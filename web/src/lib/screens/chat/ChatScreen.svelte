@@ -529,4 +529,18 @@
 		min-height: min(calc(var(--s15) * 4), 100%);
 		overscroll-behavior-y: auto;
 	}
+
+	/* Телефон боком: шапка, поле ввода и карточка запроса делят 412 px, и карточке нужен каждый
+	   пиксель. Слот забирает место ленты целиком, а сама карточка прокручивается к вариантам
+	   ответа (см. QuestionCard): иначе вариантам достаётся полоска под заголовком. */
+	@media (max-height: 30rem) {
+		.screen:has(> .request-cards-slot) > :global(.feed-wrap) {
+			display: none;
+		}
+
+		.request-cards-slot {
+			flex: 1 1 auto;
+			max-height: none;
+		}
+	}
 </style>

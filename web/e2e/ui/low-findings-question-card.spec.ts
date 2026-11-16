@@ -58,6 +58,9 @@ const OPTIONS = [
   { label: 'Спросить владельца' }
 ];
 
+// Варианты в одну строку: на коротком экране карточка обязана показать два целых варианта.
+const PLAIN_OPTIONS = ['Мягкий ребейз', 'Слияние коммитом', 'Отложить до утра', 'Спросить владельца'];
+
 async function settled(page: Page) {
   await expect(page.locator('.question-card')).toBeVisible();
   await expect
@@ -141,3 +144,90 @@ test('two questions without headers keep the counter on the title line', async (
     expect(counter.fontSize).toBeGreaterThanOrEqual(11);
   }
 });
+
+type Landscape = {
+  viewport: { width: number; height: number };
+  header: Box | null;
+  feed: Box | null;
+  slot: Box | null;
+  card: Box | null;
+  actions: Box | null;
+  composer: Box | null;
+  scrollTop: number;
+  options: { label: string; box: Box; hit: string | null; behindActions: boolean }[];
+};
+
+type Box = { top: number; bottom: number; left: number; right: number; height: number };
+
+async function measure(page: Page): Promise<Landscape> {
+  return page.evaluate(() => {
+    const rect = (element: Element | null): Box | null => {
+      if (!element) return null;
+      const box = element.getBoundingClientRect();
+      return { top: box.top, bottom: box.bottom, left: box.left, right: box.right, height: box.height };
+    };
+    const slot = document.querySelector<HTMLElement>('.request-cards-slot')!;
+    const card = slot.querySelector<HTMLElement>(':scope > .card-root')!;
+    const actions = card.querySelector<HTMLElement>('.actions')!;
+    const options = [...card.querySelectorAll<HTMLElement>('[data-option]')].map((option) => {
+      const box = option.getBoundingClientRect();
+      const hit = document.elementFromPoint((box.left + box.right) / 2, (box.top + box.bottom) / 2);
+      return {
+        label: option.dataset.option ?? '',
+        box: { top: box.top, bottom: box.bottom, left: box.left, right: box.right, height: box.height },
+        hit: hit?.closest('[data-option]')?.getAttribute('data-option') ?? null,
+        behindActions: hit !== null && hit.closest('.actions') !== null
+      };
+    });
+    return {
+      viewport: { width: innerWidth, height: innerHeight },
+      header: rect(document.querySelector('.chat-header')),
+      feed: rect(document.querySelector('.feed-wrap')),
+      slot: rect(slot),
+      card: rect(card),
+      actions: rect(actions),
+      composer: rect(document.querySelector('section.composer')),
+      scrollTop: card.scrollTop,
+      options
+    };
+  });
+}
+
+const SLOTS = [
+  { width: 892, height: 412 },
+  { width: 412, height: 892 }
+] as const;
+
+for (const viewport of SLOTS) {
+  test(`a single question shows two options above the answer bar at ${viewport.width}x${viewport.height}`, async ({ page }) => {
+    const { hub, api, id } = await boot(page, viewport);
+    openQuestion(hub, api, id, [{ id: 'q0', header: 'ВЕТКА', text: 'Как слить ветку в основную?', options: PLAIN_OPTIONS }]);
+    await settled(page);
+    const before = await measure(page);
+
+    expect(before.card).not.toBeNull();
+    expect(before.actions).not.toBeNull();
+    // Первые два варианта целиком видны над закреплённой «Ответить» и принимают касание.
+    for (const option of before.options.slice(0, 2)) {
+      expect(option.box.top, `${option.label} не срезан верхом карточки`).toBeGreaterThanOrEqual(before.card!.top - 1);
+      expect(option.box.bottom, `${option.label} выше «Ответить»`).toBeLessThanOrEqual(before.actions!.top + 1);
+      expect(option.hit, `${option.label} принимает касание`).toBe(option.label);
+      expect(option.behindActions, `${option.label} не под полосой «Ответить»`).toBe(false);
+    }
+    // Кнопка ответа и поле ввода остаются в окне.
+    expect(before.actions!.bottom).toBeLessThanOrEqual(before.viewport.height + 1);
+    expect(before.composer!.bottom).toBeLessThanOrEqual(before.viewport.height + 1);
+
+    if (viewport.height <= 480) {
+      // Короткий экран: карточка запроса занимает место ленты целиком, от шапки до поля ввода.
+      expect(before.feed!.height, 'лента уступила место карточке').toBe(0);
+      expect(before.slot!.top, 'слот начинается под шапкой').toBeLessThanOrEqual(before.header!.bottom + 1);
+      // Заголовок вопроса уезжает вверх прокруткой, а не отнимает высоту у вариантов.
+      expect(before.scrollTop).toBeGreaterThan(0);
+    } else {
+      // Портрет не изменился: карточка стоит на месте, заголовок вопроса виден.
+      expect(before.scrollTop).toBe(0);
+      await expect(page.locator('.q-text')).toBeInViewport();
+    }
+  });
+}

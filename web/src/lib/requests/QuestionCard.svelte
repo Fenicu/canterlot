@@ -207,6 +207,31 @@
     };
   }
 
+  // Короткий экран (телефон боком, клавиатура): шапка, заголовок и подсказка не помещаются
+  // вместе с двумя вариантами над закреплённой «Ответить». Карточка сразу прокручивается
+  // к вариантам: текст вопроса уезжает вверх, а ответ остаётся на виду и под пальцем.
+  function revealOptions(node: HTMLElement) {
+    let frame = requestAnimationFrame(() => {
+      // В jsdom media-query нет: проверка не должна падать вне браузера.
+      if (!window.matchMedia?.('(max-height: 30rem)').matches) return;
+      const scroller = node.closest<HTMLElement>('.card-root');
+      const actions = scroller?.querySelector<HTMLElement>('.actions');
+      const options = [...node.querySelectorAll<HTMLElement>('[data-option]')].slice(0, 2);
+      if (!scroller || !actions || options.length < 2) return;
+      const limit = actions.getBoundingClientRect().top;
+      if (options.every((option) => option.getBoundingClientRect().bottom <= limit + 1)) return;
+      const pad = Number.parseFloat(getComputedStyle(scroller).paddingTop) || 0;
+      scroller.scrollTo({
+        top: scroller.scrollTop + options[0]!.getBoundingClientRect().top - scroller.getBoundingClientRect().top - pad
+      });
+    });
+    return {
+      destroy() {
+        cancelAnimationFrame(frame);
+      }
+    };
+  }
+
   async function handleSubmit(e: MouseEvent | SubmitEvent) {
     e.preventDefault();
     if (isDisabled) return;
@@ -258,7 +283,7 @@
 {#if readonly}
   {@render answered()}
 {:else}
-<div class="question-card" data-disabled={isDisabled ? '' : undefined}>
+<div class="question-card" data-disabled={isDisabled ? '' : undefined} use:revealOptions>
   <div class="card-head">
     <span class="meta" data-wait-long={headLong ? '' : undefined}>{head}</span>
   </div>
@@ -592,6 +617,14 @@
     height: var(--s8);
     background: linear-gradient(to bottom, var(--transparent), var(--fade));
     pointer-events: none;
+  }
+
+  /* Короткий экран: полоса «Ответить» жмётся к вариантам, иначе двум вариантам не хватает
+     высоты над кнопкой. */
+  @media (max-height: 30rem) {
+    .actions {
+      padding-block: var(--s2) var(--under);
+    }
   }
 
   .submit-btn {

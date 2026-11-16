@@ -268,6 +268,14 @@
     to { --card-bg: var(--surface); }
   }
 
+  /* Телефон боком: карточка жмётся к краям, чтобы над закреплённой «Ответить» поместились
+     два варианта ответа, а не полоска первого. */
+  @media (max-height: 30rem) {
+    .card-root {
+      --card-pad-block: var(--s3);
+    }
+  }
+
   .conflict-notice {
     padding: var(--s2) var(--s3);
     border-radius: var(--radius-sm);
