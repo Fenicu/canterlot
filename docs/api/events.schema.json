@@ -2621,6 +2621,16 @@
                   "type": "null"
                 }
               ]
+            },
+            "side_of": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Uuid"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
@@ -2853,6 +2863,16 @@
                     "path"
                   ],
                   "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "side_of": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Uuid"
                 },
                 {
                   "type": "null"

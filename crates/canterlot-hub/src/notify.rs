@@ -162,6 +162,7 @@ async fn enqueue_in_tx(
          select $1,c.id,$3,$4,$5,clock_timestamp()
          from push_settings s join conversations c on c.id=$2
          where c.trashed_at is null
+           and c.side_of is null
            and (not $6 or c.parent_conversation_id is null)
            and ($3 <> 'turn_finished' or c.snoozed_until is null or c.snoozed_until <= clock_timestamp())
            and case $3 when 'waiting' then s.waiting
@@ -703,11 +704,12 @@ async fn compose(
     let Some(conversation_id) = row.conversation_id else {
         return compose_auth(pool, row, app_url).await;
     };
-    let conversation: Option<(String, bool)> =
-        sqlx::query_as("select title,trashed_at is not null from conversations where id=$1")
-            .bind(conversation_id)
-            .fetch_optional(pool)
-            .await?;
+    let conversation: Option<(String, bool)> = sqlx::query_as(
+        "select title,trashed_at is not null from conversations where id=$1 and side_of is null",
+    )
+    .bind(conversation_id)
+    .fetch_optional(pool)
+    .await?;
     let Some((title, trashed)) = conversation else {
         return Ok(None);
     };

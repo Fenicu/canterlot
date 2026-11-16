@@ -215,6 +215,8 @@ pub enum HoldReason {
         #[serde(default, with = "optional_utc_time")]
         resets_at: Option<DateTime<Utc>>,
     },
+    /// Боковой чат OpenCode ждёт простоя родителя: форк активного хода не проверен.
+    SideParentBusy,
 }
 
 impl HoldReason {
@@ -230,6 +232,7 @@ impl HoldReason {
             Self::AttachmentsPending { .. } => "attachments_pending",
             Self::QuotaExhausted { .. } => "quota_exhausted",
             Self::WeeklyReserve { .. } => "weekly_reserve",
+            Self::SideParentBusy => "side_parent_busy",
         }
     }
 }
@@ -249,6 +252,7 @@ impl FromStr for HoldReason {
             "attachments_pending" => Err(ModelError::MissingReasonData("attachments_pending")),
             "quota_exhausted" => Err(ModelError::MissingReasonData("quota_exhausted")),
             "weekly_reserve" => Err(ModelError::MissingReasonData("weekly_reserve")),
+            "side_parent_busy" => Ok(Self::SideParentBusy),
             _ => Err(ModelError::UnknownValue {
                 kind: "hold reason",
                 value: value.into(),
@@ -289,6 +293,7 @@ pub enum HoldView {
         #[serde(default, with = "optional_utc_time")]
         resets_at: Option<DateTime<Utc>>,
     },
+    SideParentBusy,
     MachineNotReconciled,
     CapabilityMissing {
         input_id: Uuid,
@@ -329,6 +334,7 @@ impl From<HoldReason> for HoldView {
                 provider,
                 resets_at,
             },
+            HoldReason::SideParentBusy => Self::SideParentBusy,
         }
     }
 }

@@ -344,7 +344,7 @@ async fn sweep_disk(
 }
 
 /// Крупнейшие по памяти исполнения выборки с названиями бесед.
-async fn heaviest(
+pub async fn heaviest(
     conn: &mut PgConnection,
     owner_id: Uuid,
     executions: &Value,
@@ -365,8 +365,10 @@ async fn heaviest(
     let mut out = Vec::new();
     for (execution_id, rss) in rows {
         let title: Option<String> = sqlx::query_scalar(
-            "select c.title from executions e join conversations c on c.id=e.conversation_id
-             where e.id=$1 and c.owner_id=$2",
+            "select coalesce(p.title,c.title) from executions e
+               join conversations c on c.id=e.conversation_id
+               left join conversations p on p.id=c.side_of
+              where e.id=$1 and c.owner_id=$2",
         )
         .bind(execution_id)
         .bind(owner_id)

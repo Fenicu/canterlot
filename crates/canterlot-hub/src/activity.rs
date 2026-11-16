@@ -786,12 +786,20 @@ pub async fn refresh_with_metrics(
         settings["model_resolved"] = json!(resolved);
     }
     let payload = json!({"conversation_id":conversation_id,"activity":{"state":activity.state,"evidence":evidence,"since":since.to_rfc3339_opts(SecondsFormat::Millis,true)},"unread_count":unread,"queue":{"queued":inputs.queue.queued,"pause_reasons":pauses,"hold_reasons":holds},"last_activity_at":last_activity.map(|at|at.to_rfc3339_opts(SecondsFormat::Millis,true)),"snoozed_until":snoozed_until.map(|at|at.to_rfc3339_opts(SecondsFormat::Millis,true)),"settings":settings,"crunch":{"enabled":crunch},"working_ms":working_ms,"preview":preview});
-    for scope in [
-        Scope::Conversation {
-            id: conversation_id,
-        },
-        Scope::Conversations { owner_id },
-    ] {
+    // Боковой чат публикуется только в своей области: в списке владельца его нет.
+    let side: bool = sqlx::query_scalar(
+        "select exists(select 1 from conversations where id=$1 and side_of is not null)",
+    )
+    .bind(conversation_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    let mut scopes = vec![Scope::Conversation {
+        id: conversation_id,
+    }];
+    if !side {
+        scopes.push(Scope::Conversations { owner_id });
+    }
+    for scope in scopes {
         events::append(
             &mut *conn,
             NewEvent {

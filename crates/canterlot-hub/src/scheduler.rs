@@ -755,6 +755,7 @@ impl Scheduler {
 
     pub async fn tick(&self, now: DateTime<Utc>) -> Result<TickReport, sqlx::Error> {
         crunch::expire_pending(&self.pool, now).await?;
+        crate::side::sweep(&self.pool, now).await?;
         let mut report = TickReport::default();
         loop {
             let mut tx = crate::db::begin(&self.pool).await?;

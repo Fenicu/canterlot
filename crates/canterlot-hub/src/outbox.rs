@@ -6,8 +6,8 @@ use std::{
 use canterlot_proto::{
     limits::{MAX_MESSAGE_BYTES, check_deliver_input},
     worker::v1::{
-        CancelInput, Command, CompactSession, ControlDown, DeliverDecision, DeliverInput,
-        Instructions, Interrupt, RemoveWorktree, ResolveOwnerLost, SettingsOverride,
+        CancelInput, Command, CompactSession, ContentBlock, ControlDown, DeliverDecision,
+        DeliverInput, Instructions, Interrupt, RemoveWorktree, ResolveOwnerLost, SettingsOverride,
         StartExecution, SteerInput, StopExecution, WithdrawInput, WorktreeSpec, command,
         control_down,
     },
@@ -69,6 +69,9 @@ struct InputPayload {
     attachment_ids: Vec<Uuid>,
     settings: Option<SettingsPayload>,
     settings_rev: Option<i64>,
+    /// Сводка о родителе для бокового чата; пусто у обычной сессии.
+    #[serde(default)]
+    side_preface: String,
 }
 #[derive(Deserialize)]
 struct SettingsPayload {
@@ -206,6 +209,19 @@ fn to_proto_with_capability(
     {
         return Err(OutboxError::CapabilityMissing);
     }
+    // Форк от родителя понимает только воркер с боковым чатом; иначе копия
+    // запустилась бы обычной сессией и получила бы запись в родительскую.
+    if row.kind == "start_execution"
+        && (row.payload.get("canterlot_mcp").and_then(Value::as_str) == Some("side")
+            || row
+                .payload
+                .get("fork_from_native")
+                .and_then(Value::as_str)
+                .is_some_and(|native| !native.is_empty()))
+        && !has(crate::session::CAPABILITY_SIDE_CHAT_V1)
+    {
+        return Err(OutboxError::CapabilityMissing);
+    }
     if row.kind == "resolve_owner_lost" && !has(crate::session::CAPABILITY_OWNER_EXIT_V1) {
         return Err(OutboxError::CapabilityMissing);
     }
@@ -262,14 +278,26 @@ pub fn to_proto(row: &CommandRow) -> Result<Command, OutboxError> {
             let payload: InputPayload = serde_json::from_value(row.payload.clone())
                 .map_err(|_| OutboxError::InvalidCommand)?;
             let _revision = payload.settings_rev;
+            let mut content: Vec<ContentBlock> = payload
+                .content
+                .iter()
+                .map(submit::ContentBlock::to_proto)
+                .collect();
+            // Сводка о сессии идёт перед вопросом владельца и хранится в самой команде:
+            // повторная отправка несёт тот же текст.
+            if !payload.side_preface.is_empty() {
+                content.insert(
+                    0,
+                    submit::ContentBlock::Text {
+                        text: payload.side_preface.clone(),
+                    }
+                    .to_proto(),
+                );
+            }
             command::Kind::DeliverInput(DeliverInput {
                 input_id: payload.input_id.to_string(),
                 conversation_id: payload.conversation_id.to_string(),
-                content: payload
-                    .content
-                    .iter()
-                    .map(submit::ContentBlock::to_proto)
-                    .collect(),
+                content,
                 settings: payload.settings.map(|s| SettingsOverride {
                     model: s.model.unwrap_or_default(),
                     effort: s.effort.unwrap_or_default(),

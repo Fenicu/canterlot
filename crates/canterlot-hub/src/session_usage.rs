@@ -160,7 +160,8 @@ async fn live_descendants(
         "with recursive tree as (
              select id from conversations where id=$1
              union all
-             select c.id from conversations c join tree t on c.parent_conversation_id=t.id
+             select c.id from conversations c join tree t
+               on c.parent_conversation_id=t.id or c.side_of=t.id
          )
          select count(*)::bigint from runs r join tree t on r.conversation_id=t.id
           where t.id<>$1",
@@ -172,7 +173,8 @@ async fn live_descendants(
         "with recursive tree as (
              select id from conversations where id=$1
              union all
-             select c.id from conversations c join tree t on c.parent_conversation_id=t.id
+             select c.id from conversations c join tree t
+               on c.parent_conversation_id=t.id or c.side_of=t.id
          )
          select u.model,
                 sum(u.input_tokens)::bigint, sum(u.output_tokens)::bigint,
@@ -212,7 +214,8 @@ async fn folded(
         "with recursive tree as (
              select id from conversations where id=$1
              union all
-             select c.id from conversations c join tree t on c.parent_conversation_id=t.id
+             select c.id from conversations c join tree t
+               on c.parent_conversation_id=t.id or c.side_of=t.id
          )
          select turns, models from conversation_usage_rollup
           where parent_id in (select id from tree)",
@@ -282,11 +285,12 @@ pub async fn for_conversation(
 /// удаления до очистки строк и идемпотентен по ключу `(parent_id, source_id)`;
 /// у корневой сессии сворачивать некуда, её строки убирает каскад.
 pub async fn fold_in_tx(conn: &mut PgConnection, id: Uuid) -> Result<(), sqlx::Error> {
-    let parent: Option<Option<Uuid>> =
-        sqlx::query_scalar("select parent_conversation_id from conversations where id=$1")
-            .bind(id)
-            .fetch_optional(&mut *conn)
-            .await?;
+    let parent: Option<Option<Uuid>> = sqlx::query_scalar(
+        "select coalesce(parent_conversation_id, side_of) from conversations where id=$1",
+    )
+    .bind(id)
+    .fetch_optional(&mut *conn)
+    .await?;
     let Some(Some(parent_id)) = parent else {
         return Ok(());
     };

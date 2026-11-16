@@ -267,6 +267,29 @@ pub async fn dispatch_next(
     }
     sqlx::query("update commands set payload=case when $2::jsonb='{}'::jsonb then payload-'settings'-'settings_rev' else (payload-'settings'-'settings_rev') || jsonb_build_object('settings',$2::jsonb,'settings_rev',$3::bigint) end where id=$1")
         .bind(command_id).bind(&pending).bind(rev).execute(&mut *conn).await?;
+    // Сводка о родителе прикладывается к первой выдаче ввода и остаётся в команде:
+    // повтор после обрыва отправит тот же текст, а не соберёт новую картину.
+    let side: Option<Uuid> = sqlx::query_scalar(
+        "select side_of from conversations where id=$1 and side_of is not null",
+    )
+    .bind(conversation_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    if side.is_some() {
+        let missing: bool = sqlx::query_scalar("select not(payload ? 'side_preface') from commands where id=$1")
+            .bind(command_id)
+            .fetch_one(&mut *conn)
+            .await?;
+        if missing
+            && let Some(text) = crate::side::compose_preface(&mut *conn, conversation_id).await?
+        {
+            sqlx::query("update commands set payload = payload || jsonb_build_object('side_preface',$2) where id=$1")
+                .bind(command_id)
+                .bind(text)
+                .execute(&mut *conn)
+                .await?;
+        }
+    }
     let (execution_id, generation, _) = live.ok_or(sqlx::Error::RowNotFound)?;
     let (attempt, machine_id): (i32, Uuid) = sqlx::query_as(
         "update commands set delivery_state = 'pending', dispatch_attempt = dispatch_attempt + 1,

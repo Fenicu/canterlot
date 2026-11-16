@@ -59,6 +59,7 @@ pub mod search;
 pub mod session;
 pub mod session_tools;
 pub mod session_usage;
+pub mod side;
 pub mod singleton;
 pub mod snapshot;
 pub mod speed;

@@ -361,13 +361,14 @@ fn is_builtin_title(title: &str) -> bool {
     lower == BUILTIN_CLEAN_TITLE.to_lowercase() || lower == BUILTIN_OWNER_TITLE.to_lowercase()
 }
 
-async fn used_by(
+pub async fn used_by(
     conn: &mut PgConnection,
     owner: Uuid,
     reference: &str,
 ) -> Result<i64, sqlx::Error> {
     sqlx::query_scalar(
         "select count(*) from conversations where owner_id=$1 and archived_at is null and trashed_at is null
+         and side_of is null
          and (instruction_profile=$2 or pending_settings->>'instruction_profile'=$2)",
     )
     .bind(owner)

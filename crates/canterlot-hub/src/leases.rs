@@ -236,7 +236,7 @@ pub async fn apply(
                 .filter_map(|(.., execution)| *execution)
                 .collect();
             let conversations: HashMap<Uuid, Uuid> = sqlx::query_as::<_, (Uuid, Uuid)>(
-                "select e.id,e.conversation_id from executions e
+                "select e.id,coalesce(c.side_of,c.id) from executions e
                  join conversations c on c.id=e.conversation_id
                  where e.id=any($1) and c.machine_id=$2 and c.owner_id=$3",
             )

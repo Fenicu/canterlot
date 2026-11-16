@@ -18,6 +18,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(create, list))
         .routes(routes!(get, update, remove))
+        .routes(routes!(create_side, remove_side))
         .routes(routes!(restore))
         .routes(routes!(purge_trash))
         .routes(routes!(set_groups))
@@ -975,6 +976,48 @@ async fn remove(
     crate::deletion::trash(&s.pool, o.owner_id, id, &key, c).await?;
     Ok(StatusCode::NO_CONTENT)
 }
+#[utoipa::path(
+    post, path="/api/v1/conversations/{id}/side", tag="conversations",
+    params(("id"=Uuid,Path)),
+    responses(
+        (status=201,description="Боковой чат создан",body=crate::side::SideView),
+        (status=200,description="Боковой чат уже есть",body=crate::side::SideView),
+        (status=409,description="unsupported_harness, capability_missing, side_of_side, side_not_started, side_parent_busy",body=super::error::ErrorEnvelope)
+    )
+)]
+async fn create_side(
+    State(s): State<AppState>,
+    o: Owner,
+    ApiPath(id): ApiPath<Uuid>,
+    Correlation(c): Correlation,
+) -> Result<(StatusCode, Json<crate::side::SideView>), ApiError> {
+    let view = crate::side::create(&s.pool, o.owner_id, id, c, &s.registry).await?;
+    let status = if view.created {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+    Ok((status, Json(view)))
+}
+
+#[utoipa::path(
+    delete, path="/api/v1/conversations/{id}/side", tag="conversations",
+    params(("id"=Uuid,Path)),
+    responses(
+        (status=204,description="Боковой чат остановлен и удалён; повтор безвреден"),
+        (status=404,description="not_found",body=super::error::ErrorEnvelope)
+    )
+)]
+async fn remove_side(
+    State(s): State<AppState>,
+    o: Owner,
+    ApiPath(id): ApiPath<Uuid>,
+    Correlation(c): Correlation,
+) -> Result<StatusCode, ApiError> {
+    crate::side::remove(&s.pool, o.owner_id, id, c).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[utoipa::path(post,path="/api/v1/conversations/{id}/restore",tag="conversations",params(("id"=Uuid,Path),("Idempotency-Key"=String,Header)),responses((status=200,description="Сессия возвращена из корзины",body=ConversationDetail),(status=404,description="not_found или conversation_deleted",body=super::error::ErrorEnvelope)))]
 async fn restore(
     State(s): State<AppState>,

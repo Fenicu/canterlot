@@ -323,6 +323,14 @@ async fn begin_steps_in_tx(
 ) -> Result<AcceptState, sqlx::Error> {
     conversations::lock_owner(conn, owner_id).await?;
     send::lock_queue(conn, id).await?;
+    // Приём убирает рабочую копию: боковой чат в ней жить не может. Копия уходит
+    // первой, а её заказанная остановка не ждёт приёма.
+    let _ = crate::side::stop_and_delete_for_parent_in_tx(conn, owner_id, id, correlation_id)
+        .await
+        .map_err(|error| match error {
+            crate::deletion::DeleteError::Db(error) => error,
+            _ => sqlx::Error::RowNotFound,
+        })?;
     let child = load_child(conn, owner_id, id)
         .await?
         .ok_or(sqlx::Error::RowNotFound)?;

@@ -198,6 +198,9 @@ pub struct AttributeView {
     pub spawn_depth: i32,
     #[serde(default)]
     pub worktree: Option<WorktreeView>,
+    /// Родитель бокового чата; `None` у обычной сессии.
+    #[serde(default)]
+    pub side_of: Option<Uuid>,
 }
 /// Рабочая копия делегированной сессии: остальное из `conversations.worktree` хабу для себя.
 #[derive(Clone, Serialize, Deserialize, ToSchema)]
@@ -294,6 +297,9 @@ pub struct ConversationDetail {
     pub execution: Option<Value>,
     /// Начало продолженной истории Claude Code; тихая первая строка ленты.
     pub continued_from_at: Option<String>,
+    /// Свежий перефорк копии после первого старта: тихая строка «Начато заново…».
+    #[serde(default)]
+    pub side_fresh_at: Option<String>,
     pub holds: Vec<HoldView>,
     /// Принятый ход записан: следующий запуск продолжит беседу, а не начнёт новую.
     pub turn_recorded: bool,
@@ -421,6 +427,7 @@ fn item(row: &PgRow) -> Result<ListItem, sqlx::Error> {
             worktree: row
                 .try_get::<Option<Value>, _>("worktree")?
                 .and_then(|worktree| serde_json::from_value(worktree).ok()),
+            side_of: row.try_get("side_of")?,
         },
         model: row.try_get("effective_model")?,
         model_resolved: row
@@ -450,8 +457,8 @@ fn item(row: &PgRow) -> Result<ListItem, sqlx::Error> {
     })
 }
 pub async fn counts(conn: &mut PgConnection, owner_id: Uuid) -> Result<Counts, sqlx::Error> {
-    let (all,pinned,archived,trashed)=sqlx::query_as("select count(*) filter(where archived_at is null and trashed_at is null),count(*) filter(where archived_at is null and trashed_at is null and pinned),count(*) filter(where archived_at is not null and accepted_at is null and trashed_at is null),count(*) filter(where trashed_at is not null) from conversations where owner_id=$1").bind(owner_id).fetch_one(&mut *conn).await?;
-    let groups=sqlx::query_as::<_,(Uuid,i64)>("select g.id,count(c.id) from conversation_groups g left join conversation_group_members gm on gm.group_id=g.id left join conversations c on c.id=gm.conversation_id and c.owner_id=$1 and c.archived_at is null and c.trashed_at is null where g.owner_id=$1 group by g.id order by g.position,g.id").bind(owner_id).fetch_all(conn).await?.into_iter().map(|(id,count)|GroupCount{id,count}).collect();
+    let (all,pinned,archived,trashed)=sqlx::query_as("select count(*) filter(where side_of is null and archived_at is null and trashed_at is null),count(*) filter(where side_of is null and archived_at is null and trashed_at is null and pinned),count(*) filter(where side_of is null and archived_at is not null and accepted_at is null and trashed_at is null),count(*) filter(where side_of is null and trashed_at is not null) from conversations where owner_id=$1").bind(owner_id).fetch_one(&mut *conn).await?;
+    let groups=sqlx::query_as::<_,(Uuid,i64)>("select g.id,count(c.id) from conversation_groups g left join conversation_group_members gm on gm.group_id=g.id left join conversations c on c.id=gm.conversation_id and c.owner_id=$1 and c.side_of is null and c.archived_at is null and c.trashed_at is null where g.owner_id=$1 group by g.id order by g.position,g.id").bind(owner_id).fetch_all(conn).await?.into_iter().map(|(id,count)|GroupCount{id,count}).collect();
     Ok(Counts {
         all,
         pinned,
@@ -472,6 +479,8 @@ pub async fn list(conn: &mut PgConnection, q: &ListQuery) -> Result<ListPage, sq
     }
     let mut sql = sqlx::QueryBuilder::new(SELECT);
     sql.push(" where c.owner_id=").push_bind(q.owner_id);
+    // Боковые чаты живут только в своей панели: в списках и счётчиках их нет.
+    sql.push(" and c.side_of is null");
     if q.filter == ListFilter::Trashed {
         sql.push(" and c.trashed_at is not null");
     } else {
@@ -615,21 +624,21 @@ pub async fn list(conn: &mut PgConnection, q: &ListQuery) -> Result<ListPage, sq
     })
 }
 /// Список для инструмента агента: `family` сужает его до семьи делегированной сессии.
-pub(crate) struct AgentListQuery {
+pub struct AgentListQuery {
     pub owner_id: Uuid,
     pub family: Option<Vec<Uuid>>,
     pub state: Option<activity::ActivityState>,
     pub include_archived: bool,
     pub limit: i64,
 }
-pub(crate) async fn agent_list(
+pub async fn agent_list(
     conn: &mut PgConnection,
     q: &AgentListQuery,
 ) -> Result<Vec<ListItem>, sqlx::Error> {
     let mut sql = sqlx::QueryBuilder::new(SELECT);
     sql.push(" where c.owner_id=")
         .push_bind(q.owner_id)
-        .push(" and c.trashed_at is null");
+        .push(" and c.trashed_at is null and c.side_of is null");
     if let Some(family) = &q.family {
         sql.push(" and c.id=any(")
             .push_bind(family.clone())
@@ -662,12 +671,13 @@ pub(crate) async fn list_item(
         .map(item)
         .transpose()
 }
-pub(crate) async fn snapshot_items(
+pub async fn snapshot_items(
     conn: &mut PgConnection,
     owner_id: Uuid,
 ) -> Result<Vec<ListItem>, sqlx::Error> {
     let mut q = sqlx::QueryBuilder::new(SELECT);
     q.push(" where c.owner_id=").push_bind(owner_id)
+        .push(" and c.side_of is null")
         .push(" order by c.pinned desc,c.pinned_at desc nulls last,d.last_activity_at desc nulls last,c.id limit 501");
     q.build().fetch_all(conn).await?.iter().map(item).collect()
 }
@@ -811,6 +821,7 @@ pub async fn detail(
         },
         execution,
         continued_from_at: optional_time(&row, "continued_from_at")?,
+        side_fresh_at: optional_time(&row, "side_fresh_at")?,
         holds,
         turn_recorded,
         routing: row.try_get("routing").ok().flatten(),
@@ -1030,7 +1041,7 @@ pub(crate) async fn attribute_payload(
     p["counts"] = serde_json::to_value(counts(conn, owner).await?).expect("counts");
     Ok(p)
 }
-pub(crate) async fn emit_attributes(
+pub async fn emit_attributes(
     conn: &mut PgConnection,
     owner: Uuid,
     id: Uuid,
@@ -1046,6 +1057,16 @@ pub(crate) async fn emit_attributes(
         correlation,
     )
     .await?;
+    // Боковой чат не входит в список владельца: событие остаётся только в его области.
+    let side: bool = sqlx::query_scalar(
+        "select exists(select 1 from conversations where id=$1 and side_of is not null)",
+    )
+    .bind(id)
+    .fetch_one(&mut *conn)
+    .await?;
+    if side {
+        return Ok(());
+    }
     let scope = Scope::Conversations { owner_id: owner }.key();
     sqlx::query("insert into scope_counters(scope,last_seq) values($1,0) on conflict do nothing")
         .bind(&scope)
@@ -2269,6 +2290,13 @@ async fn submit_message_in_tx_with_device(
     .bind(req.conversation_id)
     .execute(&mut *conn)
     .await?;
+    // Вопрос владельца сам поднимает боковой чат: копия форкается заново и отвечает.
+    crate::side::start_for_input_in_tx(conn, req.owner_id, req.conversation_id, correlation_id)
+        .await
+        .map_err(|error| match error {
+            crate::side::SideError::Db(error) => crate::delivery::SubmitError::Db(error),
+            _ => crate::delivery::SubmitError::ConversationNotFound,
+        })?;
     Ok(submitted)
 }
 

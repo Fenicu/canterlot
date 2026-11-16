@@ -306,6 +306,7 @@ fn exempt(method: &str, path: &str) -> bool {
         || (method == "POST" && path == "/api/v1/routing-policy/preview")
         || (method == "POST" && path == "/api/v1/search")
         || (method == "PUT" && path.ends_with("/draft"))
+        || (matches!(method, "POST" | "DELETE") && path.ends_with("/side"))
         || (matches!(method, "PUT" | "DELETE") && path.contains("/bookmarks/"))
 }
 

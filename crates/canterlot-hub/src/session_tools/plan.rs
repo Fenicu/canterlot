@@ -504,6 +504,7 @@ pub async fn snapshot_views(
            select p.* from plan_tasks p
            join conversations c on c.id=p.orchestrator_conversation_id
            where p.owner_id=$1 and c.owner_id=$1 and c.spawn_depth=0
+             and c.side_of is null
              and c.archived_at is null and c.trashed_at is null
              and (p.state not in ('done','cancelled')
                   or p.updated_at > clock_timestamp() - make_interval(days => $2::int))),

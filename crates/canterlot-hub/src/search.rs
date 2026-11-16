@@ -285,7 +285,7 @@ impl RawQuery {
 /// `$5`/`$6` период, `$7` харнесс, `$8`/`$9` нужны ли ответы и сообщения.
 const BLOCK_WHERE: &str = "b.kind = 'text' and b.state <> 'streaming'
    and canterlot_block_doc(b.content) @@ websearch_to_tsquery('pg_catalog.russian', $2)
-   and c.owner_id = $1 and c.trashed_at is null
+   and c.owner_id = $1 and c.trashed_at is null and c.side_of is null
    and ($3::uuid[] is null or b.conversation_id = any($3::uuid[]))
    and ($4::uuid is null or b.conversation_id = $4::uuid)
    and ($5::timestamptz is null or b.created_at >= $5::timestamptz)
@@ -302,7 +302,7 @@ const INPUT_WHERE: &str = "i.feed_seq is not null
         or (i.origin->>'kind' = 'event'
             and (i.origin->>'from' is not null or i.origin->'sender_deleted' = 'true'::jsonb
                  or i.origin->'event'->>'kind' = 'limit_resumed')))
-   and c.owner_id = $1 and c.trashed_at is null
+   and c.owner_id = $1 and c.trashed_at is null and c.side_of is null
    and ($3::uuid[] is null or i.conversation_id = any($3::uuid[]))
    and ($4::uuid is null or i.conversation_id = $4::uuid)
    and ($5::timestamptz is null or i.created_at >= $5::timestamptz)

@@ -1433,6 +1433,28 @@ async fn apply_body(
                     if to == ExecutionState::Running {
                         sqlx::query("update executions set native_conversation_id = coalesce(nullif($2, ''), native_conversation_id) where id = $1")
                             .bind(execution_id).bind(&fact.native_conversation_id).execute(&mut *conn).await?;
+                        // Свежий форк после первого старта: копия начнёт историю заново,
+                        // и лента говорит об этом тихой строкой.
+                        if fact.fresh_fork {
+                            let first: Option<bool> = sqlx::query_scalar(
+                                "update executions set fresh_fork=true
+                                  where id=$1 and not fresh_fork
+                                  returning generation = 1",
+                            )
+                            .bind(execution_id)
+                            .fetch_optional(&mut *conn)
+                            .await?;
+                            if first == Some(false) {
+                                sqlx::query(
+                                    "update conversations set side_fresh_at=clock_timestamp()
+                                      where id=(select conversation_id from executions where id=$1)
+                                        and side_of is not null",
+                                )
+                                .bind(execution_id)
+                                .execute(&mut *conn)
+                                .await?;
+                            }
+                        }
                         sqlx::query("update commands set delivery_state = 'completed', completed_at = coalesce(completed_at, now()), result = '{\"started\":true}' where execution_id = $1 and machine_id = $2 and kind = 'start_execution' and delivery_state <> 'completed'")
                             .bind(execution_id).bind(machine_id).execute(&mut *conn).await?;
                     } else if matches!(

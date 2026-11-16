@@ -295,6 +295,22 @@ pub async fn start_in_tx_with_native(
             "base": worktree["base"],
         });
     }
+    // Боковой чат: read-only форк от текущей нативной записи родителя. Поля собираются
+    // здесь, потому что нативный id читается заново при каждом старте.
+    if let Some(parent_id) = row.try_get::<Option<Uuid>, _>("side_of")? {
+        let mut side_instructions = payload["instructions"].clone();
+        crate::side::prepare_start_in_tx(
+            conn,
+            conversation_id,
+            parent_id,
+            &row.try_get::<String, _>("harness")?,
+            first_start,
+            &mut side_instructions,
+            &mut payload,
+        )
+        .await?;
+        payload["instructions"] = side_instructions;
+    }
     sqlx::query(
         "insert into commands (id, machine_id, conversation_id, execution_id,
                                execution_generation, kind, payload, delivery_state)

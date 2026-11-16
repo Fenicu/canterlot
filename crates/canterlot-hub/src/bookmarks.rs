@@ -466,7 +466,7 @@ pub async fn list_owner(
                 .await?;
             let sql = format!(
                 "{ENTRY_COLUMNS}{ENTRY_FROM}
-                 and b.owner_id=$1 and c.trashed_at is null
+                 and b.owner_id=$1 and c.trashed_at is null and c.side_of is null
                  and ($2::timestamptz is null or b.created_at < $2
                       or (b.created_at = $2 and b.id > $3))
                  order by b.created_at desc,b.id limit $4"

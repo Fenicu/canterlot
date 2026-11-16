@@ -217,6 +217,9 @@ error_reasons! {
     ConversationClosed => "conversation_closed", ConversationClosed;
     NulCharacter => "nul_character", InvalidRequest;
     SpawnRefused => "spawn_refused", InvalidState;
+    SideOfSide => "side_of_side", InvalidState;
+    SideNotStarted => "side_not_started", InvalidState;
+    SideParentBusy => "side_parent_busy", InvalidState;
     Logout => "logout", SessionRevoked;
     Owner => "owner", SessionRevoked;
     Others => "others", SessionRevoked;
@@ -250,6 +253,22 @@ fn invalid_field(field: &'static str) -> ApiError {
         field: Some(field.into()),
         ..Default::default()
     })
+}
+
+impl From<crate::side::SideError> for ApiError {
+    fn from(error: crate::side::SideError) -> Self {
+        use crate::side::SideError as E;
+        match error {
+            E::NotFound => Self::new(ErrorCode::NotFound),
+            E::UnsupportedHarness => refusal("unsupported_harness"),
+            E::CapabilityMissing => Self::new(ErrorCode::CapabilityMissing),
+            E::ParentIsSide => refusal("side_of_side"),
+            E::NoNativeId => refusal("side_not_started"),
+            E::ParentBusy => refusal("side_parent_busy"),
+            E::Live => refusal("run_in_progress"),
+            E::Db(error) => error.into(),
+        }
+    }
 }
 
 impl From<crate::conversations::SettingsError> for ApiError {

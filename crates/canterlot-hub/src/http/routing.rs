@@ -32,6 +32,21 @@ pub struct RoutingPolicyView {
     pub builtin: Policy,
 }
 
+/// Машина по умолчанию: последняя активная сессия владельца. Боковые чаты не участвуют:
+/// их активность — это разговор о сессии, а не новая работа.
+pub async fn default_machine(
+    conn: &mut sqlx::PgConnection,
+    owner_id: Uuid,
+) -> Result<Option<Uuid>, sqlx::Error> {
+    sqlx::query_scalar(
+        "select machine_id from conversations where owner_id=$1 and side_of is null
+          order by last_activity_at desc nulls last, created_at desc limit 1",
+    )
+    .bind(owner_id)
+    .fetch_optional(conn)
+    .await
+}
+
 #[derive(Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RoutingPolicyBody {
@@ -190,13 +205,7 @@ async fn preview(
         return Err(ApiError::new(ErrorCode::TaskTypeUnknown));
     }
     // Машина вызова: последняя активная сессия владельца, затем свежие метрики.
-    let machine: Option<Uuid> = sqlx::query_scalar(
-        "select machine_id from conversations where owner_id=$1
-          order by last_activity_at desc nulls last, created_at desc limit 1",
-    )
-    .bind(o.owner_id)
-    .fetch_optional(&mut *conn)
-    .await?;
+    let machine = default_machine(&mut conn, o.owner_id).await?;
     let machine: Option<Uuid> = match machine {
         Some(machine) => Some(machine),
         None => {

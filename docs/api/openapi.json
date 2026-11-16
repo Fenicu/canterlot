@@ -3285,159 +3285,6 @@
         }
       }
     },
-    "/api/v1/conversations/{id}/auto-resume": {
-      "post": {
-        "tags": [
-          "conversations"
-        ],
-        "summary": "Одноразовое «Продолжить при сбросе»: обычная пауза лимита становится удержанием\nс продолжением после подтверждённого сброса; «кранч» остаётся выключенным.",
-        "operationId": "post__api_v1_conversations__id__auto_resume",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          },
-          {
-            "name": "Idempotency-Key",
-            "in": "header",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Одноразовое продолжение взведено",
-            "headers": {
-              "X-Server-Time-Ms": {
-                "schema": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "description": "Часы хаба: целые миллисекунды Unix"
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ResumeAtResetOutcome"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Нет паузы лимита",
-            "headers": {
-              "X-Server-Time-Ms": {
-                "schema": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "description": "Часы хаба: целые миллисекунды Unix"
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          },
-          "default": {
-            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
-            "headers": {
-              "X-Server-Time-Ms": {
-                "schema": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "description": "Часы хаба: целые миллисекунды Unix"
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          }
-        }
-      },
-      "delete": {
-        "tags": [
-          "conversations"
-        ],
-        "summary": "Отказ от одноразового продолжения: задание пробуждения отменяется, пауза лимита\nвозвращается с прежними провайдером, окном и сроком сброса.",
-        "operationId": "delete__api_v1_conversations__id__auto_resume",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          },
-          {
-            "name": "Idempotency-Key",
-            "in": "header",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Одноразовое продолжение отменено",
-            "headers": {
-              "X-Server-Time-Ms": {
-                "schema": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "description": "Часы хаба: целые миллисекунды Unix"
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/CancelResumeOutcome"
-                }
-              }
-            }
-          },
-          "default": {
-            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
-            "headers": {
-              "X-Server-Time-Ms": {
-                "schema": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "description": "Часы хаба: целые миллисекунды Unix"
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/api/v1/conversations/{id}/blocks/{block_id}": {
       "get": {
         "tags": [
@@ -6479,81 +6326,12 @@
         }
       }
     },
-    "/api/v1/conversations/{id}/snapshot": {
-      "get": {
-        "tags": [
-          "snapshots"
-        ],
-        "operationId": "get__api_v1_conversations__id__snapshot",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "format": "uuid"
-            }
-          },
-          {
-            "name": "history_limit",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "format": "int64"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Снимок разговора и граница журнала",
-            "headers": {
-              "X-Server-Time-Ms": {
-                "schema": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "description": "Часы хаба: целые миллисекунды Unix"
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Snapshot_ConversationSnapshot"
-                }
-              }
-            }
-          },
-          "default": {
-            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
-            "headers": {
-              "X-Server-Time-Ms": {
-                "schema": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "description": "Часы хаба: целые миллисекунды Unix"
-              }
-            },
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorEnvelope"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/conversations/{id}/snooze": {
-      "put": {
+    "/api/v1/conversations/{id}/side": {
+      "post": {
         "tags": [
           "conversations"
         ],
-        "summary": "Отложить сессию до абсолютного времени: не дальше тридцати дней вперёд.",
-        "operationId": "put__api_v1_conversations__id__snooze",
+        "operationId": "post__api_v1_conversations__id__side",
         "parameters": [
           {
             "name": "id",
@@ -6563,29 +6341,11 @@
               "type": "string",
               "format": "uuid"
             }
-          },
-          {
-            "name": "Idempotency-Key",
-            "in": "header",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
           }
         ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/SnoozeBody"
-              }
-            }
-          },
-          "required": true
-        },
         "responses": {
           "200": {
-            "description": "Сессия отложена",
+            "description": "Боковой чат уже есть",
             "headers": {
               "X-Server-Time-Ms": {
                 "schema": {
@@ -6598,13 +6358,32 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ConversationDetail"
+                  "$ref": "#/components/schemas/SideView"
                 }
               }
             }
           },
-          "400": {
-            "description": "Срок вне допустимого диапазона",
+          "201": {
+            "description": "Боковой чат создан",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SideView"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "unsupported_harness, capability_missing, side_of_side, side_not_started, side_parent_busy",
             "headers": {
               "X-Server-Time-Ms": {
                 "schema": {
@@ -6647,8 +6426,7 @@
         "tags": [
           "conversations"
         ],
-        "summary": "Вернуть отложенную сессию сразу.",
-        "operationId": "delete__api_v1_conversations__id__snooze",
+        "operationId": "delete__api_v1_conversations__id__side",
         "parameters": [
           {
             "name": "id",
@@ -6658,19 +6436,11 @@
               "type": "string",
               "format": "uuid"
             }
-          },
-          {
-            "name": "Idempotency-Key",
-            "in": "header",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
           }
         ],
         "responses": {
           "204": {
-            "description": "Сессия возвращена",
+            "description": "Боковой чат остановлен и удалён; повтор безвреден",
             "headers": {
               "X-Server-Time-Ms": {
                 "schema": {
@@ -6696,6 +6466,74 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/conversations/{id}/snapshot": {
+      "get": {
+        "tags": [
+          "snapshots"
+        ],
+        "operationId": "get__api_v1_conversations__id__snapshot",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "history_limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Снимок разговора и граница журнала",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Snapshot_ConversationSnapshot"
                 }
               }
             }
@@ -10870,6 +10708,14 @@
           "pinned": {
             "type": "boolean"
           },
+          "side_of": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Родитель бокового чата; `None` у обычной сессии."
+          },
           "spawn_depth": {
             "type": "integer",
             "format": "int32"
@@ -11373,14 +11219,6 @@
           }
         ]
       },
-      "CancelResumeOutcome": {
-        "type": "string",
-        "description": "Итог отказа от одноразового продолжения.",
-        "enum": [
-          "cancelled",
-          "not_pending"
-        ]
-      },
       "Candidate": {
         "type": "object",
         "description": "Кандидат типа задачи.",
@@ -11863,11 +11701,12 @@
               "settings": {
                 "$ref": "#/components/schemas/SettingsView"
               },
-              "snoozed_until": {
+              "side_fresh_at": {
                 "type": [
                   "string",
                   "null"
-                ]
+                ],
+                "description": "Свежий перефорк копии после первого старта: тихая строка «Начато заново…»."
               },
               "turn_recorded": {
                 "type": "boolean",
@@ -12796,6 +12635,9 @@
           "conversation_closed",
           "nul_character",
           "spawn_refused",
+          "side_of_side",
+          "side_not_started",
+          "side_parent_busy",
           "logout",
           "owner",
           "others",
@@ -13718,6 +13560,20 @@
                   "null"
                 ],
                 "format": "date-time"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "reason"
+            ],
+            "properties": {
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "side_parent_busy"
+                ]
               }
             }
           },
@@ -14937,13 +14793,6 @@
               },
               "routing": {
                 "description": "Решение маршрута, выбравшее исполнителя; `None` — запуск без маршрута."
-              },
-              "snoozed_until": {
-                "type": [
-                  "string",
-                  "null"
-                ],
-                "description": "До этого времени сессия отложена владельцем; срока в прошлом значит «уже вернулась»."
               },
               "unread_count": {
                 "type": "integer",
@@ -17931,14 +17780,6 @@
           }
         ]
       },
-      "ResumeAtResetOutcome": {
-        "type": "string",
-        "description": "Итог одноразового «Продолжить при сбросе».",
-        "enum": [
-          "armed",
-          "already_armed"
-        ]
-      },
       "ResumeBody": {
         "type": "object",
         "properties": {
@@ -18649,6 +18490,23 @@
           }
         }
       },
+      "SideView": {
+        "type": "object",
+        "description": "Строка ответа на создание: `created=false` значит, что копия уже была.",
+        "required": [
+          "conversation_id",
+          "created"
+        ],
+        "properties": {
+          "conversation_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "created": {
+            "type": "boolean"
+          }
+        }
+      },
       "SignInMethod": {
         "type": "string",
         "description": "Способ входа, создавший сеанс.",
@@ -18946,20 +18804,6 @@
             "type": "string"
           }
         }
-      },
-      "SnoozeBody": {
-        "type": "object",
-        "required": [
-          "until"
-        ],
-        "properties": {
-          "until": {
-            "type": "string",
-            "format": "date-time",
-            "description": "Абсолютное время возврата в UTC."
-          }
-        },
-        "additionalProperties": false
       },
       "SpawnQueueActionView": {
         "type": "object",

@@ -469,6 +469,8 @@ enum TrashGuard {
     /// Принятая делегация после срока хранения: всё условие отбора кандидатов
     /// перепроверяется под блокировкой.
     AcceptedBefore(DateTime<Utc>),
+    /// Боковой чат удаляется приложением вместе с родителем: отметка корзины не нужна.
+    Ignore,
 }
 
 async fn delete_in_tx(
@@ -480,6 +482,25 @@ async fn delete_in_tx(
     trash_guard: TrashGuard,
 ) -> Result<Value, DeleteError> {
     conversations::lock_owner(&mut *conn, owner_id).await?;
+    // Боковой чат родителя уходит первым: связь без каскада, и строка копии
+    // не должна пережить строку, на которую ссылается.
+    let side_of: Option<Option<Uuid>> =
+        sqlx::query_scalar("select side_of from conversations where id=$1 and owner_id=$2")
+            .bind(id)
+            .bind(owner_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    if matches!(side_of, Some(None))
+        && !Box::pin(crate::side::stop_and_delete_for_parent_in_tx(
+            &mut *conn,
+            owner_id,
+            id,
+            correlation_id,
+        ))
+        .await?
+    {
+        return Err(DeleteError::Live);
+    }
     // Задания разговора берутся до очереди и без ожидания: планировщик держит строку
     // задания и потом ждёт очередь, а под блокировкой очереди ждать задание нельзя.
     // Запертое задание уже выполняется; удаление откатывается и повторяется позже.
@@ -612,6 +633,25 @@ async fn delete_in_tx(
     Ok(json!({"deleted": true}))
 }
 
+/// Удаление строк бокового чата обычным путём, без требований корзины и подписчиков.
+pub(crate) async fn delete_side_in_tx(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    id: Uuid,
+    correlation_id: Uuid,
+) -> Result<(), DeleteError> {
+    delete_in_tx(
+        conn,
+        owner_id,
+        id,
+        correlation_id,
+        DeleteMode::Retention,
+        TrashGuard::Ignore,
+    )
+    .await
+    .map(|_| ())
+}
+
 /// Мягкое удаление в тех же блокировках, что и окончательное: владелец, курсоры журнала,
 /// очередь, строка разговора. Строка берётся `FOR NO KEY UPDATE`: подписка держит на ней
 /// `FOR KEY SHARE`, и обновление неключевой отметки корзины не должно с ней конфликтовать.
@@ -659,6 +699,19 @@ async fn trash_in_tx(
     }
     if executions::live(conn, id).await?.is_some() {
         return Err(DeleteError::Live);
+    }
+    // Копия уходит вместе с родителем; если она ещё отвечает, её остановку заказали,
+    // а строки уберёт следующий проход после остановки.
+    if !crate::side::stop_and_delete_for_parent_in_tx(&mut *conn, owner_id, id, correlation_id)
+        .await?
+    {
+        sqlx::query(
+            "update conversations set trashed_at=clock_timestamp()
+              where side_of=$1 and trashed_at is null",
+        )
+        .bind(id)
+        .execute(&mut *conn)
+        .await?;
     }
     if holds_worktree(conn, id).await? {
         return Err(DeleteError::WorktreeNotRemoved);
