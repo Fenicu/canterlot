@@ -668,3 +668,42 @@ fn prompt_suggestions_need_a_cli_that_was_checked_live() {
         "2.1.311".into()
     )));
 }
+
+#[test]
+fn fork_passes_resume_parent_fork_session_and_the_allocated_id() {
+    let td = TempDir::new().unwrap();
+    let exec_dir = td.path().join("exec");
+    fs::create_dir_all(&exec_dir).unwrap();
+    let workdir = td.path().join("work");
+    fs::create_dir_all(&workdir).unwrap();
+    let owner = owner_instructions();
+    let fork_id = Uuid::now_v7();
+    let spec = LaunchSpec {
+        executable: Path::new("/usr/bin/claude"),
+        exec_dir: &exec_dir,
+        workdir: &workdir,
+        session: SessionArg::Fork {
+            parent: "parent-native".into(),
+            new_id: Some(fork_id),
+        },
+        model: "haiku",
+        effort: "low",
+        permission_mode: "read_only",
+        instructions: &owner,
+        isolate_mcp: false,
+        prompt_suggestions: false,
+    };
+    let args = build_args(&spec, &cfg()).unwrap();
+    let s: Vec<String> = args
+        .iter()
+        .map(|o| o.to_string_lossy().to_string())
+        .collect();
+    let resume = s.iter().position(|x| x == "--resume").unwrap();
+    assert_eq!(s[resume + 1], "parent-native");
+    assert_eq!(s[resume + 2], "--fork-session");
+    let id = s.iter().position(|x| x == "--session-id").unwrap();
+    assert_eq!(s[id + 1], fork_id.to_string());
+    // `read_only` по-прежнему отображается в план: режим только для чтения держит CLI.
+    let mode = s.iter().position(|x| x == "--permission-mode").unwrap();
+    assert_eq!(s[mode + 1], "plan");
+}

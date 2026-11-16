@@ -15,7 +15,11 @@ if '--version' in sys.argv:
     print(v); sys.exit(1 if v=='failed' else 0)
 (d/'args.json').write_text(json.dumps(sys.argv[1:]))
 (d/'connectors.json').write_text(json.dumps(os.environ.get('ENABLE_CLAUDEAI_MCP_SERVERS')))
-sid=sys.argv[sys.argv.index('--resume')+1] if '--resume' in sys.argv else sys.argv[sys.argv.index('--session-id')+1]
+# Форк 2.1.325 отдаёт заказанный --session-id, а не id родителя из --resume.
+if '--fork-session' in sys.argv and '--session-id' in sys.argv:
+    sid=sys.argv[sys.argv.index('--session-id')+1]
+else:
+    sid=sys.argv[sys.argv.index('--resume')+1] if '--resume' in sys.argv else sys.argv[sys.argv.index('--session-id')+1]
 def emit(v):
     if isinstance(v,str): print(v,flush=True); return
     if v.get('subtype')=='init': v=dict(v,session_id=sid)

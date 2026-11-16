@@ -3,9 +3,9 @@
 use canterlot_proto::requests::{AnswerValue, DecisionPayload, PermissionBehavior};
 use canterlot_worker::{
     adapter::{
-        self, Adapter, AdapterContext, AdapterEvent, BlockKind, CloseMode, InstructionMode,
-        InstructionSpec, SettingsChange, StartSpec, Transmission, TransmitOutcome,
-        claude_code::version::CliVersion,
+        self, Adapter, AdapterContext, AdapterEvent, BlockKind, CloseMode, ForkSpec,
+        InstructionMode, InstructionSpec, SettingsChange, StartSpec, Transmission,
+        TransmitOutcome, claude_code::version::CliVersion,
     },
     config::ClaudeCodeConfig,
     containment::TreeContainment,
@@ -3230,4 +3230,69 @@ sys.stdin.read()
         );
         adapter.close(CloseMode::Graceful, &group).await.unwrap();
     }
+}
+
+#[tokio::test]
+async fn fork_starts_a_fresh_copy_and_reports_its_own_id() {
+    let mut fake = Fake::new(vec![]);
+    fake.spec.native_conversation_id = None;
+    fake.spec.permission_mode = "read_only".into();
+    fake.spec.fork = Some(ForkSpec {
+        parent_native_id: "parent-native".into(),
+        side_mcp: true,
+    });
+    fake.permit = Some(CLI_GATE.lock().await);
+    let started = tokio::time::timeout(WAIT, fake.adapter.start(&fake.spec, &fake.group))
+        .await
+        .expect("start must finish")
+        .expect("start");
+    assert!(started.fresh_fork);
+    assert!(Uuid::parse_str(&started.native_conversation_id).is_ok());
+    assert_ne!(started.native_conversation_id, "parent-native");
+    let argv = fake.dir.path().join("args.json");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !argv.exists() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let args: Vec<String> =
+        serde_json::from_str(&std::fs::read_to_string(&argv).unwrap()).unwrap();
+    let resume = args.iter().position(|x| x == "--resume").unwrap();
+    assert_eq!(args[resume + 1], "parent-native");
+    assert_eq!(args[resume + 2], "--fork-session");
+    let id = args.iter().position(|x| x == "--session-id").unwrap();
+    assert_eq!(args[id + 1], started.native_conversation_id);
+    // Родительская запись не тронута семантически: двойнику не ушло ни одного
+    // кадра и ни одного resume, кроме аргумента запуска.
+    let stdin = std::fs::read_to_string(fake.dir.path().join("stdin.log")).unwrap_or_default();
+    assert!(!stdin.contains("parent-native"));
+    fake.adapter.close(CloseMode::Force, &fake.group).await.unwrap();
+    fake.permit.take();
+}
+
+#[tokio::test]
+async fn fork_reforks_when_the_side_record_is_gone() {
+    let mut fake = Fake::new(vec![]);
+    fake.spec.native_conversation_id = Some(Uuid::now_v7().to_string());
+    fake.spec.permission_mode = "read_only".into();
+    fake.spec.fork = Some(ForkSpec {
+        parent_native_id: "parent-native".into(),
+        side_mcp: true,
+    });
+    fake.permit = Some(CLI_GATE.lock().await);
+    let started = tokio::time::timeout(WAIT, fake.adapter.start(&fake.spec, &fake.group))
+        .await
+        .expect("start must finish")
+        .expect("start");
+    assert!(started.fresh_fork);
+    assert_ne!(started.native_conversation_id, fake.spec.native_conversation_id.as_deref().unwrap());
+    let argv = fake.dir.path().join("args.json");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !argv.exists() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let args: Vec<String> =
+        serde_json::from_str(&std::fs::read_to_string(&argv).unwrap()).unwrap();
+    assert!(args.contains(&"--fork-session".to_string()));
+    fake.adapter.close(CloseMode::Force, &fake.group).await.unwrap();
+    fake.permit.take();
 }

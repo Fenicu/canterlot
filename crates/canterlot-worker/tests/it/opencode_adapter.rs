@@ -7,7 +7,7 @@ use canterlot_proto::requests::{AnswerValue, DecisionPayload, PermissionBehavior
 use canterlot_worker::{
     adapter::{
         Adapter, AdapterError, AdapterEvent, AgentCallResult, BlockKind, CloseMode, CompactOutcome,
-        DecisionOutcome, InstructionMode, InstructionSpec, InterruptOutcome, LimitFact,
+        DecisionOutcome, ForkSpec, InstructionMode, InstructionSpec, InterruptOutcome, LimitFact,
         LimitWindow, Phase, SettingsChange, StartSpec, Started, SteerOutcome, Transmission,
         TransmitOutcome,
         opencode::{
@@ -6622,5 +6622,133 @@ async fn steer_without_a_turn_sends_nothing() {
             .any(|request| path_of(request).ends_with("/prompt")),
         "no prompt without a running turn"
     );
+    bench.close(CloseMode::Graceful).await;
+}
+
+fn fork_script(parent: &str, forked: &str, resumed: Option<bool>) -> Script {
+    let mut script = ready();
+    script.steps.clear();
+    if let Some(found) = resumed {
+        let session = if found {
+            Reply {
+                body: Some(json!({"data": {"id": forked, "title": "canterlot"}})),
+                ..Default::default()
+            }
+        } else {
+            Reply {
+                status: 404,
+                body: Some(json!({"_tag": "SessionNotFoundError", "sessionID": forked})),
+                ..Default::default()
+            }
+        };
+        script.set_route("GET", &format!("/api/session/{forked}"), vec![session]);
+    }
+    script.set_route(
+        "POST",
+        &format!("/api/session/{parent}/fork"),
+        vec![Reply {
+            body: Some(json!({"data": {"id": forked, "title": "p (fork #1)"}})),
+            ..Default::default()
+        }],
+    );
+    for (method, path) in [
+        ("PATCH", format!("/api/session/{forked}")),
+        ("POST", format!("/api/session/{forked}/model")),
+    ] {
+        script.set_route(method, &path, vec![reply_204()]);
+    }
+    script
+}
+
+fn side_effect(permissions: &Value, tool: &str) -> Option<String> {
+    permissions
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|rule| rule["action"] == tool || rule["action"] == "*")
+        .and_then(|rule| rule["effect"].as_str())
+        .map(str::to_owned)
+}
+
+#[tokio::test]
+async fn fork_creates_a_fresh_session_and_sets_side_rules_and_model() {
+    let parent = "ses_11112222333344445555666677778888";
+    let forked = "ses_99990000111122223333444455556666";
+    let mut bench = Bench::new(fork_script(parent, forked, None));
+    bench.spec.native_conversation_id = None;
+    bench.spec.permission_mode = "read_only".into();
+    bench.spec.fork = Some(ForkSpec {
+        parent_native_id: parent.into(),
+        side_mcp: true,
+    });
+    let started = bench.start_ok().await;
+    assert!(started.fresh_fork);
+    // Отчитывается своим нативным id, а не родительским.
+    assert_eq!(started.native_conversation_id, forked);
+    let requests = bench.fake.requests();
+    let fork = find_exact(&requests, "POST", &format!("/api/session/{parent}/fork")).unwrap();
+    assert_eq!(fork["body"], json!({}));
+    // Родительская запись не тронута семантически: кроме самого форка ни один
+    // запрос не читает, не правит и не продолжает родительский id.
+    assert!(
+        requests.iter().all(|request| {
+            let path = path_of(request);
+            !path.contains(parent) || path.ends_with("/fork")
+        }),
+        "{requests:?}"
+    );
+    // Ни создания, ни resume: только форк.
+    assert!(find(&requests, "POST", "/api/session").is_none());
+    assert!(find_exact(&requests, "GET", &format!("/api/session/{parent}")).is_none());
+    // Перед первым вводом — права read-only без подагентов и предназначенная модель.
+    let patch = find_exact(&requests, "PATCH", &format!("/api/session/{forked}")).unwrap();
+    let permissions = &patch["body"]["permissions"];
+    assert_eq!(side_effect(permissions, "*").as_deref(), Some("deny"));
+    assert_eq!(side_effect(permissions, "subagent").as_deref(), Some("deny"));
+    assert_eq!(side_effect(permissions, "task").as_deref(), Some("deny"));
+    assert_eq!(side_effect(permissions, "todowrite").as_deref(), Some("allow"));
+    assert_eq!(side_effect(permissions, "read").as_deref(), Some("allow"));
+    let model = find(&requests, "POST", "/model").unwrap();
+    assert_eq!(
+        model["body"]["model"],
+        json!({"id": "fake-1", "providerID": "fake", "variant": "high"})
+    );
+    bench.close(CloseMode::Graceful).await;
+}
+
+#[tokio::test]
+async fn side_start_resumes_the_live_session_without_forking() {
+    let parent = "ses_11112222333344445555666677778888";
+    let forked = "ses_99990000111122223333444455556666";
+    let mut bench = Bench::new(fork_script(parent, forked, Some(true)));
+    bench.spec.native_conversation_id = Some(forked.into());
+    bench.spec.permission_mode = "read_only".into();
+    bench.spec.fork = Some(ForkSpec {
+        parent_native_id: parent.into(),
+        side_mcp: true,
+    });
+    let started = bench.start_ok().await;
+    assert!(!started.fresh_fork);
+    assert_eq!(started.native_conversation_id, forked);
+    let requests = bench.fake.requests();
+    assert!(find(&requests, "POST", "/fork").is_none());
+    bench.close(CloseMode::Graceful).await;
+}
+
+#[tokio::test]
+async fn side_start_reforks_when_the_side_session_is_gone() {
+    let parent = "ses_11112222333344445555666677778888";
+    let forked = "ses_99990000111122223333444455556666";
+    let mut bench = Bench::new(fork_script(parent, forked, Some(false)));
+    bench.spec.native_conversation_id = Some("ses_deaddeaddeaddeaddeaddeaddeaddead".into());
+    bench.spec.permission_mode = "read_only".into();
+    bench.spec.fork = Some(ForkSpec {
+        parent_native_id: parent.into(),
+        side_mcp: true,
+    });
+    let started = bench.start_ok().await;
+    assert!(started.fresh_fork);
+    assert_eq!(started.native_conversation_id, forked);
     bench.close(CloseMode::Graceful).await;
 }

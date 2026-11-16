@@ -187,3 +187,49 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod side_tests {
+    use super::*;
+
+    fn effect_side(mode: PermissionMode, tool: &str) -> Option<String> {
+        mode.session_rules_side()
+            .as_array()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|rule| rule["action"] == tool || rule["action"] == "*")
+            .and_then(|rule| rule["effect"].as_str())
+            .map(str::to_owned)
+    }
+
+    #[test]
+    fn side_read_only_denies_subagents_and_keeps_reading_and_todowrite() {
+        assert_eq!(
+            effect_side(PermissionMode::ReadOnly, "subagent").as_deref(),
+            Some("deny")
+        );
+        assert_eq!(
+            effect_side(PermissionMode::ReadOnly, "task").as_deref(),
+            Some("deny")
+        );
+        for tool in ["read", "glob", "grep", "question", "todowrite"] {
+            assert_eq!(
+                effect_side(PermissionMode::ReadOnly, tool).as_deref(),
+                Some("allow"),
+                "{tool}"
+            );
+        }
+    }
+
+    #[test]
+    fn side_rules_match_normal_rules_outside_read_only() {
+        for mode in [PermissionMode::Owner, PermissionMode::Ask, PermissionMode::Bypass] {
+            assert_eq!(mode.ruleset_side(), mode.ruleset(), "{mode:?}");
+        }
+        assert_ne!(
+            PermissionMode::ReadOnly.ruleset_side(),
+            PermissionMode::ReadOnly.ruleset()
+        );
+    }
+}

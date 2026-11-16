@@ -1033,12 +1033,21 @@ pub fn handle_rpc_with_provider(msg: &Value, tool_set: ToolSet, provider: &str) 
                         ToolKind::Permission
                     }
                 }
-                ("canterlot_limits", _) => ToolKind::Limits,
-                ("share_file", _) => {
+                ("canterlot_limits", ToolSet::ApproveAndLimits)
+                | ("canterlot_limits", ToolSet::LimitsOnly) => ToolKind::Limits,
+                ("share_file", ToolSet::ApproveAndLimits) | ("share_file", ToolSet::LimitsOnly) => {
                     if let Err(detail) = check_arguments(&share_input_schema(), &arguments) {
                         return error(&id, -32602, &argument_error("share_file", &detail));
                     }
                     ToolKind::ShareFile
+                }
+                // Боковой чат: мост уже разобран выше, всё остальное неизвестно.
+                (mcp_name, ToolSet::Side) => {
+                    return error(
+                        &id,
+                        -32602,
+                        &unknown_tool_message(mcp_name, tool_set, provider),
+                    );
                 }
                 (mcp_name, _) => {
                     let Some((_, tool)) = AGENT_TOOLS.iter().find(|(agent, _)| *agent == mcp_name)
@@ -1577,5 +1586,112 @@ mod tests {
     fn instructions_stay_short() {
         let lines: Vec<&str> = SERVER_INSTRUCTIONS.lines().collect();
         assert!((10..=15).contains(&lines.len()), "{SERVER_INSTRUCTIONS}");
+    }
+}
+
+#[cfg(test)]
+mod side_tests {
+    use super::*;
+    use crate::adapter::ForkSpec;
+
+    fn side() -> Option<ForkSpec> {
+        Some(ForkSpec {
+            parent_native_id: "parent".into(),
+            side_mcp: true,
+        })
+    }
+
+    #[test]
+    fn side_lists_only_the_permission_bridge_for_claude_and_nothing_elsewhere() {
+        let claude = tools_list(ToolSet::Side, "claude");
+        let names: Vec<&str> = claude["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect();
+        assert_eq!(names, ["approve"]);
+        for provider in ["codex", "opencode", "antigravity"] {
+            let listing = tools_list(ToolSet::Side, provider);
+            assert_eq!(
+                listing["tools"].as_array().expect("tools").len(),
+                0,
+                "{provider}"
+            );
+        }
+    }
+
+    #[test]
+    fn side_accepts_the_permission_bridge_and_refuses_everything_else() {
+        let approve = |name: &str| {
+            handle_rpc_with_provider(
+                &json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                    "params": {"name": name,
+                        "arguments": {"tool_name": "Bash", "tool_use_id": "toolu_1", "input": {}},
+                        "_meta": {"claudecode/toolUseId": "toolu_1"}}}),
+                ToolSet::Side,
+                "claude",
+            )
+        };
+        assert!(matches!(
+            approve("approve"),
+            McpAction::ToolCall {
+                kind: ToolKind::Permission,
+                ..
+            }
+        ));
+        for name in [
+            "canterlot_limits",
+            "share_file",
+            "sessions_list",
+            "session_spawn",
+            "canterlot_presets_list",
+            "plan_add",
+        ] {
+            let error = handle_rpc_with_provider(
+                &json!({"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                    "params": {"name": name, "arguments": {}}}),
+                ToolSet::Side,
+                "claude",
+            )
+            .as_error()
+            .unwrap_or_else(|| panic!("{name} отклонён"))
+            .clone();
+            assert_eq!(error["code"], -32602, "{name}");
+            assert!(
+                error["message"].as_str().is_some_and(|message| message
+                    .starts_with(&format!("unknown tool '{name}'"))),
+                "{name}: {}",
+                error["message"]
+            );
+        }
+    }
+
+    #[test]
+    fn for_side_picks_the_reduced_set_only_for_side_chats() {
+        assert_eq!(
+            ToolSet::for_side(side().as_ref(), ToolSet::ApproveAndLimits),
+            ToolSet::Side
+        );
+        assert_eq!(
+            ToolSet::for_side(side().as_ref(), ToolSet::LimitsOnly),
+            ToolSet::Side
+        );
+        assert_eq!(
+            ToolSet::for_side(None, ToolSet::LimitsOnly),
+            ToolSet::LimitsOnly
+        );
+        assert_eq!(
+            ToolSet::for_side(None, ToolSet::ApproveAndLimits),
+            ToolSet::ApproveAndLimits
+        );
+        let not_side = ForkSpec {
+            parent_native_id: "parent".into(),
+            side_mcp: false,
+        };
+        assert_eq!(
+            ToolSet::for_side(Some(&not_side), ToolSet::LimitsOnly),
+            ToolSet::LimitsOnly
+        );
     }
 }

@@ -7,8 +7,8 @@
 use canterlot_proto::requests::{DecisionPayload, PermissionBehavior};
 use canterlot_worker::{
     adapter::{
-        self, Adapter, AdapterContext, AdapterEvent, BlockKind, CloseMode, Phase, StartSpec,
-        SteerOutcome, Transmission, TransmitOutcome,
+        self, Adapter, AdapterContext, AdapterEvent, BlockKind, CloseMode, ForkSpec, Phase,
+        StartSpec, SteerOutcome, Transmission, TransmitOutcome,
         codex::{CodexCatalog, input::model_entries},
     },
     config::CodexConfig,
@@ -3705,4 +3705,92 @@ async fn compaction_turn_without_its_item_is_a_failure() {
         matches!(events.last(), Some(AdapterEvent::Compacted { ok: false })),
         "{events:?}"
     );
+}
+
+fn fork_handshake(new_thread: &str) -> Vec<String> {
+    vec![
+        w_in(0, "initialize", json!({"clientInfo": {"name": "t"}})),
+        w_out(json!({"id": 0, "result": {"codexHome": "/h"}})),
+        w_in_notification("initialized"),
+        w_in(1, "account/read", json!({"refreshToken": false})),
+        w_out(
+            json!({"id": 1, "result": {"account": {"type": "chatgpt"}, "requiresOpenaiAuth": true}}),
+        ),
+        w_in(2, "config/read", json!({})),
+        w_out(json!({"id": 2, "result": "<omitted: test>"})),
+        w_in(3, "thread/fork", json!({})),
+        w_out(json!({"id": 3, "result": thread_result(new_thread, "gpt-6-luna")})),
+    ]
+}
+
+fn stdin_entries(dir: &TempDir) -> Vec<Value> {
+    std::fs::read_to_string(dir.path().join("stdin.log"))
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect()
+}
+
+#[tokio::test]
+async fn fork_uses_ephemeral_read_only_params_and_reports_the_new_thread() {
+    let mut fake = Fake::new(fork_handshake("thread-new"));
+    fake.spec.native_conversation_id = None;
+    fake.spec.permission_mode = "read_only".into();
+    fake.spec.fork = Some(ForkSpec {
+        parent_native_id: "thread-parent".into(),
+        side_mcp: true,
+    });
+    let started = tokio::time::timeout(WAIT, fake.adapter.start(&fake.spec, &fake.group))
+        .await
+        .expect("start must finish")
+        .expect("start");
+    assert!(started.fresh_fork);
+    assert_eq!(started.native_conversation_id, "thread-new");
+    let entries = stdin_entries(&fake.dir);
+    let forks: Vec<&Value> = entries
+        .iter()
+        .filter(|entry| entry["method"] == "thread/fork")
+        .collect();
+    assert_eq!(forks.len(), 1);
+    let params = &forks[0]["params"];
+    assert_eq!(params["threadId"], "thread-parent");
+    assert_eq!(params["ephemeral"], true);
+    assert_eq!(params["excludeTurns"], true);
+    assert_eq!(params["sandbox"], "read-only");
+    assert_eq!(params["model"], "gpt-6-luna");
+    assert!(params["cwd"].as_str().is_some_and(|cwd| !cwd.is_empty()));
+    assert!(params["developerInstructions"].as_str().is_some());
+    // Родитель не тронут: ни resume, ни стартов, ни ходов на его id.
+    assert!(
+        entries.iter().all(|entry| entry["method"] != "thread/resume"
+            && entry["method"] != "thread/start")
+    );
+    for entry in &entries {
+        if entry["method"] == "turn/start" || entry["method"] == "turn/steer" {
+            assert_ne!(entry["params"]["threadId"], "thread-parent");
+        }
+    }
+}
+
+#[tokio::test]
+async fn later_side_start_forks_again_instead_of_resuming_the_dead_ephemeral_id() {
+    let mut fake = Fake::new(fork_handshake("thread-second"));
+    fake.spec.native_conversation_id = Some("thread-new".into());
+    fake.spec.permission_mode = "read_only".into();
+    fake.spec.fork = Some(ForkSpec {
+        parent_native_id: "thread-parent".into(),
+        side_mcp: true,
+    });
+    let started = tokio::time::timeout(WAIT, fake.adapter.start(&fake.spec, &fake.group))
+        .await
+        .expect("start must finish")
+        .expect("start");
+    assert!(started.fresh_fork);
+    assert_eq!(started.native_conversation_id, "thread-second");
+    let entries = stdin_entries(&fake.dir);
+    assert!(
+        entries.iter().any(|entry| entry["method"] == "thread/fork"
+            && entry["params"]["threadId"] == "thread-parent")
+    );
+    assert!(entries.iter().all(|entry| entry["method"] != "thread/resume"));
 }
