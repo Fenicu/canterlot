@@ -305,6 +305,8 @@ fn exempt(method: &str, path: &str) -> bool {
         || (method == "POST" && path == "/api/v1/limits/refresh")
         || (method == "POST" && path == "/api/v1/routing-policy/preview")
         || (method == "POST" && path == "/api/v1/search")
+        // Отметка присутствия — идемпотентный образец: ключ повтора ничего не добавит.
+        || (method == "POST" && path == "/api/v1/presence")
         || (method == "PUT" && path.ends_with("/draft"))
         || (matches!(method, "POST" | "DELETE") && path.ends_with("/side"))
         || (matches!(method, "PUT" | "DELETE") && path.contains("/bookmarks/"))

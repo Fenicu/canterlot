@@ -85,6 +85,7 @@ mod owner_push;
 mod owner_reclaim;
 mod plan_board;
 mod poison_records;
+mod presence;
 mod presets;
 mod prompt_suggestions;
 mod provider_status;

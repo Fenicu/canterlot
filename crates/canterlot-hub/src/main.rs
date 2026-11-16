@@ -355,12 +355,14 @@ async fn serve(
     canterlot_hub::notify::configure(&pool, push_settings.as_ref())
         .await
         .map_err(str::to_owned)?;
+    let presence = canterlot_hub::presence::Presence::default();
     let owner_push = notify
         .gotify
         .as_ref()
         .map(canterlot_hub::notify::Sender::new)
         .transpose()
-        .map_err(str::to_owned)?;
+        .map_err(str::to_owned)?
+        .map(|sender| sender.with_presence(presence.clone()));
     match &owner_push {
         Some(_) => tracing::info!(kind = "owner_push_enabled", "gotify pushes enabled"),
         None => tracing::info!(kind = "owner_push_disabled", "no [notify.gotify] table"),
@@ -494,6 +496,7 @@ async fn serve(
             limits,
             activity,
             nudge_enabled: orchestrator.nudge.enabled,
+            presence,
             routing_stale: orchestrator.routing.stale_limits,
             guards: orchestrator.guards.clone(),
             session_tools: session_tools.clone(),

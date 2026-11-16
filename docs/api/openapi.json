@@ -8867,6 +8867,76 @@
         }
       }
     },
+    "/api/v1/presence": {
+      "post": {
+        "tags": [
+          "events"
+        ],
+        "operationId": "post__api_v1_presence",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PresenceBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Отметка учтена",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            }
+          },
+          "404": {
+            "description": "Разговор не найден",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/presets": {
       "get": {
         "tags": [
@@ -16636,6 +16706,24 @@
               "type": "string"
             },
             "default": []
+          }
+        },
+        "additionalProperties": false
+      },
+      "PresenceBody": {
+        "type": "object",
+        "required": [
+          "conversation_id",
+          "visible"
+        ],
+        "properties": {
+          "conversation_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "visible": {
+            "type": "boolean",
+            "description": "`true` — чат открыт и виден; `false` — скрыт, закрыт или страница уходит."
           }
         },
         "additionalProperties": false

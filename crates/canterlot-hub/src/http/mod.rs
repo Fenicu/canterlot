@@ -48,6 +48,7 @@ pub mod media;
 pub mod nudge;
 pub mod openapi;
 pub mod plan;
+pub mod presence;
 pub mod presets;
 pub mod prompt_suggestions;
 pub mod routing;
@@ -78,6 +79,8 @@ pub struct AppDeps {
     pub activity: ActivityConfig,
     /// Выключатель `[orchestrator.nudge]`: обновление проекции при отметке прочитанного.
     pub nudge_enabled: bool,
+    /// Открытые у владельца чаты; та же карта глушит пуши в фоновой службе.
+    pub presence: crate::presence::Presence,
     /// Свежесть показаний лимитов для предпросмотра маршрута.
     pub routing_stale: std::time::Duration,
     /// Пороги стража машины перед запуском.
@@ -115,6 +118,7 @@ pub struct AppState {
     pub limits: Arc<LimitsConfig>,
     pub activity: Arc<ActivityConfig>,
     pub nudge_enabled: bool,
+    pub presence: crate::presence::Presence,
     pub routing_stale: std::time::Duration,
     pub guards: GuardsConfig,
     pub session_tools: SessionToolsConfig,
@@ -161,6 +165,7 @@ impl AppState {
             limits: Arc::new(deps.limits),
             activity: Arc::new(deps.activity),
             nudge_enabled: deps.nudge_enabled,
+            presence: deps.presence,
             routing_stale: deps.routing_stale,
             guards: deps.guards,
             session_tools: deps.session_tools,
@@ -215,6 +220,7 @@ pub fn api_routes() -> OpenApiRouter<AppState> {
         .merge(scheduled::routes())
         .merge(alarms::routes())
         .merge(plan::routes())
+        .merge(presence::routes())
         .merge(nudge::routes())
         .merge(routing::routes())
         .merge(search::routes())

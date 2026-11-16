@@ -26,6 +26,7 @@ use canterlot_hub::{
     model::ExecutionState,
     notify::{self, PushSettings, Sender},
     session_tools::settle::{SettleFacts, Settled},
+    presence::{Presence, TTL},
     testkit::{self, Seed},
 };
 use canterlot_proto::worker::v1::{
@@ -34,6 +35,7 @@ use canterlot_proto::worker::v1::{
 use chrono::{DateTime, TimeDelta, Utc};
 use serde_json::{Value, json};
 use sqlx::PgPool;
+use tokio::time::Instant;
 use uuid::Uuid;
 
 const TOKEN: &str = "AbCdEf-gotify-SECRET-token_123";
@@ -490,6 +492,10 @@ fn sender(config: &GotifyConfig) -> Sender {
     Sender::new(config)
         .unwrap()
         .with_backoff(vec![Duration::from_millis(1), Duration::from_millis(1)])
+}
+
+fn presence_sender(config: &GotifyConfig, presence: &Presence) -> Sender {
+    sender(config).with_presence(presence.clone())
 }
 
 // ---------- тесты ----------
@@ -1745,12 +1751,15 @@ async fn a_server_error_is_retried_and_then_delivered(pool: PgPool) {
     let second = sender.deliver_due(&pool).await.unwrap();
     assert_eq!(second.sent, 1);
     assert_eq!(fake.seen().len(), 2);
-    let (state, attempts, status): (String, i32, Option<i32>) =
+    let (state, attempts, status): (String, i32, Option<String>) =
         sqlx::query_as("select state,attempts,last_status from owner_pushes")
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!((state.as_str(), attempts, status), ("sent", 2, Some(200)));
+    assert_eq!(
+        (state.as_str(), attempts, status),
+        ("sent", 2, Some("200".into()))
+    );
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
@@ -2075,4 +2084,166 @@ fn config_errors_are_clear_at_start() {
         result.unwrap_err().contains("gotify-token"),
         "names the token file"
     );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_visible_chat_suppresses_waiting_turn_finished_and_failure(pool: PgPool) {
+    let (fake, url) = fake_gotify().await;
+    let (_dir, config) = gotify(&url, "");
+    enable(&pool).await;
+    let s = seed(&pool).await;
+    let now = Utc::now();
+    let execution = start(&pool, s.owner_id, s.conversation_id).await;
+    long_idle(&pool, s.conversation_id, now).await;
+    finish_turn(
+        &pool,
+        s.machine_id,
+        s.conversation_id,
+        &execution,
+        now - TimeDelta::seconds(1),
+    )
+    .await;
+    for step in [5, 10, 20, 40] {
+        refresh_at(&pool, s.conversation_id, now + TimeDelta::seconds(step)).await;
+    }
+    open_question(
+        &pool,
+        &s,
+        &question_batch(&execution, Uuid::now_v7(), "Да?"),
+    )
+    .await;
+    lose(&pool, s.conversation_id, execution.execution_id).await;
+
+    let kinds: Vec<String> =
+        sqlx::query_scalar("select kind from owner_pushes where state='pending' order by kind")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(kinds, ["failure", "turn_finished", "waiting"]);
+
+    let presence = Presence::default();
+    let at = Instant::now();
+    presence.report(s.conversation_id, "phone", true, at);
+    let report = presence_sender(&config, &presence)
+        .deliver_due_at(&pool, at)
+        .await
+        .unwrap();
+    assert_eq!(
+        (report.sent, report.suppressed, report.cancelled),
+        (0, 3, 0)
+    );
+    assert!(fake.seen().is_empty(), "nothing reached Gotify");
+    let rows: Vec<(String, String, Option<String>)> =
+        sqlx::query_as("select kind,state,last_status from owner_pushes order by kind")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    for (kind, state, status) in rows {
+        assert_eq!(state, "suppressed", "{kind}");
+        assert_eq!(status.as_deref(), Some("suppressed_visible"), "{kind}");
+    }
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_hidden_chat_does_not_suppress(pool: PgPool) {
+    let (fake, url) = fake_gotify().await;
+    let (_dir, config) = gotify(&url, "");
+    enable(&pool).await;
+    let s = seed(&pool).await;
+    let execution = start(&pool, s.owner_id, s.conversation_id).await;
+    open_question(
+        &pool,
+        &s,
+        &question_batch(&execution, Uuid::now_v7(), "Да?"),
+    )
+    .await;
+
+    let presence = Presence::default();
+    let at = Instant::now();
+    presence.report(s.conversation_id, "phone", true, at);
+    presence.report(s.conversation_id, "phone", false, at);
+    assert!(!presence.is_visible(s.conversation_id, at));
+    let report = presence_sender(&config, &presence)
+        .deliver_due_at(&pool, at)
+        .await
+        .unwrap();
+    assert_eq!((report.sent, report.suppressed), (1, 0));
+    assert_eq!(fake.seen().len(), 1);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_second_device_keeps_a_chat_visible_when_another_goes_hidden(pool: PgPool) {
+    let (fake, url) = fake_gotify().await;
+    let (_dir, config) = gotify(&url, "");
+    enable(&pool).await;
+    let first = seed(&pool).await;
+    let second = seed(&pool).await;
+    for s in [&first, &second] {
+        let execution = start(&pool, s.owner_id, s.conversation_id).await;
+        open_question(&pool, s, &question_batch(&execution, Uuid::now_v7(), "Да?")).await;
+    }
+
+    let presence = Presence::default();
+    let at = Instant::now();
+    // На первом чате телефон скрыт, но ноутбук виден; на втором наоборот.
+    presence.report(first.conversation_id, "phone", true, at);
+    presence.report(first.conversation_id, "phone", false, at);
+    presence.report(first.conversation_id, "laptop", true, at);
+    presence.report(second.conversation_id, "phone", false, at);
+    presence.report(second.conversation_id, "laptop", true, at);
+
+    let report = presence_sender(&config, &presence)
+        .deliver_due_at(&pool, at)
+        .await
+        .unwrap();
+    assert_eq!((report.sent, report.suppressed), (0, 2));
+    assert!(fake.seen().is_empty());
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn presence_expires_after_45_seconds_of_silence(pool: PgPool) {
+    let (fake, url) = fake_gotify().await;
+    let (_dir, config) = gotify(&url, "");
+    enable(&pool).await;
+    let s = seed(&pool).await;
+    let execution = start(&pool, s.owner_id, s.conversation_id).await;
+    open_question(
+        &pool,
+        &s,
+        &question_batch(&execution, Uuid::now_v7(), "Да?"),
+    )
+    .await;
+
+    let presence = Presence::default();
+    let at = Instant::now();
+    presence.report(s.conversation_id, "phone", true, at);
+    assert!(presence.is_visible(s.conversation_id, at + TTL - Duration::from_secs(1)));
+    assert!(!presence.is_visible(s.conversation_id, at + TTL));
+    let report = presence_sender(&config, &presence)
+        .deliver_due_at(&pool, at + TTL)
+        .await
+        .unwrap();
+    assert_eq!((report.sent, report.suppressed), (1, 0));
+    assert_eq!(fake.seen().len(), 1);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn sign_in_pushes_are_never_suppressed(pool: PgPool) {
+    let (fake, url) = fake_gotify().await;
+    let (_dir, config) = gotify(&url, "");
+    enable(&pool).await;
+    let s = seed(&pool).await;
+    notify::on_sign_in(&pool, Uuid::now_v7(), "Firefox 159 · Linux")
+        .await
+        .unwrap();
+
+    let presence = Presence::default();
+    let at = Instant::now();
+    presence.report(s.conversation_id, "phone", true, at);
+    let report = presence_sender(&config, &presence)
+        .deliver_due_at(&pool, at)
+        .await
+        .unwrap();
+    assert_eq!((report.sent, report.suppressed), (1, 0));
+    assert_eq!(fake.seen()[0].body["title"], "Новый вход в canterlot");
 }

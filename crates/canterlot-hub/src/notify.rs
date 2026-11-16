@@ -22,6 +22,7 @@ use crate::{
     activity::{Evidence, OWNER_LOST},
     config::{GotifyConfig, GotifyToken},
     events::Scope,
+    presence::Presence,
     session_tools::settle::{SettleFacts, Settled},
 };
 
@@ -671,6 +672,8 @@ pub struct DeliveryReport {
     pub retried: usize,
     pub dropped: usize,
     pub cancelled: usize,
+    /// Чат сессии был открыт у владельца: пуш не отправлен и не будет повторён.
+    pub suppressed: usize,
     /// Отложены общим пределом в минуту.
     pub deferred: usize,
 }
@@ -709,6 +712,7 @@ pub struct Sender {
     max_per_minute: usize,
     backoff: Vec<Duration>,
     window: Arc<Mutex<VecDeque<Instant>>>,
+    presence: Presence,
 }
 
 impl std::fmt::Debug for Sender {
@@ -737,12 +741,19 @@ impl Sender {
             // Три попытки примерно за пять минут.
             backoff: vec![Duration::from_secs(60), Duration::from_secs(180)],
             window: Arc::default(),
+            presence: Presence::default(),
         })
     }
 
     /// Паузы между попытками; попыток на одну больше, чем пауз.
     pub fn with_backoff(mut self, backoff: Vec<Duration>) -> Self {
         self.backoff = backoff;
+        self
+    }
+
+    /// Карта присутствия, общая с HTTP-слоем: чат, открытый в PWA, глушит пуши.
+    pub fn with_presence(mut self, presence: Presence) -> Self {
+        self.presence = presence;
         self
     }
 
@@ -802,6 +813,15 @@ impl Sender {
     /// Один проход: забирает созревшие строки и отправляет их по одной.
     /// И готовность, и протухание считает база: часы хаба и базы могут расходиться.
     pub async fn deliver_due(&self, pool: &PgPool) -> Result<DeliveryReport, sqlx::Error> {
+        self.deliver_due_at(pool, Instant::now()).await
+    }
+
+    /// Тот же проход с явными часами: срок присутствия проверяется без ожидания.
+    pub async fn deliver_due_at(
+        &self,
+        pool: &PgPool,
+        now: Instant,
+    ) -> Result<DeliveryReport, sqlx::Error> {
         let rows: Vec<PushRow> = sqlx::query_as(
             "select id,conversation_id,kind,payload,attempts,created_at,
                     clock_timestamp()-created_at > $1 * interval '1 second' as stale
@@ -819,6 +839,15 @@ impl Sender {
                 finish(pool, row.id, "dropped", None).await?;
                 warn_dropped(&row, None, "stale");
                 report.dropped += 1;
+                continue;
+            }
+            // Чат открыт и виден: владелец увидит событие на экране, пуш не нужен.
+            // Решение принимается при отправке: отметка живёт секунды, а строка может ждать.
+            if let Some(conversation_id) = row.conversation_id
+                && self.presence.is_visible(conversation_id, now)
+            {
+                finish(pool, row.id, "suppressed", Some("suppressed_visible")).await?;
+                report.suppressed += 1;
                 continue;
             }
             let Some(message) = compose(pool, &row, &self.app_url).await? else {
@@ -851,7 +880,7 @@ impl Sender {
             .await?;
             match self.post(&message).await {
                 Ok(status) => {
-                    finish(pool, row.id, "sent", Some(status)).await?;
+                    finish(pool, row.id, "sent", Some(&status.to_string())).await?;
                     report.sent += 1;
                 }
                 Err(Failure::Retry(status)) if attempts < self.max_attempts() => {
@@ -860,7 +889,7 @@ impl Sender {
                          where id=$1 and state='pending'",
                     )
                     .bind(row.id)
-                    .bind(status.map(i32::from))
+                    .bind(status.map(|code| code.to_string()))
                     .execute(pool)
                     .await?;
                     report.retried += 1;
@@ -877,7 +906,7 @@ impl Sender {
                          where id=$1 and state='pending'",
                     )
                     .bind(row.id)
-                    .bind(status.map(i32::from))
+                    .bind(status.map(|code| code.to_string()))
                     .execute(pool)
                     .await?;
                     warn_dropped(&row, status, "gave_up");
@@ -893,7 +922,7 @@ async fn finish(
     pool: &PgPool,
     id: Uuid,
     state: &str,
-    status: Option<u16>,
+    status: Option<&str>,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "update owner_pushes set state=$2,last_status=coalesce($3,last_status),
@@ -902,7 +931,7 @@ async fn finish(
     )
     .bind(id)
     .bind(state)
-    .bind(status.map(i32::from))
+    .bind(status)
     .execute(pool)
     .await?;
     Ok(())
@@ -1203,6 +1232,7 @@ pub async fn run(pool: PgPool, sender: Sender, shutdown: watch::Receiver<bool>) 
                         retried = report.retried,
                         dropped = report.dropped,
                         cancelled = report.cancelled,
+                        suppressed = report.suppressed,
                         deferred = report.deferred,
                         "owner pushes processed"
                     ),

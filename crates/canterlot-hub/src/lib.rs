@@ -48,6 +48,7 @@ pub mod model_resolution;
 pub mod notify;
 pub mod outbox;
 pub mod owner_auth;
+pub mod presence;
 pub mod presets;
 pub mod preview;
 pub mod prompt_suggestions;
