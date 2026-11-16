@@ -106,6 +106,10 @@
 	let showNudge = $state(false);
 	let showRoute = $state(false);
 	let showSheet = $state(false);
+	let showSide = $state(false);
+	let sideQuestion = $state('');
+	let sideSerial = $state(0);
+	let SideChat = $state<Component<{ parent: ChatStore; question?: string; serial?: number; now: number; onclose: () => void }> | null>(null);
 	let infoRunId = $state<string | null>(null);
 	// Редкие панели не входят в маршрут чата: подгружаются, когда их открывают.
 	let TodoPanel = $state<Component<{ chat: ChatStore; lane?: string | null }> | null>(null);
@@ -146,6 +150,7 @@
 		if (showAlarms && !AlarmsSheet) import('./AlarmsSheet.svelte').then((m) => { AlarmsSheet = m.default; });
 		if (showNudge && !NudgeSheet) import('./NudgeSheet.svelte').then((m) => { NudgeSheet = m.default; });
 		if (showRoute && !RouteSheet) import('./RouteSheet.svelte').then((m) => { RouteSheet = m.default; });
+		if (showSide && !SideChat) import('./SideChat.svelte').then((m) => { SideChat = m.default; });
 	});
 	// Список задач показывается не в каждом ходу: панель догружается вместе с ним.
 	$effect(() => {
@@ -173,6 +178,26 @@
 	const continuedFromAt = $derived(
 		(chat.detail as { continued_from_at?: string | null } | null)?.continued_from_at ?? null
 	);
+	// Боковой чат предлагается там, где хаб его примет: не Antigravity, не сама копия,
+	// и у родителя уже есть нативная запись. OpenCode ждёт простоя.
+	const sideIsParent = $derived(Boolean((chat.detail as { side_of?: string | null } | null)?.side_of));
+	const sideHasNative = $derived(
+		Boolean((chat.execution as { native_conversation_id?: string | null } | null)?.native_conversation_id) ||
+			chat.turnRecorded
+	);
+	const sideHidden = $derived(
+		sideIsParent || sessionHarnessId === 'antigravity' || !sideHasNative
+	);
+	const sideHint = $derived(
+		sessionHarnessId === 'opencode' && chat.activity?.state !== 'idle'
+			? 'Доступно, когда сессия остановится'
+			: null
+	);
+	function openSide(question = '') {
+		sideQuestion = question;
+		sideSerial += 1;
+		showSide = true;
+	}
 	const sessionPermissionMode = $derived(
 		(chat.settings.effective as { permission_mode?: string } | null | undefined)?.permission_mode ??
 			((chat.detail?.permission_mode as string | undefined) ?? '')
@@ -258,6 +283,8 @@
 		}}
 		onOpenMessages={() => (showMessages = true)}
 		onOpenSearch={() => openSearch('', { id: chat.id, title: (chat.detail as { title?: string } | null)?.title ?? '' })}
+		onOpenSide={sideHidden ? undefined : () => openSide()}
+		{sideHint}
 		onOpenBookmarks={() => (showBookmarks = true)}
 		bookmarkCount={marks?.count ?? 0}
 		onOpenAlarms={() => (showAlarms = true)}
@@ -334,7 +361,17 @@
 
 	<PendingStrip {chat} />
 
-	<Composer {chat} />
+	<Composer {chat} onside={(question) => openSide(question)} />
+
+	{#if showSide && SideChat && !sideHidden}
+		<SideChat
+			parent={chat}
+			question={sideQuestion}
+			serial={sideSerial}
+			{now}
+			onclose={() => (showSide = false)}
+		/>
+	{/if}
 
 	{#if showAccept}
 		<ConfirmDialog

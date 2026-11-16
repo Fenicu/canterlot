@@ -609,6 +609,7 @@ export interface ConversationCreated {
       state: string;
       path: string;
     } | null;
+    side_of?: Uuid | null;
   };
 }
 export interface GroupPin {
@@ -678,6 +679,7 @@ export interface ConversationUpdated {
       state: string;
       path: string;
     } | null;
+    side_of?: Uuid | null;
   };
 }
 export interface ConversationDeleted {

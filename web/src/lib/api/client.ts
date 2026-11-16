@@ -545,6 +545,34 @@ export function conversationInputs(
   );
 }
 
+export function createSideChat(
+  conversationId: string,
+  opts?: RequestOptions,
+): Promise<
+  HttpResponse<Ok<operations["post__api_v1_conversations__id__side"]>>
+> {
+  return http(
+    "POST",
+    `/api/v1/conversations/${id(conversationId)}/side`,
+    undefined,
+    keyed(crypto.randomUUID(), opts),
+  );
+}
+
+export function deleteSideChat(
+  conversationId: string,
+  opts?: RequestOptions,
+): Promise<
+  HttpResponse<Ok<operations["delete__api_v1_conversations__id__side"]>>
+> {
+  return http(
+    "DELETE",
+    `/api/v1/conversations/${id(conversationId)}/side`,
+    undefined,
+    keyed(crypto.randomUUID(), opts),
+  );
+}
+
 export function conversationImages(
   conversationId: string,
   query?: Query,

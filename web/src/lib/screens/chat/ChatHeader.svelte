@@ -67,6 +67,8 @@
 		onOpenDelegation,
 		onOpenMessages,
 		onOpenSearch,
+		onOpenSide,
+		sideHint = null,
 		onOpenBookmarks,
 		bookmarkCount = 0,
 		onOpenAlarms,
@@ -87,6 +89,9 @@
 		onOpenDelegation?: () => void;
 		onOpenMessages?: () => void;
 		onOpenSearch?: () => void;
+		/** Вход в боковой чат; `sideHint` делает его недоступным с подсказкой. */
+		onOpenSide?: () => void;
+		sideHint?: string | null;
 		/** Избранное разговора: лист с закладками и их число. */
 		onOpenBookmarks?: () => void;
 		bookmarkCount?: number;
@@ -411,6 +416,19 @@
 
 				{#if onOpenSheet}
 					<MenuItem icon="pin" onclick={() => { menuOpen = false; onOpenSheet(); }}>Название, цвет и группы</MenuItem>
+				{/if}
+
+				{#if onOpenSide}
+					<MenuItem
+						icon="chats"
+						disabled={Boolean(sideHint)}
+						title={sideHint ?? undefined}
+						onclick={() => {
+							if (sideHint) return;
+							menuOpen = false;
+							onOpenSide();
+						}}>Спросить в стороне</MenuItem
+					>
 				{/if}
 
 				{#if onOpenSettings}

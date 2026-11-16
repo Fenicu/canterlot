@@ -340,6 +340,17 @@ export function pauseHoldCards(q: QueueView, ctx: PauseCardsContext): Card[] {
         break;
       }
 
+      case "side_parent_busy": {
+        cards.push({
+          key: "hold:side_parent_busy",
+          tone: "default",
+          title: "Ждём, пока сессия остановится",
+          body: ["Боковой чат OpenCode начнётся на простое родителя."],
+          actions: [],
+        });
+        break;
+      }
+
       case "attachments_pending": {
         const body: string[] = [];
         if (h.machine_reason === "hub_unreachable") {

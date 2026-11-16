@@ -72,6 +72,18 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
         return;
       }
     }
+    if (kind === 'side' && parts.length === 6) {
+      if (route.request().method() === 'POST') {
+        const view = api.createSideChat(id);
+        await route.fulfill({ status: view.created ? 201 : 200, headers, json: view });
+        return;
+      }
+      if (route.request().method() === 'DELETE') {
+        api.deleteSideChat(id);
+        await route.fulfill({ status: 204, headers });
+        return;
+      }
+    }
     if (kind === 'draft') {
       if (route.request().method() === 'GET') {
         await route.fulfill({ headers, json: api.draft(id) });

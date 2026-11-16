@@ -585,6 +585,39 @@ export class FakeHubApi {
 		for (const id of [...this.promptSuggestions.keys()]) this.setPromptSuggestion(id, null);
 	}
 
+	/** Боковые чаты: строка родителя и его копия живут только в памяти фейка. */
+	readonly sideChats = new Map<string, string>();
+
+	createSideChat(parent: string): { conversation_id: string; created: boolean } {
+		const existing = this.sideChats.get(parent);
+		if (existing && this.details.has(existing)) {
+			return { conversation_id: existing, created: false };
+		}
+		const parentRow = this.list.get(parent);
+		const id = this.id();
+		this.sideChats.set(parent, id);
+		const row: Record<string, unknown> = {
+			...(parentRow ?? { title: 'Сессия', harness: { id: 'claude', title: 'Claude', provider: 'anthropic' } }),
+			id,
+			title: `${parentRow?.title ?? 'Сессия'} · в стороне`,
+			side_of: parent,
+			permission_mode: 'read_only'
+		};
+		this.details.set(id, { ...row, turn_recorded: true, execution: null });
+		this.histories.set(id, []);
+		this.bindConversation(id);
+		return { conversation_id: id, created: true };
+	}
+
+	deleteSideChat(parent: string): boolean {
+		const id = this.sideChats.get(parent);
+		if (!id) return false;
+		this.sideChats.delete(parent);
+		this.details.delete(id);
+		this.histories.delete(id);
+		return true;
+	}
+
 	conversationData(id: string): SnapshotData {
 		const open_requests = [...this.requestRows(id).values()].filter((r) =>
 			r.state === 'open' || r.state === 'decision_saved' || r.state === 'decision_transmitting'

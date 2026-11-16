@@ -31,7 +31,7 @@
   import { probe } from '#lib/perf/probe.js';
   import type { Component } from 'svelte';
 
-  let { chat }: { chat: ChatStore } = $props();
+  let { chat, onside }: { chat: ChatStore; onside?: (question: string) => void } = $props();
   const runtime = getRuntime();
   const uploads = sessionUploads();
   let limits = $state<Limits>({
@@ -337,7 +337,7 @@
     if (decision === 'newline' || decision === 'ignore') return;
     event.preventDefault();
     if (decision === 'send_later_menu') later = true;
-    else void model.send();
+    else if (!sideCommand()) void model.send();
   }
 
   function pointerDown(event: PointerEvent) {
@@ -360,11 +360,26 @@
     window.clearTimeout(timer);
   }
 
+  /**
+   * `/side` и `/side вопрос` — вход в боковой чат: текст не уходит в родителя.
+   * Возвращает true, когда команда перехвачена.
+   */
+  function sideCommand(): boolean {
+    if (!onside) return false;
+    const match = /^\/side(?:\s+([\s\S]*))?\s*$/.exec(model.text);
+    if (!match) return false;
+    const question = (match[1] ?? '').trim();
+    model.text = '';
+    onside(question);
+    return true;
+  }
+
   function sendClick() {
     if (held) {
       held = false;
       return;
     }
+    if (sideCommand()) return;
     void model.send();
   }
 
