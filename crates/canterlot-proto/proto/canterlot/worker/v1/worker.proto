@@ -45,6 +45,9 @@ message Hello {
   string boot_id = 10;
   StreamKind stream_kind = 11;
   uint64 machine_time_ms = 12;
+  // Хранилище секретов этой загрузки: `<boot_id>:<inode базового каталога>`.
+  // Смена эпохи означает, что tmpfs очищен и прежние файлы исчезли.
+  string secrets_epoch = 13;
 }
 
 message JournalCursor {
@@ -98,9 +101,6 @@ message ControlUp {
     // Только при согласованной возможности watchdog_v1. Номер 13 оставлен
     // под состояние очереди тяжёлых задач.
     MachineWatch machine_watch = 14;
-    // Только при согласованной возможности secret_requests_v1: метаданные файлов
-    // секретов, которые воркер уже написал. Значений здесь нет и быть не может.
-    SecretManifests secret_manifests = 15;
   }
 }
 
@@ -130,7 +130,7 @@ message ControlDown {
     ListClaudeHistories list_claude_histories = 9;
     // Только при согласованной возможности path_probe_v1.
     ProbePath probe_path = 10;
-    // Только при согласованной возможности secret_requests_v1: одноразовая передача
+    // Только при согласованной возможности secret_requests_v2: одноразовая передача
     // значения на машину. Это не `Command` и в outbox не попадает.
     SecretDeliver secret_deliver = 11;
   }
@@ -195,27 +195,33 @@ message Command {
     // Только при согласованной возможности send_now_v1: влить ожидающий ввод
     // в идущий ход, не открывая нового.
     SteerInput steer_input = 20;
-    // Только при согласованной возможности secret_requests_v1: убрать файл секрета.
-    // Только метаданные: значения команда не несёт.
+    // Только при согласованной возможности secret_requests_v2: убрать файл секрета
+    // до поколения `up_to` включительно. Только метаданные: значения команда не несёт.
     RevokeSecret revoke_secret = 21;
   }
 }
 
 // Одноразовая передача значения на машину. В журналах и outbox её нет.
 message SecretDeliver {
-  string attempt_id = 1;
-  string request_id = 2;
-  string conversation_id = 3;
+  string request_id = 1;
+  string conversation_id = 2;
   // Байты значения без изменений; размер ограничивает хаб.
-  bytes value = 4;
+  bytes value = 3;
+  // Поколение запроса: файл с меньшим или равным поколением отзыва не воскреснет.
+  uint64 generation = 4;
+  // Когда файл истекает; часы хаба, не воркера.
+  uint64 expires_at_ms = 5;
 }
 
-// Убрать файл секрета по отзыву владельца, истечению или концу сессии.
+// Убрать файл секрета до поколения `up_to` включительно: отзыв владельца,
+// истечение, замена или конец сессии.
 message RevokeSecret {
   string request_id = 1;
-  string attempt_id = 2;
   // Каталог разговора: воркер открывает ровно его, а не сканирует базу.
-  string conversation_id = 3;
+  string conversation_id = 2;
+  uint64 up_to = 3;
+  // Короткая причина для факта: `revoked`, `expired`, `session_end`, `superseded`.
+  string reason = 4;
 }
 
 /// Влить ожидающий ввод в идущий ход («Отправить сейчас»). Несёт тот же ввод,
@@ -362,56 +368,46 @@ message RecordBody {
     BlockFile block_file = 41;
     // Только при согласованной возможности prompt_suggestions_v1.
     PromptSuggested prompt_suggested = 42;
-    // Только при согласованной возможности secret_requests_v1.
+    // Только при согласованной возможности secret_requests_v2.
     SecretDelivered secret_delivered = 43;
     SecretFailed secret_failed = 44;
     SecretRemoved secret_removed = 45;
-    // Файл не удалось убрать: манифест остаётся, уборка повторит попытку.
+    // Файл не удалось убрать: хаб повторит отзыв, а «отозван» не напишет.
     SecretRemoveFailed secret_remove_failed = 46;
   }
 }
 
 // Файл секрета записан. Только метаданные: значения здесь нет.
 message SecretDelivered {
-  string attempt_id = 1;
-  string request_id = 2;
-  string path = 3;
-  uint64 expires_at_ms = 4;
-}
-
-// Значение не дошло до файла: причина короткая, без значения и без пути.
-message SecretFailed {
-  string attempt_id = 1;
-  string reason = 2;
-}
-
-// Файл секрета удалён: причина `revoked`, `expired` или `session_end`.
-message SecretRemoved {
-  string attempt_id = 1;
-  string reason = 2;
-}
-
-// Удалить файл не удалось: `attempt_id` остаётся на учёте, манифест не тронут,
-// и следующая уборка повторит попытку. Значения и пути здесь нет.
-message SecretRemoveFailed {
-  string attempt_id = 1;
-  string reason = 2;
-}
-
-// Метаданные файла при подключении: хаб сверяет незавершённые доставки.
-message SecretManifest {
-  string attempt_id = 1;
-  string request_id = 2;
-  string conversation_id = 3;
+  string request_id = 1;
+  string conversation_id = 2;
+  uint64 generation = 3;
   string path = 4;
   uint64 expires_at_ms = 5;
 }
 
-message SecretManifests {
-  repeated SecretManifest manifests = 1;
-  // Соединение, на котором снят снимок: хаб сверяет только попытки, отправленные
-  // до него, и не трогает доставки, ушедшие уже на этом соединении.
-  string snapshot_id = 2;
+// Значение не дошло до файла: причина короткая, без значения и без пути.
+message SecretFailed {
+  string request_id = 1;
+  string conversation_id = 2;
+  uint64 generation = 3;
+  string reason = 4;
+}
+
+// Файла с поколением `cap` и старше больше нет: отзыв подтверждён проверкой.
+message SecretRemoved {
+  string request_id = 1;
+  string conversation_id = 2;
+  uint64 cap = 3;
+  string reason = 4;
+}
+
+// Удалить файл не удалось: подтверждения нет, хаб повторит отзыв.
+message SecretRemoveFailed {
+  string request_id = 1;
+  string conversation_id = 2;
+  uint64 cap = 3;
+  string reason = 4;
 }
 
 message CommandStored {

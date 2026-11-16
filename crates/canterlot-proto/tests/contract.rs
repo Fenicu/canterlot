@@ -2205,17 +2205,17 @@ fn prompt_suggestion_is_trimmed_and_capped_on_a_char_boundary() {
 #[test]
 fn secret_messages_keep_their_wire_shape_and_hide_the_value() {
     use canterlot_proto::worker::v1::{
-        ControlDown, ControlUp, SecretDeliver, SecretDelivered, SecretFailed, SecretManifest,
-        SecretManifests, SecretRemoveFailed, SecretRemoved, command, control_down, control_up,
-        record_body,
+        ControlDown, SecretDeliver, SecretDelivered, SecretFailed, SecretRemoveFailed,
+        SecretRemoved, command, control_down, record_body,
     };
     const VALUE: &str = "canterlot-secret-PROBE-value";
 
     let deliver = SecretDeliver {
-        attempt_id: "attempt".into(),
         request_id: "request".into(),
         conversation_id: "conversation".into(),
         value: VALUE.as_bytes().to_vec(),
+        generation: 3,
+        expires_at_ms: 7,
     };
     let down = ControlDown {
         msg: Some(control_down::Msg::SecretDeliver(deliver.clone())),
@@ -2234,19 +2234,21 @@ fn secret_messages_keep_their_wire_shape_and_hide_the_value() {
         [0x5A, wire[1]],
         "ControlDown.secret_deliver is field 11"
     );
-    assert_eq!(deliver.encode_to_vec()[0], 0x0A, "attempt_id is field 1");
     assert_eq!(SecretDeliver::default().value, Vec::<u8>::new());
+    assert_roundtrip(down);
 
     let revoke = canterlot_proto::worker::v1::RevokeSecret {
         request_id: "request".into(),
-        attempt_id: "attempt".into(),
         conversation_id: "conversation".into(),
+        up_to: 3,
+        reason: "revoked".into(),
     };
-    assert_eq!(
-        revoke.encode_to_vec()[18],
-        0x1A,
-        "RevokeSecret.conversation_id is field 3"
+    let wire = revoke.encode_to_vec();
+    assert!(
+        wire.windows(2).any(|pair| pair == [0x18, 0x03]),
+        "RevokeSecret.up_to is field 3"
     );
+    assert!(!format!("{revoke:?}").contains(VALUE));
     let command = Command {
         command_id: "command".into(),
         kind: Some(command::Kind::RevokeSecret(revoke)),
@@ -2261,8 +2263,9 @@ fn secret_messages_keep_their_wire_shape_and_hide_the_value() {
     assert_roundtrip(command);
 
     let delivered = SecretDelivered {
-        attempt_id: "attempt".into(),
         request_id: "request".into(),
+        conversation_id: "conversation".into(),
+        generation: 3,
         path: "/run/canterlot-secrets/c/one".into(),
         expires_at_ms: 7,
     };
@@ -2275,7 +2278,9 @@ fn secret_messages_keep_their_wire_shape_and_hide_the_value() {
     assert!(!format!("{delivered:?}").contains(VALUE));
 
     let failed = SecretFailed {
-        attempt_id: "attempt".into(),
+        request_id: "request".into(),
+        conversation_id: "conversation".into(),
+        generation: 3,
         reason: "not_tmpfs".into(),
     };
     let body = RecordBody {
@@ -2285,7 +2290,9 @@ fn secret_messages_keep_their_wire_shape_and_hide_the_value() {
     assert!(!format!("{failed:?}").contains(VALUE));
 
     let removed = SecretRemoved {
-        attempt_id: "attempt".into(),
+        request_id: "request".into(),
+        conversation_id: "conversation".into(),
+        cap: 3,
         reason: "revoked".into(),
     };
     let body = RecordBody {
@@ -2295,7 +2302,9 @@ fn secret_messages_keep_their_wire_shape_and_hide_the_value() {
     assert!(!format!("{removed:?}").contains(VALUE));
 
     let remove_failed = SecretRemoveFailed {
-        attempt_id: "attempt".into(),
+        request_id: "request".into(),
+        conversation_id: "conversation".into(),
+        cap: 3,
         reason: "io".into(),
     };
     let body = RecordBody {
@@ -2303,22 +2312,4 @@ fn secret_messages_keep_their_wire_shape_and_hide_the_value() {
     };
     assert_eq!(body.encode_to_vec()[..2], [0xF2, 0x02], "field 46");
     assert!(!format!("{remove_failed:?}").contains(VALUE));
-
-    let manifests = SecretManifests {
-        manifests: vec![SecretManifest {
-            attempt_id: "attempt".into(),
-            request_id: "request".into(),
-            conversation_id: "conversation".into(),
-            path: "/run/canterlot-secrets/c/one".into(),
-            expires_at_ms: 7,
-        }],
-        snapshot_id: "connection".into(),
-    };
-    let up = ControlUp {
-        msg: Some(control_up::Msg::SecretManifests(manifests.clone())),
-    };
-    let wire = up.encode_to_vec();
-    assert_eq!(wire[0], 0x7A, "ControlUp.secret_manifests is field 15");
-    assert_roundtrip(up);
-    assert!(!format!("{manifests:?}").contains(VALUE));
 }

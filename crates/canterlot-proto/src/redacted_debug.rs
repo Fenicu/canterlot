@@ -482,9 +482,10 @@ impl fmt::Debug for crate::worker::ipc::AgentCallResult {
 impl fmt::Debug for crate::worker::v1::SecretDeliver {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SecretDeliver")
-            .field("attempt_id", &self.attempt_id)
             .field("request_id", &self.request_id)
             .field("conversation_id", &self.conversation_id)
+            .field("generation", &self.generation)
+            .field("expires_at_ms", &self.expires_at_ms)
             .field("value_bytes", &self.value.len())
             .finish()
     }
@@ -494,8 +495,9 @@ impl fmt::Debug for crate::worker::v1::RevokeSecret {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RevokeSecret")
             .field("request_id", &self.request_id)
-            .field("attempt_id", &self.attempt_id)
             .field("conversation_id", &self.conversation_id)
+            .field("up_to", &self.up_to)
+            .field("reason", &self.reason)
             .finish()
     }
 }
@@ -503,8 +505,9 @@ impl fmt::Debug for crate::worker::v1::RevokeSecret {
 impl fmt::Debug for crate::worker::v1::SecretDelivered {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SecretDelivered")
-            .field("attempt_id", &self.attempt_id)
             .field("request_id", &self.request_id)
+            .field("conversation_id", &self.conversation_id)
+            .field("generation", &self.generation)
             .field("path_bytes", &self.path.len())
             .field("expires_at_ms", &self.expires_at_ms)
             .finish()
@@ -514,7 +517,9 @@ impl fmt::Debug for crate::worker::v1::SecretDelivered {
 impl fmt::Debug for crate::worker::v1::SecretFailed {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SecretFailed")
-            .field("attempt_id", &self.attempt_id)
+            .field("request_id", &self.request_id)
+            .field("conversation_id", &self.conversation_id)
+            .field("generation", &self.generation)
             .field("reason", &self.reason)
             .finish()
     }
@@ -523,7 +528,9 @@ impl fmt::Debug for crate::worker::v1::SecretFailed {
 impl fmt::Debug for crate::worker::v1::SecretRemoved {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SecretRemoved")
-            .field("attempt_id", &self.attempt_id)
+            .field("request_id", &self.request_id)
+            .field("conversation_id", &self.conversation_id)
+            .field("cap", &self.cap)
             .field("reason", &self.reason)
             .finish()
     }
@@ -532,29 +539,10 @@ impl fmt::Debug for crate::worker::v1::SecretRemoved {
 impl fmt::Debug for crate::worker::v1::SecretRemoveFailed {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SecretRemoveFailed")
-            .field("attempt_id", &self.attempt_id)
-            .field("reason", &self.reason)
-            .finish()
-    }
-}
-
-impl fmt::Debug for crate::worker::v1::SecretManifest {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SecretManifest")
-            .field("attempt_id", &self.attempt_id)
             .field("request_id", &self.request_id)
             .field("conversation_id", &self.conversation_id)
-            .field("path_bytes", &self.path.len())
-            .field("expires_at_ms", &self.expires_at_ms)
-            .finish()
-    }
-}
-
-impl fmt::Debug for crate::worker::v1::SecretManifests {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SecretManifests")
-            .field("manifests", &self.manifests.len())
-            .field("snapshot_id", &self.snapshot_id)
+            .field("cap", &self.cap)
+            .field("reason", &self.reason)
             .finish()
     }
 }
