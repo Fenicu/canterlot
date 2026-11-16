@@ -3,6 +3,7 @@
   import { SvelteMap } from 'svelte/reactivity';
   import { announce } from '#lib/a11y/announce.js';
   import RequestCard from '#lib/requests/RequestCard.svelte';
+  import SecretRequestCard from '#lib/requests/SecretRequestCard.svelte';
   import { clock } from '#lib/clock.js';
   import { durationMs } from '#lib/motion.js';
   import { probe } from '#lib/perf/probe.js';
@@ -736,6 +737,7 @@
     <div class="sentinel" use:sentinel></div>
     <div class="pad" style:height={`${range.padTop}px`} use:spacer></div>
     {#each windowRows as row (row.key)}
+      {@const first = row.entries[0]}
       <div class="row" data-row data-kind={row.kind} data-key={row.key} data-jump={(row.kind === 'answer' || row.kind === 'event') && row.key === highlightKey ? '' : undefined} use:measure>
         {#if row.kind === 'day'}
           <p class="day">{row.label}</p>
@@ -755,8 +757,18 @@
             open={folds.isOpen(row.key)}
             onToggle={() => folds.toggle(row.key)}
           />
-        {:else if row.kind === 'request' && row.entries[0]?.kind === 'request'}
-          <RequestCard request={row.entries[0].request} onDecision={async () => undefined} {harnessId} {permissionMode} {now} open={folds.isOpen(row.key)} onToggle={() => folds.toggle(row.key)} />
+        {:else if row.kind === 'request' && first?.kind === 'secret_request'}
+          <SecretRequestCard
+            view={first.view}
+            onAnswer={async (body) => {
+              await chat.answerSecretRequest(first.view.id, body);
+            }}
+            onRevoke={async () => {
+              await chat.revokeSecretRequest(first.view.id);
+            }}
+          />
+        {:else if row.kind === 'request' && first?.kind === 'request'}
+          <RequestCard request={first.request} onDecision={async () => undefined} {harnessId} {permissionMode} {now} open={folds.isOpen(row.key)} onToggle={() => folds.toggle(row.key)} />
         {:else if row.kind === 'answer'}
           <AnswerCard cardKey={row.key} {laneRoot} entries={row.entries} {folds} {links} {harness} {activeRun} conversationId={chat.id} {now} {onInfo} load={loadBlock} interrupt={feed || laneRoot ? null : interrupt} {leaseWait} {bookmarks} />
         {:else if row.kind === 'compaction' && row.entries[0]?.kind === 'compaction'}

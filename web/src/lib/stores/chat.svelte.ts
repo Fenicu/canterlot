@@ -38,6 +38,13 @@ import {
 import { LOCAL_SEQ, TimelineModel, cmpSeq, type TimelineEntry } from "./timeline";
 import { rawCell } from "./cell.svelte.js";
 import { RequestsModel, isDocked } from "./requests.svelte";
+import { SecretRequestsModel } from "./secretRequests.svelte";
+import {
+  answerSecretRequest as postSecretAnswer,
+  revokeSecretRequest as postSecretRevoke,
+  type SecretRequestAnswer,
+  type SecretRequestView,
+} from "#lib/requests/secretRequest.js";
 import { BackgroundModel, type BackgroundTask } from "./background.svelte";
 import { TodosModel, type TodoList } from "./todos.svelte";
 import type { components } from "#lib/api/generated/openapi.js";
@@ -163,6 +170,8 @@ export interface ChatApi {
     query?: { before?: string; limit?: number },
   ): Promise<LanePage>;
   events(scope: string, after: string, limit: number): Promise<RangeResult>;
+  /** Секретные запросы разговора: список всех состояний, новые первыми. */
+  secretRequests?(id: string): Promise<SecretRequestView[]>;
   markRead(id: string, seq: string): Promise<void>;
 }
 
@@ -290,6 +299,7 @@ const SHAPING: ReadonlySet<string> = new Set([
   "request_closed",
   "request_decided",
   "request_transmitting",
+  "secret_request_changed",
 ]);
 
 function scopeOf(id: string): ScopeName {
@@ -313,6 +323,7 @@ export class ChatStore {
   readonly inputs = new InputMap();
   readonly timeline = new TimelineModel(() => this.#pruneBlocks());
   readonly requests: RequestsModel;
+  readonly secretRequests: SecretRequestsModel;
   readonly todos = new TodosModel();
   readonly background = new BackgroundModel();
   readonly diagnostics: unknown[] = [];
@@ -466,6 +477,7 @@ export class ChatStore {
       schedule: deps.clock.schedule,
     });
     this.requests = new RequestsModel(this.id);
+    this.secretRequests = new SecretRequestsModel(this.id);
   }
 
   get status(): ScopeStatus {
@@ -548,6 +560,7 @@ export class ChatStore {
     this.timeline.clear();
     this.attachments.clear();
     this.requests.items.clear();
+    this.secretRequests.clear();
     this.todos.clear();
     this.background.clear();
     this.diagnostics.length = 0;
@@ -590,6 +603,29 @@ export class ChatStore {
     if (version !== this.timeline.windowVersion) return;
     this.#ingest(page.items, "older");
     this.timeline.hasOlder = Boolean(page.next_before);
+  }
+
+  /** Список секретных запросов дополняет события: состояния и старые карточки живут и после перезагрузки. */
+  async loadSecretRequests(): Promise<void> {
+    const fetchList = this.deps.api.secretRequests;
+    if (!fetchList) return;
+    const items = await fetchList.call(this.deps.api, this.id);
+    this.secretRequests.ingest(items);
+    // Сверху список новых первыми, а в ленте старые должны встать раньше.
+    for (const view of [...items].sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id)))
+      this.#placeSecretRequest(view);
+  }
+
+  async answerSecretRequest(id: string, body: SecretRequestAnswer): Promise<void> {
+    const view = await postSecretAnswer(id, body);
+    this.secretRequests.apply(view);
+    this.#placeSecretRequest(view);
+  }
+
+  async revokeSecretRequest(id: string): Promise<void> {
+    const view = await postSecretRevoke(id);
+    this.secretRequests.apply(view);
+    this.#placeSecretRequest(view);
   }
 
   /** Список сообщений владельца живёт вне окна ленты и покрывает весь разговор. */
@@ -708,6 +744,7 @@ export class ChatStore {
       if (page.next_after) return;
       this.timeline.tailDetached = false;
       this.timeline.newerCount = 0;
+      this.#placeSecretRequests();
     } finally {
       this.#release();
     }
@@ -726,6 +763,7 @@ export class ChatStore {
         this.timeline.hasOlder = Boolean(page.next_before);
       }
       this.#ingest(page.items, "tail");
+      this.#placeSecretRequests();
     } finally {
       this.#release();
     }
@@ -1245,6 +1283,13 @@ export class ChatStore {
       case "request_transmitting":
         this.requests.applyTransmitting(event);
         return;
+      case "secret_request_changed":
+        if (event.kind === "secret_request_changed") {
+          const view = event.payload as SecretRequestView;
+          this.secretRequests.apply(view, event.scope_seq);
+          this.#placeSecretRequest(view, event.scope_seq);
+        }
+        return;
       case "block_conflicting_final":
       case "adapter_diagnostic":
       case "state_divergence":
@@ -1268,6 +1313,46 @@ export class ChatStore {
       seq: event.scope_seq,
       request,
     });
+  }
+
+  /**
+   * Карточка секрета встаёт по `created_at`: событие создания даёт номер сразу,
+   * а список без события ищет ближайшую запись ленты по времени.
+   */
+  #placeSecretRequest(view: SecretRequestView, anchor?: string): void {
+    const seq = this.secretRequests.anchorOf(view.id) ?? anchor ?? this.#secretAnchor(view.created_at);
+    this.secretRequests.setAnchor(view.id, seq);
+    this.timeline.upsert({
+      kind: "secret_request",
+      key: `secret_request:${view.id}`,
+      seq,
+      view,
+    });
+  }
+
+  #placeSecretRequests(): void {
+    for (const view of this.secretRequests.items.values()) this.#placeSecretRequest(view);
+  }
+
+  #secretAnchor(createdAt: string): string {
+    const at = Date.parse(createdAt);
+    if (!Number.isFinite(at)) return this.timeline.newestSeq() ?? "0";
+    let seq = "0";
+    for (const entry of this.timeline.entries) {
+      if (entry.kind === "input" && entry.input.placement !== "feed") continue;
+      if (entry.kind === "request") continue;
+      const stamp =
+        entry.kind === "block"
+          ? entry.block.createdAt
+          : entry.kind === "compaction"
+            ? entry.compaction.createdAt
+            : entry.kind === "input"
+              ? entry.input.createdAt
+              : Date.parse(entry.view.created_at);
+      if (!stamp || stamp > at) continue;
+      seq = entry.seq;
+    }
+    return seq;
   }
 
   #diagnose(item: unknown): void {
@@ -1566,6 +1651,8 @@ export class ChatStore {
     }
     if (data.nudge_events) this.nudgeEvents = data.nudge_events;
     if (data.open_requests) this.requests.reconcileSnapshot(data.open_requests);
+    // Секретные запросы приходят списком: история их не знает и событий прошлого не повторяет.
+    void this.loadSecretRequests().catch(() => undefined);
     if (data.todos) this.todos.ingestSnapshot(data.todos);
     if (data.background) this.background.ingestSnapshot(data.background);
     if (data.context !== undefined)
@@ -1827,6 +1914,7 @@ function terminalEntry(entry: TimelineEntry): boolean {
   if (entry.kind === "block")
     return entry.block.state === "final" || entry.block.state === "incomplete";
   if (entry.kind === "request") return !isDocked(entry.request);
+  if (entry.kind === "secret_request") return true;
   if (entry.kind === "compaction") return compactionTerminal(entry);
   return (
     entry.input.state === "accepted" ||

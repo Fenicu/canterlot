@@ -80,6 +80,7 @@ function view(rows: Row[]): unknown {
     entries: row.entries.map((entry) => {
       if (entry.kind === "block") return `block:${entry.block.id}:${entry.block.state}`;
       if (entry.kind === "request") return `request:${entry.request.id}:${entry.request.state}`;
+      if (entry.kind === "secret_request") return `secret_request:${entry.view.id}:${entry.view.state}`;
       if (entry.kind === "input") return `input:${entry.input.key}:${entry.input.placement}:${entry.input.state}`;
       return `compaction:${entry.compaction.id}`;
     }),

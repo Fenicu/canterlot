@@ -3,6 +3,7 @@ import type { BlockModel } from "#lib/stores/blocks.js";
 import { fmt } from "#lib/format/ru.js";
 import { isDocked } from "#lib/stores/requests.svelte.js";
 import type { RequestItem } from "#lib/stores/requests.svelte.js";
+import { isSecretRequestDocked, type SecretRequestView } from "#lib/requests/secretRequest.js";
 import type { InputView } from "#lib/stores/inputs.js";
 import type { CompactionModel, TimelineEntry } from "#lib/stores/timeline.js";
 import { providerApiError, providerOf, type ProviderId } from "./apiError";
@@ -237,19 +238,26 @@ export function shownInCard(block: BlockModel): boolean {
   return block.kind !== "reasoning" || block.text.trim().length > 0;
 }
 
+function requestLike(entry: TimelineEntry): boolean {
+  return entry.kind === "request" || entry.kind === "secret_request";
+}
+
 function stampOf(entry: TimelineEntry): number {
   if (entry.kind === "block") return entry.block.createdAt;
   if (entry.kind === "compaction") return entry.compaction.createdAt;
+  if (entry.kind === "secret_request") return Date.parse(entry.view.created_at) || 0;
   if (entry.kind === "request") return 0;
   return entry.input.createdAt ?? 0;
 }
 
-function modelOf(entry: TimelineEntry): BlockModel | RequestItem | InputView | CompactionModel {
+function modelOf(entry: TimelineEntry): BlockModel | RequestItem | SecretRequestView | InputView | CompactionModel {
   switch (entry.kind) {
     case "block":
       return entry.block;
     case "request":
       return entry.request;
+    case "secret_request":
+      return entry.view;
     case "input":
       return entry.input;
     default:
@@ -280,6 +288,10 @@ function shapeOf(entry: TimelineEntry, provider: ProviderId | null = null): stri
   if (entry.kind === "request") {
     return ["r", entry.seq, entry.request.state].join("|");
   }
+  if (entry.kind === "secret_request") {
+    const view = entry.view;
+    return ["s", entry.seq, view.state, view.updated_at, view.name, view.purpose, view.expires_at ?? ""].join("|");
+  }
   if (entry.kind === "input") {
     const input = entry.input;
     return [
@@ -296,7 +308,7 @@ function shapeOf(entry: TimelineEntry, provider: ProviderId | null = null): stri
 
 type EntryRecord = {
   entry: TimelineEntry;
-  model: BlockModel | RequestItem | InputView | CompactionModel;
+  model: BlockModel | RequestItem | SecretRequestView | InputView | CompactionModel;
   shape: string;
 };
 
@@ -326,6 +338,13 @@ class RowAccumulator {
 
   add(entry: TimelineEntry, fork = false): boolean {
     if (entry.kind === "input" && entry.input.placement !== "feed") return false;
+    if (entry.kind === "secret_request") {
+      // Карточка секрета стоит отдельной строкой на своём месте: соседний ответ её не поглощает.
+      if (isSecretRequestDocked(entry.view)) return false;
+      this.card = null;
+      this.#push({ key: entry.key, kind: "request", entries: [entry] }, fork);
+      return true;
+    }
     if (entry.kind === "request") {
       if (isDocked(entry.request)) return false;
       if (this.card) {
@@ -399,15 +418,16 @@ class RowAccumulator {
   canDrop(entry: TimelineEntry, links: BlockLinks): boolean {
     if (entry.kind === "input" && entry.input.placement !== "feed") return true;
     if (entry.kind === "request" && isDocked(entry.request)) return true;
+    if (entry.kind === "secret_request" && isSecretRequestDocked(entry.view)) return true;
     if (entry.kind === "block" && links.parent(entry.block) !== null) return true;
     const found = this.#locate(entry.key);
     if (!found) return true;
     const { row, at } = found;
-    if (row.entries.some((item) => item.kind === "request")) return false;
+    if (row.entries.some((item) => item.kind === "request" || item.kind === "secret_request")) return false;
     if (row.entries.length > 1 && at === 0) return false;
     if (
       row.entries.length > 1 &&
-      row.entries.every((item, index) => index === at || item.kind === "request")
+      row.entries.every((item, index) => index === at || requestLike(item))
     )
       return false;
     return true;
@@ -418,6 +438,7 @@ class RowAccumulator {
     if (!this.canDrop(entry, links)) return false;
     if (entry.kind === "input" && entry.input.placement !== "feed") return true;
     if (entry.kind === "request" && isDocked(entry.request)) return true;
+    if (entry.kind === "secret_request" && isSecretRequestDocked(entry.view)) return true;
     if (entry.kind === "block" && links.parent(entry.block) !== null) return true;
     const found = this.#locate(entry.key);
     if (!found) return true;
@@ -489,7 +510,7 @@ class RowAccumulator {
       while (at < rows.length) {
         const row = rows[at]!;
         if (row.kind === "day") break;
-        if (row.entries.some((entry) => entry.kind !== "request")) break;
+        if (row.entries.some((entry) => !requestLike(entry))) break;
         at++;
       }
       if (at >= rows.length) {
@@ -506,7 +527,7 @@ class RowAccumulator {
         continue;
       }
       // Запрос не задаёт день: подпись встаёт перед первым блоком, а не перед запросами.
-      const head = target.entries.find((entry) => entry.kind !== "request")!;
+      const head = target.entries.find((entry) => !requestLike(entry))!;
       const label = this.label(stampOf(head));
       if (at === 1 && label === first.label) break;
       this.#forgetDay(rows, 1, first.label);
@@ -539,7 +560,7 @@ class RowAccumulator {
         this.day = row.label ?? "";
         break;
       }
-      const head = row.entries.find((entry) => entry.kind !== "request");
+      const head = row.entries.find((entry) => !requestLike(entry));
       if (head) {
         this.day = this.label(stampOf(head));
         break;

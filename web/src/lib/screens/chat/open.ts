@@ -20,6 +20,7 @@ import {
   type SnapshotData,
 } from "#lib/stores/chat.svelte.js";
 import type { RangeResult } from "#lib/sync/scope.js";
+import { listSecretRequests } from "#lib/requests/secretRequest.js";
 
 /** Сколько отпущенных чатов держать готовыми к возврату; остальные освобождаются целиком. */
 const WARM_CHATS = 4;
@@ -168,6 +169,9 @@ async function createChatSession(id: string): Promise<ChatStore> {
       },
       async markRead(conversationId, seq) {
         await markRead(conversationId, { seq });
+      },
+      async secretRequests(conversationId) {
+        return listSecretRequests(conversationId);
       },
     },
     ops: runtime.journal,

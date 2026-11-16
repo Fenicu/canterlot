@@ -20,7 +20,9 @@
 	import SpawnQueueStrip from './SpawnQueueStrip.svelte';
 	import PlanStrip from '#lib/screens/plan/PlanStrip.svelte';
 	import RequestCard from '#lib/requests/RequestCard.svelte';
+	import SecretRequestCard from '#lib/requests/SecretRequestCard.svelte';
 	import { isDocked } from '#lib/stores/requests.svelte.js';
+	import { isSecretRequestDocked } from '#lib/requests/secretRequest.js';
 	import DelegationSheet from './DelegationSheet.svelte';
 	import WorktreeNotice from './WorktreeNotice.svelte';
 	import ConfirmDialog from '#lib/ui/ConfirmDialog.svelte';
@@ -254,6 +256,7 @@
 
 	const waitingId = $props.id();
 	const docked = $derived([...chat.requests.items.values()].filter(isDocked));
+	const dockedSecrets = $derived([...chat.secretRequests.items.values()].filter(isSecretRequestDocked));
 	// Вопрос из активности без открытого запроса отвечать некуда: показываем его только для чтения.
 	const waitingQuestion = $derived.by((): string | null => {
 		const evidence = chat.activity?.evidence as Record<string, unknown> | undefined;
@@ -320,7 +323,7 @@
 
 	{#if TodoPanel}<TodoPanel {chat} />{/if}
 
-	{#if docked.length > 0}
+	{#if docked.length > 0 || dockedSecrets.length > 0}
 		<div class="request-cards-slot">
 			{#each docked as req (req.id)}
 				<RequestCard
@@ -331,6 +334,17 @@
 					permissionMode={sessionPermissionMode}
 					onDecision={async (decision) => {
 						await chat.requests.submitDecision(req.id, decision, chat.ops);
+					}}
+				/>
+			{/each}
+			{#each dockedSecrets as secret (secret.id)}
+				<SecretRequestCard
+					view={secret}
+					onAnswer={async (body) => {
+						await chat.answerSecretRequest(secret.id, body);
+					}}
+					onRevoke={async () => {
+						await chat.revokeSecretRequest(secret.id);
 					}}
 				/>
 			{/each}

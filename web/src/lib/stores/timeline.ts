@@ -1,6 +1,7 @@
 import type { BlockModel } from './blocks';
 import type { InputView } from './inputs';
 import type { RequestItem } from './requests.svelte';
+import type { SecretRequestView } from '#lib/requests/secretRequest.js';
 import { untrack } from 'svelte';
 import { rawCell } from './cell.svelte';
 
@@ -17,6 +18,7 @@ export type TimelineEntry =
 	| { kind: 'input'; key: string; seq: string; input: InputView }
 	| { kind: 'block'; key: string; seq: string; block: BlockModel }
 	| { kind: 'request'; key: string; seq: string; request: RequestItem }
+	| { kind: 'secret_request'; key: string; seq: string; view: SecretRequestView }
 	| { kind: 'compaction'; key: string; seq: string; compaction: CompactionModel };
 
 /** Откуда лента берёт записи и как подгружает старые: у разговора это его окно, у субагента своя ветка. */
@@ -95,11 +97,29 @@ export class TimelineModel {
 
 	applyHistoryPage(items: TimelineEntry[], dir: 'older' | 'newer' | 'tail'): void {
 		const locals = this.entries.filter(isLocalEntry);
+		const secrets = this.entries.filter((entry) => entry.kind === 'secret_request');
 		this.#applyPage(items, dir);
-		if (locals.length === 0) return;
+		this.#restorePersistent(secrets, locals);
+	}
+
+	/**
+	 * Секретные запросы не приходят страницами истории: их место в ленте держится
+	 * отдельно и не должно пропадать при перечитывании окна.
+	 */
+	#restorePersistent(secrets: TimelineEntry[], locals: TimelineEntry[]): void {
+		if (secrets.length === 0 && locals.length === 0) return;
 		const present = new Set(this.entries.map((entry) => entry.key));
-		const missing = locals.filter((entry) => !present.has(entry.key));
-		if (missing.length > 0) this.#entries.set([...this.entries, ...missing]);
+		const missingSecrets = secrets.filter((entry) => !present.has(entry.key));
+		const missingLocals = locals.filter((entry) => !present.has(entry.key));
+		if (missingSecrets.length === 0 && missingLocals.length === 0) return;
+		const merged = [...this.entries.filter((entry) => !isLocalEntry(entry)), ...missingSecrets, ...missingLocals];
+		merged.sort((a, b) => {
+			const localA = isLocalEntry(a);
+			const localB = isLocalEntry(b);
+			if (localA !== localB) return localA ? 1 : -1;
+			return cmpSeq(a.seq, b.seq);
+		});
+		this.#entries.set(merged);
 	}
 
 	#applyPage(items: TimelineEntry[], dir: 'older' | 'newer' | 'tail'): void {
@@ -147,8 +167,14 @@ export class TimelineModel {
 	replaceWindow(items: TimelineEntry[], hasOlder: boolean, tailDetached: boolean): void {
 		this.#window += 1;
 		const locals = this.entries.filter(isLocalEntry);
+		const secrets = this.entries.filter((entry) => entry.kind === 'secret_request');
 		const incoming = dedupe([...items].sort((a, b) => cmpSeq(a.seq, b.seq)));
-		this.#entries.set([...incoming, ...locals]);
+		const present = new Set(incoming.map((entry) => entry.key));
+		const keptSecrets = secrets.filter((entry) => !present.has(entry.key));
+		const keptLocals = locals.filter((entry) => !present.has(entry.key));
+		const merged = [...incoming, ...keptSecrets];
+		merged.sort((a, b) => cmpSeq(a.seq, b.seq));
+		this.#entries.set([...merged, ...keptLocals]);
 		this.hasOlder = hasOlder;
 		this.tailDetached = tailDetached;
 		this.newerCount = 0;
@@ -194,6 +220,7 @@ function sameEntry(a: TimelineEntry, b: TimelineEntry): boolean {
 	if (a.seq !== b.seq) return false;
 	if (a.kind === 'block') return b.kind === 'block' && a.block === b.block;
 	if (a.kind === 'request') return b.kind === 'request' && a.request === b.request;
+	if (a.kind === 'secret_request') return b.kind === 'secret_request' && a.view === b.view;
 	if (a.kind === 'compaction') return b.kind === 'compaction' && a.compaction === b.compaction;
 	return b.kind === 'input' && a.input === b.input;
 }
