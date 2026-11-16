@@ -95,6 +95,8 @@
   const currentAnchor = $derived(anchors[shot.media_id] ?? null);
   const src = $derived(shotSrc(shot));
   const caption = $derived(shotCaption(shot, naturals[shot.media_id] ?? declaredSize(shot)));
+  // Подпись кадра уже начинается с заголовка файла: второй раз его не печатаем.
+  const captioned = $derived(title !== '' && (caption === title || caption.startsWith(`${title} · `)));
   const slides = $derived([index - 1, index, index + 1].filter((i) => i >= 0 && i < list.length));
 
   let dialog: HTMLDialogElement;
@@ -849,7 +851,7 @@
       <button type="button" class="control round side next" aria-label="Следующая картинка" {...edge(index === list.length - 1 && !hasNewer)} onclick={() => void go(index + 1)}><Icon name="chevron" /></button>
     {/if}
     <div class="bottom">
-      <p class="caption" id={captionId}>{caption}{#if title && shot.media_id === openedId}<span class="title">{title}</span>{/if}</p>
+      <p class="caption" id={captionId}>{caption}{#if title && shot.media_id === openedId && !captioned}<span class="title">{title}</span>{/if}</p>
     </div>
   </div>
 </dialog>

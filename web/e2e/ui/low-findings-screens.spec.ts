@@ -3,6 +3,7 @@ import { FakeHub, FakeHubApi } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
 import { seedTaigaCards } from '../../testing/fixtures/taiga-cards';
 import { bootScreen, SCREENS, type Screen } from '../parity/states';
+import { viewer } from './image-viewer-fixture';
 import { expect, test } from './fixtures';
 
 const OWNER = '00000000-0000-4000-8000-0000000000c1';
@@ -100,4 +101,13 @@ test('F-31: word viewer keeps the download beside the close button', async ({ pa
 
 test('F-31: excel viewer keeps the download beside the close button', async ({ page }) => {
   await downloadRow(page, 'xlsx-viewer');
+});
+
+// F-32: подпись просмотрщика не повторяет заголовок карточки.
+test('F-32: image viewer caption prints the title once', async ({ page }) => {
+  await bootScreen(page, screen('image-viewer'));
+  const caption = viewer(page).locator('.caption');
+  await expect(caption).toBeVisible();
+  const text = (await caption.textContent()) ?? '';
+  expect(text.match(/Рабочий стол 1/g) ?? [], `caption: ${text}`).toHaveLength(1);
 });
