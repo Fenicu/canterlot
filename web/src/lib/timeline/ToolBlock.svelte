@@ -86,7 +86,8 @@
       anchor: { kind: 'block_file', id: file.attachment_id }
     };
   }
-  const isCliPolicy = $derived(block.approvedBy === 'cli_policy');
+  // Пометка жила на вызове, теперь на результате: читаем оба места.
+  const isCliPolicy = $derived(block.approvedBy === 'cli_policy' || result?.approvedBy === 'cli_policy');
 </script>
 
 <div class="tool">

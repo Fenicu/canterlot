@@ -971,7 +971,18 @@ async fn tools_reach_the_journal_with_exit_status_and_mark() {
         })
         .collect();
     assert_eq!(tools.len(), 7);
-    assert!(tools.iter().all(|tool| tool.approved_by == "cli_policy"));
+    // Начало уходит по готовности входа без пометки: время честное.
+    assert!(tools.iter().all(|tool| tool.approved_by.is_empty()));
+    let results: Vec<_> = env
+        .bodies
+        .iter()
+        .filter_map(|body| match body {
+            Body::BlockStarted(f) if f.kind == "tool_result" => Some(f),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results.len(), 7);
+    assert!(results.iter().all(|tool| tool.approved_by == "cli_policy"));
     assert!(env.bodies.iter().any(|body| matches!(
         body,
         Body::BlockFinal(f) if f.summary == "shell: exit 3, exit 3"

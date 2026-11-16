@@ -1545,3 +1545,117 @@ fn compaction_failure_closes_the_episode_as_failed() {
         "{out:?}"
     );
 }
+
+/// Записи `live/turn_text_flash` и `live/turn_tools_flash` (OpenCode 2.2.6) дают блоки
+/// основного агента и расход с совпадающей моделью: вход для расчёта скорости.
+fn translated_fixture(
+    name: &str,
+    session: &str,
+    model: &str,
+) -> (Vec<Translated>, Vec<ModelUsage>) {
+    let frames: Vec<Value> = capture_lines(name, None)
+        .into_iter()
+        .filter(|line| line["dir"] == "sse")
+        .map(|line| line["data"].clone())
+        .collect();
+    let windows = HashMap::from([(model.to_owned(), 200_000)]);
+    let mut translator = Translator::new(session, windows);
+    let command = Uuid::now_v7();
+    translator.begin_run(Some(command));
+    let mut out = Vec::new();
+    let mut usage = Vec::new();
+    for frame in &frames {
+        for item in translator.feed(frame) {
+            if let Translated::RunEnded(RunOutcome::Succeeded) = &item
+                && let AdapterEvent::RunFinished {
+                    usage: finished, ..
+                } = translator.finish_run(command)
+            {
+                usage = finished;
+            }
+            out.push(item);
+        }
+    }
+    (out, usage)
+}
+
+fn started_blocks(translated: &[Translated]) -> Vec<(String, String, String)> {
+    let mut blocks = Vec::new();
+    for item in translated {
+        match item {
+            Translated::Event(AdapterEvent::BlockStarted {
+                kind, agent, model, ..
+            })
+            | Translated::ToolCall {
+                event:
+                    AdapterEvent::BlockStarted {
+                        kind, agent, model, ..
+                    },
+                ..
+            } => blocks.push((format!("{kind:?}"), agent.clone(), model.clone())),
+            _ => {}
+        }
+    }
+    blocks
+}
+
+#[test]
+fn current_text_turn_gives_main_agent_blocks_and_matching_usage() {
+    let model = "opencode-go/deepseek-v4.1-flash";
+    let (translated, usage) = translated_fixture(
+        "live/turn_text_flash",
+        "ses_02speedtext00000000000001",
+        model,
+    );
+    assert_eq!(
+        started_blocks(&translated),
+        [(
+            "Text".to_owned(),
+            "orchestrator".to_owned(),
+            model.to_owned()
+        )]
+    );
+    assert_eq!(usage.len(), 1);
+    assert_eq!(usage[0].model, model);
+    assert_eq!(usage[0].agent, "orchestrator");
+    assert!(usage[0].output_tokens > 0);
+}
+
+#[test]
+fn current_tool_turn_gives_reasoning_call_result_text_and_matching_usage() {
+    let model = "opencode-go/deepseek-v4.1-flash";
+    let (translated, usage) = translated_fixture(
+        "live/turn_tools_flash",
+        "ses_02speedtools000000000001",
+        model,
+    );
+    assert_eq!(
+        started_blocks(&translated),
+        [
+            (
+                "Reasoning".to_owned(),
+                "orchestrator".to_owned(),
+                model.to_owned()
+            ),
+            (
+                "ToolCall".to_owned(),
+                "orchestrator".to_owned(),
+                model.to_owned()
+            ),
+            (
+                "ToolResult".to_owned(),
+                "orchestrator".to_owned(),
+                model.to_owned()
+            ),
+            (
+                "Text".to_owned(),
+                "orchestrator".to_owned(),
+                model.to_owned()
+            ),
+        ]
+    );
+    assert_eq!(usage.len(), 1);
+    assert_eq!(usage[0].model, model);
+    assert_eq!(usage[0].agent, "orchestrator");
+    assert!(usage[0].output_tokens > 0);
+}

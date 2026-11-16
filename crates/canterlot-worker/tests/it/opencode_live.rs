@@ -398,7 +398,7 @@ fn marks(events: &[AdapterEvent]) -> Vec<Option<String>> {
         .iter()
         .filter_map(|event| match event {
             AdapterEvent::BlockStarted {
-                kind: BlockKind::ToolCall,
+                kind: BlockKind::ToolResult,
                 approved_by,
                 ..
             } => Some(approved_by.clone()),

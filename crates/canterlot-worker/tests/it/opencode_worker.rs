@@ -384,6 +384,276 @@ async fn worker_with_the_table_reports_the_harness_and_runs_a_turn(pool: PgPool)
     stack.close().await;
 }
 
+/// Ход с инструментом в режиме владельца: вызов виден сразу по готовности входа,
+/// пометка политики — на результате, скорость честная.
+#[sqlx::test(migrations = "../canterlot-hub/migrations")]
+async fn tool_turn_in_owner_mode_yields_a_speed(pool: PgPool) {
+    use canterlot_hub::speed;
+    let mut script = Script::from_capture("start_stream", None)
+        .with_canterlot_mcp("connected")
+        .with_recorded_models();
+    let session = script
+        .steps
+        .iter()
+        .find_map(|step| match step {
+            Step::Expect { reply, .. } => reply
+                .body
+                .as_ref()?
+                .pointer("/data/id")?
+                .as_str()
+                .map(str::to_owned),
+            _ => None,
+        })
+        .unwrap();
+    let prompt = script
+        .steps
+        .iter()
+        .position(|step| {
+            step.expected_path()
+                .is_some_and(|path| path.ends_with("/prompt"))
+        })
+        .unwrap();
+    script.steps.truncate(prompt + 1);
+    let message = "msg_speedtool2";
+    let started = |suffix: &str| {
+        json!({"type": suffix, "data": {
+            "sessionID": session, "assistantMessageID": message,
+            "agent": "build", "model": {"id": "deepseek-v4.1-flash", "providerID": "opencode-go"}}})
+    };
+    let frame = |suffix: &str, data: serde_json::Value| {
+        let mut data = data;
+        data["sessionID"] = session.clone().into();
+        data["assistantMessageID"] = message.into();
+        json!({"type": suffix, "data": data})
+    };
+    let call = "call_speedtool2";
+    script.steps.push(Step::Emit {
+        events: vec![
+            json!({"type": "session.inbox.enqueued", "data": {
+                "inboxID": "msg_18f9dc297001Uo9jYOKSsV0hur",
+                "sessionID": session,
+                "item": {"type": "user", "payload": {"text": "say hello"}}}}),
+            json!({"type": "session.execution.started", "data": {"sessionID": session}}),
+            json!({"type": "session.inbox.delivered", "data": {
+                "inboxID": "msg_18f9dc297001Uo9jYOKSsV0hur", "sessionID": session}}),
+            started("session.step.started"),
+            frame("session.reasoning.started", json!({"ordinal": 0})),
+            frame(
+                "session.tool.input.started",
+                json!({"id": call, "name": "read"}),
+            ),
+        ],
+    });
+    script.steps.push(Step::Stall { ms: 400 });
+    script.steps.push(Step::Emit {
+        events: vec![
+            frame(
+                "session.reasoning.delta",
+                json!({"ordinal": 0, "delta": "let me read"}),
+            ),
+            frame(
+                "session.reasoning.ended",
+                json!({"ordinal": 0, "text": "let me read"}),
+            ),
+            frame(
+                "session.tool.input.ended",
+                json!({"id": call, "text": "{\"path\":\"/tmp/notes.txt\"}"}),
+            ),
+            frame(
+                "session.tool.called",
+                json!({"id": call, "input": {"path": "/tmp/notes.txt"}}),
+            ),
+            frame(
+                "session.tool.success",
+                json!({"id": call, "content": [{"type": "text", "text": "beta"}],
+                    "metadata": {"truncated": false, "exit": 0}}),
+            ),
+            frame("session.step.streamed", json!({})),
+            frame(
+                "session.step.ended",
+                json!({"finish": "tool-calls", "rawFinish": "tool_calls", "cost": 0,
+                    "tokens": {"input": 11540, "output": 47, "reasoning": 20,
+                               "cache": {"read": 4480, "write": 0}}}),
+            ),
+            json!({"type": "session.execution.succeeded", "data": {"sessionID": session}}),
+        ],
+    });
+    let stack = Stack::start(pool.clone(), script).await;
+    sqlx::query(
+        "update conversations set permission_mode = 'owner', effort = 'high' where id = $1",
+    )
+    .bind(stack.conversation)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let execution = stack.execution().await;
+    stack.say("Прочитай файл").await;
+    stack.finished_runs(execution, 1).await;
+
+    let run: (Option<String>, bool, bool, Uuid) = sqlx::query_as(
+        "select provider, exact, finished_at is not null, input_command_id from runs
+         where execution_id = $1",
+    )
+    .bind(execution)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(run.0.as_deref(), Some("opencode"));
+    assert!(run.1 && run.2);
+    let command = run.3;
+
+    let mut conn = pool.acquire().await.unwrap();
+    let speed = speed::for_runs(&mut conn, &[command]).await.unwrap();
+    let speed = speed.get(&command).cloned().unwrap_or_default();
+    eprintln!("SPEED: {speed:?}");
+    assert!(
+        speed.iter().any(|s| s.tokens_per_second.is_some()),
+        "tool turn in owner mode must yield tokens per second: {speed:?}"
+    );
+    stack.close().await;
+}
+
+/// Ход с инструментом в режиме по умолчанию: рассуждение и вызов дают честную генерацию.
+#[sqlx::test(migrations = "../canterlot-hub/migrations")]
+async fn tool_turn_in_bypass_yields_a_speed(pool: PgPool) {
+    use canterlot_hub::speed;
+    let mut script = Script::from_capture("start_stream", None)
+        .with_canterlot_mcp("connected")
+        .with_recorded_models();
+    let session = script
+        .steps
+        .iter()
+        .find_map(|step| match step {
+            Step::Expect { reply, .. } => reply
+                .body
+                .as_ref()?
+                .pointer("/data/id")?
+                .as_str()
+                .map(str::to_owned),
+            _ => None,
+        })
+        .unwrap();
+    let prompt = script
+        .steps
+        .iter()
+        .position(|step| {
+            step.expected_path()
+                .is_some_and(|path| path.ends_with("/prompt"))
+        })
+        .unwrap();
+    script.steps.truncate(prompt + 1);
+    // Кадры как в записи `live/turn_tools_flash` (OpenCode 2.2.6): рассуждение,
+    // вызов read, короткий ответ. `tool.called` приходит до готовности входа.
+    let message = "msg_speedtool1";
+    let started = |suffix: &str| {
+        json!({"type": suffix, "data": {
+            "sessionID": session, "assistantMessageID": message,
+            "agent": "build", "model": {"id": "deepseek-v4.1-flash", "providerID": "opencode-go"}}})
+    };
+    let frame = |suffix: &str, data: serde_json::Value| {
+        let mut data = data;
+        data["sessionID"] = session.clone().into();
+        data["assistantMessageID"] = message.into();
+        json!({"type": suffix, "data": data})
+    };
+    let call = "call_speedtool1";
+    script.steps.push(Step::Emit {
+        events: vec![
+            json!({"type": "session.inbox.enqueued", "data": {
+                "inboxID": "msg_18f9dc297001Uo9jYOKSsV0hur",
+                "sessionID": session,
+                "item": {"type": "user", "payload": {"text": "say hello"}}}}),
+            json!({"type": "session.execution.started", "data": {"sessionID": session}}),
+            json!({"type": "session.inbox.delivered", "data": {
+                "inboxID": "msg_18f9dc297001Uo9jYOKSsV0hur", "sessionID": session}}),
+            started("session.step.started"),
+            frame("session.reasoning.started", json!({"ordinal": 0})),
+            frame(
+                "session.tool.input.started",
+                json!({"id": call, "name": "read"}),
+            ),
+        ],
+    });
+    script.steps.push(Step::Stall { ms: 400 });
+    script.steps.push(Step::Emit {
+        events: vec![
+            frame(
+                "session.reasoning.delta",
+                json!({"ordinal": 0, "delta": "let me read"}),
+            ),
+            frame(
+                "session.reasoning.ended",
+                json!({"ordinal": 0, "text": "let me read"}),
+            ),
+            frame(
+                "session.tool.input.ended",
+                json!({"id": call, "text": "{\"path\":\"/tmp/notes.txt\"}"}),
+            ),
+            frame(
+                "session.tool.called",
+                json!({"id": call, "input": {"path": "/tmp/notes.txt"}}),
+            ),
+            frame(
+                "session.tool.success",
+                json!({"id": call, "content": [{"type": "text", "text": "beta"}],
+                    "metadata": {"truncated": false, "exit": 0}}),
+            ),
+            frame("session.step.streamed", json!({})),
+            frame(
+                "session.step.ended",
+                json!({"finish": "tool-calls", "rawFinish": "tool_calls", "cost": 0,
+                    "tokens": {"input": 11540, "output": 47, "reasoning": 20,
+                               "cache": {"read": 4480, "write": 0}}}),
+            ),
+            json!({"type": "session.execution.succeeded", "data": {"sessionID": session}}),
+        ],
+    });
+    let stack = Stack::start(pool.clone(), script).await;
+    let execution = stack.execution().await;
+    stack.say("Прочитай файл").await;
+    stack.finished_runs(execution, 1).await;
+
+    let run: (Option<String>, bool, bool, Uuid) = sqlx::query_as(
+        "select provider, exact, finished_at is not null, input_command_id from runs
+         where execution_id = $1",
+    )
+    .bind(execution)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(run.0.as_deref(), Some("opencode"));
+    assert!(run.1 && run.2);
+    let command = run.3;
+
+    let blocks: Vec<(String, String, String, bool)> = sqlx::query_as(
+        "select kind, agent, model, finished_at is not null from blocks
+         where input_command_id = $1 order by created_seq",
+    )
+    .bind(command)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    eprintln!("BLOCKS: {blocks:?}");
+    let usage: Vec<(String, String, i64)> = sqlx::query_as(
+        "select model, agent, output_tokens from run_model_usage where input_command_id = $1",
+    )
+    .bind(command)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    eprintln!("USAGE: {usage:?}");
+
+    let mut conn = pool.acquire().await.unwrap();
+    let speed = speed::for_runs(&mut conn, &[command]).await.unwrap();
+    let speed = speed.get(&command).cloned().unwrap_or_default();
+    eprintln!("SPEED: {speed:?}");
+    assert!(
+        speed.iter().any(|s| s.tokens_per_second.is_some()),
+        "tool turn must yield tokens per second: {speed:?}"
+    );
+    stack.close().await;
+}
+
 /// Сбой пробы на старте не убирает харнесс до перезапуска: повтор доносит каталог до хаба.
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn failed_startup_probe_is_retried_and_updates_the_catalog(pool: PgPool) {
@@ -519,5 +789,157 @@ async fn stuck_session_pauses_the_queue_until_compaction_finishes(pool: PgPool) 
         })
         .count();
     assert_eq!(prompts, 3);
+    stack.close().await;
+}
+
+/// Обычный текстовый ход OpenCode даёт скорость: кадры как в записи
+/// `live/turn_text_flash` (OpenCode 2.2.6), генерация разнесена паузой двойника,
+/// чтобы время генерации было честным.
+#[sqlx::test(migrations = "../canterlot-hub/migrations")]
+async fn plain_text_turn_yields_a_speed(pool: PgPool) {
+    use canterlot_hub::speed;
+    let model = "opencode-go/deepseek-v4.1-flash";
+    let mut script = Script::from_capture("start_stream", None)
+        .with_canterlot_mcp("connected")
+        .with_recorded_models();
+    let session = script
+        .steps
+        .iter()
+        .find_map(|step| match step {
+            Step::Expect { reply, .. } => reply
+                .body
+                .as_ref()?
+                .pointer("/data/id")?
+                .as_str()
+                .map(str::to_owned),
+            _ => None,
+        })
+        .unwrap();
+    let prompt = script
+        .steps
+        .iter()
+        .position(|step| {
+            step.expected_path()
+                .is_some_and(|path| path.ends_with("/prompt"))
+        })
+        .unwrap();
+    script.steps.truncate(prompt + 1);
+    let message = "msg_speedtext1";
+    let started = |suffix: &str| {
+        json!({"type": suffix, "data": {
+            "sessionID": session, "assistantMessageID": message,
+            "agent": "build", "model": {"id": "deepseek-v4.1-flash", "providerID": "opencode-go"}}})
+    };
+    let frame = |suffix: &str, data: serde_json::Value| {
+        let mut data = data;
+        data["sessionID"] = session.clone().into();
+        data["assistantMessageID"] = message.into();
+        json!({"type": suffix, "data": data})
+    };
+    // Сервер ставит ввод в очередь и отдаёт его ходу: без этих кадров конец хода
+    // выглядит чужим периодом и ход не закрывается. Идентификаторы записанные:
+    // двойник подменяет их живыми из привязки ответа `/prompt`.
+    script.steps.push(Step::Emit {
+        events: vec![
+            json!({"type": "session.inbox.enqueued", "data": {
+                "inboxID": "msg_18f9dc297001Uo9jYOKSsV0hur",
+                "sessionID": session,
+                "item": {"type": "user", "payload": {"text": "say hello"}}}}),
+            json!({"type": "session.execution.started", "data": {"sessionID": session}}),
+            json!({"type": "session.inbox.delivered", "data": {
+                "inboxID": "msg_18f9dc297001Uo9jYOKSsV0hur", "sessionID": session}}),
+            started("session.step.started"),
+            frame("session.text.started", json!({"ordinal": 0})),
+        ],
+    });
+    // Честная генерация: между первым кадром текста и его концом 400 мс.
+    script.steps.push(Step::Stall { ms: 400 });
+    script.steps.push(Step::Emit {
+        events: vec![
+            frame(
+                "session.text.delta",
+                json!({"ordinal": 0, "delta": "hello "}),
+            ),
+            frame(
+                "session.text.delta",
+                json!({"ordinal": 0, "delta": "world"}),
+            ),
+            frame(
+                "session.text.ended",
+                json!({"ordinal": 0, "text": "hello world"}),
+            ),
+            frame("session.step.streamed", json!({})),
+            frame(
+                "session.step.ended",
+                json!({"finish": "stop", "rawFinish": "stop", "cost": 0,
+                    "tokens": {"input": 15196, "output": 300, "reasoning": 0,
+                               "cache": {"read": 384, "write": 0}}}),
+            ),
+            json!({"type": "session.execution.succeeded", "data": {"sessionID": session}}),
+        ],
+    });
+    let stack = Stack::start(pool.clone(), script).await;
+    let execution = stack.execution().await;
+    stack.say("Скажи привет").await;
+    stack.finished_runs(execution, 1).await;
+
+    let run: (Option<String>, bool, bool, Uuid) = sqlx::query_as(
+        "select provider, exact, finished_at is not null, input_command_id from runs
+         where execution_id = $1",
+    )
+    .bind(execution)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(run.0.as_deref(), Some("opencode"), "provider хода");
+    assert!(run.1, "ход шёл вживую");
+    assert!(run.2, "ход завершён");
+    let command = run.3;
+
+    let blocks: Vec<(String, String, String, bool)> = sqlx::query_as(
+        "select kind, agent, model, finished_at is not null from blocks
+         where input_command_id = $1 order by created_seq",
+    )
+    .bind(command)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        blocks,
+        [(
+            "text".to_owned(),
+            "orchestrator".to_owned(),
+            model.to_owned(),
+            true
+        )],
+        "текст основного агента с моделью шага",
+    );
+    let usage: Vec<(String, String, i64)> = sqlx::query_as(
+        "select model, agent, output_tokens from run_model_usage where input_command_id = $1",
+    )
+    .bind(command)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        usage,
+        [(model.to_owned(), "orchestrator".to_owned(), 300)],
+        "выходные токены шага",
+    );
+
+    let mut conn = pool.acquire().await.unwrap();
+    let speed = speed::for_runs(&mut conn, &[command]).await.unwrap();
+    let speed = speed.get(&command).cloned().unwrap_or_default();
+    assert_eq!(speed.len(), 1, "ход даёт одну скорость: {speed:?}");
+    assert_eq!(speed[0].model, model);
+    assert_eq!(speed[0].output_tokens, 300);
+    assert!(
+        speed[0].tokens_per_second.is_some_and(|tps| tps > 0.0),
+        "токены в секунду: {speed:?}"
+    );
+    assert!(
+        speed[0].first_token_ms.is_some(),
+        "задержка первого токена: {speed:?}"
+    );
     stack.close().await;
 }

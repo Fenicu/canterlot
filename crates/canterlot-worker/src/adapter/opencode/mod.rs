@@ -37,7 +37,6 @@ use crate::{
         SteerOutcome, Support, Transmission, TransmitOutcome,
         canterlot_mcp::{Broker, BrokerEvent, ToolSet},
         cli_version::{CliVersion, Triple, VersionError},
-        held_tool::HeldTools,
     },
     config::OpenCodeConfig,
     containment::Containment,
@@ -582,7 +581,10 @@ pub struct OpenCodeAdapter {
     steer_pending: HashSet<Uuid>,
     shells: Option<ShellList>,
     resync: Option<Resync>,
-    held: HeldTools,
+    /// Вызовы, чей результат ещё не пришёл: пометка «Разрешено правилами CLI» ставится
+    /// на результат, а начало уходит сразу по готовности входа — иначе скорость врёт.
+    /// Ключ — блок вызова, значение — пара для `cli_mark`.
+    pending_marks: HashMap<Uuid, String>,
     /// Вызовы, по которым был запрос: пометки CLI у них нет.
     asked: HashSet<String>,
     requests: Requests,
@@ -653,7 +655,7 @@ impl OpenCodeAdapter {
             steer_pending: HashSet::new(),
             shells: None,
             resync: None,
-            held: HeldTools::default(),
+            pending_marks: HashMap::new(),
             asked: HashSet::new(),
             requests: Requests::default(),
             limits_calls: HashMap::new(),
@@ -1337,7 +1339,7 @@ impl OpenCodeAdapter {
     }
 
     fn on_run_ended(&mut self, outcome: RunOutcome) {
-        self.held.release_all(&mut self.events);
+        self.pending_marks.clear();
         self.asked.clear();
         self.requests.drop_session(&self.session);
         if matches!(outcome, RunOutcome::Succeeded) {
@@ -1525,13 +1527,10 @@ impl OpenCodeAdapter {
     }
 
     /// Пометка «Разрешено правилами CLI»: вызов прошёл без запроса при режиме не `bypass`.
+    /// Ставится на результат, когда запрос уже не придёт: начало вызова уходит раньше,
+    /// по готовности входа, чтобы время генерации оставалось честным.
     fn cli_mark(&self, item: &str) -> Option<&'static str> {
         (self.mode != PermissionMode::Bypass && !self.asked.contains(item)).then_some("cli_policy")
-    }
-
-    fn release_tool(&mut self, item: &str) {
-        let mark = self.cli_mark(item);
-        self.held.release(item, mark, &mut self.events);
     }
 
     fn turn_running(&self) -> bool {
@@ -1553,7 +1552,6 @@ impl OpenCodeAdapter {
     fn on_request(&mut self, request: PendingRequest) {
         if let Some(item) = &request.item {
             self.asked.insert(item.clone());
-            self.held.release(item, None, &mut self.events);
         }
         let id = request.id.clone();
         match self.requests.intake(request) {
@@ -1592,21 +1590,28 @@ impl OpenCodeAdapter {
 
     fn on_translated(&mut self, item: Translated) {
         match item {
-            Translated::Event(event) => {
-                if let Some(event) = self.held.capture(event) {
-                    self.events.push_back(event);
+            Translated::Event(mut event) => {
+                // Пометка итога: запрос, если ему быть, приходит раньше конца вызова,
+                // поэтому решение на результате окончательно.
+                if let AdapterEvent::BlockStarted {
+                    kind: BlockKind::ToolResult,
+                    parent: Some(call),
+                    approved_by,
+                    ..
+                } = &mut event
+                    && let Some(item) = self.pending_marks.remove(call)
+                {
+                    *approved_by = self.cli_mark(&item).map(str::to_owned);
                 }
+                self.events.push_back(event);
             }
+            // Начало вызова уходит сразу: скорость меряет генерацию входа, а не ожидание.
             Translated::ToolCall { item, block, event } => {
-                if self.mode == PermissionMode::Bypass {
-                    self.events.push_back(event);
-                } else {
-                    self.held.hold(item, block, event);
-                }
+                self.pending_marks.insert(block, item);
+                self.events.push_back(event);
             }
-            Translated::ToolRunning(item) => self.release_tool(&item),
+            Translated::ToolRunning(_) => {}
             Translated::ToolDone(item) => {
-                self.release_tool(&item);
                 for request_id in self.requests.close_item(&item) {
                     self.close_request(request_id);
                 }

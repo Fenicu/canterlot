@@ -291,6 +291,20 @@ fn calls(events: &[AdapterEvent]) -> Vec<Call> {
         .collect()
 }
 
+fn result_marks(events: &[AdapterEvent]) -> Vec<Option<String>> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            AdapterEvent::BlockStarted {
+                kind: BlockKind::ToolResult,
+                approved_by,
+                ..
+            } => Some(approved_by.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
 fn session_of(script: &Script) -> String {
     script
         .steps
@@ -3212,22 +3226,26 @@ async fn bypass_shows_tools_without_a_mark() {
 }
 
 #[tokio::test]
-async fn owner_mode_marks_tools_that_ran_without_a_prompt() {
+async fn owner_mode_marks_tool_results_that_ran_without_a_prompt() {
     let mut bench = Bench::new(tools());
     bench.spec.permission_mode = "owner".into();
     bench.start_ok().await;
     let input = bench.input("run tools");
     bench.accepted(&input).await;
     let events = bench.until_finished(input.command_id).await;
+    // Начало вызова уходит по готовности входа без пометки: время честное.
     let calls = calls(&events);
     assert_eq!(calls.len(), 7);
-    for call in &calls {
-        assert_eq!(
-            call.approved_by.as_deref(),
-            Some("cli_policy"),
-            "{}",
-            call.tool
-        );
+    assert!(
+        calls
+            .iter()
+            .all(|call| call.approved_by.is_none() && !call.tool.is_empty())
+    );
+    // Запрос так и не пришёл: пометка политики на результатах.
+    let marks = result_marks(&events);
+    assert_eq!(marks.len(), 7);
+    for mark in &marks {
+        assert_eq!(mark.as_deref(), Some("cli_policy"));
     }
     bench.close(CloseMode::Graceful).await;
 }
@@ -3663,9 +3681,10 @@ async fn aborted_tool_closes_its_request() {
     bench.close(CloseMode::Graceful).await;
 }
 
-// Команда пошла без запроса: вызов виден сразу, с пометкой, а не после конца команды.
+// Команда пошла без запроса: вызов виден сразу без пометки; пометка политики
+// встанет на результат, когда станет ясно, что запроса не будет.
 #[tokio::test]
-async fn progress_releases_a_long_tool_before_it_ends() {
+async fn tool_call_without_a_prompt_is_visible_immediately() {
     let capture = Script::from_capture("tools", None);
     let session = session_of(&capture);
     let prefix = tool_prefix(&capture);
@@ -3697,7 +3716,7 @@ async fn progress_releases_a_long_tool_before_it_ends() {
             ..
         } = bench.event().await
         {
-            assert_eq!(approved_by.as_deref(), Some("cli_policy"));
+            assert_eq!(approved_by, None);
             break;
         }
     }
@@ -3705,9 +3724,9 @@ async fn progress_releases_a_long_tool_before_it_ends() {
     bench.close(CloseMode::Force).await;
 }
 
-// Ход кончился без решения: вызов не теряется и остаётся без пометки.
+// Ход кончился без конца вызова: вызов уже виден без пометки, результат не придёт.
 #[tokio::test]
-async fn end_of_a_turn_releases_held_tools_without_a_mark() {
+async fn end_of_a_turn_keeps_the_call_without_a_mark() {
     let capture = Script::from_capture("tools", None);
     let session = session_of(&capture);
     let prefix = tool_prefix(&capture);
