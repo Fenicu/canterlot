@@ -473,6 +473,10 @@ test('header_rows_hold_in_every_palette_and_both_themes', async ({ page }, info)
 test('desktop_header_keeps_one_line_rows', async ({ page }, info) => {
 	test.skip(info.project.name !== 'desktop', 'настольная шапка');
 	await boot(page, { width: 1440, height: 900, theme: 'dark', variant: 'parent-route-nudge' });
+	// Под нагрузкой строка маршрута успевает измериться до того, как шрифт и соседняя строка
+	// автопинка встали на место: ждём устоявшейся раскладки, а не первого кадра.
+	await page.evaluate(() => document.fonts.ready);
+	await expect.poll(async () => (await geometry(page)).routeFirstWordVisible).toBe(true);
 	const g = await geometry(page);
 	expect(g.back, 'на столе стрелки назад нет').toBeNull();
 	expectAlignedWithTitle(g);
