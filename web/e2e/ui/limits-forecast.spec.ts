@@ -173,9 +173,11 @@ test('limits_screen_shows_the_countdown_the_warning_the_calm_forecast_and_nothin
     calm: getComputedStyle(card.querySelector('.row[data-window="five"] .verdict')!).color
   }));
   expect(tones.before).not.toBe(tones.calm);
-  // Полная дата сброса — в общей подсказке времени.
+  // Полная дата сброса — в общей подсказке времени, а полный отсчёт остаётся текстом:
+  // aria-label на <time> без роли запрещён.
   const time = claudeWeek.locator('time.reset');
-  await expect(time).toHaveAttribute('aria-label', /^сброс через 23 часа 5\d минут/);
+  await expect(time).not.toHaveAttribute('aria-label');
+  await expect(time.locator('.reset-long')).toBeVisible();
   await time.focus();
   await expect(page.locator('.time-tip')).toHaveText(/\d{4}, \d\d:\d\d:\d\d$/);
   await page.keyboard.press('Escape');

@@ -260,23 +260,35 @@ test.describe('F-35 current limits rows at 360', () => {
         const resetNode = row.querySelector<HTMLElement>('.reset');
         if (!value || !resetNode) return { label: row.querySelector('.label')?.textContent?.trim(), value, reset: null, visual: null };
         const box = resetNode.getBoundingClientRect();
-        // В тесной карточке текст сброса рисует псевдоэлемент: в разметке остаётся полная подпись.
+        // В тесной карточке полный отсчёт прячется невидимо для глаза (sr-only), но остаётся
+        // в разметке для экранного читалки: у <time> нет роли, и aria-label там запрещён.
+        // Видимый сжатый отсчёт рисует псевдоэлемент с пустым альтернативным текстом.
         const long = row.querySelector<HTMLElement>('.reset-long')!;
-        const visual = getComputedStyle(long).display === 'none'
+        const longStyle = getComputedStyle(long);
+        const srOnly = longStyle.position === 'absolute' && longStyle.clipPath !== 'none';
+        const visual = srOnly
           ? getComputedStyle(resetNode, '::after').content
           : (long.textContent ?? '');
         return {
           label: row.querySelector('.label')?.textContent?.trim(),
           value,
           reset: { left: box.left, right: box.right, top: box.top, bottom: box.bottom, text: resetNode.textContent!.trim() },
-          visual
+          visual,
+          long: { text: long.textContent ?? '', display: longStyle.display, visibility: longStyle.visibility, srOnly }
         };
       }));
       expect(rows).toHaveLength(3);
       for (const row of rows) {
         expect(row.reset).not.toBeNull();
         expect(row.reset!.text).toMatch(/^сброс через\s+\d+/);
+        // Полный отсчёт не спрятан от экранного читалки, а видимая карточка показывает сжатый.
+        expect(row.long).not.toBeNull();
+        expect(row.long!.display).not.toBe('none');
+        expect(row.long!.visibility).not.toBe('hidden');
+        expect(row.long!.text).toBe(row.reset!.text);
+        expect(row.long!.srOnly).toBe(true);
         expect(row.visual).toMatch(/\d+\s*ч\s*\d+\s*м/);
+        expect(row.visual).not.toContain('через');
         const overlapX = Math.min(row.value!.right, row.reset!.right) - Math.max(row.value!.left, row.reset!.left);
         const overlapY = Math.min(row.value!.bottom, row.reset!.bottom) - Math.max(row.value!.top, row.reset!.top);
         expect(overlapX <= 0.5 || overlapY <= 0.5, `${width}px ${row.label}: ${JSON.stringify(row)}`).toBe(true);

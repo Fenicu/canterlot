@@ -22,7 +22,7 @@
           <div class="row" data-window={row.key} data-tone={row.tone} data-stale={row.stale || undefined}>
             <span class="label">{row.label}</span>
             <b class="value">{row.value}</b>
-            {#if row.reset}<time class="reset" data-short={row.resetShort} datetime={new Date(row.resetAt).toISOString()} aria-label={row.resetLong} use:timeTip={row.resetAt}><span class="reset-long" aria-hidden="true">{row.reset}</span></time>{/if}
+            {#if row.reset}<time class="reset" data-short={row.resetShort} datetime={new Date(row.resetAt).toISOString()} use:timeTip={row.resetAt}><span class="reset-long">{row.reset}</span></time>{/if}
             <span class="gauge"><Gauge value={row.fill} tone={row.tone} quiet dim={row.stale} label="{block.label}, {row.label}" /></span>
             <!-- Прогноз по средней скорости окна: предупреждение, только если окно кончится раньше сброса. -->
             {#if row.forecast}<p class="forecast" data-forecast={row.forecast.before ? 'before' : 'calm'}><span class="verdict">{row.forecast.text}</span><span class="pace" title="Средняя скорость расхода окна">{row.forecast.pace}</span></p>{/if}
@@ -75,9 +75,12 @@
     .forecast { grid-row: 4; }
   }
   /* В тесной карточке (296 px при 360) полному «сброс через 4 ч 58 мин» не хватает места рядом
-     со значением: остаётся сжатый отсчёт, полная дата — в подсказке и в подписи для чтения вслух. */
+     со значением: видимый сжатый отсчёт рисует псевдоэлемент, а полный текст остаётся в разметке
+     невидимым для глаза, но доступным экранному читалке. У <time> нет роли, поэтому aria-label
+     там запрещён. */
   @container (max-width: 20.5em) {
-    .reset-long { display: none; }
-    .reset::after { content: attr(data-short); }
+    .reset-long { position: absolute; width: var(--hairline); height: var(--hairline); padding: 0; margin: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+    /* Пустой альтернативный текст: сжатый отсчёт декоративен и не читается вторым разом. */
+    .reset::after { content: attr(data-short) / ''; }
   }
 </style>
