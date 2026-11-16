@@ -54,6 +54,10 @@ const TURN_FINISHED_EXTENSION: TimeDelta = TimeDelta::hours(24);
 const STALE: TimeDelta = TimeDelta::minutes(30);
 /// Сколько строк забирает один проход.
 const BATCH: i64 = 20;
+/// Открытый чат откладывает пуш на минуту: телефон мог уснуть, не прислав «скрыто».
+const VISIBLE_RETRY_SECS: i64 = 60;
+/// Больше двух отсрочек не ждём: после них пуш уходит, даже если чат всё ещё виден.
+const VISIBLE_RETRIES: i32 = 2;
 /// Готовые строки живут неделю: ключи итогов с отметкой времени не повторяются и так.
 const RETENTION: TimeDelta = TimeDelta::days(7);
 const POLL: Duration = Duration::from_secs(1);
@@ -192,12 +196,23 @@ pub async fn on_request_opened_in_tx(
     conversation_id: Uuid,
     request_id: Uuid,
 ) -> Result<(), sqlx::Error> {
+    // Место запроса в ленте: по нему проверяем, прочитал ли владелец карточку.
+    // Отсутствующая строка не повод не ставить пуш: тогда просто нет ссылки на ленту.
+    let seq: Option<i64> = sqlx::query_scalar("select created_seq from requests where id=$1")
+        .bind(request_id)
+        .fetch_optional(&mut *conn)
+        .await?
+        .flatten();
+    let mut payload = json!({"request_id": request_id});
+    if let Some(seq) = seq {
+        payload["seq"] = json!(seq);
+    }
     enqueue_in_tx(
         conn,
         conversation_id,
         KIND_WAITING,
         &format!("{KIND_WAITING}:{request_id}"),
-        &json!({"request_id": request_id}),
+        &payload,
         false,
         true,
     )
@@ -276,6 +291,22 @@ pub async fn on_settled_in_tx(
     let mut payload = json!({"state": state_name(state), "evidence": evidence});
     if final_mark.is_some() {
         payload["final"] = json!(true);
+    }
+    // Место последнего блока хода в ленте: если владелец дочитал до него, итог он видел.
+    if let (KIND_TURN_FINISHED, Some(turn)) = (kind, turn) {
+        let seq: Option<i64> = sqlx::query_scalar(
+            "select max(b.created_seq) from blocks b
+             where b.conversation_id=$1 and b.created_at <= $2
+               and b.created_at >= coalesce((select started_at from runs
+                   where conversation_id=$1 order by finished_at desc limit 1), $2)",
+        )
+        .bind(conversation_id)
+        .bind(turn)
+        .fetch_one(&mut *conn)
+        .await?;
+        if let Some(seq) = seq {
+            payload["seq"] = json!(seq);
+        }
     }
     enqueue_in_tx(conn, conversation_id, kind, &key, &payload, true, false).await?;
     if let Some(mark) = final_mark {
@@ -672,8 +703,10 @@ pub struct DeliveryReport {
     pub retried: usize,
     pub dropped: usize,
     pub cancelled: usize,
-    /// Чат сессии был открыт у владельца: пуш не отправлен и не будет повторён.
+    /// Чат сессии был открыт и владелец уже прочитал событие: пуш не отправлен.
     pub suppressed: usize,
+    /// Строку отложили из-за открытого чата; она вернётся через минуту.
+    pub deferred_visible: usize,
     /// Отложены общим пределом в минуту.
     pub deferred: usize,
 }
@@ -698,6 +731,7 @@ struct PushRow {
     kind: String,
     payload: Value,
     attempts: i32,
+    visible_defers: i32,
     created_at: DateTime<Utc>,
     stale: bool,
 }
@@ -751,7 +785,7 @@ impl Sender {
         self
     }
 
-    /// Карта присутствия, общая с HTTP-слоем: чат, открытый в PWA, глушит пуши.
+    /// Карта присутствия, общая с HTTP-слоем: открытый чат откладывает пуши.
     pub fn with_presence(mut self, presence: Presence) -> Self {
         self.presence = presence;
         self
@@ -823,7 +857,7 @@ impl Sender {
         now: Instant,
     ) -> Result<DeliveryReport, sqlx::Error> {
         let rows: Vec<PushRow> = sqlx::query_as(
-            "select id,conversation_id,kind,payload,attempts,created_at,
+            "select id,conversation_id,kind,payload,attempts,visible_defers,created_at,
                     clock_timestamp()-created_at > $1 * interval '1 second' as stale
              from owner_pushes
              where state='pending' and run_at<=clock_timestamp()
@@ -841,14 +875,32 @@ impl Sender {
                 report.dropped += 1;
                 continue;
             }
-            // Чат открыт и виден: владелец увидит событие на экране, пуш не нужен.
-            // Решение принимается при отправке: отметка живёт секунды, а строка может ждать.
+            // Открытый чат сам по себе не повод бросить пуш: телефон мог уснуть, так и не
+            // прислав «скрыто». Сначала проверяем, что владелец действительно прочитал
+            // событие; иначе откладываем строку и вернёмся к ней через минуту.
             if let Some(conversation_id) = row.conversation_id
                 && self.presence.is_visible(conversation_id, now)
             {
-                finish(pool, row.id, "suppressed", Some("suppressed_visible")).await?;
-                report.suppressed += 1;
-                continue;
+                if owner_seen(pool, &row).await? {
+                    finish(pool, row.id, "suppressed", Some("suppressed_seen")).await?;
+                    report.suppressed += 1;
+                    continue;
+                }
+                if row.visible_defers < VISIBLE_RETRIES {
+                    sqlx::query(
+                        "update owner_pushes set visible_defers=visible_defers+1,
+                           run_at=clock_timestamp()+$2*interval '1 second',
+                           last_status='deferred_visible',updated_at=clock_timestamp()
+                         where id=$1 and state='pending'",
+                    )
+                    .bind(row.id)
+                    .bind(VISIBLE_RETRY_SECS)
+                    .execute(pool)
+                    .await?;
+                    report.deferred_visible += 1;
+                    continue;
+                }
+                // Отсрочки кончились: чат, возможно, замер навсегда. Отправляем.
             }
             let Some(message) = compose(pool, &row, &self.app_url).await? else {
                 finish(pool, row.id, "cancelled", None).await?;
@@ -916,6 +968,27 @@ impl Sender {
         }
         Ok(report)
     }
+}
+
+/// Владелец уже прочитал событие, из-за которого поставлен пуш.
+///
+/// Ссылка — место в ленте (`seq`) в payload. У сбоя такого места нет: состояние
+/// сессии не появляется в ленте, поэтому пуш о сбое не подавляется, а доходит
+/// после отсрочек.
+async fn owner_seen(pool: &PgPool, row: &PushRow) -> Result<bool, sqlx::Error> {
+    let Some(seq) = row.payload.get("seq").and_then(Value::as_i64) else {
+        return Ok(false);
+    };
+    let Some(conversation_id) = row.conversation_id else {
+        return Ok(false);
+    };
+    let seen: Option<bool> =
+        sqlx::query_scalar("select last_read_seq >= $2 from conversations where id=$1")
+            .bind(conversation_id)
+            .bind(seq)
+            .fetch_optional(pool)
+            .await?;
+    Ok(seen.unwrap_or(false))
 }
 
 async fn finish(
@@ -1233,6 +1306,7 @@ pub async fn run(pool: PgPool, sender: Sender, shutdown: watch::Receiver<bool>) 
                         dropped = report.dropped,
                         cancelled = report.cancelled,
                         suppressed = report.suppressed,
+                        deferred_visible = report.deferred_visible,
                         deferred = report.deferred,
                         "owner pushes processed"
                     ),

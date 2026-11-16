@@ -79,7 +79,7 @@ pub struct AppDeps {
     pub activity: ActivityConfig,
     /// Выключатель `[orchestrator.nudge]`: обновление проекции при отметке прочитанного.
     pub nudge_enabled: bool,
-    /// Открытые у владельца чаты; та же карта глушит пуши в фоновой службе.
+    /// Открытые у владельца чаты: откладывают пуши, пока прочтение не догонит событие.
     pub presence: crate::presence::Presence,
     /// Свежесть показаний лимитов для предпросмотра маршрута.
     pub routing_stale: std::time::Duration,

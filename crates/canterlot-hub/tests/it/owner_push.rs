@@ -1142,6 +1142,17 @@ async fn turn_finished(pool: &PgPool, conversation: Uuid) -> i64 {
     .unwrap()
 }
 
+/// Строка отложена до следующего прохода: в тесте минуту не ждём, а делаем её созревшей.
+async fn make_due(pool: &PgPool) {
+    sqlx::query(
+        "update owner_pushes set run_at=clock_timestamp()-interval '1 second'
+         where state='pending'",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
 async fn block(
     pool: &PgPool,
     execution: Uuid,
@@ -2087,7 +2098,7 @@ fn config_errors_are_clear_at_start() {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_visible_chat_suppresses_waiting_turn_finished_and_failure(pool: PgPool) {
+async fn a_visible_and_read_chat_suppresses_waiting_and_turn_finished(pool: PgPool) {
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     enable(&pool).await;
@@ -2095,14 +2106,19 @@ async fn a_visible_chat_suppresses_waiting_turn_finished_and_failure(pool: PgPoo
     let now = Utc::now();
     let execution = start(&pool, s.owner_id, s.conversation_id).await;
     long_idle(&pool, s.conversation_id, now).await;
-    finish_turn(
-        &pool,
-        s.machine_id,
-        s.conversation_id,
-        &execution,
-        now - TimeDelta::seconds(1),
+    let turn_at = now - TimeDelta::seconds(1);
+    finish_turn(&pool, s.machine_id, s.conversation_id, &execution, turn_at).await;
+    sqlx::query(
+        "insert into blocks(block_id,execution_id,conversation_id,kind,state,rev,content,created_at,agent,created_seq)
+         values($1,$2,$3,'text','final',1,'Готово',$4,'main',42)",
     )
-    .await;
+    .bind(Uuid::now_v7())
+    .bind(execution.execution_id)
+    .bind(s.conversation_id)
+    .bind(turn_at)
+    .execute(&pool)
+    .await
+    .unwrap();
     for step in [5, 10, 20, 40] {
         refresh_at(&pool, s.conversation_id, now + TimeDelta::seconds(step)).await;
     }
@@ -2112,14 +2128,25 @@ async fn a_visible_chat_suppresses_waiting_turn_finished_and_failure(pool: PgPoo
         &question_batch(&execution, Uuid::now_v7(), "Да?"),
     )
     .await;
-    lose(&pool, s.conversation_id, execution.execution_id).await;
 
     let kinds: Vec<String> =
         sqlx::query_scalar("select kind from owner_pushes where state='pending' order by kind")
             .fetch_all(&pool)
             .await
             .unwrap();
-    assert_eq!(kinds, ["failure", "turn_finished", "waiting"]);
+    assert_eq!(kinds, ["turn_finished", "waiting"]);
+    let head: i64 =
+        sqlx::query_scalar("select coalesce(max((payload->>'seq')::bigint),0) from owner_pushes")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(head > 0, "both pushes carry their feed position");
+    sqlx::query("update conversations set last_read_seq=greatest(last_read_seq,$2) where id=$1")
+        .bind(s.conversation_id)
+        .bind(head)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     let presence = Presence::default();
     let at = Instant::now();
@@ -2129,8 +2156,8 @@ async fn a_visible_chat_suppresses_waiting_turn_finished_and_failure(pool: PgPoo
         .await
         .unwrap();
     assert_eq!(
-        (report.sent, report.suppressed, report.cancelled),
-        (0, 3, 0)
+        (report.sent, report.suppressed, report.deferred_visible),
+        (0, 2, 0)
     );
     assert!(fake.seen().is_empty(), "nothing reached Gotify");
     let rows: Vec<(String, String, Option<String>)> =
@@ -2140,7 +2167,7 @@ async fn a_visible_chat_suppresses_waiting_turn_finished_and_failure(pool: PgPoo
             .unwrap();
     for (kind, state, status) in rows {
         assert_eq!(state, "suppressed", "{kind}");
-        assert_eq!(status.as_deref(), Some("suppressed_visible"), "{kind}");
+        assert_eq!(status.as_deref(), Some("suppressed_seen"), "{kind}");
     }
 }
 
@@ -2181,6 +2208,11 @@ async fn a_second_device_keeps_a_chat_visible_when_another_goes_hidden(pool: PgP
     for s in [&first, &second] {
         let execution = start(&pool, s.owner_id, s.conversation_id).await;
         open_question(&pool, s, &question_batch(&execution, Uuid::now_v7(), "Да?")).await;
+        sqlx::query("update conversations set last_read_seq=1000000 where id=$1")
+            .bind(s.conversation_id)
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 
     let presence = Presence::default();
@@ -2198,6 +2230,101 @@ async fn a_second_device_keeps_a_chat_visible_when_another_goes_hidden(pool: PgP
         .unwrap();
     assert_eq!((report.sent, report.suppressed), (0, 2));
     assert!(fake.seen().is_empty());
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_visible_but_unread_chat_gets_the_push_after_the_postpone(pool: PgPool) {
+    let (fake, url) = fake_gotify().await;
+    let (_dir, config) = gotify(&url, "");
+    enable(&pool).await;
+    let s = seed(&pool).await;
+    let execution = start(&pool, s.owner_id, s.conversation_id).await;
+    open_question(
+        &pool,
+        &s,
+        &question_batch(&execution, Uuid::now_v7(), "Да?"),
+    )
+    .await;
+
+    let presence = Presence::default();
+    let at = Instant::now();
+    presence.report(s.conversation_id, "phone", true, at);
+    let sender = presence_sender(&config, &presence);
+    let first = sender.deliver_due_at(&pool, at).await.unwrap();
+    assert_eq!(
+        (first.sent, first.suppressed, first.deferred_visible),
+        (0, 0, 1)
+    );
+    let (state, status, defers): (String, Option<String>, i32) =
+        sqlx::query_as("select state,last_status,visible_defers from owner_pushes")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        (state.as_str(), status.as_deref(), defers),
+        ("pending", Some("deferred_visible"), 1)
+    );
+
+    // Телефон уснул и больше не шлёт отметок: через минуту присутствия уже нет.
+    make_due(&pool).await;
+    let second = sender
+        .deliver_due_at(&pool, at + Duration::from_secs(60))
+        .await
+        .unwrap();
+    assert_eq!((second.sent, second.suppressed), (1, 0));
+    assert_eq!(fake.seen().len(), 1);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_still_visible_chat_is_postponed_twice_and_then_gets_the_push(pool: PgPool) {
+    let (fake, url) = fake_gotify().await;
+    let (_dir, config) = gotify(&url, "");
+    enable(&pool).await;
+    let s = seed(&pool).await;
+    let execution = start(&pool, s.owner_id, s.conversation_id).await;
+    open_question(
+        &pool,
+        &s,
+        &question_batch(&execution, Uuid::now_v7(), "Да?"),
+    )
+    .await;
+
+    let presence = Presence::default();
+    let at = Instant::now();
+    let sender = presence_sender(&config, &presence);
+    for (step, expected) in [(0, 1), (60, 2)] {
+        presence.report(
+            s.conversation_id,
+            "phone",
+            true,
+            at + Duration::from_secs(step),
+        );
+        make_due(&pool).await;
+        let report = sender
+            .deliver_due_at(&pool, at + Duration::from_secs(step))
+            .await
+            .unwrap();
+        assert_eq!(report.deferred_visible, 1, "step {step}");
+        let defers: i32 = sqlx::query_scalar("select visible_defers from owner_pushes")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(defers, expected);
+    }
+    // Третья встреча: две отсрочки уже были, пуш уходит, даже если чат всё ещё виден.
+    presence.report(
+        s.conversation_id,
+        "phone",
+        true,
+        at + Duration::from_secs(120),
+    );
+    make_due(&pool).await;
+    let last = sender
+        .deliver_due_at(&pool, at + Duration::from_secs(120))
+        .await
+        .unwrap();
+    assert_eq!((last.sent, last.deferred_visible), (1, 0));
+    assert_eq!(fake.seen().len(), 1);
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
