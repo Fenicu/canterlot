@@ -62,6 +62,7 @@ impl fmt::Debug for command::Kind {
                 f.debug_tuple("ResolveOwnerLost").field(input).finish()
             }
             Self::SteerInput(input) => f.debug_tuple("SteerInput").field(input).finish(),
+            Self::RevokeSecret(input) => f.debug_tuple("RevokeSecret").field(input).finish(),
         }
     }
 }
@@ -474,5 +475,75 @@ impl fmt::Debug for crate::worker::ipc::AgentCallResult {
             .field("result_bytes", &self.result_json.len())
             .field("error_code", &self.error_code)
             .finish_non_exhaustive()
+    }
+}
+
+/// Значение секрета — данные одного сообщения: в `Debug` его нет, только размер.
+impl fmt::Debug for crate::worker::v1::SecretDeliver {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SecretDeliver")
+            .field("attempt_id", &self.attempt_id)
+            .field("request_id", &self.request_id)
+            .field("conversation_id", &self.conversation_id)
+            .field("value_bytes", &self.value.len())
+            .finish()
+    }
+}
+
+impl fmt::Debug for crate::worker::v1::RevokeSecret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RevokeSecret")
+            .field("request_id", &self.request_id)
+            .field("attempt_id", &self.attempt_id)
+            .finish()
+    }
+}
+
+impl fmt::Debug for crate::worker::v1::SecretDelivered {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SecretDelivered")
+            .field("attempt_id", &self.attempt_id)
+            .field("request_id", &self.request_id)
+            .field("path_bytes", &self.path.len())
+            .field("expires_at_ms", &self.expires_at_ms)
+            .finish()
+    }
+}
+
+impl fmt::Debug for crate::worker::v1::SecretFailed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SecretFailed")
+            .field("attempt_id", &self.attempt_id)
+            .field("reason", &self.reason)
+            .finish()
+    }
+}
+
+impl fmt::Debug for crate::worker::v1::SecretRemoved {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SecretRemoved")
+            .field("attempt_id", &self.attempt_id)
+            .field("reason", &self.reason)
+            .finish()
+    }
+}
+
+impl fmt::Debug for crate::worker::v1::SecretManifest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SecretManifest")
+            .field("attempt_id", &self.attempt_id)
+            .field("request_id", &self.request_id)
+            .field("conversation_id", &self.conversation_id)
+            .field("path_bytes", &self.path.len())
+            .field("expires_at_ms", &self.expires_at_ms)
+            .finish()
+    }
+}
+
+impl fmt::Debug for crate::worker::v1::SecretManifests {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SecretManifests")
+            .field("manifests", &self.manifests.len())
+            .finish()
     }
 }

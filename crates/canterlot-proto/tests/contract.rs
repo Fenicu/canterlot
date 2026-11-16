@@ -2199,3 +2199,108 @@ fn prompt_suggestion_is_trimmed_and_capped_on_a_char_boundary() {
     assert_eq!(bounded.len(), MAX_PROMPT_SUGGESTION_BYTES - 1);
     assert!(bounded.starts_with('x'));
 }
+
+// Значение секрета живёт только в одном сообщении: номера полей неизменны, а `Debug`
+// его не печатает, иначе значение утекло бы в первый же журнал.
+#[test]
+fn secret_messages_keep_their_wire_shape_and_hide_the_value() {
+    use canterlot_proto::worker::v1::{
+        ControlDown, ControlUp, SecretDeliver, SecretDelivered, SecretFailed, SecretManifest,
+        SecretManifests, SecretRemoved, command, control_down, control_up, record_body,
+    };
+    const VALUE: &str = "canterlot-secret-PROBE-value";
+
+    let deliver = SecretDeliver {
+        attempt_id: "attempt".into(),
+        request_id: "request".into(),
+        conversation_id: "conversation".into(),
+        value: VALUE.as_bytes().to_vec(),
+    };
+    let down = ControlDown {
+        msg: Some(control_down::Msg::SecretDeliver(deliver.clone())),
+    };
+    assert!(
+        !format!("{down:?}").contains(VALUE),
+        "value must stay out of Debug"
+    );
+    assert!(matches!(
+        ControlDown::decode(&down.encode_to_vec()[..]).unwrap().msg,
+        Some(control_down::Msg::SecretDeliver(_))
+    ));
+    let wire = down.encode_to_vec();
+    assert_eq!(
+        wire[..2],
+        [0x5A, wire[1]],
+        "ControlDown.secret_deliver is field 11"
+    );
+    assert_eq!(deliver.encode_to_vec()[0], 0x0A, "attempt_id is field 1");
+    assert_eq!(SecretDeliver::default().value, Vec::<u8>::new());
+
+    let revoke = canterlot_proto::worker::v1::RevokeSecret {
+        request_id: "request".into(),
+        attempt_id: "attempt".into(),
+    };
+    let command = Command {
+        command_id: "command".into(),
+        kind: Some(command::Kind::RevokeSecret(revoke)),
+        ..Default::default()
+    };
+    let wire = command.encode_to_vec();
+    let tag = wire
+        .iter()
+        .position(|byte| *byte == 0xAA)
+        .expect("field 21");
+    assert_eq!(wire[tag + 1], 0x01, "Command.revoke_secret is field 21");
+    assert_roundtrip(command);
+
+    let delivered = SecretDelivered {
+        attempt_id: "attempt".into(),
+        request_id: "request".into(),
+        path: "/run/canterlot-secrets/c/one".into(),
+        expires_at_ms: 7,
+    };
+    let body = RecordBody {
+        body: Some(record_body::Body::SecretDelivered(delivered.clone())),
+    };
+    let wire = body.encode_to_vec();
+    assert_eq!(wire[..2], [0xDA, 0x02], "field 43");
+    assert_roundtrip(body);
+    assert!(!format!("{delivered:?}").contains(VALUE));
+
+    let failed = SecretFailed {
+        attempt_id: "attempt".into(),
+        reason: "not_tmpfs".into(),
+    };
+    let body = RecordBody {
+        body: Some(record_body::Body::SecretFailed(failed.clone())),
+    };
+    assert_eq!(body.encode_to_vec()[..2], [0xE2, 0x02], "field 44");
+    assert!(!format!("{failed:?}").contains(VALUE));
+
+    let removed = SecretRemoved {
+        attempt_id: "attempt".into(),
+        reason: "revoked".into(),
+    };
+    let body = RecordBody {
+        body: Some(record_body::Body::SecretRemoved(removed.clone())),
+    };
+    assert_eq!(body.encode_to_vec()[..2], [0xEA, 0x02], "field 45");
+    assert!(!format!("{removed:?}").contains(VALUE));
+
+    let manifests = SecretManifests {
+        manifests: vec![SecretManifest {
+            attempt_id: "attempt".into(),
+            request_id: "request".into(),
+            conversation_id: "conversation".into(),
+            path: "/run/canterlot-secrets/c/one".into(),
+            expires_at_ms: 7,
+        }],
+    };
+    let up = ControlUp {
+        msg: Some(control_up::Msg::SecretManifests(manifests.clone())),
+    };
+    let wire = up.encode_to_vec();
+    assert_eq!(wire[0], 0x7A, "ControlUp.secret_manifests is field 15");
+    assert_roundtrip(up);
+    assert!(!format!("{manifests:?}").contains(VALUE));
+}

@@ -58,6 +58,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ".canterlot.worker.v1.ProbePath",
             ".canterlot.worker.v1.PathProbeExists",
             ".canterlot.worker.v1.DiskHotspot",
+            ".canterlot.worker.v1.SecretDeliver",
+            ".canterlot.worker.v1.RevokeSecret",
+            ".canterlot.worker.v1.SecretDelivered",
+            ".canterlot.worker.v1.SecretFailed",
+            ".canterlot.worker.v1.SecretRemoved",
+            ".canterlot.worker.v1.SecretManifest",
+            ".canterlot.worker.v1.SecretManifests",
         ])
         .build_server(true)
         .build_client(true)
