@@ -720,11 +720,13 @@ Description=Canterlot Execution Worker
 After=default.target
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
 WorkingDirectory=%h
 ExecStart=/usr/local/bin/canterlot-worker run --config %h/.config/canterlot/worker.toml
 Restart=always
 RestartSec=3s
+WatchdogSec=60
 
 # КРИТИЧЕСКИ ВАЖНО ДЛЯ ВЫЖИВАНИЯ ИСПОЛНЕНИЙ:
 KillMode=process
@@ -735,6 +737,8 @@ LimitNOFILE=65536
 [Install]
 WantedBy=default.target
 ```
+
+`Type=notify` выбран вместо `Type=simple`: служба считается запущенной только после `READY=1`, когда воркер открыл хранилище и прошёл стартовую проверку. `NotifyAccess=main` разрешает уведомления только главному процессу — их и шлёт главный цикл сессии. Тот же цикл отправляет `WATCHDOG=1` каждые полминуты (`WatchdogSec=60`); отдельного таймера нет, поэтому зависший цикл перестаёт пинтовать, и systemd перезапускает службу. `Restart=always` уже покрывает `on-failure` и дополнительно поднимает воркер после штатного выхода. `KillMode=process` не меняется: сопровождения и агентские CLI переживают перезапуск воркера. Без `NOTIFY_SOCKET` (тесты, ручной запуск) уведомления — no-op.
 
 #### Механизм `KillMode=process` и выживание процессов сопровождения
 

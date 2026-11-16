@@ -450,6 +450,8 @@ pub struct Worker {
     metrics_task: Option<(u64, MetricsFuture)>,
     metrics_epoch: u64,
     watchdog: std::sync::Arc<crate::machine::watch::Watchdog>,
+    /// systemd watchdog: пинги шлёт только главный цикл сессии.
+    systemd_watchdog: crate::watchdog::SystemdWatchdog,
     workdirs: crate::machine::workdirs::WorkdirSuggester,
     catalogs: std::sync::Arc<catalog::Catalogs>,
     catalog_retry_delays: Option<Vec<Duration>>,
@@ -602,6 +604,7 @@ impl Worker {
         );
         Self {
             watchdog: std::sync::Arc::new(watchdog),
+            systemd_watchdog: crate::watchdog::SystemdWatchdog::from_env(),
             limits_cache,
             limits_source,
             live_limits,
@@ -823,7 +826,10 @@ impl Worker {
         let mut cap = self.config.timers.backoff_min;
         let mut read_retries = 0;
         let mut refusal = None;
+        // Воркер готов принимать работу; с этого места главный цикл шлёт пинги.
+        self.systemd_watchdog.ready();
         loop {
+            self.systemd_watchdog.ping();
             self.metrics_epoch = self.metrics_epoch.wrapping_add(1);
             if *shutdown.borrow() {
                 self.transition(SessionState::Disconnected);
@@ -978,6 +984,7 @@ impl Worker {
         });
         let mut cap = self.config.timers.backoff_min;
         loop {
+            self.systemd_watchdog.ping();
             let delay = Duration::from_nanos(rand::random_range(
                 self.config
                     .timers
@@ -1417,6 +1424,7 @@ impl Worker {
             })
             .collect();
         loop {
+            self.systemd_watchdog.ping();
             if limits_operation.is_none()
                 && limits_outbound.is_none()
                 && let Some((provider, kind)) = polls.pop_front()

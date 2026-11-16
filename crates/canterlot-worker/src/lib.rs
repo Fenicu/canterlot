@@ -19,6 +19,7 @@ pub mod session;
 pub mod session_store;
 pub mod store;
 pub mod supervisor;
+pub mod watchdog;
 pub mod worktree;
 
 #[cfg(test)]
