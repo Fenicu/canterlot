@@ -374,21 +374,25 @@
       <div class="actions" class:sticky={dirty} data-role="policy-actions">
         {#if saveError}<p class="error" role="alert">{saveError}</p>{/if}
         {#if notice && !dirty}<p class="note" role="status">{notice}</p>{/if}
-        {#if busy}
-          <Button variant="primary" disabled reason="Сохраняю…">Сохранить</Button>
-        {:else if !dirty}
-          <Button variant="primary" disabled reason="Нет изменений">Сохранить</Button>
-        {:else if issues.length > 0}
-          <Button variant="primary" disabled reason="Исправьте ошибки выше: {issues.length}">Сохранить</Button>
-        {:else}
-          <Button variant="primary" onclick={() => void send(toPolicy(draft!))}>Сохранить</Button>
-        {/if}
-        {#if dirty && !busy}<Button onclick={() => saved && (draft = fromPolicy(saved))}>Отменить правки</Button>{/if}
-        {#if builtinActive}
-          <Button disabled reason="Уже действует встроенная политика">Сбросить к встроенной</Button>
-        {:else}
-          <Button onclick={() => (confirmingReset = true)}>Сбросить к встроенной</Button>
-        {/if}
+        <span class="action">
+          {#if busy}
+            <Button variant="primary" disabled reason="Сохраняю…">Сохранить</Button>
+          {:else if !dirty}
+            <Button variant="primary" disabled reason="Нет изменений">Сохранить</Button>
+          {:else if issues.length > 0}
+            <Button variant="primary" disabled reason="Исправьте ошибки выше: {issues.length}">Сохранить</Button>
+          {:else}
+            <Button variant="primary" onclick={() => void send(toPolicy(draft!))}>Сохранить</Button>
+          {/if}
+        </span>
+        {#if dirty && !busy}<span class="action"><Button onclick={() => saved && (draft = fromPolicy(saved))}>Отменить правки</Button></span>{/if}
+        <span class="action">
+          {#if builtinActive}
+            <Button disabled reason="Уже действует встроенная политика">Сбросить к встроенной</Button>
+          {:else}
+            <Button onclick={() => (confirmingReset = true)}>Сбросить к встроенной</Button>
+          {/if}
+        </span>
       </div>
 
       <RoutingPreview types={Object.entries(saved?.task_types ?? {}).map(([key, task]) => ({ key, title: task.title }))} {titles} stale={dirty} />
@@ -453,6 +457,10 @@
   .parallel .field:first-child { flex: 1 1 var(--bar-56); }
   .parallel .error { flex-basis: 100%; }
   .actions { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--s4); margin: var(--s0) calc(-1 * var(--s8)) var(--s10); padding: var(--s6) var(--s8); background: var(--bg); }
+  /* Кнопка и её причина — одна пара: причина центрируется по высоте кнопки и не уезжает на чужую строку. */
+  .action { display: inline-flex; align-items: center; gap: var(--s4); min-width: 0; }
+  /* Кнопка не сжимается вслед за причиной: иначе её подпись ломается на две строки. */
+  .action :global(button) { flex: none; }
   /* С правками кнопка сохранения всегда под рукой: панель липнет к низу и закрывает отступ прокрутки. */
   .actions.sticky { position: sticky; bottom: calc(-1 * var(--s8)); z-index: 1; padding-bottom: calc(var(--s6) + var(--s8)); }
   /* Встроенный в настройки редактор живёт без полей страницы: панель кнопок не выходит за край, её фон — фон панели настроек. */

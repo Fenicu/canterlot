@@ -3,6 +3,7 @@ import { FakeHub, FakeHubApi } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
 import { seedTaigaCards } from '../../testing/fixtures/taiga-cards';
 import { bootScreen, SCREENS, type Screen } from '../parity/states';
+import { bootSecondary } from './secondary-fixture';
 import { viewer } from './image-viewer-fixture';
 import { expect, test } from './fixtures';
 
@@ -110,4 +111,29 @@ test('F-32: image viewer caption prints the title once', async ({ page }) => {
   await expect(caption).toBeVisible();
   const text = (await caption.textContent()) ?? '';
   expect(text.match(/Рабочий стол 1/g) ?? [], `caption: ${text}`).toHaveLength(1);
+});
+
+// F-34: причина стоит рядом со своей кнопкой и по центру её высоты, а не отдельной строкой.
+test('F-34: routing action reasons are centred against their buttons', async ({ page }) => {
+  await bootSecondary(page, '/settings/routing');
+  const actions = page.locator('[data-role="policy-actions"]');
+  for (const width of [360, 412]) {
+    await page.setViewportSize({ width, height: 892 });
+    await settle(page);
+    await actions.scrollIntoViewIfNeeded();
+    const reasons = actions.locator('.reason');
+    const count = await reasons.count();
+    expect(count, `${width}: disabled actions carry a reason`).toBeGreaterThan(0);
+    for (let index = 0; index < count; index++) {
+      const reason = reasons.nth(index);
+      const button = reason.locator('xpath=preceding-sibling::button[1]');
+      await expect(button).toHaveCount(1);
+      const reasonBox = (await reason.boundingBox())!;
+      const buttonBox = (await button.boundingBox())!;
+      expect(
+        Math.abs(centerY(reasonBox) - centerY(buttonBox)),
+        `${width}: reason «${(await reason.textContent())?.trim()}» is centred against its button`
+      ).toBeLessThanOrEqual(2);
+    }
+  }
 });
