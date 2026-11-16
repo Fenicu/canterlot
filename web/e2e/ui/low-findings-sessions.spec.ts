@@ -286,9 +286,18 @@ test.describe('F-35 current limits rows at 360', () => {
         expect(row.long!.display).not.toBe('none');
         expect(row.long!.visibility).not.toBe('hidden');
         expect(row.long!.text).toBe(row.reset!.text);
-        expect(row.long!.srOnly).toBe(true);
-        expect(row.visual).toMatch(/\d+\s*ч\s*\d+\s*м/);
-        expect(row.visual).not.toContain('через');
+        if (width === 360) {
+          // В тесной карточке (296 px содержимого) полному отсчёту нет места: он остаётся
+          // текстом для экранного читалки, а видимый сжатый рисует псевдоэлемент.
+          expect(row.long!.srOnly, `${width}px ${row.label}: полный отсчёт спрятан от глаз`).toBe(true);
+          expect(row.visual).toMatch(/\d+\s*ч\s*\d+\s*м/);
+          expect(row.visual).not.toContain('через');
+        } else {
+          // На 390 содержимое карточки — 326 px, порог сжатия 20.5em при шрифте карточки 15 px
+          // равен 307.5 px: полный отсчёт помещается целиком и остаётся видимым.
+          expect(row.long!.srOnly, `${width}px ${row.label}: полный отсчёт виден`).toBe(false);
+          expect(row.visual).toBe(row.reset!.text);
+        }
         const overlapX = Math.min(row.value!.right, row.reset!.right) - Math.max(row.value!.left, row.reset!.left);
         const overlapY = Math.min(row.value!.bottom, row.reset!.bottom) - Math.max(row.value!.top, row.reset!.top);
         expect(overlapX <= 0.5 || overlapY <= 0.5, `${width}px ${row.label}: ${JSON.stringify(row)}`).toBe(true);
