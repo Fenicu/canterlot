@@ -592,6 +592,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/conversations/{id}/auto-resume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Одноразовое «Продолжить при сбросе»: обычная пауза лимита становится удержанием
+         *     с продолжением после подтверждённого сброса; «кранч» остаётся выключенным.
+         */
+        post: operations["post__api_v1_conversations__id__auto_resume"];
+        /**
+         * Отказ от одноразового продолжения: задание пробуждения отменяется, пауза лимита
+         *     возвращается с прежними провайдером, окном и сроком сброса.
+         */
+        delete: operations["delete__api_v1_conversations__id__auto_resume"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/conversations/{id}/blocks/{block_id}": {
         parameters: {
             query?: never;
@@ -1067,6 +1091,24 @@ export interface paths {
         put?: never;
         post?: never;
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/conversations/{id}/snooze": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** Отложить сессию до абсолютного времени: не дальше тридцати дней вперёд. */
+        put: operations["put__api_v1_conversations__id__snooze"];
+        post?: never;
+        /** Вернуть отложенную сессию сразу. */
+        delete: operations["delete__api_v1_conversations__id__snooze"];
         options?: never;
         head?: never;
         patch?: never;
@@ -2072,6 +2114,11 @@ export interface components {
                 state: components["schemas"]["InputState"];
             };
         };
+        /**
+         * @description Итог отказа от одноразового продолжения.
+         * @enum {string}
+         */
+        CancelResumeOutcome: "cancelled" | "not_pending";
         /** @description Кандидат типа задачи. */
         Candidate: {
             effort?: string | null;
@@ -2210,6 +2257,7 @@ export interface components {
             settings: components["schemas"]["SettingsView"];
             /** @description Свежий перефорк копии после первого старта: тихая строка «Начато заново…». */
             side_fresh_at?: string | null;
+            snoozed_until?: string | null;
             /** @description Принятый ход записан: следующий запуск продолжит беседу, а не начнёт новую. */
             turn_recorded: boolean;
             /** Format: int32 */
@@ -3065,6 +3113,8 @@ export interface components {
             queue: components["schemas"]["QueueView"];
             /** @description Решение маршрута, выбравшее исполнителя; `None` — запуск без маршрута. */
             routing?: unknown;
+            /** @description До этого времени сессия отложена владельцем; срока в прошлом значит «уже вернулась». */
+            snoozed_until?: string | null;
             /** Format: int32 */
             unread_count: number;
             /**
@@ -3968,6 +4018,11 @@ export interface components {
                 command_id: string;
             };
         } | "not_owner_lost";
+        /**
+         * @description Итог одноразового «Продолжить при сбросе».
+         * @enum {string}
+         */
+        ResumeAtResetOutcome: "armed" | "already_armed";
         ResumeBody: {
             continue_queue?: boolean;
         };
@@ -4237,6 +4292,13 @@ export interface components {
         SnippetSegment: {
             hit: boolean;
             text: string;
+        };
+        SnoozeBody: {
+            /**
+             * Format: date-time
+             * @description Абсолютное время возврата в UTC.
+             */
+            until: string;
         };
         SpawnQueueActionView: {
             harness?: string | null;
@@ -6516,6 +6578,91 @@ export interface operations {
             };
         };
     };
+    post__api_v1_conversations__id__auto_resume: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Одноразовое продолжение взведено */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ResumeAtResetOutcome"];
+                };
+            };
+            /** @description Нет паузы лимита */
+            409: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    delete__api_v1_conversations__id__auto_resume: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Одноразовое продолжение отменено */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CancelResumeOutcome"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
     get__api_v1_conversations__id__blocks__block_id_: {
         parameters: {
             query?: {
@@ -8277,6 +8424,104 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Snapshot_ConversationSnapshot"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    put__api_v1_conversations__id__snooze: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SnoozeBody"];
+            };
+        };
+        responses: {
+            /** @description Сессия отложена */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConversationDetail"];
+                };
+            };
+            /** @description Срок вне допустимого диапазона */
+            400: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    delete__api_v1_conversations__id__snooze: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Сессия возвращена */
+            204: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description not_found */
+            404: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
