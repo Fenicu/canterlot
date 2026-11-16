@@ -652,6 +652,22 @@ impl ClaudeCodeAdapter {
         }
     }
 
+    /// Есть ли записанная беседа для resume: тот же поиск, что у проверки
+    /// `resume_transcript_missing` в exec manager, чтобы решения совпадали.
+    fn transcript_exists(workdir: &std::path::Path, native: &str) -> bool {
+        let home = std::env::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
+        let config_dir = crate::config::claude_config_dir(
+            &home,
+            std::env::var_os("CLAUDE_CONFIG_DIR").as_deref(),
+        );
+        crate::machine::claude_history::transcript(
+            &workdir.to_string_lossy(),
+            &config_dir,
+            native,
+        )
+        .is_some()
+    }
+
     /// Остановить старый CLI для перезапуска между ходами: stdin EOF, до 5 с
     /// ожидания с чтением stdout через разбор, затем SIGTERM группе процесса
     /// и до 2 с, затем SIGKILL. После SIGKILL дочитывание stdout и ожидание
@@ -1387,22 +1403,43 @@ impl Adapter for ClaudeCodeAdapter {
                 }));
             }
         }
-        self.resumed = spec.native_conversation_id.is_some();
-        self.native_id = spec
-            .native_conversation_id
-            .clone()
-            .unwrap_or_else(|| Uuid::now_v7().to_string());
+        // Боковой чат: без своей записи или с пропавшей — свежий форк от родителя.
+        // Запись могла пропасть между перезапусками; resume тогда невозможен, и хаб
+        // покажет «Начато заново от свежей копии сессии».
+        let (session, fresh_fork) = match (&spec.native_conversation_id, &spec.fork) {
+            (Some(native), Some(fork))
+                if Self::transcript_exists(&spec.workdir, native) =>
+            {
+                (SessionArg::Resume(native.clone()), false)
+            }
+            (_, Some(fork)) => (
+                SessionArg::Fork {
+                    parent: fork.parent_native_id.clone(),
+                    new_id: Some(Uuid::now_v7()),
+                },
+                true,
+            ),
+            (Some(native), None) => (SessionArg::Resume(native.clone()), false),
+            (None, None) => (
+                SessionArg::New(Uuid::now_v7()),
+                false,
+            ),
+        };
+        self.resumed = matches!(session, SessionArg::Resume(_));
+        self.native_id = match &session {
+            SessionArg::New(id) => id.to_string(),
+            SessionArg::Resume(id) => id.clone(),
+            SessionArg::Fork { new_id, .. } => new_id
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| Uuid::now_v7().to_string()),
+        };
         let delegates = self.delegate_mcp_servers(spec.isolate_mcp);
         // Пресеты инструкций принимает все режимы: текст пишет хаб через StartSpec.
         let launch = LaunchSpec {
             executable: &self.cfg.executable,
             exec_dir: &self.exec_dir,
             workdir: &spec.workdir,
-            session: spec
-                .native_conversation_id
-                .clone()
-                .map(SessionArg::Resume)
-                .unwrap_or_else(|| SessionArg::New(Uuid::parse_str(&self.native_id).unwrap())),
+            session,
             model: &spec.model,
             effort: &spec.effort,
             permission_mode: &spec.permission_mode,
@@ -1414,7 +1451,15 @@ impl Adapter for ClaudeCodeAdapter {
         self.workdir = spec.workdir.clone();
         self.instructions = spec.instructions.clone();
         // The exec manager stages a named Task-1 profile before starting the supervisor.
-        let broker = Broker::bind(&self.exec_dir).await?;
+        let broker = Broker::bind_with(
+            &self.exec_dir,
+            crate::adapter::canterlot_mcp::ToolSet::for_side(
+                spec.fork.as_ref(),
+                crate::adapter::canterlot_mcp::ToolSet::ApproveAndLimits,
+            ),
+            "claude",
+        )
+        .await?;
         process::write_exec_files_with(
             &launch,
             &self.cfg,
@@ -1443,7 +1488,7 @@ impl Adapter for ClaudeCodeAdapter {
             native_conversation_id: self.native_id.clone(),
             cli_pid: cli.pid,
             cli_start_ticks: cli.start_ticks,
-            fresh_fork: false,
+            fresh_fork,
         };
         self.cli = Some(cli);
         Ok(started)

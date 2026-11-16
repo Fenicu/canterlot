@@ -12,6 +12,10 @@ use uuid::Uuid;
 pub enum SessionArg {
     New(Uuid),
     Resume(String),
+    /// Боковой чат: новая сессия — свежая копия родительской.
+    /// Проверено вживую на 2.1.325: `--session-id` с `--resume --fork-session`
+    /// даёт новую сессию с заказанным id, родителя в его ходу не трогает.
+    Fork { parent: String, new_id: Option<Uuid> },
 }
 
 /// Корень репозитория рабочего каталога: ближайший каталог (сам workdir или выше),
@@ -318,6 +322,15 @@ pub fn build_args(
         SessionArg::Resume(id) => {
             args.push("--resume".into());
             args.push(id.clone().into());
+        }
+        SessionArg::Fork { parent, new_id } => {
+            args.push("--resume".into());
+            args.push(parent.clone().into());
+            args.push("--fork-session".into());
+            if let Some(id) = new_id {
+                args.push("--session-id".into());
+                args.push(id.to_string().into());
+            }
         }
     }
     if spec.prompt_suggestions && !spec.isolate_mcp {
