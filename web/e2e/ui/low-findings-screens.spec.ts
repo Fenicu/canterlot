@@ -196,3 +196,16 @@ test('X-2: plan tab keeps link-in-text-block clean', async ({ page }) => {
   await bootScreen(page, screen('plan-tab'));
   expect(await linkInTextViolations(page)).toEqual([]);
 });
+
+test('X-2: only the inline plan head link is underlined', async ({ page }) => {
+  await bootScreen(page, screen('plan-cards'));
+  const card = page.locator('.feed-card[data-card="canterlot.plan_add"]').first();
+  await expect(card).toBeVisible();
+  // Заголовок «План: добавлено N задач» — ссылка внутри фразы: подчёркивание обязательно.
+  await expect(card.locator('.head .line .plan-link')).toHaveCSS('text-decoration-line', 'underline');
+  // Строки задач — самостоятельные пункты списка: их, как и раньше, выделяет только цвет.
+  const rows = card.locator('li.row[data-plan-task] .plan-link');
+  expect(await rows.count(), 'the card lists task rows').toBeGreaterThan(0);
+  const decorations = await rows.evaluateAll((nodes) => nodes.map((node) => getComputedStyle(node).textDecorationLine));
+  expect(decorations).toEqual(decorations.map(() => 'none'));
+});
