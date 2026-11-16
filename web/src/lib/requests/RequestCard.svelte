@@ -224,8 +224,17 @@
 {/if}
 
 <style>
+  /* Фон карточки — зарегистрированное свойство: вход анимирует его, а не готовый
+     background-color, и закреплённые кнопки внутри красятся тем же значением. */
+  @property --card-bg {
+    syntax: '<color>';
+    inherits: true;
+    initial-value: transparent;
+  }
+
   .card-root {
     --card-pad-block: var(--s5);
+    --card-bg: var(--surface);
     flex: 0 1 auto;
     min-width: 0;
     min-height: 0;
@@ -236,7 +245,7 @@
     scroll-padding-block: var(--s4) calc(var(--target) + var(--s8));
     padding: var(--card-pad-block) var(--s6);
     border-radius: var(--radius-card);
-    background: var(--surface);
+    background: var(--card-bg);
     display: flex;
     flex-direction: column;
     gap: var(--s3);
@@ -255,8 +264,8 @@
     from { opacity: 0; transform: translateY(var(--shift-enter)); }
   }
   @keyframes request-accent {
-    from { background-color: var(--arrive-peak); }
-    to { background-color: var(--surface); }
+    from { --card-bg: var(--arrive-peak); }
+    to { --card-bg: var(--surface); }
   }
 
   .conflict-notice {

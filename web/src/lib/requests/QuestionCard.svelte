@@ -266,13 +266,18 @@
   <form bind:this={formEl} onsubmit={handleSubmit} class="questions-form" use:keepInputInView>
     {#each questions as q, qIndex (q.id)}
       <section class="question-section" data-question={q.id}>
-        {#if q.header || questions.length > 1}
+        {#if q.header}
           <span class="q-head">
-            {#if q.header}<span class="q-header">{q.header}</span>{/if}
+            <span class="q-header">{q.header}</span>
             {#if questions.length > 1}<span class="counter">{qIndex + 1} из {questions.length}</span>{/if}
           </span>
         {/if}
-        <h3 class="q-text" id={`${uid}-q${qIndex}`}>{q.text}</h3>
+        <div class="q-title-row">
+          <h3 class="q-text" id={`${uid}-q${qIndex}`}>{q.text}</h3>
+          {#if !q.header && questions.length > 1}
+            <span class="counter">{qIndex + 1} из {questions.length}</span>
+          {/if}
+        </div>
 
         {#if q.options && q.options.length > 0}
           <span class="selection-mode">
@@ -409,6 +414,13 @@
     min-width: 0;
   }
 
+  .q-title-row {
+    display: flex;
+    align-items: baseline;
+    gap: var(--s4);
+    min-width: 0;
+  }
+
   .counter {
     flex: none;
     margin-left: auto;
@@ -429,6 +441,7 @@
 
   .q-text {
     margin: var(--s0);
+    min-width: 0;
     font-size: var(--fs-title);
     font-weight: var(--weight-semibold);
     line-height: var(--lh-tight);
@@ -557,9 +570,10 @@
   }
 
   /* Кнопка ответа закреплена у нижнего края прокручиваемой карточки и закрывает её
-     нижний отступ, чтобы под кнопкой не проезжал текст. */
+     нижний отступ, чтобы под кнопкой не проезжал текст. Фон берётся у карточки: пока
+     она входит тоном акцента, полоса под кнопкой не выбивается квадратом. */
   .actions {
-    --fade: var(--surface);
+    --fade: var(--card-bg);
     --under: var(--card-pad-block, var(--s0));
     display: flex;
     position: sticky;
