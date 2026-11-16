@@ -641,6 +641,9 @@
     grid-template-areas: 'tray tray tray tray tray tray' 'input input input input input input' 'attach mic context clock steer send';
   }
   .capsule:has(textarea:focus-visible) { outline: var(--focus-width) solid var(--accent); outline-offset: var(--s1); }
+  /* Раскрытые подробности контекста не влезают в предел поля: капсула прокручивается сама,
+     иначе кнопка «Сжать контекст» уходит за нижний край окна. */
+  .capsule:has(:global([data-details])) { overflow-y: auto; overscroll-behavior: contain; }
   textarea {
     grid-area: input;
     field-sizing: content;

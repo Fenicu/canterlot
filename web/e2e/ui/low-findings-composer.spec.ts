@@ -5,6 +5,8 @@ import { expect, test } from './fixtures';
 
 const OWNER = '00000000-0000-4000-8000-0000000000e4';
 const CLAUDE = { id: 'claude_code', title: 'Claude Code', provider: 'claude' };
+/** Исполнитель без «Влить в ход»: так выглядит состояние из отчёта про контекст. */
+const CLAUDE_PLAIN = { id: 'claude', title: 'Claude Code', provider: 'claude' };
 
 /** Длинный черновик: поле упирается в свой предел и прокручивается. */
 const LONG_DRAFT = Array.from(
@@ -16,11 +18,32 @@ const LONG_DRAFT = Array.from(
 const LONG_SUGGESTION =
   'добавь тесты для пустой строки, для строки из одних пробелов и для пути /home/fenicu/.local/state/canterlot-worker/worktrees/01a1e117-25c6-7237-bed5-d31506012780/web/src/lib/timeline/cards/plan/PlanUpdateCard.svelte, затем прогони cargo test и npm run check, а после этого проверь, что подсказка в поле ввода не режется посреди строки, что кнопка «Подставить» вставляет весь текст целиком и что длинный путь по-прежнему переносится, а не выдавливает поле за край.';
 
-async function boot(page: Page, opts: { suggestion?: string } = {}) {
+async function boot(
+  page: Page,
+  opts: {
+    suggestion?: string;
+    context?: { tokens: number; window: number };
+    live?: boolean;
+    liveTurn?: boolean;
+    harness?: { id: string; title: string; provider: string };
+  } = {}
+) {
   const hub = new FakeHub();
   const api = new FakeHubApi(hub);
-  const id = seedConversation(api, { harness: CLAUDE });
+  const id = seedConversation(api, { harness: opts.harness ?? CLAUDE });
   seedHistory(api, id, 1);
+  if (opts.context) api.pushContext(id, opts.context.tokens, opts.context.window);
+  if (opts.live) {
+    const detail = api.details.get(id) as Record<string, unknown>;
+    detail.execution = { state: 'running', generation: 1 };
+  }
+  if (opts.liveTurn) {
+    const detail = api.details.get(id) as Record<string, unknown>;
+    detail.activity = { state: 'working', evidence: { phase: 'generating' }, since: new Date().toISOString() };
+    (detail.queue as Record<string, unknown>).run_slot = {
+      running: { input_id: '00000000-0000-4000-8000-000000000010' }
+    };
+  }
   if (opts.suggestion) api.setPromptSuggestion(id, opts.suggestion);
   await installChatRoutes(page, hub, api, OWNER);
   await page.goto(`/c/${id}`);
@@ -177,3 +200,69 @@ for (const width of [360, 412] as const) {
     );
   });
 }
+
+test('context_details_fit_the_keyboard_sized_viewport', async ({ page }, info) => {
+  test.skip(info.project.name !== 'phone', 'экранная клавиатура телефона');
+  await page.setViewportSize({ width: 412, height: 450 });
+  await boot(page, {
+    context: { tokens: 630_000, window: 1_000_000 },
+    live: true,
+    liveTurn: true,
+    harness: CLAUDE_PLAIN
+  });
+  await expect(page.locator('html')).toHaveAttribute('data-compact', '');
+
+  const ctx = page.getByRole('button', { name: /^Контекст/ });
+  await expect(ctx).toBeVisible();
+  await ctx.click();
+  const details = page.locator('[data-details]');
+  await expect(details).toBeVisible();
+  const squeeze = details.getByRole('button', { name: 'Сжать контекст' });
+
+  // Подробности не влезают целиком — капсула прокручивается и сама долистывает их до кнопки.
+  const viewport = page.viewportSize()!.height;
+  await expect
+    .poll(async () => {
+      const box = await squeeze.boundingBox();
+      return box ? box.y + box.height : Number.POSITIVE_INFINITY;
+    }, { message: 'низ кнопки «Сжать контекст» в окне' })
+    .toBeLessThanOrEqual(viewport + 0.5);
+
+  const measured = await details.evaluate((node) => {
+    let host: HTMLElement | null = node as HTMLElement;
+    let scrolled = false;
+    while (host) {
+      const style = getComputedStyle(host);
+      if (/(auto|scroll)/.test(style.overflowY) && host.scrollHeight > host.clientHeight + 1) {
+        scrolled = host.scrollTop > 0;
+        break;
+      }
+      host = host.parentElement;
+    }
+    return {
+      viewport: window.innerHeight,
+      detailsBottom: node.getBoundingClientRect().bottom,
+      scrolled,
+      composerBottom: document.querySelector('[data-composer]')!.getBoundingClientRect().bottom
+    };
+  });
+  expect(measured.scrolled, 'подробности прокручиваются внутри капсулы до кнопки').toBe(true);
+  expect(measured.composerBottom, 'поле ввода не выходит за окно').toBeLessThanOrEqual(
+    measured.viewport + 0.5
+  );
+  expect(measured.detailsBottom, 'подробности целиком в окне').toBeLessThanOrEqual(
+    measured.viewport + 0.5
+  );
+
+  // «Сжать контекст» видна целиком и правда принимает нажатие.
+  const box = await squeeze.boundingBox();
+  expect(box).not.toBeNull();
+  expect(box!.y, 'верх кнопки в окне').toBeGreaterThanOrEqual(-0.5);
+  expect(box!.y + box!.height, 'низ кнопки в окне').toBeLessThanOrEqual(measured.viewport + 0.5);
+  const tappable = await squeeze.evaluate((node) => {
+    const rect = node.getBoundingClientRect();
+    const found = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    return !!found && (found === node || node.contains(found));
+  });
+  expect(tappable, 'кнопка не перекрыта и не обрезана').toBe(true);
+});

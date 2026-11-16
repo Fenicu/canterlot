@@ -21,6 +21,7 @@
 	let armed = $state(false);
 	let busy = $state(false);
 	let error = $state('');
+	let detailsNode = $state<HTMLElement | null>(null);
 
 	const snapshot = $derived(chat.context);
 	const usedPercent = $derived(snapshot ? contextPercent(snapshot.tokens, snapshot.window) : null);
@@ -47,6 +48,21 @@
 
 	$effect(() => {
 		if (disabledReason) armed = false;
+	});
+
+	// Раскрытые подробности могут не поместиться в предел поля: долистываем капсулу до кнопки,
+	// иначе «Сжать контекст» остаётся за нижней кромкой окна.
+	$effect(() => {
+		if (!open || !detailsNode) return;
+		let host: HTMLElement | null = detailsNode.parentElement;
+		while (host) {
+			const style = getComputedStyle(host);
+			if (/(auto|scroll)/.test(style.overflowY) && host.scrollHeight > host.clientHeight + 1) {
+				host.scrollTop = host.scrollHeight;
+				return;
+			}
+			host = host.parentElement;
+		}
 	});
 
 	function toggle(): void {
@@ -92,7 +108,7 @@
 		<span class="label">{label}</span>
 	</button>
 	{#if open}
-		<div class="ctx-details" data-details>
+		<div class="ctx-details" data-details bind:this={detailsNode}>
 			<p class="tokens">{details}</p>
 			{#if model}<p class="model">{model}</p>{/if}
 			{#if disabledReason}
