@@ -4983,7 +4983,8 @@ async fn relay_sees_the_preset_tools_and_the_opencode_budget() {
             "plan_add",
             "plan_update",
             "plan_adopt",
-            "history_search"
+            "history_search",
+            "secret_request"
         ]
     );
     bench.close(CloseMode::Graceful).await;

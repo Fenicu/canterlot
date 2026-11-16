@@ -240,6 +240,21 @@ async fn seed_everything(f: &Fixture, conversation: Uuid, machine: Uuid, group: 
         &[Uuid::now_v7(), owner, conversation, Uuid::now_v7()],
     )
     .await;
+    // Доставленный секрет: при удалении его файл отзывается командой без conversation_id,
+    // поэтому строка таблицы исчезает, а команда живёт дальше.
+    exec(
+        pool,
+        "insert into secret_requests(id,conversation_id,owner_id,machine_id,name,purpose,state,attempt_id,path,expires_at)
+         values($1,$2,$3,$4,'Ключ','проверка','delivered',$5,'/run/secret',now()+interval '1 hour')",
+        &[
+            Uuid::now_v7(),
+            conversation,
+            owner,
+            machine,
+            Uuid::now_v7(),
+        ],
+    )
+    .await;
     exec(
         pool,
         "insert into machine_event_marks(episode_id,kind,conversation_id) values($1,'disk_low',$2)",

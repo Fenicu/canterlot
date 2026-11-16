@@ -59,7 +59,9 @@ async fn answer(
     // уходит только `invalid_request`.
     let body: AnswerBody =
         serde_json::from_slice(&body).map_err(|_| ApiError::new(ErrorCode::InvalidRequest))?;
-    let answer = body.parse().ok_or_else(|| ApiError::new(ErrorCode::InvalidRequest))?;
+    let answer = body
+        .parse()
+        .ok_or_else(|| ApiError::new(ErrorCode::InvalidRequest))?;
     let view = secrets::answer(
         &state.pool,
         &state.registry,

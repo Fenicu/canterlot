@@ -458,6 +458,8 @@ pub struct Worker {
     catalogs: std::sync::Arc<catalog::Catalogs>,
     catalog_retry_delays: Option<Vec<Duration>>,
     catalog_tasks: Vec<tokio::task::JoinHandle<()>>,
+    /// Уборка файлов секретов: живёт столько же, сколько менеджер исполнений.
+    sweeper: Option<tokio::task::JoinHandle<()>>,
     lease: Option<crate::lease::server::LeaseServer>,
 }
 
@@ -618,6 +620,7 @@ impl Worker {
             catalogs: std::sync::Arc::new(catalog::Catalogs::new()),
             catalog_retry_delays: None,
             catalog_tasks: Vec::new(),
+            sweeper: None,
             lease: None,
             #[cfg(feature = "fault-injection")]
             probe: Default::default(),
@@ -689,6 +692,11 @@ impl Worker {
         // Зависший сбор метрик не должен держать ни переподключение, ни остановку:
         // его результат сеансу больше не нужен.
         self.metrics_task = None;
+        // Уборка держит клиент хранилища: снять её нужно до закрытия хранилища.
+        if let Some(sweeper) = self.sweeper.take() {
+            sweeper.abort();
+            let _ = sweeper.await;
+        }
         if let Some(lease) = self.lease.take() {
             lease.stop().await;
         }
@@ -791,11 +799,11 @@ impl Worker {
         // Уборка файлов секретов при старте и раз в 10 минут: срок жизни и каталоги
         // разговоров, которых воркер больше не ведёт.
         manager.set_secrets(self.config.secrets.clone());
-        tokio::spawn(crate::secret::run_sweeper(
+        self.sweeper = Some(tokio::spawn(crate::secret::run_sweeper(
             self.config.secrets.clone(),
             manager.shared(),
-            shutdown.clone(),
-        ));
+            manager.shared().shutdown.clone(),
+        )));
         self.manager = Some(manager);
         self.relay = Some(relay);
         let hub_url =

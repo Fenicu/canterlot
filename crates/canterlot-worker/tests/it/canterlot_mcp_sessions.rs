@@ -19,7 +19,7 @@ const PROVIDERS: [(ToolSet, &str); 3] = [
     (ToolSet::LimitsOnly, "opencode"),
 ];
 
-const SESSION_TOOLS: [(&str, &str); 22] = [
+const SESSION_TOOLS: [(&str, &str); 23] = [
     ("sessions_list", "sessions.list"),
     ("session_inspect", "sessions.inspect"),
     ("session_send", "sessions.send"),
@@ -42,6 +42,7 @@ const SESSION_TOOLS: [(&str, &str); 22] = [
     ("plan_update", "plan.update"),
     ("plan_adopt", "plan.adopt"),
     ("history_search", "history.search"),
+    ("secret_request", "secrets.request"),
 ];
 
 fn tools_of(tool_set: ToolSet, provider: &str) -> Vec<Value> {
@@ -499,11 +500,12 @@ fn no_tool_touches_the_whitelist() {
                 || hub_name.starts_with("routing.")
                 || hub_name.starts_with("spawn_queue.")
                 || hub_name.starts_with("plan.")
-                || hub_name.starts_with("history."),
+                || hub_name.starts_with("history.")
+                || hub_name.starts_with("secrets."),
             "{hub_name}"
         );
     }
-    assert_eq!(mcp::AGENT_TOOLS.len(), 25);
+    assert_eq!(mcp::AGENT_TOOLS.len(), 26);
 }
 
 #[tokio::test]

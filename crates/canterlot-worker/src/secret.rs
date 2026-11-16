@@ -700,7 +700,11 @@ mod tests {
 
     #[test]
     fn a_base_outside_tmpfs_is_refused() {
-        let directory = tempfile::tempdir().unwrap();
+        // Каталог репозитория лежит на диске, а не на tmpfs: годной базой он быть не может.
+        let directory = tempfile::Builder::new()
+            .prefix("canterlot-secret-on-disk-")
+            .tempdir_in(env!("CARGO_MANIFEST_DIR"))
+            .unwrap();
         let config = SecretConfig {
             base_dir: Some(directory.path().join("secrets")),
         };
