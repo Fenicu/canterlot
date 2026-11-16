@@ -477,7 +477,7 @@
   .label.danger { color: var(--danger); }
   /* Стол читает подпись и текст как две колонки строки; телефон собирает их в один поток. */
   .body { display: contents; }
-  .text { flex: 1 1 12ch; min-width: 0; display: -webkit-box; overflow: hidden; color: var(--text); text-overflow: clip; white-space: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
+  .text { flex: 1 1 12ch; min-width: 0; display: -webkit-box; overflow: hidden; color: var(--text); text-overflow: clip; white-space: normal; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
   .pill :global(button) { color: var(--secondary); }
   /* Вливание — текстовое действие: значок «play» читался как «запустить». */
   .steer { flex: none; min-height: var(--target); padding-inline: var(--s4); border: var(--s0); border-radius: var(--radius-pill); background: var(--raised); color: var(--accent-link); font-size: var(--fs-sm); font-weight: var(--weight-medium); white-space: nowrap; }
@@ -527,6 +527,7 @@
       display: -webkit-box;
       min-width: 0;
       overflow: hidden;
+      overflow-wrap: anywhere;
       -webkit-box-orient: vertical;
       -webkit-line-clamp: 2;
       line-clamp: 2;

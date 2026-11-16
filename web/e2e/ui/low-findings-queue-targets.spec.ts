@@ -7,10 +7,11 @@ import type { ScheduledMessage } from '../../src/lib/stores/chat.svelte';
 import { expect, test } from './fixtures';
 
 /**
- * Мелкая находка ревью от 2026-11-16: F-20.
+ * Мелкие находки ревью от 2026-11-16: F-20 и F-21.
  * Очередь меряется только там, где включается её телефонная раскладка (`pointer: coarse`).
  */
 const OWNER = '00000000-0000-4000-8000-0000000000d1';
+const AT = '2026-10-28T12:00:00.000Z';
 const WIDTHS = [360, 412];
 const SHOTS = process.env.W3_SHOTS ? '/tmp/w3-queue' : null;
 
@@ -68,10 +69,17 @@ async function queue(hub: FakeHub, api: FakeHubApi, id: string, texts: string[])
 async function shot(page: Page, name: string): Promise<void> {
   if (!SHOTS) return;
   mkdirSync(SHOTS, { recursive: true });
-  await page.locator('.strip').first().screenshot({ path: join(SHOTS, `${name}.png`) });
+  await page.locator('.strip, article.bubble, article.card').first().screenshot({ path: join(SHOTS, `${name}.png`) });
 }
 
-async function boxes(pill: Locator): Promise<{ pill: Box; body: Box; line: number; target: number; button: Box; icon: Box }> {
+async function boxes(pill: Locator): Promise<{
+  pill: Box;
+  body: Box;
+  line: number;
+  target: number;
+  button: Box;
+  icon: Box;
+}> {
   return pill.evaluate((node) => {
     const box = (el: Element): Box => {
       const rect = el.getBoundingClientRect();
@@ -122,6 +130,7 @@ async function expectOverflowOnFirstLine(pill: Locator, label: string): Promise<
   expect(hit.filter((point) => !point.own), `${label}: точки цели принадлежат «⋯»`).toEqual([]);
 }
 
+const LONG_TOKEN = `sha256:${'9f8e'.repeat(48)}`;
 const TWO_LINES = 'После тестов обнови README и добавь строку про порядок подписки и снимка журнала';
 
 for (const width of WIDTHS) {
@@ -146,5 +155,44 @@ for (const width of WIDTHS) {
     await expectOverflowOnFirstLine(queued.nth(0), `очередь в одну строку @${width}`);
     await expectOverflowOnFirstLine(queued.nth(1), `очередь в две строки @${width}`);
     await shot(page, `f20-queue-${width}`);
+  });
+
+  test(`queue_wraps_an_unbroken_token_under_the_clamp ${width}`, async ({ page }) => {
+    const { hub, api, id } = await boot(page, width);
+    await queue(hub, api, id, [LONG_TOKEN]);
+    const pill = page.locator('.strip .pill').first();
+    await expect(pill).toBeVisible();
+    const found = await pill.evaluate((node) => {
+      const body = node.querySelector('.body') as HTMLElement;
+      const text = body.querySelector('.text') as HTMLElement;
+      // Обрезка стоит на теле карточки, а на столе — на самом тексте.
+      const clamp = [body, text].find((el) => getComputedStyle(el).webkitLineClamp === '2') ?? body;
+      const style = getComputedStyle(clamp);
+      const range = document.createRange();
+      range.selectNodeContents(clamp);
+      const rect = clamp.getBoundingClientRect();
+      const rects = [...range.getClientRects()].filter((item) => item.width > 0.5);
+      return {
+        clampHeight: rect.height,
+        clampTop: rect.top,
+        clampRight: rect.right,
+        clampBottom: rect.bottom,
+        overflowWrap: style.overflowWrap,
+        lineClamp: style.webkitLineClamp,
+        overflow: style.overflow,
+        lines: rects.length,
+        right: Math.max(...rects.map((item) => item.right)),
+        bottom: Math.max(...rects.map((item) => item.bottom))
+      };
+    });
+    // Токен ломается по буквам и остаётся внутри своей колонки: половины глифа у правого края нет.
+    expect(found.overflowWrap, 'перенос длинного токена разрешён').toBe('anywhere');
+    expect(found.lines, 'токен занял несколько строк').toBeGreaterThanOrEqual(2);
+    expect(found.right, 'строки не вылезают за правый край').toBeLessThanOrEqual(found.clampRight + 0.5);
+    // Строк больше, чем помещается в предел: видимую часть заканчивает многоточие обрезки.
+    expect(found.lineClamp, 'очередь держит предел в две строки').toBe('2');
+    expect(found.overflow, 'лишние строки скрыты обрезкой').toBe('hidden');
+    expect(found.bottom, 'видимых строк больше, чем влезает в предел').toBeGreaterThan(found.clampBottom + 0.5);
+    await shot(page, `f21-token-${width}`);
   });
 }
