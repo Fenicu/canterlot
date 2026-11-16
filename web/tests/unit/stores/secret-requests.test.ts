@@ -26,6 +26,13 @@ describe('stores/secretRequests', () => {
     expect(model.get('sr-1')?.state).toBe('revoking');
   });
 
+  it('an equal revision cannot overwrite an already stored state', () => {
+    const model = new SecretRequestsModel('conv-1');
+    expect(model.apply(view({ state: 'revoking', revision: 6 }))).toBe(true);
+    expect(model.apply(view({ state: 'lost', revision: 6 }))).toBe(false);
+    expect(model.get('sr-1')?.state).toBe('revoking');
+  });
+
   it('a stale list snapshot keeps the newer event state', () => {
     const model = new SecretRequestsModel('conv-1');
     model.apply(view({ state: 'revoked', revision: 9 }));

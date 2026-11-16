@@ -32,7 +32,9 @@ export class SecretRequestsModel {
 
   #store(view: SecretRequestView): boolean {
     const current = this.items.get(view.id);
-    if (current && current.revision > view.revision) return false;
+    // Равная версия — тот же факт: ответ со старым состоянием не должен
+    // затирать уже применённое событие с той же ревизией.
+    if (current && current.revision >= view.revision) return false;
     this.items.set(view.id, view);
     return true;
   }
