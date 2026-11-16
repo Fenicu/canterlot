@@ -94,6 +94,8 @@
   .word[data-tone='danger'] { color: var(--danger); }
   .word[data-tone='muted'] { color: var(--muted); }
   .content { display: flex; flex-direction: column; gap: var(--s2); min-width: 0; padding: var(--s0) var(--s5) var(--s4) calc(var(--s4) + var(--icon-small) + var(--s3)); font-size: var(--fs-sm); }
+  /* Карточка передала пустой набор: тело без единого элемента не добавляет 8 px под шапкой. */
+  .content:not(:has(> *)) { display: none; }
   .fold { display: grid; grid-template-rows: 1fr; }
   .body { display: flex; flex-direction: column; gap: var(--s2); min-height: 0; overflow: hidden; padding-inline: var(--s2); }
   .body > :global(:last-child) { margin-bottom: var(--s2); }
