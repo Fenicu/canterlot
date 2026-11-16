@@ -193,5 +193,5 @@
   .when { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--gauge-width)), 1fr)); gap: var(--s4); margin-bottom: var(--s2); }
   time { color: var(--secondary); font-variant-numeric: tabular-nums; }
   .on time { color: inherit; }
-  .zone { margin: 0; color: var(--muted); font-size: var(--fs-sm); }
+  .zone { margin: var(--s0) var(--s0) var(--s4); color: var(--muted); font-size: var(--fs-sm); }
 </style>

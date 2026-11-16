@@ -148,3 +148,32 @@ test('long_suggestion_is_shown_at_whole_lines_and_still_inserts_everything', asy
   }
   await expect(area).toHaveValue(LONG_SUGGESTION);
 });
+
+for (const width of [360, 412] as const) {
+  test(`send_later_note_is_not_glued_to_the_button_${width}`, async ({ page }, info) => {
+    test.skip(info.project.name !== 'phone', 'лист «Отправить позже» открывается на телефоне');
+    await page.setViewportSize({ width, height: 892 });
+    const { area } = await boot(page);
+    await area.fill('позже');
+    await area.press('Control+Shift+Enter');
+    const panel = page.getByRole('dialog', { name: 'Отправить позже' });
+    await expect(panel).toBeVisible();
+
+    const measured = await panel.evaluate((node) => {
+      const zone = node.querySelector('.zone') as HTMLElement | null;
+      if (!zone) throw new Error('нет пояса о часовом поясе');
+      const button = [...node.querySelectorAll('button')].find((item) =>
+        /Запланировать/.test(item.textContent ?? '')
+      );
+      if (!button) throw new Error('нет кнопки «Запланировать»');
+      const root = getComputedStyle(document.documentElement);
+      return {
+        gap: button.getBoundingClientRect().top - zone.getBoundingClientRect().bottom,
+        step: Number.parseFloat(root.getPropertyValue('--s4'))
+      };
+    });
+    expect(measured.gap, 'зазор между поясом о зоне и кнопкой').toBeGreaterThanOrEqual(
+      measured.step - 0.5
+    );
+  });
+}
