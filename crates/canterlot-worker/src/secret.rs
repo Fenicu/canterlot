@@ -835,8 +835,26 @@ pub fn sweep(config: &SecretConfig, live: &[Uuid], now_ms: u64) -> Swept {
             let value = value_name(request_id);
             let present = entry_stat(dir.fd(), &value).is_some_and(|stat| is_regular(&stat));
             if !present {
-                if unlink_entry(dir.fd(), &file) {
-                    swept.orphans += 1;
+                // Значения уже нет: удаление подтверждено, даже если манифест
+                // остался от неудавшегося unlink. Хаб должен узнать об этом.
+                match unlinkat(dir.fd(), &file, AtFlags::empty()) {
+                    Ok(()) => {
+                        if terminal {
+                            swept.removed.push(SecretRemoved {
+                                attempt_id: manifest.attempt_id.to_string(),
+                                reason: "revoked".into(),
+                            });
+                        } else if manifest.expires_at_ms <= now_ms {
+                            swept.removed.push(SecretRemoved {
+                                attempt_id: manifest.attempt_id.to_string(),
+                                reason: "expired".into(),
+                            });
+                        } else {
+                            swept.orphans += 1;
+                        }
+                    }
+                    Err(Errno::NOENT) => {}
+                    Err(_) => swept.fail(manifest.attempt_id, "io"),
                 }
                 continue;
             }
@@ -1438,6 +1456,32 @@ mod tests {
         )
         .unwrap();
         assert_eq!(std::fs::read(&newer.path).unwrap(), b"newer\n");
+    }
+
+    #[test]
+    fn sweep_confirms_a_removal_whose_unlink_failed_once() {
+        let base = TestBase::new();
+        let config = base.config();
+        let (conversation, request_id, attempt) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        let written = write(
+            &config,
+            &request(conversation, request_id, attempt, "value\n"),
+            &live_set(conversation),
+        )
+        .unwrap();
+        let dir = written.path.parent().unwrap().to_path_buf();
+        std::fs::remove_file(&written.path).unwrap();
+        std::fs::create_dir(&written.path).unwrap();
+        std::fs::write(written.path.join("inner"), b"keep").unwrap();
+        assert_eq!(remove(&config, request_id, attempt), Removal::Failed);
+        // Значение исчезло другим путём, а манифест и надгробие остались.
+        std::fs::remove_dir_all(&written.path).unwrap();
+        let now_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap();
+        let swept = sweep(&config, &[conversation], now_ms);
+        assert_eq!(swept.removed.len(), 1);
+        assert_eq!(swept.removed[0].attempt_id, attempt.to_string());
+        assert_eq!(swept.removed[0].reason, "revoked");
+        assert!(!dir.join(format!("{request_id}.json")).exists());
     }
 
     #[test]
