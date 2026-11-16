@@ -236,7 +236,11 @@ async function visualLanguageProblems(page: Page, label: string): Promise<string
       const interactive = el.matches('a[href], button, select, textarea, input:not([type="hidden"]), [role="button"], [role="menuitem"], [role="tab"], [role="radio"], [role="switch"], summary');
       if (interactive && !el.closest('.sr-only, [hidden], [inert]') && !(el instanceof HTMLAnchorElement && el.closest('p, li, span, label, td') && el.parentElement?.tagName !== 'NAV')) {
         const holder = el instanceof HTMLInputElement && ['checkbox', 'radio'].includes(el.type) ? (el.closest('label') ?? el) : el;
-        const rect = holder.getBoundingClientRect();
+        const box = holder.getBoundingClientRect();
+        // Цель касания, вынесенная из раскладки в абсолютный ::after, добавляет к рамке свои выносы.
+        const hit = getComputedStyle(holder, '::after');
+        const out = (side: string) => (hit.content !== 'none' && hit.position === 'absolute' ? Math.max(0, -(parseFloat(side) || 0)) : 0);
+        const rect = { width: box.width + out(hit.left) + out(hit.right), height: box.height + out(hit.top) + out(hit.bottom) };
         // Под точным указателем помеченным плотным спискам хватает минимума WCAG 2.5.8 (24px).
         const fine = el.closest('[data-fine-targets]') && matchMedia('(pointer: fine)').matches;
         const need = fine ? 24 : target;
