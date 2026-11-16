@@ -126,7 +126,7 @@
   .actions { display: flex; flex-wrap: wrap; gap: var(--s2); }
   button {
     min-height: var(--target);
-    padding-inline: var(--s4);
+    padding-inline: var(--s8);
     border: var(--s0);
     border-radius: var(--radius-pill);
     background: var(--chip);

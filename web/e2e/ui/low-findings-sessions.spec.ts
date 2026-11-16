@@ -88,3 +88,38 @@ test.describe('F-23 collapsed limits row with an active reserve', () => {
     });
   }
 });
+
+test.describe('F-30 trash buttons keep the pill padding', () => {
+  for (const width of [360, 412]) {
+    test(`restore_and_purge_have_sixteen_pixels_at_${width}`, async ({ page }, info) => {
+      phoneOnly(info);
+      await page.setViewportSize({ width, height: 892 });
+      const hub = new FakeHub();
+      const api = new FakeHubApi(hub);
+      const id = seedConversation(api, { title: 'Сессия для корзины', activity: { state: 'stopped', evidence: {}, since: AT } as never });
+      api.trashConversation(id);
+      await installChatRoutes(page, hub, api, OWNER);
+      await page.goto('/sessions');
+      await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
+      await page.getByRole('tab', { name: /Корзина/ }).click();
+      const buttons = page.locator('.trash button');
+      await expect(buttons).toHaveCount(2);
+      await shot(page, `f30-trash-buttons-${width}`);
+      const found = await buttons.evaluateAll((nodes) => nodes.map((node) => {
+        const style = getComputedStyle(node);
+        const box = node.getBoundingClientRect();
+        const range = document.createRange();
+        range.selectNodeContents(node);
+        const text = range.getBoundingClientRect();
+        return { left: box.left, right: box.right, radius: parseFloat(style.borderTopLeftRadius), pad: parseFloat(style.paddingInlineStart), gap: text.left - box.left };
+      }));
+      expect(found).toHaveLength(2);
+      for (const button of found) {
+        expect(button.pad, JSON.stringify(found)).toBeCloseTo(16, 0);
+        expect(button.gap, JSON.stringify(found)).toBeGreaterThanOrEqual(15.5);
+        // Текст начинается за дугой закругления, а кнопка остаётся пилюлей в одну строку.
+        expect(button.radius).toBeGreaterThanOrEqual(21);
+      }
+    });
+  }
+});
