@@ -6705,9 +6705,15 @@ async fn fork_creates_a_fresh_session_and_sets_side_rules_and_model() {
     let patch = find_exact(&requests, "PATCH", &format!("/api/session/{forked}")).unwrap();
     let permissions = &patch["body"]["permissions"];
     assert_eq!(side_effect(permissions, "*").as_deref(), Some("deny"));
-    assert_eq!(side_effect(permissions, "subagent").as_deref(), Some("deny"));
+    assert_eq!(
+        side_effect(permissions, "subagent").as_deref(),
+        Some("deny")
+    );
     assert_eq!(side_effect(permissions, "task").as_deref(), Some("deny"));
-    assert_eq!(side_effect(permissions, "todowrite").as_deref(), Some("allow"));
+    assert_eq!(
+        side_effect(permissions, "todowrite").as_deref(),
+        Some("allow")
+    );
     assert_eq!(side_effect(permissions, "read").as_deref(), Some("allow"));
     let model = find(&requests, "POST", "/model").unwrap();
     assert_eq!(

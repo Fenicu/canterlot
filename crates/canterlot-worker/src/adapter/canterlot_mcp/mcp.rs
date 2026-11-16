@@ -1659,8 +1659,9 @@ mod side_tests {
             .clone();
             assert_eq!(error["code"], -32602, "{name}");
             assert!(
-                error["message"].as_str().is_some_and(|message| message
-                    .starts_with(&format!("unknown tool '{name}'"))),
+                error["message"]
+                    .as_str()
+                    .is_some_and(|message| message.starts_with(&format!("unknown tool '{name}'"))),
                 "{name}: {}",
                 error["message"]
             );

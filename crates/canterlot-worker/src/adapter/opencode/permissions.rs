@@ -224,7 +224,11 @@ mod side_tests {
 
     #[test]
     fn side_rules_match_normal_rules_outside_read_only() {
-        for mode in [PermissionMode::Owner, PermissionMode::Ask, PermissionMode::Bypass] {
+        for mode in [
+            PermissionMode::Owner,
+            PermissionMode::Ask,
+            PermissionMode::Bypass,
+        ] {
             assert_eq!(mode.ruleset_side(), mode.ruleset(), "{mode:?}");
         }
         assert_ne!(

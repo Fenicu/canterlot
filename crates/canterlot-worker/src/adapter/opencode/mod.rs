@@ -885,7 +885,11 @@ impl OpenCodeAdapter {
         let failed = |_| AdapterError::StartFailed("fork_failed");
         let created = self
             .http()?
-            .post(&format!("/api/session/{parent}/fork"), &json!({}), REQUEST_WAIT)
+            .post(
+                &format!("/api/session/{parent}/fork"),
+                &json!({}),
+                REQUEST_WAIT,
+            )
             .await
             .map_err(failed)?;
         let id = created
@@ -1060,10 +1064,7 @@ impl OpenCodeAdapter {
                 Err(_) => (self.fork_session(spec, &fork.parent_native_id).await?, true),
             },
             (Some(native), None) => (self.resume_session(spec, native).await?, false),
-            (None, Some(fork)) => (
-                self.fork_session(spec, &fork.parent_native_id).await?,
-                true,
-            ),
+            (None, Some(fork)) => (self.fork_session(spec, &fork.parent_native_id).await?, true),
             (None, None) => (self.create_session(spec).await?, false),
         };
         self.session = session;
@@ -1102,15 +1103,14 @@ impl OpenCodeAdapter {
             self.diagnostic("untested_cli_version", false);
         }
         self.version = Some(version);
-        self.broker =
-            Some(
-                Broker::bind_with(
-                    &self.exec_dir,
-                    ToolSet::for_side(spec.fork.as_ref(), ToolSet::LimitsOnly),
-                    "opencode",
-                )
-                .await?,
-            );
+        self.broker = Some(
+            Broker::bind_with(
+                &self.exec_dir,
+                ToolSet::for_side(spec.fork.as_ref(), ToolSet::LimitsOnly),
+                "opencode",
+            )
+            .await?,
+        );
         if let Some(native) = &spec.native_conversation_id {
             self.sweep_orphans(native).await;
         }

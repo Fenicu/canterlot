@@ -15,7 +15,10 @@ pub enum SessionArg {
     /// Боковой чат: новая сессия — свежая копия родительской.
     /// Проверено вживую на 2.1.325: `--session-id` с `--resume --fork-session`
     /// даёт новую сессию с заказанным id, родителя в его ходу не трогает.
-    Fork { parent: String, new_id: Option<Uuid> },
+    Fork {
+        parent: String,
+        new_id: Option<Uuid>,
+    },
 }
 
 /// Корень репозитория рабочего каталога: ближайший каталог (сам workdir или выше),

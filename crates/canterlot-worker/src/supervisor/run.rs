@@ -1853,11 +1853,9 @@ impl Supervisor {
             instructions,
             isolate_mcp: start.isolate_mcp,
             prompt_suggestions: self.prompt_suggestions,
-            fork: (!start.fork_from_native.is_empty()).then(|| {
-                crate::adapter::ForkSpec {
-                    parent_native_id: start.fork_from_native.clone(),
-                    side_mcp: start.canterlot_mcp == "side",
-                }
+            fork: (!start.fork_from_native.is_empty()).then(|| crate::adapter::ForkSpec {
+                parent_native_id: start.fork_from_native.clone(),
+                side_mcp: start.canterlot_mcp == "side",
             }),
         };
         let outcome = timeout(
@@ -1911,7 +1909,12 @@ impl Supervisor {
         self.started = Some(info.clone());
         self.lifecycle = Lifecycle::Running;
         self.send(up::Msg::CliStarted(info));
-        self.state_record("running", "", &started.native_conversation_id, started.fresh_fork)?;
+        self.state_record(
+            "running",
+            "",
+            &started.native_conversation_id,
+            started.fresh_fork,
+        )?;
         self.phase_record(Phase::AwaitingInput)?;
         self.ready = true;
         Ok(())

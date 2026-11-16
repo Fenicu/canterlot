@@ -660,12 +660,8 @@ impl ClaudeCodeAdapter {
             &home,
             std::env::var_os("CLAUDE_CONFIG_DIR").as_deref(),
         );
-        crate::machine::claude_history::transcript(
-            &workdir.to_string_lossy(),
-            &config_dir,
-            native,
-        )
-        .is_some()
+        crate::machine::claude_history::transcript(&workdir.to_string_lossy(), &config_dir, native)
+            .is_some()
     }
 
     /// Остановить старый CLI для перезапуска между ходами: stdin EOF, до 5 с
@@ -1407,9 +1403,7 @@ impl Adapter for ClaudeCodeAdapter {
         // Запись могла пропасть между перезапусками; resume тогда невозможен, и хаб
         // покажет «Начато заново от свежей копии сессии».
         let (session, fresh_fork) = match (&spec.native_conversation_id, &spec.fork) {
-            (Some(native), Some(fork))
-                if Self::transcript_exists(&spec.workdir, native) =>
-            {
+            (Some(native), Some(fork)) if Self::transcript_exists(&spec.workdir, native) => {
                 (SessionArg::Resume(native.clone()), false)
             }
             (_, Some(fork)) => (
@@ -1420,10 +1414,7 @@ impl Adapter for ClaudeCodeAdapter {
                 true,
             ),
             (Some(native), None) => (SessionArg::Resume(native.clone()), false),
-            (None, None) => (
-                SessionArg::New(Uuid::now_v7()),
-                false,
-            ),
+            (None, None) => (SessionArg::New(Uuid::now_v7()), false),
         };
         self.resumed = matches!(session, SessionArg::Resume(_));
         self.native_id = match &session {

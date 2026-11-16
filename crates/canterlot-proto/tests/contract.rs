@@ -1966,7 +1966,11 @@ fn side_chat_fields_are_additive_on_both_hops() {
         ..Default::default()
     };
     let wire = start.encode_to_vec();
-    assert_eq!(&wire[..3], [0x72, 6, b'p'], "StartExecution.fork_from_native is field 14");
+    assert_eq!(
+        &wire[..3],
+        [0x72, 6, b'p'],
+        "StartExecution.fork_from_native is field 14"
+    );
     assert!(
         wire.windows(2).any(|w| w == [0x7a, 4]),
         "StartExecution.canterlot_mcp is field 15"

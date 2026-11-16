@@ -3762,8 +3762,9 @@ async fn fork_uses_ephemeral_read_only_params_and_reports_the_new_thread() {
     assert!(params["developerInstructions"].as_str().is_some());
     // Родитель не тронут: ни resume, ни стартов, ни ходов на его id.
     assert!(
-        entries.iter().all(|entry| entry["method"] != "thread/resume"
-            && entry["method"] != "thread/start")
+        entries
+            .iter()
+            .all(|entry| entry["method"] != "thread/resume" && entry["method"] != "thread/start")
     );
     for entry in &entries {
         if entry["method"] == "turn/start" || entry["method"] == "turn/steer" {
@@ -3792,5 +3793,9 @@ async fn later_side_start_forks_again_instead_of_resuming_the_dead_ephemeral_id(
         entries.iter().any(|entry| entry["method"] == "thread/fork"
             && entry["params"]["threadId"] == "thread-parent")
     );
-    assert!(entries.iter().all(|entry| entry["method"] != "thread/resume"));
+    assert!(
+        entries
+            .iter()
+            .all(|entry| entry["method"] != "thread/resume")
+    );
 }

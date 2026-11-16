@@ -4,8 +4,8 @@ use canterlot_proto::requests::{AnswerValue, DecisionPayload, PermissionBehavior
 use canterlot_worker::{
     adapter::{
         self, Adapter, AdapterContext, AdapterEvent, BlockKind, CloseMode, ForkSpec,
-        InstructionMode, InstructionSpec, SettingsChange, StartSpec, Transmission,
-        TransmitOutcome, claude_code::version::CliVersion,
+        InstructionMode, InstructionSpec, SettingsChange, StartSpec, Transmission, TransmitOutcome,
+        claude_code::version::CliVersion,
     },
     config::ClaudeCodeConfig,
     containment::TreeContainment,
@@ -3254,8 +3254,7 @@ async fn fork_starts_a_fresh_copy_and_reports_its_own_id() {
     while !argv.exists() && std::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let args: Vec<String> =
-        serde_json::from_str(&std::fs::read_to_string(&argv).unwrap()).unwrap();
+    let args: Vec<String> = serde_json::from_str(&std::fs::read_to_string(&argv).unwrap()).unwrap();
     let resume = args.iter().position(|x| x == "--resume").unwrap();
     assert_eq!(args[resume + 1], "parent-native");
     assert_eq!(args[resume + 2], "--fork-session");
@@ -3265,7 +3264,10 @@ async fn fork_starts_a_fresh_copy_and_reports_its_own_id() {
     // кадра и ни одного resume, кроме аргумента запуска.
     let stdin = std::fs::read_to_string(fake.dir.path().join("stdin.log")).unwrap_or_default();
     assert!(!stdin.contains("parent-native"));
-    fake.adapter.close(CloseMode::Force, &fake.group).await.unwrap();
+    fake.adapter
+        .close(CloseMode::Force, &fake.group)
+        .await
+        .unwrap();
     fake.permit.take();
 }
 
@@ -3284,15 +3286,20 @@ async fn fork_reforks_when_the_side_record_is_gone() {
         .expect("start must finish")
         .expect("start");
     assert!(started.fresh_fork);
-    assert_ne!(started.native_conversation_id, fake.spec.native_conversation_id.as_deref().unwrap());
+    assert_ne!(
+        started.native_conversation_id,
+        fake.spec.native_conversation_id.as_deref().unwrap()
+    );
     let argv = fake.dir.path().join("args.json");
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while !argv.exists() && std::time::Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let args: Vec<String> =
-        serde_json::from_str(&std::fs::read_to_string(&argv).unwrap()).unwrap();
+    let args: Vec<String> = serde_json::from_str(&std::fs::read_to_string(&argv).unwrap()).unwrap();
     assert!(args.contains(&"--fork-session".to_string()));
-    fake.adapter.close(CloseMode::Force, &fake.group).await.unwrap();
+    fake.adapter
+        .close(CloseMode::Force, &fake.group)
+        .await
+        .unwrap();
     fake.permit.take();
 }
