@@ -589,7 +589,9 @@
     width: 100%;
     min-height: var(--target);
     max-height: min(calc(var(--fs-input) * var(--lh-body) * 6 + var(--s5) * 2), calc(var(--composer-limit) * .5));
-    padding: var(--s5);
+    /* Верхний отступ живёт вне прокрутки: иначе первая видимая строка режется кромкой поля. */
+    margin-block-start: var(--s5);
+    padding: 0 var(--s5) var(--s5);
     overflow: auto;
     resize: none;
     border: var(--s0);
