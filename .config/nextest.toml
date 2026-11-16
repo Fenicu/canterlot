@@ -45,3 +45,9 @@ slow-timeout = { period = "30s", terminate-after = 8 }
 # ничего не перезапускается. Запись помечается строкой с причиной (слово в верхнем регистре, см. выше), её показывает
 # scripts/list-quarantine.sh. Правила карантина идут выше; в вебе карантин
 # ведётся такими же пометками в спеках Playwright.
+
+# QUARANTINE: снят 16.11 после двух чистых гейтов и в тот же день упал в гейте 1.38.0 рядом с чужими
+# docker run: 67 с, «timed out: streamed deltas» (exec_e2e.rs:82). Повтор разрешён.
+[[profile.default.overrides]]
+filter = 'test(=exec_e2e::transport_errors_never_stop_an_execution)'
+retries = 2
