@@ -100,6 +100,7 @@ mod scheduler;
 mod schema;
 mod security;
 mod send_now;
+mod service_notes;
 mod session_accept;
 mod session_api;
 mod session_send;

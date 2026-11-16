@@ -1,5 +1,5 @@
 use serde_json::{Value, json};
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 use super::LockedQueue;
@@ -290,6 +290,7 @@ pub async fn dispatch_next(
                 .await?;
         }
     }
+    prepend_service_notes(&mut *conn, conversation_id, input_id, command_id).await?;
     let (execution_id, generation, _) = live.ok_or(sqlx::Error::RowNotFound)?;
     let (attempt, machine_id): (i32, Uuid) = sqlx::query_as(
         "update commands set delivery_state = 'pending', dispatch_attempt = dispatch_attempt + 1,
@@ -370,4 +371,64 @@ pub async fn dispatch_next(
         })
     })
     .await
+}
+
+/// Служебные строки, накопившиеся до этого ввода, идут агенту одним коротким блоком
+/// перед текстом владельца или событием. Сами они хода не начинали; приставка
+/// снимается здесь, при выдаче, поэтому правка ожидающего ввода их не теряет.
+async fn prepend_service_notes(
+    conn: &mut PgConnection,
+    conversation_id: Uuid,
+    input_id: Uuid,
+    command_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    let notes: Vec<(Uuid, Value)> = sqlx::query_as(
+        "select id,content from inputs
+         where conversation_id=$1 and service_note and note_attached_to is null
+         order by input_seq for update",
+    )
+    .bind(conversation_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    if notes.is_empty() {
+        return Ok(());
+    }
+    let text = notes
+        .iter()
+        .filter_map(|(_, content)| {
+            content
+                .as_array()
+                .and_then(|blocks| blocks.first())
+                .and_then(|block| block.get("text"))
+                .and_then(Value::as_str)
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    if text.is_empty() {
+        return Ok(());
+    }
+    let payload: Value = sqlx::query_scalar("select payload from commands where id=$1 for update")
+        .bind(command_id)
+        .fetch_one(&mut *conn)
+        .await?;
+    let mut content = payload
+        .get("content")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    content.insert(0, json!({"type":"text","text":text}));
+    sqlx::query("update commands set payload=jsonb_set(payload,'{content}',$2::jsonb) where id=$1")
+        .bind(command_id)
+        .bind(json!(content))
+        .execute(&mut *conn)
+        .await?;
+    let ids: Vec<Uuid> = notes.iter().map(|(id, _)| *id).collect();
+    sqlx::query(
+        "update inputs set note_attached_to=$2 where id=any($1) and note_attached_to is null",
+    )
+    .bind(&ids)
+    .bind(input_id)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
 }

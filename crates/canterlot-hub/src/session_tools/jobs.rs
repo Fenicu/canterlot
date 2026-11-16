@@ -634,20 +634,35 @@ async fn deliver(
     if let Some(input_id) = existing {
         return Ok(JobOutcome::Done(json!({"input_id":input_id})));
     }
-    let submitted = submit_input_in_tx(
-        conn,
-        &SubmitInput {
-            owner_id: job.owner_id,
-            conversation_id: subscriber,
-            idempotency_key: key,
-            content: vec![ContentBlock::Text { text }],
-            received_at: now,
-            correlation_id,
-            origin,
-        },
-    )
-    .await?;
+    let request = SubmitInput {
+        owner_id: job.owner_id,
+        conversation_id: subscriber,
+        idempotency_key: key,
+        content: vec![ContentBlock::Text { text }],
+        received_at: now,
+        correlation_id,
+        origin,
+    };
+    let submitted = if request.origin.as_ref().is_some_and(is_service_note) {
+        crate::delivery::submit_service_note_in_tx(conn, &request).await?
+    } else {
+        submit_input_in_tx(conn, &request).await?
+    };
     Ok(JobOutcome::Done(json!({"input_id":submitted.input_id})))
+}
+
+/// Служебная строка, которая не стоит отдельного хода: приём делегата и старт из
+/// очереди запусков. Она остаётся в ленте и уходит агенту со следующим вводом;
+/// сбои очереди и остальные события будят оркестратор как раньше.
+fn is_service_note(origin: &Value) -> bool {
+    let Some(event) = origin.get("event") else {
+        return false;
+    };
+    match event.get("kind").and_then(Value::as_str) {
+        Some("accepted") => true,
+        Some("spawn_queue") => event.get("state").and_then(Value::as_str) == Some("started"),
+        _ => false,
+    }
 }
 
 /// Задание исчерпало попытки или признано негодным: то, что оно должно было закрыть, закрывается

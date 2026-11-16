@@ -460,6 +460,113 @@ pub async fn submit_input_in_tx(
     }
 }
 
+/// Служебная строка, которая не начинает ход: терминальный ввод сразу попадает в ленту,
+/// а к агенту уходит приставкой к следующему выданному вводу. Очередь её не видит.
+pub async fn submit_service_note_in_tx(
+    tx: &mut PgConnection,
+    req: &SubmitInput,
+) -> Result<SubmittedInput, SubmitError> {
+    validate_content(req, false)?;
+    if !tx.is_in_transaction() {
+        return Err(sqlx::Error::InvalidArgument("an outer transaction is required".into()).into());
+    }
+    let (input_seq, machine_id): (i64, Uuid) = sqlx::query_as(
+        "select q.next_input_seq, c.machine_id
+         from queue_state q join conversations c on c.id=q.conversation_id
+         where q.conversation_id=$1 and c.owner_id=$2 and c.trashed_at is null
+         for update of q",
+    )
+    .bind(req.conversation_id)
+    .bind(req.owner_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or(SubmitError::ConversationNotFound)?;
+    let submitted = SubmittedInput {
+        input_id: Uuid::now_v7(),
+        input_seq,
+        command_id: Uuid::now_v7(),
+        state: InputState::Accepted,
+    };
+    sqlx::query("update queue_state set next_input_seq=next_input_seq+1 where conversation_id=$1")
+        .bind(req.conversation_id)
+        .execute(&mut *tx)
+        .await?;
+    let content =
+        serde_json::to_value(&req.content).map_err(|error| sqlx::Error::Encode(Box::new(error)))?;
+    sqlx::query(
+        "insert into commands(id,machine_id,conversation_id,kind,delivery_state,dispatch_attempt,payload)
+         values($1,$2,$3,$4,'completed',0,$5)",
+    )
+    .bind(submitted.command_id)
+    .bind(machine_id)
+    .bind(req.conversation_id)
+    .bind(CommandKind::DeliverInput.as_str())
+    .bind(json!({"input_id": submitted.input_id, "conversation_id": req.conversation_id, "content": content}))
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "insert into inputs(id,conversation_id,owner_id,input_seq,idempotency_key,content,state,
+                            command_id,received_at,origin,service_note)
+         values($1,$2,$3,$4,$5,$6,'accepted',$7,$8,$9,true)",
+    )
+    .bind(submitted.input_id)
+    .bind(req.conversation_id)
+    .bind(req.owner_id)
+    .bind(input_seq)
+    .bind(&req.idempotency_key)
+    .bind(&content)
+    .bind(submitted.command_id)
+    .bind(req.received_at)
+    .bind(&req.origin)
+    .execute(&mut *tx)
+    .await?;
+    let queued = events::append(
+        tx,
+        NewEvent {
+            scope: Scope::Conversation {
+                id: req.conversation_id,
+            },
+            kind: "input_queued",
+            conversation_id: Some(req.conversation_id),
+            execution_id: None,
+            payload: json!({
+                "input_id": submitted.input_id,
+                "input_seq": input_seq,
+                "idempotency_key": req.idempotency_key,
+                "state": submitted.state,
+                "content": content,
+                "origin": req.origin,
+            }),
+            correlation_id: req.correlation_id,
+        },
+    )
+    .await?;
+    // Ввод не ждёт выдачи: состояние сразу терминальное, и лента узнаёт об этом
+    // тем же кадром, что у обычного принятого ввода.
+    let accepted = events::append(
+        tx,
+        NewEvent {
+            scope: Scope::Conversation {
+                id: req.conversation_id,
+            },
+            kind: "input_state_changed",
+            conversation_id: Some(req.conversation_id),
+            execution_id: None,
+            payload: json!({"input_id": submitted.input_id, "state": submitted.state}),
+            correlation_id: req.correlation_id,
+        },
+    )
+    .await?;
+    sqlx::query("update inputs set created_seq=$2,created_at=$3,feed_seq=$4 where id=$1")
+        .bind(submitted.input_id)
+        .bind(queued.scope_seq)
+        .bind(queued.committed_at)
+        .bind(accepted.scope_seq)
+        .execute(&mut *tx)
+        .await?;
+    Ok(submitted)
+}
+
 pub(crate) async fn submit_message_input_in_tx(
     tx: &mut PgConnection,
     req: &SubmitInput,
