@@ -84,6 +84,10 @@ message StartCli {
   bool send_now_v1 = 15;
   // Флаг --prompt-suggestions и запись PromptSuggested: хаб включил подсказки и знает запись.
   bool prompt_suggestions = 16;
+  // Только при согласованной возможности side_chat_v1: нативный id родителя для форка.
+  string fork_from_native = 17;
+  // Профиль MCP canterlot: пусто — обычный набор адаптера, "side" — только мост разрешений и вопросов.
+  string canterlot_mcp = 18;
 }
 
 // Вызов инструмента агента: сопровождение → управляющий процесс → хаб и обратно.

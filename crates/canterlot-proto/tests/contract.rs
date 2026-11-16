@@ -414,6 +414,7 @@ fn exec_records_roundtrip() {
         state: "running".into(),
         outcome: String::new(),
         native_conversation_id: "native".into(),
+        fresh_fork: false,
     });
     assert_roundtrip(BlockStarted {
         block_id: "block".into(),
@@ -1142,6 +1143,8 @@ fn n_minus_one_decoders_skip_new_fields() {
         worktree: None,
         isolate_mcp: false,
         prompt_suggestions: true,
+        fork_from_native: String::new(),
+        canterlot_mcp: String::new(),
     };
     assert_eq!(
         OldStartExecution::decode(new.encode_to_vec().as_slice()).unwrap(),
@@ -1284,6 +1287,8 @@ fn start_execution_capabilities_machine_report_os_and_limits_snapshot_roundtrip(
         isolate_mcp: true,
         send_now_v1: true,
         prompt_suggestions: true,
+        fork_from_native: String::new(),
+        canterlot_mcp: String::new(),
     });
     assert_roundtrip(ipc::CompactRequest {
         command_id: "command".into(),
@@ -1949,6 +1954,64 @@ fn isolate_mcp_is_additive_on_both_hops() {
         [0x78, 1],
         "StartCli.send_now_v1 is field 15"
     );
+}
+
+#[test]
+fn side_chat_fields_are_additive_on_both_hops() {
+    use canterlot_proto::worker::{ipc, v1::ExecutionState};
+    // Неизвестное поле старый получатель пропускает, а его отсутствие значит обычный запуск.
+    let start = StartExecution {
+        fork_from_native: "parent".into(),
+        canterlot_mcp: "side".into(),
+        ..Default::default()
+    };
+    let wire = start.encode_to_vec();
+    assert_eq!(&wire[..3], [0x72, 6, b'p'], "StartExecution.fork_from_native is field 14");
+    assert!(
+        wire.windows(2).any(|w| w == [0x7a, 4]),
+        "StartExecution.canterlot_mcp is field 15"
+    );
+    assert_roundtrip(start);
+    let old_wire = StartExecution {
+        harness: "synthetic".into(),
+        ..Default::default()
+    }
+    .encode_to_vec();
+    let new_wire = StartExecution {
+        harness: "synthetic".into(),
+        fork_from_native: "parent".into(),
+        canterlot_mcp: "side".into(),
+        ..Default::default()
+    }
+    .encode_to_vec();
+    assert_eq!(&new_wire[..old_wire.len()], old_wire.as_slice());
+    let cli = ipc::StartCli {
+        fork_from_native: "parent".into(),
+        canterlot_mcp: "side".into(),
+        ..Default::default()
+    };
+    let wire = cli.encode_to_vec();
+    assert!(
+        wire.windows(3).any(|w| w == [0x8a, 0x01, 6]),
+        "StartCli.fork_from_native is field 17"
+    );
+    assert!(
+        wire.windows(3).any(|w| w == [0x92, 0x01, 4]),
+        "StartCli.canterlot_mcp is field 18"
+    );
+    assert_roundtrip(cli);
+    assert!(StartExecution::default().encode_to_vec().is_empty());
+    assert!(ipc::StartCli::default().encode_to_vec().is_empty());
+    let state = ExecutionState {
+        fresh_fork: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        state.encode_to_vec(),
+        [0x30, 1],
+        "ExecutionState.fresh_fork is field 6"
+    );
+    assert_roundtrip(state);
 }
 
 #[test]

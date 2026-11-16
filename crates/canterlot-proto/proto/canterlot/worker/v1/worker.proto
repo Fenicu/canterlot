@@ -257,6 +257,12 @@ message StartExecution {
   bool isolate_mcp = 12;
   // Только при согласованной возможности prompt_suggestions_v1: подсказки следующего сообщения Claude Code.
   bool prompt_suggestions = 13;
+  // Только при согласованной возможности side_chat_v1: боковой чат форкается
+  // из нативной сессии родителя и никогда её не трогает. Пусто — обычный запуск.
+  string fork_from_native = 14;
+  // Профиль MCP canterlot этого запуска: пусто — обычный набор адаптера,
+  // "side" — только мост разрешений и вопросов (без сессий, пресетов, share_file и лимитов).
+  string canterlot_mcp = 15;
 }
 
 // Изолированная рабочая копия git: путь воркер строит сам из корня рабочих копий.
@@ -397,6 +403,9 @@ message ExecutionState {
   string state = 3;
   string outcome = 4;
   string native_conversation_id = 5;
+  // Только при согласованной возможности side_chat_v1: запуск был свежим форком
+  // (первый старт или перефорк при невозможном resume). Пусто у старого воркера.
+  bool fresh_fork = 6;
 }
 
 message RunFinished {
