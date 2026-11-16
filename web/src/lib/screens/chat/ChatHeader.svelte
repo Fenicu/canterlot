@@ -507,7 +507,9 @@
 		flex: 1;
 		display: flex;
 		flex-direction: column;
-		gap: var(--s3);
+		/* Название и подпись вместе укладываются в строку 44 px: шаг 3 px держит разрывы ровными,
+		   а лишние пиксели шапки отнимали высоту у прижатой ленты. */
+		gap: calc(var(--s2) - var(--hairline));
 		min-width: 0;
 	}
 	.title-row {

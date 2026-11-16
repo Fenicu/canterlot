@@ -994,22 +994,35 @@ test('history_after_reload_shows_answer_text_at_once', async ({ page }) => {
 test('feed_after_resync_shows_exact_text_without_a_jump_when_pinned', async ({ page }) => {
   const { hub, api, id } = await boot(page, 4);
   const feed = page.locator('.feed');
+  const header = page.locator('.chat-header');
   const blockId = api.id();
   const scope = `conversation:${id}`;
   hub.append(scope, { kind: 'block_started', conversation_id: id, payload: started(blockId) });
   hub.append(scope, { kind: 'block_delta', conversation_id: id, payload: { block_id: blockId, base_rev: 0, rev: 1, append: 'точно' } });
   hub.flush();
-  await expect(page.getByText('точно')).toBeVisible();
+  const block = page.locator(`[data-block="${blockId}"]`);
+  await expect(block).toHaveText('точно');
   const canonical = textBlock(api, 'точно', '9', 'final');
   canonical.id = blockId;
   api.blocks.set(blockId, { text: 'точно', rev: 1, state: 'final' });
   api.histories.set(id, [...(api.histories.get(id) ?? []), canonical]);
-  const before = await settled(() => feed.evaluate((el) => el.scrollTop), (a, b) => Math.abs(a - b) <= 0.5);
+  const headerBefore = await header.evaluate((el) => el.getBoundingClientRect().height);
+  const textHeightBefore = await block.evaluate((el) => el.getBoundingClientRect().height);
   hub.chaos.forceResync('cursor_ahead');
   hub.flush();
   await expect(page.locator('.caret')).toHaveCount(0);
-  await expect(page.getByText('точно')).toBeVisible();
-  await expect.poll(() => feed.evaluate((el, top) => Math.abs(el.scrollTop - top), before)).toBeLessThanOrEqual(1);
+  // Снимок заменил поток тем же блоком в том же месте: один узел с точным текстом, без второго экземпляра.
+  await expect(block).toHaveCount(1);
+  await expect(block).toHaveText('точно');
+  // Свой текст не переложился: высота блока та же, новых строк и переносов не прибавилось.
+  const textHeightAfter = await block.evaluate((el) => el.getBoundingClientRect().height);
+  expect(Math.abs(textHeightAfter - textHeightBefore), 'текст не переложился на новую высоту').toBeLessThanOrEqual(1);
+  // Хвост после снимка короче, но прижатая лента остаётся у низа.
+  await expect.poll(() => feed.evaluate((el) => el.scrollHeight - el.scrollTop - el.clientHeight)).toBeLessThanOrEqual(1);
+  const headerAfter = await header.evaluate((el) => el.getBoundingClientRect().height);
+  expect(Math.abs(headerAfter - headerBefore), 'шапка не меняет высоту на пересинхронизации').toBeLessThanOrEqual(0.5);
+  // 68 px — шапка с названием и подписью: название 22,5 + шаг 3 + подпись 18 и поля строки.
+  expect(headerBefore, 'шапка укладывает название и подпись в строку 44 px').toBeLessThanOrEqual(68);
 });
 
 test('tool_block_shows_thumbnail_without_layout_shift', async ({ page }) => {
