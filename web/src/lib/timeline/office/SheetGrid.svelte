@@ -94,7 +94,7 @@
 
 <div class="sheet-grid">
   {#if sheets.length > 1}
-    <div class="tabs" role="tablist" aria-label="Листы">
+    <div class="tabs" data-sheet-tabs role="tablist" aria-label="Листы">
       {#each sheets as item, index (index)}
         <button
           type="button"

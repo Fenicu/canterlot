@@ -5,6 +5,7 @@ import { resolve } from 'node:path';
 import { PALETTES } from '../../src/lib/palettes';
 import { expect, test } from '../ui/fixtures';
 import { bootScreen, SCREENS, type Theme } from './states';
+import { geometryAudit, type Finding } from './geometry';
 
 const THEMES: Theme[] = ['dark', 'light'];
 const COLOR_TOKENS = [...readFileSync(resolve(process.cwd(), 'src/lib/styles/tokens.css'), 'utf8').matchAll(/(--[a-z0-9-]+):\s*(?:#|rgb|hsl|oklch|color-mix)/g)].map((match) => match[1]!);
@@ -101,6 +102,29 @@ function contrastProblems(results: AxeResults, label: string): string[] {
   return results.violations
     .filter((violation) => violation.id === 'color-contrast')
     .flatMap((violation) => violation.nodes.slice(0, 3).map((node) => `${label}: ${node.target.join(' ')} — ${node.any[0]?.message ?? violation.help}`));
+}
+
+/**
+ * Известные случаи мягких проверок. Это не разрешение на дефект, а снимок того, что осталось:
+ * новый случай или лишнее повторение того же узла валит тест, а исчезнувший повод править эталон
+ * не требует — правка ради уменьшения счётчика ломала бы прогон из-за разницы браузеров.
+ */
+interface SoftBaselineEntry {
+  screen: string;
+  rule: string;
+  where: string;
+  count: number;
+  reason: string;
+}
+
+const SOFT_BASELINE: SoftBaselineEntry[] = JSON.parse(readFileSync(resolve(process.cwd(), 'e2e/parity/geometry-baseline.json'), 'utf8'));
+
+/** Мягкие находки, которых нет в эталоне или которых стало больше, чем записано. */
+function newSoftCases(screen: string, found: Finding[]): Finding[] {
+  const known = new Map(
+    SOFT_BASELINE.filter((entry) => entry.screen === screen).map((entry) => [`${entry.rule}|${entry.where}`, entry.count])
+  );
+  return found.filter((item) => item.count > (known.get(`${item.rule}|${item.where}`) ?? 0));
 }
 
 /**
@@ -274,6 +298,13 @@ for (const screen of AUDITED) {
       expect(serious, label).toEqual([]);
       const problems = await visualLanguageProblems(page, label);
       expect(problems, problems.join('\n')).toEqual([]);
+      // Геометрический обход идёт по этой же странице: второй заход на экран стоил бы столько же,
+      // сколько весь остальной аудит, а инварианты раскладки от темы не зависят.
+      const geometry = await geometryAudit(page);
+      const geoLabel = (item: Finding) => `${label}: ${item.rule} x${item.count} — ${item.where}: ${item.detail}`;
+      expect(geometry.hard.map(geoLabel), 'геометрия раскладки').toEqual([]);
+      const fresh = newSoftCases(screen.name, geometry.soft);
+      expect(fresh.map(geoLabel), 'новые случаи мягких проверок: допишите их в e2e/parity/geometry-baseline.json с причиной').toEqual([]);
       // color-contrast разбирается отдельно: продукт держит корень обрезанным, и axe молча пропускает текст.
       await liftRootClipping(page);
       const contrastResults = await new AxeBuilder({ page }).withRules(['color-contrast']).analyze();
@@ -335,6 +366,20 @@ for (const screen of AUDITED.filter((item) => item.viewport.width < 1000)) {
     });
   }
 }
+
+// Эталон мягких проверок — часть гейта: запись без причины или с опечаткой в имени экрана молча
+// ничего не разрешает, а через месяц выглядит как разрешение. Проверяем сам файл, без захода на страницу.
+test('soft_geometry_baseline_entries_name_a_known_screen_and_a_reason', () => {
+  const screens = new Set(SCREENS.map((screen) => screen.name));
+  const problems = SOFT_BASELINE.flatMap((entry) => {
+    const where = `${entry.screen}: ${entry.rule} — ${entry.where}`;
+    if (!screens.has(entry.screen)) return [`${where}: нет такого экрана`];
+    if (!entry.reason?.trim()) return [`${where}: нет причины`];
+    if (!Number.isInteger(entry.count) || entry.count < 1) return [`${where}: count должен быть целым и не меньше 1`];
+    return [];
+  });
+  expect(problems, problems.join('\n')).toEqual([]);
+});
 
 test('keyboard_only_flow_reaches_send_sheets_and_back', async ({ page }) => {
   test.setTimeout(120_000);
