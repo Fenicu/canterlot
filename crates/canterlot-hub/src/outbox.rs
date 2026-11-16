@@ -30,7 +30,7 @@ use crate::{
         submit,
     },
     dispatcher::wait_for_shutdown,
-    session::{Availability, Registry},
+    session::{AppProbeReply, Availability, Registry},
 };
 
 #[derive(sqlx::FromRow)]
@@ -726,6 +726,72 @@ struct Sent {
     resent: bool,
 }
 
+/// После просроченной квитанции спрашивает машину дешёвой прикладной пробой:
+/// транспорт может быть жив, пока управляющий цикл воркера завис. Проба не
+/// задерживает обычный повтор команды, а её тишина разрывает сеанс.
+fn spawn_app_probe(
+    registry: &Registry,
+    machine: Uuid,
+    connection: Uuid,
+    interval: std::time::Duration,
+    wait: std::time::Duration,
+) {
+    let Some(reservation) = registry.reserve_app_probe(machine, interval) else {
+        return;
+    };
+    tracing::debug!(
+        kind = "app_probe",
+        machine_id = %machine,
+        connection_id = %connection,
+        "application liveness probe sent"
+    );
+    let registry = registry.clone();
+    tokio::spawn(async move {
+        let reply = registry.app_probe(machine, wait).await;
+        drop(reservation);
+        match reply {
+            AppProbeReply::Answered => tracing::debug!(
+                kind = "app_probe_answered",
+                machine_id = %machine,
+                connection_id = %connection,
+                "application liveness probe answered"
+            ),
+            AppProbeReply::Timeout => {
+                if registry.disconnect_control(machine, connection) {
+                    tracing::warn!(
+                        kind = "app_probe_timeout",
+                        reason = "app_probe_timeout",
+                        machine_id = %machine,
+                        connection_id = %connection,
+                        "application probe timed out; disconnecting control session"
+                    );
+                }
+            }
+            AppProbeReply::NoSession => tracing::debug!(
+                kind = "app_probe_skipped",
+                machine_id = %machine,
+                connection_id = %connection,
+                reason = "no_session",
+                "application liveness probe skipped"
+            ),
+            AppProbeReply::CapabilityMissing => tracing::debug!(
+                kind = "app_probe_skipped",
+                machine_id = %machine,
+                connection_id = %connection,
+                reason = "capability_missing",
+                "application liveness probe skipped"
+            ),
+            AppProbeReply::Busy => tracing::debug!(
+                kind = "app_probe_skipped",
+                machine_id = %machine,
+                connection_id = %connection,
+                reason = "busy",
+                "application liveness probe skipped"
+            ),
+        }
+    });
+}
+
 async fn run_machine(context: SenderContext, machine: Uuid, mut wake: mpsc::Receiver<()>) {
     let SenderContext {
         pool,
@@ -826,44 +892,65 @@ async fn run_machine(context: SenderContext, machine: Uuid, mut wake: mpsc::Rece
                 if item.deadline > Instant::now() {
                     continue;
                 }
-                if item.resent {
-                    let restarted = {
-                        let mut counts = restarts.lock().expect("restart counter lock");
-                        let count = counts
-                            .entry((machine, row.id, row.dispatch_attempt))
-                            .or_insert(0);
-                        *count += 1;
-                        *count
-                    };
-                    // Первый обрыв квитанции — транзиент: медленный, но живой
-                    // воркер; рестарт сеанса уже восстановил доставку, поэтому
-                    // не будим страж выката. Повтор той же попытки после
-                    // рестарта — признак застрявшей доставки.
-                    if restarted > 1 {
-                        tracing::warn!(
-                            kind = "outbox_restart",
-                            command_id = %row.id,
-                            machine_id = %machine,
-                            restarts = restarted,
-                            "command receipt timeout repeats"
-                        );
-                    } else {
-                        tracing::info!(
-                            kind = "outbox_restart",
-                            command_id = %row.id,
-                            machine_id = %machine,
-                            "command receipt timeout"
-                        );
+                let resent = item.resent;
+                spawn_app_probe(
+                    &registry,
+                    machine,
+                    connection,
+                    timers.app_probe_interval,
+                    timers.app_probe_timeout,
+                );
+                if resent {
+                    // Пока проба не ответила, разрыв сеанса преждевременен: тишина
+                    // закончится `app_probe_timeout`, ответ — обычным повтором.
+                    if registry.app_probe_in_flight(machine) {
+                        if let Some(item) = sent.get_mut(&row.id) {
+                            item.deadline = Instant::now() + timers.dispatch_sweep;
+                        }
+                        continue;
                     }
-                    // Пустое сообщение закрывает сеанс внутри gRPC и не попадает в сеть.
-                    tokio::select! {
-                        biased;
-                        _ = wait_for_shutdown(&mut shutdown) => return,
-                        _ = sender.send(ControlDown { msg: None }) => {},
+                    // Воркер умеет прикладную пробу: живость канала решает она,
+                    // а не число просроченных квитанций. Тишина разорвёт сеанс,
+                    // ответ оставит медленную команду в обычном повторе.
+                    if !registry.has_capability(machine, crate::session::CAPABILITY_PATH_PROBE_V1) {
+                        let restarted = {
+                            let mut counts = restarts.lock().expect("restart counter lock");
+                            let count = counts
+                                .entry((machine, row.id, row.dispatch_attempt))
+                                .or_insert(0);
+                            *count += 1;
+                            *count
+                        };
+                        // Первый обрыв квитанции — транзиент: медленный, но живой
+                        // воркер; рестарт сеанса уже восстановил доставку, поэтому
+                        // не будим страж выката. Повтор той же попытки после
+                        // рестарта — признак застрявшей доставки.
+                        if restarted > 1 {
+                            tracing::warn!(
+                                kind = "outbox_restart",
+                                command_id = %row.id,
+                                machine_id = %machine,
+                                restarts = restarted,
+                                "command receipt timeout repeats"
+                            );
+                        } else {
+                            tracing::info!(
+                                kind = "outbox_restart",
+                                command_id = %row.id,
+                                machine_id = %machine,
+                                "command receipt timeout"
+                            );
+                        }
+                        // Пустое сообщение закрывает сеанс внутри gRPC и не попадает в сеть.
+                        tokio::select! {
+                            biased;
+                            _ = wait_for_shutdown(&mut shutdown) => return,
+                            _ = sender.send(ControlDown { msg: None }) => {},
+                        }
+                        sent.clear();
+                        closing = true;
+                        break;
                     }
-                    sent.clear();
-                    closing = true;
-                    break;
                 }
             } else if registry.availability(machine) != Availability::Available {
                 continue;

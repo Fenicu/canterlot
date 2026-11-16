@@ -85,6 +85,44 @@ type SuggestWaiters = Arc<Mutex<HashMap<(Uuid, Uuid), oneshot::Sender<Vec<String
 type ClaudeHistoryWaiters = Arc<Mutex<HashMap<(Uuid, Uuid), oneshot::Sender<Vec<ClaudeHistory>>>>>;
 type PathProbeWaiters =
     Arc<Mutex<HashMap<(Uuid, Uuid), oneshot::Sender<canterlot_proto::worker::v1::PathProbe>>>>;
+
+/// Прикладная проба живости после просроченной квитанции команды.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AppProbeReply {
+    Answered,
+    /// Ответа нет, хотя сеанс всё ещё считается живым: канал завис.
+    Timeout,
+    NoSession,
+    CapabilityMissing,
+    /// Не удалось поставить пробу в очередь: сеанс занят другими запросами.
+    Busy,
+}
+
+#[derive(Default)]
+struct AppProbeState {
+    last_started: Option<Instant>,
+    in_flight: bool,
+}
+
+/// Держит отметку «проба в полёте», пока задача пробы жива.
+pub(crate) struct AppProbeReservation {
+    registry: Registry,
+    machine_id: Uuid,
+}
+
+impl Drop for AppProbeReservation {
+    fn drop(&mut self) {
+        if let Some(state) = self
+            .registry
+            .app_probes
+            .lock()
+            .expect("app probe lock")
+            .get_mut(&self.machine_id)
+        {
+            state.in_flight = false;
+        }
+    }
+}
 type OwnerOverviewWaiters = Arc<
     Mutex<
         HashMap<
@@ -107,6 +145,7 @@ pub struct Registry {
     suggests: SuggestWaiters,
     histories: ClaudeHistoryWaiters,
     probes: PathProbeWaiters,
+    app_probes: Arc<Mutex<HashMap<Uuid, AppProbeState>>>,
     owner_overview: OwnerOverviewWaiters,
     owner_files: OwnerFileWaiters,
 }
@@ -204,6 +243,15 @@ pub enum ProbeReply {
     Unavailable,
 }
 
+/// Причина, по которой проба пути не получила ответа.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeFailure {
+    NoSession,
+    CapabilityMissing,
+    Busy,
+    NoAnswer,
+}
+
 impl Registry {
     pub fn new(timers: HubTimers) -> Self {
         Self {
@@ -213,6 +261,7 @@ impl Registry {
             suggests: Arc::default(),
             histories: Arc::default(),
             probes: Arc::default(),
+            app_probes: Arc::default(),
             owner_overview: Arc::default(),
             owner_files: Arc::default(),
         }
@@ -524,14 +573,90 @@ impl Registry {
         read_head_bytes: u32,
         wait: std::time::Duration,
     ) -> ProbeReply {
+        match self
+            .ask_path_probe(machine_id, path, read_head_bytes, wait)
+            .await
+        {
+            Ok(reply) => ProbeReply::Answered(reply),
+            Err(ProbeFailure::CapabilityMissing) => ProbeReply::CapabilityMissing,
+            Err(ProbeFailure::NoSession | ProbeFailure::Busy | ProbeFailure::NoAnswer) => {
+                ProbeReply::Unavailable
+            }
+        }
+    }
+
+    /// Одна прикладная проба живости на машину за `interval`. Отметка живёт в реестре,
+    /// поэтому ограничение не сбрасывается переподключением или перезапуском задачи outbox.
+    pub(crate) fn reserve_app_probe(
+        &self,
+        machine_id: Uuid,
+        interval: std::time::Duration,
+    ) -> Option<AppProbeReservation> {
+        if self.session_info(machine_id).is_none()
+            || !self.has_capability(machine_id, CAPABILITY_PATH_PROBE_V1)
+        {
+            return None;
+        }
+        let mut probes = self.app_probes.lock().expect("app probe lock");
+        let state = probes.entry(machine_id).or_default();
+        if state.in_flight {
+            return None;
+        }
+        if state
+            .last_started
+            .is_some_and(|last| last.elapsed() < interval)
+        {
+            return None;
+        }
+        state.in_flight = true;
+        state.last_started = Some(Instant::now());
+        drop(probes);
+        Some(AppProbeReservation {
+            registry: self.clone(),
+            machine_id,
+        })
+    }
+
+    pub(crate) fn app_probe_in_flight(&self, machine_id: Uuid) -> bool {
+        self.app_probes
+            .lock()
+            .expect("app probe lock")
+            .get(&machine_id)
+            .is_some_and(|state| state.in_flight)
+    }
+
+    /// Дешёвая проба на том же управляющем канале: ответ значит «канал жив,
+    /// команда просто медленная», тишина — повод разорвать сеанс.
+    pub(crate) async fn app_probe(
+        &self,
+        machine_id: Uuid,
+        wait: std::time::Duration,
+    ) -> AppProbeReply {
+        // Путь не читается: воркер отвечает «нет доступа» так же быстро, как «нет файла».
+        match self.ask_path_probe(machine_id, "/", 0, wait).await {
+            Ok(_) => AppProbeReply::Answered,
+            Err(ProbeFailure::NoSession) => AppProbeReply::NoSession,
+            Err(ProbeFailure::CapabilityMissing) => AppProbeReply::CapabilityMissing,
+            Err(ProbeFailure::Busy) => AppProbeReply::Busy,
+            Err(ProbeFailure::NoAnswer) => AppProbeReply::Timeout,
+        }
+    }
+
+    async fn ask_path_probe(
+        &self,
+        machine_id: Uuid,
+        path: &str,
+        read_head_bytes: u32,
+        wait: std::time::Duration,
+    ) -> Result<canterlot_proto::worker::v1::PathProbe, ProbeFailure> {
         if self.session_info(machine_id).is_none() {
-            return ProbeReply::Unavailable;
+            return Err(ProbeFailure::NoSession);
         }
         if !self.has_capability(machine_id, CAPABILITY_PATH_PROBE_V1) {
-            return ProbeReply::CapabilityMissing;
+            return Err(ProbeFailure::CapabilityMissing);
         }
         let Some(sender) = self.command_sender(machine_id) else {
-            return ProbeReply::Unavailable;
+            return Err(ProbeFailure::NoSession);
         };
         let request_id = Uuid::now_v7();
         let key = (machine_id, request_id);
@@ -540,7 +665,7 @@ impl Registry {
             let mut waiters = self.probes.lock().expect("probe waiters lock");
             let busy = waiters.keys().filter(|(id, _)| *id == machine_id).count();
             if busy >= MAX_PATH_PROBES_PER_MACHINE {
-                return ProbeReply::Unavailable;
+                return Err(ProbeFailure::Busy);
             }
             waiters.insert(key, answer);
         }
@@ -556,13 +681,27 @@ impl Registry {
             })),
         };
         if sender.try_send(message).is_err() {
-            return ProbeReply::Unavailable;
+            return Err(ProbeFailure::Busy);
         }
         tokio::time::timeout(wait, answered)
             .await
             .ok()
             .and_then(Result::ok)
-            .map_or(ProbeReply::Unavailable, ProbeReply::Answered)
+            .ok_or(ProbeFailure::NoAnswer)
+    }
+
+    /// Разрывает управляющий сеанс, не отзывая учётные данные: воркер сам
+    /// переподключится. Чужой или уже сменившийся сеанс не трогается.
+    pub(crate) fn disconnect_control(&self, machine_id: Uuid, connection_id: Uuid) -> bool {
+        let entries = self.entries.lock().expect("session registry lock");
+        let Some(entry) = entries
+            .get(&machine_id)
+            .filter(|entry| entry.info.connection_id == connection_id)
+        else {
+            return false;
+        };
+        entry.cancel.cancel();
+        true
     }
 
     /// Ответ принимается только от машины, которую спросили.
@@ -1008,6 +1147,41 @@ mod tests {
         );
         drop(lease);
         assert!(registry.capabilities(machine).is_empty());
+    }
+
+    #[tokio::test]
+    async fn application_probes_are_rate_limited_per_machine() {
+        let registry = Registry::new(HubTimers::default());
+        let machine = Uuid::now_v7();
+        let connection = Uuid::now_v7();
+        let (_lease, _commands) = registry.register(machine, connection, vec![]).unwrap();
+        registry.mark_accepted(machine, connection, &[CAPABILITY_PATH_PROBE_V1.to_owned()]);
+        let interval = std::time::Duration::from_millis(20);
+        let first = registry
+            .reserve_app_probe(machine, interval)
+            .expect("first probe");
+        assert!(registry.app_probe_in_flight(machine));
+        assert!(
+            registry.reserve_app_probe(machine, interval).is_none(),
+            "a probe already in flight is not duplicated"
+        );
+        drop(first);
+        assert!(!registry.app_probe_in_flight(machine));
+        assert!(
+            registry.reserve_app_probe(machine, interval).is_none(),
+            "a second probe waits out the interval"
+        );
+        tokio::time::sleep(interval + std::time::Duration::from_millis(10)).await;
+        assert!(
+            registry.reserve_app_probe(machine, interval).is_some(),
+            "the interval has passed"
+        );
+        assert!(
+            registry
+                .reserve_app_probe(Uuid::now_v7(), interval)
+                .is_none(),
+            "an unknown machine has no capability"
+        );
     }
 
     #[tokio::test]

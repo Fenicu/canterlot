@@ -163,6 +163,40 @@ impl Worker {
         command
     }
 
+    /// Ближайшая прикладная проба; переотправленные команды пропускаются.
+    async fn probe(&mut self) -> ProbePath {
+        timeout(Duration::from_secs(3), async {
+            loop {
+                let message = self
+                    .down
+                    .message()
+                    .await
+                    .expect("control stream")
+                    .expect("control message");
+                match message.msg {
+                    Some(control_down::Msg::ProbePath(request)) => return request,
+                    Some(control_down::Msg::Command(_)) => {}
+                    other => panic!("unexpected message: {other:?}"),
+                }
+            }
+        })
+        .await
+        .expect("application probe")
+    }
+
+    async fn answer_probe(&mut self, request: ProbePath) {
+        self.control
+            .send(ControlUp {
+                msg: Some(control_up::Msg::PathProbe(PathProbe {
+                    request_id: request.request_id,
+                    outcome: Some(path_probe::Outcome::Missing(PathProbeMissing {})),
+                    now_ms: 0,
+                })),
+            })
+            .await
+            .unwrap();
+    }
+
     async fn stored(&mut self, command: &Command) {
         self.seq += 1;
         self.control
@@ -854,6 +888,108 @@ async fn degraded_outbox_resends_past_older_unsent_row_without_spinning(pool: Pg
             .unwrap()
             .unwrap()
             .is_none()
+    );
+    stop(hub).await;
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn app_probe_timeout_disconnects_a_worker_that_stops_answering(pool: PgPool) {
+    let hub = spawn_test_hub(
+        pool.clone(),
+        HubTimers {
+            command_stored_receipt: Duration::from_millis(100),
+            dispatch_sweep: Duration::from_millis(25),
+            app_probe_timeout: Duration::from_millis(300),
+            app_probe_interval: Duration::from_secs(30),
+            ..timers()
+        },
+    )
+    .await;
+    let (machine, conversation) = setup(&pool, &hub).await;
+    let mut worker = Worker::connect_with_capabilities(
+        &hub,
+        &machine,
+        Uuid::now_v7(),
+        &["instructions_v1", "path_probe_v1"],
+    )
+    .await;
+    let submitted = input(&pool, &hub, conversation).await;
+    let command = worker.command().await;
+    assert_eq!(command.command_id, submitted.command_id.to_string());
+    // Квитанции нет, но и пробу воркер оставляет без ответа.
+    let _probe = worker.probe().await;
+    timeout(Duration::from_secs(3), async {
+        while let Ok(Some(_)) = worker.down.message().await {}
+    })
+    .await
+    .expect("the hub disconnects a silent control stream");
+    assert_eq!(
+        hub.registry.availability(machine.machine_id),
+        Availability::Unavailable
+    );
+    // Обычная доставка не изменилась: команда всё ещё ждёт квитанции.
+    assert_eq!(
+        state(&pool, submitted.command_id).await,
+        ("pending".into(), "dispatched".into(), false, false)
+    );
+    stop(hub).await;
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_live_probe_keeps_a_slow_worker_connected_and_is_rate_limited(pool: PgPool) {
+    let hub = spawn_test_hub(
+        pool.clone(),
+        HubTimers {
+            command_stored_receipt: Duration::from_millis(75),
+            dispatch_sweep: Duration::from_millis(20),
+            app_probe_timeout: Duration::from_millis(300),
+            app_probe_interval: Duration::from_secs(30),
+            ..timers()
+        },
+    )
+    .await;
+    let (machine, conversation) = setup(&pool, &hub).await;
+    let mut worker = Worker::connect_with_capabilities(
+        &hub,
+        &machine,
+        Uuid::now_v7(),
+        &["instructions_v1", "path_probe_v1"],
+    )
+    .await;
+    let submitted = input(&pool, &hub, conversation).await;
+    let command = worker.command().await;
+    assert_eq!(command.command_id, submitted.command_id.to_string());
+
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(700);
+    let mut probes = 0;
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => break,
+            message = worker.down.message() => match message {
+                Ok(Some(message)) => match message.msg {
+                    Some(control_down::Msg::Command(_)) => {}
+                    Some(control_down::Msg::ProbePath(request)) => {
+                        probes += 1;
+                        worker.answer_probe(request).await;
+                    }
+                    other => panic!("unexpected message: {other:?}"),
+                },
+                Ok(None) | Err(_) => panic!("a live probe must keep the control stream connected"),
+            },
+        }
+    }
+    assert_eq!(
+        probes, 1,
+        "at most one application probe per machine per interval"
+    );
+    assert_eq!(
+        hub.registry.availability(machine.machine_id),
+        Availability::Available
+    );
+    // Медленная команда остаётся в обычном повторе, без разрыва сеанса.
+    assert_eq!(
+        state(&pool, submitted.command_id).await,
+        ("pending".into(), "dispatched".into(), false, false)
     );
     stop(hub).await;
 }

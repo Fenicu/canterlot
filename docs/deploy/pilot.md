@@ -205,7 +205,8 @@ manifest = "/etc/canterlot/manifest/installation.toml"
 [timers]
 handshake = "10s"
 # degraded_after (15s), unavailable_after (30s)
-# и command_stored_receipt (5s) опущены — действуют значения по умолчанию из кода
+# и command_stored_receipt (5s), app_probe_timeout (10s), app_probe_interval (30s)
+# опущены — действуют значения по умолчанию из кода
 http2_keepalive_interval = "30s"
 http2_keepalive_timeout = "10s"
 dispatch_sweep = "5s"

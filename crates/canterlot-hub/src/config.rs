@@ -82,6 +82,12 @@ pub struct HubTimers {
     pub command_stored_receipt: Duration,
     #[serde(with = "humantime_serde")]
     pub dispatch_sweep: Duration,
+    /// Срок ответа на прикладную пробу после просроченной квитанции команды.
+    #[serde(with = "humantime_serde")]
+    pub app_probe_timeout: Duration,
+    /// Не чаще одной прикладной пробы на машину за этот срок.
+    #[serde(with = "humantime_serde")]
+    pub app_probe_interval: Duration,
     /// Срок итога «Отправить сейчас»: без итога вливание считается неподтверждённым.
     #[serde(with = "humantime_serde")]
     pub steer_outcome: Duration,
@@ -97,6 +103,8 @@ impl Default for HubTimers {
             http2_keepalive_timeout: Duration::from_secs(10),
             command_stored_receipt: Duration::from_secs(5),
             dispatch_sweep: Duration::from_secs(5),
+            app_probe_timeout: Duration::from_secs(10),
+            app_probe_interval: Duration::from_secs(30),
             steer_outcome: Duration::from_secs(120),
         }
     }
