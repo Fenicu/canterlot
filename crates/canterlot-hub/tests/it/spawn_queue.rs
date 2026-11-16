@@ -379,6 +379,15 @@ async fn queue_row(
         .unwrap()
 }
 
+/// Сохранённые аргументы элемента очереди: очередь видит канонический маршрут.
+async fn queue_args(pool: &PgPool, id: Uuid) -> Value {
+    sqlx::query_scalar("select spec->'args' from spawn_queue where id=$1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
 async fn make_due(pool: &PgPool, id: Uuid) {
     sqlx::query("update spawn_queue set not_before=now()-interval '1 second' where id=$1")
         .bind(id)
@@ -2208,6 +2217,74 @@ async fn queue_views_name_the_future_session(pool: PgPool) {
         .unwrap();
     let view = views.iter().find(|view| view.id == routed_id).unwrap();
     assert!(view.child_id.is_some(), "{view:?}");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn queued_spawn_accepts_flat_route(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    sqlx::query("update owners set routing_policy=$2 where id=$1")
+        .bind(f.owner)
+        .bind(json!({
+            "task_types": {"bugfix": {"title": "Починка", "candidates": [
+                {"harness":"opencode","model":"opencode-go/beam-free","effort":"medium"}
+            ]}},
+            "max_parallel": {"opencode/opencode-go/beam-free": 1}
+        }))
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    child_of(
+        &f.pool,
+        f.parent,
+        "opencode",
+        "opencode-go/beam-free",
+        "working",
+    )
+    .await;
+    let nested = f
+        .call(
+            "sessions.spawn",
+            json!({"route":{"task_type":"bugfix","level":"high"},"brief":"b"}),
+        )
+        .await
+        .unwrap();
+    let flat = f
+        .call(
+            "sessions.spawn",
+            json!({"route":"bugfix","level":"high","brief":"b"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(flat["status"], "queued", "{flat}");
+    let nested_id: Uuid = serde_json::from_value(nested["queue_id"].clone()).unwrap();
+    let flat_id: Uuid = serde_json::from_value(flat["queue_id"].clone()).unwrap();
+    // Очередь хранит маршрут в прежней вложенной форме для обеих записей.
+    let expected = json!({"task_type": "bugfix", "level": "high"});
+    assert_eq!(queue_args(&f.pool, nested_id).await["route"], expected);
+    assert_eq!(queue_args(&f.pool, flat_id).await["route"], expected);
+
+    let mut conn = f.pool.acquire().await.unwrap();
+    let views = spawn_queue::snapshot_views(&mut conn, f.parent)
+        .await
+        .unwrap();
+    let view = views.iter().find(|view| view.id == flat_id).unwrap();
+    assert_eq!(view.task_type.as_deref(), Some("bugfix"));
+    assert_eq!(view.level.as_deref(), Some("high"));
+
+    // Освободим слот: короткая форма доезжает из очереди тем же путём.
+    sqlx::query(
+        "update conversation_derived set activity_state='stopped'
+          where conversation_id in (select id from conversations where parent_conversation_id=$1)",
+    )
+    .bind(f.parent)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    make_due(&f.pool, flat_id).await;
+    f.run_dequeue(flat_id, Utc::now()).await;
+    let (state, _reason, _detail, child, _not_before) = queue_row(&f.pool, flat_id).await;
+    assert_eq!(state, "started");
+    assert!(child.is_some(), "flat route started a session");
 }
 
 async fn plan_task(pool: &PgPool, parent: Uuid, number: i32) -> (String, Option<Uuid>) {

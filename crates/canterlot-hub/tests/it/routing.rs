@@ -271,6 +271,123 @@ async fn spawn_with_route_and_harness_or_model_is_invalid(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn spawn_accepts_route_as_a_task_type_string(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    // Один кандидат на оба типа: сравнение короткой и вложенной формы не зависит от занятости.
+    sqlx::query("update owners set routing_policy=$2 where id=$1")
+        .bind(f.owner)
+        .bind(json!({
+            "task_types": {
+                "review": {"title": "Обзор", "candidates": [
+                    {"harness":"opencode","model":"opencode-go/deepseek-v4.1-flash","effort":"high"}
+                ]},
+                "bugfix": {"title": "Починка", "candidates": [
+                    {"harness":"opencode","model":"opencode-go/deepseek-v4.1-flash","effort":"high"}
+                ]}
+            }
+        }))
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let nested = f
+        .call(
+            "sessions.spawn",
+            json!({"route":{"task_type":"review","level":"high"},"brief":"b"}),
+        )
+        .await
+        .unwrap();
+    let flat = f
+        .call(
+            "sessions.spawn",
+            json!({"route":"review","level":"high","brief":"b"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(flat["status"], "started", "{flat}");
+    for key in ["task_type", "harness", "model", "effort"] {
+        assert_eq!(
+            flat["routing"][key], nested["routing"][key],
+            "{key}: {flat}"
+        );
+    }
+    let flat_id: Uuid = serde_json::from_value(flat["session_id"].clone()).unwrap();
+    let saved: (Option<String>, Option<String>) = sqlx::query_as(
+        "select routing->>'task_type', routing->>'level' from conversations where id=$1",
+    )
+    .bind(flat_id)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(saved.0.as_deref(), Some("review"));
+    assert_eq!(saved.1.as_deref(), Some("high"));
+
+    // Уровень рядом с вложенной формой заполняет её так же.
+    let beside = f
+        .call(
+            "sessions.spawn",
+            json!({"route":{"task_type":"bugfix"},"level":"high","brief":"b"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(beside["status"], "started", "{beside}");
+    let beside_level: Option<String> =
+        sqlx::query_scalar("select routing->>'level' from conversations where id=$1")
+            .bind(serde_json::from_value::<Uuid>(beside["session_id"].clone()).unwrap())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(beside_level.as_deref(), Some("high"));
+
+    // Строка без уровня — прежний запуск без уровня.
+    let plain = f
+        .call("sessions.spawn", json!({"route":"bugfix","brief":"b"}))
+        .await
+        .unwrap();
+    assert_eq!(plain["status"], "started", "{plain}");
+    assert_eq!(plain["routing"]["task_type"], "bugfix", "{plain}");
+    let plain_level: Option<String> =
+        sqlx::query_scalar("select routing->>'level' from conversations where id=$1")
+            .bind(serde_json::from_value::<Uuid>(plain["session_id"].clone()).unwrap())
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(plain_level, None);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn spawn_rejects_level_that_disagrees_with_route_level(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let error = f
+        .call(
+            "sessions.spawn",
+            json!({
+                "route": {"task_type": "review", "level": "high"},
+                "level": "low",
+                "brief": "b",
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, Code::InvalidArguments);
+    assert!(error.message.contains("route.level"), "{}", error.message);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn spawn_rejects_level_without_route(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let error = f
+        .call("sessions.spawn", json!({"level":"high","brief":"b"}))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, Code::InvalidArguments);
+    assert!(
+        error.message.contains("`level` needs `route`"),
+        "{}",
+        error.message
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn spawn_with_unknown_task_type_lists_available(pool: PgPool) {
     let f = Fx::new(pool).await;
     let error = f

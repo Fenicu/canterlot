@@ -64,6 +64,57 @@ pub(crate) struct RouteArg {
     pub(crate) level: Option<String>,
 }
 
+/// Короткая форма маршрута, как у `route_preview`: `route` — строка типа задачи,
+/// а `level` — рядом с ней. Приводится к прежней вложенной форме
+/// `{"route": {"task_type", "level"}}` до разбора аргументов, чтобы очередь,
+/// сохранённые аргументы и маршрутизация видели один и тот же вид.
+fn normalise_route(mut arguments: Value) -> Result<Value, ToolError> {
+    let Some(object) = arguments.as_object_mut() else {
+        return Ok(arguments);
+    };
+    let level = object.remove("level").filter(|level| !level.is_null());
+    let Some(route) = object.get("route").filter(|route| !route.is_null()) else {
+        if level.is_some() {
+            return Err(ToolError::with_message(
+                ToolErrorCode::InvalidArguments,
+                "session_spawn: `level` needs `route`; give the task type first, as in route_preview",
+            ));
+        }
+        return Ok(arguments);
+    };
+    let mut route = match route.clone() {
+        Value::String(task_type) => json!({"task_type": task_type}),
+        Value::Object(route) => Value::Object(route),
+        _ => {
+            return Err(ToolError::with_message(
+                ToolErrorCode::InvalidArguments,
+                "session_spawn: argument 'route' must be a task type string or an object {task_type, level}",
+            ));
+        }
+    };
+    if let Some(level) = level {
+        match route
+            .get("level")
+            .filter(|route_level| !route_level.is_null())
+        {
+            Some(route_level) if route_level != &level => {
+                return Err(ToolError::with_message(
+                    ToolErrorCode::InvalidArguments,
+                    "session_spawn: `level` conflicts with `route.level`; give one of them",
+                ));
+            }
+            Some(_) => {}
+            None => {
+                if let Some(object) = route.as_object_mut() {
+                    object.insert("level".to_owned(), level);
+                }
+            }
+        }
+    }
+    object.insert("route".to_owned(), route);
+    Ok(arguments)
+}
+
 #[derive(Deserialize, Serialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SpawnArgs {
@@ -1074,7 +1125,7 @@ pub async fn spawn(
     caller: &Caller,
     arguments: Value,
 ) -> Result<Value, ToolError> {
-    let mut args: SpawnArgs = parse_arguments("session_spawn", arguments)?;
+    let mut args: SpawnArgs = parse_arguments("session_spawn", normalise_route(arguments)?)?;
     check_arguments(&args)?;
     let mut tx = crate::db::begin(&context.pool).await?;
     send::lock_sender(&mut tx, caller.conversation_id).await?;

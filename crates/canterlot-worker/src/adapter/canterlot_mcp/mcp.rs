@@ -252,7 +252,7 @@ fn session_tool_description(mcp_name: &str) -> &'static str {
             "Queue a text message for another session; it reads it as a message from an agent, not from the owner. `attachment_ids` passes on files of this session's own conversation. By default you are subscribed to its completion. Do not use it to ask the owner anything (use your own question flow) and do not send the same text twice. After sending, end your turn instead of polling."
         }
         "session_spawn" => {
-            "Start a new session with a brief, optionally in an isolated git worktree of the parent's workdir; `attachment_ids` passes on files of this session's own conversation. With `route` instead of `harness`, canterlot picks the executor by the owner's policy and current limits and tells you why. Spawns blocked by the hourly limit, busy executors or a busy machine are queued, not refused: the start arrives as a message. The child never gets wider permissions than yours without the owner: a mode that is stronger in the child's CLI than yours (Codex `ask` runs commands without asking) answers pending_approval, and an omitted mode falls back to the widest one that is not stronger. Harnesses or models outside the owner's list answer pending_approval and the owner decides in the app. Do not use it for small steps you can do yourself, and do not call it in a loop. After spawning, end your turn: the summary arrives in your queue."
+            "Start a new session with a brief, optionally in an isolated git worktree of the parent's workdir; `attachment_ids` passes on files of this session's own conversation. With `route` instead of `harness`, canterlot picks the executor by the owner's policy and current limits and tells you why. `route`: a task type string or `{task_type, level}`; `level` may also be given next to it, as in `route_preview`. Spawns blocked by the hourly limit, busy executors or a busy machine are queued, not refused: the start arrives as a message. The child never gets wider permissions than yours without the owner: a mode that is stronger in the child's CLI than yours (Codex `ask` runs commands without asking) answers pending_approval, and an omitted mode falls back to the widest one that is not stronger. Harnesses or models outside the owner's list answer pending_approval and the owner decides in the app. Do not use it for small steps you can do yourself, and do not call it in a loop. After spawning, end your turn: the summary arrives in your queue."
         }
         "session_subscribe" => {
             "Ask for a [canterlot] message when another session finishes, asks or stalls. Sending to or spawning a session already subscribes you. Do not call it for a session you just sent to or spawned."
@@ -357,14 +357,27 @@ fn session_input_schema(mcp_name: &str) -> Value {
             "properties": {
                 "harness": {"type": "string", "description": "claude_code, codex or opencode."},
                 "route": {
-                    "type": "object",
-                    "description": "A task type from the owner's routing policy, see route_preview.",
-                    "properties": {
-                        "task_type": {"type": "string"},
-                        "level": {"type": "string", "enum": ["low", "medium", "high", "xhigh"]},
-                    },
-                    "required": ["task_type"],
-                    "additionalProperties": false,
+                    "description": "A task type string or {task_type, level}.",
+                    "oneOf": [
+                        {
+                            "type": "string",
+                            "description": "A task type from the owner's routing policy, see route_preview.",
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "task_type": {"type": "string"},
+                                "level": {"type": "string", "enum": ["low", "medium", "high", "xhigh"]},
+                            },
+                            "required": ["task_type"],
+                            "additionalProperties": false,
+                        },
+                    ],
+                },
+                "level": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high", "xhigh"],
+                    "description": "Applies to `route` in either form, as in route_preview.",
                 },
                 "brief": {"type": "string", "description": "Task for the new session, up to 64 KiB."},
                 "model": {"type": "string", "description": "Catalog id or a recognizable name such as fable, Opus 5.5, claude-sonnet-5-5, deepseek-v4.1-flash; unknown or ambiguous names answer with the catalog ids."},
@@ -1372,10 +1385,31 @@ mod tests {
             json!({"type": "string"})
         );
         let spawn = tool("session_spawn")["inputSchema"].clone();
-        assert!(spawn["properties"]["route"].is_object());
+        let route = &spawn["properties"]["route"];
+        let variants = route["oneOf"]
+            .as_array()
+            .unwrap_or_else(|| panic!("route is oneOf string or object: {route}"));
+        assert!(
+            variants
+                .iter()
+                .any(|variant| variant["type"] == json!("string")),
+            "{route}"
+        );
+        let object = variants
+            .iter()
+            .find(|variant| variant["type"] == json!("object"))
+            .unwrap_or_else(|| panic!("route object variant: {route}"));
+        assert_eq!(object["required"], json!(["task_type"]));
         assert_eq!(
-            spawn["properties"]["route"]["required"],
-            json!(["task_type"])
+            spawn["properties"]["level"]["enum"],
+            json!(["low", "medium", "high", "xhigh"])
+        );
+        let description = tool("session_spawn")["description"]
+            .as_str()
+            .expect("description");
+        assert!(
+            description.contains("`route`: a task type string or `{task_type, level}`; `level` may also be given next to it, as in `route_preview`"),
+            "{description}"
         );
         assert!(spawn["properties"]["watchdog_minutes"].is_object());
         assert_eq!(spawn["required"], json!(["brief"]));
