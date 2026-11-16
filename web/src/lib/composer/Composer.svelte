@@ -649,13 +649,12 @@
     field-sizing: content;
     min-width: 0;
     width: 100%;
-    /* Верхний отступ вынесен в margin и в высоту поля не входит: вычитаем его из min-height,
-       чтобы капсула не выросла на его величину. */
-    min-height: calc(var(--target) - var(--s5));
-    max-height: min(calc(var(--fs-input) * var(--lh-body) * 6 + var(--s5)), calc(var(--composer-limit) * .5));
-    /* Верхний отступ живёт вне прокрутки: иначе первая видимая строка режется кромкой поля. */
-    margin-block-start: var(--s5);
-    padding: 0 var(--s5) var(--s5);
+    min-height: var(--target);
+    max-height: min(calc(var(--fs-input) * var(--lh-body) * 6 + var(--s5) * 2), calc(var(--composer-limit) * .5));
+    /* Верхний отступ остаётся в поле: прокрученная строка не режется кромкой капсулы, а гаснет
+       маской на его собственной высоте, поэтому размер поля и капсулы не меняется. */
+    padding: var(--s5);
+    mask-image: linear-gradient(to bottom, var(--transparent), var(--text) var(--s5));
     overflow: auto;
     resize: none;
     border: var(--s0);
@@ -666,7 +665,7 @@
   }
   /* Клавиатура забрала высоту: поле показывает три строки и прокручивается внутри. */
   :global(html[data-compact]) textarea {
-    max-height: calc(var(--fs-input) * var(--lh-body) * 3 + var(--s5));
+    max-height: calc(var(--fs-input) * var(--lh-body) * 3 + var(--s5) * 2);
   }
   textarea:focus-visible { outline: none; }
   .attach { grid-area: attach; display: inline-flex; }

@@ -76,39 +76,33 @@ async function boot(
   return { hub, api, id, area };
 }
 
-interface CutMeasured {
-  capsuleTop: number;
-  capsuleLeft: number;
-  radius: number;
+interface FieldMeasured {
   fieldTop: number;
-  fieldLeft: number;
-  fieldPadLeft: number;
+  fieldHeight: number;
+  fieldPaddingTop: number;
   trayBottom: number | null;
+  maskImage: string;
+  step: number;
+  target: number;
   scrollTop: number;
-  scrollHeight: number;
-  clientHeight: number;
 }
 
-/** Где проходит срез прокрученного черновика: кромка поля относительно капсулы и лотка. */
-function cutOf(page: Page): Promise<CutMeasured> {
+/** Поле ввода: размер, верхний отступ, маска и лоток вложений. */
+function fieldOf(page: Page): Promise<FieldMeasured> {
   return page.evaluate(() => {
-    const capsule = document.querySelector('[data-composer] .capsule') as HTMLElement;
     const field = document.querySelector('[data-composer] textarea') as HTMLTextAreaElement;
     const tray = document.querySelector('[data-composer] .tray') as HTMLElement | null;
-    const capsuleBox = capsule.getBoundingClientRect();
     const fieldBox = field.getBoundingClientRect();
-    const trayBox = tray?.getBoundingClientRect() ?? null;
+    const root = getComputedStyle(document.documentElement);
     return {
-      capsuleTop: capsuleBox.top,
-      capsuleLeft: capsuleBox.left,
-      radius: Number.parseFloat(getComputedStyle(capsule).borderTopLeftRadius) || 0,
       fieldTop: fieldBox.top,
-      fieldLeft: fieldBox.left,
-      fieldPadLeft: Number.parseFloat(getComputedStyle(field).paddingLeft),
-      trayBottom: trayBox ? trayBox.bottom : null,
-      scrollTop: field.scrollTop,
-      scrollHeight: field.scrollHeight,
-      clientHeight: field.clientHeight
+      fieldHeight: fieldBox.height,
+      fieldPaddingTop: Number.parseFloat(getComputedStyle(field).paddingTop),
+      trayBottom: tray ? tray.getBoundingClientRect().bottom : null,
+      maskImage: getComputedStyle(field).maskImage,
+      step: Number.parseFloat(root.getPropertyValue('--s5')),
+      target: Number.parseFloat(root.getPropertyValue('--target')),
+      scrollTop: field.scrollTop
     };
   });
 }
@@ -121,30 +115,51 @@ async function scrollDraft(page: Page, area: ReturnType<Page['getByRole']>) {
   await expect.poll(() => area.evaluate((node: HTMLTextAreaElement) => node.scrollTop)).toBeGreaterThan(0);
 }
 
-/** Точка среза лежит на закрашенной части капсулы, а не в её скруглении. */
-function expectSlicedLineOnTheCapsule(cut: CutMeasured): void {
-  const x = cut.fieldLeft - cut.capsuleLeft + cut.fieldPadLeft;
-  const y = cut.fieldTop - cut.capsuleTop;
-  const dx = Math.max(cut.radius - x, 0);
-  const dy = Math.max(cut.radius - y, 0);
-  expect(dx * dx + dy * dy, 'срез первой строки не в зоне скругления капсулы').toBeLessThanOrEqual(
-    cut.radius * cut.radius + 0.5
-  );
+interface MaskStop {
+  alpha: number;
+  offset: number | null;
 }
 
-test('scrolled_long_draft_is_cut_below_the_capsule_top_inset', async ({ page }) => {
+/** Остановки градиента маски: непрозрачность цвета и явное смещение в пикселях. */
+function maskStops(image: string): MaskStop[] {
+  const stops: MaskStop[] = [];
+  const color = /(rgba?\([^)]*\)|transparent|hsla?\([^)]*\)|#[0-9a-f]{3,8})(?:\s+(-?[\d.]+)px)?/gi;
+  for (const match of image.matchAll(color)) {
+    const value = match[1].toLowerCase();
+    const alpha = value === 'transparent' ? 0 : value.startsWith('rgba(') ? Number.parseFloat(value.split(',')[3]) : 1;
+    stops.push({ alpha, offset: match[2] === undefined ? null : Number.parseFloat(match[2]) });
+  }
+  return stops;
+}
+
+/** Верх поля гаснет маской: прозрачно на кромке и непрозрачно к верхнему отступу --s5. */
+function expectTopFade(measured: FieldMeasured): void {
+  expect(measured.maskImage, 'у поля есть верхняя маска').toContain('linear-gradient');
+  const stops = maskStops(measured.maskImage);
+  expect(stops.length, `остановки маски: ${measured.maskImage}`).toBeGreaterThanOrEqual(2);
+  // Нет явного смещения — значит 0, то есть верхняя кромка поля.
+  expect(stops[0].alpha, 'верхняя кромка поля прозрачна').toBe(0);
+  expect(stops[0].offset ?? 0, 'прозрачная остановка на верхней кромке').toBe(0);
+  const opaque = stops.find(
+    (stop) => stop.alpha === 1 && stop.offset !== null && Math.abs(stop.offset - measured.step) <= 0.5
+  );
+  expect(opaque, `маска непрозрачна к --s5 (${measured.step}px): ${measured.maskImage}`).toBeDefined();
+}
+
+test('scrolled_long_draft_fades_at_the_capsule_top_inset', async ({ page }) => {
   const { area } = await boot(page);
   await scrollDraft(page, area);
 
-  const cut = await cutOf(page);
-  expect(cut.scrollTop, 'черновик прокручен до конца').toBeGreaterThan(0);
-  expect(cut.trayBottom, 'вложений нет').toBeNull();
-  // Кромка поля, где режется первая видимая строка, стоит ниже верхней кромки капсулы.
-  expect(cut.fieldTop - cut.capsuleTop, 'отступ сверху вне прокрутки').toBeGreaterThanOrEqual(8);
-  expectSlicedLineOnTheCapsule(cut);
+  const field = await fieldOf(page);
+  expect(field.scrollTop, 'черновик прокручен до конца').toBeGreaterThan(0);
+  expect(field.trayBottom, 'вложений нет').toBeNull();
+  // Маска живёт в верхнем отступе самого поля: размер поля не меняется, кромка капсулы не режет строку.
+  expect(field.fieldPaddingTop, 'верхний отступ прокрутки внутри поля').toBeGreaterThanOrEqual(field.step);
+  expect(field.fieldHeight, 'поле не ниже цели касания').toBeGreaterThanOrEqual(field.target);
+  expectTopFade(field);
 });
 
-test('scrolled_long_draft_with_attachments_is_cut_below_the_chips', async ({ page }) => {
+test('scrolled_long_draft_with_attachments_fades_below_the_chips', async ({ page }) => {
   const { area } = await boot(page);
   await page.setInputFiles('input[type=file]', {
     name: 'Снимок экрана 2026-11-16 в 00.12.44 — чат с длинным названием.png',
@@ -157,11 +172,13 @@ test('scrolled_long_draft_with_attachments_is_cut_below_the_chips', async ({ pag
   await expect(page.locator('[data-composer] .tray')).toBeVisible();
   await scrollDraft(page, area);
 
-  const cut = await cutOf(page);
-  expect(cut.scrollTop, 'черновик прокручен до конца').toBeGreaterThan(0);
-  expect(cut.trayBottom, 'лоток вложений на месте').not.toBeNull();
-  // Строка среза не прилипает к чипам: между лотком и кромкой поля есть отступ.
-  expect(cut.fieldTop - cut.trayBottom!, 'отступ под чипами вне прокрутки').toBeGreaterThanOrEqual(8);
+  const field = await fieldOf(page);
+  expect(field.scrollTop, 'черновик прокручен до конца').toBeGreaterThan(0);
+  expect(field.trayBottom, 'лоток вложений на месте').not.toBeNull();
+  expect(field.fieldHeight, 'поле не ниже цели касания').toBeGreaterThanOrEqual(field.target);
+  // Погашенная зона — верхний отступ поля, поэтому между чипами и кромкой поля остаётся зазор.
+  expect(field.fieldTop - field.trayBottom!, 'зазор между чипами и полем').toBeGreaterThan(0);
+  expectTopFade(field);
 });
 
 test('long_suggestion_is_shown_at_whole_lines_and_still_inserts_everything', async ({ page }, info) => {
