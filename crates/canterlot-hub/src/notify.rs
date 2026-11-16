@@ -21,6 +21,7 @@ use uuid::Uuid;
 use crate::{
     activity::{Evidence, OWNER_LOST},
     config::{GotifyConfig, GotifyToken},
+    events::Scope,
     session_tools::settle::{SettleFacts, Settled},
 };
 
@@ -213,8 +214,8 @@ pub async fn on_settled_in_tx(
     facts: &SettleFacts,
     evidence: &Evidence,
 ) -> Result<(), sqlx::Error> {
-    let mut turn_from_owner = false;
-    let mut owner_mark = None;
+    let turn_from_owner: bool;
+    let owner_mark: Option<DateTime<Utc>>;
     let mut final_mark = None;
     let (kind, turn) = match state {
         // Ход должен быть и быть недавним: новая пустая сессия и давно осевшая
@@ -249,7 +250,10 @@ pub async fn on_settled_in_tx(
             if facts.now - facts.since > FRESH {
                 return Ok(());
             }
-            (KIND_FAILURE, None)
+            // Сбой пушится один раз на эпизод: дребезг состояния внутри того же
+            // исполнения и причины не повторяет пуш.
+            enqueue_failure_in_tx(conn, conversation_id, state, fingerprint, evidence).await?;
+            return Ok(());
         }
         Settled::WaitingForUser | Settled::Stopped => return Ok(()),
     };
@@ -280,6 +284,127 @@ pub async fn on_settled_in_tx(
         clear_owner_waiting(conn, conversation_id, owner_mark).await?;
     }
     Ok(())
+}
+
+/// Пуш о сбое привязан к эпизоду: исполнение, состояние и причина. Внутри эпизода
+/// пуш ставится один раз; если владелец прочитал сессию после первой постановки,
+/// новая постановка не делается. Новое исполнение, состояние или причина — новый эпизод.
+async fn enqueue_failure_in_tx(
+    conn: &mut PgConnection,
+    conversation_id: Uuid,
+    state: Settled,
+    fingerprint: &str,
+    evidence: &Evidence,
+) -> Result<(), sqlx::Error> {
+    let execution: Option<Uuid> = sqlx::query_scalar(
+        "select id from executions where conversation_id=$1
+         order by generation desc limit 1",
+    )
+    .bind(conversation_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let episode = match execution {
+        Some(execution) => format!("{execution}:{}", failure_episode(state, evidence)),
+        // Синтетическая строка без исполнения: отпечаток не даёт ей писать заново.
+        None => format!("no_execution:{fingerprint}"),
+    };
+    let stored: Option<(bool, i64)> = sqlx::query_as(
+        "select pushed,read_seq from failure_push_episodes
+         where conversation_id=$1 and episode=$2",
+    )
+    .bind(conversation_id)
+    .bind(&episode)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let last_read: i64 = sqlx::query_scalar("select last_read_seq from conversations where id=$1")
+        .bind(conversation_id)
+        .fetch_one(&mut *conn)
+        .await?;
+    match stored {
+        Some((pushed, read_seq)) => {
+            // Тот же эпизод: либо пуш уже был, либо владелец прочитал после него.
+            // Непоставленный пуш (пуши были выключены) можно поставить, если не читали.
+            if pushed || last_read >= read_seq {
+                return Ok(());
+            }
+        }
+        None => {
+            let read_seq: i64 = sqlx::query_scalar(
+                "select coalesce((select last_seq from scope_counters where scope=$1),0)",
+            )
+            .bind(
+                Scope::Conversation {
+                    id: conversation_id,
+                }
+                .key(),
+            )
+            .fetch_one(&mut *conn)
+            .await?;
+            sqlx::query(
+                "insert into failure_push_episodes(conversation_id,episode,read_seq,pushed)
+                 values($1,$2,$3,false)
+                 on conflict(conversation_id,episode) do nothing",
+            )
+            .bind(conversation_id)
+            .bind(&episode)
+            .bind(read_seq)
+            .execute(&mut *conn)
+            .await?;
+        }
+    }
+    let key = format!("{KIND_FAILURE}:{conversation_id}:{episode}");
+    let evidence = serde_json::to_value(evidence).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
+    enqueue_in_tx(
+        conn,
+        conversation_id,
+        KIND_FAILURE,
+        &key,
+        &json!({"state": state_name(state), "evidence": evidence}),
+        true,
+        false,
+    )
+    .await?;
+    let queued: bool =
+        sqlx::query_scalar("select exists(select 1 from owner_pushes where dedupe_key=$1)")
+            .bind(&key)
+            .fetch_one(&mut *conn)
+            .await?;
+    if queued {
+        sqlx::query(
+            "update failure_push_episodes set pushed=true,updated_at=clock_timestamp()
+             where conversation_id=$1 and episode=$2",
+        )
+        .bind(conversation_id)
+        .bind(&episode)
+        .execute(&mut *conn)
+        .await?;
+    }
+    Ok(())
+}
+
+/// Причина эпизода: `failed:<reason>`, `stalled`, `quota_paused:<provider>:<window>`,
+/// `owner_lost`. Исполнение добавляется перед ней отдельно.
+fn failure_episode(state: Settled, evidence: &Evidence) -> String {
+    match state {
+        Settled::OwnerLost => OWNER_LOST.to_owned(),
+        Settled::Failed => match evidence {
+            Evidence::Failed { reason } if reason == OWNER_LOST => OWNER_LOST.to_owned(),
+            Evidence::Failed { reason } => format!("failed:{reason}"),
+            _ => "failed".to_owned(),
+        },
+        Settled::Stalled => "stalled".to_owned(),
+        Settled::QuotaPaused => match evidence {
+            Evidence::QuotaPaused {
+                provider, window, ..
+            } => format!(
+                "quota_paused:{}:{}",
+                provider.as_deref().unwrap_or("unknown"),
+                window.as_deref().unwrap_or("unknown")
+            ),
+            _ => "quota_paused".to_owned(),
+        },
+        _ => state_name(state).to_owned(),
+    }
 }
 
 /// Последний законченный ход начат вводом владельца. Строка без ввода (старые данные,

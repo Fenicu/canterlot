@@ -68,6 +68,13 @@ async fn seed_everything(f: &Fixture, conversation: Uuid, machine: Uuid, group: 
     .await;
     exec(
         pool,
+        "insert into failure_push_episodes(conversation_id,episode,read_seq)
+         values($1,'seed:failed',0)",
+        &[conversation],
+    )
+    .await;
+    exec(
+        pool,
         "insert into executions(id,conversation_id,generation,state,outcome,native_conversation_id)
          values($1,$2,1,'stopped','user_stop','native-'||$2::text)",
         &[execution, conversation],

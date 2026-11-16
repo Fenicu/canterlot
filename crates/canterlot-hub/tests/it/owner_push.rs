@@ -16,7 +16,7 @@ use axum::{
     routing::post,
 };
 use canterlot_hub::{
-    activity::{self, Thresholds},
+    activity::{self, Evidence, Thresholds},
     attachments::{self, LocalBlobStore},
     config::{ActivityConfig, AttachmentsConfig, GotifyConfig, HubConfig},
     deletion,
@@ -25,6 +25,7 @@ use canterlot_hub::{
     ingest::{Ingest, IngestOutcome, JournalKind},
     model::ExecutionState,
     notify::{self, PushSettings, Sender},
+    session_tools::settle::{SettleFacts, Settled},
     testkit::{self, Seed},
 };
 use canterlot_proto::worker::v1::{
@@ -387,6 +388,38 @@ async fn long_idle(pool: &PgPool, id: Uuid, now: DateTime<Utc>) {
         .await
         .unwrap();
     refresh_at(pool, id, now - TimeDelta::hours(1)).await;
+}
+
+async fn settle(
+    pool: &PgPool,
+    conversation: Uuid,
+    state: Settled,
+    evidence: &Evidence,
+    now: DateTime<Utc>,
+    fingerprint: &str,
+) {
+    let facts = SettleFacts {
+        now,
+        since: now - TimeDelta::seconds(5),
+        last_turn_at: None,
+        last_event_at: None,
+        phase_since: None,
+    };
+    let mut tx = pool.begin().await.unwrap();
+    notify::on_settled_in_tx(&mut tx, conversation, state, fingerprint, &facts, evidence)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+}
+
+async fn failure_pushes(pool: &PgPool, conversation: Uuid) -> i64 {
+    sqlx::query_scalar(
+        "select count(*) from owner_pushes where conversation_id=$1 and kind='failure'",
+    )
+    .bind(conversation)
+    .fetch_one(pool)
+    .await
+    .unwrap()
 }
 
 fn question_batch(
@@ -1409,6 +1442,226 @@ async fn a_failure_of_a_root_session_is_pushed_once_and_a_delegate_failure_is_no
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].body["priority"], 7);
     assert_eq!(seen[0].body["message"], "Сессия упала: воркер потерян");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn one_failure_push_per_episode_survives_a_failed_idle_bounce(pool: PgPool) {
+    enable(&pool).await;
+    let s = seed(&pool).await;
+    start(&pool, s.owner_id, s.conversation_id).await;
+    let now = Utc::now();
+    let failed = Evidence::Failed {
+        reason: "process_exited".into(),
+    };
+    settle(
+        &pool,
+        s.conversation_id,
+        Settled::Failed,
+        &failed,
+        now,
+        "fail-1",
+    )
+    .await;
+    let idle = Evidence::Idle {
+        last_turn_at: None,
+        background_work: None,
+        process_alive: Some(false),
+    };
+    settle(
+        &pool,
+        s.conversation_id,
+        Settled::Idle,
+        &idle,
+        now + TimeDelta::seconds(10),
+        "idle-1",
+    )
+    .await;
+    settle(
+        &pool,
+        s.conversation_id,
+        Settled::Failed,
+        &failed,
+        now + TimeDelta::seconds(20),
+        "fail-2",
+    )
+    .await;
+    assert_eq!(failure_pushes(&pool, s.conversation_id).await, 1);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn one_failure_push_per_episode_survives_a_stalled_working_bounce(pool: PgPool) {
+    enable(&pool).await;
+    let s = seed(&pool).await;
+    start(&pool, s.owner_id, s.conversation_id).await;
+    let now = Utc::now();
+    let stalled = Evidence::Stalled {
+        last_event_at: now - TimeDelta::minutes(40),
+        phase: "generating".into(),
+        process_alive: Some(true),
+        cpu_busy: Some(false),
+        link: "available".into(),
+    };
+    settle(
+        &pool,
+        s.conversation_id,
+        Settled::Stalled,
+        &stalled,
+        now,
+        "stalled-1",
+    )
+    .await;
+    let idle = Evidence::Idle {
+        last_turn_at: None,
+        background_work: None,
+        process_alive: Some(true),
+    };
+    settle(
+        &pool,
+        s.conversation_id,
+        Settled::Idle,
+        &idle,
+        now + TimeDelta::seconds(10),
+        "idle-2",
+    )
+    .await;
+    settle(
+        &pool,
+        s.conversation_id,
+        Settled::Stalled,
+        &stalled,
+        now + TimeDelta::seconds(20),
+        "stalled-2",
+    )
+    .await;
+    assert_eq!(failure_pushes(&pool, s.conversation_id).await, 1);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_read_episode_never_pushes_again(pool: PgPool) {
+    enable(&pool).await;
+    let s = seed(&pool).await;
+    start(&pool, s.owner_id, s.conversation_id).await;
+    let now = Utc::now();
+    let failed = Evidence::Failed {
+        reason: "process_exited".into(),
+    };
+    settle(
+        &pool,
+        s.conversation_id,
+        Settled::Failed,
+        &failed,
+        now,
+        "fail-1",
+    )
+    .await;
+    let marker: i64 =
+        sqlx::query_scalar("select read_seq from failure_push_episodes where conversation_id=$1")
+            .bind(s.conversation_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    sqlx::query("update conversations set last_read_seq=$2 where id=$1")
+        .bind(s.conversation_id)
+        .bind(marker)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Строку пуша убираем: даже без неё прочитанный эпизод молчит.
+    sqlx::query("delete from owner_pushes where conversation_id=$1 and kind='failure'")
+        .bind(s.conversation_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("update failure_push_episodes set pushed=false where conversation_id=$1")
+        .bind(s.conversation_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    settle(
+        &pool,
+        s.conversation_id,
+        Settled::Failed,
+        &failed,
+        now + TimeDelta::seconds(20),
+        "fail-2",
+    )
+    .await;
+    assert_eq!(failure_pushes(&pool, s.conversation_id).await, 0);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_new_execution_failing_is_a_new_episode(pool: PgPool) {
+    enable(&pool).await;
+    let s = seed(&pool).await;
+    let first = start(&pool, s.owner_id, s.conversation_id).await;
+    let now = Utc::now();
+    let failed = Evidence::Failed {
+        reason: "process_exited".into(),
+    };
+    settle(
+        &pool,
+        s.conversation_id,
+        Settled::Failed,
+        &failed,
+        now,
+        "fail-1",
+    )
+    .await;
+    sqlx::query("update executions set state='failed',outcome='process_exited' where id=$1")
+        .bind(first.execution_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "insert into executions(id,conversation_id,generation,state)
+         values($1,$2,2,'running')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(s.conversation_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    settle(
+        &pool,
+        s.conversation_id,
+        Settled::Failed,
+        &failed,
+        now + TimeDelta::seconds(20),
+        "fail-2",
+    )
+    .await;
+    assert_eq!(failure_pushes(&pool, s.conversation_id).await, 2);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn another_reason_is_a_new_episode(pool: PgPool) {
+    enable(&pool).await;
+    let s = seed(&pool).await;
+    start(&pool, s.owner_id, s.conversation_id).await;
+    let now = Utc::now();
+    settle(
+        &pool,
+        s.conversation_id,
+        Settled::Failed,
+        &Evidence::Failed {
+            reason: "process_exited".into(),
+        },
+        now,
+        "fail-1",
+    )
+    .await;
+    settle(
+        &pool,
+        s.conversation_id,
+        Settled::Failed,
+        &Evidence::Failed {
+            reason: "context_exhausted".into(),
+        },
+        now + TimeDelta::seconds(20),
+        "fail-2",
+    )
+    .await;
+    assert_eq!(failure_pushes(&pool, s.conversation_id).await, 2);
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
