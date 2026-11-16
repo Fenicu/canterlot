@@ -10,6 +10,7 @@ import type { PlanTask, PlanTaskDetail } from '../../src/lib/stores/plan.svelte'
 import type { RangeResult } from '../../src/lib/sync/scope';
 import type { HubEvent } from '../../src/lib/sync/wire';
 import type { DraftRecord } from '../../src/lib/drafts/sync';
+import type { SecretRequestAnswer, SecretRequestView } from '../../src/lib/requests/secretRequest';
 import type { FakeHub } from './hub';
 import type { components } from '../../src/lib/api/generated/openapi.js';
 
@@ -140,6 +141,15 @@ export class FakeHubApi {
 	];
 	readonly reads: { id: string; seq: string }[] = [];
 	readonly decisions = new Map<string, { winnerId: string; decision: unknown; key: string }>();
+	/** Секретные запросы по разговорам: список отдаёт все состояния, новые первыми. */
+	readonly secretRequestRows = new Map<string, Map<string, SecretRequestView>>();
+	/** Тела ответов на секрет в порядке прихода: значение проверяют тесты хранилища. */
+	readonly secretRequestAnswerBodies: SecretRequestAnswer[] = [];
+	readonly secretRequestRevokes: string[] = [];
+	/** Следующий ответ на секрет отказывает, как машина не на связи. */
+	secretMachineOffline = false;
+	/** Следующий ответ на секрет отказывает по лимиту. */
+	secretAnswerLimit = false;
 	readonly deleted = new Set<string>();
 	readonly drafts = new Map<string, DraftRecord>();
 	readonly attachments = new Map<string, { size: number; offset: number; key: string; name: string; mime: string; conversation_id: string }>();
@@ -444,6 +454,138 @@ export class FakeHubApi {
 	id(): string {
 		this.#seq += 1;
 		return `00000000-0000-4000-8000-${this.#seq.toString(16).padStart(12, '0')}`;
+	}
+
+	secretRequestMap(conversationId: string): Map<string, SecretRequestView> {
+		let map = this.secretRequestRows.get(conversationId);
+		if (!map) {
+			map = new Map();
+			this.secretRequestRows.set(conversationId, map);
+		}
+		return map;
+	}
+
+	secretRequest(id: string): SecretRequestView | undefined {
+		for (const rows of this.secretRequestRows.values()) {
+			const found = rows.get(id);
+			if (found) return found;
+		}
+		return undefined;
+	}
+
+	secretRequestList(conversationId: string): SecretRequestView[] {
+		return [...this.secretRequestMap(conversationId).values()].sort(
+			(a, b) => b.created_at.localeCompare(a.created_at) || b.id.localeCompare(a.id)
+		);
+	}
+
+	/** Открыть запрос так, как это делает агент: событие в разговоре и ожидание в списке. */
+	openSecretRequest(
+		conversationId: string,
+		patch: Partial<SecretRequestView> = {}
+	): SecretRequestView {
+		const now = new Date().toISOString();
+		const view: SecretRequestView = {
+			id: patch.id ?? this.id(),
+			conversation_id: conversationId,
+			name: patch.name ?? 'Секрет',
+			purpose: patch.purpose ?? '',
+			state: patch.state ?? 'open',
+			path: patch.path ?? null,
+			expires_at: patch.expires_at ?? null,
+			note: patch.note ?? null,
+			created_at: patch.created_at ?? now,
+			updated_at: patch.updated_at ?? now
+		};
+		this.secretRequestMap(conversationId).set(view.id, view);
+		this.hub.append(`conversation:${conversationId}`, {
+			kind: 'secret_request_changed',
+			conversation_id: conversationId,
+			payload: view
+		});
+		this.hub.flush();
+		this.#secretActivity(conversationId, view);
+		return view;
+	}
+
+	/** Смена состояния без ответа владельца: доставка, отзыв, истечение, потеря. */
+	setSecretRequest(id: string, patch: Partial<SecretRequestView>): SecretRequestView {
+		const found = this.secretRequest(id);
+		if (!found) throw { status: 404, code: 'not_found', message: 'Секретный запрос не найден' };
+		const next: SecretRequestView = { ...found, ...patch, updated_at: new Date().toISOString() };
+		this.secretRequestMap(next.conversation_id).set(next.id, next);
+		this.hub.append(`conversation:${next.conversation_id}`, {
+			kind: 'secret_request_changed',
+			conversation_id: next.conversation_id,
+			payload: next
+		});
+		this.hub.flush();
+		this.#secretActivity(next.conversation_id, next);
+		return next;
+	}
+
+	answerSecretRequest(id: string, body: SecretRequestAnswer): SecretRequestView {
+		const found = this.secretRequest(id);
+		if (!found) throw { status: 404, code: 'not_found', message: 'Секретный запрос не найден' };
+		if (this.secretMachineOffline) throw { status: 409, code: 'machine_offline', message: 'Машина не на связи' };
+		if (this.secretAnswerLimit) throw { status: 409, code: 'limit', message: 'Слишком часто' };
+		if (found.state !== 'open' && found.state !== 'lost')
+			throw { status: 409, code: 'not_open', message: 'Запрос уже закрыт' };
+		if ('value' in body) {
+			if (typeof body.value !== 'string') throw { status: 400, code: 'invalid_request', message: 'Нет значения' };
+			if (new TextEncoder().encode(body.value).length > 16 * 1024)
+				throw { status: 413, code: 'too_large', message: 'Значение слишком большое' };
+		}
+		this.secretRequestAnswerBodies.push(body);
+		return this.setSecretRequest(
+			id,
+			'decline' in body
+				? { state: 'declined', path: null, expires_at: null }
+				: { state: 'sending', path: null, expires_at: null }
+		);
+	}
+
+	revokeSecretRequest(id: string): SecretRequestView {
+		const found = this.secretRequest(id);
+		if (!found) throw { status: 404, code: 'not_found', message: 'Секретный запрос не найден' };
+		if (found.state !== 'delivered')
+			throw { status: 409, code: 'not_delivered', message: 'Значение ещё не доставлено' };
+		this.secretRequestRevokes.push(id);
+		return this.setSecretRequest(id, { state: 'revoking', path: null, expires_at: null });
+	}
+
+	/** Открытый и потерянный запрос держат сессию в «Ждут вас», остальные её отпускают. */
+	#secretActivity(conversationId: string, view: SecretRequestView): void {
+		const waiting = view.state === 'open' || view.state === 'lost';
+		const row = this.list.get(conversationId);
+		const detail = this.details.get(conversationId);
+		const activity = waiting
+			? {
+					state: 'waiting_for_user' as const,
+					evidence: { kind: 'secret_request', request_id: view.id, question: view.name },
+					since: view.created_at
+				}
+			: { state: 'idle' as const, evidence: {}, since: view.updated_at };
+		if (row) row.activity = activity as ListRow['activity'];
+		if (detail) detail.activity = activity;
+		this.hub.append('conversations', {
+			kind: 'derived_changed',
+			conversation_id: conversationId,
+			payload: {
+				conversation_id: conversationId,
+				activity,
+				unread_count: row?.unread_count ?? 0,
+				queue: row?.queue ?? { queued: 0, pause_reasons: [], hold_reasons: [] },
+				last_activity_at: row?.last_activity_at ?? null,
+				settings: {
+					model: row?.model ?? 'opus',
+					effort: row?.effort ?? 'medium',
+					permission_mode: row?.permission_mode ?? 'owner'
+				},
+				crunch: { enabled: row?.crunch?.enabled ?? false }
+			}
+		});
+		this.hub.flush();
 	}
 
 	bindConversation(id: string): void {

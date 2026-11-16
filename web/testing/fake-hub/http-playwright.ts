@@ -106,6 +106,11 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
         return;
       }
     }
+    if (kind === 'secret-requests') {
+      if (route.request().method() !== 'GET') return route.fallback();
+      await route.fulfill({ headers, json: { items: api.secretRequestList(id) } });
+      return;
+    }
     if (route.request().method() === 'GET' && kind === 'snapshot') {
       if (api.deleted.has(id)) {
         await route.fulfill({
@@ -1606,6 +1611,38 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
       await route.fulfill({ headers: headers(), json: api.ownerOverview });
     } else {
       await route.fallback();
+    }
+  });
+
+  const secretFailure = (err: unknown) => {
+    const failure = err as { status?: number; code?: string; message?: string };
+    return {
+      status: failure.status ?? 500,
+      headers: headers(),
+      json: { code: failure.code ?? 'internal', message: failure.message ?? 'Ошибка секрета' }
+    };
+  };
+
+  await page.route('**/api/v1/secret-requests/*/answer', async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback();
+    const id = new URL(route.request().url()).pathname.split('/')[4] ?? '';
+    try {
+      const body = route.request().postDataJSON() as { value?: unknown; decline?: unknown };
+      const answer = body.decline === true ? { decline: true as const } : { value: String(body.value ?? '') };
+      const view = api.answerSecretRequest(id, answer);
+      await route.fulfill({ headers: headers(), json: view });
+    } catch (err) {
+      await route.fulfill(secretFailure(err));
+    }
+  });
+
+  await page.route('**/api/v1/secret-requests/*/revoke', async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback();
+    const id = new URL(route.request().url()).pathname.split('/')[4] ?? '';
+    try {
+      await route.fulfill({ headers: headers(), json: api.revokeSecretRequest(id) });
+    } catch (err) {
+      await route.fulfill(secretFailure(err));
     }
   });
 
