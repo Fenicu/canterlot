@@ -218,3 +218,69 @@ test.describe('F-33 nested delegate rows', () => {
     });
   }
 });
+
+test.describe('F-35 current limits rows at 360', () => {
+  test('value_and_reset_do_not_overlap_with_three_windows', async ({ page }, info) => {
+    phoneOnly(info);
+    await page.setViewportSize({ width: 360, height: 892 });
+    const now = Date.now();
+    const at = (ms: number) => new Date(now + ms).toISOString();
+    await bootSecondary(page, '/limits', (api) => {
+      api.limits = [
+        {
+          provider: 'claude',
+          weekly_reserve_active: true,
+          weekly_reserve_resets_at: at(2 * 86_400_000),
+          five_hour: { used_permille: 610, resets_at: at(4 * 3_600_000 + 58 * 60_000), observed_at: at(-60_000) },
+          weekly: { used_permille: 950, resets_at: at(47 * 3_600_000 + 29 * 60_000), observed_at: at(-60_000) },
+          weekly_fable: { used_permille: 870, resets_at: at(47 * 3_600_000 + 29 * 60_000), observed_at: at(-60_000) }
+        }
+      ] as never;
+    });
+    const card = page.getByRole('region', { name: 'Claude, текущие лимиты' });
+    await expect(card.locator('.row')).toHaveCount(3);
+    await shot(page, 'f35-limits-rows-360');
+    for (const width of [360, 390]) {
+      await resizeViewport(page, { width, height: 892 });
+      const rows = await card.locator('.row').evaluateAll((nodes) => nodes.map((row) => {
+        const ink = (node: Element | null) => {
+          if (!node) return null;
+          const range = document.createRange();
+          range.selectNodeContents(node);
+          const rects = [...range.getClientRects()].filter((rect) => rect.width > 0);
+          if (rects.length === 0) return null;
+          return {
+            left: Math.min(...rects.map((rect) => rect.left)),
+            right: Math.max(...rects.map((rect) => rect.right)),
+            top: Math.min(...rects.map((rect) => rect.top)),
+            bottom: Math.max(...rects.map((rect) => rect.bottom))
+          };
+        };
+        const value = ink(row.querySelector('.value'));
+        const resetNode = row.querySelector<HTMLElement>('.reset');
+        if (!value || !resetNode) return { label: row.querySelector('.label')?.textContent?.trim(), value, reset: null, visual: null };
+        const box = resetNode.getBoundingClientRect();
+        // В тесной карточке текст сброса рисует псевдоэлемент: в разметке остаётся полная подпись.
+        const long = row.querySelector<HTMLElement>('.reset-long')!;
+        const visual = getComputedStyle(long).display === 'none'
+          ? getComputedStyle(resetNode, '::after').content
+          : (long.textContent ?? '');
+        return {
+          label: row.querySelector('.label')?.textContent?.trim(),
+          value,
+          reset: { left: box.left, right: box.right, top: box.top, bottom: box.bottom, text: resetNode.textContent!.trim() },
+          visual
+        };
+      }));
+      expect(rows).toHaveLength(3);
+      for (const row of rows) {
+        expect(row.reset).not.toBeNull();
+        expect(row.reset!.text).toMatch(/^сброс через\s+\d+/);
+        expect(row.visual).toMatch(/\d+\s*ч\s*\d+\s*м/);
+        const overlapX = Math.min(row.value!.right, row.reset!.right) - Math.max(row.value!.left, row.reset!.left);
+        const overlapY = Math.min(row.value!.bottom, row.reset!.bottom) - Math.max(row.value!.top, row.reset!.top);
+        expect(overlapX <= 0.5 || overlapY <= 0.5, `${width}px ${row.label}: ${JSON.stringify(row)}`).toBe(true);
+      }
+    }
+  });
+});

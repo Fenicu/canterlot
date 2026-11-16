@@ -28,6 +28,8 @@ export interface WindowRow {
   stale: boolean;
   /** «сброс через 2 ч 15 мин»; у устаревшего окна пусто. */
   reset: string;
+  /** Сжатый отсчёт «2ч15м» для тесной карточки; полная дата — в подсказке. */
+  resetShort: string;
   /** Момент сброса для подсказки с полной датой; `NaN` без сброса. */
   resetAt: number;
   /** То же словами для чтения вслух. */
@@ -69,7 +71,7 @@ export function currentBlocks(providers: ProviderLimits[], now: number, cfg: Lim
         key, label: WINDOW_LABEL[key], fill: meter.fill,
         value: meter.stale ? meter.text : `осталось ${meter.text}`,
         tone: meter.tone, stale: meter.stale, pct: meter.text,
-        reset: resetPhrase(meter.reset), resetAt: meter.resetAt,
+        reset: resetPhrase(meter.reset), resetShort: meter.resetShort, resetAt: meter.resetAt,
         resetLong: meter.resetLong ? `сброс ${meter.resetLong}` : '', forecast: meter.forecast
       }));
     const markers = [row.estimated ? 'оценка' : '', row.reserve ? 'резерв недели' : ''].filter(Boolean);
