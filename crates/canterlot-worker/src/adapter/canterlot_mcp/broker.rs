@@ -251,7 +251,7 @@ impl Broker {
         let pending: Pending = Arc::default();
         let agent_pending: AgentPending = Arc::default();
         let gate = Arc::new(SyncMutex::new(Gate {
-            single: tool_set == ToolSet::ApproveAndLimits,
+            single: tool_set.has_approve(),
             ..Gate::default()
         }));
         let provider = limits_provider.to_owned();

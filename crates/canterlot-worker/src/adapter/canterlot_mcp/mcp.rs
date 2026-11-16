@@ -53,11 +53,32 @@ pub fn log_initialize(msg: &Value) {
     );
 }
 
-/// Набор инструментов MCP: Claude — approve и лимиты, Codex — только лимиты.
+/// Набор инструментов MCP: Claude — approve и лимиты, Codex — только лимиты,
+/// боковой чат — только мост разрешений и вопросов.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolSet {
     ApproveAndLimits,
     LimitsOnly,
+    /// Боковой чат: ни сессий, ни пресетов, ни share_file, ни лимитов. У Claude
+    /// здесь `approve` (мост разрешений и вопросов, нужен `--permission-prompt-tool`),
+    /// у остальных провайдеров список пуст.
+    Side,
+}
+
+impl ToolSet {
+    /// Соединение единственное: approve зовёт только живой CLI.
+    pub fn has_approve(self) -> bool {
+        matches!(self, Self::ApproveAndLimits | Self::Side)
+    }
+
+    /// Набор запуска: обычный по адаптеру или урезанный боковой (`canterlot_mcp: "side"`).
+    pub fn for_side(fork: Option<&crate::adapter::ForkSpec>, normal: Self) -> Self {
+        if fork.is_some_and(|fork| fork.side_mcp) {
+            Self::Side
+        } else {
+            normal
+        }
+    }
 }
 
 /// Текст инструкций сервера (10–15 строк, для MCP initialize и developerInstructions).
@@ -932,6 +953,20 @@ fn tools_list(tool_set: ToolSet, provider: &str) -> Value {
             tools.append(&mut presets);
             json!({"tools": tools})
         }
+        ToolSet::Side => {
+            // Мост разрешений и вопросов нужен только Claude (`--permission-prompt-tool`):
+            // у остальных провайдеров список пуст, и всё равно ни сессий, ни лимитов.
+            let tools = if provider == "claude" {
+                vec![json!({
+                    "name": "approve",
+                    "description": "Permission prompt handler of the canterlot supervisor. Not for direct use: the CLI calls it for permission prompts and AskUserQuestion.",
+                    "inputSchema": {"type": "object", "additionalProperties": true},
+                })]
+            } else {
+                Vec::new()
+            };
+            json!({"tools": tools})
+        }
     }
 }
 
@@ -983,7 +1018,7 @@ pub fn handle_rpc_with_provider(msg: &Value, tool_set: ToolSet, provider: &str) 
                 .cloned()
                 .unwrap_or_else(|| json!({}));
             let kind = match (name, tool_set) {
-                ("approve", ToolSet::ApproveAndLimits) => {
+                ("approve", ToolSet::ApproveAndLimits) | ("approve", ToolSet::Side) => {
                     if !is_permission_prompt(msg, &arguments) {
                         return error(
                             &id,
