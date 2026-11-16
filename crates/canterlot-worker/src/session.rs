@@ -792,13 +792,16 @@ impl Worker {
             self.config.opencode.clone(),
             self.config.antigravity.clone().filter(|cfg| cfg.enabled),
         );
+        // Файлы секретов: конфигурация ставится до проверки владения, потому что
+        // startup_verify заново проигрывает сохранённые отзывы, а без неё отзыв
+        // пошёл бы в каталог по умолчанию.
+        manager.set_secrets(self.config.secrets.clone());
         manager
             .startup_verify()
             .await
             .map_err(|_| WorkerError::Execution)?;
         // Уборка файлов секретов при старте и раз в 10 минут: срок жизни и каталоги
         // разговоров, которых воркер больше не ведёт.
-        manager.set_secrets(self.config.secrets.clone());
         self.sweeper = Some(tokio::spawn(crate::secret::run_sweeper(
             self.config.secrets.clone(),
             manager.shared(),

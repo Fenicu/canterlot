@@ -467,6 +467,13 @@ pub fn to_proto(row: &CommandRow) -> Result<Command, OutboxError> {
         "revoke_secret" => command::Kind::RevokeSecret(canterlot_proto::worker::v1::RevokeSecret {
             request_id: text(&row.payload, "request_id")?,
             attempt_id: text(&row.payload, "attempt_id")?,
+            conversation_id: row
+                .payload
+                .get("conversation_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .or_else(|| row.conversation_id.map(|id| id.to_string()))
+                .unwrap_or_default(),
         }),
         "stop_execution" => command::Kind::StopExecution(StopExecution {
             force: match row.payload.get("force") {

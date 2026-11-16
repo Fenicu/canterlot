@@ -495,6 +495,7 @@ impl fmt::Debug for crate::worker::v1::RevokeSecret {
         f.debug_struct("RevokeSecret")
             .field("request_id", &self.request_id)
             .field("attempt_id", &self.attempt_id)
+            .field("conversation_id", &self.conversation_id)
             .finish()
     }
 }

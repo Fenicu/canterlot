@@ -2240,7 +2240,13 @@ fn secret_messages_keep_their_wire_shape_and_hide_the_value() {
     let revoke = canterlot_proto::worker::v1::RevokeSecret {
         request_id: "request".into(),
         attempt_id: "attempt".into(),
+        conversation_id: "conversation".into(),
     };
+    assert_eq!(
+        revoke.encode_to_vec()[18],
+        0x1A,
+        "RevokeSecret.conversation_id is field 3"
+    );
     let command = Command {
         command_id: "command".into(),
         kind: Some(command::Kind::RevokeSecret(revoke)),

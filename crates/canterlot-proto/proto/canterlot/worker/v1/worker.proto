@@ -214,6 +214,8 @@ message SecretDeliver {
 message RevokeSecret {
   string request_id = 1;
   string attempt_id = 2;
+  // Каталог разговора: воркер открывает ровно его, а не сканирует базу.
+  string conversation_id = 3;
 }
 
 /// Влить ожидающий ввод в идущий ход («Отправить сейчас»). Несёт тот же ввод,

@@ -19,9 +19,8 @@ use canterlot_proto::{
             AttachmentFailed, AttachmentReady, AttachmentRef, CancelInput, Command,
             CommandRejected, CompactionState, CompactionStatus, ContentBlock, DecisionNotApplied,
             ExecutionState, InputCancelLost, InputCancelWon, InputDispatchDeferred, InputWithdrawn,
-            InterruptState, InterruptStatus, MediaHeader, RemoveWorktree, SecretRemoved,
-            StartExecution, WithdrawInput, WorktreeRemoved, command::Kind, content_block,
-            record_body::Body,
+            InterruptState, InterruptStatus, MediaHeader, RemoveWorktree, StartExecution,
+            WithdrawInput, WorktreeRemoved, command::Kind, content_block, record_body::Body,
         },
     },
 };
@@ -821,24 +820,28 @@ pub(super) async fn revoke_secret(
     command: &Command,
     request: &canterlot_proto::worker::v1::RevokeSecret,
 ) -> Result<(), ExecError> {
-    let config = shared.secrets.get().cloned().unwrap_or_default();
+    // Без установленной конфигурации не трогаем файлы: молчаливый переход к
+    // каталогу по умолчанию удалял бы не тот файл.
     let body = match (
+        shared.secrets.get(),
         Uuid::parse_str(&request.request_id),
         Uuid::parse_str(&request.attempt_id),
+        Uuid::parse_str(&request.conversation_id),
     ) {
-        (Ok(request_id), Ok(attempt_id)) => {
-            let removal = crate::secret::remove(&config, request_id, attempt_id);
+        (Some(config), Ok(request_id), Ok(attempt_id), Ok(conversation_id)) => {
+            let removal = crate::secret::remove(config, conversation_id, request_id, attempt_id);
             if removal == crate::secret::Removal::Failed {
                 Body::SecretRemoveFailed(crate::secret::remove_failed_fact(attempt_id, "io"))
             } else {
                 Body::SecretRemoved(crate::secret::removed_fact(attempt_id, removal))
             }
         }
-        // Некорректная команда: файл не тронут, но команда не должна висеть.
-        _ => Body::SecretRemoved(SecretRemoved {
-            attempt_id: request.attempt_id.clone(),
-            reason: "invalid".into(),
-        }),
+        _ => {
+            // Некорректная команда или не установленная конфигурация: файл не
+            // тронут, но команда не должна висеть. Хаб повторит отзыв.
+            let id = Uuid::parse_str(&request.attempt_id).unwrap_or_default();
+            Body::SecretRemoveFailed(crate::secret::remove_failed_fact(id, "invalid"))
+        }
     };
     shared.cj(vec![body], terminal_self(command)).await
 }
@@ -3180,6 +3183,152 @@ mod tests {
         }).await.unwrap();
         drop(actor);
         manager.shutdown().await;
+        thread.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_stored_revoke_uses_the_installed_secret_config_and_never_a_default_dir() {
+        use canterlot_proto::worker::v1::{RevokeSecret, SecretDeliver};
+
+        let root = tempfile::tempdir().unwrap();
+        let store = WorkerStore::open(&root.path().join("store")).unwrap();
+        let thread = StoreThread::new(store);
+        let (relay, _rx) = mpsc::channel(1);
+        let manager = ExecutionManager::new_with_runtime_dir(
+            ExecutionConfig::default(),
+            thread.client(),
+            relay,
+            Some(root.path().join("runtime")),
+        );
+        let conversation = Uuid::now_v7();
+        let request = Uuid::now_v7();
+        let attempt = Uuid::now_v7();
+        let command = |id: Uuid| Command {
+            command_id: id.to_string(),
+            dispatch_attempt: 1,
+            execution_id: String::new(),
+            kind: Some(Kind::RevokeSecret(RevokeSecret {
+                request_id: request.to_string(),
+                attempt_id: attempt.to_string(),
+                conversation_id: conversation.to_string(),
+            })),
+            ..Default::default()
+        };
+        let revoke = match command(Uuid::now_v7()).kind {
+            Some(Kind::RevokeSecret(revoke)) => revoke,
+            _ => unreachable!(),
+        };
+        // Без установленной конфигурации отзыв не трогает файлы и не уходит в
+        // каталог по умолчанию: хаб повторит его после установки конфигурации.
+        revoke_secret(&manager.shared, &command(Uuid::now_v7()), &revoke)
+            .await
+            .unwrap();
+        thread
+            .client()
+            .call(|slot| {
+                let store = open(slot)?;
+                assert!(
+                    store.cj_records_from(1, usize::MAX)?.iter().any(|record| {
+                        matches!(
+                            record.body.as_ref().and_then(|body| body.body.as_ref()),
+                            Some(Body::SecretRemoveFailed(fact)) if fact.reason == "invalid"
+                        )
+                    }),
+                    "a missing config is an explicit failure"
+                );
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        // С конфигурацией файл создаётся и удаляется именно в названном каталоге.
+        let shared_base =
+            PathBuf::from("/dev/shm").join(format!("canterlot-revoke-{}", Uuid::now_v7()));
+        let config = crate::config::SecretConfig {
+            base_dir: Some(shared_base.clone()),
+        };
+        let written = crate::secret::write(
+            &config,
+            &SecretDeliver {
+                attempt_id: attempt.to_string(),
+                request_id: request.to_string(),
+                conversation_id: conversation.to_string(),
+                value: b"value".to_vec(),
+            },
+            &HashSet::from([conversation]),
+        )
+        .unwrap();
+        manager.set_secrets(config);
+        revoke_secret(&manager.shared, &command(Uuid::now_v7()), &revoke)
+            .await
+            .unwrap();
+        assert!(!written.path.exists(), "the configured file is removed");
+        let _ = std::fs::remove_dir_all(&shared_base);
+        manager.shutdown().await;
+        thread.close().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_sweeper_removes_an_expired_file_without_a_hub_session() {
+        use canterlot_proto::worker::v1::SecretDeliver;
+
+        let root = tempfile::tempdir().unwrap();
+        let store = WorkerStore::open(&root.path().join("store")).unwrap();
+        let thread = StoreThread::new(store);
+        let (relay, _rx) = mpsc::channel(1);
+        let manager = ExecutionManager::new_with_runtime_dir(
+            ExecutionConfig::default(),
+            thread.client(),
+            relay,
+            Some(root.path().join("runtime")),
+        );
+        let base = PathBuf::from("/dev/shm").join(format!("canterlot-sweep-{}", Uuid::now_v7()));
+        let config = crate::config::SecretConfig {
+            base_dir: Some(base.clone()),
+        };
+        let conversation = Uuid::now_v7();
+        let request = Uuid::now_v7();
+        let written = crate::secret::write(
+            &config,
+            &SecretDeliver {
+                attempt_id: Uuid::now_v7().to_string(),
+                request_id: request.to_string(),
+                conversation_id: conversation.to_string(),
+                value: b"old".to_vec(),
+            },
+            &HashSet::from([conversation]),
+        )
+        .unwrap();
+        let manifest = written
+            .path
+            .parent()
+            .unwrap()
+            .join(format!("{request}.json"));
+        let mut raw: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest).unwrap()).unwrap();
+        raw["expires_at_ms"] = serde_json::json!(1);
+        std::fs::write(&manifest, serde_json::to_vec(&raw).unwrap()).unwrap();
+
+        let shared = manager.shared.clone();
+        let task = tokio::spawn(crate::secret::run_sweeper(
+            config,
+            shared.clone(),
+            shared.shutdown.clone(),
+        ));
+        for _ in 0..100 {
+            if !written.path.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            !written.path.exists(),
+            "expiry does not wait for the first hub session"
+        );
+        manager.shutdown().await;
+        let _ = task.await;
+        drop(shared);
+        let _ = std::fs::remove_dir_all(&base);
         thread.close().await.unwrap();
     }
 
