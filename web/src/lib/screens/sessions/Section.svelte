@@ -121,7 +121,7 @@
   /* Делегированные под родителем: линия слева, компактные строки. */
   .kids-list { position: relative; margin: var(--s0) var(--s3) var(--s1) calc(var(--s3) + var(--s5) + var(--avatar) / 2); padding-left: calc(var(--s2) + var(--hairline) * 2); }
   .kids-list::before { content: ''; position: absolute; inset: var(--s0) auto var(--s0) var(--s0); width: calc(var(--hairline) * 2); border-radius: var(--radius-pill); background: var(--line); }
-  .kids-list.nested { margin-left: calc(var(--s5) + var(--avatar-small) / 2); }
+  .kids-list.nested { margin-left: calc(var(--s5) + var(--avatar-small) / 2); margin-right: var(--s0); }
   .kids-list :global(.row) { margin-inline: var(--s0); }
   .kids {
     min-height: var(--s11);

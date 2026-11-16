@@ -123,3 +123,98 @@ test.describe('F-30 trash buttons keep the pill padding', () => {
     });
   }
 });
+
+test.describe('F-33 nested delegate rows', () => {
+  async function bootTree(page: Page) {
+    const hub = new FakeHub();
+    const api = new FakeHubApi(hub);
+    const parent = seedConversation(api, {
+      title: 'Оркестратор',
+      activity: { state: 'idle', evidence: { last_turn_at: AT }, since: AT } as never
+    });
+    const child = seedConversation(api, {
+      title: 'Первый делегат',
+      parent_id: parent,
+      spawn_depth: 1,
+      working_ms: 13_380_000,
+      activity: { state: 'working', evidence: { phase: 'generating' }, since: AT } as never
+    });
+    const grand = seedConversation(api, {
+      title: 'Второй делегат ждёт разрешения',
+      parent_id: child,
+      spawn_depth: 2,
+      working_ms: 1_380_000,
+      unread_count: 128,
+      queue: { queued: 12, pause_reasons: [], hold_reasons: [] },
+      activity: { state: 'waiting_for_user', evidence: { phase: 'awaiting_permission', question: 'Bash: rm -rf target/debug/incremental && cargo build --release' }, since: AT } as never
+    });
+    api.counts = api.recount();
+    await installChatRoutes(page, hub, api, OWNER);
+    await page.goto('/sessions');
+    await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
+    // Раскрываем ветки, пока не покажутся все три уровня.
+    for (let round = 0; round < 4; round++) {
+      const folds = page.locator('button[aria-expanded="false"]').filter({ hasText: /Делегированные/ });
+      if ((await folds.count()) === 0) break;
+      await folds.first().click({ timeout: 2_000 }).catch(() => {});
+    }
+    await expect(page.locator(`[data-session="${grand}"]`)).toHaveClass(/depth-2/);
+    return { grand };
+  }
+
+  for (const width of [360, 412]) {
+    test(`row_and_fold_edges_form_one_column_at_${width}`, async ({ page }, info) => {
+      phoneOnly(info);
+      await page.setViewportSize({ width, height: 892 });
+      const { grand } = await bootTree(page);
+      await shot(page, `f33-nested-delegates-${width}`);
+      const found = await page.evaluate(() => {
+        const round = (n: number) => Math.round(n * 10) / 10;
+        const rows = [...document.querySelectorAll<HTMLElement>('article.row')].map((row) => {
+          const button = row.querySelector<HTMLElement>(':scope > button')!;
+          return { depth: row.classList.contains('depth-2') ? 2 : row.classList.contains('child') ? 1 : 0, rowRight: round(row.getBoundingClientRect().right), moreRight: round(button.getBoundingClientRect().right) };
+        });
+        const folds = [...document.querySelectorAll<HTMLElement>('button.kids')].map((fold) => ({
+          depth: fold.classList.contains('depth-2') ? 2 : 1,
+          right: round(fold.getBoundingClientRect().right),
+          chevronRight: round(fold.querySelector<HTMLElement>('.chevron')!.getBoundingClientRect().right)
+        }));
+        return { rows, folds };
+      });
+      // Строки всех трёх уровней кончаются на одном правом краю: 6 px на уровень больше не набегают.
+      const expected = found.rows.find((row) => row.depth === 0)!.rowRight;
+      for (const row of found.rows) {
+        expect(Math.abs(row.rowRight - expected), JSON.stringify(found.rows)).toBeLessThanOrEqual(1);
+        expect(Math.abs(row.moreRight - expected), JSON.stringify(found.rows)).toBeLessThanOrEqual(1);
+      }
+      expect(found.folds.length).toBeGreaterThanOrEqual(2);
+      for (const fold of found.folds) expect(Math.abs(fold.right - expected), JSON.stringify(found.folds)).toBeLessThanOrEqual(1);
+      // Стрелки сгибов на всех уровнях стоят одной колонкой.
+      const chevron = found.folds[0]!.chevronRight;
+      for (const fold of found.folds) expect(Math.abs(fold.chevronRight - chevron), JSON.stringify(found.folds)).toBeLessThanOrEqual(1);
+
+      // У самого узкого ожидающего ряда на 412 px хватает места на «Ждёт разрешения» целиком.
+      if (width === 412) {
+        const state = await page.locator(`[data-session="${grand}"] .activity .text`).evaluate((node) => {
+        const box = node.getBoundingClientRect();
+        const data = node.firstChild as Text;
+        const phrase = 'Ждёт разрешения';
+        const range = document.createRange();
+        range.setStart(data, 0);
+        range.setEnd(data, phrase.length);
+        const rects = [...range.getClientRects()].filter((rect) => rect.width > 0);
+        return {
+          text: (node.textContent ?? '').trim(),
+          clientWidth: node.clientWidth,
+          scrollWidth: node.scrollWidth,
+          right: Math.max(...rects.map((rect) => rect.right)),
+          limit: box.left + node.clientWidth
+        };
+      });
+        expect(state.text.startsWith('Ждёт разрешения')).toBe(true);
+        expect(state.scrollWidth, JSON.stringify(state)).toBeGreaterThan(state.clientWidth);
+        expect(state.right, JSON.stringify(state)).toBeLessThanOrEqual(state.limit + 0.5);
+      }
+    });
+  }
+});

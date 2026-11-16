@@ -162,6 +162,8 @@
   .row[data-state='stalled'] .activity .text { color: var(--danger); }
   .plan, .queued { flex: none; max-width: 50%; padding: var(--s0) var(--s3); overflow: hidden; border-radius: var(--radius-pill); background: var(--chip); color: var(--chip-text); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
   .worked { flex: none; color: var(--muted); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  /* В узком ряду ожидания или сбоя состояние важнее потраченного времени: без «работала …» помещается «Ждёт разрешения» целиком. */
+  .row.child[data-state='waiting'] .worked, .row.child[data-state='failed'] .worked { display: none; }
   .pin { flex: none; display: inline-flex; color: var(--badge); }
   .pin :global(svg) { width: var(--icon-small); height: var(--icon-small); }
   .count { flex: none; min-width: var(--s9); height: var(--s9); padding: var(--s0) var(--s3); box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; border-radius: var(--radius-pill); background: var(--accent); color: var(--accent-ink); font-size: var(--fs-xs); font-weight: var(--weight-bold); font-variant-numeric: tabular-nums; }
