@@ -14,4 +14,9 @@
   input { position: absolute; opacity: 0; width: var(--hairline); }
   input:checked + span { background: var(--accent); color: var(--accent-ink); font-weight: var(--weight-medium); }
   input:focus-visible + span { outline: var(--focus-width) solid var(--accent); }
+  /* Пять коротких вариантов в узком окне: без запаса вокруг плашек «1 год» падал на свою строку. */
+  @media (max-width: 374px) {
+    .segmented:has(> label:nth-child(5)) { gap: var(--s1); }
+    .segmented:has(> label:nth-child(5)) span { padding-inline: var(--s1); }
+  }
 </style>

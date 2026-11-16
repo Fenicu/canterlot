@@ -13,6 +13,12 @@ const screen = (name: string): Screen => SCREENS.find((item) => item.name === na
 
 const centerY = (box: { y: number; height: number }): number => box.y + box.height / 2;
 
+/** Ряды, в которые раскладывается элемент: сколько разных верхних краёв у его детей. */
+async function rows(locator: Locator): Promise<number> {
+  const tops = await locator.evaluateAll((nodes) => nodes.map((node) => Math.round(node.getBoundingClientRect().top)));
+  return new Set(tops).size;
+}
+
 async function settle(page: Page): Promise<void> {
   await page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
 }
@@ -135,5 +141,28 @@ test('F-34: routing action reasons are centred against their buttons', async ({ 
         `${width}: reason «${(await reason.textContent())?.trim()}» is centred against its button`
       ).toBeLessThanOrEqual(2);
     }
+  }
+});
+
+// F-36: пять коротких вариантов срока бездействия помещаются в одну строку и на 360.
+test('F-36: idle timeout segmented control stays on one row at 360', async ({ page }) => {
+  await bootSecondary(page, '/settings/sign-in');
+  await page.setViewportSize({ width: 360, height: 892 });
+  const idle = page.getByRole('radiogroup', { name: 'Срок бездействия' });
+  await expect(idle).toBeVisible();
+  const labels = idle.locator('label');
+  await expect(labels).toHaveCount(5);
+  expect(await rows(labels), 'five options share one row').toBe(1);
+  const box = (await idle.boundingBox())!;
+  expect(box.height, 'control is one 44 px row plus padding').toBeLessThanOrEqual(60);
+});
+
+test('F-36: other segmented controls keep their rows at 360', async ({ page }) => {
+  await bootSecondary(page, '/settings?c=appearance');
+  await page.setViewportSize({ width: 360, height: 892 });
+  for (const name of ['Режим', 'Скорость анимаций']) {
+    const group = page.getByRole('radiogroup', { name });
+    await expect(group).toBeVisible();
+    expect(await rows(group.locator('label')), `${name} stays on one row`).toBe(1);
   }
 });
