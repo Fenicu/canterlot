@@ -530,7 +530,8 @@ test('scheduled_card_puts_its_overflow_on_the_first_text_line', async ({ page },
   expectCompactCard(shape);
   // Две строки и по половине цели касания сверху и снизу: выше — воздух сверх цели, а не зазоры.
   expect(shape.height, 'карточка в две строки не выше строк и цели касания').toBeLessThanOrEqual(2 * shape.line + (shape.target - shape.line) + 1);
-  expect(shape.iconTop ?? Number.NEGATIVE_INFINITY, '«⋯» стоит на первой строке, а не отдельной').toBeGreaterThanOrEqual(shape.firstLineTop - 0.5);
+  // Значок 20 px выше строки текста: по центру строки он выступает над ней на 1 px.
+  expect(shape.iconTop ?? Number.NEGATIVE_INFINITY, '«⋯» стоит на первой строке, а не отдельной').toBeGreaterThanOrEqual(shape.firstLineTop - 1.5);
   expect(shape.iconTop ?? Number.POSITIVE_INFINITY, '«⋯» стоит на первой строке, а не отдельной').toBeLessThanOrEqual(shape.firstLineBottom + 0.5);
   expect(shape.textToIcon ?? Number.NEGATIVE_INFINITY, 'текст переносится до «⋯», а не уходит под него').toBeGreaterThanOrEqual(0);
 });
@@ -548,7 +549,8 @@ test('one_line_scheduled_card_keeps_even_gaps', async ({ page }, info) => {
   expectCompactCard(shape);
   // Одна строка и по половине цели касания сверху и снизу: карточка не выше самой цели.
   expect(shape.height, 'карточка в одну строку не выше цели касания').toBeLessThanOrEqual(shape.target + 1);
-  expect(shape.iconTop ?? Number.NEGATIVE_INFINITY, '«⋯» стоит на первой строке').toBeGreaterThanOrEqual(shape.firstLineTop - 0.5);
+  // Значок 20 px выше строки текста: по центру строки он выступает над ней на 1 px.
+  expect(shape.iconTop ?? Number.NEGATIVE_INFINITY, '«⋯» стоит на первой строке').toBeGreaterThanOrEqual(shape.firstLineTop - 1.5);
   expect(shape.iconTop ?? Number.POSITIVE_INFINITY, '«⋯» стоит на первой строке').toBeLessThanOrEqual(shape.firstLineBottom + 0.5);
 });
 
