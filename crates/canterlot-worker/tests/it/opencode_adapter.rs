@@ -76,6 +76,7 @@ impl Bench {
             instructions: instructions(InstructionMode::Owner, ""),
             isolate_mcp: false,
             prompt_suggestions: false,
+            fork: None,
         };
         Self {
             fake,

@@ -1074,6 +1074,7 @@ impl OpenCodeAdapter {
             native_conversation_id: self.session.clone(),
             cli_pid: proc.pid,
             cli_start_ticks: proc.start_ticks,
+            fresh_fork: false,
         })
     }
 

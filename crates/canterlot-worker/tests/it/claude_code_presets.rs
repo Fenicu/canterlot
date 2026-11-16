@@ -505,6 +505,7 @@ impl RestartHarness {
             instructions: owner_spec(),
             isolate_mcp: false,
             prompt_suggestions: false,
+            fork: None,
         };
         let started = tokio::time::timeout(WAIT, adapter.start(&spec, &group))
             .await
@@ -1245,6 +1246,7 @@ for line in sys.stdin:
         instructions: owner_spec(),
         isolate_mcp: false,
         prompt_suggestions: false,
+        fork: None,
     };
     let started = tokio::time::timeout(WAIT, adapter.start(&spec, &group))
         .await
@@ -1334,6 +1336,7 @@ sys.stdout.flush()
         instructions: owner_spec(),
         isolate_mcp: false,
         prompt_suggestions: false,
+        fork: None,
     };
     tokio::time::timeout(WAIT, adapter.start(&spec, &group))
         .await
@@ -1405,6 +1408,7 @@ for line in sys.stdin:
         instructions: owner_spec(),
         isolate_mcp: false,
         prompt_suggestions: false,
+        fork: None,
     };
     tokio::time::timeout(WAIT, adapter.start(&spec, &group))
         .await

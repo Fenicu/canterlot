@@ -562,6 +562,7 @@ pub(super) async fn report_owner_lost(
                 state: "owner_lost".into(),
                 outcome: String::new(),
                 native_conversation_id: String::new(),
+                fresh_fork: false,
             })],
             vec![],
         )
@@ -596,6 +597,7 @@ pub(super) async fn reclaim_owner(
                 state: "running".into(),
                 outcome: canterlot_proto::OWNER_RECLAIMED.into(),
                 native_conversation_id: String::new(),
+                fresh_fork: false,
             }))?;
             let mut record = store
                 .ownership()
@@ -1082,6 +1084,7 @@ pub(super) async fn answer_without_execution(
                         state: "stopped".into(),
                         outcome: "start_cancelled".into(),
                         native_conversation_id: String::new(),
+                        fresh_fork: false,
                     })],
                     terminal_self(command),
                 )
@@ -1366,7 +1369,12 @@ impl Actor {
         }
         // Продолжать можно только записанную беседу этого рабочего каталога: хаб
         // присылает идентификатор, а не путь, и файл ищется в каталоге проекта CLI.
-        if start.harness == "claude_code" && !start.native_conversation_id.is_empty() {
+        // Боковой чат при пропавшей записи не падает, а форкается заново от родителя:
+        // решение принимает адаптер, сюда отказ не возвращается.
+        if start.harness == "claude_code"
+            && !start.native_conversation_id.is_empty()
+            && start.fork_from_native.is_empty()
+        {
             let home = std::env::home_dir().unwrap_or_else(|| PathBuf::from("/"));
             let config_dir = crate::config::claude_config_dir(
                 &home,
@@ -1595,6 +1603,8 @@ impl Actor {
                 isolate_mcp: start.isolate_mcp,
                 send_now_v1: start.capabilities.iter().any(|c| c == "send_now_v1"),
                 prompt_suggestions: prompt_suggestions_enabled(start),
+                fork_from_native: start.fork_from_native.clone(),
+                canterlot_mcp: start.canterlot_mcp.clone(),
             }))
             .await;
         Ok(())
@@ -1684,6 +1694,7 @@ impl Actor {
                     state: "stopped".into(),
                     outcome: "start_cancelled".into(),
                     native_conversation_id: String::new(),
+                    fresh_fork: false,
                 })],
                 terminal,
             )

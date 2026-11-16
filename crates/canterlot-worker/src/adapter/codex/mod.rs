@@ -1148,6 +1148,7 @@ impl CodexAdapter {
         translator.set_workdir(&spec.workdir);
         self.translator = Some(translator);
         let started = Started {
+            fresh_fork: false,
             native_conversation_id: effective.thread_id.clone(),
             cli_pid: self.proc.as_ref().map(|proc| proc.pid).unwrap_or_default(),
             cli_start_ticks: self

@@ -51,6 +51,7 @@ fn spec(model: &str, effort: &str, mode: &str) -> StartSpec {
         instructions: instructions(),
         isolate_mcp: false,
         prompt_suggestions: false,
+        fork: None,
     }
 }
 

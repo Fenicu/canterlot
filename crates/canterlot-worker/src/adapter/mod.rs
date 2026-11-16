@@ -51,12 +51,26 @@ pub struct StartSpec {
     pub isolate_mcp: bool,
     /// Подсказки следующего сообщения: только Claude Code, только если хаб их включил.
     pub prompt_suggestions: bool,
+    /// Боковой чат: стартовать форком из нативной сессии родителя, а не resume/созданием.
+    /// `None` — обычный запуск; неизвестное или отсутствующее поле у старого хаба — то же самое.
+    pub fork: Option<ForkSpec>,
+}
+
+/// Боковой чат: нативный id родителя для форка и профиль MCP этого запуска.
+#[derive(Clone)]
+pub struct ForkSpec {
+    pub parent_native_id: String,
+    /// Профиль MCP canterlot `"side"`: только мост разрешений и вопросов.
+    pub side_mcp: bool,
 }
 #[derive(Debug)]
 pub struct Started {
     pub native_conversation_id: String,
     pub cli_pid: u32,
     pub cli_start_ticks: u64,
+    /// Запуск был свежим форком (первый старт или перефорк при невозможном resume):
+    /// хаб показывает «Начато заново от свежей копии сессии».
+    pub fresh_fork: bool,
 }
 pub struct Transmission {
     pub command_id: Uuid,

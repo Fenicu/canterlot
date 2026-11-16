@@ -49,6 +49,7 @@ const WATCH_FIRST_DELAY: Duration = Duration::from_secs(90);
 
 pub const CAPABILITY_LIMITS_FABLE_V1: &str = "limits_fable_v1";
 pub const CAPABILITY_PROMPT_SUGGESTIONS_V1: &str = "prompt_suggestions_v1";
+pub const CAPABILITY_SIDE_CHAT_V1: &str = "side_chat_v1";
 
 pub const OPTIONAL_CAPABILITIES: &[&str] = &[
     "exec_v1",
@@ -70,6 +71,7 @@ pub const OPTIONAL_CAPABILITIES: &[&str] = &[
     "resource_lease_v1",
     "watchdog_v1",
     CAPABILITY_PROMPT_SUGGESTIONS_V1,
+    CAPABILITY_SIDE_CHAT_V1,
 ];
 
 #[derive(Clone)]

@@ -1443,6 +1443,7 @@ impl Adapter for ClaudeCodeAdapter {
             native_conversation_id: self.native_id.clone(),
             cli_pid: cli.pid,
             cli_start_ticks: cli.start_ticks,
+            fresh_fork: false,
         };
         self.cli = Some(cli);
         Ok(started)

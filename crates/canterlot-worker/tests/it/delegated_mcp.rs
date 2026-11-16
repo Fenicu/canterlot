@@ -534,6 +534,7 @@ for line in sys.stdin:
                 instructions: instructions(mode),
                 isolate_mcp,
                 prompt_suggestions: false,
+                fork: None,
             }
         }
 

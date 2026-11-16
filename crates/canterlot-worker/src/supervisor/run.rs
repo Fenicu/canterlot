@@ -476,7 +476,7 @@ pub(super) async fn run(exec_dir: PathBuf) -> Result<ExitCode, SupervisorError> 
             generation: supervisor.spec.generation,
             supervisor_protocol_version: IPC_PROTOCOL_VERSION,
         }))?;
-        supervisor.state_record("starting", "", "")?;
+        supervisor.state_record("starting", "", "", false)?;
     }
     while supervisor.faults.attach_held() {
         tokio::time::sleep(Duration::from_millis(25)).await;
@@ -642,6 +642,7 @@ impl Supervisor {
         state: &str,
         outcome: &str,
         native: &str,
+        fresh_fork: bool,
     ) -> Result<(), SupervisorError> {
         self.record(Body::ExecutionState(
             canterlot_proto::worker::v1::ExecutionState {
@@ -650,6 +651,7 @@ impl Supervisor {
                 state: state.into(),
                 outcome: outcome.into(),
                 native_conversation_id: native.into(),
+                fresh_fork,
             },
         ))?;
         Ok(())
@@ -1851,6 +1853,12 @@ impl Supervisor {
             instructions,
             isolate_mcp: start.isolate_mcp,
             prompt_suggestions: self.prompt_suggestions,
+            fork: (!start.fork_from_native.is_empty()).then(|| {
+                crate::adapter::ForkSpec {
+                    parent_native_id: start.fork_from_native.clone(),
+                    side_mcp: start.canterlot_mcp == "side",
+                }
+            }),
         };
         let outcome = timeout(
             timers.ready_deadline,
@@ -1903,7 +1911,7 @@ impl Supervisor {
         self.started = Some(info.clone());
         self.lifecycle = Lifecycle::Running;
         self.send(up::Msg::CliStarted(info));
-        self.state_record("running", "", &started.native_conversation_id)?;
+        self.state_record("running", "", &started.native_conversation_id, started.fresh_fork)?;
         self.phase_record(Phase::AwaitingInput)?;
         self.ready = true;
         Ok(())
@@ -3158,7 +3166,7 @@ impl Supervisor {
                 "execution_terminal"
             },
         )?;
-        self.state_record("stopping", "", "")?;
+        self.state_record("stopping", "", "", false)?;
         self.lifecycle = Lifecycle::Stopping(StopState {
             cause,
             force,
@@ -3325,7 +3333,7 @@ impl Supervisor {
                 _ => {}
             }
         }
-        self.state_record(terminal, outcome, "")?;
+        self.state_record(terminal, outcome, "", false)?;
         if self.faults.will_abort("after_stopped_before_closed") {
             self.sj.flush()?;
         }
@@ -3573,6 +3581,7 @@ mod tests {
                 native_conversation_id: "stub".into(),
                 cli_pid: 0,
                 cli_start_ticks: 0,
+                fresh_fork: false,
             })
         }
 

@@ -114,6 +114,7 @@ impl Live {
             },
             isolate_mcp: false,
             prompt_suggestions: false,
+            fork: None,
         }
     }
 

@@ -196,6 +196,7 @@ async fn adapter_child() {
         },
         isolate_mcp: false,
         prompt_suggestions: false,
+        fork: None,
     };
     let make = |profile: &str| {
         SyntheticAdapter::new(profile)
@@ -289,6 +290,7 @@ async fn adapter_child() {
             let mut resumed = make("synthetic");
             let resumed_spec = StartSpec {
                 native_conversation_id: Some(id.clone()),
+                fork: None,
                 ..spec
             };
             assert_eq!(
@@ -309,6 +311,7 @@ async fn adapter_child() {
                     .start(
                         &StartSpec {
                             profile: profile.into(),
+                            fork: None,
                             ..spec.clone()
                         },
                         &group,

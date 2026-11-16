@@ -545,6 +545,8 @@ mod manager_tests {
                 capabilities: vec!["pilot_v1".into()],
                 worktree: None,
                 isolate_mcp: false,
+                fork_from_native: String::new(),
+                canterlot_mcp: String::new(),
                 prompt_suggestions: false,
             }),
         )

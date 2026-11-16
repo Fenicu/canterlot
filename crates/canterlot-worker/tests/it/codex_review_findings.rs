@@ -206,6 +206,7 @@ impl Fake {
             },
             isolate_mcp: false,
             prompt_suggestions: false,
+            fork: None,
         };
         Self {
             dir,

@@ -1063,6 +1063,7 @@ async fn crash_between_reclaim_fact_and_ownership_repeats_the_proof() {
                         state: "running".into(),
                         outcome: canterlot_proto::OWNER_RECLAIMED.into(),
                         native_conversation_id: String::new(),
+                        fresh_fork: false,
                     },
                 ))?;
             Ok(())

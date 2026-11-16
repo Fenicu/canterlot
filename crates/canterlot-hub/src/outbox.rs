@@ -326,6 +326,18 @@ pub fn to_proto(row: &CommandRow) -> Result<Command, OutboxError> {
                 .transpose()?,
             capabilities: vec![],
             isolate_mcp: isolate_mcp(&row.payload),
+            fork_from_native: row
+                .payload
+                .get("fork_from_native")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            canterlot_mcp: row
+                .payload
+                .get("canterlot_mcp")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
             prompt_suggestions: row
                 .payload
                 .get("prompt_suggestions")

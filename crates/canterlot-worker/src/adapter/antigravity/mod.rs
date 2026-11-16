@@ -1239,6 +1239,7 @@ impl Adapter for AntigravityAdapter {
                     native_conversation_id: info.session_id.clone(),
                     cli_pid: proc.pid,
                     cli_start_ticks: proc.start_ticks,
+                    fresh_fork: false,
                 };
                 self.session = Some(info);
                 Ok(started)

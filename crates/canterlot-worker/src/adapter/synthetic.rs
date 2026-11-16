@@ -606,6 +606,7 @@ impl Adapter for SyntheticAdapter {
             native_conversation_id,
             cli_pid: pid,
             cli_start_ticks: start_ticks,
+            fresh_fork: false,
         })
     }
 
