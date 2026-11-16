@@ -1,35 +1,13 @@
 import { fmt } from '#lib/format/ru.js';
+import type { components } from '#lib/api/generated/openapi.js';
 
 /** Предел значения на клиенте: 16 КиБ в UTF-8, как у хаба. */
 export const SECRET_REQUEST_VALUE_LIMIT = 16 * 1024;
 
-export type SecretRequestState =
-  | 'open'
-  | 'sending'
-  | 'delivered'
-  | 'declined'
-  | 'revoking'
-  | 'revoked'
-  | 'expired'
-  | 'lost'
-  | 'cancelled';
-
-/**
- * Ответ хаба на список, ответ и отзыв. Значения секрета здесь нет и быть не может:
- * оно живёт только в поле карточки и в теле одного запроса.
- */
-export interface SecretRequestView {
-  id: string;
-  conversation_id: string;
-  name: string;
-  purpose: string;
-  state: SecretRequestState;
-  path?: string | null;
-  expires_at?: string | null;
-  note?: string | null;
-  created_at: string;
-  updated_at: string;
-}
+// Значения секрета в ответах хаба нет и быть не может: оно живёт только в поле
+// карточки и в теле одного запроса.
+export type SecretRequestState = components['schemas']['SecretState'];
+export type SecretRequestView = components['schemas']['SecretRequestView'];
 
 export type SecretRequestAnswer = { value: string } | { decline: true };
 
@@ -185,10 +163,8 @@ export async function answerSecretRequest(
     `/api/v1/secret-requests/${encodeURIComponent(id)}/answer`,
     {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Idempotency-Key': crypto.randomUUID()
-      },
+      // Без Idempotency-Key: общий слой идемпотентности хранит хеш тела, а тело здесь секрет.
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
     },
     fetcher

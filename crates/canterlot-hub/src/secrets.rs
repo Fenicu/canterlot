@@ -123,10 +123,13 @@ pub struct SecretRequestView {
     pub purpose: String,
     pub state: SecretState,
     #[schema(nullable = false)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     #[schema(nullable = false)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<DateTime<Utc>>,
     #[schema(nullable = false)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

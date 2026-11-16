@@ -491,9 +491,9 @@ export class FakeHubApi {
 			name: patch.name ?? 'Секрет',
 			purpose: patch.purpose ?? '',
 			state: patch.state ?? 'open',
-			path: patch.path ?? null,
-			expires_at: patch.expires_at ?? null,
-			note: patch.note ?? null,
+			path: patch.path,
+			expires_at: patch.expires_at,
+			note: patch.note,
 			created_at: patch.created_at ?? now,
 			updated_at: patch.updated_at ?? now
 		};
@@ -540,8 +540,8 @@ export class FakeHubApi {
 		return this.setSecretRequest(
 			id,
 			'decline' in body
-				? { state: 'declined', path: null, expires_at: null }
-				: { state: 'sending', path: null, expires_at: null }
+				? { state: 'declined', path: undefined, expires_at: undefined }
+				: { state: 'sending', path: undefined, expires_at: undefined }
 		);
 	}
 
@@ -551,7 +551,7 @@ export class FakeHubApi {
 		if (found.state !== 'delivered')
 			throw { status: 409, code: 'not_delivered', message: 'Значение ещё не доставлено' };
 		this.secretRequestRevokes.push(id);
-		return this.setSecretRequest(id, { state: 'revoking', path: null, expires_at: null });
+		return this.setSecretRequest(id, { state: 'revoking', path: undefined, expires_at: undefined });
 	}
 
 	/** Открытый и потерянный запрос держат сессию в «Ждут вас», остальные её отпускают. */
