@@ -1,0 +1,2 @@
+/* Проверка */
+.a { margin-block: calc(-1 * (var(--target) - var(--fs-sm) * var(--lh-body)) / 2); }

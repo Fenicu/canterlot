@@ -4,7 +4,7 @@ import { definedTokens, lintFile, lintTree, undefinedTokens } from '../../script
 import { icons } from '../../src/lib/ui/icons';
 const directory = 'tests/unit/fixtures/token-lint';
 describe('tokens', () => {
-  test('repo_has_no_raw_styling_values', () => expect(lintTree('src', JSON.parse(readFileSync('token-lint.allow.json', 'utf8')))).toEqual([]));
+  test('repo_has_no_raw_styling_values', () => expect(lintTree('src', JSON.parse(readFileSync('token-lint.allow.json', 'utf8'))).filter(v => v.severity !== 'warning')).toEqual([]));
   test('lint_detects_each_forbidden_form', () => {
     for (const name of readdirSync(directory).filter(n => n.startsWith('bad-'))) {
       const text = readFileSync(`${directory}/${name}`, 'utf8');
@@ -32,12 +32,37 @@ describe('tokens', () => {
     ]) expect(lintFile('bad.ts', code).map(v => v.rule)).toContain('all_durations_go_through_the_motion_scale');
     expect(lintFile('good.ts', "element.animate([], { duration: fadeMs('--duration-viewer-fade') });")).toEqual([]);
   });
-  test('raw_length_detects_transforms_flex_and_background_positions', () => {
-    expect(lintFile('bad.css', '.a { transform: translateY(12px); }').map(v => v.rule)).toContain('raw-length');
+  test('raw_length_detects_transforms_flex_and_background_positions', () => {    expect(lintFile('bad.css', '.a { transform: translateY(12px); }').map(v => v.rule)).toContain('raw-length');
     expect(lintFile('bad.css', '.a { flex-basis: 14px; }').map(v => v.rule)).toContain('raw-length');
     expect(lintFile('bad.css', '.a { flex: 0 0 20px; }').map(v => v.rule)).toContain('raw-length');
     expect(lintFile('bad.css', '.a { background-position: 10px 20px; }').map(v => v.rule)).toContain('raw-length');
     expect(lintFile('good.css', '.a { transform: translateY(var(--s4)); flex: 1; background-position: 0 0; }')).toEqual([]);
+  });
+  test('layout_rules_catch_their_forms_and_accept_the_repairs', () => {
+    const rules = (css: string) => lintFile('x.css', css).map(v => v.rule);
+    // Вертикальный скроллер объявляет вторую ось: иначе широкий ребёнок делает его скроллером вбок.
+    expect(rules('.a { overflow-y: auto; }')).toEqual(['both_axes_of_a_scroller_are_declared']);
+    expect(rules('.a { overflow-y: scroll; }')).toEqual(['both_axes_of_a_scroller_are_declared']);
+    expect(rules('.a { overflow-x: hidden; overflow-y: auto; }')).toEqual([]);
+    expect(rules('.a { overflow: hidden auto; }')).toEqual([]);
+    // Обрезка по строкам и отступ блока: следующая строка видна в отступе.
+    expect(rules('.a { -webkit-line-clamp: 3; padding: var(--s2) var(--s4); }')).toEqual(['line_clamp_has_no_block_padding']);
+    expect(rules('.a { -webkit-line-clamp: 3; padding-block: var(--s2); }')).toEqual(['line_clamp_has_no_block_padding']);
+    expect(rules('.a { -webkit-line-clamp: 3; padding: var(--s0) var(--s4); }')).toEqual([]);
+    expect(rules('.a { -webkit-line-clamp: 3; padding-inline: var(--s4); }')).toEqual([]);
+    // Пилюля обещает одну строку.
+    expect(rules('.a { border-radius: var(--radius-pill); }')).toEqual(['pill_radius_needs_one_line']);
+    expect(rules('.a { border-radius: var(--radius-pill); white-space: nowrap; }')).toEqual([]);
+    // Отрицательное поле прячет цель касания в текстовую строку.
+    expect(rules('.a { margin-block: calc((var(--target) - var(--fs-sm)) / -2); }')).toEqual(['tap_target_is_not_a_negative_margin']);
+    expect(rules('.a { --pad: calc((var(--target) - var(--fs-sm)) / 2); margin-block: calc(-1 * var(--pad)); }')).toEqual(['tap_target_is_not_a_negative_margin']);
+    expect(rules('.a { margin-block: calc(var(--s2) * -1); }')).toEqual([]);
+    expect(rules('.a { margin-inline: calc(var(--s2) * -1); }')).toEqual([]);
+    // Перенос в шапке — предупреждение, а не ошибка: гейт он не валит.
+    const header = lintFile('x.css', 'header.topbar { flex-wrap: wrap; }');
+    expect(header.map(v => v.rule)).toEqual(['header_does_not_wrap']);
+    expect(header[0]!.severity).toBe('warning');
+    expect(lintFile('x.css', '.topbar { flex-wrap: wrap; }')).toEqual([]);
   });
   test('ui_strings_have_no_emoji_or_checkmark_glyphs', () => {
     for (const glyph of ['\u2713', '\u2714', '\u2717', '\u2705', '\u{1f680}', '\u{1f1f7}\u{1f1fa}', '1\ufe0f\u20e3']) expect(lintFile('bad.svelte', `<p>${glyph}</p>`).map(v => v.rule)).toContain('ui_strings_have_no_emoji_or_checkmark_glyphs');

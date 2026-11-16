@@ -17,9 +17,9 @@ const stripVars = value => value.replace(/var\(\s*--[\w-]+\s*\)/g, '');
 export function lintFile(path, text) {
   if (path.replaceAll('\\', '/').endsWith('/styles/tokens.css')) return [];
   const found = [];
-  const add = (rule, offset, value) => {
+  const add = (rule, offset, value, severity = 'error') => {
     const line = text.slice(0, offset).split('\n').length;
-    if (!found.some(v => v.rule === rule && v.line === line)) found.push({ rule, line, value });
+    if (!found.some(v => v.rule === rule && v.line === line)) found.push({ rule, line, value, severity });
   };
   const allowed = publicDurations();
   const aliases = new Map();
@@ -43,6 +43,72 @@ export function lintFile(path, text) {
     return { valid: results.every(r => r.valid), time: results.some(r => r.time) };
   };
   const scaled = value => { const result = resolveTime(value); return result.valid && result.time; };
+  // Формы раскладки, которые ломаются на переносе и на узком экране. Значения токенов здесь не
+  // проверяются — только сочетание свойств внутри одного правила, иначе правило читается глазами.
+  const zeroValue = value => /^(?:0|var\(\s*--s0\s*\))$/.test(value.trim());
+  const negative = value => /(?:^|[^\w-])-1\s*\*|\*\s*-1(?![\d.])|\/\s*-[12](?![\d.])|^\s*-\s*[\d(]/.test(value);
+  /** Значение считает от цели касания напрямую или через переменную, объявленную в этом же файле. */
+  const usesTarget = (value, seen = new Set()) => {
+    if (/var\(\s*--target\s*[,)]/.test(value)) return true;
+    for (const m of value.matchAll(/var\(\s*(--[\w-]+)/g)) {
+      if (seen.has(m[1])) continue;
+      const next = aliases.get(m[1]) ?? tokenValues.get(m[1]);
+      if (next !== undefined && usesTarget(next, new Set([...seen, m[1]]))) return true;
+    }
+    return false;
+  };
+  const blockPadding = decls => {
+    for (const [prop, value] of decls) {
+      if (prop === 'padding-block' || prop === 'padding-block-start' || prop === 'padding-block-end') {
+        if (!zeroValue(value)) return value;
+      }
+      if (prop === 'padding') {
+        const parts = value.trim().split(/\s+/);
+        const block = parts.length <= 2 ? [parts[0]] : [parts[0], parts[2]];
+        if (block.some(part => part && !zeroValue(part))) return value;
+      }
+    }
+    return null;
+  };
+  function structure(tree, offset) {
+    tree.walkRules(rule => {
+      const decls = rule.nodes
+        .filter(node => node.type === 'decl' && !node.prop.startsWith('--'))
+        .map(node => [node.prop, node.value, node]);
+      const get = prop => decls.filter(([name]) => name === prop);
+      const at = decl => offset + decl[2].source.start.offset;
+      // 1. Вертикальный скроллер объявляет обе оси: иначе вбок он тоже поедет.
+      if (!decls.some(([prop]) => prop === 'overflow' || prop === 'overflow-x')) {
+        for (const decl of get('overflow-y')) {
+          if (/^(?:auto|scroll)$/i.test(decl[1].trim())) add('both_axes_of_a_scroller_are_declared', at(decl), `${rule.selector} { overflow-y: ${decl[1]} }`);
+        }
+      }
+      // 2. Обрезка по строкам при отступе сверху или снизу: следующая строка видна в отступе.
+      const clamp = get('-webkit-line-clamp').find(decl => !/^(?:none|initial|inherit|unset)$/i.test(decl[1].trim()));
+      if (clamp) {
+        const padding = blockPadding(decls);
+        if (padding !== null) add('line_clamp_has_no_block_padding', at(clamp), `${rule.selector} { -webkit-line-clamp: ${clamp[1]}; padding: ${padding} }`);
+      }
+      // 3. Пилюля обещает одну строку: скругление в половину высоты на переносе смотрится ошибкой.
+      for (const decl of get('border-radius')) {
+        if (!/var\(\s*--radius-pill\s*\)/.test(decl[1])) continue;
+        if (decls.some(([prop, value]) => prop === 'white-space' && /nowrap/.test(value))) continue;
+        add('pill_radius_needs_one_line', at(decl), `${rule.selector} { border-radius: ${decl[1]} }`);
+      }
+      // 4. Отрицательное поле, которым цель касания прячется в текстовую строку: есть общая .tap-target.
+      for (const decl of decls) {
+        if (!/^margin-block(?:-start|-end)?$/.test(decl[0])) continue;
+        if (!negative(decl[1]) || !usesTarget(decl[1])) continue;
+        add('tap_target_is_not_a_negative_margin', at(decl), `${rule.selector} { ${decl[0]}: ${decl[1]} }`);
+      }
+      // 5. Перенос в шапке отпускает хвост (время, закладку, «⋯») на свою строку: сетка с minmax(0, 1fr) auto так не ломается.
+      for (const decl of get('flex-wrap')) {
+        if (!/^wrap$/i.test(decl[1].trim())) continue;
+        if (!/(?:^|[\s>+~,])header(?![\w-])/i.test(rule.selector)) continue;
+        add('header_does_not_wrap', at(decl), `${rule.selector} { flex-wrap: ${decl[1]} }`, 'warning');
+      }
+    });
+  }
   function declaration(prop, value, offset, inline = false) {
     const clean = stripVars(value);
     const rawColor = colors.test(clean) || ((/color|background|^fill$|^stroke$|^border|^outline/.test(prop) || prop.startsWith('--')) && names.test(clean));
@@ -62,7 +128,9 @@ export function lintFile(path, text) {
     if (!rawMotion && /^(?:transition|animation)(?:-duration|-delay)?$/.test(prop) && !/^(none|0|initial|inherit|unset)$/.test(value.trim()) && !scaled(value)) add('all_durations_go_through_the_motion_scale', offset, value);
   }
   for (const block of cssBlocks) {
-    postcss.parse(block.text).walkDecls(d => declaration(d.prop, d.value, block.offset + d.source.start.offset));
+    const tree = postcss.parse(block.text);
+    tree.walkDecls(d => declaration(d.prop, d.value, block.offset + d.source.start.offset));
+    structure(tree, block.offset);
     for (const m of block.text.matchAll(/\\([0-9a-fA-F]{1,6})[ \t]?/g)) {
       try {
         const codePoint = parseInt(m[1], 16);

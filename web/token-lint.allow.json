@@ -28,5 +28,155 @@
     "rule": "html-sink",
     "value": "{@html}",
     "reason": "sanitised renderer output"
+  },
+  {
+    "path": "lib/composer/AttachmentTray.svelte",
+    "rule": "pill_radius_needs_one_line",
+    "value": ".bar { border-radius: var(--radius-pill) }",
+    "reason": "Полоска прогресса загрузки без текста: форма задаётся высотой, переносить нечего."
+  },
+  {
+    "path": "lib/composer/AttachmentTray.svelte",
+    "rule": "pill_radius_needs_one_line",
+    "value": ".fill { border-radius: var(--radius-pill) }",
+    "reason": "Заливка полоски загрузки без текста: форма задаётся высотой, переносить нечего."
+  },
+  {
+    "path": "lib/screens/chat/DelegationTree.svelte",
+    "rule": "pill_radius_needs_one_line",
+    "value": ".tree-node { border-radius: var(--radius-pill) }",
+    "reason": "Строка дерева делегирования: название внутри обрезается многоточием, переноса нет."
+  },
+  {
+    "path": "lib/screens/limits/UsageTable.svelte",
+    "rule": "pill_radius_needs_one_line",
+    "value": ".share span { border-radius: var(--radius-pill) }",
+    "reason": "Полоска доли расхода без текста: ширина считается из данных, переносить нечего."
+  },
+  {
+    "path": "lib/screens/sessions/GroupManager.svelte",
+    "rule": "pill_radius_needs_one_line",
+    "value": ".group > input { border-radius: var(--radius-pill) }",
+    "reason": "Поле ввода не переносит текст по строкам: white-space на него не действует."
+  },
+  {
+    "path": "lib/screens/sessions/Section.svelte",
+    "rule": "pill_radius_needs_one_line",
+    "value": ".kids-list::before { border-radius: var(--radius-pill) }",
+    "reason": "Линия отступа вложенных сессий: декоративный псевдоэлемент без текста."
+  },
+  {
+    "path": "lib/screens/sessions/TrashToast.svelte",
+    "rule": "pill_radius_needs_one_line",
+    "value": ".toast { border-radius: var(--radius-pill) }",
+    "reason": "Тост держит сообщение переменной длины: при переносе он остаётся одной плашкой, а не строкой списка."
+  },
+  {
+    "path": "lib/screens/settings/RoutingScreen.svelte",
+    "rule": "pill_radius_needs_one_line",
+    "value": ".path-chips li { border-radius: var(--radius-pill) }",
+    "reason": "Чип исключённого каталога: путь приходит от пользователя и может не поместиться, чип переносится вместе с крестиком."
+  },
+  {
+    "path": "lib/screens/settings/RoutingScreen.svelte",
+    "rule": "pill_radius_needs_one_line",
+    "value": ".inline input { border-radius: var(--radius-pill) }",
+    "reason": "Поле ввода не переносит текст по строкам: white-space на него не действует."
+  },
+  {
+    "path": "lib/screens/share/SharePicker.svelte",
+    "rule": "pill_radius_needs_one_line",
+    "value": "input { border-radius: var(--radius-pill) }",
+    "reason": "Поле ввода не переносит текст по строкам: white-space на него не действует."
+  },
+  {
+    "path": "lib/styles/base.css",
+    "rule": "pill_radius_needs_one_line",
+    "value": "button { border-radius: var(--radius-pill) }",
+    "reason": "Общий вид кнопки: пилюля по умолчанию, однострочность задаёт правило конкретной кнопки."
+  },
+  {
+    "path": "lib/styles/base.css",
+    "rule": "pill_radius_needs_one_line",
+    "value": ".skeleton { border-radius: var(--radius-pill) }",
+    "reason": "Заглушка загрузки без текста: форма задаётся строкой, в которой она стоит."
+  },
+  {
+    "path": "lib/timeline/CompactionRow.svelte",
+    "rule": "pill_radius_needs_one_line",
+    "value": ".fold i { border-radius: var(--radius-pill) }",
+    "reason": "Кружок значка свёрнутого блока: декоративный элемент без текста."
+  },
+  {
+    "path": "lib/timeline/LiveLine.svelte",
+    "rule": "pill_radius_needs_one_line",
+    "value": ".write i { border-radius: var(--radius-pill) }",
+    "reason": "Кружок значка живой строки хода: декоративный элемент без текста."
+  },
+  {
+    "path": "lib/ui/Disclosure.svelte",
+    "rule": "pill_radius_needs_one_line",
+    "value": "summary { border-radius: var(--radius-pill) }",
+    "reason": "Заголовок раскрывающегося блока переменной длины: рассчитан на перенос в две строки."
+  },
+  {
+    "path": "lib/ui/Field.svelte",
+    "rule": "pill_radius_needs_one_line",
+    "value": ":global(.field input), :global(.field select), :global(.field textarea) { border-radius: var(--radius-pill) }",
+    "reason": "Поля формы не переносят текст по строкам: white-space на них не действует."
+  },
+  {
+    "path": "lib/ui/Gauge.svelte",
+    "rule": "pill_radius_needs_one_line",
+    "value": "div { border-radius: var(--radius-pill) }",
+    "reason": "Корпус шкалы лимитов: индикатор без текста, форма задаётся высотой."
+  },
+  {
+    "path": "lib/ui/Sheet.svelte",
+    "rule": "pill_radius_needs_one_line",
+    "value": ".handle { border-radius: var(--radius-pill) }",
+    "reason": "Ручка нижнего листа: полоска без текста."
+  },
+  {
+    "path": "lib/ui/StageTrack.svelte",
+    "rule": "pill_radius_needs_one_line",
+    "value": ".st-line { border-radius: var(--radius-pill) }",
+    "reason": "Линия шкалы состояний: декоративный элемент без текста."
+  },
+  {
+    "path": "lib/ui/Toggle.svelte",
+    "rule": "pill_radius_needs_one_line",
+    "value": ".toggle-track { border-radius: var(--radius-pill) }",
+    "reason": "Дорожка переключателя: декоративный элемент без текста."
+  },
+  {
+    "path": "lib/timeline/PendingStrip.svelte",
+    "rule": "tap_target_is_not_a_negative_margin",
+    "value": ".pill:not(:has(.steer)):has(.row-actions) .row-actions { margin-block: calc(-1 * (var(--target) - var(--fs-sm) * var(--lh-body)) / 2) }",
+    "reason": "Обойма кнопки «⋯»: в ней нет текста, который мог бы перенестись, а высота цели касания не должна растить строку карточки."
+  },
+  {
+    "path": "lib/timeline/SessionMessageBubble.svelte",
+    "rule": "tap_target_is_not_a_negative_margin",
+    "value": ".actions { margin-block: calc((var(--target) - var(--fs-sm) * var(--lh-body)) / -2) }",
+    "reason": "Обойма кнопок закладки в шапке пузыря: текста в ней нет, высота цели касания не должна растить шапку."
+  },
+  {
+    "path": "lib/timeline/SystemBubble.svelte",
+    "rule": "tap_target_is_not_a_negative_margin",
+    "value": ".actions { margin-block: calc((var(--target) - var(--fs-sm) * var(--lh-body)) / -2) }",
+    "reason": "Обойма кнопок закладки в шапке служебного пузыря: текста в ней нет, высота цели касания не должна растить шапку."
+  },
+  {
+    "path": "lib/timeline/UserBubble.svelte",
+    "rule": "tap_target_is_not_a_negative_margin",
+    "value": ".message-actions { margin-block: calc((var(--target) - var(--fs-sm) * var(--lh-body)) / -2) }",
+    "reason": "Обойма кнопок сообщения владельца: текста в ней нет, высота цели касания не должна растить строку статуса."
+  },
+  {
+    "path": "lib/screens/limits/UsageTable.svelte",
+    "rule": "tap_target_is_not_a_negative_margin",
+    "value": "a { margin-block: calc(-1 * var(--pad)) }",
+    "reason": "Ячейка таблицы расхода: ссылка — единственная цель строки, и вынос цели в .tap-target накрыл бы подпись мелким шрифтом под ней (это ловит геометрический обход). Поля строки держат цель в её же высоте, не задевая соседние ячейки."
   }
 ]
