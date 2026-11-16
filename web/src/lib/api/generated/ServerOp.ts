@@ -1425,6 +1425,7 @@ export interface SecretRequestChanged {
     note?: string | null;
     created_at: Time;
     updated_at: Time;
+    revision: number;
   };
 }
 export interface TodoUpdated {

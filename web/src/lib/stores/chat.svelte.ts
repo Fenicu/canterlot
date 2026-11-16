@@ -610,22 +610,20 @@ export class ChatStore {
     const fetchList = this.deps.api.secretRequests;
     if (!fetchList) return;
     const items = await fetchList.call(this.deps.api, this.id);
-    this.secretRequests.ingest(items);
+    const applied = this.secretRequests.ingest(items);
     // Сверху список новых первыми, а в ленте старые должны встать раньше.
-    for (const view of [...items].sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id)))
+    for (const view of [...applied].sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id)))
       this.#placeSecretRequest(view);
   }
 
   async answerSecretRequest(id: string, body: SecretRequestAnswer): Promise<void> {
     const view = await postSecretAnswer(id, body);
-    this.secretRequests.apply(view);
-    this.#placeSecretRequest(view);
+    if (this.secretRequests.apply(view)) this.#placeSecretRequest(view);
   }
 
   async revokeSecretRequest(id: string): Promise<void> {
     const view = await postSecretRevoke(id);
-    this.secretRequests.apply(view);
-    this.#placeSecretRequest(view);
+    if (this.secretRequests.apply(view)) this.#placeSecretRequest(view);
   }
 
   /** Список сообщений владельца живёт вне окна ленты и покрывает весь разговор. */
@@ -1286,8 +1284,8 @@ export class ChatStore {
       case "secret_request_changed":
         if (event.kind === "secret_request_changed") {
           const view = event.payload as SecretRequestView;
-          this.secretRequests.apply(view, event.scope_seq);
-          this.#placeSecretRequest(view, event.scope_seq);
+          if (this.secretRequests.apply(view, event.scope_seq))
+            this.#placeSecretRequest(view, event.scope_seq);
         }
         return;
       case "block_conflicting_final":

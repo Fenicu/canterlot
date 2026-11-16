@@ -495,7 +495,8 @@ export class FakeHubApi {
 			expires_at: patch.expires_at,
 			note: patch.note,
 			created_at: patch.created_at ?? now,
-			updated_at: patch.updated_at ?? now
+			updated_at: patch.updated_at ?? now,
+			revision: patch.revision ?? 0
 		};
 		this.secretRequestMap(conversationId).set(view.id, view);
 		this.hub.append(`conversation:${conversationId}`, {
@@ -512,7 +513,12 @@ export class FakeHubApi {
 	setSecretRequest(id: string, patch: Partial<SecretRequestView>): SecretRequestView {
 		const found = this.secretRequest(id);
 		if (!found) throw { status: 404, code: 'not_found', message: 'Секретный запрос не найден' };
-		const next: SecretRequestView = { ...found, ...patch, updated_at: new Date().toISOString() };
+		const next: SecretRequestView = {
+			...found,
+			...patch,
+			revision: found.revision + 1,
+			updated_at: new Date().toISOString()
+		};
 		this.secretRequestMap(next.conversation_id).set(next.id, next);
 		this.hub.append(`conversation:${next.conversation_id}`, {
 			kind: 'secret_request_changed',

@@ -14,14 +14,27 @@ export class SecretRequestsModel {
     this.conversationId = conversationId;
   }
 
-  /** Снимок списка: порядок в ленте задаёт `created_at`, а не порядок ответа. */
-  ingest(items: SecretRequestView[]): void {
-    for (const item of items) this.items.set(item.id, item);
+  /** Снимок списка: применяются только версии не старее уже известной. */
+  ingest(items: SecretRequestView[]): SecretRequestView[] {
+    const applied: SecretRequestView[] = [];
+    for (const item of items) {
+      if (this.#store(item)) applied.push(item);
+    }
+    return applied;
   }
 
-  apply(view: SecretRequestView, anchor?: string): void {
-    this.items.set(view.id, view);
+  /** Ответ или событие: старое не затирает новое состояние карточки. */
+  apply(view: SecretRequestView, anchor?: string): boolean {
+    if (!this.#store(view)) return false;
     if (anchor && !this.#anchors.has(view.id)) this.#anchors.set(view.id, anchor);
+    return true;
+  }
+
+  #store(view: SecretRequestView): boolean {
+    const current = this.items.get(view.id);
+    if (current && current.revision > view.revision) return false;
+    this.items.set(view.id, view);
+    return true;
   }
 
   anchorOf(id: string): string | undefined {

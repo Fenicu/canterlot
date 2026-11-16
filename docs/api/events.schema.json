@@ -5295,6 +5295,9 @@
             },
             "updated_at": {
               "$ref": "#/$defs/Time"
+            },
+            "revision": {
+              "type": "integer"
             }
           },
           "required": [
@@ -5304,7 +5307,8 @@
             "purpose",
             "state",
             "created_at",
-            "updated_at"
+            "updated_at",
+            "revision"
           ],
           "additionalProperties": false
         }

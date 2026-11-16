@@ -4236,6 +4236,8 @@ export interface components {
             note?: string;
             path?: string;
             purpose: string;
+            /** Format: int64 */
+            revision: number;
             state: components["schemas"]["SecretState"];
             /** Format: date-time */
             updated_at: string;

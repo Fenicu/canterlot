@@ -23,7 +23,8 @@
   } = $props();
 
   let value = $state('');
-  let inputEl: HTMLInputElement | undefined = $state();
+  let multiline = $state(false);
+  let inputEl: HTMLInputElement | HTMLTextAreaElement | undefined = $state();
   let busy = $state<'sending' | 'revoking' | 'declining' | null>(null);
   let error = $state<string | null>(null);
 
@@ -134,23 +135,52 @@
   {/if}
 
   {#if showsInput}
-    <input
-      bind:this={inputEl}
-      bind:value={value}
-      type="password"
-      class="secret-input"
-      data-secret-input
-      aria-label={view.name}
-      autocomplete="off"
-      autocapitalize="off"
-      autocorrect="off"
-      spellcheck="false"
-      data-1p-ignore=""
-      data-lpignore="true"
-      data-bwignore="true"
-      data-form-type="other"
-      disabled={isDisabled}
-    />
+    {#if multiline}
+      <textarea
+        bind:this={inputEl}
+        bind:value={value}
+        class="secret-input secret-input-multiline"
+        data-secret-input
+        rows="4"
+        aria-label={view.name}
+        autocomplete="off"
+        autocapitalize="off"
+        {...{ autocorrect: 'off' }}
+        spellcheck="false"
+        data-1p-ignore=""
+        data-lpignore="true"
+        data-bwignore="true"
+        data-form-type="other"
+        disabled={isDisabled}
+      ></textarea>
+    {:else}
+      <input
+        bind:this={inputEl}
+        bind:value={value}
+        type="password"
+        class="secret-input"
+        data-secret-input
+        aria-label={view.name}
+        autocomplete="off"
+        autocapitalize="off"
+        autocorrect="off"
+        spellcheck="false"
+        data-1p-ignore=""
+        data-lpignore="true"
+        data-bwignore="true"
+        data-form-type="other"
+        disabled={isDisabled}
+      />
+    {/if}
+    <button
+      type="button"
+      class="multiline-toggle"
+      data-secret-multiline-toggle
+      aria-pressed={multiline}
+      onclick={() => (multiline = !multiline)}
+    >
+      Несколько строк
+    </button>
   {/if}
 
   {#if canAnswer || canRevoke}
@@ -258,6 +288,35 @@
   .secret-input::placeholder {
     color: var(--muted);
     opacity: 1;
+  }
+
+  .secret-input-multiline {
+    min-height: calc(var(--target) * 3);
+    padding: var(--s3) var(--s6);
+    resize: vertical;
+    font-family: var(--font-mono);
+    line-height: var(--lh-body);
+  }
+
+  .multiline-toggle {
+    align-self: flex-start;
+    min-height: var(--target);
+    padding: var(--s2) var(--s4);
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--secondary);
+    font-size: var(--fs-meta);
+    cursor: pointer;
+  }
+
+  .multiline-toggle[aria-pressed='true'] {
+    background: var(--raised);
+    color: var(--text);
+  }
+
+  .multiline-toggle:focus-visible {
+    outline: var(--focus-width) solid var(--accent);
+    outline-offset: var(--s1);
   }
 
   .secret-input:focus-visible {

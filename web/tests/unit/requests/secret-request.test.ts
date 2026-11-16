@@ -21,6 +21,7 @@ function view(patch: Partial<SecretRequestView> = {}): SecretRequestView {
     state: 'open',
     created_at: '2026-11-16T11:55:00.000Z',
     updated_at: '2026-11-16T11:55:00.000Z',
+    revision: 0,
     ...patch
   };
 }
