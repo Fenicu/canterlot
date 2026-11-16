@@ -36,5 +36,7 @@
   .meta { color: var(--secondary); overflow-wrap: anywhere; }
   .danger { color: var(--danger); }
   .rows { display: flex; flex-direction: column; gap: var(--s2); margin: var(--s0); padding: var(--s0); list-style: none; }
-  .more { align-self: flex-start; min-height: var(--target); margin-block: calc(var(--s2) * -1); padding: var(--s0); background: var(--transparent); color: var(--accent-link); }
+  /* Отрицательное поле снизу срезает высоту цели касания в нижнем отступе карточки; сверху его нет,
+     иначе верхние 4 px кнопки заходили на кнопку раскрытия шапки и перехватывали её нажатие. */
+  .more { align-self: flex-start; min-height: var(--target); margin-block: var(--s0) calc(var(--s2) * -1); padding: var(--s0); background: var(--transparent); color: var(--accent-link); }
 </style>
