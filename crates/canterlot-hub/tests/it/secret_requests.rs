@@ -49,9 +49,6 @@ impl Fx {
         let seed = seed_for(&pool, owner).await;
         let client = TestClient::over_socket(hub.http_addr()).await.as_owner();
         let registry = hub.registry.clone();
-        // Фоновая служба хаба подбирает `sending` при старте: дать ей закончить,
-        // иначе она гонится с строками, которые тест сам переводит в `sending`.
-        tokio::time::sleep(Duration::from_millis(50)).await;
         let dir = tempfile::tempdir().expect("temp dir");
         Self {
             pool,

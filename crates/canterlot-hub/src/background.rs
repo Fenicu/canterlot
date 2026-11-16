@@ -42,6 +42,9 @@ pub struct Background {
 impl Background {
     pub fn start(deps: BackgroundDeps) -> Self {
         let (signal, stopped) = watch::channel(false);
+        // Граница восстановления секретов — момент старта процесса: строки,
+        // созданные уже после него, не считаются «отправленными до рестарта».
+        let secret_recovery_cutoff = chrono::Utc::now();
         let BackgroundDeps {
             pool,
             registry,
@@ -132,7 +135,11 @@ impl Background {
             ),
             (
                 "secret_requests_task_error",
-                tokio::spawn(crate::secrets::run(pool.clone(), stopped.clone())),
+                tokio::spawn(crate::secrets::run(
+                    pool.clone(),
+                    secret_recovery_cutoff,
+                    stopped.clone(),
+                )),
             ),
         ];
         if let Some(sender) = owner_push {

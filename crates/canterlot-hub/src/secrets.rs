@@ -1228,24 +1228,38 @@ pub async fn revoke_before_deletion_in_tx(
     Ok(())
 }
 
-/// Перезапуск хаба: `sending` без квитанции не дождётся ответа воркера.
+/// Перезапуск хаба: `sending` без квитанции не дождётся ответа воркера. Граница —
+/// момент старта: строки, отправленные уже этим процессом, остаются в покое.
 pub async fn recover_after_restart(pool: &PgPool) -> Result<u64, sqlx::Error> {
+    recover_after_restart_before(pool, Utc::now()).await
+}
+
+async fn recover_after_restart_before(
+    pool: &PgPool,
+    cutoff: DateTime<Utc>,
+) -> Result<u64, sqlx::Error> {
     let conversation_ids: Vec<Uuid> = sqlx::query_scalar(
-        "select conversation_id from secret_requests where state = 'sending' order by id",
+        "select conversation_id from secret_requests
+         where state = 'sending' and updated_at < $1 order by id",
     )
+    .bind(cutoff)
     .fetch_all(pool)
     .await?;
     let mut lost = 0u64;
     for conversation_id in conversation_ids {
-        lost += lose_sending_in_conversation(pool, conversation_id, None).await?;
+        lost += lose_sending_in_conversation(pool, conversation_id, None, Some(cutoff)).await?;
     }
     Ok(lost)
 }
 
 /// Служба хаба: после старта `sending` становится `lost`, дальше раз в минуту
 /// подбираются попытки, о которых не помнит ни память, ни воркер.
-pub async fn run(pool: PgPool, mut stopped: tokio::sync::watch::Receiver<bool>) {
-    if let Err(error) = recover_after_restart(&pool).await {
+pub async fn run(
+    pool: PgPool,
+    recovered_before: DateTime<Utc>,
+    mut stopped: tokio::sync::watch::Receiver<bool>,
+) {
+    if let Err(error) = recover_after_restart_before(&pool, recovered_before).await {
         tracing::error!(
             kind = "secret_recovery_error",
             error = %crate::dberr::describe(&error),
@@ -1287,7 +1301,7 @@ pub async fn sweep_sending(pool: &PgPool, older_than: Duration) -> Result<u64, s
     .await?;
     let mut lost = 0u64;
     for conversation_id in conversations {
-        lost += lose_sending_in_conversation(pool, conversation_id, Some(older_than)).await?;
+        lost += lose_sending_in_conversation(pool, conversation_id, Some(older_than), None).await?;
     }
     Ok(lost)
 }
@@ -1296,6 +1310,7 @@ async fn lose_sending_in_conversation(
     pool: &PgPool,
     conversation_id: Uuid,
     older_than: Option<Duration>,
+    before: Option<DateTime<Utc>>,
 ) -> Result<u64, sqlx::Error> {
     let mut tx = crate::db::begin(pool).await?;
     sqlx::query("select id from conversations where id = $1 for no key update")
@@ -1308,11 +1323,13 @@ async fn lose_sending_in_conversation(
          where conversation_id = $1 and state = 'sending'
            and ($3::double precision is null
                 or updated_at < now() - $3 * interval '1 second')
+           and ($4::timestamptz is null or updated_at < $4)
          returning *",
     )
     .bind(conversation_id)
     .bind(NOTE_LOST)
     .bind(older_than.map(|age| age.as_secs_f64()))
+    .bind(before)
     .fetch_all(&mut *tx)
     .await?;
     let count = rows.len() as u64;

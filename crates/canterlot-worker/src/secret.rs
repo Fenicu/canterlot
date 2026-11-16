@@ -944,7 +944,25 @@ pub(crate) async fn run_sweeper(
 ) {
     let mut ticker = tokio::time::interval(Duration::from_secs(600));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // До первого сеанса с хабом `infos` ещё пуст: уборка приняла бы живые
+    // каталоги за брошенные и удалила бы файлы при каждом старте воркера.
+    let mut hub_ready = shared.hub.subscribe();
     loop {
+        if hub_ready.borrow().is_none() {
+            tokio::select! {
+                changed = hub_ready.changed() => {
+                    if changed.is_err() {
+                        return;
+                    }
+                }
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow_and_update() {
+                        return;
+                    }
+                }
+            }
+            continue;
+        }
         let swept = {
             let live = shared
                 .infos
