@@ -1111,7 +1111,29 @@ impl CodexAdapter {
             thread::ChangeNote::None,
         );
         let model = (!spec.model.is_empty()).then(|| spec.model.clone());
-        let effective = if let Some(native) = spec.native_conversation_id.as_deref() {
+        // Боковой чат: эфемерный форк умирает вместе с процессом сервера, поэтому
+        // каждый старт форкает заново от родителя и докладывает свежий форк —
+        // мёртвый эфемерный id никогда не resume'ится. Родительский тред этим
+        // вызовом не трогается: вопросы и ответы бокового чата его не видят.
+        let (effective, fresh_fork) = if let Some(fork) = spec.fork.as_ref() {
+            let result = self
+                .rpc_round(
+                    "thread/fork",
+                    thread::thread_fork_params(
+                        &fork.parent_native_id,
+                        model.as_deref(),
+                        &spec.workdir,
+                        &instructions,
+                    ),
+                    self.handshake_step,
+                )
+                .await
+                .ok_or(AdapterError::StartFailed("app_server_failed"))?
+                .map_err(|_| AdapterError::StartFailed("fork_failed"))?;
+            let effective = thread::parse_thread_result(&result)
+                .map_err(|_| AdapterError::StartFailed("fork_failed"))?;
+            (effective, true)
+        } else if let Some(native) = spec.native_conversation_id.as_deref() {
             let launch = ResumeLaunch {
                 mode: self.mode,
                 launch_mode: spec.instructions.mode,
@@ -1119,7 +1141,7 @@ impl CodexAdapter {
                 dev: &instructions,
                 home: None,
             };
-            self.resume_thread(native, launch).await?
+            (self.resume_thread(native, launch).await?, false)
         } else {
             let result = self
                 .rpc_round(
@@ -1142,13 +1164,13 @@ impl CodexAdapter {
                 self.owner
                     .observe_thread(&effective.approval_policy, &effective.sandbox);
             }
-            effective
+            (effective, false)
         };
         let mut translator = Translator::new(&effective.thread_id, &effective.model);
         translator.set_workdir(&spec.workdir);
         self.translator = Some(translator);
         let started = Started {
-            fresh_fork: false,
+            fresh_fork,
             native_conversation_id: effective.thread_id.clone(),
             cli_pid: self.proc.as_ref().map(|proc| proc.pid).unwrap_or_default(),
             cli_start_ticks: self
@@ -2037,7 +2059,12 @@ impl Adapter for CodexAdapter {
         self.mode = PermissionMode::parse(&spec.permission_mode)
             .map_err(|_| AdapterError::StartFailed("unknown_permission_mode"))?;
         self.effort = (!spec.effort.is_empty()).then(|| spec.effort.clone());
-        let broker = Broker::bind_with(&self.exec_dir, mcp::ToolSet::LimitsOnly, "codex").await?;
+        let broker = Broker::bind_with(
+            &self.exec_dir,
+            mcp::ToolSet::for_side(spec.fork.as_ref(), mcp::ToolSet::LimitsOnly),
+            "codex",
+        )
+        .await?;
         self.broker = Some(broker);
         let relay = self
             .relay_executable

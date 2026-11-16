@@ -265,6 +265,32 @@ pub fn thread_start_params(
     Value::Object(params)
 }
 
+/// Параметры `thread/fork` бокового чата. Форма проверена вживую на 0.167.0:
+/// `ephemeral: true` с постраничным источником требует `excludeTurns: true`;
+/// песочница всегда `read-only`, родительский тред в его ходу не трогается,
+/// итог — новый id треда. Модель и инструкции — предназначенные боковому чату.
+pub fn thread_fork_params(
+    parent_thread_id: &str,
+    model: Option<&str>,
+    workdir: &Path,
+    developer_instructions: &str,
+) -> Value {
+    let mut params = serde_json::Map::new();
+    params.insert("threadId".to_owned(), parent_thread_id.into());
+    params.insert("ephemeral".to_owned(), true.into());
+    params.insert("sandbox".to_owned(), "read-only".into());
+    params.insert("cwd".to_owned(), workdir.to_string_lossy().into());
+    if let Some(model) = model {
+        params.insert("model".to_owned(), model.into());
+    }
+    params.insert(
+        "developerInstructions".to_owned(),
+        developer_instructions.into(),
+    );
+    params.insert("excludeTurns".to_owned(), true.into());
+    Value::Object(params)
+}
+
 pub fn thread_resume_params(
     thread_id: &str,
     mode: PermissionMode,
