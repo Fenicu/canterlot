@@ -533,7 +533,9 @@ pub async fn submit_service_note_in_tx(
                 "input_id": submitted.input_id,
                 "input_seq": input_seq,
                 "idempotency_key": req.idempotency_key,
-                "state": submitted.state,
+                // Схема ServerOp допускает в input_queued только «queued»; терминальное
+                // состояние приходит следующим кадром input_state_changed.
+                "state": "queued",
                 "content": content,
                 "origin": req.origin,
             }),
