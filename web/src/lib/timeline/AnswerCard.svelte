@@ -177,6 +177,8 @@
   }
   /* Высота кнопки (i) и без неё: футер карточки без хода не ниже остальных. */
   .byline { display: flex; justify-content: space-between; align-items: center; gap: var(--s2); margin-top: var(--s2); margin-right: calc(var(--s3) * -1); min-height: var(--target); }
+  /* В ветке у подписи нет кнопок: пустая полоса высотой с кнопку делала карточку перегруженной снизу. */
+  .byline:not(:has(.footer-actions > *)) { min-height: var(--s0); }
   .byline p { display: flex; align-items: baseline; gap: var(--s4); min-width: 0; margin: 0; }
   strong { font-weight: var(--weight-semibold); }
   time { color: var(--time); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
