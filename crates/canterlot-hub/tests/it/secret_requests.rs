@@ -1379,6 +1379,51 @@ async fn a_late_receipt_for_a_replaced_attempt_revokes_it_without_a_request_row(
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_reconcile_of_an_already_delivered_file_does_not_revoke_it(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let row = fx.open("Живой после сверки").await;
+    let attempt = Uuid::now_v7();
+    sqlx::query(
+        "update secret_requests set state='delivered', attempt_id=$2, path='/run/live' where id=$1",
+    )
+    .bind(row.id)
+    .bind(attempt)
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+    // Переподключение присылает манифест уже доставленного файла: сверка не
+    // должна принять его за чужую попытку и заказать отзыв живого секрета.
+    secrets::reconcile_manifests(
+        &fx.pool,
+        &fx.registry,
+        fx.seed.machine_id,
+        Uuid::now_v7(),
+        &[canterlot_proto::worker::v1::SecretManifest {
+            attempt_id: attempt.to_string(),
+            request_id: row.id.to_string(),
+            conversation_id: fx.seed.conversation_id.to_string(),
+            path: "/run/live".into(),
+            expires_at_ms: 1,
+        }],
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(fx.state(row.id).await, "delivered");
+    let commands: i64 = sqlx::query_scalar(
+        "select count(*) from commands where kind='revoke_secret' and payload->>'attempt_id'=$1",
+    )
+    .bind(attempt.to_string())
+    .fetch_one(&fx.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        commands, 0,
+        "a delivered file is not revoked by a reconcile"
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn retrying_removals_repeats_a_failed_revoke_with_backoff(pool: PgPool) {
     let fx = Fx::new(pool).await;
     let row = fx.open("Повтор отзыва").await;

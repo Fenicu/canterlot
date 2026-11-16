@@ -728,7 +728,7 @@ pub async fn apply_delivered_in_tx(
         // Строка уже заменена новой попыткой или удалена: файл этой попытки мог
         // появиться, поэтому его надо убрать отдельной командой без разговора.
         if let Some(request_id) = parse_uuid(&fact.request_id) {
-            revoke_superseded_attempt_in_tx(conn, machine_id, request_id, attempt_id).await?;
+            revoke_late_delivery_in_tx(conn, machine_id, request_id, attempt_id).await?;
         }
         return Ok(());
     };
@@ -767,7 +767,7 @@ pub async fn apply_delivered_in_tx(
         if let Some(stale) = stale {
             enqueue_revoke_if_missing_in_tx(conn, &stale).await?;
         } else if let Some(request_id) = parse_uuid(&fact.request_id) {
-            revoke_superseded_attempt_in_tx(conn, machine_id, request_id, attempt_id).await?;
+            revoke_late_delivery_in_tx(conn, machine_id, request_id, attempt_id).await?;
         }
         return Ok(());
     };
@@ -1086,22 +1086,37 @@ async fn enqueue_revoke_if_missing_in_tx(
     enqueue_revoke_in_tx(conn, row).await
 }
 
-/// Отзыв для попытки, которой уже нет в строке запроса: каталог берётся из
-/// запроса, если строка ещё существует, иначе команда остаётся без каталога.
-async fn revoke_superseded_attempt_in_tx(
+/// Отзыв для опоздавшей квитанции: он нужен только чужой попытке. Строка,
+/// которая всё ещё владеет этой попыткой (например, уже `delivered`), не
+/// отзывается: иначе каждая сверка после переподключения убивала бы живой файл.
+async fn revoke_late_delivery_in_tx(
     conn: &mut PgConnection,
     machine_id: Uuid,
     request_id: Uuid,
     attempt_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    let conversation: Option<Uuid> = sqlx::query_scalar(
-        "select conversation_id from secret_requests where id = $1 and machine_id = $2",
+    let existing: Option<(Uuid, Option<Uuid>)> = sqlx::query_as(
+        "select conversation_id, attempt_id from secret_requests
+         where id = $1 and machine_id = $2",
     )
     .bind(request_id)
     .bind(machine_id)
     .fetch_optional(&mut *conn)
     .await?;
-    enqueue_revoke_command_in_tx(conn, machine_id, request_id, attempt_id, conversation).await
+    match existing {
+        Some((_, Some(current))) if current == attempt_id => Ok(()),
+        Some((conversation, _)) => {
+            enqueue_revoke_command_in_tx(
+                conn,
+                machine_id,
+                request_id,
+                attempt_id,
+                Some(conversation),
+            )
+            .await
+        }
+        None => enqueue_revoke_command_in_tx(conn, machine_id, request_id, attempt_id, None).await,
+    }
 }
 
 /// Снимает ещё не отправленное сообщение «передан», чтобы оно не пришло после отзыва.
@@ -1299,12 +1314,15 @@ pub async fn revoke_before_deletion_in_tx(
         // Незавершённая команда, созданная остановкой или корзиной, должна
         // пережить удаление строк разговора: отвязываем её от каталога.
         sqlx::query(
-            "update commands set conversation_id = null
+            "update commands
+             set conversation_id = null,
+                 payload = payload || jsonb_build_object('conversation_id', $3::text)
              where machine_id = $1 and kind = 'revoke_secret'
                and payload->>'attempt_id' = $2 and delivery_state <> 'completed'",
         )
         .bind(row.machine_id)
         .bind(attempt_id.to_string())
+        .bind(row.conversation_id.to_string())
         .execute(&mut *conn)
         .await?;
         enqueue_revoke_command_in_tx(
