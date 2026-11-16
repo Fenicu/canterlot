@@ -41,6 +41,7 @@ export type WireEvent =
   | RequestClosed
   | RequestDecided
   | RequestTransmitting
+  | SecretRequestChanged
   | TodoUpdated
   | BackgroundWorkChanged
   | MachineAvailabilityChanged
@@ -1280,6 +1281,31 @@ export interface RequestTransmitting {
   kind: "request_transmitting";
   payload: {
     request_id: Uuid;
+  };
+}
+export interface SecretRequestChanged {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "secret_request_changed";
+  payload: {
+    id: Uuid;
+    conversation_id: Uuid;
+    name: string;
+    purpose: string;
+    state: "open" | "sending" | "delivered" | "declined" | "revoking" | "revoked" | "expired" | "lost" | "cancelled";
+    path?: string | null;
+    expires_at?: Time | null;
+    note?: string | null;
+    created_at: Time;
+    updated_at: Time;
   };
 }
 export interface TodoUpdated {

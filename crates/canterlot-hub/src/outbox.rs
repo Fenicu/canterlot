@@ -222,6 +222,9 @@ fn to_proto_with_capability(
     {
         return Err(OutboxError::CapabilityMissing);
     }
+    if row.kind == "revoke_secret" && !has(crate::session::CAPABILITY_SECRET_REQUESTS_V1) {
+        return Err(OutboxError::CapabilityMissing);
+    }
     if row.kind == "resolve_owner_lost" && !has(crate::session::CAPABILITY_OWNER_EXIT_V1) {
         return Err(OutboxError::CapabilityMissing);
     }
@@ -461,6 +464,10 @@ pub fn to_proto(row: &CommandRow) -> Result<Command, OutboxError> {
             })
         }
         "resolve_owner_lost" => command::Kind::ResolveOwnerLost(ResolveOwnerLost {}),
+        "revoke_secret" => command::Kind::RevokeSecret(canterlot_proto::worker::v1::RevokeSecret {
+            request_id: text(&row.payload, "request_id")?,
+            attempt_id: text(&row.payload, "attempt_id")?,
+        }),
         "stop_execution" => command::Kind::StopExecution(StopExecution {
             force: match row.payload.get("force") {
                 None => false,
@@ -469,20 +476,27 @@ pub fn to_proto(row: &CommandRow) -> Result<Command, OutboxError> {
         }),
         _ => return Err(OutboxError::InvalidCommand),
     };
+    // Отзыв секрета не привязан к исполнению: файл живёт дольше хода.
+    let (execution_id, execution_generation) = if row.kind == "revoke_secret" {
+        (String::new(), 0)
+    } else {
+        (
+            row.execution_id
+                .ok_or(OutboxError::InvalidCommand)?
+                .to_string(),
+            row.execution_generation
+                .and_then(|value| u64::try_from(value).ok())
+                .ok_or(OutboxError::InvalidCommand)?,
+        )
+    };
     let command = Command {
         command_id: row.id.to_string(),
         dispatch_attempt: row
             .dispatch_attempt
             .try_into()
             .map_err(|_| OutboxError::InvalidCommand)?,
-        execution_id: row
-            .execution_id
-            .ok_or(OutboxError::InvalidCommand)?
-            .to_string(),
-        execution_generation: row
-            .execution_generation
-            .and_then(|value| u64::try_from(value).ok())
-            .ok_or(OutboxError::InvalidCommand)?,
+        execution_id,
+        execution_generation,
         kind: Some(kind),
     };
     check_deliver_input(&command).map_err(|_| OutboxError::ResourceLimit)?;

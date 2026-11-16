@@ -40,6 +40,8 @@ fn inputs() -> ActivityInputs {
             hold_reasons: vec![],
         },
         open_requests: 0,
+        open_secret_requests: 0,
+        secret_question: None,
         last_event_at: Some(now),
         last_turn_at: None,
         turn_started_at: Some(now),

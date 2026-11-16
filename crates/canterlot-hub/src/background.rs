@@ -130,6 +130,10 @@ impl Background {
                     stopped.clone(),
                 )),
             ),
+            (
+                "secret_requests_task_error",
+                tokio::spawn(crate::secrets::run(pool.clone(), stopped.clone())),
+            ),
         ];
         if let Some(sender) = owner_push {
             tasks.push((

@@ -49,6 +49,10 @@ const ALL_ERROR_CODES: ErrorCode[] = [
   "too_many_scheduled",
   "machine_not_found",
   "machine_unavailable",
+  "machine_offline",
+  "not_open",
+  "not_delivered",
+  "limit",
   "capability_missing",
   "limits_mismatch",
   "harness_unknown",
@@ -130,7 +134,7 @@ describe("api/errors", () => {
   });
 
   it("error_actions_cover_every_code_in_the_api_error_table", () => {
-    expect(ALL_ERROR_CODES.length).toBe(77);
+    expect(ALL_ERROR_CODES.length).toBe(81);
 
     for (const code of ALL_ERROR_CODES) {
       const err = new ApiError(

@@ -116,6 +116,10 @@ error_codes! {
     TooManyScheduled => "too_many_scheduled", 409, Browser, Never, "Слишком много отложенных сообщений";
     MachineNotFound => "machine_not_found", 404, Browser, Never, "Машина не найдена";
     MachineUnavailable => "machine_unavailable", 409, Delivery, AfterCondition, "Машина недоступна";
+    MachineOffline => "machine_offline", 409, Delivery, AfterCondition, "Машина не на связи";
+    NotOpen => "not_open", 409, Browser, Never, "Запрос секрета уже закрыт";
+    NotDelivered => "not_delivered", 409, Browser, Never, "Значение ещё не доставлено";
+    Limit => "limit", 409, Browser, AfterCondition, "Слишком много запросов секрета, ответьте на открытые";
     CapabilityMissing => "capability_missing", 409, Delivery, AfterCondition, "Требуется обновление воркера";
     LimitsMismatch => "limits_mismatch", 409, Browser, Never, "Лимиты вложений машины не совпадают";
     HarnessUnknown => "harness_unknown", 422, Browser, Never, "Харнесс отсутствует в каталоге машины";
@@ -509,6 +513,26 @@ impl From<sqlx::Error> for ApiError {
             "database error"
         );
         api
+    }
+}
+
+impl From<crate::secrets::SecretError> for ApiError {
+    fn from(error: crate::secrets::SecretError) -> Self {
+        use crate::secrets::SecretError as E;
+        match error {
+            E::NotFound | E::ConversationNotFound => Self::new(ErrorCode::NotFound),
+            E::NotOpen => Self::new(ErrorCode::NotOpen),
+            E::NotDelivered => Self::new(ErrorCode::NotDelivered),
+            E::MachineOffline => Self::new(ErrorCode::MachineOffline),
+            E::Limit => Self::new(ErrorCode::Limit),
+            E::TooLarge => Self::new(ErrorCode::ResourceLimit),
+            E::InvalidName | E::InvalidPurpose => Self::new(ErrorCode::InvalidRequest)
+                .with_details(ErrorDetails {
+                    field: Some("name".into()),
+                    ..Default::default()
+                }),
+            E::Database(error) => error.into(),
+        }
     }
 }
 

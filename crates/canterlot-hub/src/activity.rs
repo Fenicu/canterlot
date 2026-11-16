@@ -177,6 +177,10 @@ pub struct ActivityInputs {
     pub execution: Option<ExecutionFacts>,
     pub queue: QueueFacts,
     pub open_requests: u32,
+    /// Запросы секрета, которые ждут владельца: `open` и `lost`.
+    pub open_secret_requests: u32,
+    /// Имя первого такого запроса: карточка и пуш называют его.
+    pub secret_question: Option<String>,
     pub last_event_at: Option<DateTime<Utc>>,
     pub last_turn_at: Option<DateTime<Utc>>,
     /// Когда занялся текущий слот (`dispatching`/`running`): молчание нового хода
@@ -306,6 +310,25 @@ pub fn compute(i: &ActivityInputs, t: &Thresholds) -> Activity {
             },
         },
     };
+    // Секрет ждёт владельца и после конца хода: карточка у поля ввода, сессия в «Ждут вас».
+    // Упавшее или остановленное исполнение говорит о себе громче.
+    if i.open_requests == 0
+        && i.open_secret_requests > 0
+        && !i.execution.as_ref().is_some_and(|execution| {
+            matches!(
+                execution.state,
+                ExecutionState::Stopped | ExecutionState::Failed | ExecutionState::OwnerLost
+            )
+        })
+    {
+        return Activity {
+            state: S::WaitingForUser,
+            evidence: Evidence::WaitingForUser {
+                phase: "awaiting_secret".into(),
+                question: i.secret_question.clone(),
+            },
+        };
+    }
     let Some(e) = &i.execution else {
         return idle();
     };
@@ -598,6 +621,16 @@ pub async fn load_inputs(
             .unwrap_or(crate::requests::RequestKind::Question);
         extract_request_summary(kind, payload)
     });
+    let secret_rows: Vec<String> = sqlx::query_scalar(
+        "select name from secret_requests
+         where conversation_id = $1 and state in ('open', 'lost')
+         order by created_at asc, id asc",
+    )
+    .bind(conversation_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    let open_secret_requests = secret_rows.len() as u32;
+    let secret_question = secret_rows.first().cloned();
     let background_work =
         match crate::background_tasks::running(&mut *conn, conversation_id).await? {
             0 => None,
@@ -613,6 +646,8 @@ pub async fn load_inputs(
             hold_reasons: q.try_get::<Json<Vec<HoldReason>>, _>("hold_reasons")?.0,
         },
         open_requests,
+        open_secret_requests,
+        secret_question,
         last_event_at,
         last_turn_at,
         turn_started_at,

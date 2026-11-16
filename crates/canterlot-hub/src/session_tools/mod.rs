@@ -25,6 +25,7 @@ pub mod read;
 pub mod report;
 pub mod routing;
 pub mod search;
+pub mod secret;
 pub mod send;
 pub mod settle;
 pub mod spawn;
@@ -73,6 +74,7 @@ pub const TOOLS: &[&str] = &[
     "plan.update",
     "plan.adopt",
     "history.search",
+    "secrets.request",
 ];
 
 pub fn is_tool(name: &str) -> bool {
@@ -114,12 +116,13 @@ pub enum ToolErrorCode {
     PlanTaskClosed,
     PlanFull,
     AlreadyDecided,
+    TooManySecrets,
     InvalidArguments,
     Internal,
 }
 
 impl ToolErrorCode {
-    pub const ALL: [Self; 34] = [
+    pub const ALL: [Self; 35] = [
         Self::UnknownTool,
         Self::SessionNotFound,
         Self::ReadOnlySession,
@@ -152,6 +155,7 @@ impl ToolErrorCode {
         Self::PlanTaskClosed,
         Self::PlanFull,
         Self::AlreadyDecided,
+        Self::TooManySecrets,
         Self::InvalidArguments,
         Self::Internal,
     ];
@@ -190,6 +194,7 @@ impl ToolErrorCode {
             Self::PlanTaskClosed => "plan_task_closed",
             Self::PlanFull => "plan_full",
             Self::AlreadyDecided => "already_decided",
+            Self::TooManySecrets => "too_many_secrets",
             Self::InvalidArguments => "invalid_arguments",
             Self::Internal => "internal_error",
         }
@@ -229,6 +234,7 @@ impl ToolErrorCode {
             Self::PlanTaskClosed => "The plan task is done or cancelled",
             Self::PlanFull => "The plan holds too many tasks",
             Self::AlreadyDecided => "The owner has already answered this request",
+            Self::TooManySecrets => "Too many secret requests are already waiting",
             Self::InvalidArguments => "Invalid arguments",
             Self::Internal => "The hub could not complete the call, try later",
         }
@@ -299,6 +305,9 @@ impl ToolErrorCode {
             Self::AlreadyDecided => {
                 "The owner's answer stands; wait for its result instead of cancelling."
             }
+            Self::TooManySecrets => {
+                "Wait for the owner to answer the open ones; do not repeat the call."
+            }
             Self::InvalidArguments => {
                 "Fix the argument and call again; tools/list shows the schema."
             }
@@ -337,6 +346,20 @@ impl ToolError {
             ". "
         };
         format!("{message}{separator}{}", self.code.hint())
+    }
+}
+
+impl ToolError {
+    /// Доменные отказы секретов сверх названных вызывающим: только код, без текста.
+    pub(crate) fn from_secret(error: crate::secrets::SecretError) -> Self {
+        use crate::secrets::SecretError as E;
+        match error {
+            E::Database(error) => error.into(),
+            E::TooLarge => Self::new(ToolErrorCode::TooLarge),
+            E::Limit => Self::new(ToolErrorCode::TooManySecrets),
+            E::MachineOffline => Self::new(ToolErrorCode::MachineUnavailable),
+            _ => Self::new(ToolErrorCode::Internal),
+        }
     }
 }
 
@@ -415,6 +438,7 @@ pub async fn call(
         "plan.update" => plan::update(context, caller, arguments).await,
         "plan.adopt" => plan::adopt(context, caller, arguments).await,
         "history.search" => search::search(context, caller, arguments).await,
+        "secrets.request" => secret::request(context, caller, arguments).await,
         _ => Err(ToolError::new(ToolErrorCode::UnknownTool)),
     }
 }

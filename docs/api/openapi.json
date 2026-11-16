@@ -6402,6 +6402,85 @@
         }
       }
     },
+    "/api/v1/conversations/{id}/secret-requests": {
+      "get": {
+        "tags": [
+          "secrets"
+        ],
+        "operationId": "get__api_v1_conversations__id__secret_requests",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Разговор",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Все запросы разговора, новые первыми",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecretRequestList"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Разговор не найден",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/conversations/{id}/settings": {
       "patch": {
         "tags": [
@@ -10190,6 +10269,231 @@
         }
       }
     },
+    "/api/v1/secret-requests/{id}/answer": {
+      "post": {
+        "tags": [
+          "secrets"
+        ],
+        "operationId": "post__api_v1_secret_requests__id__answer",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Запрос секрета",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AnswerBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Ответ принят; для значения — доставка началась",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecretRequestView"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Запрос не найден",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Машина не на связи, запрос закрыт или превышен предел",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Значение больше 16 КиБ",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/secret-requests/{id}/revoke": {
+      "post": {
+        "tags": [
+          "secrets"
+        ],
+        "operationId": "post__api_v1_secret_requests__id__revoke",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Запрос секрета",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Файл будет удалён воркером",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecretRequestView"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Запрос не найден",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Значение ещё не доставлено",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/snapshot/conversations": {
       "get": {
         "tags": [
@@ -10908,6 +11212,22 @@
             ]
           }
         }
+      },
+      "AnswerBody": {
+        "type": "object",
+        "description": "`{\"value\": \"...\"}` или `{\"decline\": true}`. Значение не сериализуется и не\nхешируется нигде, кроме одного управляющего сообщения.",
+        "properties": {
+          "decline": {
+            "type": "boolean",
+            "description": "`true` — владелец отказал."
+          },
+          "value": {
+            "type": "string",
+            "description": "Значение секрета; ровно одно из двух полей.",
+            "writeOnly": true
+          }
+        },
+        "additionalProperties": false
       },
       "AppliedPreset": {
         "type": "object",
@@ -12912,6 +13232,10 @@
           "too_many_scheduled",
           "machine_not_found",
           "machine_unavailable",
+          "machine_offline",
+          "not_open",
+          "not_delivered",
+          "limit",
           "capability_missing",
           "limits_mismatch",
           "harness_unknown",
@@ -18738,6 +19062,84 @@
             "description": "Совпадений больше, чем `total`."
           }
         }
+      },
+      "SecretRequestList": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SecretRequestView"
+            }
+          }
+        }
+      },
+      "SecretRequestView": {
+        "type": "object",
+        "description": "Ответ списка, ответа и отзыва. Поля значения здесь нет и быть не может.",
+        "required": [
+          "id",
+          "conversation_id",
+          "name",
+          "purpose",
+          "state",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "conversation_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "note": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "purpose": {
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/SecretState"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "SecretState": {
+        "type": "string",
+        "enum": [
+          "open",
+          "sending",
+          "delivered",
+          "declined",
+          "revoking",
+          "revoked",
+          "expired",
+          "lost",
+          "cancelled"
+        ]
       },
       "SendNowOutcome": {
         "oneOf": [

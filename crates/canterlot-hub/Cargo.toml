@@ -19,6 +19,7 @@ fault-injection = []
 
 [dev-dependencies]
 canterlot-hub = { path = ".", features = ["testkit"] }
+sha1_smol = "1.0.1"
 jsonschema = { version = "0.60.2", default-features = false }
 rcgen = { version = "0.14.10", default-features = false, features = ["ring", "pem", "crypto"] }
 rustix = { version = "1.1.6", features = ["process"] }

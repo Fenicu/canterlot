@@ -54,6 +54,7 @@ pub mod prompt_suggestions;
 pub mod routing;
 pub mod scheduled;
 pub mod search;
+pub mod secrets;
 pub mod session_tools;
 pub mod signin;
 pub mod signin_passkeys;
@@ -224,6 +225,7 @@ pub fn api_routes() -> OpenApiRouter<AppState> {
         .merge(nudge::routes())
         .merge(routing::routes())
         .merge(search::routes())
+        .merge(secrets::routes())
         .merge(conversations::routes())
         .merge(drafts::routes())
         .merge(bookmarks::routes())

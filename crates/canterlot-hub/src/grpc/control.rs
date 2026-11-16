@@ -176,6 +176,27 @@ impl WorkerControl for HubGrpc {
                             Some(control_up::Msg::ReconcileReport(report)) => {
                                 lane.submit_reconcile(report).map_err(|error| session_log.error(error))?;
                             }
+                            Some(control_up::Msg::SecretManifests(manifests)) => {
+                                if !state.registry.has_capability(machine_id,crate::session::CAPABILITY_SECRET_REQUESTS_V1){Err(session_log.error(Status::invalid_argument("capability_missing")))?;}
+                                // Сверка не держит пульс: её ответ решает судьбу только `sending`.
+                                let pool = state.pool.clone();
+                                tokio::spawn(async move {
+                                    if let Err(error) = crate::secrets::reconcile_manifests(
+                                        &pool,
+                                        machine_id,
+                                        &manifests.manifests,
+                                        uuid::Uuid::now_v7(),
+                                    )
+                                    .await
+                                    {
+                                        tracing::error!(
+                                            kind = "secret_manifests_error",
+                                            error = %crate::dberr::describe(&error),
+                                            "secret manifests reconciliation failed"
+                                        );
+                                    }
+                                });
+                            }
                             _ => Err(session_log.error(Status::invalid_argument("unexpected control message")))?,
                         }
                     }

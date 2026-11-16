@@ -91,6 +91,9 @@ pub struct HubTimers {
     /// Срок итога «Отправить сейчас»: без итога вливание считается неподтверждённым.
     #[serde(with = "humantime_serde")]
     pub steer_outcome: Duration,
+    /// Сколько хаб ждёт квитанцию о файле секрета, прежде чем счесть доставку потерянной.
+    #[serde(with = "humantime_serde")]
+    pub secret_attempt: Duration,
 }
 
 impl Default for HubTimers {
@@ -106,6 +109,7 @@ impl Default for HubTimers {
             app_probe_timeout: Duration::from_secs(10),
             app_probe_interval: Duration::from_secs(30),
             steer_outcome: Duration::from_secs(120),
+            secret_attempt: Duration::from_secs(60),
         }
     }
 }

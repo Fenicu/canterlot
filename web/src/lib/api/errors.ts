@@ -176,6 +176,22 @@ const ERROR_TABLE: Record<ErrorCode, ErrorDescriptor> = {
     action: "restore_connection",
     message: "Машина недоступна",
   },
+  machine_offline: {
+    action: "restore_connection",
+    message: "Машина не на связи, попробуйте позже",
+  },
+  not_open: {
+    action: "none",
+    message: "Запрос секрета уже закрыт",
+  },
+  not_delivered: {
+    action: "none",
+    message: "Значение ещё не доставлено",
+  },
+  limit: {
+    action: "none",
+    message: "Слишком много запросов секрета, ответьте на открытые",
+  },
   capability_missing: {
     action: "none",
     message: "Требуется обновление воркера",

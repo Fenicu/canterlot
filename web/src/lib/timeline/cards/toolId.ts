@@ -33,7 +33,8 @@ const CANTERLOT_TOOLS: Record<string, string> = {
   plan_add: 'plan_add',
   plan_update: 'plan_update',
   plan_adopt: 'plan_adopt',
-  history_search: 'history_search'
+  history_search: 'history_search',
+  secret_request: 'secret_request'
 };
 
 /** Все имена инструментов canterlot, как их объявляет воркер. */

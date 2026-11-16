@@ -99,6 +99,7 @@ mod retention_keyset;
 mod routing;
 mod scheduler;
 mod schema;
+mod secret_requests;
 mod security;
 mod send_now;
 mod service_notes;

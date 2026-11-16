@@ -914,6 +914,9 @@ fn touches_activity(body: &Body) -> bool {
             | Body::CompactionEvent(_)
             | Body::ContextProgress(_)
             | Body::CompactionStatus(_)
+            | Body::SecretDelivered(_)
+            | Body::SecretFailed(_)
+            | Body::SecretRemoved(_)
     )
 }
 
@@ -1622,6 +1625,15 @@ async fn apply_body(
         | Body::ContextProgress(_)
         | Body::PromptSuggested(_)
         | Body::SessionStuck(_) => return Err(IngestError::InvalidRecord),
+        Body::SecretDelivered(fact) => {
+            crate::secrets::apply_delivered_in_tx(conn, machine_id, fact, correlation_id).await?;
+        }
+        Body::SecretFailed(fact) => {
+            crate::secrets::apply_failed_in_tx(conn, machine_id, fact, correlation_id).await?;
+        }
+        Body::SecretRemoved(fact) => {
+            crate::secrets::apply_removed_in_tx(conn, machine_id, fact, correlation_id).await?;
+        }
         Body::WorktreeRemoved(fact) => {
             use crate::session_tools::accept::{Removal, apply_removal_in_tx};
             let removal = match fact.outcome.as_str() {
@@ -1699,6 +1711,16 @@ pub(crate) async fn apply_command_rejected_in_tx(
             dispatch_attempt,
             crate::session_tools::accept::Removal::Failed,
             "rejected",
+            correlation_id,
+        )
+        .await?;
+    } else if target.kind == "revoke_secret" {
+        crate::secrets::on_revoke_rejected_in_tx(
+            conn,
+            machine_id,
+            command_id,
+            dispatch_attempt,
+            reason,
             correlation_id,
         )
         .await?;

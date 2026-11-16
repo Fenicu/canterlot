@@ -130,6 +130,9 @@
       "$ref": "#/$defs/request_transmitting"
     },
     {
+      "$ref": "#/$defs/secret_request_changed"
+    },
+    {
       "$ref": "#/$defs/todo_updated"
     },
     {
@@ -5179,6 +5182,149 @@
       ],
       "additionalProperties": false
     },
+    "secret_request_changed": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "scope_seq": {
+          "$ref": "#/$defs/Seq"
+        },
+        "scope_seq_from": {
+          "$ref": "#/$defs/Seq"
+        },
+        "committed_at": {
+          "$ref": "#/$defs/Time"
+        },
+        "committed_at_from": {
+          "$ref": "#/$defs/Time"
+        },
+        "conversation_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "execution_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "correlation_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "kind": {
+          "const": "secret_request_changed"
+        },
+        "payload": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/Uuid"
+            },
+            "conversation_id": {
+              "$ref": "#/$defs/Uuid"
+            },
+            "name": {
+              "type": "string"
+            },
+            "purpose": {
+              "type": "string"
+            },
+            "state": {
+              "enum": [
+                "open",
+                "sending",
+                "delivered",
+                "declined",
+                "revoking",
+                "revoked",
+                "expired",
+                "lost",
+                "cancelled"
+              ]
+            },
+            "path": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "expires_at": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Time"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "note": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "created_at": {
+              "$ref": "#/$defs/Time"
+            },
+            "updated_at": {
+              "$ref": "#/$defs/Time"
+            }
+          },
+          "required": [
+            "id",
+            "conversation_id",
+            "name",
+            "purpose",
+            "state",
+            "created_at",
+            "updated_at"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "v",
+        "id",
+        "scope",
+        "scope_seq",
+        "scope_seq_from",
+        "committed_at",
+        "committed_at_from",
+        "conversation_id",
+        "execution_id",
+        "correlation_id",
+        "kind",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
     "request_opened": {
       "type": "object",
       "properties": {
@@ -6836,6 +6982,9 @@
                 },
                 {
                   "$ref": "#/$defs/request_transmitting"
+                },
+                {
+                  "$ref": "#/$defs/secret_request_changed"
                 },
                 {
                   "$ref": "#/$defs/todo_updated"

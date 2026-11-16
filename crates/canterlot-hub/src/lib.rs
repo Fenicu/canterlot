@@ -57,6 +57,7 @@ pub mod requests;
 pub mod runs;
 pub mod scheduler;
 pub mod search;
+pub mod secrets;
 pub mod session;
 pub mod session_tools;
 pub mod session_usage;

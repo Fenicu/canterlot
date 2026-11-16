@@ -548,6 +548,8 @@ async fn stop_locked_in_tx(
         return Ok(StopExecutionOutcome::OwnerLost);
     }
     mark_owner_stop(&mut *conn, conversation_id, true).await?;
+    // Остановка владельцем — конец сессии: открытые секреты отменяются, файлы отзываются.
+    crate::secrets::on_session_end_in_tx(&mut *conn, conversation_id, correlation_id).await?;
     // Остановка родителя отменяет его ожидающие запуски; возобновление их не возвращает.
     let owner_id: Uuid = sqlx::query_scalar("select owner_id from conversations where id=$1")
         .bind(conversation_id)

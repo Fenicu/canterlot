@@ -219,6 +219,25 @@ pub async fn on_request_opened_in_tx(
     .await
 }
 
+/// Агент просит секрет: пуш говорит, что именно нужно владельцу. Значение в
+/// пуш не попадает — его ещё нет, а имя пришло из аргументов инструмента.
+pub async fn on_secret_request_opened_in_tx(
+    conn: &mut PgConnection,
+    conversation_id: Uuid,
+    secret_request_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    enqueue_in_tx(
+        conn,
+        conversation_id,
+        KIND_WAITING,
+        &format!("{KIND_WAITING}:secret:{secret_request_id}"),
+        &json!({"secret_request_id": secret_request_id}),
+        false,
+        true,
+    )
+    .await
+}
+
 /// Осевшее состояние корневой сессии после шлюза автопинка — то же решение, что у
 /// подписок. Ключ итога хода — конец хода: дребезг состояния меняет отпечаток
 /// оседания, но не сам ход, и второго пуша о нём быть не должно.
@@ -1045,6 +1064,28 @@ async fn compose(
         return Ok(None);
     }
     let (body, priority) = match row.kind.as_str() {
+        KIND_WAITING if row.payload.get("secret_request_id").is_some() => {
+            let Some(secret_id) = row.payload["secret_request_id"]
+                .as_str()
+                .and_then(|id| id.parse::<Uuid>().ok())
+            else {
+                return Ok(None);
+            };
+            let secret: Option<(String, String)> = sqlx::query_as(
+                "select name,state from secret_requests where id=$1 and conversation_id=$2",
+            )
+            .bind(secret_id)
+            .bind(conversation_id)
+            .fetch_optional(pool)
+            .await?;
+            match secret {
+                Some((name, state)) if matches!(state.as_str(), "open" | "lost") => (
+                    format!("Агент просит секрет «{}»", clip(&name, TITLE_CHARS)),
+                    PRIORITY_WAITING,
+                ),
+                _ => return Ok(None),
+            }
+        }
         KIND_WAITING => {
             let Some(request_id) = row.payload["request_id"]
                 .as_str()

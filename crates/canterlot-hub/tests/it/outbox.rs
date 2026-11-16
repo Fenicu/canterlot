@@ -581,6 +581,7 @@ fn to_proto_maps_all_command_variants_and_rejects_unknown_kinds() {
             command::Kind::StopExecution(value) => assert!(value.force),
             command::Kind::DeliverDecision(_) => panic!("unexpected decision command"),
             command::Kind::RemoveWorktree(_) => panic!("unexpected worktree command"),
+            command::Kind::RevokeSecret(_) => panic!("unexpected secret command"),
         }
     }
     assert!(matches!(

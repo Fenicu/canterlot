@@ -601,6 +601,9 @@ async fn delete_in_tx(
     .bind(&execution_ids)
     .execute(&mut *conn)
     .await?;
+    // Файлы секретов убираются командами без `conversation_id`: строки сессии
+    // сейчас исчезнут, а файл на машине должен исчезнуть тоже.
+    crate::secrets::revoke_before_deletion_in_tx(conn, id, correlation_id).await?;
     crate::session_tools::spawn_queue::cancel_for_parent_in_tx(
         conn,
         owner_id,
@@ -737,6 +740,8 @@ async fn trash_in_tx(
     subs::on_target_deleted_in_tx(conn, id, Utc::now()).await?;
     origin::scrub_sender_in_tx(conn, id).await?;
     crate::notify::cancel_for_conversation_in_tx(conn, id).await?;
+    // Конец сессии: открытые секреты отменяются, доставленные файлы отзываются.
+    crate::secrets::on_session_end_in_tx(conn, id, correlation_id).await?;
     // Список и открытый чат узнают о корзине тем же обновлением атрибутов.
     conversations::emit_attributes(conn, owner_id, id, correlation_id).await?;
     Ok(json!({"trashed": true}))

@@ -225,7 +225,7 @@ fn coverage_table_matches_openapi_and_event_schema() {
             kinds.insert(span.to_owned());
         }
     }
-    assert_eq!(rows, 34, "screen coverage rows");
+    assert_eq!(rows, 35, "screen coverage rows");
     let in_document = operations(&document);
     let missing: Vec<_> = in_document.difference(&routes).collect();
     let unknown: Vec<_> = routes.difference(&in_document).collect();
@@ -310,6 +310,11 @@ fn exempt(method: &str, path: &str) -> bool {
         || (method == "PUT" && path.ends_with("/draft"))
         || (matches!(method, "POST" | "DELETE") && path.ends_with("/side"))
         || (matches!(method, "PUT" | "DELETE") && path.contains("/bookmarks/"))
+        // Ответ и отзыв секрета намеренно не проходят слой идемпотентности:
+        // тело ответа не хешируется и не сохраняется, `Idempotency-Key` игнорируется.
+        || (method == "POST"
+            && path.starts_with("/api/v1/secret-requests/")
+            && (path.ends_with("/answer") || path.ends_with("/revoke")))
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
