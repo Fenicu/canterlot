@@ -26,7 +26,7 @@ const AQUAMARINE = {
     'chip': '#c6dfd7', 'chip-text': '#254f50', 'badge': '#729e96', 'accent': '#006966',
     'accent-link': '#006360', 'accent-ink': '#f2fffc', 'accent-soft': '#c3e6de',
     'success': '#256a53', 'warning': '#7d531d', 'warning-soft': '#f0e7d4',
-    'danger': '#9d493e', 'danger-soft': '#f4e1db', 'blue': '#3d6579', 'code': '#dfede7',
+    'danger': '#9d493e', 'danger-soft': '#f4e1db', 'blue': '#3b6276', 'code': '#dfede7',
     'scrim': '#ccdfd7', 'chart-secondary': '#50778a', 'transparent': 'transparent',
     'popover': '#cce6de', 'popover-hover': '#bdddd5'
   }
@@ -99,8 +99,8 @@ const textPairs: [string, string[]][] = [
   ['accent-ink', ['accent']],
   // Активная вкладка нижней навигации и пилюля действующей политики маршрутизации.
   ['accent-link', ['bg', 'surface', 'raised', 'selected', 'accent-soft']],
-  // Состояние задачи плана «на проверке».
-  ['blue', ['raised']],
+  // Состояние задачи плана «на проверке»: и на карточке, и на подсвеченной строке.
+  ['blue', ['raised', 'hover']],
   ...['success', 'warning', 'danger'].flatMap(fg => [
     [fg, ['bg', 'surface', `${fg}-soft`]] as [string, string[]]
   ])
