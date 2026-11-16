@@ -70,6 +70,10 @@ pub enum ContainmentError {
 #[async_trait::async_trait]
 pub trait Containment: Send + Sync {
     fn kind(&self) -> &'static str;
+    /// Команда запуска агентского CLI: наследники получают `nice` из конфигурации.
+    fn command(&self, executable: &Path) -> Command {
+        Command::new(executable)
+    }
     fn prepare_command(&self, command: &mut Command);
     fn members(&self) -> Result<Vec<Member>, ContainmentError>;
     /// Живые участники без побочных действий: `members` закрепляет CLI и забирает зомби,
@@ -105,6 +109,8 @@ pub struct TreeContainment {
     marker: Option<String>,
     /// Переменные аренды из окружения сопровождения (их ставит воркер при запуске).
     lease_env: Vec<(&'static str, std::ffi::OsString)>,
+    /// `execution.agent_nice`: 0 — запускать CLI с приоритетом сопровождения.
+    agent_nice: u32,
 }
 
 pub(crate) struct Stat {
@@ -224,17 +230,34 @@ fn disappeared(error: &ContainmentError) -> bool {
 
 impl TreeContainment {
     pub fn new() -> Result<Self, ContainmentError> {
-        Self::build(None)
+        Self::build(None, 0)
     }
 
     /// Группа с меткой исполнения: её участники опознаются и после смерти сопровождения.
     pub fn marked(marker: String) -> Result<Self, ContainmentError> {
-        Self::build(Some(marker))
+        Self::build(Some(marker), 0)
     }
 
-    fn build(marker: Option<String>) -> Result<Self, ContainmentError> {
+    /// Группа с меткой и пониженным приоритетом CLI (и всех его потомков).
+    pub fn marked_with_agent_nice(
+        marker: String,
+        agent_nice: u32,
+    ) -> Result<Self, ContainmentError> {
+        Self::build(Some(marker), agent_nice)
+    }
+
+    /// Тестовый шов: группа без метки, но с приоритетом агентских CLI.
+    pub fn with_agent_nice(agent_nice: u32) -> Result<Self, ContainmentError> {
+        Self::build(None, agent_nice)
+    }
+
+    fn build(marker: Option<String>, agent_nice: u32) -> Result<Self, ContainmentError> {
         process::set_child_subreaper(Pid::from_raw(1))?;
-        tracing::info!(containment = "tree", "process containment initialized");
+        tracing::info!(
+            containment = "tree",
+            agent_nice,
+            "process containment initialized"
+        );
         Ok(Self {
             supervisor: stat(std::process::id())?.member,
             cli: Mutex::new(None),
@@ -248,6 +271,7 @@ impl TreeContainment {
                 Vec::new()
             },
             marker,
+            agent_nice,
         })
     }
 
@@ -322,6 +346,20 @@ impl TreeContainment {
 impl Containment for TreeContainment {
     fn kind(&self) -> &'static str {
         "tree"
+    }
+
+    fn command(&self, executable: &Path) -> Command {
+        if self.agent_nice == 0 {
+            return Command::new(executable);
+        }
+        // `#![forbid(unsafe_code)]` не даёт `pre_exec`, поэтому приоритет задаёт
+        // обёртка `nice`; она делает exec целевого CLI, сохраняя PID группы.
+        let mut command = Command::new("nice");
+        command
+            .arg("-n")
+            .arg(self.agent_nice.min(19).to_string())
+            .arg(executable);
+        command
     }
 
     fn prepare_command(&self, command: &mut Command) {
@@ -555,6 +593,58 @@ mod tests {
         child.kill().unwrap();
         child.wait().unwrap();
         assert_eq!(inspected.ok(), Some(child.id()));
+    }
+
+    fn nice_of(pid: u32) -> i64 {
+        let text = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+        let fields: Vec<_> = text[text.rfind(')').unwrap() + 1..]
+            .split_whitespace()
+            .collect();
+        fields[16].parse().unwrap()
+    }
+
+    #[tokio::test]
+    async fn agent_cli_and_its_children_start_at_nice_ten_while_the_worker_stays() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let script = directory.path().join("fake-agent");
+        fs::write(
+            &script,
+            "#!/bin/sh\nawk '{print $19}' /proc/self/stat\nsh -c \"awk '{print \\$19}' /proc/self/stat\"\n",
+        )
+        .unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+
+        let worker_nice = nice_of(std::process::id());
+        let containment = TreeContainment::with_agent_nice(10).unwrap();
+        let mut command = containment.command(&script);
+        command.kill_on_drop(true);
+        let output = command.output().await.unwrap();
+        assert!(output.status.success());
+        let niceness: Vec<i64> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(|line| line.trim().parse().unwrap())
+            .collect();
+        assert_eq!(niceness, [10, 10], "the CLI and its child run at nice 10");
+        assert_eq!(
+            nice_of(std::process::id()),
+            worker_nice,
+            "the worker itself keeps its priority"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_nice_zero_keeps_the_default_priority() {
+        let containment = TreeContainment::with_agent_nice(0).unwrap();
+        let mut command = containment.command(Path::new("/bin/sh"));
+        command.args(["-c", "awk '{print $19}' /proc/self/stat"]);
+        let output = command.output().await.unwrap();
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            nice_of(std::process::id()).to_string()
+        );
     }
 
     #[test]

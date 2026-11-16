@@ -1407,6 +1407,7 @@ impl Actor {
             }
         }
         let id = self.id;
+        let agent_nice = self.shared.config.agent_nice;
         let timers = self.shared.config.supervisor.clone();
         let generation = self.generation;
         let runtime_dir = self.shared.runtime_dir.clone();
@@ -1423,6 +1424,7 @@ impl Actor {
                 id,
                 generation,
                 conversation_id,
+                agent_nice,
                 &timers,
                 runtime_dir.as_deref(),
             )?;

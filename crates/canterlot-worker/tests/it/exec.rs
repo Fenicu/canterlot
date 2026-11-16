@@ -215,6 +215,7 @@ impl Env {
             supervisor_exe: Some(supervisor_exe.clone()),
             spawn_timeout: Duration::from_secs(10),
             build_jobs: 7,
+            agent_nice: 0,
             supervisor: SupervisorTimers {
                 stop_grace: Duration::from_secs(1),
                 stop_retry: Duration::from_millis(200),

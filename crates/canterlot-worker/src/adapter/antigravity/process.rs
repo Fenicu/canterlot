@@ -317,7 +317,7 @@ impl Process {
         let env = process_env(std::env::vars_os());
         // Повтор при ETXTBSY: тесты пишут двойника перед запуском.
         let child = spawn_with_retry_sync(|| {
-            let mut cmd = TokioCommand::new(executable);
+            let mut cmd = group.command(executable);
             cmd.env_clear()
                 .args(&args)
                 .current_dir(workdir)

@@ -391,8 +391,10 @@ pub(super) async fn run(exec_dir: PathBuf) -> Result<ExitCode, SupervisorError> 
         Ok(_) | Err(rustix::io::Errno::PERM) => {}
         Err(error) => return Err(std::io::Error::from(error).into()),
     }
-    let containment: Arc<dyn Containment> =
-        Arc::new(TreeContainment::marked(spec.execution_id.to_string())?);
+    let containment: Arc<dyn Containment> = Arc::new(TreeContainment::marked_with_agent_nice(
+        spec.execution_id.to_string(),
+        spec.agent_nice,
+    )?);
     crate::containment::write_group_file(&exec_dir, &[])?;
     let sj = Sj::create(&exec_dir)?;
     let recovered = sj.last_seq() > 0;
@@ -3707,6 +3709,7 @@ mod tests {
                 protocol_version: canterlot_proto::limits::IPC_PROTOCOL_VERSION,
                 ipc_socket: None,
                 version_cache: None,
+                agent_nice: 0,
                 timers: Default::default(),
                 claude_code: None,
                 codex: None,

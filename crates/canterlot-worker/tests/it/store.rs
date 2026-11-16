@@ -452,6 +452,7 @@ fn config_loads_with_defaults() {
     assert_eq!(config.timers.backoff_max, Duration::from_secs(30));
     assert_eq!(config.timers.backoff_reset_after, Duration::from_secs(30));
     assert_eq!(config.execution.build_jobs, 6);
+    assert_eq!(config.execution.agent_nice, 10);
 }
 
 #[test]
@@ -465,6 +466,20 @@ fn config_execution_build_jobs_can_be_set() {
     .unwrap();
     let config = load(&path).unwrap();
     assert_eq!(config.execution.build_jobs, 2);
+}
+
+#[test]
+fn config_execution_agent_nice_can_be_set_and_disabled() {
+    let dir = private_dir();
+    let path = dir.path().join("worker.toml");
+    for (table, value, expected) in [("[execution]", 5, 5), ("[exec]", 0, 0)] {
+        fs::write(
+            &path,
+            format!("{}\n{table}\nagent_nice = {value}\n", config_text()),
+        )
+        .unwrap();
+        assert_eq!(load(&path).unwrap().execution.agent_nice, expected);
+    }
 }
 
 #[test]

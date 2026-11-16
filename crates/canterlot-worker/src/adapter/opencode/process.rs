@@ -255,8 +255,16 @@ pub struct ServerProcess {
 
 const MAX_READY_LINE: u64 = 64 * 1024;
 
-fn command(executable: &Path, workdir: &Path, env: &[(OsString, OsString)]) -> Command {
-    let mut cmd = Command::new(executable);
+fn command(
+    group: Option<&dyn Containment>,
+    executable: &Path,
+    workdir: &Path,
+    env: &[(OsString, OsString)],
+) -> Command {
+    let mut cmd = group.map_or_else(
+        || Command::new(executable),
+        |group| group.command(executable),
+    );
     cmd.env_clear()
         .envs(env.iter().map(|(key, value)| (key, value)))
         .args(["serve", "--stdio", "--port", "0"])
@@ -276,7 +284,7 @@ impl ServerProcess {
         group: &dyn Containment,
     ) -> Result<Self, LaunchError> {
         let child = spawn_with_retry_io(|| {
-            let mut cmd = command(executable, workdir, env);
+            let mut cmd = command(Some(group), executable, workdir, env);
             group.prepare_command(&mut cmd);
             async move { cmd.spawn() }
         })
@@ -303,7 +311,7 @@ impl ServerProcess {
         env: &[(OsString, OsString)],
     ) -> Result<Self, LaunchError> {
         let child = spawn_with_retry_io(|| {
-            let mut cmd = command(executable, workdir, env);
+            let mut cmd = command(None, executable, workdir, env);
             cmd.process_group(0);
             async move { cmd.spawn() }
         })

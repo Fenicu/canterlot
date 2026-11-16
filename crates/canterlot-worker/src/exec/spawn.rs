@@ -95,6 +95,7 @@ pub(super) fn prepare(
     execution_id: Uuid,
     generation: u64,
     conversation_id: Uuid,
+    agent_nice: u32,
     timers: &SupervisorTimers,
     runtime_dir: Option<&Path>,
 ) -> Result<Prepared, ExecError> {
@@ -138,7 +139,7 @@ pub(super) fn prepare(
     let secret: [u8; 32] = rand::random();
     private_file(&dir.join("secret"), &secret)?;
     let spec = format!(
-        "execution_id = \"{execution_id}\"\ngeneration = {generation}\nconversation_id = \"{conversation_id}\"\nprotocol_version = {IPC_PROTOCOL_VERSION}\n\n[timers]\nattach_wait = {}\nready_deadline = {}\ntransmit_deadline = {}\ncli_version_probe = {}\nstop_grace = {}\nstop_retry = {}\n",
+        "execution_id = \"{execution_id}\"\ngeneration = {generation}\nconversation_id = \"{conversation_id}\"\nprotocol_version = {IPC_PROTOCOL_VERSION}\nagent_nice = {agent_nice}\n\n[timers]\nattach_wait = {}\nready_deadline = {}\ntransmit_deadline = {}\ncli_version_probe = {}\nstop_grace = {}\nstop_retry = {}\n",
         millis(timers.attach_wait),
         millis(timers.ready_deadline),
         millis(timers.transmit_deadline),

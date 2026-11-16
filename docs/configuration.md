@@ -267,6 +267,7 @@ allowed_workdir_roots = ["/home/user/projects"]
 supervisor_exe = "/usr/local/bin/canterlot-worker"
 spawn_timeout = "10s"
 build_jobs = 6
+agent_nice = 10                                # nice агентских CLI и их потомков; 0 — не понижать
 # delegate_mcp_servers = ["context7"] # Серверы MCP владельца для делегатов; только на чтение.
 
 [execution.supervisor]
@@ -454,7 +455,10 @@ CANTERLOT_CLAUDE_CODE_SMOKE=1 cargo test -p canterlot-worker --all-features --te
 `supervisor_exe` — бинарник процесса сопровождения (по умолчанию текущий исполняемый файл),
 `spawn_timeout` — срок, за который запущенное сопровождение должно принять `Attach`.
 `build_jobs` — предел параллельной сборки для запускаемых сессий (по умолчанию 6); уже заданный
-в окружении воркера `CARGO_BUILD_JOBS` не перекрывается.
+в окружении воркера `CARGO_BUILD_JOBS` не перекрывается. `agent_nice` — приоритет агентских CLI
+(`claude`, `codex`, `opencode serve`, `antigravity`, синтетические) и всех их потомков: по умолчанию
+10, `0` выключает понижение. Воркер и сопровождение свой приоритет сохраняют. Для совместимости
+таблица принимается и под именем `[exec]`.
 `delegate_mcp_servers` — имена серверов MCP владельца, которые делегированная сессия (D24) получает
 рядом с canterlot; по умолчанию список пуст, и делегат видит один canterlot. Имя непустое, из
 `[A-Za-z0-9_-]`, не `canterlot`, иначе воркер не стартует с ошибкой конфигурации. Ключ задаёт только

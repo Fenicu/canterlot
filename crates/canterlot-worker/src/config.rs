@@ -21,7 +21,7 @@ pub struct WorkerConfig {
     pub data_dir: PathBuf,
     #[serde(default)]
     pub timers: WorkerTimers,
-    #[serde(default)]
+    #[serde(default, alias = "exec")]
     pub execution: ExecutionConfig,
     #[serde(default)]
     pub machine: MachineConfig,
@@ -46,6 +46,8 @@ pub struct ExecutionConfig {
     pub spawn_timeout: Duration,
     /// Предел параллельной сборки для запускаемых сессий; не перекрывает уже заданный `CARGO_BUILD_JOBS`.
     pub build_jobs: u32,
+    /// Приоритет (nice) процессов агентских CLI и их потомков; 0 выключает понижение.
+    pub agent_nice: u32,
     pub supervisor: SupervisorTimers,
     /// Серверы MCP владельца, которые делегированная сессия получает рядом с canterlot (D24).
     /// Только серверы на чтение; пустой список — делегат видит один canterlot.
@@ -59,6 +61,7 @@ impl Default for ExecutionConfig {
             supervisor_exe: None,
             spawn_timeout: Duration::from_secs(10),
             build_jobs: 6,
+            agent_nice: 10,
             supervisor: SupervisorTimers::default(),
             delegate_mcp_servers: Vec::new(),
         }

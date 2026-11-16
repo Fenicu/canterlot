@@ -5,7 +5,6 @@ use crate::containment::Containment;
 use std::ffi::OsString;
 use std::path::Path;
 use std::process::Stdio;
-use tokio::process::Command as TokioCommand;
 
 /// SIGKILL всей группе короткого запуска CLI (`--version`, зонд) при любом
 /// выходе, кроме снятого после чистого завершения: kill_on_drop убивает только
@@ -187,7 +186,7 @@ impl AppServerProcess {
         // Повтор при ETXTBSY: тесты пишут двойника прямо перед запуском.
         // Синхронный сон только в редкой ветви повтора, обычный путь без задержек.
         let mut child = spawn_with_retry_sync(|| {
-            let mut cmd = TokioCommand::new(spec.executable);
+            let mut cmd = group.command(spec.executable);
             cmd.env_clear()
                 .args(&args)
                 .current_dir(spec.workdir)

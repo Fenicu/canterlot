@@ -676,6 +676,7 @@ allowed_workdir_roots = ["/"]
 supervisor_exe = "/usr/local/bin/canterlot-worker"  # current_exe по умолчанию
 spawn_timeout = "10s"
 build_jobs = 6                                      # CARGO_BUILD_JOBS для сессий, если он ещё не задан
+agent_nice = 10                                     # nice агентских CLI и их потомков; 0 — не понижать
 # Серверы MCP владельца, которые получают делегаты (D24); только на чтение, nanokvm никогда.
 delegate_mcp_servers = ["context7"]
 

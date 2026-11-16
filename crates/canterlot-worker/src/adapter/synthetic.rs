@@ -351,7 +351,7 @@ impl SyntheticAdapter {
         };
         // Повтор при ETXTBSY: исполняемым может быть свежезаписанный двойник тестов.
         let mut child = crate::adapter::spawn_with_retry_io(|| {
-            let mut command = tokio::process::Command::new(&executable);
+            let mut command = group.command(&executable);
             command
                 .args([
                     "synthetic-cli",

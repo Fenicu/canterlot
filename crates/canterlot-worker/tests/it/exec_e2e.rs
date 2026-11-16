@@ -353,6 +353,7 @@ impl Fixture {
                 supervisor_exe: Some(wrapper),
                 spawn_timeout: Duration::from_secs(2),
                 build_jobs: 6,
+                agent_nice: 0,
                 supervisor: SupervisorTimers {
                     stop_grace: Duration::from_millis(500),
                     stop_retry: Duration::from_millis(300),

@@ -601,6 +601,7 @@ mod manager_tests {
                 supervisor_exe: Some(PathBuf::from(env!("CARGO_BIN_EXE_canterlot-worker"))),
                 spawn_timeout: Duration::from_secs(10),
                 build_jobs: 6,
+                agent_nice: 0,
                 supervisor: SupervisorTimers {
                     stop_grace: Duration::from_secs(1),
                     stop_retry: Duration::from_millis(200),

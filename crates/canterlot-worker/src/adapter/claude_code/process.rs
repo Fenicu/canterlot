@@ -5,7 +5,6 @@ use crate::containment::Containment;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use tokio::process::Command as TokioCommand;
 use uuid::Uuid;
 
 #[derive(Debug, Clone)]
@@ -517,7 +516,7 @@ impl CliProcess {
         // Команда собирается заново на каждую попытку: повтор нужен только
         // для ETXTBSY при запуске свежезаписанного двойника в тестах.
         let mut child = spawn_with_retry_io(|| {
-            let mut cmd = TokioCommand::new(spec.executable);
+            let mut cmd = group.command(spec.executable);
             cmd.env_clear()
                 .kill_on_drop(true)
                 .args(&args)

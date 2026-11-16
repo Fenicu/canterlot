@@ -50,6 +50,9 @@ pub struct SupervisorSpec {
     /// Общий кэш успешных проб `<cli> --version`; без ключа кэш только в памяти.
     #[serde(default)]
     pub version_cache: Option<PathBuf>,
+    /// Понижение приоритета CLI и его потомков; 0 — не понижать.
+    #[serde(default)]
+    pub agent_nice: u32,
     #[serde(default)]
     pub timers: SupervisorTimers,
     #[serde(default)]
