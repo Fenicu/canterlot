@@ -1,3 +1,4 @@
+import AxeBuilder from '@axe-core/playwright';
 import type { Locator, Page } from '@playwright/test';
 import { FakeHub, FakeHubApi } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
@@ -165,4 +166,33 @@ test('F-36: other segmented controls keep their rows at 360', async ({ page }) =
     await expect(group).toBeVisible();
     expect(await rows(group.locator('label')), `${name} stays on one row`).toBe(1);
   }
+});
+
+/** Продукт держит html нулевой высоты: на время axe поднимаем корень, как parity-проверка. */
+async function liftRootClipping(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    document.documentElement.style.setProperty('overflow', 'visible', 'important');
+    document.documentElement.style.setProperty('min-height', '100dvh');
+    document.body.style.setProperty('min-height', '100dvh');
+    document.getElementById('app-shell')?.removeAttribute('inert');
+  });
+}
+
+async function linkInTextViolations(page: Page): Promise<string[]> {
+  await liftRootClipping(page);
+  const results = await new AxeBuilder({ page }).withRules(['link-in-text-block']).analyze();
+  return results.violations.flatMap((violation) =>
+    violation.nodes.slice(0, 5).map((node) => `${node.target.join(' ')} — ${node.any[0]?.message ?? violation.help}`)
+  );
+}
+
+// X-2: ссылка плана внутри строки карточки отличается не только цветом.
+test('X-2: plan link inside a card line is distinguishable without colour', async ({ page }) => {
+  await bootScreen(page, screen('plan-cards'));
+  expect(await linkInTextViolations(page)).toEqual([]);
+});
+
+test('X-2: plan tab keeps link-in-text-block clean', async ({ page }) => {
+  await bootScreen(page, screen('plan-tab'));
+  expect(await linkInTextViolations(page)).toEqual([]);
 });

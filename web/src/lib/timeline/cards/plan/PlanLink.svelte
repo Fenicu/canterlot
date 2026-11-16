@@ -21,7 +21,7 @@
 {/if}
 
 <style>
-  .plan-link { min-width: 0; overflow: hidden; color: var(--accent-link); text-decoration: none; text-overflow: ellipsis; white-space: nowrap; }
-  span.plan-link { color: var(--text); }
+  .plan-link { min-width: 0; overflow: hidden; color: var(--accent-link); text-decoration: underline; text-underline-offset: var(--s1); text-overflow: ellipsis; white-space: nowrap; }
+  span.plan-link { color: var(--text); text-decoration: none; }
   a:hover, a:focus-visible { text-decoration: underline; text-underline-offset: var(--s1); }
 </style>
