@@ -852,8 +852,9 @@ async fn plain_text_turn_yields_a_speed(pool: PgPool) {
             frame("session.text.started", json!({"ordinal": 0})),
         ],
     });
-    // Честная генерация: между первым кадром текста и его концом 400 мс.
-    script.steps.push(Step::Stall { ms: 400 });
+    // Честная генерация: между первым кадром текста и его концом 1,5 с. Время блокам ставит хаб
+    // при записи, и под нагрузкой задержка доставки съедает запас над порогом в 250 мс.
+    script.steps.push(Step::Stall { ms: 1500 });
     script.steps.push(Step::Emit {
         events: vec![
             frame(
