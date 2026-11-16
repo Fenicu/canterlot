@@ -364,6 +364,8 @@ message RecordBody {
     SecretDelivered secret_delivered = 43;
     SecretFailed secret_failed = 44;
     SecretRemoved secret_removed = 45;
+    // Файл не удалось убрать: манифест остаётся, уборка повторит попытку.
+    SecretRemoveFailed secret_remove_failed = 46;
   }
 }
 
@@ -387,6 +389,13 @@ message SecretRemoved {
   string reason = 2;
 }
 
+// Удалить файл не удалось: `attempt_id` остаётся на учёте, манифест не тронут,
+// и следующая уборка повторит попытку. Значения и пути здесь нет.
+message SecretRemoveFailed {
+  string attempt_id = 1;
+  string reason = 2;
+}
+
 // Метаданные файла при подключении: хаб сверяет незавершённые доставки.
 message SecretManifest {
   string attempt_id = 1;
@@ -398,6 +407,9 @@ message SecretManifest {
 
 message SecretManifests {
   repeated SecretManifest manifests = 1;
+  // Соединение, на котором снят снимок: хаб сверяет только попытки, отправленные
+  // до него, и не трогает доставки, ушедшие уже на этом соединении.
+  string snapshot_id = 2;
 }
 
 message CommandStored {

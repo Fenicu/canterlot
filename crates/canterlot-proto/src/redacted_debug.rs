@@ -528,6 +528,15 @@ impl fmt::Debug for crate::worker::v1::SecretRemoved {
     }
 }
 
+impl fmt::Debug for crate::worker::v1::SecretRemoveFailed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SecretRemoveFailed")
+            .field("attempt_id", &self.attempt_id)
+            .field("reason", &self.reason)
+            .finish()
+    }
+}
+
 impl fmt::Debug for crate::worker::v1::SecretManifest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SecretManifest")
@@ -544,6 +553,7 @@ impl fmt::Debug for crate::worker::v1::SecretManifests {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SecretManifests")
             .field("manifests", &self.manifests.len())
+            .field("snapshot_id", &self.snapshot_id)
             .finish()
     }
 }

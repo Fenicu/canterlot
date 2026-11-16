@@ -1346,6 +1346,7 @@ impl Worker {
         let mut secret_outbound = secret_enabled.then(|| ControlUp {
             msg: Some(control_up::Msg::SecretManifests(crate::secret::manifests(
                 &self.config.secrets,
+                &hello.connection_id,
             ))),
         });
         // Полное состояние очереди при подключении и при каждом изменении.
@@ -1732,7 +1733,21 @@ impl Worker {
                             // Запись файла коротка и не держит пульс: значение живёт
                             // только в этом сообщении и в файле.
                             let config = self.config.secrets.clone();
-                            let body = match crate::secret::write(&config, &request) {
+                            let live: std::collections::HashSet<Uuid> = self
+                                .manager
+                                .as_ref()
+                                .and_then(|manager| {
+                                    manager
+                                        .shared()
+                                        .infos
+                                        .lock()
+                                        .ok()
+                                        .map(|infos| crate::secret::live_conversations(&infos))
+                                })
+                                .unwrap_or_default()
+                                .into_iter()
+                                .collect();
+                            let body = match crate::secret::write(&config, &request, &live) {
                                 Ok(written) => {
                                     canterlot_proto::worker::v1::record_body::Body::SecretDelivered(
                                         crate::secret::delivered_fact(&request, &written),

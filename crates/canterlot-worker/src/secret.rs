@@ -3,18 +3,32 @@
 //! Значение приходит одним управляющим сообщением и живёт только здесь, в файле.
 //! Поэтому в этом модуле нет журналирования значения: `Debug`, ошибки и логи
 //! называют лишь короткую причину, а не текст, путь или размер содержимого.
+//!
+//! Каталоги открываются один раз и дальше используются только относительные
+//! `*at`-операции с `O_NOFOLLOW`: между проверкой и использованием путь не
+//! переигрывается, а симлинк не уводит запись или уборку за пределы дерева.
 
 use std::{
+    collections::HashSet,
     fmt,
-    io::Write,
+    io::{Read as _, Write as _},
+    os::fd::OwnedFd,
     path::{Path, PathBuf},
+    sync::Mutex,
     time::Duration,
 };
 
 use canterlot_proto::worker::v1::{
-    SecretDeliver, SecretDelivered, SecretFailed, SecretManifest, SecretManifests, SecretRemoved,
+    SecretDeliver, SecretDelivered, SecretFailed, SecretManifest, SecretManifests,
+    SecretRemoveFailed, SecretRemoved,
 };
-use rustix::fs::{Mode, OFlags};
+use rustix::{
+    fs::{
+        AtFlags, Dir, FileType, Mode, OFlags, Stat, fstat, fstatfs, mkdirat, open, openat,
+        renameat, statat, unlinkat,
+    },
+    io::Errno,
+};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -22,8 +36,30 @@ use crate::config::SecretConfig;
 
 /// Сколько файл живёт после записи.
 pub const FILE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
-/// Полный бросок временного файла: такой считается мусором уборки.
-const TEMP_MAX_AGE: Duration = Duration::from_secs(60 * 60);
+
+/// Все операции над файлами секретов идут по одной: уборка не может встать между
+/// переименованием значения и манифеста или удалить файл свежей доставки.
+static OPERATIONS: Mutex<()> = Mutex::new(());
+
+fn operations() -> std::sync::MutexGuard<'static, ()> {
+    OPERATIONS.lock().unwrap_or_else(|error| error.into_inner())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Тестовый крючок: следующая запись файла падает, не оставляя временного файла.
+    static FAIL_NEXT_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn take_write_failure() -> bool {
+    FAIL_NEXT_WRITE.with(|flag| flag.replace(false))
+}
+
+#[cfg(not(test))]
+fn take_write_failure() -> bool {
+    false
+}
 
 /// Короткий код причины: он уходит в факт и в журнал, но не содержит значения.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +74,10 @@ pub enum Failure {
     Io,
     /// Манифест не читается или не совпадает с файлом.
     Manifest,
+    /// Попытка уже отозвана или заменена более новой.
+    StaleAttempt,
+    /// Разговор, которого воркер не ведёт: файл писать некуда.
+    UnknownConversation,
 }
 
 impl Failure {
@@ -49,6 +89,8 @@ impl Failure {
             Self::InsecureDirectory => "insecure_directory",
             Self::Io => "io",
             Self::Manifest => "manifest",
+            Self::StaleAttempt => "stale_attempt",
+            Self::UnknownConversation => "unknown_conversation",
         }
     }
 }
@@ -75,6 +117,42 @@ struct Manifest {
     expires_at_ms: u64,
 }
 
+/// Надгробие запроса: только метаданные. Оно переживает файл и не даёт повторной
+/// доставке воскресить отозванное или затереть более новое значение.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct Tombstone {
+    request_id: Uuid,
+    conversation_id: Uuid,
+    #[serde(default)]
+    accepted: Option<Uuid>,
+    #[serde(default)]
+    terminal: Vec<Uuid>,
+}
+
+impl Tombstone {
+    fn new(request_id: Uuid, conversation_id: Uuid) -> Self {
+        Self {
+            request_id,
+            conversation_id,
+            accepted: None,
+            terminal: Vec::new(),
+        }
+    }
+
+    fn is_terminal(&self, attempt_id: Uuid) -> bool {
+        self.terminal.contains(&attempt_id)
+    }
+
+    fn supersede(&mut self, attempt_id: Uuid) {
+        if !self.terminal.contains(&attempt_id) {
+            self.terminal.push(attempt_id);
+        }
+        if self.accepted == Some(attempt_id) {
+            self.accepted = None;
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Removal {
     Removed,
@@ -82,14 +160,15 @@ pub enum Removal {
     Missing,
     /// Манифест принадлежит другой попытке: чужой файл не трогаем.
     Stale,
+    /// Удалить не удалось: манифест остаётся, уборка повторит.
+    Failed,
 }
 
 impl Removal {
     fn reason(self) -> &'static str {
         match self {
-            Self::Removed => "revoked",
-            Self::Missing => "revoked",
-            Self::Stale => "revoked",
+            Self::Removed | Self::Missing | Self::Stale => "revoked",
+            Self::Failed => "io",
         }
     }
 }
@@ -98,45 +177,247 @@ fn uid() -> u32 {
     rustix::process::geteuid().as_raw()
 }
 
-/// Проверка каталога: настоящий каталог, не симлинк, владелец — воркер, права 0700.
-fn secure_directory(path: &Path) -> Result<(), Failure> {
-    let metadata = std::fs::symlink_metadata(path).map_err(|_| Failure::InsecureDirectory)?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        return Err(Failure::InsecureDirectory);
+const TMPFS_MAGIC: i64 = 0x0102_1994;
+const BASE_FLAGS: OFlags = OFlags::RDONLY
+    .union(OFlags::DIRECTORY)
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::CLOEXEC);
+
+/// Открытый и проверенный каталог: дальше все пути считаются от этого fd.
+struct PinnedDir {
+    fd: OwnedFd,
+}
+
+impl PinnedDir {
+    fn open_at(parent: &OwnedFd, name: &str) -> Result<Self, Failure> {
+        let fd = openat(parent, name, BASE_FLAGS, Mode::empty())
+            .map_err(|_| Failure::InsecureDirectory)?;
+        Self::verify(fd)
     }
-    use std::os::unix::fs::MetadataExt;
-    if metadata.uid() != uid() || metadata.mode() & 0o777 != 0o700 {
-        return Err(Failure::InsecureDirectory);
+
+    fn open_path(path: &Path) -> Result<Self, Failure> {
+        let fd = open(path, BASE_FLAGS, Mode::empty()).map_err(|_| Failure::InsecureDirectory)?;
+        Self::verify(fd)
     }
+
+    /// Родитель базового каталога: нужен только как якорь для `mkdirat`/`openat`.
+    /// Права и владельца у него не требуем, но симлинк и не-каталог отвергаем.
+    fn open_parent(path: &Path) -> Result<Self, Failure> {
+        let fd = open(path, BASE_FLAGS, Mode::empty()).map_err(|_| Failure::InsecureDirectory)?;
+        let stat = fstat(&fd).map_err(|_| Failure::InsecureDirectory)?;
+        if FileType::from_raw_mode(stat.st_mode) != FileType::Directory {
+            return Err(Failure::InsecureDirectory);
+        }
+        Ok(Self { fd })
+    }
+
+    fn verify(fd: OwnedFd) -> Result<Self, Failure> {
+        let stat = fstat(&fd).map_err(|_| Failure::InsecureDirectory)?;
+        if FileType::from_raw_mode(stat.st_mode) != FileType::Directory
+            || stat.st_uid != uid()
+            || stat.st_mode & 0o777 != 0o700
+        {
+            return Err(Failure::InsecureDirectory);
+        }
+        Ok(Self { fd })
+    }
+
+    fn fd(&self) -> &OwnedFd {
+        &self.fd
+    }
+
+    fn entries(&self) -> Result<Vec<String>, Failure> {
+        let dir = Dir::read_from(&self.fd).map_err(|_| Failure::Io)?;
+        Ok(dir
+            .flatten()
+            .filter_map(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                (!name.is_empty() && name != "." && name != "..").then_some(name)
+            })
+            .collect())
+    }
+}
+
+/// Каталог разговора: открыт от базового fd, проверен на нём же.
+struct ConversationDir {
+    dir: PinnedDir,
+    conversation_id: Uuid,
+    root: PathBuf,
+}
+
+impl ConversationDir {
+    fn ensure(base: &PinnedDir, root: &Path, conversation_id: Uuid) -> Result<Self, Failure> {
+        let name = conversation_id.to_string();
+        match openat(base.fd(), &name, BASE_FLAGS, Mode::empty()) {
+            Ok(fd) => Ok(Self {
+                dir: PinnedDir::verify(fd)?,
+                conversation_id,
+                root: root.to_path_buf(),
+            }),
+            Err(Errno::NOENT) => {
+                match mkdirat(base.fd(), &name, Mode::from_bits_truncate(0o700)) {
+                    Ok(()) | Err(Errno::EXIST) => {}
+                    Err(_) => return Err(Failure::Io),
+                }
+                Ok(Self {
+                    dir: PinnedDir::open_at(base.fd(), &name)?,
+                    conversation_id,
+                    root: root.to_path_buf(),
+                })
+            }
+            // Симлинк или не каталог: открывать нельзя.
+            Err(_) => Err(Failure::InsecureDirectory),
+        }
+    }
+
+    fn open(base: &PinnedDir, root: &Path, conversation_id: Uuid) -> Result<Self, Failure> {
+        let name = conversation_id.to_string();
+        Ok(Self {
+            dir: PinnedDir::open_at(base.fd(), &name)?,
+            conversation_id,
+            root: root.to_path_buf(),
+        })
+    }
+
+    fn fd(&self) -> &OwnedFd {
+        self.dir.fd()
+    }
+
+    fn path(&self, name: &str) -> PathBuf {
+        self.root.join(self.conversation_id.to_string()).join(name)
+    }
+}
+
+fn manifest_name(request_id: Uuid) -> String {
+    format!("{request_id}.json")
+}
+
+fn tombstone_name(request_id: Uuid) -> String {
+    format!("{request_id}.tomb.json")
+}
+
+fn value_name(request_id: Uuid) -> String {
+    request_id.to_string()
+}
+
+fn temp_name(request_id: Uuid, kind: &str, attempt_id: Uuid) -> String {
+    format!(".{request_id}.{kind}.tmp-{attempt_id}")
+}
+
+fn read_at(dir: &OwnedFd, name: &str) -> Result<Vec<u8>, Failure> {
+    let fd = openat(
+        dir,
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|_| Failure::Io)?;
+    let mut file = std::fs::File::from(fd);
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).map_err(|_| Failure::Io)?;
+    Ok(bytes)
+}
+
+/// `O_CREAT|O_EXCL|O_NOFOLLOW` и 0600: чужой файл не подменить симлинком.
+fn write_new_at(dir: &OwnedFd, name: &str, bytes: &[u8]) -> Result<(), Failure> {
+    let fd = openat(
+        dir,
+        name,
+        OFlags::CREATE
+            .union(OFlags::EXCL)
+            .union(OFlags::WRONLY)
+            .union(OFlags::NOFOLLOW)
+            .union(OFlags::CLOEXEC),
+        Mode::from_bits_truncate(0o600),
+    )
+    .map_err(|_| Failure::Io)?;
+    let mut file = std::fs::File::from(fd);
+    if take_write_failure() {
+        return Err(Failure::Io);
+    }
+    file.write_all(bytes).map_err(|_| Failure::Io)?;
+    file.sync_all().map_err(|_| Failure::Io)?;
     Ok(())
 }
 
-/// Каталог живёт на tmpfs: `statfs` отвечает за точку монтирования файла.
-fn is_tmpfs(path: &Path) -> bool {
-    const TMPFS_MAGIC: i64 = 0x0102_1994;
-    match rustix::fs::statfs(path) {
+/// Временный файл убирается на любом пути ошибки, кроме успешного переименования.
+struct TempFile<'a> {
+    dir: &'a OwnedFd,
+    name: String,
+    armed: bool,
+}
+
+impl<'a> TempFile<'a> {
+    fn new(dir: &'a OwnedFd, name: String) -> Self {
+        Self {
+            dir,
+            name,
+            armed: true,
+        }
+    }
+
+    fn write(&self, bytes: &[u8]) -> Result<(), Failure> {
+        write_new_at(self.dir, &self.name, bytes)
+    }
+
+    fn commit(mut self, destination: &str) -> Result<(), Failure> {
+        renameat(self.dir, &self.name, self.dir, destination).map_err(|_| Failure::Io)?;
+        self.armed = false;
+        Ok(())
+    }
+}
+
+impl Drop for TempFile<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = unlinkat(self.dir, &self.name, AtFlags::empty());
+        }
+    }
+}
+
+fn read_manifest(dir: &OwnedFd, request_id: Uuid) -> Option<Manifest> {
+    serde_json::from_slice(&read_at(dir, &manifest_name(request_id)).ok()?).ok()
+}
+
+fn read_tombstone(dir: &OwnedFd, request_id: Uuid) -> Result<Tombstone, Failure> {
+    match read_at(dir, &tombstone_name(request_id)) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| Failure::Manifest),
+        Err(_) => Ok(Tombstone::new(request_id, Uuid::nil())),
+    }
+}
+
+fn write_tombstone(dir: &OwnedFd, request_id: Uuid, tombstone: &Tombstone) -> Result<(), Failure> {
+    let encoded = serde_json::to_vec(tombstone).map_err(|_| Failure::Manifest)?;
+    let temp = TempFile::new(dir, temp_name(request_id, "tomb", Uuid::nil()));
+    temp.write(&encoded)?;
+    temp.commit(&tombstone_name(request_id))
+}
+
+fn entry_stat(dir: &OwnedFd, name: &str) -> Option<Stat> {
+    statat(dir, name, AtFlags::SYMLINK_NOFOLLOW).ok()
+}
+
+fn is_regular(stat: &Stat) -> bool {
+    FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile
+}
+
+fn is_symlink(stat: &Stat) -> bool {
+    FileType::from_raw_mode(stat.st_mode) == FileType::Symlink
+}
+
+fn is_directory(stat: &Stat) -> bool {
+    FileType::from_raw_mode(stat.st_mode) == FileType::Directory
+}
+
+fn is_tmpfs(fd: &OwnedFd) -> bool {
+    match fstatfs(fd) {
         Ok(stat) => stat.f_type == TMPFS_MAGIC,
         Err(_) => false,
     }
 }
 
-fn create_private_directory(path: &Path) -> Result<(), Failure> {
-    if path.exists() {
-        return secure_directory(path);
-    }
-    let mut builder = std::fs::DirBuilder::new();
-    use std::os::unix::fs::DirBuilderExt;
-    builder.mode(0o700);
-    match builder.create(path) {
-        Ok(()) => secure_directory(path),
-        // Каталог мог создать параллельный вызов: проверка решает гонку.
-        Err(_) if path.exists() => secure_directory(path),
-        Err(_) => Err(Failure::Io),
-    }
-}
-
-/// Базовый каталог секретов: `$XDG_RUNTIME_DIR/canterlot-secrets` либо явный
-/// тестовый путь. Каталог создаётся 0700, проверяется и обязан быть на tmpfs.
+/// Базовый каталог: создаётся 0700 от открытого родителя, затем проверяется на
+/// уже открытом fd (fs type, владелец, права): пути между проверками не ходят.
 pub fn base_dir(config: &SecretConfig) -> Result<PathBuf, Failure> {
     let base = match &config.base_dir {
         Some(path) => path.clone(),
@@ -145,60 +426,79 @@ pub fn base_dir(config: &SecretConfig) -> Result<PathBuf, Failure> {
             PathBuf::from(runtime).join("canterlot-secrets")
         }
     };
-    create_private_directory(&base)?;
-    if !is_tmpfs(&base) {
+    let parent = base.parent().ok_or(Failure::InsecureDirectory)?;
+    let name = base
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or(Failure::InsecureDirectory)?;
+    let parent = PinnedDir::open_parent(parent).map_err(|_| Failure::InsecureDirectory)?;
+    match mkdirat(parent.fd(), name, Mode::from_bits_truncate(0o700)) {
+        Ok(()) | Err(Errno::EXIST) => {}
+        Err(_) => return Err(Failure::Io),
+    }
+    let pinned = PinnedDir::open_at(parent.fd(), name)?;
+    if !is_tmpfs(pinned.fd()) {
         return Err(Failure::NotTmpfs);
     }
     Ok(base)
 }
 
-/// Каталог разговора: `0700`, владелец — воркер, не симлинк.
-fn conversation_dir(config: &SecretConfig, conversation_id: Uuid) -> Result<PathBuf, Failure> {
+fn open_base(config: &SecretConfig) -> Result<(PinnedDir, PathBuf), Failure> {
     let base = base_dir(config)?;
-    let dir = base.join(conversation_id.to_string());
-    create_private_directory(&dir)?;
-    // Вложенный каталог не должен уводить за базовый даже через симлинк родителя.
-    let canonical = std::fs::canonicalize(&dir).map_err(|_| Failure::InsecureDirectory)?;
-    let canonical_base = std::fs::canonicalize(&base).map_err(|_| Failure::InsecureDirectory)?;
-    if !canonical.starts_with(&canonical_base) {
-        return Err(Failure::InsecureDirectory);
-    }
-    Ok(dir)
+    Ok((PinnedDir::open_path(&base)?, base))
 }
 
-fn manifest_path(dir: &Path, request_id: Uuid) -> PathBuf {
-    dir.join(format!("{request_id}.json"))
-}
-
-fn file_path(dir: &Path, request_id: Uuid) -> PathBuf {
-    dir.join(request_id.to_string())
-}
-
-fn read_manifest(dir: &Path, request_id: Uuid) -> Option<Manifest> {
-    let bytes = std::fs::read(manifest_path(dir, request_id)).ok()?;
-    serde_json::from_slice(&bytes).ok()
-}
-
-/// Пишет файл и манифест. Та же попытка не переписывает файл и не сдвигает срок.
-pub fn write(config: &SecretConfig, request: &SecretDeliver) -> Result<Written, Failure> {
+/// Сохраняет манифест до значения: файл значения не существует без манифеста.
+pub fn write(
+    config: &SecretConfig,
+    request: &SecretDeliver,
+    live: &HashSet<Uuid>,
+) -> Result<Written, Failure> {
+    let _operations = operations();
     let request_id = Uuid::parse_str(&request.request_id).map_err(|_| Failure::Manifest)?;
     let attempt_id = Uuid::parse_str(&request.attempt_id).map_err(|_| Failure::Manifest)?;
     let conversation_id =
         Uuid::parse_str(&request.conversation_id).map_err(|_| Failure::Manifest)?;
-    let dir = conversation_dir(config, conversation_id)?;
+    if !live.contains(&conversation_id) {
+        return Err(Failure::UnknownConversation);
+    }
+    let (base, root) = open_base(config)?;
+    let dir = ConversationDir::ensure(&base, &root, conversation_id)?;
 
-    // Повтор той же попытки: файл уже на месте, срок не сбрасывается.
-    if let Some(manifest) = read_manifest(&dir, request_id)
+    let mut tombstone = read_tombstone(dir.fd(), request_id)?;
+    if tombstone.request_id == Uuid::nil() {
+        tombstone.request_id = request_id;
+    }
+    if tombstone.conversation_id == Uuid::nil() {
+        tombstone.conversation_id = conversation_id;
+    }
+    if tombstone.is_terminal(attempt_id) {
+        return Err(Failure::StaleAttempt);
+    }
+
+    // Повтор той же принятой попытки: файл уже на месте, срок не сбрасывается.
+    if tombstone.accepted == Some(attempt_id)
+        && let Some(manifest) = read_manifest(dir.fd(), request_id)
         && manifest.attempt_id == attempt_id
+        && entry_stat(dir.fd(), &value_name(request_id)).is_some_and(|stat| is_regular(&stat))
     {
-        let path = file_path(&dir, request_id);
-        if path.exists() {
-            return Ok(Written {
-                path,
-                expires_at_ms: manifest.expires_at_ms,
-                conversation_id,
-            });
-        }
+        return Ok(Written {
+            path: dir.path(&value_name(request_id)),
+            expires_at_ms: manifest.expires_at_ms,
+            conversation_id,
+        });
+    }
+
+    // Новая попытка заменяет прежнюю: прежняя становится тупиковой и не воскреснет.
+    if let Some(previous) = tombstone.accepted
+        && previous != attempt_id
+    {
+        tombstone.supersede(previous);
+    }
+    if let Some(manifest) = read_manifest(dir.fd(), request_id)
+        && manifest.attempt_id != attempt_id
+    {
+        tombstone.supersede(manifest.attempt_id);
     }
 
     let expires_at_ms = u64::try_from(
@@ -208,233 +508,366 @@ pub fn write(config: &SecretConfig, request: &SecretDeliver) -> Result<Written, 
             .timestamp_millis(),
     )
     .unwrap_or(0);
-    let temp = dir.join(format!(".{request_id}.tmp-{attempt_id}"));
-    write_private(&temp, &request.value)?;
-    let path = file_path(&dir, request_id);
-    if std::fs::rename(&temp, &path).is_err() {
-        let _ = std::fs::remove_file(&temp);
-        return Err(Failure::Io);
-    }
     let manifest = Manifest {
         attempt_id,
         conversation_id,
         expires_at_ms,
     };
-    let encoded = serde_json::to_vec(&manifest).map_err(|_| Failure::Manifest)?;
-    let temp_manifest = dir.join(format!(".{request_id}.json.tmp-{attempt_id}"));
-    write_private(&temp_manifest, &encoded)?;
-    if std::fs::rename(&temp_manifest, manifest_path(&dir, request_id)).is_err() {
-        let _ = std::fs::remove_file(&temp_manifest);
-        return Err(Failure::Io);
-    }
+    let encoded_manifest = serde_json::to_vec(&manifest).map_err(|_| Failure::Manifest)?;
+    tombstone.accepted = Some(attempt_id);
+    let encoded_tombstone = serde_json::to_vec(&tombstone).map_err(|_| Failure::Manifest)?;
+
+    let value_temp = TempFile::new(dir.fd(), temp_name(request_id, "value", attempt_id));
+    value_temp.write(&request.value)?;
+    let manifest_temp = TempFile::new(dir.fd(), temp_name(request_id, "manifest", attempt_id));
+    manifest_temp.write(&encoded_manifest)?;
+    let tomb_temp = TempFile::new(dir.fd(), temp_name(request_id, "tomb", attempt_id));
+    tomb_temp.write(&encoded_tombstone)?;
+
+    // Манифест и надгробие встают раньше значения: значение всегда опознано.
+    tomb_temp.commit(&tombstone_name(request_id))?;
+    manifest_temp.commit(&manifest_name(request_id))?;
+    value_temp.commit(&value_name(request_id))?;
     Ok(Written {
-        path,
+        path: dir.path(&value_name(request_id)),
         expires_at_ms,
         conversation_id,
     })
 }
 
-/// `O_CREAT|O_EXCL|O_NOFOLLOW` и 0600: чужой файл не подменить симлинком.
-fn write_private(path: &Path, bytes: &[u8]) -> Result<(), Failure> {
-    let flags = OFlags::CREATE | OFlags::EXCL | OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let fd =
-        rustix::fs::open(path, flags, Mode::from_bits_truncate(0o600)).map_err(|_| Failure::Io)?;
-    let mut file = std::fs::File::from(fd);
-    file.write_all(bytes).map_err(|_| Failure::Io)?;
-    file.sync_all().map_err(|_| Failure::Io)?;
-    Ok(())
+fn remove_in_dir(
+    dir: &ConversationDir,
+    request_id: Uuid,
+    attempt_id: Uuid,
+) -> Result<Removal, Failure> {
+    let manifest = read_manifest(dir.fd(), request_id);
+    if let Some(manifest) = &manifest
+        && manifest.attempt_id != attempt_id
+    {
+        return Ok(Removal::Stale);
+    }
+    let mut tombstone = read_tombstone(dir.fd(), request_id)?;
+    if tombstone.request_id == Uuid::nil() {
+        tombstone = Tombstone::new(request_id, dir.conversation_id);
+    }
+    if manifest.is_none()
+        && !tombstone.is_terminal(attempt_id)
+        && tombstone.accepted != Some(attempt_id)
+    {
+        return Ok(Removal::Missing);
+    }
+
+    // Сначала надгробие: после падения повторная доставка уже не воскресит файл.
+    tombstone.supersede(attempt_id);
+    write_tombstone(dir.fd(), request_id, &tombstone)?;
+
+    let removed = match unlinkat(dir.fd(), value_name(request_id), AtFlags::empty()) {
+        Ok(()) => true,
+        Err(Errno::NOENT) => false,
+        Err(_) => return Ok(Removal::Failed),
+    };
+    if manifest.is_some()
+        && let Err(error) = unlinkat(dir.fd(), manifest_name(request_id), AtFlags::empty())
+        && error != Errno::NOENT
+    {
+        return Ok(Removal::Failed);
+    }
+    Ok(if removed {
+        Removal::Removed
+    } else {
+        Removal::Missing
+    })
 }
 
-/// Удаляет файл и манифест, если манифест принадлежит этой попытке.
+/// Удаляет файл и манифест, но только у своей попытки. Удаление подтверждается
+/// успешным `unlinkat`: иначе причина `revoked` была бы ложью.
 pub fn remove(config: &SecretConfig, request_id: Uuid, attempt_id: Uuid) -> Removal {
-    let Ok(base) = base_dir(config) else {
-        return Removal::Missing;
+    let _operations = operations();
+    let Ok((base, root)) = open_base(config) else {
+        return Removal::Failed;
     };
-    let Ok(entries) = std::fs::read_dir(&base) else {
-        return Removal::Missing;
+    let Ok(entries) = base.entries() else {
+        return Removal::Failed;
     };
-    for entry in entries.flatten() {
-        let dir = entry.path();
-        if !dir.is_dir() {
-            continue;
-        }
-        let Some(manifest) = read_manifest(&dir, request_id) else {
+    for name in entries {
+        let Some(stat) = entry_stat(base.fd(), &name) else {
             continue;
         };
-        if manifest.attempt_id != attempt_id {
-            return Removal::Stale;
+        if !is_directory(&stat) || is_symlink(&stat) {
+            continue;
         }
-        let path = file_path(&dir, request_id);
-        let file_gone = !path.exists();
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(manifest_path(&dir, request_id));
-        return if file_gone {
-            Removal::Missing
-        } else {
-            Removal::Removed
+        let Ok(conversation_id) = Uuid::parse_str(&name) else {
+            continue;
         };
+        let Ok(dir) = ConversationDir::open(&base, &root, conversation_id) else {
+            continue;
+        };
+        if read_manifest(dir.fd(), request_id).is_none()
+            && read_tombstone(dir.fd(), request_id)
+                .map(|tombstone| {
+                    tombstone.accepted != Some(attempt_id) && !tombstone.is_terminal(attempt_id)
+                })
+                .unwrap_or(true)
+        {
+            continue;
+        }
+        return remove_in_dir(&dir, request_id, attempt_id).unwrap_or(Removal::Failed);
     }
     Removal::Missing
 }
 
 /// Метаданные всех файлов: хаб сверяет `sending` после переподключения.
-pub fn manifests(config: &SecretConfig) -> SecretManifests {
+pub fn manifests(config: &SecretConfig, snapshot_id: &str) -> SecretManifests {
+    let _operations = operations();
     let mut items = Vec::new();
-    let Ok(base) = base_dir(config) else {
-        return SecretManifests { manifests: items };
+    let Ok((base, root)) = open_base(config) else {
+        return SecretManifests {
+            manifests: items,
+            snapshot_id: snapshot_id.to_owned(),
+        };
     };
-    let Ok(entries) = std::fs::read_dir(&base) else {
-        return SecretManifests { manifests: items };
+    let Ok(entries) = base.entries() else {
+        return SecretManifests {
+            manifests: items,
+            snapshot_id: snapshot_id.to_owned(),
+        };
     };
-    for entry in entries.flatten() {
-        let dir = entry.path();
-        if !dir.is_dir() {
-            continue;
-        }
-        let Ok(files) = std::fs::read_dir(&dir) else {
+    for name in entries {
+        let Some(stat) = entry_stat(base.fd(), &name) else {
             continue;
         };
-        for file in files.flatten() {
-            let name = file.file_name();
-            let Some(name) = name.to_str() else { continue };
-            let Some(request) = name.strip_suffix(".json") else {
+        if !is_directory(&stat) || is_symlink(&stat) {
+            continue;
+        }
+        let Ok(conversation_id) = Uuid::parse_str(&name) else {
+            continue;
+        };
+        let Ok(dir) = ConversationDir::open(&base, &root, conversation_id) else {
+            continue;
+        };
+        let Ok(files) = dir.dir.entries() else {
+            continue;
+        };
+        for file in files {
+            let Some(request) = file.strip_suffix(".json") else {
                 continue;
             };
-            if request.starts_with('.') {
+            if request.is_empty() || request.starts_with('.') || request.ends_with(".tomb") {
                 continue;
             }
             let Ok(request_id) = Uuid::parse_str(request) else {
                 continue;
             };
-            let Some(manifest) = read_manifest(&dir, request_id) else {
+            let Some(manifest) = read_manifest(dir.fd(), request_id) else {
                 continue;
             };
-            let path = file_path(&dir, request_id);
-            if !path.exists() {
+            if read_tombstone(dir.fd(), request_id)
+                .is_ok_and(|tombstone| tombstone.is_terminal(manifest.attempt_id))
+            {
+                continue;
+            }
+            let value = value_name(request_id);
+            if !entry_stat(dir.fd(), &value).is_some_and(|stat| is_regular(&stat)) {
                 continue;
             }
             items.push(SecretManifest {
                 attempt_id: manifest.attempt_id.to_string(),
                 request_id: request_id.to_string(),
                 conversation_id: manifest.conversation_id.to_string(),
-                path: path.display().to_string(),
+                path: dir.path(&value).display().to_string(),
                 expires_at_ms: manifest.expires_at_ms,
             });
         }
     }
-    SecretManifests { manifests: items }
+    SecretManifests {
+        manifests: items,
+        snapshot_id: snapshot_id.to_owned(),
+    }
 }
 
 /// Что уборка нашла и убрала: каждый известный файл отчитывается отдельно.
 #[derive(Debug, Default)]
 pub struct Swept {
     pub removed: Vec<SecretRemoved>,
+    pub failed: Vec<SecretRemoveFailed>,
     pub corrupt: u64,
     pub orphans: u64,
+}
+
+impl Swept {
+    fn fail(&mut self, attempt_id: Uuid, reason: &str) {
+        self.failed.push(SecretRemoveFailed {
+            attempt_id: attempt_id.to_string(),
+            reason: reason.to_owned(),
+        });
+    }
+}
+
+fn unlink_entry(dir: &OwnedFd, name: &str) -> bool {
+    unlinkat(dir, name, AtFlags::empty()).is_ok()
+}
+
+/// Убирает каталог, не заходя в симлинки: симлинк снимается как ссылка, а не как путь.
+fn remove_tree_at(parent: &OwnedFd, name: &str, dir: &PinnedDir) -> u64 {
+    let mut removed = 0;
+    if let Ok(entries) = dir.entries() {
+        for entry in entries {
+            let Some(stat) = entry_stat(dir.fd(), &entry) else {
+                continue;
+            };
+            if is_symlink(&stat) {
+                if unlink_entry(dir.fd(), &entry) {
+                    removed += 1;
+                }
+            } else if is_directory(&stat) {
+                if let Ok(fd) = openat(dir.fd(), &entry, BASE_FLAGS, Mode::empty())
+                    && let Ok(stat) = fstat(&fd)
+                    && stat.st_uid == uid()
+                    && let Ok(child) = PinnedDir::verify(fd)
+                {
+                    removed += remove_tree_at(dir.fd(), &entry, &child);
+                }
+            } else if unlink_entry(dir.fd(), &entry) {
+                removed += 1;
+            }
+        }
+    }
+    if unlinkat(parent, name, AtFlags::REMOVEDIR).is_ok() {
+        removed += 1;
+    }
+    removed
 }
 
 /// Уборка: просроченные файлы, сироты, брошенные временные файлы, испорченные
 /// манифесты и каталоги разговоров, которых воркер больше не ведёт.
 pub fn sweep(config: &SecretConfig, live: &[Uuid], now_ms: u64) -> Swept {
+    let _operations = operations();
     let mut swept = Swept::default();
-    let Ok(base) = base_dir(config) else {
+    let Ok((base, root)) = open_base(config) else {
         return swept;
     };
-    let Ok(entries) = std::fs::read_dir(&base) else {
+    let Ok(entries) = base.entries() else {
         return swept;
     };
-    let live: std::collections::HashSet<Uuid> = live.iter().copied().collect();
-    for entry in entries.flatten() {
-        let dir = entry.path();
-        if !dir.is_dir() {
-            continue;
-        }
-        let conversation = entry
-            .file_name()
-            .to_str()
-            .and_then(|name| Uuid::parse_str(name).ok());
-        // Каталог сессии, которую воркер больше не ведёт, убирается целиком.
-        if conversation.is_none_or(|id| !live.contains(&id)) {
-            swept.orphans += remove_tree(&dir);
-            continue;
-        }
-        let Ok(files) = std::fs::read_dir(&dir) else {
+    let live: HashSet<Uuid> = live.iter().copied().collect();
+    for name in entries {
+        let Some(stat) = entry_stat(base.fd(), &name) else {
             continue;
         };
-        let mut names: Vec<String> = files
-            .flatten()
-            .filter_map(|file| file.file_name().to_str().map(str::to_owned))
-            .collect();
-        names.sort();
-        for name in names {
-            if name.starts_with('.') {
-                let path = dir.join(&name);
-                let old = std::fs::metadata(&path)
-                    .ok()
-                    .and_then(|meta| meta.modified().ok())
-                    .and_then(|time| time.elapsed().ok())
-                    .is_some_and(|age| age > TEMP_MAX_AGE);
-                if old {
-                    let _ = std::fs::remove_file(&path);
+        if is_symlink(&stat) {
+            if unlink_entry(base.fd(), &name) {
+                swept.orphans += 1;
+            }
+            continue;
+        }
+        if !is_directory(&stat) {
+            if unlink_entry(base.fd(), &name) {
+                swept.orphans += 1;
+            }
+            continue;
+        }
+        let Ok(conversation_id) = Uuid::parse_str(&name) else {
+            // Не каталог разговора: не наш, не трогаем.
+            continue;
+        };
+        let Ok(dir) = ConversationDir::open(&base, &root, conversation_id) else {
+            continue;
+        };
+        // Каталог сессии, которую воркер больше не ведёт, убирается целиком.
+        if !live.contains(&conversation_id) {
+            swept.orphans += remove_tree_at(base.fd(), &name, &dir.dir);
+            continue;
+        }
+        let Ok(files) = dir.dir.entries() else {
+            continue;
+        };
+        for file in files {
+            let Some(stat) = entry_stat(dir.fd(), &file) else {
+                continue;
+            };
+            if is_symlink(&stat) {
+                if unlink_entry(dir.fd(), &file) {
                     swept.orphans += 1;
                 }
                 continue;
             }
-            let Some(request) = name.strip_suffix(".json") else {
+            if is_directory(&stat) {
+                // Настоящий подкаталог в каталоге разговора не наш: не рекурсируем.
+                continue;
+            }
+            if file.starts_with('.') {
+                // Под блокировкой ни одна запись не идёт: все временные файлы брошены.
+                if unlink_entry(dir.fd(), &file) {
+                    swept.orphans += 1;
+                }
+                continue;
+            }
+            if file.ends_with(".tomb.json") {
+                continue;
+            }
+            let Some(request) = file.strip_suffix(".json") else {
                 // Файл без манифеста: его писал прерванный вызов, срок неизвестен.
-                let Ok(request_id) = Uuid::parse_str(&name) else {
-                    continue;
-                };
-                if read_manifest(&dir, request_id).is_none() {
-                    let _ = std::fs::remove_file(dir.join(&name));
+                if let Ok(request_id) = Uuid::parse_str(&file)
+                    && read_manifest(dir.fd(), request_id).is_none()
+                    && unlink_entry(dir.fd(), &file)
+                {
                     swept.orphans += 1;
                 }
                 continue;
             };
             let Ok(request_id) = Uuid::parse_str(request) else {
-                let _ = std::fs::remove_file(dir.join(&name));
-                swept.corrupt += 1;
+                if unlink_entry(dir.fd(), &file) {
+                    swept.corrupt += 1;
+                }
                 continue;
             };
-            let Some(manifest) = read_manifest(&dir, request_id) else {
-                let _ = std::fs::remove_file(dir.join(&name));
-                let _ = std::fs::remove_file(file_path(&dir, request_id));
-                swept.corrupt += 1;
+            let Some(manifest) = read_manifest(dir.fd(), request_id) else {
+                if unlink_entry(dir.fd(), &file) {
+                    let _ = unlink_entry(dir.fd(), &value_name(request_id));
+                    swept.corrupt += 1;
+                }
                 continue;
             };
-            let path = file_path(&dir, request_id);
-            if !path.exists() {
-                let _ = std::fs::remove_file(manifest_path(&dir, request_id));
-                swept.orphans += 1;
+            let tombstone = read_tombstone(dir.fd(), request_id).ok();
+            let terminal = tombstone
+                .as_ref()
+                .is_some_and(|tombstone| tombstone.is_terminal(manifest.attempt_id));
+            let value = value_name(request_id);
+            let present = entry_stat(dir.fd(), &value).is_some_and(|stat| is_regular(&stat));
+            if !present {
+                if unlink_entry(dir.fd(), &file) {
+                    swept.orphans += 1;
+                }
                 continue;
             }
-            if manifest.expires_at_ms <= now_ms {
-                let _ = std::fs::remove_file(&path);
-                let _ = std::fs::remove_file(manifest_path(&dir, request_id));
-                swept.removed.push(SecretRemoved {
-                    attempt_id: manifest.attempt_id.to_string(),
-                    reason: "expired".into(),
-                });
+            if terminal || manifest.expires_at_ms <= now_ms {
+                let outcome = match unlinkat(dir.fd(), &value, AtFlags::empty()) {
+                    Ok(()) => true,
+                    Err(Errno::NOENT) => false,
+                    Err(_) => {
+                        swept.fail(manifest.attempt_id, "io");
+                        continue;
+                    }
+                };
+                if outcome && unlinkat(dir.fd(), &file, AtFlags::empty()).is_err() {
+                    swept.fail(manifest.attempt_id, "io");
+                    continue;
+                }
+                if terminal {
+                    swept.removed.push(SecretRemoved {
+                        attempt_id: manifest.attempt_id.to_string(),
+                        reason: "revoked".into(),
+                    });
+                } else {
+                    swept.removed.push(SecretRemoved {
+                        attempt_id: manifest.attempt_id.to_string(),
+                        reason: "expired".into(),
+                    });
+                }
             }
         }
     }
     swept
-}
-
-fn remove_tree(dir: &Path) -> u64 {
-    let mut removed = 0;
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                removed += remove_tree(&path);
-            } else if std::fs::remove_file(&path).is_ok() {
-                removed += 1;
-            }
-        }
-    }
-    let _ = std::fs::remove_dir(dir);
-    removed
 }
 
 /// Факт доставки: только метаданные.
@@ -463,6 +896,27 @@ pub fn removed_fact(attempt_id: Uuid, removal: Removal) -> SecretRemoved {
     }
 }
 
+/// Файл не убран: хаб оставит `revoking` с подписью и повторит уборку.
+pub fn remove_failed_fact(attempt_id: Uuid, reason: &str) -> SecretRemoveFailed {
+    SecretRemoveFailed {
+        attempt_id: attempt_id.to_string(),
+        reason: reason.to_owned(),
+    }
+}
+
+/// Живые разговоры: списанные и остановленные исполнения не держат каталоги.
+pub(crate) fn live_conversations(
+    infos: &std::collections::HashMap<Uuid, crate::exec::ExecInfo>,
+) -> Vec<Uuid> {
+    infos
+        .values()
+        .filter(|info| {
+            !info.retired && !matches!(info.state.as_str(), "stopped" | "failed" | "owner_lost")
+        })
+        .map(|info| info.conversation_id)
+        .collect()
+}
+
 /// Убирает файлы разговоров, которые воркер больше не ведёт, и просроченные файлы.
 /// Запускается при старте и раз в 10 минут.
 pub(crate) async fn run_sweeper(
@@ -474,23 +928,35 @@ pub(crate) async fn run_sweeper(
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         let swept = {
-            let live: Vec<Uuid> = shared
+            let live = shared
                 .infos
                 .lock()
-                .map(|infos| infos.values().map(|info| info.conversation_id).collect())
+                .map(|infos| live_conversations(&infos))
                 .unwrap_or_default();
             let now_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0);
             sweep(&config, &live, now_ms)
         };
-        if !swept.removed.is_empty() || swept.corrupt > 0 || swept.orphans > 0 {
-            let facts = swept.removed.clone();
+        if !swept.removed.is_empty()
+            || !swept.failed.is_empty()
+            || swept.corrupt > 0
+            || swept.orphans > 0
+        {
+            let removed = swept.removed.clone();
+            let failed = swept.failed.clone();
             let _ = shared
                 .store
                 .call(move |slot| {
                     let store = crate::exec::open(slot)?;
-                    for fact in facts {
+                    for fact in removed {
                         store.append_cj_fact(
                             canterlot_proto::worker::v1::record_body::Body::SecretRemoved(fact),
+                        )?;
+                    }
+                    for fact in failed {
+                        store.append_cj_fact(
+                            canterlot_proto::worker::v1::record_body::Body::SecretRemoveFailed(
+                                fact,
+                            ),
                         )?;
                     }
                     Ok(())
@@ -499,6 +965,7 @@ pub(crate) async fn run_sweeper(
             tracing::info!(
                 kind = "secret_sweep",
                 removed = swept.removed.len(),
+                failed = swept.failed.len(),
                 corrupt = swept.corrupt,
                 orphans = swept.orphans,
                 "secret files swept"
@@ -552,14 +1019,38 @@ mod tests {
         }
     }
 
+    fn live_set(conversation: Uuid) -> HashSet<Uuid> {
+        HashSet::from([conversation])
+    }
+
+    fn files_under(root: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        let Ok(entries) = std::fs::read_dir(root) else {
+            return found;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                found.extend(files_under(&path));
+            } else {
+                found.push(path);
+            }
+        }
+        found
+    }
+
     #[test]
     fn writes_exact_bytes_into_a_private_file_with_a_metadata_only_manifest() {
         let base = TestBase::new();
         let config = base.config();
         let (conversation, request_id, attempt) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
         let value = "canterlot-secret-PROBE-строка\n";
-        let written =
-            write(&config, &request(conversation, request_id, attempt, value)).expect("write");
+        let written = write(
+            &config,
+            &request(conversation, request_id, attempt, value),
+            &live_set(conversation),
+        )
+        .expect("write");
         let bytes = std::fs::read(&written.path).expect("file");
         assert_eq!(bytes, value.as_bytes(), "byte-exact, newline preserved");
         let file = std::fs::metadata(&written.path).expect("file metadata");
@@ -588,6 +1079,14 @@ mod tests {
                 .unwrap()
                 .contains("PROBE")
         );
+        let tomb = written
+            .path
+            .parent()
+            .unwrap()
+            .join(format!("{request_id}.tomb.json"));
+        let text = std::fs::read_to_string(&tomb).unwrap();
+        assert!(!text.contains("PROBE"), "the tombstone is metadata only");
+        assert!(text.contains(&attempt.to_string()));
         let expires = written.expires_at_ms;
         assert!(expires > 0);
     }
@@ -600,11 +1099,13 @@ mod tests {
         let first = write(
             &config,
             &request(conversation, request_id, attempt, "first\n"),
+            &live_set(conversation),
         )
         .unwrap();
         let again = write(
             &config,
             &request(conversation, request_id, attempt, "second\n"),
+            &live_set(conversation),
         )
         .unwrap();
         assert_eq!(first.path, again.path);
@@ -613,21 +1114,35 @@ mod tests {
     }
 
     #[test]
-    fn a_new_attempt_replaces_the_old_value() {
+    fn a_new_attempt_replaces_the_old_value_and_a_replay_of_the_old_one_is_refused() {
         let base = TestBase::new();
         let config = base.config();
         let (conversation, request_id) = (Uuid::now_v7(), Uuid::now_v7());
+        let first_attempt = Uuid::now_v7();
         let first = write(
             &config,
-            &request(conversation, request_id, Uuid::now_v7(), "old\n"),
+            &request(conversation, request_id, first_attempt, "old\n"),
+            &live_set(conversation),
         )
         .unwrap();
         let second = write(
             &config,
             &request(conversation, request_id, Uuid::now_v7(), "new\n"),
+            &live_set(conversation),
         )
         .unwrap();
         assert_eq!(first.path, second.path);
+        assert_eq!(std::fs::read(&second.path).unwrap(), b"new\n");
+
+        // A → B → A: повтор старой попытки не затирает новую.
+        let replay = write(
+            &config,
+            &request(conversation, request_id, first_attempt, "resurrected\n"),
+            &live_set(conversation),
+        )
+        .unwrap_err();
+        assert_eq!(replay, Failure::StaleAttempt);
+        assert_eq!(replay.code(), "stale_attempt");
         assert_eq!(std::fs::read(&second.path).unwrap(), b"new\n");
     }
 
@@ -639,6 +1154,7 @@ mod tests {
         let written = write(
             &config,
             &request(conversation, request_id, attempt, "value\n"),
+            &live_set(conversation),
         )
         .unwrap();
         assert_eq!(remove(&config, request_id, Uuid::now_v7()), Removal::Stale);
@@ -657,6 +1173,16 @@ mod tests {
                 .exists()
         );
         assert_eq!(remove(&config, request_id, attempt), Removal::Missing);
+
+        // Доставка после отзыва: та же попытка уже тупиковая.
+        let replay = write(
+            &config,
+            &request(conversation, request_id, attempt, "resurrected\n"),
+            &live_set(conversation),
+        )
+        .unwrap_err();
+        assert_eq!(replay, Failure::StaleAttempt);
+        assert!(!written.path.exists());
     }
 
     #[test]
@@ -667,10 +1193,12 @@ mod tests {
         let written = write(
             &config,
             &request(conversation, request_id, attempt, "value\n"),
+            &live_set(conversation),
         )
         .unwrap();
-        let listed = manifests(&config);
+        let listed = manifests(&config, "snapshot-1");
         assert_eq!(listed.manifests.len(), 1);
+        assert_eq!(listed.snapshot_id, "snapshot-1");
         let manifest = &listed.manifests[0];
         assert_eq!(manifest.attempt_id, attempt.to_string());
         assert_eq!(manifest.request_id, request_id.to_string());
@@ -691,6 +1219,7 @@ mod tests {
         let failure = write(
             &config,
             &request(conversation, Uuid::now_v7(), Uuid::now_v7(), "value\n"),
+            &live_set(conversation),
         )
         .unwrap_err();
         assert_eq!(failure, Failure::InsecureDirectory);
@@ -713,6 +1242,102 @@ mod tests {
     }
 
     #[test]
+    fn a_conversation_the_worker_does_not_run_is_refused() {
+        let base = TestBase::new();
+        let config = base.config();
+        let conversation = Uuid::now_v7();
+        let failure = write(
+            &config,
+            &request(conversation, Uuid::now_v7(), Uuid::now_v7(), "value\n"),
+            &HashSet::new(),
+        )
+        .unwrap_err();
+        assert_eq!(failure, Failure::UnknownConversation);
+        assert_eq!(failure.code(), "unknown_conversation");
+    }
+
+    #[test]
+    fn a_failed_write_leaves_no_temp_file_and_no_value() {
+        let base = TestBase::new();
+        let config = base.config();
+        let (conversation, request_id, attempt) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        FAIL_NEXT_WRITE.with(|flag| flag.set(true));
+        let failure = write(
+            &config,
+            &request(
+                conversation,
+                request_id,
+                attempt,
+                "canterlot-secret-PROBE\n",
+            ),
+            &live_set(conversation),
+        )
+        .unwrap_err();
+        assert_eq!(failure, Failure::Io);
+        let files = files_under(&base.0);
+        assert!(files.is_empty(), "no temp file survives: {files:?}");
+    }
+
+    #[test]
+    fn a_failed_unlink_keeps_the_manifest_for_the_next_sweep() {
+        let base = TestBase::new();
+        let config = base.config();
+        let (conversation, request_id, attempt) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        let written = write(
+            &config,
+            &request(conversation, request_id, attempt, "value\n"),
+            &live_set(conversation),
+        )
+        .unwrap();
+        let dir = written.path.parent().unwrap().to_path_buf();
+        // Значение — непустой каталог: unlinkat без REMOVEDIR ответит ошибкой.
+        std::fs::remove_file(&written.path).unwrap();
+        std::fs::create_dir(&written.path).unwrap();
+        std::fs::write(written.path.join("inner"), b"keep").unwrap();
+        assert_eq!(remove(&config, request_id, attempt), Removal::Failed);
+        assert!(written.path.is_dir(), "the value stays until removal works");
+        let manifest = dir.join(format!("{request_id}.json"));
+        assert!(manifest.exists(), "the manifest is kept for the next sweep");
+        // Файл действительно убрали, повтор подтверждает отсутствие и снимает манифест.
+        std::fs::remove_dir_all(&written.path).unwrap();
+        assert_eq!(remove(&config, request_id, attempt), Removal::Missing);
+        assert!(!manifest.exists());
+    }
+
+    #[test]
+    fn sweep_unlinks_a_planted_symlink_without_touching_its_target() {
+        let base = TestBase::new();
+        let config = base.config();
+        let live = Uuid::now_v7();
+        let written = write(
+            &config,
+            &request(live, Uuid::now_v7(), Uuid::now_v7(), "live\n"),
+            &live_set(live),
+        )
+        .unwrap();
+        let dir = written.path.parent().unwrap().to_path_buf();
+        let elsewhere = tempfile::tempdir().unwrap();
+        std::fs::write(elsewhere.path().join("keep"), b"keep").unwrap();
+        std::os::unix::fs::symlink(elsewhere.path(), dir.join("planted")).unwrap();
+        std::os::unix::fs::symlink(elsewhere.path().join("keep"), dir.join("planted-file"))
+            .unwrap();
+
+        let now_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap();
+        let swept = sweep(&config, &[live], now_ms);
+        assert!(
+            elsewhere.path().join("keep").exists(),
+            "the target survives"
+        );
+        assert_eq!(
+            std::fs::read(elsewhere.path().join("keep")).unwrap(),
+            b"keep"
+        );
+        assert!(!dir.join("planted").exists());
+        assert!(!dir.join("planted-file").exists());
+        assert!(swept.orphans >= 2);
+    }
+
+    #[test]
     fn sweep_removes_expired_orphans_corrupt_manifests_and_dead_conversations() {
         let base = TestBase::new();
         let config = base.config();
@@ -721,17 +1346,20 @@ mod tests {
         let live_ok = write(
             &config,
             &request(live, Uuid::now_v7(), Uuid::now_v7(), "live\n"),
+            &live_set(live),
         )
         .unwrap();
         let expired_request = Uuid::now_v7();
         let expired = write(
             &config,
             &request(live, expired_request, Uuid::now_v7(), "old\n"),
+            &live_set(live),
         )
         .unwrap();
         let dead_written = write(
             &config,
             &request(dead, Uuid::now_v7(), Uuid::now_v7(), "dead\n"),
+            &live_set(dead),
         )
         .unwrap();
         // Просроченный манифест: срок в прошлом.
@@ -757,15 +1385,9 @@ mod tests {
             .unwrap()
             .join(Uuid::now_v7().to_string());
         std::fs::write(&orphan, b"orphan").unwrap();
-        // Брошенный временный файл.
+        // Брошенный временный файл: под блокировкой он уже не пишется.
         let temp = live_ok.path.parent().unwrap().join(".tmp-test");
         std::fs::write(&temp, b"temp").unwrap();
-        std::fs::File::options()
-            .write(true)
-            .open(&temp)
-            .unwrap()
-            .set_modified(std::time::SystemTime::now() - Duration::from_secs(7200))
-            .unwrap();
 
         let now_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap();
         let swept = sweep(&config, &[live], now_ms);
@@ -780,6 +1402,42 @@ mod tests {
         assert_eq!(swept.removed[0].reason, "expired");
         assert_eq!(swept.corrupt, 1);
         assert!(swept.orphans >= 1);
+    }
+
+    #[test]
+    fn a_file_written_before_restart_is_reported_again_after_it() {
+        let base = TestBase::new();
+        let config = base.config();
+        let (conversation, request_id, attempt) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        let written = write(
+            &config,
+            &request(conversation, request_id, attempt, "before\n"),
+            &live_set(conversation),
+        )
+        .unwrap();
+        // Новый процесс: тот же каталог, пустая память.
+        let restarted = SecretConfig {
+            base_dir: Some(base.0.clone()),
+        };
+        let listed = manifests(&restarted, "after-restart");
+        assert_eq!(listed.manifests.len(), 1);
+        assert_eq!(listed.manifests[0].attempt_id, attempt.to_string());
+        let again = write(
+            &restarted,
+            &request(conversation, request_id, attempt, "after\n"),
+            &live_set(conversation),
+        )
+        .unwrap();
+        assert_eq!(again.path, written.path);
+        assert_eq!(std::fs::read(&again.path).unwrap(), b"before\n");
+        // Следующая попытка после рестарта по-прежнему заменяет файл.
+        let newer = write(
+            &restarted,
+            &request(conversation, request_id, Uuid::now_v7(), "newer\n"),
+            &live_set(conversation),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&newer.path).unwrap(), b"newer\n");
     }
 
     #[test]

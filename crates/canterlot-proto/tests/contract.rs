@@ -2206,7 +2206,8 @@ fn prompt_suggestion_is_trimmed_and_capped_on_a_char_boundary() {
 fn secret_messages_keep_their_wire_shape_and_hide_the_value() {
     use canterlot_proto::worker::v1::{
         ControlDown, ControlUp, SecretDeliver, SecretDelivered, SecretFailed, SecretManifest,
-        SecretManifests, SecretRemoved, command, control_down, control_up, record_body,
+        SecretManifests, SecretRemoveFailed, SecretRemoved, command, control_down, control_up,
+        record_body,
     };
     const VALUE: &str = "canterlot-secret-PROBE-value";
 
@@ -2287,6 +2288,16 @@ fn secret_messages_keep_their_wire_shape_and_hide_the_value() {
     assert_eq!(body.encode_to_vec()[..2], [0xEA, 0x02], "field 45");
     assert!(!format!("{removed:?}").contains(VALUE));
 
+    let remove_failed = SecretRemoveFailed {
+        attempt_id: "attempt".into(),
+        reason: "io".into(),
+    };
+    let body = RecordBody {
+        body: Some(record_body::Body::SecretRemoveFailed(remove_failed.clone())),
+    };
+    assert_eq!(body.encode_to_vec()[..2], [0xF2, 0x02], "field 46");
+    assert!(!format!("{remove_failed:?}").contains(VALUE));
+
     let manifests = SecretManifests {
         manifests: vec![SecretManifest {
             attempt_id: "attempt".into(),
@@ -2295,6 +2306,7 @@ fn secret_messages_keep_their_wire_shape_and_hide_the_value() {
             path: "/run/canterlot-secrets/c/one".into(),
             expires_at_ms: 7,
         }],
+        snapshot_id: "connection".into(),
     };
     let up = ControlUp {
         msg: Some(control_up::Msg::SecretManifests(manifests.clone())),

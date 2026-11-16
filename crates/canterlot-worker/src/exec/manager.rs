@@ -822,23 +822,25 @@ pub(super) async fn revoke_secret(
     request: &canterlot_proto::worker::v1::RevokeSecret,
 ) -> Result<(), ExecError> {
     let config = shared.secrets.get().cloned().unwrap_or_default();
-    let fact = match (
+    let body = match (
         Uuid::parse_str(&request.request_id),
         Uuid::parse_str(&request.attempt_id),
     ) {
         (Ok(request_id), Ok(attempt_id)) => {
             let removal = crate::secret::remove(&config, request_id, attempt_id);
-            crate::secret::removed_fact(attempt_id, removal)
+            if removal == crate::secret::Removal::Failed {
+                Body::SecretRemoveFailed(crate::secret::remove_failed_fact(attempt_id, "io"))
+            } else {
+                Body::SecretRemoved(crate::secret::removed_fact(attempt_id, removal))
+            }
         }
         // Некорректная команда: файл не тронут, но команда не должна висеть.
-        _ => SecretRemoved {
+        _ => Body::SecretRemoved(SecretRemoved {
             attempt_id: request.attempt_id.clone(),
             reason: "invalid".into(),
-        },
+        }),
     };
-    shared
-        .cj(vec![Body::SecretRemoved(fact)], terminal_self(command))
-        .await
+    shared.cj(vec![body], terminal_self(command)).await
 }
 
 /// Уборка рабочей копии не привязана к исполнению: итог идёт в CJ, команда гасится вместе с ним.

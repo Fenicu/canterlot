@@ -63,6 +63,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ".canterlot.worker.v1.SecretDelivered",
             ".canterlot.worker.v1.SecretFailed",
             ".canterlot.worker.v1.SecretRemoved",
+            ".canterlot.worker.v1.SecretRemoveFailed",
             ".canterlot.worker.v1.SecretManifest",
             ".canterlot.worker.v1.SecretManifests",
         ])
