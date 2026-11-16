@@ -507,6 +507,21 @@ pub async fn on_limit_reached_in_tx(
         )
         .await;
     }
+    // Одноразовое продолжение уже держит это окно: повторный факт лимита не добавляет
+    // вторую, обычную паузу под удержанием.
+    let one_shot_pending: bool = sqlx::query_scalar(
+        "select exists(select 1 from scheduled_jobs where conversation_id=$1 and kind='wake'
+           and state='pending' and payload->>'one_shot'='true'
+           and payload->>'provider'=$2 and payload->>'window'=$3)",
+    )
+    .bind(run.conversation_id)
+    .bind(&fact.provider)
+    .bind(window.as_str())
+    .fetch_one(&mut *conn)
+    .await?;
+    if one_shot_pending {
+        return Ok(LimitReachedEffect::Paused);
+    }
     // Пока пауза по этому окну стоит, повторный факт ничего не добавляет.
     if queue.pause_reasons.0.iter().any(|reason| {
         matches!(reason, PauseReason::LimitReached { provider, window: stored, .. }

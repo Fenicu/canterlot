@@ -701,6 +701,34 @@ test('pause_cards_render_mockup_08_in_both_themes', async ({ page }) => {
 	await expect(page.getByText('Вкладку можно закрыть: продолжение отправит хаб.')).toBeVisible();
 });
 
+test('limit_pause_offers_a_one_shot_continuation_at_reset_and_can_be_refused', async ({ page }) => {
+	const reset = new Date(Date.now() + 3_600_000).toISOString();
+	await bootChat(page, {
+		seeder: (api) => {
+			const id = seedConversation(api, { title: 'Лимит', activity: { state: 'quota_paused', evidence: { reason: 'quota' }, since: new Date().toISOString() } });
+			const detail = api.details.get(id)!;
+			detail.crunch = { enabled: false, resume_pending: false, resume_text: null };
+			detail.queue = {
+				pause_reasons: [{ reason: 'limit_reached', provider: 'claude', window: 'five_hour', resets_at: reset }],
+				hold_reasons: [],
+				queued: 1,
+				run_slot: 'free'
+			};
+			return id;
+		}
+	});
+
+	await expect(page.getByText(/Остановлена: достигнут лимит Claude/)).toBeVisible();
+	await page.getByRole('button', { name: 'Продолжить при сбросе' }).click();
+	await expect(page.getByRole('heading', { name: /Пауза до .*, затем продолжу автоматически/ })).toBeVisible();
+	await expect(page.getByRole('button', { name: 'Не продолжать' })).toBeVisible();
+	await expect(page.getByRole('button', { name: 'Продолжить при сбросе' })).toHaveCount(0);
+
+	await page.getByRole('button', { name: 'Не продолжать' }).click();
+	await expect(page.getByRole('button', { name: 'Продолжить при сбросе' })).toBeVisible();
+	await expect(page.getByRole('heading', { name: /Пауза до .*, затем продолжу автоматически/ })).toHaveCount(0);
+});
+
 test('spend_reserve_button_continues_one_session_and_updates_the_card', async ({ page }) => {
 	await bootChat(page, {
 		seeder: (api) => seedMockup08(api)

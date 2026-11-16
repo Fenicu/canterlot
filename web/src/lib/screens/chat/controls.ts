@@ -84,6 +84,18 @@ export async function spendSessionReserve(
   return { outcome, message };
 }
 
+export async function resumeAtReset(conversationId: string, key?: string) {
+  return once(`auto-resume:${conversationId}`, key, (used) =>
+    client.resumeAtReset(conversationId, used),
+  );
+}
+
+export async function cancelResumeAtReset(conversationId: string, key?: string) {
+  return once(`cancel-auto-resume:${conversationId}`, key, (used) =>
+    client.cancelResumeAtReset(conversationId, used),
+  );
+}
+
 export async function updateCrunch(
   conversationId: string,
   body: CrunchSetting,

@@ -41,7 +41,9 @@ export type CardAction = {
     | "edit_resume_text"
     | "retry_as_new"
     | "compact_context"
-    | "resolve_owner_lost";
+    | "resolve_owner_lost"
+    | "auto_resume"
+    | "cancel_resume";
   label: string;
   /** Ввод, который повторяет `retry_as_new`. */
   inputId?: string;
@@ -71,6 +73,8 @@ const ACTION_LABELS: Record<Exclude<CardAction["id"], "run">, string> = {
   retry_as_new: "Отправить повторно как новое",
   compact_context: "Сжать контекст",
   resolve_owner_lost: "Завершить исполнение",
+  auto_resume: "Продолжить при сбросе",
+  cancel_resume: "Не продолжать",
 };
 
 export const RESOLVE_WARNING =
@@ -174,7 +178,13 @@ export function pauseHoldCards(q: QueueView, ctx: PauseCardsContext): Card[] {
           tone: "warning",
           title,
           body: [],
-          actions: forward,
+          actions: [
+            ...forward,
+            {
+              id: "auto_resume",
+              label: ACTION_LABELS.auto_resume,
+            },
+          ],
         });
         break;
       }
@@ -356,7 +366,11 @@ export function pauseHoldCards(q: QueueView, ctx: PauseCardsContext): Card[] {
           tone: "warning",
           title: `Пауза до ${time}, затем продолжу автоматически`,
           body: ["Вкладку можно закрыть: продолжение отправит хаб."],
-          actions: [],
+          // У «кранча» продолжение — настройка сессии; отменить здесь можно только
+          // одноразовое «Продолжить при сбросе».
+          actions: ctx.crunch
+            ? []
+            : [{ id: "cancel_resume", label: ACTION_LABELS.cancel_resume }],
         });
         break;
       }

@@ -2,9 +2,11 @@
 	import { executionLive, type ChatStore } from '#lib/stores/chat.svelte.js';
 	import { RESOLVE_WARNING, pauseHoldCards, type CardAction, type QueueView } from './pauseCards';
 	import {
+		cancelResumeAtReset,
 		compactSessionContext,
 		continueSessionQueue,
 		resolveOwnerLost,
+		resumeAtReset,
 		resumeSession,
 		spendSessionReserve,
 		updateCrunch
@@ -118,6 +120,12 @@
 				}
 				case 'edit_resume_text':
 					editingCrunch = !editingCrunch;
+					break;
+				case 'auto_resume':
+					await resumeAtReset(chat.id);
+					break;
+				case 'cancel_resume':
+					await cancelResumeAtReset(chat.id);
 					break;
 				case 'retry_as_new': {
 					const input = [...chat.inputs.values()].find((item) => item.id === action.inputId);

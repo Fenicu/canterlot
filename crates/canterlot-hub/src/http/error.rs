@@ -274,6 +274,8 @@ impl From<crate::crunch::CrunchError> for ApiError {
         use crate::crunch::CrunchError as E;
         match error {
             E::NotFound => Self::new(ErrorCode::NotFound),
+            E::InvalidState => Self::new(ErrorCode::InvalidState),
+            E::NotPending => Self::new(ErrorCode::NotPending),
             E::IdempotencyConflict => Self::new(ErrorCode::IdempotencyConflict),
             E::Db(error) => error.into(),
         }

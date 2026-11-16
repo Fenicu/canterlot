@@ -93,6 +93,7 @@ mod requests_domain;
 mod requests_integration;
 mod rereview;
 mod reserve_settings;
+mod resume_at_reset;
 mod retention_keyset;
 mod routing;
 mod scheduler;

@@ -3285,6 +3285,159 @@
         }
       }
     },
+    "/api/v1/conversations/{id}/auto-resume": {
+      "post": {
+        "tags": [
+          "conversations"
+        ],
+        "summary": "Одноразовое «Продолжить при сбросе»: обычная пауза лимита становится удержанием\nс продолжением после подтверждённого сброса; «кранч» остаётся выключенным.",
+        "operationId": "post__api_v1_conversations__id__auto_resume",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Одноразовое продолжение взведено",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResumeAtResetOutcome"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Нет паузы лимита",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "conversations"
+        ],
+        "summary": "Отказ от одноразового продолжения: задание пробуждения отменяется, пауза лимита\nвозвращается с прежними провайдером, окном и сроком сброса.",
+        "operationId": "delete__api_v1_conversations__id__auto_resume",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Одноразовое продолжение отменено",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CancelResumeOutcome"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/conversations/{id}/blocks/{block_id}": {
       "get": {
         "tags": [
@@ -11045,6 +11198,14 @@
           }
         ]
       },
+      "CancelResumeOutcome": {
+        "type": "string",
+        "description": "Итог отказа от одноразового продолжения.",
+        "enum": [
+          "cancelled",
+          "not_pending"
+        ]
+      },
       "Candidate": {
         "type": "object",
         "description": "Кандидат типа задачи.",
@@ -17580,6 +17741,14 @@
               "not_owner_lost"
             ]
           }
+        ]
+      },
+      "ResumeAtResetOutcome": {
+        "type": "string",
+        "description": "Итог одноразового «Продолжить при сбросе».",
+        "enum": [
+          "armed",
+          "already_armed"
         ]
       },
       "ResumeBody": {

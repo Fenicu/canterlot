@@ -182,7 +182,7 @@ describe("chat/pauseCards", () => {
         },
         expectedTitle: `Остановлена: достигнут лимит Claude, сброс через 21\u00a0ч (${RESET_AT_FMT}); без «кранча» продолжение не отправляется`,
         expectedTone: "warning",
-        expectedActionIds: ["run"],
+        expectedActionIds: ["run", "auto_resume"],
       },
       {
         reason: {
@@ -330,7 +330,7 @@ describe("chat/pauseCards", () => {
         },
         expectedTitle: `Пауза до ${WAKE_AT_FMT}, затем продолжу автоматически`,
         expectedTone: "warning",
-        expectedActionIds: [],
+        expectedActionIds: ["cancel_resume"],
         expectedBody: ["Вкладку можно закрыть: продолжение отправит хаб."],
       },
       {
@@ -819,5 +819,56 @@ describe("chat/pauseCards", () => {
       "pause:unconfirmed_delivery",
     ]);
     expect(cards[0]!.entries).toBeUndefined();
+  });
+
+  it("a_limit_pause_offers_the_one_shot_continuation_at_reset", () => {
+    const cards = pauseHoldCards(
+      {
+        pause_reasons: [
+          {
+            reason: "limit_reached",
+            provider: "claude",
+            resets_at: RESET_AT_ISO,
+            window: "five_hour",
+          },
+        ],
+        hold_reasons: [],
+        queued: 1,
+      },
+      { ...base, crunch: false, liveExecution: true },
+    );
+    expect(cards[0]!.actions).toEqual([
+      { id: "continue_queue", label: "Продолжить очередь" },
+      { id: "auto_resume", label: "Продолжить при сбросе" },
+    ]);
+  });
+
+  it("a_one_shot_quota_hold_can_be_refused_but_a_crunch_hold_cannot", () => {
+    const queue: QueueView = {
+      pause_reasons: [],
+      hold_reasons: [
+        {
+          reason: "quota_exhausted",
+          provider: "claude",
+          wake_at: WAKE_AT_ISO,
+          window: "five_hour",
+        },
+      ],
+      queued: 0,
+    };
+    const oneShot = pauseHoldCards(queue, {
+      ...base,
+      crunch: false,
+      liveExecution: false,
+    });
+    expect(oneShot[0]!.actions).toEqual([
+      { id: "cancel_resume", label: "Не продолжать" },
+    ]);
+    const crunch = pauseHoldCards(queue, {
+      ...base,
+      crunch: true,
+      liveExecution: false,
+    });
+    expect(crunch[0]!.actions).toEqual([]);
   });
 });

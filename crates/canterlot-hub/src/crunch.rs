@@ -51,8 +51,28 @@ pub enum SpendOutcome {
     NotHeld,
 }
 
+/// Итог одноразового «Продолжить при сбросе».
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ResumeAtResetOutcome {
+    Armed,
+    AlreadyArmed,
+}
+
+/// Итог отказа от одноразового продолжения.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CancelResumeOutcome {
+    Cancelled,
+    NotPending,
+}
+
 pub enum CrunchError {
     NotFound,
+    /// Пауза лимита, к которой относится действие, уже сменилась.
+    InvalidState,
+    /// Пробуждение, которое просили отменить, уже не ждёт.
+    NotPending,
     IdempotencyConflict,
     Db(sqlx::Error),
 }
@@ -60,6 +80,8 @@ impl fmt::Debug for CrunchError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotFound => f.write_str("NotFound"),
+            Self::InvalidState => f.write_str("InvalidState"),
+            Self::NotPending => f.write_str("NotPending"),
             Self::IdempotencyConflict => f.write_str("IdempotencyConflict"),
             Self::Db(e) => f
                 .debug_tuple("Db")
@@ -110,6 +132,15 @@ fn quota_key(provider: &str, window: &str) -> String {
 }
 fn weekly_key(provider: &str) -> String {
     format!("weekly:{provider}")
+}
+fn window_from_wire(value: &str) -> Option<Window> {
+    match value {
+        "five_hour" => Some(Window::FiveHour),
+        "weekly" => Some(Window::Weekly),
+        "monthly" => Some(Window::Monthly),
+        "weekly_fable" => Some(Window::WeeklyFable),
+        _ => None,
+    }
 }
 fn is_quota(hold: &HoldReason, provider: &str, window: &str) -> bool {
     matches!(hold, HoldReason::QuotaExhausted { provider: p, window: w, .. } if p == provider && w == window)
@@ -296,6 +327,56 @@ pub async fn hold_quota_in_tx(
     let mut queue: LockedQueue = sqlx::query_as("select q.* from queue_state q join conversations c on c.id=q.conversation_id join executions e on e.conversation_id=c.id where e.id=$1 and c.id=$2 and c.machine_id=$3 for update of q")
         .bind(run.execution_id).bind(run.conversation_id).bind(run.machine_id).fetch_one(&mut *conn).await?;
     let resets_at = limits::timestamp(fact.resets_at_ms)?;
+    let input_command = if fact.input_command_id.is_empty() {
+        None
+    } else {
+        Some(
+            Uuid::parse_str(&fact.input_command_id)
+                .map_err(|e| sqlx::Error::Decode(Box::new(e)))?,
+        )
+    };
+    let owner_stopped: bool = sqlx::query_scalar("select owner_stop_requested or (owner_stop_input_seq is not null and ($2::uuid is null or coalesce((select input_seq from inputs where command_id=$2 and conversation_id=$3),0)<=owner_stop_input_seq)) from executions where id=$1")
+        .bind(run.execution_id).bind(input_command).bind(run.conversation_id).fetch_one(&mut *conn).await?;
+    let pending = !owner_stopped && !queue.pause_reasons.0.contains(&PauseReason::UserStop);
+    let effect = hold_quota_core_in_tx(
+        conn,
+        owner_id,
+        run.conversation_id,
+        &mut queue,
+        provider,
+        window,
+        resets_at,
+        pending,
+        false,
+        Some(run.execution_id),
+        config,
+        now,
+        correlation_id,
+    )
+    .await?;
+    limits::limit_reached_event(conn, run, provider, window, resets_at, correlation_id).await?;
+    Ok(effect)
+}
+
+/// Общее с «кранчем» удержание: очередь уже заблокирована вызывающим, строка провайдера — тоже.
+/// `one_shot` помечает одноразовое продолжение: пробуждение не откажется продолжить сессию
+/// с выключенным «кранчем», но следующая остановка лимитом снова будет обычной паузой.
+#[allow(clippy::too_many_arguments)]
+async fn hold_quota_core_in_tx(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    conversation_id: Uuid,
+    queue: &mut LockedQueue,
+    provider: &str,
+    window: Window,
+    resets_at: Option<DateTime<Utc>>,
+    pending: bool,
+    one_shot: bool,
+    execution_id: Option<Uuid>,
+    config: &LimitsConfig,
+    now: DateTime<Utc>,
+    correlation_id: Uuid,
+) -> Result<LimitReachedEffect, sqlx::Error> {
     let candidate = millis(resets_at.unwrap_or(now + delta(config.unknown_reset_retry)?));
     let holds = &mut queue.hold_reasons.0;
     let (wake_at, moved) = match holds
@@ -333,32 +414,24 @@ pub async fn hold_quota_in_tx(
         .filter(|at| *at > now)
         .unwrap_or(now + TimeDelta::days(7))
         + TimeDelta::days(7);
-    let input_command = if fact.input_command_id.is_empty() {
-        None
-    } else {
-        Some(
-            Uuid::parse_str(&fact.input_command_id)
-                .map_err(|e| sqlx::Error::Decode(Box::new(e)))?,
-        )
-    };
-    let owner_stopped: bool = sqlx::query_scalar("select owner_stop_requested or (owner_stop_input_seq is not null and ($2::uuid is null or coalesce((select input_seq from inputs where command_id=$2 and conversation_id=$3),0)<=owner_stop_input_seq)) from executions where id=$1")
-        .bind(run.execution_id).bind(input_command).bind(run.conversation_id).fetch_one(&mut *conn).await?;
-    let pending = !owner_stopped && !queue.pause_reasons.0.contains(&PauseReason::UserStop);
     let resume_pending: bool = if pending {
         sqlx::query_scalar("update conversations set resume_pending=true,resume_pending_until=case when $3 or not resume_pending then $2 else coalesce(resume_pending_until,$2) end where id=$1 returning resume_pending")
-            .bind(run.conversation_id).bind(expires).bind(moved).fetch_one(&mut *conn).await?
+            .bind(conversation_id).bind(expires).bind(moved).fetch_one(&mut *conn).await?
     } else {
         sqlx::query_scalar("select resume_pending from conversations where id=$1")
-            .bind(run.conversation_id)
+            .bind(conversation_id)
             .fetch_one(&mut *conn)
             .await?
     };
     let hold_key = quota_key(provider, window.as_str());
-    let payload = json!({"provider":provider,"window":window,"hold_key":hold_key,"resets_at":resets_at.map(wire)});
+    let mut payload = json!({"provider":provider,"window":window,"hold_key":hold_key,"resets_at":resets_at.map(wire)});
+    if one_shot {
+        payload["one_shot"] = json!(true);
+    }
     let wake_job = schedule_wake(
         conn,
         owner_id,
-        run.conversation_id,
+        conversation_id,
         &hold_key,
         wake_at + delta(config.reset_grace)?,
         &payload,
@@ -367,14 +440,13 @@ pub async fn hold_quota_in_tx(
     .await?;
     let slot = queue.slot()?;
     queue
-        .save(conn, &slot, Some(run.execution_id), correlation_id)
+        .save(conn, &slot, execution_id, correlation_id)
         .await?;
-    limits::limit_reached_event(conn, run, provider, window, resets_at, correlation_id).await?;
     append(
         conn,
-        run.conversation_id,
+        conversation_id,
         "crunch_held",
-        Some(run.execution_id),
+        execution_id,
         json!({"provider":provider,"window":window,"reason":"quota_exhausted","wake_at":wire(wake_at),"resume_pending":resume_pending}),
         correlation_id,
     )
@@ -763,6 +835,9 @@ struct WakePayload {
     verified: bool,
     #[serde(default)]
     resets_at: Option<DateTime<Utc>>,
+    /// Одноразовое продолжение по паузе лимита: «кранч» выключен, но это пробуждение продолжает.
+    #[serde(default)]
+    one_shot: bool,
 }
 
 /// Что говорят показания о сбросе окна после срока `wake_at`.
@@ -882,12 +957,9 @@ pub async fn handle_wake_in_tx(
     ) else {
         return Ok(JobOutcome::Cancelled("invalid_payload"));
     };
-    let window = match payload.window.as_str() {
-        "five_hour" => Window::FiveHour,
-        "weekly" => Window::Weekly,
-        "monthly" => Window::Monthly,
-        "weekly_fable" => Window::WeeklyFable,
-        _ => return Ok(JobOutcome::Cancelled("invalid_payload")),
+    let window = match window_from_wire(&payload.window) {
+        Some(window) => window,
+        None => return Ok(JobOutcome::Cancelled("invalid_payload")),
     };
     let provider = payload.provider.as_str();
     if !limits::known_provider(provider) {
@@ -965,9 +1037,11 @@ pub async fn handle_wake_in_tx(
     .bind(id)
     .fetch_one(&mut *conn)
     .await?;
+    // Одноразовое продолжение по паузе лимита идёт тем же путём, что и «кранч».
+    let resume_allowed = crunch || payload.one_shot;
     if payload.verified {
         // Пробуждение после сброса недели создано правилом, уже снявшим удержание `weekly_reserve`.
-        if !crunch || !resume_pending {
+        if !resume_allowed || !resume_pending {
             return Ok(JobOutcome::Cancelled("not_resumable"));
         }
     } else {
@@ -999,7 +1073,7 @@ pub async fn handle_wake_in_tx(
     .await?;
     let skipped = if queue.closed {
         Some("closed")
-    } else if !crunch {
+    } else if !resume_allowed {
         Some("crunch_disabled")
     } else if !live {
         // Мёртвому процессу текст не ставится: исполнения автоматика не запускает (E-7).
@@ -1430,6 +1504,249 @@ async fn spend_in_tx(
     )
     .await?;
     Ok(SpendOutcome::Continued)
+}
+
+/// «Продолжить при сбросе»: обычная пауза лимита становится таким же удержанием,
+/// `resume_pending` и заданием пробуждения, какие создал бы «кранч», но одноразово.
+pub async fn resume_at_reset(
+    pool: &PgPool,
+    owner_id: Uuid,
+    conversation_id: Uuid,
+    key: &str,
+    config: &LimitsConfig,
+    now: DateTime<Utc>,
+    correlation_id: Uuid,
+) -> Result<ResumeAtResetOutcome, CrunchError> {
+    let request = json!({"conversation_id": conversation_id});
+    let config = config.clone();
+    let outcome = idempotency::run_in_tx(
+        pool,
+        owner_id,
+        key,
+        "resume_at_reset",
+        &request,
+        Some(conversation_id),
+        move |conn| {
+            Box::pin(resume_at_reset_in_tx(
+                conn,
+                owner_id,
+                conversation_id,
+                config.clone(),
+                now,
+                correlation_id,
+            ))
+        },
+    )
+    .await?;
+    Ok(outcome.value)
+}
+
+async fn resume_at_reset_in_tx(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    id: Uuid,
+    config: LimitsConfig,
+    now: DateTime<Utc>,
+    correlation_id: Uuid,
+) -> Result<ResumeAtResetOutcome, CrunchError> {
+    let found: Option<Uuid> =
+        sqlx::query_scalar("select id from conversations where id=$1 and owner_id=$2")
+            .bind(id)
+            .bind(owner_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    if found.is_none() {
+        return Err(CrunchError::NotFound);
+    }
+    // Провайдера берём из паузы без блокировки, чтобы порядок блокировок остался
+    // «строка провайдера, очередь»: его держат приём лимитов и пробуждение.
+    let pauses: Option<Json<Vec<PauseReason>>> =
+        sqlx::query_scalar("select pause_reasons from queue_state where conversation_id=$1")
+            .bind(id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    let pause = pauses.and_then(|p| {
+        p.0.into_iter().find_map(|reason| match reason {
+            PauseReason::LimitReached {
+                provider: Some(provider),
+                window: Some(window),
+                ..
+            } if window_from_wire(&window).is_some() => Some((provider, window)),
+            _ => None,
+        })
+    });
+    let Some((provider, window)) = pause else {
+        // Повтор после уже взведённого одноразового продолжения не ошибка.
+        let armed: bool = sqlx::query_scalar(
+            "select exists(select 1 from scheduled_jobs where conversation_id=$1 and kind='wake'
+               and state='pending' and payload->>'one_shot'='true')",
+        )
+        .bind(id)
+        .fetch_one(&mut *conn)
+        .await?;
+        return Ok(if armed {
+            ResumeAtResetOutcome::AlreadyArmed
+        } else {
+            return Err(CrunchError::InvalidState);
+        });
+    };
+    limits::lock_provider(conn, &provider).await?;
+    let mut queue: LockedQueue =
+        sqlx::query_as("select * from queue_state where conversation_id=$1 for update")
+            .bind(id)
+            .fetch_optional(&mut *conn)
+            .await?
+            .ok_or(CrunchError::NotFound)?;
+    let Some(position) = queue.pause_reasons.0.iter().position(|reason| {
+        matches!(reason, PauseReason::LimitReached { provider: Some(p), window: Some(w), .. }
+            if p == &provider && w == &window)
+    }) else {
+        return Err(CrunchError::InvalidState);
+    };
+    let PauseReason::LimitReached { resets_at, .. } = queue.pause_reasons.0.remove(position) else {
+        return Err(CrunchError::InvalidState);
+    };
+    let Some(window) = window_from_wire(&window) else {
+        return Err(CrunchError::InvalidState);
+    };
+    let pending = !queue.pause_reasons.0.contains(&PauseReason::UserStop);
+    hold_quota_core_in_tx(
+        conn,
+        owner_id,
+        id,
+        &mut queue,
+        &provider,
+        window,
+        resets_at,
+        pending,
+        true,
+        None,
+        &config,
+        now,
+        correlation_id,
+    )
+    .await?;
+    Ok(ResumeAtResetOutcome::Armed)
+}
+
+/// «Не продолжать»: одноразовое пробуждение отменяется, а обычная пауза лимита возвращается.
+pub async fn cancel_resume_at_reset(
+    pool: &PgPool,
+    owner_id: Uuid,
+    conversation_id: Uuid,
+    key: &str,
+    now: DateTime<Utc>,
+    correlation_id: Uuid,
+) -> Result<CancelResumeOutcome, CrunchError> {
+    let request = json!({"conversation_id": conversation_id});
+    let outcome = idempotency::run_in_tx(
+        pool,
+        owner_id,
+        key,
+        "cancel_resume_at_reset",
+        &request,
+        Some(conversation_id),
+        move |conn| {
+            Box::pin(cancel_resume_at_reset_in_tx(
+                conn,
+                owner_id,
+                conversation_id,
+                now,
+                correlation_id,
+            ))
+        },
+    )
+    .await?;
+    Ok(outcome.value)
+}
+
+async fn cancel_resume_at_reset_in_tx(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    id: Uuid,
+    _now: DateTime<Utc>,
+    correlation_id: Uuid,
+) -> Result<CancelResumeOutcome, CrunchError> {
+    let found: Option<Uuid> =
+        sqlx::query_scalar("select id from conversations where id=$1 and owner_id=$2")
+            .bind(id)
+            .bind(owner_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    if found.is_none() {
+        return Err(CrunchError::NotFound);
+    }
+    let job: Option<(Uuid, Value)> = sqlx::query_as(
+        "select id,payload from scheduled_jobs where conversation_id=$1 and kind='wake'
+           and state='pending' and payload->>'one_shot'='true'
+         order by created_at desc,id desc limit 1 for update",
+    )
+    .bind(id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some((job_id, payload)) = job else {
+        return Ok(CancelResumeOutcome::NotPending);
+    };
+    let payload: WakePayload =
+        serde_json::from_value(payload).map_err(|_| CrunchError::InvalidState)?;
+    let Some(window) = window_from_wire(&payload.window) else {
+        return Ok(CancelResumeOutcome::NotPending);
+    };
+    if !limits::known_provider(&payload.provider) {
+        return Ok(CancelResumeOutcome::NotPending);
+    }
+    limits::lock_provider(conn, &payload.provider).await?;
+    let mut queue: LockedQueue =
+        sqlx::query_as("select * from queue_state where conversation_id=$1 for update")
+            .bind(id)
+            .fetch_optional(&mut *conn)
+            .await?
+            .ok_or(CrunchError::NotFound)?;
+    let cancelled: Option<Uuid> =
+        sqlx::query_scalar("update scheduled_jobs set state='cancelled',updated_at=clock_timestamp() where id=$1 and state='pending' returning id")
+            .bind(job_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    if cancelled.is_none() {
+        return Ok(CancelResumeOutcome::NotPending);
+    }
+    let Some(position) = queue
+        .hold_reasons
+        .0
+        .iter()
+        .position(|hold| is_quota(hold, &payload.provider, window.as_str()))
+    else {
+        return Ok(CancelResumeOutcome::NotPending);
+    };
+    queue.hold_reasons.0.remove(position);
+    let pause = PauseReason::LimitReached {
+        provider: Some(payload.provider.clone()),
+        window: Some(window.as_str().into()),
+        resets_at: payload.resets_at,
+    };
+    if !queue.pause_reasons.0.contains(&pause) {
+        queue.pause_reasons.0.push(pause);
+    }
+    sqlx::query("update conversations set resume_pending=false,resume_pending_until=null,updated_at=clock_timestamp() where id=$1")
+        .bind(id)
+        .execute(&mut *conn)
+        .await?;
+    let slot = queue.slot()?;
+    queue.save(conn, &slot, None, correlation_id).await?;
+    let enabled: bool = sqlx::query_scalar("select crunch_enabled from conversations where id=$1")
+        .bind(id)
+        .fetch_one(&mut *conn)
+        .await?;
+    append(
+        conn,
+        id,
+        "crunch_changed",
+        None,
+        json!({"enabled":enabled,"resume_pending":false,"reserve_override_until":null}),
+        correlation_id,
+    )
+    .await?;
+    Ok(CancelResumeOutcome::Cancelled)
 }
 
 /// Чем закончилась просьба об опросе лимитов провайдера.

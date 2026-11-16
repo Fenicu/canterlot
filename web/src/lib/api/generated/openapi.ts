@@ -592,6 +592,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/conversations/{id}/auto-resume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Одноразовое «Продолжить при сбросе»: обычная пауза лимита становится удержанием
+         *     с продолжением после подтверждённого сброса; «кранч» остаётся выключенным.
+         */
+        post: operations["post__api_v1_conversations__id__auto_resume"];
+        /**
+         * Отказ от одноразового продолжения: задание пробуждения отменяется, пауза лимита
+         *     возвращается с прежними провайдером, окном и сроком сброса.
+         */
+        delete: operations["delete__api_v1_conversations__id__auto_resume"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/conversations/{id}/blocks/{block_id}": {
         parameters: {
             query?: never;
@@ -2035,6 +2059,11 @@ export interface components {
                 state: components["schemas"]["InputState"];
             };
         };
+        /**
+         * @description Итог отказа от одноразового продолжения.
+         * @enum {string}
+         */
+        CancelResumeOutcome: "cancelled" | "not_pending";
         /** @description Кандидат типа задачи. */
         Candidate: {
             effort?: string | null;
@@ -3920,6 +3949,11 @@ export interface components {
                 command_id: string;
             };
         } | "not_owner_lost";
+        /**
+         * @description Итог одноразового «Продолжить при сбросе».
+         * @enum {string}
+         */
+        ResumeAtResetOutcome: "armed" | "already_armed";
         ResumeBody: {
             continue_queue?: boolean;
         };
@@ -6447,6 +6481,91 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    post__api_v1_conversations__id__auto_resume: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Одноразовое продолжение взведено */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ResumeAtResetOutcome"];
+                };
+            };
+            /** @description Нет паузы лимита */
+            409: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    delete__api_v1_conversations__id__auto_resume: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Одноразовое продолжение отменено */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CancelResumeOutcome"];
                 };
             };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */

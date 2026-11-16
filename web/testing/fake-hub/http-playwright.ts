@@ -812,6 +812,92 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     await route.fulfill({ status: 200, headers: headers(), json: { enabled: body.enabled, resume_text: body.resume_text } });
   });
 
+  await page.route('**/api/v1/conversations/*/auto-resume', async (route) => {
+    const method = route.request().method();
+    if (method !== 'POST' && method !== 'DELETE') return route.fallback();
+    const id = new URL(route.request().url()).pathname.split('/').at(-2) ?? '';
+    const detail = api.details.get(id) as
+      | (Record<string, unknown> & {
+          crunch?: { enabled?: boolean; resume_pending?: boolean };
+          queue?: {
+            pause_reasons?: { reason?: string; provider?: string; window?: string; resets_at?: string | null }[];
+            hold_reasons?: { reason?: string; provider?: string; window?: string; wake_at?: string }[];
+            queued?: number;
+            run_slot?: string;
+          };
+        })
+      | undefined;
+    if (!detail?.queue) {
+      await route.fulfill({
+        status: 409,
+        headers: headers(),
+        json: { error: { code: 'invalid_state' } }
+      });
+      return;
+    }
+    const queue = detail.queue;
+    queue.pause_reasons ??= [];
+    queue.hold_reasons ??= [];
+    if (method === 'POST') {
+      const index = queue.pause_reasons.findIndex((reason) => reason.reason === 'limit_reached');
+      const pause = index >= 0 ? queue.pause_reasons.splice(index, 1)[0] : null;
+      if (!pause) {
+        await route.fulfill({
+          status: 409,
+          headers: headers(),
+          json: { error: { code: 'invalid_state' } }
+        });
+        return;
+      }
+      const wakeAt = pause.resets_at ?? new Date(Date.now() + 60 * 60_000).toISOString();
+      queue.hold_reasons.push({
+        reason: 'quota_exhausted',
+        provider: pause.provider ?? 'claude',
+        window: pause.window ?? 'five_hour',
+        wake_at: wakeAt
+      });
+      if (detail.crunch) detail.crunch.resume_pending = true;
+      hub.append(`conversation:${id}`, {
+        kind: 'queue_state_changed',
+        conversation_id: id,
+        payload: {
+          pause_reasons: queue.pause_reasons,
+          hold_reasons: queue.hold_reasons,
+          run_slot: queue.run_slot ?? 'free'
+        }
+      });
+      hub.flush();
+      await route.fulfill({ status: 200, headers: headers(), json: 'armed' });
+      return;
+    }
+    const index = queue.hold_reasons.findIndex(
+      (hold) => hold.reason === 'quota_exhausted'
+    );
+    if (index < 0) {
+      await route.fulfill({ status: 200, headers: headers(), json: 'not_pending' });
+      return;
+    }
+    const hold = queue.hold_reasons.splice(index, 1)[0]!;
+    queue.pause_reasons.push({
+      reason: 'limit_reached',
+      provider: hold.provider ?? 'claude',
+      window: hold.window ?? 'five_hour',
+      resets_at: hold.wake_at ?? null
+    });
+    if (detail.crunch) detail.crunch.resume_pending = false;
+    hub.append(`conversation:${id}`, {
+      kind: 'queue_state_changed',
+      conversation_id: id,
+      payload: {
+        pause_reasons: queue.pause_reasons,
+        hold_reasons: queue.hold_reasons,
+        run_slot: queue.run_slot ?? 'free'
+      }
+    });
+    hub.flush();
+    await route.fulfill({ status: 200, headers: headers(), json: 'cancelled' });
+  });
+
   await page.route('**/api/v1/conversations/*/spend-reserve', async (route) => {
     if (route.request().method() !== 'POST') return route.fallback();
     const id = new URL(route.request().url()).pathname.split('/').at(-2) ?? '';

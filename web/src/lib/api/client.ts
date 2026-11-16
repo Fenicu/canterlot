@@ -980,6 +980,36 @@ export function getAttachmentContent(
   );
 }
 
+export function resumeAtReset(
+  conversationId: string,
+  key: string,
+  opts?: RequestOptions,
+): Promise<
+  HttpResponse<Ok<operations["post__api_v1_conversations__id__auto_resume"]>>
+> {
+  return http(
+    "POST",
+    `/api/v1/conversations/${id(conversationId)}/auto-resume`,
+    undefined,
+    keyed(key, opts),
+  );
+}
+
+export function cancelResumeAtReset(
+  conversationId: string,
+  key: string,
+  opts?: RequestOptions,
+): Promise<
+  HttpResponse<Ok<operations["delete__api_v1_conversations__id__auto_resume"]>>
+> {
+  return http(
+    "DELETE",
+    `/api/v1/conversations/${id(conversationId)}/auto-resume`,
+    undefined,
+    keyed(key, opts),
+  );
+}
+
 export function spendReserve(
   conversationId: string,
   key: string,
