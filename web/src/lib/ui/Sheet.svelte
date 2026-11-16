@@ -3,7 +3,7 @@
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
   import IconButton from './IconButton.svelte';
-  let { open, title, subtitle, routeKey, onclose, children }: { open: boolean; title: string; subtitle?: string; routeKey?: string; onclose: () => void; children: Snippet } = $props();
+  let { open, title, subtitle, routeKey, onclose, actions, children }: { open: boolean; title: string; subtitle?: string; routeKey?: string; onclose: () => void; actions?: Snippet; children: Snippet } = $props();
   const id = $props.id();
   let dialog: HTMLDialogElement;
   let heading: HTMLHeadingElement | undefined;
@@ -81,7 +81,7 @@
 </script>
 <dialog bind:this={dialog} aria-labelledby={id} aria-modal="true" onkeydown={keydown} onpointerdown={(event) => { pressedBackdrop = overBackdrop(event); }} onclick={backdropClick} oncancel={(event) => { event.preventDefault(); close(); }}>
   <div class="handle" aria-hidden="true"></div>
-  <header><div class="titles"><h2 id={id} bind:this={heading} tabindex="-1">{title}</h2>{#if subtitle}<p>{subtitle}</p>{/if}</div><IconButton icon="close" label="Закрыть" onclick={close} /></header>
+  <header><div class="titles"><h2 id={id} bind:this={heading} tabindex="-1">{title}</h2>{#if subtitle}<p>{subtitle}</p>{/if}</div><div class="sheet-actions">{#if actions}{@render actions()}{/if}<IconButton icon="close" label="Закрыть" onclick={close} /></div></header>
   <div class="body">{@render children()}</div>
 </dialog>
 <style>
@@ -91,6 +91,7 @@
   dialog[open] { animation: sheet-enter var(--duration-expand) var(--ease-sheet); }
   .handle { width: var(--handle-width); height: var(--handle-height); border-radius: var(--radius-pill); background: var(--control-line); margin: var(--s4) auto; }
   header { flex: none; display: flex; align-items: center; justify-content: space-between; gap: var(--s4); }
+  .sheet-actions { flex: none; display: flex; align-items: center; gap: var(--s4); }
   .titles { min-width: 0; }
   h2:focus { outline: none; }
   p { margin: var(--s1) var(--s0) var(--s0); color: var(--muted); font-size: var(--fs-sm); overflow-wrap: anywhere; }

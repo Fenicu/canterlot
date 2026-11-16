@@ -78,3 +78,26 @@ test('F-29: head-only taiga card is as tall as its head and centres its text', a
   expect(box.height - head.height, 'no empty body below the head').toBeLessThanOrEqual(0.5);
   expect(Math.abs(centerY(lead) - centerY(box)), 'head text is centred in the card').toBeLessThanOrEqual(1);
 });
+
+async function downloadRow(page: Page, name: string): Promise<void> {
+  await bootScreen(page, screen(name));
+  const dialog = page.getByRole('dialog').first();
+  await expect(dialog).toBeVisible();
+  const close = dialog.getByRole('button', { name: 'Закрыть' });
+  const download = dialog.getByRole('link', { name: /^Скачать/ });
+  const header = (await dialog.locator('header').boundingBox())!;
+  const closeBox = (await close.boundingBox())!;
+  const downloadBox = (await download.boundingBox())!;
+  // Кнопка скачивания живёт в шапке рядом с «Закрыть», а не отдельной строкой над документом.
+  expect(Math.abs(centerY(downloadBox) - centerY(closeBox)), `${name}: download and close share a row`).toBeLessThanOrEqual(4);
+  expect(downloadBox.y, `${name}: download lies inside the header`).toBeGreaterThanOrEqual(header.y - 2);
+  expect(downloadBox.y + downloadBox.height, `${name}: download lies inside the header`).toBeLessThanOrEqual(header.y + header.height + 2);
+}
+
+test('F-31: word viewer keeps the download beside the close button', async ({ page }) => {
+  await downloadRow(page, 'docx-viewer');
+});
+
+test('F-31: excel viewer keeps the download beside the close button', async ({ page }) => {
+  await downloadRow(page, 'xlsx-viewer');
+});
