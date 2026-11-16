@@ -25,9 +25,12 @@
 </div>
 
 <style>
-  .live { display: flex; align-items: center; gap: var(--s3); margin: 0; color: var(--secondary); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
+  /* Строка хода остаётся своей высоты, а цель «Прервать» выступает над ней и под ней на половину
+     остатка цели. Недостающие до соседей зазоры отдаём строке: сверху до строки инструмента,
+     снизу до подвала карточки, иначе цель ложится на их кнопки. */
+  .live { display: flex; align-items: center; gap: var(--s3); margin-block: calc((var(--target) - var(--icon)) / 2 - var(--s2)) calc((var(--target) - var(--icon)) / 2 - var(--s2) * 2); color: var(--secondary); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
   .text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  /* Цель нажатия 44 px, а строка хода остаётся своей высоты: лишнее уходит в отрицательные поля. */
+  /* Цель нажатия 44 px держится на строке, а лишнее уходит в отрицательные поля. */
   .stop {
     flex: none;
     display: inline-flex;

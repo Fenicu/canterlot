@@ -345,6 +345,10 @@
   p { margin: 0; overflow-wrap: anywhere; }
   .text { white-space: pre-wrap; }
   .status-row { display: flex; align-items: center; gap: var(--s3); min-width: 0; }
+  /* Над строкой статуса стоят вложения: цель закладки выступает выше строки на половину остатка цели
+     и заходила бы на плитку. Пузырь с вложениями отдаёт этот зазор строке, а без вложений своей высоты
+     не меняет; лишний 1 px оставляет между целью и плиткой чистую полосу. */
+  .files + .status-row { margin-block-start: calc((var(--target) - var(--fs-sm) * var(--lh-body)) / 2 - var(--s3) + var(--hairline)); }
   .status { min-width: 0; }
   .status, .reason { color: var(--secondary); font-size: var(--fs-sm); }
   /* Значок держит цель касания, но не делает строку статуса выше: поле съедается отрицательным отступом. */
