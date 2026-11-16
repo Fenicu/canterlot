@@ -43,6 +43,17 @@ impl PermissionMode {
 
     /// `None` у режима владельца: действуют правила его конфигурации.
     pub fn ruleset(self) -> Option<Value> {
+        self.ruleset_for(false)
+    }
+
+    /// Правила бокового чата (`canterlot_mcp: "side"`): как обычные, но в `read_only`
+    /// без подагентов — ответы на вопросы владельца не порождают чужую работу.
+    /// `task` — то же имя в других версиях схемы; лишнее правило безвредно.
+    pub fn ruleset_side(self) -> Option<Value> {
+        self.ruleset_for(true)
+    }
+
+    fn ruleset_for(self, side: bool) -> Option<Value> {
         let rules = match self {
             Self::Owner => return None,
             Self::Bypass => vec![rule("*", "allow")],
@@ -50,6 +61,17 @@ impl PermissionMode {
                 rule("*", "ask"),
                 rule("question", "allow"),
                 rule("todowrite", "allow"),
+            ]),
+            // Список задан явно: всё, чего в нём нет, исчезает из инструментов модели.
+            Self::ReadOnly if side => with_read_tools(vec![
+                rule("*", "deny"),
+                rule("read", "allow"),
+                rule("glob", "allow"),
+                rule("grep", "allow"),
+                rule("question", "allow"),
+                rule("todowrite", "allow"),
+                rule("task", "deny"),
+                rule("subagent", "deny"),
             ]),
             // Список задан явно: всё, чего в нём нет, исчезает из инструментов модели.
             Self::ReadOnly => with_read_tools(vec![
@@ -68,6 +90,12 @@ impl PermissionMode {
     /// Правила для `PATCH`: `null` сервер игнорирует, снять их можно только пустым списком.
     pub fn session_rules(self) -> Value {
         self.ruleset().unwrap_or_else(|| Value::Array(Vec::new()))
+    }
+
+    /// То же для бокового чата.
+    pub fn session_rules_side(self) -> Value {
+        self.ruleset_side()
+            .unwrap_or_else(|| Value::Array(Vec::new()))
     }
 }
 

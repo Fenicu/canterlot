@@ -596,6 +596,8 @@ pub struct OpenCodeAdapter {
     orphan_journal: Option<orphans::Journal>,
     session: String,
     mode: PermissionMode,
+    /// Боковой чат (`canterlot_mcp: "side"`): в `read_only` запрещены и подагенты.
+    side: bool,
     /// На сервере могли остаться другие правила: перед вводом они ставятся заново.
     rules_dirty: bool,
     /// Режим только что вышел из `read_only`: первому вводу после этого нужно напоминание.
@@ -664,6 +666,7 @@ impl OpenCodeAdapter {
             orphan_journal: None,
             session: String::new(),
             mode: PermissionMode::Owner,
+            side: false,
             rules_dirty: false,
             exit_note: false,
             model: String::new(),
@@ -827,6 +830,15 @@ impl OpenCodeAdapter {
         Ok(id)
     }
 
+    /// Правила этого запуска для сервера: боковому чату — без подагентов.
+    fn session_rules(&self) -> Value {
+        if self.side {
+            self.mode.session_rules_side()
+        } else {
+            self.mode.session_rules()
+        }
+    }
+
     // Повторное создание не меняет сессию, поэтому правила и модель ставятся отдельно.
     async fn resume_session(
         &mut self,
@@ -847,7 +859,7 @@ impl OpenCodeAdapter {
         {
             self.exit_note = true;
         }
-        let body = json!({"permissions": self.mode.session_rules()});
+        let body = json!({"permissions": self.session_rules()});
         self.http()?
             .patch(&path, &body, REQUEST_WAIT)
             .await
@@ -860,6 +872,40 @@ impl OpenCodeAdapter {
                 .map_err(failed)?;
         }
         Ok(native.to_owned())
+    }
+
+    // Форк родительской сессии своим сервером: проверено вживую на 2.2.6, запись
+    // родителя при простое не меняется. Форк наследует права родителя, поэтому
+    // сразу ставятся правила и модель этого запуска — той же политикой, что resume.
+    async fn fork_session(
+        &mut self,
+        spec: &StartSpec,
+        parent: &str,
+    ) -> Result<String, AdapterError> {
+        let failed = |_| AdapterError::StartFailed("fork_failed");
+        let created = self
+            .http()?
+            .post(&format!("/api/session/{parent}/fork"), &json!({}), REQUEST_WAIT)
+            .await
+            .map_err(failed)?;
+        let id = created
+            .pointer("/data/id")
+            .and_then(Value::as_str)
+            .ok_or(AdapterError::StartFailed("fork_failed"))?;
+        let path = format!("/api/session/{id}");
+        let body = json!({"permissions": self.session_rules()});
+        self.http()?
+            .patch(&path, &body, REQUEST_WAIT)
+            .await
+            .map_err(failed)?;
+        if let Some(model) = model_ref(&spec.model, &spec.effort) {
+            let body = json!({"model": model});
+            self.http()?
+                .post(&format!("{path}/model"), &body, REQUEST_WAIT)
+                .await
+                .map_err(failed)?;
+        }
+        Ok(id.to_owned())
     }
 
     async fn wait_mcp(&mut self) -> Result<(), AdapterError> {
@@ -996,7 +1042,7 @@ impl OpenCodeAdapter {
         env: &[(OsString, OsString)],
         password: String,
         group: &dyn Containment,
-    ) -> Result<(), AdapterError> {
+    ) -> Result<bool, AdapterError> {
         let base = self.spawn_server(spec, env, group).await?;
         let http = Http::new(base, password)
             .await
@@ -1007,12 +1053,23 @@ impl OpenCodeAdapter {
         if matches!(self.version, Some(CliVersion::UntestedNewer(_))) {
             self.check_schema().await?;
         }
-        self.session = match &spec.native_conversation_id {
-            Some(native) => self.resume_session(spec, native).await?,
-            None => self.create_session(spec).await?,
+        let (session, fresh_fork) = match (&spec.native_conversation_id, spec.fork.as_ref()) {
+            // Своя запись пропала, а родитель известен: перефорк вместо отказа.
+            (Some(native), Some(fork)) => match self.resume_session(spec, native).await {
+                Ok(id) => (id, false),
+                Err(_) => (self.fork_session(spec, &fork.parent_native_id).await?, true),
+            },
+            (Some(native), None) => (self.resume_session(spec, native).await?, false),
+            (None, Some(fork)) => (
+                self.fork_session(spec, &fork.parent_native_id).await?,
+                true,
+            ),
+            (None, None) => (self.create_session(spec).await?, false),
         };
+        self.session = session;
         self.wait_mcp().await?;
-        self.wait_agents().await
+        self.wait_agents().await?;
+        Ok(fresh_fork)
     }
 
     async fn start_inner(
@@ -1023,6 +1080,7 @@ impl OpenCodeAdapter {
         self.mode = PermissionMode::parse(&spec.permission_mode)
             .ok_or(AdapterError::StartFailed("unknown_permission_mode"))?;
         self.isolate_mcp = spec.isolate_mcp;
+        self.side = spec.fork.as_ref().is_some_and(|fork| fork.side_mcp);
         let layout = DataLayout::for_execution(&self.cfg, &self.exec_dir);
         let env = prepared_env(&self.cfg, &layout, self.exec_dir.join("tmp"))
             .await
@@ -1045,12 +1103,19 @@ impl OpenCodeAdapter {
         }
         self.version = Some(version);
         self.broker =
-            Some(Broker::bind_with(&self.exec_dir, ToolSet::LimitsOnly, "opencode").await?);
+            Some(
+                Broker::bind_with(
+                    &self.exec_dir,
+                    ToolSet::for_side(spec.fork.as_ref(), ToolSet::LimitsOnly),
+                    "opencode",
+                )
+                .await?,
+            );
         if let Some(native) = &spec.native_conversation_id {
             self.sweep_orphans(native).await;
         }
         let (env, password) = self.launch_env(&spec.instructions).await?;
-        self.launch(spec, &env, password, group).await?;
+        let fresh_fork = self.launch(spec, &env, password, group).await?;
         self.model = spec.model.clone();
         self.effort = spec.effort.clone();
         self.instructions = spec.instructions.clone();
@@ -1074,7 +1139,7 @@ impl OpenCodeAdapter {
             native_conversation_id: self.session.clone(),
             cli_pid: proc.pid,
             cli_start_ticks: proc.start_ticks,
-            fresh_fork: false,
+            fresh_fork,
         })
     }
 
@@ -1094,7 +1159,7 @@ impl OpenCodeAdapter {
         group: &dyn Containment,
     ) -> Result<(), AdapterError> {
         let (env, password) = self.launch_env(instructions).await?;
-        self.launch(spec, &env, password, group).await
+        self.launch(spec, &env, password, group).await.map(|_| ())
     }
 
     // «Как у владельца» отличается окружением запуска: такая смена требует нового процесса,
