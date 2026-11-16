@@ -14,8 +14,9 @@ use std::{
 pub struct SystemdWatchdog {
     socket: Option<UnixDatagram>,
     target: Option<PathBuf>,
-    /// Половина `WATCHDOG_USEC`: чаще пинговать незачем.
-    interval: Option<Duration>,
+    /// Четверть `WATCHDOG_USEC`: запас перекрывает самые длинные ожидания
+    /// главного цикла, пока пинг всё ещё заметно чаще `WatchdogSec`.
+    ping_interval: Option<Duration>,
     last_ping: Option<Instant>,
 }
 
@@ -24,20 +25,20 @@ impl SystemdWatchdog {
         let target = env::var_os("NOTIFY_SOCKET")
             .filter(|value| !value.is_empty())
             .map(PathBuf::from);
-        let interval = env::var("WATCHDOG_USEC")
+        let period = env::var("WATCHDOG_USEC")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
-            .filter(|micros| *micros >= 2)
-            .map(|micros| Duration::from_micros(micros / 2));
-        Self::new(target, interval)
+            .filter(|micros| *micros >= 4)
+            .map(Duration::from_micros);
+        Self::new(target, period)
     }
 
-    fn new(target: Option<PathBuf>, interval: Option<Duration>) -> Self {
+    fn new(target: Option<PathBuf>, watchdog_period: Option<Duration>) -> Self {
         let socket = target.as_ref().and_then(|_| UnixDatagram::unbound().ok());
         Self {
             socket,
             target,
-            interval,
+            ping_interval: watchdog_period.map(|period| period / 4),
             last_ping: None,
         }
     }
@@ -48,9 +49,9 @@ impl SystemdWatchdog {
         self.last_ping = None;
     }
 
-    /// Пинг из главного цикла; чаще половины `WATCHDOG_USEC` не отправляется.
+    /// Пинг из главного цикла; чаще четверти `WATCHDOG_USEC` не отправляется.
     pub fn ping(&mut self) {
-        let Some(interval) = self.interval else {
+        let Some(interval) = self.ping_interval else {
             return;
         };
         if self.last_ping.is_some_and(|last| last.elapsed() < interval) {
@@ -107,7 +108,7 @@ mod tests {
     fn fake_notify_socket_receives_ready_and_periodic_watchdog_pings() {
         let directory = short_directory();
         let (path, socket) = socket(&directory);
-        let mut watchdog = SystemdWatchdog::new(Some(path), Some(Duration::from_millis(20)));
+        let mut watchdog = SystemdWatchdog::new(Some(path), Some(Duration::from_millis(80)));
 
         watchdog.ready();
         assert_eq!(
@@ -130,6 +131,42 @@ mod tests {
                 "the loop keeps sending watchdog pings"
             );
         }
+    }
+
+    #[test]
+    fn throttle_is_a_quarter_of_the_watchdog_period() {
+        let watchdog = SystemdWatchdog::new(None, Some(Duration::from_secs(60)));
+        assert_eq!(watchdog.ping_interval, Some(Duration::from_secs(15)));
+    }
+
+    #[test]
+    fn short_intervals_ping_after_the_quarter_period_not_the_half() {
+        let directory = short_directory();
+        let (path, socket) = socket(&directory);
+        let mut watchdog = SystemdWatchdog::new(Some(path), Some(Duration::from_millis(800)));
+        assert_eq!(watchdog.ping_interval, Some(Duration::from_millis(200)));
+
+        watchdog.ready();
+        assert_eq!(
+            receive(&socket, Duration::from_secs(1)).as_deref(),
+            Some("READY=1")
+        );
+
+        watchdog.ping();
+        assert_eq!(
+            receive(&socket, Duration::from_secs(1)).as_deref(),
+            Some("WATCHDOG=1")
+        );
+        sleep(Duration::from_millis(100));
+        watchdog.ping();
+        assert_eq!(receive(&socket, Duration::from_millis(50)), None);
+
+        sleep(Duration::from_millis(100));
+        watchdog.ping();
+        assert_eq!(
+            receive(&socket, Duration::from_secs(1)).as_deref(),
+            Some("WATCHDOG=1")
+        );
     }
 
     #[test]

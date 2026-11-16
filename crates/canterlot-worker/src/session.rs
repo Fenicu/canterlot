@@ -845,6 +845,9 @@ impl Worker {
                 }
                 result = self.attempt(&boot_id, &mut live_since) => result,
             };
+            // Пинг сразу после попытки: до следующего цикла впереди может быть
+            // длинная пауза переподключения.
+            self.systemd_watchdog.ping();
             // Зависший сбор метрик не держит переподключение: задача остаётся в полёте
             // одна, а её результат из прошлой эпохи будет отброшен при завершении.
             self.manager.as_ref().unwrap().set_attachment_source(None);
@@ -962,6 +965,7 @@ impl Worker {
                 }
                 _ = sleep(delay) => {},
             }
+            self.systemd_watchdog.ping();
             cap = cap.saturating_mul(2).min(self.config.timers.backoff_max);
         }
     }
@@ -1001,6 +1005,7 @@ impl Worker {
                 }
                 _ = sleep(delay) => {}
             }
+            self.systemd_watchdog.ping();
             if crate::exec::storage_probe(&data_dir).is_ok() {
                 tracing::warn!(
                     kind = "disk_recovered",
