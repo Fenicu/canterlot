@@ -485,6 +485,7 @@
 	}
 	.settings.desktop { --end: var(--s6); }
 	.desktop .settings-body {
+		overflow-x: hidden;
 		overflow-y: auto;
 		padding: var(--s3) var(--gutter) var(--s0);
 	}

@@ -495,6 +495,7 @@
     z-index: 3;
     left: var(--s3);
     right: var(--s3);
+    overflow-x: hidden;
     overflow-y: auto;
     padding: var(--s6);
     border-radius: var(--radius-card);

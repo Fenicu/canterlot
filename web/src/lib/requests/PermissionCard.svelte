@@ -309,6 +309,7 @@
 
   .detail {
     max-height: calc(var(--fs-sm) * var(--lh-body) * 12);
+    overflow-x: hidden;
     overflow-y: auto;
   }
 

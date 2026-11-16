@@ -139,6 +139,7 @@
     gap: var(--s1);
     max-height: calc(var(--target) * 5);
     padding: var(--s2);
+    overflow-x: hidden;
     overflow-y: auto;
     border-radius: var(--radius);
     background: var(--raised);

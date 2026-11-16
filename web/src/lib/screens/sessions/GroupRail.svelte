@@ -88,7 +88,7 @@
 
 <style>
   .rail { flex: 0 0 var(--rail-width); width: var(--rail-width); min-height: 0; display: flex; flex-direction: column; padding-block: var(--s4) var(--s4); background: var(--bg); }
-  .tabs { flex: 1; min-height: 0; overflow-y: auto; scrollbar-width: none; display: flex; flex-direction: column; }
+  .tabs { flex: 1; min-height: 0; overflow-x: hidden; overflow-y: auto; scrollbar-width: none; display: flex; flex-direction: column; }
   .sep { flex: none; height: var(--hairline); margin: var(--s3) var(--s7); background: var(--line); }
   .sections { flex: none; display: flex; flex-direction: column; }
   .item { position: relative; display: flex; flex-direction: column; align-items: center; gap: var(--s2); width: 100%; padding: var(--s5) var(--s2) var(--s4); border: var(--s0); background: var(--transparent); color: var(--muted); font-size: var(--fs-xs); line-height: var(--lh-tight); text-align: center; }

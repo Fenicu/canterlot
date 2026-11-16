@@ -166,6 +166,7 @@
 	}
 	.list {
 		height: min(58dvh, calc(var(--sheet-max) - var(--s15)));
+		overflow-x: hidden;
 		overflow-y: auto;
 		overscroll-behavior: contain;
 		scrollbar-gutter: stable;

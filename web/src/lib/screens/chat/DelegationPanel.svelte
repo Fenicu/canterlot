@@ -87,6 +87,7 @@
 	.tree-slot {
 		flex: none;
 		max-height: 50%;
+		overflow-x: hidden;
 		overflow-y: auto;
 		border-radius: var(--radius-card);
 		margin: var(--s0) var(--gutter) var(--s4);

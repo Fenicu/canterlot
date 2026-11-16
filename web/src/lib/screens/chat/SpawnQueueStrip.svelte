@@ -129,7 +129,7 @@
 
 <style>
   /* Очередь запуска выше своего предела прокручивается сама, а не выдавливает поле ввода. */
-  .queue { display: flex; flex-direction: column; flex: 0 1 auto; min-height: 0; max-height: var(--stack-max); overflow-y: auto; overscroll-behavior: contain; padding: var(--s2) var(--gutter) var(--s0); }
+  .queue { display: flex; flex-direction: column; flex: 0 1 auto; min-height: 0; max-height: var(--stack-max); overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; padding: var(--s2) var(--gutter) var(--s0); }
   .head { display: flex; align-items: center; gap: var(--s4); min-height: var(--target); padding: var(--s0) var(--s6); border-radius: var(--radius-pill); background: var(--surface); color: var(--secondary); font-size: var(--fs-sm); text-align: left; }
   .head :global(svg) { width: var(--icon-small); height: var(--icon-small); flex: none; }
   .summary { flex: 1; min-width: 0; overflow: hidden; color: var(--text); text-overflow: ellipsis; white-space: nowrap; }

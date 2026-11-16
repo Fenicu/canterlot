@@ -275,6 +275,7 @@
 		min-height: 0;
 		/* Карточки паузы выше своего предела прокручиваются сами, а не выдавливают поле ввода. */
 		max-height: var(--stack-max);
+		overflow-x: hidden;
 		overflow-y: auto;
 		overscroll-behavior: contain;
 		gap: var(--s3);

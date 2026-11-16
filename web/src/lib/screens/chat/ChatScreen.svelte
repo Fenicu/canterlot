@@ -521,6 +521,7 @@
 	   поле ввода важнее второй карточки. Колесо и касание на пределе карточки продолжают
 	   прокрутку слота (auto), иначе до второй карточки не добраться: жест остаётся в первой. */
 	.request-cards-slot:global(:has(> :nth-child(2))) {
+		overflow-x: hidden;
 		overflow-y: auto;
 		overscroll-behavior: contain;
 	}

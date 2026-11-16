@@ -231,7 +231,7 @@
   .stack > :global(.field) { align-self: stretch; }
   .meta, .note, .path { font-size: var(--fs-meta); color: var(--secondary); }
   .path { overflow-wrap: anywhere; }
-  .md { align-self: stretch; max-height: 40vh; overflow-y: auto; overscroll-behavior: contain; }
+  .md { align-self: stretch; max-height: 40vh; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; }
   .files { align-self: stretch; list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--s2); }
   .link { background: none; border: 0; padding: 0; color: var(--accent); font: inherit; cursor: pointer; text-align: left; }
   .error { color: var(--danger); }

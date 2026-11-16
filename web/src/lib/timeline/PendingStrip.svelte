@@ -444,7 +444,7 @@
 
 <style>
   /* Раскрытая очередь выше своего предела прокручивается сама, а не выдавливает поле ввода. */
-  .strip { display: flex; flex-direction: column; gap: var(--s2); flex: 0 1 auto; min-height: 0; max-height: var(--stack-max); overflow-y: auto; overscroll-behavior: contain; padding: var(--s3) var(--gutter); }
+  .strip { display: flex; flex-direction: column; gap: var(--s2); flex: 0 1 auto; min-height: 0; max-height: var(--stack-max); overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; padding: var(--s3) var(--gutter); }
   /* «Свернуть» закреплена полосой у нижней кромки прокручиваемой очереди: раскрытый список не прячет её. */
   .strip > .more[data-fold] {
     position: sticky;

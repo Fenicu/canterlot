@@ -67,6 +67,7 @@
   .body {
     flex: 1;
     min-height: 0;
+    overflow-x: hidden;
     overflow-y: auto;
     padding: var(--s0) var(--gutter) var(--s4);
   }

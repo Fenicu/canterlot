@@ -188,6 +188,7 @@
 		max-height: var(--todo-list-max);
 		margin: var(--s0);
 		padding: var(--s1) var(--s6) var(--s4);
+		overflow-x: hidden;
 		overflow-y: auto;
 		list-style: none;
 	}
