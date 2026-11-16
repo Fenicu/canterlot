@@ -192,9 +192,16 @@
 		color: var(--muted);
 	}
 	:global(.capsule):has([data-details]) {
-		grid-template-areas: 'input input input input' 'attach context clock send' 'details details details details';
+		grid-template-areas:
+			'input input input input input input'
+			'attach mic context clock steer send'
+			'details details details details details details';
 	}
 	:global(.capsule):has(:global(.tray)):has([data-details]) {
-		grid-template-areas: 'tray tray tray tray' 'input input input input' 'attach context clock send' 'details details details details';
+		grid-template-areas:
+			'tray tray tray tray tray tray'
+			'input input input input input input'
+			'attach mic context clock steer send'
+			'details details details details details details';
 	}
 </style>

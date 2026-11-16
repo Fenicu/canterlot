@@ -1,6 +1,7 @@
 import type { Page } from '@playwright/test';
 import { FakeHub, FakeHubApi, seedConversation, seedHistory } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
+import { stubMicrophone } from './dictation-fixture';
 import { expect, test } from './fixtures';
 
 const OWNER = '00000000-0000-4000-8000-0000000000e4';
@@ -26,6 +27,8 @@ async function boot(
     live?: boolean;
     liveTurn?: boolean;
     harness?: { id: string; title: string; provider: string };
+    mic?: boolean;
+    queued?: string;
   } = {}
 ) {
   const hub = new FakeHub();
@@ -45,11 +48,31 @@ async function boot(
     };
   }
   if (opts.suggestion) api.setPromptSuggestion(id, opts.suggestion);
+  if (opts.mic) {
+    hub.dictation.status = { available: true, reason: null, mode: 'gpu', engine: 'warm' };
+    await stubMicrophone(page, 'granted');
+    await page.addInitScript(() => localStorage.setItem('canterlot.dictation', 'on'));
+  }
   await installChatRoutes(page, hub, api, OWNER);
   await page.goto(`/c/${id}`);
   await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
   const area = page.getByRole('textbox', { name: 'Сообщение' });
   await expect(area).toBeVisible();
+  if (opts.queued) {
+    hub.append(`conversation:${id}`, {
+      kind: 'input_queued',
+      conversation_id: id,
+      payload: {
+        input_id: api.id(),
+        input_seq: '50',
+        idempotency_key: api.id(),
+        state: 'queued',
+        content: [{ type: 'text', text: opts.queued }]
+      }
+    });
+    hub.flush();
+    await expect(page.locator('.strip').getByText(opts.queued)).toBeVisible();
+  }
   return { hub, api, id, area };
 }
 
@@ -266,3 +289,109 @@ test('context_details_fit_the_keyboard_sized_viewport', async ({ page }, info) =
   });
   expect(tappable, 'кнопка не перекрыта и не обрезана').toBe(true);
 });
+
+interface Cell {
+  top: number;
+  bottom: number;
+  center: number;
+}
+
+interface ComposerCells {
+  send: Cell;
+  steer: Cell | null;
+  mic: Cell | null;
+  details: Cell | null;
+  squeeze: Cell | null;
+  /** Низ самой нижней ячейки сетки: ниже подробностей ничего не должно стоять. */
+  lowest: number;
+  capsuleBottom: number;
+  viewport: number;
+}
+
+/** Ряды сетки капсулы: кнопки нижней строки, раскрытые подробности и самая нижняя ячейка. */
+function cellsOf(page: Page): Promise<ComposerCells> {
+  return page.evaluate(() => {
+    const capsule = document.querySelector('[data-composer] .capsule') as HTMLElement;
+    const cell = (element: Element | null): { top: number; bottom: number; center: number } | null => {
+      if (!element) return null;
+      const rect = element.getBoundingClientRect();
+      return { top: rect.top, bottom: rect.bottom, center: rect.top + rect.height / 2 };
+    };
+    const details = capsule.querySelector('[data-details]');
+    const squeeze = details
+      ? [...details.querySelectorAll('button')].find((item) => /Сжать контекст/.test(item.textContent ?? '')) ?? null
+      : null;
+    // Абсолютные элементы (поле файла, скрытая подсказка) в раскладке сетки не участвуют.
+    const inFlow = [...capsule.children].filter(
+      (child) => getComputedStyle(child).position !== 'absolute'
+    );
+    return {
+      send: cell(capsule.querySelector('.send'))!,
+      steer: cell(capsule.querySelector('.steer')),
+      mic: cell(capsule.querySelector('.mic')),
+      details: cell(details),
+      squeeze: cell(squeeze),
+      lowest: Math.max(...inFlow.map((child) => child.getBoundingClientRect().bottom)),
+      capsuleBottom: capsule.getBoundingClientRect().bottom,
+      viewport: window.innerHeight
+    };
+  });
+}
+
+/** Состояния поля ввода из отчёта: «Влить в ход» и микрофон по отдельности и вместе. */
+const CELL_CASES = [
+  { name: 'steer и микрофон', steer: true, mic: true },
+  { name: 'только «Влить в ход»', steer: true, mic: false },
+  { name: 'только микрофон', steer: false, mic: true }
+] as const;
+
+const CELL_VIEWPORTS = [
+  { width: 412, height: 892 },
+  { width: 412, height: 450 }
+] as const;
+
+for (const viewport of CELL_VIEWPORTS) {
+  for (const variant of CELL_CASES) {
+    test(`${variant.name} стоят в строке отправки и с раскрытыми подробностями ${viewport.width}x${viewport.height}`, async ({ page }, info) => {
+      test.skip(info.project.name !== 'phone', 'сенсорная раскладка поля ввода');
+      await page.setViewportSize(viewport);
+      await boot(page, {
+        harness: CLAUDE,
+        liveTurn: variant.steer,
+        mic: variant.mic,
+        queued: variant.steer ? 'Проверь очередь, пока идёт ход' : undefined,
+        context: { tokens: 630_000, window: 1_000_000 },
+        live: true
+      });
+
+      const steer = page.getByRole('button', { name: 'Влить в ход' });
+      const mic = page.getByRole('button', { name: 'Диктовка' });
+      if (variant.steer) await expect(steer).toBeVisible();
+      else await expect(steer).toHaveCount(0);
+      if (variant.mic) await expect(mic).toBeVisible();
+      else await expect(mic).toHaveCount(0);
+
+      // До раскрытия: кнопки в нижней строке рядом с отправкой.
+      const closed = await cellsOf(page);
+      expect(closed.details, 'подробности закрыты').toBeNull();
+      if (variant.steer) expect(closed.steer!.center, '«Влить в ход» в строке отправки').toBeCloseTo(closed.send.center, 0);
+      if (variant.mic) expect(closed.mic!.center, 'микрофон в строке отправки').toBeCloseTo(closed.send.center, 0);
+
+      await page.getByRole('button', { name: /^Контекст/ }).click();
+      await expect(page.locator('[data-details]')).toBeVisible();
+
+      const open = await cellsOf(page);
+      expect(open.details, 'подробности раскрыты').not.toBeNull();
+      // С раскрытыми подробностями строка кнопок та же: ничего не уезжает в неявный ряд.
+      if (variant.steer) expect(open.steer!.center, '«Влить в ход» остался в строке отправки').toBeCloseTo(open.send.center, 0);
+      if (variant.mic) expect(open.mic!.center, 'микрофон остался в строке отправки').toBeCloseTo(open.send.center, 0);
+      // Ниже подробностей нет ни одной ячейки сетки.
+      expect(open.lowest, 'подробности — последний ряд капсулы').toBeCloseTo(open.details!.bottom, 0);
+      expect(open.details!.bottom, 'подробности внутри капсулы').toBeLessThanOrEqual(open.capsuleBottom + 0.5);
+      // «Сжать контекст» видна целиком.
+      expect(open.squeeze, 'кнопка сжатия на месте').not.toBeNull();
+      expect(open.squeeze!.top, 'верх кнопки сжатия в окне').toBeGreaterThanOrEqual(-0.5);
+      expect(open.squeeze!.bottom, 'низ кнопки сжатия в окне').toBeLessThanOrEqual(open.viewport + 0.5);
+    });
+  }
+}
