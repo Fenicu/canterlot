@@ -1,12 +1,14 @@
 import type { Page } from '@playwright/test';
+import type { HistoryBlock, HistoryInput, HistoryItem } from '../../src/lib/stores/chat.svelte';
 import { FakeHub, FakeHubApi, seedMachine } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
 import { seedConversation } from '../../testing/fake-hub/seed';
 import { expect, test } from './fixtures';
 
 const OWNER = '00000000-0000-4000-8000-0000000000d1';
+const AT = '2026-10-28T12:00:00.000Z';
 
-async function boot(page: Page, viewport: { width: number; height: number }) {
+async function boot(page: Page, viewport: { width: number; height: number }, seed?: (api: FakeHubApi, id: string) => void) {
   await page.setViewportSize(viewport);
   const hub = new FakeHub();
   const api = new FakeHubApi(hub);
@@ -36,10 +38,63 @@ async function boot(page: Page, viewport: { width: number; height: number }) {
     detail.effort = 'medium';
     detail.permission_mode = 'owner';
   }
+  seed?.(api, id);
   await installChatRoutes(page, hub, api, OWNER);
   await page.goto(`/c/${id}`);
   await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
   return { hub, api, id };
+}
+
+function historyBlock(api: FakeHubApi, seq: number, text: string): HistoryBlock {
+  const blockId = api.id();
+  api.blocks.set(blockId, { text, rev: 1, state: 'final' });
+  return {
+    kind: 'block',
+    id: blockId,
+    block_kind: 'text',
+    content: text,
+    content_bytes: text.length,
+    content_truncated: false,
+    created_seq: String(seq),
+    created_at: AT,
+    rev: 1,
+    state: 'final',
+    agent: 'agent',
+    model: 'opus',
+    tool_name: null,
+    summary: null,
+    parent_block_id: null,
+    input_command_id: null,
+    line_count: text.split('\n').length
+  };
+}
+
+function historyMessage(api: FakeHubApi, seq: number, text: string): HistoryInput {
+  return {
+    kind: 'input',
+    id: api.id(),
+    idempotency_key: `message-${seq}-${api.id()}`,
+    state: 'accepted',
+    content: [{ type: 'text', text }],
+    attachments: [],
+    created_seq: String(seq),
+    feed_seq: String(seq),
+    created_at: AT
+  };
+}
+
+/** Длинная история: лента заведомо выше окна, и у низа есть куда стоять. */
+function seedLongHistory(api: FakeHubApi, id: string, count = 60): string {
+  const items: HistoryItem[] = [];
+  let last = '';
+  for (let seq = 1; seq <= count; seq++) {
+    const text = seq % 5 === 0 ? `Моё сообщение ${seq}` : `Ответ ${seq}: строка истории разговора`;
+    items.push(seq % 5 === 0 ? historyMessage(api, seq, text) : historyBlock(api, seq, text));
+    last = text;
+  }
+  api.histories.set(id, items);
+  api.bindConversation(id);
+  return last;
 }
 
 function openQuestion(hub: FakeHub, api: FakeHubApi, id: string, questions: unknown[]) {
@@ -229,5 +284,93 @@ for (const viewport of SLOTS) {
       expect(before.scrollTop).toBe(0);
       await expect(page.locator('.q-text')).toBeInViewport();
     }
+  });
+}
+
+/** Запас ленты до последней строки: 0 — лента стоит у хвоста. */
+async function feedGap(page: Page): Promise<number> {
+  return page.locator('.feed').evaluate((element) => Math.round(element.scrollHeight - element.scrollTop - element.clientHeight));
+}
+
+const JUMP_SLOTS = [
+  { width: 892, height: 412 },
+  { width: 412, height: 450 }
+] as const;
+
+for (const viewport of JUMP_SLOTS) {
+  test(`the feed keeps the newest message while a question opens and closes at ${viewport.width}x${viewport.height}`, async ({ page }) => {
+    let lastText = '';
+    const { hub, api, id } = await boot(page, viewport, (fakeApi, conversationId) => {
+      lastText = seedLongHistory(fakeApi, conversationId);
+    });
+
+    // Открытие уже прижало ленту к хвосту: от этого места и считаем.
+    await expect.poll(() => feedGap(page), { timeout: 10_000 }).toBeLessThanOrEqual(2);
+    const before = await page.locator('.feed').evaluate((element) => element.scrollTop);
+    expect(before, 'история длиннее окна').toBeGreaterThan(100);
+
+    openQuestion(hub, api, id, [{ id: 'q0', text: 'Как слить ветку?', options: ['Мягкий ребейз', 'Слияние коммитом'] }]);
+    await expect(page.locator('.question-card')).toBeVisible();
+
+    // Проба кадров: положение ленты на каждом кадре, пока карточка занимает и отдаёт место.
+    await page.evaluate(() => {
+      const state: { tops: { at: number; top: number }[]; stop: boolean } = { tops: [], stop: false };
+      (window as unknown as { __feedSpot?: typeof state }).__feedSpot = state;
+      const start = performance.now();
+      const tick = () => {
+        const feed = document.querySelector<HTMLElement>('.feed');
+        state.tops.push({ at: Math.round(performance.now() - start), top: feed ? Math.round(feed.scrollTop) : -1 });
+        if (!state.stop) requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    });
+
+    await page.locator('[data-option="Мягкий ребейз"]').click();
+    await page.getByRole('button', { name: 'Ответить' }).click();
+    await expect(page.locator('.request-cards-slot')).toHaveCount(0, { timeout: 10_000 });
+    await page.waitForTimeout(600);
+    await page.evaluate(() => {
+      (window as unknown as { __feedSpot: { stop: boolean } }).__feedSpot.stop = true;
+    });
+    const samples = await page.evaluate(
+      () => (window as unknown as { __feedSpot: { tops: { at: number; top: number }[] } }).__feedSpot.tops
+    );
+
+    expect(samples.length, 'проба сняла кадры').toBeGreaterThan(10);
+    const jumped = samples.filter((sample) => sample.top <= 0);
+    expect(
+      jumped,
+      `лента стояла в начале истории на ${jumped.map((sample) => `${sample.at} мс`).join(', ')}`
+    ).toEqual([]);
+    await expect.poll(() => feedGap(page), { timeout: 10_000 }).toBeLessThanOrEqual(2);
+    await expect(page.getByText(lastText, { exact: true })).toBeInViewport();
+    expect(await page.locator('.feed').evaluate((element) => element.scrollTop)).toBeGreaterThan(100);
+  });
+}
+
+for (const viewport of JUMP_SLOTS) {
+  test(`the feed keeps a mid-history position while a question opens and closes at ${viewport.width}x${viewport.height}`, async ({ page }) => {
+    const { hub, api, id } = await boot(page, viewport, (fakeApi, conversationId) => {
+      seedLongHistory(fakeApi, conversationId);
+    });
+    await expect.poll(() => feedGap(page), { timeout: 10_000 }).toBeLessThanOrEqual(2);
+
+    // Владелец читает историю выше хвоста: прижатие к низу снято его же прокруткой.
+    await page.locator('.feed').evaluate((element) => element.scrollTo({ top: 1200 }));
+    await page.waitForTimeout(300);
+    const reading = await page.locator('.feed').evaluate((element) => element.scrollTop);
+    expect(reading, 'лента стоит выше хвоста').toBeGreaterThan(100);
+    expect(await feedGap(page)).toBeGreaterThan(100);
+
+    openQuestion(hub, api, id, [{ id: 'q0', text: 'Как слить ветку?', options: ['Мягкий ребейз', 'Слияние коммитом'] }]);
+    await expect(page.locator('.question-card')).toBeVisible();
+    await page.locator('[data-option="Мягкий ребейз"]').click();
+    await page.getByRole('button', { name: 'Ответить' }).click();
+    await expect(page.locator('.request-cards-slot')).toHaveCount(0, { timeout: 10_000 });
+    await page.waitForTimeout(600);
+
+    // Карточка отдала место, а читаемая строка осталась на месте: ни начала истории, ни хвоста.
+    const after = await page.locator('.feed').evaluate((element) => element.scrollTop);
+    expect(Math.abs(after - reading), 'лента не сдвинулась с читаемой строки').toBeLessThanOrEqual(2);
   });
 }
