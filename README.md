@@ -283,7 +283,7 @@ sudo useradd --system --home-dir /var/lib/canterlot --shell /usr/sbin/nologin ca
 - `/etc/canterlot/hub.toml` с таблицей `[http]`: `trusted_proxies` — адрес Caddy, `owner_login` — логин для страницы входа, `allowed_origins` — адрес PWA (§2.4);
 - секрет прокси, общий для хаба и Caddy (§2.5);
 - сертификат gRPC от своего УЦ, имя хоста хаба в SAN (§3);
-- по желанию — пуши на телефон через Gotify: таблица `[notify.gotify]` с `url` сервера и `token_file` с ключом приложения; события включаются ключами `waiting`, `turn_finished` и `failures` ([docs/configuration.md](docs/configuration.md)).
+- по желанию — пуши на телефон через Gotify: таблица `[notify.gotify]` с `url` сервера и `token_file` с ключом приложения; события включаются ключами `waiting`, `turn_finished` и `failures`, а `turn_finished` шлётся на итог запроса владельца, а не на каждый служебный ход ([docs/configuration.md](docs/configuration.md)).
 
 Затем создайте каталоги из §2.6, один раз инициализируйте хаб и включите службу из §2.7:
 

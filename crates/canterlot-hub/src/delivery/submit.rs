@@ -669,6 +669,17 @@ async fn submit_attempt(
     if inserted == 0 {
         return Ok(Attempt::LostRace);
     }
+    // Ввод владельца взводит отметку «ждёт ответа»: итог придёт один раз, когда
+    // сессия осядет и ни один делегат уже не работает. Служебные вводы её не трогают.
+    if req.origin.is_none() {
+        sqlx::query(
+            "update conversations set owner_waiting_since=coalesce(owner_waiting_since,clock_timestamp())
+             where id=$1",
+        )
+        .bind(req.conversation_id)
+        .execute(&mut *conn)
+        .await?;
+    }
     crate::prompt_suggestions::clear_in_tx(conn, req.conversation_id, req.correlation_id).await?;
     // Ввод не от автопинка сбрасывает серию толчков и возвращает `exhausted` в наблюдение:
     // оркестратор или владелец вмешался, отсчёт начинается заново.

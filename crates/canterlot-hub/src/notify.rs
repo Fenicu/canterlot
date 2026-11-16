@@ -213,6 +213,9 @@ pub async fn on_settled_in_tx(
     facts: &SettleFacts,
     evidence: &Evidence,
 ) -> Result<(), sqlx::Error> {
+    let mut turn_from_owner = false;
+    let mut owner_mark = None;
+    let mut final_mark = None;
     let (kind, turn) = match state {
         // Ход должен быть и быть недавним: новая пустая сессия и давно осевшая
         // после перезапуска хаба пуша не дают. Свежесть — от последнего события:
@@ -225,6 +228,19 @@ pub async fn on_settled_in_tx(
                             .last_event_at
                             .is_some_and(|at| facts.now - at <= FRESH)) =>
             {
+                turn_from_owner = last_turn_from_owner(conn, conversation_id).await?;
+                owner_mark = owner_waiting_since(conn, conversation_id).await?;
+                if !turn_from_owner {
+                    // Ход от события сам по себе молчит. Единственный пуш — итог
+                    // запроса владельца, когда ни один делегат больше не работает.
+                    let Some(mark) = owner_mark else {
+                        return Ok(());
+                    };
+                    if delegate_work_remains(conn, conversation_id).await? {
+                        return Ok(());
+                    }
+                    final_mark = Some(mark);
+                }
                 (KIND_TURN_FINISHED, Some(turn))
             }
             _ => return Ok(()),
@@ -237,23 +253,108 @@ pub async fn on_settled_in_tx(
         }
         Settled::WaitingForUser | Settled::Stopped => return Ok(()),
     };
-    let key = match turn {
-        Some(turn) => format!(
-            "{kind}:{conversation_id}:{}",
-            turn.to_rfc3339_opts(SecondsFormat::Micros, true)
+    let key = match final_mark {
+        // Один итог на запрос владельца: отметка «владелец ждёт» и есть ключ эпизода.
+        Some(mark) => format!(
+            "{kind}:all_done:{conversation_id}:{}",
+            mark.to_rfc3339_opts(SecondsFormat::Micros, true)
         ),
-        None => format!("{kind}:{conversation_id}:{fingerprint}"),
+        None => match turn {
+            Some(turn) => format!(
+                "{kind}:{conversation_id}:{}",
+                turn.to_rfc3339_opts(SecondsFormat::Micros, true)
+            ),
+            None => format!("{kind}:{conversation_id}:{fingerprint}"),
+        },
     };
     let evidence = serde_json::to_value(evidence).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
-    enqueue_in_tx(
-        conn,
-        conversation_id,
-        kind,
-        &key,
-        &json!({"state": state_name(state), "evidence": evidence}),
-        true,
-        false,
+    let mut payload = json!({"state": state_name(state), "evidence": evidence});
+    if final_mark.is_some() {
+        payload["final"] = json!(true);
+    }
+    enqueue_in_tx(conn, conversation_id, kind, &key, &payload, true, false).await?;
+    if let Some(mark) = final_mark {
+        clear_owner_waiting(conn, conversation_id, Some(mark)).await?;
+    } else if turn_from_owner && !delegate_work_remains(conn, conversation_id).await? {
+        // Пуш о ходе владельца уже покрывает запрос: второго «Всё готово» нет.
+        clear_owner_waiting(conn, conversation_id, owner_mark).await?;
+    }
+    Ok(())
+}
+
+/// Последний законченный ход начат вводом владельца. Строка без ввода (старые данные,
+/// синтетические тесты) считается владельческой: иначе итог давнего хода пропал бы.
+async fn last_turn_from_owner(
+    conn: &mut PgConnection,
+    conversation_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let origin: Option<Option<Value>> = sqlx::query_scalar(
+        "select i.origin
+         from runs r left join inputs i on i.command_id=r.input_command_id
+         where r.conversation_id=$1
+         order by r.finished_at desc nulls last, r.started_at desc limit 1",
     )
+    .bind(conversation_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(origin.flatten().is_none())
+}
+
+async fn owner_waiting_since(
+    conn: &mut PgConnection,
+    conversation_id: Uuid,
+) -> Result<Option<DateTime<Utc>>, sqlx::Error> {
+    sqlx::query_scalar("select owner_waiting_since from conversations where id=$1")
+        .bind(conversation_id)
+        .fetch_one(&mut *conn)
+        .await
+}
+
+async fn clear_owner_waiting(
+    conn: &mut PgConnection,
+    conversation_id: Uuid,
+    mark: Option<DateTime<Utc>>,
+) -> Result<(), sqlx::Error> {
+    let Some(mark) = mark else {
+        return Ok(());
+    };
+    sqlx::query(
+        "update conversations set owner_waiting_since=null
+         where id=$1 and owner_waiting_since=$2",
+    )
+    .bind(conversation_id)
+    .bind(mark)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+/// Незавершённая работа делегатов: ребёнок (транзитивно) не осел или его ввод ждёт
+/// выдачи, либо у этого родителя ещё стоит очередь запусков.
+async fn delegate_work_remains(
+    conn: &mut PgConnection,
+    conversation_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "with recursive tree(id) as (
+           select id from conversations where parent_conversation_id=$1
+           union all
+           select c.id from conversations c join tree t on c.parent_conversation_id=t.id
+         )
+         select exists(
+           select 1 from tree t join conversations c on c.id=t.id
+           left join conversation_derived d on d.conversation_id=t.id
+           where c.trashed_at is null
+             and (d.conversation_id is null
+                  or d.activity_state not in ('idle','failed','stopped')
+                  or exists(select 1 from inputs i
+                            where i.conversation_id=t.id
+                              and i.state in ('queued','dispatched','on_machine'))))
+           or exists(select 1 from spawn_queue q
+                     where q.parent_id=$1 and q.state in ('queued','starting'))",
+    )
+    .bind(conversation_id)
+    .fetch_one(&mut *conn)
     .await
 }
 
@@ -767,7 +868,12 @@ async fn compose(
                 }
                 None => None,
             };
-            (turn_text(answer.as_deref()), PRIORITY_TURN_FINISHED)
+            let text = if row.payload["final"].as_bool() == Some(true) {
+                all_done_text(answer.as_deref())
+            } else {
+                turn_text(answer.as_deref())
+            };
+            (text, PRIORITY_TURN_FINISHED)
         }
         KIND_FAILURE => {
             let at = failure_time(&row.payload["evidence"]);
@@ -918,6 +1024,14 @@ pub fn turn_text(answer: Option<&str>) -> String {
     }
 }
 
+/// Итог запроса владельца: последний ход может быть и служебным, но работа кончилась.
+pub fn all_done_text(answer: Option<&str>) -> String {
+    match answer.map(|text| clip(text, ANSWER_CHARS)) {
+        Some(text) if !text.is_empty() => format!("Всё готово\n{text}"),
+        _ => "Всё готово".into(),
+    }
+}
+
 pub fn failure_text(state: &str, evidence: &Value, local_time: Option<&str>) -> String {
     match state {
         "stalled" => match local_time {
@@ -1041,6 +1155,14 @@ mod tests {
             ),
             "Ждёт одобрения запуска: codex"
         );
+    }
+
+    #[test]
+    fn turn_texts_name_the_end_of_the_request() {
+        assert_eq!(turn_text(Some("готово")), "Ход завершён\nготово");
+        assert_eq!(turn_text(None), "Ход завершён");
+        assert_eq!(all_done_text(Some("готово")), "Всё готово\nготово");
+        assert_eq!(all_done_text(None), "Всё готово");
     }
 
     #[test]

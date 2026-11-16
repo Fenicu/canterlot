@@ -19,7 +19,9 @@ use canterlot_hub::{
     activity::{self, Thresholds},
     attachments::{self, LocalBlobStore},
     config::{ActivityConfig, AttachmentsConfig, GotifyConfig, HubConfig},
-    deletion, executions,
+    deletion,
+    delivery::{self, ContentBlock, SubmitInput},
+    executions,
     ingest::{Ingest, IngestOutcome, JournalKind},
     model::ExecutionState,
     notify::{self, PushSettings, Sender},
@@ -281,6 +283,101 @@ async fn finish_turn(
     .unwrap();
 }
 
+/// Ввод через обычный приём: ввод владельца (`origin` null) или служебное событие.
+async fn input(
+    pool: &PgPool,
+    seed: &Seed,
+    conversation: Uuid,
+    key: &str,
+    text: &str,
+    origin: Option<Value>,
+    at: DateTime<Utc>,
+) -> delivery::SubmittedInput {
+    let submitted = delivery::submit_input(
+        pool,
+        SubmitInput {
+            owner_id: seed.owner_id,
+            conversation_id: conversation,
+            idempotency_key: key.to_owned(),
+            content: vec![ContentBlock::Text {
+                text: text.to_owned(),
+            }],
+            received_at: at,
+            correlation_id: Uuid::now_v7(),
+            origin,
+        },
+    )
+    .await
+    .unwrap();
+    // Ход по этому вводу уже принят: очередь его не держит, как и в жизни после выдачи.
+    sqlx::query("update inputs set state='accepted' where id=$1")
+        .bind(submitted.input_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    submitted
+}
+
+/// Ход по уже принятому вводу: его команда и есть начало хода.
+async fn finish_submitted_turn(
+    pool: &PgPool,
+    conversation: Uuid,
+    execution: &executions::StartedExecution,
+    command: Uuid,
+    at: DateTime<Utc>,
+) {
+    sqlx::query(
+        "insert into runs(input_command_id,execution_id,conversation_id,started_at,finished_at)
+         values($1,$2,$3,$4,$4)",
+    )
+    .bind(command)
+    .bind(execution.execution_id)
+    .bind(conversation)
+    .bind(at)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+fn event_origin(kind: &str) -> Value {
+    json!({"kind":"event","chain_depth":0,"event":{"kind":kind}})
+}
+
+async fn child_of(pool: &PgPool, seed: &Seed, parent: Uuid, state: &str) -> Uuid {
+    let child = testkit::seed_conversation(pool, seed.owner_id, seed.machine_id).await;
+    sqlx::query("update conversations set parent_conversation_id=$2,title='Делегат' where id=$1")
+        .bind(child)
+        .bind(parent)
+        .execute(pool)
+        .await
+        .unwrap();
+    set_child_state(pool, child, state).await;
+    child
+}
+
+async fn set_child_state(pool: &PgPool, child: Uuid, state: &str) {
+    sqlx::query(
+        "insert into conversation_derived(conversation_id,activity_state,activity_evidence,activity_since)
+         values($1,$2,'{}',clock_timestamp())
+         on conflict(conversation_id) do update set activity_state=excluded.activity_state,
+           activity_evidence=excluded.activity_evidence,activity_since=excluded.activity_since,
+           updated_at=clock_timestamp()",
+    )
+    .bind(child)
+    .bind(state)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+async fn owner_mark(pool: &PgPool, conversation: Uuid) -> Option<DateTime<Utc>> {
+    sqlx::query_scalar("select owner_waiting_since from conversations where id=$1")
+        .bind(conversation)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
 /// Разговор давно простаивает: окно тишины уже прошло.
 async fn long_idle(pool: &PgPool, id: Uuid, now: DateTime<Utc>) {
     sqlx::query("update executions set last_event_at=$2 where conversation_id=$1")
@@ -533,6 +630,467 @@ async fn a_turn_held_by_a_background_task_is_pushed_when_the_background_ends(poo
         pushes(&pool).await,
         [(s.conversation_id, "turn_finished".into(), "pending".into())]
     );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_turn_from_the_owner_is_pushed_and_a_turn_from_an_event_is_silent(pool: PgPool) {
+    let (fake, url) = fake_gotify().await;
+    let (_dir, config) = gotify(&url, "");
+    enable(&pool).await;
+    let s = seed(&pool).await;
+    let execution = start(&pool, s.owner_id, s.conversation_id).await;
+    let now = Utc::now();
+    long_idle(&pool, s.conversation_id, now).await;
+
+    let owner = input(
+        &pool,
+        &s,
+        s.conversation_id,
+        "owner:one",
+        "собери релиз",
+        None,
+        now,
+    )
+    .await;
+    finish_submitted_turn(
+        &pool,
+        s.conversation_id,
+        &execution,
+        owner.command_id,
+        now - TimeDelta::seconds(1),
+    )
+    .await;
+    refresh_at(&pool, s.conversation_id, now + TimeDelta::seconds(6)).await;
+    assert_eq!(turn_finished(&pool, s.conversation_id).await, 1);
+    assert_eq!(sender(&config).deliver_due(&pool).await.unwrap().sent, 1);
+    assert_eq!(fake.seen()[0].body["message"], "Ход завершён");
+    assert_eq!(owner_mark(&pool, s.conversation_id).await, None);
+
+    let event = input(
+        &pool,
+        &s,
+        s.conversation_id,
+        "event:one",
+        "итог делегата",
+        Some(event_origin("session_result")),
+        now + TimeDelta::seconds(10),
+    )
+    .await;
+    finish_submitted_turn(
+        &pool,
+        s.conversation_id,
+        &execution,
+        event.command_id,
+        now + TimeDelta::seconds(10),
+    )
+    .await;
+    refresh_at(&pool, s.conversation_id, now + TimeDelta::seconds(16)).await;
+    assert_eq!(
+        turn_finished(&pool, s.conversation_id).await,
+        1,
+        "ход от события молчит"
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn an_owner_turn_without_delegates_gives_exactly_one_push(pool: PgPool) {
+    enable(&pool).await;
+    let s = seed(&pool).await;
+    let execution = start(&pool, s.owner_id, s.conversation_id).await;
+    let now = Utc::now();
+    long_idle(&pool, s.conversation_id, now).await;
+    let owner = input(
+        &pool,
+        &s,
+        s.conversation_id,
+        "owner:one",
+        "вопрос",
+        None,
+        now,
+    )
+    .await;
+    finish_submitted_turn(
+        &pool,
+        s.conversation_id,
+        &execution,
+        owner.command_id,
+        now - TimeDelta::seconds(1),
+    )
+    .await;
+    for step in [6, 12, 20] {
+        refresh_at(&pool, s.conversation_id, now + TimeDelta::seconds(step)).await;
+    }
+    assert_eq!(turn_finished(&pool, s.conversation_id).await, 1);
+    let final_pushes: i64 = sqlx::query_scalar(
+        "select count(*) from owner_pushes where conversation_id=$1 and payload->>'final'='true'",
+    )
+    .bind(s.conversation_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(final_pushes, 0, "пуш о ходе владельца и есть итог");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn the_last_delegate_result_sends_one_all_done_push(pool: PgPool) {
+    let (fake, url) = fake_gotify().await;
+    let (_dir, config) = gotify(&url, "");
+    enable(&pool).await;
+    let s = seed(&pool).await;
+    let execution = start(&pool, s.owner_id, s.conversation_id).await;
+    let now = Utc::now();
+    long_idle(&pool, s.conversation_id, now).await;
+    let first = child_of(&pool, &s, s.conversation_id, "working").await;
+    let second = child_of(&pool, &s, s.conversation_id, "working").await;
+
+    let owner = input(
+        &pool,
+        &s,
+        s.conversation_id,
+        "owner:one",
+        "сделай две задачи",
+        None,
+        now,
+    )
+    .await;
+    finish_submitted_turn(
+        &pool,
+        s.conversation_id,
+        &execution,
+        owner.command_id,
+        now - TimeDelta::seconds(1),
+    )
+    .await;
+    refresh_at(&pool, s.conversation_id, now + TimeDelta::seconds(6)).await;
+    assert_eq!(turn_finished(&pool, s.conversation_id).await, 1);
+    assert!(
+        owner_mark(&pool, s.conversation_id).await.is_some(),
+        "работа делегатов держит отметку"
+    );
+
+    let first_result = input(
+        &pool,
+        &s,
+        s.conversation_id,
+        "event:first",
+        "первый готов",
+        Some(event_origin("session_result")),
+        now + TimeDelta::seconds(10),
+    )
+    .await;
+    finish_submitted_turn(
+        &pool,
+        s.conversation_id,
+        &execution,
+        first_result.command_id,
+        now + TimeDelta::seconds(10),
+    )
+    .await;
+    set_child_state(&pool, first, "idle").await;
+    refresh_at(&pool, s.conversation_id, now + TimeDelta::seconds(16)).await;
+    assert_eq!(
+        turn_finished(&pool, s.conversation_id).await,
+        1,
+        "второй делегат ещё работает"
+    );
+
+    let second_result = input(
+        &pool,
+        &s,
+        s.conversation_id,
+        "event:second",
+        "второй готов",
+        Some(event_origin("session_result")),
+        now + TimeDelta::seconds(20),
+    )
+    .await;
+    finish_submitted_turn(
+        &pool,
+        s.conversation_id,
+        &execution,
+        second_result.command_id,
+        now + TimeDelta::seconds(20),
+    )
+    .await;
+    set_child_state(&pool, second, "idle").await;
+    refresh_at(&pool, s.conversation_id, now + TimeDelta::seconds(26)).await;
+    assert_eq!(turn_finished(&pool, s.conversation_id).await, 2);
+    assert_eq!(owner_mark(&pool, s.conversation_id).await, None);
+    let final_flags: Vec<Option<String>> = sqlx::query_scalar(
+        "select payload->>'final' from owner_pushes where conversation_id=$1 order by id",
+    )
+    .bind(s.conversation_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(final_flags, [None, Some("true".to_owned())]);
+
+    assert_eq!(sender(&config).deliver_due(&pool).await.unwrap().sent, 2);
+    let seen = fake.seen();
+    assert!(
+        seen[1].body["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("Всё готово"),
+        "{:?}",
+        seen[1].body
+    );
+
+    let later = input(
+        &pool,
+        &s,
+        s.conversation_id,
+        "event:later",
+        "ещё событие",
+        Some(event_origin("session_result")),
+        now + TimeDelta::seconds(30),
+    )
+    .await;
+    finish_submitted_turn(
+        &pool,
+        s.conversation_id,
+        &execution,
+        later.command_id,
+        now + TimeDelta::seconds(30),
+    )
+    .await;
+    refresh_at(&pool, s.conversation_id, now + TimeDelta::seconds(36)).await;
+    assert_eq!(
+        turn_finished(&pool, s.conversation_id).await,
+        2,
+        "после итога события молчат"
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_delegate_stuck_on_the_owner_holds_the_all_done_push(pool: PgPool) {
+    enable(&pool).await;
+    let s = seed(&pool).await;
+    let execution = start(&pool, s.owner_id, s.conversation_id).await;
+    let now = Utc::now();
+    long_idle(&pool, s.conversation_id, now).await;
+    let child = child_of(&pool, &s, s.conversation_id, "waiting_for_user").await;
+
+    let owner = input(
+        &pool,
+        &s,
+        s.conversation_id,
+        "owner:one",
+        "спроси делегата",
+        None,
+        now,
+    )
+    .await;
+    finish_submitted_turn(
+        &pool,
+        s.conversation_id,
+        &execution,
+        owner.command_id,
+        now - TimeDelta::seconds(1),
+    )
+    .await;
+    refresh_at(&pool, s.conversation_id, now + TimeDelta::seconds(6)).await;
+    assert_eq!(turn_finished(&pool, s.conversation_id).await, 1);
+
+    let waiting = input(
+        &pool,
+        &s,
+        s.conversation_id,
+        "event:waiting",
+        "делегат ждёт владельца",
+        Some(event_origin("session_result")),
+        now + TimeDelta::seconds(10),
+    )
+    .await;
+    finish_submitted_turn(
+        &pool,
+        s.conversation_id,
+        &execution,
+        waiting.command_id,
+        now + TimeDelta::seconds(10),
+    )
+    .await;
+    refresh_at(&pool, s.conversation_id, now + TimeDelta::seconds(16)).await;
+    assert_eq!(
+        turn_finished(&pool, s.conversation_id).await,
+        1,
+        "ожидающий владельца делегат держит итог"
+    );
+
+    set_child_state(&pool, child, "idle").await;
+    let settled = input(
+        &pool,
+        &s,
+        s.conversation_id,
+        "event:settled",
+        "делегат закончил",
+        Some(event_origin("session_result")),
+        now + TimeDelta::seconds(20),
+    )
+    .await;
+    finish_submitted_turn(
+        &pool,
+        s.conversation_id,
+        &execution,
+        settled.command_id,
+        now + TimeDelta::seconds(20),
+    )
+    .await;
+    refresh_at(&pool, s.conversation_id, now + TimeDelta::seconds(26)).await;
+    assert_eq!(turn_finished(&pool, s.conversation_id).await, 2);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_queued_spawn_holds_the_all_done_push(pool: PgPool) {
+    enable(&pool).await;
+    let s = seed(&pool).await;
+    let execution = start(&pool, s.owner_id, s.conversation_id).await;
+    let now = Utc::now();
+    long_idle(&pool, s.conversation_id, now).await;
+    let queued = Uuid::now_v7();
+    sqlx::query(
+        "insert into spawn_queue(id,owner_id,parent_id,call_id,spec,reason,not_before)
+         values($1,$2,$3,$4,'{}','rate',$5)",
+    )
+    .bind(queued)
+    .bind(s.owner_id)
+    .bind(s.conversation_id)
+    .bind(Uuid::now_v7())
+    .bind(now)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let owner = input(
+        &pool,
+        &s,
+        s.conversation_id,
+        "owner:one",
+        "запусти делегата",
+        None,
+        now,
+    )
+    .await;
+    finish_submitted_turn(
+        &pool,
+        s.conversation_id,
+        &execution,
+        owner.command_id,
+        now - TimeDelta::seconds(1),
+    )
+    .await;
+    refresh_at(&pool, s.conversation_id, now + TimeDelta::seconds(6)).await;
+    assert_eq!(turn_finished(&pool, s.conversation_id).await, 1);
+    assert!(owner_mark(&pool, s.conversation_id).await.is_some());
+
+    let waiting = input(
+        &pool,
+        &s,
+        s.conversation_id,
+        "event:waiting",
+        "ждём очередь",
+        Some(event_origin("session_result")),
+        now + TimeDelta::seconds(10),
+    )
+    .await;
+    finish_submitted_turn(
+        &pool,
+        s.conversation_id,
+        &execution,
+        waiting.command_id,
+        now + TimeDelta::seconds(10),
+    )
+    .await;
+    refresh_at(&pool, s.conversation_id, now + TimeDelta::seconds(16)).await;
+    assert_eq!(turn_finished(&pool, s.conversation_id).await, 1);
+
+    sqlx::query("update spawn_queue set state='cancelled' where id=$1")
+        .bind(queued)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let settled = input(
+        &pool,
+        &s,
+        s.conversation_id,
+        "event:settled",
+        "очередь кончилась",
+        Some(event_origin("spawn_queue")),
+        now + TimeDelta::seconds(20),
+    )
+    .await;
+    finish_submitted_turn(
+        &pool,
+        s.conversation_id,
+        &execution,
+        settled.command_id,
+        now + TimeDelta::seconds(20),
+    )
+    .await;
+    refresh_at(&pool, s.conversation_id, now + TimeDelta::seconds(26)).await;
+    assert_eq!(turn_finished(&pool, s.conversation_id).await, 2);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn the_owner_mark_is_reloaded_from_the_database(pool: PgPool) {
+    enable(&pool).await;
+    let s = seed(&pool).await;
+    let execution = start(&pool, s.owner_id, s.conversation_id).await;
+    let now = Utc::now();
+    long_idle(&pool, s.conversation_id, now).await;
+    input(
+        &pool,
+        &s,
+        s.conversation_id,
+        "owner:one",
+        "дождись делегата",
+        None,
+        now,
+    )
+    .await;
+    let mark = owner_mark(&pool, s.conversation_id).await;
+    assert!(mark.is_some(), "ввод владельца взводит отметку");
+
+    // Новый процесс хаба читает отметку из строки, а не из памяти: любой свежий
+    // запрос видит тот же срок, по которому потом снимется итог.
+    let mut reloaded = pool.acquire().await.unwrap();
+    let after_restart: Option<DateTime<Utc>> =
+        sqlx::query_scalar("select owner_waiting_since from conversations where id=$1")
+            .bind(s.conversation_id)
+            .fetch_one(&mut *reloaded)
+            .await
+            .unwrap();
+    drop(reloaded);
+    assert_eq!(after_restart, mark);
+
+    let result = input(
+        &pool,
+        &s,
+        s.conversation_id,
+        "event:result",
+        "делегат готов",
+        Some(event_origin("session_result")),
+        now + TimeDelta::seconds(10),
+    )
+    .await;
+    finish_submitted_turn(
+        &pool,
+        s.conversation_id,
+        &execution,
+        result.command_id,
+        now + TimeDelta::seconds(10),
+    )
+    .await;
+    refresh_at(&pool, s.conversation_id, now + TimeDelta::seconds(16)).await;
+    assert_eq!(turn_finished(&pool, s.conversation_id).await, 1);
+    let final_flag: Option<String> =
+        sqlx::query_scalar("select payload->>'final' from owner_pushes where conversation_id=$1")
+            .bind(s.conversation_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(final_flag.as_deref(), Some("true"));
+    assert_eq!(owner_mark(&pool, s.conversation_id).await, None);
 }
 
 async fn turn_finished(pool: &PgPool, conversation: Uuid) -> i64 {
