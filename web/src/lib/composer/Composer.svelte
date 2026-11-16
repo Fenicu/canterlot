@@ -145,7 +145,66 @@
   const turnLive = $derived(turnIsLive(chat.activity, chat.queue.run_slot));
   const harnessId = $derived((chat.detail?.harness as { id?: string } | undefined)?.id ?? '');
   const canSteer = $derived(turnLive && steerSupported(harnessId));
-  const placeholder = $derived(composerPlaceholder(turnLive, suggestion));
+
+  // Подсказка живёт в placeholder, а placeholder не прокручивается: длинная подсказка уходила
+  // под кнопки и резалась посреди строки. Показываем целые строки с многоточием, а полный
+  // текст остаётся в описании для экранных читалок и у «Подставить».
+  let fieldVersion = $state(0);
+  let shownSuggestion = $state<string | null>(null);
+  const placeholder = $derived(composerPlaceholder(turnLive, shownSuggestion));
+
+  $effect(() => {
+    if (!node) return;
+    const observer = new ResizeObserver(() => fieldVersion++);
+    observer.observe(node);
+    return () => observer.disconnect();
+  });
+
+  $effect(() => {
+    void fieldVersion;
+    const el = node;
+    const text = suggestion;
+    shownSuggestion = text && el ? capToField(el, text) : text;
+  });
+
+  /** Обрезает подсказку по целым строкам поля: последняя видимая кончается многоточием. */
+  function capToField(el: HTMLTextAreaElement, text: string): string {
+    const style = getComputedStyle(el);
+    const line = Number.parseFloat(style.lineHeight) || Number.parseFloat(style.fontSize) * 1.5;
+    const limit = Number.parseFloat(style.maxHeight);
+    const height = (Number.isFinite(limit) ? limit : el.clientHeight) -
+      Number.parseFloat(style.paddingTop) -
+      Number.parseFloat(style.paddingBottom);
+    const lines = Math.floor(height / line);
+    const width = el.clientWidth - Number.parseFloat(style.paddingLeft) - Number.parseFloat(style.paddingRight);
+    if (!(width > 0) || !(lines > 0)) return text;
+
+    const mirror = document.createElement('div');
+    mirror.setAttribute('aria-hidden', 'true');
+    mirror.style.cssText =
+      `position: absolute; top: 0; left: -10000px; width: ${width}px; visibility: hidden; pointer-events: none; ` +
+      `white-space: ${style.whiteSpace}; overflow-wrap: ${style.overflowWrap}; word-break: ${style.wordBreak}; ` +
+      `letter-spacing: ${style.letterSpacing}; font-family: ${style.fontFamily}; font-size: ${style.fontSize}; ` +
+      `font-weight: ${style.fontWeight}; line-height: ${style.lineHeight};`;
+    document.body.append(mirror);
+    const fits = (value: string) => {
+      mirror.textContent = value;
+      return mirror.scrollHeight <= lines * line + 0.5;
+    };
+    try {
+      if (fits(text)) return text;
+      let low = 0;
+      let high = text.length;
+      while (low < high) {
+        const middle = Math.ceil((low + high) / 2);
+        if (fits(`${text.slice(0, middle).trimEnd()}…`)) low = middle;
+        else high = middle - 1;
+      }
+      return `${text.slice(0, low).trimEnd()}…`;
+    } finally {
+      mirror.remove();
+    }
+  }
   const fitsContent = typeof CSS !== 'undefined' && CSS.supports('field-sizing', 'content');
 
   $effect(() => {

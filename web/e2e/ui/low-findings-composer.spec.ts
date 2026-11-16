@@ -12,11 +12,16 @@ const LONG_DRAFT = Array.from(
   (_, index) => `Строка ${index + 1}: проверь и закоммить, потом прогони тесты.`
 ).join('\n');
 
-async function boot(page: Page) {
+/** Длинная подсказка: в поле она не влезает и без обрезки уходит под кнопки. */
+const LONG_SUGGESTION =
+  'добавь тесты для пустой строки, для строки из одних пробелов и для пути /home/fenicu/.local/state/canterlot-worker/worktrees/01a1e117-25c6-7237-bed5-d31506012780/web/src/lib/timeline/cards/plan/PlanUpdateCard.svelte, затем прогони cargo test и npm run check, а после этого проверь, что подсказка в поле ввода не режется посреди строки, что кнопка «Подставить» вставляет весь текст целиком и что длинный путь по-прежнему переносится, а не выдавливает поле за край.';
+
+async function boot(page: Page, opts: { suggestion?: string } = {}) {
   const hub = new FakeHub();
   const api = new FakeHubApi(hub);
   const id = seedConversation(api, { harness: CLAUDE });
   seedHistory(api, id, 1);
+  if (opts.suggestion) api.setPromptSuggestion(id, opts.suggestion);
   await installChatRoutes(page, hub, api, OWNER);
   await page.goto(`/c/${id}`);
   await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
@@ -111,4 +116,35 @@ test('scrolled_long_draft_with_attachments_is_cut_below_the_chips', async ({ pag
   expect(cut.trayBottom, 'лоток вложений на месте').not.toBeNull();
   // Строка среза не прилипает к чипам: между лотком и кромкой поля есть отступ.
   expect(cut.fieldTop - cut.trayBottom!, 'отступ под чипами вне прокрутки').toBeGreaterThanOrEqual(8);
+});
+
+test('long_suggestion_is_shown_at_whole_lines_and_still_inserts_everything', async ({ page }, info) => {
+  const { area } = await boot(page, { suggestion: LONG_SUGGESTION });
+
+  const shown = await area.evaluate((node: HTMLTextAreaElement) => ({
+    placeholder: node.placeholder,
+    scrollHeight: node.scrollHeight,
+    clientHeight: node.clientHeight
+  }));
+  // Ни одной строки под кромкой: placeholder не прокручивается, и седьмая строка не режется.
+  expect(shown.scrollHeight, 'подсказка не прячет строк за кромкой').toBeLessThanOrEqual(
+    shown.clientHeight + 1
+  );
+  const truncated = shown.placeholder !== LONG_SUGGESTION;
+  // На телефоне подсказка заведомо не влезает: видно многоточие на целой строке, а не срез.
+  if (info.project.name === 'phone') expect(truncated, 'длинная подсказка обрезана').toBe(true);
+  if (truncated) {
+    expect(shown.placeholder.endsWith('…'), 'конец подсказки виден многоточием').toBe(true);
+    expect(LONG_SUGGESTION.startsWith(shown.placeholder.replace(/…$/, ''))).toBe(true);
+    expect(shown.placeholder.length).toBeLessThan(LONG_SUGGESTION.length);
+  }
+
+  // «Подставить» вставляет полный текст, а не обрезанный placeholder.
+  if (info.project.name === 'phone') {
+    await page.getByRole('button', { name: 'Подставить' }).click();
+  } else {
+    await area.focus();
+    await page.keyboard.press('Tab');
+  }
+  await expect(area).toHaveValue(LONG_SUGGESTION);
 });
