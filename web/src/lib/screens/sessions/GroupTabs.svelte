@@ -109,12 +109,23 @@
   /* Выбор заметен в обеих темах: заливка акцентом, как у нижней навигации. */
   button[aria-selected='true'] { background: var(--accent); color: var(--accent-ink); font-weight: var(--weight-medium); }
   button[aria-selected='true'] .count { background: var(--accent-ink); color: var(--accent); }
-  :global([data-pane='list']) .tabs { flex-wrap: wrap; overflow-x: visible; }
-  :global([data-pane='list']) button { flex: 0 1 auto; min-width: 0; max-width: 100%; padding-inline: var(--s4); overflow-wrap: anywhere; white-space: normal; }
+  /* В боковой колонке вкладки не растут без предела: две строки, дальше полоса прокручивается,
+     и список сессий сохраняет большую часть колонки. Имена вкладок заканчиваются многоточием. */
+  :global([data-pane='list']) .tabs {
+    --tabs-row: var(--target);
+    --tabs-gap: var(--s2);
+    --tabs-pad: var(--s2);
+    flex-wrap: wrap;
+    overflow-x: hidden;
+    max-height: calc(var(--tabs-row) * 2 + var(--tabs-gap) + var(--tabs-pad) * 2);
+    overflow-y: auto;
+  }
+  :global([data-pane='list']) button { flex: 1 1 28%; min-width: 0; max-width: 100%; padding-inline: var(--s4); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   /* Точный указатель не нуждается в пальцевой мишени: чипы мелкие и плотные. */
   @media (pointer: fine) {
     .tabs { gap: var(--s3); margin-block: var(--s2); padding-block: var(--s1); }
     button { flex: 0 0 auto; min-height: var(--s11); padding: var(--s1) var(--s5); }
+    :global([data-pane='list']) .tabs { --tabs-row: var(--s11); --tabs-gap: var(--s3); --tabs-pad: var(--s1); }
     :global([data-pane='list']) button { padding-inline: var(--s5); }
   }
 </style>

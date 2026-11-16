@@ -284,3 +284,64 @@ test.describe('F-35 current limits rows at 360', () => {
     }
   });
 });
+
+test.describe('F-38 group tabs in the tablet sidebar', () => {
+  test('eleven_long_groups_take_at_most_two_rows', async ({ page }, info) => {
+    desktopOnly(info);
+    const hub = new FakeHub();
+    const api = new FakeHubApi(hub);
+    seedMockupSessions(api);
+    for (let index = 1; index <= 11; index++) {
+      const group = api.id();
+      api.groups.push({ id: group, name: `Инфраструктура и выкатка homelab ${index}`, position: api.groups.length, created_at: AT });
+      seedConversation(api, { title: `Сессия группы ${index}`, groups: [group] });
+    }
+    api.counts = api.recount();
+    await installChatRoutes(page, hub, api, OWNER);
+    await page.goto('/sessions');
+    await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
+    await resizeViewport(page, { width: 1024, height: 768 });
+    const tabs = page.getByRole('tablist', { name: 'Группы сессий' });
+    await expect(tabs).toBeVisible();
+    await shot(page, 'f38-group-tabs-1024');
+    const found = await tabs.evaluate((root) => {
+      const box = root.getBoundingClientRect();
+      const style = getComputedStyle(root);
+      const items = [...root.children].map((child) => {
+        const r = child.getBoundingClientRect();
+        const own = getComputedStyle(child);
+        return { text: child.textContent?.trim() ?? '', top: r.top, bottom: r.bottom, left: r.left, right: r.right, height: r.height, overflow: own.textOverflow, wrap: own.whiteSpace };
+      });
+      const scroll = document.querySelector('[data-list-scroll]')!.getBoundingClientRect();
+      const pane = document.querySelector('[data-pane="list"]')!.getBoundingClientRect();
+      const visible = items.filter((item) => item.top >= box.top - 0.5 && item.bottom <= box.bottom + 0.5);
+      return {
+        box: { top: box.top, bottom: box.bottom, height: box.height, left: box.left, right: box.right, scrollWidth: root.scrollWidth, clientWidth: root.clientWidth },
+        gap: parseFloat(style.rowGap || style.gap) || 0,
+        padTop: parseFloat(style.paddingTop),
+        padBottom: parseFloat(style.paddingBottom),
+        rows: [...new Set(visible.map((item) => Math.round(item.top)))].length,
+        rowHeight: items[0]?.height ?? 0,
+        items,
+        visible: visible.length,
+        scrollHeight: scroll.height,
+        paneHeight: pane.height
+      };
+    });
+    // Не больше двух рядов вкладок: высота полосы считается по двум кнопкам, зазор и отступы.
+    const twoRows = found.rowHeight * 2 + found.gap + found.padTop + found.padBottom;
+    expect(found.box.height, JSON.stringify(found)).toBeLessThanOrEqual(twoRows + 1);
+    expect(found.rows, JSON.stringify(found)).toBeLessThanOrEqual(2);
+    expect(found.visible).toBeGreaterThan(0);
+    // Список сессий сохраняет большую часть боковой колонки.
+    expect(found.scrollHeight, JSON.stringify(found)).toBeGreaterThan(found.paneHeight * 0.55);
+    // Полоса не прокручивается вбок, а длинные имена заканчиваются многоточием.
+    expect(found.box.scrollWidth, JSON.stringify(found.box)).toBeLessThanOrEqual(found.box.clientWidth + 1);
+    for (const item of found.items) {
+      expect(item.left).toBeGreaterThanOrEqual(found.box.left - 0.5);
+      expect(item.right).toBeLessThanOrEqual(found.box.right + 0.5);
+      expect(item.overflow).toBe('ellipsis');
+      expect(item.wrap).toBe('nowrap');
+    }
+  });
+});
