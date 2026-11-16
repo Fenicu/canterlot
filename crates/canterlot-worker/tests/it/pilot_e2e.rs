@@ -11,6 +11,7 @@ use std::{
     time::Duration,
 };
 
+use base64::Engine as _;
 use canterlot_hub::{
     config::{ActivityConfig, LimitsConfig},
     events::is_client_visible,
@@ -22,6 +23,7 @@ use pilot::*;
 use serde_json::{Value, json};
 use sha2::Digest as _;
 use sqlx::PgPool;
+use std::sync::{Mutex, OnceLock};
 use tokio::time::{sleep, timeout};
 use uuid::Uuid;
 
@@ -1573,36 +1575,54 @@ async fn lease_queue_of_a_real_worker_reaches_the_machine_view(pool: PgPool) {
 
 const WAIT_LONG: Duration = Duration::from_secs(30);
 
-/// Файл журнала процесса: сюда пишут и хаб, и воркер этого теста.
-struct LogCapture {
-    _file: std::fs::File,
-    path: std::path::PathBuf,
-    _guard: tracing::subscriber::DefaultGuard,
+/// Журнал всего процесса: глобальный подписчик пишет и хаб, и воркер, и тест.
+struct LogCapture;
+
+static CAPTURED: OnceLock<Mutex<Vec<u8>>> = OnceLock::new();
+
+fn captured() -> &'static Mutex<Vec<u8>> {
+    CAPTURED.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+struct CapturedWriter;
+
+impl std::io::Write for CapturedWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        captured()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
+    type Writer = CapturedWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        CapturedWriter
+    }
 }
 
 impl LogCapture {
-    fn install(directory: &std::path::Path) -> Self {
-        let path = directory.join("captured.log");
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .expect("log file");
-        let writer = file.try_clone().expect("log clone");
+    fn install() -> Self {
         let subscriber = tracing_subscriber::fmt()
-            .with_writer(std::sync::Mutex::new(writer))
+            .with_writer(Self)
             .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
             .finish();
-        let guard = tracing::subscriber::set_default(subscriber);
-        Self {
-            _file: file,
-            path,
-            _guard: guard,
-        }
+        // nextest запускает каждый тест отдельным процессом: подписчик один.
+        let _ = tracing::subscriber::set_global_default(subscriber);
+        Self
     }
 
     fn read(&self) -> String {
-        std::fs::read_to_string(&self.path).unwrap_or_default()
+        String::from_utf8_lossy(&captured().lock().unwrap_or_else(|error| error.into_inner()))
+            .into_owned()
     }
 }
 
@@ -1649,18 +1669,67 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// Ни значение, ни его SHA-256/SHA-1 в тексте.
-fn assert_clean(what: &str, text: &str, marker: &str, hashes: &[String]) {
-    assert!(!text.contains(marker), "{what} contains the plaintext");
-    for hash in hashes {
-        assert!(!text.contains(hash.as_str()), "{what} contains a hash");
+/// Что искать в чужих файлах: само значение (с хвостовым переводом строки и без),
+/// его base64 и hex, а также SHA-256/SHA-1 именно отправленных байт.
+fn secret_needles(value: &str) -> Vec<String> {
+    let bytes = value.as_bytes();
+    let mut needles = vec![
+        value.to_owned(),
+        hex(bytes),
+        base64::engine::general_purpose::STANDARD.encode(bytes),
+        hex(&sha2::Sha256::digest(bytes)),
+        hex(&sha1_smol::Sha1::from(bytes).digest().bytes()),
+    ];
+    let trimmed = value.trim_end_matches('\n');
+    if trimmed != value && !trimmed.is_empty() {
+        needles.push(trimmed.to_owned());
+        needles.push(hex(&sha2::Sha256::digest(trimmed.as_bytes())));
+    }
+    needles.retain(|needle| !needle.is_empty());
+    needles
+}
+
+fn assert_clean(what: &str, text: &str, needles: &[String]) {
+    for needle in needles {
+        assert!(
+            !text.contains(needle.as_str()),
+            "{what} contains {}",
+            if needle.len() > 16 {
+                "the plaintext or its encoding/hash"
+            } else {
+                needle.as_str()
+            }
+        );
+    }
+}
+
+/// Каждый файл базы секретов, кроме самого значения, обязан читаться и быть чистым.
+fn assert_secrets_clean(
+    root: &std::path::Path,
+    allowed: Option<&std::path::Path>,
+    needles: &[String],
+) {
+    for path in files_under(root) {
+        if allowed == Some(path.as_path()) {
+            continue;
+        }
+        let bytes = fs::read(&path).unwrap_or_else(|error| {
+            panic!(
+                "secret state file {} is unreadable: {error}",
+                path.display()
+            )
+        });
+        assert_clean(
+            &format!("secret state {}", path.display()),
+            &String::from_utf8_lossy(&bytes),
+            needles,
+        );
     }
 }
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn secret_value_reaches_only_the_file_and_never_the_stores(pool: PgPool) {
-    let root = tempfile::TempDir::new().unwrap();
-    let capture = LogCapture::install(root.path());
+    let capture = LogCapture::install();
     let base = SecretBase::new();
     let p = Pilot::new(
         &pool,
@@ -1670,13 +1739,12 @@ async fn secret_value_reaches_only_the_file_and_never_the_stores(pool: PgPool) {
         },
     )
     .await;
-    let conversation = canterlot_hub::testkit::seed_conversation(&pool, p.owner, p.machine).await;
+    // Настоящая сессия: воркер ведёт этот разговор, иначе доставка справедливо
+    // отказывается писать файл.
+    let conversation = p.create("synthetic", false).await;
     let marker = format!("canterlot-secret-PROBE-{}", Uuid::now_v7());
-    let hashes = [
-        hex(&sha2::Sha256::digest(marker.as_bytes())),
-        hex(&sha1_smol::Sha1::from(marker.as_bytes()).digest().bytes()),
-    ];
     let value = format!("{marker}\n");
+    let needles = secret_needles(&value);
 
     let row = secrets::open(
         &pool,
@@ -1780,12 +1848,7 @@ async fn secret_value_reaches_only_the_file_and_never_the_stores(pool: PgPool) {
             .fetch_all(&pool)
             .await
             .unwrap();
-        assert_clean(
-            &format!("table {table}"),
-            &rows.join("\n"),
-            &marker,
-            &hashes,
-        );
+        assert_clean(&format!("table {table}"), &rows.join("\n"), &needles);
     }
     let payloads: Vec<Value> = sqlx::query_scalar("select payload from commands")
         .fetch_all(&pool)
@@ -1794,19 +1857,28 @@ async fn secret_value_reaches_only_the_file_and_never_the_stores(pool: PgPool) {
     assert_clean(
         "commands",
         &serde_json::to_string(&payloads).unwrap(),
-        &marker,
-        &hashes,
+        &needles,
     );
     let state_files = files_under(&p.config.data_dir);
     let mut state_text = String::new();
     for path in &state_files {
-        if let Ok(bytes) = fs::read(path) {
-            state_text.push_str(&String::from_utf8_lossy(&bytes));
-        }
+        let bytes = fs::read(path).unwrap_or_else(|error| {
+            panic!(
+                "worker state file {} is unreadable: {error}",
+                path.display()
+            )
+        });
+        state_text.push_str(&String::from_utf8_lossy(&bytes));
     }
-    assert_clean("worker state", &state_text, &marker, &hashes);
+    assert_clean("worker state", &state_text, &needles);
+    // База секретов после отзыва: остался только метаданный tombstone, и он чист.
+    assert_secrets_clean(&base.0, None, &needles);
     let logs = capture.read();
-    assert_clean("logs", &logs, &marker, &hashes);
+    assert!(
+        !logs.is_empty(),
+        "the captured process log must not be empty"
+    );
+    assert_clean("logs", &logs, &needles);
     // Полный дамп базы: то же, что видит `pg_dump`, а не только отдельные таблицы.
     // Адрес тестовой базы — `DATABASE_URL` с именем базы этого теста.
     let database = pool.connect_options().get_database().map(str::to_owned);
@@ -1831,7 +1903,7 @@ async fn secret_value_reaches_only_the_file_and_never_the_stores(pool: PgPool) {
     match output {
         Some(Ok(output)) if output.status.success() => {
             let text = String::from_utf8_lossy(&output.stdout);
-            assert_clean("pg_dump", &text, &marker, &hashes);
+            assert_clean("pg_dump", &text, &needles);
             eprintln!(
                 "pg_dump: {} bytes, plaintext + sha256 + sha1 absent",
                 text.len()
@@ -1867,7 +1939,7 @@ async fn a_declined_request_never_creates_a_file(pool: PgPool) {
         },
     )
     .await;
-    let conversation = canterlot_hub::testkit::seed_conversation(&pool, p.owner, p.machine).await;
+    let conversation = p.create("synthetic", false).await;
     let row = secrets::open(
         &pool,
         p.owner,

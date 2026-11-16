@@ -145,6 +145,32 @@ test.describe('E2E Secret request card', () => {
     await expect(card(page).getByText(/^Передан · файл до /)).toBeVisible();
   });
 
+  test('secret_request_multiline_keeps_pem_bytes', async ({ page }) => {
+    const { api, id } = await bootChat(page);
+    openRequest(api, id);
+    const pem = '-----BEGIN PRIVATE KEY-----\nAAAA\nBBBB\n-----END PRIVATE KEY-----\n';
+
+    await card(page).getByRole('button', { name: 'Несколько строк' }).click();
+    const area = card(page).locator('textarea[data-secret-input]');
+    await expect(area).toBeVisible();
+    for (const [name, value] of [
+      ['autocomplete', 'off'],
+      ['autocapitalize', 'off'],
+      ['autocorrect', 'off'],
+      ['spellcheck', 'false'],
+      ['data-1p-ignore', ''],
+      ['data-lpignore', 'true'],
+      ['data-bwignore', 'true']
+    ] as const) {
+      await expect(area).toHaveAttribute(name, value);
+    }
+
+    await area.fill(pem);
+    await card(page).getByRole('button', { name: 'Передать' }).click();
+    await expect(card(page).getByText('Передаю на машину…')).toBeVisible();
+    expect(api.secretRequestAnswerBodies.at(-1)).toEqual({ value: pem });
+  });
+
   test('secret_request_revoke', async ({ page }) => {
     const { api, id } = await bootChat(page);
     const view = openRequest(api, id);
