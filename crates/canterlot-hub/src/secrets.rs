@@ -1030,6 +1030,7 @@ async fn enqueue_revoke_in_tx(
         row.id,
         attempt_id,
         Some(row.conversation_id),
+        Some(row.conversation_id),
     )
     .await
 }
@@ -1042,6 +1043,7 @@ async fn enqueue_revoke_command_in_tx(
     request_id: Uuid,
     attempt_id: Uuid,
     conversation_id: Option<Uuid>,
+    payload_conversation: Option<Uuid>,
 ) -> Result<(), sqlx::Error> {
     // Один незавершённый отзыв на попытку: повторный путь не плодит команды.
     let pending: bool = sqlx::query_scalar(
@@ -1068,7 +1070,7 @@ async fn enqueue_revoke_command_in_tx(
     .bind(json!({
         "request_id": request_id,
         "attempt_id": attempt_id,
-        "conversation_id": conversation_id,
+        "conversation_id": payload_conversation,
     }))
     .execute(&mut *conn)
     .await?;
@@ -1112,10 +1114,34 @@ async fn revoke_late_delivery_in_tx(
                 request_id,
                 attempt_id,
                 Some(conversation),
+                Some(conversation),
             )
             .await
         }
-        None => enqueue_revoke_command_in_tx(conn, machine_id, request_id, attempt_id, None).await,
+        None => {
+            // Строки уже нет: каталог помнит прежняя команда по этой попытке
+            // (её отвязывает окончательная уборка), иначе файл не найти.
+            let conversation: Option<Uuid> = sqlx::query_scalar(
+                "select nullif(payload->>'conversation_id', '')::uuid from commands
+                 where machine_id = $1 and kind = 'revoke_secret'
+                   and payload->>'attempt_id' = $2
+                   and nullif(payload->>'conversation_id', '') is not null
+                 order by created_at desc limit 1",
+            )
+            .bind(machine_id)
+            .bind(attempt_id.to_string())
+            .fetch_optional(&mut *conn)
+            .await?;
+            enqueue_revoke_command_in_tx(
+                conn,
+                machine_id,
+                request_id,
+                attempt_id,
+                None,
+                conversation,
+            )
+            .await
+        }
     }
 }
 
@@ -1330,6 +1356,7 @@ pub async fn revoke_before_deletion_in_tx(
             row.machine_id,
             row.id,
             attempt_id,
+            Some(row.conversation_id),
             Some(row.conversation_id),
         )
         .await?;

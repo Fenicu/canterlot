@@ -1598,6 +1598,39 @@ async fn purge_keeps_the_revoke_and_a_receipt_finishes_it_without_the_row(pool: 
         state, "completed",
         "a receipt finishes the command even without its row"
     );
+
+    // Даже после уборки опоздавшая запись той же попытки находит каталог в
+    // прежней команде и снова получает отзыв, а не пустой conversation_id.
+    let mut tx = fx.pool.begin().await.unwrap();
+    secrets::apply_delivered_in_tx(
+        &mut tx,
+        fx.seed.machine_id,
+        &canterlot_proto::worker::v1::SecretDelivered {
+            attempt_id: attempt.to_string(),
+            request_id: row.id.to_string(),
+            path: "/run/p".into(),
+            expires_at_ms: 1,
+        },
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let (state, payload): (String, Value) = sqlx::query_as(
+        "select delivery_state, payload from commands
+         where kind='revoke_secret' and payload->>'attempt_id'=$1
+         order by created_at desc limit 1",
+    )
+    .bind(attempt.to_string())
+    .fetch_one(&fx.pool)
+    .await
+    .unwrap();
+    assert_eq!(state, "pending");
+    assert_eq!(
+        payload["conversation_id"],
+        fx.seed.conversation_id.to_string(),
+        "the retry still knows the directory"
+    );
 }
 
 /// Доставка и переподключение не должны разойтись: значение уходит ровно на то
