@@ -112,6 +112,7 @@ async fn nul_in_any_text_of_a_record_never_refuses_the_record(pool: PgPool) -> T
                 state: "running".into(),
                 outcome: "out\0come".into(),
                 native_conversation_id: "native\0id".into(),
+                fresh_fork: false,
             }),
         ),
         (
