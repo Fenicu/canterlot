@@ -1133,7 +1133,10 @@ async fn sweep_and_report(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    use std::os::{
+        fd::AsFd,
+        unix::fs::{MetadataExt, PermissionsExt},
+    };
 
     /// Базовый каталог на настоящем tmpfs: `$XDG_RUNTIME_DIR` не трогаем.
     struct TestBase(PathBuf);
@@ -1386,11 +1389,21 @@ mod tests {
 
     #[test]
     fn a_base_outside_tmpfs_is_refused() {
-        // Каталог репозитория лежит на диске, а не на tmpfs: годной базой он быть не может.
+        // Каталог репозитория обычно лежит на диске, а не на tmpfs: годной базой
+        // он быть не может. Но рабочая копия может сама быть на tmpfs (например,
+        // в /tmp), и тогда продукт прав — тест к такой среде неприменим.
         let directory = tempfile::Builder::new()
             .prefix("canterlot-secret-on-disk-")
             .tempdir_in(env!("CARGO_MANIFEST_DIR"))
             .unwrap();
+        let probe = std::fs::File::open(directory.path()).unwrap();
+        if fstatfs(probe.as_fd()).is_ok_and(|stat| stat.f_type == TMPFS_MAGIC) {
+            eprintln!(
+                "skipping a_base_outside_tmpfs_is_refused: {} is on tmpfs",
+                directory.path().display()
+            );
+            return;
+        }
         let config = SecretConfig {
             base_dir: Some(directory.path().join("secrets")),
         };
