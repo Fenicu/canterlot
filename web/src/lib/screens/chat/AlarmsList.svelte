@@ -82,6 +82,7 @@
   .alarms { display: flex; flex-direction: column; gap: var(--s3); min-width: 0; }
   .item { display: flex; flex-direction: column; gap: var(--s3); min-width: 0; }
   .pill {
+    white-space: nowrap;
     display: flex;
     align-items: center;
     gap: var(--s4);

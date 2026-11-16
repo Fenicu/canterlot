@@ -226,6 +226,7 @@
 		padding: var(--s2) var(--gutter) var(--s4);
 	}
 	.field {
+		white-space: nowrap;
 		display: flex;
 		align-items: center;
 		gap: var(--s2);
@@ -244,6 +245,7 @@
 		height: var(--icon-small);
 	}
 	input {
+		white-space: nowrap;
 		flex: 1;
 		min-width: 0;
 		min-height: var(--target);
@@ -261,6 +263,7 @@
 		display: none;
 	}
 	.reset {
+		white-space: nowrap;
 		flex: none;
 		min-height: var(--target);
 		padding-inline: var(--s6);
@@ -271,6 +274,7 @@
 		font-size: var(--fs-meta);
 	}
 	.scope {
+		white-space: nowrap;
 		display: flex;
 		align-items: center;
 		align-self: flex-start;
@@ -334,6 +338,7 @@
 		font-size: var(--fs-meta);
 	}
 	.retry {
+		white-space: nowrap;
 		min-height: var(--target);
 		margin-top: var(--s6);
 		padding: var(--s4) var(--s8);

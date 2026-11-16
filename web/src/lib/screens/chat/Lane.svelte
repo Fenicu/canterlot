@@ -250,6 +250,7 @@
 		padding-block: var(--s3) max(var(--s4), env(safe-area-inset-bottom));
 	}
 	.pending-line {
+		white-space: nowrap;
 		margin: 0;
 		padding: var(--s3) var(--s6);
 		border-radius: var(--radius-pill);
@@ -258,6 +259,7 @@
 		font-size: var(--fs-sm);
 	}
 	.return-link {
+		white-space: nowrap;
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;

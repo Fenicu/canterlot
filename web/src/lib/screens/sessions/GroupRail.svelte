@@ -95,7 +95,7 @@
   .icon { display: inline-flex; color: var(--muted); }
   .icon :global(svg) { width: var(--s10); height: var(--s10); }
   .label { max-width: 100%; display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow-wrap: anywhere; hyphens: manual; }
-  .count { position: absolute; top: var(--s2); left: calc(50% + var(--s2)); min-width: var(--s9); height: var(--s9); box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; padding: var(--s0) var(--s2); border-radius: var(--radius-pill); background: var(--badge); color: var(--bg); font-size: var(--fs-xs); font-weight: var(--weight-bold); font-variant-numeric: tabular-nums; }
+  .count { white-space: nowrap; position: absolute; top: var(--s2); left: calc(50% + var(--s2)); min-width: var(--s9); height: var(--s9); box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; padding: var(--s0) var(--s2); border-radius: var(--radius-pill); background: var(--badge); color: var(--bg); font-size: var(--fs-xs); font-weight: var(--weight-bold); font-variant-numeric: tabular-nums; }
   @media (hover: hover) and (pointer: fine) {
     .item:hover { background: var(--hover); color: var(--text); }
   }

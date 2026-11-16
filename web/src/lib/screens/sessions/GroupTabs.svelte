@@ -105,7 +105,7 @@
     padding: var(--s4) var(--s6);
     white-space: nowrap;
   }
-  .count { display: inline-block; min-width: var(--s9); margin-left: var(--s1); padding-inline: var(--s3); border-radius: var(--radius-pill); background: var(--chip); color: var(--chip-text); font-size: var(--fs-sm); }
+  .count { white-space: nowrap; display: inline-block; min-width: var(--s9); margin-left: var(--s1); padding-inline: var(--s3); border-radius: var(--radius-pill); background: var(--chip); color: var(--chip-text); font-size: var(--fs-sm); }
   /* Выбор заметен в обеих темах: заливка акцентом, как у нижней навигации. */
   button[aria-selected='true'] { background: var(--accent); color: var(--accent-ink); font-weight: var(--weight-medium); }
   button[aria-selected='true'] .count { background: var(--accent-ink); color: var(--accent); }

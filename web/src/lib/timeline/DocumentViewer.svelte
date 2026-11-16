@@ -145,7 +145,7 @@
   .document-viewer { display: flex; flex-direction: column; gap: var(--s6); min-width: 0; }
   .toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--s4); min-width: 0; }
   .actions { display: flex; flex-wrap: wrap; gap: var(--s2); min-width: 0; }
-  .download { display: inline-flex; align-items: center; gap: var(--s4); min-height: var(--target); padding: var(--s2) var(--s8); border-radius: var(--radius-pill); background: var(--raised); color: var(--text); font-size: var(--fs-meta); text-decoration: none; }
+  .download { white-space: nowrap; display: inline-flex; align-items: center; gap: var(--s4); min-height: var(--target); padding: var(--s2) var(--s8); border-radius: var(--radius-pill); background: var(--raised); color: var(--text); font-size: var(--fs-meta); text-decoration: none; }
   .status { display: flex; flex-direction: column; align-items: flex-start; gap: var(--s2); margin: 0; padding-block: var(--s6); }
   .status p { margin: 0; }
   .hint { color: var(--secondary); font-size: var(--fs-sm); }

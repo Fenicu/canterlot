@@ -178,6 +178,7 @@
   h2 { margin: 0; font-size: var(--fs-title); font-weight: var(--weight-semibold); }
   .presets { display: flex; flex-direction: column; gap: var(--s1); margin-bottom: var(--s2); }
   .presets label {
+    white-space: nowrap;
     display: flex;
     align-items: center;
     justify-content: space-between;

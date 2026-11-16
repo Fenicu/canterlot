@@ -26,6 +26,7 @@
   .text, .error { margin: var(--s0); font-size: var(--fs-body); overflow-wrap: anywhere; }
   .error { color: var(--danger); font-size: var(--fs-meta); }
   .force {
+    white-space: nowrap;
     min-height: var(--target);
     padding: var(--s2) var(--s6);
     border-radius: var(--radius-pill);

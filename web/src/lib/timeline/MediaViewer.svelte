@@ -898,6 +898,7 @@
   .stage:global([data-settling]) .slide, .stage:global([data-settling]) .frame { transition: transform var(--duration-expand) var(--ease-expand); }
   .viewer:has(:global(.stage[data-settling])) .backdrop { transition: opacity var(--duration-expand) var(--ease-expand); }
   .status {
+    white-space: nowrap;
     position: absolute;
     top: 50%;
     left: 50%;
@@ -944,8 +945,9 @@
   .control:hover { background: var(--viewer-control-hover); }
   .control[aria-disabled='true'] { color: var(--viewer-muted); cursor: default; opacity: var(--opacity-dim); }
   .header-actions { grid-column: 1; justify-self: start; display: flex; align-items: center; gap: var(--s2); }
-  .save { grid-column: 3; justify-self: end; padding-inline: var(--s6) var(--s8); border-radius: var(--radius-pill); }
+  .save { white-space: nowrap; grid-column: 3; justify-self: end; padding-inline: var(--s6) var(--s8); border-radius: var(--radius-pill); }
   .counter {
+    white-space: nowrap;
     grid-column: 2;
     margin: 0;
     padding: var(--s3) var(--s6);

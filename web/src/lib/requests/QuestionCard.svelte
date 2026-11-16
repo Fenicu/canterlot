@@ -628,6 +628,7 @@
   }
 
   .submit-btn {
+    white-space: nowrap;
     flex: 1;
     min-height: var(--target);
     padding: var(--s2) var(--s6);

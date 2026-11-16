@@ -33,6 +33,7 @@
 		padding: var(--s2) var(--gutter) var(--s0);
 	}
 	.head {
+		white-space: nowrap;
 		display: flex;
 		align-items: center;
 		gap: var(--s4);

@@ -662,6 +662,7 @@
 		font-variant-numeric: tabular-nums;
 	}
 	.pane-action {
+		white-space: nowrap;
 		min-height: var(--target);
 		padding-inline: var(--s8);
 		border-radius: var(--radius-pill);
@@ -699,6 +700,7 @@
 		gap: var(--s2);
 	}
 	.btn-confirm-danger, .btn-cancel {
+		white-space: nowrap;
 		min-height: var(--target);
 		padding: var(--s2) var(--s6);
 		border-radius: var(--radius-pill);

@@ -131,6 +131,6 @@
   .rows { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
   .state { margin: var(--s4) var(--s2); color: var(--secondary); }
   .error { margin: var(--s2) var(--s2) var(--s4); color: var(--danger); font-size: var(--fs-sm); }
-  .retry { min-height: var(--target); padding-inline: var(--s6); border: var(--s0); border-radius: var(--radius-pill); background: var(--transparent); color: var(--accent-link); font-size: var(--fs-meta); }
+  .retry { white-space: nowrap; min-height: var(--target); padding-inline: var(--s6); border: var(--s0); border-radius: var(--radius-pill); background: var(--transparent); color: var(--accent-link); font-size: var(--fs-meta); }
   .sentinel { height: var(--s1); }
 </style>

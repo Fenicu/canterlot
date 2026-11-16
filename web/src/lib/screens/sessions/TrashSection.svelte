@@ -125,6 +125,7 @@
   .meta { color: var(--secondary); font-size: var(--fs-sm); }
   .actions { display: flex; flex-wrap: wrap; gap: var(--s2); }
   button {
+    white-space: nowrap;
     min-height: var(--target);
     padding-inline: var(--s8);
     border: var(--s0);

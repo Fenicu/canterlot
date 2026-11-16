@@ -215,9 +215,9 @@
   .setting .note { margin: var(--s0); }
   .terms { display: flex; flex-direction: column; gap: var(--s3); list-style: none; margin: var(--s0); padding: var(--s0); }
   .terms li { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto; align-items: center; gap: var(--s3); }
-  .field { width: 100%; min-width: 0; min-height: var(--target); padding: var(--s5) var(--s8); border: var(--s0); border-radius: var(--radius-pill); background: var(--raised); color: var(--text); font: inherit; font-size: var(--fs-meta); }
+  .field { white-space: nowrap; width: 100%; min-width: 0; min-height: var(--target); padding: var(--s5) var(--s8); border: var(--s0); border-radius: var(--radius-pill); background: var(--raised); color: var(--text); font: inherit; font-size: var(--fs-meta); }
   .arrow { color: var(--muted); }
-  .remove { min-height: var(--target); padding: var(--s4) var(--s5); border: var(--s0); border-radius: var(--radius-pill); background: var(--transparent); color: var(--secondary); font-size: var(--fs-sm); }
+  .remove { white-space: nowrap; min-height: var(--target); padding: var(--s4) var(--s5); border: var(--s0); border-radius: var(--radius-pill); background: var(--transparent); color: var(--secondary); font-size: var(--fs-sm); }
   .actions { display: flex; flex-wrap: wrap; justify-content: flex-start; gap: var(--s4); }
   .frequent { display: flex; flex-direction: column; gap: var(--s4); padding: var(--s5); border-radius: var(--radius); background: var(--raised); }
   .picks { display: grid; gap: var(--s2); list-style: none; margin: var(--s0); padding: var(--s0); }

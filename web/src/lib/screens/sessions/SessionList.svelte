@@ -577,7 +577,7 @@
 </svelte:element>
 
 <style>
-  .deep-search { display: flex; align-items: center; gap: var(--s4); box-sizing: border-box; width: calc(100% - var(--gutter) * 2); min-height: var(--target); margin: var(--s2) var(--gutter) var(--s6); padding: var(--s3) var(--s6); border: var(--s0); border-radius: var(--radius-pill); background: var(--transparent); color: var(--accent-link); font-size: var(--fs-meta); text-align: start; }
+  .deep-search { white-space: nowrap; display: flex; align-items: center; gap: var(--s4); box-sizing: border-box; width: calc(100% - var(--gutter) * 2); min-height: var(--target); margin: var(--s2) var(--gutter) var(--s6); padding: var(--s3) var(--s6); border: var(--s0); border-radius: var(--radius-pill); background: var(--transparent); color: var(--accent-link); font-size: var(--fs-meta); text-align: start; }
   .deep-search :global(svg) { flex: none; width: var(--icon-small); height: var(--icon-small); }
   .deep-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   @media (hover: hover) and (pointer: fine) { .deep-search:hover { background: var(--hover); } }
@@ -594,7 +594,7 @@
   .column { position: relative; display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
   .railed .bar { flex-wrap: nowrap; gap: var(--s2); margin: var(--s6) var(--s6) var(--s3); padding-block: var(--s0); }
   /* Поле-кнопка поиска на столе: та же капсула, что у открытого поиска. */
-  .search-field { flex: 1; min-width: 0; display: flex; align-items: center; gap: var(--s4); min-height: var(--target); padding: var(--s0) var(--s7); border: var(--s0); border-radius: var(--radius-pill); background: var(--surface); color: var(--muted); font-size: var(--fs-body); text-align: start; }
+  .search-field { white-space: nowrap; flex: 1; min-width: 0; display: flex; align-items: center; gap: var(--s4); min-height: var(--target); padding: var(--s0) var(--s7); border: var(--s0); border-radius: var(--radius-pill); background: var(--surface); color: var(--muted); font-size: var(--fs-body); text-align: start; }
   .search-field :global(svg) { width: var(--icon-small); height: var(--icon-small); }
   @media (hover: hover) and (pointer: fine) { .search-field:hover { background: var(--hover); } }
   .bar { position: relative; display: flex; flex-wrap: wrap; align-items: center; gap: var(--s0); min-width: 0; margin: var(--s5) var(--gutter) var(--s3); padding-block: var(--s2); }

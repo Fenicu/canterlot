@@ -33,16 +33,16 @@
   .preview { display: flex; flex-direction: column; overflow: hidden; border-radius: var(--radius-sm); background: var(--chat-bg); color: var(--text); font-size: var(--fs-xs); line-height: var(--lh-tight); }
   .bar { display: flex; align-items: center; gap: var(--s2); padding: var(--s3) var(--s4); background: var(--surface); }
   .dot { flex: none; width: var(--mark); height: var(--mark); border-radius: var(--radius-round); background: var(--success); }
-  .title { flex: 1; height: var(--s2); max-width: 40%; border-radius: var(--radius-pill); background: var(--text); }
-  .action { flex: none; width: var(--s10); height: var(--s5); margin-left: auto; border-radius: var(--radius-pill); background: var(--accent); }
+  .title { white-space: nowrap; flex: 1; height: var(--s2); max-width: 40%; border-radius: var(--radius-pill); background: var(--text); }
+  .action { white-space: nowrap; flex: none; width: var(--s10); height: var(--s5); margin-left: auto; border-radius: var(--radius-pill); background: var(--accent); }
   .feed { display: flex; flex-direction: column; gap: var(--s2); padding: var(--s3) var(--s4) var(--s4); }
-  .line { display: block; height: var(--s2); width: 86%; border-radius: var(--radius-pill); background: var(--secondary); }
+  .line { white-space: nowrap; display: block; height: var(--s2); width: 86%; border-radius: var(--radius-pill); background: var(--secondary); }
   .line.short { width: 58%; }
   .code { display: block; padding: var(--s1) var(--s3); overflow: hidden; border-radius: var(--radius-pill); background: var(--code); color: var(--syn-variable); font-family: var(--font-mono); white-space: nowrap; }
   .kw { color: var(--syn-keyword); }
   .var { color: var(--syn-variable); }
   .str { color: var(--syn-string); }
-  .owner { align-self: flex-end; width: 56%; padding: var(--s2) var(--s3); border-radius: var(--radius-pill); background: var(--accent-soft); }
+  .owner { white-space: nowrap; align-self: flex-end; width: 56%; padding: var(--s2) var(--s3); border-radius: var(--radius-pill); background: var(--accent-soft); }
   .owner .line { width: 100%; background: var(--text); }
   .caption { display: flex; align-items: center; gap: var(--s3); min-height: var(--s10); padding-inline: var(--s3); font-size: var(--fs-meta); }
   /* Метка как у radio: пустое кольцо и заполненный круг с точкой. Кольцо — внутренний круг поверх заливки, без рамки. */

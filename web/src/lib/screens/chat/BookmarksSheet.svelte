@@ -40,5 +40,5 @@
 <style>
   .state { margin: var(--s4) var(--s2); color: var(--secondary); }
   .rows { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
-  .retry { min-height: var(--target); padding-inline: var(--s6); border: var(--s0); border-radius: var(--radius-pill); background: var(--transparent); color: var(--accent-link); font-size: var(--fs-meta); }
+  .retry { white-space: nowrap; min-height: var(--target); padding-inline: var(--s6); border: var(--s0); border-radius: var(--radius-pill); background: var(--transparent); color: var(--accent-link); font-size: var(--fs-meta); }
 </style>

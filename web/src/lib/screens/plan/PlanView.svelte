@@ -231,6 +231,7 @@
 		font-weight: var(--weight-medium);
 	}
 	.group-head.toggle {
+		white-space: nowrap;
 		min-height: var(--target);
 		border-radius: var(--radius-pill);
 		background: var(--transparent);
@@ -392,6 +393,7 @@
 		overflow-wrap: anywhere;
 	}
 	.report {
+		white-space: nowrap;
 		display: inline-flex;
 		align-self: flex-start;
 		align-items: center;

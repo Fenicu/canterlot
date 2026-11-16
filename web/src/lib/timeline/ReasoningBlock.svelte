@@ -110,7 +110,7 @@
 
 <style>
   .reasoning { display: flex; flex-direction: column; min-width: 0; margin-block: calc(var(--s2) * -1); color: var(--secondary); }
-  .toggle { display: flex; align-items: center; gap: var(--s3); width: 100%; min-width: 0; min-height: var(--target); padding: var(--s0) var(--s4); border-radius: var(--radius-pill); background: var(--transparent); color: var(--secondary); font-size: var(--fs-sm); text-align: start; }
+  .toggle { white-space: nowrap; display: flex; align-items: center; gap: var(--s3); width: 100%; min-width: 0; min-height: var(--target); padding: var(--s0) var(--s4); border-radius: var(--radius-pill); background: var(--transparent); color: var(--secondary); font-size: var(--fs-sm); text-align: start; }
   .chevron { flex: none; color: var(--muted); transition: transform var(--duration-expand) var(--ease-expand); }
   .chevron :global(svg) { width: var(--icon-small); height: var(--icon-small); }
   [data-open] .chevron { transform: rotate(90deg); }

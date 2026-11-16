@@ -152,7 +152,7 @@
   .activity[data-tone='danger'] .text { color: var(--danger); }
   .live { display: inline-block; width: var(--mark); height: var(--mark); margin-right: var(--s2); border-radius: var(--radius-round); background: var(--accent); vertical-align: middle; }
   /* Цвет владельца — тонкая полоска у левого края, чтобы не спорить с кольцом и точкой состояния. */
-  .owner { position: absolute; left: var(--s0); top: var(--s4); bottom: var(--s4); width: calc(var(--s1) * 1.5); border-radius: var(--radius-pill); background: var(--owner); }
+  .owner { white-space: nowrap; position: absolute; left: var(--s0); top: var(--s4); bottom: var(--s4); width: calc(var(--s1) * 1.5); border-radius: var(--radius-pill); background: var(--owner); }
   /* Процесса нет: строка гаснет и читается как архивная. */
   .row.dim .title { color: var(--secondary); font-weight: var(--weight-normal); }
   .row.dim .activity .text { color: var(--muted); }
@@ -166,7 +166,7 @@
   .row.child[data-state='waiting'] .worked, .row.child[data-state='failed'] .worked { display: none; }
   .pin { flex: none; display: inline-flex; color: var(--badge); }
   .pin :global(svg) { width: var(--icon-small); height: var(--icon-small); }
-  .count { flex: none; min-width: var(--s9); height: var(--s9); padding: var(--s0) var(--s3); box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; border-radius: var(--radius-pill); background: var(--accent); color: var(--accent-ink); font-size: var(--fs-xs); font-weight: var(--weight-bold); font-variant-numeric: tabular-nums; }
+  .count { white-space: nowrap; flex: none; min-width: var(--s9); height: var(--s9); padding: var(--s0) var(--s3); box-sizing: border-box; display: inline-flex; align-items: center; justify-content: center; border-radius: var(--radius-pill); background: var(--accent); color: var(--accent-ink); font-size: var(--fs-xs); font-weight: var(--weight-bold); font-variant-numeric: tabular-nums; }
   button { flex: none; align-self: stretch; min-width: var(--target); display: inline-flex; align-items: center; justify-content: center; border: var(--s0); border-radius: var(--radius-sm); background: var(--transparent); color: var(--secondary); }
   /* Телефон: аватар крупнее, кнопка меню — пальцевая мишень. */
   :global([data-layout='phone']) .row { --avatar: var(--avatar-phone); }

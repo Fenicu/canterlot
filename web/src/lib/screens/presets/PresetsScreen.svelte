@@ -202,6 +202,7 @@
     margin-bottom: var(--s5);
   }
   .tabs button {
+    white-space: nowrap;
     min-height: var(--target);
     padding: 0 var(--s5);
     border-radius: var(--radius-pill);

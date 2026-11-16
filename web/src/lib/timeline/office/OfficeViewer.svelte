@@ -129,7 +129,7 @@
   :global([data-layout='desktop'] dialog:has(.office-viewer[data-kind='excel'][data-state='sheets'])) { width: min(calc(100% - 2 * var(--s13)), calc(var(--index-max) * 1.25)); height: 85dvh; }
   .office-viewer { display: flex; flex-direction: column; gap: var(--s6); min-width: 0; }
   .office-viewer[data-state='sheets'] { height: 100%; }
-  .download { display: inline-flex; align-items: center; gap: var(--s4); min-height: var(--target); padding: var(--s2) var(--s8); border-radius: var(--radius-pill); background: var(--raised); color: var(--text); font-size: var(--fs-meta); text-decoration: none; }
+  .download { white-space: nowrap; display: inline-flex; align-items: center; gap: var(--s4); min-height: var(--target); padding: var(--s2) var(--s8); border-radius: var(--radius-pill); background: var(--raised); color: var(--text); font-size: var(--fs-meta); text-decoration: none; }
   .status { display: flex; flex-direction: column; align-items: flex-start; gap: var(--s2); margin: 0; padding-block: var(--s6); }
   .status p { margin: 0; }
   .hint { color: var(--secondary); font-size: var(--fs-sm); }
