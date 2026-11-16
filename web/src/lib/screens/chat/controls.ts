@@ -84,6 +84,23 @@ export async function spendSessionReserve(
   return { outcome, message };
 }
 
+export async function snoozeSession(
+  conversationId: string,
+  until: Date,
+  key?: string,
+) {
+  const body = { until: until.toISOString() };
+  return once(`snooze:${conversationId}:${body.until}`, key, (used) =>
+    client.setSnooze(conversationId, body, used),
+  );
+}
+
+export async function clearSnooze(conversationId: string, key?: string) {
+  return once(`unsnooze:${conversationId}`, key, (used) =>
+    client.clearSnooze(conversationId, used),
+  );
+}
+
 export async function resumeAtReset(conversationId: string, key?: string) {
   return once(`auto-resume:${conversationId}`, key, (used) =>
     client.resumeAtReset(conversationId, used),

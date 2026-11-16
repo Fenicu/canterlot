@@ -1,4 +1,5 @@
 import type { Counts, ListRow } from "#lib/stores/list.svelte.js";
+import { isSnoozed } from "./snooze";
 import { WAITING_SECTION, waitingRows } from "./waiting";
 
 export type Tab =
@@ -36,6 +37,9 @@ export interface Section {
   collapsed: boolean;
 }
 
+/** Раздел отложенных сессий: свёрнут, пока владелец его не раскрыл. */
+export const SNOOZE_SECTION = "snoozed";
+
 /** Явный выбор владельца по родителям: свернул или раскрыл поверх умолчания. */
 export interface KidsChoice {
   collapsed: ReadonlySet<string>;
@@ -65,11 +69,14 @@ export function buildSections(
   tab: Tab,
   collapsed: ReadonlySet<string>,
   kids: KidsChoice = noKids,
+  now = Date.now(),
 ): Section[] {
   const ordered = [...groups].sort(
     (a, b) => a.position - b.position || a.name.localeCompare(b.name, "ru"),
   );
-  const active = items.filter((item) => !item.archived && !item.trashed_at);
+  const visible = items.filter((item) => !item.archived && !item.trashed_at);
+  const active = visible.filter((item) => !isSnoozed(item, now));
+  const snoozed = snoozedRows(visible, tab, now);
   if (tab.kind === "archive") {
     const archived = items.filter(
       (item) => item.archived && !item.accepted && !item.trashed_at,
@@ -89,7 +96,7 @@ export function buildSections(
   }
   if (tab.kind === "pinned") {
     const pinned = active.filter((item) => item.pinned);
-    return [
+    const sections = [
       section(
         "pinned",
         "Закреплённые",
@@ -97,6 +104,7 @@ export function buildSections(
         collapsed,
       ),
     ];
+    return withSnoozed(sections, snoozed, kids, collapsed);
   }
   if (tab.kind === "group") {
     const group = ordered.find((item) => item.id === tab.id);
@@ -137,7 +145,7 @@ export function buildSections(
           collapsed,
         ),
       );
-    return sections;
+    return withSnoozed(sections, snoozed, kids, collapsed);
   }
   const roots = nest(active, null, kids);
   const used = new Set<string>();
@@ -160,6 +168,43 @@ export function buildSections(
   const rest = roots.filter((node) => !used.has(node.item.id));
   if (rest.length > 0)
     sections.push(section("none", "Без группы", rest, collapsed));
+  return withSnoozed(sections, snoozed, kids, collapsed);
+}
+
+/** Отложенные одной вкладки: в группе — только её участники, в закреплённых — все. */
+function snoozedRows(items: ListRow[], tab: Tab, now: number): ListRow[] {
+  if (tab.kind === "archive" || tab.kind === "trash") return [];
+  const rows = items.filter((item) => isSnoozed(item, now));
+  const scoped =
+    tab.kind === "group"
+      ? rows.filter((item) => item.groups.includes(tab.id))
+      : rows;
+  return scoped.sort(
+    (a, b) =>
+      (Date.parse(a.snoozed_until ?? "") || 0) -
+        (Date.parse(b.snoozed_until ?? "") || 0) ||
+      a.id.localeCompare(b.id),
+  );
+}
+
+/**
+ * Раздел внизу списка. Свёрнут по умолчанию: в `collapsed` лежит раскрытие,
+ * а не сворачивание, потому что пустой набор хранилища значит «ещё не трогали».
+ */
+function withSnoozed(
+  sections: Section[],
+  rows: ListRow[],
+  kids: KidsChoice,
+  collapsed: ReadonlySet<string>,
+): Section[] {
+  if (rows.length === 0) return sections;
+  sections.push({
+    id: SNOOZE_SECTION,
+    title: "Отложенные",
+    count: rows.length,
+    items: nest(rows, null, kids),
+    collapsed: !collapsed.has(SNOOZE_SECTION),
+  });
   return sections;
 }
 

@@ -27,6 +27,8 @@
   import { turnRunning, turnText, type Activity } from './activityText';
   import { COLOR_KEYS, COLOR_NAMES } from './colors';
   import { groupPinAt } from './grouping';
+  import SnoozeMenu from './SnoozeMenu.svelte';
+  import { isSnoozed, limitResetAt } from './snooze';
   import { menuTop } from './menuPlace';
 
   let {
@@ -419,7 +421,17 @@
       <div class="groups">
         <div class="line">
           <span class="caption">Группы</span>
-          {#if ongroups}<button type="button" class="link" onclick={ongroups}>Изменить список</button>{/if}
+          <span class="line-actions">
+            {#if ongroups}<button type="button" class="link" onclick={ongroups}>Изменить список</button>{/if}
+            <SnoozeMenu
+              inline
+              conversationId={item.id}
+              snoozed={isSnoozed(item)}
+              resetAt={limitResetAt(item.queue)}
+              ondone={onclose}
+              onerror={(err) => (saveError = errorText(err, 'Не удалось отложить сессию'))}
+            />
+          </span>
         </div>
         {#if groups.length > 0}
           <div class="chips">
@@ -512,6 +524,7 @@
   .rows { display: flex; flex-direction: column; gap: var(--s2); padding: var(--s2) var(--s6); border-radius: var(--radius-card); background: var(--raised); }
   .groups { display: flex; flex-direction: column; gap: var(--s2); padding-block: var(--s2); }
   .chips { display: flex; flex-wrap: wrap; gap: var(--s3); }
+  .line-actions { display: flex; align-items: center; gap: var(--s3); min-width: 0; flex-wrap: wrap; }
   .link { min-height: var(--target); padding-inline: var(--s2); border-radius: var(--radius-sm); background: var(--transparent); color: var(--accent-link); font-size: var(--fs-meta); }
   .note { margin: 0; color: var(--muted); font-size: var(--fs-sm); }
   /* Подпись и подсказка стоят друг под другом: строка не ломает название и обе строки листа одной высоты. */

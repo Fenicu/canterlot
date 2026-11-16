@@ -216,4 +216,137 @@ describe("sessions/grouping", () => {
     );
     expect(sections[0]?.items.map((node) => node.item.id)).toEqual(["kept"]);
   });
+
+  describe("snoozed sessions", () => {
+    const NOW = Date.parse("2026-10-29T12:00:00.000Z");
+    const later = (minutes: number) =>
+      new Date(NOW + minutes * 60_000).toISOString();
+
+    it("leave_their_group_for_a_collapsed_section_at_the_bottom", () => {
+      const items = [
+        row({
+          id: "awake",
+          title: "Бодрая",
+          groups: ["canterlot"],
+        }),
+        row({
+          id: "sleeping",
+          title: "Отложенная",
+          groups: ["canterlot"],
+          snoozed_until: later(60),
+        }),
+      ];
+      const sections = buildSections(
+        items,
+        groups,
+        { kind: "all" },
+        new Set(),
+        undefined,
+        NOW,
+      );
+      expect(sections.map((section) => section.id)).toEqual([
+        "canterlot",
+        "snoozed",
+      ]);
+      expect(sections[0]?.items.map((node) => node.item.id)).toEqual(["awake"]);
+      expect(sections[1]?.title).toBe("Отложенные");
+      expect(sections[1]?.count).toBe(1);
+      expect(sections[1]?.collapsed).toBe(true);
+      expect(sections[1]?.items.map((node) => node.item.id)).toEqual([
+        "sleeping",
+      ]);
+      // Раскрытие хранится тем же набором, что и сворачивание разделов.
+      const expanded = buildSections(
+        items,
+        groups,
+        { kind: "all" },
+        new Set(["snoozed"]),
+        undefined,
+        NOW,
+      );
+      expect(expanded.at(-1)?.collapsed).toBe(false);
+    });
+
+    it("return_to_their_group_as_soon_as_the_time_passes_without_a_reload", () => {
+      const items = [
+        row({
+          id: "sleeping",
+          title: "Отложенная",
+          groups: ["canterlot"],
+          snoozed_until: later(1),
+        }),
+      ];
+      const before = buildSections(
+        items,
+        groups,
+        { kind: "all" },
+        new Set(),
+        undefined,
+        NOW,
+      );
+      expect(before.at(-1)?.id).toBe("snoozed");
+      const after = buildSections(
+        items,
+        groups,
+        { kind: "all" },
+        new Set(),
+        undefined,
+        NOW + 2 * 60_000,
+      );
+      expect(after.map((section) => section.id)).toEqual(["canterlot"]);
+      expect(after[0]?.items.map((node) => node.item.id)).toEqual([
+        "sleeping",
+      ]);
+    });
+
+    it("never_appear_in_the_waiting_section", () => {
+      const items = [
+        row({
+          id: "asking",
+          title: "Спрашивает",
+          activity: { state: "waiting_for_user" },
+          snoozed_until: later(60),
+        }),
+      ];
+      const sections = buildSections(
+        items,
+        groups,
+        { kind: "all" },
+        new Set(),
+        undefined,
+        NOW,
+      );
+      expect(sections.map((section) => section.id)).toEqual(["snoozed"]);
+      expect(sections[0]?.items[0]?.item.id).toBe("asking");
+    });
+
+    it("stay_in_the_section_of_their_own_group_tab", () => {
+      const items = [
+        row({
+          id: "canterlot-one",
+          title: "Своя",
+          groups: ["canterlot"],
+          snoozed_until: later(30),
+        }),
+        row({
+          id: "books-one",
+          title: "Чужая",
+          groups: ["books"],
+          snoozed_until: later(30),
+        }),
+      ];
+      const sections = buildSections(
+        items,
+        groups,
+        { kind: "group", id: "canterlot" },
+        new Set(),
+        undefined,
+        NOW,
+      );
+      const snoozed = sections.find((section) => section.id === "snoozed");
+      expect(snoozed?.items.map((node) => node.item.id)).toEqual([
+        "canterlot-one",
+      ]);
+    });
+  });
 });

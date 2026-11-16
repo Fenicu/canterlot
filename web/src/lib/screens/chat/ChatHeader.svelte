@@ -15,7 +15,7 @@
 	import MenuItem from '#lib/ui/MenuItem.svelte';
 	import { stateMark } from '#lib/screens/sessions/rowState.js';
 	import { theme } from '#lib/theme.js';
-	import { stopSession, resumeSession, continueSessionQueue, resolveOwnerLost, controlBusy } from './controls';
+	import { stopSession, resumeSession, continueSessionQueue, resolveOwnerLost, controlBusy, clearSnooze } from './controls';
 	import { RESOLVE_WARNING, runLabel } from './pauseCards';
 	import LimitsStrip from '#lib/screens/sessions/LimitsStrip.svelte';
 	import type { ProviderLimits } from '#lib/stores/limits.js';
@@ -31,6 +31,8 @@
 	import { pendingItems } from '#lib/routing/queue.js';
 	import { waitFactsFromRequest } from '#lib/requests/waitCopy.js';
 	import { WAITING_SECTION, focusListSection, otherWaitingCount } from '#lib/screens/sessions/waiting.js';
+	import SnoozeMenu from '#lib/screens/sessions/SnoozeMenu.svelte';
+	import { limitResetAt } from '#lib/screens/sessions/snooze.js';
 
 	interface DetailLike {
 		title?: string;
@@ -39,6 +41,7 @@
 		machine?: { name?: string };
 		model?: string;
 		model_resolved?: string | null;
+		snoozed_until?: string | null;
 	}
 
 	interface SettingsLike {
@@ -111,6 +114,15 @@
 	let confirmingForce = $state(false);
 	let actionError = $state<string | null>(null);
 
+	async function handleUnsnooze() {
+		actionError = null;
+		try {
+			await clearSnooze(chat.id);
+		} catch (err) {
+			actionError = errorText(err, 'Не удалось вернуть сессию');
+		}
+	}
+
 	const detail = $derived(chat.detail as DetailLike | null);
 	const parentId = $derived(((chat.detail as AcceptDetail | null)?.parent_id) ?? null);
 	const accept = $derived(acceptView(chat.detail as AcceptDetail | null));
@@ -131,6 +143,11 @@
 	);
 
 	const title = $derived(detail?.title || 'Сессия');
+	// Тихая строка «Отложена до …»: срок в прошлом значит, что сессия уже вернулась.
+	const snoozedAt = $derived.by(() => {
+		const parsed = detail?.snoozed_until ? Date.parse(detail.snoozed_until) : Number.NaN;
+		return Number.isFinite(parsed) && parsed > now ? parsed : null;
+	});
 	// Открытый запрос говорит в шапке своим видом и возрастом, а не общей фразой.
 	const pending = $derived.by(() => {
 		const stamp = (value?: string): number => {
@@ -358,6 +375,13 @@
 		</div>
 	</div>
 
+	{#if snoozedAt !== null}
+		<p class="header-status snoozed-line" role="status">
+			<span>Отложена до {fmt.clock(snoozedAt)}</span>
+			<button type="button" class="unsnooze" onclick={() => void handleUnsnooze()}>Вернуть</button>
+		</p>
+	{/if}
+
 	{#if stopping}
 		<p class="header-status" role="status">Останавливаю сессию</p>
 	{:else if actionError && !menuOpen}
@@ -408,6 +432,15 @@
 				{#if onOpenDiagnostics}
 					<MenuItem icon="info" onclick={() => { menuOpen = false; onOpenDiagnostics(); }}>Диагностика</MenuItem>
 				{/if}
+
+				<SnoozeMenu
+					conversationId={chat.id}
+					snoozed={snoozedAt !== null}
+					resetAt={limitResetAt(chat.queue)}
+					now={now}
+					ondone={() => { menuOpen = false; }}
+					onerror={(err) => { actionError = errorText(err, 'Не удалось отложить сессию'); }}
+				/>
 
 				{#if alarmCount > 0 && onOpenAlarms}
 					<MenuItem
@@ -647,6 +680,16 @@
 	}
 	.header-error {
 		color: var(--danger);
+	}
+	/* Отложенная сессия говорит тихо: срок и возврат в одной строке. */
+	.snoozed-line { display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap; }
+	.unsnooze {
+		min-height: var(--target);
+		padding-inline: var(--s3);
+		border-radius: var(--radius-sm);
+		background: var(--transparent);
+		color: var(--accent-link);
+		font-size: var(--fs-meta);
 	}
 	.delegation-btn {
 		width: auto;

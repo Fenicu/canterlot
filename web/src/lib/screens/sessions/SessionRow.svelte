@@ -13,6 +13,7 @@
   import VendorAvatar from '#lib/vendors/VendorAvatar.svelte';
   import { VENDOR_TITLES, vendorOf } from '#lib/vendors/vendor.js';
   import { catalogTitle, onlineMachines, rowLine } from './rowText';
+  import { snoozedUntil } from './snooze';
 
   let {
     item,
@@ -53,6 +54,7 @@
   });
   const stamp = $derived(stampTs !== null ? fmt.clock(stampTs) : '');
   const queued = $derived(item.queue?.queued ?? 0);
+  const snoozedAt = $derived(snoozedUntil(item, now));
   const modelNote = $derived([item.harness.title, resolvedModelLabel(item.model, item.model_resolved), item.machine.name, modelAliasNote(item.model, item.model_resolved)].filter(Boolean).join(' · '));
   // Пробел в конце собирается в скрипте: Svelte срезает его у края элемента.
   const workedPrefix = 'работала ';
@@ -108,6 +110,9 @@
         {#if plan}
           <span class="plan" data-role="plan-badge"><span class="sr-only">{plan.label}</span><span aria-hidden="true">{plan.text}</span></span>
         {/if}
+        {#if snoozedAt !== null}
+          <span class="snoozed" data-snoozed><span class="sr-only">Отложена</span>до {fmt.clock(snoozedAt)}</span>
+        {/if}
         {#if queued > 0}
           <span class="queued" data-queued><span class="sr-only">В очереди сообщений: {queued}</span><span aria-hidden="true">+{queued}</span></span>
         {/if}
@@ -160,6 +165,7 @@
   .row.strong .activity .text { font-weight: var(--weight-bold); }
   /* Подвисшая сессия — беда того же ряда, что сбой: красное кольцо и красные слова. */
   .row[data-state='stalled'] .activity .text { color: var(--danger); }
+  .snoozed { flex: none; color: var(--secondary); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; white-space: nowrap; }
   .plan, .queued { flex: none; max-width: 50%; padding: var(--s0) var(--s3); overflow: hidden; border-radius: var(--radius-pill); background: var(--chip); color: var(--chip-text); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
   .worked { flex: none; color: var(--muted); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; white-space: nowrap; }
   /* В узком ряду ожидания или сбоя состояние важнее потраченного времени: без «работала …» помещается «Ждёт разрешения» целиком. */

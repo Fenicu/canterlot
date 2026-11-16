@@ -38,7 +38,7 @@
   import GroupManager from './GroupManager.svelte';
   import GroupRail from './GroupRail.svelte';
   import GroupTabs from './GroupTabs.svelte';
-  import { buildSections, tabCounts, type Tab, type TreeNode } from './grouping';
+  import { SNOOZE_SECTION, buildSections, tabCounts, type Tab, type TreeNode } from './grouping';
   import { WAITING_SECTION, takeFocusSection, waitingRows } from './waiting';
   import { readTab, resolveTab, writeTab } from './listTab';
   import { activeGroupId, setActiveGroupId } from './activeGroup.svelte';
@@ -183,11 +183,11 @@
   const sections = $derived(
     found
       ? [{ id: 'search', title: 'Результаты', count: found.length, items: found, collapsed: false }]
-      : buildSections(rows, groups, tab, collapsedSet(collapsed), kids)
+      : buildSections(rows, groups, tab, collapsedSet(collapsed), kids, now)
   );
   const view = $derived(results ? `search:${query.trim()}` : JSON.stringify(tab));
   // Ждущие владельца во «Все»: янтарный счёт полосы групп говорит о них и без раздела.
-  const waitingAll = $derived(waitingRows(rows, { kind: 'all' }).length);
+  const waitingAll = $derived(waitingRows(rows, { kind: 'all' }, now).length);
   const emptyTab = $derived.by(() => {
     if (results || !ready || rows.length === 0 || sections.some((section) => section.items.length > 0)) return '';
     if (tab.kind === 'archive') return 'В архиве пока пусто';
@@ -532,9 +532,9 @@
           current={openRow?.id ?? ''}
           copy={section.id === WAITING_SECTION}
           keyPrefix={section.id === WAITING_SECTION ? `${WAITING_SECTION}:` : ''}
-          headingLabel={section.id === WAITING_SECTION ? `${section.title} · ${section.count}` : ''}
+          headingLabel={section.id === WAITING_SECTION || section.id === SNOOZE_SECTION ? `${section.title} · ${section.count}` : ''}
           tone={section.id === WAITING_SECTION ? 'warning' : null}
-          heading={!results && (section.id === WAITING_SECTION || tab.kind === 'all' || (tab.kind === 'group' && sections.some((section) => section.id.startsWith('pinned:'))))}
+          heading={!results && (section.id === WAITING_SECTION || section.id === SNOOZE_SECTION || tab.kind === 'all' || (tab.kind === 'group' && sections.some((section) => section.id.startsWith('pinned:'))))}
           ontoggle={toggle}
           ontoggleKids={toggleKids}
           onopen={openSheet}

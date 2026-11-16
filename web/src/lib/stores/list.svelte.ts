@@ -71,6 +71,8 @@ export interface ListRow {
   queue: { queued: number; pause_reasons: unknown[]; hold_reasons: unknown[] };
   crunch: { enabled: boolean };
   last_activity_at: string | null;
+  /** До этого времени сессия отложена владельцем; срок в прошлом значит «вернулась». */
+  snoozed_until?: string | null;
   /** Сумма ходов без ожидания владельца; у живой сессии — вместе с текущим ходом. */
   working_ms?: number;
   /** Решение маршрута, выбравшее исполнителя; `null` — запуск без маршрута. */
@@ -295,6 +297,8 @@ export class ListStore {
       row.effort = event.payload.settings.effort;
       row.permission_mode = event.payload.settings.permission_mode;
       row.crunch = { enabled: event.payload.crunch.enabled };
+      // Старый хаб срок «Отложить» не присылает: тогда остаётся прежнее.
+      if ("snoozed_until" in event.payload) row.snoozed_until = event.payload.snoozed_until ?? null;
       // Старый хаб превью не присылает: тогда остаётся прежнее.
       if ("preview" in event.payload) row.preview = event.payload.preview ?? null;
       this.items.set(row.id, { ...row });

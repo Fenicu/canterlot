@@ -2543,6 +2543,16 @@
                 }
               ]
             },
+            "snoozed_until": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Time"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "working_ms": {
               "type": "integer",
               "minimum": 0
@@ -3473,6 +3483,16 @@
               "$ref": "#/$defs/Queue"
             },
             "last_activity_at": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Time"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "snoozed_until": {
               "anyOf": [
                 {
                   "$ref": "#/$defs/Time"

@@ -636,6 +636,7 @@ export interface ConversationCreated {
       enabled: boolean;
     };
     last_activity_at: Time | null;
+    snoozed_until?: Time | null;
     working_ms?: number;
     routing?: {} | null;
     preview?: string | null;
@@ -886,6 +887,7 @@ export interface DerivedChanged {
     unread_count: number;
     queue: Queue;
     last_activity_at: Time | null;
+    snoozed_until?: Time | null;
     settings: Settings;
     crunch: {
       enabled: boolean;

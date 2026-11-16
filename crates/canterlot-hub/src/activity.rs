@@ -673,8 +673,8 @@ pub async fn refresh_with_metrics(
         .bind(conversation_id)
         .fetch_one(&mut *conn)
         .await?;
-    let (owner_id, read_seq, model, effort, permission, crunch): (Uuid, i64, String, String, String, bool) =
-        sqlx::query_as("select owner_id,last_read_seq,model,effort,permission_mode,crunch_enabled from conversations where id=$1 for no key update")
+    let (owner_id, read_seq, model, effort, permission, crunch, mut snoozed_until): (Uuid, i64, String, String, String, bool, Option<DateTime<Utc>>) =
+        sqlx::query_as("select owner_id,last_read_seq,model,effort,permission_mode,crunch_enabled,snoozed_until from conversations where id=$1 for no key update")
             .bind(conversation_id)
             .fetch_one(&mut *conn)
             .await?;
@@ -690,6 +690,25 @@ pub async fn refresh_with_metrics(
         .bind(conversation_id)
         .fetch_optional(&mut *conn)
         .await?;
+    // «Отложить» кончается раньше срока, только если владелец нужен: вопрос, сбой
+    // или подвисание. Законченный ход ждёт срока; истёкший срок снимается сам.
+    let old_activity_state: Option<String> = match &old {
+        Some(row) => Some(row.try_get("activity_state")?),
+        None => None,
+    };
+    let owner_needed = matches!(
+        activity.state,
+        ActivityState::WaitingForUser | ActivityState::Failed | ActivityState::Stalled
+    );
+    let woke_by_owner = owner_needed
+        && old_activity_state.as_deref() != Some(activity.state.as_str());
+    if snoozed_until.is_some_and(|until| until <= now) || woke_by_owner {
+        sqlx::query("update conversations set snoozed_until=null where id=$1")
+            .bind(conversation_id)
+            .execute(&mut *conn)
+            .await?;
+        snoozed_until = None;
+    }
     let pauses = json!(inputs.queue.pause_reasons);
     let mut holds: Vec<HoldView> = inputs
         .queue
@@ -744,6 +763,7 @@ pub async fn refresh_with_metrics(
             && old.try_get::<String, _>("effective_effort")? == effort
             && old.try_get::<String, _>("effective_permission_mode")? == permission
             && old.try_get::<bool, _>("crunch_enabled")? == crunch
+            && old.try_get::<Option<DateTime<Utc>>, _>("snoozed_until")? == snoozed_until
             && old.try_get::<Option<String>, _>("preview")? == preview
             && old.try_get::<Option<DateTime<Utc>>, _>("preview_turn_at")? == turn_at
         {
@@ -758,14 +778,14 @@ pub async fn refresh_with_metrics(
         .bind(last_activity)
         .execute(&mut *conn)
         .await?;
-    sqlx::query("insert into conversation_derived(conversation_id,activity_state,activity_evidence,activity_since,unread_count,queue_queued,pause_reasons,hold_reasons,last_activity_at,effective_model,effective_effort,effective_permission_mode,crunch_enabled,effective_model_resolved,preview,preview_turn_at) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) on conflict(conversation_id) do update set effective_model_resolved=excluded.effective_model_resolved,preview=excluded.preview,preview_turn_at=excluded.preview_turn_at, activity_state=excluded.activity_state,activity_evidence=excluded.activity_evidence,activity_since=excluded.activity_since,unread_count=excluded.unread_count,queue_queued=excluded.queue_queued,pause_reasons=excluded.pause_reasons,hold_reasons=excluded.hold_reasons,last_activity_at=excluded.last_activity_at,effective_model=excluded.effective_model,effective_effort=excluded.effective_effort,effective_permission_mode=excluded.effective_permission_mode,crunch_enabled=excluded.crunch_enabled,updated_at=clock_timestamp()")
-        .bind(conversation_id).bind(activity.state.as_str()).bind(&evidence).bind(since).bind(unread as i32).bind(inputs.queue.queued as i32).bind(&pauses).bind(&holds).bind(last_activity).bind(&model).bind(&effort).bind(&permission).bind(crunch).bind(&resolved).bind(&preview).bind(turn_at).execute(&mut *conn).await?;
+    sqlx::query("insert into conversation_derived(conversation_id,activity_state,activity_evidence,activity_since,unread_count,queue_queued,pause_reasons,hold_reasons,last_activity_at,effective_model,effective_effort,effective_permission_mode,crunch_enabled,effective_model_resolved,preview,preview_turn_at,snoozed_until) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) on conflict(conversation_id) do update set effective_model_resolved=excluded.effective_model_resolved,preview=excluded.preview,preview_turn_at=excluded.preview_turn_at,snoozed_until=excluded.snoozed_until, activity_state=excluded.activity_state,activity_evidence=excluded.activity_evidence,activity_since=excluded.activity_since,unread_count=excluded.unread_count,queue_queued=excluded.queue_queued,pause_reasons=excluded.pause_reasons,hold_reasons=excluded.hold_reasons,last_activity_at=excluded.last_activity_at,effective_model=excluded.effective_model,effective_effort=excluded.effective_effort,effective_permission_mode=excluded.effective_permission_mode,crunch_enabled=excluded.crunch_enabled,updated_at=clock_timestamp()")
+        .bind(conversation_id).bind(activity.state.as_str()).bind(&evidence).bind(since).bind(unread as i32).bind(inputs.queue.queued as i32).bind(&pauses).bind(&holds).bind(last_activity).bind(&model).bind(&effort).bind(&permission).bind(crunch).bind(&resolved).bind(&preview).bind(turn_at).bind(snoozed_until).execute(&mut *conn).await?;
     // Конкретная модель приходит, только когда известна: без неё объект настроек прежний.
     let mut settings = json!({"model":model,"effort":effort,"permission_mode":permission});
     if !resolved.is_empty() {
         settings["model_resolved"] = json!(resolved);
     }
-    let payload = json!({"conversation_id":conversation_id,"activity":{"state":activity.state,"evidence":evidence,"since":since.to_rfc3339_opts(SecondsFormat::Millis,true)},"unread_count":unread,"queue":{"queued":inputs.queue.queued,"pause_reasons":pauses,"hold_reasons":holds},"last_activity_at":last_activity.map(|at|at.to_rfc3339_opts(SecondsFormat::Millis,true)),"settings":settings,"crunch":{"enabled":crunch},"working_ms":working_ms,"preview":preview});
+    let payload = json!({"conversation_id":conversation_id,"activity":{"state":activity.state,"evidence":evidence,"since":since.to_rfc3339_opts(SecondsFormat::Millis,true)},"unread_count":unread,"queue":{"queued":inputs.queue.queued,"pause_reasons":pauses,"hold_reasons":holds},"last_activity_at":last_activity.map(|at|at.to_rfc3339_opts(SecondsFormat::Millis,true)),"snoozed_until":snoozed_until.map(|at|at.to_rfc3339_opts(SecondsFormat::Millis,true)),"settings":settings,"crunch":{"enabled":crunch},"working_ms":working_ms,"preview":preview});
     for scope in [
         Scope::Conversation {
             id: conversation_id,

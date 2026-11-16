@@ -112,6 +112,7 @@ mod session_wait;
 mod settings;
 mod singleton_regressions;
 mod snapshot_boundary;
+mod snooze;
 mod spawn_queue;
 mod submit;
 mod todos_integration;

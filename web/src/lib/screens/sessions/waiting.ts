@@ -1,5 +1,6 @@
 import type { ListRow } from '#lib/stores/list.svelte.js';
 import { waitFactsFromActivity } from '#lib/requests/waitCopy.js';
+import { isSnoozed } from './snooze';
 import type { Tab } from './grouping';
 
 /** Раздел ожидания в списке: его же просит открыть шапка чата. */
@@ -32,11 +33,12 @@ export function waitSince(item: ListRow): number {
  * Ждущие сессии вкладки, самые долгие первыми. «Закреплённые», архив,
  * корзина и поиск живут без раздела: они не про «кто ждёт меня сейчас».
  */
-export function waitingRows(items: Iterable<ListRow>, tab: Tab): ListRow[] {
+export function waitingRows(items: Iterable<ListRow>, tab: Tab, now = Date.now()): ListRow[] {
   if (tab.kind === 'archive' || tab.kind === 'trash' || tab.kind === 'pinned') return [];
   const rows: ListRow[] = [];
   for (const item of items) {
-    if (item.archived || item.trashed_at || !waitsForOwner(item)) continue;
+    // Хаб снимает «Отложить» раньше вопроса, но старая строка могла прийти со сроком.
+    if (item.archived || item.trashed_at || isSnoozed(item, now) || !waitsForOwner(item)) continue;
     if (tab.kind === 'group' && !item.groups.includes(tab.id)) continue;
     rows.push(item);
   }

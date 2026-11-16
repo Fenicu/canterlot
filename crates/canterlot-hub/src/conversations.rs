@@ -12,7 +12,7 @@ use crate::{
     },
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow};
@@ -241,6 +241,8 @@ pub struct ListItem {
     pub queue: QueueView,
     pub crunch: CrunchView,
     pub last_activity_at: Option<String>,
+    /// До этого времени сессия отложена владельцем; срока в прошлом значит «уже вернулась».
+    pub snoozed_until: Option<String>,
     /// Сумма ходов без ожидания владельца; у живой сессии — вместе с текущим ходом.
     pub working_ms: i64,
     /// Решение маршрута, выбравшее исполнителя; `None` — запуск без маршрута.
@@ -285,6 +287,7 @@ pub struct ConversationDetail {
     pub unread_count: i32,
     pub queue: QueueView,
     pub last_activity_at: Option<String>,
+    pub snoozed_until: Option<String>,
     pub settings: SettingsView,
     pub crunch: CrunchDetail,
     #[schema(value_type=Option<LiveExecutionView>)]
@@ -440,6 +443,7 @@ fn item(row: &PgRow) -> Result<ListItem, sqlx::Error> {
             enabled: row.try_get("derived_crunch")?,
         },
         last_activity_at: optional_time(row, "derived_last_activity")?,
+        snoozed_until: optional_time(row, "snoozed_until")?,
         working_ms: row.try_get("working_ms")?,
         routing: row.try_get("routing").ok().flatten(),
         preview: row.try_get("derived_preview")?,
@@ -776,6 +780,7 @@ pub async fn detail(
         unread_count: i.unread_count,
         queue: i.queue,
         last_activity_at: i.last_activity_at,
+        snoozed_until: i.snoozed_until,
         settings: SettingsView {
             effective: {
                 let profile: String = row.try_get("instruction_profile")?;
@@ -1613,6 +1618,83 @@ async fn set_crunch_in_tx(
 
 #[derive(Clone, Default, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
+pub struct SnoozeBody {
+    /// Абсолютное время возврата в UTC.
+    pub until: DateTime<Utc>,
+}
+
+/// Отложить сессию до указанного времени: не дольше тридцати дней вперёд.
+pub async fn set_snooze(
+    pool: &PgPool,
+    owner_id: Uuid,
+    id: Uuid,
+    key: &str,
+    until: DateTime<Utc>,
+    now: DateTime<Utc>,
+    _correlation_id: Uuid,
+) -> Result<ConversationDetail, UpdateError> {
+    if until <= now || until > now + TimeDelta::days(30) {
+        return Err(UpdateError::Invalid("until"));
+    }
+    let request = json!({"id":id,"until":time(until)});
+    let outcome = idempotency::run_in_tx(
+        pool,
+        owner_id,
+        key,
+        "set_snooze",
+        &request,
+        Some(id),
+        move |conn| {
+            Box::pin(async move {
+                lock_conversation(conn, owner_id, id).await?;
+                sqlx::query("update conversations set snoozed_until=$2,updated_at=clock_timestamp() where id=$1")
+                    .bind(id)
+                    .bind(until)
+                    .execute(&mut *conn)
+                    .await?;
+                detail(conn, owner_id, id)
+                    .await?
+                    .ok_or(UpdateError::NotFound)
+            })
+        },
+    )
+    .await?;
+    Ok(outcome.value)
+}
+
+/// Снять срок «Отложить»: сессия сразу возвращается в обычный список.
+pub async fn clear_snooze(
+    pool: &PgPool,
+    owner_id: Uuid,
+    id: Uuid,
+    key: &str,
+    _correlation_id: Uuid,
+) -> Result<(), UpdateError> {
+    let request = json!({"id":id});
+    idempotency::run_in_tx(
+        pool,
+        owner_id,
+        key,
+        "clear_snooze",
+        &request,
+        Some(id),
+        move |conn| {
+            Box::pin(async move {
+                lock_conversation(conn, owner_id, id).await?;
+                sqlx::query("update conversations set snoozed_until=null,updated_at=clock_timestamp() where id=$1")
+                    .bind(id)
+                    .execute(&mut *conn)
+                    .await?;
+                Ok::<(), UpdateError>(())
+            })
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+#[derive(Clone, Default, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
 pub struct SettingsPatch {
     pub model: Option<String>,
     pub effort: Option<String>,
@@ -2164,7 +2246,7 @@ async fn submit_message_in_tx_with_device(
     draft_device: Option<&str>,
 ) -> Result<crate::delivery::SubmittedInput, crate::delivery::SubmitError> {
     ensure_owned_in_tx(conn, req).await?;
-    crate::delivery::submit::submit_message_input_in_tx(
+    let submitted = crate::delivery::submit::submit_message_input_in_tx(
         conn,
         &crate::delivery::SubmitInput {
             owner_id: req.owner_id,
@@ -2179,7 +2261,15 @@ async fn submit_message_in_tx_with_device(
         req.retry_of,
         draft_device,
     )
-    .await
+    .await?;
+    // Сообщение владельца возвращает отложенную сессию раньше срока.
+    sqlx::query(
+        "update conversations set snoozed_until=null where id=$1 and snoozed_until is not null",
+    )
+    .bind(req.conversation_id)
+    .execute(&mut *conn)
+    .await?;
+    Ok(submitted)
 }
 
 async fn ensure_owned_in_tx(

@@ -6,7 +6,7 @@ use super::{
 };
 use crate::conversations::{
     self, Attributes, ConversationDetail, Created, CrunchSetting, ListCursor, ListFilter, ListPage,
-    ListQuery, NewConversation,
+    ListQuery, NewConversation, SnoozeBody,
 };
 use axum::{Json, extract::State, http::StatusCode};
 use serde::Deserialize;
@@ -23,6 +23,8 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(set_groups))
         .routes(routes!(pin_in_group, unpin_in_group))
         .routes(routes!(set_crunch))
+        .routes(routes!(set_snooze))
+        .routes(routes!(clear_snooze))
         .routes(routes!(read))
         .routes(routes!(decision))
         .routes(routes!(interrupt))
@@ -1054,6 +1056,52 @@ async fn set_crunch(
         conversations::set_crunch(&s.pool, o.owner_id, id, &key, b, &s.limits, c).await?,
     ))
 }
+/// Отложить сессию до абсолютного времени: не дальше тридцати дней вперёд.
+#[utoipa::path(put,path="/api/v1/conversations/{id}/snooze",tag="conversations",params(("id"=Uuid,Path),("Idempotency-Key"=String,Header)),request_body=SnoozeBody,responses((status=200,description="Сессия отложена",body=ConversationDetail),(status=400,description="Срок вне допустимого диапазона",body=super::error::ErrorEnvelope)))]
+async fn set_snooze(
+    State(s): State<AppState>,
+    o: Owner,
+    ApiPath(id): ApiPath<Uuid>,
+    IdempotencyKey(key): IdempotencyKey,
+    Correlation(c): Correlation,
+    ApiJson(b): ApiJson<SnoozeBody>,
+) -> Result<Json<ConversationDetail>, ApiError> {
+    let now = chrono::Utc::now();
+    let result = conversations::set_snooze(&s.pool, o.owner_id, id, &key, b.until, now, c).await?;
+    refresh_derived(&s, id, c).await?;
+    Ok(Json(result))
+}
+
+/// Вернуть отложенную сессию сразу.
+#[utoipa::path(delete,path="/api/v1/conversations/{id}/snooze",tag="conversations",params(("id"=Uuid,Path),("Idempotency-Key"=String,Header)),responses((status=204,description="Сессия возвращена"),(status=404,description="not_found",body=super::error::ErrorEnvelope)))]
+async fn clear_snooze(
+    State(s): State<AppState>,
+    o: Owner,
+    ApiPath(id): ApiPath<Uuid>,
+    IdempotencyKey(key): IdempotencyKey,
+    Correlation(c): Correlation,
+) -> Result<StatusCode, ApiError> {
+    conversations::clear_snooze(&s.pool, o.owner_id, id, &key, c).await?;
+    refresh_derived(&s, id, c).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Срок «Отложить» живёт в производной строке и её событии: пересчёт делает его
+/// видимым списку и шапке чата без перечитывания снимка.
+async fn refresh_derived(s: &AppState, id: Uuid, correlation: Uuid) -> Result<(), ApiError> {
+    crate::activity::refresh_with_metrics(
+        &s.pool,
+        id,
+        chrono::Utc::now(),
+        &crate::activity::Thresholds::from(&*s.activity),
+        s.machines.metrics_stale_after,
+        s.nudge_enabled,
+        correlation,
+    )
+    .await?;
+    Ok(())
+}
+
 #[utoipa::path(post,path="/api/v1/conversations/{id}/read",tag="conversations",params(("id"=Uuid,Path)),request_body=ReadBody,responses((status=204,description="Прочитанность сохранена")))]
 async fn read(
     State(s): State<AppState>,

@@ -1211,6 +1211,9 @@ export class ChatStore {
         if (event.kind === "derived_changed") {
           this.activity = { ...event.payload.activity };
           this.queue.queued = event.payload.queue.queued;
+          if ("snoozed_until" in event.payload && this.detail) {
+            this.detail = { ...this.detail, snoozed_until: event.payload.snoozed_until ?? null };
+          }
           const settings = event.payload.settings;
           // Конкретная модель приходит с первым блоком хода: шапка узнаёт её без перечитывания.
           if (this.detail && (settings.model_resolved ?? null) !== (this.detail.model_resolved ?? null)) {

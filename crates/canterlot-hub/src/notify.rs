@@ -163,6 +163,7 @@ async fn enqueue_in_tx(
          from push_settings s join conversations c on c.id=$2
          where c.trashed_at is null
            and (not $6 or c.parent_conversation_id is null)
+           and ($3 <> 'turn_finished' or c.snoozed_until is null or c.snoozed_until <= clock_timestamp())
            and case $3 when 'waiting' then s.waiting
                        when 'turn_finished' then s.turn_finished
                        else s.failures end

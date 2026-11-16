@@ -895,6 +895,37 @@ export function setCrunch(
   );
 }
 
+export function setSnooze(
+  conversationId: string,
+  body: Body<operations["put__api_v1_conversations__id__snooze"]>,
+  key: string,
+  opts?: RequestOptions,
+): Promise<
+  HttpResponse<Ok<operations["put__api_v1_conversations__id__snooze"]>>
+> {
+  return http(
+    "PUT",
+    `/api/v1/conversations/${id(conversationId)}/snooze`,
+    body,
+    keyed(key, opts),
+  );
+}
+
+export function clearSnooze(
+  conversationId: string,
+  key: string,
+  opts?: RequestOptions,
+): Promise<
+  HttpResponse<Ok<operations["delete__api_v1_conversations__id__snooze"]>>
+> {
+  return http(
+    "DELETE",
+    `/api/v1/conversations/${id(conversationId)}/snooze`,
+    undefined,
+    keyed(key, opts),
+  );
+}
+
 export function setConversationGroups(
   conversationId: string,
   body: Body<operations["put__api_v1_conversations__id__groups"]>,

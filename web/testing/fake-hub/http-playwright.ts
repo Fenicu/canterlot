@@ -898,6 +898,60 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     await route.fulfill({ status: 200, headers: headers(), json: 'cancelled' });
   });
 
+  await page.route('**/api/v1/conversations/*/snooze', async (route) => {
+    const method = route.request().method();
+    if (method !== 'PUT' && method !== 'DELETE') return route.fallback();
+    const id = new URL(route.request().url()).pathname.split('/').at(-2) ?? '';
+    const row = api.list.get(id);
+    const detail = api.details.get(id) as Record<string, unknown> | undefined;
+    if (!row || !detail) {
+      await route.fulfill({
+        status: 404,
+        headers: headers(),
+        json: { error: { code: 'not_found' } }
+      });
+      return;
+    }
+    if (method === 'PUT') {
+      const body = route.request().postDataJSON() as { until?: string };
+      const until = body.until ?? new Date(Date.now() + 60 * 60_000).toISOString();
+      row.snoozed_until = until;
+      detail.snoozed_until = until;
+    } else {
+      row.snoozed_until = null;
+      detail.snoozed_until = null;
+    }
+    // Настоящий хаб пересчитывает производную строку: список и шапка чата живут её событием.
+    const payload = {
+      conversation_id: id,
+      activity: row.activity,
+      unread_count: row.unread_count,
+      queue: row.queue,
+      last_activity_at: row.last_activity_at,
+      snoozed_until: row.snoozed_until ?? null,
+      settings: {
+        model: row.model,
+        effort: row.effort,
+        permission_mode: row.permission_mode
+      },
+      crunch: { enabled: row.crunch.enabled },
+      working_ms: 0
+    };
+    for (const scope of [`conversation:${id}`, 'conversations']) {
+      hub.append(scope, {
+        kind: 'derived_changed',
+        conversation_id: id,
+        payload
+      });
+    }
+    hub.flush();
+    if (method === 'DELETE') {
+      await route.fulfill({ status: 204, headers: headers() });
+      return;
+    }
+    await route.fulfill({ status: 200, headers: headers(), json: detail });
+  });
+
   await page.route('**/api/v1/conversations/*/spend-reserve', async (route) => {
     if (route.request().method() !== 'POST') return route.fallback();
     const id = new URL(route.request().url()).pathname.split('/').at(-2) ?? '';

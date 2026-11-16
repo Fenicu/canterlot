@@ -330,8 +330,21 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
     let delegated = testkit::seed_conversation(&pool, owner, machine).await;
     let trashed = testkit::seed_conversation(&pool, owner, machine).await;
     let restore_me = testkit::seed_conversation(&pool, owner, machine).await;
+    let arming = testkit::seed_conversation(&pool, owner, machine).await;
     sqlx::query("update conversations set trashed_at=clock_timestamp() where id=any($1)")
         .bind(&[trashed, restore_me][..])
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("update queue_state set pause_reasons=$2 where conversation_id=$1")
+        .bind(arming)
+        .bind(json!([{
+            "reason": "limit_reached",
+            "provider": "claude",
+            "window": "five_hour",
+            "resets_at": (chrono::Utc::now() + chrono::TimeDelta::hours(2))
+                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        }]))
         .execute(&pool)
         .await
         .unwrap();
@@ -667,6 +680,34 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
             format!("/api/v1/conversations/{id}/crunch"),
             Some(json!({"enabled":true})),
             Some(json!({"enabled":false})),
+        ),
+        case(
+            Method::PUT,
+            "/api/v1/conversations/{id}/snooze",
+            format!("/api/v1/conversations/{id}/snooze"),
+            Some(json!({"until":run_at(2)})),
+            Some(json!({"until":run_at(3)})),
+        ),
+        case(
+            Method::DELETE,
+            "/api/v1/conversations/{id}/snooze",
+            format!("/api/v1/conversations/{id}/snooze"),
+            None,
+            None,
+        ),
+        case(
+            Method::POST,
+            "/api/v1/conversations/{id}/auto-resume",
+            format!("/api/v1/conversations/{arming}/auto-resume"),
+            None,
+            None,
+        ),
+        case(
+            Method::DELETE,
+            "/api/v1/conversations/{id}/auto-resume",
+            format!("/api/v1/conversations/{arming}/auto-resume"),
+            None,
+            None,
         ),
         case(
             Method::POST,
