@@ -25,8 +25,8 @@ use canterlot_hub::{
     ingest::{Ingest, IngestOutcome, JournalKind},
     model::ExecutionState,
     notify::{self, PushSettings, Sender},
-    session_tools::settle::{SettleFacts, Settled},
     presence::{Presence, TTL},
+    session_tools::settle::{SettleFacts, Settled},
     testkit::{self, Seed},
 };
 use canterlot_proto::worker::v1::{
