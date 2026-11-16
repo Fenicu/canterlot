@@ -917,6 +917,7 @@ fn touches_activity(body: &Body) -> bool {
             | Body::SecretDelivered(_)
             | Body::SecretFailed(_)
             | Body::SecretRemoved(_)
+            | Body::SecretRemoveFailed(_)
     )
 }
 
@@ -932,6 +933,19 @@ impl Ingest {
     ) -> Result<(bool, Option<(String, crate::limits::Window)>, bool), IngestError> {
         use crate::limits::{self, DataConfidence, Observation, ObservationSource, Window};
         let now = chrono::Utc::now();
+        // Любая квитанция снимает попытку с учёта: срок больше не должен её терять.
+        let receipt = match body {
+            Body::SecretDelivered(fact) => Some(&fact.attempt_id),
+            Body::SecretFailed(fact) => Some(&fact.attempt_id),
+            Body::SecretRemoved(fact) => Some(&fact.attempt_id),
+            Body::SecretRemoveFailed(fact) => Some(&fact.attempt_id),
+            _ => None,
+        };
+        if let (Some(registry), Some(attempt_id)) = (registry, receipt)
+            && let Ok(attempt_id) = Uuid::parse_str(attempt_id)
+        {
+            registry.take_secret_attempt(attempt_id);
+        }
         if matches!(body, Body::LimitObserved(_) | Body::LimitReached(_)) {
             let execution: Option<Uuid> =
                 sqlx::query_scalar("select execution_id from journal_cursors where journal_id=$1")
@@ -1633,6 +1647,10 @@ async fn apply_body(
         }
         Body::SecretRemoved(fact) => {
             crate::secrets::apply_removed_in_tx(conn, machine_id, fact, correlation_id).await?;
+        }
+        Body::SecretRemoveFailed(fact) => {
+            crate::secrets::apply_remove_failed_in_tx(conn, machine_id, fact, correlation_id)
+                .await?;
         }
         Body::WorktreeRemoved(fact) => {
             use crate::session_tools::accept::{Removal, apply_removal_in_tx};

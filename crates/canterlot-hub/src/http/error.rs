@@ -522,6 +522,7 @@ impl From<crate::secrets::SecretError> for ApiError {
         match error {
             E::NotFound | E::ConversationNotFound => Self::new(ErrorCode::NotFound),
             E::NotOpen => Self::new(ErrorCode::NotOpen),
+            E::OwnerStopped => Self::new(ErrorCode::ConversationClosed),
             E::NotDelivered => Self::new(ErrorCode::NotDelivered),
             E::MachineOffline => Self::new(ErrorCode::MachineOffline),
             E::Limit => Self::new(ErrorCode::Limit),

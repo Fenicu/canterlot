@@ -46,6 +46,10 @@ pub async fn request(
         SecretError::ConversationNotFound | SecretError::NotFound => {
             ToolError::new(ToolErrorCode::ConversationClosed)
         }
+        SecretError::OwnerStopped => ToolError::with_message(
+            ToolErrorCode::ConversationClosed,
+            "secrets.request: the conversation is stopped by the owner",
+        ),
         other => ToolError::from_secret(other),
     })?;
     Ok(json!({"request_id": view.id, "status": "requested"}))

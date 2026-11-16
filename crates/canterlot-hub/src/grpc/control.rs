@@ -179,11 +179,19 @@ impl WorkerControl for HubGrpc {
                             Some(control_up::Msg::SecretManifests(manifests)) => {
                                 if !state.registry.has_capability(machine_id,crate::session::CAPABILITY_SECRET_REQUESTS_V1){Err(session_log.error(Status::invalid_argument("capability_missing")))?;}
                                 // Сверка не держит пульс: её ответ решает судьбу только `sending`.
+                                let snapshot = uuid::Uuid::parse_str(&manifests.snapshot_id).unwrap_or_default();
+                                if state.registry.connection_id(machine_id) != Some(snapshot) {
+                                    // Снимок прошлого соединения: он не знает о новых доставках.
+                                    continue;
+                                }
                                 let pool = state.pool.clone();
+                                let registry = state.registry.clone();
                                 tokio::spawn(async move {
                                     if let Err(error) = crate::secrets::reconcile_manifests(
                                         &pool,
+                                        &registry,
                                         machine_id,
+                                        snapshot,
                                         &manifests.manifests,
                                         uuid::Uuid::now_v7(),
                                     )

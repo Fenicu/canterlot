@@ -19087,7 +19087,8 @@
           "purpose",
           "state",
           "created_at",
-          "updated_at"
+          "updated_at",
+          "revision"
         ],
         "properties": {
           "conversation_id": {
@@ -19117,6 +19118,10 @@
           },
           "purpose": {
             "type": "string"
+          },
+          "revision": {
+            "type": "integer",
+            "format": "int64"
           },
           "state": {
             "$ref": "#/components/schemas/SecretState"

@@ -277,12 +277,19 @@ impl Registry {
     }
 
     /// Помнит попытку доставки до квитанции или срока, без значения.
-    pub fn track_secret_attempt(&self, attempt_id: Uuid, request_id: Uuid, machine_id: Uuid) {
+    pub fn track_secret_attempt(
+        &self,
+        attempt_id: Uuid,
+        request_id: Uuid,
+        machine_id: Uuid,
+        connection_id: Uuid,
+    ) {
         self.secret_attempts.track(
             attempt_id,
             crate::secrets::Attempt {
                 request_id,
                 machine_id,
+                connection_id,
             },
         );
     }
@@ -290,6 +297,21 @@ impl Registry {
     /// Снимает попытку с учёта по квитанции или сроку.
     pub fn take_secret_attempt(&self, attempt_id: Uuid) -> Option<crate::secrets::Attempt> {
         self.secret_attempts.take(attempt_id)
+    }
+
+    /// Соединение, на котором ушла попытка; `None` — попытка не из этой памяти.
+    pub fn secret_attempt_connection(&self, attempt_id: Uuid) -> Option<Uuid> {
+        self.secret_attempts.connection(attempt_id)
+    }
+
+    /// Живое управляющее соединение машины.
+    pub fn connection_id(&self, machine_id: Uuid) -> Option<Uuid> {
+        self.entries
+            .lock()
+            .expect("session registry lock")
+            .get(&machine_id)
+            .filter(|entry| !entry.revoked.load(std::sync::atomic::Ordering::SeqCst))
+            .map(|entry| entry.info.connection_id)
     }
 
     pub fn has_capability(&self, machine_id: Uuid, capability: &str) -> bool {
