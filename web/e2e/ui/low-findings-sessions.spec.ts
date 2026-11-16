@@ -345,3 +345,48 @@ test.describe('F-38 group tabs in the tablet sidebar', () => {
     }
   });
 });
+
+test.describe('F-39 desktop session popover', () => {
+  test('the_close_button_clears_the_title_field', async ({ page }, info) => {
+    desktopOnly(info);
+    const hub = new FakeHub();
+    const api = new FakeHubApi(hub);
+    seedMockupSessions(api);
+    await installChatRoutes(page, hub, api, OWNER);
+    await page.goto('/sessions');
+    await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
+    const measures: { width: number; close: { left: number; right: number; top: number; bottom: number; width: number; height: number }; input: { left: number; right: number; top: number; bottom: number } }[] = [];
+    for (const size of [{ width: 1440, height: 900 }, { width: 1024, height: 768 }]) {
+      await resizeViewport(page, size);
+      await page.getByRole('button', { name: /^Действия:/ }).first().click({ force: true });
+      const popover = page.getByRole('dialog', { name: 'Сессия' });
+      await expect(popover).toBeVisible();
+      await shot(page, `f39-session-popover-${size.width}`);
+      const found = await popover.evaluate((root) => {
+        const close = root.querySelector<HTMLElement>('.close button') ?? root.querySelector<HTMLElement>('button[aria-label="Закрыть"]');
+        const input = root.querySelector<HTMLInputElement>('input[aria-label="Название"]');
+        if (!close || !input) return null;
+        const a = close.getBoundingClientRect();
+        const b = input.getBoundingClientRect();
+        return {
+          close: { left: a.left, right: a.right, top: a.top, bottom: a.bottom, width: a.width, height: a.height },
+          input: { left: b.left, right: b.right, top: b.top, bottom: b.bottom }
+        };
+      });
+      expect(found, `${size.width}px: кнопка закрытия и поле названия`).not.toBeNull();
+      measures.push({ width: size.width, ...found! });
+      await page.keyboard.press('Escape');
+      await expect(popover).toHaveCount(0);
+    }
+    for (const found of measures) {
+      const close = found.close;
+      const input = found.input;
+      const overlapX = Math.min(close.right, input.right) - Math.max(close.left, input.left);
+      const overlapY = Math.min(close.bottom, input.bottom) - Math.max(close.top, input.top);
+      expect(overlapX <= 0.5 || overlapY <= 0.5, `${found.width}px: ${JSON.stringify(found)}`).toBe(true);
+      // Закрытие остаётся пальцевой целью.
+      expect(close.width).toBeGreaterThanOrEqual(44);
+      expect(close.height).toBeGreaterThanOrEqual(44);
+    }
+  });
+});

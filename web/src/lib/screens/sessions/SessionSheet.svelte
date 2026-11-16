@@ -390,9 +390,13 @@
   }
 </script>
 
-{#snippet fields()}
+{#snippet closeButton()}
+  <div class="close"><IconButton icon="close" label="Закрыть" onclick={dismiss} /></div>
+{/snippet}
+
+{#snippet fields(close = false)}
   <div class="fields" bind:this={content}>
-    <Field label={touch ? 'Переименовать' : 'Название · Enter сохраняет'}>
+    <Field label={touch ? 'Переименовать' : 'Название · Enter сохраняет'} trailing={close ? closeButton : undefined}>
       {#snippet children({ id })}
         <input {id} bind:value={title} aria-label="Название" onkeydown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void saveTitle(); } }} onblur={() => void saveTitle()} />
       {/snippet}
@@ -481,8 +485,7 @@
   <Sheet open title="Меню сессии" onclose={() => { void saveTitle(); onclose(); }}>{@render fields()}</Sheet>
 {:else}
   <div class="popover" role="dialog" aria-label="Сессия" bind:this={panel} use:dismissable={{ onclose: dismissBy, keep: ownToggle }} style:top={`${top}px`} style:max-height={room === null ? undefined : `${room}px`}>
-    <div class="close"><IconButton icon="close" label="Закрыть" onclick={dismiss} /></div>
-    {@render fields()}
+    {@render fields(true)}
   </div>
 {/if}
 
@@ -500,7 +503,7 @@
     animation: popover-enter var(--duration-fast) var(--ease);
   }
   @keyframes popover-enter { from { opacity: 0; transform: translateY(var(--shift-label)); } to { opacity: 1; transform: none; } }
-  .close { position: absolute; top: var(--s1); right: var(--s1); }
+  .close { display: inline-flex; flex: none; }
   .fields { display: flex; flex-direction: column; gap: var(--s6); }
   .pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--gauge-width)), 1fr)); gap: var(--s4); }
   .line { display: flex; align-items: center; justify-content: space-between; gap: var(--s4); flex-wrap: wrap; }
