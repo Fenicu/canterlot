@@ -53,12 +53,12 @@
   }
 </script>
 
-{#snippet meter(tag: string, name: string, m: MeterView, window: 'five' | 'week' | 'fable' | 'month', first: boolean = false)}
+{#snippet meter(tag: string, name: string, m: MeterView, window: 'five' | 'week' | 'fable' | 'month', first: boolean = false, reserve: boolean = false)}
   <span class="meter" data-window={window} data-stale={m.stale || undefined} data-known={m.known}>
     <span class="name pname" title={first ? name : undefined}>{first ? name : ''}</span>
     <span class="tag">{tag}</span>
     <span class="bar" aria-hidden="true"><Gauge value={m.fill} tone={m.tone} quiet dim={m.stale || !m.known} label="{name} {tag}" /></span>
-    <b class="pct" data-tone={m.tone}><span class="sr-only">осталось </span><span class="unit" aria-hidden="true">ост.&nbsp;</span>{m.text}</b>
+    <b class="pct" data-tone={m.tone} data-reserve={reserve || undefined}><span class="sr-only">осталось </span><span class="unit" aria-hidden="true">ост.&nbsp;</span>{m.text}</b>
     {#if m.reset}
       <!-- Свёрнутая полоса показывает сжатый отсчёт, раскрытая — словами; полная дата в подсказке. -->
       <span class="reset" data-forecast={m.forecast?.before ? 'before' : undefined} title={resetTitle(m)}>
@@ -127,14 +127,15 @@
               </span>
             {:else}
               {#if row.five.absent}
-                {@render meter('нед', compact ? 'Лимиты' : row.label, row.week, 'week', true)}
+                {@render meter('нед', compact ? 'Лимиты' : row.label, row.week, 'week', true, row.reserve)}
               {:else}
                 {@render meter('5ч', compact ? 'Лимиты' : row.label, row.five, 'five', true)}
-                {@render meter('нед', row.label, row.week, 'week')}
+                {@render meter('нед', row.label, row.week, 'week', false, row.reserve)}
               {/if}
               {#if row.fable}{@render meter('Fable', row.label, row.fable, 'fable')}{/if}
               {#if row.month}{@render meter('мес', row.label, row.month, 'month')}{/if}
-              {#if row.reserve}<span class="reserve" title="Остаток недели в резерве">резерв</span>{/if}
+              <!-- Свёрнутая строка держится одной линией: слово «резерв» остаётся для чтения с экрана, а о резерве говорит тон недельного процента. -->
+              {#if row.reserve}<span class="reserve" class:sr-only={!open} title="Остаток недели в резерве">резерв</span>{/if}
             {/if}
             {#if row.estimated}<span class="estimated" title="Расход выведен из локальных журналов, а не получен от провайдера">оценка</span>{/if}
             {#if row.status}<span class="status-line">{#if open}{@render statusLink(row.status, true)}{:else}{@render statusWord(row.status)}{/if}</span>{/if}
@@ -271,6 +272,8 @@
   /* Слово «осталось» видно и на экране: без него процент читается как израсходованный. */
   .unit { color: var(--muted); font-weight: var(--weight-normal); }
   .pct[data-tone='warning'], .reserve { color: var(--warning); }
+  /* Резерв недели в свёрнутой строке виден тоном значения: слова там нет, чтобы строка осталась одной. */
+  .limits:not([open]) .pct[data-reserve][data-tone='normal'] { color: var(--warning); }
   .pct[data-tone='danger'] { color: var(--danger); }
   .meter[data-stale] .pct, .meter[data-known='false'] .pct { color: var(--muted); font-weight: var(--weight-normal); }
   .reset { display: none; padding-inline-start: var(--s2); color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
