@@ -7,6 +7,7 @@
   import ChatTrashed from '#lib/screens/chat/ChatTrashed.svelte';
   import ChatScreen from '#lib/screens/chat/ChatScreen.svelte';
   import { leaseChatSession } from '#lib/screens/chat/open.js';
+  import { trackChatPresence } from '#lib/presence.js';
   import type { ChatStore } from '#lib/stores/chat.svelte.js';
 
   let chat = $state<ChatStore | null>(null);
@@ -18,6 +19,13 @@
   const id = $derived(page.params.id ?? '');
 
   onMount(() => ticker.retain());
+
+  // Пока этот экран виден, хаб не шлёт пуши об этой сессии.
+  $effect(() => {
+    const current = id;
+    if (!current) return;
+    return trackChatPresence(current);
+  });
 
   $effect(() => {
     const current = id;

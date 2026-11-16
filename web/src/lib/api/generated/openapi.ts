@@ -1539,6 +1539,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/presence": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["post__api_v1_presence"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/presets": {
         parameters: {
             query?: never;
@@ -3597,6 +3613,12 @@ export interface components {
             unknown_limits: components["schemas"]["UnknownLimits"];
             /** @default [] */
             unlimited_models: string[];
+        };
+        PresenceBody: {
+            /** Format: uuid */
+            conversation_id: string;
+            /** @description `true` — чат открыт и виден; `false` — скрыт, закрыт или страница уходит. */
+            visible: boolean;
         };
         /** @description Детальный ответ: текст только у пользовательских пресетов. */
         Preset: components["schemas"]["PresetSummary"] & {
@@ -9588,6 +9610,52 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["PlanList"];
                 };
+            };
+            /** @description Разговор не найден */
+            404: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    post__api_v1_presence: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PresenceBody"];
+            };
+        };
+        responses: {
+            /** @description Отметка учтена */
+            204: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Разговор не найден */
             404: {

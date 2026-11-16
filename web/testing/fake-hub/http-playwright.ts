@@ -1757,6 +1757,17 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     if (hub.auth.signedIn || new URL(route.request().url()).pathname.startsWith('/api/v1/auth/')) return route.fallback();
     await hub.auth.refuse(route);
   });
+  // Присутствие: последний обработчик выигрывает у общего 401 выше.
+  await page.route('**/api/v1/presence', async (route) => {
+    if (!hub.auth.signedIn) return hub.auth.refuse(route);
+    if (route.request().method() !== 'POST') return route.fallback();
+    const body = route.request().postDataJSON() as { conversation_id?: unknown; visible?: unknown };
+    if (typeof body?.conversation_id !== 'string' || typeof body.visible !== 'boolean') {
+      return route.fulfill({ status: 400, json: errorBody('invalid_request', 'Некорректная отметка') });
+    }
+    hub.presence.push({ conversation_id: body.conversation_id, visible: body.visible, at: Date.now() });
+    await route.fulfill({ status: 204 });
+  });
 }
 
 function errorBody(code: string, message: string, details?: Record<string, unknown>): unknown {

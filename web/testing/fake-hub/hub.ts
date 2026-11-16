@@ -24,6 +24,8 @@ export class FakeHub {
   readonly chaos: Chaos;
   readonly auth = new FakeAuth();
   readonly dictation = new FakeDictation();
+  /** Отметки присутствия в порядке прихода: что PWA сказала хабу про открытый чат. */
+  readonly presence: Array<{ conversation_id: string; visible: boolean; at: number }> = [];
   readonly routes = new Map<string, (route: Route) => Promise<void>>();
   readonly wire: { memory(clock: FakeClock): MemoryWire; playwright(page: Page): Promise<void> };
   constructor(private opts: { mergeWindowMs?: number; maxSubscriptions?: number; journalRetention?: number; maxFrameBytes?: number } = {}) {
