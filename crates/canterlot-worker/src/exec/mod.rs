@@ -268,6 +268,8 @@ pub(crate) struct Shared {
     pub cache_ages: Mutex<CacheAges>,
     pub data_dir: OnceCell<PathBuf>,
     pub boot_id: OnceCell<String>,
+    /// Файлы секретов: база и сроки. Ставит сеанс после создания менеджера.
+    pub secrets: OnceCell<crate::config::SecretConfig>,
     #[cfg(feature = "fault-injection")]
     pub spawn_delay: Mutex<std::time::Duration>,
     #[cfg(feature = "fault-injection")]
@@ -550,6 +552,17 @@ impl Drop for ExecutionManager {
 }
 
 impl ExecutionManager {
+    /// Общее состояние исполнений: уборке файлов секретов нужны живые
+    /// разговоры и журнал управляющей службы.
+    pub(crate) fn shared(&self) -> Arc<Shared> {
+        self.shared.clone()
+    }
+
+    /// Запоминает настройки файлов секретов для команды отзыва.
+    pub fn set_secrets(&self, config: crate::config::SecretConfig) {
+        let _ = self.shared.secrets.set(config);
+    }
+
     pub fn new(
         config: ExecutionConfig,
         store: StoreClient,
@@ -625,6 +638,7 @@ impl ExecutionManager {
                 cache_ages: Mutex::new(CacheAges::default()),
                 data_dir: OnceCell::new(),
                 boot_id: OnceCell::new(),
+                secrets: OnceCell::new(),
                 #[cfg(feature = "fault-injection")]
                 spawn_delay: Mutex::new(std::time::Duration::ZERO),
                 #[cfg(feature = "fault-injection")]
@@ -1069,7 +1083,10 @@ impl ExecutionManager {
             .call(|store| Ok(open(store)?.stored_commands()?))
             .await?;
         for command in commands {
-            if matches!(command.kind, Some(Kind::RemoveWorktree(_))) {
+            if matches!(
+                command.kind,
+                Some(Kind::RemoveWorktree(_) | Kind::RevokeSecret(_))
+            ) {
                 self.route(command).await?;
                 continue;
             }
@@ -1127,6 +1144,11 @@ impl ExecutionManager {
         if let Kind::RemoveWorktree(request) = kind {
             let request = request.clone();
             self.remove_worktree(command, request);
+            return Ok(());
+        }
+        if let Kind::RevokeSecret(request) = kind {
+            let request = request.clone();
+            self.revoke_secret(command, request);
             return Ok(());
         }
         let Ok(id) = Uuid::parse_str(&command.execution_id) else {
@@ -1226,6 +1248,19 @@ impl ExecutionManager {
 
     /// Вне актора исполнения: у уборки его нет. Остановка менеджера обрывает её, команда
     /// остаётся непогашенной и доигрывается при следующем старте.
+    /// Отзыв секрета: файл удаляется в отдельной задаче, факт и гашение — в ней же.
+    fn revoke_secret(&self, command: Command, request: canterlot_proto::worker::v1::RevokeSecret) {
+        let shared = self.shared.clone();
+        tokio::spawn(async move {
+            if let Err(error) = manager::revoke_secret(&shared, &command, &request).await {
+                tracing::warn!(
+                    error_kind = ?std::mem::discriminant(&error),
+                    "secret revocation failed"
+                );
+            }
+        });
+    }
+
     fn remove_worktree(
         &self,
         command: Command,

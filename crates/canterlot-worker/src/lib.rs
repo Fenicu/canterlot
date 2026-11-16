@@ -15,6 +15,7 @@ pub mod machine;
 pub mod mcp_relay;
 pub mod media;
 pub mod ownership;
+pub mod secret;
 pub mod session;
 pub mod session_store;
 pub mod store;

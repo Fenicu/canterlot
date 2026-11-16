@@ -146,6 +146,7 @@ impl Fixture {
             env!("CARGO_BIN_EXE_canterlot-worker").into()
         };
         let config = WorkerConfig {
+            secrets: Default::default(),
             hub_url: format!("https://localhost:{}", hub.addr.port()),
             ca_cert,
             token_file,

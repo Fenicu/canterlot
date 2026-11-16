@@ -49,6 +49,7 @@ uuid = { version = "1.29.0", features = ["v5", "v7", "serde"] }
 
 [dev-dependencies]
 canterlot-hub = { path = "../canterlot-hub", features = ["testkit"] }
+sha1_smol = "1.0.1"
 jsonschema = { version = "0.60.2", default-features = false }
 rustix = { version = "1.1.5", features = ["net", "process"] }
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "postgres", "uuid", "migrate", "macros"] }

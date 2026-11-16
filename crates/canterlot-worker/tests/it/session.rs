@@ -41,6 +41,7 @@ async fn fixture(pool: &PgPool, hub: &TestHub) -> (TempDir, WorkerConfig, Worker
     let data_dir = directory.path().join("store");
     let store = WorkerStore::open(&data_dir).unwrap();
     let config = WorkerConfig {
+        secrets: Default::default(),
         machine: Default::default(),
         attachments: Default::default(),
         claude_code: None,

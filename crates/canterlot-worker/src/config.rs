@@ -35,6 +35,16 @@ pub struct WorkerConfig {
     pub opencode: Option<OpenCodeConfig>,
     #[serde(default)]
     pub antigravity: Option<AntigravityConfig>,
+    #[serde(default)]
+    pub secrets: SecretConfig,
+}
+
+/// Файлы секретов: базовый каталог в tmpfs. Явный путь нужен тестам; боевой
+/// воркер берёт `$XDG_RUNTIME_DIR/canterlot-secrets`.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SecretConfig {
+    pub base_dir: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Deserialize)]

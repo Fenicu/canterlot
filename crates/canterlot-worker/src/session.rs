@@ -50,6 +50,7 @@ const WATCH_FIRST_DELAY: Duration = Duration::from_secs(90);
 pub const CAPABILITY_LIMITS_FABLE_V1: &str = "limits_fable_v1";
 pub const CAPABILITY_PROMPT_SUGGESTIONS_V1: &str = "prompt_suggestions_v1";
 pub const CAPABILITY_SIDE_CHAT_V1: &str = "side_chat_v1";
+pub const CAPABILITY_SECRET_REQUESTS_V1: &str = "secret_requests_v1";
 
 pub const OPTIONAL_CAPABILITIES: &[&str] = &[
     "exec_v1",
@@ -72,6 +73,7 @@ pub const OPTIONAL_CAPABILITIES: &[&str] = &[
     "watchdog_v1",
     CAPABILITY_PROMPT_SUGGESTIONS_V1,
     CAPABILITY_SIDE_CHAT_V1,
+    CAPABILITY_SECRET_REQUESTS_V1,
 ];
 
 #[derive(Clone)]
@@ -786,6 +788,14 @@ impl Worker {
             .startup_verify()
             .await
             .map_err(|_| WorkerError::Execution)?;
+        // Уборка файлов секретов при старте и раз в 10 минут: срок жизни и каталоги
+        // разговоров, которых воркер больше не ведёт.
+        manager.set_secrets(self.config.secrets.clone());
+        tokio::spawn(crate::secret::run_sweeper(
+            self.config.secrets.clone(),
+            manager.shared(),
+            shutdown.clone(),
+        ));
         self.manager = Some(manager);
         self.relay = Some(relay);
         let hub_url =
@@ -1226,6 +1236,10 @@ impl Worker {
             .capabilities
             .iter()
             .any(|cap| cap == "path_probe_v1");
+        let secret_enabled = accepted
+            .capabilities
+            .iter()
+            .any(|cap| cap == CAPABILITY_SECRET_REQUESTS_V1);
         let lease_enabled = accepted
             .capabilities
             .iter()
@@ -1320,6 +1334,12 @@ impl Worker {
         } else {
             None
         };
+        // Метаданные уже записанных файлов: хаб решает судьбу незавершённых доставок.
+        let mut secret_outbound = secret_enabled.then(|| ControlUp {
+            msg: Some(control_up::Msg::SecretManifests(crate::secret::manifests(
+                &self.config.secrets,
+            ))),
+        });
         // Полное состояние очереди при подключении и при каждом изменении.
         let mut lease_updates = self
             .lease
@@ -1661,6 +1681,7 @@ impl Worker {
             let batch_deadline = pending_batches.front().and_then(|p| p.deadline);
             let can_send = heartbeat_outbound.is_some()
                 || machine_outbound.is_some()
+                || secret_outbound.is_some()
                 || limits_outbound.is_some()
                 || suggest_outbound.is_some()
                 || histories_outbound.is_some()
@@ -1699,6 +1720,34 @@ impl Worker {
                             }
                         }
                         Some(control_down::Msg::Command(command)) => { commands.push_back(command); }
+                        Some(control_down::Msg::SecretDeliver(request)) if secret_enabled => {
+                            // Запись файла коротка и не держит пульс: значение живёт
+                            // только в этом сообщении и в файле.
+                            let config = self.config.secrets.clone();
+                            let body = match crate::secret::write(&config, &request) {
+                                Ok(written) => {
+                                    canterlot_proto::worker::v1::record_body::Body::SecretDelivered(
+                                        crate::secret::delivered_fact(&request, &written),
+                                    )
+                                }
+                                Err(failure) => {
+                                    tracing::warn!(
+                                        kind = "secret_file_failed",
+                                        reason = failure.code(),
+                                        "secret file was not written"
+                                    );
+                                    canterlot_proto::worker::v1::record_body::Body::SecretFailed(
+                                        crate::secret::failed_fact(&request, failure),
+                                    )
+                                }
+                            };
+                            self.store.call(move |slot| {
+                                store_mut(slot)?.append_cj_fact(body)?;
+                                Ok(())
+                            })
+                            .await?;
+                            dirty = true;
+                        }
                         Some(control_down::Msg::CjAck(ack)) => {
                             if ack.journal_id != journal_id { return Err(WorkerError::Protocol); }
                             store_ack = Some(store_ack.unwrap_or(0).max(ack.up_to_seq));
@@ -1768,6 +1817,7 @@ impl Worker {
                     let permit = permit.map_err(|_| WorkerError::Transport)?;
                     let mut message = if let Some(message) = heartbeat_outbound.take() { message }
                     else if let Some(message)=machine_outbound.take() {message}
+                    else if let Some(message)=secret_outbound.take() {message}
                     else if let Some(message)=limits_outbound.take() {message}
                     else if let Some(message)=suggest_outbound.take() {message}
                     else if let Some(message)=histories_outbound.take() {message}

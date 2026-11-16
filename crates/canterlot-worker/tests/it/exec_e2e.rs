@@ -332,6 +332,7 @@ impl Fixture {
         script.push_str(&format!("exec '{supervisor}' \"$@\"\n"));
         fake_exec::write_executable(&wrapper, script, 0o700);
         let config = WorkerConfig {
+            secrets: Default::default(),
             machine: Default::default(),
             attachments: Default::default(),
             claude_code: None,

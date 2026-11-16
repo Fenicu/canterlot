@@ -446,6 +446,7 @@ impl ProtocolHub {
                 .await
         });
         let config = WorkerConfig {
+            secrets: Default::default(),
             machine: Default::default(),
             attachments: Default::default(),
             claude_code: None,

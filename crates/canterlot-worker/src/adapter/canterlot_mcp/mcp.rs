@@ -163,7 +163,7 @@ pub enum ToolKind {
 }
 
 /// Агентские инструменты: имя MCP → имя инструмента хаба.
-pub const AGENT_TOOLS: [(&str, &str); 25] = [
+pub const AGENT_TOOLS: [(&str, &str); 26] = [
     ("canterlot_presets_list", "presets.list"),
     ("canterlot_preset_save", "presets.save"),
     ("canterlot_preset_apply", "presets.apply"),
@@ -189,6 +189,7 @@ pub const AGENT_TOOLS: [(&str, &str); 25] = [
     ("plan_update", "plan.update"),
     ("plan_adopt", "plan.adopt"),
     ("history_search", "history.search"),
+    ("secret_request", "secrets.request"),
 ];
 
 /// Инструменты, которые в режимах `ask` и `read_only` не спрашивают владельца ни у Claude Code,
@@ -241,6 +242,7 @@ fn is_session_tool(mcp_name: &str) -> bool {
             | "plan_update"
             | "plan_adopt"
             | "history_search"
+            | "secret_request"
     )
 }
 
@@ -325,6 +327,9 @@ fn session_tool_description(mcp_name: &str) -> &'static str {
         }
         "plan_adopt" => {
             "Move the open tasks of another root session's plan (for example your previous orchestrator, even in the trash) into yours, renumbered after your last number; linked executors stay linked and you may accept them. Only a root session can adopt, and only from a root session of the same owner. Do not call it from a delegate or to copy a plan you still use."
+        }
+        "secret_request" => {
+            "Ask the owner for a secret: a password, token or key. You get `{request_id, status: \"requested\"}` at once; the answer arrives later as a [canterlot] message with the path of a file on this machine. End the turn if you cannot proceed without the value. Read the value from the file only inside the command that needs it, and prefer passing the file path or stdin over `$(cat …)`: substitution strips trailing newlines and shows the value in the process list. Never print the value. The file expires in 24 hours; the owner may revoke it or decline the request."
         }
         "history_search" => {
             "Full-text search over the history of the sessions you may see: agent answers and feed messages (the owner's, other sessions', spawn briefs and session results), newest first. Whole words match in any Russian or English form; quotes search a phrase, -word excludes, or matches either. Substrings, partial identifiers, tool output and thinking are not searched. Narrow with session_id, since/until (RFC 3339), harness or kind; page with cursor. Each hit names session_id and block_id (read the whole block with session_inspect) or input_id. Read-only. Do not use it to wait for a session or to poll; do not repeat the same query."
@@ -553,6 +558,15 @@ fn session_input_schema(mcp_name: &str) -> Value {
                 "findings": {"type": "array", "items": {"type": "string", "maxLength": 500}, "maxItems": 20, "description": "Replaces the findings list."},
             },
             "required": ["number"],
+            "additionalProperties": false,
+        }),
+        "secret_request" => json!({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "maxLength": 80, "description": "Short name of the secret for the owner's card."},
+                "purpose": {"type": "string", "maxLength": 300, "description": "Why you need it."},
+            },
+            "required": ["name", "purpose"],
             "additionalProperties": false,
         }),
         "history_search" => json!({
@@ -1580,6 +1594,49 @@ mod tests {
             json!({"tasks": [{"number": 1, "title": "Собрать"}]})
         );
         assert_eq!(hint, "Call plan_list.");
+    }
+
+    #[test]
+    fn secret_request_is_listed_and_goes_to_the_hub_tool() {
+        let listing = tools_list(ToolSet::ApproveAndLimits, "claude");
+        let tool = listing["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "secret_request")
+            .expect("secret_request in tools/list");
+        let description = tool["description"].as_str().unwrap();
+        for phrase in [
+            "arrives later",
+            "End the turn",
+            "only inside the command",
+            "stdin",
+            "Never print the value",
+        ] {
+            assert!(
+                description.contains(phrase),
+                "missing {phrase}: {description}"
+            );
+        }
+        assert_eq!(tool["inputSchema"]["required"], json!(["name", "purpose"]));
+        let action = handle_rpc(
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 7,
+                "method": "tools/call",
+                "params": {"name": "secret_request", "arguments": {"name": "Ключ", "purpose": "для теста"}},
+            }),
+            ToolSet::ApproveAndLimits,
+        );
+        assert!(matches!(
+            action,
+            McpAction::ToolCall {
+                kind: ToolKind::Agent {
+                    tool: "secrets.request"
+                },
+                ..
+            }
+        ));
     }
 
     #[test]

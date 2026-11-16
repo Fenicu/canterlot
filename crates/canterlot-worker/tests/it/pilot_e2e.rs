@@ -14,10 +14,13 @@ use std::{
 use canterlot_hub::{
     config::{ActivityConfig, LimitsConfig},
     events::is_client_visible,
+    secrets,
     testkit::Method,
 };
+use canterlot_worker::config::SecretConfig;
 use pilot::*;
 use serde_json::{Value, json};
+use sha2::Digest as _;
 use sqlx::PgPool;
 use tokio::time::{sleep, timeout};
 use uuid::Uuid;
@@ -1564,4 +1567,287 @@ async fn lease_queue_of_a_real_worker_reaches_the_machine_view(pool: PgPool) {
             .await
             .unwrap();
     assert!(events >= 4, "{events}");
+}
+
+// ---------------------------------------------------------------- секретные запросы
+
+const WAIT_LONG: Duration = Duration::from_secs(30);
+
+/// Файл журнала процесса: сюда пишут и хаб, и воркер этого теста.
+struct LogCapture {
+    _file: std::fs::File,
+    path: std::path::PathBuf,
+    _guard: tracing::subscriber::DefaultGuard,
+}
+
+impl LogCapture {
+    fn install(directory: &std::path::Path) -> Self {
+        let path = directory.join("captured.log");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .expect("log file");
+        let writer = file.try_clone().expect("log clone");
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(std::sync::Mutex::new(writer))
+            .with_ansi(false)
+            .finish();
+        let guard = tracing::subscriber::set_default(subscriber);
+        Self {
+            _file: file,
+            path,
+            _guard: guard,
+        }
+    }
+
+    fn read(&self) -> String {
+        std::fs::read_to_string(&self.path).unwrap_or_default()
+    }
+}
+
+/// База секретов на настоящем tmpfs.
+struct SecretBase(std::path::PathBuf);
+
+impl SecretBase {
+    fn new() -> Self {
+        let path = std::path::PathBuf::from("/dev/shm")
+            .join(format!("canterlot-e2e-secret-{}", Uuid::now_v7()));
+        Self(path)
+    }
+
+    fn config(&self) -> SecretConfig {
+        SecretConfig {
+            base_dir: Some(self.0.clone()),
+        }
+    }
+}
+
+impl Drop for SecretBase {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn files_under(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            found.extend(files_under(&path));
+        } else if path.is_file() {
+            found.push(path);
+        }
+    }
+    found
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Ни значение, ни его SHA-256/SHA-1 в тексте.
+fn assert_clean(what: &str, text: &str, marker: &str, hashes: &[String]) {
+    assert!(!text.contains(marker), "{what} contains the plaintext");
+    for hash in hashes {
+        assert!(!text.contains(hash.as_str()), "{what} contains a hash");
+    }
+}
+
+#[sqlx::test(migrations = "../canterlot-hub/migrations")]
+async fn secret_value_reaches_only_the_file_and_never_the_stores(pool: PgPool) {
+    let root = tempfile::TempDir::new().unwrap();
+    let capture = LogCapture::install(root.path());
+    let base = SecretBase::new();
+    let p = Pilot::new(
+        &pool,
+        PilotOptions {
+            secrets: base.config(),
+            ..Default::default()
+        },
+    )
+    .await;
+    let conversation = canterlot_hub::testkit::seed_conversation(&pool, p.owner, p.machine).await;
+    let marker = format!("canterlot-secret-PROBE-{}", Uuid::now_v7());
+    let hashes = [
+        hex(&sha2::Sha256::digest(marker.as_bytes())),
+        hex(&sha1_smol::Sha1::from(marker.as_bytes()).digest().bytes()),
+    ];
+    let value = format!("{marker}\n");
+
+    let row = secrets::open(
+        &pool,
+        p.owner,
+        conversation,
+        "Пароль от базы",
+        "нужен для миграции",
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    let response = p
+        .api
+        .send(
+            Method::POST,
+            &format!("/api/v1/secret-requests/{}/answer", row.id),
+            Some(&Uuid::now_v7().to_string()),
+            Some(json!({"value": value})),
+        )
+        .await;
+    assert_eq!(
+        response.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&response.body)
+    );
+
+    let dir = base.0.join(conversation.to_string());
+    let file = dir.join(row.id.to_string());
+    timeout(WAIT_LONG, async {
+        while !file.exists() {
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("file written");
+    assert_eq!(fs::read(&file).unwrap(), value.as_bytes(), "exact bytes");
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(
+        fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(
+        fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+
+    timeout(WAIT_LONG, async {
+        loop {
+            let listed: Value = p
+                .get(&format!(
+                    "/api/v1/conversations/{conversation}/secret-requests"
+                ))
+                .await;
+            if listed["items"][0]["state"] == "delivered" {
+                return listed;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("hub learns about the file");
+    let delivered: Value = p
+        .get(&format!(
+            "/api/v1/conversations/{conversation}/secret-requests"
+        ))
+        .await;
+    let item = &delivered["items"][0];
+    assert_eq!(item["path"], file.display().to_string());
+    assert!(item.get("value").is_none());
+
+    let revoked = p
+        .api
+        .send(
+            Method::POST,
+            &format!("/api/v1/secret-requests/{}/revoke", row.id),
+            Some(&Uuid::now_v7().to_string()),
+            None,
+        )
+        .await;
+    assert_eq!(revoked.status, 200);
+    timeout(WAIT_LONG, async {
+        while file.exists() {
+            sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("file revoked");
+
+    // Гарантия: база, outbox, файлы состояния и журналы.
+    let tables: Vec<String> = sqlx::query_scalar(
+        "select table_name from information_schema.tables
+         where table_schema='public' and table_type='BASE TABLE' order by table_name",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    for table in &tables {
+        let sql = format!("select coalesce(to_jsonb(t)::text,'') from \"{table}\" t");
+        let rows: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(sql))
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_clean(
+            &format!("table {table}"),
+            &rows.join("\n"),
+            &marker,
+            &hashes,
+        );
+    }
+    let payloads: Vec<Value> = sqlx::query_scalar("select payload from commands")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_clean(
+        "commands",
+        &serde_json::to_string(&payloads).unwrap(),
+        &marker,
+        &hashes,
+    );
+    let mut state_text = String::new();
+    for path in files_under(&p.config.data_dir) {
+        if let Ok(bytes) = fs::read(&path) {
+            state_text.push_str(&String::from_utf8_lossy(&bytes));
+        }
+    }
+    assert_clean("worker state", &state_text, &marker, &hashes);
+    assert_clean("logs", &capture.read(), &marker, &hashes);
+}
+
+#[sqlx::test(migrations = "../canterlot-hub/migrations")]
+async fn a_declined_request_never_creates_a_file(pool: PgPool) {
+    let base = SecretBase::new();
+    let p = Pilot::new(
+        &pool,
+        PilotOptions {
+            secrets: base.config(),
+            ..Default::default()
+        },
+    )
+    .await;
+    let conversation = canterlot_hub::testkit::seed_conversation(&pool, p.owner, p.machine).await;
+    let row = secrets::open(
+        &pool,
+        p.owner,
+        conversation,
+        "Токен",
+        "проверка отказа",
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    let response = p
+        .api
+        .send(
+            Method::POST,
+            &format!("/api/v1/secret-requests/{}/answer", row.id),
+            Some(&Uuid::now_v7().to_string()),
+            Some(json!({"decline": true})),
+        )
+        .await;
+    assert_eq!(response.status, 200);
+    assert!(
+        files_under(&base.0).is_empty(),
+        "a decline never reaches the machine"
+    );
+    let prompts: Vec<String> =
+        sqlx::query_scalar("select content->0->>'text' from inputs where conversation_id=$1")
+            .bind(conversation)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(prompts, vec!["Владелец отказал в секрете «Токен»."]);
 }

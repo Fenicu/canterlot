@@ -371,6 +371,8 @@ pub struct PilotOptions {
     pub metrics_interval: Duration,
     pub claude_code: Option<ClaudeCodeConfig>,
     pub antigravity: Option<AntigravityConfig>,
+    /// Файлы секретов: тесты кладут базу на tmpfs, а не в `$XDG_RUNTIME_DIR`.
+    pub secrets: canterlot_worker::config::SecretConfig,
 }
 
 impl Default for PilotOptions {
@@ -391,6 +393,7 @@ impl Default for PilotOptions {
             metrics_interval: Duration::from_secs(30),
             claude_code: None,
             antigravity: None,
+            secrets: Default::default(),
         }
     }
 }
@@ -497,6 +500,7 @@ impl Pilot {
             },
             opencode: None,
             antigravity: options.antigravity,
+            secrets: options.secrets,
         };
         let api = TestClient::over_socket(hub.http_addr()).await.as_owner();
         let mut pilot = Self {
