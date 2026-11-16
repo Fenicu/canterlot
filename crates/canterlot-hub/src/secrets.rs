@@ -543,14 +543,25 @@ async fn deliver(
     }
     // Машина должна быть на связи прямо сейчас и понимать секреты: иначе значение
     // некуда девать, и оно отбрасывается вместе с ответом.
-    let connection_id = registry.connection_id(machine_id);
-    if row.machine_id != machine_id
-        || !registry.has_capability(machine_id, crate::session::CAPABILITY_SECRET_REQUESTS_V1)
-        || connection_id.is_none()
-    {
+    if row.machine_id != machine_id {
         return Err(SecretError::MachineOffline);
     }
-    let connection_id = connection_id.expect("checked connection");
+    // Отправитель и соединение берутся одним взглядом на реестр: иначе reconnect
+    // между двумя вызовами увёл бы значение на новое соединение, а попытку
+    // пометил бы старым, и сверка нового соединения объявила бы её потерянной.
+    let Some((sender, connection_id, _)) = registry.command_session(machine_id) else {
+        return Err(SecretError::MachineOffline);
+    };
+    let capable = registry
+        .capabilities_for_connection(machine_id, connection_id)
+        .is_some_and(|capabilities| {
+            capabilities
+                .iter()
+                .any(|capability| capability == crate::session::CAPABILITY_SECRET_REQUESTS_V1)
+        });
+    if !capable {
+        return Err(SecretError::MachineOffline);
+    }
     let attempt_id = Uuid::now_v7();
     let row: SecretRequestRow = sqlx::query_as(
         "update secret_requests
@@ -563,7 +574,13 @@ async fn deliver(
     .fetch_one(&mut *tx)
     .await?;
     emit_in_tx(&mut tx, &row, correlation_id).await?;
-    tx.commit().await?;
+    // Учёт попытки встаёт до коммита: как только `sending` станет видимым сверке,
+    // она уже знает, на каком соединении искать значение.
+    registry.track_secret_attempt(attempt_id, row.id, machine_id, connection_id);
+    if let Err(error) = tx.commit().await {
+        registry.take_secret_attempt(attempt_id);
+        return Err(error.into());
+    }
 
     let deliver = canterlot_proto::worker::v1::SecretDeliver {
         attempt_id: attempt_id.to_string(),
@@ -574,29 +591,64 @@ async fn deliver(
     let message = canterlot_proto::worker::v1::ControlDown {
         msg: Some(canterlot_proto::worker::v1::control_down::Msg::SecretDeliver(deliver)),
     };
-    let sent = registry
-        .command_sender(machine_id)
-        .is_some_and(|sender| sender.try_send(message).is_ok());
+    // Точка для проверки гонки переподключения: значение ещё не ушло, а новая
+    // сессия машины уже может быть на связи.
+    test_hooks::before_secret_send().await;
+    let sent = sender.try_send(message).is_ok();
     if !sent {
-        // Значение уже потеряно: карточка должна предложить ввести снова.
+        // Значение уже потеряно: карточка должна предложить ввести снова. Ответ
+        // берётся из базы: параллельный отзыв мог сменить состояние и ревизию.
+        registry.take_secret_attempt(attempt_id);
         lose_attempt(pool, attempt_id, correlation_id).await?;
-        return Ok(lost_view(&row));
+        let current: SecretRequestRow =
+            sqlx::query_as("select * from secret_requests where id = $1")
+                .bind(id)
+                .fetch_one(pool)
+                .await?;
+        return Ok(view(&current));
     }
-    registry.track_secret_attempt(attempt_id, row.id, machine_id, connection_id);
     spawn_timeout(pool.clone(), registry.clone(), attempt_id);
     Ok(view(&row))
 }
 
-fn lost_view(row: &SecretRequestRow) -> SecretRequestView {
-    SecretRequestView {
-        state: SecretState::Lost,
-        path: None,
-        expires_at: None,
-        note: Some(NOTE_LOST.into()),
-        updated_at: Utc::now(),
-        revision: row.revision.saturating_add(1),
-        ..view(row)
+/// Тестовый шов на время между коммитом `sending` и отправкой значения.
+#[cfg(feature = "testkit")]
+#[allow(dead_code)]
+pub mod test_hooks {
+    use std::sync::Mutex;
+    use tokio::sync::oneshot;
+
+    type Pause = oneshot::Sender<oneshot::Sender<()>>;
+
+    static BEFORE_SEND: Mutex<Option<Pause>> = Mutex::new(None);
+
+    /// Ближайшая доставка остановится перед отправкой и отдаст тесту канал
+    /// «продолжить»: так гонка переподключения воспроизводится без сна.
+    pub fn arm_before_secret_send() -> oneshot::Receiver<oneshot::Sender<()>> {
+        let (reached, wait) = oneshot::channel();
+        *BEFORE_SEND
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(reached);
+        wait
     }
+
+    pub async fn before_secret_send() {
+        let pause = BEFORE_SEND
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        if let Some(pause) = pause {
+            let (resume, wait) = oneshot::channel();
+            if pause.send(resume).is_ok() {
+                let _ = wait.await;
+            }
+        }
+    }
+}
+
+#[cfg(not(feature = "testkit"))]
+pub mod test_hooks {
+    pub async fn before_secret_send() {}
 }
 
 fn spawn_timeout(pool: PgPool, registry: Registry, attempt_id: Uuid) {
@@ -617,18 +669,19 @@ fn spawn_timeout(pool: PgPool, registry: Registry, attempt_id: Uuid) {
 }
 
 /// Попытка не дошла: `sending` становится `lost` с подписью для карточки.
+/// Возвращает изменённую строку; `None` — состояние уже сменил другой путь.
 pub async fn lose_attempt(
     pool: &PgPool,
     attempt_id: Uuid,
     correlation_id: Uuid,
-) -> Result<(), sqlx::Error> {
+) -> Result<Option<SecretRequestRow>, sqlx::Error> {
     let conversation: Option<Uuid> =
         sqlx::query_scalar("select conversation_id from secret_requests where attempt_id = $1")
             .bind(attempt_id)
             .fetch_optional(pool)
             .await?;
     let Some(conversation_id) = conversation else {
-        return Ok(());
+        return Ok(None);
     };
     let mut tx = crate::db::begin(pool).await?;
     sqlx::query("select id from conversations where id = $1 for no key update")
@@ -651,7 +704,7 @@ pub async fn lose_attempt(
         emit_in_tx(&mut tx, row, correlation_id).await?;
     }
     tx.commit().await?;
-    Ok(())
+    Ok(row)
 }
 
 /// Квитанция воркера: файл записан. Повтор старой попытки игнорируется.
@@ -672,6 +725,11 @@ pub async fn apply_delivered_in_tx(
     .fetch_optional(&mut *conn)
     .await?;
     let Some(conversation_id) = conversation else {
+        // Строка уже заменена новой попыткой или удалена: файл этой попытки мог
+        // появиться, поэтому его надо убрать отдельной командой без разговора.
+        if let Some(request_id) = parse_uuid(&fact.request_id) {
+            revoke_superseded_attempt_in_tx(conn, machine_id, request_id, attempt_id).await?;
+        }
         return Ok(());
     };
     sqlx::query("select id from conversations where id = $1 for no key update")
@@ -694,12 +752,13 @@ pub async fn apply_delivered_in_tx(
     .fetch_optional(&mut *conn)
     .await?;
     let Some(row) = row else {
-        // Квитанция опоздала: запрос уже потерян, отменён или отзывается. Файл
-        // мог материализоваться, поэтому его надо убрать, а состояние не менять.
+        // Квитанция опоздала: запрос уже потерян, отменён, истёк или отозван.
+        // Файл мог материализоваться, поэтому его надо убрать, а состояние не
+        // менять; терминальное состояние не даёт отзыву потеряться.
         let stale: Option<SecretRequestRow> = sqlx::query_as(
             "select * from secret_requests
              where attempt_id = $1 and machine_id = $2
-               and state in ('lost', 'cancelled', 'revoking')",
+               and state in ('lost', 'cancelled', 'revoking', 'revoked', 'expired', 'declined')",
         )
         .bind(attempt_id)
         .bind(machine_id)
@@ -707,6 +766,8 @@ pub async fn apply_delivered_in_tx(
         .await?;
         if let Some(stale) = stale {
             enqueue_revoke_if_missing_in_tx(conn, &stale).await?;
+        } else if let Some(request_id) = parse_uuid(&fact.request_id) {
+            revoke_superseded_attempt_in_tx(conn, machine_id, request_id, attempt_id).await?;
         }
         return Ok(());
     };
@@ -783,6 +844,16 @@ pub async fn apply_removed_in_tx(
     let Some(attempt_id) = parse_uuid(&fact.attempt_id) else {
         return Ok(());
     };
+    // Команда отзыва закрывается по машине и попытке ещё до поиска строки:
+    // detached-команда переживает удаление разговора, а заменённая попытка уже
+    // не имеет строки, но её файл всё равно убран.
+    complete_revoke_commands(
+        conn,
+        machine_id,
+        attempt_id,
+        json!({"removed": true, "reason": fact.reason}),
+    )
+    .await?;
     let expired = fact.reason == "expired";
     let conversation: Option<Uuid> = sqlx::query_scalar(
         "select conversation_id from secret_requests where attempt_id = $1 and machine_id = $2",
@@ -799,13 +870,6 @@ pub async fn apply_removed_in_tx(
         .execute(&mut *conn)
         .await?;
     let next = if expired { "expired" } else { "revoked" };
-    complete_revoke_commands(
-        conn,
-        machine_id,
-        attempt_id,
-        json!({"removed": true, "reason": fact.reason}),
-    )
-    .await?;
     let row: Option<SecretRequestRow> = sqlx::query_as(
         "update secret_requests
          set state = $2, path = null, expires_at = null, note = null,
@@ -846,6 +910,15 @@ pub async fn apply_remove_failed_in_tx(
     let Some(attempt_id) = parse_uuid(&fact.attempt_id) else {
         return Ok(());
     };
+    // Итог команды пишется по машине и попытке даже без строки запроса:
+    // detached-отзыв иначе остался бы незавершённым навсегда.
+    complete_revoke_commands(
+        conn,
+        machine_id,
+        attempt_id,
+        json!({"removed": false, "reason": fact.reason}),
+    )
+    .await?;
     let conversation: Option<Uuid> = sqlx::query_scalar(
         "select conversation_id from secret_requests where attempt_id = $1 and machine_id = $2",
     )
@@ -875,13 +948,6 @@ pub async fn apply_remove_failed_in_tx(
     .bind(&note)
     .bind(machine_id)
     .fetch_optional(&mut *conn)
-    .await?;
-    complete_revoke_commands(
-        conn,
-        machine_id,
-        attempt_id,
-        json!({"removed": false, "reason": fact.reason}),
-    )
     .await?;
     if let Some(row) = &row {
         emit_in_tx(conn, row, correlation_id).await?;
@@ -958,6 +1024,25 @@ async fn enqueue_revoke_in_tx(
     let Some(attempt_id) = row.attempt_id else {
         return Ok(());
     };
+    enqueue_revoke_command_in_tx(
+        conn,
+        row.machine_id,
+        row.id,
+        attempt_id,
+        Some(row.conversation_id),
+    )
+    .await
+}
+
+/// Постоянная команда отзыва. `conversation_id = None` — команда переживает
+/// удаление разговора и несёт каталог в payload, чтобы воркер открыл его после.
+async fn enqueue_revoke_command_in_tx(
+    conn: &mut PgConnection,
+    machine_id: Uuid,
+    request_id: Uuid,
+    attempt_id: Uuid,
+    conversation_id: Option<Uuid>,
+) -> Result<(), sqlx::Error> {
     // Один незавершённый отзыв на попытку: повторный путь не плодит команды.
     let pending: bool = sqlx::query_scalar(
         "select exists(
@@ -965,30 +1050,30 @@ async fn enqueue_revoke_in_tx(
             where machine_id = $1 and kind = 'revoke_secret'
               and payload->>'attempt_id' = $2 and delivery_state <> 'completed')",
     )
-    .bind(row.machine_id)
+    .bind(machine_id)
     .bind(attempt_id.to_string())
     .fetch_one(&mut *conn)
     .await?;
     if pending {
         return Ok(());
     }
-    let command_id = Uuid::now_v7();
     sqlx::query(
         "insert into commands (id, machine_id, conversation_id, execution_id,
                                execution_generation, kind, payload, delivery_state)
          values ($1, $2, $3, null, null, 'revoke_secret', $4, 'pending')",
     )
-    .bind(command_id)
-    .bind(row.machine_id)
-    .bind(row.conversation_id)
+    .bind(Uuid::now_v7())
+    .bind(machine_id)
+    .bind(conversation_id)
     .bind(json!({
-        "request_id": row.id,
+        "request_id": request_id,
         "attempt_id": attempt_id,
+        "conversation_id": conversation_id,
     }))
     .execute(&mut *conn)
     .await?;
     sqlx::query("select pg_notify('canterlot_outbox', $1)")
-        .bind(row.machine_id.to_string())
+        .bind(machine_id.to_string())
         .execute(&mut *conn)
         .await?;
     Ok(())
@@ -999,6 +1084,24 @@ async fn enqueue_revoke_if_missing_in_tx(
     row: &SecretRequestRow,
 ) -> Result<(), sqlx::Error> {
     enqueue_revoke_in_tx(conn, row).await
+}
+
+/// Отзыв для попытки, которой уже нет в строке запроса: каталог берётся из
+/// запроса, если строка ещё существует, иначе команда остаётся без каталога.
+async fn revoke_superseded_attempt_in_tx(
+    conn: &mut PgConnection,
+    machine_id: Uuid,
+    request_id: Uuid,
+    attempt_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    let conversation: Option<Uuid> = sqlx::query_scalar(
+        "select conversation_id from secret_requests where id = $1 and machine_id = $2",
+    )
+    .bind(request_id)
+    .bind(machine_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    enqueue_revoke_command_in_tx(conn, machine_id, request_id, attempt_id, conversation).await
 }
 
 /// Снимает ещё не отправленное сообщение «передан», чтобы оно не пришло после отзыва.
@@ -1193,36 +1296,25 @@ pub async fn revoke_before_deletion_in_tx(
         let Some(attempt_id) = row.attempt_id else {
             continue;
         };
-        let pending: bool = sqlx::query_scalar(
-            "select exists(
-                select 1 from commands
-                where machine_id = $1 and kind = 'revoke_secret'
-                  and payload->>'attempt_id' = $2 and delivery_state <> 'completed')",
+        // Незавершённая команда, созданная остановкой или корзиной, должна
+        // пережить удаление строк разговора: отвязываем её от каталога.
+        sqlx::query(
+            "update commands set conversation_id = null
+             where machine_id = $1 and kind = 'revoke_secret'
+               and payload->>'attempt_id' = $2 and delivery_state <> 'completed'",
         )
         .bind(row.machine_id)
         .bind(attempt_id.to_string())
-        .fetch_one(&mut *conn)
-        .await?;
-        if pending {
-            continue;
-        }
-        sqlx::query(
-            "insert into commands (id, machine_id, conversation_id, execution_id,
-                                   execution_generation, kind, payload, delivery_state)
-             values ($1, $2, null, null, null, 'revoke_secret', $3, 'pending')",
-        )
-        .bind(Uuid::now_v7())
-        .bind(row.machine_id)
-        .bind(json!({
-            "request_id": row.id,
-            "attempt_id": attempt_id,
-        }))
         .execute(&mut *conn)
         .await?;
-        sqlx::query("select pg_notify('canterlot_outbox', $1)")
-            .bind(row.machine_id.to_string())
-            .execute(&mut *conn)
-            .await?;
+        enqueue_revoke_command_in_tx(
+            conn,
+            row.machine_id,
+            row.id,
+            attempt_id,
+            Some(row.conversation_id),
+        )
+        .await?;
         let _ = correlation_id;
     }
     Ok(())
@@ -1266,6 +1358,7 @@ pub async fn run(
             "secret requests recovery failed"
         );
     }
+    retry_removals_logged(&pool).await;
     let mut ticker = tokio::time::interval(Duration::from_secs(60));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
@@ -1283,9 +1376,60 @@ pub async fn run(
                         "secret requests sweep failed"
                     );
                 }
+                retry_removals_logged(&pool).await;
             }
         }
     }
+}
+
+async fn retry_removals_logged(pool: &PgPool) {
+    if let Err(error) = retry_removals(pool).await {
+        tracing::error!(
+            kind = "secret_removal_retry_error",
+            error = %crate::dberr::describe(&error),
+            "secret removal retry failed"
+        );
+    }
+}
+
+/// Повторяет отзывы, которые не подтвердились: `revoking` без завершённой
+/// команды и доставленные/истёкшие файлы с ошибкой удаления. Пока команда
+/// ждёт воркер, новой нет; срок растёт вдвое с каждой завершённой попыткой,
+/// но не больше десяти минут.
+pub async fn retry_removals(pool: &PgPool) -> Result<u64, sqlx::Error> {
+    let rows: Vec<SecretRequestRow> = sqlx::query_as(
+        "select * from secret_requests r
+         where r.attempt_id is not null
+           and (r.state = 'revoking'
+                or (r.state in ('delivered', 'expired')
+                    and coalesce(r.note, '') like 'Файл не удалён:%'))
+           and not exists (
+               select 1 from commands c
+               where c.machine_id = r.machine_id and c.kind = 'revoke_secret'
+                 and c.payload->>'attempt_id' = r.attempt_id::text
+                 and c.delivery_state <> 'completed')
+           and r.updated_at < now() - least(
+               power(2.0, (select count(*) from commands c
+                         where c.machine_id = r.machine_id and c.kind = 'revoke_secret'
+                           and c.payload->>'attempt_id' = r.attempt_id::text
+                           and c.delivery_state = 'completed')::double precision) * interval '10 seconds',
+               interval '10 minutes')
+         order by r.id",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut retried = 0u64;
+    for row in rows {
+        let mut tx = crate::db::begin(pool).await?;
+        sqlx::query("select id from conversations where id = $1 for no key update")
+            .bind(row.conversation_id)
+            .execute(&mut *tx)
+            .await?;
+        enqueue_revoke_in_tx(&mut tx, &row).await?;
+        tx.commit().await?;
+        retried += 1;
+    }
+    Ok(retried)
 }
 
 /// Периодическая уборка: `sending`, которое не получило квитанции и не попало в

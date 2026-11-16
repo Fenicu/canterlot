@@ -609,6 +609,13 @@ impl Ingest {
             progress.refused_seq = None;
             up_to_seq = record.seq;
             last_digest = digest;
+            // Квитанции секретов приходят и в CJ: попытка снимается с учёта
+            // после успешного коммита, а не только в SJ-пути.
+            if let (Some(registry), Some(attempt_id)) =
+                (&self.registry, secret_receipt_attempt(body))
+            {
+                registry.take_secret_attempt(attempt_id);
+            }
             if ignored {
                 self.ignored.fetch_add(1, Ordering::Relaxed);
             }
@@ -891,6 +898,19 @@ impl Ingest {
     }
 }
 
+/// Попытка, о которой говорит квитанция секрета: после успешной записи её срок
+/// больше не нужен. Общая для SJ-пути и CJ-пути: квитанции приходят обоими.
+fn secret_receipt_attempt(body: &Body) -> Option<Uuid> {
+    let attempt = match body {
+        Body::SecretDelivered(fact) => &fact.attempt_id,
+        Body::SecretFailed(fact) => &fact.attempt_id,
+        Body::SecretRemoved(fact) => &fact.attempt_id,
+        Body::SecretRemoveFailed(fact) => &fact.attempt_id,
+        _ => return None,
+    };
+    Uuid::parse_str(attempt).ok()
+}
+
 fn touches_activity(body: &Body) -> bool {
     matches!(
         body,
@@ -934,16 +954,7 @@ impl Ingest {
         use crate::limits::{self, DataConfidence, Observation, ObservationSource, Window};
         let now = chrono::Utc::now();
         // Любая квитанция снимает попытку с учёта: срок больше не должен её терять.
-        let receipt = match body {
-            Body::SecretDelivered(fact) => Some(&fact.attempt_id),
-            Body::SecretFailed(fact) => Some(&fact.attempt_id),
-            Body::SecretRemoved(fact) => Some(&fact.attempt_id),
-            Body::SecretRemoveFailed(fact) => Some(&fact.attempt_id),
-            _ => None,
-        };
-        if let (Some(registry), Some(attempt_id)) = (registry, receipt)
-            && let Ok(attempt_id) = Uuid::parse_str(attempt_id)
-        {
+        if let (Some(registry), Some(attempt_id)) = (registry, secret_receipt_attempt(body)) {
             registry.take_secret_attempt(attempt_id);
         }
         if matches!(body, Body::LimitObserved(_) | Body::LimitReached(_)) {

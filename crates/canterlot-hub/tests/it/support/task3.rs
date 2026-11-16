@@ -295,7 +295,7 @@ pub async fn connect_with(
         result: Some(hello_reply::Result::Accepted(a)),
     })) = down.msg
     else {
-        panic!("expected accepted")
+        panic!("expected accepted, got {down:?}")
     };
     assert_eq!(a.capabilities, capabilities);
     Client {

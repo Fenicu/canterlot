@@ -115,6 +115,18 @@ impl Fx {
     }
 }
 
+/// Ждёт, пока сервер отпустит старое управляющее соединение: новое с тем же
+/// `unavailable_after` иначе не примут.
+async fn wait_disconnected(registry: &Registry, machine: Uuid) {
+    for _ in 0..500 {
+        if registry.connection_id(machine).is_none() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("the old control connection did not end");
+}
+
 async fn seed_for(pool: &PgPool, owner: Uuid) -> Seed {
     use sha2::{Digest, Sha256};
     let machine = Uuid::now_v7();
@@ -1272,4 +1284,414 @@ async fn a_manifest_snapshot_does_not_lose_a_delivery_from_its_own_connection(po
     )
     .await;
     assert_eq!(fx.state(fresh.id).await, "delivered");
+}
+
+/// Инвариант: после терминального состояния (отозван, истёк, отменён, отклонён)
+/// ни один файл этой попытки не может остаться, даже если квитанция о записи
+/// пришла позже. Поздняя квитанция обязана поставить отзыв.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_late_receipt_after_any_terminal_state_triggers_a_revoke(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    for state in ["expired", "revoked", "declined", "revoking"] {
+        let row = fx.open(&format!("Поздняя квитанция {state}")).await;
+        let attempt = Uuid::now_v7();
+        sqlx::query("update secret_requests set state=$2, attempt_id=$3 where id=$1")
+            .bind(row.id)
+            .bind(state)
+            .bind(attempt)
+            .execute(&fx.pool)
+            .await
+            .unwrap();
+        cj(
+            &fx.pool,
+            &fx.registry,
+            &fx.seed,
+            Uuid::now_v7(),
+            1,
+            fact_body(record_body::Body::SecretDelivered(
+                canterlot_proto::worker::v1::SecretDelivered {
+                    attempt_id: attempt.to_string(),
+                    request_id: row.id.to_string(),
+                    path: "/run/late-terminal".into(),
+                    expires_at_ms: 1,
+                },
+            )),
+        )
+        .await;
+        assert_eq!(fx.state(row.id).await, state, "state stays {state}");
+        let commands: i64 = sqlx::query_scalar(
+            "select count(*) from commands where kind='revoke_secret' and payload->>'attempt_id'=$1",
+        )
+        .bind(attempt.to_string())
+        .fetch_one(&fx.pool)
+        .await
+        .unwrap();
+        assert_eq!(commands, 1, "a late receipt revokes a {state} attempt");
+    }
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_late_receipt_for_a_replaced_attempt_revokes_it_without_a_request_row(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let row = fx.open("Заменённая попытка").await;
+    let old_attempt = Uuid::now_v7();
+    let new_attempt = Uuid::now_v7();
+    sqlx::query("update secret_requests set state='sending', attempt_id=$2 where id=$1")
+        .bind(row.id)
+        .bind(new_attempt)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    cj(
+        &fx.pool,
+        &fx.registry,
+        &fx.seed,
+        Uuid::now_v7(),
+        1,
+        fact_body(record_body::Body::SecretDelivered(
+            canterlot_proto::worker::v1::SecretDelivered {
+                attempt_id: old_attempt.to_string(),
+                request_id: row.id.to_string(),
+                path: "/run/superseded".into(),
+                expires_at_ms: 1,
+            },
+        )),
+    )
+    .await;
+    let payload: Value = sqlx::query_scalar(
+        "select payload from commands
+         where kind='revoke_secret' and payload->>'attempt_id'=$1",
+    )
+    .bind(old_attempt.to_string())
+    .fetch_one(&fx.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        payload["conversation_id"],
+        fx.seed.conversation_id.to_string(),
+        "the detached command still names the directory"
+    );
+    assert_eq!(
+        fx.state(row.id).await,
+        "sending",
+        "the new attempt is intact"
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn retrying_removals_repeats_a_failed_revoke_with_backoff(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let row = fx.open("Повтор отзыва").await;
+    let attempt = Uuid::now_v7();
+    sqlx::query(
+        "update secret_requests set state='revoking', attempt_id=$2,
+                updated_at=now() - interval '1 hour' where id=$1",
+    )
+    .bind(row.id)
+    .bind(attempt)
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "insert into commands (id, machine_id, conversation_id, kind, payload, delivery_state, completed_at)
+         values ($1, $2, $3, 'revoke_secret', $4, 'completed', now())",
+    )
+    .bind(Uuid::now_v7())
+    .bind(fx.seed.machine_id)
+    .bind(fx.seed.conversation_id)
+    .bind(json!({"request_id": row.id, "attempt_id": attempt, "conversation_id": fx.seed.conversation_id}))
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+
+    assert_eq!(secrets::retry_removals(&fx.pool).await.unwrap(), 1);
+    let pending: i64 = sqlx::query_scalar(
+        "select count(*) from commands where kind='revoke_secret'
+           and payload->>'attempt_id'=$1 and delivery_state <> 'completed'",
+    )
+    .bind(attempt.to_string())
+    .fetch_one(&fx.pool)
+    .await
+    .unwrap();
+    assert_eq!(pending, 1, "a fresh revoke is enqueued");
+    assert_eq!(
+        secrets::retry_removals(&fx.pool).await.unwrap(),
+        0,
+        "while the command waits for the worker no duplicate is made"
+    );
+
+    // Молодая строка ждёт своей очереди: срок растёт с числом попыток.
+    let fresh = fx.open("Молодой отзыв").await;
+    let fresh_attempt = Uuid::now_v7();
+    sqlx::query("update secret_requests set state='revoking', attempt_id=$2 where id=$1")
+        .bind(fresh.id)
+        .bind(fresh_attempt)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    assert_eq!(secrets::retry_removals(&fx.pool).await.unwrap(), 0);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_failed_expiry_removal_is_retried(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let row = fx.open("Истёк, но не удалён").await;
+    let attempt = Uuid::now_v7();
+    sqlx::query(
+        "update secret_requests set state='expired', attempt_id=$2,
+                note='Файл не удалён: воркер вернул ошибку (io)',
+                updated_at=now() - interval '1 hour' where id=$1",
+    )
+    .bind(row.id)
+    .bind(attempt)
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "insert into commands (id, machine_id, conversation_id, kind, payload, delivery_state, completed_at)
+         values ($1, $2, $3, 'revoke_secret', $4, 'completed', now())",
+    )
+    .bind(Uuid::now_v7())
+    .bind(fx.seed.machine_id)
+    .bind(fx.seed.conversation_id)
+    .bind(json!({"request_id": row.id, "attempt_id": attempt, "conversation_id": fx.seed.conversation_id}))
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+    assert_eq!(secrets::retry_removals(&fx.pool).await.unwrap(), 1);
+    assert_eq!(
+        fx.state(row.id).await,
+        "expired",
+        "the card keeps its state"
+    );
+}
+
+/// Окончательная уборка не должна выбрасывать отзыв, который сама же и заказала.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn purge_keeps_the_revoke_and_a_receipt_finishes_it_without_the_row(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let row = fx.open("Пережить уборку").await;
+    let attempt = Uuid::now_v7();
+    sqlx::query(
+        "update secret_requests set state='delivered', attempt_id=$2, path='/run/p' where id=$1",
+    )
+    .bind(row.id)
+    .bind(attempt)
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+    let trash = fx
+        .client
+        .send(
+            axum::http::Method::DELETE,
+            &format!("/api/v1/conversations/{}", fx.seed.conversation_id),
+            Some(&Uuid::now_v7().to_string()),
+            None,
+        )
+        .await;
+    assert_eq!(trash.status, axum::http::StatusCode::NO_CONTENT);
+    assert_eq!(fx.state(row.id).await, "revoking");
+
+    let purge = fx
+        .client
+        .send(
+            axum::http::Method::DELETE,
+            &format!("/api/v1/conversations/{}/trash", fx.seed.conversation_id),
+            Some(&Uuid::now_v7().to_string()),
+            None,
+        )
+        .await;
+    assert_eq!(
+        purge.status,
+        axum::http::StatusCode::NO_CONTENT,
+        "{}",
+        String::from_utf8_lossy(&purge.body)
+    );
+    let rows: i64 = sqlx::query_scalar("select count(*) from secret_requests where id=$1")
+        .bind(row.id)
+        .fetch_one(&fx.pool)
+        .await
+        .unwrap();
+    assert_eq!(rows, 0, "the request row is gone");
+    let (conversation, state): (Option<Uuid>, String) = sqlx::query_as(
+        "select conversation_id, delivery_state from commands
+         where kind='revoke_secret' and payload->>'attempt_id'=$1",
+    )
+    .bind(attempt.to_string())
+    .fetch_one(&fx.pool)
+    .await
+    .unwrap();
+    assert!(
+        conversation.is_none(),
+        "the command was detached before the conversation rows went"
+    );
+    assert_eq!(state, "pending");
+
+    cj(
+        &fx.pool,
+        &fx.registry,
+        &fx.seed,
+        Uuid::now_v7(),
+        1,
+        fact_body(record_body::Body::SecretRemoved(
+            canterlot_proto::worker::v1::SecretRemoved {
+                attempt_id: attempt.to_string(),
+                reason: "revoked".into(),
+            },
+        )),
+    )
+    .await;
+    let state: String = sqlx::query_scalar(
+        "select delivery_state from commands
+         where kind='revoke_secret' and payload->>'attempt_id'=$1",
+    )
+    .bind(attempt.to_string())
+    .fetch_one(&fx.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        state, "completed",
+        "a receipt finishes the command even without its row"
+    );
+}
+
+/// Доставка и переподключение не должны разойтись: значение уходит ровно на то
+/// соединение, которым помечена попытка, и никогда на чужое.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_delivery_racing_a_reconnect_is_not_tagged_with_the_wrong_connection(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let row = fx.open("Гонка соединений").await;
+    let journal = Uuid::now_v7();
+    let first = task3::connect_with(&fx.hub, &fx.seed, journal, CAPS, 1000).await;
+    let resume = secrets::test_hooks::arm_before_secret_send();
+
+    let pool_clone = fx.pool.clone();
+    let registry = fx.registry.clone();
+    let owner = fx.seed.owner_id;
+    let id = row.id;
+    let task = tokio::spawn(async move {
+        secrets::answer(
+            &pool_clone,
+            &registry,
+            owner,
+            id,
+            Answer::Value("canterlot-secret-PROBE-race".into()),
+            Uuid::now_v7(),
+        )
+        .await
+    });
+
+    let resume = resume.await.expect("the delivery paused before sending");
+    drop(first);
+    wait_disconnected(&fx.registry, fx.seed.machine_id).await;
+    let _second = task3::connect_with(&fx.hub, &fx.seed, journal, CAPS, 1000).await;
+    resume.send(()).expect("resume the delivery");
+
+    let view = task.await.unwrap().expect("answer");
+    assert_eq!(
+        view.state,
+        secrets::SecretState::Lost,
+        "the captured connection was gone: the value is lost, not sent elsewhere"
+    );
+    let attempt = fx.row(row.id).await.attempt_id.expect("attempt");
+    assert!(
+        fx.registry.secret_attempt_connection(attempt).is_none(),
+        "a lost attempt is not left tagged to an old connection"
+    );
+}
+
+/// Если отправка не удалась, карточка получает строку из базы, а не выдуманную
+/// ревизию: параллельный отзыв не должен затираться состоянием `lost`.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_failed_send_reports_the_authoritative_row(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let row = fx.open("Ответ после отказа отправки").await;
+    let first = task3::connect_with(&fx.hub, &fx.seed, Uuid::now_v7(), CAPS, 1000).await;
+    let resume = secrets::test_hooks::arm_before_secret_send();
+
+    let pool_clone = fx.pool.clone();
+    let registry = fx.registry.clone();
+    let owner = fx.seed.owner_id;
+    let id = row.id;
+    let task = tokio::spawn(async move {
+        secrets::answer(
+            &pool_clone,
+            &registry,
+            owner,
+            id,
+            Answer::Value("canterlot-secret-PROBE-failed-send".into()),
+            Uuid::now_v7(),
+        )
+        .await
+    });
+
+    let resume = resume.await.expect("the delivery paused before sending");
+    // Пока значение не ушло, владелец отзывает запрос: попытка уже `revoking`.
+    sqlx::query(
+        "update secret_requests set state='revoking', revision=revision+1, updated_at=now()
+         where id=$1",
+    )
+    .bind(row.id)
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+    drop(first);
+    wait_disconnected(&fx.registry, fx.seed.machine_id).await;
+    resume.send(()).expect("resume the delivery");
+
+    let view = task.await.unwrap().expect("answer");
+    let current = fx.row(row.id).await;
+    assert_eq!(
+        view.state,
+        secrets::SecretState::Revoking,
+        "the authoritative state is returned"
+    );
+    assert_eq!(view.revision, current.revision);
+    assert_eq!(view.updated_at, current.updated_at);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_cj_receipt_clears_the_attempt_deadline(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let row = fx.open("Учёт попытки").await;
+    let mut worker = task3::connect_with(&fx.hub, &fx.seed, Uuid::now_v7(), CAPS, 1000).await;
+    let response = fx
+        .answer(row.id, json!({"value": "canterlot-secret-PROBE-cj"}))
+        .await;
+    assert_eq!(response.status, axum::http::StatusCode::OK);
+    let delivered = tokio::time::timeout(Duration::from_secs(5), worker.stream.message())
+        .await
+        .expect("delivery")
+        .unwrap()
+        .unwrap();
+    let Some(control_down::Msg::SecretDeliver(deliver)) = delivered.msg else {
+        panic!("expected SecretDeliver, got {delivered:?}");
+    };
+    let attempt: Uuid = deliver.attempt_id.parse().unwrap();
+    assert_eq!(
+        fx.registry.secret_attempt_connection(attempt),
+        Some(worker.connection),
+        "the attempt is tracked until a receipt"
+    );
+    // Квитанция приходит в CJ: учёт снимается после коммита, как и в SJ.
+    cj(
+        &fx.pool,
+        &fx.registry,
+        &fx.seed,
+        Uuid::now_v7(),
+        1,
+        fact_body(record_body::Body::SecretDelivered(
+            canterlot_proto::worker::v1::SecretDelivered {
+                attempt_id: attempt.to_string(),
+                request_id: row.id.to_string(),
+                path: "/run/cj".into(),
+                expires_at_ms: 1,
+            },
+        )),
+    )
+    .await;
+    assert!(
+        fx.registry.secret_attempt_connection(attempt).is_none(),
+        "a CJ receipt clears the in-flight attempt"
+    );
 }
