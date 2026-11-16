@@ -351,6 +351,9 @@ pub async fn open(
     validate_name(name)?;
     validate_purpose(purpose)?;
     let mut tx = crate::db::begin(pool).await?;
+    // Предел на владельца общий для всех его разговоров: порядок блокировок хаба
+    // начинается с владельца, иначе два разговора одновременно увидят 19 и вставят двадцатый и двадцать первый.
+    crate::conversations::lock_owner(&mut tx, owner_id).await?;
     let machine_id = lock_conversation(&mut tx, owner_id, conversation_id).await?;
     let open_here: i64 = sqlx::query_scalar(
         "select count(*) from secret_requests where conversation_id = $1 and state = 'open'",

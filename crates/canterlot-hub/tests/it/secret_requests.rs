@@ -796,3 +796,42 @@ async fn the_session_tool_returns_a_request_id_and_holds_the_limit(pool: PgPool)
         "the argument is not echoed"
     );
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn twenty_open_requests_per_owner_are_the_limit_across_conversations(pool: PgPool) {
+    let fx = Fx::new(pool.clone()).await;
+    let per_conversation = secrets::MAX_OPEN_PER_CONVERSATION;
+    let conversations = (secrets::MAX_OPEN_PER_OWNER + per_conversation - 1) / per_conversation;
+    let mut opened = 0;
+    for index in 0..conversations {
+        let conversation =
+            testkit::seed_conversation(&pool, fx.seed.owner_id, fx.seed.machine_id).await;
+        let here = per_conversation.min(secrets::MAX_OPEN_PER_OWNER - opened);
+        for slot in 0..here {
+            secrets::open(
+                &fx.pool,
+                fx.seed.owner_id,
+                conversation,
+                &format!("Секрет {index}-{slot}"),
+                "предел владельца",
+                Uuid::now_v7(),
+            )
+            .await
+            .unwrap();
+            opened += 1;
+        }
+    }
+    assert_eq!(opened, secrets::MAX_OPEN_PER_OWNER);
+    let extra = testkit::seed_conversation(&pool, fx.seed.owner_id, fx.seed.machine_id).await;
+    let error = secrets::open(
+        &fx.pool,
+        fx.seed.owner_id,
+        extra,
+        "Двадцать первый",
+        "лишний",
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(error, secrets::SecretError::Limit), "{error:?}");
+}
