@@ -11,6 +11,7 @@ import LimitsCard from './LimitsCard.svelte';
 import QuestionCard from './QuestionCard.svelte';
 import SendCard from './SendCard.svelte';
 import SessionsCard from './SessionsCard.svelte';
+import ShellCard from './ShellCard.svelte';
 import ShareCard from './ShareCard.svelte';
 import SpawnCard from './SpawnCard.svelte';
 import SubagentCard from './SubagentCard.svelte';
@@ -26,10 +27,12 @@ import { limits } from './defs/limits';
 import { planAdd, planAdopt, planList, planUpdate } from './defs/plan';
 import * as sessions from './defs/sessions';
 import { share } from './defs/share';
+import { shell, type ShellData } from './defs/shell';
 import { todo } from './defs/todo';
 import { context7, question, quiet, skill, subagent, taiga } from './defs/tools';
 import { fetchPage, search } from './defs/web';
 import { sessionLink } from './links';
+import { outcomeWord } from './outcome';
 import { toolFamily, toolId } from './toolId';
 import type { CardCall, CardDef, CardLogic, CardProps, StateWord } from './types';
 
@@ -94,6 +97,7 @@ const REGISTRY: Record<string, CardDef<never>> = {
   'web.search': card(search),
   'web.fetch': card({ ...fetchPage, link: (_call, data) => ({ text: data.domain, href: data.url, external: true }) }),
   skill: card(skill),
+  'shell.exec': card({ ...shell, word: (call, data) => outcomeWord(data.outcome) ?? defaultWord(call) } as CardLogic<ShellData>, ShellCard),
   'meta.tool_search': card(quiet),
   'meta.monitor': card(quiet),
   'meta.task_stop': card(quiet),

@@ -213,9 +213,10 @@ test('generic_tools_and_unknown_tools_keep_the_plain_block', async ({ page }) =>
   const unknown = await reveal(page, row(page, seed.blocks.unknown!).locator('.tool'));
   await expect(unknown.locator('.name')).toHaveText('create_issue');
   await expect(row(page, seed.blocks.unknown!).locator('.feed-card')).toHaveCount(0);
-  const bash = await reveal(page, row(page, seed.blocks.bash!).locator('.tool'));
-  await expect(bash.locator('.name')).toHaveText('Bash');
-  await expect(bash.locator('.summary')).toHaveText('npm run lint:tokens');
+  // Команда оболочки получила свою карточку: имя инструмента уступило место самой команде.
+  const bash = await reveal(page, row(page, seed.blocks.bash!).locator('.feed-card'));
+  await expect(bash).toHaveAttribute('data-card', 'shell.exec');
+  await expect(bash.locator('pre.code')).toHaveText('npm run lint:tokens');
 });
 
 test('malformed_input_of_a_known_tool_falls_back_to_the_plain_block', async ({ page }) => {

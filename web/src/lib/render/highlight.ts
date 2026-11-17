@@ -154,3 +154,46 @@ export function highlightWithin(root: HTMLElement): () => void {
     clearTimeout(timer);
   };
 }
+
+/** Кусок подсвеченной строки: текст и классы highlight.js всех его обёрток. */
+export interface CodeToken {
+  text: string;
+  cls: string;
+}
+
+/** Язык подсветки по имени файла: `a/b.ts` → `ts`; незнакомое расширение — `null`. */
+export function languageForPath(path: string): string | null {
+  const name = path.split('/').pop() ?? '';
+  const dot = name.lastIndexOf('.');
+  if (dot <= 0) return null;
+  const ext = name.slice(dot + 1).toLowerCase();
+  return LANGUAGE_MAP[ext] ? ext : null;
+}
+
+/**
+ * Разметка highlight.js построчно. Обёртка может пересекать перевод строки (многострочная
+ * строка, комментарий): тогда её класс достаётся каждой строке, куда она дотянулась.
+ */
+export function htmlLines(html: string): CodeToken[][] {
+  const lines: CodeToken[][] = [[]];
+  const walk = (node: Node, cls: string[]) => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      const parts = (node.textContent ?? '').split('\n');
+      parts.forEach((part, index) => {
+        if (index > 0) lines.push([]);
+        if (part) lines[lines.length - 1]!.push({ text: part, cls: cls.join(' ') });
+      });
+      return;
+    }
+    const own = node instanceof Element ? [...node.classList] : [];
+    for (const child of node.childNodes) walk(child, [...cls, ...own]);
+  };
+  walk(new DOMParser().parseFromString(`<body>${html}</body>`, 'text/html').body, []);
+  return lines;
+}
+
+/** Код построчно с подсветкой; `null` — язык незнаком или код больше пределов подсветки. */
+export async function highlightLines(code: string, lang: string | null): Promise<CodeToken[][] | null> {
+  const html = await highlightLazy(code, lang);
+  return html === null ? null : htmlLines(html);
+}

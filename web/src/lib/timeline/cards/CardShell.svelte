@@ -18,7 +18,9 @@
     dot = false,
     live = false,
     head,
-    children
+    children,
+    fold,
+    reveal = 'вызов'
   }: {
     call: CardCall;
     env: CardEnv;
@@ -34,6 +36,10 @@
     live?: boolean;
     head?: Snippet;
     children?: Snippet;
+    /** Своё раскрытие вместо сырого вызова: вывод команды, разница файла. */
+    fold?: Snippet;
+    /** Что раскрывает шеврон, в винительном: «вызов», «вывод», «изменения». */
+    reveal?: string;
   } = $props();
 
   const called = $derived(call.block.text.trim().length > 0 && call.block.state !== 'streaming');
@@ -42,7 +48,7 @@
 <div class="feed-card" data-card={call.id} data-state={call.state} data-quiet={quiet ? '' : undefined} data-grows={grows ? '' : undefined}>
   <div class="head">
     <!-- Кнопка лежит под всей шапкой: ссылки в шапке стоят поверх неё и остаются ссылками. -->
-    <button type="button" class="hit" aria-expanded={env.open} aria-label={`${line}. ${env.open ? 'Скрыть вызов' : 'Показать вызов'}`} onclick={env.onToggle}></button>
+    <button type="button" class="hit" aria-expanded={env.open} aria-label={`${line}. ${env.open ? 'Скрыть' : 'Показать'} ${reveal}`} onclick={env.onToggle}></button>
     <span class="chevron" data-open={env.open ? '' : undefined} aria-hidden="true"><Icon name="chevron" /></span>
     <span class="lead">
       {#if head}{@render head()}{:else}<span class="line">{line}</span>{/if}
@@ -52,10 +58,14 @@
   {#if children}<div class="content">{@render children()}</div>{/if}
   {#if env.open}
     <div class="fold" transition:blockFold>
-      <div class="body" data-role="card-raw">
-        {#if called}<ToolOutput block={call.block} caption={callCaption(call.block)} load={env.load} />{/if}
-        {#if call.result || !called}<ToolOutput block={call.result ?? call.block} running={call.state === 'running'} load={env.load} />{/if}
-      </div>
+      {#if fold}
+        <div class="body" data-role="card-fold">{@render fold()}</div>
+      {:else}
+        <div class="body" data-role="card-raw">
+          {#if called}<ToolOutput block={call.block} caption={callCaption(call.block)} load={env.load} />{/if}
+          {#if call.result || !called}<ToolOutput block={call.result ?? call.block} running={call.state === 'running'} load={env.load} />{/if}
+        </div>
+      {/if}
     </div>
   {/if}
 </div>

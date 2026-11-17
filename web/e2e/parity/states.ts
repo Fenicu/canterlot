@@ -12,6 +12,7 @@ import { seedConversation, seedMachineWatch } from '../../testing/fake-hub/seed'
 import { seedFeedCards } from '../../testing/fixtures/feed-cards';
 import { seedPlanCards } from '../../testing/fixtures/plan-cards';
 import { seedTaigaCards } from '../../testing/fixtures/taiga-cards';
+import { seedToolCards } from '../../testing/fixtures/tool-cards';
 import { DEEPSEEK, seedQueue, seedRoutedSpawn, seedRoutingCatalog, seedRoutingWhitelist } from '../../testing/fixtures/routing';
 import { openChat, settled, thumb, viewer } from '../ui/image-viewer-fixture';
 import { seedPlan } from '../../testing/fixtures/plan';
@@ -192,6 +193,23 @@ async function feedCards(page: Page, at: 'bottom' | 'top'): Promise<void> {
 }
 
 /** Лента с карточками Taiga: правка, раскрытый комментарий или раскрытый список. */
+async function toolCards(page: Page, at: 'bottom' | 'top'): Promise<void> {
+  const { hub, api } = fresh();
+  const seed = seedToolCards(api);
+  await installChatRoutes(page, hub, api, OWNER);
+  await page.goto(`/c/${seed.id}`);
+  await expect(page.locator('.screen[data-ready]')).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('.feed-card').first()).toBeVisible();
+  if (at === 'top') {
+    // Верх ленты: первая команда раскрыта, виден хвост её вывода.
+    await page.locator('.feed').evaluate((node) => { node.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 })); node.scrollTop = 0; });
+    const first = page.locator(`[data-key="block:${seed.blocks.shellLong}"] .feed-card .head .hit`);
+    await expect(first).toBeVisible();
+    await first.click();
+    await expect(page.locator('[data-role="card-fold"] pre').first()).toBeVisible();
+  }
+}
+
 async function taigaCards(page: Page, at: 'update' | 'comment' | 'list'): Promise<void> {
   const { hub, api } = fresh();
   const seed = seedTaigaCards(api);
@@ -565,6 +583,9 @@ export const SCREENS: Screen[] = [
   screen('feed-cards', false, PHONE, 'dark', (page) => feedCards(page, 'bottom')),
   screen('feed-cards-top', false, PHONE, 'dark', (page) => feedCards(page, 'top')),
   screen('feed-cards-desktop', false, DESKTOP, 'light', (page) => feedCards(page, 'bottom')),
+  screen('tool-cards', false, PHONE, 'dark', (page) => toolCards(page, 'bottom')),
+  screen('tool-cards-top', false, PHONE, 'dark', (page) => toolCards(page, 'top')),
+  screen('tool-cards-desktop', false, DESKTOP, 'light', (page) => toolCards(page, 'bottom')),
   screen('taiga-cards', false, PHONE, 'dark', (page) => taigaCards(page, 'update')),
   screen('taiga-cards-comment', false, PHONE, 'dark', (page) => taigaCards(page, 'comment')),
   screen('taiga-cards-list', false, PHONE, 'light', (page) => taigaCards(page, 'list')),
