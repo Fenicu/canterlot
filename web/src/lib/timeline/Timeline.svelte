@@ -270,6 +270,12 @@
       const end = Math.min(list.length, start + 80);
       next = { start, end, padTop: ix.offset(start), padBottom: Math.max(0, ix.total() - ix.offset(end)) };
     }
+    // Высокий ответ вытесняет сообщение владельца за край окна: последний ввод держим в DOM,
+    // иначе пузырь пропадает из ленты, пока владелец читает ответ под ним.
+    const lastInput = jumping || !controller?.pinned ? -1 : list.findLastIndex((row) => row.kind === 'input');
+    if (lastInput >= 0 && lastInput < next.start) {
+      next = { ...next, start: lastInput, padTop: ix.offset(lastInput) };
+    }
     if (range.start === next.start && range.end === next.end && range.padTop === next.padTop && range.padBottom === next.padBottom) return;
     range = next;
   }

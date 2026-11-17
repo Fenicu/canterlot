@@ -20,6 +20,7 @@
     head,
     children,
     fold,
+    badge,
     reveal = 'вызов'
   }: {
     call: CardCall;
@@ -36,6 +37,8 @@
     live?: boolean;
     head?: Snippet;
     children?: Snippet;
+    /** Отметка рядом со словом состояния: фоновая команда, политика CLI. */
+    badge?: Snippet;
     /** Своё раскрытие вместо сырого вызова: вывод команды, разница файла. */
     fold?: Snippet;
     /** Что раскрывает шеврон, в винительном: «вызов», «вывод», «изменения». */
@@ -53,6 +56,7 @@
     <span class="lead">
       {#if head}{@render head()}{:else}<span class="line">{line}</span>{/if}
     </span>
+    {#if badge}{@render badge()}{/if}
     {#if status}<span class="word" data-tone={tone} data-role="card-state">{#if dot}<span class="dot" data-live={live ? '' : undefined} aria-hidden="true"></span>{/if}{status}</span>{/if}
   </div>
   {#if children}<div class="content">{@render children()}</div>{/if}
@@ -107,7 +111,8 @@
   /* Карточка передала пустой набор: тело без единого элемента не добавляет 8 px под шапкой. */
   .content:not(:has(> *)) { display: none; }
   .fold { display: grid; grid-template-rows: 1fr; }
-  .body { display: flex; flex-direction: column; gap: var(--s2); min-height: 0; overflow: hidden; padding-inline: var(--s2); }
+  /* Тело раскрытой карточки встаёт на ту же колонку, что и шапка, — вывод не гуляет влево. */
+  .body { display: flex; flex-direction: column; gap: var(--s2); min-height: 0; overflow: hidden; padding-inline: var(--s4); }
   .body > :global(:last-child) { margin-bottom: var(--s2); }
   /* Вырастает слева направо, как строка субагента: высота не меняется, лента не перемеряет соседей. */
   .feed-card[data-grows] { animation: card-reveal var(--duration-branch-grow) var(--ease-branch-grow) backwards; }

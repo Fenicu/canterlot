@@ -7,6 +7,7 @@
 </script>
 
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { highlightLines, type CodeToken } from '#lib/render/highlight.js';
 
   let {
@@ -29,10 +30,13 @@
 
   /** Подсветка по строкам; заголовки кусков идут мимо неё, это не код. */
   let painted = $state<(CodeToken[] | null)[] | null>(null);
+  // Карточки пересобираются каждый тик часов, но массив строк при этом тот же по содержимому.
+  // Эффект зависит от подписи кода, а не от личности массива: подсветка не дрожит и не обрывается.
+  const signature = $derived(`${lang ?? ''}\n${lines.map((line) => `${line.kind ?? ''}:${line.text}`).join('\n')}`);
 
   $effect(() => {
-    const source = lines;
-    const language = lang;
+    const language = signature.slice(0, signature.indexOf('\n'));
+    const source = untrack(() => lines);
     painted = null;
     if (!language) return;
     const code = source.filter((line) => line.kind !== 'hunk');

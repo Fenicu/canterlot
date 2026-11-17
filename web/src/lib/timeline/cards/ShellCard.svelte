@@ -1,7 +1,8 @@
 <script lang="ts">
   import { fmt } from '#lib/format/ru.js';
   import ToolOutput from '#lib/timeline/ToolOutput.svelte';
-  import { toolPillText, toolTiming } from '#lib/timeline/present.js';
+  import StatusPill from '#lib/timeline/StatusPill.svelte';
+  import { toolBackground, toolPillText, toolTiming } from '#lib/timeline/present.js';
   import CardShell from './CardShell.svelte';
   import CodeLines from './CodeLines.svelte';
   import CopyButton from './CopyButton.svelte';
@@ -18,11 +19,15 @@
   const timing = $derived(toolTiming(call.block, call.result, env.working, env.background));
   const took = $derived(toolPillText({ running: timing.running, error: false, startedAt: timing.startedAt, finishedAt: timing.finishedAt, now: env.now }));
   const outputLines = $derived(call.result && call.result.state !== 'streaming' ? (call.result.lineCount ?? (call.output ? call.output.split('\n').length : 0)) : 0);
+  const launched = $derived(toolBackground(call.result));
 </script>
 
 <!-- Команда видна всегда, вывод свёрнут: раскрытие показывает его хвост и «Показать полностью». -->
 <CardShell {call} {env} {line} {grows} {quiet} status={word?.word ?? ''} tone={word?.tone ?? 'muted'} reveal="вывод">
   {#snippet head()}<span class="title" data-role="shell-title">{data.description || 'Команда'}</span>{/snippet}
+  {#snippet badge()}
+    {#if env.background || data.background}<StatusPill state="background" text="Фоном" />{:else if launched}<StatusPill state="background" text="В фоне" />{/if}
+  {/snippet}
   <CodeLines lines={shown} lang="bash" label="Команда" />
   <div class="meta" data-role="shell-meta">
     {#if lines.length > SHOWN}
@@ -31,7 +36,6 @@
     {#if data.cwd}<span class="cwd" data-role="shell-cwd">{data.cwd}</span>{/if}
     {#if data.outcome.exit === 0}<span>код 0</span>{/if}
     {#if took}<span data-role="shell-took">{took}</span>{/if}
-    {#if data.background}<span>в фоне</span>{/if}
     {#if outputLines > 0}<span>вывод · {outputLines} {fmt.plural(outputLines, ['строка', 'строки', 'строк'])}</span>{/if}
     <CopyButton text={data.command} label="Скопировать команду" />
   </div>

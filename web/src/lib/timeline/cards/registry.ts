@@ -201,7 +201,11 @@ export function resolveCard(call: CardCall, now: number): ResolvedCard | null {
   return cardDef(call.id)?.resolve(call, now) ?? null;
 }
 
-function defOf(block: Pick<BlockModel, 'toolName' | 'kind'>): AnyCard | null {
+type FoldBlock = Pick<BlockModel, 'toolName' | 'kind'> & { media?: readonly unknown[] };
+
+function defOf(block: FoldBlock): AnyCard | null {
+  // Медиа живёт в обычном блоке инструмента: бледная строка свёртки его не показывает.
+  if (block.media && block.media.length > 0) return null;
   return block.kind === 'tool_call' ? cardDef(toolId(block.toolName)) : null;
 }
 
