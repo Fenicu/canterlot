@@ -246,6 +246,25 @@ pub async fn connect_with(
     capabilities: &[&str],
     clock: u64,
 ) -> Client {
+    connect_with_epoch(
+        hub,
+        seed,
+        journal,
+        capabilities,
+        clock,
+        &format!("test:{}", Uuid::now_v7()),
+    )
+    .await
+}
+
+pub async fn connect_with_epoch(
+    hub: &testkit::TestHub,
+    seed: &Seed,
+    journal: Uuid,
+    capabilities: &[&str],
+    clock: u64,
+    epoch: &str,
+) -> Client {
     use tokio_stream::wrappers::ReceiverStream;
     use tonic::transport::{Certificate, ClientTlsConfig, Endpoint};
     let channel = Endpoint::from_shared(format!("https://{}", hub.addr))
@@ -273,6 +292,7 @@ pub async fn connect_with(
             stream_kind: StreamKind::Control as i32,
             optional_capabilities: capabilities.iter().map(|c| (*c).to_owned()).collect(),
             machine_time_ms: clock,
+            secrets_epoch: epoch.to_owned(),
             ..Default::default()
         })),
     })

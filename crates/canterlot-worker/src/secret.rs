@@ -1,4 +1,4 @@
-//! Файлы секретов на машине сессии: tmpfs, 0700/0600 и ровно один срок жизни.
+//! Файлы секретов на машине сессии: tmpfs, 0700/0600 и поколения вместо попыток.
 //!
 //! Значение приходит одним управляющим сообщением и живёт только здесь, в файле.
 //! Поэтому в этом модуле нет журналирования значения: `Debug`, ошибки и логи
@@ -8,14 +8,16 @@
 //! `*at`-операции с `O_NOFOLLOW`: между проверкой и использованием путь не
 //! переигрывается, а симлинк не уводит запись или уборку за пределы дерева.
 //!
-//! Инвариант: как только хаб записал попытку отозванной, истёкшей, заменённой
-//! или удалённой, файла с её байтами (и с байтами более старой попытки) на
-//! машине нет и он не появится позже — ни при каком порядке сообщений, сбое или
-//! перезапуске. Поэтому отзыв фиксирует попытку в надгробии до удаления, а
-//! доставка отвергает уже терминальную попытку.
+//! Инвариант: как только хаб объявил поколение `g` недействительным (отзыв,
+//! истечение, замена, потеря, конец сессии), на машине не остаётся и не может
+//! появиться ни одного файла с байтами поколения `g` или старше — при любом
+//! порядке сообщений, сбое, перезапуске, переподключении и даже удалении или
+//! восстановлении каталога разговора. Поэтому забор (`fence`) пишется раньше
+//! файла, отзыв поднимает `dead` раньше удаления, а доставка отказывает всему,
+//! что не выше `max(seen, dead)`.
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fmt,
     io::{Read as _, Write as _},
     os::fd::OwnedFd,
@@ -25,13 +27,12 @@ use std::{
 };
 
 use canterlot_proto::worker::v1::{
-    SecretDeliver, SecretDelivered, SecretFailed, SecretManifest, SecretManifests,
-    SecretRemoveFailed, SecretRemoved,
+    SecretDeliver, SecretDelivered, SecretFailed, SecretRemoveFailed, SecretRemoved,
 };
 use rustix::{
     fs::{
-        AtFlags, Dir, FileType, Mode, OFlags, Stat, fstat, fstatfs, mkdirat, open, openat,
-        renameat, statat, unlinkat,
+        AtFlags, Dir, FileType, FlockOperation, Mode, OFlags, Stat, flock, fstat, fstatfs, fsync,
+        mkdirat, open, openat, renameat, statat, unlinkat,
     },
     io::Errno,
 };
@@ -40,22 +41,57 @@ use uuid::Uuid;
 
 use crate::config::SecretConfig;
 
-/// Сколько файл живёт после записи.
+/// Сколько файл живёт после записи, если хаб не назвал свой срок.
 pub const FILE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Забор без значения и без файла переживает файл: 25 часов — это сутки жизни
+/// плюс час запаса, за который отзыв и уборка успевают закрыть запрос.
+pub const FENCE_TTL_MS: u64 = 25 * 60 * 60 * 1000;
 
 /// Все операции над файлами секретов идут по одной: уборка не может встать между
 /// переименованием значения и манифеста или удалить файл свежей доставки.
 static OPERATIONS: Mutex<()> = Mutex::new(());
 
+/// Запросы, у которых забор не записался при отзыве: доставка обязана отказать,
+/// даже если в памяти остался прежний `dead`.
+static REMOVAL_PENDING: Mutex<Option<HashSet<Uuid>>> = Mutex::new(None);
+
 fn operations() -> std::sync::MutexGuard<'static, ()> {
     OPERATIONS.lock().unwrap_or_else(|error| error.into_inner())
+}
+
+fn mark_removal_pending(request_id: Uuid) {
+    let mut pending = REMOVAL_PENDING
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    pending.get_or_insert_with(HashSet::new).insert(request_id);
+}
+
+fn clear_removal_pending(request_id: Uuid) {
+    if let Some(pending) = REMOVAL_PENDING
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .as_mut()
+    {
+        pending.remove(&request_id);
+    }
+}
+
+fn is_removal_pending(request_id: Uuid) -> bool {
+    REMOVAL_PENDING
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .as_ref()
+        .is_some_and(|pending| pending.contains(&request_id))
 }
 
 #[cfg(test)]
 thread_local! {
     /// Тестовый крючок: следующая запись файла падает, не оставляя временного файла.
     static FAIL_NEXT_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// Тестовый крючок: переименование значения падает после публикации манифеста.
+    /// Тестовый крючок: следующая запись забора падает.
+    static FAIL_NEXT_FENCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Тестовый крючок: переименование значения падает после публикации забора.
     static FAIL_VALUE_COMMIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
@@ -66,6 +102,16 @@ fn take_write_failure() -> bool {
 
 #[cfg(not(test))]
 fn take_write_failure() -> bool {
+    false
+}
+
+#[cfg(test)]
+fn take_fence_failure() -> bool {
+    FAIL_NEXT_FENCE.with(|flag| flag.replace(false))
+}
+
+#[cfg(not(test))]
+fn take_fence_failure() -> bool {
     false
 }
 
@@ -88,12 +134,14 @@ pub enum Failure {
     NotTmpfs,
     /// Каталог не 0700, не принадлежит воркеру или является симлинком.
     InsecureDirectory,
-    /// Записать или переименовать файл не удалось.
+    /// Записать, переименовать или прочитать файл не удалось.
     Io,
-    /// Манифест не читается или не совпадает с файлом.
+    /// Манифест или забор не читается либо противоречит файлу.
     Manifest,
-    /// Попытка уже отозвана или заменена более новой.
+    /// Поколение уже отозвано или заменено более новым.
     StaleAttempt,
+    /// Отзыв этого запроса не смог записать забор: доставка запрещена до повтора.
+    RemovalPending,
     /// Разговор, которого воркер не ведёт: файл писать некуда.
     UnknownConversation,
 }
@@ -108,6 +156,7 @@ impl Failure {
             Self::Io => "io",
             Self::Manifest => "manifest",
             Self::StaleAttempt => "stale_attempt",
+            Self::RemovalPending => "removal_pending",
             Self::UnknownConversation => "unknown_conversation",
         }
     }
@@ -127,68 +176,41 @@ pub struct Written {
     pub conversation_id: Uuid,
 }
 
-/// Манифест рядом с файлом: только адреса и срок, значения нет.
+/// Манифест рядом с файлом: только поколение и срок, значения нет.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Manifest {
-    attempt_id: Uuid,
-    conversation_id: Uuid,
+    generation: u64,
     expires_at_ms: u64,
 }
 
-/// Надгробие запроса: только метаданные. Оно переживает файл и не даёт повторной
-/// доставке воскресить отозванное или затереть более новое значение.
+/// Забор запроса: переживает файл и каталог разговора, лежит вне их.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct Tombstone {
-    request_id: Uuid,
+struct Fence {
     conversation_id: Uuid,
     #[serde(default)]
-    accepted: Option<Uuid>,
+    seen: u64,
     #[serde(default)]
-    terminal: Vec<Uuid>,
+    dead: u64,
+    #[serde(default)]
+    updated_at: u64,
 }
 
-impl Tombstone {
-    fn new(request_id: Uuid, conversation_id: Uuid) -> Self {
+impl Fence {
+    fn new(conversation_id: Uuid) -> Self {
         Self {
-            request_id,
             conversation_id,
-            accepted: None,
-            terminal: Vec::new(),
-        }
-    }
-
-    fn is_terminal(&self, attempt_id: Uuid) -> bool {
-        self.terminal.contains(&attempt_id)
-    }
-
-    fn supersede(&mut self, attempt_id: Uuid) {
-        if !self.terminal.contains(&attempt_id) {
-            self.terminal.push(attempt_id);
-        }
-        if self.accepted == Some(attempt_id) {
-            self.accepted = None;
+            seen: 0,
+            dead: 0,
+            updated_at: 0,
         }
     }
 }
 
+/// Подтверждённое удаление или отказ: «удалено» без проверки не выдаётся.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Removal {
     Removed,
-    /// Файла уже нет: отзыв повторный, повтор безвреден.
-    Missing,
-    /// Манифест принадлежит другой попытке: чужой файл не трогаем.
-    Stale,
-    /// Удалить не удалось: манифест остаётся, уборка повторит.
     Failed,
-}
-
-impl Removal {
-    fn reason(self) -> &'static str {
-        match self {
-            Self::Removed | Self::Missing | Self::Stale => "revoked",
-            Self::Failed => "io",
-        }
-    }
 }
 
 fn uid() -> u32 {
@@ -200,6 +222,10 @@ const BASE_FLAGS: OFlags = OFlags::RDONLY
     .union(OFlags::DIRECTORY)
     .union(OFlags::NOFOLLOW)
     .union(OFlags::CLOEXEC);
+
+fn now_ms() -> u64 {
+    u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0)
+}
 
 /// Открытый и проверенный каталог: дальше все пути считаются от этого fd.
 #[derive(Debug)]
@@ -240,15 +266,23 @@ impl PinnedDir {
         &self.fd
     }
 
+    /// Перебор каталога: ошибка чтения — ошибка, а не пустой список. Иначе
+    /// удаление подтвердило бы отсутствие файла, которого просто не увидели.
     fn entries(&self) -> Result<Vec<String>, Failure> {
-        let dir = Dir::read_from(&self.fd).map_err(|_| Failure::Io)?;
-        Ok(dir
-            .flatten()
-            .filter_map(|entry| {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                (!name.is_empty() && name != "." && name != "..").then_some(name)
-            })
-            .collect())
+        let mut dir = Dir::read_from(&self.fd).map_err(|_| Failure::Io)?;
+        let mut names = Vec::new();
+        while let Some(entry) = dir.read() {
+            let entry = entry.map_err(|_| Failure::Io)?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.is_empty() && name != "." && name != ".." {
+                names.push(name);
+            }
+        }
+        Ok(names)
+    }
+
+    fn is_empty(&self) -> Result<bool, Failure> {
+        Ok(self.entries()?.is_empty())
     }
 }
 
@@ -285,12 +319,25 @@ impl ConversationDir {
     }
 
     fn open(base: &PinnedDir, root: &Path, conversation_id: Uuid) -> Result<Self, Failure> {
+        Self::open_opt(base, root, conversation_id)?.ok_or(Failure::InsecureDirectory)
+    }
+
+    /// `Ok(None)` — каталога нет: файлов в нём тоже нет, отсутствие проверено.
+    fn open_opt(
+        base: &PinnedDir,
+        root: &Path,
+        conversation_id: Uuid,
+    ) -> Result<Option<Self>, Failure> {
         let name = conversation_id.to_string();
-        Ok(Self {
-            dir: PinnedDir::open_at(base.fd(), &name)?,
-            conversation_id,
-            root: root.to_path_buf(),
-        })
+        match openat(base.fd(), &name, BASE_FLAGS, Mode::empty()) {
+            Ok(fd) => Ok(Some(Self {
+                dir: PinnedDir::verify(fd)?,
+                conversation_id,
+                root: root.to_path_buf(),
+            })),
+            Err(Errno::NOENT) => Ok(None),
+            Err(_) => Err(Failure::InsecureDirectory),
+        }
     }
 
     fn fd(&self) -> &OwnedFd {
@@ -302,20 +349,40 @@ impl ConversationDir {
     }
 }
 
-fn manifest_name(request_id: Uuid) -> String {
-    format!("{request_id}.json")
-}
-
-fn tombstone_name(request_id: Uuid) -> String {
-    format!("{request_id}.tomb.json")
+/// Базовый каталог под замком: mutex процесса плюс `flock` на `$base/.lock`,
+/// поэтому запись одна и внутри воркера, и между процессами.
+struct BaseLock {
+    base: PinnedDir,
+    root: PathBuf,
+    _lock: std::fs::File,
 }
 
 fn value_name(request_id: Uuid) -> String {
     request_id.to_string()
 }
 
-fn temp_name(request_id: Uuid, kind: &str, attempt_id: Uuid) -> String {
-    format!(".{request_id}.{kind}.tmp-{attempt_id}")
+fn manifest_name(request_id: Uuid) -> String {
+    format!("{request_id}.json")
+}
+
+fn value_temp_name(request_id: Uuid, generation: u64) -> String {
+    format!(".{request_id}.{generation}.tmp")
+}
+
+fn manifest_temp_name(request_id: Uuid, generation: u64) -> String {
+    format!(".{request_id}.{generation}.json.tmp")
+}
+
+fn fence_name(request_id: Uuid) -> String {
+    format!("{request_id}.json")
+}
+
+fn is_temp_for(name: &str, request_id: Uuid) -> bool {
+    name.len() > 1 && name.starts_with(&format!(".{request_id}.")) && name.ends_with(".tmp")
+}
+
+fn is_abandoned_temp(name: &str) -> bool {
+    name.starts_with('.') && name.ends_with(".tmp")
 }
 
 /// `Ok(None)` — файла нет; ошибка открытия или чтения — `Err`: отсутствие и сбой
@@ -338,7 +405,7 @@ fn read_opt(dir: &OwnedFd, name: &str) -> Result<Option<Vec<u8>>, Failure> {
 }
 
 /// `O_CREAT|O_EXCL|O_NOFOLLOW` и 0600: чужой файл не подменить симлинком.
-fn write_new_at(dir: &OwnedFd, name: &str, bytes: &[u8]) -> Result<(), Failure> {
+fn write_new_at(dir: &OwnedFd, name: &str, bytes: &[u8], value: bool) -> Result<(), Failure> {
     let fd = openat(
         dir,
         name,
@@ -351,7 +418,7 @@ fn write_new_at(dir: &OwnedFd, name: &str, bytes: &[u8]) -> Result<(), Failure> 
     )
     .map_err(|_| Failure::Io)?;
     let mut file = std::fs::File::from(fd);
-    if take_write_failure() {
+    if value && take_write_failure() {
         return Err(Failure::Io);
     }
     file.write_all(bytes).map_err(|_| Failure::Io)?;
@@ -364,6 +431,8 @@ struct TempFile<'a> {
     dir: &'a OwnedFd,
     name: String,
     armed: bool,
+    /// Только значение проходит тестовый крючок отказа записи; забор — нет.
+    value: bool,
 }
 
 impl<'a> TempFile<'a> {
@@ -372,11 +441,21 @@ impl<'a> TempFile<'a> {
             dir,
             name,
             armed: true,
+            value: true,
+        }
+    }
+
+    fn fence(dir: &'a OwnedFd, name: String) -> Self {
+        Self {
+            dir,
+            name,
+            armed: true,
+            value: false,
         }
     }
 
     fn write(&self, bytes: &[u8]) -> Result<(), Failure> {
-        write_new_at(self.dir, &self.name, bytes)
+        write_new_at(self.dir, &self.name, bytes, self.value)
     }
 
     fn commit(mut self, destination: &str) -> Result<(), Failure> {
@@ -403,8 +482,10 @@ fn read_manifest(dir: &OwnedFd, request_id: Uuid) -> Result<Option<Manifest>, Fa
     }
 }
 
-fn read_tombstone(dir: &OwnedFd, request_id: Uuid) -> Result<Option<Tombstone>, Failure> {
-    match read_opt(dir, &tombstone_name(request_id))? {
+/// `Ok(None)` — забора нет; нечитаемый или испорченный забор — `Err`: доставка
+/// и отзыв тогда отказывают закрыто, а не угадывают поколения.
+fn read_fence(fences: &PinnedDir, request_id: Uuid) -> Result<Option<Fence>, Failure> {
+    match read_opt(fences.fd(), &fence_name(request_id))? {
         Some(bytes) => serde_json::from_slice(&bytes)
             .map(Some)
             .map_err(|_| Failure::Manifest),
@@ -412,33 +493,29 @@ fn read_tombstone(dir: &OwnedFd, request_id: Uuid) -> Result<Option<Tombstone>, 
     }
 }
 
-/// Надгробие запроса, при необходимости созданное: пустые id заменяются на
-/// известные команде, чтобы отзыв работал и до первой доставки.
-fn tombstone_for(
-    dir: &OwnedFd,
-    request_id: Uuid,
-    conversation_id: Uuid,
-) -> Result<Tombstone, Failure> {
-    let mut tombstone = read_tombstone(dir, request_id)?
-        .unwrap_or_else(|| Tombstone::new(request_id, conversation_id));
-    if tombstone.request_id == Uuid::nil() {
-        tombstone.request_id = request_id;
+/// Атомарная запись забора: временный файл, fsync, rename, fsync каталога.
+fn write_fence(fences: &PinnedDir, request_id: Uuid, fence: &Fence) -> Result<(), Failure> {
+    let encoded = serde_json::to_vec(fence).map_err(|_| Failure::Manifest)?;
+    if take_fence_failure() {
+        return Err(Failure::Io);
     }
-    if tombstone.conversation_id == Uuid::nil() {
-        tombstone.conversation_id = conversation_id;
-    }
-    Ok(tombstone)
-}
-
-fn write_tombstone(dir: &OwnedFd, request_id: Uuid, tombstone: &Tombstone) -> Result<(), Failure> {
-    let encoded = serde_json::to_vec(tombstone).map_err(|_| Failure::Manifest)?;
-    let temp = TempFile::new(dir, temp_name(request_id, "tomb", Uuid::nil()));
+    let temp = TempFile::fence(
+        fences.fd(),
+        format!(".fence-{request_id}-{}.tmp", Uuid::now_v7()),
+    );
     temp.write(&encoded)?;
-    temp.commit(&tombstone_name(request_id))
+    temp.commit(&fence_name(request_id))?;
+    fsync(fences.fd()).map_err(|_| Failure::Io)?;
+    Ok(())
 }
 
-fn entry_stat(dir: &OwnedFd, name: &str) -> Option<Stat> {
-    statat(dir, name, AtFlags::SYMLINK_NOFOLLOW).ok()
+/// `Ok(None)` — файла нет; ошибка проверки — `Err`, а не «нет файла».
+fn entry_stat(dir: &OwnedFd, name: &str) -> Result<Option<Stat>, Failure> {
+    match statat(dir, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(stat) => Ok(Some(stat)),
+        Err(Errno::NOENT) => Ok(None),
+        Err(_) => Err(Failure::Io),
+    }
 }
 
 fn is_regular(stat: &Stat) -> bool {
@@ -488,213 +565,350 @@ fn open_base(config: &SecretConfig) -> Result<(PinnedDir, PathBuf), Failure> {
     Ok((pinned, base))
 }
 
-/// Сохраняет манифест до значения: файл значения не существует без манифеста.
-/// Прежняя попытка сначала становится тупиковой и теряет свои файлы, поэтому
-/// падение между шагами не оставит новому манифесту старые байты.
-pub fn write(
+fn lock_base(config: &SecretConfig) -> Result<BaseLock, Failure> {
+    let (base, root) = open_base(config)?;
+    let fd = openat(
+        base.fd(),
+        ".lock",
+        OFlags::CREATE
+            .union(OFlags::RDWR)
+            .union(OFlags::NOFOLLOW)
+            .union(OFlags::CLOEXEC),
+        Mode::from_bits_truncate(0o600),
+    )
+    .map_err(|_| Failure::Io)?;
+    let lock = std::fs::File::from(fd);
+    flock(&lock, FlockOperation::LockExclusive).map_err(|_| Failure::Io)?;
+    Ok(BaseLock {
+        base,
+        root,
+        _lock: lock,
+    })
+}
+
+/// Каталог заборов лежит вне каталогов разговоров: удаление или восстановление
+/// разговора не может вернуть отозванное поколение.
+fn open_fences(base: &PinnedDir) -> Result<PinnedDir, Failure> {
+    match mkdirat(base.fd(), ".fences", Mode::from_bits_truncate(0o700)) {
+        Ok(()) | Err(Errno::EXIST) => {}
+        Err(_) => return Err(Failure::Io),
+    }
+    PinnedDir::open_at(base.fd(), ".fences")
+}
+
+/// Эпоха хранилища: загрузка плюс inode базового каталога. Новая эпоха означает,
+/// что tmpfs очищен и прежних файлов нет, даже если строки хаба говорят иное.
+pub fn epoch(config: &SecretConfig, boot_id: &str) -> String {
+    let inode = open_base(config)
+        .ok()
+        .and_then(|(base, _)| fstat(base.fd()).ok())
+        .map(|stat| stat.st_ino)
+        .unwrap_or(0);
+    format!("{boot_id}:{inode}")
+}
+
+/// Публикует файл поколения `generation`: забор первым, манифест последним.
+///
+/// Отказ до записи забора оставляет диск нетронутым; отказ после — убирает
+/// временные файлы и значение, если манифест на диске не это поколение.
+pub fn deliver(
     config: &SecretConfig,
     request: &SecretDeliver,
     live: &HashSet<Uuid>,
 ) -> Result<Written, Failure> {
     let _operations = operations();
     let request_id = Uuid::parse_str(&request.request_id).map_err(|_| Failure::Manifest)?;
-    let attempt_id = Uuid::parse_str(&request.attempt_id).map_err(|_| Failure::Manifest)?;
     let conversation_id =
         Uuid::parse_str(&request.conversation_id).map_err(|_| Failure::Manifest)?;
+    if request.generation == 0 {
+        return Err(Failure::Manifest);
+    }
     if !live.contains(&conversation_id) {
         return Err(Failure::UnknownConversation);
     }
-    let (base, root) = open_base(config)?;
-    let dir = ConversationDir::ensure(&base, &root, conversation_id)?;
+    if is_removal_pending(request_id) {
+        return Err(Failure::RemovalPending);
+    }
+    let lock = lock_base(config)?;
+    let fences = open_fences(&lock.base)?;
 
-    let mut tombstone = tombstone_for(dir.fd(), request_id, conversation_id)?;
-    if tombstone.is_terminal(attempt_id) {
+    let mut fence = match read_fence(&fences, request_id)? {
+        Some(fence) => {
+            if fence.conversation_id != conversation_id {
+                return Err(Failure::Manifest);
+            }
+            fence
+        }
+        None => Fence::new(conversation_id),
+    };
+    let generation = request.generation;
+    if generation < fence.seen || generation <= fence.dead {
         return Err(Failure::StaleAttempt);
     }
-
-    // Повтор той же принятой попытки: файл уже на месте, срок не сбрасывается.
-    if tombstone.accepted == Some(attempt_id) {
-        match read_manifest(dir.fd(), request_id)? {
-            Some(manifest)
-                if manifest.attempt_id == attempt_id
-                    && entry_stat(dir.fd(), &value_name(request_id))
-                        .is_some_and(|stat| is_regular(&stat)) =>
-            {
-                return Ok(Written {
-                    path: dir.path(&value_name(request_id)),
-                    expires_at_ms: manifest.expires_at_ms,
-                    conversation_id,
-                });
-            }
-            // Манифест не успел или принадлежит прежней попытке: значение
-            // дописывается заново, старые байты не считаются принятыми.
-            _ => {}
-        }
+    if generation == fence.seen {
+        // Повтор уже опубликованного поколения: файл не перезаписывается и срок
+        // не продлевается. Иначе повтор после частичного сбоя дал бы новый срок.
+        return match published(&lock, conversation_id, request_id, generation) {
+            Some(expires_at_ms) => Ok(Written {
+                path: conversation_path(&lock, conversation_id, &value_name(request_id)),
+                expires_at_ms,
+                conversation_id,
+            }),
+            None => Err(Failure::StaleAttempt),
+        };
     }
 
-    // Новая попытка заменяет прежнюю: прежняя становится тупиковой и не воскреснет,
-    // а её файлы уходят до записи нового значения.
-    let mut retired: Vec<Uuid> = Vec::new();
-    if let Some(previous) = tombstone
-        .accepted
-        .filter(|previous| *previous != attempt_id)
-    {
-        retired.push(previous);
-    }
-    if let Some(manifest) = read_manifest(dir.fd(), request_id)?
-        && manifest.attempt_id != attempt_id
-    {
-        retired.push(manifest.attempt_id);
-    }
-    retired.sort_unstable();
-    retired.dedup();
-    if !retired.is_empty() {
-        for previous in &retired {
-            tombstone.supersede(*previous);
+    // Забор раньше файла: падение между ними не даст доставке воскресить
+    // отозванное поколение, а восстановление увидит несовпадение и уберёт файл.
+    fence.seen = generation;
+    fence.updated_at = now_ms();
+    write_fence(&fences, request_id, &fence)?;
+
+    let dir = match ConversationDir::ensure(&lock.base, &lock.root, conversation_id) {
+        Ok(dir) => dir,
+        Err(error) => {
+            retire_unpublished(&lock, conversation_id, request_id, generation);
+            return Err(error);
         }
-        // Надгробие раньше файлов: упав между ними, повторная доставка прежней
-        // попытки уже будет отвергнута.
-        write_tombstone(dir.fd(), request_id, &tombstone)?;
-        for _ in &retired {
-            let _ = unlinkat(dir.fd(), value_name(request_id), AtFlags::empty());
+    };
+    let manifest = Manifest {
+        generation,
+        expires_at_ms: request.expires_at_ms,
+    };
+    let encoded = match serde_json::to_vec(&manifest) {
+        Ok(encoded) => encoded,
+        Err(_) => {
+            retire_unpublished(&lock, conversation_id, request_id, generation);
+            return Err(Failure::Manifest);
+        }
+    };
+    let published = (|| -> Result<(), Failure> {
+        let value_temp = TempFile::new(dir.fd(), value_temp_name(request_id, generation));
+        value_temp.write(&request.value)?;
+        let manifest_temp = TempFile::new(dir.fd(), manifest_temp_name(request_id, generation));
+        manifest_temp.write(&encoded)?;
+        if take_value_commit_failure() {
+            return Err(Failure::Io);
+        }
+        value_temp.commit(&value_name(request_id))?;
+        manifest_temp.commit(&manifest_name(request_id))?;
+        fsync(dir.fd()).map_err(|_| Failure::Io)
+    })();
+    if let Err(error) = published {
+        retire_unpublished(&lock, conversation_id, request_id, generation);
+        return Err(error);
+    }
+    Ok(Written {
+        path: dir.path(&value_name(request_id)),
+        expires_at_ms: request.expires_at_ms,
+        conversation_id,
+    })
+}
+
+fn conversation_path(root: &BaseLock, conversation_id: Uuid, name: &str) -> PathBuf {
+    root.root.join(conversation_id.to_string()).join(name)
+}
+
+/// Срок опубликованного поколения; `None` — файла или манифеста этого поколения
+/// нет, и повтор доставки не может считаться принятым.
+fn published(
+    lock: &BaseLock,
+    conversation_id: Uuid,
+    request_id: Uuid,
+    generation: u64,
+) -> Option<u64> {
+    let dir = ConversationDir::open(&lock.base, &lock.root, conversation_id).ok()?;
+    let manifest = read_manifest(dir.fd(), request_id).ok().flatten()?;
+    if manifest.generation != generation {
+        return None;
+    }
+    if !entry_stat(dir.fd(), &value_name(request_id))
+        .ok()
+        .flatten()
+        .is_some_and(|stat| is_regular(&stat))
+    {
+        return None;
+    }
+    Some(manifest.expires_at_ms)
+}
+
+/// Неполная публикация: если манифест на диске не это поколение, значение
+/// удаляется консервативно — чужие байты не должны остаться под нашим забором.
+fn retire_unpublished(lock: &BaseLock, conversation_id: Uuid, request_id: Uuid, generation: u64) {
+    let Ok(Some(dir)) = ConversationDir::open_opt(&lock.base, &lock.root, conversation_id) else {
+        return;
+    };
+    let same = read_manifest(dir.fd(), request_id)
+        .ok()
+        .flatten()
+        .is_some_and(|manifest| manifest.generation == generation);
+    if !same {
+        let _ = unlinkat(dir.fd(), value_name(request_id), AtFlags::empty());
+        if !read_manifest(dir.fd(), request_id).ok().flatten().is_some() {
             let _ = unlinkat(dir.fd(), manifest_name(request_id), AtFlags::empty());
         }
     }
-
-    let expires_at_ms = u64::try_from(
-        chrono::Utc::now()
-            .checked_add_signed(chrono::TimeDelta::seconds(FILE_TTL.as_secs() as i64))
-            .unwrap_or_else(chrono::Utc::now)
-            .timestamp_millis(),
-    )
-    .unwrap_or(0);
-    let manifest = Manifest {
-        attempt_id,
-        conversation_id,
-        expires_at_ms,
-    };
-    let encoded_manifest = serde_json::to_vec(&manifest).map_err(|_| Failure::Manifest)?;
-    tombstone.accepted = Some(attempt_id);
-    let encoded_tombstone = serde_json::to_vec(&tombstone).map_err(|_| Failure::Manifest)?;
-
-    let value_temp = TempFile::new(dir.fd(), temp_name(request_id, "value", attempt_id));
-    value_temp.write(&request.value)?;
-    let manifest_temp = TempFile::new(dir.fd(), temp_name(request_id, "manifest", attempt_id));
-    manifest_temp.write(&encoded_manifest)?;
-    let tomb_temp = TempFile::new(dir.fd(), temp_name(request_id, "tomb", attempt_id));
-    tomb_temp.write(&encoded_tombstone)?;
-
-    // Манифест и надгробие встают раньше значения: значение всегда опознано.
-    tomb_temp.commit(&tombstone_name(request_id))?;
-    manifest_temp.commit(&manifest_name(request_id))?;
-    if take_value_commit_failure() {
-        return Err(Failure::Io);
-    }
-    value_temp.commit(&value_name(request_id))?;
-    Ok(Written {
-        path: dir.path(&value_name(request_id)),
-        expires_at_ms,
-        conversation_id,
-    })
-}
-
-fn remove_in_dir(
-    dir: &ConversationDir,
-    request_id: Uuid,
-    attempt_id: Uuid,
-) -> Result<Removal, Failure> {
-    let manifest = read_manifest(dir.fd(), request_id)?;
-    let mut tombstone = tombstone_for(dir.fd(), request_id, dir.conversation_id)?;
-
-    // Отзыв всегда фиксирует попытку терминальной, даже если значения и манифеста
-    // ещё нет: иначе опоздавшая доставка воскресила бы файл после «отозван».
-    if !tombstone.is_terminal(attempt_id) {
-        tombstone.supersede(attempt_id);
-        if let Err(error) = write_tombstone(dir.fd(), request_id, &tombstone) {
-            // Надгробие не записалось (например, кончилось место): файл всё равно
-            // убираем, а хаб по ошибке повторит отзыв и допишет надгробие.
-            if manifest
-                .as_ref()
-                .is_none_or(|manifest| manifest.attempt_id == attempt_id)
-            {
-                let _ = unlinkat(dir.fd(), value_name(request_id), AtFlags::empty());
-                let _ = unlinkat(dir.fd(), manifest_name(request_id), AtFlags::empty());
-            }
-            return Err(error);
+    for name in dir.dir.entries().unwrap_or_default() {
+        if is_temp_for(&name, request_id) {
+            let _ = unlinkat(dir.fd(), &name, AtFlags::empty());
         }
     }
-
-    let Some(manifest) = manifest else {
-        // Манифеста нет: значения по контракту быть не должно, но файл мог
-        // остаться от прерванной записи. Его удаление и есть подтверждение.
-        let removed = match unlinkat(dir.fd(), value_name(request_id), AtFlags::empty()) {
-            Ok(()) => true,
-            Err(Errno::NOENT) => false,
-            Err(_) => return Ok(Removal::Failed),
-        };
-        return Ok(if removed {
-            Removal::Removed
-        } else {
-            Removal::Missing
-        });
-    };
-    if manifest.attempt_id != attempt_id {
-        return Ok(Removal::Stale);
-    }
-    let removed = match unlinkat(dir.fd(), value_name(request_id), AtFlags::empty()) {
-        Ok(()) => true,
-        Err(Errno::NOENT) => false,
-        Err(_) => return Ok(Removal::Failed),
-    };
-    if let Err(error) = unlinkat(dir.fd(), manifest_name(request_id), AtFlags::empty())
-        && error != Errno::NOENT
-    {
-        return Ok(Removal::Failed);
-    }
-    Ok(if removed {
-        Removal::Removed
-    } else {
-        Removal::Missing
-    })
 }
 
-/// Удаляет файл и манифест в каталоге названного разговора. `Missing` — только
-/// проверенное отсутствие после успешной записи надгробия; любой сбой проверки
-/// даёт `Failed`, чтобы хаб не объявил «отозван» без доказательства.
-pub fn remove(
+/// Поднимает `dead` и `seen` до `up_to`, затем убирает файл и манифест, если
+/// манифест не новее `up_to` (или не читается, или принадлежит другому разговору).
+/// `Removed` выдаётся только после проверки отсутствия и успешной записи забора.
+pub fn revoke(
     config: &SecretConfig,
     conversation_id: Uuid,
     request_id: Uuid,
-    attempt_id: Uuid,
+    up_to: u64,
+    _reason: &str,
 ) -> Removal {
     let _operations = operations();
-    let Ok((base, root)) = open_base(config) else {
-        return Removal::Failed;
+    let lock = match lock_base(config) {
+        Ok(lock) => lock,
+        Err(_) => {
+            mark_removal_pending(request_id);
+            return Removal::Failed;
+        }
     };
-    let Ok(dir) = ConversationDir::ensure(&base, &root, conversation_id) else {
-        return Removal::Failed;
+    let fences = match open_fences(&lock.base) {
+        Ok(fences) => fences,
+        Err(_) => {
+            mark_removal_pending(request_id);
+            return Removal::Failed;
+        }
     };
-    remove_in_dir(&dir, request_id, attempt_id).unwrap_or(Removal::Failed)
+    let fence_ok = match read_fence(&fences, request_id) {
+        Ok(fence) => {
+            let mut fence = fence.unwrap_or_else(|| Fence::new(conversation_id));
+            if fence.conversation_id != conversation_id {
+                false
+            } else {
+                fence.dead = fence.dead.max(up_to);
+                fence.seen = fence.seen.max(up_to);
+                fence.updated_at = now_ms();
+                match write_fence(&fences, request_id, &fence) {
+                    Ok(()) => true,
+                    Err(_) => {
+                        mark_removal_pending(request_id);
+                        false
+                    }
+                }
+            }
+        }
+        Err(_) => {
+            // Забор не читается: не перезаписываем его вслепую (можно потерять
+            // большее `dead`), но файл всё равно убираем.
+            mark_removal_pending(request_id);
+            false
+        }
+    };
+    let removed = revoke_locked(&lock, request_id, conversation_id, up_to);
+    if fence_ok && removed {
+        clear_removal_pending(request_id);
+        Removal::Removed
+    } else {
+        Removal::Failed
+    }
 }
 
-/// Метаданные всех файлов: хаб сверяет `sending` после переподключения.
-pub fn manifests(config: &SecretConfig, snapshot_id: &str) -> SecretManifests {
-    let _operations = operations();
-    let mut items = Vec::new();
-    let Ok((base, root)) = open_base(config) else {
-        return SecretManifests {
-            manifests: items,
-            snapshot_id: snapshot_id.to_owned(),
-        };
+fn revoke_locked(lock: &BaseLock, request_id: Uuid, conversation_id: Uuid, up_to: u64) -> bool {
+    let Some(dir) = (match ConversationDir::open_opt(&lock.base, &lock.root, conversation_id) {
+        Ok(dir) => dir,
+        Err(_) => return false,
+    }) else {
+        // Каталога нет — файлов в нём тоже нет. Проверять больше нечего.
+        return true;
     };
-    let Ok(entries) = base.entries() else {
-        return SecretManifests {
-            manifests: items,
-            snapshot_id: snapshot_id.to_owned(),
-        };
+    let manifest = read_manifest(dir.fd(), request_id);
+    let manifest = match manifest {
+        Ok(manifest) => manifest,
+        Err(_) => None,
+    };
+    let covers = manifest
+        .as_ref()
+        .is_some_and(|manifest| manifest.generation <= up_to);
+    if manifest.is_none() || covers {
+        match unlinkat(dir.fd(), value_name(request_id), AtFlags::empty()) {
+            Ok(()) | Err(Errno::NOENT) => {}
+            Err(_) => return false,
+        }
+        match unlinkat(dir.fd(), manifest_name(request_id), AtFlags::empty()) {
+            Ok(()) | Err(Errno::NOENT) => {}
+            Err(_) => return false,
+        }
+    }
+    for name in match dir.dir.entries() {
+        Ok(names) => names,
+        Err(_) => return false,
+    } {
+        if is_temp_for(&name, request_id)
+            && !matches!(
+                unlinkat(dir.fd(), &name, AtFlags::empty()),
+                Ok(()) | Err(Errno::NOENT)
+            )
+        {
+            return false;
+        }
+    }
+    // Проверка, а не вера в unlink: отсутствие подтверждается тем же fd.
+    if manifest.is_none() || covers {
+        match entry_stat(dir.fd(), &value_name(request_id)) {
+            Ok(None) => {}
+            Ok(Some(_)) | Err(_) => return false,
+        }
+    }
+    for name in match dir.dir.entries() {
+        Ok(names) => names,
+        Err(_) => return false,
+    } {
+        if is_temp_for(&name, request_id) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Что восстановление нашло и убрало; нужно только для журнала.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Recovered {
+    pub temps: u64,
+    pub values: u64,
+    pub failed: u64,
+}
+
+/// Восстановление до приёма любых доставок: брошенные временные файлы, значения
+/// без манифеста, значения мёртвого поколения и неполной публикации.
+pub fn recover(config: &SecretConfig) -> Recovered {
+    let _operations = operations();
+    let mut stats = Recovered::default();
+    let Ok(lock) = lock_base(config) else {
+        return stats;
+    };
+    let Ok(fences) = open_fences(&lock.base) else {
+        stats.failed += 1;
+        return stats;
+    };
+    let Ok(names) = fences.entries() else {
+        stats.failed += 1;
+        return stats;
+    };
+    for name in names {
+        if is_abandoned_temp(&name) && unlinkat(fences.fd(), &name, AtFlags::empty()).is_ok() {
+            stats.temps += 1;
+        }
+    }
+    let Ok(entries) = lock.base.entries() else {
+        stats.failed += 1;
+        return stats;
     };
     for name in entries {
-        let Some(stat) = entry_stat(base.fd(), &name) else {
+        if name == ".fences" || name == ".lock" {
+            continue;
+        }
+        let Some(stat) = entry_stat(lock.base.fd(), &name).ok().flatten() else {
             continue;
         };
         if !is_directory(&stat) || is_symlink(&stat) {
@@ -703,303 +917,228 @@ pub fn manifests(config: &SecretConfig, snapshot_id: &str) -> SecretManifests {
         let Ok(conversation_id) = Uuid::parse_str(&name) else {
             continue;
         };
-        let Ok(dir) = ConversationDir::open(&base, &root, conversation_id) else {
+        let Ok(dir) = ConversationDir::open(&lock.base, &lock.root, conversation_id) else {
+            stats.failed += 1;
             continue;
         };
         let Ok(files) = dir.dir.entries() else {
+            stats.failed += 1;
             continue;
         };
         for file in files {
-            let Some(request) = file.strip_suffix(".json") else {
-                continue;
-            };
-            if request.is_empty() || request.starts_with('.') || request.ends_with(".tomb") {
-                continue;
-            }
-            let Ok(request_id) = Uuid::parse_str(request) else {
-                continue;
-            };
-            let Some(manifest) = read_manifest(dir.fd(), request_id).ok().flatten() else {
-                continue;
-            };
-            if manifest.conversation_id != conversation_id {
+            if is_abandoned_temp(&file) {
+                if unlinkat(dir.fd(), &file, AtFlags::empty()).is_ok() {
+                    stats.temps += 1;
+                } else {
+                    stats.failed += 1;
+                }
                 continue;
             }
-            // Отчитываемся только о принятой попытке: манифест, оставшийся от
-            // прежней или терминальной попытки, не описывает байты на диске.
-            let Some(tombstone) = read_tombstone(dir.fd(), request_id).ok().flatten() else {
+            let Ok(request_id) = Uuid::parse_str(&file) else {
                 continue;
             };
-            if tombstone.is_terminal(manifest.attempt_id)
-                || tombstone.accepted != Some(manifest.attempt_id)
-            {
+            let fence = match read_fence(&fences, request_id) {
+                Ok(fence) => fence.unwrap_or_else(|| Fence::new(conversation_id)),
+                // Испорченный забор: доставки всё равно откажут, файл не трогаем.
+                Err(_) => {
+                    stats.failed += 1;
+                    continue;
+                }
+            };
+            let manifest = read_manifest(dir.fd(), request_id);
+            let retire = match &manifest {
+                Ok(Some(manifest)) => {
+                    manifest.generation <= fence.dead || manifest.generation != fence.seen
+                }
+                // Манифеста нет или он испорчен: опознать байты нечем.
+                Ok(None) | Err(_) => true,
+            };
+            if !retire {
                 continue;
             }
-            let value = value_name(request_id);
-            if !entry_stat(dir.fd(), &value).is_some_and(|stat| is_regular(&stat)) {
-                continue;
+            let unlinked = unlinkat(dir.fd(), &file, AtFlags::empty()).is_ok();
+            let manifest_unlinked = matches!(
+                unlinkat(dir.fd(), &manifest_name(request_id), AtFlags::empty()),
+                Ok(()) | Err(Errno::NOENT)
+            );
+            if unlinked && manifest_unlinked {
+                stats.values += 1;
+            } else {
+                stats.failed += 1;
             }
-            items.push(SecretManifest {
-                attempt_id: manifest.attempt_id.to_string(),
-                request_id: request_id.to_string(),
-                conversation_id: manifest.conversation_id.to_string(),
-                path: dir.path(&value).display().to_string(),
-                expires_at_ms: manifest.expires_at_ms,
-            });
         }
     }
-    SecretManifests {
-        manifests: items,
-        snapshot_id: snapshot_id.to_owned(),
-    }
+    stats
 }
 
-/// Что уборка нашла и убрала: каждый известный файл отчитывается отдельно.
-#[derive(Debug, Default)]
+/// Что уборка нашла и убрала.
+#[derive(Debug, Default, Clone)]
 pub struct Swept {
     pub removed: Vec<SecretRemoved>,
     pub failed: Vec<SecretRemoveFailed>,
-    pub corrupt: u64,
-    pub orphans: u64,
+    pub temps: u64,
+    pub fences: u64,
 }
 
-impl Swept {
-    fn fail(&mut self, attempt_id: Uuid, reason: &str) {
-        self.failed.push(SecretRemoveFailed {
-            attempt_id: attempt_id.to_string(),
-            reason: reason.to_owned(),
-        });
-    }
-}
-
-fn unlink_entry(dir: &OwnedFd, name: &str) -> bool {
-    unlinkat(dir, name, AtFlags::empty()).is_ok()
-}
-
-/// Убирает каталог, не заходя в симлинки: симлинк снимается как ссылка, а не как путь.
-fn remove_tree_at(parent: &OwnedFd, name: &str, dir: &PinnedDir) -> u64 {
-    let mut removed = 0;
-    if let Ok(entries) = dir.entries() {
-        for entry in entries {
-            let Some(stat) = entry_stat(dir.fd(), &entry) else {
-                continue;
-            };
-            if is_symlink(&stat) {
-                if unlink_entry(dir.fd(), &entry) {
-                    removed += 1;
-                }
-            } else if is_directory(&stat) {
-                if let Ok(fd) = openat(dir.fd(), &entry, BASE_FLAGS, Mode::empty())
-                    && let Ok(stat) = fstat(&fd)
-                    && stat.st_uid == uid()
-                    && let Ok(child) = PinnedDir::verify(fd)
-                {
-                    removed += remove_tree_at(dir.fd(), &entry, &child);
-                }
-            } else if unlink_entry(dir.fd(), &entry) {
-                removed += 1;
-            }
-        }
-    }
-    if unlinkat(parent, name, AtFlags::REMOVEDIR).is_ok() {
-        removed += 1;
-    }
-    removed
-}
-
-/// Уборка: просроченные файлы, сироты, брошенные временные файлы, испорченные
-/// манифесты и каталоги разговоров, которых воркер больше не ведёт.
-pub fn sweep(config: &SecretConfig, live: &[Uuid], now_ms: u64) -> Swept {
-    sweep_with(config, live, now_ms, true)
-}
-
-/// `retire_dead = false` — каталоги разговоров не трогаются: до первого сеанса с
-/// хабом список живых разговоров пуст, и уборка приняла бы их за брошенные.
-/// Просроченные файлы, сироты и временные файлы убираются в любом случае.
-pub fn sweep_with(config: &SecretConfig, live: &[Uuid], now_ms: u64, retire_dead: bool) -> Swept {
+/// Уборка: просроченные файлы, брошенные временные файлы, пустые каталоги
+/// разговоров и старые заборы без значения. Идёт без сеанса с хабом.
+pub fn sweep(config: &SecretConfig, now: u64) -> Swept {
     let _operations = operations();
     let mut swept = Swept::default();
-    let Ok((base, root)) = open_base(config) else {
+    let Ok(lock) = lock_base(config) else {
         return swept;
     };
-    let Ok(entries) = base.entries() else {
+    let Ok(fences) = open_fences(&lock.base) else {
         return swept;
     };
-    let live: HashSet<Uuid> = live.iter().copied().collect();
+    let Ok(entries) = lock.base.entries() else {
+        return swept;
+    };
     for name in entries {
-        let Some(stat) = entry_stat(base.fd(), &name) else {
-            continue;
-        };
-        if is_symlink(&stat) {
-            if unlink_entry(base.fd(), &name) {
-                swept.orphans += 1;
-            }
+        if name == ".fences" || name == ".lock" {
             continue;
         }
-        if !is_directory(&stat) {
-            if unlink_entry(base.fd(), &name) {
-                swept.orphans += 1;
+        let Some(stat) = entry_stat(lock.base.fd(), &name).ok().flatten() else {
+            continue;
+        };
+        if !is_directory(&stat) || is_symlink(&stat) {
+            if is_abandoned_temp(&name) && unlinkat(lock.base.fd(), &name, AtFlags::empty()).is_ok()
+            {
+                swept.temps += 1;
             }
             continue;
         }
         let Ok(conversation_id) = Uuid::parse_str(&name) else {
-            // Не каталог разговора: не наш, не трогаем.
             continue;
         };
-        let Ok(dir) = ConversationDir::open(&base, &root, conversation_id) else {
+        let Ok(dir) = ConversationDir::open(&lock.base, &lock.root, conversation_id) else {
             continue;
         };
-        // Каталог сессии, которую воркер больше не ведёт, убирается целиком.
-        if retire_dead && !live.contains(&conversation_id) {
-            swept.orphans += remove_tree_at(base.fd(), &name, &dir.dir);
-            continue;
-        }
         let Ok(files) = dir.dir.entries() else {
             continue;
         };
+        let mut failed_here = false;
         for file in files {
-            let Some(stat) = entry_stat(dir.fd(), &file) else {
-                continue;
-            };
-            if is_symlink(&stat) {
-                if unlink_entry(dir.fd(), &file) {
-                    swept.orphans += 1;
+            if is_abandoned_temp(&file) {
+                match unlinkat(dir.fd(), &file, AtFlags::empty()) {
+                    Ok(()) => swept.temps += 1,
+                    Err(Errno::NOENT) => {}
+                    Err(_) => failed_here = true,
                 }
                 continue;
             }
-            if is_directory(&stat) {
-                // Настоящий подкаталог в каталоге разговора не наш: не рекурсируем.
-                continue;
-            }
-            if file.starts_with('.') {
-                // Под блокировкой ни одна запись не идёт: все временные файлы брошены.
-                if unlink_entry(dir.fd(), &file) {
-                    swept.orphans += 1;
-                }
-                continue;
-            }
-            if file.ends_with(".tomb.json") {
-                continue;
-            }
-            let Some(request) = file.strip_suffix(".json") else {
-                // Файл без манифеста: его писал прерванный вызов, срок неизвестен.
-                if let Ok(request_id) = Uuid::parse_str(&file)
-                    && read_manifest(dir.fd(), request_id).ok().flatten().is_none()
-                    && unlink_entry(dir.fd(), &file)
-                {
-                    swept.orphans += 1;
-                }
-                continue;
-            };
-            let Ok(request_id) = Uuid::parse_str(request) else {
-                if unlink_entry(dir.fd(), &file) {
-                    swept.corrupt += 1;
-                }
+            let Ok(request_id) = Uuid::parse_str(&file) else {
                 continue;
             };
             let manifest = match read_manifest(dir.fd(), request_id) {
                 Ok(Some(manifest)) => manifest,
+                // Без манифеста байты не опознать: это прерванная публикация.
                 Ok(None) | Err(_) => {
-                    // Испорченный или пустой манифест: опознать байты нечем.
-                    if unlink_entry(dir.fd(), &file) {
-                        let _ = unlink_entry(dir.fd(), &value_name(request_id));
-                        swept.corrupt += 1;
+                    let value_gone = matches!(
+                        unlinkat(dir.fd(), &file, AtFlags::empty()),
+                        Ok(()) | Err(Errno::NOENT)
+                    );
+                    let manifest_gone = matches!(
+                        unlinkat(dir.fd(), &manifest_name(request_id), AtFlags::empty()),
+                        Ok(()) | Err(Errno::NOENT)
+                    );
+                    if !(value_gone && manifest_gone) {
+                        failed_here = true;
                     }
                     continue;
                 }
             };
-            let tombstone = match read_tombstone(dir.fd(), request_id) {
-                Ok(tombstone) => tombstone,
-                // Надгробие не читается: удалять нельзя, иначе отзыв подтвердил бы
-                // отсутствие файла, не увидев запрет на его воскрешение.
-                Err(_) => {
-                    swept.fail(manifest.attempt_id, "io");
-                    continue;
+            if manifest.expires_at_ms > now {
+                continue;
+            }
+            // Истечение — это отзыв до своего поколения: сначала забор, потом файл.
+            let fence_ok = match read_fence(&fences, request_id) {
+                Ok(fence) => {
+                    let mut fence = fence.unwrap_or_else(|| Fence::new(conversation_id));
+                    fence.dead = fence.dead.max(manifest.generation);
+                    fence.seen = fence.seen.max(manifest.generation);
+                    fence.updated_at = now;
+                    write_fence(&fences, request_id, &fence).is_ok()
                 }
+                Err(_) => false,
             };
-            let terminal = tombstone
-                .as_ref()
-                .is_some_and(|tombstone| tombstone.is_terminal(manifest.attempt_id));
-            let expired = manifest.expires_at_ms <= now_ms;
-            let value = value_name(request_id);
-            let present = entry_stat(dir.fd(), &value).is_some_and(|stat| is_regular(&stat));
-            if terminal || expired {
-                // Сначала терминальная отметка, потом удаление: падение между
-                // шагами не даст повторной доставке воскресить файл с новым сроком.
-                if terminalize_attempt(&dir, request_id, manifest.attempt_id, tombstone).is_err() {
-                    // Надгробие не записалось: файл всё равно убираем, а хаб по
-                    // ошибке повторит отзыв и допишет отметку.
-                    let _ = unlinkat(dir.fd(), &value, AtFlags::empty());
-                    let _ = unlinkat(dir.fd(), &file, AtFlags::empty());
-                    swept.fail(manifest.attempt_id, "io");
-                    continue;
-                }
-                match unlinkat(dir.fd(), &value, AtFlags::empty()) {
-                    Ok(()) | Err(Errno::NOENT) => {}
-                    Err(_) => {
-                        swept.fail(manifest.attempt_id, "io");
-                        continue;
-                    }
-                }
-                match unlinkat(dir.fd(), &file, AtFlags::empty()) {
-                    Ok(()) | Err(Errno::NOENT) => {}
-                    Err(_) => {
-                        swept.fail(manifest.attempt_id, "io");
-                        continue;
-                    }
-                }
+            let removed = revoke_locked(&lock, request_id, conversation_id, manifest.generation);
+            if fence_ok && removed {
                 swept.removed.push(SecretRemoved {
-                    attempt_id: manifest.attempt_id.to_string(),
-                    reason: if terminal { "revoked" } else { "expired" }.into(),
+                    request_id: request_id.to_string(),
+                    conversation_id: conversation_id.to_string(),
+                    cap: manifest.generation,
+                    reason: "expired".into(),
                 });
-                continue;
+            } else {
+                swept.failed.push(SecretRemoveFailed {
+                    request_id: request_id.to_string(),
+                    conversation_id: conversation_id.to_string(),
+                    cap: manifest.generation,
+                    reason: if removed { "fence" } else { "io" }.into(),
+                });
             }
-            if !present {
-                // Значения нет у непросроченного манифеста: это прерванная запись
-                // или чужое удаление, подтверждения «удалено» тут нет.
-                match unlinkat(dir.fd(), &file, AtFlags::empty()) {
-                    Ok(()) => {
-                        swept.orphans += 1;
-                    }
-                    Err(Errno::NOENT) => {}
-                    Err(_) => swept.fail(manifest.attempt_id, "io"),
-                }
-                continue;
+        }
+        // Пустой каталог разговора убирается; непустой не трогаем ни при каком
+        // локальном списке живых разговоров — иначе удаление разговора на хабе
+        // не дождалось бы отзыва.
+        if !failed_here && dir.dir.is_empty().unwrap_or(false) {
+            let _ = unlinkat(lock.base.fd(), &name, AtFlags::REMOVEDIR);
+        }
+    }
+
+    // Заборы без значения старше 25 часов: volatile-доставка не переживает
+    // соединение, а срок жизни файла — сутки.
+    let Ok(names) = fences.entries() else {
+        return swept;
+    };
+    for name in names {
+        if is_abandoned_temp(&name) {
+            if unlinkat(fences.fd(), &name, AtFlags::empty()).is_ok() {
+                swept.temps += 1;
             }
+            continue;
+        }
+        let Some(request) = name.strip_suffix(".json") else {
+            continue;
+        };
+        let Ok(request_id) = Uuid::parse_str(request) else {
+            continue;
+        };
+        let Ok(Some(fence)) = read_fence(&fences, request_id) else {
+            continue;
+        };
+        if now.saturating_sub(fence.updated_at) < FENCE_TTL_MS {
+            continue;
+        }
+        if value_exists(&lock, fence.conversation_id, request_id) != Some(false) {
+            continue;
+        }
+        if unlinkat(fences.fd(), &name, AtFlags::empty()).is_ok() {
+            swept.fences += 1;
         }
     }
     swept
 }
 
-/// Записывает попытку в надгробие: `Ok(true)` — запись сделана, `Ok(false)` —
-/// попытка уже терминальна.
-fn terminalize_attempt(
-    dir: &ConversationDir,
-    request_id: Uuid,
-    attempt_id: Uuid,
-    tombstone: Option<Tombstone>,
-) -> Result<bool, Failure> {
-    let mut tombstone =
-        tombstone.unwrap_or_else(|| Tombstone::new(request_id, dir.conversation_id));
-    if tombstone.request_id == Uuid::nil() {
-        tombstone.request_id = request_id;
-    }
-    if tombstone.conversation_id == Uuid::nil() {
-        tombstone.conversation_id = dir.conversation_id;
-    }
-    if tombstone.is_terminal(attempt_id) {
-        return Ok(false);
-    }
-    tombstone.supersede(attempt_id);
-    write_tombstone(dir.fd(), request_id, &tombstone)?;
-    Ok(true)
+/// `Some(true/false)` — проверено; `None` — проверить не удалось. Прунинг забора
+/// требует именно проверенного отсутствия значения.
+fn value_exists(lock: &BaseLock, conversation_id: Uuid, request_id: Uuid) -> Option<bool> {
+    let dir = ConversationDir::open_opt(&lock.base, &lock.root, conversation_id).ok()?;
+    let Some(dir) = dir else {
+        return Some(false);
+    };
+    entry_stat(dir.fd(), &value_name(request_id))
+        .ok()
+        .map(|stat| stat.is_some_and(|stat| is_regular(&stat)))
 }
 
 /// Факт доставки: только метаданные.
 pub fn delivered_fact(request: &SecretDeliver, written: &Written) -> SecretDelivered {
     SecretDelivered {
-        attempt_id: request.attempt_id.clone(),
         request_id: request.request_id.clone(),
+        conversation_id: request.conversation_id.clone(),
+        generation: request.generation,
         path: written.path.display().to_string(),
         expires_at_ms: written.expires_at_ms,
     }
@@ -1008,31 +1147,45 @@ pub fn delivered_fact(request: &SecretDeliver, written: &Written) -> SecretDeliv
 /// Факт отказа: короткая причина без значения и без пути.
 pub fn failed_fact(request: &SecretDeliver, failure: Failure) -> SecretFailed {
     SecretFailed {
-        attempt_id: request.attempt_id.clone(),
+        request_id: request.request_id.clone(),
+        conversation_id: request.conversation_id.clone(),
+        generation: request.generation,
         reason: failure.code().into(),
     }
 }
 
-/// Факт удаления: тот же `attempt_id`, который назвал отзыв.
-pub fn removed_fact(attempt_id: Uuid, removal: Removal) -> SecretRemoved {
+/// Факт подтверждённого удаления: поколение, до которого убрано.
+pub fn removed_fact(
+    conversation_id: Uuid,
+    request_id: Uuid,
+    cap: u64,
+    reason: &str,
+) -> SecretRemoved {
     SecretRemoved {
-        attempt_id: attempt_id.to_string(),
-        reason: removal.reason().into(),
-    }
-}
-
-/// Файл не убран: хаб оставит `revoking` с подписью и повторит уборку.
-pub fn remove_failed_fact(attempt_id: Uuid, reason: &str) -> SecretRemoveFailed {
-    SecretRemoveFailed {
-        attempt_id: attempt_id.to_string(),
+        request_id: request_id.to_string(),
+        conversation_id: conversation_id.to_string(),
+        cap,
         reason: reason.to_owned(),
     }
 }
 
-/// Живые разговоры: списанные и остановленные исполнения не держат каталоги.
-pub(crate) fn live_conversations(
-    infos: &std::collections::HashMap<Uuid, crate::exec::ExecInfo>,
-) -> Vec<Uuid> {
+/// Файл не убран: хаб оставит `revoking` с подписью и повторит отзыв.
+pub fn remove_failed_fact(
+    conversation_id: Uuid,
+    request_id: Uuid,
+    cap: u64,
+    reason: &str,
+) -> SecretRemoveFailed {
+    SecretRemoveFailed {
+        request_id: request_id.to_string(),
+        conversation_id: conversation_id.to_string(),
+        cap,
+        reason: reason.to_owned(),
+    }
+}
+
+/// Живые разговоры: списанные и остановленные исполнения не принимают доставку.
+pub(crate) fn live_conversations(infos: &HashMap<Uuid, crate::exec::ExecInfo>) -> Vec<Uuid> {
     infos
         .values()
         .filter(|info| {
@@ -1042,9 +1195,8 @@ pub(crate) fn live_conversations(
         .collect()
 }
 
-/// Убирает файлы разговоров, которые воркер больше не ведёт, и просроченные файлы.
-/// Запускается сразу при старте и раз в 10 минут, не дожидаясь хаба: просроченный
-/// файл и брошенный временный не должны жить до первого переподключения.
+/// Уборка при старте и раз в 10 минут, без ожидания хаба: просроченный файл и
+/// брошенный временный не должны жить до первого переподключения.
 pub(crate) async fn run_sweeper(
     config: SecretConfig,
     shared: std::sync::Arc<crate::exec::Shared>,
@@ -1052,21 +1204,9 @@ pub(crate) async fn run_sweeper(
 ) {
     let mut ticker = tokio::time::interval(Duration::from_secs(600));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    // До первого сеанса с хабом `infos` ещё пуст: каталоги живых разговоров
-    // нельзя принимать за брошенные. Всё остальное убирается и без хаба.
-    let mut hub_ready = shared.hub.subscribe();
-    let mut have_hub = hub_ready.borrow().is_some();
     loop {
-        sweep_and_report(&config, &shared, have_hub).await;
+        sweep_and_report(&config, &shared).await;
         tokio::select! {
-            changed = hub_ready.changed(), if !have_hub => {
-                if changed.is_err() {
-                    return;
-                }
-                if hub_ready.borrow_and_update().is_some() {
-                    have_hub = true;
-                }
-            }
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow_and_update() {
                     return;
@@ -1077,29 +1217,9 @@ pub(crate) async fn run_sweeper(
     }
 }
 
-async fn sweep_and_report(
-    config: &SecretConfig,
-    shared: &std::sync::Arc<crate::exec::Shared>,
-    retire_dead: bool,
-) {
-    let swept = {
-        let live = if retire_dead {
-            shared
-                .infos
-                .lock()
-                .map(|infos| live_conversations(&infos))
-                .unwrap_or_default()
-        } else {
-            Vec::new()
-        };
-        let now_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0);
-        sweep_with(config, &live, now_ms, retire_dead)
-    };
-    if !swept.removed.is_empty()
-        || !swept.failed.is_empty()
-        || swept.corrupt > 0
-        || swept.orphans > 0
-    {
+async fn sweep_and_report(config: &SecretConfig, shared: &std::sync::Arc<crate::exec::Shared>) {
+    let swept = sweep(config, now_ms());
+    if !swept.removed.is_empty() || !swept.failed.is_empty() {
         let removed = swept.removed.clone();
         let failed = swept.failed.clone();
         let _ = shared
@@ -1119,24 +1239,33 @@ async fn sweep_and_report(
                 Ok(())
             })
             .await;
+    }
+    if !swept.removed.is_empty() || !swept.failed.is_empty() || swept.temps > 0 || swept.fences > 0
+    {
         tracing::info!(
             kind = "secret_sweep",
             removed = swept.removed.len(),
             failed = swept.failed.len(),
-            corrupt = swept.corrupt,
-            orphans = swept.orphans,
+            temps = swept.temps,
+            fences = swept.fences,
             "secret files swept"
         );
     }
 }
 
+/// Запрет держать лишние открытые дескрипторы в тестах: число fd под замком
+/// видно снаружи, и утечка была бы тихой.
+#[cfg(test)]
+fn open_fd_count() -> usize {
+    std::fs::read_dir("/proc/self/fd")
+        .map(|entries| entries.count())
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::{
-        fd::AsFd,
-        unix::fs::{MetadataExt, PermissionsExt},
-    };
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
     /// Базовый каталог на настоящем tmpfs: `$XDG_RUNTIME_DIR` не трогаем.
     struct TestBase(PathBuf);
@@ -1161,12 +1290,13 @@ mod tests {
         }
     }
 
-    fn request(conversation: Uuid, request: Uuid, attempt: Uuid, value: &str) -> SecretDeliver {
+    fn request(conversation: Uuid, request: Uuid, generation: u64, value: &str) -> SecretDeliver {
         SecretDeliver {
-            attempt_id: attempt.to_string(),
             request_id: request.to_string(),
             conversation_id: conversation.to_string(),
             value: value.as_bytes().to_vec(),
+            generation,
+            expires_at_ms: now_ms() + FILE_TTL.as_millis() as u64,
         }
     }
 
@@ -1190,20 +1320,41 @@ mod tests {
         found
     }
 
+    fn fence_path(base: &Path, request: Uuid) -> PathBuf {
+        base.join(".fences").join(format!("{request}.json"))
+    }
+
+    fn read_fence_file(base: &Path, request: Uuid) -> Fence {
+        serde_json::from_slice(&std::fs::read(fence_path(base, request)).unwrap()).unwrap()
+    }
+
+    fn write_fence_file(base: &Path, request: Uuid, fence: &Fence) {
+        std::fs::create_dir_all(base.join(".fences")).unwrap();
+        std::fs::write(
+            fence_path(base, request),
+            serde_json::to_vec(fence).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn value_path(base: &Path, conversation: Uuid, request: Uuid) -> PathBuf {
+        base.join(conversation.to_string())
+            .join(request.to_string())
+    }
+
     #[test]
-    fn writes_exact_bytes_into_a_private_file_with_a_metadata_only_manifest() {
+    fn writes_exact_bytes_with_a_metadata_only_manifest_and_a_fence_outside_the_dir() {
         let base = TestBase::new();
         let config = base.config();
-        let (conversation, request_id, attempt) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        let (conversation, request_id) = (Uuid::now_v7(), Uuid::now_v7());
         let value = "canterlot-secret-PROBE-строка\n";
-        let written = write(
+        let written = deliver(
             &config,
-            &request(conversation, request_id, attempt, value),
+            &request(conversation, request_id, 1, value),
             &live_set(conversation),
         )
-        .expect("write");
-        let bytes = std::fs::read(&written.path).expect("file");
-        assert_eq!(bytes, value.as_bytes(), "byte-exact, newline preserved");
+        .expect("deliver");
+        assert_eq!(std::fs::read(&written.path).unwrap(), value.as_bytes());
         let file = std::fs::metadata(&written.path).expect("file metadata");
         assert_eq!(file.permissions().mode() & 0o777, 0o600);
         let dir = std::fs::metadata(written.path.parent().unwrap()).expect("dir metadata");
@@ -1211,115 +1362,304 @@ mod tests {
         assert_eq!(dir.uid(), uid());
         assert_eq!(written.conversation_id, conversation);
 
-        let manifest = written
-            .path
-            .parent()
-            .unwrap()
-            .join(format!("{request_id}.json"));
-        let raw: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&manifest).expect("manifest")).unwrap();
+        let raw: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(
+                written
+                    .path
+                    .parent()
+                    .unwrap()
+                    .join(format!("{request_id}.json")),
+            )
+            .expect("manifest"),
+        )
+        .unwrap();
         let mut keys: Vec<&String> = raw.as_object().unwrap().keys().collect();
         keys.sort();
-        assert_eq!(
-            keys,
-            vec!["attempt_id", "conversation_id", "expires_at_ms"],
-            "the manifest never carries the value"
+        assert_eq!(keys, vec!["expires_at_ms", "generation"]);
+        assert!(
+            !std::fs::read_to_string(
+                written
+                    .path
+                    .parent()
+                    .unwrap()
+                    .join(format!("{request_id}.json"))
+            )
+            .unwrap()
+            .contains("PROBE"),
+            "the manifest is metadata only"
+        );
+
+        let fence = read_fence_file(&base.0, request_id);
+        assert_eq!(fence.conversation_id, conversation);
+        assert_eq!(fence.seen, 1);
+        assert_eq!(fence.dead, 0);
+        assert!(fence.updated_at > 0);
+        assert!(
+            !std::fs::read_to_string(fence_path(&base.0, request_id))
+                .unwrap()
+                .contains("PROBE"),
+            "the fence is metadata only"
         );
         assert!(
-            !std::fs::read_to_string(&manifest)
-                .unwrap()
-                .contains("PROBE")
+            !written.path.parent().unwrap().join(".fences").exists(),
+            "the fence lives outside the conversation directory"
         );
-        let tomb = written
-            .path
-            .parent()
-            .unwrap()
-            .join(format!("{request_id}.tomb.json"));
-        let text = std::fs::read_to_string(&tomb).unwrap();
-        assert!(!text.contains("PROBE"), "the tombstone is metadata only");
-        assert!(text.contains(&attempt.to_string()));
-        let expires = written.expires_at_ms;
-        assert!(expires > 0);
     }
 
     #[test]
-    fn a_replayed_attempt_re_reports_the_file_without_rewriting_it() {
+    fn a_delayed_older_generation_after_a_newer_one_is_refused() {
         let base = TestBase::new();
         let config = base.config();
-        let (conversation, request_id, attempt) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
-        let first = write(
+        let (conversation, request_id) = (Uuid::now_v7(), Uuid::now_v7());
+        let newer = deliver(
             &config,
-            &request(conversation, request_id, attempt, "first\n"),
+            &request(conversation, request_id, 2, "new\n"),
             &live_set(conversation),
         )
         .unwrap();
-        let again = write(
+        let older = deliver(
             &config,
-            &request(conversation, request_id, attempt, "second\n"),
+            &request(conversation, request_id, 1, "old\n"),
+            &live_set(conversation),
+        )
+        .unwrap_err();
+        assert_eq!(older, Failure::StaleAttempt);
+        assert_eq!(std::fs::read(&newer.path).unwrap(), b"new\n");
+    }
+
+    #[test]
+    fn a_duplicate_generation_is_idempotent_and_does_not_extend_the_expiry() {
+        let base = TestBase::new();
+        let config = base.config();
+        let (conversation, request_id) = (Uuid::now_v7(), Uuid::now_v7());
+        let first = deliver(
+            &config,
+            &request(conversation, request_id, 1, "first\n"),
             &live_set(conversation),
         )
         .unwrap();
+        let mut replay = request(conversation, request_id, 1, "second\n");
+        replay.expires_at_ms = first.expires_at_ms + 60_000;
+        let again = deliver(&config, &replay, &live_set(conversation)).unwrap();
         assert_eq!(first.path, again.path);
-        assert_eq!(first.expires_at_ms, again.expires_at_ms, "the expiry stays");
+        assert_eq!(first.expires_at_ms, again.expires_at_ms, "expiry stays");
         assert_eq!(std::fs::read(&first.path).unwrap(), b"first\n");
     }
 
     #[test]
-    fn a_new_attempt_replaces_the_old_value_and_a_replay_of_the_old_one_is_refused() {
+    fn a_new_generation_replaces_the_value_and_an_old_replay_is_refused() {
         let base = TestBase::new();
         let config = base.config();
         let (conversation, request_id) = (Uuid::now_v7(), Uuid::now_v7());
-        let first_attempt = Uuid::now_v7();
-        let first = write(
+        let first = deliver(
             &config,
-            &request(conversation, request_id, first_attempt, "old\n"),
+            &request(conversation, request_id, 1, "old\n"),
             &live_set(conversation),
         )
         .unwrap();
-        let second = write(
+        let second = deliver(
             &config,
-            &request(conversation, request_id, Uuid::now_v7(), "new\n"),
+            &request(conversation, request_id, 2, "new\n"),
             &live_set(conversation),
         )
         .unwrap();
         assert_eq!(first.path, second.path);
         assert_eq!(std::fs::read(&second.path).unwrap(), b"new\n");
-
-        // A → B → A: повтор старой попытки не затирает новую.
-        let replay = write(
+        let replay = deliver(
             &config,
-            &request(conversation, request_id, first_attempt, "resurrected\n"),
+            &request(conversation, request_id, 1, "resurrected\n"),
             &live_set(conversation),
         )
         .unwrap_err();
         assert_eq!(replay, Failure::StaleAttempt);
-        assert_eq!(replay.code(), "stale_attempt");
         assert_eq!(std::fs::read(&second.path).unwrap(), b"new\n");
     }
 
     #[test]
-    fn removal_deletes_the_file_and_ignores_a_stale_attempt() {
+    fn a_revoke_before_any_delivery_blocks_the_late_file() {
         let base = TestBase::new();
         let config = base.config();
-        let (conversation, request_id, attempt) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
-        let written = write(
+        let (conversation, request_id) = (Uuid::now_v7(), Uuid::now_v7());
+        assert_eq!(
+            revoke(&config, conversation, request_id, 1, "revoked"),
+            Removal::Removed,
+            "a verifiable absence confirms the revoke"
+        );
+        let failure = deliver(
             &config,
-            &request(conversation, request_id, attempt, "value\n"),
+            &request(conversation, request_id, 1, "resurrected\n"),
+            &live_set(conversation),
+        )
+        .unwrap_err();
+        assert_eq!(failure, Failure::StaleAttempt);
+        assert!(files_under(&base.0).iter().all(|path| {
+            path.file_name()
+                .is_none_or(|name| name != std::ffi::OsStr::new(&request_id.to_string()))
+        }));
+        assert_eq!(
+            revoke(&config, conversation, request_id, 1, "revoked"),
+            Removal::Removed,
+            "a repeated revoke is harmless"
+        );
+    }
+
+    #[test]
+    fn a_delivery_after_revoke_is_refused_and_the_value_stays_gone() {
+        let base = TestBase::new();
+        let config = base.config();
+        let (conversation, request_id) = (Uuid::now_v7(), Uuid::now_v7());
+        let written = deliver(
+            &config,
+            &request(conversation, request_id, 1, "value\n"),
             &live_set(conversation),
         )
         .unwrap();
         assert_eq!(
-            remove(&config, conversation, request_id, Uuid::now_v7()),
-            Removal::Stale
-        );
-        assert!(
-            written.path.exists(),
-            "another attempt leaves the file alone"
-        );
-        assert_eq!(
-            remove(&config, conversation, request_id, attempt),
+            revoke(&config, conversation, request_id, 1, "revoked"),
             Removal::Removed
         );
+        assert!(!written.path.exists());
+        let again = deliver(
+            &config,
+            &request(conversation, request_id, 1, "resurrected\n"),
+            &live_set(conversation),
+        )
+        .unwrap_err();
+        assert_eq!(again, Failure::StaleAttempt);
+        assert!(!written.path.exists());
+    }
+
+    #[test]
+    fn a_revoke_of_an_older_generation_leaves_a_newer_published_file_intact() {
+        let base = TestBase::new();
+        let config = base.config();
+        let (conversation, request_id) = (Uuid::now_v7(), Uuid::now_v7());
+        let older = deliver(
+            &config,
+            &request(conversation, request_id, 1, "old\n"),
+            &live_set(conversation),
+        )
+        .unwrap();
+        assert_eq!(
+            revoke(&config, conversation, request_id, 1, "revoked"),
+            Removal::Removed
+        );
+        assert!(!older.path.exists());
+        let newer = deliver(
+            &config,
+            &request(conversation, request_id, 2, "new\n"),
+            &live_set(conversation),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&newer.path).unwrap(), b"new\n");
+        // Отзыв до первого поколения не трогает второе: оно новее `up_to`.
+        assert_eq!(
+            revoke(&config, conversation, request_id, 1, "revoked"),
+            Removal::Removed
+        );
+        assert_eq!(
+            std::fs::read(&newer.path).unwrap(),
+            b"new\n",
+            "a newer published generation survives an older cap"
+        );
+    }
+
+    #[test]
+    fn a_fence_write_failure_leaves_no_value_and_keeps_delivery_refused() {
+        // Забор не записался: значение не публикуется, отзыв сообщает об ошибке,
+        // а доставка остаётся запрещённой до успешного отзыва.
+        let base = TestBase::new();
+        let config = base.config();
+        let (conversation, request_id) = (Uuid::now_v7(), Uuid::now_v7());
+        FAIL_NEXT_FENCE.with(|flag| flag.set(true));
+        let failure = deliver(
+            &config,
+            &request(conversation, request_id, 1, "canterlot-secret-PROBE\n"),
+            &live_set(conversation),
+        )
+        .unwrap_err();
+        assert_eq!(failure, Failure::Io);
+        assert!(
+            files_under(&base.0).iter().all(|path| path
+                .file_name()
+                .is_some_and(|name| name != std::ffi::OsStr::new(&request_id.to_string()))),
+            "no value or temp survives"
+        );
+
+        // Отзыв не смог записать забор до `up_to` (флаг снова срабатывает).
+        FAIL_NEXT_FENCE.with(|flag| flag.set(true));
+        assert_eq!(
+            revoke(&config, conversation, request_id, 1, "revoked"),
+            Removal::Failed
+        );
+        assert!(is_removal_pending(request_id));
+        let refused = deliver(
+            &config,
+            &request(conversation, request_id, 1, "late\n"),
+            &live_set(conversation),
+        )
+        .unwrap_err();
+        assert_eq!(refused, Failure::RemovalPending);
+        assert_eq!(
+            revoke(&config, conversation, request_id, 1, "revoked"),
+            Removal::Removed
+        );
+        assert!(!is_removal_pending(request_id));
+        assert_eq!(read_fence_file(&base.0, request_id).dead, 1);
+    }
+
+    #[test]
+    fn a_failed_value_write_leaves_no_temp_file_and_no_value() {
+        let base = TestBase::new();
+        let config = base.config();
+        let (conversation, request_id) = (Uuid::now_v7(), Uuid::now_v7());
+        FAIL_NEXT_WRITE.with(|flag| flag.set(true));
+        let failure = deliver(
+            &config,
+            &request(conversation, request_id, 1, "canterlot-secret-PROBE\n"),
+            &live_set(conversation),
+        )
+        .unwrap_err();
+        assert_eq!(failure, Failure::Io);
+        let dir = base.0.join(conversation.to_string());
+        assert!(
+            !dir.exists() || std::fs::read_dir(&dir).unwrap().next().is_none(),
+            "no value or temp survives in the conversation dir"
+        );
+        assert!(
+            files_under(&base.0)
+                .iter()
+                .all(|path| !path.to_string_lossy().ends_with(".tmp")),
+            "no temp file survives"
+        );
+        assert_eq!(read_fence_file(&base.0, request_id).seen, 1);
+    }
+
+    #[test]
+    fn a_crash_between_the_fence_and_the_unlink_is_cleaned_by_recovery() {
+        // Забор уже говорит «мертво», файл и манифест остались: восстановление
+        // до приёма доставок обязано убрать байты.
+        let base = TestBase::new();
+        let config = base.config();
+        let (conversation, request_id) = (Uuid::now_v7(), Uuid::now_v7());
+        let written = deliver(
+            &config,
+            &request(conversation, request_id, 1, "value\n"),
+            &live_set(conversation),
+        )
+        .unwrap();
+        write_fence_file(
+            &base.0,
+            request_id,
+            &Fence {
+                conversation_id: conversation,
+                seen: 1,
+                dead: 1,
+                updated_at: now_ms(),
+            },
+        );
+        let recovered = recover(&config);
+        assert_eq!(recovered.values, 1);
         assert!(!written.path.exists());
         assert!(
             !written
@@ -1329,41 +1669,259 @@ mod tests {
                 .join(format!("{request_id}.json"))
                 .exists()
         );
-        assert_eq!(
-            remove(&config, conversation, request_id, attempt),
-            Removal::Missing
-        );
+    }
 
-        // Доставка после отзыва: та же попытка уже тупиковая.
-        let replay = write(
+    #[test]
+    fn a_crash_between_the_value_and_manifest_renames_is_cleaned_by_recovery() {
+        let base = TestBase::new();
+        let config = base.config();
+        let (conversation, request_id) = (Uuid::now_v7(), Uuid::now_v7());
+        deliver(
             &config,
-            &request(conversation, request_id, attempt, "resurrected\n"),
+            &request(conversation, request_id, 1, "old\n"),
             &live_set(conversation),
         )
-        .unwrap_err();
-        assert_eq!(replay, Failure::StaleAttempt);
+        .unwrap();
+        // Неполная публикация второго поколения: забор уже видит 2, а манифест нет.
+        let dir = base.0.join(conversation.to_string());
+        std::fs::write(dir.join(request_id.to_string()), b"new\n").unwrap();
+        write_fence_file(
+            &base.0,
+            request_id,
+            &Fence {
+                conversation_id: conversation,
+                seen: 2,
+                dead: 0,
+                updated_at: now_ms(),
+            },
+        );
+        let recovered = recover(&config);
+        assert_eq!(recovered.values, 1);
+        assert!(!value_path(&base.0, conversation, request_id).exists());
+    }
+
+    #[test]
+    fn recovery_removes_abandoned_temps_and_verifies_it() {
+        let base = TestBase::new();
+        let config = base.config();
+        let (conversation, request_id) = (Uuid::now_v7(), Uuid::now_v7());
+        deliver(
+            &config,
+            &request(conversation, request_id, 1, "value\n"),
+            &live_set(conversation),
+        )
+        .unwrap();
+        let dir = base.0.join(conversation.to_string());
+        std::fs::write(dir.join(format!(".{request_id}.2.tmp")), b"temp").unwrap();
+        std::fs::write(dir.join(format!(".{request_id}.2.json.tmp")), b"temp").unwrap();
+        std::fs::write(base.0.join(".fences/.fence-x.tmp"), b"temp").unwrap();
+        let recovered = recover(&config);
+        assert_eq!(recovered.temps, 3);
+        assert_eq!(recovered.failed, 0);
+        assert!(
+            std::fs::read_dir(&dir)
+                .unwrap()
+                .flatten()
+                .all(|entry| !entry.file_name().to_string_lossy().ends_with(".tmp"))
+        );
+    }
+
+    #[test]
+    fn an_inspection_failure_is_not_a_successful_removal() {
+        // Нечитаемый каталог разговора — не доказательство отсутствия файла.
+        let base = TestBase::new();
+        let config = base.config();
+        let (conversation, request_id) = (Uuid::now_v7(), Uuid::now_v7());
+        let written = deliver(
+            &config,
+            &request(conversation, request_id, 1, "value\n"),
+            &live_set(conversation),
+        )
+        .unwrap();
+        let dir = written.path.parent().unwrap().to_path_buf();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        assert_eq!(
+            revoke(&config, conversation, request_id, 1, "revoked"),
+            Removal::Failed,
+            "the directory mode is not 0700: the inspection failed"
+        );
+        assert!(written.path.exists());
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        // Нечитаемый забор: отзыв не подтверждается, файл всё равно убирается.
+        let manifest = dir.join(format!("{request_id}.json"));
+        std::fs::set_permissions(&manifest, std::fs::Permissions::from_mode(0o000)).unwrap();
+        std::fs::set_permissions(
+            fence_path(&base.0, request_id),
+            std::fs::Permissions::from_mode(0o000),
+        )
+        .unwrap();
+        assert_eq!(
+            revoke(&config, conversation, request_id, 1, "revoked"),
+            Removal::Failed,
+            "an unreadable fence is not proof of removal"
+        );
+        assert!(!written.path.exists(), "the value goes anyway");
+        assert!(
+            !manifest.exists(),
+            "an unreadable manifest is retired together with the value"
+        );
+        std::fs::set_permissions(
+            fence_path(&base.0, request_id),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        assert_eq!(
+            revoke(&config, conversation, request_id, 1, "revoked"),
+            Removal::Removed
+        );
+        assert!(!is_removal_pending(request_id));
+    }
+
+    #[test]
+    fn an_expired_value_is_removed_without_a_hub_session() {
+        // Уборка не ждёт хаба: срок в манифесте — единственное условие.
+        let base = TestBase::new();
+        let config = base.config();
+        let conversation = Uuid::now_v7();
+        let (expired, kept) = (Uuid::now_v7(), Uuid::now_v7());
+        let old = deliver(
+            &config,
+            &request(conversation, expired, 1, "old\n"),
+            &live_set(conversation),
+        )
+        .unwrap();
+        let fresh = deliver(
+            &config,
+            &request(conversation, kept, 1, "fresh\n"),
+            &live_set(conversation),
+        )
+        .unwrap();
+        let manifest_path = old.path.parent().unwrap().join(format!("{expired}.json"));
+        let mut manifest: Manifest =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        manifest.expires_at_ms = 1;
+        std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+
+        let swept = sweep(&config, 2);
+        assert!(!old.path.exists());
+        assert!(!manifest_path.exists());
+        assert!(fresh.path.exists(), "a fresh file stays");
+        assert_eq!(swept.removed.len(), 1);
+        assert_eq!(swept.removed[0].reason, "expired");
+        assert_eq!(swept.removed[0].cap, 1);
+        assert_eq!(swept.failed.len(), 0);
+        assert_eq!(read_fence_file(&base.0, expired).dead, 1);
+        // После истечения поколение не воскресает.
+        assert_eq!(
+            deliver(
+                &config,
+                &request(conversation, expired, 1, "resurrected\n"),
+                &live_set(conversation)
+            )
+            .unwrap_err(),
+            Failure::StaleAttempt
+        );
+    }
+
+    #[test]
+    fn a_fence_survives_conversation_removal_and_a_restored_dir_cannot_resurrect_it() {
+        let base = TestBase::new();
+        let config = base.config();
+        let (conversation, request_id) = (Uuid::now_v7(), Uuid::now_v7());
+        let written = deliver(
+            &config,
+            &request(conversation, request_id, 1, "value\n"),
+            &live_set(conversation),
+        )
+        .unwrap();
+        assert_eq!(
+            revoke(&config, conversation, request_id, 1, "session_end"),
+            Removal::Removed
+        );
+        std::fs::remove_dir_all(written.path.parent().unwrap()).unwrap();
+        assert!(fence_path(&base.0, request_id).exists());
+        // Восстановленный каталог: доставка того же поколения отвергается забором.
+        std::fs::create_dir(written.path.parent().unwrap()).unwrap();
+        std::fs::set_permissions(
+            written.path.parent().unwrap(),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        assert_eq!(
+            deliver(
+                &config,
+                &request(conversation, request_id, 1, "resurrected\n"),
+                &live_set(conversation)
+            )
+            .unwrap_err(),
+            Failure::StaleAttempt
+        );
         assert!(!written.path.exists());
     }
 
     #[test]
-    fn manifests_list_only_files_with_a_manifest() {
+    fn a_fence_is_pruned_only_after_25_hours_and_only_without_a_value() {
         let base = TestBase::new();
         let config = base.config();
-        let (conversation, request_id, attempt) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
-        let written = write(
+        let conversation = Uuid::now_v7();
+        let (dead, live) = (Uuid::now_v7(), Uuid::now_v7());
+        deliver(
             &config,
-            &request(conversation, request_id, attempt, "value\n"),
+            &request(conversation, dead, 1, "value\n"),
             &live_set(conversation),
         )
         .unwrap();
-        let listed = manifests(&config, "snapshot-1");
-        assert_eq!(listed.manifests.len(), 1);
-        assert_eq!(listed.snapshot_id, "snapshot-1");
-        let manifest = &listed.manifests[0];
-        assert_eq!(manifest.attempt_id, attempt.to_string());
-        assert_eq!(manifest.request_id, request_id.to_string());
-        assert_eq!(manifest.path, written.path.display().to_string());
-        assert_eq!(manifest.expires_at_ms, written.expires_at_ms);
+        assert_eq!(
+            revoke(&config, conversation, dead, 1, "revoked"),
+            Removal::Removed
+        );
+        let mut live_request = request(conversation, live, 1, "value\n");
+        // Значение живёт дольше забора: иначе уборка снимет его по сроку и
+        // проверка «забор со значением не прунится» ничего бы не показала.
+        live_request.expires_at_ms = now_ms() + 3 * FENCE_TTL_MS;
+        let live_written = deliver(&config, &live_request, &live_set(conversation)).unwrap();
+
+        let now = now_ms();
+        // Молодой забор не трогается.
+        let swept = sweep(&config, now);
+        assert_eq!(swept.fences, 0);
+        assert!(fence_path(&base.0, dead).exists());
+
+        // Старый забор без значения убирается; забор со значением — нет.
+        let old = now + FENCE_TTL_MS + 1_000;
+        let swept = sweep(&config, old);
+        assert_eq!(swept.fences, 1);
+        assert!(!fence_path(&base.0, dead).exists());
+        assert!(
+            fence_path(&base.0, live).exists(),
+            "a fence with a value survives"
+        );
+        assert!(live_written.path.exists());
+    }
+
+    #[test]
+    fn sweep_removes_empty_conversation_dirs_but_never_a_non_empty_one() {
+        let base = TestBase::new();
+        let config = base.config();
+        let (conversation, request_id) = (Uuid::now_v7(), Uuid::now_v7());
+        let written = deliver(
+            &config,
+            &request(conversation, request_id, 1, "value\n"),
+            &live_set(conversation),
+        )
+        .unwrap();
+        // Непустой каталог живого разговора не убирается, даже если список живых пуст.
+        let swept = sweep(&config, now_ms());
+        assert!(swept.removed.is_empty());
+        assert!(written.path.exists());
+        assert!(written.path.parent().unwrap().exists());
+        assert!(
+            std::fs::read_dir(base.0.join(conversation.to_string()))
+                .unwrap()
+                .next()
+                .is_some()
+        );
     }
 
     #[test]
@@ -1376,9 +1934,9 @@ mod tests {
         let conversation = Uuid::now_v7();
         std::os::unix::fs::symlink(elsewhere.path(), base.0.join(conversation.to_string()))
             .unwrap();
-        let failure = write(
+        let failure = deliver(
             &config,
-            &request(conversation, Uuid::now_v7(), Uuid::now_v7(), "value\n"),
+            &request(conversation, Uuid::now_v7(), 1, "value\n"),
             &live_set(conversation),
         )
         .unwrap_err();
@@ -1397,7 +1955,7 @@ mod tests {
             .tempdir_in(env!("CARGO_MANIFEST_DIR"))
             .unwrap();
         let probe = std::fs::File::open(directory.path()).unwrap();
-        if fstatfs(probe.as_fd()).is_ok_and(|stat| stat.f_type == TMPFS_MAGIC) {
+        if fstatfs(std::os::fd::AsFd::as_fd(&probe)).is_ok_and(|stat| stat.f_type == TMPFS_MAGIC) {
             eprintln!(
                 "skipping a_base_outside_tmpfs_is_refused: {} is on tmpfs",
                 directory.path().display()
@@ -1408,7 +1966,7 @@ mod tests {
             base_dir: Some(directory.path().join("secrets")),
         };
         assert_eq!(open_base(&config).unwrap_err(), Failure::NotTmpfs);
-        assert!(!directory.path().join("secrets").join(".tmp").exists());
+        assert!(!directory.path().join("secrets").join(".lock").exists());
     }
 
     #[test]
@@ -1416,9 +1974,9 @@ mod tests {
         let base = TestBase::new();
         let config = base.config();
         let conversation = Uuid::now_v7();
-        let failure = write(
+        let failure = deliver(
             &config,
-            &request(conversation, Uuid::now_v7(), Uuid::now_v7(), "value\n"),
+            &request(conversation, Uuid::now_v7(), 1, "value\n"),
             &HashSet::new(),
         )
         .unwrap_err();
@@ -1427,468 +1985,57 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_write_leaves_no_temp_file_and_no_value() {
-        let base = TestBase::new();
-        let config = base.config();
-        let (conversation, request_id, attempt) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
-        FAIL_NEXT_WRITE.with(|flag| flag.set(true));
-        let failure = write(
-            &config,
-            &request(
-                conversation,
-                request_id,
-                attempt,
-                "canterlot-secret-PROBE\n",
-            ),
-            &live_set(conversation),
-        )
-        .unwrap_err();
-        assert_eq!(failure, Failure::Io);
-        let files = files_under(&base.0);
-        assert!(files.is_empty(), "no temp file survives: {files:?}");
-    }
-
-    #[test]
-    fn a_failed_unlink_keeps_the_manifest_for_the_next_sweep() {
-        let base = TestBase::new();
-        let config = base.config();
-        let (conversation, request_id, attempt) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
-        let written = write(
-            &config,
-            &request(conversation, request_id, attempt, "value\n"),
-            &live_set(conversation),
-        )
-        .unwrap();
-        let dir = written.path.parent().unwrap().to_path_buf();
-        // Значение — непустой каталог: unlinkat без REMOVEDIR ответит ошибкой.
-        std::fs::remove_file(&written.path).unwrap();
-        std::fs::create_dir(&written.path).unwrap();
-        std::fs::write(written.path.join("inner"), b"keep").unwrap();
-        assert_eq!(
-            remove(&config, conversation, request_id, attempt),
-            Removal::Failed
-        );
-        assert!(written.path.is_dir(), "the value stays until removal works");
-        let manifest = dir.join(format!("{request_id}.json"));
-        assert!(manifest.exists(), "the manifest is kept for the next sweep");
-        // Файл действительно убрали, повтор подтверждает отсутствие и снимает манифест.
-        std::fs::remove_dir_all(&written.path).unwrap();
-        assert_eq!(
-            remove(&config, conversation, request_id, attempt),
-            Removal::Missing
-        );
-        assert!(!manifest.exists());
-    }
-
-    #[test]
-    fn sweep_unlinks_a_planted_symlink_without_touching_its_target() {
-        let base = TestBase::new();
-        let config = base.config();
-        let live = Uuid::now_v7();
-        let written = write(
-            &config,
-            &request(live, Uuid::now_v7(), Uuid::now_v7(), "live\n"),
-            &live_set(live),
-        )
-        .unwrap();
-        let dir = written.path.parent().unwrap().to_path_buf();
-        let elsewhere = tempfile::tempdir().unwrap();
-        std::fs::write(elsewhere.path().join("keep"), b"keep").unwrap();
-        std::os::unix::fs::symlink(elsewhere.path(), dir.join("planted")).unwrap();
-        std::os::unix::fs::symlink(elsewhere.path().join("keep"), dir.join("planted-file"))
-            .unwrap();
-
-        let now_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap();
-        let swept = sweep(&config, &[live], now_ms);
-        assert!(
-            elsewhere.path().join("keep").exists(),
-            "the target survives"
-        );
-        assert_eq!(
-            std::fs::read(elsewhere.path().join("keep")).unwrap(),
-            b"keep"
-        );
-        assert!(!dir.join("planted").exists());
-        assert!(!dir.join("planted-file").exists());
-        assert!(swept.orphans >= 2);
-    }
-
-    #[test]
-    fn sweep_removes_expired_orphans_corrupt_manifests_and_dead_conversations() {
-        let base = TestBase::new();
-        let config = base.config();
-        let live = Uuid::now_v7();
-        let dead = Uuid::now_v7();
-        let live_ok = write(
-            &config,
-            &request(live, Uuid::now_v7(), Uuid::now_v7(), "live\n"),
-            &live_set(live),
-        )
-        .unwrap();
-        let expired_request = Uuid::now_v7();
-        let expired = write(
-            &config,
-            &request(live, expired_request, Uuid::now_v7(), "old\n"),
-            &live_set(live),
-        )
-        .unwrap();
-        let dead_written = write(
-            &config,
-            &request(dead, Uuid::now_v7(), Uuid::now_v7(), "dead\n"),
-            &live_set(dead),
-        )
-        .unwrap();
-        // Просроченный манифест: срок в прошлом.
-        let manifest_path = expired
-            .path
-            .parent()
-            .unwrap()
-            .join(format!("{expired_request}.json"));
-        let mut manifest: Manifest =
-            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
-        manifest.expires_at_ms = 1;
-        std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
-        // Испорченный манифест и файл-сирота без манифеста.
-        let corrupt = live_ok
-            .path
-            .parent()
-            .unwrap()
-            .join(format!("{}.json", Uuid::now_v7()));
-        std::fs::write(&corrupt, b"{not json").unwrap();
-        let orphan = live_ok
-            .path
-            .parent()
-            .unwrap()
-            .join(Uuid::now_v7().to_string());
-        std::fs::write(&orphan, b"orphan").unwrap();
-        // Брошенный временный файл: под блокировкой он уже не пишется.
-        let temp = live_ok.path.parent().unwrap().join(".tmp-test");
-        std::fs::write(&temp, b"temp").unwrap();
-
-        let now_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap();
-        let swept = sweep(&config, &[live], now_ms);
-        assert!(live_ok.path.exists(), "a live file stays");
-        assert!(!expired.path.exists(), "expired file removed");
-        assert!(!manifest_path.exists());
-        assert!(!dead_written.path.exists(), "dead conversation removed");
-        assert!(!corrupt.exists());
-        assert!(!orphan.exists());
-        assert!(!temp.exists());
-        assert_eq!(swept.removed.len(), 1);
-        assert_eq!(swept.removed[0].reason, "expired");
-        assert_eq!(swept.corrupt, 1);
-        assert!(swept.orphans >= 1);
-    }
-
-    #[test]
-    fn a_file_written_before_restart_is_reported_again_after_it() {
-        let base = TestBase::new();
-        let config = base.config();
-        let (conversation, request_id, attempt) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
-        let written = write(
-            &config,
-            &request(conversation, request_id, attempt, "before\n"),
-            &live_set(conversation),
-        )
-        .unwrap();
-        // Новый процесс: тот же каталог, пустая память.
-        let restarted = SecretConfig {
-            base_dir: Some(base.0.clone()),
-        };
-        let listed = manifests(&restarted, "after-restart");
-        assert_eq!(listed.manifests.len(), 1);
-        assert_eq!(listed.manifests[0].attempt_id, attempt.to_string());
-        let again = write(
-            &restarted,
-            &request(conversation, request_id, attempt, "after\n"),
-            &live_set(conversation),
-        )
-        .unwrap();
-        assert_eq!(again.path, written.path);
-        assert_eq!(std::fs::read(&again.path).unwrap(), b"before\n");
-        // Следующая попытка после рестарта по-прежнему заменяет файл.
-        let newer = write(
-            &restarted,
-            &request(conversation, request_id, Uuid::now_v7(), "newer\n"),
-            &live_set(conversation),
-        )
-        .unwrap();
-        assert_eq!(std::fs::read(&newer.path).unwrap(), b"newer\n");
-    }
-
-    #[test]
-    fn sweep_confirms_a_removal_whose_unlink_failed_once() {
-        let base = TestBase::new();
-        let config = base.config();
-        let (conversation, request_id, attempt) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
-        let written = write(
-            &config,
-            &request(conversation, request_id, attempt, "value\n"),
-            &live_set(conversation),
-        )
-        .unwrap();
-        let dir = written.path.parent().unwrap().to_path_buf();
-        std::fs::remove_file(&written.path).unwrap();
-        std::fs::create_dir(&written.path).unwrap();
-        std::fs::write(written.path.join("inner"), b"keep").unwrap();
-        assert_eq!(
-            remove(&config, conversation, request_id, attempt),
-            Removal::Failed
-        );
-        // Значение исчезло другим путём, а манифест и надгробие остались.
-        std::fs::remove_dir_all(&written.path).unwrap();
-        let now_ms = u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap();
-        let swept = sweep(&config, &[conversation], now_ms);
-        assert_eq!(swept.removed.len(), 1);
-        assert_eq!(swept.removed[0].attempt_id, attempt.to_string());
-        assert_eq!(swept.removed[0].reason, "revoked");
-        assert!(!dir.join(format!("{request_id}.json")).exists());
-    }
-
-    #[test]
-    fn a_revoke_before_delivery_blocks_the_late_file() {
-        // Инвариант: отозванная попытка не может появиться на машине позже,
-        // даже если отзыв пришёл раньше доставки и каталога ещё не было.
-        let base = TestBase::new();
-        let config = base.config();
-        let (conversation, request_id, attempt) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
-        assert_eq!(
-            remove(&config, conversation, request_id, attempt),
-            Removal::Missing,
-            "проверенное отсутствие подтверждает отзыв"
-        );
-        let failure = write(
-            &config,
-            &request(conversation, request_id, attempt, "resurrected\n"),
-            &live_set(conversation),
-        )
-        .unwrap_err();
-        assert_eq!(failure, Failure::StaleAttempt);
-        let name = attempt.to_string();
-        assert!(
-            !files_under(&base.0)
-                .iter()
-                .any(|path| path.file_name() == Some(std::ffi::OsStr::new(&name))),
-            "the delayed value never materialised"
-        );
-        assert_eq!(
-            remove(&config, conversation, request_id, attempt),
-            Removal::Missing,
-            "a repeated revoke is harmless"
-        );
-    }
-
-    #[test]
-    fn expiry_terminalises_the_attempt_before_the_file_disappears() {
-        // Инвариант: истёкшая попытка не воскресает с новым сроком после повтора.
-        let base = TestBase::new();
-        let config = base.config();
-        let (conversation, request_id, attempt) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
-        let written = write(
-            &config,
-            &request(conversation, request_id, attempt, "old\n"),
-            &live_set(conversation),
-        )
-        .unwrap();
-        let manifest_path = written
-            .path
-            .parent()
-            .unwrap()
-            .join(format!("{request_id}.json"));
-        let mut manifest: Manifest =
-            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
-        manifest.expires_at_ms = 1;
-        std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
-
-        let swept = sweep(&config, &[conversation], 2);
-        assert_eq!(swept.removed.len(), 1);
-        assert_eq!(swept.removed[0].reason, "expired");
-        assert!(!written.path.exists());
-        let failure = write(
-            &config,
-            &request(conversation, request_id, attempt, "resurrected\n"),
-            &live_set(conversation),
-        )
-        .unwrap_err();
-        assert_eq!(failure, Failure::StaleAttempt);
-        assert!(!written.path.exists());
-    }
-
-    #[test]
-    fn an_inspection_failure_is_not_a_successful_removal() {
-        // Нечитаемый каталог разговора — не доказательство отсутствия файла.
-        let base = TestBase::new();
-        let config = base.config();
-        let (conversation, request_id, attempt) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
-        let written = write(
-            &config,
-            &request(conversation, request_id, attempt, "value\n"),
-            &live_set(conversation),
-        )
-        .unwrap();
-        let dir = written.path.parent().unwrap().to_path_buf();
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
-        assert_eq!(
-            remove(&config, conversation, request_id, attempt),
-            Removal::Failed,
-            "the directory mode is not 0700: the inspection failed"
-        );
-        assert!(written.path.exists(), "the value is untouched");
-
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-        assert_eq!(
-            remove(&config, conversation, request_id, attempt),
-            Removal::Removed
-        );
-        assert!(!written.path.exists());
-    }
-
-    #[test]
-    fn a_failed_tombstone_write_removes_the_value_and_asks_for_a_retry() {
-        // Место на tmpfs кончилось на надгробии: файл всё равно убираем, но
-        // отзыв не подтверждаем, чтобы хаб повторил и дописал отметку.
-        let base = TestBase::new();
-        let config = base.config();
-        let (conversation, request_id, attempt) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
-        let written = write(
-            &config,
-            &request(conversation, request_id, attempt, "value\n"),
-            &live_set(conversation),
-        )
-        .unwrap();
-        FAIL_NEXT_WRITE.with(|flag| flag.set(true));
-        assert_eq!(
-            remove(&config, conversation, request_id, attempt),
-            Removal::Failed
-        );
-        assert!(!written.path.exists(), "the value is gone anyway");
-        assert!(
-            !written
-                .path
-                .parent()
-                .unwrap()
-                .join(format!("{request_id}.json"))
-                .exists()
-        );
-        // Повтор дописывает надгробие и подтверждает отсутствие.
-        assert_eq!(
-            remove(&config, conversation, request_id, attempt),
-            Removal::Missing
-        );
-        let replay = write(
-            &config,
-            &request(conversation, request_id, attempt, "resurrected\n"),
-            &live_set(conversation),
-        )
-        .unwrap_err();
-        assert_eq!(replay, Failure::StaleAttempt);
-    }
-
-    #[test]
-    fn an_interrupted_replacement_never_certifies_old_bytes_as_new() {
-        // Падение между манифестом новой попытки и её значением: манифест B не
-        // должен описывать байты A, иначе сверка после рестарта объявит B доставленным.
-        let base = TestBase::new();
-        let config = base.config();
-        let (conversation, request_id) = (Uuid::now_v7(), Uuid::now_v7());
-        let first = write(
-            &config,
-            &request(conversation, request_id, Uuid::now_v7(), "old\n"),
-            &live_set(conversation),
-        )
-        .unwrap();
-        let second_attempt = Uuid::now_v7();
-        FAIL_VALUE_COMMIT.with(|flag| flag.set(true));
-        let failure = write(
-            &config,
-            &request(conversation, request_id, second_attempt, "new\n"),
-            &live_set(conversation),
-        )
-        .unwrap_err();
-        assert_eq!(failure, Failure::Io);
-        assert!(
-            !first.path.exists(),
-            "the old value is retired before the new manifest is published"
-        );
-        let listed = manifests(&config, "after-crash");
-        assert!(
-            listed.manifests.is_empty(),
-            "no attempt is certified without its own value: {listed:?}"
-        );
-        // Повтор той же новой попытки дописывает её значение и срок.
-        let again = write(
-            &config,
-            &request(conversation, request_id, second_attempt, "new\n"),
-            &live_set(conversation),
-        )
-        .unwrap();
-        assert_eq!(std::fs::read(&again.path).unwrap(), b"new\n");
-        let listed = manifests(&config, "after-replay");
-        assert_eq!(listed.manifests.len(), 1);
-        assert_eq!(listed.manifests[0].attempt_id, second_attempt.to_string());
-    }
-
-    #[test]
     fn the_base_fd_returned_for_use_is_the_checked_tmpfs_directory() {
-        // Проверки tmpfs, владельца и 0700 идут на том же fd, с которым дальше
-        // работают `*at`-операции: подмена пути после проверки никуда не ведёт.
         let base = TestBase::new();
         let config = base.config();
         let (pinned, root) = open_base(&config).expect("checked base");
         assert_eq!(root, base.0);
-        assert!(is_tmpfs(pinned.fd()), "the used fd is on tmpfs");
+        assert!(is_tmpfs(pinned.fd()));
         let stat = fstat(pinned.fd()).expect("base stat");
         assert_eq!(stat.st_uid, uid());
         assert_eq!(stat.st_mode & 0o777, 0o700);
     }
 
     #[test]
-    fn sweep_before_a_hub_session_keeps_conversation_dirs_but_removes_expired_files() {
-        // До первого сеанса с хабом список живых разговоров пуст: каталоги
-        // трогать нельзя, а срок жизни файлов от connectivity не зависит.
+    fn the_epoch_names_the_boot_and_the_base_inode() {
         let base = TestBase::new();
         let config = base.config();
-        let live = Uuid::now_v7();
-        let dead = Uuid::now_v7();
-        let dead_written = write(
-            &config,
-            &request(dead, Uuid::now_v7(), Uuid::now_v7(), "dead\n"),
-            &live_set(dead),
-        )
-        .unwrap();
-        let expired_request = Uuid::now_v7();
-        let expired = write(
-            &config,
-            &request(live, expired_request, Uuid::now_v7(), "old\n"),
-            &live_set(live),
-        )
-        .unwrap();
-        let manifest_path = expired
-            .path
-            .parent()
-            .unwrap()
-            .join(format!("{expired_request}.json"));
-        let mut manifest: Manifest =
-            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
-        manifest.expires_at_ms = 1;
-        std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
-
-        let swept = sweep_with(&config, &[], 2, false);
-        assert!(dead_written.path.exists(), "a conversation dir stays");
-        assert!(!expired.path.exists(), "an expired value is removed");
-        assert_eq!(swept.removed.len(), 1);
-
-        let swept = sweep_with(&config, &[live], 2, true);
-        assert!(!dead_written.path.exists(), "after a hub session it goes");
-        assert!(swept.orphans >= 1);
+        let first = epoch(&config, "boot");
+        let stat = std::fs::metadata(&base.0).unwrap();
+        assert_eq!(first, format!("boot:{}", stat.ino()));
+        assert_eq!(first, epoch(&config, "boot"), "the epoch is stable");
+        assert_ne!(first, epoch(&config, "another-boot"));
     }
 
     #[test]
     fn the_tmpfs_message_never_holds_the_value() {
-        let (conversation, request_id, attempt) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
-        let deliver = request(conversation, request_id, attempt, "canterlot-secret-PROBE");
+        let (conversation, request_id) = (Uuid::now_v7(), Uuid::now_v7());
+        let deliver = request(conversation, request_id, 1, "canterlot-secret-PROBE");
         let failed = failed_fact(&deliver, Failure::NotTmpfs);
         assert!(!format!("{failed:?}").contains("PROBE"));
         assert_eq!(failed.reason, "not_tmpfs");
+        assert_eq!(failed.generation, 1);
+    }
+
+    #[test]
+    fn operations_do_not_leak_descriptors() {
+        let base = TestBase::new();
+        let config = base.config();
+        let (conversation, request_id) = (Uuid::now_v7(), Uuid::now_v7());
+        let before = open_fd_count();
+        for generation in 1..=3 {
+            deliver(
+                &config,
+                &request(conversation, request_id, generation, "value\n"),
+                &live_set(conversation),
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            revoke(&config, conversation, request_id, 3, "revoked"),
+            Removal::Removed
+        );
+        let after = open_fd_count();
+        assert!(after <= before + 2, "fd count {before} -> {after}");
     }
 }

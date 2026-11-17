@@ -1871,7 +1871,7 @@ async fn secret_value_reaches_only_the_file_and_never_the_stores(pool: PgPool) {
         state_text.push_str(&String::from_utf8_lossy(&bytes));
     }
     assert_clean("worker state", &state_text, &needles);
-    // База секретов после отзыва: остался только метаданный tombstone, и он чист.
+    // База секретов после отзыва: остался только метаданный забор `.fences/`, и он чист.
     assert_secrets_clean(&base.0, None, &needles);
     let logs = capture.read();
     assert!(

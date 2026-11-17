@@ -41,7 +41,7 @@ pub const CAPABILITY_WATCHDOG_V1: &str = "watchdog_v1";
 pub const CAPABILITY_ALARMS_V1: &str = "alarms_v1";
 pub const CAPABILITY_NUDGE_V1: &str = "nudge_v1";
 pub const CAPABILITY_RESOURCE_LEASE_V1: &str = "resource_lease_v1";
-pub const CAPABILITY_SECRET_REQUESTS_V1: &str = "secret_requests_v1";
+pub const CAPABILITY_SECRET_REQUESTS_V2: &str = "secret_requests_v2";
 
 /// Форма спрашивает по одному запросу с паузой на ввод, остальным ждать незачем.
 pub const MAX_SUGGESTS_PER_MACHINE: usize = 4;
@@ -65,6 +65,8 @@ pub struct SessionInfo {
     pub connection_id: Uuid,
     pub data_attached: bool,
     pub last_heartbeat: Instant,
+    /// Эпоха хранилища секретов из `Hello`: `<boot_id>:<inode базового каталога>`.
+    pub secrets_epoch: Option<String>,
 }
 
 struct SessionEntry {
@@ -149,8 +151,6 @@ pub struct Registry {
     app_probes: Arc<Mutex<HashMap<Uuid, AppProbeState>>>,
     owner_overview: OwnerOverviewWaiters,
     owner_files: OwnerFileWaiters,
-    /// Попытки доставки секрета: без значения, только адреса и срок.
-    secret_attempts: crate::secrets::Attempts,
 }
 
 /// Снимает ожидание и на сроке, и при обрыве HTTP-запроса.
@@ -267,7 +267,6 @@ impl Registry {
             app_probes: Arc::default(),
             owner_overview: Arc::default(),
             owner_files: Arc::default(),
-            secret_attempts: crate::secrets::Attempts::default(),
         }
     }
 
@@ -276,32 +275,34 @@ impl Registry {
         self.timers.secret_attempt
     }
 
-    /// Помнит попытку доставки до квитанции или срока, без значения.
-    pub fn track_secret_attempt(
+    /// Эпоха хранилища секретов соединения: по ней хаб узнаёт очищенный tmpfs.
+    pub fn secrets_epoch_for_connection(
         &self,
-        attempt_id: Uuid,
-        request_id: Uuid,
         machine_id: Uuid,
         connection_id: Uuid,
-    ) {
-        self.secret_attempts.track(
-            attempt_id,
-            crate::secrets::Attempt {
-                request_id,
-                machine_id,
-                connection_id,
-            },
-        );
+    ) -> Option<String> {
+        self.entries
+            .lock()
+            .expect("session registry lock")
+            .get(&machine_id)
+            .filter(|entry| entry.info.connection_id == connection_id)
+            .and_then(|entry| entry.info.secrets_epoch.clone())
     }
 
-    /// Снимает попытку с учёта по квитанции или сроку.
-    pub fn take_secret_attempt(&self, attempt_id: Uuid) -> Option<crate::secrets::Attempt> {
-        self.secret_attempts.take(attempt_id)
-    }
-
-    /// Соединение, на котором ушла попытка; `None` — попытка не из этой памяти.
-    pub fn secret_attempt_connection(&self, attempt_id: Uuid) -> Option<Uuid> {
-        self.secret_attempts.connection(attempt_id)
+    /// Запоминает эпоху из принятого `Hello`.
+    pub(crate) fn set_secrets_epoch(&self, machine_id: Uuid, connection_id: Uuid, epoch: String) {
+        if epoch.is_empty() {
+            return;
+        }
+        if let Some(entry) = self
+            .entries
+            .lock()
+            .expect("session registry lock")
+            .get_mut(&machine_id)
+            .filter(|entry| entry.info.connection_id == connection_id)
+        {
+            entry.info.secrets_epoch = Some(epoch);
+        }
     }
 
     /// Живое управляющее соединение машины.
@@ -988,6 +989,7 @@ impl Registry {
                 connection_id,
                 data_attached: false,
                 last_heartbeat: Instant::now(),
+                secrets_epoch: None,
             },
             key,
             commands,

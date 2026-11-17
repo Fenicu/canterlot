@@ -814,34 +814,52 @@ pub(super) async fn validate(
     Ok(Ok(validated))
 }
 
-/// Удаление файла секрета не привязано к исполнению: команда гасится вместе с фактом.
+/// Удаление файла секрета до названного поколения не привязано к исполнению:
+/// команда гасится вместе с фактом, а подтверждение выдаётся только проверкой.
 pub(super) async fn revoke_secret(
     shared: &Shared,
     command: &Command,
     request: &canterlot_proto::worker::v1::RevokeSecret,
 ) -> Result<(), ExecError> {
+    let request_id = Uuid::parse_str(&request.request_id).ok();
+    let conversation_id = Uuid::parse_str(&request.conversation_id).ok();
     // Без установленной конфигурации не трогаем файлы: молчаливый переход к
     // каталогу по умолчанию удалял бы не тот файл.
-    let body = match (
-        shared.secrets.get(),
-        Uuid::parse_str(&request.request_id),
-        Uuid::parse_str(&request.attempt_id),
-        Uuid::parse_str(&request.conversation_id),
-    ) {
-        (Some(config), Ok(request_id), Ok(attempt_id), Ok(conversation_id)) => {
-            let removal = crate::secret::remove(config, conversation_id, request_id, attempt_id);
-            if removal == crate::secret::Removal::Failed {
-                Body::SecretRemoveFailed(crate::secret::remove_failed_fact(attempt_id, "io"))
-            } else {
-                Body::SecretRemoved(crate::secret::removed_fact(attempt_id, removal))
+    let body = match (shared.secrets.get(), request_id, conversation_id) {
+        (Some(config), Some(request_id), Some(conversation_id)) => {
+            match crate::secret::revoke(
+                config,
+                conversation_id,
+                request_id,
+                request.up_to,
+                &request.reason,
+            ) {
+                crate::secret::Removal::Removed => {
+                    Body::SecretRemoved(crate::secret::removed_fact(
+                        conversation_id,
+                        request_id,
+                        request.up_to,
+                        &request.reason,
+                    ))
+                }
+                crate::secret::Removal::Failed => {
+                    Body::SecretRemoveFailed(crate::secret::remove_failed_fact(
+                        conversation_id,
+                        request_id,
+                        request.up_to,
+                        "io",
+                    ))
+                }
             }
         }
-        _ => {
-            // Некорректная команда или не установленная конфигурация: файл не
-            // тронут, но команда не должна висеть. Хаб повторит отзыв.
-            let id = Uuid::parse_str(&request.attempt_id).unwrap_or_default();
-            Body::SecretRemoveFailed(crate::secret::remove_failed_fact(id, "invalid"))
-        }
+        // Некорректная команда или не установленная конфигурация: файл не тронут,
+        // но команда не должна висеть. Хаб повторит отзыв.
+        _ => Body::SecretRemoveFailed(crate::secret::remove_failed_fact(
+            conversation_id.unwrap_or_default(),
+            request_id.unwrap_or_default(),
+            request.up_to,
+            "invalid",
+        )),
     };
     shared.cj(vec![body], terminal_self(command)).await
 }
@@ -3202,15 +3220,15 @@ mod tests {
         );
         let conversation = Uuid::now_v7();
         let request = Uuid::now_v7();
-        let attempt = Uuid::now_v7();
         let command = |id: Uuid| Command {
             command_id: id.to_string(),
             dispatch_attempt: 1,
             execution_id: String::new(),
             kind: Some(Kind::RevokeSecret(RevokeSecret {
                 request_id: request.to_string(),
-                attempt_id: attempt.to_string(),
                 conversation_id: conversation.to_string(),
+                up_to: 1,
+                reason: "revoked".into(),
             })),
             ..Default::default()
         };
@@ -3247,13 +3265,15 @@ mod tests {
         let config = crate::config::SecretConfig {
             base_dir: Some(shared_base.clone()),
         };
-        let written = crate::secret::write(
+        let written = crate::secret::deliver(
             &config,
             &SecretDeliver {
-                attempt_id: attempt.to_string(),
                 request_id: request.to_string(),
                 conversation_id: conversation.to_string(),
                 value: b"value".to_vec(),
+                generation: 1,
+                expires_at_ms: crate::secret::FILE_TTL.as_millis() as u64
+                    + u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0),
             },
             &HashSet::from([conversation]),
         )
@@ -3288,13 +3308,14 @@ mod tests {
         };
         let conversation = Uuid::now_v7();
         let request = Uuid::now_v7();
-        let written = crate::secret::write(
+        let written = crate::secret::deliver(
             &config,
             &SecretDeliver {
-                attempt_id: Uuid::now_v7().to_string(),
                 request_id: request.to_string(),
                 conversation_id: conversation.to_string(),
                 value: b"old".to_vec(),
+                generation: 1,
+                expires_at_ms: 2,
             },
             &HashSet::from([conversation]),
         )

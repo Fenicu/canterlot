@@ -8,6 +8,17 @@ use super::{
     checked,
 };
 
+fn accepted_secret_v2(state: &HubGrpc, machine_id: Uuid, connection_id: Uuid) -> bool {
+    state
+        .registry
+        .capabilities_for_connection(machine_id, connection_id)
+        .is_some_and(|capabilities| {
+            capabilities
+                .iter()
+                .any(|capability| capability == crate::session::CAPABILITY_SECRET_REQUESTS_V2)
+        })
+}
+
 // Команды растут с аддитивными полями; ожидание живёт на стеке один шаг.
 #[allow(clippy::large_enum_variant)]
 enum Next {
@@ -82,6 +93,23 @@ impl WorkerControl for HubGrpc {
             let reply = state.accepted(machine_id, &hello).await?;
             if let Some(hello_reply::Result::Accepted(accepted)) = &reply.result {
                 state.registry.mark_accepted(machine_id, connection_id, &accepted.capabilities);
+            }
+            state.registry.set_secrets_epoch(machine_id, connection_id, hello.secrets_epoch.clone());
+            if accepted_secret_v2(&state, machine_id, connection_id) && !hello.secrets_epoch.is_empty() {
+                // Смена эпохи означает очищенный tmpfs: доставленные строки
+                // становятся `lost`, а обязательства отзыва — созревшими.
+                let pool = state.pool.clone();
+                let registry = state.registry.clone();
+                let epoch = hello.secrets_epoch.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = crate::secrets::on_hub_session_established(&pool, &registry, machine_id, &epoch).await {
+                        tracing::error!(
+                            kind = "secret_epoch_error",
+                            error = %crate::dberr::describe(&error),
+                            "secret epoch reconciliation failed"
+                        );
+                    }
+                });
             }
             state.registry.observe_clock(machine_id,hello.machine_time_ms,chrono::Utc::now());
             let reply = checked(ControlDown { msg: Some(control_down::Msg::HelloReply(reply)) })?;
@@ -175,35 +203,6 @@ impl WorkerControl for HubGrpc {
                             }
                             Some(control_up::Msg::ReconcileReport(report)) => {
                                 lane.submit_reconcile(report).map_err(|error| session_log.error(error))?;
-                            }
-                            Some(control_up::Msg::SecretManifests(manifests)) => {
-                                if !state.registry.has_capability(machine_id,crate::session::CAPABILITY_SECRET_REQUESTS_V1){Err(session_log.error(Status::invalid_argument("capability_missing")))?;}
-                                // Сверка не держит пульс: её ответ решает судьбу только `sending`.
-                                let snapshot = uuid::Uuid::parse_str(&manifests.snapshot_id).unwrap_or_default();
-                                if state.registry.connection_id(machine_id) != Some(snapshot) {
-                                    // Снимок прошлого соединения: он не знает о новых доставках.
-                                    continue;
-                                }
-                                let pool = state.pool.clone();
-                                let registry = state.registry.clone();
-                                tokio::spawn(async move {
-                                    if let Err(error) = crate::secrets::reconcile_manifests(
-                                        &pool,
-                                        &registry,
-                                        machine_id,
-                                        snapshot,
-                                        &manifests.manifests,
-                                        uuid::Uuid::now_v7(),
-                                    )
-                                    .await
-                                    {
-                                        tracing::error!(
-                                            kind = "secret_manifests_error",
-                                            error = %crate::dberr::describe(&error),
-                                            "secret manifests reconciliation failed"
-                                        );
-                                    }
-                                });
                             }
                             _ => Err(session_log.error(Status::invalid_argument("unexpected control message")))?,
                         }

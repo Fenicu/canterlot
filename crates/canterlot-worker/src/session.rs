@@ -50,7 +50,7 @@ const WATCH_FIRST_DELAY: Duration = Duration::from_secs(90);
 pub const CAPABILITY_LIMITS_FABLE_V1: &str = "limits_fable_v1";
 pub const CAPABILITY_PROMPT_SUGGESTIONS_V1: &str = "prompt_suggestions_v1";
 pub const CAPABILITY_SIDE_CHAT_V1: &str = "side_chat_v1";
-pub const CAPABILITY_SECRET_REQUESTS_V1: &str = "secret_requests_v1";
+pub const CAPABILITY_SECRET_REQUESTS_V2: &str = "secret_requests_v2";
 
 pub const OPTIONAL_CAPABILITIES: &[&str] = &[
     "exec_v1",
@@ -73,7 +73,7 @@ pub const OPTIONAL_CAPABILITIES: &[&str] = &[
     "watchdog_v1",
     CAPABILITY_PROMPT_SUGGESTIONS_V1,
     CAPABILITY_SIDE_CHAT_V1,
-    CAPABILITY_SECRET_REQUESTS_V1,
+    CAPABILITY_SECRET_REQUESTS_V2,
 ];
 
 #[derive(Clone)]
@@ -796,6 +796,24 @@ impl Worker {
         // startup_verify заново проигрывает сохранённые отзывы, а без неё отзыв
         // пошёл бы в каталог по умолчанию.
         manager.set_secrets(self.config.secrets.clone());
+        // Восстановление до приёма любых доставок: брошенные временные файлы,
+        // значения без манифеста и неполные публикации убираются раньше, чем
+        // хаб успеет прислать новое поколение.
+        {
+            let secrets = self.config.secrets.clone();
+            match tokio::task::spawn_blocking(move || crate::secret::recover(&secrets)).await {
+                Ok(stats) if stats.temps > 0 || stats.values > 0 || stats.failed > 0 => {
+                    tracing::info!(
+                        kind = "secret_recovery",
+                        temps = stats.temps,
+                        values = stats.values,
+                        failed = stats.failed,
+                        "incomplete secret files retired"
+                    );
+                }
+                _ => {}
+            }
+        }
         manager
             .startup_verify()
             .await
@@ -1119,6 +1137,8 @@ impl Worker {
                 .chain(initial_sj)
                 .collect(),
             boot_id: boot_id.to_owned(),
+            // Эпоха хранилища: хаб по ней узнаёт, что tmpfs очищен и файлы исчезли.
+            secrets_epoch: crate::secret::epoch(&self.config.secrets, boot_id),
             stream_kind: StreamKind::Control as i32,
             required_capabilities: vec![],
             optional_capabilities: OPTIONAL_CAPABILITIES
@@ -1250,7 +1270,7 @@ impl Worker {
         let secret_enabled = accepted
             .capabilities
             .iter()
-            .any(|cap| cap == CAPABILITY_SECRET_REQUESTS_V1);
+            .any(|cap| cap == CAPABILITY_SECRET_REQUESTS_V2);
         let lease_enabled = accepted
             .capabilities
             .iter()
@@ -1345,13 +1365,6 @@ impl Worker {
         } else {
             None
         };
-        // Метаданные уже записанных файлов: хаб решает судьбу незавершённых доставок.
-        let mut secret_outbound = secret_enabled.then(|| ControlUp {
-            msg: Some(control_up::Msg::SecretManifests(crate::secret::manifests(
-                &self.config.secrets,
-                &hello.connection_id,
-            ))),
-        });
         // Полное состояние очереди при подключении и при каждом изменении.
         let mut lease_updates = self
             .lease
@@ -1693,7 +1706,6 @@ impl Worker {
             let batch_deadline = pending_batches.front().and_then(|p| p.deadline);
             let can_send = heartbeat_outbound.is_some()
                 || machine_outbound.is_some()
-                || secret_outbound.is_some()
                 || limits_outbound.is_some()
                 || suggest_outbound.is_some()
                 || histories_outbound.is_some()
@@ -1750,7 +1762,7 @@ impl Worker {
                                 .unwrap_or_default()
                                 .into_iter()
                                 .collect();
-                            let body = match crate::secret::write(&config, &request, &live) {
+                            let body = match crate::secret::deliver(&config, &request, &live) {
                                 Ok(written) => {
                                     canterlot_proto::worker::v1::record_body::Body::SecretDelivered(
                                         crate::secret::delivered_fact(&request, &written),
@@ -1843,7 +1855,6 @@ impl Worker {
                     let permit = permit.map_err(|_| WorkerError::Transport)?;
                     let mut message = if let Some(message) = heartbeat_outbound.take() { message }
                     else if let Some(message)=machine_outbound.take() {message}
-                    else if let Some(message)=secret_outbound.take() {message}
                     else if let Some(message)=limits_outbound.take() {message}
                     else if let Some(message)=suggest_outbound.take() {message}
                     else if let Some(message)=histories_outbound.take() {message}

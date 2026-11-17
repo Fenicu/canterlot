@@ -85,6 +85,13 @@ async fn revoke(
     ApiPath(id): ApiPath<Uuid>,
     Correlation(correlation): Correlation,
 ) -> Result<Json<SecretRequestView>, ApiError> {
-    let view = secrets::revoke(&state.pool, owner.owner_id, id, correlation).await?;
+    let view = secrets::revoke(
+        &state.pool,
+        &state.registry,
+        owner.owner_id,
+        id,
+        correlation,
+    )
+    .await?;
     Ok(Json(view))
 }

@@ -222,7 +222,7 @@ fn to_proto_with_capability(
     {
         return Err(OutboxError::CapabilityMissing);
     }
-    if row.kind == "revoke_secret" && !has(crate::session::CAPABILITY_SECRET_REQUESTS_V1) {
+    if row.kind == "revoke_secret" && !has(crate::session::CAPABILITY_SECRET_REQUESTS_V2) {
         return Err(OutboxError::CapabilityMissing);
     }
     if row.kind == "resolve_owner_lost" && !has(crate::session::CAPABILITY_OWNER_EXIT_V1) {
@@ -466,14 +466,24 @@ pub fn to_proto(row: &CommandRow) -> Result<Command, OutboxError> {
         "resolve_owner_lost" => command::Kind::ResolveOwnerLost(ResolveOwnerLost {}),
         "revoke_secret" => command::Kind::RevokeSecret(canterlot_proto::worker::v1::RevokeSecret {
             request_id: text(&row.payload, "request_id")?,
-            attempt_id: text(&row.payload, "attempt_id")?,
             conversation_id: row
                 .payload
                 .get("conversation_id")
                 .and_then(Value::as_str)
                 .map(str::to_owned)
                 .or_else(|| row.conversation_id.map(|id| id.to_string()))
-                .unwrap_or_default(),
+                .ok_or(OutboxError::InvalidCommand)?,
+            up_to: row
+                .payload
+                .get("up_to")
+                .and_then(Value::as_u64)
+                .ok_or(OutboxError::InvalidCommand)?,
+            reason: row
+                .payload
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("revoked")
+                .to_owned(),
         }),
         "stop_execution" => command::Kind::StopExecution(StopExecution {
             force: match row.payload.get("force") {
