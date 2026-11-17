@@ -144,7 +144,7 @@ test.describe('shell card', () => {
 
 /** Имена анимаций на блике навыка: пусто — имя стоит спокойно. */
 async function glints(card: Locator): Promise<string[]> {
-  return card.locator('.glint').evaluate((node) => node.getAnimations().map((item) => (item as CSSAnimation).animationName));
+  return card.locator('[data-role="skill-name"]').evaluate((node) => node.getAnimations({ subtree: true }).map((item) => (item as CSSAnimation).animationName));
 }
 
 test.describe('skill card', () => {
@@ -152,13 +152,13 @@ test.describe('skill card', () => {
     const { seed } = await boot(page);
     const card = await cardOf(page, seed.blocks.skillDone!);
     await expect(card).toHaveAttribute('data-card', 'skill');
-    await expect(card.locator('[data-role="skill-name"]')).toContainText('test-driven-development');
+    await expect(card.locator('[data-role="skill-name"]')).toHaveText('test-driven-development');
     await expect(card.locator('[data-role="skill-plugin"]')).toHaveText('superpowers');
     await expect(card.locator('[data-role="skill-args"]')).toHaveText('карточки ленты: формат команды и счёт строк');
     await expect(card.locator('[data-role="card-state"]')).toHaveCount(0);
     expect(await glints(card)).toEqual([]);
     const opencode = await cardOf(page, seed.blocks.skillOpencode!);
-    await expect(opencode.locator('[data-role="skill-name"]')).toContainText('frontend-design');
+    await expect(opencode.locator('[data-role="skill-name"]')).toHaveText('frontend-design');
     await shot(page, card, 'skill-phone');
   });
 
@@ -184,4 +184,101 @@ test.describe('skill card', () => {
       expect(await glints(card)).toEqual([]);
     });
   }
+});
+
+test.describe('edit and write cards', () => {
+  test('an_edit_is_compact_by_default_and_expands_to_a_highlighted_diff', async ({ page }) => {
+    const { seed } = await boot(page);
+    const card = await cardOf(page, seed.blocks.editClaude!);
+    await expect(card).toHaveAttribute('data-card', 'file.edit');
+    await expect(card.locator('[data-role="edit-kind"]')).toHaveText('Правка');
+    await expect(card.locator('[data-role="edit-name"]')).toHaveText('registry.ts');
+    await expect(card.locator('[data-role="edit-dir"]')).toHaveText('…/timeline/cards');
+    await expect(card.locator('[data-role="edit-counts"]')).toHaveText('+3−1');
+    await expect(card.locator('pre.code')).toHaveCount(0);
+    await shot(page, card, 'edit-phone');
+    const head = card.locator('.head .hit');
+    await expect(head).toHaveAttribute('aria-label', 'Правка registry.ts · +3 −1. Показать изменения');
+    await head.click();
+    const code = card.locator('[data-role="card-fold"] pre.code');
+    await expect(code.locator('.row[data-kind="add"]')).toHaveCount(3);
+    await expect(code.locator('.row[data-kind="del"]')).toHaveCount(1);
+    await expect(code.locator('.row[data-kind="del"]')).toContainText('skill: card(skill),');
+    await expect(code.locator('[class*="hljs-"]').first()).toBeAttached();
+    const backgrounds = await code.evaluate((node) => {
+      const probe = document.createElement('span');
+      node.append(probe);
+      probe.style.color = 'var(--success-soft)';
+      const success = getComputedStyle(probe).color;
+      probe.style.color = 'var(--danger-soft)';
+      const danger = getComputedStyle(probe).color;
+      probe.remove();
+      return {
+        add: getComputedStyle(node.querySelector('.row[data-kind="add"]')!).backgroundColor === success,
+        del: getComputedStyle(node.querySelector('.row[data-kind="del"]')!).backgroundColor === danger
+      };
+    });
+    expect(backgrounds).toEqual({ add: true, del: true });
+    await shot(page, card, 'edit-expanded-phone');
+    await head.click();
+    await expect(card.locator('pre.code')).toHaveCount(0);
+  });
+
+  test('a_new_file_reads_as_added_and_its_long_content_is_cut_with_show_all', async ({ page }) => {
+    const { seed } = await boot(page);
+    const card = await cardOf(page, seed.blocks.writeClaude!);
+    await expect(card).toHaveAttribute('data-card', 'file.write');
+    await expect(card.locator('[data-role="edit-kind"]')).toHaveText('Новый файл');
+    await expect(card.locator('[data-role="edit-kind"]')).toHaveAttribute('data-kind', 'add');
+    await expect(card.locator('[data-role="edit-counts"]')).toHaveText('+72');
+    await shot(page, card, 'write-phone');
+    await card.locator('.head .hit').click();
+    const code = card.locator('[data-role="card-fold"] pre.code');
+    await expect(code.locator('.row')).toHaveCount(60);
+    await expect(code.locator('.sign')).toHaveCount(0);
+    const more = card.getByRole('button', { name: 'Показать всё · 72 строки' });
+    await more.click();
+    await expect(code.locator('.row')).toHaveCount(72);
+    await expect(card.getByRole('button', { name: 'Свернуть' })).toBeVisible();
+  });
+
+  test('opencode_and_codex_shapes_render_the_same_card', async ({ page }) => {
+    const { seed } = await boot(page);
+    const opencode = await cardOf(page, seed.blocks.editOpencode!);
+    await expect(opencode.locator('[data-role="edit-name"]')).toHaveText('limit.py');
+    await expect(opencode.locator('[data-role="edit-counts"]')).toHaveText('+3−2');
+    const codex = await cardOf(page, seed.blocks.patchCodex!);
+    await expect(codex).toHaveAttribute('data-card', 'file.patch');
+    await expect(codex.locator('[data-role="edit-name"]')).toHaveText('events.rs');
+    await expect(codex.locator('[data-role="edit-counts"]')).toHaveText('+2−1');
+    await codex.locator('.head .hit').click();
+    await expect(codex.locator('pre.code .row[data-kind="hunk"]')).toContainText('@@ -12,6 +12,7 @@');
+    await shot(page, codex, 'patch-codex-expanded-phone');
+    const added = await cardOf(page, seed.blocks.patchCodexAdd!);
+    await expect(added.locator('[data-role="edit-kind"]')).toHaveText('Новый файл');
+    await expect(added.locator('[data-role="edit-counts"]')).toHaveText('+3');
+    const envelope = await cardOf(page, seed.blocks.patchEnvelope!);
+    await expect(envelope.locator('[data-role="edit-name"]')).toHaveText('copy.ts');
+    await expect(envelope).toContainText('и ещё 1');
+    await expect(envelope.locator('[data-role="edit-counts"]')).toHaveText('+4−1');
+    await envelope.locator('.head .hit').click();
+    await expect(envelope.locator('[data-role="edit-file"]')).toHaveCount(2);
+    await expect(envelope.locator('[data-role="edit-file"]').first()).toContainText('+2−1');
+    await expect(envelope.locator('[data-role="card-fold"] pre.code')).toHaveCount(2);
+    await shot(page, envelope, 'patch-envelope-expanded-phone');
+  });
+
+  test('a_running_edit_awaiting_permission_keeps_its_card_and_the_request_card', async ({ page }) => {
+    const { hub, api, seed } = await boot(page, { working: true });
+    const fresh = streamCall(hub, api, seed.id, seed.run, 'Edit', { file_path: '/w/src/a.ts', old_string: 'a', new_string: 'b' });
+    const card = row(page, fresh.call).locator('.feed-card');
+    await expect(card.locator('[data-role="card-state"]')).toHaveText('идёт');
+    await expect(card.locator('[data-role="edit-counts"]')).toHaveText('+1−1');
+    hub.append(`conversation:${seed.id}`, { kind: 'request_opened', conversation_id: seed.id, payload: { request_id: api.id(), kind: 'permission', payload: { tool_name: 'Edit', input: { file_path: '/w/src/a.ts', old_string: 'a', new_string: 'b' } } } });
+    hub.flush();
+    await expect(page.locator('.permission-card')).toBeVisible();
+    await expect(card.locator('[data-role="card-state"]')).toHaveText('идёт');
+    streamCall(hub, api, seed.id, seed.run, 'Edit', null, { blockId: fresh.call, resultId: fresh.result, result: 'The file /w/src/a.ts has been updated.' });
+    await expect(card.locator('[data-role="card-state"]')).toHaveCount(0);
+  });
 });

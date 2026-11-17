@@ -28,7 +28,7 @@ describe('shell card', () => {
   it('claude_failure_takes_the_exit_code_from_the_output', () => {
     const call = cardCall(callBlock('Bash', { command: 'npm test' }), resultBlock('Exit code 2\nFAIL src/a.test.ts', { summary: 'error' }), { root: true });
     const card = shell(call)!;
-    expect(card.data.outcome).toEqual({ exit: 2, denied: false });
+    expect(card.data.outcome).toEqual({ exit: 2, denied: false, failed: false });
     expect(card.word).toEqual({ word: 'код 2', tone: 'danger' });
   });
 
@@ -41,10 +41,10 @@ describe('shell card', () => {
     const opencode = cardCall(callBlock('bash', LONG, { summary: 'bash: cd web, exit 1' }), resultBlock('boom'), { root: true });
     const card = shell(opencode)!;
     expect(card.data.command).toBe(LONG);
-    expect(card.data.outcome).toEqual({ exit: 1, denied: false });
+    expect(card.data.outcome).toEqual({ exit: 1, denied: false, failed: false });
     expect(card.word).toEqual({ word: 'код 1', tone: 'danger' });
     const codex = cardCall(callBlock('shell', 'cargo test', { summary: 'cargo test, exit 0' }), resultBlock('ok'), { root: true });
-    expect(shell(codex)!.data.outcome).toEqual({ exit: 0, denied: false });
+    expect(shell(codex)!.data.outcome).toEqual({ exit: 0, denied: false, failed: false });
     expect(shell(codex)!.word).toBeNull();
     const declined = cardCall(callBlock('shell', 'rm -rf /tmp/x', { summary: 'rm -rf /tmp/x, declined' }), resultBlock(''), { root: true });
     expect(shell(declined)!.word).toEqual({ word: 'отклонено', tone: 'warning' });

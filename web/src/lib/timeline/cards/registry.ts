@@ -7,6 +7,7 @@ import type { Component } from 'svelte';
 import type { BlockModel } from '#lib/stores/blocks.js';
 import AcceptCard from './AcceptCard.svelte';
 import AlarmListCard from './AlarmListCard.svelte';
+import EditCard from './EditCard.svelte';
 import LimitsCard from './LimitsCard.svelte';
 import QuestionCard from './QuestionCard.svelte';
 import SendCard from './SendCard.svelte';
@@ -27,13 +28,14 @@ import { alarmCancel, alarmList, alarmSet } from './defs/alarms';
 import { limits } from './defs/limits';
 import { planAdd, planAdopt, planList, planUpdate } from './defs/plan';
 import * as sessions from './defs/sessions';
+import { edit, patch, write } from './defs/files';
 import { share } from './defs/share';
-import { shell, type ShellData } from './defs/shell';
+import { shell } from './defs/shell';
 import { todo } from './defs/todo';
 import { context7, question, quiet, skill, subagent, taiga } from './defs/tools';
 import { fetchPage, search } from './defs/web';
 import { sessionLink } from './links';
-import { outcomeWord } from './outcome';
+import { outcomeWord, type Outcome } from './outcome';
 import { toolFamily, toolId } from './toolId';
 import type { CardCall, CardDef, CardLogic, CardProps, StateWord } from './types';
 
@@ -63,6 +65,11 @@ function lined(logic: CardLogic<sessions.LineData>): CardLogic<sessions.LineData
     ...bySession(logic, (_call, data) => data.sessionId),
     word: (call, data) => (data.word ? { word: data.word, tone: data.tone } : defaultWord(call))
   };
+}
+
+/** Отказ, ненулевой код и сорванный вызов говорят своим словом; остальное — по состоянию. */
+function outcomed<D extends { outcome: Outcome }>(logic: CardLogic<D>): CardLogic<D> {
+  return { ...logic, word: (call, data) => outcomeWord(data.outcome) ?? defaultWord(call) };
 }
 
 const REGISTRY: Record<string, CardDef<never>> = {
@@ -98,7 +105,10 @@ const REGISTRY: Record<string, CardDef<never>> = {
   'web.search': card(search),
   'web.fetch': card({ ...fetchPage, link: (_call, data) => ({ text: data.domain, href: data.url, external: true }) }),
   skill: card(skill, SkillCard),
-  'shell.exec': card({ ...shell, word: (call, data) => outcomeWord(data.outcome) ?? defaultWord(call) } as CardLogic<ShellData>, ShellCard),
+  'file.edit': card(outcomed(edit), EditCard),
+  'file.write': card(outcomed(write), EditCard),
+  'file.patch': card(outcomed(patch), EditCard),
+  'shell.exec': card(outcomed(shell), ShellCard),
   'meta.tool_search': card(quiet),
   'meta.monitor': card(quiet),
   'meta.task_stop': card(quiet),

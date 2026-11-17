@@ -78,8 +78,8 @@ const CONTRAST_FLOOR: Record<string, number> = {
   'taiga-cards-comment': 40,
   'taiga-cards-desktop': 33,
   'taiga-cards-list': 87,
-  'tool-cards': 38,
-  'tool-cards-desktop': 35,
+  'tool-cards': 82,
+  'tool-cards-desktop': 53,
   'tool-cards-top': 13,
   trash: 17,
   'url-request': 13,
@@ -89,7 +89,7 @@ const CONTRAST_FLOOR: Record<string, number> = {
 const PALETTE_KEYS = PALETTES.map((palette) => palette.key);
 // Экраны, где видны все пары из F-18: активная вкладка навигации, пилюля действующей политики
 // и состояние задачи плана. Остальные экраны идут в палитре по умолчанию.
-const PALETTE_SCREENS = ['01-sessions', 'routing-editor', 'plan-cards'];
+const PALETTE_SCREENS = ['01-sessions', 'routing-editor', 'plan-cards', 'tool-cards'];
 
 type AxeResults = Awaited<ReturnType<AxeBuilder['analyze']>>;
 

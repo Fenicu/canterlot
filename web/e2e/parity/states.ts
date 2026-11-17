@@ -200,6 +200,14 @@ async function toolCards(page: Page, at: 'bottom' | 'top'): Promise<void> {
   await page.goto(`/c/${seed.id}`);
   await expect(page.locator('.screen[data-ready]')).toBeVisible({ timeout: 15_000 });
   await expect(page.locator('.feed-card').first()).toBeVisible();
+  if (at === 'bottom') {
+    // Низ ленты: правка на два файла раскрыта, видны строки разницы с подсветкой.
+    const last = page.locator(`[data-key="block:${seed.blocks.patchEnvelope}"] .feed-card .head .hit`);
+    await expect(last).toBeVisible();
+    await last.click();
+    await expect(page.locator('[data-role="card-fold"] pre.code .row[data-kind="add"]').first()).toBeVisible();
+    await expect(page.locator('[data-role="card-fold"] pre.code [class*="hljs-"]').first()).toBeAttached();
+  }
   if (at === 'top') {
     // Верх ленты: первая команда раскрыта, виден хвост её вывода.
     await page.locator('.feed').evaluate((node) => { node.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 })); node.scrollTop = 0; });

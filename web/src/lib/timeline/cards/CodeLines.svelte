@@ -50,7 +50,7 @@
 
 <!-- Код не переносится: длинная строка листается вбок внутри блока, а не всей страницей; с клавиатуры до неё доходит Tab. -->
 <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
-<pre class="code" tabindex="0" role="region" aria-label={label} data-signs={signs ? '' : undefined}><code>{#each lines as line, index (index)}<span class="row" data-kind={line.kind}>{#if signs}<span class="sign" aria-hidden="true">{SIGN[line.kind ?? 'ctx']}</span>{/if}{#if painted?.[index]}{#each painted[index] as token, at (at)}<span class={token.cls}>{token.text}</span>{/each}{:else}{line.text}{/if}{NEWLINE}</span>{/each}</code></pre>
+<pre class="code" tabindex="0" role="region" aria-label={label} data-signs={signs ? '' : undefined}><code>{#each lines as line, index (index)}<span class="row" data-kind={line.kind}>{#if signs}<span class="sign" aria-hidden="true">{SIGN[line.kind ?? 'ctx']}</span>{/if}{#if painted?.[index]}{#each painted[index] as token, at (at)}<span class={`token ${token.cls}`}>{token.text}</span>{/each}{:else}{line.text}{/if}{NEWLINE}</span>{/each}</code></pre>
 
 <style>
   .code {
@@ -75,6 +75,12 @@
   .row[data-kind='add'] { background: var(--success-soft); }
   .row[data-kind='del'] { background: var(--danger-soft); }
   .row[data-kind='hunk'] { color: var(--secondary); }
+  /*
+   * Цвета подсветки рассчитаны на фон кода: на мягком зелёном и красном комментарии и строки
+   * части палитр теряют контраст AA. Изменённая строка остаётся строкой текста на своём фоне,
+   * подсветка — у контекста вокруг и у нового файла целиком.
+   */
+  .row:is([data-kind='add'], [data-kind='del']) .token { color: var(--text); font-style: normal; }
   .sign { display: inline-block; width: var(--s6); color: var(--secondary); user-select: none; }
   .row[data-kind='add'] .sign { color: var(--success); }
   .row[data-kind='del'] .sign { color: var(--danger); }

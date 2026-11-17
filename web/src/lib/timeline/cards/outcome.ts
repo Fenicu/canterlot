@@ -14,6 +14,8 @@ export interface Outcome {
   exit: number | null;
   /** Владелец или правило отказали в разрешении. */
   denied: boolean;
+  /** Харнесс назвал вызов сорвавшимся без кода выхода (`…, failed` у Codex и OpenCode). */
+  failed: boolean;
 }
 
 /** Аргумент из сводки без итога в хвосте: `npm test, exit 1` → `npm test`. */
@@ -25,16 +27,17 @@ export function callOutcome(call: CardCall): Outcome {
   const status = SUMMARY_STATUS.exec(call.block.summary ?? '');
   if (status) {
     const code = status[2] !== undefined ? Number(status[2]) : null;
-    return { exit: code, denied: status[1] === 'declined' };
+    return { exit: code, denied: status[1] === 'declined', failed: status[1] === 'failed' };
   }
   const exit = CLAUDE_EXIT.exec(call.output);
   const denied = call.state === 'error' && CLAUDE_DENIED.test(call.output.trim());
-  return { exit: exit ? Number(exit[1]) : null, denied };
+  return { exit: exit ? Number(exit[1]) : null, denied, failed: false };
 }
 
 /** Слово справа сверх обычного состояния: отказ и ненулевой код; иначе `null`, и реестр берёт слово по состоянию. */
 export function outcomeWord(outcome: Outcome): StateWord | null {
   if (outcome.denied) return { word: 'отклонено', tone: 'warning' };
   if (outcome.exit !== null && outcome.exit !== 0) return { word: `код ${outcome.exit}`, tone: 'danger' };
+  if (outcome.failed) return { word: 'ошибка', tone: 'danger' };
   return null;
 }

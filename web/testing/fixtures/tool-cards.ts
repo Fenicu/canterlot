@@ -18,7 +18,46 @@ export const PIPELINE = `rg -n "cardDef\\(" src/lib/timeline | awk -F: '{print $
 
 const TEST_OUTPUT = Array.from({ length: 34 }, (_, index) => (index < 30 ? ` PASS tests/unit/timeline/cards/case-${index + 1}.test.ts (${index + 3} tests) ${12 + index}ms` : ['', ' Test Files  30 passed (30)', '      Tests  465 passed (465)', '   Duration  4.21s'][index - 30]!)).join('\n');
 
-export type ToolCardsScene = 'shell';
+export const REGISTRY_PATH = '/home/owner/canterlot/web/src/lib/timeline/cards/registry.ts';
+const EDIT_OLD = [
+  "  'web.fetch': card({ ...fetchPage, link: (_call, data) => ({ text: data.domain, href: data.url, external: true }) }),",
+  '  skill: card(skill),',
+  "  'meta.tool_search': card(quiet),"
+].join('\n');
+const EDIT_NEW = [
+  "  'web.fetch': card({ ...fetchPage, link: (_call, data) => ({ text: data.domain, href: data.url, external: true }) }),",
+  '  skill: card(skill, SkillCard),',
+  "  'file.edit': card(outcomed(edit), EditCard),",
+  "  'file.write': card(outcomed(write), EditCard),",
+  "  'meta.tool_search': card(quiet),"
+].join('\n');
+const LIMIT_NAMES = ['контекста', 'кусков', 'файлов', 'строк'];
+/** Новый модуль на 72 строки: раскрытая карточка режет его на 60 и предлагает «Показать всё». */
+export const NEW_MODULE = [
+  '// Разница файла для карточки правки.',
+  "import { fmt } from '#lib/format/ru.js';",
+  '',
+  "export type DiffKind = 'add' | 'del' | 'ctx' | 'hunk';",
+  '',
+  ...Array.from({ length: 66 }, (_, index) => (index % 3 === 0 ? `export const LIMIT_${index} = ${index * 8};` : index % 3 === 1 ? `/** Предел ${index}: ${LIMIT_NAMES[index % 4]}. */` : '')),
+  "export const DONE = 'diff';"
+].join('\n');
+const PY_OLD = 'def limit(rows):\n    return rows[:20]\n';
+const PY_NEW = 'def limit(rows, size=40):\n    """Первые строки отчёта."""\n    return rows[:size]\n';
+const CODEX_DIFF = ['@@ -12,6 +12,7 @@ pub fn command_summary(item: &Value) -> String {', '     let actions = item', '         .get("commandActions")', '-        .and_then(Value::as_array)', '+        .and_then(Value::as_array)', '+        .filter(|actions| !actions.is_empty())', '         .map(|actions| {', ''].join('\n');
+const CODEX_ADD = '# Пузыри инструментов\n\nКарточки команды, навыка и правки файла.\n';
+const ENVELOPE = [
+  '*** Begin Patch',
+  '*** Update File: web/src/lib/timeline/cards/copy.ts',
+  '@@ export function clip(text: string, max = 80): string {',
+  "-  const clean = text.replace(/\\s+/g, ' ');",
+  "+  const clean = text.replace(/\\s+/g, ' ').trim();",
+  '+  if (!clean) return clean;',
+  '*** Add File: web/src/lib/timeline/cards/outcome.ts',
+  '+// Итог вызова команды или правки файла.',
+  '+export interface Outcome { exit: number | null }',
+  '*** End Patch'
+].join('\n');
 
 /** Лента одной сессии Claude Code; вызовы OpenCode и Codex несут свои формы входа и сводки. */
 export function seedToolCards(api: FakeHubApi, opts: { now?: number; working?: boolean } = {}): ToolCardsSeed {
@@ -51,7 +90,21 @@ export function seedToolCards(api: FakeHubApi, opts: { now?: number; working?: b
   feed.call(skills, 'skillDone', 'Skill', { skill: 'superpowers:test-driven-development', args: 'карточки ленты: формат команды и счёт строк' }, 'Launching skill: superpowers:test-driven-development');
   feed.text(skills, 'Навык загружен. Беру следующий.');
   feed.call(skills, 'skillOpencode', 'skill', { name: 'frontend-design' }, '<skill_content name="frontend-design">…</skill_content>');
-  feed.text(skills, 'И ещё один, пока пишу тесты.');
+  feed.text(skills, 'Навыки на месте.');
+
+  const files = api.id();
+  feed.input('Поправь реестр и добавь модуль разницы');
+  feed.call(files, 'editClaude', 'Edit', { file_path: REGISTRY_PATH, old_string: EDIT_OLD, new_string: EDIT_NEW }, `The file ${REGISTRY_PATH} has been updated. Here's the result of running \`cat -n\` on a snippet of the edited file.`);
+  feed.text(files, 'Новый модуль разницы.');
+  feed.call(files, 'writeClaude', 'Write', { file_path: '/home/owner/canterlot/web/src/lib/timeline/cards/diff.ts', content: NEW_MODULE }, 'File created successfully at: /home/owner/canterlot/web/src/lib/timeline/cards/diff.ts');
+  feed.text(files, 'OpenCode правит отчёт.');
+  feed.call(files, 'editOpencode', 'edit', { filePath: '/srv/reports/limit.py', oldString: PY_OLD, newString: PY_NEW }, 'Edit applied successfully.');
+  feed.text(files, 'Codex правит воркер и пишет заметку.');
+  feed.call(files, 'patchCodex', 'apply_patch', CODEX_DIFF, null, { summary: 'crates/canterlot-worker/src/adapter/codex/events.rs, completed' });
+  feed.call(files, 'patchCodexAdd', 'apply_patch', CODEX_ADD, null, { summary: 'docs/bubbles.md, completed' });
+  feed.text(files, 'И конвертом на два файла.');
+  feed.call(files, 'patchEnvelope', 'apply_patch', { input: ENVELOPE }, 'Success. Updated the following files:\nM web/src/lib/timeline/cards/copy.ts\nA web/src/lib/timeline/cards/outcome.ts');
+  feed.text(files, 'Правки готовы.');
 
   api.histories.set(id, items);
   api.bindConversation(id);
