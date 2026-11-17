@@ -12,6 +12,10 @@ const areasFile = moduleUrl.protocol === 'file:'
     ? fileURLToPath(new URL('./areas.json', import.meta.url))
     : `${process.cwd()}/e2e/areas.json`;
 const SPEC = /(?:^|\/)e2e\/(?:ui|parity)\/.*\.spec\.ts$/;
+const PROJECTS = ['phone', 'desktop'];
+// Глобальный путь дёргает весь набор, но только на телефоне: desktop нужен только для точечных правок.
+const GLOBAL_PROJECTS = ['phone'];
+const AREA_PROJECTS = ['phone', 'desktop'];
 
 const escape = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -52,10 +56,11 @@ export function findUncovered(paths, areas) {
 
 export function selectSpecs(changed, areas, allSpecs) {
     const selected = new Map();
-    const add = (spec, reason) => {
-        if (!selected.has(spec)) selected.set(spec, []);
-        const reasons = selected.get(spec);
-        if (!reasons.includes(reason)) reasons.push(reason);
+    const add = (spec, reason, projects) => {
+        if (!selected.has(spec)) selected.set(spec, { reasons: [], projects: new Set() });
+        const entry = selected.get(spec);
+        if (!entry.reasons.includes(reason)) entry.reasons.push(reason);
+        for (const project of projects) entry.projects.add(project);
     };
     const globalGlobs = areas.global.map(globToRegExp);
     const areaMatches = areas.areas.map(area => ({
@@ -65,21 +70,25 @@ export function selectSpecs(changed, areas, allSpecs) {
     }));
     for (const path of changed) {
         if (SPEC.test(path)) {
-            add(path, 'изменена спека');
+            add(path, 'изменена спека', AREA_PROJECTS);
             continue;
         }
         if (globalGlobs.some(regexp => regexp.test(path))) {
-            for (const spec of allSpecs) add(spec, 'глобальный путь');
+            for (const spec of allSpecs) add(spec, 'глобальный путь', GLOBAL_PROJECTS);
             continue;
         }
         for (const area of areaMatches) {
             if (area.regexps.some(regexp => regexp.test(path))) {
-                for (const spec of area.specs) add(spec, `область «${area.name}»`);
+                for (const spec of area.specs) add(spec, `область «${area.name}»`, AREA_PROJECTS);
             }
         }
     }
     return [...selected]
-        .map(([path, reasons]) => ({ path, reasons }))
+        .map(([path, entry]) => ({
+            path,
+            reasons: entry.reasons,
+            projects: PROJECTS.filter(project => entry.projects.has(project))
+        }))
         .sort((a, b) => a.path.localeCompare(b.path));
 }
 
@@ -124,8 +133,8 @@ if (mode === '--completeness') {
 } else if (mode === '--select') {
     const changed = readFileSync(0, 'utf8').split('\n').map(path => path.trim()).filter(Boolean);
     const selected = selectSpecs(changed, areas(), allSpecs());
-    for (const { path, reasons } of selected) {
-        process.stdout.write(`${path}\t${reasons.join('; ')}\n`);
+    for (const { path, reasons, projects } of selected) {
+        process.stdout.write(`${path}\t${reasons.join('; ')}\t${projects.join(',')}\n`);
     }
 } else {
     process.stderr.write('Использование: node e2e/select-specs.mjs --completeness | --select < changed-paths\n');

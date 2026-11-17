@@ -5,7 +5,8 @@
 #   scripts/check-web.sh --fast          то же без полного Playwright, vitest только по изменённым файлам;
 #                                        проверки собранных артефактов — только если была сборка;
 #                                        по diff выбираются изменённые спеки и спеки затронутых областей
-#                                        из e2e/areas.json и запускаются на phone и desktop
+#                                        из e2e/areas.json (phone и desktop), глобальный путь — весь набор
+#                                        только на phone; сгенерированные типы API — только проверка типов
 #   scripts/check-web.sh --fast --base REF  сравнивать с REF (по умолчанию main)
 #   scripts/check-web.sh --stack         полная плюс сквозные сценарии на настоящем хабе (перед выкаткой)
 # Прогон встаёт в очередь тяжёлых задач воркера: --stack берёт аренду gate, остальные
@@ -108,7 +109,7 @@ if ((api_changed)); then
 fi
 
 unit=(npx --no-install vitest run)
-declare -a specs=() reasons=()
+declare -a specs=() reasons=() projects=()
 if ((fast)); then
     if merge_base=$(git merge-base HEAD "$base" 2>/dev/null); then
         unit=(npx --no-install vitest run --changed "$merge_base" --passWithNoTests)
@@ -118,9 +119,10 @@ if ((fast)); then
         if [[ -n "$changed" ]]; then
             selection=$(printf '%s\n' "$changed" | node e2e/select-specs.mjs --select)
             if [[ -n "$selection" ]]; then
-                while IFS=$'\t' read -r spec reason; do
+                while IFS=$'\t' read -r spec reason spec_projects; do
                     specs+=("$spec")
                     reasons+=("$reason")
+                    projects+=("$spec_projects")
                 done <<<"$selection"
             fi
         fi
@@ -153,22 +155,44 @@ fi
 export PATH="${HOME}/.cargo/bin:${PATH}"
 if ((fast)); then
     if ((${#specs[@]})); then
-        printf '\n==> Playwright: выбранные спеки на phone и desktop\n'
+        printf '\n==> Playwright: выбранные спеки\n'
         printf 'Выбор по e2e/areas.json (изменённая спека / область / глобальный путь):\n'
         for index in "${!specs[@]}"; do
-            printf '  %s — %s\n' "${specs[$index]}" "${reasons[$index]}"
+            printf '  %s — %s [%s]\n' "${specs[$index]}" "${reasons[$index]}" "${projects[$index]}"
         done
+        # Глобальный путь дёргает весь набор, но только на phone: desktop — только для
+        # изменённых спек и областей, чтобы быстрая проверка не распухала до гейта.
         # Самопроверки обвязки (контактный лист, провод fake-hub) в обычный прогон не входят:
         # изменившуюся из них запускает PW_HARNESS=1, иначе она молча пропустилась бы.
-        plain=() harness_specs=()
-        for spec in "${specs[@]}"; do
+        plain_phone=() plain_both=() harness_phone=() harness_both=()
+        for index in "${!specs[@]}"; do
+            spec=${specs[$index]}
+            harness=0
             case "$spec" in
-                *contact-sheet.spec.ts|*fake-hub-wire.spec.ts) harness_specs+=("$spec") ;;
-                *) plain+=("$spec") ;;
+                *contact-sheet.spec.ts|*fake-hub-wire.spec.ts) harness=1 ;;
             esac
+            if [[ "${projects[$index]}" == "phone" ]]; then
+                if ((harness)); then harness_phone+=("$spec"); else plain_phone+=("$spec"); fi
+            else
+                if ((harness)); then harness_both+=("$spec"); else plain_both+=("$spec"); fi
+            fi
         done
-        if ((${#plain[@]})); then npx --no-install playwright test --project=phone --project=desktop "${plain[@]}"; fi
-        if ((${#harness_specs[@]})); then PW_HARNESS=1 npx --no-install playwright test --project=phone --project=desktop "${harness_specs[@]}"; fi
+        if ((${#plain_phone[@]})); then
+            printf '\n-- глобальный выбор, phone: %d спек\n' "${#plain_phone[@]}"
+            npx --no-install playwright test --project=phone "${plain_phone[@]}"
+        fi
+        if ((${#plain_both[@]})); then
+            printf '\n-- изменённые спеки и области, phone и desktop: %d спек\n' "${#plain_both[@]}"
+            npx --no-install playwright test --project=phone --project=desktop "${plain_both[@]}"
+        fi
+        if ((${#harness_phone[@]})); then
+            printf '\n-- обвязка, phone: %d спеки\n' "${#harness_phone[@]}"
+            PW_HARNESS=1 npx --no-install playwright test --project=phone "${harness_phone[@]}"
+        fi
+        if ((${#harness_both[@]})); then
+            printf '\n-- обвязка, phone и desktop: %d спеки\n' "${#harness_both[@]}"
+            PW_HARNESS=1 npx --no-install playwright test --project=phone --project=desktop "${harness_both[@]}"
+        fi
     fi
 else
     printf '\n==> Playwright e2e/ui и e2e/parity\n'

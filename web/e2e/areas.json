@@ -7,7 +7,8 @@
     "src/routes/__test/**",
     "src/lib/styles/**",
     "src/lib/ui/**",
-    "src/lib/api/**",
+    "src/lib/api/client.ts",
+    "src/lib/api/http.ts",
     "src/lib/shell/**",
     "src/lib/a11y/**",
     "src/lib/app/**",
@@ -48,6 +49,31 @@
     "e2e/parity/**/*.spec.ts"
   ],
   "areas": [
+    {
+      "name": "api/sync",
+      "description": "тонкие обёртки эндпоинтов: конфиг, ошибки и гейт отправки; проверяются спеками загрузки слепка, синхронизации и ленты",
+      "sources": [
+        "src/lib/api/config.ts",
+        "src/lib/api/errors.ts",
+        "src/lib/api/gate.ts"
+      ],
+      "specs": [
+        "e2e/ui/api-errors.spec.ts",
+        "e2e/ui/hub-events.spec.ts",
+        "e2e/ui/limits.spec.ts",
+        "e2e/ui/offline-stale.spec.ts",
+        "e2e/ui/reconnect.spec.ts",
+        "e2e/ui/timeline.spec.ts"
+      ]
+    },
+    {
+      "name": "api/generated",
+      "description": "только проверка типов: файлы перегенерируются из docs/api, Playwright-спеки не нужны",
+      "sources": [
+        "src/lib/api/generated/**"
+      ],
+      "specs": []
+    },
     {
       "name": "лента и таймлайн",
       "sources": [

@@ -2,7 +2,8 @@
 # Проверка перед сдачей работы.
 #   scripts/check.sh           полная: Rust и web, смотрит только то, что затронуто относительно main
 #   scripts/check.sh --fast    быстрая для небольшой правки: fmt, clippy, тесты изменённых крейтов, web check и vitest по diff,
-#                              Playwright только по изменённым и затронутым картой областей спекам на phone и desktop
+#                              Playwright только по изменённым и затронутым картой областей спекам на phone и desktop,
+#                              глобальный путь берёт весь набор только на phone
 #   scripts/check.sh --all     полная без учёта путей
 #   scripts/check.sh --all --no-web  полная без веб-половины: её целиком делает
 #                                    scripts/check-web.sh --stack (гейт выпуска)
