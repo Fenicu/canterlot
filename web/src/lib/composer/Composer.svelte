@@ -2,7 +2,9 @@
   import { onMount, tick, untrack } from 'svelte';
   import { canSendNow } from '#lib/api/gate.js';
   import { loadConfig } from '#lib/api/config.js';
-  import { getAttachment, putConversationDraft } from '#lib/api/client.js';
+  import { getAttachment, getConversationDraft, putConversationDraft } from '#lib/api/client.js';
+  import { ApiError } from '#lib/api/http.js';
+  import { DraftConflict, type DraftRecord } from '#lib/drafts/sync.js';
   import { clock } from '#lib/clock.js';
   import { ticker } from '#lib/ticker.svelte.js';
   import AttachmentTray from '#lib/composer/AttachmentTray.svelte';
@@ -56,14 +58,23 @@
         serverNow: () => clock.serverNow(),
         deviceId: runtime.deviceId,
         serverDrafts: {
+          get: async () => (await getConversationDraft(chat.id)).data,
           put: async (text, attachmentIds, baseRevision) => {
-            const response = await putConversationDraft(chat.id, {
-              text,
-              attachment_ids: attachmentIds,
-              base_revision: baseRevision,
-              device_id: runtime.deviceId
-            });
-            return response.data;
+            try {
+              const response = await putConversationDraft(chat.id, {
+                text,
+                attachment_ids: attachmentIds,
+                base_revision: baseRevision,
+                device_id: runtime.deviceId
+              });
+              return response.data;
+            } catch (err) {
+              // Старые PWA получат 409 как обычную ошибку и не воскреснут с давним текстом.
+              if (err instanceof ApiError && err.code === 'draft_revision_conflict' && err.details?.draft) {
+                throw new DraftConflict(err.details.draft as DraftRecord);
+              }
+              throw err;
+            }
           }
         },
         attachmentInfo: async (id) => {

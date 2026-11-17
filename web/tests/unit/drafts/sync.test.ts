@@ -7,9 +7,17 @@ interface Timer {
   cancelled: boolean;
 }
 
+interface LocalState {
+  text: string;
+  updatedAt: number;
+  attachments?: { id: string }[];
+  baseRevision?: number;
+  unsynced?: boolean;
+}
+
 function harness(options: {
   online?: boolean;
-  local?: { text: string; updatedAt: number; attachments?: { id: string }[] } | null;
+  local?: LocalState | null;
 } = {}) {
   let now = 0;
   let current = "";
@@ -42,9 +50,15 @@ function harness(options: {
     },
     local: {
       load: async () => local,
-      set: (text) => {
+      set: (text, edit) => {
         localSets.push(text);
-        local = { text, updatedAt: now, attachments: local?.attachments };
+        local = {
+          text,
+          updatedAt: now,
+          attachments: edit?.attachments ?? local?.attachments,
+          baseRevision: edit?.baseRevision ?? local?.baseRevision,
+          unsynced: edit?.unsynced ?? false,
+        };
       },
       clear: () => {
         local = null;
@@ -189,9 +203,9 @@ describe("drafts/sync", () => {
     expect(h.sync.dirty).toBe(false);
   });
 
-  it("keeps_a_newer_local_buffer_over_an_older_server_draft_and_sends_it", async () => {
+  it("keeps_a_real_offline_edit_over_an_older_server_draft_and_sends_it", async () => {
     const h = harness({
-      local: { text: "локальное", updatedAt: 2_000 },
+      local: { text: "локальное", updatedAt: 2_000, baseRevision: 7, unsynced: true },
     });
     await h.sync.start({
       text: "серверное",
@@ -292,5 +306,58 @@ describe("drafts/sync", () => {
     await h.sync.leave();
     await h.advance(5_000);
     expect(h.puts).toEqual([]);
+  });
+
+  it("a_stale_synced_local_buffer_does_not_resurrect_text_when_the_server_has_no_draft", async () => {
+    // Устройство S: давний локальный текст, черновик на хабе удалён отправкой с другого устройства.
+    const h = harness({
+      local: { text: "старый текст, отправленный несколько дней назад", updatedAt: 1_000 },
+    });
+    await h.sync.start(null);
+    expect(h.text()).toBe("");
+    await h.advance(5_000);
+    expect(h.puts).toEqual([]);
+    expect(h.local()?.text).toBe("");
+  });
+
+  it("an_empty_server_draft_wins_over_a_synced_local_buffer_even_with_a_newer_clock", async () => {
+    // Событие draft_changed не несёт updated_at: сравнение по часам даёт serverTime = 0.
+    const h = harness({
+      local: { text: "старый текст", updatedAt: 10_000 },
+    });
+    await h.sync.start({ text: "", revision: 42, updated_at: null });
+    expect(h.text()).toBe("");
+    await h.advance(5_000);
+    expect(h.puts).toEqual([]);
+  });
+
+  it("a_newer_server_revision_is_adopted_when_the_local_buffer_has_no_unsynced_edits", async () => {
+    const h = harness({
+      local: {
+        text: "старый",
+        updatedAt: 10_000,
+        baseRevision: 3,
+        unsynced: false,
+      },
+    });
+    await h.sync.start({ text: "новый", revision: 9, updated_at: null });
+    expect(h.text()).toBe("новый");
+    await h.advance(5_000);
+    expect(h.puts).toEqual([]);
+  });
+
+  it("a_real_offline_edit_is_kept_and_put_on_the_revision_it_was_edited_on", async () => {
+    const h = harness({
+      local: {
+        text: "набрано без сети",
+        updatedAt: 1_000,
+        baseRevision: 3,
+        unsynced: true,
+      },
+    });
+    await h.sync.start({ text: "новый текст на хабе", revision: 9, updated_at: null });
+    expect(h.text()).toBe("набрано без сети");
+    await h.advance(500);
+    expect(h.puts).toEqual([{ text: "набрано без сети", attachments: [], base: 3 }]);
   });
 });

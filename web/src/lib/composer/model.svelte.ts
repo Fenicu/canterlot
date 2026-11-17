@@ -2,7 +2,7 @@ import { SvelteDate } from "svelte/reactivity";
 import type { ChatStore } from "#lib/stores/chat.svelte.js";
 import type { OpJournal, Op } from "#lib/ops/journal.js";
 import type { DraftStore } from "#lib/drafts/store.js";
-import { DraftSync, type DraftRecord } from "#lib/drafts/sync.js";
+import { DraftSync, type DraftRecord, type DraftSyncApi } from "#lib/drafts/sync.js";
 import type { Returned } from "#lib/composer/returned.js";
 import type { Upload, UploadManager } from "#lib/uploads/manager.js";
 import type { ConnectionStatus } from "#lib/sync/connection.js";
@@ -50,13 +50,7 @@ export interface ComposerDeps {
   probe?: { mark(name: string): void };
   serverNow?(): number;
   /** Общий черновик на хабе; без него остаётся только локальный буфер. */
-  serverDrafts?: {
-    put(
-      text: string,
-      attachmentIds: string[],
-      baseRevision: number,
-    ): Promise<DraftRecord>;
-  };
+  serverDrafts?: DraftSyncApi;
   /** Идентификатор установки для отбрасывания эха своей записи. */
   deviceId?: string;
   /** Метаданные готового вложения для лотка на другом устройстве. */
@@ -106,7 +100,19 @@ export class ComposerModel {
         },
         local: {
           load: () => deps.drafts.load(deps.conversationId),
-          set: (text) => deps.drafts.set(deps.conversationId, { text }),
+          set: (text, edit) =>
+            deps.drafts.set(deps.conversationId, {
+              text,
+              ...(edit?.baseRevision !== undefined
+                ? { baseRevision: edit.baseRevision }
+                : {}),
+              ...(edit?.unsynced !== undefined
+                ? { unsynced: edit.unsynced }
+                : {}),
+              ...(edit?.attachments !== undefined
+                ? { attachments: edit.attachments }
+                : {}),
+            }),
           clear: () => deps.drafts.clear(deps.conversationId),
         },
         now: deps.now ?? (() => Date.now()),

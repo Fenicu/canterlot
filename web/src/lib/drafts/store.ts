@@ -12,6 +12,10 @@ export interface Draft {
   attachments: DraftAttachment[];
   updatedAt: number;
   ownerId?: string;
+  /** Серверная ревизия, на которой текст был последний раз синхронизирован. */
+  baseRevision?: number;
+  /** Были ли правки после синхронизации: только они имеют право на запись на хаб. */
+  unsynced?: boolean;
 }
 
 export interface DraftStoreOptions {
@@ -24,6 +28,8 @@ interface PendingDraft {
   attachments: DraftAttachment[];
   updatedAt: number;
   pendingSince: number;
+  baseRevision: number;
+  unsynced: boolean;
 }
 
 const writers = new Set<DraftStore>();
@@ -91,6 +97,8 @@ export class DraftStore {
         pending.text,
         pending.attachments,
         pending.updatedAt,
+        pending.baseRevision,
+        pending.unsynced,
       );
     }
     for (const [conversationId, draft] of this.#inflight.entries()) {
@@ -100,6 +108,8 @@ export class DraftStore {
         draft.text,
         draft.attachments,
         draft.updatedAt,
+        draft.baseRevision ?? 0,
+        draft.unsynced ?? false,
       );
     }
   }
@@ -109,6 +119,8 @@ export class DraftStore {
     text: string,
     attachments: DraftAttachment[],
     updatedAt: number,
+    baseRevision: number,
+    unsynced: boolean,
   ): void {
     const draft: Draft = {
       ownerId: this.ownerId,
@@ -116,6 +128,8 @@ export class DraftStore {
       text,
       attachments,
       updatedAt,
+      baseRevision,
+      unsynced,
     };
     localStorage.setItem(this.#tailKey(conversationId), JSON.stringify(draft));
   }
@@ -126,11 +140,18 @@ export class DraftStore {
     const existing =
       this.#pending.get(conversationId) ?? this.#known.get(conversationId);
     const pendingSince = now;
+    const baseRevision = patch.baseRevision ?? existing?.baseRevision ?? 0;
+    // Текст без явного признака приходит от нажатия/вставки — это правка владельца.
+    const unsynced =
+      patch.unsynced ??
+      (patch.text !== undefined ? true : (existing?.unsynced ?? false));
     const pending: PendingDraft = {
       text: patch.text ?? existing?.text ?? "",
       attachments: patch.attachments ?? existing?.attachments ?? [],
       updatedAt: patch.updatedAt ?? now,
       pendingSince,
+      baseRevision,
+      unsynced,
     };
     this.#pending.set(conversationId, pending);
     this.#known.set(conversationId, {
@@ -139,6 +160,8 @@ export class DraftStore {
       text: pending.text,
       attachments: pending.attachments,
       updatedAt: pending.updatedAt,
+      baseRevision,
+      unsynced,
     });
 
     const existingTimer = this.#timers.get(conversationId);
@@ -166,6 +189,8 @@ export class DraftStore {
       text: pending.text,
       attachments: pending.attachments,
       updatedAt: pending.updatedAt,
+      baseRevision: pending.baseRevision,
+      unsynced: pending.unsynced,
     };
     this.#inflight.set(conversationId, draft);
     if (this.#pending.get(conversationId) === pending)
