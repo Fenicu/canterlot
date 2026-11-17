@@ -847,7 +847,7 @@ impl Translator {
             }
             "fileChange" => {
                 let summary = file_summary(item, self.workdir.as_deref());
-                let diff = file_diff(item);
+                let diff = file_diff(item, self.workdir.as_deref());
                 self.open.insert(
                     item_id.to_owned(),
                     OpenBlock {
@@ -1275,7 +1275,7 @@ impl Translator {
                     .and_then(Value::as_str)
                     .unwrap_or_default();
                 let summary = file_summary(item, self.workdir.as_deref());
-                let diff = file_diff(item);
+                let diff = file_diff(item, self.workdir.as_deref());
                 if !diff.is_empty() {
                     block.pending_diff = diff;
                 }
@@ -1645,7 +1645,7 @@ impl Translator {
         if let Some(diff) = params.get("diff").and_then(Value::as_str) {
             block.pending_diff = diff.to_owned();
         } else if let Some(changes) = params.get("changes") {
-            let diff = extract_diffs(changes);
+            let diff = extract_diffs(changes, self.workdir.as_deref());
             if !diff.is_empty() {
                 block.pending_diff = diff;
             }
@@ -2179,21 +2179,100 @@ fn file_summary(item: &Value, workdir: Option<&Path>) -> String {
     cut120(&paths)
 }
 
-fn extract_diffs(changes: &Value) -> String {
-    changes
-        .as_array()
-        .map(|changes| {
-            changes
-                .iter()
-                .filter_map(|c| c.get("diff").and_then(Value::as_str))
-                .collect::<Vec<_>>()
-                .join("")
-        })
-        .unwrap_or_default()
+// Содержимое нового или удалённого файла: каждая строка с знаком и переводом.
+fn content_lines(content: &str, sign: char) -> (usize, String) {
+    let lines: Vec<&str> = content.lines().collect();
+    let count = lines.len();
+    let mut out = String::new();
+    for line in lines {
+        out.push(sign);
+        out.push_str(line);
+        out.push('\n');
+    }
+    (count, out)
 }
 
-fn file_diff(item: &Value) -> String {
-    item.get("changes").map(extract_diffs).unwrap_or_default()
+// Тело правки уже несёт свою шапку — вторую добавлять нельзя.
+fn has_diff_headers(body: &str) -> bool {
+    let mut lines = body.lines();
+    lines.next().is_some_and(|line| line.starts_with("--- "))
+        && lines.next().is_some_and(|line| line.starts_with("+++ "))
+}
+
+// Каждая секция заканчивается переводом строки перед следующей шапкой.
+fn finish_section(out: &mut String, body: &str) {
+    out.push_str(body);
+    if !body.is_empty() && !body.ends_with('\n') {
+        out.push('\n');
+    }
+}
+
+fn extract_diffs(changes: &Value, workdir: Option<&Path>) -> String {
+    let Some(changes) = changes.as_array() else {
+        return String::new();
+    };
+    let mut out = String::new();
+    for change in changes {
+        let path = change
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let rel = relative_path(path, workdir);
+        let body = change
+            .get("diff")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let kind = change
+            .get("kind")
+            .and_then(|kind| kind.get("type"))
+            .and_then(Value::as_str)
+            .unwrap_or("update");
+        match kind {
+            "add" => {
+                out.push_str("--- /dev/null\n+++ b/");
+                out.push_str(rel);
+                out.push('\n');
+                let (count, lines) = content_lines(body, '+');
+                if count > 0 {
+                    out.push_str(&format!("@@ -0,0 +1,{count} @@\n"));
+                    out.push_str(&lines);
+                }
+            }
+            "delete" => {
+                out.push_str("--- a/");
+                out.push_str(rel);
+                out.push_str("\n+++ /dev/null\n");
+                let (count, lines) = content_lines(body, '-');
+                if count > 0 {
+                    out.push_str(&format!("@@ -1,{count} +0,0 @@\n"));
+                    out.push_str(&lines);
+                }
+            }
+            _ => {
+                if !has_diff_headers(body) {
+                    let new_path = change
+                        .get("kind")
+                        .and_then(|kind| kind.get("move_path"))
+                        .and_then(Value::as_str)
+                        .map(|path| relative_path(path, workdir))
+                        .unwrap_or(rel);
+                    out.push_str("--- a/");
+                    out.push_str(rel);
+                    out.push_str("\n+++ b/");
+                    out.push_str(new_path);
+                    out.push('\n');
+                }
+                finish_section(&mut out, body);
+            }
+        }
+    }
+    out
+}
+
+fn file_diff(item: &Value, workdir: Option<&Path>) -> String {
+    item.get("changes")
+        .map(|changes| extract_diffs(changes, workdir))
+        .unwrap_or_default()
 }
 
 fn mcp_summary(item: &Value) -> (String, String) {

@@ -244,7 +244,11 @@ fn file_change_item_carries_diff_and_declined_status() {
             _ => None,
         })
         .expect("apply_patch final");
-    assert_eq!(final_text, "hi\n");
+    // Новый файл приходит с собственной шапкой, а не голым содержимым.
+    assert_eq!(
+        final_text,
+        "--- /dev/null\n+++ b/note.txt\n@@ -0,0 +1,1 @@\n+hi\n"
+    );
     assert!(events.iter().any(|e| matches!(
         e,
         AdapterEvent::BlockFinal { block_id, summary, .. }
@@ -277,6 +281,158 @@ fn file_change_item_carries_diff_and_declined_status() {
             .iter()
             .any(|(id, status, _)| id.starts_with("exec-579f86a8") && *status == "declined")
     }));
+}
+
+// Разница fileChange несёт заголовки файлов: по ним лента различает правку,
+// создание и удаление, а текст без заголовков разложить на файлы нельзя.
+const DIFF_WORKDIR: &str = "/work/project";
+
+fn file_change_final(changes: Vec<Value>, workdir: Option<&str>) -> String {
+    let mut translator = Translator::new("thread-main", "gpt-6-luna");
+    if let Some(workdir) = workdir {
+        translator.set_workdir(std::path::Path::new(workdir));
+    }
+    translator.begin_turn("turn-main", command_id());
+    let item = json!({
+        "id": "patch-1",
+        "type": "fileChange",
+        "status": "completed",
+        "changes": changes,
+    });
+    let params = json!({"threadId": "thread-main", "turnId": "turn-main", "item": item});
+    translator.feed("item/started", &params);
+    let out = translator.feed("item/completed", &params);
+    events_of(&out)
+        .into_iter()
+        .find_map(|e| match e {
+            AdapterEvent::BlockFinal { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .expect("fileChange BlockFinal")
+}
+
+#[test]
+fn file_change_add_gets_dev_null_header_and_counted_plus_lines() {
+    let changes = vec![json!({
+        "path": "/work/project/new.txt",
+        "kind": {"type": "add"},
+        "diff": "one\ntwo\n"
+    })];
+    assert_eq!(
+        file_change_final(changes, Some(DIFF_WORKDIR)),
+        "--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1,2 @@\n+one\n+two\n"
+    );
+}
+
+#[test]
+fn file_change_delete_gets_dev_null_header_and_minus_lines() {
+    let changes = vec![json!({
+        "path": "/work/project/gone.txt",
+        "kind": {"type": "delete"},
+        "diff": "bye\n"
+    })];
+    assert_eq!(
+        file_change_final(changes, Some(DIFF_WORKDIR)),
+        "--- a/gone.txt\n+++ /dev/null\n@@ -1,1 +0,0 @@\n-bye\n"
+    );
+}
+
+#[test]
+fn file_change_update_gets_a_b_headers() {
+    let changes = vec![json!({
+        "path": "/work/project/src/main.rs",
+        "kind": {"type": "update", "move_path": null},
+        "diff": "@@ -1 +1 @@\n-old\n+new\n"
+    })];
+    assert_eq!(
+        file_change_final(changes, Some(DIFF_WORKDIR)),
+        "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1 @@\n-old\n+new\n"
+    );
+}
+
+#[test]
+fn file_change_update_with_move_path_uses_new_path_in_b_header() {
+    let changes = vec![json!({
+        "path": "/work/project/old.rs",
+        "kind": {"type": "update", "move_path": "/work/project/renamed.rs"},
+        "diff": "@@ -1 +1 @@\n-a\n+b\n"
+    })];
+    assert_eq!(
+        file_change_final(changes, Some(DIFF_WORKDIR)),
+        "--- a/old.rs\n+++ b/renamed.rs\n@@ -1 +1 @@\n-a\n+b\n"
+    );
+}
+
+#[test]
+fn file_change_update_with_existing_headers_is_not_prefixed() {
+    let body = "--- a/edit.txt\n+++ b/edit.txt\n@@ -1 +1 @@\n-a\n+b\n";
+    let changes = vec![json!({
+        "path": "/work/project/edit.txt",
+        "kind": {"type": "update", "move_path": null},
+        "diff": body
+    })];
+    assert_eq!(file_change_final(changes, Some(DIFF_WORKDIR)), body);
+}
+
+#[test]
+fn file_change_two_changes_are_concatenated_with_own_headers() {
+    let changes = vec![
+        json!({
+            "path": "/work/project/a.txt",
+            "kind": {"type": "update", "move_path": null},
+            "diff": "@@ -1 +1 @@\n-1\n+2\n"
+        }),
+        json!({
+            "path": "/work/project/b.txt",
+            "kind": {"type": "add"},
+            "diff": "fresh\n"
+        }),
+    ];
+    assert_eq!(
+        file_change_final(changes, Some(DIFF_WORKDIR)),
+        concat!(
+            "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-1\n+2\n",
+            "--- /dev/null\n+++ b/b.txt\n@@ -0,0 +1,1 @@\n+fresh\n"
+        )
+    );
+}
+
+#[test]
+fn file_change_headers_use_workdir_relative_paths() {
+    let changes = vec![json!({
+        "path": "/work/project/src/deep/tree.rs",
+        "kind": {"type": "update", "move_path": null},
+        "diff": "@@ -1 +1 @@\n-x\n+y\n"
+    })];
+    assert_eq!(
+        file_change_final(changes, Some(DIFF_WORKDIR)),
+        "--- a/src/deep/tree.rs\n+++ b/src/deep/tree.rs\n@@ -1 +1 @@\n-x\n+y\n"
+    );
+}
+
+#[test]
+fn file_change_empty_add_emits_only_headers() {
+    let changes = vec![json!({
+        "path": "/work/project/empty.txt",
+        "kind": {"type": "add"},
+        "diff": ""
+    })];
+    assert_eq!(
+        file_change_final(changes, Some(DIFF_WORKDIR)),
+        "--- /dev/null\n+++ b/empty.txt\n"
+    );
+}
+
+#[test]
+fn file_change_missing_kind_is_treated_as_update() {
+    let changes = vec![json!({
+        "path": "/work/project/plain.txt",
+        "diff": "@@ -1 +1 @@\n-a\n+b\n"
+    })];
+    assert_eq!(
+        file_change_final(changes, Some(DIFF_WORKDIR)),
+        "--- a/plain.txt\n+++ b/plain.txt\n@@ -1 +1 @@\n-a\n+b\n"
+    );
 }
 
 #[test]
