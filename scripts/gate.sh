@@ -228,8 +228,9 @@ junit="target/nextest/default/junit.xml"
 pw_report_base="$PWD/$log_dir/pw-report"
 stack_report_base="$PWD/$log_dir/stack-report"
 if [[ "$web_action" == tests ]]; then
-    pw_report_base="$PWD/$log_dir/pw-rerun"
-    stack_report_base="$PWD/$log_dir/stack-rerun"
+    rerun_stamp=$(date -u +%Y%m%dT%H%M%SZ)
+    pw_report_base="$PWD/$log_dir/pw-rerun-$rerun_stamp"
+    stack_report_base="$PWD/$log_dir/stack-rerun-$rerun_stamp"
 fi
 export CANTERLOT_PW_JSON_REPORT="$pw_report_base"
 export CANTERLOT_STACK_JSON_REPORT="$stack_report_base"
