@@ -43,7 +43,7 @@ def optional_field(struct, field_name, structs):
             tp = spec["type"].strip()
             if info.get("default") or tp.startswith(("Option<", "Vec<", "BTreeMap<", "HashMap<")):
                 return True
-            return spec.get("has_default", False)
+            return spec.get("default", False)
     return False
 
 

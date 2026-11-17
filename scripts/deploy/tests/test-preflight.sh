@@ -159,6 +159,20 @@ assert_not_contains "${FAKE_ROOT}/out.log" "SECRET-VALUE-1" "value not printed"
 teardown_case
 case_end
 
+# 1d. ключ без Option, но с #[serde(default)] у поля (agent_nice с 1.39.0), форму не ломает.
+case_begin "preflight spec with a field-level serde default key"
+setup_live fielddefault
+{ printf 'agent_nice = 10\n'; cat "${WORKER_DATA}/executions/${EXEC1}/spec.toml"; } >"${FAKE_ROOT}/spec.new"
+cp "${FAKE_ROOT}/spec.new" "${WORKER_DATA}/executions/${EXEC1}/spec.toml"
+if bash "${DEPLOY_DIR}/preflight.sh" "${SHA_PREV}" --source "${REPO_ROOT}" >"${FAKE_ROOT}/out.log" 2>&1; then
+    case_ok "exit 0"
+else
+    case_fail "exit nonzero"; tail -5 "${FAKE_ROOT}/out.log"
+fi
+assert_contains "${FAKE_ROOT}/out.log" "optional in target: agent_nice" "field default accepted and named"
+teardown_case
+case_end
+
 # 2. супервизор без строки хаба: жёсткая ошибка.
 case_begin "supervisor without hub row"
 setup_live norow
