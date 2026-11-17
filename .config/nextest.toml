@@ -51,3 +51,9 @@ slow-timeout = { period = "30s", terminate-after = 8 }
 [[profile.default.overrides]]
 filter = 'test(=exec_e2e::transport_errors_never_stop_an_execution)'
 retries = 2
+
+# QUARANTINE: один таймаут в гейте 1.39.0 рядом с параллельным веб-стеком: 650 мс сна и
+# окно 100 мс дали «Elapsed»; отдельно проходит 30/30. Повтор разрешён.
+[[profile.default.overrides]]
+filter = 'package(canterlot-hub) & binary(it) & test(=outbox::degraded_outbox_resends_past_older_unsent_row_without_spinning)'
+retries = 2
