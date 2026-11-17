@@ -110,6 +110,34 @@ fn usable(model: &Value) -> bool {
         && model.get("status").and_then(Value::as_str) != Some("deprecated")
 }
 
+// Провайдер в идентификаторе `provider/model`; модель тоже может содержать `/`.
+fn provider_of(id: &str) -> &str {
+    id.split_once('/').map_or(id, |(provider, _)| provider)
+}
+
+fn provider_suffix(provider: &str) -> String {
+    match provider {
+        GO_PROVIDER => " · Go".to_owned(),
+        "opencode" => " · Zen".to_owned(),
+        other => format!(" · {other}"),
+    }
+}
+
+// Одинаковые названия разных провайдеров получают подпись провайдера.
+fn disambiguate_titles(entries: &mut [ModelEntry]) {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for entry in entries.iter() {
+        *counts.entry(entry.title.clone()).or_insert(0) += 1;
+    }
+    for entry in entries.iter_mut() {
+        if counts.get(&entry.title).copied().unwrap_or(0) > 1 {
+            entry
+                .title
+                .push_str(&provider_suffix(provider_of(&entry.id)));
+        }
+    }
+}
+
 /// Записи каталога машины: Go и явно включённые провайдеры, выбор по умолчанию первым.
 pub fn entries(
     models: &Value,
@@ -164,6 +192,7 @@ pub fn entries(
         })
         .collect();
     entries.sort_by_key(|entry| Some(&entry.id) != default.as_ref());
+    disambiguate_titles(&mut entries);
     entries
 }
 
@@ -288,6 +317,86 @@ mod tests {
 
     fn ids(found: Vec<ModelEntry>) -> Vec<String> {
         found.into_iter().map(|entry| entry.id).collect()
+    }
+
+    fn titles(found: Vec<ModelEntry>) -> Vec<String> {
+        found.into_iter().map(|entry| entry.title).collect()
+    }
+
+    fn named(provider: &str, id: &str, name: &str) -> Value {
+        let mut m = model(provider, id);
+        m["name"] = name.into();
+        m
+    }
+
+    fn unnamed(provider: &str, id: &str) -> Value {
+        let mut m = model(provider, id);
+        m.as_object_mut().unwrap().remove("name");
+        m
+    }
+
+    #[test]
+    fn duplicate_title_gets_provider_suffix() {
+        let list = json!({"data": [
+            named("opencode", "flash", "Hy4 flash Free"),
+            named("opencode-go", "flash", "Hy4 flash Free"),
+        ]});
+        let providers = vec!["opencode".to_owned()];
+        let found = entries(&list, None, &providers, &BTreeMap::new());
+        assert_eq!(
+            titles(found),
+            ["Hy4 flash Free · Zen", "Hy4 flash Free · Go"]
+        );
+    }
+
+    #[test]
+    fn unique_title_stays_unchanged() {
+        let list = json!({"data": [
+            named("opencode", "flash", "Hy4 flash Free"),
+            named("opencode-go", "pickle", "Big Pickle"),
+        ]});
+        let providers = vec!["opencode".to_owned()];
+        let found = entries(&list, None, &providers, &BTreeMap::new());
+        assert_eq!(titles(found), ["Hy4 flash Free", "Big Pickle"]);
+    }
+
+    #[test]
+    fn other_provider_gets_its_id_as_suffix() {
+        let list = json!({"data": [
+            named("opencode", "flash", "Shared"),
+            named("opencode-go", "flash", "Shared"),
+            named("openrouter", "flash", "Shared"),
+        ]});
+        let providers = vec!["opencode".to_owned(), "openrouter".to_owned()];
+        let found = entries(&list, None, &providers, &BTreeMap::new());
+        assert_eq!(
+            titles(found),
+            ["Shared · Zen", "Shared · Go", "Shared · openrouter"]
+        );
+    }
+
+    #[test]
+    fn missing_names_fall_back_to_ids_without_colliding() {
+        let list = json!({"data": [
+            unnamed("opencode", "flash"),
+            unnamed("opencode-go", "flash"),
+        ]});
+        let providers = vec!["opencode".to_owned()];
+        let found = entries(&list, None, &providers, &BTreeMap::new());
+        assert_eq!(titles(found), ["opencode/flash", "opencode-go/flash"]);
+    }
+
+    #[test]
+    fn default_model_stays_first_after_titles_are_disambiguated() {
+        let list = json!({"data": [
+            named("opencode", "a", "Shared"),
+            named("opencode-go", "b", "Shared"),
+        ]});
+        let providers = vec!["opencode".to_owned()];
+        let default = json!({"data": {"id": "b", "providerID": "opencode-go"}});
+        let found = entries(&list, Some(&default), &providers, &BTreeMap::new());
+        assert_eq!(ids(found.clone()), ["opencode-go/b", "opencode/a"]);
+        assert_eq!(titles(found), ["Shared · Go", "Shared · Zen"]);
     }
 
     #[test]
