@@ -444,7 +444,8 @@ async fn tool_turn_in_owner_mode_yields_a_speed(pool: PgPool) {
             ),
         ],
     });
-    script.steps.push(Step::Stall { ms: 400 });
+    // Пауза 1,5 с, как в plain_text_turn_yields_a_speed: время блокам ставит хаб при записи.
+    script.steps.push(Step::Stall { ms: 1500 });
     script.steps.push(Step::Emit {
         events: vec![
             frame(
@@ -574,7 +575,8 @@ async fn tool_turn_in_bypass_yields_a_speed(pool: PgPool) {
             ),
         ],
     });
-    script.steps.push(Step::Stall { ms: 400 });
+    // Пауза 1,5 с, как в plain_text_turn_yields_a_speed: время блокам ставит хаб при записи.
+    script.steps.push(Step::Stall { ms: 1500 });
     script.steps.push(Step::Emit {
         events: vec![
             frame(
