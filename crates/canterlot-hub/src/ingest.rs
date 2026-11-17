@@ -217,6 +217,7 @@ impl Ingest {
             })
             .collect::<Result<Vec<_>, IngestError>>()?;
         let pool = self.pool.clone();
+        let registry = self.registry.clone();
         crate::db::in_tx::<(), IngestError, _>(&pool, move |conn| {
             Box::pin(async move {
         let owner_id: Uuid = sqlx::query_scalar("select owner_id from machines where id = $1")
@@ -265,6 +266,9 @@ impl Ingest {
                         continue;
                     }
                 }
+                let current_epoch = registry
+                    .as_ref()
+                    .and_then(|registry| registry.current_secrets_epoch(machine_id));
                 apply_body(
                     &mut *conn,
                     machine_id,
@@ -276,6 +280,7 @@ impl Ingest {
                         ..Default::default()
                     }),
                     Uuid::now_v7(),
+                    current_epoch.as_deref(),
                 )
                 .await?;
             } else {
@@ -587,7 +592,20 @@ impl Ingest {
             .await
             {
                 Ok(Some(ignored)) => ignored,
-                Ok(None) => match apply_body(&mut tx, machine_id, body, correlation_id).await {
+                Ok(None) => match {
+                    let current_epoch = self
+                        .registry
+                        .as_ref()
+                        .and_then(|registry| registry.current_secrets_epoch(machine_id));
+                    apply_body(
+                        &mut tx,
+                        machine_id,
+                        body,
+                        correlation_id,
+                        current_epoch.as_deref(),
+                    )
+                    .await
+                } {
                     Ok(ignored) => ignored,
                     Err(error) => {
                         let _ = tx.rollback().await;
@@ -1019,7 +1037,7 @@ impl Ingest {
                 _ => unreachable!(),
             }
         } else {
-            let ignored = apply_body(conn, machine, body, correlation).await?;
+            let ignored = apply_body(conn, machine, body, correlation, None).await?;
             match body {
                 Body::InputAccepted(f) => {
                     let cmd = parse_id(&f.command_id)?;
@@ -1264,6 +1282,7 @@ async fn apply_body(
     machine_id: Uuid,
     body: &Body,
     correlation_id: Uuid,
+    current_epoch: Option<&str>,
 ) -> Result<bool, IngestError> {
     match body {
         Body::CommandStored(fact) => {
@@ -1627,7 +1646,14 @@ async fn apply_body(
         | Body::PromptSuggested(_)
         | Body::SessionStuck(_) => return Err(IngestError::InvalidRecord),
         Body::SecretDelivered(fact) => {
-            crate::secrets::apply_delivered_in_tx(conn, machine_id, fact, correlation_id).await?;
+            crate::secrets::apply_delivered_in_tx(
+                conn,
+                machine_id,
+                fact,
+                correlation_id,
+                current_epoch,
+            )
+            .await?;
         }
         Body::SecretFailed(fact) => {
             crate::secrets::apply_failed_in_tx(conn, machine_id, fact, correlation_id).await?;

@@ -664,6 +664,7 @@ pub async fn apply_delivered_in_tx(
     machine_id: Uuid,
     fact: &canterlot_proto::worker::v1::SecretDelivered,
     correlation_id: Uuid,
+    current_epoch: Option<&str>,
 ) -> Result<(), sqlx::Error> {
     let Some(request_id) = parse_uuid(&fact.request_id) else {
         return Ok(());
@@ -691,6 +692,7 @@ pub async fn apply_delivered_in_tx(
          set state = 'delivered', path = $2, expires_at = $3, note = null,
              send_deadline_at = null, revision = revision + 1, updated_at = now()
          where id = $1 and machine_id = $4 and state = 'sending' and generation = $5
+           and ($6::text is null or coalesce(secrets_epoch, '') = $6)
          returning *",
     )
     .bind(request_id)
@@ -698,9 +700,31 @@ pub async fn apply_delivered_in_tx(
     .bind(expires_at)
     .bind(machine_id)
     .bind(generation)
+    .bind(current_epoch)
     .fetch_optional(&mut *conn)
     .await?;
     let Some(row) = row else {
+        // Квитанция из прошлой загрузки: tmpfs с тех пор очищен, файла нет.
+        // Строку с другой эпохой нельзя объявлять доставленной.
+        if let Some(current) = current_epoch {
+            let stale: Option<SecretRequestRow> = sqlx::query_as(
+                "select * from secret_requests
+                 where id = $1 and machine_id = $2 and conversation_id = $3
+                   and generation = $4 and state = 'sending'
+                   and coalesce(secrets_epoch, '') <> $5
+                 for update",
+            )
+            .bind(request_id)
+            .bind(machine_id)
+            .bind(conversation_id)
+            .bind(generation)
+            .bind(current)
+            .fetch_optional(&mut *conn)
+            .await?;
+            if let Some(row) = stale {
+                lose_epoch_in_tx(conn, row, correlation_id).await?;
+            }
+        }
         return Ok(());
     };
     emit_in_tx(conn, &row, correlation_id).await?;
@@ -719,6 +743,42 @@ pub async fn apply_delivered_in_tx(
     };
     queue_message_in_tx(conn, &row, &text, "delivered", correlation_id).await;
     Ok(())
+}
+
+/// Смена эпохи делает поколение мёртвым: tmpfs очищен, файла нет. Карточка
+/// становится `lost` (её можно заполнить снова), а долг отзыва закрывается
+/// подтверждённым отсутствием.
+async fn lose_epoch_in_tx(
+    conn: &mut PgConnection,
+    row: SecretRequestRow,
+    correlation_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let updated: Option<SecretRequestRow> = sqlx::query_as(
+        "update secret_requests
+         set state = 'lost', path = null, expires_at = null, note = $3,
+             send_deadline_at = null, revision = revision + 1, updated_at = now()
+         where id = $1 and generation = $2 and state in ('sending', 'delivered')
+         returning *",
+    )
+    .bind(row.id)
+    .bind(row.generation)
+    .bind(NOTE_LOST)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some(updated) = updated else {
+        return Ok(false);
+    };
+    raise_revocation_in_tx(
+        conn,
+        row.machine_id,
+        row.conversation_id,
+        row.id,
+        row.generation,
+        "epoch",
+    )
+    .await?;
+    emit_in_tx(conn, &updated, correlation_id).await?;
+    Ok(true)
 }
 
 /// Воркер не смог записать файл: карточка снова ждёт владельца, поколение
@@ -1518,9 +1578,9 @@ pub async fn on_hub_session_established(
 ) -> Result<u64, sqlx::Error> {
     let rows: Vec<SecretRequestRow> = sqlx::query_as(
         "select * from secret_requests
-         where machine_id = $1 and state = 'delivered'
+         where machine_id = $1 and state in ('delivered', 'sending')
            and coalesce(secrets_epoch, '') <> $2
-         order by id for update",
+         order by id",
     )
     .bind(machine_id)
     .bind(epoch)
@@ -1533,28 +1593,7 @@ pub async fn on_hub_session_established(
             .bind(row.conversation_id)
             .execute(&mut *tx)
             .await?;
-        let updated: Option<SecretRequestRow> = sqlx::query_as(
-            "update secret_requests
-             set state = 'lost', path = null, expires_at = null, note = $3,
-                 send_deadline_at = null, revision = revision + 1, updated_at = now()
-             where id = $1 and generation = $2 and state = 'delivered' returning *",
-        )
-        .bind(row.id)
-        .bind(row.generation)
-        .bind(NOTE_LOST)
-        .fetch_optional(&mut *tx)
-        .await?;
-        if let Some(updated) = updated {
-            raise_revocation_in_tx(
-                &mut tx,
-                row.machine_id,
-                row.conversation_id,
-                row.id,
-                row.generation,
-                "epoch",
-            )
-            .await?;
-            emit_in_tx(&mut tx, &updated, Uuid::now_v7()).await?;
+        if lose_epoch_in_tx(&mut tx, row, Uuid::now_v7()).await? {
             found += 1;
         }
         tx.commit().await?;

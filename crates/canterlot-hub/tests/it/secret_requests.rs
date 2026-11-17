@@ -1209,6 +1209,74 @@ async fn an_epoch_change_marks_delivered_requests_lost(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn an_epoch_change_marks_sending_requests_lost(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let row = fx.open("В полёте").await;
+    sqlx::query(
+        "update secret_requests set state='sending', generation=1,
+                secrets_epoch='epoch-a', send_deadline_at=now() + interval '60 seconds'
+         where id=$1",
+    )
+    .bind(row.id)
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        secrets::on_hub_session_established(&fx.pool, &fx.registry, fx.seed.machine_id, "epoch-b",)
+            .await
+            .unwrap(),
+        1
+    );
+    let lost = fx.row(row.id).await;
+    assert_eq!(lost.state, secrets::SecretState::Lost);
+    assert!(lost.send_deadline_at.is_none());
+    assert_eq!(fx.obligation(row.id).await, Some((1, "epoch".into(), 0)));
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_replayed_delivery_receipt_from_an_old_epoch_becomes_lost(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let row = fx.open("Квитанция из прошлой загрузки").await;
+    sqlx::query(
+        "update secret_requests set state='sending', generation=1, secrets_epoch='epoch-a'
+         where id=$1",
+    )
+    .bind(row.id)
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+    let fact = canterlot_proto::worker::v1::SecretDelivered {
+        request_id: row.id.to_string(),
+        conversation_id: fx.seed.conversation_id.to_string(),
+        generation: 1,
+        path: "/run/gone".into(),
+        expires_at_ms: u64::try_from(
+            (chrono::Utc::now() + chrono::TimeDelta::hours(1)).timestamp_millis(),
+        )
+        .unwrap(),
+    };
+    let mut tx = canterlot_hub::db::begin(&fx.pool).await.unwrap();
+    secrets::apply_delivered_in_tx(
+        &mut tx,
+        fx.seed.machine_id,
+        &fact,
+        Uuid::now_v7(),
+        Some("epoch-b"),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let lost = fx.row(row.id).await;
+    assert_eq!(
+        lost.state,
+        secrets::SecretState::Lost,
+        "a receipt from the previous tmpfs cannot certify a file"
+    );
+    assert!(lost.path.is_none());
+    assert_eq!(fx.obligation(row.id).await, Some((1, "epoch".into(), 0)));
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn an_open_secret_keeps_the_session_in_waiting_for_user(pool: PgPool) {
     let fx = Fx::new(pool).await;
     fx.open("Пароль").await;
