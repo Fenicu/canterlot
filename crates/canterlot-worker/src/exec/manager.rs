@@ -3315,7 +3315,9 @@ mod tests {
                 conversation_id: conversation.to_string(),
                 value: b"old".to_vec(),
                 generation: 1,
-                expires_at_ms: 2,
+                expires_at_ms: u64::try_from(chrono::Utc::now().timestamp_millis())
+                    .unwrap_or(0)
+                    .saturating_add(60_000),
             },
             &HashSet::from([conversation]),
         )
