@@ -143,6 +143,9 @@ pub struct ProviderLimits {
     pub five_hour_absent_at: Option<DateTime<Utc>>,
     /// Точность последнего показания; старые записи без поля считаются точными.
     pub data_confidence: DataConfidence,
+    /// Конец входа провайдера на машинах владельца (самый ранний): у провайдера нет окна
+    /// для этой даты, она приходит из кадров `result`. `None` — дата неизвестна.
+    pub credential_expires_at: Option<DateTime<Utc>>,
     /// Публичный статус провайдера; `None`, пока хаб его не опрашивал.
     #[serde(skip)]
     pub status: Option<crate::provider_status::Status>,
@@ -385,6 +388,10 @@ pub(crate) async fn emit_changed(
         };
         let wire = |at: DateTime<Utc>| at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         let reserve = p.weekly_reserve_resets_at.map(wire);
+        // Дата конца входа меняется без смены окна: её несёт каждое событие лимитов.
+        let credential = credential_expires_at(&mut *conn, owner_id, provider)
+            .await?
+            .map(wire);
         let forecast = state
             .as_ref()
             .and_then(|s| s.forecast.as_ref())
@@ -394,10 +401,10 @@ pub(crate) async fn emit_changed(
         // Отсутствующее окно уходит клиентам событием без значения: `used_permille` и `resets_at` равны null.
         let payload = match (state, p.five_hour_absent_at) {
             (Some(s), _) => Some(
-                json!({"provider":provider,"window":window,"used_permille":s.used_permille,"resets_at":s.resets_at.map(wire),"observed_at":wire(s.observed_at),"weekly_reserve_active":p.weekly_reserve_active,"weekly_reserve_resets_at":reserve,"data_confidence":p.data_confidence.as_str(),"forecast":forecast}),
+                json!({"provider":provider,"window":window,"used_permille":s.used_permille,"resets_at":s.resets_at.map(wire),"observed_at":wire(s.observed_at),"weekly_reserve_active":p.weekly_reserve_active,"weekly_reserve_resets_at":reserve,"data_confidence":p.data_confidence.as_str(),"forecast":forecast,"credential_expires_at":credential}),
             ),
             (None, Some(absent)) if window == Window::FiveHour => Some(
-                json!({"provider":provider,"window":window,"used_permille":null,"resets_at":null,"observed_at":wire(absent),"weekly_reserve_active":p.weekly_reserve_active,"weekly_reserve_resets_at":reserve,"data_confidence":p.data_confidence.as_str(),"forecast":forecast}),
+                json!({"provider":provider,"window":window,"used_permille":null,"resets_at":null,"observed_at":wire(absent),"weekly_reserve_active":p.weekly_reserve_active,"weekly_reserve_resets_at":reserve,"data_confidence":p.data_confidence.as_str(),"forecast":forecast,"credential_expires_at":credential}),
             ),
             _ => None,
         };
@@ -638,6 +645,7 @@ pub async fn current(conn: &mut PgConnection) -> Result<Vec<ProviderLimits>, sql
                     .as_deref()
                     .unwrap_or("exact"),
             ),
+            credential_expires_at: None,
             status,
         });
     }
@@ -662,11 +670,69 @@ pub async fn shown(
     owner_id: Uuid,
 ) -> Result<Vec<ProviderLimits>, sqlx::Error> {
     let offered = offered_providers(&mut *conn, owner_id).await?;
-    Ok(current(conn)
+    let mut rows: Vec<ProviderLimits> = current(conn)
         .await?
         .into_iter()
         .filter(|p| offered.contains(&p.provider))
-        .collect())
+        .collect();
+    for row in &mut rows {
+        row.credential_expires_at =
+            credential_expires_at(&mut *conn, owner_id, &row.provider).await?;
+    }
+    Ok(rows)
+}
+
+/// Самый ранний конец входа провайдера среди машин владельца: полоса лимитов общая,
+/// а вход свой на каждой машине — владельцу важнее та, что закончится первой.
+pub async fn credential_expires_at(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    provider: &str,
+) -> Result<Option<DateTime<Utc>>, sqlx::Error> {
+    sqlx::query_scalar(
+        "select min(pc.expires_at) from provider_credentials pc
+         join machines m on m.id=pc.machine_id
+         where m.owner_id=$1 and pc.provider=$2",
+    )
+    .bind(owner_id)
+    .bind(provider)
+    .fetch_one(conn)
+    .await
+}
+
+/// Дата конца входа из кадра `result` Claude Code. Дата заменяется только более поздним
+/// наблюдением: пересланная старая запись после повторного входа её не откатывает.
+pub async fn record_credential_in_tx(
+    conn: &mut PgConnection,
+    machine_id: Uuid,
+    provider: &str,
+    expires_at: DateTime<Utc>,
+    observed_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> Result<bool, sqlx::Error> {
+    if !known_provider(provider) {
+        return Err(sqlx::Error::InvalidArgument(
+            "unknown limit provider".into(),
+        ));
+    }
+    let observed_at = DateTime::from_timestamp_micros(observed_at.timestamp_micros())
+        .ok_or_else(|| sqlx::Error::InvalidArgument("invalid credential time".into()))?;
+    let observed_at = clamp_to_now(observed_at, now);
+    let stored: Option<DateTime<Utc>> = sqlx::query_scalar(
+        "insert into provider_credentials(machine_id,provider,expires_at,observed_at)
+         values($1,$2,$3,$4)
+         on conflict(machine_id,provider) do update
+           set expires_at=excluded.expires_at,observed_at=excluded.observed_at
+           where provider_credentials.observed_at < excluded.observed_at
+         returning expires_at",
+    )
+    .bind(machine_id)
+    .bind(provider)
+    .bind(expires_at)
+    .bind(observed_at)
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(stored.is_some())
 }
 /// Каталог машин владельца изменил набор провайдеров: клиенты убирают ушедших,
 /// а вернувшиеся получают свои окна событиями `limits_changed`.

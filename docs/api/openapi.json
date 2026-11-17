@@ -12715,6 +12715,27 @@
           }
         ]
       },
+      "CredentialView": {
+        "type": "object",
+        "required": [
+          "provider",
+          "expires_at",
+          "observed_at"
+        ],
+        "properties": {
+          "expires_at": {
+            "type": "string",
+            "description": "Конец входа провайдера на машине."
+          },
+          "observed_at": {
+            "type": "string",
+            "description": "Когда машина сообщила дату: по ней видно, что вход обновили."
+          },
+          "provider": {
+            "type": "string"
+          }
+        }
+      },
       "CrunchDetail": {
         "type": "object",
         "required": [
@@ -15729,6 +15750,7 @@
           "allowed_roots",
           "limits_ok",
           "harnesses",
+          "credentials",
           "sessions",
           "warnings"
         ],
@@ -15759,6 +15781,13 @@
               "string",
               "null"
             ]
+          },
+          "credentials": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CredentialView"
+            },
+            "description": "Конец входа провайдера на этой машине: по строке на провайдера с известной датой."
           },
           "harnesses": {
             "type": "array",
@@ -17854,6 +17883,13 @@
           "data_confidence"
         ],
         "properties": {
+          "credential_expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Самый ранний конец входа провайдера на машинах владельца; `null` — дата неизвестна\n(API-ключ, старый CLI) или у провайдера такого входа нет."
+          },
           "data_confidence": {
             "$ref": "#/components/schemas/DataConfidence",
             "description": "`estimated`, когда CodexBar вывел расход из локальных журналов, иначе `exact`."

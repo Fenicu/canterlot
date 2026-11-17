@@ -46,6 +46,8 @@ pub struct MachineView {
     pub containment: Option<String>,
     pub limits_ok: bool,
     pub harnesses: Vec<HarnessView>,
+    /// Конец входа провайдера на этой машине: по строке на провайдера с известной датой.
+    pub credentials: Vec<CredentialView>,
     #[schema(value_type=Option<MetricsView>)]
     pub metrics: Option<Value>,
     pub sessions: Vec<SessionView>,
@@ -68,6 +70,15 @@ pub struct HarnessView {
     #[schema(value_type=Vec<ModelView>)]
     pub models: Value,
 }
+#[derive(Serialize, ToSchema)]
+pub struct CredentialView {
+    pub provider: String,
+    /// Конец входа провайдера на машине.
+    pub expires_at: String,
+    /// Когда машина сообщила дату: по ней видно, что вход обновили.
+    pub observed_at: String,
+}
+
 #[derive(Serialize, ToSchema)]
 pub struct SessionView {
     pub conversation_id: Uuid,
@@ -184,6 +195,22 @@ pub(crate) async fn load_stored(
             })
             .collect::<Result<_, _>>()?;
 
+    let credentials = sqlx::query(
+        "select provider,expires_at,observed_at from provider_credentials where machine_id=$1 order by provider",
+    )
+    .bind(id)
+    .fetch_all(&mut *conn)
+    .await?
+    .into_iter()
+    .map(|c| -> Result<CredentialView, sqlx::Error> {
+        Ok(CredentialView {
+            provider: c.try_get("provider")?,
+            expires_at: conversations::time(c.try_get("expires_at")?),
+            observed_at: conversations::time(c.try_get("observed_at")?),
+        })
+    })
+    .collect::<Result<_, _>>()?;
+
     let sessions=sqlx::query("select c.id,c.title,coalesce(d.activity_state,'idle') activity_state from conversations c left join conversation_derived d on d.conversation_id=c.id where c.machine_id=$1 and c.owner_id=$2 and c.trashed_at is null and c.side_of is null order by c.id").bind(id).bind(owner).fetch_all(&mut *conn).await?.into_iter().map(|p|->Result<SessionView,sqlx::Error>{Ok(SessionView{conversation_id:p.try_get("id")?,title:p.try_get("title")?,activity_state:p.try_get("activity_state")?})}).collect::<Result<_,_>>()?;
     let metrics=sqlx::query("select to_jsonb(mm)-'machine_id' value, observed_at from machine_metrics mm where machine_id=$1").bind(id).fetch_optional(&mut *conn).await?;
     let mut warnings = Vec::new();
@@ -253,6 +280,7 @@ pub(crate) async fn load_stored(
         containment: r.try_get("containment")?,
         limits_ok,
         harnesses,
+        credentials,
         metrics,
         sessions,
         warnings,

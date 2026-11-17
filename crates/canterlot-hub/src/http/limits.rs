@@ -74,6 +74,9 @@ pub struct ProviderView {
     pub five_hour_absent: bool,
     /// `estimated`, когда CodexBar вывел расход из локальных журналов, иначе `exact`.
     pub data_confidence: limits::DataConfidence,
+    /// Самый ранний конец входа провайдера на машинах владельца; `null` — дата неизвестна
+    /// (API-ключ, старый CLI) или у провайдера такого входа нет.
+    pub credential_expires_at: Option<String>,
     /// Публичный статус провайдера со страницы statuspage; `null`, пока хаб её не опрашивал
     /// или провайдер без такой страницы (OpenCode, Antigravity).
     pub status: Option<crate::provider_status::ProviderStatusView>,
@@ -90,6 +93,7 @@ impl From<limits::ProviderLimits> for ProviderView {
             weekly_reserve_resets_at: p.weekly_reserve_resets_at.map(time),
             five_hour_absent: p.five_hour_absent,
             data_confidence: p.data_confidence,
+            credential_expires_at: p.credential_expires_at.map(time),
             status: p
                 .status
                 .as_ref()

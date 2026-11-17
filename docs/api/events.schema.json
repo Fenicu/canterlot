@@ -4889,6 +4889,16 @@
                 "estimated"
               ]
             },
+            "credential_expires_at": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Time"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "forecast": {
               "anyOf": [
                 {

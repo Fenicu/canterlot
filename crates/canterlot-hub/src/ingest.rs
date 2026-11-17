@@ -950,6 +950,54 @@ impl Ingest {
     ) -> Result<(bool, Option<(String, crate::limits::Window)>, bool), IngestError> {
         use crate::limits::{self, DataConfidence, Observation, ObservationSource, Window};
         let now = chrono::Utc::now();
+        // Конец входа провайдера: дата без окна, проверяется тем же владением исполнением,
+        // что и показания лимитов, — иначе чужой журнал мог бы её подменить.
+        if let Body::ProviderCredential(f) = body {
+            let execution: Option<Uuid> =
+                sqlx::query_scalar("select execution_id from journal_cursors where journal_id=$1")
+                    .bind(journal)
+                    .fetch_one(&mut *conn)
+                    .await?;
+            let run = owned_execution(
+                conn,
+                machine,
+                execution.ok_or(IngestError::InvalidRecord)?,
+                None,
+            )
+            .await?
+            .ok_or(IngestError::ForeignExecution)?;
+            let harness: String =
+                sqlx::query_scalar("select harness from conversations where id=$1")
+                    .bind(run.conversation_id)
+                    .fetch_one(&mut *conn)
+                    .await?;
+            if canterlot_proto::harness::provider_of(&harness) != Some(f.provider.as_str()) {
+                return Err(IngestError::InvalidRecord);
+            }
+            let Some(expires_at) =
+                limits::timestamp(f.expires_at_ms).map_err(|_| IngestError::InvalidRecord)?
+            else {
+                // 0 — дата неизвестна (API-ключ, старый CLI): хранить нечего.
+                return Ok((false, None, false));
+            };
+            let observed_at = registry
+                .as_ref()
+                .and_then(|r| r.to_hub_time(machine, f.observed_machine_ms))
+                .unwrap_or_else(|| {
+                    Self::hub_time_for(registry, machine, f.observed_machine_ms, now)
+                });
+            limits::record_credential_in_tx(
+                conn,
+                machine,
+                &f.provider,
+                expires_at,
+                observed_at,
+                now,
+            )
+            .await
+            .map_err(pilot_error)?;
+            return Ok((false, None, false));
+        }
         if matches!(body, Body::LimitObserved(_) | Body::LimitReached(_)) {
             let execution: Option<Uuid> =
                 sqlx::query_scalar("select execution_id from journal_cursors where journal_id=$1")
@@ -2377,6 +2425,24 @@ impl crate::grpc::Ingest for Ingest {
                 Some((a.provider, at))
             })
             .collect();
+        // Даты конца входа опрос может принести наравне с окнами: тот же отчёт, та же дата.
+        let credentials: Vec<(
+            String,
+            chrono::DateTime<chrono::Utc>,
+            chrono::DateTime<chrono::Utc>,
+        )> = report
+            .credentials
+            .into_iter()
+            .filter_map(|c| {
+                let expires = limits::timestamp(c.expires_at_ms).ok().flatten()?;
+                let at = self
+                    .registry
+                    .as_ref()
+                    .and_then(|r| r.to_hub_time(machine_id, c.observed_machine_ms))
+                    .unwrap_or_else(|| self.hub_time(machine_id, c.observed_machine_ms, now));
+                Some((c.provider, expires, at))
+            })
+            .collect();
         let pool = self.pool.clone();
         let limits = self.limits.clone();
         let outcome = crate::db::in_tx(&pool, move |conn| {
@@ -2389,6 +2455,7 @@ impl crate::grpc::Ingest for Ingest {
                     .iter()
                     .map(|(o, _)| o.provider.as_str())
                     .chain(absences.iter().map(|(provider, _)| provider.as_str()))
+                    .chain(credentials.iter().map(|(provider, _, _)| provider.as_str()))
                     .filter(|provider| limits::known_provider(provider))
                     .collect();
                 for provider in providers {
@@ -2430,6 +2497,19 @@ impl crate::grpc::Ingest for Ingest {
                             limits::Window::FiveHour,
                             at,
                             Uuid::now_v7(),
+                        )
+                        .await?;
+                    }
+                }
+                for (provider, expires_at, observed_at) in &credentials {
+                    if limits::known_provider(provider) {
+                        limits::record_credential_in_tx(
+                            &mut *conn,
+                            machine_id,
+                            provider,
+                            *expires_at,
+                            *observed_at,
+                            now,
                         )
                         .await?;
                     }

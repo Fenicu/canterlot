@@ -2377,6 +2377,13 @@ export interface components {
         CreatedAttachment: components["schemas"]["AttachmentRecord"] & {
             upload: components["schemas"]["UploadOffer"];
         };
+        CredentialView: {
+            /** @description Конец входа провайдера на машине. */
+            expires_at: string;
+            /** @description Когда машина сообщила дату: по ней видно, что вход обновили. */
+            observed_at: string;
+            provider: string;
+        };
         CrunchDetail: {
             enabled: boolean;
             reserve_override_until?: string | null;
@@ -3236,6 +3243,8 @@ export interface components {
             availability_since?: string | null;
             capabilities: string[];
             containment?: string | null;
+            /** @description Конец входа провайдера на этой машине: по строке на провайдера с известной датой. */
+            credentials: components["schemas"]["CredentialView"][];
             harnesses: components["schemas"]["HarnessView"][];
             /** Format: int64 */
             heartbeat_age_ms?: number | null;
@@ -3873,6 +3882,11 @@ export interface components {
             max_weekly_percent: number | null;
         };
         ProviderView: {
+            /**
+             * @description Самый ранний конец входа провайдера на машинах владельца; `null` — дата неизвестна
+             *     (API-ключ, старый CLI) или у провайдера такого входа нет.
+             */
+            credential_expires_at?: string | null;
             /** @description `estimated`, когда CodexBar вывел расход из локальных журналов, иначе `exact`. */
             data_confidence: components["schemas"]["DataConfidence"];
             five_hour?: components["schemas"]["WindowView"] | null;
