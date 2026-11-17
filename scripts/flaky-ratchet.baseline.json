@@ -1,0 +1,829 @@
+{
+  "allowances": {},
+  "counts": {
+    "crates/canterlot-hub/src/activity.rs": {
+      "rust_clock": 1
+    },
+    "crates/canterlot-hub/src/http/preview.rs": {
+      "rust_sleep": 1
+    },
+    "crates/canterlot-hub/src/leases.rs": {
+      "rust_clock": 1
+    },
+    "crates/canterlot-hub/src/machine_info.rs": {
+      "rust_clock": 1
+    },
+    "crates/canterlot-hub/src/presence.rs": {
+      "rust_clock": 3
+    },
+    "crates/canterlot-hub/src/provider_status.rs": {
+      "rust_clock": 1
+    },
+    "crates/canterlot-hub/src/scheduler.rs": {
+      "rust_clock": 4
+    },
+    "crates/canterlot-hub/src/session.rs": {
+      "rust_sleep": 1
+    },
+    "crates/canterlot-hub/src/session_tools/alarms.rs": {
+      "rust_clock": 5
+    },
+    "crates/canterlot-hub/src/session_tools/completion.rs": {
+      "rust_clock": 1
+    },
+    "crates/canterlot-hub/src/session_tools/jobs.rs": {
+      "rust_clock": 1
+    },
+    "crates/canterlot-hub/src/session_tools/machine_text.rs": {
+      "rust_clock": 1
+    },
+    "crates/canterlot-hub/src/session_tools/nudge.rs": {
+      "rust_clock": 3
+    },
+    "crates/canterlot-hub/src/session_tools/probe.rs": {
+      "rust_clock": 2
+    },
+    "crates/canterlot-hub/src/singleton.rs": {
+      "rust_clock": 1,
+      "rust_sleep": 1
+    },
+    "crates/canterlot-hub/src/subscriptions.rs": {
+      "rust_clock": 1,
+      "rust_sleep": 2
+    },
+    "crates/canterlot-hub/tests/it/accepted_retention.rs": {
+      "rust_clock": 12
+    },
+    "crates/canterlot-hub/tests/it/accepted_retention_recheck.rs": {
+      "rust_clock": 1
+    },
+    "crates/canterlot-hub/tests/it/activity.rs": {
+      "rust_clock": 1
+    },
+    "crates/canterlot-hub/tests/it/agent_calls.rs": {
+      "rust_clock": 2,
+      "rust_sleep": 1
+    },
+    "crates/canterlot-hub/tests/it/agent_facts.rs": {
+      "rust_clock": 57,
+      "rust_sleep": 2
+    },
+    "crates/canterlot-hub/tests/it/alarms.rs": {
+      "rust_clock": 45,
+      "rust_sleep": 2
+    },
+    "crates/canterlot-hub/tests/it/attachments.rs": {
+      "rust_clock": 18,
+      "rust_sleep": 5
+    },
+    "crates/canterlot-hub/tests/it/attachments_gc.rs": {
+      "rust_clock": 17,
+      "rust_sleep": 5
+    },
+    "crates/canterlot-hub/tests/it/attachments_gc_drafts.rs": {
+      "rust_clock": 1
+    },
+    "crates/canterlot-hub/tests/it/auth_geo.rs": {
+      "rust_clock": 1
+    },
+    "crates/canterlot-hub/tests/it/auth_qr.rs": {
+      "rust_clock": 1,
+      "rust_sleep": 2
+    },
+    "crates/canterlot-hub/tests/it/auth_ws.rs": {
+      "rust_sleep": 1
+    },
+    "crates/canterlot-hub/tests/it/background_tasks.rs": {
+      "rust_clock": 1
+    },
+    "crates/canterlot-hub/tests/it/bookmarks.rs": {
+      "rust_clock": 3
+    },
+    "crates/canterlot-hub/tests/it/composer_drafts.rs": {
+      "rust_clock": 3
+    },
+    "crates/canterlot-hub/tests/it/contract_coverage.rs": {
+      "rust_clock": 2
+    },
+    "crates/canterlot-hub/tests/it/control.rs": {
+      "rust_clock": 1
+    },
+    "crates/canterlot-hub/tests/it/conversation_delete.rs": {
+      "rust_clock": 5
+    },
+    "crates/canterlot-hub/tests/it/conversation_trash.rs": {
+      "rust_clock": 9,
+      "rust_sleep": 3
+    },
+    "crates/canterlot-hub/tests/it/conversations_api.rs": {
+      "rust_clock": 9,
+      "rust_sleep": 1
+    },
+    "crates/canterlot-hub/tests/it/credential_pushes.rs": {
+      "rust_clock": 5
+    },
+    "crates/canterlot-hub/tests/it/credentials.rs": {
+      "rust_clock": 4
+    },
+    "crates/canterlot-hub/tests/it/crunch.rs": {
+      "rust_clock": 5,
+      "rust_sleep": 3
+    },
+    "crates/canterlot-hub/tests/it/crunch_http.rs": {
+      "rust_clock": 2
+    },
+    "crates/canterlot-hub/tests/it/derived.rs": {
+      "rust_clock": 6,
+      "rust_sleep": 4
+    },
+    "crates/canterlot-hub/tests/it/dictation.rs": {
+      "rust_sleep": 6
+    },
+    "crates/canterlot-hub/tests/it/dispatch.rs": {
+      "rust_clock": 1
+    },
+    "crates/canterlot-hub/tests/it/edit_input.rs": {
+      "rust_clock": 1
+    },
+    "crates/canterlot-hub/tests/it/event_schema.rs": {
+      "rust_clock": 6
+    },
+    "crates/canterlot-hub/tests/it/execution_control.rs": {
+      "rust_clock": 2,
+      "rust_sleep": 1
+    },
+    "crates/canterlot-hub/tests/it/file_probe.rs": {
+      "rust_clock": 25,
+      "rust_sleep": 2
+    },
+    "crates/canterlot-hub/tests/it/final_fix_cli.rs": {
+      "rust_sleep": 1
+    },
+    "crates/canterlot-hub/tests/it/final_review.rs": {
+      "rust_clock": 1
+    },
+    "crates/canterlot-hub/tests/it/final_wave.rs": {
+      "rust_clock": 15,
+      "rust_sleep": 9
+    },
+    "crates/canterlot-hub/tests/it/git_facts.rs": {
+      "rust_clock": 5
+    },
+    "crates/canterlot-hub/tests/it/grpc_attachments.rs": {
+      "rust_clock": 1
+    },
+    "crates/canterlot-hub/tests/it/grpc_session.rs": {
+      "rust_sleep": 5
+    },
+    "crates/canterlot-hub/tests/it/held_delivery.rs": {
+      "rust_clock": 2
+    },
+    "crates/canterlot-hub/tests/it/history_search.rs": {
+      "rust_clock": 7
+    },
+    "crates/canterlot-hub/tests/it/http_core.rs": {
+      "rust_clock": 2,
+      "rust_sleep": 6
+    },
+    "crates/canterlot-hub/tests/it/http_requests.rs": {
+      "rust_sleep": 1
+    },
+    "crates/canterlot-hub/tests/it/in_tx.rs": {
+      "rust_clock": 1
+    },
+    "crates/canterlot-hub/tests/it/ingest.rs": {
+      "rust_clock": 4,
+      "rust_sleep": 1
+    },
+    "crates/canterlot-hub/tests/it/limits_absent.rs": {
+      "rust_clock": 6
+    },
+    "crates/canterlot-hub/tests/it/limits_fable.rs": {
+      "rust_clock": 10
+    },
+    "crates/canterlot-hub/tests/it/limits_forecast.rs": {
+      "rust_clock": 4
+    },
+    "crates/canterlot-hub/tests/it/limits_offered.rs": {
+      "rust_clock": 2
+    },
+    "crates/canterlot-hub/tests/it/limits_report.rs": {
+      "rust_clock": 5
+    },
+    "crates/canterlot-hub/tests/it/machine_disk.rs": {
+      "rust_clock": 14
+    },
+    "crates/canterlot-hub/tests/it/machine_info.rs": {
+      "rust_clock": 1,
+      "rust_sleep": 6
+    },
+    "crates/canterlot-hub/tests/it/machine_lease.rs": {
+      "rust_clock": 9
+    },
+    "crates/canterlot-hub/tests/it/machine_outage.rs": {
+      "rust_clock": 8
+    },
+    "crates/canterlot-hub/tests/it/machines.rs": {
+      "rust_sleep": 2
+    },
+    "crates/canterlot-hub/tests/it/media.rs": {
+      "rust_clock": 3
+    },
+    "crates/canterlot-hub/tests/it/model_resolution.rs": {
+      "rust_clock": 1
+    },
+    "crates/canterlot-hub/tests/it/nudge.rs": {
+      "rust_clock": 36,
+      "rust_sleep": 4
+    },
+    "crates/canterlot-hub/tests/it/outbox.rs": {
+      "rust_clock": 3,
+      "rust_sleep": 8
+    },
+    "crates/canterlot-hub/tests/it/owner_push.rs": {
+      "rust_clock": 27,
+      "rust_sleep": 2
+    },
+    "crates/canterlot-hub/tests/it/plan_board.rs": {
+      "rust_clock": 8,
+      "rust_sleep": 3
+    },
+    "crates/canterlot-hub/tests/it/presence.rs": {
+      "rust_clock": 3
+    },
+    "crates/canterlot-hub/tests/it/presets.rs": {
+      "rust_clock": 1,
+      "rust_sleep": 1
+    },
+    "crates/canterlot-hub/tests/it/prompt_suggestions.rs": {
+      "rust_clock": 3,
+      "rust_sleep": 2
+    },
+    "crates/canterlot-hub/tests/it/provider_credits.rs": {
+      "rust_clock": 6
+    },
+    "crates/canterlot-hub/tests/it/provider_status.rs": {
+      "rust_clock": 6
+    },
+    "crates/canterlot-hub/tests/it/receipts.rs": {
+      "rust_clock": 1
+    },
+    "crates/canterlot-hub/tests/it/requests_integration.rs": {
+      "rust_clock": 3,
+      "rust_sleep": 1
+    },
+    "crates/canterlot-hub/tests/it/rereview.rs": {
+      "rust_clock": 2,
+      "rust_sleep": 4
+    },
+    "crates/canterlot-hub/tests/it/reserve_settings.rs": {
+      "rust_clock": 1,
+      "rust_sleep": 1
+    },
+    "crates/canterlot-hub/tests/it/resume_at_reset.rs": {
+      "rust_clock": 1
+    },
+    "crates/canterlot-hub/tests/it/retention_keyset.rs": {
+      "rust_clock": 1
+    },
+    "crates/canterlot-hub/tests/it/routing.rs": {
+      "rust_clock": 1
+    },
+    "crates/canterlot-hub/tests/it/scheduler.rs": {
+      "rust_clock": 22,
+      "rust_sleep": 7
+    },
+    "crates/canterlot-hub/tests/it/secret_requests.rs": {
+      "rust_clock": 5,
+      "rust_sleep": 2
+    },
+    "crates/canterlot-hub/tests/it/security.rs": {
+      "rust_sleep": 2
+    },
+    "crates/canterlot-hub/tests/it/send_now.rs": {
+      "rust_clock": 1
+    },
+    "crates/canterlot-hub/tests/it/service_notes.rs": {
+      "rust_clock": 3
+    },
+    "crates/canterlot-hub/tests/it/session_accept.rs": {
+      "rust_clock": 3
+    },
+    "crates/canterlot-hub/tests/it/session_api.rs": {
+      "rust_clock": 4
+    },
+    "crates/canterlot-hub/tests/it/session_send.rs": {
+      "rust_clock": 7
+    },
+    "crates/canterlot-hub/tests/it/session_spawn.rs": {
+      "rust_clock": 3
+    },
+    "crates/canterlot-hub/tests/it/session_subs.rs": {
+      "rust_clock": 68,
+      "rust_sleep": 1
+    },
+    "crates/canterlot-hub/tests/it/session_summary.rs": {
+      "rust_clock": 18
+    },
+    "crates/canterlot-hub/tests/it/session_tools_read.rs": {
+      "rust_clock": 3
+    },
+    "crates/canterlot-hub/tests/it/session_wait.rs": {
+      "rust_clock": 12,
+      "rust_sleep": 4
+    },
+    "crates/canterlot-hub/tests/it/settings.rs": {
+      "rust_clock": 8
+    },
+    "crates/canterlot-hub/tests/it/side_chat.rs": {
+      "rust_clock": 5
+    },
+    "crates/canterlot-hub/tests/it/singleton_regressions.rs": {
+      "rust_clock": 1,
+      "rust_sleep": 5
+    },
+    "crates/canterlot-hub/tests/it/snapshot_boundary.rs": {
+      "rust_clock": 3,
+      "rust_sleep": 3
+    },
+    "crates/canterlot-hub/tests/it/snooze.rs": {
+      "rust_clock": 1
+    },
+    "crates/canterlot-hub/tests/it/spawn_queue.rs": {
+      "rust_clock": 33,
+      "rust_sleep": 1
+    },
+    "crates/canterlot-hub/tests/it/submit.rs": {
+      "rust_clock": 2,
+      "rust_sleep": 1
+    },
+    "crates/canterlot-hub/tests/it/support/settings_process_guard.rs": {
+      "rust_clock": 2
+    },
+    "crates/canterlot-hub/tests/it/support/task3.rs": {
+      "rust_clock": 1,
+      "rust_sleep": 1
+    },
+    "crates/canterlot-hub/tests/it/support/task5.rs": {
+      "rust_clock": 2,
+      "rust_sleep": 1
+    },
+    "crates/canterlot-hub/tests/it/support/task7.rs": {
+      "rust_clock": 1
+    },
+    "crates/canterlot-hub/tests/it/support/task9.rs": {
+      "rust_clock": 2,
+      "rust_sleep": 1
+    },
+    "crates/canterlot-hub/tests/it/todos_integration.rs": {
+      "rust_clock": 1
+    },
+    "crates/canterlot-hub/tests/it/tx_rollback.rs": {
+      "rust_clock": 1,
+      "rust_sleep": 2
+    },
+    "crates/canterlot-hub/tests/it/ws.rs": {
+      "rust_clock": 8,
+      "rust_sleep": 7
+    },
+    "crates/canterlot-speech/tests/serve.rs": {
+      "rust_clock": 6,
+      "rust_sleep": 4
+    },
+    "crates/canterlot-worker/src/containment.rs": {
+      "rust_clock": 2,
+      "rust_sleep": 1
+    },
+    "crates/canterlot-worker/src/exec/group.rs": {
+      "rust_clock": 2
+    },
+    "crates/canterlot-worker/src/exec/maintenance.rs": {
+      "rust_clock": 8
+    },
+    "crates/canterlot-worker/src/exec/manager.rs": {
+      "rust_clock": 3,
+      "rust_sleep": 1
+    },
+    "crates/canterlot-worker/src/fault_injection.rs": {
+      "rust_clock": 1
+    },
+    "crates/canterlot-worker/src/lease/client.rs": {
+      "rust_sleep": 1
+    },
+    "crates/canterlot-worker/src/lease/server.rs": {
+      "rust_sleep": 1
+    },
+    "crates/canterlot-worker/src/machine/hotspots.rs": {
+      "rust_clock": 6
+    },
+    "crates/canterlot-worker/src/machine/limits.rs": {
+      "rust_clock": 1
+    },
+    "crates/canterlot-worker/src/machine/owner_instructions.rs": {
+      "rust_clock": 3
+    },
+    "crates/canterlot-worker/src/machine/probe.rs": {
+      "rust_clock": 1,
+      "rust_sleep": 2
+    },
+    "crates/canterlot-worker/src/main.rs": {
+      "rust_sleep": 1
+    },
+    "crates/canterlot-worker/src/supervisor/run.rs": {
+      "rust_clock": 5,
+      "rust_sleep": 1
+    },
+    "crates/canterlot-worker/tests/it/adapter.rs": {
+      "rust_clock": 3
+    },
+    "crates/canterlot-worker/tests/it/attachments.rs": {
+      "rust_sleep": 2
+    },
+    "crates/canterlot-worker/tests/it/canterlot_mcp_presets.rs": {
+      "rust_clock": 1,
+      "rust_sleep": 1
+    },
+    "crates/canterlot-worker/tests/it/claude_code_containment.rs": {
+      "rust_sleep": 2
+    },
+    "crates/canterlot-worker/tests/it/claude_code_e2e.rs": {
+      "rust_clock": 15,
+      "rust_sleep": 11
+    },
+    "crates/canterlot-worker/tests/it/claude_code_large_result.rs": {
+      "rust_clock": 1,
+      "rust_sleep": 2
+    },
+    "crates/canterlot-worker/tests/it/claude_code_limits.rs": {
+      "rust_clock": 1
+    },
+    "crates/canterlot-worker/tests/it/claude_code_parser.rs": {
+      "rust_clock": 2
+    },
+    "crates/canterlot-worker/tests/it/claude_code_presets.rs": {
+      "rust_clock": 1,
+      "rust_sleep": 4
+    },
+    "crates/canterlot-worker/tests/it/claude_code_process.rs": {
+      "rust_sleep": 1
+    },
+    "crates/canterlot-worker/tests/it/claude_code_restart_stuck.rs": {
+      "rust_clock": 1,
+      "rust_sleep": 1
+    },
+    "crates/canterlot-worker/tests/it/codex_containment.rs": {
+      "rust_sleep": 2
+    },
+    "crates/canterlot-worker/tests/it/codex_e2e.rs": {
+      "rust_clock": 3,
+      "rust_sleep": 1
+    },
+    "crates/canterlot-worker/tests/it/codex_limits.rs": {
+      "rust_clock": 5,
+      "rust_sleep": 2
+    },
+    "crates/canterlot-worker/tests/it/codexbar_limits.rs": {
+      "rust_clock": 1
+    },
+    "crates/canterlot-worker/tests/it/codexbar_logging.rs": {
+      "rust_clock": 1
+    },
+    "crates/canterlot-worker/tests/it/containment.rs": {
+      "rust_sleep": 4
+    },
+    "crates/canterlot-worker/tests/it/e2e.rs": {
+      "rust_clock": 1
+    },
+    "crates/canterlot-worker/tests/it/exec.rs": {
+      "rust_clock": 2,
+      "rust_sleep": 23
+    },
+    "crates/canterlot-worker/tests/it/exec_attachments.rs": {
+      "rust_clock": 2
+    },
+    "crates/canterlot-worker/tests/it/exec_e2e.rs": {
+      "rust_clock": 5,
+      "rust_ignore": 2,
+      "rust_sleep": 1
+    },
+    "crates/canterlot-worker/tests/it/exec_media.rs": {
+      "rust_clock": 1
+    },
+    "crates/canterlot-worker/tests/it/git_facts.rs": {
+      "rust_clock": 1
+    },
+    "crates/canterlot-worker/tests/it/instructions.rs": {
+      "rust_clock": 9,
+      "rust_sleep": 3
+    },
+    "crates/canterlot-worker/tests/it/lease.rs": {
+      "rust_clock": 6,
+      "rust_sleep": 10
+    },
+    "crates/canterlot-worker/tests/it/machine.rs": {
+      "rust_sleep": 3
+    },
+    "crates/canterlot-worker/tests/it/opencode_adapter.rs": {
+      "rust_clock": 12,
+      "rust_sleep": 8
+    },
+    "crates/canterlot-worker/tests/it/opencode_e2e.rs": {
+      "rust_clock": 2,
+      "rust_sleep": 2
+    },
+    "crates/canterlot-worker/tests/it/opencode_live.rs": {
+      "rust_clock": 7,
+      "rust_sleep": 5
+    },
+    "crates/canterlot-worker/tests/it/opencode_process.rs": {
+      "rust_clock": 1,
+      "rust_sleep": 3
+    },
+    "crates/canterlot-worker/tests/it/opencode_review_findings.rs": {
+      "rust_clock": 1,
+      "rust_sleep": 4
+    },
+    "crates/canterlot-worker/tests/it/opencode_worker.rs": {
+      "rust_clock": 2,
+      "rust_sleep": 1
+    },
+    "crates/canterlot-worker/tests/it/pilot_e2e.rs": {
+      "rust_clock": 2
+    },
+    "crates/canterlot-worker/tests/it/prune_target_script.rs": {
+      "rust_clock": 1
+    },
+    "crates/canterlot-worker/tests/it/session.rs": {
+      "rust_clock": 5
+    },
+    "crates/canterlot-worker/tests/it/spec_compat.rs": {
+      "rust_sleep": 3
+    },
+    "crates/canterlot-worker/tests/it/store.rs": {
+      "rust_clock": 1
+    },
+    "crates/canterlot-worker/tests/it/supervisor.rs": {
+      "rust_clock": 1,
+      "rust_sleep": 7
+    },
+    "crates/canterlot-worker/tests/it/supervisor_requests.rs": {
+      "rust_sleep": 5
+    },
+    "crates/canterlot-worker/tests/it/support/attachments.rs": {
+      "rust_clock": 1,
+      "rust_sleep": 1
+    },
+    "crates/canterlot-worker/tests/it/support/frozen_clock.rs": {
+      "rust_clock": 1
+    },
+    "crates/canterlot-worker/tests/it/support/mod.rs": {
+      "rust_sleep": 2
+    },
+    "crates/canterlot-worker/tests/it/support/opencode.rs": {
+      "rust_clock": 2,
+      "rust_sleep": 1
+    },
+    "crates/canterlot-worker/tests/it/support/opencode_stub.rs": {
+      "rust_sleep": 1
+    },
+    "crates/canterlot-worker/tests/it/support/pilot.rs": {
+      "rust_clock": 1
+    },
+    "crates/canterlot-worker/tests/it/support/process_guard.rs": {
+      "rust_clock": 2
+    },
+    "crates/canterlot-worker/tests/it/support/task8.rs": {
+      "rust_clock": 3
+    },
+    "crates/canterlot-worker/tests/it/support/trace.rs": {
+      "rust_clock": 2
+    },
+    "crates/canterlot-worker/tests/it/version_probe.rs": {
+      "rust_clock": 5,
+      "rust_sleep": 1
+    },
+    "crates/canterlot-worker/tests/it/worktree.rs": {
+      "rust_sleep": 1
+    },
+    "web/e2e/parity/contact-sheet.spec.ts": {
+      "ts_wait": 1
+    },
+    "web/e2e/parity/visual-language.spec.ts": {
+      "ts_wait": 1
+    },
+    "web/e2e/perf/perf.spec.ts": {
+      "ts_wait": 6
+    },
+    "web/e2e/screenshots/feed-cards.spec.ts": {
+      "ts_wait": 17
+    },
+    "web/e2e/screenshots/image-viewer.spec.ts": {
+      "ts_setTimeout": 1,
+      "ts_wait": 33
+    },
+    "web/e2e/screenshots/machine-watch.spec.ts": {
+      "ts_wait": 1
+    },
+    "web/e2e/screenshots/plan-cards.spec.ts": {
+      "ts_wait": 1
+    },
+    "web/e2e/screenshots/readme.spec.ts": {
+      "ts_wait": 1
+    },
+    "web/e2e/screenshots/session-states.spec.ts": {
+      "ts_wait": 2
+    },
+    "web/e2e/screenshots/taiga-cards.spec.ts": {
+      "ts_wait": 13
+    },
+    "web/e2e/screenshots/theme.spec.ts": {
+      "ts_wait": 1
+    },
+    "web/e2e/stack/global-setup.ts": {
+      "ts_setTimeout": 1
+    },
+    "web/e2e/stack/global-teardown.ts": {
+      "ts_setTimeout": 1
+    },
+    "web/e2e/stack/hub.ts": {
+      "ts_setTimeout": 2
+    },
+    "web/e2e/stack/input.spec.ts": {
+      "ts_wait": 3
+    },
+    "web/e2e/stack/stream.spec.ts": {
+      "ts_setTimeout": 1,
+      "ts_wait": 2
+    },
+    "web/e2e/ui/api-error-shots.spec.ts": {
+      "ts_wait": 3
+    },
+    "web/e2e/ui/block-fold.spec.ts": {
+      "ts_setTimeout": 1
+    },
+    "web/e2e/ui/bookmarks.spec.ts": {
+      "ts_wait": 1
+    },
+    "web/e2e/ui/chat-chrome.spec.ts": {
+      "ts_setTimeout": 1,
+      "ts_wait": 1
+    },
+    "web/e2e/ui/chat-visual-fix.spec.ts": {
+      "ts_wait": 1
+    },
+    "web/e2e/ui/composer-interrupt.spec.ts": {
+      "ts_wait": 1
+    },
+    "web/e2e/ui/composer-stack-bound.spec.ts": {
+      "ts_wait": 4
+    },
+    "web/e2e/ui/composer-suggestion.spec.ts": {
+      "ts_wait": 1
+    },
+    "web/e2e/ui/composer.spec.ts": {
+      "ts_wait": 11
+    },
+    "web/e2e/ui/connection-banner.spec.ts": {
+      "ts_wait": 2
+    },
+    "web/e2e/ui/delegation-grow.spec.ts": {
+      "ts_wait": 1
+    },
+    "web/e2e/ui/design-layout.spec.ts": {
+      "ts_wait": 2
+    },
+    "web/e2e/ui/dialog.spec.ts": {
+      "ts_wait": 6
+    },
+    "web/e2e/ui/dictation-worklet.spec.ts": {
+      "ts_wait": 1
+    },
+    "web/e2e/ui/edit-input.spec.ts": {
+      "ts_wait": 1
+    },
+    "web/e2e/ui/fake-hub-wire.spec.ts": {
+      "ts_wait": 1
+    },
+    "web/e2e/ui/feed-jitter.spec.ts": {
+      "ts_wait": 3
+    },
+    "web/e2e/ui/image-native-menu.spec.ts": {
+      "ts_wait": 2
+    },
+    "web/e2e/ui/image-viewer-fixture.ts": {
+      "ts_setTimeout": 2
+    },
+    "web/e2e/ui/image-viewer.spec.ts": {
+      "ts_wait": 1
+    },
+    "web/e2e/ui/limits-shots.spec.ts": {
+      "ts_wait": 2
+    },
+    "web/e2e/ui/low-findings-question-card.spec.ts": {
+      "ts_setTimeout": 1,
+      "ts_wait": 3
+    },
+    "web/e2e/ui/low-findings-sessions.spec.ts": {
+      "ts_skip": 2
+    },
+    "web/e2e/ui/new-session.spec.ts": {
+      "ts_wait": 6
+    },
+    "web/e2e/ui/offline-stale.spec.ts": {
+      "ts_wait": 1
+    },
+    "web/e2e/ui/owner-messages.spec.ts": {
+      "ts_wait": 1
+    },
+    "web/e2e/ui/primitives.spec.ts": {
+      "ts_wait": 1
+    },
+    "web/e2e/ui/prose-copy-button.spec.ts": {
+      "ts_wait": 3
+    },
+    "web/e2e/ui/reasoning.spec.ts": {
+      "ts_wait": 3
+    },
+    "web/e2e/ui/request-card-overflow.spec.ts": {
+      "ts_wait": 4
+    },
+    "web/e2e/ui/requests.spec.ts": {
+      "ts_wait": 1
+    },
+    "web/e2e/ui/reveal-footer.spec.ts": {
+      "ts_wait": 4
+    },
+    "web/e2e/ui/search.spec.ts": {
+      "ts_wait": 1
+    },
+    "web/e2e/ui/session-chat-rows.spec.ts": {
+      "ts_wait": 2
+    },
+    "web/e2e/ui/session-row-fold.spec.ts": {
+      "ts_setTimeout": 1
+    },
+    "web/e2e/ui/sessions.spec.ts": {
+      "ts_setTimeout": 2,
+      "ts_wait": 2
+    },
+    "web/e2e/ui/settings.spec.ts": {
+      "ts_wait": 1
+    },
+    "web/e2e/ui/shell.spec.ts": {
+      "ts_wait": 1
+    },
+    "web/e2e/ui/sign-in.spec.ts": {
+      "ts_wait": 4
+    },
+    "web/e2e/ui/small-layout-fixes.spec.ts": {
+      "ts_skip": 2,
+      "ts_wait": 3
+    },
+    "web/e2e/ui/spawn-whitelist.spec.ts": {
+      "ts_wait": 1
+    },
+    "web/e2e/ui/theme-picker.spec.ts": {
+      "ts_wait": 1
+    },
+    "web/e2e/ui/time-tip.spec.ts": {
+      "ts_wait": 4
+    },
+    "web/e2e/ui/timeline.spec.ts": {
+      "ts_wait": 5
+    },
+    "web/e2e/ui/tool-cards.spec.ts": {
+      "ts_wait": 1
+    },
+    "web/e2e/ui/update.spec.ts": {
+      "ts_wait": 1
+    },
+    "web/e2e/ui/waiting-shots.spec.ts": {
+      "ts_wait": 2
+    },
+    "web/tests/unit/api/http.test.ts": {
+      "ts_setTimeout": 1
+    },
+    "web/tests/unit/drafts/store.test.ts": {
+      "ts_setTimeout": 5
+    },
+    "web/tests/unit/ops/journal.test.ts": {
+      "ts_setTimeout": 1
+    },
+    "web/tests/unit/pwa/platform.test.ts": {
+      "ts_setTimeout": 2
+    },
+    "web/tests/unit/sessions/new-session.test.ts": {
+      "ts_setTimeout": 1
+    },
+    "web/tests/unit/stores/chat-snapshot.test.ts": {
+      "ts_setTimeout": 1
+    },
+    "web/tests/unit/stores/task4.test.ts": {
+      "ts_setTimeout": 1
+    },
+    "web/tests/unit/uploads/manager.test.ts": {
+      "ts_setTimeout": 2
+    }
+  },
+  "version": 1
+}
