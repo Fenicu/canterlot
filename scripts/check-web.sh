@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Проверка веба.
-#   scripts/check-web.sh                 сверка сгенерированных типов API, svelte-check, eslint, токены, vitest, проверки собранных артефактов, Playwright e2e/ui и e2e/parity
-#   scripts/check-web.sh --fast          то же без Playwright, vitest только по изменённым файлам;
-#                                        проверки собранных артефактов — только если была сборка
-#                                        изменённые спеки e2e запускаются на phone
+#   scripts/check-web.sh                 сверка сгенерированных типов API, svelte-check, eslint, токены, vitest, проверки собранных артефактов, Playwright e2e/ui и e2e/parity;
+#                                        полнота карты областей e2e/areas.json проверяется в обоих режимах
+#   scripts/check-web.sh --fast          то же без полного Playwright, vitest только по изменённым файлам;
+#                                        проверки собранных артефактов — только если была сборка;
+#                                        по diff выбираются изменённые спеки и спеки затронутых областей
+#                                        из e2e/areas.json и запускаются на phone и desktop
 #   scripts/check-web.sh --fast --base REF  сравнивать с REF (по умолчанию main)
 #   scripts/check-web.sh --stack         полная плюс сквозные сценарии на настоящем хабе (перед выкаткой)
 # Прогон встаёт в очередь тяжёлых задач воркера: --stack берёт аренду gate, остальные
@@ -91,6 +93,10 @@ if [[ ! -d node_modules || package-lock.json -nt node_modules/.package-lock.json
 fi
 npx --no-install svelte-kit sync
 
+# Карта областей не должна отставать от исходников: иначе правка нового файла web/src
+# молча не возьмёт ни одну спек, и регрессия всплывёт только в полном гейте.
+node e2e/select-specs.mjs --completeness
+
 # Сгенерированные типы сверяются с docs/api: в быстром режиме, только когда менялся контракт или сами типы.
 api_changed=1
 if ((fast)) && api_base=$(git merge-base HEAD "$base" 2>/dev/null); then
@@ -102,11 +108,22 @@ if ((api_changed)); then
 fi
 
 unit=(npx --no-install vitest run)
-specs=()
+declare -a specs=() reasons=()
 if ((fast)); then
     if merge_base=$(git merge-base HEAD "$base" 2>/dev/null); then
         unit=(npx --no-install vitest run --changed "$merge_base" --passWithNoTests)
-        mapfile -t specs < <({ git diff --relative --name-only "$merge_base" -- e2e/ui e2e/parity; git ls-files --others --exclude-standard -- e2e/ui e2e/parity; } | grep -E '\.spec\.ts$' | sort -u)
+        # Выбор спеков: изменённые спеки ∪ спеки областей, чьи исходники затронуты diff.
+        # Карта и глобальные пути живут в e2e/areas.json; причину выбора печатаем перед прогоном.
+        changed=$({ git diff --relative --name-only "$merge_base"; git ls-files --others --exclude-standard; } | sort -u)
+        if [[ -n "$changed" ]]; then
+            selection=$(printf '%s\n' "$changed" | node e2e/select-specs.mjs --select)
+            if [[ -n "$selection" ]]; then
+                while IFS=$'\t' read -r spec reason; do
+                    specs+=("$spec")
+                    reasons+=("$reason")
+                done <<<"$selection"
+            fi
+        fi
     fi
 fi
 
@@ -136,7 +153,11 @@ fi
 export PATH="${HOME}/.cargo/bin:${PATH}"
 if ((fast)); then
     if ((${#specs[@]})); then
-        printf '\n==> Playwright: изменённые спеки на phone\n'
+        printf '\n==> Playwright: выбранные спеки на phone и desktop\n'
+        printf 'Выбор по e2e/areas.json (изменённая спека / область / глобальный путь):\n'
+        for index in "${!specs[@]}"; do
+            printf '  %s — %s\n' "${specs[$index]}" "${reasons[$index]}"
+        done
         # Самопроверки обвязки (контактный лист, провод fake-hub) в обычный прогон не входят:
         # изменившуюся из них запускает PW_HARNESS=1, иначе она молча пропустилась бы.
         plain=() harness_specs=()
@@ -146,8 +167,8 @@ if ((fast)); then
                 *) plain+=("$spec") ;;
             esac
         done
-        if ((${#plain[@]})); then npx --no-install playwright test --project=phone "${plain[@]}"; fi
-        if ((${#harness_specs[@]})); then PW_HARNESS=1 npx --no-install playwright test --project=phone "${harness_specs[@]}"; fi
+        if ((${#plain[@]})); then npx --no-install playwright test --project=phone --project=desktop "${plain[@]}"; fi
+        if ((${#harness_specs[@]})); then PW_HARNESS=1 npx --no-install playwright test --project=phone --project=desktop "${harness_specs[@]}"; fi
     fi
 else
     printf '\n==> Playwright e2e/ui и e2e/parity\n'
