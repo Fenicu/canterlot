@@ -4,6 +4,11 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fakeAudioFile } from './testing/fake-audio.mjs';
 
+// Гейт выпуска просит machine-readable отчёт о проваленных тестах: он читает
+// идентичности (проект, файл, заголовок) из JSON, а не из текста лога. Без переменных
+// конфиг ведёт себя как раньше — список тестов в stdout и никаких файлов отчёта.
+const pwJsonReport = process.env.CANTERLOT_PW_JSON_REPORT;
+const stackJsonReport = process.env.CANTERLOT_STACK_JSON_REPORT;
 const SLOT_SUFFIX = process.env.CANTERLOT_STACK_SLOT ? `-${process.env.CANTERLOT_STACK_SLOT}` : '';
 const STACK_INFO_FILE = join(tmpdir(), `canterlot-stack-info${SLOT_SUFFIX}.json`);
 // Cookie владельца, которую global-setup стенда получает по ссылке восстановления.
@@ -32,6 +37,10 @@ if (isStackOrPerf && existsSync(STACK_INFO_FILE)) {
   } catch {}
 }
 
+const jsonReportFile = isStackOrPerf
+  ? stackJsonReport ? `${stackJsonReport}${SLOT_SUFFIX}.json` : undefined
+  : pwJsonReport ? `${pwJsonReport}.json` : undefined;
+
 const requestedWorkers = process.env.PW_WORKERS;
 const workers = requestedWorkers ? (requestedWorkers.endsWith('%') ? requestedWorkers : Number(requestedWorkers)) : '50%';
 
@@ -54,6 +63,7 @@ const firefoxLayout = (name: string, width: number, height: number) => ({
 
 export default defineConfig({
   testDir: './e2e',
+  reporter: jsonReportFile ? [['list'], ['json', { outputFile: jsonReportFile }]] : [['list']],
   // Проект budget зависит от phone и desktop, поэтому прогон `e2e/ui` тянул бы за собой и сквозные наборы, которым нужен стенд.
   testIgnore: baseIgnore,
   // Тесты независимы: пара «проект, тест» занимает воркер сама. Стенд и перф делят одно состояние и идут по одному.

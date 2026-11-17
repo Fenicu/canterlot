@@ -232,6 +232,60 @@ grep -qF 'flaky=rust|crate-a|mod::flaky' "$att" || fail 'аттестация: �
 grep -q 'отчёт о нестабильных тестах' "$out" || fail 'нет отчёта о нестабильных тестах'
 grep -q 'flaky-tests.md' "$out" || fail 'нет напоминания про flaky-tests.md'
 
+# --- идентичности наборов выката, Playwright и сквозных сценариев ---
+# shellcheck disable=SC2016
+fake_check_pass='echo "check $GATE_STEP_MODE" >>"$GATE_FAKE_CALLS"; exit 0'
+# shellcheck disable=SC2016
+fake_deploy_fail='
+echo "deploy $GATE_STEP_MODE [$GATE_STEP_SELECTION]" >>"$GATE_FAKE_CALLS"
+mkdir -p "$RUN_LOG_DIR"
+for t in changed release; do
+  if [[ "$FAKE_DEPLOY_FAIL" == "$t" ]]; then printf "1 5\n" >"$RUN_LOG_DIR/$t.rc"; else printf "0 5\n" >"$RUN_LOG_DIR/$t.rc"; fi
+done
+[[ "$FAKE_DEPLOY_FAIL" == none ]]
+'
+# shellcheck disable=SC2016
+fake_web_fail='
+echo "web $GATE_STEP_MODE [$GATE_STEP_SELECTION]" >>"$GATE_FAKE_CALLS"
+pw="${CANTERLOT_PW_JSON_REPORT}.json"
+st="${CANTERLOT_STACK_JSON_REPORT}-1.json"
+mkdir -p "${pw%/*}"
+if [[ "$FAKE_WEB_FAIL" == none ]]; then
+  printf "%s\n" "{\"suites\":[]}" >"$pw"
+  printf "%s\n" "{\"suites\":[]}" >"$st"
+  exit 0
+fi
+printf "%s\n" "{\"suites\":[{\"specs\":[{\"file\":\"e2e/ui/x.spec.ts\",\"title\":\"x spec\",\"tests\":[{\"projectName\":\"phone\",\"title\":\"flaky title\",\"results\":[{\"status\":\"failed\"}]}]}]}]}" >"$pw"
+printf "%s\n" "{\"suites\":[{\"specs\":[{\"file\":\"e2e/stack/y.spec.ts\",\"title\":\"stack spec\",\"tests\":[{\"title\":\"stack title\",\"results\":[{\"status\":\"timedOut\"}]}]}]}]}" >"$st"
+exit 1
+'
+web_env=(
+    env CANTERLOT_NO_LEASE=1 CANTERLOT_GATE_DEPLOY_NEEDED=1
+    CANTERLOT_GATE_STEP_NPM="$fake_npm" CANTERLOT_GATE_STEP_CHECK="$fake_check_pass"
+    CANTERLOT_GATE_STEP_DEPLOY="$fake_deploy_fail" CANTERLOT_GATE_STEP_WEB="$fake_web_fail"
+)
+g6="$tmp/g6"
+new_gate_repo "$g6"
+export FAKE_DEPLOY_FAIL=release FAKE_WEB_FAIL=fail
+run 1 "${web_env[@]}" bash "$g6/scripts/gate.sh" --no-attest
+g6short=$(git -C "$g6" rev-parse --short=8 HEAD)
+state6="$g6/.superpowers/gate/$g6short/state.tsv"
+grep -qF $'deploy_fail\tdeploy|release' "$state6" || fail 'нет идентичности упавшего набора выката'
+grep -qF $'pw_fail\tpw|phone|e2e/ui/x.spec.ts|x spec › flaky title' "$state6" || fail 'нет идентичности Playwright из JSON'
+grep -qF $'stack_fail\tstack|e2e/stack/y.spec.ts|stack spec › stack title' "$state6" || fail 'нет идентичности сценария из JSON'
+grep -qF $'deploy_failed\ttests' "$state6" || fail 'падение deploy не отнесено к тестам'
+grep -qF $'web_failed\ttests' "$state6" || fail 'падение web не отнесено к тестам'
+export FAKE_DEPLOY_FAIL=none FAKE_WEB_FAIL=none
+: >"$GATE_FAKE_CALLS"
+run 0 "${web_env[@]}" bash "$g6/scripts/gate.sh" --rerun-failed --no-attest
+if grep -qE '^(npm|check) ' "$GATE_FAKE_CALLS"; then fail 'перезапуск задел прошедшие шаги npm/check'; fi
+grep -qF 'deploy tests [release]' "$GATE_FAKE_CALLS" || fail 'deploy не перезапустил только упавший набор'
+grep -qF 'pw|phone|e2e/ui/x.spec.ts' "$GATE_FAKE_CALLS" || fail 'web не получил идентичность Playwright'
+grep -qF 'stack|e2e/stack/y.spec.ts' "$GATE_FAKE_CALLS" || fail 'web не получил идентичность сценария'
+for id in 'deploy|release' 'pw|phone|e2e/ui/x.spec.ts|x spec › flaky title' 'stack|e2e/stack/y.spec.ts|stack spec › stack title'; do
+    grep -qF "$(printf 'flaky\t%s' "$id")" "$state6" || fail "нет отметки flaky для $id"
+done
+
 # Битый индекс: git status падает, и проверка чистоты обязана провалиться, а не
 # пропустить аттестацию из-за пустого вывода.
 printf 'garbage' >"$scratch/.git/index"

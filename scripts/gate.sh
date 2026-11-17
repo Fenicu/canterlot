@@ -319,15 +319,17 @@ PY
 }
 
 pw_failures() {
-    local prefix=$1 f files=() slot
+    local prefix=$1 kind=${2:-pw} f files=() slot
     [[ -f "$prefix.json" ]] && files+=("$prefix.json")
     for slot in 1 2 3 4 5 6 7 8; do
         [[ -f "$prefix-$slot.json" ]] && files+=("$prefix-$slot.json")
     done
     ((${#files[@]})) || return 0
-    python3 - "${files[@]}" <<'PY'
+    python3 - "$kind" "${files[@]}" <<'PY'
 import json
 import sys
+
+kind = sys.argv[1]
 
 
 def walk(suites, out):
@@ -341,12 +343,15 @@ def walk(suites, out):
                     project = test.get('projectName') or spec.get('projectName') or ''
                     title = test.get('title', '')
                     full = f"{spec_title} › {title}" if spec_title and title else (spec_title or title)
-                    out.append(f"pw|{project}|{path}|{full}")
+                    if kind == 'pw':
+                        out.append(f"pw|{project}|{path}|{full}")
+                    else:
+                        out.append(f"stack|{path}|{full}")
         walk(suite.get('suites', []), out)
 
 
 out = []
-for path in sys.argv[1:]:
+for path in sys.argv[2:]:
     try:
         with open(path) as handle:
             data = json.load(handle)
@@ -450,7 +455,7 @@ if [[ "$web_action" != skip ]]; then
     web_s=$((SECONDS - s))
     printf '    check-web.sh --stack: %ds, код %s\n' "$web_s" "$web_status"
     mapfile -t pw_ids < <(pw_failures "$CANTERLOT_PW_JSON_REPORT")
-    mapfile -t stack_ids < <(pw_failures "$CANTERLOT_STACK_JSON_REPORT")
+    mapfile -t stack_ids < <(pw_failures "$CANTERLOT_STACK_JSON_REPORT" stack)
 else
     printf '\n==> scripts/check-web.sh --stack: переиспользован прошедший шаг\n'
 fi
