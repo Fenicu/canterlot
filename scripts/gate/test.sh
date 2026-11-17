@@ -229,6 +229,9 @@ grep -q '^npm_ci_exit=0$' "$att" || fail 'аттестация: npm_ci_exit не
 grep -q '^check_exit=0$' "$att" || fail 'аттестация: check_exit не обнулился'
 grep -q "^rerun_of=$first_started$" "$att" || fail 'аттестация: нет rerun_of времени первого прогона'
 grep -qF 'flaky=rust|crate-a|mod::flaky' "$att" || fail 'аттестация: нет строки flaky'
+grep -q '^test_seams=1$' "$att" || fail 'аттестация с тестовыми швами не помечена test_seams=1'
+grep -q 'ВНИМАНИЕ: включены тестовые швы' "$out" || fail 'нет громкого предупреждения о тестовых швах'
+grep -qF $'seams\t1' "$state" || fail 'в состоянии нет отметки о тестовых швах'
 grep -q 'отчёт о нестабильных тестах' "$out" || fail 'нет отчёта о нестабильных тестах'
 grep -q 'flaky-tests.md' "$out" || fail 'нет напоминания про flaky-tests.md'
 

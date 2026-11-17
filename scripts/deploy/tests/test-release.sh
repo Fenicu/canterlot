@@ -177,6 +177,15 @@ assert_eq "$(rres status)/$(rres published)" "done/yes" "result: done, published
 teardown_case
 case_end
 
+case_begin "ship refuses an attestation produced with test seams"
+setup_release seams
+attest_head
+printf 'test_seams=1\n' >>"${RREPO}/.superpowers/gate/$(git -C "${RREPO}" rev-parse HEAD).ok"
+run_release ship "${RVER}"
+assert_refused "produced with test seams"
+teardown_case
+case_end
+
 case_begin "ship refuses the example site values (deploy and build origins), naming only the keys"
 setup_release example
 export SITE_ORIGIN=https://hub.example.com

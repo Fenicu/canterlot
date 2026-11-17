@@ -63,6 +63,17 @@ step_npm="${CANTERLOT_GATE_STEP_NPM:-}"
 step_check="${CANTERLOT_GATE_STEP_CHECK:-}"
 step_deploy="${CANTERLOT_GATE_STEP_DEPLOY:-}"
 step_web="${CANTERLOT_GATE_STEP_WEB:-}"
+step_needed="${CANTERLOT_GATE_DEPLOY_NEEDED:-}"
+# Подменённый шаг — уже не доказательство качества: такой прогон не имеет права
+# дать аттестацию, которую примет release.sh. Метка живёт и в состоянии, чтобы
+# перезапуск не «отмыл» швы, использованные в первом прогоне.
+seams_active=0
+for seam in "$step_npm" "$step_check" "$step_deploy" "$step_web" "$step_needed"; do
+    [[ -n "$seam" ]] && seams_active=1
+done
+if ((seams_active)); then
+    printf 'ВНИМАНИЕ: включены тестовые швы CANTERLOT_GATE_STEP_* / CANTERLOT_GATE_DEPLOY_NEEDED: это НЕ настоящий гейт; аттестация получит test_seams=1 и будет отклонена release.sh\n' >&2
+fi
 
 die() { printf 'гейт: %s\n' "$*" >&2; exit 1; }
 
@@ -135,6 +146,7 @@ if ((rerun)); then
         || die "--rerun-failed требует состояние для того же коммита $sha, а не для другого"
     clean_tree || die '--rerun-failed требует чистого дерева: рабочая копия грязная'
     prev_started=$(state_value "$prev" started)
+    [[ "$(state_value "$prev" seams)" == 1 ]] && seams_active=1
     mapfile -t done_ids < <(state_values "$prev" rerun_done)
     mapfile -t prev_flaky < <(state_values "$prev" flaky)
     mapfile -t prev_rust < <(state_values "$prev" rust_fail)
@@ -470,6 +482,7 @@ else
 fi
 state_add schema 1
 state_add sha "$sha"
+state_add seams "$seams_active"
 state_add finished "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 state_add completed 1
 mode_name=full
@@ -572,6 +585,7 @@ tmp="$attestation.tmp.$$"
     printf 'web_exit=%s\n' "$web_status"
     printf 'web_duration_s=%s\n' "$web_s"
     printf 'logs=%s\n' "$log_dir"
+    if ((seams_active)); then printf 'test_seams=1\n'; fi
     if ((rerun)); then
         printf 'rerun_of=%s\n' "$prev_started"
         for id in "${flaky_ids[@]}"; do printf 'flaky=%s\n' "$id"; done

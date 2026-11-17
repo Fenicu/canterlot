@@ -480,6 +480,11 @@ preconditions() {
     [[ -s $att ]] || refuse "no gate attestation for HEAD $head ($att): run scripts/gate.sh"
     [[ $(kv "$att" sha) == "$head" ]] || refuse "the gate attestation $att was written for another commit"
     while IFS='=' read -r key value; do
+        # Подменённые шаги гейта (CANTERLOT_GATE_STEP_*) помечают аттестацию test_seams=1:
+        # такой прогон не проверял код, и принимать его нельзя ни при каких кодах шагов.
+        if [[ $key == test_seams || $key == *_seam* ]]; then
+            refuse "the gate attestation $att was produced with test seams ($key=$value): run a real gate without CANTERLOT_GATE_STEP_* overrides"
+        fi
         if [[ $key == *_exit && $value != 0 && ! ($key == deploy_exit && $value == skipped) ]]; then refuse "the gate attestation $att records $key=$value"; fi
     done <"$att"
     while IFS='=' read -r key value; do
