@@ -1,5 +1,5 @@
 use crate::adapter::{LimitFact, LimitWindow};
-use canterlot_proto::worker::v1::LimitObservation;
+use canterlot_proto::worker::v1::{LimitObservation, ProviderCredits, ResetCredit};
 use serde_json::Value;
 
 /// Промилле и сброс (мс) по окнам для MCP `canterlot_limits`.
@@ -155,6 +155,41 @@ pub fn observations_from_read_response(
         }
     }
     observations
+}
+
+/// Сбросы лимитов из ответа `account/rateLimits/read`. Поля нет или оно null — сбросы
+/// неизвестны: прежний показ не стирается. Счёт — число провайдера, список может быть короче.
+pub fn credits_from_read_response(response: &Value, observed_ms: u64) -> Option<ProviderCredits> {
+    let block = response.get("rateLimitResetCredits")?.as_object()?;
+    let count = block.get("availableCount")?.as_u64()?;
+    let resets = block
+        .get("credits")
+        .and_then(Value::as_array)
+        .map(|credits| {
+            credits
+                .iter()
+                .filter(|credit| credit.get("status").and_then(Value::as_str) == Some("available"))
+                .map(|credit| ResetCredit {
+                    title: credit
+                        .get("title")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                    // null — сброс не сгорает.
+                    expires_at_ms: credit.get("expiresAt").and_then(resets_at_ms).unwrap_or(0),
+                    granted_at_ms: credit.get("grantedAt").and_then(resets_at_ms).unwrap_or(0),
+                })
+                .take(64)
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(ProviderCredits {
+        provider: "codex".into(),
+        observed_machine_ms: observed_ms,
+        resets_known: true,
+        reset_count: u32::try_from(count).unwrap_or(u32::MAX),
+        resets,
+    })
 }
 
 impl LimitTracker {

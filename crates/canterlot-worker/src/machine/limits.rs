@@ -1,4 +1,6 @@
-use canterlot_proto::worker::v1::{LimitAbsence, LimitObservation, ProviderCredential};
+use canterlot_proto::worker::v1::{
+    LimitAbsence, LimitObservation, ProviderCredential, ProviderCredits,
+};
 use std::{
     collections::HashMap,
     fmt,
@@ -8,7 +10,10 @@ use std::{
 };
 use tokio::time::Instant;
 
-use crate::adapter::codex::{limits::observations_from_read_response, probe};
+use crate::adapter::codex::{
+    limits::{credits_from_read_response, observations_from_read_response},
+    probe,
+};
 use crate::config::CodexConfig;
 
 const FIRST_TICK_MAX_DELAY: Duration = Duration::from_secs(60);
@@ -23,6 +28,8 @@ pub struct LimitsFetch {
     pub absent: Vec<LimitAbsence>,
     /// Конец входа провайдера, если источник его знает: у Claude его приносят сессии, не опрос.
     pub credentials: Vec<ProviderCredential>,
+    /// Сбросы лимитов провайдера: их знает опрос Codex, сессии о них не сообщают.
+    pub provider_credits: Vec<ProviderCredits>,
 }
 
 #[async_trait::async_trait]
@@ -43,6 +50,7 @@ pub trait LimitsSource: Send + Sync {
             },
             absent: Vec::new(),
             credentials: Vec::new(),
+            provider_credits: Vec::new(),
         }
     }
     /// Просьба владельца обновить сейчас (`PollLimits.owner_refresh`).
@@ -282,7 +290,7 @@ impl CodexRateLimitsSource {
         self
     }
 
-    pub async fn fetch(&self) -> Result<Vec<LimitObservation>, probe::ProbeError> {
+    pub async fn fetch(&self) -> Result<LimitsFetch, probe::ProbeError> {
         let response = probe::probe(
             &self.executable,
             "account/rateLimits/read",
@@ -290,25 +298,38 @@ impl CodexRateLimitsSource {
             CODEX_PROBE_TIMEOUT,
         )
         .await?;
-        Ok(observations_from_read_response(&response, super::now_ms()))
+        let at = super::now_ms();
+        Ok(LimitsFetch {
+            observations: observations_from_read_response(&response, at),
+            absent: Vec::new(),
+            credentials: Vec::new(),
+            // Сбросы видит только ответ чтения: уведомление их не несёт.
+            provider_credits: credits_from_read_response(&response, at)
+                .into_iter()
+                .collect(),
+        })
     }
 }
 
 #[async_trait::async_trait]
 impl LimitsSource for CodexRateLimitsSource {
     async fn poll(&self, provider: &str) -> Vec<LimitObservation> {
-        self.poll_with(provider, false).await
+        self.report_with(provider, false).await.observations
     }
 
     async fn poll_idle(&self, provider: &str) -> Vec<LimitObservation> {
-        self.poll_with(provider, true).await
+        self.report_with(provider, true).await.observations
+    }
+
+    async fn poll_report(&self, provider: &str, idle: bool) -> LimitsFetch {
+        self.report_with(provider, idle).await
     }
 }
 
 impl CodexRateLimitsSource {
-    async fn poll_with(&self, provider: &str, idle: bool) -> Vec<LimitObservation> {
+    async fn report_with(&self, provider: &str, idle: bool) -> LimitsFetch {
         if provider != "codex" {
-            return Vec::new();
+            return LimitsFetch::default();
         }
         let now = (self.clock)();
         {
@@ -323,16 +344,16 @@ impl CodexRateLimitsSource {
                         || since(self.live.last(provider), self.interval)
                         || since((self.hub_age)(provider), self.interval)))
             {
-                return Vec::new();
+                return LimitsFetch::default();
             }
             state.last_request = Some(now);
         }
         match self.fetch().await {
-            Ok(observations) => {
+            Ok(fetched) => {
                 let mut state = self.state.lock().expect("codex poll state");
                 state.rate_limited = 0;
                 state.backoff_until = None;
-                observations
+                fetched
             }
             Err(error) => {
                 if error == probe::ProbeError::Timeout {
@@ -343,7 +364,7 @@ impl CodexRateLimitsSource {
                 } else {
                     tracing::warn!(kind = "codex_limits_probe_failed", reason = ?error, "codex limits probe failed");
                 }
-                Vec::new()
+                LimitsFetch::default()
             }
         }
     }

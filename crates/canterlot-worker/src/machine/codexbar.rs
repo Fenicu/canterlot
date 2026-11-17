@@ -267,6 +267,7 @@ pub fn reading_from_output(
         observations,
         absent,
         credentials: Vec::new(),
+        provider_credits: Vec::new(),
     })
 }
 
@@ -391,6 +392,7 @@ impl CodexBarLimitsSource {
             },
             absent: Vec::new(),
             credentials: Vec::new(),
+            provider_credits: Vec::new(),
         }
     }
 

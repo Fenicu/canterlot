@@ -10,8 +10,8 @@ use std::{
 };
 
 use canterlot_proto::worker::v1::{
-    ControlDown, LimitObservation, LimitWindow as ProtoWindow, PollLimits, control_down,
-    control_up::Msg,
+    ControlDown, LimitObservation, LimitWindow as ProtoWindow, LimitsReport, PollLimits,
+    ProviderCredits, control_down, control_up::Msg,
 };
 use canterlot_worker::{
     adapter::{
@@ -22,7 +22,7 @@ use canterlot_worker::{
         },
     },
     config::{ClaudeCodeConfig, ConfigErrorCategory},
-    machine::limits::LimitsSource,
+    machine::limits::{LimitsFetch, LimitsSource},
     session::{SessionState, Worker},
 };
 use serde_json::json;
@@ -595,6 +595,94 @@ async fn next_limits_report(hub: &mut support::ProtocolHub) -> Vec<LimitObservat
     }
 }
 
+struct CreditsSource;
+
+#[async_trait::async_trait]
+impl LimitsSource for CreditsSource {
+    async fn poll(&self, provider: &str) -> Vec<LimitObservation> {
+        // Окно едет всегда: отчёт и без сбросов должен уйти, иначе проверка ждала бы вечно.
+        if provider != "codex" {
+            return Vec::new();
+        }
+        vec![LimitObservation {
+            provider: provider.to_owned(),
+            window: ProtoWindow::Weekly as i32,
+            used_permille: 260,
+            resets_at_ms: 0,
+            observed_machine_ms: 1,
+            ..Default::default()
+        }]
+    }
+
+    async fn poll_report(&self, provider: &str, _idle: bool) -> LimitsFetch {
+        if provider != "codex" {
+            return LimitsFetch::default();
+        }
+        LimitsFetch {
+            observations: self.poll(provider).await,
+            provider_credits: vec![ProviderCredits {
+                provider: "codex".into(),
+                observed_machine_ms: 1,
+                resets_known: true,
+                reset_count: 2,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+}
+
+async fn credits_report(capabilities: &[&str]) -> LimitsReport {
+    let (mut hub, store) = support::ProtocolHub::start(support::Behavior {
+        capabilities: capabilities.iter().map(|cap| (*cap).to_owned()).collect(),
+        ..Default::default()
+    })
+    .await;
+    let worker = Worker::new(hub.config.clone(), store)
+        .with_runtime_dir(hub.config.data_dir.join("runtime"))
+        .with_limits_source(Arc::new(CreditsSource));
+    let mut state = worker.state();
+    let (stop, shutdown) = watch::channel(false);
+    let join = tokio::spawn(worker.run(shutdown));
+    state.wait_for(|s| *s == SessionState::Live).await.unwrap();
+    hub.send(ControlDown {
+        msg: Some(control_down::Msg::PollLimits(PollLimits {
+            provider: "codex".into(),
+            owner_refresh: false,
+        })),
+    })
+    .await;
+    let report = loop {
+        if let support::Observed::Control(message) = hub.event().await
+            && let Some(Msg::LimitsReport(report)) = message.msg
+        {
+            break report;
+        }
+    };
+    stop.send(true).unwrap();
+    join.await.unwrap().unwrap();
+    report
+}
+
+#[tokio::test(start_paused = true)]
+async fn machine_limits_report_omits_credits_without_the_capability() {
+    frozen_clock::run(async {
+        let report = credits_report(&["pilot_v1"]).await;
+        assert!(report.provider_credits.is_empty(), "{report:?}");
+    })
+    .await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn machine_limits_report_carries_credits_with_the_capability() {
+    frozen_clock::run(async {
+        let report = credits_report(&["pilot_v1", "provider_credits_v1"]).await;
+        assert_eq!(report.provider_credits.len(), 1, "{report:?}");
+        assert_eq!(report.provider_credits[0].reset_count, 2);
+    })
+    .await;
+}
+
 // Хаб держит один необработанный отчёт: пустой, идущий следом, вытеснил бы настоящий.
 #[tokio::test(start_paused = true)]
 async fn empty_poll_sends_no_report() {
@@ -652,6 +740,7 @@ impl LimitsSource for AbsenceOnlySource {
                 observed_machine_ms: 7,
             }],
             credentials: Vec::new(),
+            provider_credits: Vec::new(),
         }
     }
 }

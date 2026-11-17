@@ -751,6 +751,7 @@ message LimitsReport {
   repeated LimitObservation observations = 1;
   repeated LimitAbsence absent = 2;
   repeated ProviderCredential credentials = 3;
+  repeated ProviderCredits provider_credits = 4;
 }
 
 // Конец входа провайдера на машине: то, что `result` Claude Code называет
@@ -760,6 +761,26 @@ message ProviderCredential {
   // Мс эпохи; 0 — дата неизвестна.
   uint64 expires_at_ms = 2;
   uint64 observed_machine_ms = 3;
+}
+
+// Сбросы лимитов, подаренные провайдером (подарки Codex). Показ, а не трата:
+// воркер ничего не покупает и не расходует.
+message ProviderCredits {
+  string provider = 1;
+  uint64 observed_machine_ms = 2;
+  // false — сбросы неизвестны: хаб оставляет прежние, а не стирает.
+  bool resets_known = 3;
+  // Сколько сбросов доступно; список ниже может быть короче.
+  uint32 reset_count = 4;
+  repeated ResetCredit resets = 5;
+}
+
+message ResetCredit {
+  // Заголовок от провайдера; пусто — «сброс лимитов».
+  string title = 1;
+  // Мс эпохи; 0 — не сгорает.
+  uint64 expires_at_ms = 2;
+  uint64 granted_at_ms = 3;
 }
 
 message PollLimits {

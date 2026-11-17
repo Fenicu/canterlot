@@ -53,6 +53,8 @@ pub const CAPABILITY_SIDE_CHAT_V1: &str = "side_chat_v1";
 pub const CAPABILITY_SECRET_REQUESTS_V2: &str = "secret_requests_v2";
 /// Хаб хранит конец входа провайдера из кадра `result`; без неё старая запись не уходит.
 pub const CAPABILITY_CREDENTIAL_EXPIRY_V1: &str = "credential_expiry_v1";
+/// Хаб показывает сбросы лимитов Codex; без неё воркер их не шлёт.
+pub const CAPABILITY_PROVIDER_CREDITS_V1: &str = "provider_credits_v1";
 
 pub const OPTIONAL_CAPABILITIES: &[&str] = &[
     "exec_v1",
@@ -77,6 +79,7 @@ pub const OPTIONAL_CAPABILITIES: &[&str] = &[
     CAPABILITY_SIDE_CHAT_V1,
     CAPABILITY_SECRET_REQUESTS_V2,
     CAPABILITY_CREDENTIAL_EXPIRY_V1,
+    CAPABILITY_PROVIDER_CREDITS_V1,
 ];
 
 #[derive(Clone)]
@@ -1262,6 +1265,10 @@ impl Worker {
         let pilot = accepted.capabilities.iter().any(|cap| cap == "pilot_v1");
         let hub_records = data::HubRecords::from_capabilities(&accepted.capabilities);
         let limits_fable = hub_records.limits_fable;
+        let provider_credits = accepted
+            .capabilities
+            .iter()
+            .any(|cap| cap == CAPABILITY_PROVIDER_CREDITS_V1);
         let diagnostics = JournalDiagnostics::default();
         if cj_pilot && !pilot {
             diagnostics
@@ -1950,7 +1957,11 @@ impl Worker {
                     if !limits_fable {
                         observations.retain(|o| o.window != LimitWindow::WeeklyFable as i32);
                     }
-                    if !observations.is_empty() || !fetched.absent.is_empty() || !fetched.credentials.is_empty() {limits_outbound=Some(ControlUp{msg:Some(control_up::Msg::LimitsReport(LimitsReport{observations,absent:fetched.absent,credentials:fetched.credentials}))});}
+                    let mut credits = fetched.provider_credits;
+                    if !provider_credits {
+                        credits.clear();
+                    }
+                    if !observations.is_empty() || !fetched.absent.is_empty() || !fetched.credentials.is_empty() || !credits.is_empty() {limits_outbound=Some(ControlUp{msg:Some(control_up::Msg::LimitsReport(LimitsReport{observations,absent:fetched.absent,credentials:fetched.credentials,provider_credits:credits}))});}
                 }
                 reply=async{suggest_operation.as_mut().unwrap().await}, if suggest_operation.is_some()=>{
                     suggest_operation=None;suggest_outbound=Some(ControlUp{msg:Some(control_up::Msg::WorkdirSuggestions(reply))});

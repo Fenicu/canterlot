@@ -848,6 +848,17 @@ fn pilot_records_roundtrip() {
     };
     assert_eq!(&record.encode_to_vec()[..2], &[0xFA, 0x02]);
     assert_roundtrip(record);
+    let credits = ProviderCredits {
+        provider: "codex".into(),
+        observed_machine_ms: 1_700_000_000_000,
+        resets_known: true,
+        reset_count: 2,
+        resets: vec![ResetCredit {
+            title: "Full reset (Weekly + 5 hr)".into(),
+            expires_at_ms: 1_797_000_000_000,
+            granted_at_ms: 1_796_000_000_000,
+        }],
+    };
     let report = MachineReport {
         worker_version: "0.1.0".into(),
         allowed_roots: vec!["/tmp/w".into()],
@@ -904,6 +915,7 @@ fn pilot_records_roundtrip() {
             observed_machine_ms: 1_700_000_000_000,
         }],
         credentials: vec![credential],
+        provider_credits: vec![credits],
     };
     assert_roundtrip(report.clone());
     assert_roundtrip(metrics.clone());

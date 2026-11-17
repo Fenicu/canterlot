@@ -15,7 +15,7 @@ use canterlot_worker::{
         LimitFact, LimitWindow,
         codex::limits::{
             CrunchContext, LimitTracker, ReachedDecision, TurnErrorInfo,
-            observations_from_read_response, windows_from_snapshot,
+            credits_from_read_response, observations_from_read_response, windows_from_snapshot,
         },
         codex::probe::{self, ProbeError},
     },
@@ -401,6 +401,84 @@ fn live_read_response_reports_proto_windows() {
 }
 
 #[test]
+fn live_read_response_carries_reset_credits() {
+    let response = json!({
+        "rateLimitResetCredits": {
+            "availableCount": 2,
+            "credits": [
+                {"id": "RateLimitResetCredit_aaa", "resetType": "codexRateLimits", "status": "available",
+                 "grantedAt": 1_793_570_435_u64, "expiresAt": 1_796_162_435_u64,
+                 "title": "Full reset (Weekly + 5 hr)", "description": "..."},
+                {"id": "RateLimitResetCredit_bbb", "resetType": "codexRateLimits", "status": "available",
+                 "grantedAt": 1_794_516_277_u64, "expiresAt": 1_797_108_277_u64,
+                 "title": "Full reset (Weekly + 5 hr)", "description": "..."}
+            ]
+        },
+        "rateLimits": {"planType": "plus"},
+        "ordinaryUsageAllowed": true
+    });
+    let credits = credits_from_read_response(&response, NOW).expect("reset credits");
+    assert_eq!(credits.provider, "codex");
+    assert_eq!(credits.observed_machine_ms, NOW);
+    assert!(credits.resets_known);
+    assert_eq!(credits.reset_count, 2);
+    assert_eq!(credits.resets.len(), 2);
+    assert_eq!(credits.resets[0].title, "Full reset (Weekly + 5 hr)");
+    assert_eq!(credits.resets[0].expires_at_ms, 1_796_162_435_000);
+    assert_eq!(credits.resets[0].granted_at_ms, 1_793_570_435_000);
+    assert_eq!(credits.resets[1].expires_at_ms, 1_797_108_277_000);
+}
+
+#[test]
+fn reset_credits_are_unknown_when_the_field_is_null_or_absent() {
+    for response in [json!({"rateLimitResetCredits": null}), json!({})] {
+        assert!(
+            credits_from_read_response(&response, NOW).is_none(),
+            "unknown resets must not wipe the hub"
+        );
+    }
+}
+
+#[test]
+fn zero_available_resets_are_known_empty_and_clear_the_display() {
+    let response = json!({"rateLimitResetCredits": {"availableCount": 0, "credits": []}});
+    let credits = credits_from_read_response(&response, NOW).unwrap();
+    assert!(credits.resets_known);
+    assert_eq!(credits.reset_count, 0);
+    assert!(credits.resets.is_empty());
+}
+
+#[test]
+fn only_available_resets_are_shown_and_the_count_can_exceed_the_list() {
+    let response = json!({"rateLimitResetCredits": {
+        "availableCount": 3,
+        "credits": [
+            {"status": "redeeming", "expiresAt": 1_796_162_435_u64, "title": "Redeeming"},
+            {"status": "available", "expiresAt": null, "grantedAt": 1_794_516_277_u64, "title": null},
+            {"status": "available", "expiresAt": 1_797_108_277_u64}
+        ]
+    }});
+    let credits = credits_from_read_response(&response, NOW).unwrap();
+    assert_eq!(credits.reset_count, 3, "the count is the provider's number");
+    assert_eq!(credits.resets.len(), 2, "only available credits are listed");
+    assert_eq!(
+        credits.resets[0].expires_at_ms, 0,
+        "null means never expires"
+    );
+    assert!(credits.resets[0].title.is_empty());
+    assert_eq!(credits.resets[1].expires_at_ms, 1_797_108_277_000);
+}
+
+#[test]
+fn a_null_credit_list_keeps_the_known_count() {
+    let response = json!({"rateLimitResetCredits": {"availableCount": 2, "credits": null}});
+    let credits = credits_from_read_response(&response, NOW).unwrap();
+    assert!(credits.resets_known);
+    assert_eq!(credits.reset_count, 2);
+    assert!(credits.resets.is_empty(), "the count alone is shown");
+}
+
+#[test]
 fn internal_windows_convert_to_proto_values() {
     for (window, proto) in [
         (LimitWindow::FiveHour, ProtoLimitWindow::FiveHour),
@@ -419,7 +497,7 @@ async fn idle_source_reads_limits_through_a_short_lived_app_server() {
     let config = CodexConfig::default();
     let source = CodexRateLimitsSource::new(&config, LiveLimits::default(), Arc::new(|_| None))
         .with_executable(server.executable.clone());
-    let observations = source.fetch().await.unwrap();
+    let observations = source.fetch().await.unwrap().observations;
     assert_eq!(observations.len(), 4);
     assert!(observations.iter().all(|o| o.provider == "codex"));
     let methods = server.methods_seen();
