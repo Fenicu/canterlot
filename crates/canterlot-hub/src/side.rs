@@ -182,9 +182,6 @@ pub async fn create(
             .await?
             .ok_or(SideError::NotFound)?;
             let harness: String = parent.try_get("harness")?;
-            if harness == "antigravity" {
-                return Err(SideError::UnsupportedHarness);
-            }
             if parent.try_get::<Option<Uuid>, _>("side_of")?.is_some() {
                 return Err(SideError::ParentIsSide);
             }

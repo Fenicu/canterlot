@@ -189,24 +189,8 @@ async fn side_endpoint_creates_returns_existing_and_deletes(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn side_endpoint_refuses_antigravity_capability_native_and_nested(pool: PgPool) {
+async fn side_endpoint_refuses_capability_native_and_nested(pool: PgPool) {
     let mut f = fixture(pool).await;
-    let gravity_parent = f.parent("antigravity").await;
-    let response = f
-        .client
-        .send(
-            Method::POST,
-            &format!("/api/v1/conversations/{gravity_parent}/side"),
-            None,
-            None,
-        )
-        .await;
-    assert_eq!(response.status.as_u16(), 409);
-    assert_eq!(
-        response.json::<Value>()["error"]["details"]["reason"],
-        "unsupported_harness"
-    );
-
     let parent = f.parent("claude_code").await;
     f.lose_side_capability();
     let response = f

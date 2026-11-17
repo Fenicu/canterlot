@@ -1066,7 +1066,7 @@ pub async fn request_send_now(
                     .await?;
             if !matches!(
                 harness.as_str(),
-                "claude_code" | "codex" | "opencode" | "antigravity"
+                "claude_code" | "codex" | "opencode"
             ) {
                 return Err(ControlError::InvalidRequest {
                     reason: "unsupported_harness",

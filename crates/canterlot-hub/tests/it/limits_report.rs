@@ -39,7 +39,7 @@ fn context(pool: &PgPool) -> ToolContext {
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn limits_report_lists_every_provider_with_windows_and_freshness(pool: PgPool) {
     let seed = testkit::seed(&pool).await;
-    for provider in ["claude", "codex", "opencode", "antigravity"] {
+    for provider in ["claude", "codex", "opencode"] {
         testkit::offer_provider(&pool, seed.machine_id, provider).await;
     }
     let now = Utc::now();
@@ -50,7 +50,6 @@ async fn limits_report_lists_every_provider_with_windows_and_freshness(pool: PgP
         ("claude", 120, fresh, None),
         ("codex", 340, stale, None),
         ("opencode", 93, fresh, Some(7)),
-        ("antigravity", 41, fresh, None),
     ] {
         sqlx::query(
             "insert into provider_limits(provider,five_hour_used_permille,five_hour_resets_at,
@@ -84,9 +83,8 @@ async fn limits_report_lists_every_provider_with_windows_and_freshness(pool: PgP
     .await
     .unwrap();
     let providers = report["providers"].as_array().unwrap();
-    assert_eq!(providers.len(), 4);
+    assert_eq!(providers.len(), 3);
     assert_eq!(providers[0]["provider"], "claude");
-    assert_eq!(providers[1]["provider"], "antigravity");
     let find = |name: &str| {
         providers
             .iter()
@@ -98,11 +96,9 @@ async fn limits_report_lists_every_provider_with_windows_and_freshness(pool: PgP
         text.starts_with("Claude API budget: five-hour window 12% used, resets in "),
         "{text}"
     );
-    assert!(text.contains("Antigravity (Gemini): five-hour window 4.1% used"));
     assert!(text.contains("weekly window 22% used"));
     assert!(text.contains("Codex API budget"));
     assert!(text.contains("OpenCode API budget"));
-    assert!(text.contains("Antigravity (Gemini)"));
     assert!(text.contains("monthly window 0.7% used"));
     assert!(text.contains("Observed:"));
     assert!(
@@ -179,7 +175,7 @@ async fn limits_report_hides_providers_the_pwa_hides(pool: PgPool) {
     testkit::offer_provider(&pool, seed.machine_id, "codex").await;
     let now = Utc::now();
     let reset = now + TimeDelta::hours(2);
-    for (provider, used) in [("claude", 120), ("codex", 340), ("antigravity", 0)] {
+    for (provider, used) in [("claude", 120), ("codex", 340), ("gemini", 0)] {
         sqlx::query(
             "insert into provider_limits(provider,five_hour_used_permille,five_hour_resets_at,
                five_hour_observed_at)
@@ -204,8 +200,8 @@ async fn limits_report_hides_providers_the_pwa_hides(pool: PgPool) {
         .collect();
     assert_eq!(names, ["claude", "codex"]);
     let text = report["text"].as_str().unwrap();
-    assert!(!text.contains("Antigravity"), "{text}");
-    assert!(!text.contains("antigravity"), "{text}");
+    assert!(!text.contains("Gemini"), "{text}");
+    assert!(!text.contains("gemini"), "{text}");
     let lines: Vec<&str> = text.lines().collect();
     assert_eq!(lines.len(), 3, "{text}");
     assert!(
@@ -225,7 +221,7 @@ async fn limits_report_without_offered_providers_says_no_data(pool: PgPool) {
     let seed = testkit::seed(&pool).await;
     sqlx::query(
         "insert into provider_limits(provider,weekly_used_permille,weekly_resets_at,weekly_observed_at)
-         values('antigravity',1,now()+interval '3 days',now())",
+         values('gemini',1,now()+interval '3 days',now())",
     )
     .execute(&pool)
     .await

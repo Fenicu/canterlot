@@ -115,7 +115,7 @@ pub struct ProviderView {
     /// Сбросы лимитов Codex с самой свежей машины; `null` — провайдер о них молчит.
     pub credits: Option<CreditsView>,
     /// Публичный статус провайдера со страницы statuspage; `null`, пока хаб её не опрашивал
-    /// или провайдер без такой страницы (OpenCode, Antigravity).
+    /// или провайдер без такой страницы (OpenCode).
     pub status: Option<crate::provider_status::ProviderStatusView>,
 }
 impl From<limits::ProviderLimits> for ProviderView {
@@ -267,7 +267,7 @@ async fn refresh(
 ) -> Result<(StatusCode, Json<RefreshView>), ApiError> {
     use crate::crunch::{PollRequest, request_poll_outcome};
     let providers: Vec<String> = sqlx::query_scalar(
-        "select distinct provider from machine_harnesses where provider in ('claude','codex','opencode','antigravity') order by provider",
+        "select distinct provider from machine_harnesses where provider in ('claude','codex','opencode') order by provider",
     )
     .fetch_all(&s.pool)
     .await?;

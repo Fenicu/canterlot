@@ -80,7 +80,6 @@ fn label(provider: &str) -> &str {
     match provider {
         "codex" => "Codex API budget",
         "opencode" => "OpenCode API budget",
-        "antigravity" => "Antigravity (Gemini)",
         _ => "Claude API budget",
     }
 }

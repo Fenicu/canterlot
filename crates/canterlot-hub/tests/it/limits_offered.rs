@@ -76,8 +76,8 @@ async fn providers_outside_the_catalog_are_hidden_but_their_rows_and_history_sta
     let s = testkit::seed(&pool).await;
     testkit::offer_provider(&pool, s.machine_id, "claude").await;
     observe(&pool, &s, "claude", Window::Weekly, 410).await;
-    observe(&pool, &s, "antigravity", Window::FiveHour, 200).await;
-    observe(&pool, &s, "antigravity", Window::Weekly, 300).await;
+    observe(&pool, &s, "codex", Window::FiveHour, 200).await;
+    observe(&pool, &s, "codex", Window::Weekly, 300).await;
 
     assert_eq!(shown(&pool, s.owner_id).await, ["claude"]);
     let list = snapshot::conversations(&pool, s.owner_id).await?;
@@ -87,11 +87,7 @@ async fn providers_outside_the_catalog_are_hidden_but_their_rows_and_history_sta
         .iter()
         .map(|p| p["provider"].as_str().unwrap().to_owned())
         .collect();
-    assert_eq!(
-        listed,
-        ["claude"],
-        "the list snapshot hides antigravity too"
-    );
+    assert_eq!(listed, ["claude"], "the list snapshot hides codex too");
     // Событие о свежем показании провайдера вне каталога клиентам не уходит.
     let providers: Vec<Value> = changes(&pool, "limits_changed")
         .await
@@ -106,18 +102,18 @@ async fn providers_outside_the_catalog_are_hidden_but_their_rows_and_history_sta
         .into_iter()
         .map(|p| p.provider)
         .collect();
-    assert_eq!(stored, ["antigravity", "claude"], "rows are not deleted");
+    assert_eq!(stored, ["claude", "codex"], "rows are not deleted");
     let history: i64 =
-        sqlx::query_scalar("select count(*) from limit_snapshots where provider='antigravity'")
+        sqlx::query_scalar("select count(*) from limit_snapshots where provider='codex'")
             .fetch_one(&pool)
             .await?;
     assert_eq!(history, 2, "history is not deleted");
 
-    // Другой владелец со своим харнессом antigravity не открывает его лимиты этому.
+    // Другой владелец со своим харнессом codex не открывает его лимиты этому.
     let other = testkit::seed(&pool).await;
-    testkit::offer_provider(&pool, other.machine_id, "antigravity").await;
+    testkit::offer_provider(&pool, other.machine_id, "codex").await;
     assert_eq!(shown(&pool, s.owner_id).await, ["claude"]);
-    assert_eq!(shown(&pool, other.owner_id).await, ["antigravity"]);
+    assert_eq!(shown(&pool, other.owner_id).await, ["codex"]);
     Ok(())
 }
 
@@ -127,14 +123,14 @@ async fn a_harness_leaving_and_returning_tells_clients_and_brings_the_windows_ba
 ) -> TestResult {
     let s = testkit::seed(&pool).await;
     let mut with = report();
-    with.harnesses.push(harness("antigravity", "antigravity"));
+    with.harnesses.push(harness("codex", "codex"));
     machine_info::apply_report(&pool, s.owner_id, s.machine_id, &with, Uuid::now_v7()).await?;
     observe(&pool, &s, "claude", Window::Weekly, 410).await;
-    observe(&pool, &s, "antigravity", Window::Weekly, 300).await;
-    assert_eq!(shown(&pool, s.owner_id).await, ["antigravity", "claude"]);
+    observe(&pool, &s, "codex", Window::Weekly, 300).await;
+    assert_eq!(shown(&pool, s.owner_id).await, ["claude", "codex"]);
     let before = changes(&pool, "limits_providers_changed").await.len();
 
-    // Харнесс выключен: каталог без antigravity.
+    // Харнесс выключен: каталог без codex.
     machine_info::apply_report(&pool, s.owner_id, s.machine_id, &report(), Uuid::now_v7()).await?;
     assert_eq!(shown(&pool, s.owner_id).await, ["claude"]);
     let offered = changes(&pool, "limits_providers_changed").await;
@@ -154,16 +150,16 @@ async fn a_harness_leaving_and_returning_tells_clients_and_brings_the_windows_ba
     // Харнесс включён снова: провайдер возвращается вместе с сохранённым окном.
     let weekly_before = changes(&pool, "limits_changed").await.len();
     machine_info::apply_report(&pool, s.owner_id, s.machine_id, &with, Uuid::now_v7()).await?;
-    assert_eq!(shown(&pool, s.owner_id).await, ["antigravity", "claude"]);
+    assert_eq!(shown(&pool, s.owner_id).await, ["claude", "codex"]);
     let offered = changes(&pool, "limits_providers_changed").await;
     assert_eq!(
         offered.last().unwrap()["providers"],
-        serde_json::json!(["antigravity", "claude"])
+        serde_json::json!(["claude", "codex"])
     );
     let returned = changes(&pool, "limits_changed").await;
     let back: Vec<&Value> = returned[weekly_before..]
         .iter()
-        .filter(|p| p["provider"] == "antigravity")
+        .filter(|p| p["provider"] == "codex")
         .collect();
     assert_eq!(back.len(), 1, "only the stored weekly window is resent");
     assert_eq!(back[0]["window"], "weekly");
