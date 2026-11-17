@@ -146,6 +146,8 @@ pub struct ProviderLimits {
     /// Конец входа провайдера на машинах владельца (самый ранний): у провайдера нет окна
     /// для этой даты, она приходит из кадров `result`. `None` — дата неизвестна.
     pub credential_expires_at: Option<DateTime<Utc>>,
+    /// Сбросы лимитов с самой свежей машины; `None` — провайдер о них молчит.
+    pub credits: Option<Credits>,
     /// Публичный статус провайдера; `None`, пока хаб его не опрашивал.
     #[serde(skip)]
     pub status: Option<crate::provider_status::Status>,
@@ -392,6 +394,12 @@ pub(crate) async fn emit_changed(
         let credential = credential_expires_at(&mut *conn, owner_id, provider)
             .await?
             .map(wire);
+        // Сбросы меняются без смены окна: их несёт каждое событие лимитов.
+        let credits = credits(&mut *conn, owner_id, provider)
+            .await
+            .and_then(|credits| {
+                serde_json::to_value(credits).map_err(|error| sqlx::Error::Encode(Box::new(error)))
+            })?;
         let forecast = state
             .as_ref()
             .and_then(|s| s.forecast.as_ref())
@@ -401,10 +409,10 @@ pub(crate) async fn emit_changed(
         // Отсутствующее окно уходит клиентам событием без значения: `used_permille` и `resets_at` равны null.
         let payload = match (state, p.five_hour_absent_at) {
             (Some(s), _) => Some(
-                json!({"provider":provider,"window":window,"used_permille":s.used_permille,"resets_at":s.resets_at.map(wire),"observed_at":wire(s.observed_at),"weekly_reserve_active":p.weekly_reserve_active,"weekly_reserve_resets_at":reserve,"data_confidence":p.data_confidence.as_str(),"forecast":forecast,"credential_expires_at":credential}),
+                json!({"provider":provider,"window":window,"used_permille":s.used_permille,"resets_at":s.resets_at.map(wire),"observed_at":wire(s.observed_at),"weekly_reserve_active":p.weekly_reserve_active,"weekly_reserve_resets_at":reserve,"data_confidence":p.data_confidence.as_str(),"forecast":forecast,"credential_expires_at":credential,"credits":credits}),
             ),
             (None, Some(absent)) if window == Window::FiveHour => Some(
-                json!({"provider":provider,"window":window,"used_permille":null,"resets_at":null,"observed_at":wire(absent),"weekly_reserve_active":p.weekly_reserve_active,"weekly_reserve_resets_at":reserve,"data_confidence":p.data_confidence.as_str(),"forecast":forecast,"credential_expires_at":credential}),
+                json!({"provider":provider,"window":window,"used_permille":null,"resets_at":null,"observed_at":wire(absent),"weekly_reserve_active":p.weekly_reserve_active,"weekly_reserve_resets_at":reserve,"data_confidence":p.data_confidence.as_str(),"forecast":forecast,"credential_expires_at":credential,"credits":credits}),
             ),
             _ => None,
         };
@@ -646,6 +654,7 @@ pub async fn current(conn: &mut PgConnection) -> Result<Vec<ProviderLimits>, sql
                     .unwrap_or("exact"),
             ),
             credential_expires_at: None,
+            credits: None,
             status,
         });
     }
@@ -678,6 +687,7 @@ pub async fn shown(
     for row in &mut rows {
         row.credential_expires_at =
             credential_expires_at(&mut *conn, owner_id, &row.provider).await?;
+        row.credits = credits(&mut *conn, owner_id, &row.provider).await?;
     }
     Ok(rows)
 }
@@ -729,6 +739,121 @@ pub async fn record_credential_in_tx(
     .bind(machine_id)
     .bind(provider)
     .bind(expires_at)
+    .bind(observed_at)
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(stored.is_some())
+}
+
+/// Сбросы лимитов провайдера с самой свежей машины владельца.
+#[derive(Clone, Debug, Serialize)]
+pub struct Credits {
+    /// Сколько сбросов доступно; `None` — провайдер их ещё не называл.
+    pub reset_count: Option<u32>,
+    pub resets: Vec<Reset>,
+    pub observed_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct Reset {
+    /// Заголовок от провайдера; пусто — «Сброс лимитов».
+    pub title: String,
+    /// `None` — сброс не сгорает.
+    pub expires_at: Option<DateTime<Utc>>,
+    pub granted_at: Option<DateTime<Utc>>,
+}
+
+/// Самые свежие сбросы провайдера среди машин владельца: счёт общий на учётную запись,
+/// а строки разные на каждой машине.
+pub async fn credits(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    provider: &str,
+) -> Result<Option<Credits>, sqlx::Error> {
+    let row = sqlx::query(
+        "select pc.reset_count,pc.resets,pc.observed_at from provider_credits pc
+         join machines m on m.id=pc.machine_id
+         where m.owner_id=$1 and pc.provider=$2
+         order by pc.observed_at desc limit 1",
+    )
+    .bind(owner_id)
+    .bind(provider)
+    .fetch_optional(conn)
+    .await?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let resets: Vec<Reset> = row
+        .try_get::<serde_json::Value, _>("resets")?
+        .as_array()
+        .map(|rows| {
+            rows.iter()
+                .map(|reset| Reset {
+                    title: reset["title"].as_str().unwrap_or_default().to_owned(),
+                    expires_at: reset["expires_at_ms"]
+                        .as_u64()
+                        .and_then(|ms| timestamp(ms).ok().flatten()),
+                    granted_at: reset["granted_at_ms"]
+                        .as_u64()
+                        .and_then(|ms| timestamp(ms).ok().flatten()),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let count: Option<i32> = row.try_get("reset_count")?;
+    Ok(Some(Credits {
+        reset_count: count.and_then(|count| u32::try_from(count).ok()),
+        resets,
+        observed_at: row.try_get("observed_at")?,
+    }))
+}
+
+/// Сбросы из отчёта машины. Что машина не знает, не затирается: прежняя строка хранит
+/// свои сбросы, пока не придёт знающее наблюдение.
+pub async fn record_credits_in_tx(
+    conn: &mut PgConnection,
+    machine_id: Uuid,
+    provider: &str,
+    credits: &canterlot_proto::worker::v1::ProviderCredits,
+    observed_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> Result<bool, sqlx::Error> {
+    if !known_provider(provider) {
+        return Err(sqlx::Error::InvalidArgument(
+            "unknown limit provider".into(),
+        ));
+    }
+    if !credits.resets_known {
+        return Ok(false);
+    }
+    let observed_at = DateTime::from_timestamp_micros(observed_at.timestamp_micros())
+        .ok_or_else(|| sqlx::Error::InvalidArgument("invalid credits time".into()))?;
+    let observed_at = clamp_to_now(observed_at, now);
+    // Список может быть короче счёта: хаб показывает счёт и то, что провайдер назвал.
+    let resets: serde_json::Value = credits
+        .resets
+        .iter()
+        .take(64)
+        .map(|reset| {
+            json!({
+                "title": reset.title.chars().take(200).collect::<String>(),
+                "expires_at_ms": reset.expires_at_ms,
+                "granted_at_ms": reset.granted_at_ms,
+            })
+        })
+        .collect();
+    let stored: Option<DateTime<Utc>> = sqlx::query_scalar(
+        "insert into provider_credits(machine_id,provider,reset_count,resets,observed_at)
+         values($1,$2,$3,$4,$5)
+         on conflict(machine_id,provider) do update
+           set reset_count=excluded.reset_count,resets=excluded.resets,observed_at=excluded.observed_at
+           where provider_credits.observed_at < excluded.observed_at
+         returning observed_at",
+    )
+    .bind(machine_id)
+    .bind(provider)
+    .bind(i64::from(credits.reset_count))
+    .bind(resets)
     .bind(observed_at)
     .fetch_optional(&mut *conn)
     .await?;

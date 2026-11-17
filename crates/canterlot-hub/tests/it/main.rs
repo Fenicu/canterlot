@@ -90,6 +90,7 @@ mod poison_records;
 mod presence;
 mod presets;
 mod prompt_suggestions;
+mod provider_credits;
 mod provider_status;
 mod receipts;
 mod requests_domain;

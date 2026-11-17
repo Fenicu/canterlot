@@ -2456,6 +2456,24 @@ impl crate::grpc::Ingest for Ingest {
             .collect();
         let pool = self.pool.clone();
         let limits = self.limits.clone();
+        // Сбросы лимитов опрос приносит наравне с окнами: тот же отчёт.
+        let credits: Vec<(
+            String,
+            canterlot_proto::worker::v1::ProviderCredits,
+            chrono::DateTime<chrono::Utc>,
+        )> = report
+            .provider_credits
+            .into_iter()
+            .filter(|c| limits::known_provider(&c.provider))
+            .map(|c| {
+                let at = self
+                    .registry
+                    .as_ref()
+                    .and_then(|r| r.to_hub_time(machine_id, c.observed_machine_ms))
+                    .unwrap_or_else(|| self.hub_time(machine_id, c.observed_machine_ms, now));
+                (c.provider.clone(), c, at)
+            })
+            .collect();
         let has_credentials = !credentials.is_empty();
         let outcome = crate::db::in_tx(&pool, move |conn| {
             Box::pin(async move {
@@ -2494,6 +2512,21 @@ impl crate::grpc::Ingest for Ingest {
                     }
                     if !mapped {
                         unmapped += 1;
+                    }
+                }
+                for (provider, report, observed_at) in &credits {
+                    if limits::record_credits_in_tx(
+                        &mut *conn,
+                        machine_id,
+                        provider,
+                        report,
+                        *observed_at,
+                        now,
+                    )
+                    .await?
+                    {
+                        // Обновление показа ждёт события лимитов; окно-носитель — недельное.
+                        changed.insert((provider.clone(), limits::Window::Weekly));
                     }
                 }
                 for (provider, window) in &changed {

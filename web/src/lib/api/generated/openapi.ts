@@ -2384,6 +2384,17 @@ export interface components {
             observed_at: string;
             provider: string;
         };
+        /** @description Сбросы лимитов провайдера с самой свежей машины владельца. */
+        CreditsView: {
+            observed_at: string;
+            /**
+             * Format: int32
+             * @description Сколько сбросов доступно; `null` — провайдер их ещё не называл.
+             */
+            reset_count?: number | null;
+            /** @description Список может быть короче счёта: провайдер называет не все. */
+            resets: components["schemas"]["ResetView"][];
+        };
         CrunchDetail: {
             enabled: boolean;
             reserve_override_until?: string | null;
@@ -3887,6 +3898,7 @@ export interface components {
              *     (API-ключ, старый CLI) или у провайдера такого входа нет.
              */
             credential_expires_at?: string | null;
+            credits?: components["schemas"]["CreditsView"] | null;
             /** @description `estimated`, когда CodexBar вывел расход из локальных журналов, иначе `exact`. */
             data_confidence: components["schemas"]["DataConfidence"];
             five_hour?: components["schemas"]["WindowView"] | null;
@@ -4068,6 +4080,13 @@ export interface components {
             updated_at: string;
             /** Format: uuid */
             winner_decision_id?: string | null;
+        };
+        /** @description Сброс лимитов, подаренный провайдером (сбросы Codex): когда сгорит. */
+        ResetView: {
+            /** @description Когда сброс сгорит; `null` — не сгорает. */
+            expires_at?: string | null;
+            /** @description Заголовок от провайдера; `null` — провайдер его не назвал. */
+            title?: string | null;
         };
         /** @description Последнее разрешение псевдонима на машине. */
         ResolutionView: {

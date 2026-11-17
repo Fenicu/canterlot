@@ -60,6 +60,41 @@ fn window(w: limits::WindowState) -> WindowView {
         forecast: w.forecast.map(ForecastView::from),
     }
 }
+/// Сброс лимитов, подаренный провайдером (сбросы Codex): когда сгорит.
+#[derive(Serialize, ToSchema)]
+pub struct ResetView {
+    /// Заголовок от провайдера; `null` — провайдер его не назвал.
+    pub title: Option<String>,
+    /// Когда сброс сгорит; `null` — не сгорает.
+    pub expires_at: Option<String>,
+}
+
+/// Сбросы лимитов провайдера с самой свежей машины владельца.
+#[derive(Serialize, ToSchema)]
+pub struct CreditsView {
+    /// Сколько сбросов доступно; `null` — провайдер их ещё не называл.
+    pub reset_count: Option<u32>,
+    /// Список может быть короче счёта: провайдер называет не все.
+    pub resets: Vec<ResetView>,
+    pub observed_at: String,
+}
+
+impl From<limits::Credits> for CreditsView {
+    fn from(c: limits::Credits) -> Self {
+        Self {
+            reset_count: c.reset_count,
+            resets: c
+                .resets
+                .into_iter()
+                .map(|reset| ResetView {
+                    title: (!reset.title.is_empty()).then_some(reset.title),
+                    expires_at: reset.expires_at.map(time),
+                })
+                .collect(),
+            observed_at: time(c.observed_at),
+        }
+    }
+}
 #[derive(Serialize, ToSchema)]
 pub struct ProviderView {
     pub provider: String,
@@ -77,6 +112,8 @@ pub struct ProviderView {
     /// Самый ранний конец входа провайдера на машинах владельца; `null` — дата неизвестна
     /// (API-ключ, старый CLI) или у провайдера такого входа нет.
     pub credential_expires_at: Option<String>,
+    /// Сбросы лимитов Codex с самой свежей машины; `null` — провайдер о них молчит.
+    pub credits: Option<CreditsView>,
     /// Публичный статус провайдера со страницы statuspage; `null`, пока хаб её не опрашивал
     /// или провайдер без такой страницы (OpenCode, Antigravity).
     pub status: Option<crate::provider_status::ProviderStatusView>,
@@ -94,6 +131,7 @@ impl From<limits::ProviderLimits> for ProviderView {
             five_hour_absent: p.five_hour_absent,
             data_confidence: p.data_confidence,
             credential_expires_at: p.credential_expires_at.map(time),
+            credits: p.credits.map(CreditsView::from),
             status: p
                 .status
                 .as_ref()

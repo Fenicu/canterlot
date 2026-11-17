@@ -1211,6 +1211,14 @@ export interface LimitsChanged {
     weekly_reserve_resets_at: Time | null;
     data_confidence?: "exact" | "estimated";
     credential_expires_at?: Time | null;
+    credits?: {
+      reset_count: number | null;
+      resets: {
+        title: string;
+        expires_at: Time | null;
+      }[];
+      observed_at: Time;
+    } | null;
     forecast?: {
       rate_permille_per_hour: number;
       recent_rate_permille_per_hour: number | null;

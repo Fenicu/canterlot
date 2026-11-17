@@ -1212,6 +1212,7 @@ async fn reported_absence_of_the_five_hour_window_reaches_the_state_and_the_work
                 observed_machine_ms: now_ms + 1000,
             }],
             credentials: Vec::new(),
+            provider_credits: Vec::new(),
         })),
     })
     .await?;

@@ -4899,6 +4899,62 @@
                 }
               ]
             },
+            "credits": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "reset_count": {
+                      "anyOf": [
+                        {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "resets": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "title": {
+                            "type": "string"
+                          },
+                          "expires_at": {
+                            "anyOf": [
+                              {
+                                "$ref": "#/$defs/Time"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "title",
+                          "expires_at"
+                        ]
+                      }
+                    },
+                    "observed_at": {
+                      "$ref": "#/$defs/Time"
+                    }
+                  },
+                  "required": [
+                    "reset_count",
+                    "resets",
+                    "observed_at"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "forecast": {
               "anyOf": [
                 {
