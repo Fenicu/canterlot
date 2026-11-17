@@ -902,6 +902,182 @@ fn image_generation_with_only_file_id_notes_it_is_unavailable() {
     assert!(text.to_lowercase().contains("unavailable"), "{text:?}");
 }
 
+/// item/started и item/completed одного элемента главного хода.
+fn item_pair(started: Value, completed: Value) -> Vec<Translated> {
+    let mut translator = Translator::new("thread-main", "gpt-6-luna");
+    translator.begin_turn("turn-main", command_id());
+    let mut out = translator.feed(
+        "item/started",
+        &json!({"threadId": "thread-main", "turnId": "turn-main", "item": started}),
+    );
+    out.extend(translator.feed(
+        "item/completed",
+        &json!({"threadId": "thread-main", "turnId": "turn-main",
+            "completedAtMs": 2, "item": completed}),
+    ));
+    out
+}
+
+fn tool_block(events: &[&AdapterEvent], name: &str) -> (Uuid, Option<String>) {
+    events
+        .iter()
+        .find_map(|e| match e {
+            AdapterEvent::BlockStarted {
+                block_id,
+                kind: BlockKind::ToolCall,
+                tool_name,
+                summary,
+                ..
+            } if tool_name.as_deref() == Some(name) => Some((*block_id, summary.clone())),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("{name} block in {events:?}"))
+}
+
+fn block_final(events: &[&AdapterEvent], block: Uuid) -> String {
+    events
+        .iter()
+        .find_map(|e| match e {
+            AdapterEvent::BlockFinal { block_id, text, .. } if *block_id == block => {
+                Some(text.clone())
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("final of {block} in {events:?}"))
+}
+
+#[test]
+fn plan_item_text_becomes_the_call_final() {
+    let item = json!({"id": "plan-1", "type": "plan",
+        "text": "1. Read the issue\n2. Fix it"});
+    let out = item_pair(item.clone(), item);
+    let events = events_of(&out);
+    let (block, _) = tool_block(&events, "plan");
+    assert_eq!(block_final(&events, block), "1. Read the issue\n2. Fix it");
+}
+
+#[test]
+fn function_call_output_string_becomes_the_call_final() {
+    let item = json!({"id": "out-1", "type": "functionCallOutput", "name": "read_file",
+        "output": "line one\nline two"});
+    let out = item_pair(item.clone(), item);
+    let events = events_of(&out);
+    let (block, _) = tool_block(&events, "read_file");
+    assert_eq!(block_final(&events, block), "line one\nline two");
+}
+
+#[test]
+fn function_call_output_content_array_keeps_only_its_text_parts() {
+    let item = json!({"id": "out-2", "type": "functionCallOutput", "name": "read_file",
+    "output": [
+        {"type": "input_text", "text": "first"},
+        {"type": "input_image", "image_url": "data:image/png;base64,AAAA"},
+        {"type": "input_text", "text": "second"}
+    ]});
+    let out = item_pair(item.clone(), item);
+    let events = events_of(&out);
+    let (block, _) = tool_block(&events, "read_file");
+    assert_eq!(block_final(&events, block), "first\nsecond");
+}
+
+#[test]
+fn web_search_completion_lists_result_titles_and_urls() {
+    let item = |results: Value| {
+        json!({"id": "search-1", "type": "webSearch", "query": "rust cli",
+            "results": results})
+    };
+    let results = json!([
+        {"title": "Rust language", "url": "https://rust-lang.org"},
+        {"title": "Docs", "url": "https://docs.rs"}
+    ]);
+    let out = item_pair(item(Value::Null), item(results));
+    let events = events_of(&out);
+    let (block, summary) = tool_block(&events, "web_search");
+    assert_eq!(summary.as_deref(), Some("rust cli"));
+    let text = block_final(&events, block);
+    assert!(text.contains("Rust language"), "{text:?}");
+    assert!(text.contains("https://rust-lang.org"), "{text:?}");
+    assert!(text.contains("Docs"), "{text:?}");
+    assert!(text.contains("https://docs.rs"), "{text:?}");
+}
+
+#[test]
+fn web_search_result_list_is_short_and_cut() {
+    let results: Vec<Value> = (0..20)
+        .map(|n| {
+            json!({"title": format!("{n} {}", "a".repeat(300)),
+            "url": format!("https://example.test/{n}")})
+        })
+        .collect();
+    let item = json!({"id": "search-1", "type": "webSearch", "query": "q",
+        "results": results});
+    let out = item_pair(item.clone(), item);
+    let events = events_of(&out);
+    let (block, _) = tool_block(&events, "web_search");
+    let text = block_final(&events, block);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 10, "a short list: {text:?}");
+    assert!(lines.iter().all(|line| line.chars().count() <= 240));
+    assert!(lines[0].contains('…'), "a long title is cut: {text:?}");
+}
+
+#[test]
+fn review_mode_items_have_a_readable_line() {
+    let entered = json!({"id": "review-1", "type": "enteredReviewMode",
+        "review": "Check the auth flow"});
+    let out = item_pair(entered.clone(), entered);
+    let events = events_of(&out);
+    let (block, summary) = tool_block(&events, "enter_review_mode");
+    assert_eq!(summary.as_deref(), Some("Check the auth flow"));
+    assert_eq!(
+        block_final(&events, block),
+        "Entered review mode: Check the auth flow"
+    );
+
+    let exited = json!({"id": "review-2", "type": "exitedReviewMode", "review": "Done"});
+    let out = item_pair(exited.clone(), exited);
+    let events = events_of(&out);
+    let (block, _) = tool_block(&events, "exit_review_mode");
+    assert_eq!(block_final(&events, block), "Exited review mode: Done");
+}
+
+#[test]
+fn async_agent_questions_and_options_join_the_message_text() {
+    let item = json!({"id": "msg-question", "type": "agentMessage", "delivery": "async",
+    "text": "I need your choice",
+    "questions": [
+        {"title": "Which color?", "options": ["red", "blue"]},
+        {"title": "Which size?"}
+    ]});
+    let out = item_pair(
+        json!({"id": "msg-question", "type": "agentMessage", "text": ""}),
+        item,
+    );
+    let events = events_of(&out);
+    let text = events
+        .iter()
+        .find_map(|event| match event {
+            AdapterEvent::BlockFinal {
+                text,
+                summary: None,
+                ..
+            } if text.starts_with("I need your choice") => Some(text.clone()),
+            _ => None,
+        })
+        .expect("message final");
+    assert!(text.contains("Which color?"), "{text:?}");
+    assert!(text.contains("- red"), "{text:?}");
+    assert!(text.contains("- blue"), "{text:?}");
+    assert!(text.contains("Which size?"), "{text:?}");
+    assert_eq!(
+        diagnostics(&events),
+        [(
+            "codex_async_question".to_owned(),
+            "codex_async_question".to_owned()
+        )]
+    );
+}
+
 #[test]
 fn mcp_tool_call_and_output_delta_blocks() {
     let frames = codex::replay("mcp_tool");

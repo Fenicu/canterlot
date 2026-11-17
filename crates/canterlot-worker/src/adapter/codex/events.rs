@@ -2,7 +2,7 @@
 // расход, картинки и ошибки. Переводчик не паникует и сессию не завершает:
 // неизвестное игнорируется с одной диагностикой на метод за исполнение.
 use super::super::frame_names::object_field_names;
-use super::super::labels::command_label;
+use super::super::labels::{command_label, cut_end};
 use super::super::{AdapterEvent, BlockKind, MediaSource, ModelUsage, Phase, TodoItem, TodoStatus};
 use super::rpc::RpcId;
 use serde_json::Value;
@@ -1002,6 +1002,55 @@ impl Translator {
                 ));
                 out.push(self.running_tool("image_generation"));
             }
+            "plan" => {
+                out.push(self.started(
+                    block_id,
+                    BlockKind::ToolCall,
+                    agent,
+                    &model,
+                    parent,
+                    command_id,
+                    Some("plan"),
+                    None,
+                ));
+                out.push(self.running_tool("plan"));
+            }
+            "functionCallOutput" => {
+                let name = item
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or("function_call_output");
+                out.push(self.started(
+                    block_id,
+                    BlockKind::ToolCall,
+                    agent,
+                    &model,
+                    parent,
+                    command_id,
+                    Some(name),
+                    None,
+                ));
+                out.push(self.running_tool(name));
+            }
+            "enteredReviewMode" | "exitedReviewMode" => {
+                let (name, review) = review_summary(item_type, item);
+                out.push(self.started(
+                    block_id,
+                    BlockKind::ToolCall,
+                    agent,
+                    &model,
+                    parent,
+                    command_id,
+                    Some(name),
+                    if review.is_empty() {
+                        None
+                    } else {
+                        Some(&review)
+                    },
+                ));
+                out.push(self.running_tool(name));
+            }
             _ => {
                 out.push(self.started(
                     block_id,
@@ -1163,10 +1212,10 @@ impl Translator {
         }
         match item_type {
             "agentMessage" => {
-                let text = item.get("text").and_then(Value::as_str).unwrap_or_default();
+                let text = agent_message_text(item);
                 out.push(Translated::Event(AdapterEvent::BlockFinal {
                     block_id: block.block_id,
-                    text: text.to_owned(),
+                    text,
                     summary: None,
                 }));
                 // Вопрос без запроса к серверу: тред начат с инкрементальными инструментами.
@@ -1286,6 +1335,9 @@ impl Translator {
                         text = prompt.unwrap_or_default().to_owned();
                     }
                 }
+                if item_type == "webSearch" {
+                    text = web_search_results(item);
+                }
                 out.push(Translated::Event(AdapterEvent::BlockFinal {
                     block_id: block.block_id,
                     text,
@@ -1301,9 +1353,32 @@ impl Translator {
                     );
                     out.extend(result);
                 }
-                if matches!(item_type, "collabAgentToolCall") {
+                if matches!(item_type, "collabAgentToolCall" | "webSearch") {
                     out.push(self.item_completed(item));
                 }
+                self.phase = Phase::Generating;
+                out.push(Translated::Event(AdapterEvent::Phase {
+                    phase: Phase::Generating,
+                    tool_name: None,
+                    summary: None,
+                }));
+            }
+            "plan" | "functionCallOutput" | "enteredReviewMode" | "exitedReviewMode" => {
+                let text = match item_type {
+                    "plan" => item
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                    "functionCallOutput" => function_output_text(item),
+                    _ => review_final(item_type, item),
+                };
+                out.push(Translated::Event(AdapterEvent::BlockFinal {
+                    block_id: block.block_id,
+                    text,
+                    summary: None,
+                }));
+                out.push(self.item_completed(item));
                 self.phase = Phase::Generating;
                 out.push(Translated::Event(AdapterEvent::Phase {
                     phase: Phase::Generating,
@@ -2215,6 +2290,127 @@ fn mcp_result_text(item: &Value) -> String {
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_owned()
+}
+
+/// Результаты поиска приходят непрозрачным JSON: показываем заголовок и адрес.
+const MAX_SEARCH_RESULTS: usize = 10;
+const SEARCH_LINE_BYTES: usize = 240;
+
+fn web_search_results(item: &Value) -> String {
+    item.get("results")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .take(MAX_SEARCH_RESULTS)
+        .filter_map(|result| {
+            // Новые виды результатов кладут поля на уровень ниже: смотрим и туда.
+            let inner = result
+                .get("result")
+                .filter(|value| value.is_object())
+                .unwrap_or(result);
+            let field = |key: &str| {
+                result
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .filter(|text| !text.is_empty())
+                    .or_else(|| {
+                        inner
+                            .get(key)
+                            .and_then(Value::as_str)
+                            .filter(|text| !text.is_empty())
+                    })
+            };
+            match (field("title"), field("url")) {
+                (Some(title), Some(url)) => {
+                    Some(cut_end(&format!("{title} — {url}"), SEARCH_LINE_BYTES))
+                }
+                (Some(title), None) => Some(cut_end(title, SEARCH_LINE_BYTES)),
+                (None, Some(url)) => Some(cut_end(url, SEARCH_LINE_BYTES)),
+                (None, None) => None,
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+// Строка или текстовые части массива: картинки и прочее в тексте блока не нужны.
+fn function_output_text(item: &Value) -> String {
+    match item.get("output") {
+        Some(Value::String(text)) => text.clone(),
+        Some(Value::Array(parts)) => parts
+            .iter()
+            .filter_map(|part| part.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+fn review_summary(item_type: &str, item: &Value) -> (&'static str, String) {
+    let name = if item_type == "enteredReviewMode" {
+        "enter_review_mode"
+    } else {
+        "exit_review_mode"
+    };
+    let review = item
+        .get("review")
+        .and_then(Value::as_str)
+        .filter(|review| !review.is_empty())
+        .map(cut120)
+        .unwrap_or_default();
+    (name, review)
+}
+
+fn review_final(item_type: &str, item: &Value) -> String {
+    let (_, review) = review_summary(item_type, item);
+    let lead = if item_type == "enteredReviewMode" {
+        "Entered review mode"
+    } else {
+        "Exited review mode"
+    };
+    if review.is_empty() {
+        lead.to_owned()
+    } else {
+        format!("{lead}: {review}")
+    }
+}
+
+/// Асинхронный вопрос без карточки: варианты идут текстом, чтобы владелец ответил репликой.
+fn agent_message_text(item: &Value) -> String {
+    let text = item.get("text").and_then(Value::as_str).unwrap_or_default();
+    let questions = item
+        .get("questions")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    if questions.is_empty() {
+        return text.to_owned();
+    }
+    let mut sections = Vec::new();
+    if !text.is_empty() {
+        sections.push(text.to_owned());
+    }
+    let mut lines = vec!["Questions:".to_owned()];
+    for (index, question) in questions.iter().enumerate() {
+        let Some(title) = question.get("title").and_then(Value::as_str) else {
+            continue;
+        };
+        if title.is_empty() {
+            continue;
+        }
+        lines.push(format!("{}. {title}", index + 1));
+        for option in question
+            .get("options")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            lines.push(format!("   - {option}"));
+        }
+    }
+    sections.push(lines.join("\n"));
+    sections.join("\n\n")
 }
 
 fn reasoning_final(item: &Value, reasoning: &ReasoningState) -> String {
