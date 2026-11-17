@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { limitStrip } from "#lib/screens/sessions/limitsText.js";
 import {
+  creditEntries,
+  creditTitle,
+  creditsLine,
   meterTone,
   remainingText,
   type ProviderLimits,
@@ -216,3 +219,69 @@ describe("sessions/limits", () => {
   });
 });
 
+describe("sessions/limits credits", () => {
+  const credits = (count: number | null, expiries: (string | null)[]) => ({
+    reset_count: count,
+    resets: expiries.map((expires_at, index) => ({
+      title: index === 0 ? "Full reset (Weekly + 5 hr)" : null,
+      expires_at,
+    })),
+    observed_at: new Date(NOW - 60_000).toISOString(),
+  });
+
+  it("the_strip_names_the_count_and_the_nearest_burning_reset", () => {
+    const line = creditsLine(
+      "codex",
+      credits(2, [at(31, 4, 0), at(20, 12, 0)]),
+      NOW,
+    );
+    // Ближайший срок — самый ранний из названных, а не первый в списке.
+    expect(line).toMatchObject({ text: "Сбросы лимитов: 2, ближайший сгорит 20.10" });
+  });
+
+  it("a_reset_burning_within_a_week_warns", () => {
+    expect(creditsLine("codex", credits(1, [new Date(NOW + 3 * 86_400_000).toISOString()]), NOW)?.tone).toBe(
+      "warning",
+    );
+    const far = new Date(NOW + 60 * 86_400_000).toISOString();
+    expect(creditsLine("codex", credits(1, [far]), NOW)?.tone).toBe("normal");
+  });
+
+  it("without_any_expiry_the_count_stands_alone_and_zero_hides_the_line", () => {
+    expect(creditsLine("codex", credits(2, []), NOW)).toEqual({
+      text: "Сбросы лимитов: 2",
+      tone: "normal",
+    });
+    expect(creditsLine("codex", credits(2, [null]), NOW)).toEqual({
+      text: "Сбросы лимитов: 2",
+      tone: "normal",
+    });
+    expect(creditsLine("codex", credits(0, []), NOW)).toBeNull();
+    expect(creditsLine("codex", null, NOW)).toBeNull();
+    // Сбросы есть только у Codex: у Claude та же форма ничего не рисует.
+    expect(creditsLine("claude", credits(2, []), NOW)).toBeNull();
+  });
+
+  it("credit_titles_are_translated_and_missing_ones_are_named", () => {
+    expect(creditTitle("Full reset (Weekly + 5 hr)")).toBe("Полный сброс: неделя и 5 часов");
+    expect(creditTitle("Другой подарок")).toBe("Другой подарок");
+    expect(creditTitle(null)).toBe("Сброс лимитов");
+    expect(creditEntries(credits(1, [at(31, 4, 0)]))).toEqual([
+      { title: "Полный сброс: неделя и 5 часов", expiresAt: Date.parse(at(31, 4, 0)) },
+    ]);
+    expect(creditEntries(credits(1, [null]))).toEqual([
+      { title: "Полный сброс: неделя и 5 часов", expiresAt: null },
+    ]);
+  });
+
+  it("the_strip_row_carries_the_credits_of_the_provider", () => {
+    const strip = limitStrip(
+      [{ ...provider("codex", 100, 200), credits: credits(2, [at(31, 4, 0)]) }],
+      NOW,
+      cfg,
+    );
+    expect(strip.rows[0]?.credits?.text).toBe("Сбросы лимитов: 2, ближайший сгорит 31.10");
+    expect(strip.rows[0]?.creditList).toHaveLength(1);
+    expect(limitStrip([provider("claude", 100, 200)], NOW, cfg).rows[0]?.credits).toBeNull();
+  });
+});

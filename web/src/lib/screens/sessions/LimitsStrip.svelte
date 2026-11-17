@@ -33,6 +33,8 @@
   const troubled = $derived(view.rows.filter((row) => row.status));
   /** Конец входа провайдера — строкой под полосой: дата одна на провайдера, окна её не заменяют. */
   const credentials = $derived(view.rows.filter((row) => row.credential));
+  /** Сбросы лимитов — той же тихой строкой: их приносит только Codex. */
+  const credits = $derived(view.rows.filter((row) => row.credits));
 
   const refresher = new LimitsRefresh();
   // Новое показание приходит событием хаба: оно и закрывает ожидание.
@@ -145,10 +147,13 @@
         {/each}
       </span>
       {/if}
-      {#if credentials.length}
+      {#if credentials.length || credits.length}
         <span class="credentials">
           {#each credentials as row (row.provider)}
             <span class="credential" data-provider={row.provider} data-tone={row.credential?.tone}>{row.credential?.text}</span>
+          {/each}
+          {#each credits as row (row.provider)}
+            <span class="credit" data-provider={row.provider} data-tone={row.credits?.tone}>{row.credits?.text}</span>
           {/each}
         </span>
       {/if}
@@ -352,8 +357,8 @@
   .note { margin: var(--s0); min-height: var(--s0); color: var(--secondary); }
   /* Конец входа провайдера: тихая подпись, пока дата далеко; тон несут только слова тревоги. */
   .credentials { display: flex; flex-direction: column; gap: var(--s1); padding: var(--s1) var(--s6) var(--s2); }
-  .credential { color: var(--muted); font-size: var(--fs-xs); overflow-wrap: anywhere; }
-  .credential[data-tone='warning'] { color: var(--warning); }
+  .credential, .credit { color: var(--muted); font-size: var(--fs-xs); overflow-wrap: anywhere; }
+  .credential[data-tone='warning'], .credit[data-tone='warning'] { color: var(--warning); }
   .credential[data-tone='danger'] { color: var(--danger); }
   a { display: inline-flex; align-items: center; min-height: var(--target); color: var(--accent-link); }
 </style>

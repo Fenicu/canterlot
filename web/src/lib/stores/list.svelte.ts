@@ -365,6 +365,8 @@ export class ListStore {
       if (payload.data_confidence) provider.data_confidence = payload.data_confidence;
       // Дата конца входа меняется и без смены окна: событие лимитов приносит её всегда.
       if ('credential_expires_at' in payload) provider.credential_expires_at = payload.credential_expires_at as string | null;
+      // Сбросы лимитов тоже меняются без смены окна.
+      if ('credits' in payload) provider.credits = payload.credits as ProviderLimits['credits'];
       this.limits = next;
       return;
     }

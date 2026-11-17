@@ -40,6 +40,14 @@ export interface WindowRow {
   pct: string;
 }
 
+/** Сброс лимитов на полном экране: заголовок и, если срок есть, когда он сгорит. */
+export interface CreditRow {
+  key: number;
+  title: string;
+  /** «сгорит 02.12.2026»; пусто — сброс не сгорает. */
+  expires: string;
+}
+
 /** Самое тесное свежее окно провайдера: его остаток стоит крупно в шапке карточки. */
 export interface LeadWindow {
   key: WindowKey;
@@ -86,7 +94,13 @@ export function currentBlocks(providers: ProviderLimits[], now: number, cfg: Lim
       /** Статус провайдера словом, когда он не в порядке. */
       providerStatus: row.status,
       /** Конец входа провайдера: дата, предупреждение или «закончился». */
-      credential: row.credential
+      credential: row.credential,
+      /** Сбросы лимитов: каждый поимённо, со сроком сгорания. */
+      credits: row.creditList.map((credit, index) => ({
+        key: index,
+        title: credit.title,
+        expires: credit.expiresAt === null ? '' : `сгорит ${fmt.numericDate(credit.expiresAt)}`
+      }))
     };
   });
 }

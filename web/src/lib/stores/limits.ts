@@ -47,6 +47,83 @@ export interface ProviderLimits {
   status?: ProviderStatus | null;
   /** Самый ранний конец входа провайдера на машинах владельца; `null` — дата неизвестна. */
   credential_expires_at?: string | null;
+  /** Сбросы лимитов Codex с самой свежей машины; `null`/нет — провайдер о них молчит. */
+  credits?: ProviderCredits | null;
+}
+
+/** Сброс лимитов, подаренный провайдером: заголовок и срок, когда он сгорит. */
+export interface ResetCredit {
+  title: string | null;
+  expires_at: string | null;
+}
+
+export interface ProviderCredits {
+  reset_count: number | null;
+  resets: ResetCredit[];
+  observed_at: string;
+}
+
+/** За сколько до сгорания сброса полоса предупреждает. */
+export const CREDITS_WARN_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Заголовки подарков, которые провайдер называет по-английски. */
+const CREDIT_TITLES: Record<string, string> = {
+  "Full reset (Weekly + 5 hr)": "Полный сброс: неделя и 5 часов",
+};
+
+/** Заголовок сброса словами; без заголовка — «Сброс лимитов». */
+export function creditTitle(title: string | null | undefined): string {
+  if (!title) return "Сброс лимитов";
+  return CREDIT_TITLES[title] ?? title;
+}
+
+/** Сбросы в порядке показа: каждый со своим заголовком и сроком; `expiresAt` — `null`, если не сгорает. */
+export interface CreditEntry {
+  title: string;
+  expiresAt: number | null;
+}
+
+export function creditEntries(credits: ProviderCredits | null | undefined): CreditEntry[] {
+  if (!credits) return [];
+  return credits.resets.map((credit) => {
+    const at = credit.expires_at ? Date.parse(credit.expires_at) : Number.NaN;
+    return { title: creditTitle(credit.title), expiresAt: Number.isFinite(at) ? at : null };
+  });
+}
+
+/** Ближайшее сгорание из списка; `null` — сроков нет. */
+export function nearestCredit(credits: ProviderCredits | null | undefined): number | null {
+  const times = creditEntries(credits).flatMap((entry) =>
+    entry.expiresAt === null ? [] : [entry.expiresAt],
+  );
+  return times.length ? Math.min(...times) : null;
+}
+
+/** Строка о сбросах под полосой; `null` — сбросов нет или провайдер о них молчит. */
+export interface CreditsLine {
+  text: string;
+  tone: MeterTone;
+}
+
+/**
+ * «Сбросы лимитов: 2, ближайший сгорит 02.12»: счёт берётся у провайдера, а срок — самый
+ * ранний из названных. Ближе недели до сгорания — предупреждение. Сбросы есть только у Codex.
+ */
+export function creditsLine(
+  provider: string,
+  credits: ProviderCredits | null | undefined,
+  now: number,
+): CreditsLine | null {
+  if (provider !== "codex" || !credits) return null;
+  const count = credits.reset_count ?? 0;
+  if (count <= 0) return null;
+  const nearest = nearestCredit(credits);
+  if (nearest === null) return { text: `Сбросы лимитов: ${count}`, tone: "normal" };
+  const burning = nearest - now <= CREDITS_WARN_MS;
+  return {
+    text: `Сбросы лимитов: ${count}, ближайший сгорит ${fmt.shortDate(nearest)}`,
+    tone: burning ? "warning" : "normal",
+  };
 }
 
 /** За сколько до конца входа провайдера полоса предупреждает. */

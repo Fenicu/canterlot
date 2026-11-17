@@ -17,6 +17,13 @@
           <a class="pstatus" data-status-tone={block.providerStatus.tone} href={block.providerStatus.url} target="_blank" rel="noopener noreferrer" title={block.providerStatus.title} aria-label={block.providerStatus.title}>{block.providerStatus.company}: {block.providerStatus.text}</a>{/if}</p>{/if}
       </header>
       {#if block.credential}<p class="credential" data-provider={block.provider} data-tone={block.credential.tone}>{block.credential.text}</p>{/if}
+      {#if block.credits.length}
+        <ul class="credits" aria-label="Сбросы лимитов">
+          {#each block.credits as credit (credit.key)}
+            <li data-provider={block.provider}>{credit.title}{#if credit.expires}<span class="expires">&nbsp;— {credit.expires}</span>{/if}</li>
+          {/each}
+        </ul>
+      {/if}
       {#if block.empty}<p class="none">нет данных</p>
       {:else}<div class="rows">
         {#each block.windows as row (row.key)}
@@ -73,6 +80,10 @@
   .credential { margin: var(--s0) 0 var(--s6); color: var(--muted); font-size: var(--fs-sm); overflow-wrap: anywhere; }
   .credential[data-tone='warning'] { color: var(--warning); }
   .credential[data-tone='danger'] { color: var(--danger); }
+  /* Сбросы лимитов: список под шапкой, срок — тише заголовка. */
+  .credits { margin: var(--s0) 0 var(--s6); padding: var(--s0); list-style: none; color: var(--text); font-size: var(--fs-sm); }
+  .credits li { overflow-wrap: anywhere; }
+  .expires { color: var(--muted); }
   /* В очень узкой карточке сброс уходит под полосу: иначе он вылезает за край. */
   @container (max-width: 15em) {
     .rows { grid-template-columns: max-content minmax(0, 1fr); }
