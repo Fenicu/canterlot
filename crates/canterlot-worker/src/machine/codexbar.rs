@@ -384,15 +384,14 @@ impl CodexBarLimitsSource {
     }
 
     async fn fallback(&self, provider: &str, request: Request) -> LimitsFetch {
-        LimitsFetch {
-            observations: match &self.fallback {
-                Some(fallback) if request == Request::Idle => fallback.poll_idle(provider).await,
-                Some(fallback) => fallback.poll(provider).await,
-                None => Vec::new(),
-            },
-            absent: Vec::new(),
-            credentials: Vec::new(),
-            provider_credits: Vec::new(),
+        // Запасной источник отдаёт полный отчёт: его сбросы тоже должны дойти до хаба.
+        match &self.fallback {
+            Some(fallback) if request == Request::Idle => {
+                fallback.poll_report(provider, true).await
+            }
+            Some(fallback) if request == Request::Refresh => fallback.poll_refresh(provider).await,
+            Some(fallback) => fallback.poll_report(provider, false).await,
+            None => LimitsFetch::default(),
         }
     }
 

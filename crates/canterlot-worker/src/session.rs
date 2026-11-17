@@ -559,13 +559,16 @@ impl Worker {
             let cache_for_hub = limits_cache.clone();
             let hub_age: crate::machine::limits::HubLimitsAge =
                 Arc::new(move |provider| cache_for_hub.get(provider).map(|c| c.received_at));
-            let probe: Arc<dyn crate::machine::limits::LimitsSource> =
-                Arc::new(crate::machine::limits::CodexRateLimitsSource::new(
+            routes.insert(
+                "codex".into(),
+                crate::machine::limits::codex_limits_route(
                     codex,
+                    codexbar_path.clone(),
+                    limits_interval,
                     live_limits.clone(),
                     hub_age,
-                ));
-            routes.insert("codex".into(), codexbar(Some(probe)));
+                ),
+            );
         }
         if config.opencode.is_some() {
             idle_ticker.register("opencode", limits_interval);

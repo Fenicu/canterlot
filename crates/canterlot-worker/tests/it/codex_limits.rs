@@ -4,7 +4,7 @@
 
 use std::{
     fs,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -21,7 +21,8 @@ use canterlot_worker::{
     },
     config::CodexConfig,
     machine::limits::{
-        CodexRateLimitsSource, HubLimitsAge, LimitsSource, LiveLimits, RoutedLimitsSource,
+        CodexRateLimitsSource, HubLimitsAge, LimitsFetch, LimitsSource, LiveLimits,
+        RoutedLimitsSource, codex_limits_route,
     },
 };
 use serde_json::{Value, json};
@@ -50,6 +51,7 @@ fn fixture_json(name: &str) -> Value {
 
 // Раньше сбросов в фикстурах.
 const NOW: u64 = 1_792_900_000_000;
+const CODEXBAR_CODEX: &str = include_str!("fixtures/codexbar/codex.json");
 
 fn fixture_turn(name: &str) -> Vec<Value> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -323,6 +325,7 @@ fn ordinary_usage_blocked_is_read_from_the_response_top_level() {
 struct FakeProbeServer {
     executable: PathBuf,
     methods_log: PathBuf,
+    launches_log: PathBuf,
     _dir: tempfile::TempDir,
 }
 
@@ -333,6 +336,8 @@ impl FakeProbeServer {
         fs::write(&response_path, serde_json::to_string(response).unwrap()).unwrap();
         let methods_log = dir.path().join("methods.log");
         fs::write(&methods_log, "").unwrap();
+        let launches_log = dir.path().join("launches.log");
+        fs::write(&launches_log, "").unwrap();
         let handler = dir.path().join("handler.py");
         fake_exec::write_executable(
             &handler,
@@ -362,7 +367,8 @@ for line in sys.stdin:
         fake_exec::write_executable(
             &wrapper,
             format!(
-                "#!/bin/sh\nif [ \"$1\" = app-server ]; then exec \"{}\" \"{}\" \"{}\" \"{}\"; fi\nexit 1\n",
+                "#!/bin/sh\nif [ \"$1\" = app-server ]; then echo x >> '{}'; exec \"{}\" \"{}\" \"{}\" \"{}\"; fi\nexit 1\n",
+                launches_log.display(),
                 handler.display(),
                 response_path.display(),
                 if hang_on_read { "hang" } else { "ok" },
@@ -373,6 +379,7 @@ for line in sys.stdin:
         Self {
             executable: wrapper,
             methods_log,
+            launches_log,
             _dir: dir,
         }
     }
@@ -383,6 +390,13 @@ for line in sys.stdin:
             .lines()
             .map(str::to_owned)
             .collect()
+    }
+
+    fn launches(&self) -> usize {
+        fs::read_to_string(&self.launches_log)
+            .unwrap_or_default()
+            .lines()
+            .count()
     }
 }
 
@@ -744,4 +758,191 @@ async fn version_timeout_kills_the_whole_cli_group() {
             .status();
     }
     assert!(!alive, "native child {native} survived the version timeout");
+}
+
+// Маршрут Codex собирается так же, как в session.rs: codexbar основой, probe запасной.
+fn codex_route(
+    codex: &CodexConfig,
+    codexbar: PathBuf,
+    limits_interval: Duration,
+    hub_age: HubLimitsAge,
+) -> Arc<dyn LimitsSource> {
+    codex_limits_route(
+        codex,
+        Some(codexbar),
+        limits_interval,
+        LiveLimits::default(),
+        hub_age,
+    )
+}
+
+fn fake_codexbar(dir: &Path, ok: bool) -> PathBuf {
+    fs::write(dir.join("codex.json"), CODEXBAR_CODEX).unwrap();
+    let path = dir.join("codexbar");
+    let body = if ok {
+        format!("cat '{}'\n", dir.join("codex.json").display())
+    } else {
+        "exit 3\n".to_owned()
+    };
+    fake_exec::write_executable(&path, format!("#!/bin/sh\n{body}"), 0o700);
+    path
+}
+
+fn credits_response() -> Value {
+    json!({
+        "rateLimits": {
+            "limitId": "codex",
+            "primary": {"usedPercent": 10, "resetsAt": 1792927784, "windowDurationMins": 300},
+            "secondary": {"usedPercent": 20, "resetsAt": 1793514584, "windowDurationMins": 10080}
+        },
+        "rateLimitResetCredits": {
+            "availableCount": 2,
+            "credits": [
+                {"id": "c1", "status": "available", "expiresAt": 1796162435, "title": "Full reset"},
+                {"id": "c2", "status": "available", "expiresAt": 1797108277, "title": "Full reset"}
+            ]
+        },
+        "ordinaryUsageAllowed": true
+    })
+}
+
+fn no_hub_age() -> HubLimitsAge {
+    Arc::new(|_| None)
+}
+
+#[tokio::test]
+async fn codex_route_reports_reset_credits_when_codexbar_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = FakeProbeServer::new(&credits_response(), false);
+    let config = CodexConfig {
+        executable: server.executable.clone(),
+        ..CodexConfig::default()
+    };
+    let source = codex_route(
+        &config,
+        fake_codexbar(dir.path(), true),
+        Duration::from_secs(900),
+        no_hub_age(),
+    );
+    let fetched: LimitsFetch = source.poll_report("codex", false).await;
+    assert_eq!(
+        fetched.observations.len(),
+        2,
+        "окна по-прежнему от codexbar"
+    );
+    assert_eq!(
+        fetched.provider_credits.len(),
+        1,
+        "сбросы должны доходить до хаба"
+    );
+    assert_eq!(fetched.provider_credits[0].reset_count, 2);
+}
+
+#[tokio::test]
+async fn codex_route_probes_credits_at_most_once_per_interval() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = FakeProbeServer::new(&credits_response(), false);
+    let config = CodexConfig {
+        executable: server.executable.clone(),
+        ..CodexConfig::default()
+    };
+    let source = codex_route(
+        &config,
+        fake_codexbar(dir.path(), true),
+        Duration::from_secs(900),
+        no_hub_age(),
+    );
+    assert_eq!(
+        source
+            .poll_report("codex", false)
+            .await
+            .provider_credits
+            .len(),
+        1
+    );
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(30)).await;
+    assert!(
+        source
+            .poll_refresh("codex")
+            .await
+            .provider_credits
+            .is_empty(),
+        "второй опрос в пределах интервала не должен запускать probe"
+    );
+    assert_eq!(
+        server.launches(),
+        1,
+        "probe запускается не чаще раза за интервал"
+    );
+}
+
+#[tokio::test]
+async fn codex_route_fallback_reports_windows_and_credits_with_one_probe() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = FakeProbeServer::new(&credits_response(), false);
+    let config = CodexConfig {
+        executable: server.executable.clone(),
+        ..CodexConfig::default()
+    };
+    let source = codex_route(
+        &config,
+        fake_codexbar(dir.path(), false),
+        Duration::from_secs(900),
+        no_hub_age(),
+    );
+    let fetched = source.poll_report("codex", false).await;
+    assert_eq!(
+        fetched.provider_credits.len(),
+        1,
+        "сбросы приходят от probe"
+    );
+    assert_eq!(fetched.provider_credits[0].reset_count, 2);
+    assert_eq!(fetched.observations.len(), 2, "окна приходят от probe");
+    assert_eq!(
+        server.launches(),
+        1,
+        "один probe на опрос, без двойного запуска"
+    );
+}
+
+#[tokio::test]
+async fn codex_route_keeps_windows_when_credits_probe_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let codex = dir.path().join("codex");
+    fake_exec::write_executable(
+        &codex,
+        format!(
+            "#!/bin/sh\necho x >> '{}'\nexit 1\n",
+            dir.path().join("probe.log").display()
+        ),
+        0o755,
+    );
+    let config = CodexConfig {
+        executable: codex,
+        ..CodexConfig::default()
+    };
+    let source = codex_route(
+        &config,
+        fake_codexbar(dir.path(), true),
+        Duration::from_secs(900),
+        no_hub_age(),
+    );
+    let fetched = source.poll_report("codex", false).await;
+    assert_eq!(
+        fetched.observations.len(),
+        2,
+        "окна от codexbar не теряются"
+    );
+    assert!(
+        fetched.provider_credits.is_empty(),
+        "неудавшийся probe ничего не сообщает о сбросах"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.path().join("probe.log"))
+            .unwrap_or_default()
+            .lines()
+            .count(),
+        1
+    );
 }

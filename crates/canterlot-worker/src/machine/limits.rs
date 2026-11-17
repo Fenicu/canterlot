@@ -10,6 +10,7 @@ use std::{
 };
 use tokio::time::Instant;
 
+use super::codexbar::CodexBarLimitsSource;
 use crate::adapter::codex::{
     limits::{credits_from_read_response, observations_from_read_response},
     probe,
@@ -18,6 +19,8 @@ use crate::config::CodexConfig;
 
 const FIRST_TICK_MAX_DELAY: Duration = Duration::from_secs(60);
 const CODEX_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+/// Не запускать второй probe, если он уже был в этом же опросе (окна через запасной источник).
+const SAME_POLL_GAP: Duration = Duration::from_secs(1);
 
 pub type HubLimitsAge = Arc<dyn Fn(&str) -> Option<Instant> + Send + Sync>;
 
@@ -216,6 +219,7 @@ struct PollState {
     last_request: Option<Instant>,
     backoff_until: Option<Instant>,
     rate_limited: u32,
+    last_credits_fetch: Option<Instant>,
 }
 
 pub(crate) fn rfc3339_ms(text: &str) -> Option<u64> {
@@ -309,6 +313,36 @@ impl CodexRateLimitsSource {
                 .collect(),
         })
     }
+
+    /// Сбросы берём коротким probe не чаще раза за интервал опроса лимитов. Свой счётчик
+    /// независим от подавления окон по возрасту снимка и живым сессиям: когда codexbar
+    /// исправен, он не вызывает запасной источник, и сбросы иначе никогда не дошли бы.
+    pub async fn credits_if_due(&self, interval: Duration) -> Vec<ProviderCredits> {
+        let now = (self.clock)();
+        {
+            let mut state = self.state.lock().expect("codex poll state");
+            let since = |at: Option<Instant>, gap: Duration| {
+                at.is_some_and(|at| now.saturating_duration_since(at) < gap)
+            };
+            if state.backoff_until.is_some_and(|until| now < until)
+                || since(state.last_request, SAME_POLL_GAP)
+                || since(state.last_credits_fetch, interval)
+            {
+                return Vec::new();
+            }
+            state.last_credits_fetch = Some(now);
+        }
+        match self.fetch().await {
+            Ok(fetched) => {
+                let mut state = self.state.lock().expect("codex poll state");
+                state.rate_limited = 0;
+                state.backoff_until = None;
+                fetched.provider_credits
+            }
+            // При сбое молчим: окна от codexbar не трогаем, неизвестные сбросы не отправляем.
+            Err(_) => Vec::new(),
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -368,6 +402,81 @@ impl CodexRateLimitsSource {
             }
         }
     }
+}
+
+/// Маршрут Codex: окна остаются за CodexBar, сбросы приносит отдельный probe с паузой.
+pub struct CodexLimitsSource {
+    codexbar: CodexBarLimitsSource,
+    probe: Arc<CodexRateLimitsSource>,
+    credits_interval: Duration,
+}
+
+impl CodexLimitsSource {
+    async fn complete(&self, provider: &str, mut fetched: LimitsFetch) -> LimitsFetch {
+        if provider == "codex" && fetched.provider_credits.is_empty() {
+            fetched.provider_credits = self.probe.credits_if_due(self.credits_interval).await;
+        }
+        fetched
+    }
+}
+
+#[async_trait::async_trait]
+impl LimitsSource for CodexLimitsSource {
+    async fn poll(&self, provider: &str) -> Vec<LimitObservation> {
+        let observations = self.codexbar.poll(provider).await;
+        self.complete(
+            provider,
+            LimitsFetch {
+                observations,
+                ..Default::default()
+            },
+        )
+        .await
+        .observations
+    }
+
+    async fn poll_idle(&self, provider: &str) -> Vec<LimitObservation> {
+        let observations = self.codexbar.poll_idle(provider).await;
+        self.complete(
+            provider,
+            LimitsFetch {
+                observations,
+                ..Default::default()
+            },
+        )
+        .await
+        .observations
+    }
+
+    async fn poll_report(&self, provider: &str, idle: bool) -> LimitsFetch {
+        self.complete(provider, self.codexbar.poll_report(provider, idle).await)
+            .await
+    }
+
+    async fn poll_refresh(&self, provider: &str) -> LimitsFetch {
+        self.complete(provider, self.codexbar.poll_refresh(provider).await)
+            .await
+    }
+
+    fn retry_in(&self, provider: &str) -> Option<Duration> {
+        self.codexbar.retry_in(provider)
+    }
+}
+
+/// Сборка маршрута Codex, общая для воркера и тестов.
+pub fn codex_limits_route(
+    codex: &CodexConfig,
+    codexbar_path: Option<PathBuf>,
+    limits_interval: Duration,
+    live: LiveLimits,
+    hub_age: HubLimitsAge,
+) -> Arc<dyn LimitsSource> {
+    let probe = Arc::new(CodexRateLimitsSource::new(codex, live, hub_age));
+    Arc::new(CodexLimitsSource {
+        codexbar: CodexBarLimitsSource::new(codexbar_path, limits_interval, Some(probe.clone())),
+        probe,
+        credits_interval: limits_interval,
+    })
 }
 
 pub struct RoutedLimitsSource {
