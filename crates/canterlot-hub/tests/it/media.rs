@@ -797,7 +797,7 @@ async fn media_download_has_safe_headers_and_owner_check(pool: PgPool) {
     assert_eq!(h["content-disposition"], "inline");
     assert_eq!(h["etag"], format!("\"{}\"", sha(&bytes)));
     assert_eq!(h["content-security-policy"], "sandbox");
-    assert_eq!(h["cache-control"], "private, no-store");
+    assert_eq!(h["cache-control"], "private, max-age=86400, immutable");
     assert_eq!(h["content-length"], bytes.len().to_string());
     assert!(h.contains_key("x-server-time-ms"));
 
@@ -850,6 +850,50 @@ async fn media_download_has_safe_headers_and_owner_check(pool: PgPool) {
         "not_found",
         "never",
     );
+    stop.cancel();
+    timeout(WAIT, task).await.unwrap().unwrap();
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn media_download_is_immutable_and_supports_if_none_match(pool: PgPool) {
+    let mut f = Media::new(pool.clone()).await;
+    let (mut client, stop, task) = server(f.hub.clone()).await;
+    let block = f.tool_block().await;
+    let bytes = png(3, 2, 5000, 9);
+    let id = Uuid::now_v7();
+    put(&mut client, &f.token, f.header(id, block, &bytes), &bytes)
+        .await
+        .unwrap();
+    f.committed(vec![Media::reference(id, block, &bytes, 3, 2)])
+        .await;
+    let first = f.download(&f.files.client, id).await;
+    assert_eq!(first.status, 200);
+    assert_eq!(
+        first.headers["cache-control"],
+        "private, max-age=86400, immutable"
+    );
+    let etag = first.headers["etag"].to_str().unwrap().to_owned();
+    assert_eq!(etag, format!("\"{}\"", sha(&bytes)));
+    // Повтор с тем же ETag не качает тело заново.
+    let cached = f
+        .files
+        .client
+        .clone()
+        .with_header("If-None-Match", &etag)
+        .send(Method::GET, &format!("/api/v1/media/{id}"), None, None)
+        .await;
+    assert_eq!(cached.status, 304);
+    assert!(cached.body.is_empty());
+    // Чужой ETag отдаёт картинку как обычно.
+    let other = f
+        .files
+        .client
+        .clone()
+        .with_header("If-None-Match", "\"0000000000000000000000000000000000000000000000000000000000000000\"")
+        .send(Method::GET, &format!("/api/v1/media/{id}"), None, None)
+        .await;
+    assert_eq!(other.status, 200);
+    assert_eq!(other.body.as_ref(), bytes.as_slice());
     stop.cancel();
     timeout(WAIT, task).await.unwrap().unwrap();
 }

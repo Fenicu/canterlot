@@ -1792,6 +1792,55 @@ async fn download_requires_owner_and_sets_safe_headers(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn download_supports_if_none_match_with_etag(pool: PgPool) {
+    let _shared = HEAVY.read().await;
+    let f = Fixture::new(pool).await;
+    let png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR".to_vec();
+    let id = f.ready("shot.png", "image/png", &png).await;
+    let first = download(&f, &f.client, id).await;
+    assert_eq!(first.status, 200);
+    assert_eq!(
+        first.headers["cache-control"],
+        "private, max-age=86400, immutable"
+    );
+    let etag = first.headers["etag"].to_str().unwrap().to_owned();
+    // ETag вложения равен SHA-256 содержимого.
+    let expected = {
+        use sha2::Digest;
+        canterlot_hub::attachments::blobstore::hex(&Sha256::digest(&png))
+    };
+    assert_eq!(etag, format!("\"{expected}\""));
+    // Повтор с тем же ETag не качает тело заново.
+    let cached = f
+        .client
+        .clone()
+        .with_header("If-None-Match", &etag)
+        .send(
+            Method::GET,
+            &format!("/api/v1/attachments/{id}/content"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(cached.status, 304);
+    assert!(cached.body.is_empty());
+    // Слабый валидатор сравнивается слабо и тоже даёт 304.
+    let weak = f
+        .client
+        .clone()
+        .with_header("If-None-Match", &format!("W/{etag}"))
+        .send(
+            Method::GET,
+            &format!("/api/v1/attachments/{id}/content"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(weak.status, 304);
+    assert!(weak.body.is_empty());
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn html_named_file_is_served_as_octet_stream_attachment(pool: PgPool) {
     let _shared = HEAVY.read().await;
     let f = Fixture::new(pool).await;

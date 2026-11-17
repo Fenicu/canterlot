@@ -948,6 +948,7 @@ pub struct Download {
     pub name: String,
     pub mime: String,
     pub size: u64,
+    pub sha256: String,
     pub file: tokio::fs::File,
 }
 
@@ -965,8 +966,8 @@ pub async fn open_for_download(
     owner_id: Uuid,
     id: Uuid,
 ) -> Result<Download, AttachmentError> {
-    let (name, mime, size, state): (String, String, i64, String) = sqlx::query_as(
-        "select name, mime, size_bytes, state from attachments where id=$1 and owner_id=$2",
+    let (name, mime, size, sha256, state): (String, String, i64, String, String) = sqlx::query_as(
+        "select name, mime, size_bytes, sha256, state from attachments where id=$1 and owner_id=$2",
     )
     .bind(id)
     .bind(owner_id)
@@ -987,6 +988,7 @@ pub async fn open_for_download(
         name,
         mime,
         size: len.min(size as u64),
+        sha256,
         file,
     })
 }

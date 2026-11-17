@@ -258,13 +258,19 @@ fn disposition(name: &str, content_type: &str) -> HeaderValue {
     HeaderValue::from_str(&value).unwrap_or(HeaderValue::from_static("attachment"))
 }
 
-#[utoipa::path(get,path="/api/v1/attachments/{id}/content",tag="attachments",params(("id"=Uuid,Path)),responses((status=200,description="Содержимое готового вложения: проверенная картинка показывается на месте, остальное скачивается; имя файла в Content-Disposition",content_type="application/octet-stream",body=BinaryContent)))]
+#[utoipa::path(get,path="/api/v1/attachments/{id}/content",tag="attachments",params(("id"=Uuid,Path)),responses((status=200,description="Содержимое готового вложения: проверенная картинка показывается на месте, остальное скачивается; имя файла в Content-Disposition",content_type="application/octet-stream",body=BinaryContent),(status=304,description="Содержимое не изменилось: отдаётся при совпадении If-None-Match")))]
 async fn download(
     State(s): State<AppState>,
     o: Owner,
     ApiPath(id): ApiPath<Uuid>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let mut found = attachments::open_for_download(&s.pool, &*s.blobs, o.owner_id, id).await?;
+    let etag = format!("\"{}\"", found.sha256);
+    if super::etag_matches(&headers, &etag) {
+        return Ok(StatusCode::NOT_MODIFIED.into_response());
+    }
+    let etag = HeaderValue::from_str(&etag).map_err(|_| ApiError::new(ErrorCode::Internal))?;
     let content_type = served_type(&found.mime, &mut found.file)
         .await
         .map_err(AttachmentError::from)?;
@@ -273,6 +279,7 @@ async fn download(
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
     headers.insert(header::CONTENT_LENGTH, HeaderValue::from(found.size));
+    headers.insert(header::ETAG, etag);
     headers.insert(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),

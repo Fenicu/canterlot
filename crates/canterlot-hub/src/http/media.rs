@@ -15,6 +15,7 @@ use super::{
     attachments::BinaryContent,
     auth::Owner,
     error::{ApiError, ErrorCode},
+    etag_matches,
     extract::ApiPath,
 };
 use crate::{
@@ -40,17 +41,21 @@ impl From<MediaError> for ApiError {
     }
 }
 
-#[utoipa::path(get,path="/api/v1/media/{id}",tag="media",params(("id"=Uuid,Path)),responses((status=200,description="Картинка, на которую смотрел агент: тип из проверенного списка, показ на месте, ETag равен SHA-256",content((BinaryContent = "image/png"),(BinaryContent = "image/jpeg"),(BinaryContent = "image/webp"),(BinaryContent = "image/gif")),headers(("ETag"=String,description="SHA-256 содержимого в кавычках")))))]
+#[utoipa::path(get,path="/api/v1/media/{id}",tag="media",params(("id"=Uuid,Path)),responses((status=200,description="Картинка, на которую смотрел агент: тип из проверенного списка, показ на месте, ETag равен SHA-256",content((BinaryContent = "image/png"),(BinaryContent = "image/jpeg"),(BinaryContent = "image/webp"),(BinaryContent = "image/gif")),headers(("ETag"=String,description="SHA-256 содержимого в кавычках"))),(status=304,description="Содержимое не изменилось: отдаётся при совпадении If-None-Match")))]
 async fn get_media(
     State(s): State<AppState>,
     o: Owner,
     ApiPath(id): ApiPath<Uuid>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let found = media::open_for_download(&s.pool, &*s.blobs, o.owner_id, id).await?;
+    let etag = format!("\"{}\"", found.sha256);
+    if etag_matches(&headers, &etag) {
+        return Ok(StatusCode::NOT_MODIFIED.into_response());
+    }
     let content_type =
         HeaderValue::from_str(&found.mime).map_err(|_| ApiError::new(ErrorCode::Internal))?;
-    let etag = HeaderValue::from_str(&format!("\"{}\"", found.sha256))
-        .map_err(|_| ApiError::new(ErrorCode::Internal))?;
+    let etag = HeaderValue::from_str(&etag).map_err(|_| ApiError::new(ErrorCode::Internal))?;
     let stream =
         tokio_util::io::ReaderStream::with_capacity(found.file.take(found.size), IO_CHUNK_BYTES);
     let mut headers = HeaderMap::new();
@@ -69,9 +74,10 @@ async fn get_media(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static("sandbox"),
     );
+    // Медиа неизменно: повторный показ и прокрутка ленты берутся из кеша браузера.
     headers.insert(
         header::CACHE_CONTROL,
-        HeaderValue::from_static("private, no-store"),
+        HeaderValue::from_static("private, max-age=86400, immutable"),
     );
     Ok((StatusCode::OK, headers, Body::from_stream(stream)).into_response())
 }
