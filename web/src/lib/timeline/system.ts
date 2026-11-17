@@ -372,8 +372,7 @@ export function limitView(
 const API_PROVIDER_NAME: Record<ProviderId, string> = {
   claude: 'Claude',
   codex: 'Codex',
-  opencode: 'OpenCode',
-  antigravity: 'Antigravity'
+  opencode: 'OpenCode'
 };
 
 /** Заголовок ошибки API: провайдер и вид отказа, без подробностей текста. */

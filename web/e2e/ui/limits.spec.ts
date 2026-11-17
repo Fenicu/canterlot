@@ -22,28 +22,23 @@ test('limits_page_puts_current_first_and_draws_one_weekly_chart_per_provider', a
   await expect(main.getByRole('region', { name: 'Codex, текущие лимиты' })).toBeVisible();
   // Отдельный график на провайдера с недельными снимками: пятичасовых столбиков нет.
   const charts = main.getByRole('img', { name: /^Недельный остаток по дням\./ });
-  await expect(charts).toHaveCount(3);
+  await expect(charts).toHaveCount(2);
   await expect(charts.first()).toHaveAccessibleName(/Claude: от \d+ до \d+%, сегодня \d+%/);
   await expect(main.locator('[data-series="five"]')).toHaveCount(0);
-  await expect(main.locator('[data-series="weekly"]')).toHaveCount(21);
+  await expect(main.locator('[data-series="weekly"]')).toHaveCount(14);
   // Значение читается без наведения: подпись над каждым столбиком.
   await expect(charts.first().locator('.num')).toHaveCount(7);
   await expect(charts.first().locator('.num').last()).toHaveText(/^\d+%$/);
   const table = main.getByRole('table', { name: 'Недельный остаток по дням' });
   await expect(table).toHaveCount(1);
-  await expect(table.getByRole('row')).toHaveCount(22);
+  await expect(table.getByRole('row')).toHaveCount(15);
   await expect(main.getByText('Субагент · haiku').first()).toBeVisible();
   // Приблизительность сказана один раз заголовком «≈» и примечанием, а не в каждой строке.
   await expect(main.getByText('приблизительно', { exact: true })).toHaveCount(0);
   const usage = main.getByRole('table', { name: 'Сегодня по сессиям' });
   // Расход сгруппирован по провайдерам: у каждого своя неделя и свой итог за сегодня.
-  await expect(usage.locator('tbody .group th')).toHaveText(['Claude', 'Codex', 'Antigravity']);
+  await expect(usage.locator('tbody .group th')).toHaveText(['Claude', 'Codex']);
   await expect(usage.locator('tbody[data-provider="claude"] .group .total')).toHaveText('≈ 3,4%');
-  // Провайдер без недельного окна всё равно виден, но вместо выдуманного «≈ 0%» стоит прочерк.
-  const antigravity = usage.locator('tbody[data-provider="antigravity"]');
-  await expect(antigravity.locator('.group .total')).toHaveText('—');
-  await expect(antigravity.locator('tr:not(.group) td:nth-child(3)')).toHaveText(['—', '—']);
-  await expect(usage.locator('tbody tr').last().locator('td').nth(2)).toHaveText('—');
   // Числа токенов не рвутся посреди разрядов, а ссылка на сессию — полноценная цель нажатия.
   for (const count of await usage.locator('.count').all()) expect(await count.evaluate((node) => node.getClientRects().length)).toBe(1);
   await expect(usage.locator('.count').first()).toHaveText(/^вх\. [\d ]+$/);
@@ -53,7 +48,7 @@ test('limits_page_puts_current_first_and_draws_one_weekly_chart_per_provider', a
   const speed = main.getByRole('table', { name: 'Скорость моделей' });
   await expect(speed.getByText('старт 0,4 с')).toBeVisible();
   for (const value of await speed.locator('.num').all()) expect(await value.evaluate((node) => node.getClientRects().length)).toBe(1);
-  expect(historyRequests.map(query => query.get('provider')).sort()).toEqual(['antigravity', 'claude', 'codex', 'opencode']);
+  expect(historyRequests.map(query => query.get('provider')).sort()).toEqual(['claude', 'codex', 'opencode']);
   for (const query of historyRequests) { expect(query.get('tz')).toBeTruthy(); expect(query.get('from')).toMatch(/^\d{4}-\d{2}-\d{2}T/); expect(query.get('to')).toMatch(/^\d{4}-\d{2}-\d{2}T/); }
 });
 
@@ -125,25 +120,6 @@ test('huge_token_counts_stay_inside_their_cells_at_every_width', async ({ page }
       await shot(page, `limits-huge-tokens-${width}`);
     }
   }
-});
-
-test('antigravity_is_one_named_provider_on_the_limits_page', async ({ page }) => {
-  await bootSecondary(page, '/limits', (api) => {
-    const observed = new Date(Date.now() - 60_000).toISOString();
-    const reset = new Date(Date.now() + 3_600_000).toISOString();
-    api.limits.push({
-      provider: 'antigravity',
-      weekly_reserve_active: false,
-      five_hour: { used_permille: 260, resets_at: reset, observed_at: observed },
-      weekly: { used_permille: 410, resets_at: reset, observed_at: observed }
-    });
-  });
-  await expect(page.locator('header.topbar p')).toHaveText('Claude, Codex и Antigravity');
-  const card = page.getByRole('region', { name: 'Antigravity, текущие лимиты' });
-  await expect(card).toHaveCount(1);
-  await expect(card.locator('.row .value')).toHaveText(['осталось 74%', 'осталось 59%']);
-  await expect(card.locator('.row .label')).toHaveText(['5 часов', 'неделя']);
-  await expect(card.locator('.row .reset').first()).toHaveText(/^сброс \S/);
 });
 
 test('estimated_reading_is_called_out_on_the_limits_page', async ({ page }) => {

@@ -1,5 +1,5 @@
 /** Провайдеры, чьи ошибки приходят блоками `error` от адаптеров воркера. */
-export type ProviderId = 'claude' | 'codex' | 'opencode' | 'antigravity';
+export type ProviderId = 'claude' | 'codex' | 'opencode';
 
 /**
  * `account` — вход или проверка аккаунта, `rate_limit` — 429 и упор в квоту,
@@ -25,7 +25,6 @@ const PROVIDER_DOMAINS = ['anthropic.com', 'claude.ai', 'claude.com', 'openai.co
 
 const PROVIDER_NAMES: [RegExp, ProviderId][] = [
   [/opencode/, 'opencode'],
-  [/antigravity/, 'antigravity'],
   [/codex/, 'codex'],
   [/claude|anthropic/, 'claude']
 ];
@@ -49,7 +48,6 @@ function providerFromText(text: string): ProviderId | null {
   if (/Ошибка OpenCode/u.test(text)) return 'opencode';
   if (/\bCodex\b/u.test(text)) return 'codex';
   if (/\bClaude\b|Anthropic/u.test(text)) return 'claude';
-  if (/\bAntigravity\b|gemini/iu.test(text)) return 'antigravity';
   return null;
 }
 
@@ -168,24 +166,6 @@ function opencodeError(text: string, provider: ProviderId | null): Found | null 
   return { provider, kind, status: statusOf(match[2] ?? '') };
 }
 
-/** Antigravity отдаёт текст отказа JSON-RPC как есть: только явные признаки провайдера. */
-function antigravityError(text: string, provider: ProviderId | null): Found | null {
-  const status = statusOf(text);
-  if (status !== null) return { provider, kind: kindOfStatus(status), status };
-  const lower = text.toLowerCase();
-  if (/quota\s+(?:reached|exceeded|exhausted)|resource_exhausted/u.test(lower))
-    return { provider, kind: 'rate_limit', status: null };
-  if (/rate.?limit|too many requests/u.test(lower))
-    return { provider, kind: 'rate_limit', status: null };
-  if (/overload|over capacity/u.test(lower)) return { provider, kind: 'overloaded', status: null };
-  if (/unauthorized|forbidden|invalid api key|authentication|not logged in|log ?in/u.test(lower))
-    return { provider, kind: 'account', status: null };
-  if (/internal server error|server error/u.test(lower))
-    return { provider, kind: 'server', status: null };
-  if (/api error/u.test(lower)) return { provider, kind: 'api_other', status: null };
-  return null;
-}
-
 /** Без известного харнесса остаются только безошибочные признаки ошибки API. */
 function genericError(text: string): Found | null {
   const prefixed = /^([45]\d{2}):\s*API Error:/iu.exec(text);
@@ -215,9 +195,6 @@ export function providerApiError(text: string, provider: ProviderId | null = nul
       break;
     case 'opencode':
       found = opencodeError(trimmed, owner);
-      break;
-    case 'antigravity':
-      found = antigravityError(trimmed, owner);
       break;
     default:
       found = genericError(trimmed);

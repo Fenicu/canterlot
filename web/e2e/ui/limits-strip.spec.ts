@@ -117,24 +117,6 @@ test('collapsed_strip_shows_the_remaining_share_of_both_windows_per_provider', a
   await shot(page, 'strip-collapsed');
 });
 
-test('antigravity_is_named_on_the_limits_strip', async ({ page }) => {
-  await boot(page, (api) => {
-    const observed = new Date(Date.now() - 60_000).toISOString();
-    const reset = new Date(Date.now() + 3_600_000).toISOString();
-    api.limits.push({
-      provider: 'antigravity',
-      weekly_reserve_active: false,
-      five_hour: { used_permille: 260, resets_at: reset, observed_at: observed },
-      weekly: { used_permille: 410, resets_at: reset, observed_at: observed }
-    });
-  });
-  const rows = (await openStrip(page)).locator('.row');
-  await expect(rows).toHaveCount(3);
-  const antigravity = rows.filter({ hasText: 'Antigravity' });
-  await expect(antigravity).toHaveCount(1);
-  await expect(antigravity.locator('.meter').first()).toContainText('74%');
-});
-
 test('estimated_reading_is_labelled_in_the_strip_in_words', async ({ page }) => {
   await boot(page, (api) => {
     claude(api).data_confidence = 'estimated';
@@ -491,7 +473,7 @@ test('alternating_provider_rows_are_tinted_and_the_week_values_stay_aligned', as
   aligned(await weekValues());
 });
 
-const FOUR_PROVIDERS = ['Claude', 'Codex', 'Antigravity', 'OpenCode'];
+const FOUR_PROVIDERS = ['Claude', 'Codex', 'Gemini', 'OpenCode'];
 
 /** Ровно те провайдеры, что были у владельца: у Claude только неделя, у OpenCode месяц и все окна устарели. */
 function fourProviders(api: FakeHubApi): void {
@@ -515,7 +497,7 @@ function fourProviders(api: FakeHubApi): void {
       weekly: { used_permille: 430, resets_at: later, observed_at: observed }
     },
     {
-      provider: 'antigravity',
+      provider: 'gemini',
       weekly_reserve_active: false,
       five_hour: { used_permille: 0, resets_at: reset, observed_at: observed },
       weekly: { used_permille: 0, resets_at: later, observed_at: observed }
@@ -834,21 +816,21 @@ test('a_provider_gone_from_the_machine_catalog_leaves_the_strip_and_returns_with
   const { hub } = await boot(page, fourProviders);
   const strip = await openStrip(page);
   await expect(strip.locator('.row')).toHaveCount(4);
-  await expect(strip.locator('.row').filter({ hasText: 'Antigravity' })).toHaveCount(1);
+  await expect(strip.locator('.row').filter({ hasText: 'Gemini' })).toHaveCount(1);
   hub.append('conversations', { kind: 'limits_providers_changed', payload: { providers: ['claude', 'codex', 'opencode'] } });
   hub.flush();
   await expect(strip.locator('.row')).toHaveCount(3);
-  await expect(strip.locator('.row').filter({ hasText: 'Antigravity' })).toHaveCount(0);
+  await expect(strip.locator('.row').filter({ hasText: 'Gemini' })).toHaveCount(0);
   await expect(strip.locator('.row').filter({ hasText: 'OpenCode' })).toHaveCount(1);
   const observed = new Date().toISOString();
-  hub.append('conversations', { kind: 'limits_providers_changed', payload: { providers: ['antigravity', 'claude', 'codex', 'opencode'] } });
+  hub.append('conversations', { kind: 'limits_providers_changed', payload: { providers: ['gemini', 'claude', 'codex', 'opencode'] } });
   hub.append('conversations', {
     kind: 'limits_changed',
-    payload: { provider: 'antigravity', window: 'weekly', used_permille: 250, resets_at: new Date(Date.now() + 86_400_000).toISOString(), observed_at: observed, weekly_reserve_active: false, weekly_reserve_resets_at: null }
+    payload: { provider: 'gemini', window: 'weekly', used_permille: 250, resets_at: new Date(Date.now() + 86_400_000).toISOString(), observed_at: observed, weekly_reserve_active: false, weekly_reserve_resets_at: null }
   });
   hub.flush();
-  await expect(strip.locator('.row').filter({ hasText: 'Antigravity' })).toHaveCount(1);
-  await expect(strip.locator('.row').filter({ hasText: 'Antigravity' }).locator('.meter[data-window="week"]')).toContainText('75%');
+  await expect(strip.locator('.row').filter({ hasText: 'Gemini' })).toHaveCount(1);
+  await expect(strip.locator('.row').filter({ hasText: 'Gemini' }).locator('.meter[data-window="week"]')).toContainText('75%');
 });
 
 function providerStatus(level: ProviderStatus['level']): ProviderStatus {

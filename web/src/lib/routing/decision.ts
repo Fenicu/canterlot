@@ -28,8 +28,7 @@ export type ModelTitles = (harness: string, model: string) => string | undefined
 const HARNESS_PROVIDER: Record<string, string> = {
   claude_code: 'claude',
   codex: 'codex',
-  opencode: 'opencode',
-  antigravity: 'antigravity'
+  opencode: 'opencode'
 };
 
 export function harnessName(harness: string): string {

@@ -47,7 +47,7 @@
       zone = Intl.DateTimeFormat().resolvedOptions().timeZone; days = sevenDays(new Date(clock.serverNow()));
       const range = historyRange(new Date(clock.serverNow()));
       // История, расход и скорость — по всем провайдерам.
-      const replies = await Promise.all(['claude', 'codex', 'opencode', 'antigravity'].map(provider => limitsHistory({ provider, ...range, tz: zone })));
+      const replies = await Promise.all(['claude', 'codex', 'opencode'].map(provider => limitsHistory({ provider, ...range, tz: zone })));
       series = replies.flatMap(r => r.data.series); usage = replies.flatMap(r => r.data.usage);
       speed = replies.flatMap(r => r.data.speed ?? []);
     } catch (err) { error = err instanceof ApiError ? `История недоступна: ${err.message}` : 'История недоступна: нет связи с хабом'; }

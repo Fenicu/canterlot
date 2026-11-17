@@ -125,36 +125,6 @@ describe('timeline/apiError opencode', () => {
   });
 });
 
-describe('timeline/apiError antigravity', () => {
-  it('quota errors are rate limits', () => {
-    expect(providerApiError('quota exceeded', 'antigravity')).toMatchObject({
-      provider: 'antigravity',
-      kind: 'rate_limit'
-    });
-    expect(
-      providerApiError(
-        'Individual quota reached for gemini-3.8-flash-high. Resets in 2h 15m',
-        'antigravity'
-      )
-    ).toMatchObject({ provider: 'antigravity', kind: 'rate_limit' });
-  });
-
-  it('an explicit status or login message is classified', () => {
-    expect(providerApiError('API error: 503 Service Unavailable', 'antigravity')).toMatchObject({
-      kind: 'server',
-      status: 503
-    });
-    expect(
-      providerApiError('HTTP 403 Forbidden: the caller does not have permission', 'antigravity')
-    ).toMatchObject({ kind: 'account', status: 403 });
-  });
-
-  it('adapter errors of the same harness stay notices', () => {
-    expect(providerApiError('trajectory not found', 'antigravity')).toBeNull();
-    expect(providerApiError('summary failed', 'antigravity')).toBeNull();
-  });
-});
-
 describe('timeline/apiError non provider errors', () => {
   it('tool failures, adapter errors and owner stops are left alone', () => {
     for (const text of [
@@ -200,14 +170,13 @@ describe('timeline/apiError links', () => {
 });
 
 describe('timeline/apiError providerOf', () => {
-  it('harness ids and providers of the worker map to the four providers', () => {
+  it('harness ids and providers of the worker map to the three providers', () => {
     expect(providerOf({ id: 'claude_code', provider: 'claude' })).toBe('claude');
     expect(providerOf({ id: 'claude', provider: 'anthropic' })).toBe('claude');
     expect(providerOf({ id: 'codex', provider: 'openai' })).toBe('codex');
     expect(providerOf({ id: 'synthetic-codex', provider: 'codex' })).toBe('codex');
     expect(providerOf({ id: 'synthetic-opencode', provider: 'opencode' })).toBe('opencode');
     expect(providerOf({ id: 'opencode', provider: '' })).toBe('opencode');
-    expect(providerOf({ id: 'antigravity', provider: 'google' })).toBe('antigravity');
     expect(providerOf(null)).toBeNull();
   });
 });

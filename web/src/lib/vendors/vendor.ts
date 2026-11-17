@@ -14,8 +14,7 @@ export type Vendor =
   | 'gemini'
   | 'xai'
   | 'mistral'
-  | 'opencode'
-  | 'antigravity';
+  | 'opencode';
 
 export const VENDOR_TITLES: Record<Vendor, string> = {
   anthropic: 'Anthropic',
@@ -30,8 +29,7 @@ export const VENDOR_TITLES: Record<Vendor, string> = {
   gemini: 'Google Gemini',
   xai: 'xAI',
   mistral: 'Mistral',
-  opencode: 'OpenCode',
-  antigravity: 'Antigravity'
+  opencode: 'OpenCode'
 };
 
 // Порядок важен: семейство узнаётся раньше общего `gpt`, который встречается и у чужих моделей.
@@ -52,7 +50,7 @@ const BY_MODEL: [RegExp, Vendor][] = [
 
 /**
  * Вендор по харнессу и модели: Claude Code — Anthropic, Codex — OpenAI, остальные по
- * имени модели. Незнакомая модель OpenCode и Antigravity получает знак харнесса; `null` —
+ * имени модели. Незнакомая модель OpenCode получает знак харнесса; `null` —
  * знака нет, строка рисует букву.
  */
 export function vendorOf(provider: string, model: string): Vendor | null {
@@ -62,7 +60,6 @@ export function vendorOf(provider: string, model: string): Vendor | null {
   const id = model.toLowerCase();
   for (const [pattern, vendor] of BY_MODEL) if (pattern.test(id)) return vendor;
   if (family === 'opencode') return 'opencode';
-  if (family === 'antigravity') return 'antigravity';
   return null;
 }
 

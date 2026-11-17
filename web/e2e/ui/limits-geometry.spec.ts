@@ -57,7 +57,7 @@ function providers(api: FakeHubApi, count: number, reserve: boolean): void {
       weekly: win(300, 120),
       monthly: win(410, 500)
     },
-    { provider: 'antigravity', weekly_reserve_active: false, five_hour: win(0, 1), weekly: win(0, 2) }
+    { provider: 'gemini', weekly_reserve_active: false, five_hour: win(0, 1), weekly: win(0, 2) }
   ];
   api.limits = all.slice(0, count) as never;
 }

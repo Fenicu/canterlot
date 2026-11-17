@@ -26,8 +26,7 @@ export interface LimitsData {
 const LABELS: [RegExp, string, string][] = [
   [/^Claude API budget$/i, 'claude', 'Claude'],
   [/^Codex API budget$/i, 'codex', 'Codex'],
-  [/^OpenCode API budget$/i, 'opencode', 'OpenCode'],
-  [/^Antigravity/i, 'antigravity', 'Antigravity']
+  [/^OpenCode API budget$/i, 'opencode', 'OpenCode']
 ];
 
 const WINDOWS: Record<string, LimitMeter['window']> = { 'five-hour': 'five', 'Fable weekly': 'fable', weekly: 'week', monthly: 'month' };

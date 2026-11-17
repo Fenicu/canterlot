@@ -12,7 +12,7 @@ export const MAX_CANDIDATES = 8;
 export const MAX_EXCLUDE_WORKDIRS = 16;
 export const LEVELS = ['low', 'medium', 'high', 'xhigh'] as const;
 export const PROVIDERS = ['claude', 'codex', 'opencode'] as const;
-export const KNOWN_HARNESSES = ['claude_code', 'codex', 'opencode', 'antigravity'];
+export const KNOWN_HARNESSES = ['claude_code', 'codex', 'opencode'];
 /** Длительность задачи, по которой маршрут прогнозирует расход лимита, как у хаба. */
 export const EXPECTED_MINUTES = { min: 5, max: 1440, default: 60 } as const;
 export const NOT_IN_WHITELIST = 'Не в белом списке — маршрут их пропустит';

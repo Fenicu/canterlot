@@ -1347,19 +1347,19 @@ describe("stores task 4", () => {
     const window = { used_permille: 10, resets_at: null, observed_at: observed };
     list.limits = [
       { provider: "claude", five_hour: window, weekly: window, weekly_reserve_active: false },
-      { provider: "antigravity", five_hour: window, weekly: window, weekly_reserve_active: false },
+      { provider: "gemini", five_hour: window, weekly: window, weekly_reserve_active: false },
     ];
     list.applier.applyEvents([
       { event: ev("limits_providers_changed", { providers: ["claude", "codex"] }, "5"), overlap: false },
     ]);
     expect(list.limits.map((item) => item.provider)).toEqual(["claude"]);
     list.applier.applyEvents([
-      { event: ev("limits_providers_changed", { providers: ["antigravity", "claude"] }, "6"), overlap: false },
+      { event: ev("limits_providers_changed", { providers: ["gemini", "claude"] }, "6"), overlap: false },
       {
         event: ev(
           "limits_changed",
           {
-            provider: "antigravity",
+            provider: "gemini",
             window: "weekly",
             used_permille: 300,
             resets_at: null,
@@ -1372,7 +1372,7 @@ describe("stores task 4", () => {
         overlap: false,
       },
     ]);
-    expect(list.limits.map((item) => item.provider)).toEqual(["claude", "antigravity"]);
+    expect(list.limits.map((item) => item.provider)).toEqual(["claude", "gemini"]);
     expect(list.unknownKinds).toBe(0);
   });
 

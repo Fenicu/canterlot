@@ -783,8 +783,7 @@ test.describe('скриншоты README для телефона', () => {
               provider,
               five_hour: [],
               weekly: days.map((day, index) => {
-                // У Antigravity неделя сбросилась посреди периода: столбики снова высокие.
-                const used = provider === 'antigravity' ? [620, 780, 910, 40, 210, 350, 470][index]! : 310 + index * 18;
+                const used = 310 + index * 18;
                 return { observed_at: day.toISOString(), used_permille: used, used_pct: used / 10 };
               })
             }];
@@ -806,8 +805,7 @@ test.describe('скриншоты README для телефона', () => {
           usageRow({ conversation_id: ids.pinned, agent: 'agent-1', model: 'haiku', input_tokens: 18_000, output_tokens: 1_200, weekly_delta_permille: 2, overlapped_runs: 1 })
         ],
         codex: [usageRow({ conversation_id: ids.pinned, model: 'gpt-6.1-sol', input_tokens: 98_000, output_tokens: 6_700, cache_write_tokens: 1_400, weekly_delta_permille: 18, runs: 2 })],
-        opencode: [usageRow({ conversation_id: ids.themes, model: 'deepseek', input_tokens: 84_000, output_tokens: 5_200, cache_write_tokens: 1_800, weekly_delta_permille: 12, runs: 2 })],
-        antigravity: [usageRow({ conversation_id: ids.pinned, model: 'gemini-3-pro', input_tokens: 54_000, output_tokens: 3_100, cache_write_tokens: 900, weekly_delta_permille: 8 })]
+        opencode: [usageRow({ conversation_id: ids.themes, model: 'deepseek', input_tokens: 84_000, output_tokens: 5_200, cache_write_tokens: 1_800, weekly_delta_permille: 12, runs: 2 })]
       }[provider] ?? [];
       await route.fulfill({ json: { series, usage, speed } });
     });
@@ -816,13 +814,11 @@ test.describe('скриншоты README для телефона', () => {
     await expect(page.getByRole('heading', { name: 'История лимитов' })).toBeVisible();
     await expect(page.getByRole('table', { name: 'Скорость моделей' })).toBeVisible();
     await expect(page.getByRole('table', { name: 'Скорость моделей' })).toContainText('OpenCode');
-    // Расход по сессиям показывает все четыре провайдера, а не только Claude и Codex.
+    // Расход по сессиям показывает все три провайдера, а не только Claude и Codex.
     const usage = page.getByRole('table', { name: 'Сегодня по сессиям' });
     // Строки сессий идут под заголовками провайдеров: считаем только строки со ссылкой на сессию.
-    await expect(usage.locator('tbody tr').filter({ has: page.getByRole('link') })).toHaveCount(5);
+    await expect(usage.locator('tbody tr').filter({ has: page.getByRole('link') })).toHaveCount(4);
     await expect(usage.getByRole('rowheader', { name: 'OpenCode' })).toHaveCount(1);
-    await expect(usage.getByRole('rowheader', { name: 'Antigravity' })).toHaveCount(1);
-    await expect(usage.locator('tbody tr').filter({ hasText: 'gemini-3-pro' })).toHaveCount(1);
     // Кадр один и того же размера: сверху текущие окна с остатком, ниже — начало истории.
     await alignSecondary(page, '[data-region="now"]');
     await expect(page.getByRole('heading', { name: 'Сейчас' })).toBeInViewport({ ratio: 1 });

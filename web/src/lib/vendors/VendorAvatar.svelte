@@ -51,7 +51,7 @@
   [data-vendor='openai'] { background: var(--vendor-openai); color: var(--vendor-mark); }
   [data-vendor='mimo'] { background: var(--vendor-mimo); color: var(--vendor-mark); }
   [data-vendor='minimax'] { background: var(--vendor-minimax); color: var(--vendor-mark); }
-  [data-vendor='gemini'], [data-vendor='antigravity'] { background: var(--vendor-gemini); color: var(--vendor-mark); }
+  [data-vendor='gemini'] { background: var(--vendor-gemini); color: var(--vendor-mark); }
   [data-vendor='zai'], [data-vendor='xai'], [data-vendor='opencode'] { background: var(--vendor-dark); color: var(--vendor-mark); }
   [data-vendor='deepseek'] { background: var(--vendor-light); color: var(--vendor-deepseek); }
   [data-vendor='meta'] { background: var(--vendor-light); color: var(--vendor-meta); }

@@ -173,19 +173,19 @@ export interface SendNowDeps {
 
 export type SendNowResult = "requested" | "noop" | { reason: string };
 
-const STEER_HARNESSES = new Set(["claude_code", "codex", "opencode", "antigravity"]);
+const STEER_HARNESSES = new Set(["claude_code", "codex", "opencode"]);
 
 /** Хаб умеет вливать ввод в идущий ход для этих исполнителей. */
 export function steerSupported(harnessId: string | null | undefined): boolean {
   return STEER_HARNESSES.has(harnessId ?? "");
 }
 
-/** OpenCode и Antigravity вливают сообщение только через прерывание текущего шага. */
+/** OpenCode вливает сообщение только через прерывание текущего шага. */
 export function steerInterruptsStep(harnessId: string | null | undefined): boolean {
-  return harnessId === "opencode" || harnessId === "antigravity";
+  return harnessId === "opencode";
 }
 
-/** Подпись действия в очереди: для двух исполнителей она сразу говорит о прерывании. */
+/** Подпись действия в очереди: при прерывании шага она сразу говорит об этом. */
 export function steerLabel(harnessId: string | null | undefined): string {
   return steerInterruptsStep(harnessId) ? "Влить (прервёт шаг)" : "Влить";
 }

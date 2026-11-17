@@ -50,17 +50,7 @@ const PERMISSION_HINTS: Record<string, Record<string, string>> = {
     read_only:
       "OpenCode читает и ищет, а запись и команды модели не предлагаются.",
   },
-  antigravity: {
-    owner:
-      "Режим не передаётся: Antigravity берёт правила из настроек владельца в ~/.gemini. Часть инструментов разрешена там без запроса.",
-    ask: "Antigravity спрашивает о действиях вне правил владельца: решение приходит карточкой.",
-    bypass: "Antigravity выполняет всё без подтверждений, карточек разрешений не будет.",
-  },
 };
-
-/** Antigravity работает на каталоге владельца: форма предупреждает об общей истории и MCP. */
-export const ANTIGRAVITY_CATALOG_NOTE =
-  "Сессия использует ~/.gemini владельца: настройки, MCP-серверы и история общие с его Antigravity.";
 
 const PRESET_CHANGE_NOTE =
   "Смена инструкций перезапускает агента между ходами с сохранением истории. Пока идёт фоновая работа, смена ждёт её конца: задачи не останавливаются.";
@@ -79,10 +69,7 @@ export function presetChangeNote(provider: Value): string {
 }
 
 export function permissionHint(value: Value, provider: Value): string {
-  const family =
-    provider === "codex" || provider === "opencode" || provider === "antigravity"
-      ? provider
-      : "claude";
+  const family = provider === "codex" || provider === "opencode" ? provider : "claude";
   return lookup(PERMISSION_HINTS[family] ?? {}, permissionValue(value)) ?? "";
 }
 
@@ -274,7 +261,7 @@ const PROVIDERS: Record<string, string> = {
   claude: "Claude",
   codex: "Codex",
   opencode: "OpenCode",
-  antigravity: "Antigravity",
+  gemini: "Gemini",
 };
 
 export function providerLabel(value: Value): string {

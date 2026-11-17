@@ -33,13 +33,6 @@ describe("screens/limits", () => {
         { provider: "opencode" },
       ]),
     ).toBe("Claude, Codex и OpenCode");
-    expect(
-      limitsSubtitle([
-        { provider: "claude" },
-        { provider: "codex" },
-        { provider: "antigravity" },
-      ]),
-    ).toBe("Claude, Codex и Antigravity");
   });
 
   it("subtitle_does_not_repeat_a_provider_twice", () => {
@@ -65,9 +58,9 @@ describe("screens/limits", () => {
     const rows = usageRows([
       usage({ provider: "opencode", model: "free-large", weekly_delta_permille: 50, input_tokens: 50_000, output_tokens: 5_000 }),
       usage({ provider: "claude", model: "opus", weekly_delta_permille: 10, input_tokens: 1_000, output_tokens: 100 }),
-      usage({ provider: "antigravity", model: "gemini", weekly_delta_permille: 2, input_tokens: 2_000, output_tokens: 200 }),
+      usage({ provider: "codex", model: "gemini", weekly_delta_permille: 2, input_tokens: 2_000, output_tokens: 200 }),
       usage({ provider: "opencode", model: "free-small", weekly_delta_permille: 1, input_tokens: 900, output_tokens: 100 }),
-    ], "2026-10-29", new Map(), new Set(["claude", "antigravity"]));
+    ], "2026-10-29", new Map(), new Set(["claude", "codex"]));
 
     expect(rows.map((row) => row.detail.split(" · ").at(-1))).toEqual(["Opus", "Gemini", "free-large", "free-small"]);
     expect(rows.map((row) => row.weekly)).toEqual([true, true, false, false]);
@@ -89,10 +82,9 @@ describe("screens/limits current blocks", () => {
       { provider: "opencode", weekly_reserve_active: false, five_hour: win(125), weekly: win(340), monthly: win(93) },
       { provider: "codex", weekly_reserve_active: false, five_hour_absent: true, weekly: win(420) },
       { provider: "claude", weekly_reserve_active: false, five_hour: win(610), weekly: win(845) },
-      { provider: "antigravity", weekly_reserve_active: false, five_hour: win(260), weekly: win(410) },
     ];
     const blocks = currentBlocks(providers, NOW, cfg);
-    expect(blocks.map((b) => b.label)).toEqual(["Claude", "Codex", "OpenCode", "Antigravity"]);
+    expect(blocks.map((b) => b.label)).toEqual(["Claude", "Codex", "OpenCode"]);
     expect(blocks[0]!.windows.map((w) => [w.label, w.value, w.reset])).toEqual([
       ["5 часов", "осталось 39%", "сброс через 30\u00a0ч 34\u00a0мин"],
       ["неделя", "осталось 16%", "сброс через 30\u00a0ч 34\u00a0мин"],
@@ -101,7 +93,6 @@ describe("screens/limits current blocks", () => {
     expect(blocks[1]!.windows.map((w) => w.key)).toEqual(["week"]);
     expect(blocks[2]!.windows.map((w) => w.label)).toEqual(["5 часов", "неделя", "месяц"]);
     expect(blocks[2]!.windows[2]!.value).toBe("осталось 91%");
-    expect(blocks[3]!.windows.map((w) => w.value)).toEqual(["осталось 74%", "осталось 59%"]);
   });
 
   it("missing_windows_are_not_drawn_and_a_provider_without_any_says_no_data", () => {
@@ -117,14 +108,12 @@ describe("screens/limits current blocks", () => {
       { provider: "claude", weekly_reserve_active: false, five_hour: win(620), weekly: win(962) },
       { provider: "codex", weekly_reserve_active: false, five_hour: win(90, undefined, old), weekly: win(410, undefined, old) },
       { provider: "opencode", weekly_reserve_active: false, five_hour: win(125), weekly: win(340), monthly: win(507) },
-      { provider: "antigravity", weekly_reserve_active: false, five_hour: win(850), weekly: win(500) },
     ], NOW, cfg);
     expect(blocks[0]).toMatchObject({ lead: { key: "week", pct: "4%", caption: "осталось на неделю", tone: "danger" }, status: "на исходе", stale: false });
     // Все окна устарели: крупного числа нет, есть время последнего показания.
     expect(blocks[1]).toMatchObject({ lead: null, stale: true, status: "", seen: "показание 09:00" });
     expect(blocks[2]!.lead).toMatchObject({ key: "month", pct: "49%", caption: "осталось на месяц", tone: "normal" });
     expect(blocks[2]!.status).toBe("");
-    expect(blocks[3]).toMatchObject({ lead: { key: "five", pct: "15%", tone: "warning" }, status: "заканчивается" });
   });
 
   it("estimated_stale_and_reserve_are_quiet_markers", () => {
@@ -167,11 +156,11 @@ describe("screens/limits layout helpers", () => {
   const chart = (provider: string, label: string) => ({ provider, label, known: true as const, days: [], today: "", summary: "" });
 
   it("charts_follow_the_card_order_with_a_slot_for_a_provider_without_snapshots", () => {
-    const slots = alignCharts([chart("antigravity", "Antigravity"), chart("claude", "Claude")], [
+    const slots = alignCharts([chart("gemini", "Gemini"), chart("claude", "Claude")], [
       { provider: "claude", label: "Claude" },
       { provider: "codex", label: "Codex" },
     ]);
-    expect(slots.map((slot) => [slot.provider, slot.known])).toEqual([["claude", true], ["codex", false], ["antigravity", true]]);
+    expect(slots.map((slot) => [slot.provider, slot.known])).toEqual([["claude", true], ["codex", false], ["gemini", true]]);
     // Без снимков вовсе пустых мест нет: экран говорит об этом одной строкой.
     expect(alignCharts([], [{ provider: "claude", label: "Claude" }])).toEqual([]);
   });

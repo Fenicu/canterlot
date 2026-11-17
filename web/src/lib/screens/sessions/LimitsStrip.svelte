@@ -278,7 +278,7 @@
     .limits:not([open]) .reset-tail { display: none; }
   }
   .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  /* Длинное имя («Antigravity», «OpenCode») не прилипает к метке окна. */
+  /* Длинное имя провайдера не прилипает к метке окна. */
   .limits[open] .pname { padding-inline-end: var(--s2); }
   .tag { color: var(--muted); font-size: var(--fs-xs); white-space: nowrap; }
   .bar { display: inline-flex; }

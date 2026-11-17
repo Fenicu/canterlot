@@ -50,7 +50,7 @@ export interface SpawnData {
   planTask: SpawnPlanTask | null;
 }
 
-const HARNESS_IDS: Record<string, string> = { claude: 'claude_code', claude_code: 'claude_code', codex: 'codex', opencode: 'opencode', antigravity: 'antigravity' };
+const HARNESS_IDS: Record<string, string> = { claude: 'claude_code', claude_code: 'claude_code', codex: 'codex', opencode: 'opencode' };
 
 export function spawnExecutor(harness: string, model: string, effort: string, titles?: ModelTitles): string {
   if (!harness && !model) return effort ? effortName(effort) : '';

@@ -9,8 +9,7 @@ const HARNESS_TITLES: Record<string, string> = {
   claude_code: 'Claude Code',
   claude: 'Claude Code',
   codex: 'Codex',
-  opencode: 'OpenCode',
-  antigravity: 'Antigravity'
+  opencode: 'OpenCode'
 };
 
 function text(value: unknown): string {

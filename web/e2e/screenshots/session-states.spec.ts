@@ -35,7 +35,7 @@ function seed(api: FakeHubApi): { open: string; machine: string; pinned: string 
 
   const pinned = conv('Скрипт выкатки', CLAUDE, 'opus-5.5', 1, { state: 'working', evidence: { kind: 'working', phase: 'generating' }, since: stamp(-3) }, { pinned: true, color: 'accent' });
   conv('Темы оформления', OPENCODE, 'deepseek', 4, { state: 'waiting_for_user', evidence: { kind: 'waiting_for_user', question: 'Какую палитру взять за основу?' }, since: stamp(-4) }, { unread_count: 1 });
-  conv('Адаптер Antigravity', CODEX, 'gpt-6.1-sol', 2, { state: 'working', evidence: { kind: 'working', phase: 'running_tool', tool_name: 'Bash', summary: 'cargo test', phase_since: stamp(-6) }, since: stamp(-8) });
+  conv('Адаптер Codex', CODEX, 'gpt-6.1-sol', 2, { state: 'working', evidence: { kind: 'working', phase: 'running_tool', tool_name: 'Bash', summary: 'cargo test', phase_since: stamp(-6) }, since: stamp(-8) });
   const orchestrator = conv('Выпуск 1.31', CLAUDE, 'opus-5.5', 5, { state: 'idle', evidence: { kind: 'idle', last_turn_at: stamp(-5), process_alive: true }, since: stamp(-5) }, { preview: 'Раздал три задачи делегатам, жду результатов по поиску и пушам.', color: 'blue' });
   const child = (title: string, harness: typeof CLAUDE, model: string, activity: Record<string, unknown>, extra: Record<string, unknown> = {}) =>
     conv(title, harness, model, 6, activity, { parent_id: orchestrator, spawn_depth: 1, working_ms: 1_380_000, ...extra });

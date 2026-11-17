@@ -180,16 +180,14 @@
 	const continuedFromAt = $derived(
 		(chat.detail as { continued_from_at?: string | null } | null)?.continued_from_at ?? null
 	);
-	// Боковой чат предлагается там, где хаб его примет: не Antigravity, не сама копия,
+	// Боковой чат предлагается там, где хаб его примет: не сама копия,
 	// и у родителя уже есть нативная запись. OpenCode ждёт простоя.
 	const sideIsParent = $derived(Boolean((chat.detail as { side_of?: string | null } | null)?.side_of));
 	const sideHasNative = $derived(
 		Boolean((chat.execution as { native_conversation_id?: string | null } | null)?.native_conversation_id) ||
 			chat.turnRecorded
 	);
-	const sideHidden = $derived(
-		sideIsParent || sessionHarnessId === 'antigravity' || !sideHasNative
-	);
+	const sideHidden = $derived(sideIsParent || !sideHasNative);
 	const sideHint = $derived(
 		sessionHarnessId === 'opencode' && chat.activity?.state !== 'idle'
 			? 'Доступно, когда сессия остановится'

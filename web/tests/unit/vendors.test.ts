@@ -22,8 +22,6 @@ describe('vendorOf', () => {
     ['opencode', 'openai/gpt-oss-120b', 'openai'],
     ['opencode', 'anthropic/claude-sonnet-5', 'anthropic'],
     ['opencode', 'local/unknown-model', 'opencode'],
-    ['antigravity', 'gemini-3-pro', 'gemini'],
-    ['antigravity', 'mystery', 'antigravity'],
     ['synthetic', 'synthetic-small', null]
   ])('%s %s → %s', (provider, model, vendor) => {
     expect(vendorOf(provider, model)).toBe(vendor);

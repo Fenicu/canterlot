@@ -12,7 +12,7 @@
   import { browserRuntime } from '#lib/app/browser.js';
   import { catalogModelLabel } from '#lib/format/modelResolution.js';
   import ModelResolutionNote from './ModelResolutionNote.svelte';
-  import { ANTIGRAVITY_CATALOG_NOTE, DEFAULT_PERMISSION_MODE, NO_MODELS_HINT, effortLabel, modelImagesNote, permissionHint, permissionLabel } from '#lib/format/labels.js';
+  import { DEFAULT_PERMISSION_MODE, NO_MODELS_HINT, effortLabel, modelImagesNote, permissionHint, permissionLabel } from '#lib/format/labels.js';
   import Button from '#lib/ui/Button.svelte';
   import Segmented from '#lib/ui/Segmented.svelte';
   import Select from '#lib/ui/Select.svelte';
@@ -59,7 +59,7 @@
   const provider = $derived(selectedHarness?.provider ?? 'claude');
   const models = $derived(selectedHarness?.models ?? []);
   const efforts = $derived(models.find((item) => item.id === modelId)?.efforts ?? []);
-  const permissions = $derived((selectedHarness?.permission_modes ?? []).filter((mode) => !(provider === 'antigravity' && mode === 'read_only')));
+  const permissions = $derived(selectedHarness?.permission_modes ?? []);
   const BUILTIN_PRESETS: PresetSummaryLike[] = [
     {
       id: 'clean',
@@ -106,7 +106,6 @@
     )
   );
   const imagesNote = $derived(modelImagesNote(models.find((item) => item.id === modelId)?.images));
-  const catalogNote = $derived(provider === 'antigravity' ? ANTIGRAVITY_CATALOG_NOTE : '');
   const summaryModel = $derived(models.find((item) => item.id === modelId));
   const summary = $derived([
     'Как в прошлый раз',
@@ -340,17 +339,12 @@
           {/if}
         </details>
       {/if}
-      {#if provider === 'antigravity'}
+      <div class="pair">
         <Select label="Модель" options={modelOptions} bind:value={modelId} />
-      {:else}
-        <div class="pair">
-          <Select label="Модель" options={modelOptions} bind:value={modelId} />
-          <Select label="Усилие" options={effortOptions} bind:value={effort} />
-        </div>
-      {/if}
+        <Select label="Усилие" options={effortOptions} bind:value={effort} />
+      </div>
       <ModelResolutionNote entry={models.find((item) => item.id === modelId)} />
       {#if harness && models.length === 0}<p class="hint">{NO_MODELS_HINT}</p>{/if}
-      {#if catalogNote}<p class="hint">{catalogNote}</p>{/if}
       {#if imagesNote}<p class="hint">{imagesNote}</p>{/if}
     {/if}
     {#if permissionOptions.length > 0}

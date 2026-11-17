@@ -22,7 +22,7 @@ describe('toolId', () => {
       expect(CANTERLOT_MCP_NAMES).toContain(tool);
       const id = toolId(`mcp__canterlot__${tool}`);
       expect(id.startsWith('canterlot.')).toBe(true);
-      // OpenCode: `сервер_инструмент`; Codex: `сервер.инструмент`; без сервера — так зовёт свои инструменты Antigravity.
+      // OpenCode: `сервер_инструмент`; Codex: `сервер.инструмент`; без сервера — так зовёт свои инструменты.
       expect(toolId(`canterlot_${tool}`)).toBe(id);
       expect(toolId(`canterlot.${tool}`)).toBe(id);
       expect(toolId(tool)).toBe(id);

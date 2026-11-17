@@ -7,11 +7,9 @@ describe('timeline/steer copy', () => {
     expect(steerLabel('codex')).toBe('Влить');
   });
 
-  it('says_that_steering_interrupts_the_step_for_opencode_and_antigravity', () => {
+  it('says_that_steering_interrupts_the_step_for_opencode', () => {
     expect(steerLabel('opencode')).toBe('Влить (прервёт шаг)');
-    expect(steerLabel('antigravity')).toBe('Влить (прервёт шаг)');
     expect(steerInterruptsStep('opencode')).toBe(true);
-    expect(steerInterruptsStep('antigravity')).toBe(true);
     expect(steerInterruptsStep('codex')).toBe(false);
   });
 

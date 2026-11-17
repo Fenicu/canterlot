@@ -99,7 +99,7 @@
   const stampSeparator = ' · ';
   const stampAt = $derived(input.state === 'accepted' && input.createdAt !== null ? input.createdAt : null);
   const harnessId = $derived((chat.detail?.harness as { id?: string } | undefined)?.id ?? '');
-  const steerSupported = $derived(harnessId === 'claude_code' || harnessId === 'codex' || harnessId === 'opencode' || harnessId === 'antigravity');
+  const steerSupported = $derived(harnessId === 'claude_code' || harnessId === 'codex' || harnessId === 'opencode');
   const turnLive = $derived(turnIsLive(chat.activity, chat.queue.run_slot));
   // Кнопка видна, пока сообщение ждёт в очереди, а ход идёт: по умолчанию оно
   // ушло бы следующим ходом, «Отправить сейчас» вливает его в текущий.
@@ -278,7 +278,7 @@
         {/if}
       {/if}
     </div>
-    {#if (harnessId === 'opencode' || harnessId === 'antigravity') && showSendNow}<p class="reason">Прервёт текущий шаг</p>{/if}
+    {#if harnessId === 'opencode' && showSendNow}<p class="reason">Прервёт текущий шаг</p>{/if}
     {#if sendNowReason}<p class="reason">{sendNowReason}</p>{/if}
     {#if input.steer === 'returned'}<p class="reason">{STEER_RETURNED_LABEL}</p>
     {:else if sendNowSent || input.steer === 'pending'}<p class="reason">Вливается в идущий ход</p>{/if}
