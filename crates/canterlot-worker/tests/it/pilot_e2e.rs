@@ -1960,9 +1960,16 @@ async fn a_declined_request_never_creates_a_file(pool: PgPool) {
         )
         .await;
     assert_eq!(response.status, 200);
+    // База открывается уборкой и держит только метаданные: `.lock` и `.fences`.
     assert!(
-        files_under(&base.0).is_empty(),
-        "a decline never reaches the machine"
+        files_under(&base.0).iter().all(|path| {
+            path.file_name() == Some(std::ffi::OsStr::new(".lock"))
+                || path
+                    .parent()
+                    .is_some_and(|parent| parent.ends_with(".fences"))
+        }),
+        "a decline never creates a value: {:?}",
+        files_under(&base.0)
     );
     let prompts: Vec<String> =
         sqlx::query_scalar("select content->0->>'text' from inputs where conversation_id=$1")
