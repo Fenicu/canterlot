@@ -276,7 +276,7 @@ fn instructions_stay_short() {
 fn routing_is_the_default_way_to_pick_a_delegate() {
     for (tool_set, provider) in PROVIDERS {
         let text = instructions_of(tool_set, provider);
-        assert!(text.contains("by default pass route"), "{provider}: {text}");
+        assert!(text.contains("By default pass route"), "{provider}: {text}");
     }
     let tools = tools_of(ToolSet::ApproveAndLimits, "claude");
     let spawn = tools
