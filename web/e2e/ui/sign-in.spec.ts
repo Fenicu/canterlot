@@ -1,5 +1,5 @@
 import type { Page } from '@playwright/test';
-import { test, expect } from './fixtures';
+import { test, expect, resizeViewport } from './fixtures';
 import { FakeHub, FakeHubApi } from '../../testing/fake-hub';
 import type { FakeAuth } from '../../testing/fake-hub/auth';
 import { installChatRoutes, seedSecondaryScreens } from '../../testing/fake-hub/http-playwright';
@@ -128,6 +128,58 @@ test('sessions_screen_lists_sessions_with_place_ip_and_method', async ({ page },
   await sheet.getByRole('textbox', { name: 'Имя сеанса' }).fill('Домашний ноутбук');
   await sheet.getByRole('button', { name: 'Сохранить' }).click();
   await expect(rows.nth(1)).toContainText('Домашний ноутбук');
+});
+
+test('sessions_screen_keeps_long_rows_inside_the_column_and_the_heading_in_view', async ({ page }) => {
+  await boot(page, '/settings/sign-in', (auth) => {
+    const sample = auth.sessions[1]!;
+    auth.sessions.push({
+      ...sample,
+      id: '00000000-0000-4000-9000-0000000000ff',
+      name: null,
+      label: 'Windows 10',
+      user_agent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/142.0',
+      method: 'password',
+      created_at: '2026-11-10T12:00:00.000Z',
+      last_seen_at: '2026-11-16T22:40:00.000Z',
+      created_ip: '198.51.100.99',
+      last_ip: '198.51.100.99',
+      location: { city: 'Frankfurt am Main', country: 'Германия', country_code: 'DE', local: false },
+      approved: [],
+      approved_by: null,
+      current: false
+    });
+  });
+  await resizeViewport(page, { width: 412, height: 915 });
+  const main = page.locator('main[data-secondary-ready]');
+  await expect(main.locator('button[data-session]').last()).toContainText('Frankfurt am Main, Германия');
+
+  const measured = await page.evaluate(() => {
+    const body = document.querySelector('main .secondary-body')!;
+    return {
+      body: { scrollWidth: body.scrollWidth, clientWidth: body.clientWidth },
+      doc: { scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth },
+      headerBottom: document.querySelector('header.topbar')!.getBoundingClientRect().bottom,
+      viewportWidth: document.documentElement.clientWidth
+    };
+  });
+
+  expect(measured.body.scrollWidth, `body scrollWidth ${measured.body.scrollWidth} > clientWidth ${measured.body.clientWidth}`).toBeLessThanOrEqual(measured.body.clientWidth);
+  expect(measured.doc.scrollWidth, `document scrollWidth ${measured.doc.scrollWidth} > clientWidth ${measured.doc.clientWidth}`).toBeLessThanOrEqual(measured.doc.clientWidth);
+
+  const cards = main.locator('button[data-session]');
+  const count = await cards.count();
+  for (let index = 0; index < count; index++) {
+    const box = (await cards.nth(index).boundingBox())!;
+    expect(box.x, `card ${index} starts inside the viewport`).toBeGreaterThanOrEqual(-1);
+    expect(box.x + box.width, `card ${index} ends inside the viewport (${box.x}+${box.width})`).toBeLessThanOrEqual(measured.viewportWidth + 1);
+  }
+
+  const heading = main.locator('#sessions-title');
+  await expect(heading).toBeVisible();
+  const headingBox = (await heading.boundingBox())!;
+  expect(headingBox.y, `heading top ${headingBox.y} is above the header bottom ${measured.headerBottom}`).toBeGreaterThanOrEqual(measured.headerBottom - 2);
+  expect(headingBox.y, `heading top ${headingBox.y} is far below the header bottom ${measured.headerBottom}`).toBeLessThanOrEqual(measured.headerBottom + 40);
 });
 
 test('terminating_a_session_asks_to_confirm_the_sign_in_and_names_the_cascade', async ({ page }) => {
