@@ -99,20 +99,25 @@ run 0 bash "$scratch/scripts/gate.sh" --help
 # --- машиночитаемое состояние полного прогона ---
 # Шаги подменены короткими командами: они пишут те же отчёты, что настоящие шаги,
 # и Notes в журнал вызовов, чтобы тест видел, что именно перезапускалось.
+new_gate_repo() {
+    local dir=$1
+    mkdir -p "$dir/scripts"
+    cp scripts/gate.sh scripts/lease.sh "$dir/scripts/"
+    chmod 0755 "$dir/scripts/gate.sh"
+    (
+        cd "$dir"
+        git init -q
+        git config user.email gate@example.invalid
+        git config user.name gate
+        git config commit.gpgsign false
+        printf '.superpowers/\ntarget/\n' >.gitignore
+        : >tracked
+        git add .gitignore tracked scripts
+        git commit -qm init
+    )
+}
 g2="$tmp/g2"
-mkdir -p "$g2/scripts"
-cp scripts/gate.sh scripts/lease.sh "$g2/scripts/"
-chmod 0755 "$g2/scripts/gate.sh"
-(
-    cd "$g2"
-    git init -q
-    git config user.email gate@example.invalid
-    git config user.name gate
-    git config commit.gpgsign false
-    : >tracked
-    git add tracked scripts
-    git commit -qm init
-)
+new_gate_repo "$g2"
 export GATE_FAKE_CALLS="$tmp/g2-calls"
 : >"$GATE_FAKE_CALLS"
 # shellcheck disable=SC2016 # подмены исполняются через bash -c, где переменные раскрываются
@@ -142,7 +147,70 @@ grep -qF $'rust_fail\trust|crate-a|mod::flaky' "$state" || fail 'нет иден
 grep -qF $'deploy_exit\tskipped' "$state" || fail 'нет пропущенного deploy в состоянии'
 if grep -qF $'rust_fail\trust|crate-a|mod::ok' "$state"; then fail 'прошедший тест попал в упавшие'; fi
 
-# Битый индекс: git status падает, и проверка чистоты обязана провалиться, а не
+# --- перезапуск только упавших тестов ---
+# Подмена check пишет junit с указанным FAKE_CHECK_FAIL (или без падений, если none).
+# shellcheck disable=SC2016
+fake_check_rerun='
+echo "check $GATE_STEP_MODE [$GATE_STEP_SELECTION]" >>"$GATE_FAKE_CALLS"
+mkdir -p target/nextest/default
+if [[ "$FAKE_CHECK_FAIL" == none ]]; then
+  printf "%s\n" "<testsuites><testsuite name=\"crate-a\"><testcase name=\"mod::flaky\"/></testsuite></testsuites>" >target/nextest/default/junit.xml
+  exit 0
+fi
+printf "%s\n" "<testsuites><testsuite name=\"crate-a\"><testcase name=\"$FAKE_CHECK_FAIL\"><failure/></testcase></testsuite></testsuites>" >target/nextest/default/junit.xml
+exit 1
+'
+rerun_env=(
+    env CANTERLOT_NO_LEASE=1 CANTERLOT_GATE_DEPLOY_NEEDED=0
+    CANTERLOT_GATE_STEP_NPM="$fake_npm" CANTERLOT_GATE_STEP_CHECK="$fake_check_rerun"
+    CANTERLOT_GATE_STEP_DEPLOY="$fake_deploy" CANTERLOT_GATE_STEP_WEB="$fake_web"
+)
+# Первый прогон в g2 уже оставил состояние с упавшим mod::flaky. Перезапуск должен
+# тронуть только check, с точным фильтром, и принять тест, который прошёл во второй раз.
+export FAKE_CHECK_FAIL=none
+: >"$GATE_FAKE_CALLS"
+run 0 "${rerun_env[@]}" bash "$g2/scripts/gate.sh" --rerun-failed --no-attest
+[[ $(grep -c '^check ' "$GATE_FAKE_CALLS") == 1 ]] || fail 'перезапуск не вызвал check'
+if grep -qE '^(npm|deploy|web) ' "$GATE_FAKE_CALLS"; then fail 'перезапуск задел прошедшие шаги'; fi
+grep -qF 'check tests [' "$GATE_FAKE_CALLS" || fail 'check вызван не в режиме tests'
+grep -qF 'binary_id(=crate-a) & test(=mod::flaky)' "$GATE_FAKE_CALLS" \
+    || fail 'в выборку не попал точный фильтр упавшего теста'
+grep -qF $'mode\trerun' "$state" || fail 'режим rerun не записан'
+grep -qF $'check_exit\t0' "$state" || fail 'успешный перезапуск не дал check_exit=0'
+grep -qF $'flaky\trust|crate-a|mod::flaky' "$state" || fail 'нет отметки нестабильного теста'
+grep -qF $'rerun_done\trust|crate-a|mod::flaky' "$state" || fail 'нет отметки использованного перезапуска'
+started_full=$(awk -F '\t' '$1=="started"{print $2}' "$state")
+grep -qF "$(printf 'rerun_of\t%s' "$started_full")" "$state" || fail 'rerun_of не сохранил время первого прогона'
+
+# Второй прогон того же теста падает: гейт обязан провалиться и запретить ещё один перезапуск.
+g3="$tmp/g3"
+new_gate_repo "$g3"
+export FAKE_CHECK_FAIL=mod::flaky
+run 1 "${rerun_env[@]}" bash "$g3/scripts/gate.sh" --no-attest
+short3=$(git -C "$g3" rev-parse --short=8 HEAD)
+state3="$g3/.superpowers/gate/$short3/state.tsv"
+# Перезапуск того же теста, который падает снова, — настоящий провал гейта.
+run 1 "${rerun_env[@]}" bash "$g3/scripts/gate.sh" --rerun-failed --no-attest
+grep -qF $'rerun_done\trust|crate-a|mod::flaky' "$state3" || fail 'после второго падения нет отметки перезапуска'
+grep -qF $'flaky\trust|crate-a|mod::flaky' "$state3" && fail 'повторно упавший тест помечен нестабильным'
+: >"$GATE_FAKE_CALLS"
+run 1 "${rerun_env[@]}" bash "$g3/scripts/gate.sh" --rerun-failed --no-attest
+grep -q 'уже перезапускался' "$out" || { cat "$out" >&2; fail 'нет отказа на повторный перезапуск теста'; }
+[[ ! -s "$GATE_FAKE_CALLS" ]] || fail 'после отказа шаги всё же вызывались'
+
+# Перезапуск возможен только для того же коммита и чистого дерева.
+printf 'next\n' >>"$g3/tracked"
+git -C "$g3" add tracked && git -C "$g3" commit -qm next
+run 1 "${rerun_env[@]}" bash "$g3/scripts/gate.sh" --rerun-failed --no-attest
+grep -q 'нет состояния предыдущего' "$out" || { cat "$out" >&2; fail 'нет отказа для другого sha'; }
+g4="$tmp/g4"
+new_gate_repo "$g4"
+run 1 "${rerun_env[@]}" bash "$g4/scripts/gate.sh" --no-attest
+printf 'грязно\n' >"$g4/stray"
+run 1 "${rerun_env[@]}" bash "$g4/scripts/gate.sh" --rerun-failed --no-attest
+grep -q 'грязная' "$out" || { cat "$out" >&2; fail 'нет отказа для грязного дерева'; }
+export FAKE_CHECK_FAIL=none
+
 # пропустить аттестацию из-за пустого вывода.
 printf 'garbage' >"$scratch/.git/index"
 run 1 env CANTERLOT_LEASE_DRY=1 bash "$scratch/scripts/gate.sh"

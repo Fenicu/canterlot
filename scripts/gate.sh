@@ -7,10 +7,16 @@
 #      vitest, две сборки PWA, vitest.build, Playwright e2e/ui и e2e/parity)
 #      и сквозные сценарии на настоящем хабе.
 #
-#   scripts/gate.sh              гейт с аттестацией .superpowers/gate/<full sha>.ok
-#   scripts/gate.sh --no-attest  гейт без аттестации (нужен, если рабочая копия грязная)
+#   scripts/gate.sh                  полный гейт с аттестацией .superpowers/gate/<full sha>.ok
+#   scripts/gate.sh --rerun-failed   перезапустить только то, что упало на этом же коммите
+#   scripts/gate.sh --no-attest      гейт без аттестации (нужен, если рабочая копия грязная)
 #   scripts/gate.sh --help
 #
+# Обычный прогон пишет в .superpowers/gate/<sha8>/ логи, сводку и состояние state.tsv
+# (коды шагов, идентичности упавших тестов). --rerun-failed читает состояние предыдущего
+# завершённого прогона того же HEAD: прошедшие шаги не трогает, упавшие по тестам шаги
+# перезапускает только на этих тестах, упавшие не по тестам — целиком. Каждый тест можно
+# перезапустить не более одного раза на коммит; повторное падение — настоящий провал.
 # Гейт берёт одну аренду gate на весь прогон (scripts/lease.sh). Переменные:
 #   CANTERLOT_TEST_PG_PORT  порт тестовой PostgreSQL (по умолчанию 55441);
 #   CANTERLOT_WORKER_BIN    бинарник воркера для аренды (по умолчанию установка
@@ -19,22 +25,23 @@
 #                           исполнения не влезает в SUN_LEN при длинном пути);
 #   CANTERLOT_NO_LEASE=1    идти без аренды (отладка).
 #
-# Сводка и логи прогона — .superpowers/gate/<sha8>/. Аттестация пишется только
-# при полном успехе, чистой рабочей копии и неизменном HEAD: release.sh ship
-# принимает только аттестацию ровно того коммита, который выкатывает.
+# Аттестация пишется только при полном успехе, чистой рабочей копии и неизменном HEAD:
+# release.sh ship принимает только аттестацию ровно того коммита, который выкатывает.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 original_args=("$@")
 
 usage() {
-    echo 'Использование: scripts/gate.sh [--no-attest]'
+    echo 'Использование: scripts/gate.sh [--rerun-failed] [--no-attest]'
 }
 
 attest=1
+rerun=0
 while (($#)); do
     case "$1" in
         --no-attest) attest=0 ;;
+        --rerun-failed) rerun=1 ;;
         --help | -h) usage; exit 0 ;;
         *) usage >&2; exit 2 ;;
     esac
@@ -56,6 +63,8 @@ step_npm="${CANTERLOT_GATE_STEP_NPM:-}"
 step_check="${CANTERLOT_GATE_STEP_CHECK:-}"
 step_deploy="${CANTERLOT_GATE_STEP_DEPLOY:-}"
 step_web="${CANTERLOT_GATE_STEP_WEB:-}"
+
+die() { printf 'гейт: %s\n' "$*" >&2; exit 1; }
 
 clean_tree() {
     # git status может упасть (битый индекс, отказ safe.directory): пустой вывод
@@ -101,11 +110,117 @@ fi
 
 printf 'гейт %s: pg=127.0.0.1:%s, логи %s\n' "$short" "$CANTERLOT_TEST_PG_PORT" "$log_dir"
 
+# --- чтение состояния предыдущего прогона -------------------------------------
+state_value() { awk -F '\t' -v k="$2" '$1==k{print $2;exit}' "$1"; }
+state_values() { awk -F '\t' -v k="$2" '$1==k{print $2}' "$1"; }
+state_has() {
+    awk -F '\t' -v k="$2" -v v="$3" '$1==k&&$2==v{f=1}END{exit !f}' "$1"
+}
+in_array() {
+    local needle=$1 item
+    shift
+    for item in "$@"; do [[ "$item" == "$needle" ]] && return 0; done
+    return 1
+}
+
+prev=""
+prev_started=""
+declare -a done_ids=() prev_flaky=() prev_rust=() prev_deploy=() prev_pw=() prev_stack=() to_rerun=()
+if ((rerun)); then
+    prev="$log_dir/state.tsv"
+    [[ -f "$prev" ]] || die "нет состояния предыдущего завершённого прогона для --rerun-failed на коммите $short"
+    [[ "$(state_value "$prev" schema)" == 1 ]] || die 'неизвестный формат состояния предыдущего прогона'
+    [[ "$(state_value "$prev" completed)" == 1 ]] || die 'предыдущий прогон не завершён'
+    [[ "$(state_value "$prev" sha)" == "$sha" ]] \
+        || die "--rerun-failed требует состояние для того же коммита $sha, а не для другого"
+    clean_tree || die '--rerun-failed требует чистого дерева: рабочая копия грязная'
+    prev_started=$(state_value "$prev" started)
+    mapfile -t done_ids < <(state_values "$prev" rerun_done)
+    mapfile -t prev_flaky < <(state_values "$prev" flaky)
+    mapfile -t prev_rust < <(state_values "$prev" rust_fail)
+    mapfile -t prev_deploy < <(state_values "$prev" deploy_fail)
+    mapfile -t prev_pw < <(state_values "$prev" pw_fail)
+    mapfile -t prev_stack < <(state_values "$prev" stack_fail)
+    npm_status=$(state_value "$prev" npm_ci_exit); npm_s=$(state_value "$prev" npm_ci_duration_s)
+    check_status=$(state_value "$prev" check_exit); check_s=$(state_value "$prev" check_duration_s)
+    deploy_exit=$(state_value "$prev" deploy_exit); deploy_s=$(state_value "$prev" deploy_duration_s)
+    web_status=$(state_value "$prev" web_exit); web_s=$(state_value "$prev" web_duration_s)
+else
+    npm_status=0 npm_s=0 check_status=0 check_s=0 deploy_exit=skipped deploy_s=0 web_status=0 web_s=0
+fi
+
+# Что перезапускаем: skip — прошедший шаг берём из состояния, full — весь шаг,
+# tests/suites/stack — только упавшие тесты.
+npm_action=full check_action=full deploy_action=full web_action=full
+check_sel="" deploy_sel="" web_sel=""
+if ((rerun)); then
+    [[ "$npm_status" == 0 ]] && npm_action=skip || npm_action=full
+    if [[ "$check_status" == 0 ]]; then
+        check_action=skip
+    elif [[ "$(state_value "$prev" check_failed)" == tests ]]; then
+        check_action=tests
+    else
+        check_action=full
+    fi
+    if [[ "$deploy_exit" == 0 || "$deploy_exit" == skipped ]]; then
+        deploy_action=skip
+    elif [[ "$(state_value "$prev" deploy_failed)" == tests ]]; then
+        deploy_action=tests
+    else
+        deploy_action=full
+    fi
+    if [[ "$web_status" == 0 ]]; then
+        web_action=skip
+    elif [[ "$(state_value "$prev" web_failed)" == tests ]]; then
+        web_action=tests
+    else
+        web_action=full
+    fi
+
+    if [[ "$check_action" == tests ]]; then to_rerun+=("${prev_rust[@]}"); fi
+    if [[ "$deploy_action" == tests ]]; then to_rerun+=("${prev_deploy[@]}"); fi
+    if [[ "$web_action" == tests ]]; then to_rerun+=("${prev_pw[@]}" "${prev_stack[@]}"); fi
+    for id in "${to_rerun[@]}"; do
+        if in_array "$id" "${done_ids[@]}"; then
+            die "тест $id уже перезапускался на этом коммите: повторный перезапуск запрещён"
+        fi
+    done
+fi
+
+# Точный фильтр nextest: binary_id(=<id>) & test(=<name>) для каждой идентичности.
+nextest_quote() {
+    local s=$1
+    s=${s//\\/\\\\}
+    s=${s//\"/\\\"}
+    printf '%s' "$s"
+}
+if [[ "$check_action" == tests ]]; then
+    for id in "${prev_rust[@]}"; do
+        IFS='|' read -r _ binary name <<<"$id"
+        check_sel+="${check_sel:+ | }(binary_id(=$(nextest_quote "$binary")) & test(=$(nextest_quote "$name")))"
+    done
+fi
+if [[ "$deploy_action" == tests ]]; then
+    for id in "${prev_deploy[@]}"; do
+        deploy_sel+="${deploy_sel:+ }${id#deploy|}"
+    done
+fi
+if [[ "$web_action" == tests ]]; then
+    web_sel=$(printf '%s\n' "${prev_pw[@]}" "${prev_stack[@]}")
+fi
+
 # Куда шаги кладут machine-readable отчёты. JUnit nextest — фиксированный путь,
 # отчёты Playwright задаются окружением и читаются конфигом web/playwright.config.ts.
+# При перезапуске web отчёты идут в новые файлы, чтобы старые падения не попали в итог.
 junit="target/nextest/default/junit.xml"
-export CANTERLOT_PW_JSON_REPORT="$PWD/$log_dir/pw-report"
-export CANTERLOT_STACK_JSON_REPORT="$PWD/$log_dir/stack-report"
+pw_report_base="$PWD/$log_dir/pw-report"
+stack_report_base="$PWD/$log_dir/stack-report"
+if [[ "$web_action" == tests ]]; then
+    pw_report_base="$PWD/$log_dir/pw-rerun"
+    stack_report_base="$PWD/$log_dir/stack-rerun"
+fi
+export CANTERLOT_PW_JSON_REPORT="$pw_report_base"
+export CANTERLOT_STACK_JSON_REPORT="$stack_report_base"
 
 # --- запуск шага ---------------------------------------------------------------
 # В обычном прогоне вызывает настоящий скрипт; в тесте — подменённую команду.
@@ -120,12 +235,68 @@ run_gate_step() {
     else
         case "$kind" in
             npm) (cd web && npm ci --no-audit --no-fund) ;;
-            check) bash scripts/check.sh --all --no-web ;;
-            deploy) bash scripts/deploy/tests/run.sh ;;
-            web) bash scripts/check-web.sh --stack ;;
+            check)
+                if [[ "$mode" == tests ]]; then
+                    (
+                        # shellcheck disable=SC1090 # окружение cargo из домашнего каталога разработчика
+                        source ~/.cargo/env 2>/dev/null || true
+                        export DATABASE_URL="${DATABASE_URL:-postgres://canterlot:canterlot@127.0.0.1:${CANTERLOT_TEST_PG_PORT}/canterlot}"
+                        cargo nextest run --workspace --exclude canterlot-speech --all-features \
+                            --profile default --test-threads "${CANTERLOT_TEST_THREADS:-$(nproc)}" \
+                            -E "$1" --no-tests=fail
+                    )
+                else
+                    bash scripts/check.sh --all --no-web
+                fi
+                ;;
+            deploy)
+                if [[ "$mode" == tests ]]; then
+                    RUN_SUITES="$1" bash scripts/deploy/tests/run.sh
+                else
+                    bash scripts/deploy/tests/run.sh
+                fi
+                ;;
+            web)
+                if [[ "$mode" == tests ]]; then
+                    (web_rerun "$1")
+                else
+                    bash scripts/check-web.sh --stack
+                fi
+                ;;
         esac
     fi
 }
+
+# Перезапуск только упавших Playwright-тестов и сквозных сценариев. Идентичности
+# приходят строками pw|проект|файл|заголовок и stack|файл|заголовок.
+web_rerun() {
+    local selection=$1 id kind project file title grep_arg status=0
+    [[ -f package-lock.json ]] || die 'нет web/package-lock.json'
+    export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-${XDG_CACHE_HOME:-$HOME/.cache}/canterlot-playwright}"
+    export TOKIO_WORKER_THREADS="${TOKIO_WORKER_THREADS:-4}" RAYON_NUM_THREADS="${RAYON_NUM_THREADS:-4}"
+    export MOZ_TASKCONTROLLER_THREADCOUNT="${MOZ_TASKCONTROLLER_THREADCOUNT:-4}" GSETTINGS_BACKEND="${GSETTINGS_BACKEND:-memory}"
+    export PORT="${PORT:-$(node -e "const s=require('net').createServer();s.listen(0,'127.0.0.1',()=>{console.log(s.address().port);s.close()})")}"
+    export PATH="${HOME}/.cargo/bin:${PATH}"
+    cd web
+    while IFS= read -r id; do
+        [[ -n "$id" ]] || continue
+        IFS='|' read -r kind a b c <<<"$id"
+        if [[ "$kind" == pw ]]; then
+            project=$a file=$b title=$c
+        else
+            project="" file=$a title=$b
+        fi
+        grep_arg="--grep=^$(grep_escape "$title")$"
+        case "$kind" in
+            pw) npx --no-install playwright test "$file" "--project=$project" "$grep_arg" || status=1 ;;
+            stack)
+                CANTERLOT_STACK_RUN=1 npx --no-install playwright test "$file" "$grep_arg" || status=1
+                ;;
+        esac
+    done <<<"$selection"
+    return "$status"
+}
+grep_escape() { printf '%s' "$1" | sed 's/[][\\^$.*+?(){}|]/\\&/g'; }
 
 # --- разбор отчётов в идентичности упавших тестов ------------------------------
 # Идентичности канонические: rust|binary|test, pw|project|file|title,
@@ -203,7 +374,7 @@ deploy_failures() {
 }
 
 # --- состояние прогона ---------------------------------------------------------
-declare -a state_lines=()
+declare -a state_lines=() check_ids=() deploy_ids=() pw_ids=() stack_ids=() all_failures=() flaky_ids=()
 state_add() { state_lines+=("$1"$'\t'"$2"); }
 write_state() {
     local tmp="$log_dir/state.tsv.$$"
@@ -223,73 +394,108 @@ step_failure_kind() {
 }
 
 # --- npm ci: один раз, дальше check-web.sh видит свежий node_modules ---
-printf '\n==> npm ci\n'
-s=$SECONDS
-npm_status=0
-run_gate_step npm "$step_npm" full >"$log_dir/npm-ci.log" 2>&1 || npm_status=$?
-npm_s=$((SECONDS - s))
-printf '    npm ci: %ds, код %s\n' "$npm_s" "$npm_status"
+if [[ "$npm_action" != skip ]]; then
+    printf '\n==> npm ci\n'
+    s=$SECONDS
+    npm_status=0
+    run_gate_step npm "$step_npm" full >"$log_dir/npm-ci.log" 2>&1 || npm_status=$?
+    npm_s=$((SECONDS - s))
+    printf '    npm ci: %ds, код %s\n' "$npm_s" "$npm_status"
+else
+    printf '\n==> npm ci: переиспользован прошедший шаг\n'
+fi
 
 # --- Rust, речь и версия без веб-половины ---
-printf '\n==> scripts/check.sh --all --no-web\n'
-s=$SECONDS
-check_status=0
-run_gate_step check "$step_check" full >"$log_dir/check.log" 2>&1 || check_status=$?
-check_s=$((SECONDS - s))
-printf '    check.sh --all --no-web: %ds, код %s\n' "$check_s" "$check_status"
+if [[ "$check_action" != skip ]]; then
+    printf '\n==> scripts/check.sh --all --no-web (%s)\n' "$check_action"
+    s=$SECONDS
+    check_status=0
+    run_gate_step check "$step_check" "$check_action" "$check_sel" >"$log_dir/check.log" 2>&1 || check_status=$?
+    check_s=$((SECONDS - s))
+    printf '    check.sh --all --no-web: %ds, код %s\n' "$check_s" "$check_status"
+    mapfile -t check_ids < <(rust_failures)
+else
+    printf '\n==> scripts/check.sh --all --no-web: переиспользован прошедший шаг\n'
+fi
 
 # --- наборы scripts/deploy: отдельным шагом, не вместе с веб-половиной ---
 printf '\n==> scripts/deploy/tests/run.sh\n'
-s=$SECONDS
-deploy_exit=skipped
-deploy_s=0
-if deploy_needed; then
-    deploy_exit=0
+if [[ "$deploy_action" == skip ]]; then
+    printf '    deploy tests: переиспользован прошедший шаг (%s)\n' "$deploy_exit"
+elif ! deploy_needed; then
+    printf '    deploy tests: skipped (no changes since the last release tag)\n'
+else
+    s=$SECONDS
+    deploy_status=0
     mkdir -p "$log_dir/deploy"
-    RUN_LOG_DIR="$PWD/$log_dir/deploy" run_gate_step deploy "$step_deploy" full \
-        >"$log_dir/deploy.log" 2>&1 || deploy_exit=$?
+    if [[ "$deploy_action" == tests ]]; then
+        RUN_LOG_DIR="$PWD/$log_dir/deploy" run_gate_step deploy "$step_deploy" tests "$deploy_sel" \
+            >"$log_dir/deploy.log" 2>&1 || deploy_status=$?
+    else
+        RUN_LOG_DIR="$PWD/$log_dir/deploy" run_gate_step deploy "$step_deploy" full \
+            >"$log_dir/deploy.log" 2>&1 || deploy_status=$?
+    fi
+    deploy_exit=$deploy_status
     deploy_s=$((SECONDS - s))
     printf '    deploy tests: %ds, код %s\n' "$deploy_s" "$deploy_exit"
-else
-    printf '    deploy tests: skipped (no changes since the last release tag)\n'
+    mapfile -t deploy_ids < <(deploy_failures "$log_dir/deploy")
 fi
 
 # --- вся веб-половина и сквозные сценарии: один прогон ---
-printf '\n==> scripts/check-web.sh --stack\n'
-s=$SECONDS
-web_status=0
-run_gate_step web "$step_web" full >"$log_dir/web.log" 2>&1 || web_status=$?
-web_s=$((SECONDS - s))
-printf '    check-web.sh --stack: %ds, код %s\n' "$web_s" "$web_status"
+if [[ "$web_action" != skip ]]; then
+    printf '\n==> scripts/check-web.sh --stack (%s)\n' "$web_action"
+    s=$SECONDS
+    web_status=0
+    run_gate_step web "$step_web" "$web_action" "$web_sel" >"$log_dir/web.log" 2>&1 || web_status=$?
+    web_s=$((SECONDS - s))
+    printf '    check-web.sh --stack: %ds, код %s\n' "$web_s" "$web_status"
+    mapfile -t pw_ids < <(pw_failures "$CANTERLOT_PW_JSON_REPORT")
+    mapfile -t stack_ids < <(pw_failures "$CANTERLOT_STACK_JSON_REPORT")
+else
+    printf '\n==> scripts/check-web.sh --stack: переиспользован прошедший шаг\n'
+fi
 
-# --- идентичности упавших тестов и состояние ---
-mapfile -t failed_rust_ids < <(rust_failures)
-mapfile -t failed_pw_ids < <(pw_failures "$CANTERLOT_PW_JSON_REPORT")
-mapfile -t failed_stack_ids < <(pw_failures "$CANTERLOT_STACK_JSON_REPORT")
-mapfile -t failed_deploy_ids < <(deploy_failures "$log_dir/deploy")
-
+# --- состояние и отчёт о нестабильных тестах ---
+all_failures=("${check_ids[@]}" "${deploy_ids[@]}" "${pw_ids[@]}" "${stack_ids[@]}")
+if [[ -n "$prev_started" ]]; then
+    state_add started "$prev_started"
+    state_add rerun_of "$prev_started"
+else
+    state_add started "$started_at"
+fi
 state_add schema 1
 state_add sha "$sha"
-state_add started "$started_at"
 state_add finished "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 state_add completed 1
-state_add mode full
+mode_name=full
+((rerun)) && mode_name=rerun
+state_add mode "$mode_name"
 state_add npm_ci_exit "$npm_status"
 state_add npm_ci_duration_s "$npm_s"
+state_add npm_ci_failed "$(step_failure_kind "$npm_status")"
 state_add check_exit "$check_status"
 state_add check_duration_s "$check_s"
-state_add check_failed "$(step_failure_kind "$check_status" "${failed_rust_ids[@]}")"
-for id in "${failed_rust_ids[@]}"; do state_add rust_fail "$id"; done
+state_add check_failed "$(step_failure_kind "$check_status" "${check_ids[@]}")"
+for id in "${check_ids[@]}"; do state_add rust_fail "$id"; done
 state_add deploy_exit "$deploy_exit"
 state_add deploy_duration_s "$deploy_s"
-state_add deploy_failed "$(step_failure_kind "$deploy_exit" "${failed_deploy_ids[@]}")"
-for id in "${failed_deploy_ids[@]}"; do state_add deploy_fail "$id"; done
+state_add deploy_failed "$(step_failure_kind "$deploy_exit" "${deploy_ids[@]}")"
+for id in "${deploy_ids[@]}"; do state_add deploy_fail "$id"; done
 state_add web_exit "$web_status"
 state_add web_duration_s "$web_s"
-state_add web_failed "$(step_failure_kind "$web_status" "${failed_pw_ids[@]}" "${failed_stack_ids[@]}")"
-for id in "${failed_pw_ids[@]}"; do state_add pw_fail "$id"; done
-for id in "${failed_stack_ids[@]}"; do state_add stack_fail "$id"; done
-state_add npm_ci_failed "$(step_failure_kind "$npm_status")"
+state_add web_failed "$(step_failure_kind "$web_status" "${pw_ids[@]}" "${stack_ids[@]}")"
+for id in "${pw_ids[@]}"; do state_add pw_fail "$id"; done
+for id in "${stack_ids[@]}"; do state_add stack_fail "$id"; done
+for id in "${done_ids[@]}" "${to_rerun[@]}"; do state_add rerun_done "$id"; done
+for id in "${prev_flaky[@]}"; do
+    state_add flaky "$id"
+    in_array "$id" "${flaky_ids[@]}" || flaky_ids+=("$id")
+done
+for id in "${to_rerun[@]}"; do
+    if in_array "$id" "${all_failures[@]}"; then continue; fi
+    state_add flaky "$id"
+    in_array "$id" "${flaky_ids[@]}" || flaky_ids+=("$id")
+done
 write_state
 
 # Сводка в формате прежнего result.txt: коды и времена, затем nextest,
@@ -317,6 +523,17 @@ if ((npm_status != 0 || check_status != 0 || web_status != 0)) \
     printf 'гейт: провал, аттестация не пишется; логи в %s\n' "$log_dir" >&2
     exit 1
 fi
+
+if ((rerun)); then
+    printf '\n==> отчёт о нестабильных тестах\n'
+    if ((${#flaky_ids[@]})); then
+        printf '  %s\n' "${flaky_ids[@]}"
+    else
+        printf '  нет\n'
+    fi
+    printf 'Каждый нестабильный тест должен получить строку в .superpowers/carry/flaky-tests.md (скрипт файл не меняет)\n'
+fi
+
 if ((!attest)); then
     printf 'гейт: успех без аттестации (--no-attest), логи в %s\n' "$log_dir"
     exit 0
@@ -350,6 +567,10 @@ tmp="$attestation.tmp.$$"
     printf 'web_exit=%s\n' "$web_status"
     printf 'web_duration_s=%s\n' "$web_s"
     printf 'logs=%s\n' "$log_dir"
+    if ((rerun)); then
+        printf 'rerun_of=%s\n' "$prev_started"
+        for id in "${flaky_ids[@]}"; do printf 'flaky=%s\n' "$id"; done
+    fi
     while IFS= read -r line; do
         printf 'summary=%s\n' "$line"
     done <"$log_dir/result.txt"
