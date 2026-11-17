@@ -8,6 +8,7 @@
   import ChatScreen from '#lib/screens/chat/ChatScreen.svelte';
   import { leaseChatSession } from '#lib/screens/chat/open.js';
   import { trackChatPresence } from '#lib/presence.js';
+  import { sessionTabTitle } from '#lib/format/pageTitle.js';
   import type { ChatStore } from '#lib/stores/chat.svelte.js';
 
   let chat = $state<ChatStore | null>(null);
@@ -17,6 +18,8 @@
     return connectionStale.now();
   });
   const id = $derived(page.params.id ?? '');
+  // Заголовок вкладки берёт ту же подпись, что шапка чата: переименование меняет обе.
+  const title = $derived(sessionTabTitle(chat && chat.id === id ? (chat.detail as { title?: string } | null)?.title : null));
 
   onMount(() => ticker.retain());
 
@@ -48,7 +51,7 @@
   });
 </script>
 
-<svelte:head><title>Сессия</title></svelte:head>
+<svelte:head><title>{title}</title></svelte:head>
 <main id="main" class="chat-route">
   {#key id}
     {#if chat && chat.id === id && chat.gone}

@@ -6,6 +6,7 @@
 	import ChatGone from '#lib/screens/chat/ChatGone.svelte';
 	import Lane from '#lib/screens/chat/Lane.svelte';
 	import { leaseChatSession } from '#lib/screens/chat/open.js';
+	import { laneTabTitle } from '#lib/format/pageTitle.js';
 	import type { ChatStore } from '#lib/stores/chat.svelte.js';
 
 	let chat = $state<ChatStore | null>(null);
@@ -16,6 +17,7 @@
 	});
 	const id = $derived(page.params.id ?? '');
 	const blockId = $derived(page.params.blockId ?? '');
+	const title = $derived(laneTabTitle(chat && chat.id === id ? (chat.detail as { title?: string } | null)?.title : null));
 
 	onMount(() => ticker.retain());
 
@@ -40,7 +42,7 @@
 	});
 </script>
 
-<svelte:head><title>Субагент · Canterlot</title></svelte:head>
+<svelte:head><title>{title}</title></svelte:head>
 <main id="main" class="lane-route">
 	{#key id}
 		{#if chat && chat.id === id && chat.gone}

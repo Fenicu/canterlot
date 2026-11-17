@@ -635,30 +635,31 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     if (body.title !== undefined && body.title !== null) {
       row.title = body.title;
       row.title_source = 'user';
+      const detail = api.details.get(id);
+      if (detail) detail.title = row.title;
     }
     if (body.color !== undefined) row.color = body.color;
     if (body.pinned !== undefined && body.pinned !== null) row.pinned = body.pinned;
     if (body.archived !== undefined && body.archived !== null) row.archived = body.archived;
     api.counts = recount(api);
-    hub.append('conversations', {
-      kind: 'conversation_updated',
-      conversation_id: id,
-      payload: {
-        id: row.id,
-        title: row.title,
-        title_source: row.title_source === 'auto' ? 'auto' : 'user',
-        color: row.color,
-        pinned: row.pinned,
-        archived: row.archived,
-        groups: row.groups,
-        group_pins: row.group_pins,
-        machine: row.machine,
-        harness: row.harness,
-        workdir: row.workdir,
-        created_at: row.created_at,
-        counts: api.counts
-      }
-    });
+    const payload = {
+      id: row.id,
+      title: row.title,
+      title_source: row.title_source === 'auto' ? 'auto' : 'user',
+      color: row.color,
+      pinned: row.pinned,
+      archived: row.archived,
+      groups: row.groups,
+      group_pins: row.group_pins,
+      machine: row.machine,
+      harness: row.harness,
+      workdir: row.workdir,
+      created_at: row.created_at,
+      counts: api.counts
+    };
+    hub.append('conversations', { kind: 'conversation_updated', conversation_id: id, payload });
+    // Настоящий хаб шлёт атрибуты и в область самой сессии: открытый чат переименовывается на месте.
+    hub.append(`conversation:${id}`, { kind: 'conversation_updated', conversation_id: id, payload });
     hub.flush();
     await route.fulfill({ headers: headers(), json: row });
   });
