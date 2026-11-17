@@ -484,6 +484,11 @@ pub fn to_proto(row: &CommandRow) -> Result<Command, OutboxError> {
                 .and_then(Value::as_str)
                 .unwrap_or("revoked")
                 .to_owned(),
+            max_expires_at_ms: row
+                .payload
+                .get("max_expires_at_ms")
+                .and_then(Value::as_u64)
+                .unwrap_or(0),
         }),
         "stop_execution" => command::Kind::StopExecution(StopExecution {
             force: match row.payload.get("force") {

@@ -740,11 +740,14 @@ fn wipe_root(root: &PinnedDir) -> Result<(), Failure> {
     Ok(())
 }
 
-fn prepare_storage_inner(config: &SecretConfig, data_dir: &Path) -> Result<(), Failure> {
-    let (base, root) = open_base(config)?;
-    // Подготовка — тоже операция хранилища: один писатель и между процессами.
-    let lock_fd = openat(
-        base.fd(),
+struct RootLock {
+    dir: PinnedDir,
+    _lock: std::fs::File,
+}
+
+fn lock_dir(dir: &PinnedDir) -> Result<std::fs::File, Failure> {
+    let fd = openat(
+        dir.fd(),
         ".lock",
         OFlags::CREATE
             .union(OFlags::RDWR)
@@ -753,9 +756,57 @@ fn prepare_storage_inner(config: &SecretConfig, data_dir: &Path) -> Result<(), F
         Mode::from_bits_truncate(0o600),
     )
     .map_err(|_| Failure::Io)?;
-    let _lock = std::fs::File::from(lock_fd);
-    flock(&_lock, FlockOperation::LockExclusive).map_err(|_| Failure::Io)?;
-    let stat = fstat(base.fd()).map_err(|_| Failure::InsecureDirectory)?;
+    let lock = std::fs::File::from(fd);
+    flock(&lock, FlockOperation::LockExclusive).map_err(|_| Failure::Io)?;
+    Ok(lock)
+}
+
+fn lock_existing_root(path: &Path) -> Result<Option<RootLock>, Failure> {
+    let Some(dir) = open_existing_root_opt(path)? else {
+        return Ok(None);
+    };
+    let lock = lock_dir(&dir)?;
+    Ok(Some(RootLock { dir, _lock: lock }))
+}
+
+/// Держит замок ещё одного корня, если он существует и ещё не взят.
+fn lock_more(
+    path: &Path,
+    configured: &Path,
+    locked: &mut Vec<PathBuf>,
+    extras: &mut Vec<RootLock>,
+) -> Result<(), Failure> {
+    if path == configured || locked.iter().any(|known| known == path) {
+        return Ok(());
+    }
+    if let Some(lock) = lock_existing_root(path)? {
+        locked.push(path.to_path_buf());
+        extras.push(lock);
+    }
+    Ok(())
+}
+
+/// Корень по умолчанию: его тоже надо очистить, если файл идентичности потерян,
+/// иначе прежний запуск с XDG_RUNTIME_DIR оставил бы там открытый текст.
+pub(crate) fn default_root() -> Option<PathBuf> {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(|runtime| PathBuf::from(runtime).join("canterlot-secrets"))
+}
+
+fn prepare_storage_inner(
+    config: &SecretConfig,
+    data_dir: &Path,
+    default_root: Option<&Path>,
+) -> Result<(), Failure> {
+    let (base, root) = open_base(config)?;
+    // Подготовка — тоже операция хранилища: замок настроенного корня, прежнего
+    // записанного и корня по умолчанию держится до записи новой идентичности.
+    let configured_lock = lock_dir(&base)?;
+    let configured = RootLock {
+        dir: base,
+        _lock: configured_lock,
+    };
+    let stat = fstat(configured.dir.fd()).map_err(|_| Failure::InsecureDirectory)?;
     let identity = RootIdentity {
         path: root.display().to_string(),
         dev: stat.st_dev,
@@ -763,34 +814,55 @@ fn prepare_storage_inner(config: &SecretConfig, data_dir: &Path) -> Result<(), F
     };
     let data_dir = data_dir_pinned(data_dir)?;
     let recorded = read_root_identity(&data_dir)?;
+    let mut locked = vec![root.clone()];
+    let mut extras = Vec::new();
     match recorded {
         Some(recorded) if recorded == identity => Ok(()),
         Some(recorded) => {
             let previous = PathBuf::from(&recorded.path);
+            lock_more(&previous, &root, &mut locked, &mut extras)?;
             if previous != root
                 && let Some(previous) = open_existing_root_opt(&previous)?
             {
                 wipe_root(&previous)?;
             }
             // Настроенный корень тоже может хранить старые значения (например,
-            // его вернули после смены или файл идентичности потерян).
-            wipe_root(&base)?;
+            // его вернули после смены).
+            wipe_root(&configured.dir)?;
             write_root_identity(&data_dir, &identity)
         }
         None => {
-            wipe_root(&base)?;
+            if let Some(default) = default_root {
+                lock_more(default, &root, &mut locked, &mut extras)?;
+                if default != root
+                    && let Some(default) = open_existing_root_opt(default)?
+                {
+                    wipe_root(&default)?;
+                }
+            }
+            wipe_root(&configured.dir)?;
             write_root_identity(&data_dir, &identity)
         }
     }
 }
 
-/// Подготовка хранилища до приёма доставок: если корень сменился, прежний и
-/// новый очищаются до записи новой идентичности. Любая неподтверждённая уборка
+/// Подготовка хранилища до приёма доставок: если корень сменился (или файл
+/// идентичности потерян), прежний, настроенный и корень по умолчанию очищаются
+/// под замками до записи новой идентичности. Любая неподтверждённая уборка
 /// оставляет корень выключенным до следующего успешного старта.
 pub(crate) fn prepare_storage(config: &SecretConfig, data_dir: &Path) -> Result<(), Failure> {
+    prepare_storage_with_default(config, data_dir, default_root().as_deref())
+}
+
+pub(crate) fn prepare_storage_with_default(
+    config: &SecretConfig,
+    data_dir: &Path,
+    default_root: Option<&Path>,
+) -> Result<(), Failure> {
+    let _operations = operations();
     let root = base_path(config)?;
     set_disabled(&root, true);
-    let prepared = prepare_storage_inner(config, data_dir);
+    let prepared = prepare_storage_inner(config, data_dir, default_root);
     if prepared.is_ok() {
         set_disabled(&root, false);
     }
@@ -973,6 +1045,7 @@ pub fn revoke(
     conversation_id: Uuid,
     request_id: Uuid,
     up_to: u64,
+    max_expires_at_ms: u64,
     _reason: &str,
 ) -> Removal {
     let _operations = operations();
@@ -1003,12 +1076,10 @@ pub fn revoke(
                 fence.dead = fence.dead.max(up_to);
                 fence.seen = fence.seen.max(up_to);
                 fence.updated_at = now_ms();
-                // Отзываемое поколение могло быть выдано только что и прожить
-                // ещё сутки: забор обязан пережить этот срок, иначе поздняя
-                // доставка нашла бы чистый лист.
-                fence.max_expires_at_ms = fence
-                    .max_expires_at_ms
-                    .max(now_ms().saturating_add(FENCE_TTL_MS));
+                // Срок — тот, что хаб отправил с покрытым поколением: сравнение
+                // идёт с часами воркера, но число выдано хабом, поэтому
+                // расхождение часов не сокращает горизонт забора.
+                fence.max_expires_at_ms = fence.max_expires_at_ms.max(max_expires_at_ms);
                 match write_fence(&fences, request_id, &fence) {
                     Ok(()) => true,
                     Err(_) => {
@@ -1704,7 +1775,14 @@ mod tests {
         let config = base.config();
         let (conversation, request_id) = (Uuid::now_v7(), Uuid::now_v7());
         assert_eq!(
-            revoke(&config, conversation, request_id, 1, "revoked"),
+            revoke(
+                &config,
+                conversation,
+                request_id,
+                1,
+                now_ms() + FENCE_TTL_MS,
+                "revoked"
+            ),
             Removal::Removed,
             "a verifiable absence confirms the revoke"
         );
@@ -1720,7 +1798,14 @@ mod tests {
                 .is_none_or(|name| name != std::ffi::OsStr::new(&request_id.to_string()))
         }));
         assert_eq!(
-            revoke(&config, conversation, request_id, 1, "revoked"),
+            revoke(
+                &config,
+                conversation,
+                request_id,
+                1,
+                now_ms() + FENCE_TTL_MS,
+                "revoked"
+            ),
             Removal::Removed,
             "a repeated revoke is harmless"
         );
@@ -1738,7 +1823,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            revoke(&config, conversation, request_id, 1, "revoked"),
+            revoke(
+                &config,
+                conversation,
+                request_id,
+                1,
+                now_ms() + FENCE_TTL_MS,
+                "revoked"
+            ),
             Removal::Removed
         );
         assert!(!written.path.exists());
@@ -1764,7 +1856,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            revoke(&config, conversation, request_id, 1, "revoked"),
+            revoke(
+                &config,
+                conversation,
+                request_id,
+                1,
+                now_ms() + FENCE_TTL_MS,
+                "revoked"
+            ),
             Removal::Removed
         );
         assert!(!older.path.exists());
@@ -1777,7 +1876,14 @@ mod tests {
         assert_eq!(std::fs::read(&newer.path).unwrap(), b"new\n");
         // Отзыв до первого поколения не трогает второе: оно новее `up_to`.
         assert_eq!(
-            revoke(&config, conversation, request_id, 1, "revoked"),
+            revoke(
+                &config,
+                conversation,
+                request_id,
+                1,
+                now_ms() + FENCE_TTL_MS,
+                "revoked"
+            ),
             Removal::Removed
         );
         assert_eq!(
@@ -1812,7 +1918,14 @@ mod tests {
         // Отзыв не смог записать забор до `up_to` (флаг снова срабатывает).
         FAIL_NEXT_FENCE.with(|flag| flag.set(true));
         assert_eq!(
-            revoke(&config, conversation, request_id, 1, "revoked"),
+            revoke(
+                &config,
+                conversation,
+                request_id,
+                1,
+                now_ms() + FENCE_TTL_MS,
+                "revoked"
+            ),
             Removal::Failed
         );
         assert!(is_removal_pending(request_id));
@@ -1824,7 +1937,14 @@ mod tests {
         .unwrap_err();
         assert_eq!(refused, Failure::RemovalPending);
         assert_eq!(
-            revoke(&config, conversation, request_id, 1, "revoked"),
+            revoke(
+                &config,
+                conversation,
+                request_id,
+                1,
+                now_ms() + FENCE_TTL_MS,
+                "revoked"
+            ),
             Removal::Removed
         );
         assert!(!is_removal_pending(request_id));
@@ -1966,7 +2086,14 @@ mod tests {
         let dir = written.path.parent().unwrap().to_path_buf();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
         assert_eq!(
-            revoke(&config, conversation, request_id, 1, "revoked"),
+            revoke(
+                &config,
+                conversation,
+                request_id,
+                1,
+                now_ms() + FENCE_TTL_MS,
+                "revoked"
+            ),
             Removal::Failed,
             "the directory mode is not 0700: the inspection failed"
         );
@@ -1982,7 +2109,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            revoke(&config, conversation, request_id, 1, "revoked"),
+            revoke(
+                &config,
+                conversation,
+                request_id,
+                1,
+                now_ms() + FENCE_TTL_MS,
+                "revoked"
+            ),
             Removal::Failed,
             "an unreadable fence is not proof of removal"
         );
@@ -1997,7 +2131,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            revoke(&config, conversation, request_id, 1, "revoked"),
+            revoke(
+                &config,
+                conversation,
+                request_id,
+                1,
+                now_ms() + FENCE_TTL_MS,
+                "revoked"
+            ),
             Removal::Removed
         );
         assert!(!is_removal_pending(request_id));
@@ -2061,7 +2202,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            revoke(&config, conversation, request_id, 1, "session_end"),
+            revoke(
+                &config,
+                conversation,
+                request_id,
+                1,
+                now_ms() + FENCE_TTL_MS,
+                "session_end"
+            ),
             Removal::Removed
         );
         std::fs::remove_dir_all(written.path.parent().unwrap()).unwrap();
@@ -2091,7 +2239,7 @@ mod tests {
         let first = TestBase::new();
         let second = TestBase::new();
         let (conversation, request_id) = (Uuid::now_v7(), Uuid::now_v7());
-        prepare_storage(&first.config(), data.path()).expect("first root");
+        prepare_storage_with_default(&first.config(), data.path(), None).expect("first root");
         let old = deliver(
             &first.config(),
             &request(conversation, request_id, 1, "old\n"),
@@ -2102,7 +2250,7 @@ mod tests {
 
         // Новый корень: старый не должен пережить смену, даже если отзыв до него
         // не дошёл (машина была offline).
-        prepare_storage(&second.config(), data.path()).expect("second root");
+        prepare_storage_with_default(&second.config(), data.path(), None).expect("second root");
         assert!(!old.path.exists(), "the old value is gone");
         assert!(
             !old.path.parent().unwrap().exists(),
@@ -2124,12 +2272,46 @@ mod tests {
     }
 
     #[test]
+    fn losing_the_identity_wipes_the_configured_and_default_roots() {
+        let data = tempfile::tempdir().unwrap();
+        let configured = TestBase::new();
+        let default = TestBase::new();
+        let (conversation, first, second) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+        prepare_storage_with_default(&configured.config(), data.path(), Some(&default.0)).unwrap();
+        let in_configured = deliver(
+            &configured.config(),
+            &request(conversation, first, 1, "configured\n"),
+            &live_set(conversation),
+        )
+        .unwrap();
+        let default_config = SecretConfig {
+            base_dir: Some(default.0.clone()),
+        };
+        let in_default = deliver(
+            &default_config,
+            &request(conversation, second, 1, "default\n"),
+            &live_set(conversation),
+        )
+        .unwrap();
+        assert!(in_configured.path.exists());
+        assert!(in_default.path.exists());
+
+        // Файл идентичности потерян: оба корня очищаются до записи новой.
+        std::fs::remove_file(data.path().join("secret-root.json")).unwrap();
+        prepare_storage_with_default(&configured.config(), data.path(), Some(&default.0))
+            .expect("identity loss is recoverable");
+        assert!(!in_configured.path.exists());
+        assert!(!in_default.path.exists());
+        assert!(data.path().join("secret-root.json").exists());
+    }
+
+    #[test]
     fn a_failed_wipe_keeps_the_new_root_disabled_until_it_succeeds() {
         let data = tempfile::tempdir().unwrap();
         let first = TestBase::new();
         let second = TestBase::new();
         let (conversation, request_id) = (Uuid::now_v7(), Uuid::now_v7());
-        prepare_storage(&first.config(), data.path()).unwrap();
+        prepare_storage_with_default(&first.config(), data.path(), None).unwrap();
         let old = deliver(
             &first.config(),
             &request(conversation, request_id, 1, "old\n"),
@@ -2140,7 +2322,7 @@ mod tests {
         std::fs::set_permissions(&old_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
 
         assert_eq!(
-            prepare_storage(&second.config(), data.path()),
+            prepare_storage_with_default(&second.config(), data.path(), None),
             Err(Failure::Io),
             "an unverifiable wipe is not a prepared root"
         );
@@ -2155,13 +2337,15 @@ mod tests {
                 conversation,
                 late.request_id.parse().unwrap(),
                 1,
+                now_ms() + FENCE_TTL_MS,
                 "revoked"
             ),
             Removal::Failed
         );
 
         std::fs::set_permissions(&old_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
-        prepare_storage(&second.config(), data.path()).expect("the wipe succeeds on a later start");
+        prepare_storage_with_default(&second.config(), data.path(), None)
+            .expect("the wipe succeeds on a later start");
         assert!(!old.path.exists());
         let after = request(conversation, Uuid::now_v7(), 1, "blocked\n");
         let written = deliver(&second.config(), &after, &live_set(conversation)).unwrap();
@@ -2173,14 +2357,14 @@ mod tests {
         let data = tempfile::tempdir().unwrap();
         let base = TestBase::new();
         let (conversation, request_id) = (Uuid::now_v7(), Uuid::now_v7());
-        prepare_storage(&base.config(), data.path()).unwrap();
+        prepare_storage_with_default(&base.config(), data.path(), None).unwrap();
         let written = deliver(
             &base.config(),
             &request(conversation, request_id, 1, "value\n"),
             &live_set(conversation),
         )
         .unwrap();
-        prepare_storage(&base.config(), data.path()).expect("same root");
+        prepare_storage_with_default(&base.config(), data.path(), None).expect("same root");
         assert_eq!(std::fs::read(&written.path).unwrap(), b"value\n");
         assert_eq!(read_fence_file(&base.0, request_id).seen, 1);
     }
@@ -2191,7 +2375,7 @@ mod tests {
         let base = TestBase::new();
         std::fs::write(data.path().join("secret-root.json"), b"{not json").unwrap();
         assert_eq!(
-            prepare_storage(&base.config(), data.path()),
+            prepare_storage_with_default(&base.config(), data.path(), None),
             Err(Failure::Manifest)
         );
         let conversation = Uuid::now_v7();
@@ -2205,7 +2389,7 @@ mod tests {
             Failure::StorageDisabled
         );
         std::fs::remove_file(data.path().join("secret-root.json")).unwrap();
-        prepare_storage(&base.config(), data.path()).expect("a clean identity");
+        prepare_storage_with_default(&base.config(), data.path(), None).expect("a clean identity");
     }
 
     #[test]
@@ -2232,7 +2416,14 @@ mod tests {
         let config = base.config();
         let (conversation, request_id) = (Uuid::now_v7(), Uuid::now_v7());
         assert_eq!(
-            revoke(&config, conversation, request_id, 1, "revoked"),
+            revoke(
+                &config,
+                conversation,
+                request_id,
+                1,
+                now_ms() + FENCE_TTL_MS,
+                "revoked"
+            ),
             Removal::Removed,
             "a revoke before any delivery fences a future generation"
         );
@@ -2253,6 +2444,38 @@ mod tests {
     }
 
     #[test]
+    fn a_revoke_carries_the_hub_expiry_so_clock_skew_cannot_prune_the_fence() {
+        // Часы хаба впереди на 2 часа: срок поколения по часам воркера — +26 ч.
+        // Отзыв несёт именно этот срок, поэтому забор нельзя убрать на +25 ч,
+        // как было бы при горизонте «часы воркера + 24 ч».
+        let base = TestBase::new();
+        let config = base.config();
+        let (conversation, request_id) = (Uuid::now_v7(), Uuid::now_v7());
+        let now = now_ms();
+        let hub_expiry = now + FENCE_TTL_MS + 2 * 60 * 60 * 1000;
+        assert_eq!(
+            revoke(&config, conversation, request_id, 1, hub_expiry, "revoked"),
+            Removal::Removed
+        );
+        assert_eq!(
+            read_fence_file(&base.0, request_id).max_expires_at_ms,
+            hub_expiry
+        );
+        let swept = sweep(
+            &config,
+            now + FENCE_TTL_MS + 60 * 60 * 1000 + 30 * 60 * 1000,
+        );
+        assert_eq!(swept.fences, 0);
+        assert!(
+            fence_path(&base.0, request_id).exists(),
+            "a 2h-ahead hub keeps the fence past worker-now + 25h"
+        );
+        let swept = sweep(&config, hub_expiry + FENCE_GRACE_MS + 1_000);
+        assert_eq!(swept.fences, 1);
+        assert!(!fence_path(&base.0, request_id).exists());
+    }
+
+    #[test]
     fn a_pruned_fence_cannot_resurrect_an_expired_delivery() {
         // Атака: отзыв до доставки, подтверждение, уборка забора, поздняя
         // доставка. Срок поздней доставки уже прошёл, поэтому она отвергается.
@@ -2260,7 +2483,14 @@ mod tests {
         let config = base.config();
         let (conversation, request_id) = (Uuid::now_v7(), Uuid::now_v7());
         assert_eq!(
-            revoke(&config, conversation, request_id, 1, "revoked"),
+            revoke(
+                &config,
+                conversation,
+                request_id,
+                1,
+                now_ms() + FENCE_TTL_MS,
+                "revoked"
+            ),
             Removal::Removed
         );
         let fence = read_fence_file(&base.0, request_id);
@@ -2293,7 +2523,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            revoke(&config, conversation, dead, 1, "revoked"),
+            revoke(
+                &config,
+                conversation,
+                dead,
+                1,
+                now_ms() + FENCE_TTL_MS,
+                "revoked"
+            ),
             Removal::Removed
         );
         let mut live_request = request(conversation, live, 1, "value\n");
@@ -2452,7 +2689,14 @@ mod tests {
             .unwrap();
         }
         assert_eq!(
-            revoke(&config, conversation, request_id, 3, "revoked"),
+            revoke(
+                &config,
+                conversation,
+                request_id,
+                3,
+                now_ms() + FENCE_TTL_MS,
+                "revoked"
+            ),
             Removal::Removed
         );
         let after = open_fd_count();

@@ -498,6 +498,7 @@ impl fmt::Debug for crate::worker::v1::RevokeSecret {
             .field("conversation_id", &self.conversation_id)
             .field("up_to", &self.up_to)
             .field("reason", &self.reason)
+            .field("max_expires_at_ms", &self.max_expires_at_ms)
             .finish()
     }
 }

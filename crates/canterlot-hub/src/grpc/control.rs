@@ -100,9 +100,8 @@ impl WorkerControl for HubGrpc {
                 // становятся `lost`, а обязательства отзыва — созревшими.
                 let pool = state.pool.clone();
                 let registry = state.registry.clone();
-                let epoch = hello.secrets_epoch.clone();
                 tokio::spawn(async move {
-                    if let Err(error) = crate::secrets::on_hub_session_established(&pool, &registry, machine_id, &epoch).await {
+                    if let Err(error) = crate::secrets::on_hub_session_established(&pool, &registry, machine_id, connection_id).await {
                         tracing::error!(
                             kind = "secret_epoch_error",
                             error = %crate::dberr::describe(&error),

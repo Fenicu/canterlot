@@ -121,6 +121,8 @@ pub struct SecretRequestRow {
     pub secrets_epoch: Option<String>,
     /// Срок квитанции о доставке.
     pub send_deadline_at: Option<DateTime<Utc>>,
+    /// Срок, отправленный с последним поколением: отзыв несёт его воркеру.
+    pub generation_expires_at: Option<DateTime<Utc>>,
 }
 
 /// Ответ списка, ответа и отзыва. Поля значения здесь нет и быть не может.
@@ -257,6 +259,11 @@ fn connection(registry: &Registry, machine_id: Uuid) -> Option<Connection> {
         connection_id,
         epoch,
     })
+}
+
+fn expires_ms(at: Option<DateTime<Utc>>) -> u64 {
+    at.and_then(|at| u64::try_from(at.timestamp_millis()).ok())
+        .unwrap_or(0)
 }
 
 fn view(row: &SecretRequestRow) -> SecretRequestView {
@@ -541,6 +548,7 @@ async fn deliver(
             conversation_id,
             id,
             row.generation,
+            expires_ms(row.generation_expires_at.or(row.expires_at)),
             "superseded",
         )
         .await?;
@@ -550,6 +558,7 @@ async fn deliver(
         "update secret_requests
          set state = 'sending', generation = $2, secrets_epoch = $3,
              path = null, expires_at = null, send_deadline_at = $4,
+             generation_expires_at = $5,
              note = null, revision = revision + 1, updated_at = now()
          where id = $1 returning *",
     )
@@ -557,6 +566,7 @@ async fn deliver(
     .bind(generation)
     .bind(&connection.epoch)
     .bind(deadline)
+    .bind(expires_at)
     .fetch_one(&mut *tx)
     .await?;
     emit_in_tx(&mut tx, &row, correlation_id).await?;
@@ -649,6 +659,7 @@ pub async fn lose_generation(
         conversation_id,
         request_id,
         generation,
+        expires_ms(row.generation_expires_at.or(row.expires_at)),
         "lost",
     )
     .await?;
@@ -809,6 +820,7 @@ async fn lose_epoch_in_tx(
         row.conversation_id,
         row.id,
         row.generation,
+        expires_ms(row.generation_expires_at.or(row.expires_at)),
         "epoch",
     )
     .await?;
@@ -865,6 +877,7 @@ pub async fn apply_failed_in_tx(
         conversation_id,
         request_id,
         generation,
+        expires_ms(row.generation_expires_at.or(row.expires_at)),
         "failed",
     )
     .await?;
@@ -1090,6 +1103,7 @@ pub async fn revoke(
         row.conversation_id,
         row.id,
         row.generation,
+        expires_ms(row.generation_expires_at.or(row.expires_at)),
         "revoked",
     )
     .await?;
@@ -1116,6 +1130,7 @@ async fn raise_revocation_in_tx(
     conversation_id: Uuid,
     request_id: Uuid,
     up_to: i64,
+    max_expires_at_ms: u64,
     reason: &str,
 ) -> Result<(), sqlx::Error> {
     if up_to <= 0 {
@@ -1123,11 +1138,14 @@ async fn raise_revocation_in_tx(
     }
     sqlx::query(
         "insert into secret_revocations
-            (id, machine_id, conversation_id, request_id, up_to, reason)
-         values ($1, $2, $3, $4, $5, $6)
+            (id, machine_id, conversation_id, request_id, up_to,
+             max_expires_at_ms, reason)
+         values ($1, $2, $3, $4, $5, $6, $7)
          on conflict (machine_id, request_id) do update set
              conversation_id = excluded.conversation_id,
              up_to = greatest(secret_revocations.up_to, excluded.up_to),
+             max_expires_at_ms = greatest(
+                 secret_revocations.max_expires_at_ms, excluded.max_expires_at_ms),
              reason = case
                  when excluded.up_to >= secret_revocations.up_to then excluded.reason
                  else secret_revocations.reason
@@ -1143,6 +1161,7 @@ async fn raise_revocation_in_tx(
     .bind(conversation_id)
     .bind(request_id)
     .bind(up_to)
+    .bind(i64::try_from(max_expires_at_ms).unwrap_or(i64::MAX))
     .bind(reason)
     .execute(&mut *conn)
     .await?;
@@ -1357,6 +1376,7 @@ pub async fn on_session_end_in_tx(
             conversation_id,
             row.id,
             row.generation,
+            expires_ms(row.generation_expires_at.or(row.expires_at)),
             "session_end",
         )
         .await?;
@@ -1400,6 +1420,7 @@ pub async fn revoke_before_deletion_in_tx(
             row.conversation_id,
             row.id,
             row.generation,
+            expires_ms(row.generation_expires_at.or(row.expires_at)),
             "session_end",
         )
         .await?;
@@ -1529,7 +1550,8 @@ pub async fn sweep_expired(pool: &PgPool, registry: &Registry) -> Result<u64, sq
             machine_id,
             conversation_id,
             request_id,
-            generation,
+            row.generation,
+            expires_ms(row.generation_expires_at.or(row.expires_at)),
             "expired",
         )
         .await?;
@@ -1555,6 +1577,9 @@ pub fn backoff_seconds(attempts: i32) -> u64 {
 
 /// Отправляет созревшие обязательства живым воркерам `secret_requests_v2`
 /// обычной командой outbox: значения в ней нет, только поколение и каталог.
+/// Строка обязательства, прочитанная под замком.
+type DueObligation = (bool, Uuid, Uuid, Uuid, i64, String, i32, i64);
+
 pub async fn emit_due_revocations(pool: &PgPool, registry: &Registry) -> Result<u64, sqlx::Error> {
     // Отбор по живым машинам с v2 идёт до `limit`: очередь офлайн-машин иначе
     // занимала бы все сто мест и голодом морила готовый отзыв живой машины.
@@ -1562,18 +1587,51 @@ pub async fn emit_due_revocations(pool: &PgPool, registry: &Registry) -> Result<
     if eligible.is_empty() {
         return Ok(0);
     }
-    let rows: Vec<(Uuid, Uuid, Uuid, Uuid, i64, String, i32)> = sqlx::query_as(
-        "select id, machine_id, conversation_id, request_id, up_to, reason, attempts
-         from secret_revocations
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        "select id from secret_revocations
          where next_attempt_at <= now() and machine_id = any($1::uuid[])
          order by next_attempt_at, id limit 100",
     )
     .bind(&eligible)
     .fetch_all(pool)
     .await?;
+    // Тестовый шов: квитанция может удалить обязательство между выборкой и
+    // блокировкой; партия не должна из-за этого падать.
+    test_hooks::before_lock(&ids).await;
     let mut sent = 0u64;
-    for (obligation_id, machine_id, conversation_id, request_id, up_to, reason, attempts) in rows {
+    for obligation_id in ids {
+        let mut tx = crate::db::begin(pool).await?;
+        // Читаем поля под замком: между выборкой и блокировкой строку могли
+        // удалить или изменить квитанцией, и исчезнувшая строка — не ошибка партии.
+        let locked: Option<DueObligation> = sqlx::query_as(
+            "select next_attempt_at <= now(), machine_id, conversation_id, request_id,
+                    up_to, reason, attempts, max_expires_at_ms
+             from secret_revocations where id = $1 for update",
+        )
+        .bind(obligation_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some((
+            due,
+            machine_id,
+            conversation_id,
+            request_id,
+            up_to,
+            reason,
+            attempts,
+            max_expires_at_ms,
+        )) = locked
+        else {
+            tx.commit().await?;
+            continue;
+        };
+        if !due {
+            // Другой отправитель уже взял это обязательство.
+            tx.commit().await?;
+            continue;
+        }
         let Some((_, connection_id, _)) = registry.command_session(machine_id) else {
+            tx.commit().await?;
             continue;
         };
         let capable = registry
@@ -1584,19 +1642,6 @@ pub async fn emit_due_revocations(pool: &PgPool, registry: &Registry) -> Result<
                     .any(|capability| capability == crate::session::CAPABILITY_SECRET_REQUESTS_V2)
             });
         if !capable {
-            continue;
-        }
-        let mut tx = crate::db::begin(pool).await?;
-        // Обязательство под замком: два параллельных отправителя (тик, сеанс,
-        // отзыв владельца) иначе оба увидят «команды нет» и создадут две.
-        let due: bool = sqlx::query_scalar(
-            "select next_attempt_at <= now() from secret_revocations where id = $1 for update",
-        )
-        .bind(obligation_id)
-        .fetch_one(&mut *tx)
-        .await?;
-        if !due {
-            // Другой отправитель уже взял это обязательство.
             tx.commit().await?;
             continue;
         }
@@ -1640,6 +1685,7 @@ pub async fn emit_due_revocations(pool: &PgPool, registry: &Registry) -> Result<
             "conversation_id": conversation_id,
             "up_to": up_to,
             "reason": reason,
+            "max_expires_at_ms": u64::try_from(max_expires_at_ms).unwrap_or(0),
         }))
         .execute(&mut *tx)
         .await?;
@@ -1672,8 +1718,13 @@ pub async fn on_hub_session_established(
     pool: &PgPool,
     registry: &Registry,
     machine_id: Uuid,
-    epoch: &str,
+    connection_id: Uuid,
 ) -> Result<u64, sqlx::Error> {
+    // Сверка принадлежит конкретному соединению: если за время её работы машина
+    // уже подключилась заново, старая задача не имеет права трогать новые строки.
+    let Some(epoch) = registry.secrets_epoch_for_connection(machine_id, connection_id) else {
+        return Ok(0);
+    };
     let rows: Vec<SecretRequestRow> = sqlx::query_as(
         "select * from secret_requests
          where machine_id = $1 and state in ('delivered', 'sending')
@@ -1681,7 +1732,7 @@ pub async fn on_hub_session_established(
          order by id",
     )
     .bind(machine_id)
-    .bind(epoch)
+    .bind(&epoch)
     .fetch_all(pool)
     .await?;
     let mut found = 0u64;
@@ -1691,10 +1742,28 @@ pub async fn on_hub_session_established(
             .bind(row.conversation_id)
             .execute(&mut *tx)
             .await?;
+        // Замок взят: проверяем, что это всё ещё текущее соединение машины.
+        if registry.connection_id(machine_id) != Some(connection_id) {
+            tx.commit().await?;
+            return Ok(found);
+        }
+        let Some(current_epoch) = registry.secrets_epoch_for_connection(machine_id, connection_id)
+        else {
+            tx.commit().await?;
+            return Ok(found);
+        };
+        // Поколение, выданное уже текущим соединением, не трогаем.
+        if row.secrets_epoch.as_deref() == Some(current_epoch.as_str()) {
+            tx.commit().await?;
+            continue;
+        }
         if lose_epoch_in_tx(&mut tx, row, Uuid::now_v7()).await? {
             found += 1;
         }
         tx.commit().await?;
+    }
+    if registry.connection_id(machine_id) != Some(connection_id) {
+        return Ok(found);
     }
     // Повторные отзывы не ждут тика: машина только что на связи.
     sqlx::query(
@@ -1704,7 +1773,6 @@ pub async fn on_hub_session_established(
     .bind(machine_id)
     .execute(pool)
     .await?;
-    // Машина только что на связи: готовые отзывы уходят сразу.
     emit_due_revocations(pool, registry).await?;
     Ok(found)
 }
@@ -1840,6 +1908,44 @@ pub async fn awaiting_count(pool: &PgPool, conversation_id: Uuid) -> Result<i64,
 /// Строка состояния читается только внутри SQL; помощник нужен тестам.
 pub fn state_of(row: &SecretRequestRow) -> &'static str {
     row.state.as_str()
+}
+
+#[cfg(feature = "testkit")]
+pub mod test_hooks {
+    use std::sync::Mutex;
+    use tokio::sync::oneshot;
+    use uuid::Uuid;
+
+    type Pause = (oneshot::Sender<Vec<Uuid>>, oneshot::Receiver<()>);
+
+    static BEFORE_LOCK: Mutex<Option<Pause>> = Mutex::new(None);
+
+    /// Останавливает следующую отправку после выборки обязательств и отдаёт
+    /// тесту их идентификаторы; `Sender<()>` продолжает партию.
+    pub fn arm_before_lock() -> (oneshot::Receiver<Vec<Uuid>>, oneshot::Sender<()>) {
+        let (reached, ids) = oneshot::channel();
+        let (resume, wait) = oneshot::channel();
+        *BEFORE_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some((reached, wait));
+        (ids, resume)
+    }
+
+    pub(crate) async fn before_lock(ids: &[Uuid]) {
+        let pause = BEFORE_LOCK
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        if let Some((reached, wait)) = pause {
+            let _ = reached.send(ids.to_vec());
+            let _ = wait.await;
+        }
+    }
+}
+
+#[cfg(not(feature = "testkit"))]
+pub mod test_hooks {
+    pub(crate) async fn before_lock(_: &[uuid::Uuid]) {}
 }
 
 #[cfg(test)]

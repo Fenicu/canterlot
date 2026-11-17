@@ -149,15 +149,17 @@ impl Fx {
     }
 
     async fn connect(&self, capabilities: &[&str], epoch: &str) -> task3::Client {
-        task3::connect_with_epoch(
-            &self.hub,
-            &self.seed,
-            Uuid::now_v7(),
-            capabilities,
-            1000,
-            epoch,
-        )
-        .await
+        self.connect_journal(capabilities, epoch, Uuid::now_v7())
+            .await
+    }
+
+    async fn connect_journal(
+        &self,
+        capabilities: &[&str],
+        epoch: &str,
+        journal: Uuid,
+    ) -> task3::Client {
+        task3::connect_with_epoch(&self.hub, &self.seed, journal, capabilities, 1000, epoch).await
     }
 
     /// Доставляет значение через настоящий ответ владельца и возвращает
@@ -1152,6 +1154,67 @@ async fn an_offline_backlog_does_not_starve_a_live_obligation(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_vanished_obligation_does_not_abort_the_batch(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let _worker = fx.connect(CAPS, "epoch-1").await;
+    let gone = fx.open("Исчезнет").await;
+    let stays = fx.open("Останется").await;
+    let gone_id = Uuid::now_v7();
+    let stays_id = Uuid::now_v7();
+    for (id, request) in [(gone_id, gone.id), (stays_id, stays.id)] {
+        sqlx::query(
+            "insert into secret_revocations
+                (id, machine_id, conversation_id, request_id, up_to, reason, next_attempt_at)
+             values ($1, $2, $3, $4, 1, 'revoked', now())",
+        )
+        .bind(id)
+        .bind(fx.seed.machine_id)
+        .bind(fx.seed.conversation_id)
+        .bind(request)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    }
+
+    let (selected, resume) = secrets::test_hooks::arm_before_lock();
+    let pool = fx.pool.clone();
+    let registry = fx.registry.clone();
+    let task = tokio::spawn(async move { secrets::emit_due_revocations(&pool, &registry).await });
+    let ids = selected.await.expect("selection");
+    assert_eq!(ids.len(), 2, "{ids:?}");
+    // Квитанция удалила одно обязательство между выборкой и блокировкой.
+    sqlx::query("delete from secret_revocations where id=$1")
+        .bind(gone_id)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    resume.send(()).unwrap();
+    assert_eq!(
+        task.await.unwrap().unwrap(),
+        1,
+        "the other obligation emits"
+    );
+    let commands: i64 = sqlx::query_scalar(
+        "select count(*) from commands
+         where kind='revoke_secret' and payload->>'request_id'=$1",
+    )
+    .bind(stays.id.to_string())
+    .fetch_one(&fx.pool)
+    .await
+    .unwrap();
+    assert_eq!(commands, 1);
+    let vanished: i64 = sqlx::query_scalar(
+        "select count(*) from commands
+         where kind='revoke_secret' and payload->>'request_id'=$1",
+    )
+    .bind(gone.id.to_string())
+    .fetch_one(&fx.pool)
+    .await
+    .unwrap();
+    assert_eq!(vanished, 0);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn a_huge_attempt_count_does_not_overflow_the_backoff(pool: PgPool) {
     let fx = Fx::new(pool).await;
     let row = fx.open("Много попыток").await;
@@ -1202,25 +1265,32 @@ async fn a_huge_attempt_count_does_not_overflow_the_backoff(pool: PgPool) {
 async fn an_epoch_change_marks_delivered_requests_lost(pool: PgPool) {
     let fx = Fx::new(pool).await;
     let row = fx.open("Ключ").await;
-    let mut worker = fx.connect(CAPS, "epoch-a").await;
-    let deliver = fx.send_value(&mut worker, row.id, "value\n").await;
     let journal = Uuid::now_v7();
-    fx.delivered(journal, 1, &deliver, "/run/a").await;
+    let mut worker = fx.connect_journal(CAPS, "epoch-a", journal).await;
+    let deliver = fx.send_value(&mut worker, row.id, "value\n").await;
+    fx.delivered(Uuid::now_v7(), 1, &deliver, "/run/a").await;
     assert_eq!(fx.state(row.id).await, "delivered");
     drop(worker);
     wait_disconnected(&fx.registry, fx.seed.machine_id).await;
 
-    // Новый процесс: tmpfs очищен, эпоха другая.
-    assert_eq!(
-        secrets::on_hub_session_established(&fx.pool, &fx.registry, fx.seed.machine_id, "epoch-b",)
-            .await
-            .unwrap(),
-        1
-    );
+    // Новый процесс: tmpfs очищен, эпоха другая; журнал тот же, иначе хаб
+    // справедливо заподозрит сброс локального состояния.
+    let worker_b = fx.connect_journal(CAPS, "epoch-b", journal).await;
+    // Сверку могла успеть сделать сама новая сессия; итог один.
+    let reconciled = secrets::on_hub_session_established(
+        &fx.pool,
+        &fx.registry,
+        fx.seed.machine_id,
+        worker_b.connection,
+    )
+    .await
+    .unwrap();
+    assert!(reconciled <= 1);
     let lost = fx.row(row.id).await;
     assert!(lost.path.is_none(), "the path points at a vanished tmpfs");
     assert_eq!(lost.note.as_deref(), Some(secrets::NOTE_LOST));
-    assert_eq!(fx.obligation(row.id).await, Some((1, "epoch".into(), 0)));
+    let (up_to, reason, _) = fx.obligation(row.id).await.expect("obligation");
+    assert_eq!((up_to, reason.as_str()), (1, "epoch"));
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
@@ -1329,7 +1399,7 @@ async fn an_epoch_change_marks_sending_requests_lost(pool: PgPool) {
     let row = fx.open("В полёте").await;
     // Живое соединение: стартовая сверка не вправе объявить строку потерянной
     // раньше проверки эпохи.
-    let _worker = fx.connect(CAPS, "epoch-b").await;
+    let worker = fx.connect(CAPS, "epoch-b").await;
     sqlx::query(
         "update secret_requests set state='sending', generation=1,
                 secrets_epoch='epoch-a', send_deadline_at=now() + interval '60 seconds'
@@ -1339,12 +1409,15 @@ async fn an_epoch_change_marks_sending_requests_lost(pool: PgPool) {
     .execute(&fx.pool)
     .await
     .unwrap();
-    assert_eq!(
-        secrets::on_hub_session_established(&fx.pool, &fx.registry, fx.seed.machine_id, "epoch-b",)
-            .await
-            .unwrap(),
-        1
-    );
+    let reconciled = secrets::on_hub_session_established(
+        &fx.pool,
+        &fx.registry,
+        fx.seed.machine_id,
+        worker.connection,
+    )
+    .await
+    .unwrap();
+    assert!(reconciled <= 1);
     let lost = fx.row(row.id).await;
     assert_eq!(lost.state, secrets::SecretState::Lost);
     assert!(lost.send_deadline_at.is_none());
@@ -1396,6 +1469,130 @@ async fn a_replayed_delivery_receipt_from_an_old_epoch_becomes_lost(pool: PgPool
     assert!(lost.path.is_none());
     let (up_to, reason, _) = fx.obligation(row.id).await.expect("obligation");
     assert_eq!((up_to, reason.as_str()), (1, "epoch"));
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_revoke_command_carries_the_hub_expiry_of_the_covered_generation(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let row = fx.open("Срок в отзыве").await;
+    let mut worker = fx.connect(CAPS, "epoch-1").await;
+    let deliver = fx.send_value(&mut worker, row.id, "value\n").await;
+    assert!(deliver.expires_at_ms > 0);
+    fx.delivered(Uuid::now_v7(), 1, &deliver, "/run/a").await;
+    let stored: Option<chrono::DateTime<chrono::Utc>> =
+        sqlx::query_scalar("select generation_expires_at from secret_requests where id=$1")
+            .bind(row.id)
+            .fetch_one(&fx.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        stored.map(|at| u64::try_from(at.timestamp_millis()).unwrap()),
+        Some(deliver.expires_at_ms),
+        "the hub remembers the expiry it sent"
+    );
+
+    let response = fx
+        .post(
+            &format!("/api/v1/secret-requests/{}/revoke", row.id),
+            &Uuid::now_v7().to_string(),
+            None,
+        )
+        .await;
+    assert_eq!(response.status, axum::http::StatusCode::OK);
+    let payload: Value =
+        sqlx::query_scalar("select payload from commands where kind='revoke_secret'")
+            .fetch_one(&fx.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        payload["max_expires_at_ms"], deliver.expires_at_ms,
+        "the worker gets the hub-issued horizon, not its own clock"
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_session_end_obligation_carries_the_generation_expiry(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let row = fx.open("Срок конца сессии").await;
+    let mut worker = fx.connect(CAPS, "epoch-1").await;
+    let deliver = fx.send_value(&mut worker, row.id, "value\n").await;
+    let mut tx = canterlot_hub::db::begin(&fx.pool).await.unwrap();
+    secrets::on_session_end_in_tx(&mut tx, fx.seed.conversation_id, Uuid::now_v7())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let max: i64 =
+        sqlx::query_scalar("select max_expires_at_ms from secret_revocations where request_id=$1")
+            .bind(row.id)
+            .fetch_one(&fx.pool)
+            .await
+            .unwrap();
+    assert_eq!(max, i64::try_from(deliver.expires_at_ms).unwrap());
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_delayed_epoch_reconciliation_from_the_previous_connection_changes_nothing(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let old = fx.open("Старая загрузка").await;
+    let fresh = fx.open("Новая загрузка").await;
+    let journal = Uuid::now_v7();
+    let first = fx.connect_journal(CAPS, "epoch-1", journal).await;
+    let old_connection = first.connection;
+    drop(first);
+    wait_disconnected(&fx.registry, fx.seed.machine_id).await;
+    let second = fx.connect_journal(CAPS, "epoch-2", journal).await;
+
+    // E2 успела выдать новое поколение, пока задача сверки E1 ещё не дошла.
+    sqlx::query(
+        "update secret_requests set state='delivered', generation=1,
+                secrets_epoch='epoch-1', path='/run/old' where id=$1",
+    )
+    .bind(old.id)
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "update secret_requests set state='sending', generation=2,
+                secrets_epoch='epoch-2', send_deadline_at=now() + interval '60 seconds'
+         where id=$1",
+    )
+    .bind(fresh.id)
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+
+    assert_eq!(
+        secrets::on_hub_session_established(
+            &fx.pool,
+            &fx.registry,
+            fx.seed.machine_id,
+            old_connection,
+        )
+        .await
+        .unwrap(),
+        0,
+        "an obsolete connection's reconciliation does nothing"
+    );
+    assert_eq!(fx.state(old.id).await, "delivered");
+    assert_eq!(fx.state(fresh.id).await, "sending");
+    assert!(fx.obligation(old.id).await.is_none());
+    assert!(fx.obligation(fresh.id).await.is_none());
+
+    // Сверка текущего соединения видит старую эпоху и не трогает новую выдачу.
+    let reconciled = secrets::on_hub_session_established(
+        &fx.pool,
+        &fx.registry,
+        fx.seed.machine_id,
+        second.connection,
+    )
+    .await
+    .unwrap();
+    assert!(reconciled <= 1);
+    assert_eq!(fx.state(old.id).await, "lost");
+    assert_eq!(fx.state(fresh.id).await, "sending");
+    let (up_to, reason, _) = fx.obligation(old.id).await.expect("obligation");
+    assert_eq!((up_to, reason.as_str()), (1, "epoch"));
+    assert!(fx.obligation(fresh.id).await.is_none());
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]

@@ -2242,6 +2242,7 @@ fn secret_messages_keep_their_wire_shape_and_hide_the_value() {
         conversation_id: "conversation".into(),
         up_to: 3,
         reason: "revoked".into(),
+        max_expires_at_ms: 7,
     };
     let wire = revoke.encode_to_vec();
     assert!(

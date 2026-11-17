@@ -832,6 +832,7 @@ pub(super) async fn revoke_secret(
                 conversation_id,
                 request_id,
                 request.up_to,
+                request.max_expires_at_ms,
                 &request.reason,
             ) {
                 crate::secret::Removal::Removed => {
@@ -3229,6 +3230,7 @@ mod tests {
                 conversation_id: conversation.to_string(),
                 up_to: 1,
                 reason: "revoked".into(),
+                max_expires_at_ms: 1,
             })),
             ..Default::default()
         };
