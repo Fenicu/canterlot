@@ -7,6 +7,8 @@ import type { Component } from 'svelte';
 import type { BlockModel } from '#lib/stores/blocks.js';
 import AcceptCard from './AcceptCard.svelte';
 import AlarmListCard from './AlarmListCard.svelte';
+import FindCard from './FindCard.svelte';
+import ReadCard from './ReadCard.svelte';
 import EditCard from './EditCard.svelte';
 import LimitsCard from './LimitsCard.svelte';
 import QuestionCard from './QuestionCard.svelte';
@@ -28,6 +30,7 @@ import { alarmCancel, alarmList, alarmSet } from './defs/alarms';
 import { limits } from './defs/limits';
 import { planAdd, planAdopt, planList, planUpdate } from './defs/plan';
 import * as sessions from './defs/sessions';
+import { find, read } from './defs/explore';
 import { edit, patch, write } from './defs/files';
 import { share } from './defs/share';
 import { shell } from './defs/shell';
@@ -105,6 +108,8 @@ const REGISTRY: Record<string, CardDef<never>> = {
   'web.search': card(search),
   'web.fetch': card({ ...fetchPage, link: (_call, data) => ({ text: data.domain, href: data.url, external: true }) }),
   skill: card(skill, SkillCard),
+  'file.read': card(read, ReadCard),
+  'file.search': card(find, FindCard),
   'file.edit': card(outcomed(edit), EditCard),
   'file.write': card(outcomed(write), EditCard),
   'file.patch': card(outcomed(patch), EditCard),
@@ -197,6 +202,11 @@ export function cardStays(block: Pick<BlockModel, 'toolName' | 'kind'>): boolean
 /** Служебный вызов: бледная строка, подряд идущие собираются в одну. */
 export function cardQuiet(block: Pick<BlockModel, 'toolName' | 'kind'>): boolean {
   return defOf(block)?.quiet === true;
+}
+
+/** Семейство свёртки бледной строки: `explore` у чтений и поисков; у остальных `null`. */
+export function cardFold(block: Pick<BlockModel, 'toolName' | 'kind'>): string | null {
+  return defOf(block)?.fold ?? null;
 }
 
 /** Вызов уступает место карточке запроса, если она идёт сразу за ним. */

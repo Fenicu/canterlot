@@ -18,7 +18,7 @@
   import StepGroupRow from '#lib/timeline/StepGroupRow.svelte';
   import QuietRow from '#lib/timeline/cards/QuietRow.svelte';
   import ToolCard from '#lib/timeline/cards/ToolCard.svelte';
-  import { cardLabel, cardQuiet, cardStays, cardYieldsToRequest } from '#lib/timeline/cards/registry.js';
+  import { cardFold, cardLabel, cardQuiet, cardStays, cardYieldsToRequest } from '#lib/timeline/cards/registry.js';
   import TextBlock from '#lib/timeline/TextBlock.svelte';
   import IconButton from '#lib/ui/IconButton.svelte';
   import { timeTip } from '#lib/ui/time-tip.js';
@@ -84,7 +84,7 @@
   const quietLiveLine = $derived(liveLineQuiet(phase, ownReasoning));
   const report = (block: BlockModel) => block.parentId === laneRoot && block.kind === 'tool_result' && isMainAgent(block.agent);
   // Карточки делегирования, плана и файлов не прячутся в свёрнутые шаги: реестр говорит, какие.
-  const items = $derived(foldSteps(blocks, { links, working, live, folds, stays: (block) => report(block) || cardStays(block), quiet: cardQuiet, label: cardLabel }));
+  const items = $derived(foldSteps(blocks, { links, working, live, folds, stays: (block) => report(block) || cardStays(block), quiet: cardQuiet, label: cardLabel, fold: cardFold }));
   const view = $derived(folds.view(cardKey, items, live));
   const topBlocks = $derived(all.filter((block) => block.parentId === null));
   const anchor = $derived(bookmarkAnchor(topBlocks));

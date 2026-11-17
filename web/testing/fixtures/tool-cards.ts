@@ -106,6 +106,22 @@ export function seedToolCards(api: FakeHubApi, opts: { now?: number; working?: b
   feed.call(files, 'patchEnvelope', 'apply_patch', { input: ENVELOPE }, 'Success. Updated the following files:\nM web/src/lib/timeline/cards/copy.ts\nA web/src/lib/timeline/cards/outcome.ts');
   feed.text(files, 'Правки готовы.');
 
+  const explore = api.id();
+  feed.input('Разберись, как лента сворачивает шаги');
+  feed.text(explore, 'Смотрю код ленты.');
+  feed.call(explore, 'readSteps', 'Read', { file_path: '/home/owner/canterlot/web/src/lib/timeline/steps.ts', offset: 120, limit: 61 }, '120\texport function foldSteps(');
+  feed.call(explore, 'readOpencode', 'read', { filePath: '/home/owner/canterlot/web/src/lib/timeline/folds.ts' }, '<file>\n00001| export class FeedFolds {\n</file>');
+  feed.call(explore, 'grepClaude', 'Grep', { pattern: 'foldSteps\\(', path: 'web/src', glob: '*.svelte' }, 'Found 2 files\nweb/src/lib/timeline/AnswerCard.svelte\nweb/src/lib/timeline/Timeline.svelte');
+  feed.call(explore, 'globOpencode', 'glob', { pattern: 'web/src/lib/timeline/cards/*.svelte' }, Array.from({ length: 24 }, (_, index) => `/home/owner/canterlot/web/src/lib/timeline/cards/Card${index}.svelte`).join('\n'));
+  feed.call(explore, 'readAgain', 'Read', { file_path: '/home/owner/canterlot/web/src/lib/timeline/steps.ts', offset: 1, limit: 60 }, '1\timport { fmt }');
+  feed.call(explore, 'readRows', 'Read', { file_path: '/home/owner/canterlot/web/src/lib/timeline/rows.ts' }, '1\texport interface BlockLinks');
+  feed.text(explore, 'Шаги сворачивает foldSteps. Проверю ещё один файл.');
+  feed.call(explore, 'readSingle', 'Read', { file_path: '/home/owner/canterlot/web/src/lib/timeline/AnswerCard.svelte', offset: 80, limit: 20 }, '80\t  const items = $derived(foldSteps(');
+  feed.text(explore, 'И два файла, которых уже нет.');
+  feed.call(explore, 'readOk', 'Read', { file_path: '/home/owner/canterlot/web/src/lib/timeline/QuietRow.svelte' }, '1\t<script lang="ts">');
+  feed.call(explore, 'readGone', 'Read', { file_path: '/home/owner/canterlot/web/src/lib/timeline/Gone.svelte' }, '<tool_use_error>File does not exist.</tool_use_error>', {}, { summary: 'error' });
+  feed.text(explore, 'Разобралась.');
+
   api.histories.set(id, items);
   api.bindConversation(id);
   api.hub.reach(`conversation:${id}`, String(feed.seq));

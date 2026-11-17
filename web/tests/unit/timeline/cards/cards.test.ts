@@ -263,7 +263,7 @@ describe('share, limits, web, tools', () => {
 
 describe('fallback', () => {
   it('unknown_tools_and_generic_tools_have_no_card', () => {
-    for (const name of ['Read', 'mcp__github__create_issue', 'SomethingNew']) expect(resolveCard(made(name, { command: 'ls' }, 'out'), NOW)).toBeNull();
+    for (const name of ['mcp__github__create_issue', 'SomethingNew']) expect(resolveCard(made(name, { command: 'ls' }, 'out'), NOW)).toBeNull();
   });
 
   it('malformed_input_falls_back_to_the_generic_block', () => {

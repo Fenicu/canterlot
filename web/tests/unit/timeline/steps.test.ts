@@ -127,3 +127,65 @@ describe("cut", () => {
     expect(folds.view("card", rows(70), false).hidden).toBe(0);
   });
 });
+
+describe("explore fold", () => {
+  const EXPLORING = ["Read", "Grep", "Glob", "read", "grep"];
+  const ctx = (over: Partial<FoldContext> = {}): Partial<FoldContext> => ({
+    quiet: (block) => EXPLORING.includes(block.toolName ?? ""),
+    fold: (block) => (EXPLORING.includes(block.toolName ?? "") ? "explore" : null),
+    label: (block) => (block.toolName === "Read" ? "Чтение" : block.toolName === "Grep" ? "Поиск" : null),
+    ...over
+  });
+  const quietOf = (item: CardItem | undefined) => (item?.kind === "quiet" ? item : null);
+
+  it("consecutive_reads_and_searches_fold_into_one_explore_row", () => {
+    const items = fold([...step("Read"), ...step("Grep"), ...step("Read"), ...step("Read"), entry("text")], ctx());
+    expect(shape(items)).toEqual(["quiet:4", "text"]);
+    expect(quietOf(items[0])?.family).toBe("explore");
+    expect(quietOf(items[0])?.running).toBe(false);
+  });
+
+  it("a_single_read_stays_its_own_row", () => {
+    expect(shape(fold([entry("text"), ...step("Read"), entry("text")], ctx()))).toEqual(["text", "tool_call", "text"]);
+  });
+
+  it("reads_mixed_with_other_steps_keep_the_step_group_and_count_as_steps", () => {
+    const items = fold([...step("Read"), ...step("Bash"), ...step("Read")], ctx());
+    expect(shape(items)).toEqual(["group:3 шага"]);
+    expect(items[0]?.kind === "group" && items[0].tally).toBe("Чтение 2 · Bash 1");
+  });
+
+  it("two_reads_beside_a_short_run_fold_and_the_rest_stays", () => {
+    expect(shape(fold([...step("Read"), ...step("Grep"), entry("text"), ...step("Bash")], ctx()))).toEqual(["quiet:2", "text", "tool_call"]);
+  });
+
+  it("a_running_read_stays_outside_and_the_row_says_it_is_running", () => {
+    const running = entry("tool_call", { tool: "Read", state: "streaming" });
+    const items = fold([...step("Read"), ...step("Grep"), ...step("Read"), running], ctx({ live: true, working: true }));
+    expect(shape(items)).toEqual(["quiet:3", "tool_call"]);
+    expect(quietOf(items[0])?.running).toBe(true);
+    expect(items[1]?.key).toBe(running.key);
+  });
+
+  it("a_failed_read_is_counted_on_the_row", () => {
+    const items = fold([...step("Read"), ...step("Read", true), entry("text")], ctx());
+    expect(quietOf(items[0])?.failed).toBe(1);
+  });
+
+  it("reasoning_between_reads_breaks_the_fold", () => {
+    expect(shape(fold([...step("Read"), entry("reasoning"), ...step("Read"), entry("text")], ctx()))).toEqual(["tool_call", "reasoning", "tool_call", "text"]);
+  });
+
+  it("reads_of_different_agents_do_not_fold_together", () => {
+    const [a, ar] = step("Read");
+    const [b, br] = step("Read");
+    if (b?.kind === "block") b.block.agent = "subagent-1";
+    expect(shape(fold([a!, ar!, b!, br!, entry("text")], ctx()))).toEqual(["tool_call", "tool_call", "text"]);
+  });
+
+  it("meta_quiet_calls_keep_their_own_row_next_to_reads", () => {
+    const meta = ["ToolSearch", "Monitor"];
+    const items = fold([...step("ToolSearch"), ...step("Monitor"), ...step("Read"), ...step("Grep"), entry("text")], ctx({ quiet: (block) => [...meta, ...EXPLORING].includes(block.toolName ?? "") }));
+    expect(items.map((item) => (item.kind === "quiet" ? `${item.family}:${item.entries.length}` : item.kind))).toEqual(["meta:2", "explore:2", "entry"]);
+  });
+});

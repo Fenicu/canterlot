@@ -282,3 +282,64 @@ test.describe('edit and write cards', () => {
     await expect(card.locator('[data-role="card-state"]')).toHaveCount(0);
   });
 });
+
+/** Свёрнутая строка «Изучает код», где первым стоит этот вызов. */
+async function exploreRow(page: Page, firstCall: string): Promise<Locator> {
+  return reveal(page, page.locator(`[data-key="quiet:block:${firstCall}"] [data-role="quiet-group"][data-family="explore"]`));
+}
+
+test.describe('reads and searches', () => {
+  test('consecutive_reads_and_searches_fold_into_one_row_and_expand_to_compact_rows', async ({ page }) => {
+    const { seed } = await boot(page);
+    const group = await exploreRow(page, seed.blocks.readSteps!);
+    const head = group.locator(':scope > .head');
+    await expect(head).toHaveText('Изучила код: 3 файла, 2 поиска');
+    await expect(head).toHaveAttribute('aria-expanded', 'false');
+    await shot(page, group, 'explore-phone');
+    await head.click();
+    await expect(group.locator('.feed-card')).toHaveCount(6);
+    const read = group.locator(`[data-key="block:${seed.blocks.readSteps}"] .feed-card`);
+    await expect(read).toHaveAttribute('data-quiet', '');
+    await expect(read.locator('[data-role="read-name"]')).toHaveText('steps.ts');
+    await expect(read.locator('[data-role="read-dir"]')).toHaveText('…/lib/timeline');
+    await expect(read.locator('[data-role="read-range"]')).toHaveText('стр. 120–180');
+    const grep = group.locator(`[data-key="block:${seed.blocks.grepClaude}"] .feed-card`);
+    await expect(grep.locator('[data-role="find-pattern"]')).toHaveText('foldSteps\\(');
+    await expect(grep.locator('[data-role="find-where"]')).toHaveText('в web/src · *.svelte');
+    await expect(grep.locator('[data-role="find-count"]')).toHaveText('2 файла');
+    const glob = group.locator(`[data-key="block:${seed.blocks.globOpencode}"] .feed-card`);
+    await expect(glob.locator('[data-role="find-count"]')).toHaveText('24 файла');
+    await shot(page, group, 'explore-expanded-phone');
+    await head.click();
+    await expect(group.locator('.feed-card')).toHaveCount(0);
+  });
+
+  test('a_lone_read_is_a_quiet_row_and_a_failed_read_marks_its_fold', async ({ page }) => {
+    const { seed } = await boot(page);
+    const single = await cardOf(page, seed.blocks.readSingle!);
+    await expect(single).toHaveAttribute('data-card', 'file.read');
+    await expect(single.locator('[data-role="read-range"]')).toHaveText('стр. 80–99');
+    const failed = await exploreRow(page, seed.blocks.readOk!);
+    await expect(failed.locator(':scope > .head')).toContainText('Изучила код: 2 файла');
+    await expect(failed.locator('[data-role="quiet-state"]')).toHaveText('ошибка 1');
+    await expect(failed.locator('[data-role="quiet-state"]')).toHaveAttribute('data-tone', 'danger');
+  });
+
+  test('a_running_read_awaiting_permission_stays_outside_the_fold', async ({ page }) => {
+    const { hub, api, seed } = await boot(page, { working: true });
+    const first = streamCall(hub, api, seed.id, seed.run, 'Read', { file_path: '/w/src/a.ts' }, { result: '1\ta' });
+    streamCall(hub, api, seed.id, seed.run, 'Grep', { pattern: 'needle', path: '/w/src' }, { result: 'Found 1 file\n/w/src/a.ts' });
+    const waiting = streamCall(hub, api, seed.id, seed.run, 'Read', { file_path: '/home/owner/.ssh/config' });
+    hub.append(`conversation:${seed.id}`, { kind: 'request_opened', conversation_id: seed.id, payload: { request_id: api.id(), kind: 'permission', payload: { tool_name: 'Read', input: { file_path: '/home/owner/.ssh/config' } } } });
+    hub.flush();
+    await expect(page.locator('.permission-card')).toBeVisible();
+    const group = page.locator(`[data-key="quiet:block:${first.call}"] [data-role="quiet-group"]`);
+    await expect(group.locator(':scope > .head')).toContainText('Изучает код: 1 файл, 1 поиск');
+    await expect(group.locator('[data-role="quiet-state"]')).toHaveText('идёт');
+    const row = page.locator(`[data-key="block:${waiting.call}"] .feed-card`);
+    await expect(row).toBeVisible();
+    await expect(row.locator('[data-role="card-state"]')).toHaveText('идёт');
+    await expect(page.locator(`[data-role="quiet-group"] [data-key="block:${waiting.call}"]`)).toHaveCount(0);
+    await shot(page, page.locator('.feed article.card').last(), 'explore-running-permission-phone');
+  });
+});
