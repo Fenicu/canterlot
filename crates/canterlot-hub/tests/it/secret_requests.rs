@@ -288,6 +288,7 @@ async fn cj(
     seq: u64,
     body: RecordBody,
 ) {
+    let label = format!("{body:?}");
     let batch = JournalRecords {
         journal_id: journal.to_string(),
         records: vec![JournalRecord {
@@ -306,7 +307,7 @@ async fn cj(
         .await;
     assert!(
         matches!(outcome, Ok(IngestOutcome::Committed { .. })),
-        "journal {journal} seq {seq}: {outcome:?} {body:?}"
+        "journal {journal} seq {seq}: {outcome:?} {label}"
     );
 }
 
