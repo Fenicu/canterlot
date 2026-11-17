@@ -692,7 +692,11 @@ fn read_root_identity(data_dir: &PinnedDir) -> Result<Option<RootIdentity>, Fail
 
 fn write_root_identity(data_dir: &PinnedDir, identity: &RootIdentity) -> Result<(), Failure> {
     let encoded = serde_json::to_vec(identity).map_err(|_| Failure::Manifest)?;
-    let temp = TempFile::fence(data_dir.fd(), ".secret-root.tmp".into());
+    // Уникальное имя: брошенный прошлым падением временный файл не мешает записи.
+    let temp = TempFile::fence(
+        data_dir.fd(),
+        format!(".secret-root-{}.tmp", Uuid::now_v7()),
+    );
     temp.write(&encoded)?;
     temp.commit(ROOT_IDENTITY)?;
     fsync(data_dir.fd()).map_err(|_| Failure::Io)
