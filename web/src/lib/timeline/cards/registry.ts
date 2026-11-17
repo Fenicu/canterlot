@@ -44,10 +44,42 @@ import { fetchPage, search } from './defs/web';
 import { sessionLink } from './links';
 import { outcomeWord, type Outcome } from './outcome';
 import { toolFamily, toolId } from './toolId';
-import type { CardCall, CardDef, CardLogic, CardProps, StateWord } from './types';
+import LineCard from './LineCard.svelte';
+import type { AnyCard, CardCall, CardLogic, CardProps, ResolvedCard, StateWord } from './types';
 
-function card<D>(logic: CardLogic<D>, component?: Component<CardProps<D>>): CardDef<D> {
-  return { ...logic, component } as CardDef<D>;
+/**
+ * Карточка реестра: логика и разметка проверяются на один и тот же тип данных здесь, в точке
+ * вызова, и дальше живут вместе. Без своей разметки карточка — одна строка (`LineCard`).
+ * Любая ошибка разбора — `null`: лента покажет обычный блок, а не пустое место.
+ */
+export function card<D>(logic: CardLogic<D>, component: Component<CardProps<D>> = LineCard): AnyCard {
+  const self: AnyCard = {
+    quiet: logic.quiet === true,
+    stays: logic.stays === true,
+    grows: logic.grows === true,
+    yieldsToRequest: logic.yieldsToRequest === true,
+    label: logic.label ?? null,
+    fold: logic.fold ?? null,
+    resolve(call, now) {
+      try {
+        const data = logic.parse(call);
+        if (data === null || data === undefined) return null;
+        const line = logic.summary(call, data);
+        if (!line) return null;
+        return {
+          def: self,
+          data,
+          line,
+          link: logic.link?.(call, data) ?? null,
+          word: logic.word ? logic.word(call, data, now) : defaultWord(call),
+          view: { data, render: component }
+        };
+      } catch {
+        return null;
+      }
+    }
+  };
+  return self;
 }
 
 /** Ссылка на сессию по полю `session_id` входа. */
@@ -79,8 +111,8 @@ function outcomed<D extends { outcome: Outcome }>(logic: CardLogic<D>): CardLogi
   return { ...logic, word: (call, data) => outcomeWord(data.outcome) ?? defaultWord(call) };
 }
 
-const REGISTRY: Record<string, CardDef<never>> = {
-  'canterlot.session_spawn': card({ ...sessions.spawn, grows: true, link: (call, data) => sessionLink(call, data.sessionId, data.title) } as CardLogic<sessions.SpawnData>, SpawnCard),
+const REGISTRY: Record<string, AnyCard> = {
+  'canterlot.session_spawn': card<sessions.SpawnData>({ ...sessions.spawn, grows: true, link: (call, data) => sessionLink(call, data.sessionId, data.title) }, SpawnCard),
   'canterlot.session_accept': card(bySession(sessions.accept), AcceptCard),
   'canterlot.session_send': card(bySession(sessions.send), SendCard),
   'canterlot.session_inspect': card(bySession(sessions.inspect, (_call, data) => data.sessionId)),
@@ -131,18 +163,18 @@ const REGISTRY: Record<string, CardDef<never>> = {
   'taiga.project_list': card(quiet),
   'taiga.project_get': card(quiet),
   'taiga.stats': card(quiet)
-} as Record<string, CardDef<never>>;
+};
 
 /** Семейства, где карточка одна на все операции сервера. */
-const FAMILIES: Record<string, CardDef<never>> = {
+const FAMILIES: Record<string, AnyCard> = {
   taiga: card({ ...taiga, link: (_call, data) => (data.url ? { text: data.ref ? `#${data.ref}` : 'Taiga', href: data.url, external: true } : null) }, TaigaCard),
   context7: card(context7),
   forgejo: card(forgejo, ForgejoCard),
   meeting: card(meeting, MeetingCard)
-} as Record<string, CardDef<never>>;
+};
 
-export function cardDef(id: string): CardDef<unknown> | null {
-  return (REGISTRY[id] ?? FAMILIES[toolFamily(id)] ?? null) as CardDef<unknown> | null;
+export function cardDef(id: string): AnyCard | null {
+  return REGISTRY[id] ?? FAMILIES[toolFamily(id)] ?? null;
 }
 
 /** Все ids с карточкой: для тестов реестра. */
@@ -164,39 +196,12 @@ export function defaultWord(call: Pick<CardCall, 'state'>): StateWord | null {
   }
 }
 
-export interface Resolved {
-  def: CardDef<unknown>;
-  data: unknown;
-  line: string;
-  link: ReturnType<NonNullable<CardDef['link']>>;
-  word: StateWord | null;
+/** Карточка вызова, если она есть и вход ей по форме. */
+export function resolveCard(call: CardCall, now: number): ResolvedCard | null {
+  return cardDef(call.id)?.resolve(call, now) ?? null;
 }
 
-/**
- * Карточка вызова, если она есть и вход ей по форме. Любая ошибка разбора — `null`:
- * лента покажет обычный блок, а не пустое место.
- */
-export function resolveCard(call: CardCall, now: number): Resolved | null {
-  const def = cardDef(call.id);
-  if (!def) return null;
-  try {
-    const data = def.parse(call);
-    if (data === null || data === undefined) return null;
-    const line = def.summary(call, data);
-    if (!line) return null;
-    return {
-      def,
-      data,
-      line,
-      link: def.link?.(call, data) ?? null,
-      word: def.word ? def.word(call, data, now) : defaultWord(call)
-    };
-  } catch {
-    return null;
-  }
-}
-
-function defOf(block: Pick<BlockModel, 'toolName' | 'kind'>): CardDef<unknown> | null {
+function defOf(block: Pick<BlockModel, 'toolName' | 'kind'>): AnyCard | null {
   return block.kind === 'tool_call' ? cardDef(toolId(block.toolName)) : null;
 }
 

@@ -1,4 +1,4 @@
-import type { Component } from 'svelte';
+import type { Component, ComponentInternals } from 'svelte';
 import type { BackgroundFact } from '#lib/stores/background.svelte.js';
 import type { BlockModel, BlockPage } from '#lib/stores/blocks.js';
 import type { PlanTaskState } from '#lib/stores/plan.svelte.js';
@@ -99,11 +99,16 @@ export interface CardProps<D> {
   env: CardEnv;
 }
 
+/**
+ * Описание карточки. Функции объявлены свойствами, а не методами: так их параметры
+ * проверяются строго, и `word` или `link`, ждущие других данных, чем отдаёт `parse`, не
+ * пройдут проверку типов.
+ */
 export interface CardDef<D = unknown> {
   /** Данные карточки из вызова; `null` — форма не та, лента покажет обычный блок. */
-  parse(call: CardCall): D | null;
+  parse: (call: CardCall) => D | null;
   /** Одна строка: заголовок карточки, подпись для чтения с экрана и тест. */
-  summary(call: CardCall, data: D): string;
+  summary: (call: CardCall, data: D) => string;
   /** Своя разметка; без неё карточка — одна строка с раскрытием сырого вызова. */
   component?: Component<CardProps<D>>;
   /** Служебный вызов: бледная строка, подряд идущие собираются в одну. */
@@ -122,9 +127,9 @@ export interface CardDef<D = unknown> {
   /** Короткое имя для подсчёта в свёрнутых шагах. */
   label?: string;
   /** Часть строки, которая ведёт дальше: сессия, страница, история Taiga. */
-  link?(call: CardCall, data: D): CardLink | null;
+  link?: (call: CardCall, data: D) => CardLink | null;
   /** Слово состояния справа; без него — по состоянию вызова. */
-  word?(call: CardCall, data: D, now: number): StateWord | null;
+  word?: (call: CardCall, data: D, now: number) => StateWord | null;
 }
 
 export interface CardLink {
@@ -144,3 +149,40 @@ export interface StateWord {
 
 /** Логика карточки без разметки: так её проверяют юнит-тесты. */
 export type CardLogic<D> = Omit<CardDef<D>, 'component'>;
+
+/**
+ * Разметка карточки вместе со своими данными. Компонент объявлен методом: параметры методов
+ * в TypeScript бивариантны, поэтому `CardView<SpawnData>` встаёт туда, где ждут
+ * `CardView<unknown>`, без приведения типов. Разойтись данные и компонент не могут: пару
+ * собирает только `card()` в реестре, где оба проверены на один и тот же `D`.
+ */
+export interface CardView<D> {
+  readonly data: D;
+  render(this: void, internals: ComponentInternals, props: CardProps<D>): ReturnType<Component<CardProps<D>>>;
+}
+
+/** Карточка, найденная для вызова: строка, ссылка, слово и разметка с данными. */
+export interface ResolvedCard {
+  def: AnyCard;
+  /** Данные карточки; тот же объект, что `view.data`. */
+  data: unknown;
+  line: string;
+  link: CardLink | null;
+  word: StateWord | null;
+  view: CardView<unknown>;
+}
+
+/**
+ * Карточка реестра без своего типа данных наружу: всё, что зависит от `D`, связано внутри
+ * `resolve`, а снаружи видны только признаки строки и готовый результат.
+ */
+export interface AnyCard {
+  readonly quiet: boolean;
+  readonly stays: boolean;
+  readonly grows: boolean;
+  readonly yieldsToRequest: boolean;
+  readonly label: string | null;
+  readonly fold: string | null;
+  /** Карточка вызова, если вход ей по форме; `null` — лента покажет обычный блок. */
+  resolve(call: CardCall, now: number): ResolvedCard | null;
+}

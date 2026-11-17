@@ -8,7 +8,6 @@
   import ToolBlock from '#lib/timeline/ToolBlock.svelte';
   import { cardCall } from './call';
   import { feedCards } from './context';
-  import LineCard from './LineCard.svelte';
   import { resolveCard } from './registry';
   import type { CardEnv } from './types';
 
@@ -60,10 +59,11 @@
 </script>
 
 {#if card}
-  {@const Card = card.def.component ?? LineCard}
+  <!-- Разметка приходит вместе со своими данными: пару «компонент — данные» собрал реестр. -->
+  {@const Card = card.view.render}
   <!-- Сбой разметки карточки не оставляет пустого места: на его месте обычный блок инструмента. -->
   <svelte:boundary>
-    <Card {call} data={card.data as never} line={card.line} link={card.link} word={card.word} {grows} quiet={card.def.quiet === true} {env} />
+    <Card {call} data={card.view.data} line={card.line} link={card.link} word={card.word} {grows} quiet={card.def.quiet} {env} />
     {#snippet failed()}
       <ToolBlock {block} {result} {background} {working} {now} {load} {open} {onToggle} />
     {/snippet}
