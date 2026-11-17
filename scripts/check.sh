@@ -3,7 +3,8 @@
 #   scripts/check.sh           полная: Rust и web, смотрит только то, что затронуто относительно main
 #   scripts/check.sh --fast    быстрая для небольшой правки: fmt, clippy, тесты изменённых крейтов, web check и vitest по diff,
 #                              Playwright только по изменённым и затронутым картой областей спекам на phone и desktop,
-#                              глобальный путь берёт весь набор только на phone
+#                              глобальный путь берёт весь набор только на phone;
+#                              храповик флейковых паттернов и его самотесты идут в обоих режимах
 #   scripts/check.sh --all     полная без учёта путей
 #   scripts/check.sh --all --no-web  полная без веб-половины: её целиком делает
 #                                    scripts/check-web.sh --stack (гейт выпуска)
@@ -103,6 +104,12 @@ fi
 # стендом делает следующий scripts/check-web.sh --stack.
 ((no_web)) && want_web=0
 printf 'режим: %s, Rust: %s, web: %s, canterlot-speech: %s\n' "$mode" "$((want_rust))" "$((want_web))" "$((want_speech))"
+
+# Храповик считает паттерны по правилу и файлу за секунды и не зависит от выбранных путей.
+stage "храповик флейковых паттернов"
+python3 scripts/flaky-ratchet.py check
+python3 scripts/test-flaky-ratchet.py -q
+stage_done "храповик флейковых паттернов"
 
 if ((all)); then
     stage "версия"
