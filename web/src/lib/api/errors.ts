@@ -108,6 +108,10 @@ const ERROR_TABLE: Record<ErrorCode, ErrorDescriptor> = {
     action: "new_operation",
     message: "Повтор не совпал с исходной отправкой, отправьте заново",
   },
+  draft_revision_conflict: {
+    action: "none",
+    message: "Черновик уже изменён с другого устройства",
+  },
   decision_conflict: {
     action: "none",
     message: "Решение уже принято с другого устройства",

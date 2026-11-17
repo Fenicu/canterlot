@@ -12,7 +12,7 @@ use crate::events::{self, NewEvent, Scope};
 /// Предел текста черновика в байтах UTF-8.
 pub const MAX_TEXT_BYTES: usize = 65_536;
 
-#[derive(Debug, Clone, serde::Serialize, ToSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, ToSchema)]
 pub struct DraftView {
     pub text: String,
     pub attachment_ids: Vec<Uuid>,
@@ -37,6 +37,8 @@ pub enum DraftError {
     NotFound,
     Invalid,
     TooLong,
+    /// Чья-то запись уже продвинула ревизию: клиент получает актуальную копию.
+    Conflict(DraftView),
     Db(sqlx::Error),
 }
 
@@ -129,8 +131,18 @@ pub async fn get(
     .await
 }
 
-/// Полная замена текста: `base_revision` принимается для совместимости клиента,
-/// но не участвует в слиянии. Побеждает последняя запись, ответ несёт ревизию хаба.
+/// Полная замена текста с оптимистической блокировкой по `base_revision`.
+///
+/// Правила совместимы с уже установленными PWA, которые всегда слали `base_revision` 0:
+/// - строки нет — запись принимается с любой базой: нечего защищать;
+/// - база равна текущей ревизии — обычная замена;
+/// - база 0 означает «базы нет»: непустой черновик при существующей строке даёт
+///   конфликт, чтобы давний локальный текст не воскресил удалённый серверный;
+///   пустой черновик (пустые `text` и `attachment_ids`) очистку не блокирует;
+/// - любое другое расхождение даёт конфликт.
+///
+/// Конфликт не меняет строку и не публикует `draft_changed`; ответ 409 несёт
+/// актуальную копию в `details.draft`. Форма события и успешного ответа не меняется.
 pub async fn put(
     pool: &PgPool,
     owner_id: Uuid,
@@ -144,9 +156,10 @@ pub async fn put(
     let PutDraft {
         text,
         attachment_ids,
-        base_revision: _,
+        base_revision,
         device_id,
     } = body;
+    let empty_draft = text.is_empty() && attachment_ids.is_empty();
     crate::db::in_tx(pool, move |conn| {
         Box::pin(async move {
             // Строка разговора сериализует записи черновика и удаление разговора.
@@ -160,7 +173,20 @@ pub async fn put(
                 return Err(DraftError::NotFound);
             }
             lock_attachments(conn, owner_id, conversation_id, &attachment_ids).await?;
-            if text.is_empty() && attachment_ids.is_empty() {
+            // Строка разговора уже закрыта `for update`: ревизия и замена согласованы.
+            let current: Option<DraftRow> = sqlx::query_as(
+                "select text, attachment_ids, revision, updated_at from composer_drafts where conversation_id=$1",
+            )
+            .bind(conversation_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+            if let Some(row) = current {
+                let current = view(row);
+                if base_revision != current.revision && !(empty_draft && base_revision == 0) {
+                    return Err(DraftError::Conflict(current));
+                }
+            }
+            if empty_draft {
                 let removed: Option<i64> = sqlx::query_scalar(
                     "delete from composer_drafts where conversation_id=$1 returning revision",
                 )

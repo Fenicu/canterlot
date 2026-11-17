@@ -32,6 +32,7 @@ const ALL_ERROR_CODES: ErrorCode[] = [
   "not_found",
   "method_not_allowed",
   "idempotency_conflict",
+  "draft_revision_conflict",
   "decision_conflict",
   "request_not_open",
   "decision_invalid",
@@ -134,7 +135,7 @@ describe("api/errors", () => {
   });
 
   it("error_actions_cover_every_code_in_the_api_error_table", () => {
-    expect(ALL_ERROR_CODES.length).toBe(81);
+    expect(ALL_ERROR_CODES.length).toBe(82);
 
     for (const code of ALL_ERROR_CODES) {
       const err = new ApiError(

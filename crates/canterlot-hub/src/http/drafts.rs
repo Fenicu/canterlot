@@ -1,7 +1,7 @@
 use super::{
     AppState,
     auth::{Correlation, Owner},
-    error::{ApiError, ErrorCode},
+    error::{ApiError, ErrorCode, ErrorDetails},
     extract::{ApiJson, ApiPath},
 };
 use crate::drafts::{self, DraftError, DraftView, PutDraft};
@@ -20,6 +20,11 @@ fn map(error: DraftError) -> ApiError {
         DraftError::NotFound => ApiError::new(ErrorCode::NotFound),
         DraftError::Invalid => ApiError::new(ErrorCode::InvalidRequest),
         DraftError::TooLong => ApiError::new(ErrorCode::InvalidRequest),
+        DraftError::Conflict(draft) => ApiError::new(ErrorCode::DraftRevisionConflict)
+            .with_details(ErrorDetails {
+                draft: Some(draft),
+                ..Default::default()
+            }),
         DraftError::Db(error) => ApiError::from(error),
     }
 }
@@ -37,7 +42,7 @@ async fn get(
     ))
 }
 
-#[utoipa::path(put,path="/api/v1/conversations/{id}/draft",tag="conversations",params(("id"=Uuid,Path,description="Разговор")),request_body=PutDraft,responses((status=200,description="Черновик сохранён; пустой текст удаляет его",body=DraftView),(status=400,description="Текст длиннее 64 КиБ или вложение не готово/чужое",body=crate::http::error::ErrorEnvelope),(status=404,description="Разговор не найден",body=crate::http::error::ErrorEnvelope)))]
+#[utoipa::path(put,path="/api/v1/conversations/{id}/draft",tag="conversations",params(("id"=Uuid,Path,description="Разговор")),request_body=PutDraft,responses((status=200,description="Черновик сохранён; пустой текст удаляет его",body=DraftView),(status=400,description="Текст длиннее 64 КиБ или вложение не готово/чужое",body=crate::http::error::ErrorEnvelope),(status=409,description="draft_revision_conflict: актуальный черновик в details.draft",body=crate::http::error::ErrorEnvelope),(status=404,description="Разговор не найден",body=crate::http::error::ErrorEnvelope)))]
 async fn put(
     State(state): State<AppState>,
     owner: Owner,

@@ -4302,6 +4302,25 @@
               }
             }
           },
+          "409": {
+            "description": "draft_revision_conflict: актуальный черновик в details.draft",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
             "headers": {
@@ -13452,6 +13471,7 @@
           "not_found",
           "method_not_allowed",
           "idempotency_conflict",
+          "draft_revision_conflict",
           "decision_conflict",
           "request_not_open",
           "decision_invalid",
@@ -13536,6 +13556,10 @@
           "current_state": {
             "type": "string",
             "pattern": "^(open|decision_saved|decision_transmitting|decision_applied|decision_unconfirmed|decision_not_applied|closed_without_decision)$"
+          },
+          "draft": {
+            "$ref": "#/components/schemas/DraftView",
+            "description": "Актуальный общий черновик (`draft_revision_conflict`)."
           },
           "field": {
             "type": "string",

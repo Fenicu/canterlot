@@ -162,11 +162,18 @@ async fn put_get_round_trip_keeps_revision_and_updated_at(pool: PgPool) {
     assert_eq!(loaded["text"], "привет с телефона");
     assert_eq!(loaded["revision"], first_revision);
 
-    // Устаревшая base_revision не мешает: полная замена текста, побеждает последняя запись.
+    // Устаревшая база не перезаписывает свежий черновик.
+    f.put(
+        f.conversation,
+        json!({"text":"продолжил на компьютере","base_revision":first_revision - 1,"device_id":"desktop"}),
+        409,
+    )
+    .await;
+
     let second = f
         .put(
             f.conversation,
-            json!({"text":"продолжил на компьютере","base_revision":first_revision - 1,"device_id":"desktop"}),
+            json!({"text":"продолжил на компьютере","base_revision":first_revision,"device_id":"desktop"}),
             200,
         )
         .await;
@@ -727,4 +734,79 @@ async fn replaying_a_sent_input_does_not_clear_a_new_draft(pool: PgPool) {
         f.stored_text().await.as_deref(),
         Some("набрано после отправки")
     );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_stale_base_revision_conflicts_and_carries_the_current_draft(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let saved = f
+        .put(
+            f.conversation,
+            json!({"text":"свежий текст","base_revision":0,"device_id":"phone"}),
+            200,
+        )
+        .await;
+    let revision = saved["revision"].as_i64().unwrap();
+
+    // Старый клиент шлёт base_revision 0: это «нет базы», а не совпадение с ревизией 0.
+    let stale = f
+        .put(
+            f.conversation,
+            json!({"text":"давний текст с другого устройства","base_revision":0,"device_id":"stale"}),
+            409,
+        )
+        .await;
+    assert_eq!(stale["error"]["code"], "draft_revision_conflict");
+    assert_eq!(
+        stale["error"]["details"]["draft"]["revision"].as_i64(),
+        Some(revision)
+    );
+    assert_eq!(stale["error"]["details"]["draft"]["text"], "свежий текст");
+
+    let future = f
+        .put(
+            f.conversation,
+            json!({"text":"из будущего","base_revision":revision + 1,"device_id":"stale"}),
+            409,
+        )
+        .await;
+    assert_eq!(future["error"]["code"], "draft_revision_conflict");
+
+    // Конфликт не меняет черновик и не публикует событие.
+    assert_eq!(f.stored_text().await.as_deref(), Some("свежий текст"));
+    assert_eq!(f.draft_events().await.len(), 1);
+
+    let rebased = f
+        .put(
+            f.conversation,
+            json!({"text":"правка поверх свежего","base_revision":revision,"device_id":"phone"}),
+            200,
+        )
+        .await;
+    assert_eq!(rebased["text"], "правка поверх свежего");
+    assert!(rebased["revision"].as_i64().unwrap() > revision);
+    assert_eq!(f.draft_events().await.len(), 2);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn an_empty_put_clears_the_draft_even_without_a_base(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    f.put(
+        f.conversation,
+        json!({"text":"черновик","base_revision":0,"device_id":"phone"}),
+        200,
+    )
+    .await;
+
+    // Очистка идемпотентна и безопасна: старый клиент с base 0 не воскрешает текст.
+    let cleared = f
+        .put(
+            f.conversation,
+            json!({"text":"","base_revision":0,"device_id":"old-client"}),
+            200,
+        )
+        .await;
+    assert_eq!(cleared["text"], "");
+    assert!(f.stored_text().await.is_none());
+    assert_eq!(f.draft_events().await.last().unwrap()["text"], "");
 }

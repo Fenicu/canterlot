@@ -99,6 +99,7 @@ error_codes! {
     NotFound => "not_found", 404, Browser, Never, "Не найдено";
     MethodNotAllowed => "method_not_allowed", 405, Browser, Never, "Метод не поддерживается";
     IdempotencyConflict => "idempotency_conflict", 409, Browser, Never, "Ключ идемпотентности уже использован с другим запросом";
+    DraftRevisionConflict => "draft_revision_conflict", 409, Browser, AfterCondition, "Черновик уже изменён с другого устройства";
     DecisionConflict => "decision_conflict", 409, Browser, Never, "Решение уже принято с другого устройства";
     RequestNotOpen => "request_not_open", 409, Browser, Never, "Запрос уже закрыт";
     DecisionInvalid => "decision_invalid", 422, Browser, Never, "Ответ не подходит к вопросу";
@@ -361,6 +362,10 @@ pub struct ErrorDetails {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub current_revision: Option<i64>,
+    /// Актуальный общий черновик (`draft_revision_conflict`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub draft: Option<crate::drafts::DraftView>,
     /// Разбор кандидатов маршрута (`no_executor_available`): не текст в `reason`.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
