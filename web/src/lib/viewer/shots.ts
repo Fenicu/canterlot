@@ -1,4 +1,3 @@
-import { THUMB_MAX_BYTES } from '#lib/timeline/attachments.js';
 import type { Size } from '#lib/viewer/zoom.js';
 
 /** Картинка просмотрщика: медиа блока ответа или вложение. */
@@ -17,13 +16,19 @@ export interface ViewerShot {
   size?: number;
 }
 
-/** Соседей заранее грузим, только если они не тяжелее миниатюры в ленте: телефон раскодирует их целиком. */
-export function preloads(shot: ViewerShot): boolean {
-  return !shot.size || shot.size <= THUMB_MAX_BYTES;
-}
-
 export function shotSrc(shot: ViewerShot): string {
   return shot.src ?? `/api/v1/media/${encodeURIComponent(shot.media_id)}`;
+}
+
+/** Уменьшенный показ для миниатюр ленты и фона просмотрщика: оригинал остаётся для полного вида. */
+export function shotPreviewSrc(shot: ViewerShot): string {
+  const src = shot.src;
+  if (src) {
+    if (src.endsWith('/content')) return `${src.slice(0, -'/content'.length)}/preview`;
+    if (/\/api\/v1\/media\/[^/]+$/.test(src)) return `${src}/preview`;
+    return src;
+  }
+  return `/api/v1/media/${encodeURIComponent(shot.media_id)}/preview`;
 }
 
 export function shotFormat(shot: ViewerShot): string {

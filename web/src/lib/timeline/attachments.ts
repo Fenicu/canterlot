@@ -75,3 +75,8 @@ export function showsThumb(file: Pick<AttachmentRef, 'name' | 'mime' | 'image' |
 export function attachmentUrl(attachmentId: string): string {
 	return `/api/v1/attachments/${encodeURIComponent(attachmentId)}/content`;
 }
+
+/** Уменьшенный показ вложения для миниатюр ленты и фона просмотрщика. */
+export function attachmentPreviewUrl(attachmentId: string): string {
+	return `/api/v1/attachments/${encodeURIComponent(attachmentId)}/preview`;
+}

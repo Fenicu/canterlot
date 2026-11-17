@@ -79,19 +79,26 @@ const ADDRESS: Record<Source, (id: string) => string> = {
   answer: (id) => `/api/v1/media/${id}`
 };
 
+/** Миниатюра качает уменьшенный показ, ссылка ведёт на сам файл. */
+const PREVIEW: Record<Source, (id: string) => string> = {
+  owner: (id) => `/api/v1/attachments/${id}/preview`,
+  shared: (id) => `/api/v1/attachments/${id}/preview`,
+  answer: (id) => `/api/v1/media/${id}/preview`
+};
+
 for (const source of ['owner', 'answer', 'shared'] as const) {
   test(`${source}_feed_image_is_a_plain_same_origin_img_the_browser_menu_can_use`, async ({ page }) => {
     await openChat(page, source);
     const link = thumb(page, source, 0);
     const image = link.locator('img');
     await expect(image).toHaveJSProperty('complete', true);
-    // Миниатюра — ссылка на сам файл: меню браузера предлагает и картинку, и «Открыть в новой вкладке».
+    // Миниатюра — уменьшенный показ, ссылка ведёт на сам файл: меню браузера предлагает и картинку, и «Открыть в новой вкладке».
     await expect(link).toHaveAttribute('href', ADDRESS[source](PICTURES[0]!.id));
-    await expect(image).toHaveAttribute('src', ADDRESS[source](PICTURES[0]!.id));
+    await expect(image).toHaveAttribute('src', PREVIEW[source](PICTURES[0]!.id));
     const point = await centre(image);
     const state = await hit(page, point);
     expect(state).toMatchObject({ tag: 'IMG', loaded: true, sameOrigin: true, callout: [] });
-    expect(new URL(state.src!).pathname).toBe(ADDRESS[source](PICTURES[0]!.id));
+    expect(new URL(state.src!).pathname).toBe(PREVIEW[source](PICTURES[0]!.id));
     expect(await contextMenuPrevented(page, point)).toBe(false);
     expect(await readable(image)).toBe(true);
     // Обычное нажатие по-прежнему открывает просмотрщик, а не переходит по ссылке.

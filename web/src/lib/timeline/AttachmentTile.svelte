@@ -1,7 +1,7 @@
 <script lang="ts">
   import { fmt } from '#lib/format/ru.js';
   import type { AttachmentRef } from '#lib/stores/inputs.js';
-  import { attachmentKind, attachmentUrl, isOfficeKind, officeLabel, showsThumb, type OfficeKind } from '#lib/timeline/attachments.js';
+  import { attachmentKind, attachmentPreviewUrl, attachmentUrl, isOfficeKind, officeLabel, showsThumb, type OfficeKind } from '#lib/timeline/attachments.js';
   import Icon from '#lib/ui/Icon.svelte';
   import { opensViewer } from '#lib/viewer/shots.js';
   import type { Component } from 'svelte';
@@ -17,6 +17,8 @@
   const kind = $derived(attachmentKind(file));
   const name = $derived(file.name || 'Вложение');
   const url = $derived(attachmentUrl(file.attachment_id));
+  // Миниатюра качает уменьшенный показ: оригинал остаётся ссылке и просмотрщику.
+  const preview = $derived(attachmentPreviewUrl(file.attachment_id));
   const thumb = $derived(showsThumb(file) && !broken);
   // Заготовка без метаданных (`blankAttachment`) несёт размер 0 без имени: её размер неизвестен.
   // Пустой файл с именем — настоящие «0 Б».
@@ -43,7 +45,7 @@
   <!-- Ссылка на сам файл: долгое нажатие и правая кнопка дают меню браузера с картинкой. -->
   <!-- eslint-disable-next-line svelte/no-navigation-without-resolve -->
   <a class="thumb" href={url} aria-label={`Открыть картинку ${name}`} onclick={(event) => { if (!opensViewer(event)) return; event.preventDefault(); onopen(); }}>
-    <img src={url} alt="" loading="lazy" decoding="async" fetchpriority="low" data-viewer-thumb={file.attachment_id} onerror={() => { broken = true; }} />
+    <img src={preview} alt="" loading="lazy" decoding="async" fetchpriority="low" data-viewer-thumb={file.attachment_id} onerror={() => { broken = true; }} />
   </a>
 {:else if kind === 'image'}
   <button type="button" class="tile" aria-label={`Открыть картинку ${name}`} onclick={onopen}>

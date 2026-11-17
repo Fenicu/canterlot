@@ -63,6 +63,22 @@ export interface paths {
         patch: operations["patch__api_v1_attachments__id__content"];
         trace?: never;
     };
+    "/api/v1/attachments/{id}/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get__api_v1_attachments__id__preview"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/auth/logout": {
         parameters: {
             query?: never;
@@ -1556,6 +1572,22 @@ export interface paths {
             cookie?: never;
         };
         get: operations["get__api_v1_media__id_"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/media/{id}/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get__api_v1_media__id__preview"];
         put?: never;
         post?: never;
         delete?: never;
@@ -4898,6 +4930,15 @@ export interface operations {
                     "application/octet-stream": components["schemas"]["BinaryContent"];
                 };
             };
+            /** @description Содержимое не изменилось: отдаётся при совпадении If-None-Match */
+            304: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
             default: {
                 headers: {
@@ -4972,6 +5013,50 @@ export interface operations {
                 headers: {
                     /** @description Принятые байты */
                     "Upload-Offset"?: number;
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get__api_v1_attachments__id__preview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Уменьшенный показ картинки: JPEG не больше 1024 по длинной стороне; анимация отдаётся как есть; у не-картинок показа нет */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "image/jpeg": components["schemas"]["BinaryContent"];
+                };
+            };
+            /** @description Показ не изменился: отдаётся при совпадении If-None-Match */
+            304: {
+                headers: {
                     /** @description Часы хаба: целые миллисекунды Unix */
                     "X-Server-Time-Ms"?: number;
                     [name: string]: unknown;
@@ -9938,6 +10023,64 @@ export interface operations {
                     "image/webp": components["schemas"]["BinaryContent"];
                     "image/gif": components["schemas"]["BinaryContent"];
                 };
+            };
+            /** @description Содержимое не изменилось: отдаётся при совпадении If-None-Match */
+            304: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get__api_v1_media__id__preview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Уменьшенный показ картинки: JPEG не больше 1024 по длинной стороне; анимация и слишком крупные файлы отдаются как есть */
+            200: {
+                headers: {
+                    /** @description SHA-256 оригинала плюс версия показа */
+                    ETag?: string;
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "image/jpeg": components["schemas"]["BinaryContent"];
+                    "image/gif": components["schemas"]["BinaryContent"];
+                    "image/webp": components["schemas"]["BinaryContent"];
+                    "image/png": components["schemas"]["BinaryContent"];
+                };
+            };
+            /** @description Показ не изменился: отдаётся при совпадении If-None-Match */
+            304: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
             default: {

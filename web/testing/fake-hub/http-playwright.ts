@@ -209,7 +209,15 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
   });
 
   await page.route('**/api/v1/media/**', async (route) => {
-    await route.fulfill({ status: 200, contentType: 'image/png', body: PNG });
+    await route.fulfill({
+      status: 200,
+      contentType: 'image/png',
+      headers: {
+        'Cache-Control': 'private, max-age=86400, immutable',
+        ETag: `"${new URL(route.request().url()).pathname.split('/').at(-1) ?? 'media'}"`
+      },
+      body: PNG
+    });
   });
 
   const inputs = new Map<string, string>();
@@ -484,6 +492,19 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     if (method === 'DELETE') {
       attachments.delete(id);
       await route.fulfill({ status: 204, headers: headers() });
+      return;
+    }
+    if (method === 'GET' && tail === 'preview') {
+      // Уменьшенный показ вложения: однопиксельная картинка, вид плитки проверять хватает.
+      await route.fulfill({
+        status: 200,
+        contentType: 'image/png',
+        headers: { ...headers(), 'Cache-Control': 'private, max-age=86400, immutable', ETag: `"${id}-preview1"` },
+        body: Buffer.from(
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+          'base64'
+        )
+      });
       return;
     }
     await route.fallback();

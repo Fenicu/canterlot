@@ -180,6 +180,7 @@ async function feedCards(page: Page, at: 'bottom' | 'top'): Promise<void> {
   await installChatRoutes(page, hub, api, OWNER);
   // Однопиксельная картинка: проверке нужен вид плитки, а не содержимое снимка.
   await page.route(`**/api/v1/attachments/${seed.imageId}/content`, (route) => route.fulfill({ contentType: 'image/png', body: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGPQmNbz//9/BggFADYPCI8NpaO2AAAAAElFTkSuQmCC', 'base64') }));
+  await page.route(`**/api/v1/attachments/${seed.imageId}/preview`, (route) => route.fulfill({ contentType: 'image/png', body: Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGPQmNbz//9/BggFADYPCI8NpaO2AAAAAElFTkSuQmCC', 'base64') }));
   await page.goto(`/c/${seed.id}`);
   await expect(page.locator('.screen[data-ready]')).toBeVisible({ timeout: 15_000 });
   await expect(page.locator('.feed-card').first()).toBeVisible();

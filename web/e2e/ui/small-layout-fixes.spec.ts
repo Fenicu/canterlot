@@ -73,6 +73,7 @@ test.describe('F-09 owner bubble with several images', () => {
     api.bindConversation(id);
     await installChatRoutes(page, hub, api, OWNER);
     await page.route('**/api/v1/attachments/*/content*', (route) => route.fulfill({ contentType: 'image/png', body: screenshotPng(720, 450, 210) }));
+    await page.route('**/api/v1/attachments/*/preview*', (route) => route.fulfill({ contentType: 'image/png', body: screenshotPng(180, 112, 210) }));
     await page.goto(`/c/${id}`);
     await expect(page.locator('[data-ready]').first()).toBeVisible({ timeout: 20_000 });
     await expect(page.locator('article.bubble a.thumb')).toHaveCount(4);

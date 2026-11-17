@@ -16,6 +16,7 @@ async function boot(page: Page, opts: { working?: boolean } = {}): Promise<{ hub
   if (opts.working) api.details.get(seed.id)!.activity = { state: 'working', evidence: {}, since: new Date().toISOString() };
   await installChatRoutes(page, hub, api, OWNER);
   await page.route(`**/api/v1/attachments/${seed.imageId}/content`, (route) => route.fulfill({ contentType: 'image/png', body: PNG }));
+  await page.route(`**/api/v1/attachments/${seed.imageId}/preview`, (route) => route.fulfill({ contentType: 'image/png', body: PNG }));
   await page.goto(`/c/${seed.id}`);
   await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
   await expect(page.locator('.feed [data-row]').first()).toBeVisible({ timeout: 15_000 });

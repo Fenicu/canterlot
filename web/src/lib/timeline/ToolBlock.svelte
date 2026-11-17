@@ -9,7 +9,7 @@
   import StepHead from '#lib/timeline/StepHead.svelte';
   import AttachmentTile from '#lib/timeline/AttachmentTile.svelte';
   import { attachmentKind, attachmentUrl } from '#lib/timeline/attachments.js';
-  import { opensViewer, type ViewerShot } from '#lib/viewer/shots.js';
+  import { opensViewer, shotPreviewSrc, type ViewerShot } from '#lib/viewer/shots.js';
   import type { GalleryAnchor } from '#lib/viewer/gallery.js';
   import ToolOutput from '#lib/timeline/ToolOutput.svelte';
 
@@ -124,7 +124,7 @@
             <!-- Ссылка на сам файл: долгое нажатие и правая кнопка дают меню браузера с картинкой. -->
             <!-- eslint-disable-next-line svelte/no-navigation-without-resolve -->
             <a href={`/api/v1/media/${shot.media_id}`} aria-label="Открыть картинку" onclick={(event) => { if (!opensViewer(event)) return; event.preventDefault(); void view(readyShots.indexOf(shot)); }}>
-              <img src={`/api/v1/media/${shot.media_id}`} alt="" width={shot.width} height={shot.height} loading="lazy" data-viewer-thumb={shot.media_id} />
+              <img src={shotPreviewSrc(shot)} alt="" width={shot.width} height={shot.height} loading="lazy" decoding="async" data-viewer-thumb={shot.media_id} />
             </a>
           {:else if shot.failed}
             <span>Картинка недоступна</span>

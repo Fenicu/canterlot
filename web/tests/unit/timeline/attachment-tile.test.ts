@@ -33,7 +33,7 @@ describe("timeline/AttachmentTile", () => {
   it("a_small_image_is_a_lazy_thumbnail_from_the_authorised_route_that_opens_on_tap", () => {
     const { target, onopen } = render(ref({}));
     const img = target.querySelector("img")!;
-    expect(img.getAttribute("src")).toBe("/api/v1/attachments/att-1/content");
+    expect(img.getAttribute("src")).toBe("/api/v1/attachments/att-1/preview");
     expect(img.getAttribute("loading")).toBe("lazy");
     expect(img.getAttribute("decoding")).toBe("async");
     // Миниатюра — ссылка на сам файл: меню браузера видит и картинку, и ссылку.

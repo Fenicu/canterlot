@@ -1122,6 +1122,10 @@ for (const theme of ['dark', 'light'] as const) {
       fetched.push(route.request().url());
       await route.fulfill({ contentType: 'image/png', body: PNG_2X2 });
     });
+    await page.route('**/api/v1/attachments/*/preview', async (route) => {
+      fetched.push(route.request().url());
+      await route.fulfill({ contentType: 'image/png', body: PNG_2X2 });
+    });
     api.histories.set(id, [withFiles(inputItem(api, 'files', 'accepted', '1', 'с вложениями'))]);
     api.bindConversation(id);
     await page.evaluate((value) => localStorage.setItem('canterlot.theme', value), theme);
@@ -1130,7 +1134,7 @@ for (const theme of ['dark', 'light'] as const) {
     await expect(bubble).toBeVisible();
     const thumb = bubble.locator('img');
     await expect(thumb).toHaveCount(1);
-    await expect(thumb).toHaveAttribute('src', '/api/v1/attachments/att-img/content');
+    await expect(thumb).toHaveAttribute('src', '/api/v1/attachments/att-img/preview');
     await expect(thumb).toHaveAttribute('loading', 'lazy');
     await expect.poll(() => thumb.evaluate((el: HTMLImageElement) => el.complete && el.naturalWidth)).toBe(2);
     // Огромный оригинал, видео и документ не тянутся для миниатюры: байт вложений они не запрашивают.

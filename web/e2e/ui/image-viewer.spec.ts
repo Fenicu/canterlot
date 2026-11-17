@@ -249,11 +249,16 @@ test('swipe_and_arrow_keys_move_between_images_with_the_counter', async ({ page 
   // Текущая картинка стоит ровно в кадре после перехода, соседи уже загружены.
   const frame = await frameState(page);
   expect(Math.abs(frame.left + frame.width / 2 - (frame.stage.left + frame.stage.width / 2))).toBeLessThan(2);
-  // Соседи догружаются после перехода: ждём, а не ловим момент.
+  // Соседи показывают уменьшенный показ, оригинал целиком грузится только для текущей картинки;
+  // уже виденные соседи держат свой оригинал из кеша, чтобы лента не пустела.
   await expect(async () => {
-    const loaded = await dialog.locator('.slide img.full').evaluateAll((nodes) => nodes.map((node) => (node as HTMLImageElement).complete && (node as HTMLImageElement).naturalWidth > 0));
-    expect(loaded.length).toBeGreaterThanOrEqual(2);
-    expect(loaded.every(Boolean)).toBe(true);
+    const kinds = await dialog.locator('.slide img').evaluateAll((nodes) => nodes.map((node) => ({
+      full: (node as HTMLElement).classList.contains('full'),
+      done: (node as HTMLImageElement).complete && (node as HTMLImageElement).naturalWidth > 0
+    })));
+    expect(kinds.filter((item) => item.full).length).toBeGreaterThanOrEqual(1);
+    expect(kinds.length).toBeGreaterThanOrEqual(2);
+    expect(kinds.every((item) => item.done)).toBe(true);
   }).toPass();
 });
 

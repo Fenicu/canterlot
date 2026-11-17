@@ -4,7 +4,7 @@
   import { page } from '$app/state';
   import Icon from '#lib/ui/Icon.svelte';
   import { durationMs, fadeMs } from '#lib/motion.js';
-  import { declaredSize, downloadName, preloads, shotCaption, shotSrc, type ViewerShot } from '#lib/viewer/shots.js';
+  import { declaredSize, downloadName, shotCaption, shotPreviewSrc, shotSrc, type ViewerShot } from '#lib/viewer/shots.js';
   import { Gallery, galleryId, galleryPosition, mergeGalleryShots, type GalleryAnchor, type GalleryItem } from '#lib/viewer/gallery.js';
   import { gallerySource } from '#lib/viewer/gallery-context.js';
   import {
@@ -82,6 +82,8 @@
   let failed = $state<Record<string, boolean>>({});
   /** Миниатюра из ленты, которую можно показать до оригинала. */
   let previews = $state<Record<string, string>>({});
+  /** Показ-миниатюра не загрузился и убран: виден текст загрузки, пока идёт оригинал. */
+  let previewGone = $state<Record<string, boolean>>({});
 
   const list = $derived(galleryShots ?? shots);
   const index = $derived.by(() => {
@@ -340,11 +342,7 @@
     return getComputedStyle(document.documentElement).getPropertyValue('--ease-viewer-open').trim() || 'ease-out';
   }
 
-  function clip(rect: { top: number; right: number; bottom: number; left: number }, radius: number): string {
-    return `inset(${rect.top}px ${rect.right}px ${rect.bottom}px ${rect.left}px round ${radius}px)`;
-  }
-
-  /** Въезд: кадр ложится на миниатюру и раскрывается в вписанный вид, фон проявляется. */
+  /** Въезд: кадр летит из миниатюры в вписанный вид без обрезки слоя: только transform, без clip-path. */
   function enter(): void {
     const natural = naturalOf(shot);
     const target = frameOf(index);
@@ -354,13 +352,9 @@
     const rect = visibleRect(thumb);
     const stageBox = stage.getBoundingClientRect();
     if (duration > 0 && natural && target && rect) {
-      const { view: from, clip: cut } = coverRect({ x: rect.left - stageBox.left, y: rect.top - stageBox.top, width: rect.width, height: rect.height }, natural);
-      const radius = parseFloat(getComputedStyle(thumb!.closest('button, a') ?? document.body).borderTopLeftRadius) || 0;
+      const { view: from } = coverRect({ x: rect.left - stageBox.left, y: rect.top - stageBox.top, width: rect.width, height: rect.height }, natural);
       target.animate(
-        [
-          { transform: transformOf(from), clipPath: clip(cut, radius / from.scale) },
-          { transform: transformOf(view), clipPath: clip({ top: 0, right: 0, bottom: 0, left: 0 }, 0) }
-        ],
+        [{ transform: transformOf(from) }, { transform: transformOf(view) }],
         { duration: durationMs('--duration-viewer-open'), easing: easeToken() }
       );
       backdrop.animate([{ opacity: 0 }, { opacity: 1 }], { duration: durationMs('--duration-viewer-open'), easing: easeToken() });
@@ -370,7 +364,7 @@
     if (fade > 0) dialog.animate([{ opacity: 0 }, { opacity: 1 }], { duration: fadeMs('--duration-viewer-fade') });
   }
 
-  /** Уход: кадр с текущего места возвращается на миниатюру; если её не видно, просмотрщик гаснет. */
+  /** Уход: кадр возвращается на миниатюру без обрезки слоя: только transform, без clip-path. */
   async function leave(): Promise<void> {
     const natural = naturalOf(shot);
     const target = frameOf(index);
@@ -388,14 +382,10 @@
       stopSettling();
       paintNow();
       target.style.transform = transformOf(current);
-      const { view: to, clip: cut } = coverRect({ x: rect.left - stageBox.left, y: rect.top - stageBox.top, width: rect.width, height: rect.height }, natural);
-      const radius = parseFloat(getComputedStyle(thumb!.closest('button, a') ?? document.body).borderTopLeftRadius) || 0;
+      const { view: to } = coverRect({ x: rect.left - stageBox.left, y: rect.top - stageBox.top, width: rect.width, height: rect.height }, natural);
       chrome = false;
       const motion = target.animate(
-        [
-          { transform: transformOf(current), clipPath: clip({ top: 0, right: 0, bottom: 0, left: 0 }, 0) },
-          { transform: transformOf(to), clipPath: clip(cut, radius / to.scale) }
-        ],
+        [{ transform: transformOf(current) }, { transform: transformOf(to) }],
         { duration: durationMs('--duration-viewer-open'), easing: easeToken(), fill: 'forwards' }
       );
       backdrop.animate([{ opacity }, { opacity: 0 }], { duration: durationMs('--duration-viewer-open'), easing: easeToken(), fill: 'forwards' });
@@ -810,10 +800,20 @@
       {@const entry = list[i]!}
       <div class="slide" data-index={i} data-current={i === index ? '' : undefined}>
         <div class="frame" data-ready={ready[entry.media_id] ? '' : undefined}>
-          {#if previews[entry.media_id] && !ready[entry.media_id]}
-            <img class="preview" src={previews[entry.media_id]} alt="" draggable="false" />
+          {#if !ready[entry.media_id] || i !== index}
+            <!-- Фон — уменьшенный показ: оригинал целиком грузится один раз, только для текущей картинки. -->
+            <img
+              class="preview"
+              src={previews[entry.media_id] ?? shotPreviewSrc(entry)}
+              alt=""
+              draggable="false"
+              onerror={(event) => {
+                event.currentTarget.remove();
+                if (i === index) previewGone = { ...previewGone, [entry.media_id]: true };
+              }}
+            />
           {/if}
-          {#if i === index || preloads(entry)}
+          {#if i === index || ready[entry.media_id]}
             <img
               class="full"
               src={shotSrc(entry)}
@@ -827,7 +827,7 @@
         </div>
         {#if failed[entry.media_id]}
           <p class="status">Картинка недоступна</p>
-        {:else if !ready[entry.media_id] && !previews[entry.media_id]}
+        {:else if !ready[entry.media_id] && previewGone[entry.media_id]}
           <p class="status">Картинка загружается</p>
         {/if}
       </div>

@@ -82,18 +82,34 @@ function fileBlock(api: FakeHubApi, n: number, image: string): HistoryBlock {
 }
 
 async function servePictures(page: Page): Promise<void> {
-  const serve = async (route: import('@playwright/test').Route, image: string | undefined) => {
+  const serve = async (route: import('@playwright/test').Route, image: string | undefined, preview: boolean) => {
     if (!image) return route.fallback();
     const n = Number(image.split('-').at(-1)) || 1;
-    await route.fulfill({ contentType: 'image/png', body: screenshotPng(640, 400, (n * 37) % 360) });
+    const body = preview ? screenshotPng(160, 100, (n * 37) % 360) : screenshotPng(640, 400, (n * 37) % 360);
+    await route.fulfill({
+      contentType: 'image/png',
+      body,
+      headers: {
+        'Cache-Control': 'private, max-age=86400, immutable',
+        ETag: preview ? `"${image}-preview1"` : `"${image}"`
+      }
+    });
   };
   await page.route('**/api/v1/attachments/*/content', (route) => {
     const image = route.request().url().split('/attachments/')[1]?.split('/')[0];
-    return serve(route, image);
+    return serve(route, image, false);
+  });
+  await page.route('**/api/v1/attachments/*/preview', (route) => {
+    const image = route.request().url().split('/attachments/')[1]?.split('/')[0];
+    return serve(route, image, true);
   });
   await page.route('**/api/v1/media/*', (route) => {
     const image = route.request().url().split('/media/')[1]?.split('?')[0];
-    return serve(route, image);
+    return serve(route, image, false);
+  });
+  await page.route('**/api/v1/media/*/preview', (route) => {
+    const image = route.request().url().split('/media/')[1]?.split('/')[0];
+    return serve(route, image, true);
   });
 }
 

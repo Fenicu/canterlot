@@ -112,12 +112,25 @@ export async function openChat(page: Page, source: Source, pictures: Picture[] =
   }
   api.bindConversation(id);
   await installChatRoutes(page, hub, api, OWNER);
-  const serve = async (route: import('@playwright/test').Route, picture: Picture | undefined) => {
+  const serve = async (route: import('@playwright/test').Route, picture: Picture | undefined, preview: boolean) => {
     if (!picture) return route.fallback();
-    await route.fulfill({ contentType: 'image/png', body: screenshotPng(picture.width, picture.height, picture.hue) });
+    const body = preview
+      ? screenshotPng(Math.max(1, Math.ceil(picture.width / 4)), Math.max(1, Math.ceil(picture.height / 4)), picture.hue)
+      : screenshotPng(picture.width, picture.height, picture.hue);
+    await route.fulfill({
+      contentType: 'image/png',
+      body,
+      headers: {
+        'Cache-Control': 'private, max-age=86400, immutable',
+        ETag: preview ? `"${picture.id}-preview1"` : `"${picture.id}"`
+      }
+    });
   };
-  await page.route('**/api/v1/media/*', (route) => serve(route, pictures.find((picture) => route.request().url().endsWith(`/media/${picture.id}`))));
-  await page.route('**/api/v1/attachments/*/content', (route) => serve(route, pictures.find((picture) => route.request().url().includes(`/attachments/${picture.id}/`))));
+  const findPicture = (url: string) => pictures.find((picture) => url.endsWith(`/media/${picture.id}`) || url.endsWith(`/media/${picture.id}/preview`) || url.includes(`/attachments/${picture.id}/`));
+  await page.route('**/api/v1/media/*', (route) => serve(route, findPicture(route.request().url()), false));
+  await page.route('**/api/v1/media/*/preview', (route) => serve(route, findPicture(route.request().url()), true));
+  await page.route('**/api/v1/attachments/*/content', (route) => serve(route, findPicture(route.request().url()), false));
+  await page.route('**/api/v1/attachments/*/preview', (route) => serve(route, findPicture(route.request().url()), true));
   await page.goto(`/c/${id}`);
   await expect(page.locator('[data-ready]').first()).toBeVisible({ timeout: 15_000 });
   return { hub, api, id };

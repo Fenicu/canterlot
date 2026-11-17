@@ -76,6 +76,9 @@ test('shared_file_block_opens_an_image_and_downloads_other_files', async ({ page
   await page.route('**/api/v1/attachments/shared-image/content', async (route) => {
     await route.fulfill({ contentType: 'image/png', body: PNG_2X2 });
   });
+  await page.route('**/api/v1/attachments/shared-image/preview', async (route) => {
+    await route.fulfill({ contentType: 'image/png', body: PNG_2X2 });
+  });
   await page.goto(`/c/${id}`);
   await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { declaredSize, downloadName, opensViewer, preloads, shotCaption, shotFormat, shotSrc } from "#lib/viewer/shots.js";
+import { declaredSize, downloadName, opensViewer, shotCaption, shotFormat, shotPreviewSrc, shotSrc } from "#lib/viewer/shots.js";
 
 describe("viewer/shots", () => {
   it("media_and_attachments_have_their_own_addresses", () => {
@@ -27,10 +27,9 @@ describe("viewer/shots", () => {
     expect(declaredSize({ media_id: "m", width: 0, height: 0 })).toBeNull();
   });
 
-  it("heavy_neighbours_are_not_preloaded", () => {
-    expect(preloads({ media_id: "m" })).toBe(true);
-    expect(preloads({ media_id: "m", size: 300_000 })).toBe(true);
-    expect(preloads({ media_id: "m", size: 60 * 1024 * 1024 })).toBe(false);
+  it("preview_uses_the_rendition_and_full_uses_the_original", () => {
+    expect(shotPreviewSrc({ media_id: "m" })).toBe("/api/v1/media/m/preview");
+    expect(shotPreviewSrc({ media_id: "a", src: "/api/v1/attachments/a/content" })).toBe("/api/v1/attachments/a/preview");
   });
 
   it("plain_click_opens_the_viewer_and_modified_clicks_stay_with_the_browser", () => {
