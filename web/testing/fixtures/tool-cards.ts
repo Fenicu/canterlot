@@ -16,6 +16,26 @@ export interface ToolCardsSeed {
 export const LONG_COMMAND = 'cd web && npm ci --no-audit --no-fund && npm run lint:tokens && npm run test:unit -- --reporter=dot 2>&1 | tail -20';
 export const PIPELINE = `rg -n "cardDef\\(" src/lib/timeline | awk -F: '{print $1}' | sort | uniq -c | sort -rn | head -10`;
 
+export const MEETING_RUN = '01a1e8fc-7528-7318-9ce6-f7d54d39a5ad';
+const CI_RUNS = {
+  total_count: 4,
+  workflow_runs: [
+    { id: 901, index_in_repo: 128, title: 'Пузыри инструментов', workflow_id: 'ci.yml', status: 'failure', prettyref: 'canterlot/4d39a5ad', duration: 252_000_000_000, html_url: 'https://forgejo.example/owner/canterlot/actions/runs/128' },
+    { id: 902, index_in_repo: 129, title: 'Выпуск', workflow_id: '.forgejo/workflows/release.yaml', status: 'running', prettyref: 'main', html_url: 'https://forgejo.example/owner/canterlot/actions/runs/129' },
+    { id: 903, index_in_repo: 127, title: 'Документация', workflow_id: 'ci.yml', status: 'success', prettyref: 'main', started: '2026-11-07T09:00:00Z', stopped: '2026-11-07T09:03:30Z', html_url: 'https://forgejo.example/owner/canterlot/actions/runs/127' },
+    { id: 904, index_in_repo: 126, title: 'Черновик', workflow_id: 'ci.yml', status: 'cancelled', prettyref: 'draft/feed' }
+  ]
+};
+const CI_JOBS = { jobs: [{ id: 1, name: 'unit', status: 'success', runs_on: ['docker'] }, { id: 2, name: 'e2e', status: 'failure', runs_on: ['docker'] }, { id: 3, name: 'deploy', status: 'skipped' }] };
+const MEETING_HITS = [
+  { chunk_index: 12, kind: 'transcript', start_seconds: 754.2, end_seconds: 790, speaker_labels: ['Ольга', 'Иван'], text: 'Договорились перенести релиз на четверг, если e2e пройдут и миграция лимитов успеет.', score: 0.82 },
+  { chunk_index: 40, kind: 'transcript', start_seconds: 3725, end_seconds: 3760, speaker_labels: ['Иван'], text: 'Релиз зависит от миграции лимитов.', score: 0.71 },
+  { chunk_index: 41, kind: 'transcript', start_seconds: 3790, end_seconds: 3820, speaker_labels: ['Ольга'], text: 'Тогда в среду вечером заморозка.', score: 0.6 },
+  { chunk_index: 52, kind: 'transcript', start_seconds: 4100, end_seconds: 4130, speaker_labels: ['Иван'], text: 'Ок.', score: 0.4 }
+];
+const MEETING_SUMMARY = ['# Планёрка 3 ноября', '', '## Решения', '- Релиз в четверг', '- Заморозка в среду вечером', '', '## Риски', '- Миграция лимитов', ...Array.from({ length: 200 }, (_, index) => `Строка расшифровки ${index}`)].join('\n');
+const MEETING_TASKS = ['# Задачи', '', '- [ ] **Иван**: доделать миграцию лимитов', '- [ ] Ольга: починить e2e', '- [x] Пётр: подготовить заметки к выпуску', '- [ ] Все: проверить ленту на телефоне'].join('\n');
+
 const TEST_OUTPUT = Array.from({ length: 34 }, (_, index) => (index < 30 ? ` PASS tests/unit/timeline/cards/case-${index + 1}.test.ts (${index + 3} tests) ${12 + index}ms` : ['', ' Test Files  30 passed (30)', '      Tests  465 passed (465)', '   Duration  4.21s'][index - 30]!)).join('\n');
 
 export const REGISTRY_PATH = '/home/owner/canterlot/web/src/lib/timeline/cards/registry.ts';
@@ -121,6 +141,20 @@ export function seedToolCards(api: FakeHubApi, opts: { now?: number; working?: b
   feed.call(explore, 'readOk', 'Read', { file_path: '/home/owner/canterlot/web/src/lib/timeline/QuietRow.svelte' }, '1\t<script lang="ts">');
   feed.call(explore, 'readGone', 'Read', { file_path: '/home/owner/canterlot/web/src/lib/timeline/Gone.svelte' }, '<tool_use_error>File does not exist.</tool_use_error>', {}, { summary: 'error' });
   feed.text(explore, 'Разобралась.');
+
+  const ci = api.id();
+  feed.input('Что с CI и о чём договорились на планёрке?');
+  feed.call(ci, 'ciRuns', 'mcp__forgejo__list_workflow_runs', { owner: 'owner', repo: 'canterlot', limit: 4 }, JSON.stringify(CI_RUNS));
+  feed.text(ci, 'Последний запуск упал, смотрю задания.');
+  feed.call(ci, 'ciJobs', 'forgejo_list_action_run_jobs', { owner: 'owner', repo: 'canterlot', run_id: 901 }, JSON.stringify(CI_JOBS));
+  feed.text(ci, 'Тест e2e. Задача в трекере уже есть.');
+  feed.call(ci, 'ciOther', 'mcp__forgejo__get_issue_by_index', { owner: 'owner', repo: 'canterlot', index: 42 }, '{"number":42,"title":"Падает e2e"}');
+  feed.text(ci, 'Теперь планёрка.');
+  feed.call(ci, 'meetingSearch', 'mcp__meeting-pipeline__search_within_run', { run_id: MEETING_RUN, query: 'релиз' }, MEETING_HITS.map((hit) => JSON.stringify(hit)).join('\n'));
+  feed.text(ci, 'Саммари и задачи.');
+  feed.call(ci, 'meetingSummary', 'mcp__meeting-pipeline__get_summary', { run_id: MEETING_RUN }, MEETING_SUMMARY);
+  feed.call(ci, 'meetingTasks', 'meeting-pipeline_get_tasks', { run_id: MEETING_RUN }, MEETING_TASKS);
+  feed.text(ci, 'Релиз в четверг, если e2e починим.');
 
   api.histories.set(id, items);
   api.bindConversation(id);

@@ -8,9 +8,11 @@ import type { BlockModel } from '#lib/stores/blocks.js';
 import AcceptCard from './AcceptCard.svelte';
 import AlarmListCard from './AlarmListCard.svelte';
 import FindCard from './FindCard.svelte';
+import ForgejoCard from './ForgejoCard.svelte';
 import ReadCard from './ReadCard.svelte';
 import EditCard from './EditCard.svelte';
 import LimitsCard from './LimitsCard.svelte';
+import MeetingCard from './MeetingCard.svelte';
 import QuestionCard from './QuestionCard.svelte';
 import SendCard from './SendCard.svelte';
 import SessionsCard from './SessionsCard.svelte';
@@ -28,10 +30,12 @@ import PlanUpdateCard from './plan/PlanUpdateCard.svelte';
 import { planHref } from './plan/livePlan';
 import { alarmCancel, alarmList, alarmSet } from './defs/alarms';
 import { limits } from './defs/limits';
+import { meeting } from './defs/meeting';
 import { planAdd, planAdopt, planList, planUpdate } from './defs/plan';
 import * as sessions from './defs/sessions';
 import { find, read } from './defs/explore';
 import { edit, patch, write } from './defs/files';
+import { forgejo } from './defs/forgejo';
 import { share } from './defs/share';
 import { shell } from './defs/shell';
 import { todo } from './defs/todo';
@@ -132,7 +136,9 @@ const REGISTRY: Record<string, CardDef<never>> = {
 /** Семейства, где карточка одна на все операции сервера. */
 const FAMILIES: Record<string, CardDef<never>> = {
   taiga: card({ ...taiga, link: (_call, data) => (data.url ? { text: data.ref ? `#${data.ref}` : 'Taiga', href: data.url, external: true } : null) }, TaigaCard),
-  context7: card(context7)
+  context7: card(context7),
+  forgejo: card(forgejo, ForgejoCard),
+  meeting: card(meeting, MeetingCard)
 } as Record<string, CardDef<never>>;
 
 export function cardDef(id: string): CardDef<unknown> | null {

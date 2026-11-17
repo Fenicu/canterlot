@@ -99,13 +99,15 @@ function mcpParts(raw: string): { server: string; tool: string } | null {
 }
 
 /** Известные серверы, чьё имя OpenCode склеивает с инструментом через `_`. */
-const OPENCODE_SERVERS = ['canterlot', 'taiga', 'context7'];
+const OPENCODE_SERVERS = ['canterlot', 'taiga', 'context7', 'forgejo', 'meeting-pipeline', 'meeting_pipeline'];
 
 function fromServer(server: string, tool: string): string | null {
   const name = server.toLowerCase();
   if (name === 'canterlot') return canterlot(tool) ?? `canterlot.${tool}`;
   if (name === 'taiga') return `taiga.${tool.replace(/^taiga_/, '')}`;
   if (name === 'context7') return `context7.${tool}`;
+  if (name === 'forgejo') return `forgejo.${tool}`;
+  if (name === 'meeting-pipeline' || name === 'meeting_pipeline') return `meeting.${tool}`;
   return null;
 }
 

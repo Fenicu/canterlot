@@ -343,3 +343,48 @@ test.describe('reads and searches', () => {
     await shot(page, page.locator('.feed article.card').last(), 'explore-running-permission-phone');
   });
 });
+
+test.describe('mcp family cards', () => {
+  test('forgejo_runs_and_jobs_list_status_words_names_refs_durations_and_links', async ({ page }) => {
+    const { seed } = await boot(page);
+    const runs = await cardOf(page, seed.blocks.ciRuns!);
+    await expect(runs).toHaveAttribute('data-card', 'forgejo.list_workflow_runs');
+    await expect(runs.locator('.head .lead')).toHaveText('CI owner/canterlot · запуски: 4 · 1 сбой · 1 идёт');
+    const rows = runs.locator('[data-role="forgejo-rows"] li');
+    await expect(rows).toHaveCount(4);
+    await expect(rows.locator('[data-role="ci-status"]')).toHaveText(['сбой', 'идёт', 'успех', 'отменён']);
+    await expect(rows.first().locator('[data-role="ci-status"]')).toHaveAttribute('data-tone', 'danger');
+    await expect(rows.first().locator('a')).toHaveAttribute('href', 'https://forgejo.example/owner/canterlot/actions/runs/128');
+    await expect(rows.first().locator('a')).toHaveText('ci #128');
+    await expect(rows.first().locator('[data-role="ci-ref"]')).toHaveText('canterlot/4d39a5ad');
+    await expect(rows.first().locator('[data-role="ci-took"]')).toHaveText('4 мин');
+    expect(await runs.textContent()).not.toMatch(/[✓✔✅]/);
+    await shot(page, runs, 'forgejo-runs-phone');
+    const jobs = await cardOf(page, seed.blocks.ciJobs!);
+    await expect(jobs.locator('.head .lead')).toHaveText('CI owner/canterlot · задания запуска 901: 3 · 1 сбой');
+    await expect(jobs.locator('[data-role="ci-status"]')).toHaveText(['успех', 'сбой', 'пропущен']);
+    const other = await cardOf(page, seed.blocks.ciOther!);
+    await expect(other.locator('.head .lead')).toHaveText('Forgejo · get issue by index owner/canterlot');
+    await expect(other.locator('[data-role="forgejo-rows"]')).toHaveCount(0);
+  });
+
+  test('meeting_cards_say_what_was_searched_and_preview_without_dumping', async ({ page }) => {
+    const { seed } = await boot(page);
+    const search = await cardOf(page, seed.blocks.meetingSearch!);
+    await expect(search).toHaveAttribute('data-card', 'meeting.search_within_run');
+    await expect(search.locator('.head .lead')).toHaveText('Встреча 01a1e8fc: поиск «релиз» · 4 фрагмента');
+    await expect(search.locator('[data-role="meeting-preview"] li')).toHaveCount(3);
+    await expect(search.locator('[data-role="meeting-preview"] li').first()).toContainText('12:34 · Ольга, Иван');
+    await shot(page, search, 'meeting-search-phone');
+    const summary = await cardOf(page, seed.blocks.meetingSummary!);
+    await expect(summary.locator('.head .lead')).toHaveText('Саммари встречи 01a1e8fc');
+    await expect(summary.locator('[data-role="meeting-preview"]')).toHaveText('Планёрка 3 ноября');
+    await expect(summary).not.toContainText('Строка расшифровки');
+    await summary.locator('.head .hit').click();
+    await expect(summary.locator('[data-role="card-raw"]')).toContainText('Строка расшифровки 199');
+    const tasks = await cardOf(page, seed.blocks.meetingTasks!);
+    await expect(tasks.locator('.head .lead')).toHaveText('Задачи встречи 01a1e8fc · 4 задачи');
+    await expect(tasks.locator('[data-role="meeting-preview"] li')).toHaveText(['Иван: доделать миграцию лимитов', 'Ольга: починить e2e', 'Пётр: подготовить заметки к выпуску']);
+    await shot(page, tasks, 'meeting-tasks-phone');
+  });
+});

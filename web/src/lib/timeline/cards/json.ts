@@ -214,3 +214,54 @@ export function obj(value: Json | undefined): JsonObject {
 export function strings(value: Json | undefined): string[] {
   return list(value).filter((item): item is string => typeof item === 'string');
 }
+
+/**
+ * Значения JSON из ответа MCP. Сервер отдаёт список одним массивом, объектом с `result`
+ * или каждым элементом отдельным блоком текста — CLI склеивает блоки переводом строки.
+ */
+export function jsonSequence(text: string | null | undefined): Json[] {
+  const raw = (text ?? '').trim();
+  if (!raw) return [];
+  const whole = parseJson(raw);
+  if (whole.value !== undefined && !whole.partial) return [whole.value];
+  const values: Json[] = [];
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  for (let index = 0; index < raw.length; index++) {
+    const ch = raw[index]!;
+    if (inString) {
+      if (ch === '\\') index += 1;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = depth > 0;
+    else if (ch === '{' || ch === '[') {
+      if (depth === 0) start = index;
+      depth += 1;
+    } else if ((ch === '}' || ch === ']') && depth > 0) {
+      depth -= 1;
+      if (depth === 0 && start >= 0) {
+        const parsed = parseJson(raw.slice(start, index + 1));
+        if (parsed.value !== undefined && !parsed.partial) values.push(parsed.value);
+        start = -1;
+      }
+    }
+  }
+  return values;
+}
+
+/** Список объектов из ответа: массив, `{result: […]}`, `{key: […]}` или объекты подряд. */
+export function jsonItems(text: string | null | undefined, keys: string[] = []): JsonObject[] {
+  const values = jsonSequence(text);
+  if (values.length === 1) {
+    const only = values[0];
+    if (Array.isArray(only)) return only.filter(isObject);
+    if (isObject(only)) {
+      for (const key of [...keys, 'result', 'items']) if (Array.isArray(only[key])) return (only[key] as Json[]).filter(isObject);
+      return [only];
+    }
+    return [];
+  }
+  return values.flatMap((value) => (Array.isArray(value) ? value.filter(isObject) : isObject(value) ? [value] : []));
+}
