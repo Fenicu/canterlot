@@ -47,8 +47,10 @@ web_line=$(grep -E '^[[:space:]]*npx --no-install playwright test e2e/' "$web_ch
 [[ -n "$web_line" && $(printf '%s\n' "$web_line" | grep -c .) == 1 ]] \
     || fail 'check-web.sh: не одна полная команда Playwright вида «npx --no-install playwright test e2e/…»'
 web_filters=${web_line##*playwright test }
-stack_line=$(node -e "process.stdout.write(require('./web/package.json').scripts['test:stack'] || '')")
-[[ "$stack_line" == 'playwright test '* ]] || fail 'web/package.json: test:stack не «playwright test …»'
+# test:stack может быть обёрткой над шардами (node scripts/stack-shards.mjs): она
+# зовёт ту же команду, что и test:stack:single, — «playwright test e2e/stack».
+stack_line=$(node -e "const s = require('./web/package.json').scripts; const v = s['test:stack'] || ''; process.stdout.write(v.startsWith('playwright test ') ? v : (s['test:stack:single'] || ''))")
+[[ "$stack_line" == 'playwright test '* ]] || fail 'web/package.json: нет команды «playwright test …» для сквозных сценариев'
 stack_filters=${stack_line#playwright test }
 read -r -a web_args <<<"$web_filters"
 read -r -a stack_args <<<"$stack_filters"
