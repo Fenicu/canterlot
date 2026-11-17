@@ -1,4 +1,5 @@
 import { fmt } from "#lib/format/ru.js";
+import { providerLabel } from "#lib/format/labels.js";
 import { spanText, untilLong, untilShort, untilText } from "#lib/format/countdown.js";
 
 /** Прогноз хаба по средней скорости расхода окна; нет поля — данных для прогноза мало. */
@@ -44,6 +45,36 @@ export interface ProviderLimits {
   data_confidence?: "exact" | "estimated";
   /** Статус провайдера; `null`, если у провайдера нет страницы статуса или хаб её ещё не читал. */
   status?: ProviderStatus | null;
+  /** Самый ранний конец входа провайдера на машинах владельца; `null` — дата неизвестна. */
+  credential_expires_at?: string | null;
+}
+
+/** За сколько до конца входа провайдера полоса предупреждает. */
+export const CREDENTIAL_WARN_MS = 7 * 24 * 60 * 60 * 1000;
+
+export interface CredentialLine {
+  /** «Вход Claude до 12.12» или предупреждение словами. */
+  text: string;
+  tone: MeterTone;
+}
+
+/**
+ * Строка о конце входа: дата далеко — спокойная подпись, ближе недели — предупреждение,
+ * дата прошла — вход, вероятно, закончился. Ждёт местную дату, как остальные подсказки.
+ */
+export function credentialLine(
+  provider: string,
+  expiresAt: string | null | undefined,
+  now: number,
+): CredentialLine | null {
+  if (!expiresAt) return null;
+  const at = Date.parse(expiresAt);
+  if (!Number.isFinite(at)) return null;
+  const label = providerLabel(provider);
+  if (at < now) return { text: `Вход ${label}, вероятно, закончился — войдите заново`, tone: "danger" };
+  if (at - now <= CREDENTIAL_WARN_MS)
+    return { text: `Вход ${label} заканчивается ${fmt.shortDate(at)} — войдите заново`, tone: "warning" };
+  return { text: `Вход ${label} до ${fmt.shortDate(at)}`, tone: "normal" };
 }
 
 export interface LimitThresholds {

@@ -20,6 +20,8 @@ export interface MachineRecord {
 	warnings: string[];
 	metrics: MachineMetrics | null;
 	harnesses: { id: string; title: string; provider: string; models: { id: string; title: string; efforts: string[]; images?: boolean | null; context_window?: number | null }[]; permission_modes: string[]; settings_midsession?: boolean; settings_midsession_effort?: boolean }[];
+	/** Конец входа провайдера на этой машине: по строке на провайдера с известной датой. */
+	credentials?: { provider: string; expires_at: string; observed_at: string }[];
 	worker_version?: string | null;
 	capabilities?: string[];
 	limits_ok?: boolean;

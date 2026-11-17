@@ -31,6 +31,8 @@
   const view = $derived(limitStrip(providers, now, thresholds, { prefer }));
   const shown = $derived(compact ? view.rows.slice(0, 1) : view.rows);
   const troubled = $derived(view.rows.filter((row) => row.status));
+  /** Конец входа провайдера — строкой под полосой: дата одна на провайдера, окна её не заменяют. */
+  const credentials = $derived(view.rows.filter((row) => row.credential));
 
   const refresher = new LimitsRefresh();
   // Новое показание приходит событием хаба: оно и закрывает ожидание.
@@ -142,6 +144,13 @@
           </span>
         {/each}
       </span>
+      {/if}
+      {#if credentials.length}
+        <span class="credentials">
+          {#each credentials as row (row.provider)}
+            <span class="credential" data-provider={row.provider} data-tone={row.credential?.tone}>{row.credential?.text}</span>
+          {/each}
+        </span>
       {/if}
     </summary>
     <div class="open">
@@ -341,5 +350,10 @@
   .refresh.pending :global(svg) { animation: spin var(--duration-stage-spin) var(--ease-stage-spin) infinite; }
   @keyframes spin { to { transform: rotate(-360deg); } }
   .note { margin: var(--s0); min-height: var(--s0); color: var(--secondary); }
+  /* Конец входа провайдера: тихая подпись, пока дата далеко; тон несут только слова тревоги. */
+  .credentials { display: flex; flex-direction: column; gap: var(--s1); padding: var(--s1) var(--s6) var(--s2); }
+  .credential { color: var(--muted); font-size: var(--fs-xs); overflow-wrap: anywhere; }
+  .credential[data-tone='warning'] { color: var(--warning); }
+  .credential[data-tone='danger'] { color: var(--danger); }
   a { display: inline-flex; align-items: center; min-height: var(--target); color: var(--accent-link); }
 </style>

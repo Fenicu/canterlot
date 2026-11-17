@@ -16,6 +16,7 @@
           <!-- eslint-disable-next-line svelte/no-navigation-without-resolve -- внешняя страница статуса провайдера -->
           <a class="pstatus" data-status-tone={block.providerStatus.tone} href={block.providerStatus.url} target="_blank" rel="noopener noreferrer" title={block.providerStatus.title} aria-label={block.providerStatus.title}>{block.providerStatus.company}: {block.providerStatus.text}</a>{/if}</p>{/if}
       </header>
+      {#if block.credential}<p class="credential" data-provider={block.provider} data-tone={block.credential.tone}>{block.credential.text}</p>{/if}
       {#if block.empty}<p class="none">нет данных</p>
       {:else}<div class="rows">
         {#each block.windows as row (row.key)}
@@ -68,6 +69,10 @@
   .row[data-tone='danger'] .value { color: var(--danger); }
   .row[data-stale] .value { color: var(--muted); font-weight: var(--weight-normal); }
   .none { margin: var(--s0); color: var(--muted); font-size: var(--fs-meta); }
+  /* Конец входа провайдера: дата под шапкой карточки, тревогу несут только слова. */
+  .credential { margin: var(--s0) 0 var(--s6); color: var(--muted); font-size: var(--fs-sm); overflow-wrap: anywhere; }
+  .credential[data-tone='warning'] { color: var(--warning); }
+  .credential[data-tone='danger'] { color: var(--danger); }
   /* В очень узкой карточке сброс уходит под полосу: иначе он вылезает за край. */
   @container (max-width: 15em) {
     .rows { grid-template-columns: max-content minmax(0, 1fr); }

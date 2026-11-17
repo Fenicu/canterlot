@@ -2,6 +2,7 @@ const rules = new Intl.PluralRules('ru');
 const clockFmt = new Intl.DateTimeFormat('ru-RU', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
 const dayFmt = new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'long' });
 const shortDayFmt = new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'short' });
+const shortDateFmt = new Intl.DateTimeFormat('ru-RU', { day: '2-digit', month: '2-digit' });
 const weekdayFmt = new Intl.DateTimeFormat('ru-RU', { weekday: 'short' });
 const numberFmt = new Intl.NumberFormat('ru-RU');
 const fullStampFmts = new Map<string, Intl.DateTimeFormat>();
@@ -96,6 +97,10 @@ export const fmt = {
 		if (sameDay(date, new Date(now))) return clockFmt.format(date);
 		if (dayBefore(new Date(now), date)) return `вчера ${clockFmt.format(date)}`;
 		return `${shortDayFmt.format(date)} ${clockFmt.format(date)}`;
+	},
+	/** Короткая дата без года: «12.12», как в подсказках о конце входа. */
+	shortDate(ts: number): string {
+		return shortDateFmt.format(ts);
 	},
 	/** Дата и время: «28 октября, 15:00», с годом, если он не текущий. */
 	stamp(ts: number, now: number): string {

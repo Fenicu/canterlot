@@ -8,6 +8,7 @@
   import { connectionStale } from '#lib/sync/stale.svelte.js';
   import { ticker } from '#lib/ticker.svelte.js';
   import { fmt } from '#lib/format/ru.js';
+  import { credentialLine } from '#lib/stores/limits.js';
   import { modelLabel } from '#lib/format/labels.js';
   import Segmented from '#lib/ui/Segmented.svelte';
   import SecondaryHeader from '../SecondaryHeader.svelte';
@@ -58,6 +59,10 @@
       <div class="heading"><h2>{machine.name}</h2><span class="availability" data-availability={machine.availability}>{machineStatus(machine.availability)}</span></div>
       {#if machine.os}<p class="note">{({ linux: 'Linux', darwin: 'macOS', windows: 'Windows' } as Record<string, string>)[machine.os] ?? machine.os}</p>{/if}
       {#if machine.worker_version}<p class="note">Версия воркера {machine.worker_version}</p>{/if}
+      {#each machine.credentials ?? [] as credential (credential.provider)}
+        {@const line = credentialLine(credential.provider, credential.expires_at, now)}
+        {#if line}<p class="credential" data-provider={credential.provider} data-tone={line.tone}>{line.text}</p>{/if}
+      {/each}
       {#if machine.availability === 'unavailable'}<p class="notice">Машина не в сети. Данные от последнего сигнала</p>{/if}
       {#if machine.availability === 'degraded'}<p class="notice">Связь нестабильна. Показаны последние полученные данные</p>{/if}
       <div data-stale={stale} class:stale>
@@ -115,6 +120,10 @@
   [data-availability='degraded'], .notice { color: var(--warning); }
   [data-availability='unavailable'] { color: var(--muted); }
   .stale { color: var(--muted); }
+  /* Конец входа провайдера: дата на карточке машины, тревогу несут слова. */
+  .credential { color: var(--muted); font-size: var(--fs-meta); }
+  .credential[data-tone='warning'] { color: var(--warning); }
+  .credential[data-tone='danger'] { color: var(--danger); }
   .stale :global(strong) { color: var(--muted); }
   .stale :global([role='meter'] span) { background: var(--muted); }
   .session-link { display: block; padding: var(--s8); margin-bottom: var(--s4); background: var(--surface); border-radius: var(--radius-card); min-height: var(--target); }

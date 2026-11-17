@@ -363,6 +363,8 @@ export class ListStore {
       provider.weekly_reserve_active = payload.weekly_reserve_active;
       provider.weekly_reserve_resets_at = payload.weekly_reserve_resets_at;
       if (payload.data_confidence) provider.data_confidence = payload.data_confidence;
+      // Дата конца входа меняется и без смены окна: событие лимитов приносит её всегда.
+      if ('credential_expires_at' in payload) provider.credential_expires_at = payload.credential_expires_at as string | null;
       this.limits = next;
       return;
     }

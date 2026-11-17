@@ -1,8 +1,10 @@
 import { providerLabel as label } from "#lib/format/labels.js";
 import {
+  credentialLine,
   dayClock,
   limitView,
   statusBadge,
+  type CredentialLine,
   type LimitThresholds,
   type StatusBadge,
   type MeterView,
@@ -26,6 +28,8 @@ export interface LimitRow {
   estimated: boolean;
   /** Статус провайдера словом, когда он не в порядке; иначе `null`. */
   status: StatusBadge | null;
+  /** Конец входа провайдера; `null` — дата неизвестна (API-ключ, старый воркер). */
+  credential: CredentialLine | null;
 }
 
 export interface LimitStrip {
@@ -72,6 +76,7 @@ export function limitStrip(
       reserve: provider.weekly_reserve_active,
       estimated: provider.data_confidence === "estimated",
       status: statusBadge(provider.provider, provider.status),
+      credential: credentialLine(provider.provider, provider.credential_expires_at, now),
     })),
     tone,
     updated: latest ? `обновлено ${dayClock(latest, now)}` : "",

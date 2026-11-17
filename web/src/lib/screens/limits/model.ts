@@ -84,7 +84,9 @@ export function currentBlocks(providers: ProviderLimits[], now: number, cfg: Lim
       seen: Number.isFinite(seenAt) ? `показание ${dayClock(seenAt, now)}` : '',
       status: lead ? TONE_WORD[lead.tone] : '',
       /** Статус провайдера словом, когда он не в порядке. */
-      providerStatus: row.status
+      providerStatus: row.status,
+      /** Конец входа провайдера: дата, предупреждение или «закончился». */
+      credential: row.credential
     };
   });
 }
