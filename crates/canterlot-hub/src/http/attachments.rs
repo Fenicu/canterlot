@@ -40,6 +40,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .merge(
             OpenApiRouter::new()
                 .routes(routes!(download, upload_offset, upload_chunk))
+                .routes(routes!(preview))
                 .layer(DefaultBodyLimit::disable()),
         )
 }
@@ -256,6 +257,24 @@ fn disposition(name: &str, content_type: &str) -> HeaderValue {
         }
     }
     HeaderValue::from_str(&value).unwrap_or(HeaderValue::from_static("attachment"))
+}
+
+#[utoipa::path(get,path="/api/v1/attachments/{id}/preview",tag="attachments",params(("id"=Uuid,Path)),responses((status=200,description="Уменьшенный показ картинки: JPEG не больше 1024 по длинной стороне; анимация отдаётся как есть; у не-картинок показа нет",content_type="image/jpeg",body=BinaryContent),(status=304,description="Показ не изменился: отдаётся при совпадении If-None-Match")))]
+async fn preview(
+    State(s): State<AppState>,
+    o: Owner,
+    ApiPath(id): ApiPath<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let mut found = attachments::open_for_download(&s.pool, &*s.blobs, o.owner_id, id).await?;
+    // Показ есть только у настоящих картинок: подделка под картинку и текст идут мимо.
+    let shown = served_type(&found.mime, &mut found.file)
+        .await
+        .map_err(AttachmentError::from)?;
+    if !shown.starts_with("image/") {
+        return Err(ApiError::new(ErrorCode::NotFound));
+    }
+    super::preview::serve_preview(found.mime, found.size, found.sha256, found.file, &headers).await
 }
 
 #[utoipa::path(get,path="/api/v1/attachments/{id}/content",tag="attachments",params(("id"=Uuid,Path)),responses((status=200,description="Содержимое готового вложения: проверенная картинка показывается на месте, остальное скачивается; имя файла в Content-Disposition",content_type="application/octet-stream",body=BinaryContent),(status=304,description="Содержимое не изменилось: отдаётся при совпадении If-None-Match")))]

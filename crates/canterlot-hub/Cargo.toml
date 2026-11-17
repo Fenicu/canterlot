@@ -19,6 +19,7 @@ fault-injection = []
 
 [dev-dependencies]
 canterlot-hub = { path = ".", features = ["testkit"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 sha1_smol = "1.0.1"
 jsonschema = { version = "0.60.2", default-features = false }
 rcgen = { version = "0.14.10", default-features = false, features = ["ring", "pem", "crypto"] }
@@ -43,6 +44,7 @@ http-body = "1.1.0"
 http-body-util = { version = "0.1.5", optional = true }
 humantime-serde = "1.1.1"
 hyper-util = { version = "0.1.21", features = ["http1", "server-auto", "service", "tokio"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 ipnet = { version = "2.12.2", features = ["serde"] }
 maxminddb = { version = "0.32.0", features = ["mmap"] }
 prost = "0.14.4"

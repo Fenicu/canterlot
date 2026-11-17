@@ -1840,6 +1840,95 @@ async fn download_supports_if_none_match_with_etag(pool: PgPool) {
     assert!(weak.body.is_empty());
 }
 
+fn real_png(width: u32, height: u32) -> Vec<u8> {
+    let image = image::RgbImage::from_fn(width, height, |x, y| {
+        image::Rgb([(x % 251) as u8, (y % 251) as u8, ((x * y) % 251) as u8])
+    });
+    let mut bytes = Vec::new();
+    image::DynamicImage::ImageRgb8(image)
+        .write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+    bytes
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn preview_serves_downscaled_image_and_rejects_non_images(pool: PgPool) {
+    let _shared = HEAVY.read().await;
+    let f = Fixture::new(pool).await;
+    let bytes = real_png(800, 1200);
+    let id = f.ready("screen.png", "image/png", &bytes).await;
+    let preview = f
+        .client
+        .clone()
+        .send(
+            Method::GET,
+            &format!("/api/v1/attachments/{id}/preview"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(preview.status, 200);
+    assert_eq!(preview.headers["content-type"], "image/jpeg");
+    assert_eq!(
+        preview.headers["cache-control"],
+        "private, max-age=86400, immutable"
+    );
+    let dims = image::ImageReader::new(std::io::Cursor::new(&preview.body))
+        .with_guessed_format()
+        .unwrap()
+        .into_dimensions()
+        .unwrap();
+    assert_eq!(dims.0.max(dims.1), 1024);
+    let etag = preview.headers["etag"].to_str().unwrap().to_owned();
+    assert_eq!(
+        etag,
+        canterlot_hub::rendition::rendition_etag(& {
+            use sha2::Digest;
+            canterlot_hub::attachments::blobstore::hex(&Sha256::digest(&bytes))
+        })
+    );
+    let cached = f
+        .client
+        .clone()
+        .with_header("If-None-Match", &etag)
+        .send(
+            Method::GET,
+            &format!("/api/v1/attachments/{id}/preview"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(cached.status, 304);
+    assert!(cached.body.is_empty());
+    // У текстового файла и чужого id показа нет.
+    let text = f.ready("note.txt", "text/plain", b"hello").await;
+    let denied = f
+        .client
+        .clone()
+        .send(
+            Method::GET,
+            &format!("/api/v1/attachments/{text}/preview"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(denied.status, 404);
+    let unknown = f
+        .client
+        .clone()
+        .send(
+            Method::GET,
+            &format!("/api/v1/attachments/{}/preview", Uuid::now_v7()),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(unknown.status, 404);
+}
+
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn html_named_file_is_served_as_octet_stream_attachment(pool: PgPool) {
     let _shared = HEAVY.read().await;

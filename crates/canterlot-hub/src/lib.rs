@@ -43,6 +43,7 @@ pub mod machine_info;
 pub mod machine_watch;
 pub mod machines;
 pub mod media;
+pub mod rendition;
 pub mod model;
 pub mod model_resolution;
 pub mod notify;

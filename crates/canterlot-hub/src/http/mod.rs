@@ -50,6 +50,7 @@ pub mod openapi;
 pub mod plan;
 pub mod presence;
 pub mod presets;
+pub mod preview;
 pub mod prompt_suggestions;
 pub mod routing;
 pub mod scheduled;

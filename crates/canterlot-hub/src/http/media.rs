@@ -24,7 +24,9 @@ use crate::{
 };
 
 pub fn routes() -> OpenApiRouter<AppState> {
-    OpenApiRouter::new().routes(routes!(get_media))
+    OpenApiRouter::new()
+        .routes(routes!(get_media))
+        .routes(routes!(get_media_preview))
 }
 
 impl From<MediaError> for ApiError {
@@ -80,4 +82,15 @@ async fn get_media(
         HeaderValue::from_static("private, max-age=86400, immutable"),
     );
     Ok((StatusCode::OK, headers, Body::from_stream(stream)).into_response())
+}
+
+#[utoipa::path(get,path="/api/v1/media/{id}/preview",tag="media",params(("id"=Uuid,Path)),responses((status=200,description="Уменьшенный показ картинки: JPEG не больше 1024 по длинной стороне; анимация и слишком крупные файлы отдаются как есть",content((BinaryContent = "image/jpeg"),(BinaryContent = "image/gif"),(BinaryContent = "image/webp"),(BinaryContent = "image/png")),headers(("ETag"=String,description="SHA-256 оригинала плюс версия показа"))),(status=304,description="Показ не изменился: отдаётся при совпадении If-None-Match")))]
+async fn get_media_preview(
+    State(s): State<AppState>,
+    o: Owner,
+    ApiPath(id): ApiPath<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, ApiError> {
+    let found = media::open_for_download(&s.pool, &*s.blobs, o.owner_id, id).await?;
+    super::preview::serve_preview(found.mime, found.size, found.sha256, found.file, &headers).await
 }

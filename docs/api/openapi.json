@@ -306,6 +306,18 @@
               }
             }
           },
+          "304": {
+            "description": "Содержимое не изменилось: отдаётся при совпадении If-None-Match",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            }
+          },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
             "headers": {
@@ -443,6 +455,77 @@
                 },
                 "description": "Принятые байты"
               },
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/attachments/{id}/preview": {
+      "get": {
+        "tags": [
+          "attachments"
+        ],
+        "operationId": "get__api_v1_attachments__id__preview",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Уменьшенный показ картинки: JPEG не больше 1024 по длинной стороне; анимация отдаётся как есть; у не-картинок показа нет",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "image/jpeg": {
+                "schema": {
+                  "$ref": "#/components/schemas/BinaryContent"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "Показ не изменился: отдаётся при совпадении If-None-Match",
+            "headers": {
               "X-Server-Time-Ms": {
                 "schema": {
                   "type": "integer",
@@ -9106,6 +9189,110 @@
                 "schema": {
                   "$ref": "#/components/schemas/BinaryContent"
                 }
+              }
+            }
+          },
+          "304": {
+            "description": "Содержимое не изменилось: отдаётся при совпадении If-None-Match",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/media/{id}/preview": {
+      "get": {
+        "tags": [
+          "media"
+        ],
+        "operationId": "get__api_v1_media__id__preview",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Уменьшенный показ картинки: JPEG не больше 1024 по длинной стороне; анимация и слишком крупные файлы отдаются как есть",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "SHA-256 оригинала плюс версия показа"
+              },
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "image/jpeg": {
+                "schema": {
+                  "$ref": "#/components/schemas/BinaryContent"
+                }
+              },
+              "image/gif": {
+                "schema": {
+                  "$ref": "#/components/schemas/BinaryContent"
+                }
+              },
+              "image/webp": {
+                "schema": {
+                  "$ref": "#/components/schemas/BinaryContent"
+                }
+              },
+              "image/png": {
+                "schema": {
+                  "$ref": "#/components/schemas/BinaryContent"
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "Показ не изменился: отдаётся при совпадении If-None-Match",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
               }
             }
           },

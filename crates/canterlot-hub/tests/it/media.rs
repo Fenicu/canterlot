@@ -898,6 +898,137 @@ async fn media_download_is_immutable_and_supports_if_none_match(pool: PgPool) {
     timeout(WAIT, task).await.unwrap().unwrap();
 }
 
+fn real_png(width: u32, height: u32) -> Vec<u8> {
+    let image = image::RgbImage::from_fn(width, height, |x, y| {
+        image::Rgb([(x % 251) as u8, (y % 251) as u8, ((x * y) % 251) as u8])
+    });
+    let mut bytes = Vec::new();
+    image::DynamicImage::ImageRgb8(image)
+        .write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+    bytes
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn media_preview_serves_downscaled_jpeg_with_cache_headers(pool: PgPool) {
+    let mut f = Media::new(pool.clone()).await;
+    let (mut client, stop, task) = server(f.hub.clone()).await;
+    let block = f.tool_block().await;
+    let bytes = real_png(1600, 1200);
+    let id = Uuid::now_v7();
+    put(&mut client, &f.token, f.header(id, block, &bytes), &bytes)
+        .await
+        .unwrap();
+    f.committed(vec![Media::reference(id, block, &bytes, 1600, 1200)])
+        .await;
+    let preview = f
+        .files
+        .client
+        .clone()
+        .send(
+            Method::GET,
+            &format!("/api/v1/media/{id}/preview"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(preview.status, 200);
+    assert_eq!(preview.headers["content-type"], "image/jpeg");
+    assert_eq!(
+        preview.headers["cache-control"],
+        "private, max-age=86400, immutable"
+    );
+    assert_eq!(preview.headers["content-disposition"], "inline");
+    let dims = image::ImageReader::new(std::io::Cursor::new(&preview.body))
+        .with_guessed_format()
+        .unwrap()
+        .into_dimensions()
+        .unwrap();
+    assert_eq!(dims, (1024, 768));
+    assert!(preview.body.len() < bytes.len());
+    let etag = preview.headers["etag"].to_str().unwrap().to_owned();
+    assert_eq!(
+        etag,
+        canterlot_hub::rendition::rendition_etag(&sha(&bytes))
+    );
+    let cached = f
+        .files
+        .client
+        .clone()
+        .with_header("If-None-Match", &etag)
+        .send(
+            Method::GET,
+            &format!("/api/v1/media/{id}/preview"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(cached.status, 304);
+    assert!(cached.body.is_empty());
+    stop.cancel();
+    timeout(WAIT, task).await.unwrap().unwrap();
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn media_preview_passes_animation_through_and_rejects_unknown(pool: PgPool) {
+    let mut f = Media::new(pool.clone()).await;
+    let (mut client, stop, task) = server(f.hub.clone()).await;
+    let block = f.tool_block().await;
+    let gif = b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;".to_vec();
+    let id = Uuid::now_v7();
+    let header = MediaHeader {
+        media_id: id.to_string(),
+        execution_id: f.execution.to_string(),
+        block_id: block.to_string(),
+        mime: "image/gif".into(),
+        size: gif.len() as u64,
+        sha256: sha(&gif),
+        ..Default::default()
+    };
+    put(&mut client, &f.token, header, &gif).await.unwrap();
+    f.committed(vec![Body::BlockMedia(BlockMedia {
+        block_id: block.to_string(),
+        media_id: id.to_string(),
+        mime: "image/gif".into(),
+        size: gif.len() as u64,
+        sha256: sha(&gif),
+        width: 1,
+        height: 1,
+    })])
+    .await;
+    let preview = f
+        .files
+        .client
+        .clone()
+        .send(
+            Method::GET,
+            &format!("/api/v1/media/{id}/preview"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(preview.status, 200);
+    assert_eq!(preview.headers["content-type"], "image/gif");
+    assert_eq!(preview.body.as_ref(), gif.as_slice());
+    let unknown = f
+        .files
+        .client
+        .clone()
+        .send(
+            Method::GET,
+            &format!("/api/v1/media/{}/preview", Uuid::now_v7()),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(unknown.status, 404);
+    stop.cancel();
+    timeout(WAIT, task).await.unwrap().unwrap();
+}
+
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn gc_keeps_referenced_media_and_removes_unreferenced_after_grace(pool: PgPool) {
     let mut f = Media::new(pool.clone()).await;
