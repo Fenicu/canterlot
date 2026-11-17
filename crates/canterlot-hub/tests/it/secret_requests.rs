@@ -212,6 +212,19 @@ impl Fx {
     }
 
     async fn removed(&self, journal: Uuid, seq: u64, id: Uuid, cap: u64, reason: &str) {
+        self.removed_in(journal, seq, id, self.seed.conversation_id, cap, reason)
+            .await;
+    }
+
+    async fn removed_in(
+        &self,
+        journal: Uuid,
+        seq: u64,
+        id: Uuid,
+        conversation_id: Uuid,
+        cap: u64,
+        reason: &str,
+    ) {
         cj(
             &self.pool,
             &self.registry,
@@ -221,7 +234,7 @@ impl Fx {
             fact_body(record_body::Body::SecretRemoved(
                 canterlot_proto::worker::v1::SecretRemoved {
                     request_id: id.to_string(),
-                    conversation_id: self.seed.conversation_id.to_string(),
+                    conversation_id: conversation_id.to_string(),
                     cap,
                     reason: reason.into(),
                 },
@@ -1206,6 +1219,71 @@ async fn an_epoch_change_marks_delivered_requests_lost(pool: PgPool) {
     assert!(lost.path.is_none(), "the path points at a vanished tmpfs");
     assert_eq!(lost.note.as_deref(), Some(secrets::NOTE_LOST));
     assert_eq!(fx.obligation(row.id).await, Some((1, "epoch".into(), 0)));
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_removal_receipt_from_another_conversation_is_ignored(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let row = fx.open("Чужой разговор").await;
+    sqlx::query("update secret_requests set state='revoking', generation=1 where id=$1")
+        .bind(row.id)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "insert into secret_revocations
+            (id, machine_id, conversation_id, request_id, up_to, reason, next_attempt_at)
+         values ($1, $2, $3, $4, 1, 'revoked', now())",
+    )
+    .bind(Uuid::now_v7())
+    .bind(fx.seed.machine_id)
+    .bind(fx.seed.conversation_id)
+    .bind(row.id)
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+    let journal = Uuid::now_v7();
+    fx.removed_in(journal, 1, row.id, Uuid::now_v7(), 1, "revoked")
+        .await;
+    assert_eq!(
+        fx.state(row.id).await,
+        "revoking",
+        "another conversation cannot confirm this file"
+    );
+    assert!(
+        fx.obligation(row.id).await.is_some(),
+        "the obligation is not closed by a foreign conversation"
+    );
+    fx.removed_in(journal, 2, row.id, fx.seed.conversation_id, 1, "revoked")
+        .await;
+    assert_eq!(fx.state(row.id).await, "revoked");
+    assert!(fx.obligation(row.id).await.is_none());
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_delivery_receipt_from_another_conversation_is_ignored(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let row = fx.open("Чужой разговор доставки").await;
+    sqlx::query("update secret_requests set state='sending', generation=1 where id=$1")
+        .bind(row.id)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    let fact = canterlot_proto::worker::v1::SecretDelivered {
+        request_id: row.id.to_string(),
+        conversation_id: Uuid::now_v7().to_string(),
+        generation: 1,
+        path: "/run/foreign".into(),
+        expires_at_ms: u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap(),
+    };
+    let mut tx = canterlot_hub::db::begin(&fx.pool).await.unwrap();
+    secrets::apply_delivered_in_tx(&mut tx, fx.seed.machine_id, &fact, Uuid::now_v7(), None)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let kept = fx.row(row.id).await;
+    assert_eq!(kept.state, secrets::SecretState::Sending);
+    assert!(kept.path.is_none(), "a foreign path is not recorded");
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]

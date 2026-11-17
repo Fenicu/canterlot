@@ -656,9 +656,35 @@ pub async fn lose_generation(
     Ok(Some(row))
 }
 
+fn receipt_mismatch(kind: &str, machine_id: Uuid, request_id: Uuid, conversation_id: Uuid) {
+    tracing::warn!(
+        kind = "secret_receipt_mismatch",
+        receipt = kind,
+        machine_id = %machine_id,
+        request_id = %request_id,
+        conversation_id = %conversation_id,
+        "secret receipt does not name the request's conversation"
+    );
+}
+
+async fn request_conversation(
+    conn: &mut PgConnection,
+    machine_id: Uuid,
+    request_id: Uuid,
+) -> Result<Option<Uuid>, sqlx::Error> {
+    sqlx::query_scalar(
+        "select conversation_id from secret_requests where id = $1 and machine_id = $2",
+    )
+    .bind(request_id)
+    .bind(machine_id)
+    .fetch_optional(&mut *conn)
+    .await
+}
+
 /// Квитанция воркера: файл записан. Принимается только для текущего `sending`
-/// того же поколения; опоздавшая квитанция ничего не меняет — обязательство на
-/// мёртвое поколение уже создано правилом недействительности.
+/// того же поколения и того же разговора; опоздавшая квитанция ничего не
+/// меняет — обязательство на мёртвое поколение уже создано правилом
+/// недействительности.
 pub async fn apply_delivered_in_tx(
     conn: &mut PgConnection,
     machine_id: Uuid,
@@ -670,16 +696,16 @@ pub async fn apply_delivered_in_tx(
         return Ok(());
     };
     let generation = i64::try_from(fact.generation).unwrap_or(i64::MAX);
-    let Some(conversation_id): Option<Uuid> = sqlx::query_scalar(
-        "select conversation_id from secret_requests where id = $1 and machine_id = $2",
-    )
-    .bind(request_id)
-    .bind(machine_id)
-    .fetch_optional(&mut *conn)
-    .await?
-    else {
+    let Some(conversation_id) = parse_uuid(&fact.conversation_id) else {
         return Ok(());
     };
+    let Some(expected) = request_conversation(conn, machine_id, request_id).await? else {
+        return Ok(());
+    };
+    if expected != conversation_id {
+        receipt_mismatch("delivered", machine_id, request_id, conversation_id);
+        return Ok(());
+    }
     sqlx::query("select id from conversations where id = $1 for no key update")
         .bind(conversation_id)
         .execute(&mut *conn)
@@ -793,16 +819,16 @@ pub async fn apply_failed_in_tx(
         return Ok(());
     };
     let generation = i64::try_from(fact.generation).unwrap_or(i64::MAX);
-    let Some(conversation_id): Option<Uuid> = sqlx::query_scalar(
-        "select conversation_id from secret_requests where id = $1 and machine_id = $2",
-    )
-    .bind(request_id)
-    .bind(machine_id)
-    .fetch_optional(&mut *conn)
-    .await?
-    else {
+    let Some(conversation_id) = parse_uuid(&fact.conversation_id) else {
         return Ok(());
     };
+    let Some(expected) = request_conversation(conn, machine_id, request_id).await? else {
+        return Ok(());
+    };
+    if expected != conversation_id {
+        receipt_mismatch("delivered", machine_id, request_id, conversation_id);
+        return Ok(());
+    }
     sqlx::query("select id from conversations where id = $1 for no key update")
         .bind(conversation_id)
         .execute(&mut *conn)
@@ -811,12 +837,14 @@ pub async fn apply_failed_in_tx(
         "update secret_requests
          set state = 'lost', note = $3, revision = revision + 1, updated_at = now()
          where id = $1 and machine_id = $2 and state = 'sending' and generation = $4
+           and conversation_id = $5
          returning *",
     )
     .bind(request_id)
     .bind(machine_id)
     .bind(NOTE_LOST)
     .bind(generation)
+    .bind(conversation_id)
     .fetch_optional(&mut *conn)
     .await?;
     let Some(row) = row else {
@@ -852,6 +880,15 @@ pub async fn apply_removed_in_tx(
     let Some(request_id) = parse_uuid(&fact.request_id) else {
         return Ok(());
     };
+    let Some(conversation_id) = parse_uuid(&fact.conversation_id) else {
+        return Ok(());
+    };
+    if let Some(expected) = request_conversation(conn, machine_id, request_id).await?
+        && expected != conversation_id
+    {
+        receipt_mismatch("removed", machine_id, request_id, conversation_id);
+        return Ok(());
+    }
     let cap = fact.cap;
     // Команда этого или более старого поколения исполнена: повтор теперь ведёт
     // только обязательство, иначе завершённая команда навсегда занимала бы место
@@ -859,6 +896,7 @@ pub async fn apply_removed_in_tx(
     retire_revoke_commands_in_tx(
         conn,
         machine_id,
+        conversation_id,
         request_id,
         cap,
         json!({"removed": true, "reason": fact.reason}),
@@ -867,21 +905,25 @@ pub async fn apply_removed_in_tx(
     // Старый `cap` не закрывает более новое обязательство.
     sqlx::query(
         "delete from secret_revocations
-         where machine_id = $1 and request_id = $2 and up_to <= $3",
+         where machine_id = $1 and request_id = $2 and conversation_id = $3
+           and up_to <= $4",
     )
     .bind(machine_id)
     .bind(request_id)
+    .bind(conversation_id)
     .bind(i64::try_from(cap).unwrap_or(i64::MAX))
     .execute(&mut *conn)
     .await?;
     // Осталось частичное обязательство: повторяем после паузы.
-    reschedule_partial_obligation(conn, machine_id, request_id).await?;
+    reschedule_partial_obligation(conn, machine_id, conversation_id, request_id).await?;
 
     let Some(conversation_id): Option<Uuid> = sqlx::query_scalar(
-        "select conversation_id from secret_requests where id = $1 and machine_id = $2",
+        "select conversation_id from secret_requests
+         where id = $1 and machine_id = $2 and conversation_id = $3",
     )
     .bind(request_id)
     .bind(machine_id)
+    .bind(conversation_id)
     .fetch_optional(&mut *conn)
     .await?
     else {
@@ -899,12 +941,13 @@ pub async fn apply_removed_in_tx(
              set state = 'expired', path = null, expires_at = null, note = null,
                  send_deadline_at = null, revision = revision + 1, updated_at = now()
              where id = $1 and machine_id = $2 and generation <= $3
-               and state in ('revoking', 'delivered')
+               and conversation_id = $4 and state in ('revoking', 'delivered')
              returning *",
         )
         .bind(request_id)
         .bind(machine_id)
         .bind(i64::try_from(cap).unwrap_or(i64::MAX))
+        .bind(conversation_id)
         .fetch_optional(&mut *conn)
         .await?
     } else {
@@ -912,12 +955,14 @@ pub async fn apply_removed_in_tx(
             "update secret_requests
              set state = 'revoked', path = null, expires_at = null, note = null,
                  send_deadline_at = null, revision = revision + 1, updated_at = now()
-             where id = $1 and machine_id = $2 and generation <= $3 and state = 'revoking'
+             where id = $1 and machine_id = $2 and generation <= $3
+               and conversation_id = $4 and state = 'revoking'
              returning *",
         )
         .bind(request_id)
         .bind(machine_id)
         .bind(i64::try_from(cap).unwrap_or(i64::MAX))
+        .bind(conversation_id)
         .fetch_optional(&mut *conn)
         .await?
     };
@@ -945,9 +990,19 @@ pub async fn apply_remove_failed_in_tx(
     let Some(request_id) = parse_uuid(&fact.request_id) else {
         return Ok(());
     };
+    let Some(conversation_id) = parse_uuid(&fact.conversation_id) else {
+        return Ok(());
+    };
+    if let Some(expected) = request_conversation(conn, machine_id, request_id).await?
+        && expected != conversation_id
+    {
+        receipt_mismatch("remove_failed", machine_id, request_id, conversation_id);
+        return Ok(());
+    }
     retire_revoke_commands_in_tx(
         conn,
         machine_id,
+        conversation_id,
         request_id,
         fact.cap,
         json!({"removed": false, "reason": fact.reason}),
@@ -956,6 +1011,7 @@ pub async fn apply_remove_failed_in_tx(
     retry_obligation(
         conn,
         machine_id,
+        conversation_id,
         request_id,
         i64::try_from(fact.cap).unwrap_or(i64::MAX),
     )
@@ -964,7 +1020,7 @@ pub async fn apply_remove_failed_in_tx(
         "update secret_requests
          set note = $3, revision = revision + 1, updated_at = now()
          where id = $1 and machine_id = $2 and state = 'revoking'
-           and generation <= $4
+           and generation <= $4 and conversation_id = $5
          returning *",
     )
     .bind(request_id)
@@ -974,6 +1030,7 @@ pub async fn apply_remove_failed_in_tx(
         crate::delivery::receipts::sanitize_reason(&fact.reason)
     ))
     .bind(i64::try_from(fact.cap).unwrap_or(i64::MAX))
+    .bind(conversation_id)
     .fetch_optional(&mut *conn)
     .await?
     else {
@@ -1089,6 +1146,7 @@ async fn raise_revocation_in_tx(
 async fn retire_revoke_commands_in_tx(
     conn: &mut PgConnection,
     machine_id: Uuid,
+    conversation_id: Uuid,
     request_id: Uuid,
     cap: u64,
     result: serde_json::Value,
@@ -1096,14 +1154,16 @@ async fn retire_revoke_commands_in_tx(
     sqlx::query(
         "update commands
          set delivery_state = 'completed', completed_at = coalesce(completed_at, now()),
-             result = $4
+             result = $5
          where machine_id = $1 and kind = 'revoke_secret'
            and payload->>'request_id' = $2
-           and coalesce((payload->>'up_to')::bigint, 0) <= $3
+           and payload->>'conversation_id' = $3
+           and coalesce((payload->>'up_to')::bigint, 0) <= $4
            and delivery_state <> 'completed'",
     )
     .bind(machine_id)
     .bind(request_id.to_string())
+    .bind(conversation_id.to_string())
     .bind(i64::try_from(cap).unwrap_or(i64::MAX))
     .bind(result)
     .execute(&mut *conn)
@@ -1116,15 +1176,18 @@ async fn retire_revoke_commands_in_tx(
 async fn retry_obligation(
     conn: &mut PgConnection,
     machine_id: Uuid,
+    conversation_id: Uuid,
     request_id: Uuid,
     cap: i64,
 ) -> Result<(), sqlx::Error> {
     let attempts: Option<i32> = sqlx::query_scalar(
         "select attempts from secret_revocations
-         where machine_id = $1 and request_id = $2 and up_to <= $3",
+         where machine_id = $1 and request_id = $2 and conversation_id = $3
+           and up_to <= $4",
     )
     .bind(machine_id)
     .bind(request_id)
+    .bind(conversation_id)
     .bind(cap)
     .fetch_optional(&mut *conn)
     .await?;
@@ -1135,12 +1198,14 @@ async fn retry_obligation(
     sqlx::query(
         "update secret_revocations
          set attempts = attempts + 1,
-             next_attempt_at = now() + ($4::bigint * interval '1 second'),
+             next_attempt_at = now() + ($5::bigint * interval '1 second'),
              updated_at = now()
-         where machine_id = $1 and request_id = $2 and up_to <= $3",
+         where machine_id = $1 and request_id = $2 and conversation_id = $3
+           and up_to <= $4",
     )
     .bind(machine_id)
     .bind(request_id)
+    .bind(conversation_id)
     .bind(cap)
     .bind(i64::try_from(next).unwrap_or(600))
     .execute(&mut *conn)
@@ -1152,13 +1217,16 @@ async fn retry_obligation(
 async fn reschedule_partial_obligation(
     conn: &mut PgConnection,
     machine_id: Uuid,
+    conversation_id: Uuid,
     request_id: Uuid,
 ) -> Result<(), sqlx::Error> {
     let attempts: Option<i32> = sqlx::query_scalar(
-        "select attempts from secret_revocations where machine_id = $1 and request_id = $2",
+        "select attempts from secret_revocations
+         where machine_id = $1 and request_id = $2 and conversation_id = $3",
     )
     .bind(machine_id)
     .bind(request_id)
+    .bind(conversation_id)
     .fetch_optional(&mut *conn)
     .await?;
     let Some(attempts) = attempts else {
@@ -1167,12 +1235,13 @@ async fn reschedule_partial_obligation(
     let next = backoff_seconds(attempts.saturating_add(1));
     sqlx::query(
         "update secret_revocations
-         set next_attempt_at = now() + ($3::bigint * interval '1 second'),
+         set next_attempt_at = now() + ($4::bigint * interval '1 second'),
              updated_at = now()
-         where machine_id = $1 and request_id = $2",
+         where machine_id = $1 and request_id = $2 and conversation_id = $3",
     )
     .bind(machine_id)
     .bind(request_id)
+    .bind(conversation_id)
     .bind(i64::try_from(next).unwrap_or(10))
     .execute(&mut *conn)
     .await?;
@@ -1214,6 +1283,13 @@ pub async fn on_revoke_rejected_in_tx(
         .and_then(serde_json::Value::as_u64)
         .and_then(|value| i64::try_from(value).ok())
         .unwrap_or(0);
+    let Some(conversation_id) = payload
+        .get("conversation_id")
+        .and_then(|value| value.as_str())
+        .and_then(parse_uuid)
+    else {
+        return Ok(());
+    };
     sqlx::query(
         "update commands
          set delivery_state = 'completed', completed_at = coalesce(completed_at, now()),
@@ -1224,7 +1300,7 @@ pub async fn on_revoke_rejected_in_tx(
     .bind(dispatch_attempt)
     .execute(&mut *conn)
     .await?;
-    retry_obligation(conn, machine_id, request_id, up_to).await?;
+    retry_obligation(conn, machine_id, conversation_id, request_id, up_to).await?;
     tracing::warn!(
         kind = "secret_revoke_rejected",
         reason = %crate::delivery::receipts::sanitize_reason(reason),
