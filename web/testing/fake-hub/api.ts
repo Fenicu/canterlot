@@ -28,6 +28,17 @@ type BookmarkPage = components['schemas']['BookmarkPage'];
 type ImagesPage = components['schemas']['ImagesPage'];
 type ImageItem = components['schemas']['ImageItem'];
 
+/** Отказ фиктивного хаба по ревизии: несёт актуальный черновик для ответа 409. */
+export class FakeDraftConflict extends Error {
+	readonly record: DraftRecord;
+
+	constructor(record: DraftRecord) {
+		super('draft_revision_conflict');
+		this.name = 'FakeDraftConflict';
+		this.record = record;
+	}
+}
+
 const SEARCH_CAP = 200;
 const SEARCH_WINDOW = 90;
 
@@ -663,11 +674,17 @@ export class FakeHubApi {
 
 	putDraft(
 		id: string,
-		body: { text: string; attachment_ids?: string[]; device_id?: string | null }
+		body: { text: string; attachment_ids?: string[]; device_id?: string | null; base_revision?: number }
 	): DraftRecord {
-		const revision = ++this.draftRevision;
+		const current = this.drafts.get(id);
 		const attachment_ids = body.attachment_ids ?? [];
-		if (body.text === '' && attachment_ids.length === 0) {
+		const empty = body.text === '' && attachment_ids.length === 0;
+		const base = body.base_revision ?? 0;
+		if (current && base !== current.revision && !(empty && base === 0)) {
+			throw new FakeDraftConflict(current);
+		}
+		const revision = ++this.draftRevision;
+		if (empty) {
 			this.drafts.delete(id);
 			const record: DraftRecord = { text: '', attachment_ids: [], revision, updated_at: null };
 			this.hub.append(`conversation:${id}`, {

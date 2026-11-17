@@ -1,6 +1,6 @@
 import type { Page } from '@playwright/test';
 import type { FakeHub } from './hub';
-import { NUDGE_BUILTIN_TEXT, type FakeHubApi } from './api';
+import { FakeDraftConflict, NUDGE_BUILTIN_TEXT, type FakeHubApi } from './api';
 import { APP_VERSION } from '../version';
 import { installAuthRoutes } from './auth';
 
@@ -93,16 +93,36 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
         const body = route.request().postDataJSON() as {
           text?: string;
           attachment_ids?: string[];
+          base_revision?: number;
           device_id?: string | null;
         };
-        await route.fulfill({
-          headers,
-          json: api.putDraft(id, {
-            text: body.text ?? '',
-            attachment_ids: body.attachment_ids ?? [],
-            device_id: body.device_id ?? null
-          })
-        });
+        try {
+          await route.fulfill({
+            headers,
+            json: api.putDraft(id, {
+              text: body.text ?? '',
+              attachment_ids: body.attachment_ids ?? [],
+              base_revision: body.base_revision ?? 0,
+              device_id: body.device_id ?? null
+            })
+          });
+        } catch (err) {
+          if (!(err instanceof FakeDraftConflict)) throw err;
+          await route.fulfill({
+            status: 409,
+            headers,
+            json: {
+              error: {
+                code: 'draft_revision_conflict',
+                message: 'Черновик уже изменён с другого устройства',
+                scope: 'browser',
+                retry: 'after_condition',
+                correlation_id: '00000000-0000-4000-8000-0000000000d3',
+                details: { draft: err.record }
+              }
+            }
+          });
+        }
         return;
       }
     }
