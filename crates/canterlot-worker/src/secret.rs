@@ -738,6 +738,19 @@ fn wipe_root(root: &PinnedDir) -> Result<(), Failure> {
 
 fn prepare_storage_inner(config: &SecretConfig, data_dir: &Path) -> Result<(), Failure> {
     let (base, root) = open_base(config)?;
+    // Подготовка — тоже операция хранилища: один писатель и между процессами.
+    let lock_fd = openat(
+        base.fd(),
+        ".lock",
+        OFlags::CREATE
+            .union(OFlags::RDWR)
+            .union(OFlags::NOFOLLOW)
+            .union(OFlags::CLOEXEC),
+        Mode::from_bits_truncate(0o600),
+    )
+    .map_err(|_| Failure::Io)?;
+    let _lock = std::fs::File::from(lock_fd);
+    flock(&_lock, FlockOperation::LockExclusive).map_err(|_| Failure::Io)?;
     let stat = fstat(base.fd()).map_err(|_| Failure::InsecureDirectory)?;
     let identity = RootIdentity {
         path: root.display().to_string(),
