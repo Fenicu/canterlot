@@ -1885,7 +1885,7 @@ async fn preview_serves_downscaled_image_and_rejects_non_images(pool: PgPool) {
     let etag = preview.headers["etag"].to_str().unwrap().to_owned();
     assert_eq!(
         etag,
-        canterlot_hub::rendition::rendition_etag(& {
+        canterlot_hub::rendition::rendition_etag(&{
             use sha2::Digest;
             canterlot_hub::attachments::blobstore::hex(&Sha256::digest(&bytes))
         })

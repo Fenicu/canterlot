@@ -38,10 +38,7 @@ pub fn rendition(original: &[u8], mime: &str) -> Rendition {
     let Some((width, height)) = dims else {
         return Rendition::Original;
     };
-    if width == 0
-        || height == 0
-        || u64::from(width) * u64::from(height) > MAX_RENDITION_PIXELS
-    {
+    if width == 0 || height == 0 || u64::from(width) * u64::from(height) > MAX_RENDITION_PIXELS {
         return Rendition::Original;
     }
     let image = match image::load_from_memory_with_format(original, format) {
@@ -123,10 +120,7 @@ mod tests {
     #[test]
     fn animation_and_webp_pass_through() {
         let gif = b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff!\xf9\x04\x01\x00\x00\x00\x00,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;".to_vec();
-        assert!(matches!(
-            rendition(&gif, "image/gif"),
-            Rendition::Original
-        ));
+        assert!(matches!(rendition(&gif, "image/gif"), Rendition::Original));
         let webp = png(4, 4);
         assert!(matches!(
             rendition(&webp, "image/webp"),
@@ -140,10 +134,7 @@ mod tests {
         let mut huge = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR".to_vec();
         huge.extend(10_000u32.to_be_bytes());
         huge.extend(10_000u32.to_be_bytes());
-        assert!(matches!(
-            rendition(&huge, "image/png"),
-            Rendition::Original
-        ));
+        assert!(matches!(rendition(&huge, "image/png"), Rendition::Original));
         assert!(matches!(
             rendition(b"not an image", "image/png"),
             Rendition::Original

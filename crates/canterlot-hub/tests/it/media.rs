@@ -889,7 +889,10 @@ async fn media_download_is_immutable_and_supports_if_none_match(pool: PgPool) {
         .files
         .client
         .clone()
-        .with_header("If-None-Match", "\"0000000000000000000000000000000000000000000000000000000000000000\"")
+        .with_header(
+            "If-None-Match",
+            "\"0000000000000000000000000000000000000000000000000000000000000000\"",
+        )
         .send(Method::GET, &format!("/api/v1/media/{id}"), None, None)
         .await;
     assert_eq!(other.status, 200);
@@ -950,10 +953,7 @@ async fn media_preview_serves_downscaled_jpeg_with_cache_headers(pool: PgPool) {
     assert_eq!(dims, (1024, 768));
     assert!(preview.body.len() < bytes.len());
     let etag = preview.headers["etag"].to_str().unwrap().to_owned();
-    assert_eq!(
-        etag,
-        canterlot_hub::rendition::rendition_etag(&sha(&bytes))
-    );
+    assert_eq!(etag, canterlot_hub::rendition::rendition_etag(&sha(&bytes)));
     let cached = f
         .files
         .client

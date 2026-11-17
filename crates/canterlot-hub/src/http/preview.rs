@@ -37,20 +37,24 @@ pub async fn serve_preview(
         .read_to_end(&mut original)
         .await
         .map_err(|_| ApiError::new(ErrorCode::Internal))?;
-    let rendered = tokio::task::spawn_blocking(move || match rendition::rendition(&original, &mime) {
-        Rendition::Scaled { bytes, .. } => (bytes, "image/jpeg".to_owned()),
-        // Оригинал возвращается из потока вместе с решением: без лишнего копирования.
-        Rendition::Original => (original, mime),
-    })
-    .await
-    .map_err(|_| ApiError::new(ErrorCode::Internal))?;
+    let rendered =
+        tokio::task::spawn_blocking(move || match rendition::rendition(&original, &mime) {
+            Rendition::Scaled { bytes, .. } => (bytes, "image/jpeg".to_owned()),
+            // Оригинал возвращается из потока вместе с решением: без лишнего копирования.
+            Rendition::Original => (original, mime),
+        })
+        .await
+        .map_err(|_| ApiError::new(ErrorCode::Internal))?;
     let (bytes, content_type) = rendered;
     let content_type =
         HeaderValue::from_str(&content_type).map_err(|_| ApiError::new(ErrorCode::Internal))?;
     let etag = HeaderValue::from_str(&etag).map_err(|_| ApiError::new(ErrorCode::Internal))?;
     let mut headers = HeaderMap::new();
     headers.insert(header::CONTENT_TYPE, content_type);
-    headers.insert(header::CONTENT_LENGTH, HeaderValue::from(bytes.len() as u64));
+    headers.insert(
+        header::CONTENT_LENGTH,
+        HeaderValue::from(bytes.len() as u64),
+    );
     headers.insert(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),

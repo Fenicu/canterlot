@@ -70,26 +70,20 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 const MIN_PROXY_SECRET_BYTES: usize = 32;
 
 /// Совпадение `If-None-Match` со слабым сравнением: `*` или тот же opaque-tag после снятия `W/`.
-pub fn etag_matches(
-    headers: &axum::http::HeaderMap,
-    etag: &str,
-) -> bool {
+pub fn etag_matches(headers: &axum::http::HeaderMap, etag: &str) -> bool {
     use axum::http::header::IF_NONE_MATCH;
-    headers
-        .get_all(IF_NONE_MATCH)
-        .iter()
-        .any(|value| {
-            let Ok(value) = value.to_str() else {
-                return false;
-            };
-            value.split(',').any(|tag| {
-                let tag = tag.trim();
-                if tag == "*" {
-                    return true;
-                }
-                tag.strip_prefix("W/").unwrap_or(tag).trim() == etag
-            })
+    headers.get_all(IF_NONE_MATCH).iter().any(|value| {
+        let Ok(value) = value.to_str() else {
+            return false;
+        };
+        value.split(',').any(|tag| {
+            let tag = tag.trim();
+            if tag == "*" {
+                return true;
+            }
+            tag.strip_prefix("W/").unwrap_or(tag).trim() == etag
         })
+    })
 }
 
 pub struct AppDeps {
