@@ -823,10 +823,7 @@ fn revoke_locked(lock: &BaseLock, request_id: Uuid, conversation_id: Uuid, up_to
         return true;
     };
     let manifest = read_manifest(dir.fd(), request_id);
-    let manifest = match manifest {
-        Ok(manifest) => manifest,
-        Err(_) => None,
-    };
+    let manifest = manifest.unwrap_or_default();
     let covers = manifest
         .as_ref()
         .is_some_and(|manifest| manifest.generation <= up_to);
@@ -958,7 +955,7 @@ pub fn recover(config: &SecretConfig) -> Recovered {
             }
             let unlinked = unlinkat(dir.fd(), &file, AtFlags::empty()).is_ok();
             let manifest_unlinked = matches!(
-                unlinkat(dir.fd(), &manifest_name(request_id), AtFlags::empty()),
+                unlinkat(dir.fd(), manifest_name(request_id), AtFlags::empty()),
                 Ok(()) | Err(Errno::NOENT)
             );
             if unlinked && manifest_unlinked {
@@ -1039,7 +1036,7 @@ pub fn sweep(config: &SecretConfig, now: u64) -> Swept {
                         Ok(()) | Err(Errno::NOENT)
                     );
                     let manifest_gone = matches!(
-                        unlinkat(dir.fd(), &manifest_name(request_id), AtFlags::empty()),
+                        unlinkat(dir.fd(), manifest_name(request_id), AtFlags::empty()),
                         Ok(()) | Err(Errno::NOENT)
                     );
                     if !(value_gone && manifest_gone) {

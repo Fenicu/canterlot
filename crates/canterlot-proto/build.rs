@@ -23,6 +23,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ".canterlot.worker.v1.ControlDown.msg",
             "#[allow(clippy::large_enum_variant)]",
         )
+        // `Hello` растёт аддитивно (эпоха хранилища): форма oneof не меняется,
+        // и вариант с `Hello` больше остальных в обоих потоках.
+        .type_attribute(
+            ".canterlot.worker.v1.ControlUp.msg",
+            "#[allow(clippy::large_enum_variant)]",
+        )
+        .type_attribute(
+            ".canterlot.worker.v1.DataUp.msg",
+            "#[allow(clippy::large_enum_variant)]",
+        )
         .skip_debug([
             ".canterlot.worker.v1.DeliverDecision",
             ".canterlot.worker.v1.RequestOpened",
