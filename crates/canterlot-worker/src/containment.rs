@@ -603,6 +603,18 @@ mod tests {
         fields[16].parse().unwrap()
     }
 
+    /// `nice -n` прибавляет к текущему приоритету, с потолком 19.
+    fn expected_agent_nice(base: i64, increment: i64) -> i64 {
+        (base + increment).min(19)
+    }
+
+    #[test]
+    fn agent_nice_expectation_is_relative_and_capped() {
+        assert_eq!(expected_agent_nice(0, 10), 10);
+        assert_eq!(expected_agent_nice(10, 10), 19);
+        assert_eq!(expected_agent_nice(19, 10), 19);
+    }
+
     #[tokio::test]
     async fn agent_cli_and_its_children_start_at_nice_ten_while_the_worker_stays() {
         use std::os::unix::fs::PermissionsExt;
@@ -616,7 +628,14 @@ mod tests {
         .unwrap();
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
 
-        let worker_nice = nice_of(std::process::id());
+        let base = nice_of(std::process::id());
+        if base >= 19 {
+            eprintln!(
+                "skip: test process is already at nice {base}, the increment is unobservable"
+            );
+            return;
+        }
+        let expected = expected_agent_nice(base, 10);
         let containment = TreeContainment::with_agent_nice(10).unwrap();
         let mut command = containment.command(&script);
         command.kill_on_drop(true);
@@ -626,10 +645,18 @@ mod tests {
             .lines()
             .map(|line| line.trim().parse().unwrap())
             .collect();
-        assert_eq!(niceness, [10, 10], "the CLI and its child run at nice 10");
+        assert_eq!(
+            niceness,
+            [expected, expected],
+            "the CLI and its child run at nice {expected} from base {base}"
+        );
+        assert!(
+            niceness.iter().all(|&nice| nice > base),
+            "the increment is visible even when capped"
+        );
         assert_eq!(
             nice_of(std::process::id()),
-            worker_nice,
+            base,
             "the worker itself keeps its priority"
         );
     }
