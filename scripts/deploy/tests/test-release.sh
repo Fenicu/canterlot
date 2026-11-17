@@ -164,6 +164,19 @@ assert_eq "$(rres status)/$(rres published)" "done/yes" "result: done, published
 teardown_case
 case_end
 
+case_begin "ship accepts a rerun attestation with rerun_of and flaky lines"
+setup_release rerun-attest
+attest_head
+ATTEST_SHA="$(git -C "${RREPO}" rev-parse HEAD)"
+printf 'rerun_of=2026-11-17T10:00:00Z\nflaky=rust|crate-a|mod::flaky\nflaky=pw|phone|e2e/ui/example.spec.ts|works on retry\n' \
+    >>"${RREPO}/.superpowers/gate/${ATTEST_SHA}.ok"
+cutover_plan "${HAPPY_PLAN[@]}"
+run_release ship "${RVER}"
+assert_eq "${RREL_RC}" "0" "exit 0"
+assert_eq "$(rres status)/$(rres published)" "done/yes" "result: done, published"
+teardown_case
+case_end
+
 case_begin "ship refuses the example site values (deploy and build origins), naming only the keys"
 setup_release example
 export SITE_ORIGIN=https://hub.example.com

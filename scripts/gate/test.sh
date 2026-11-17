@@ -211,6 +211,28 @@ run 1 "${rerun_env[@]}" bash "$g4/scripts/gate.sh" --rerun-failed --no-attest
 grep -q 'грязная' "$out" || { cat "$out" >&2; fail 'нет отказа для грязного дерева'; }
 export FAKE_CHECK_FAIL=none
 
+# --- аттестация после перезапуска: прежние ключи плюс rerun_of и flaky ---
+g5="$tmp/g5"
+new_gate_repo "$g5"
+export FAKE_CHECK_FAIL=mod::flaky
+run 1 "${rerun_env[@]}" bash "$g5/scripts/gate.sh"
+g5short=$(git -C "$g5" rev-parse --short=8 HEAD)
+first_started=$(awk -F '\t' '$1=="started"{print $2}' "$g5/.superpowers/gate/$g5short/state.tsv")
+export FAKE_CHECK_FAIL=none
+run 0 "${rerun_env[@]}" bash "$g5/scripts/gate.sh" --rerun-failed
+att="$g5/.superpowers/gate/$(git -C "$g5" rev-parse HEAD).ok"
+[[ -s "$att" ]] || fail 'перезапуск не записал аттестацию'
+for key in sha started finished duration_s npm_ci_exit check_exit deploy_exit web_exit logs; do
+    grep -q "^$key=" "$att" || fail "в аттестации нет ключа $key"
+done
+grep -q '^npm_ci_exit=0$' "$att" || fail 'аттестация: npm_ci_exit не обнулился'
+grep -q '^check_exit=0$' "$att" || fail 'аттестация: check_exit не обнулился'
+grep -q "^rerun_of=$first_started$" "$att" || fail 'аттестация: нет rerun_of времени первого прогона'
+grep -qF 'flaky=rust|crate-a|mod::flaky' "$att" || fail 'аттестация: нет строки flaky'
+grep -q 'отчёт о нестабильных тестах' "$out" || fail 'нет отчёта о нестабильных тестах'
+grep -q 'flaky-tests.md' "$out" || fail 'нет напоминания про flaky-tests.md'
+
+# Битый индекс: git status падает, и проверка чистоты обязана провалиться, а не
 # пропустить аттестацию из-за пустого вывода.
 printf 'garbage' >"$scratch/.git/index"
 run 1 env CANTERLOT_LEASE_DRY=1 bash "$scratch/scripts/gate.sh"
