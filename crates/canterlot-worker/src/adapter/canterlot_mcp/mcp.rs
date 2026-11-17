@@ -1668,7 +1668,7 @@ mod side_tests {
             .filter_map(|tool| tool["name"].as_str())
             .collect();
         assert_eq!(names, ["approve"]);
-        for provider in ["codex", "opencode", "antigravity"] {
+        for provider in ["codex", "opencode"] {
             let listing = tools_list(ToolSet::Side, provider);
             assert_eq!(
                 listing["tools"].as_array().expect("tools").len(),

@@ -561,8 +561,8 @@ write_expect() {
 }
 case_begin "verify takes required capabilities and harnesses from the release EXPECT"
 setup_verify expect
-write_expect "claude_histories_v1 path_probe_v1 pilot_v1" "claude_code codex opencode antigravity"
-printf '\n[claude_code]\n[codex]\n[opencode]\n[antigravity]\nenabled = false\n' >>"${WORKER_CONFIG}"
+write_expect "claude_histories_v1 path_probe_v1 pilot_v1" "claude_code codex opencode synthetic"
+printf '\n[claude_code]\n[codex]\n[opencode]\n' >>"${WORKER_CONFIG}"
 if run_verify; then case_ok "verify PASS"; else case_fail "verify failed"; grep -E 'HARD|FATAL' "${FAKE_ROOT}/verify.log" | head -5; fi
 assert_contains "${FAKE_ROOT}/verify.log" "expectations from the release ${FAKE_ROOT}/dist/${SHA_PREV}/EXPECT" "EXPECT used"
 assert_contains "${FAKE_ROOT}/verify.log" "enabled in worker.toml: claude_code codex opencode" "a harness disabled in worker.toml is not required"
@@ -593,10 +593,10 @@ case_end
 
 case_begin "verify fails on an enabled harness missing from the catalog"
 setup_verify expect-harness
-write_expect "claude_histories_v1" "claude_code codex opencode antigravity"
-printf '\n[claude_code]\n[codex]\n[opencode]\n[antigravity]\n' >>"${WORKER_CONFIG}"
-if run_verify; then case_fail "verify passed without antigravity"; else case_ok "verify failed"; fi
-assert_contains "${FAKE_ROOT}/verify.log" "harness catalog: machine lacks antigravity" "enabled harness required"
+write_expect "claude_histories_v1" "claude_code codex opencode synthetic"
+printf '\n[claude_code]\n[codex]\n[opencode]\n[synthetic]\n' >>"${WORKER_CONFIG}"
+if run_verify; then case_fail "verify passed without synthetic"; else case_ok "verify failed"; fi
+assert_contains "${FAKE_ROOT}/verify.log" "harness catalog: machine lacks synthetic" "enabled harness required"
 teardown_case
 case_end
 

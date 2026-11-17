@@ -469,7 +469,7 @@ impl ProtocolHub {
             },
             execution: Default::default(),
             opencode: None,
-            antigravity: None,
+            legacy_ignored: None,
         };
         let store = WorkerStore::open(&config.data_dir).unwrap();
         (

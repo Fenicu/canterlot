@@ -71,7 +71,6 @@ int main(int argc, char **argv) {
         puts("harness claude_code");
         puts("harness codex");
         puts("harness opencode");
-        puts("harness antigravity");
         return 0;
     }
     for (;;) pause();

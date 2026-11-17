@@ -61,8 +61,6 @@ pub struct SupervisorSpec {
     pub codex: Option<crate::config::CodexConfig>,
     #[serde(default)]
     pub opencode: Option<crate::config::OpenCodeConfig>,
-    #[serde(default)]
-    pub antigravity: Option<crate::config::AntigravityConfig>,
     /// `[execution].delegate_mcp_servers` воркера: серверы владельца для делегата.
     #[serde(default)]
     pub delegate_mcp_servers: Vec<String>,

@@ -509,7 +509,6 @@ for line in sys.stdin:
                     ..Default::default()
                 }),
                 opencode: None,
-                antigravity: None,
                 delegate_mcp_servers: allowed.iter().map(|name| (*name).to_owned()).collect(),
             };
             let adapter = canterlot_worker::adapter::registry_with("codex", &context).unwrap();

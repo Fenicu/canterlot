@@ -1680,7 +1680,6 @@ fn registry_builds_the_adapter_from_context_with_supervisor_paths() {
         claude_code: None,
         codex: None,
         opencode: Some(OpenCodeConfig::default()),
-        antigravity: None,
         delegate_mcp_servers: Vec::new(),
     };
     let adapter = registry_with("opencode", &context).unwrap();

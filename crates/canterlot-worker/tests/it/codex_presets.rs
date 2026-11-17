@@ -206,7 +206,6 @@ impl PresetHarness {
                 ..Default::default()
             }),
             opencode: None,
-            antigravity: None,
             delegate_mcp_servers: Vec::new(),
         };
         let mut adapter = canterlot_worker::adapter::registry_with("codex", &context).unwrap();
@@ -426,7 +425,6 @@ async fn resume_of_a_missing_rollout_fails_once_without_a_path() {
             ..Default::default()
         }),
         opencode: None,
-        antigravity: None,
         delegate_mcp_servers: Vec::new(),
     };
     let mut adapter = canterlot_worker::adapter::registry_with("codex", &context).unwrap();

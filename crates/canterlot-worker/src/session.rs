@@ -574,24 +574,6 @@ impl Worker {
             idle_ticker.register("opencode", limits_interval);
             routes.insert("opencode".into(), codexbar(None));
         }
-        if let Some(cfg) = &config.antigravity
-            && cfg.enabled
-        {
-            // `/usage` идёт закреплённой копией из каталога данных воркера.
-            let mut cfg = cfg.clone();
-            cfg.data_dir = Some(config.data_dir.clone());
-            idle_ticker.register("antigravity", limits_interval);
-            routes.insert(
-                "antigravity".into(),
-                Arc::new(
-                    crate::adapter::antigravity::limits::AntigravityLimitsSource::new(
-                        cfg,
-                        limits_interval,
-                        live_limits.clone(),
-                    ),
-                ),
-            );
-        }
         let limits_source: Arc<dyn crate::machine::limits::LimitsSource> = if routes.is_empty() {
             default_source
         } else {
@@ -721,11 +703,6 @@ impl Worker {
 
     async fn run_inner(&mut self, mut shutdown: watch::Receiver<bool>) -> Result<(), WorkerError> {
         let configured = self.config.restore_generation;
-        let data_dir = self.config.data_dir.clone();
-        if let Some(cfg) = &mut self.config.antigravity {
-            // Закреплённая копия всегда в данных воркера, значение из TOML не решает.
-            cfg.data_dir = Some(data_dir);
-        }
         self.store
             .call(move |slot| initialize_generation(store_mut(slot)?, configured))
             .await?;
@@ -799,7 +776,6 @@ impl Worker {
             self.config.claude_code.clone(),
             self.config.codex.clone(),
             self.config.opencode.clone(),
-            self.config.antigravity.clone().filter(|cfg| cfg.enabled),
         );
         // Файлы секретов: конфигурация ставится до проверки владения, потому что
         // startup_verify заново проигрывает сохранённые отзывы, а без неё отзыв

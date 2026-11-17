@@ -32,9 +32,6 @@ fn process_guard_cleans_orphaned_cli_on_panic() {
     assert!(check.members().is_empty(), "orphan survived guard unwind");
 }
 
-#[cfg(feature = "synthetic-adapter")]
-#[path = "support/antigravity.rs"]
-mod antigravity;
 #[path = "support/fake_exec.rs"]
 mod fake_exec;
 #[path = "support/fixtures.rs"]
@@ -53,13 +50,6 @@ mod trace;
 
 #[cfg(feature = "synthetic-adapter")]
 mod adapter;
-#[cfg(feature = "synthetic-adapter")]
-mod antigravity_adapter;
-mod antigravity_config;
-#[cfg(all(feature = "fault-injection", feature = "synthetic-adapter"))]
-mod antigravity_e2e;
-#[cfg(feature = "synthetic-adapter")]
-mod antigravity_limits;
 mod attachments;
 mod canterlot_mcp_presets;
 mod canterlot_mcp_sessions;

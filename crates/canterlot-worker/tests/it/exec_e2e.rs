@@ -363,7 +363,7 @@ impl Fixture {
                 delegate_mcp_servers: Vec::new(),
             },
             opencode,
-            antigravity: None,
+            legacy_ignored: None,
         };
         let owner = hub.installation.owner_id;
         let conversation = testkit::seed_conversation(pool, owner, machine.machine_id).await;

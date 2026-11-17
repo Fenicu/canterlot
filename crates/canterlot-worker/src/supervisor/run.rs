@@ -1797,7 +1797,6 @@ impl Supervisor {
             claude_code: self.spec.claude_code.clone(),
             codex: self.spec.codex.clone(),
             opencode: self.spec.opencode.clone(),
-            antigravity: self.spec.antigravity.clone(),
             delegate_mcp_servers: self.spec.delegate_mcp_servers.clone(),
         };
         let Some(mut adapter) = registry_with(&start.profile, &context) else {
@@ -3721,7 +3720,6 @@ mod tests {
                 claude_code: None,
                 codex: None,
                 opencode: None,
-                antigravity: None,
                 delegate_mcp_servers: Vec::new(),
             },
             exec_dir: dir.path().to_owned(),

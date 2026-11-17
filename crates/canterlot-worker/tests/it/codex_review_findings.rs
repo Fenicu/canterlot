@@ -184,7 +184,6 @@ impl Fake {
                 ..Default::default()
             }),
             opencode: None,
-            antigravity: None,
             delegate_mcp_servers: Vec::new(),
         };
         let adapter = adapter::registry_with("codex", &context).unwrap();

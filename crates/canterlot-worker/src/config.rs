@@ -33,8 +33,9 @@ pub struct WorkerConfig {
     pub codex: Option<CodexConfig>,
     #[serde(default)]
     pub opencode: Option<OpenCodeConfig>,
-    #[serde(default)]
-    pub antigravity: Option<AntigravityConfig>,
+    /// Устаревший раздел: принимается и игнорируется для старых worker.toml.
+    #[serde(rename = "antigravity", default)]
+    pub legacy_ignored: Option<toml::Value>,
     #[serde(default)]
     pub secrets: SecretConfig,
 }
@@ -282,6 +283,9 @@ pub fn load(path: &Path) -> Result<WorkerConfig, ConfigError> {
             ..ConfigError::new(path, ConfigErrorCategory::Parse)
         }
     })?;
+    if config.legacy_ignored.is_some() {
+        tracing::warn!("[antigravity] section ignored: Antigravity support was removed");
+    }
     let invalid_url = || ConfigError::new(path, ConfigErrorCategory::HubUrl);
     let url = Url::parse(&config.hub_url).map_err(|_| invalid_url())?;
     if url.scheme() != "https"
@@ -571,29 +575,6 @@ impl Default for OpenCodeConfig {
     }
 }
 
-/// Таблица `[antigravity]`: включает адаптер `agy acp`.
-#[derive(Clone, Debug, serde::Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct AntigravityConfig {
-    /// Выключает харнесс, не убирая таблицу из конфигурации.
-    pub enabled: bool,
-    /// Исходный `agy`; по умолчанию `$HOME/.local/bin/agy`. Воркер копирует его
-    /// в `<data_dir>/antigravity/bin/agy-<версия>` и запускает копию.
-    pub binary: Option<PathBuf>,
-    /// Каталог данных canterlot; заполняет воркер, из TOML не читается как решение.
-    pub data_dir: Option<PathBuf>,
-}
-
-impl Default for AntigravityConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            binary: None,
-            data_dir: None,
-        }
-    }
-}
-
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct WorkerAttachmentsConfig {
@@ -633,5 +614,25 @@ mod tests {
     fn ready_deadline_outlasts_the_cli_mcp_startup_timeout() {
         // Один зависший сервер MCP задерживает init Claude Code на 30 с.
         assert!(SupervisorTimers::default().ready_deadline >= Duration::from_secs(60));
+    }
+
+    #[test]
+    fn legacy_antigravity_section_is_accepted_but_other_unknown_sections_are_rejected() {
+        let base = r#"
+hub_url = "https://localhost:1"
+ca_cert = "/tmp/ca.pem"
+token_file = "/tmp/token"
+machine_id = "00000000-0000-0000-0000-000000000001"
+installation_id = "00000000-0000-0000-0000-000000000002"
+restore_generation = "00000000-0000-0000-0000-000000000003"
+data_dir = "/tmp/store"
+"#;
+        let legacy = format!(
+            "{base}\n[antigravity]\nenabled = true\nbinary = \"/bin/false\"\nwhatever = 42\n"
+        );
+        let config: WorkerConfig = toml::from_str(&legacy).unwrap();
+        assert!(config.legacy_ignored.is_some());
+        let unknown = format!("{base}\n[unknown_section]\nkey = 1\n");
+        assert!(toml::from_str::<WorkerConfig>(&unknown).is_err());
     }
 }

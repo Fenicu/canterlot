@@ -22,8 +22,8 @@ use canterlot_hub::{
 };
 use canterlot_worker::{
     config::{
-        AntigravityConfig, ClaudeCodeConfig, ExecutionConfig, MachineConfig, SupervisorTimers,
-        WorkerConfig, WorkerTimers,
+        ClaudeCodeConfig, ExecutionConfig, MachineConfig, SupervisorTimers, WorkerConfig,
+        WorkerTimers,
     },
     session::{SessionState, Worker, WorkerError},
     store::WorkerStore,
@@ -370,7 +370,6 @@ pub struct PilotOptions {
     pub activity: ActivityConfig,
     pub metrics_interval: Duration,
     pub claude_code: Option<ClaudeCodeConfig>,
-    pub antigravity: Option<AntigravityConfig>,
     /// Файлы секретов: тесты кладут базу на tmpfs, а не в `$XDG_RUNTIME_DIR`.
     pub secrets: canterlot_worker::config::SecretConfig,
 }
@@ -392,7 +391,6 @@ impl Default for PilotOptions {
             },
             metrics_interval: Duration::from_secs(30),
             claude_code: None,
-            antigravity: None,
             secrets: Default::default(),
         }
     }
@@ -499,7 +497,7 @@ impl Pilot {
                 ..Default::default()
             },
             opencode: None,
-            antigravity: options.antigravity,
+            legacy_ignored: None,
             secrets: options.secrets,
         };
         let api = TestClient::over_socket(hub.http_addr()).await.as_owner();
@@ -579,7 +577,7 @@ impl Pilot {
             .await
     }
 
-    /// Сессия с явными моделью, усилием и режимом: каталог Antigravity не похож на синтетический.
+    /// Сессия с явными моделью, усилием и режимом.
     pub async fn create_with(
         &self,
         harness: &str,

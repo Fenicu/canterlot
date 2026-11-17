@@ -15,12 +15,11 @@ use tokio::sync::watch;
 use crate::{
     adapter::{
         HarnessCatalog,
-        antigravity::{self, AntigravityCatalog},
         claude_code::version::{self as claude_version, CliVersion},
         codex::{self, CodexCatalog},
         opencode::{self, OpenCodeCatalog},
     },
-    config::{AntigravityConfig, ClaudeCodeConfig, CodexConfig, OpenCodeConfig, WorkerConfig},
+    config::{ClaudeCodeConfig, CodexConfig, OpenCodeConfig, WorkerConfig},
 };
 
 /// Первые паузы повторов, дальше раз в пять минут: сбой обычно кончается сам.
@@ -39,7 +38,6 @@ pub(super) struct CatalogState {
     claude_version: Option<CliVersion>,
     codex: Option<CodexCatalog>,
     opencode: Option<OpenCodeCatalog>,
-    antigravity: Option<AntigravityCatalog>,
 }
 
 impl CatalogState {
@@ -48,7 +46,6 @@ impl CatalogState {
             Slot::Claude(version) => self.claude_version = Some(version),
             Slot::Codex(catalog) => self.codex = Some(catalog),
             Slot::OpenCode(catalog) => self.opencode = Some(catalog),
-            Slot::Antigravity(catalog) => self.antigravity = Some(catalog),
         }
     }
 
@@ -58,7 +55,6 @@ impl CatalogState {
             self.claude_version.as_ref(),
             self.codex.as_ref(),
             self.opencode.as_ref(),
-            self.antigravity.as_ref(),
         )
     }
 }
@@ -68,7 +64,6 @@ pub(super) enum Slot {
     Claude(CliVersion),
     Codex(CodexCatalog),
     OpenCode(OpenCodeCatalog),
-    Antigravity(AntigravityCatalog),
 }
 
 /// Настроенные харнессы. Выключенный в конфигурации харнесс сюда не попадает:
@@ -78,7 +73,6 @@ pub(super) enum Probe {
     Claude(ClaudeCodeConfig),
     Codex(CodexConfig),
     OpenCode(OpenCodeConfig),
-    Antigravity(AntigravityConfig),
 }
 
 impl Probe {
@@ -89,11 +83,6 @@ impl Probe {
         }
         if let Some(cfg) = &config.codex {
             probes.push(Self::Codex(cfg.clone()));
-        }
-        if let Some(cfg) = &config.antigravity
-            && cfg.enabled
-        {
-            probes.push(Self::Antigravity(cfg.clone()));
         }
         if let Some(cfg) = &config.opencode {
             probes.push(Self::OpenCode(cfg.clone()));
@@ -122,10 +111,6 @@ impl Probe {
                 .await
                 .map(Slot::OpenCode)
                 .map_err(|reason| format!("{reason:?}")),
-            Self::Antigravity(cfg) => antigravity::catalog::discover_with_cache(cfg, Some(&cache))
-                .await
-                .map(Slot::Antigravity)
-                .map_err(|reason| format!("{reason:?}")),
         }
     }
 
@@ -134,7 +119,6 @@ impl Probe {
             Self::Claude(_) => "claude_code_unavailable",
             Self::Codex(_) => "codex_unavailable",
             Self::OpenCode(_) => "opencode_unavailable",
-            Self::Antigravity(_) => "antigravity_unavailable",
         }
     }
 
@@ -143,7 +127,6 @@ impl Probe {
             Self::Claude(_) => "claude_code_discovered",
             Self::Codex(_) => "codex_discovered",
             Self::OpenCode(_) => "opencode_discovered",
-            Self::Antigravity(_) => "antigravity_discovered",
         }
     }
 
@@ -152,7 +135,6 @@ impl Probe {
             Self::Claude(_) => "Claude Code omitted from catalog",
             Self::Codex(_) => "Codex omitted from catalog",
             Self::OpenCode(_) => "OpenCode omitted from catalog",
-            Self::Antigravity(_) => "Antigravity omitted from catalog",
         }
     }
 
@@ -161,7 +143,6 @@ impl Probe {
             Self::Claude(_) => "Claude Code",
             Self::Codex(_) => "Codex",
             Self::OpenCode(_) => "OpenCode",
-            Self::Antigravity(_) => "Antigravity",
         }
     }
 }
@@ -265,10 +246,6 @@ pub(super) fn log_no_models(probe: &Probe, slot: &Slot) {
         (Probe::OpenCode(_), Slot::OpenCode(catalog)) if catalog.models.is_empty() => {
             ("opencode_no_models", "OpenCode has no available models")
         }
-        (Probe::Antigravity(_), Slot::Antigravity(catalog)) if catalog.models.is_empty() => (
-            "antigravity_no_models",
-            "Antigravity has no available models",
-        ),
         _ => return,
     };
     tracing::warn!(kind, "{message}");

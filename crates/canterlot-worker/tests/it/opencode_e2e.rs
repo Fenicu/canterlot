@@ -127,7 +127,6 @@ impl Env {
             config.claude_code.clone(),
             config.codex.clone(),
             config.opencode.clone(),
-            None,
         );
         Self {
             guard: ProcessGuard::new(root.path()),
@@ -163,7 +162,6 @@ impl Env {
             self.config.claude_code.clone(),
             self.config.codex.clone(),
             self.config.opencode.clone(),
-            None,
         );
         assert_eq!(
             manager.startup_verify().await.unwrap(),
@@ -195,7 +193,6 @@ impl Env {
             self.config.claude_code.clone(),
             self.config.codex.clone(),
             self.config.opencode.clone(),
-            None,
         );
         self.thread = Some(thread);
         self.manager = Some(manager);

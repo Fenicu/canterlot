@@ -288,7 +288,7 @@ async fn poll_runs_codexbar_with_the_provider_and_json_format() {
     let clock = TestClock::new();
     let source = source(printing(dir.path(), CLAUDE_WEEKLY_ONLY), &clock, None);
 
-    assert!(source.poll("antigravity").await.is_empty());
+    assert!(source.poll("unknown").await.is_empty());
     assert!(
         calls(dir.path()).is_empty(),
         "foreign provider never starts the program"
