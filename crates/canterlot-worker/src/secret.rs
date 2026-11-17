@@ -44,9 +44,11 @@ use crate::config::SecretConfig;
 /// Сколько файл живёт после записи, если хаб не назвал свой срок.
 pub const FILE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// Забор без значения и без файла переживает файл: 25 часов — это сутки жизни
-/// плюс час запаса, за который отзыв и уборка успевают закрыть запрос.
-pub const FENCE_TTL_MS: u64 = 25 * 60 * 60 * 1000;
+/// Сутки жизни файла: столько получает поколение, если хаб не назвал свой срок.
+pub const FENCE_TTL_MS: u64 = 24 * 60 * 60 * 1000;
+/// Запас после последнего известного срока: за него отзыв успевает дойти, а
+/// часы хаба и воркера могут разойтись на минуты, не на сутки.
+pub const FENCE_GRACE_MS: u64 = 60 * 60 * 1000;
 
 /// Все операции над файлами секретов идут по одной: уборка не может встать между
 /// переименованием значения и манифеста или удалить файл свежей доставки.
@@ -74,6 +76,39 @@ fn clear_removal_pending(request_id: Uuid) {
         .as_mut()
     {
         pending.remove(&request_id);
+    }
+}
+
+/// Корни, для которых подготовка хранилища не подтвердилась: доставка и отзыв
+/// отказывают, пока следующий старт не доведёт уборку прежнего корня до конца.
+static DISABLED_ROOTS: Mutex<Option<HashSet<PathBuf>>> = Mutex::new(None);
+
+fn set_disabled(root: &Path, disabled: bool) {
+    let mut roots = DISABLED_ROOTS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let roots = roots.get_or_insert_with(HashSet::new);
+    if disabled {
+        roots.insert(root.to_path_buf());
+    } else {
+        roots.remove(root);
+    }
+}
+
+fn storage_disabled(config: &SecretConfig) -> bool {
+    let Ok(root) = base_path(config) else {
+        return true;
+    };
+    DISABLED_ROOTS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .as_ref()
+        .is_some_and(|roots| roots.contains(&root))
+}
+
+pub(crate) fn disable_storage(config: &SecretConfig) {
+    if let Ok(root) = base_path(config) {
+        set_disabled(&root, true);
     }
 }
 
@@ -144,6 +179,10 @@ pub enum Failure {
     RemovalPending,
     /// Разговор, которого воркер не ведёт: файл писать некуда.
     UnknownConversation,
+    /// Срок, названный хабом, уже прошёл: публиковать просроченное нельзя.
+    Expired,
+    /// Хранилище не подтверждено после смены корня: файлы не трогаем.
+    StorageDisabled,
 }
 
 impl Failure {
@@ -158,6 +197,8 @@ impl Failure {
             Self::StaleAttempt => "stale_attempt",
             Self::RemovalPending => "removal_pending",
             Self::UnknownConversation => "unknown_conversation",
+            Self::Expired => "expired",
+            Self::StorageDisabled => "storage_disabled",
         }
     }
 }
@@ -193,6 +234,10 @@ struct Fence {
     dead: u64,
     #[serde(default)]
     updated_at: u64,
+    /// Наибольший срок среди поколений, которые этот забор видел или отзывал:
+    /// раньше него забор не убирается, иначе поздняя доставка нашла бы чистый лист.
+    #[serde(default)]
+    max_expires_at_ms: u64,
 }
 
 impl Fence {
@@ -202,6 +247,7 @@ impl Fence {
             seen: 0,
             dead: 0,
             updated_at: 0,
+            max_expires_at_ms: 0,
         }
     }
 }
@@ -540,14 +586,18 @@ fn is_tmpfs(fd: &OwnedFd) -> bool {
 /// Базовый каталог: создаётся 0700 от открытого родителя и проверяется на том же
 /// fd, который дальше используется (fs type, владелец, права). Проверять один fd,
 /// а работать с переоткрытым путём нельзя: подмена предка увела бы файл на диск.
-fn open_base(config: &SecretConfig) -> Result<(PinnedDir, PathBuf), Failure> {
-    let base = match &config.base_dir {
-        Some(path) => path.clone(),
+fn base_path(config: &SecretConfig) -> Result<PathBuf, Failure> {
+    match &config.base_dir {
+        Some(path) => Ok(path.clone()),
         None => {
             let runtime = std::env::var_os("XDG_RUNTIME_DIR").ok_or(Failure::XdgUnset)?;
-            PathBuf::from(runtime).join("canterlot-secrets")
+            Ok(PathBuf::from(runtime).join("canterlot-secrets"))
         }
-    };
+    }
+}
+
+fn open_base(config: &SecretConfig) -> Result<(PinnedDir, PathBuf), Failure> {
+    let base = base_path(config)?;
     let parent = base.parent().ok_or(Failure::InsecureDirectory)?;
     let name = base
         .file_name()
@@ -596,6 +646,140 @@ fn open_fences(base: &PinnedDir) -> Result<PinnedDir, Failure> {
     PinnedDir::open_at(base.fd(), ".fences")
 }
 
+/// Где воркер в прошлый раз держал секреты: путь и идентичность каталога на
+/// диске. Смена корня без уборки прежнего оставила бы в нём открытый текст.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RootIdentity {
+    path: String,
+    dev: u64,
+    ino: u64,
+}
+
+const ROOT_IDENTITY: &str = "secret-root.json";
+
+fn verify_owned_dir(fd: OwnedFd) -> Result<PinnedDir, Failure> {
+    let stat = fstat(&fd).map_err(|_| Failure::InsecureDirectory)?;
+    if FileType::from_raw_mode(stat.st_mode) != FileType::Directory || stat.st_uid != uid() {
+        return Err(Failure::InsecureDirectory);
+    }
+    Ok(PinnedDir { fd })
+}
+
+fn open_existing_root_opt(path: &Path) -> Result<Option<PinnedDir>, Failure> {
+    match open(path, BASE_FLAGS, Mode::empty()) {
+        Ok(fd) => Ok(Some(verify_owned_dir(fd)?)),
+        Err(Errno::NOENT) => Ok(None),
+        Err(_) => Err(Failure::InsecureDirectory),
+    }
+}
+
+fn data_dir_pinned(data_dir: &Path) -> Result<PinnedDir, Failure> {
+    let fd = open(data_dir, BASE_FLAGS, Mode::empty()).map_err(|_| Failure::InsecureDirectory)?;
+    verify_owned_dir(fd)
+}
+
+fn read_root_identity(data_dir: &PinnedDir) -> Result<Option<RootIdentity>, Failure> {
+    let Some(bytes) = read_opt(data_dir.fd(), ROOT_IDENTITY)? else {
+        return Ok(None);
+    };
+    if bytes.len() > 4096 {
+        return Err(Failure::Manifest);
+    }
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|_| Failure::Manifest)
+}
+
+fn write_root_identity(data_dir: &PinnedDir, identity: &RootIdentity) -> Result<(), Failure> {
+    let encoded = serde_json::to_vec(identity).map_err(|_| Failure::Manifest)?;
+    let temp = TempFile::fence(data_dir.fd(), ".secret-root.tmp".into());
+    temp.write(&encoded)?;
+    temp.commit(ROOT_IDENTITY)?;
+    fsync(data_dir.fd()).map_err(|_| Failure::Io)
+}
+
+/// Убирает значения, манифесты, временные файлы и заборы прежнего корня теми же
+/// пришпиленными и не идущими по ссылкам операциями. Подкаталог внутри каталога
+/// разговора считается чужим: такой корень не подтверждается.
+fn wipe_root(root: &PinnedDir) -> Result<(), Failure> {
+    for name in root.entries()? {
+        if name == ".lock" {
+            continue;
+        }
+        let Some(stat) = entry_stat(root.fd(), &name)? else {
+            continue;
+        };
+        if is_directory(&stat) && !is_symlink(&stat) {
+            let fd =
+                openat(root.fd(), &name, BASE_FLAGS, Mode::empty()).map_err(|_| Failure::Io)?;
+            let child = verify_owned_dir(fd)?;
+            for entry in child.entries()? {
+                let Some(entry_stat) = entry_stat(child.fd(), &entry)? else {
+                    continue;
+                };
+                if is_directory(&entry_stat) && !is_symlink(&entry_stat) {
+                    return Err(Failure::InsecureDirectory);
+                }
+                unlinkat(child.fd(), &entry, AtFlags::empty()).map_err(|_| Failure::Io)?;
+            }
+            if !child.is_empty()? {
+                return Err(Failure::Io);
+            }
+            unlinkat(root.fd(), &name, AtFlags::REMOVEDIR).map_err(|_| Failure::Io)?;
+        } else {
+            unlinkat(root.fd(), &name, AtFlags::empty()).map_err(|_| Failure::Io)?;
+        }
+    }
+    if root.entries()?.iter().any(|name| name != ".lock") {
+        return Err(Failure::Io);
+    }
+    Ok(())
+}
+
+fn prepare_storage_inner(config: &SecretConfig, data_dir: &Path) -> Result<(), Failure> {
+    let (base, root) = open_base(config)?;
+    let stat = fstat(base.fd()).map_err(|_| Failure::InsecureDirectory)?;
+    let identity = RootIdentity {
+        path: root.display().to_string(),
+        dev: stat.st_dev,
+        ino: stat.st_ino,
+    };
+    let data_dir = data_dir_pinned(data_dir)?;
+    let recorded = read_root_identity(&data_dir)?;
+    match recorded {
+        Some(recorded) if recorded == identity => Ok(()),
+        Some(recorded) => {
+            let previous = PathBuf::from(&recorded.path);
+            if previous != root
+                && let Some(previous) = open_existing_root_opt(&previous)?
+            {
+                wipe_root(&previous)?;
+            }
+            // Настроенный корень тоже может хранить старые значения (например,
+            // его вернули после смены или файл идентичности потерян).
+            wipe_root(&base)?;
+            write_root_identity(&data_dir, &identity)
+        }
+        None => {
+            wipe_root(&base)?;
+            write_root_identity(&data_dir, &identity)
+        }
+    }
+}
+
+/// Подготовка хранилища до приёма доставок: если корень сменился, прежний и
+/// новый очищаются до записи новой идентичности. Любая неподтверждённая уборка
+/// оставляет корень выключенным до следующего успешного старта.
+pub(crate) fn prepare_storage(config: &SecretConfig, data_dir: &Path) -> Result<(), Failure> {
+    let root = base_path(config)?;
+    set_disabled(&root, true);
+    let prepared = prepare_storage_inner(config, data_dir);
+    if prepared.is_ok() {
+        set_disabled(&root, false);
+    }
+    prepared
+}
+
 /// Эпоха хранилища: загрузка плюс inode базового каталога. Новая эпоха означает,
 /// что tmpfs очищен и прежних файлов нет, даже если строки хаба говорят иное.
 pub fn epoch(config: &SecretConfig, boot_id: &str) -> String {
@@ -617,11 +801,19 @@ pub fn deliver(
     live: &HashSet<Uuid>,
 ) -> Result<Written, Failure> {
     let _operations = operations();
+    if storage_disabled(config) {
+        return Err(Failure::StorageDisabled);
+    }
     let request_id = Uuid::parse_str(&request.request_id).map_err(|_| Failure::Manifest)?;
     let conversation_id =
         Uuid::parse_str(&request.conversation_id).map_err(|_| Failure::Manifest)?;
     if request.generation == 0 {
         return Err(Failure::Manifest);
+    }
+    if request.expires_at_ms <= now_ms() {
+        // Срок хаба уже прошёл: даже если забор успели убрать, публиковать
+        // просроченные байты нельзя — иначе уборка забора воскресила бы файл.
+        return Err(Failure::Expired);
     }
     if !live.contains(&conversation_id) {
         return Err(Failure::UnknownConversation);
@@ -662,6 +854,7 @@ pub fn deliver(
     // отозванное поколение, а восстановление увидит несовпадение и уберёт файл.
     fence.seen = generation;
     fence.updated_at = now_ms();
+    fence.max_expires_at_ms = fence.max_expires_at_ms.max(request.expires_at_ms);
     write_fence(&fences, request_id, &fence)?;
 
     let dir = match ConversationDir::ensure(&lock.base, &lock.root, conversation_id) {
@@ -766,6 +959,10 @@ pub fn revoke(
     _reason: &str,
 ) -> Removal {
     let _operations = operations();
+    if storage_disabled(config) {
+        mark_removal_pending(request_id);
+        return Removal::Failed;
+    }
     let lock = match lock_base(config) {
         Ok(lock) => lock,
         Err(_) => {
@@ -789,6 +986,12 @@ pub fn revoke(
                 fence.dead = fence.dead.max(up_to);
                 fence.seen = fence.seen.max(up_to);
                 fence.updated_at = now_ms();
+                // Отзываемое поколение могло быть выдано только что и прожить
+                // ещё сутки: забор обязан пережить этот срок, иначе поздняя
+                // доставка нашла бы чистый лист.
+                fence.max_expires_at_ms = fence
+                    .max_expires_at_ms
+                    .max(now_ms().saturating_add(FENCE_TTL_MS));
                 match write_fence(&fences, request_id, &fence) {
                     Ok(()) => true,
                     Err(_) => {
@@ -881,6 +1084,9 @@ pub struct Recovered {
 pub fn recover(config: &SecretConfig) -> Recovered {
     let _operations = operations();
     let mut stats = Recovered::default();
+    if storage_disabled(config) {
+        return stats;
+    }
     let Ok(lock) = lock_base(config) else {
         return stats;
     };
@@ -982,6 +1188,9 @@ pub struct Swept {
 pub fn sweep(config: &SecretConfig, now: u64) -> Swept {
     let _operations = operations();
     let mut swept = Swept::default();
+    if storage_disabled(config) {
+        return swept;
+    }
     let Ok(lock) = lock_base(config) else {
         return swept;
     };
@@ -1105,7 +1314,7 @@ pub fn sweep(config: &SecretConfig, now: u64) -> Swept {
         let Ok(Some(fence)) = read_fence(&fences, request_id) else {
             continue;
         };
-        if now.saturating_sub(fence.updated_at) < FENCE_TTL_MS {
+        if now <= fence.max_expires_at_ms.saturating_add(FENCE_GRACE_MS) {
             continue;
         }
         if value_exists(&lock, fence.conversation_id, request_id) != Some(false) {
@@ -1653,6 +1862,7 @@ mod tests {
                 seen: 1,
                 dead: 1,
                 updated_at: now_ms(),
+                max_expires_at_ms: 0,
             },
         );
         let recovered = recover(&config);
@@ -1690,6 +1900,7 @@ mod tests {
                 seen: 2,
                 dead: 0,
                 updated_at: now_ms(),
+                max_expires_at_ms: 0,
             },
         );
         let recovered = recover(&config);
@@ -1858,6 +2069,202 @@ mod tests {
     }
 
     #[test]
+    fn a_changed_root_wipes_the_old_values_before_it_is_recorded() {
+        let data = tempfile::tempdir().unwrap();
+        let first = TestBase::new();
+        let second = TestBase::new();
+        let (conversation, request_id) = (Uuid::now_v7(), Uuid::now_v7());
+        prepare_storage(&first.config(), data.path()).expect("first root");
+        let old = deliver(
+            &first.config(),
+            &request(conversation, request_id, 1, "old\n"),
+            &live_set(conversation),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&old.path).unwrap(), b"old\n");
+
+        // Новый корень: старый не должен пережить смену, даже если отзыв до него
+        // не дошёл (машина была offline).
+        prepare_storage(&second.config(), data.path()).expect("second root");
+        assert!(!old.path.exists(), "the old value is gone");
+        assert!(
+            !old.path.parent().unwrap().exists(),
+            "the empty old conversation dir is gone"
+        );
+        let identity: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(data.path().join("secret-root.json")).unwrap())
+                .unwrap();
+        assert_eq!(identity["path"], second.0.display().to_string());
+
+        // Новый корень принимает доставки.
+        let fresh = deliver(
+            &second.config(),
+            &request(conversation, Uuid::now_v7(), 1, "new\n"),
+            &live_set(conversation),
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&fresh.path).unwrap(), b"new\n");
+    }
+
+    #[test]
+    fn a_failed_wipe_keeps_the_new_root_disabled_until_it_succeeds() {
+        let data = tempfile::tempdir().unwrap();
+        let first = TestBase::new();
+        let second = TestBase::new();
+        let (conversation, request_id) = (Uuid::now_v7(), Uuid::now_v7());
+        prepare_storage(&first.config(), data.path()).unwrap();
+        let old = deliver(
+            &first.config(),
+            &request(conversation, request_id, 1, "old\n"),
+            &live_set(conversation),
+        )
+        .unwrap();
+        let old_dir = old.path.parent().unwrap().to_path_buf();
+        std::fs::set_permissions(&old_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        assert_eq!(
+            prepare_storage(&second.config(), data.path()),
+            Err(Failure::Io),
+            "an unverifiable wipe is not a prepared root"
+        );
+        let late = request(conversation, Uuid::now_v7(), 1, "blocked\n");
+        assert_eq!(
+            deliver(&second.config(), &late, &live_set(conversation)).unwrap_err(),
+            Failure::StorageDisabled
+        );
+        assert_eq!(
+            revoke(
+                &second.config(),
+                conversation,
+                late.request_id.parse().unwrap(),
+                1,
+                "revoked"
+            ),
+            Removal::Failed
+        );
+
+        std::fs::set_permissions(&old_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        prepare_storage(&second.config(), data.path()).expect("the wipe succeeds on a later start");
+        assert!(!old.path.exists());
+        let after = request(conversation, Uuid::now_v7(), 1, "blocked\n");
+        let written = deliver(&second.config(), &after, &live_set(conversation)).unwrap();
+        assert_eq!(std::fs::read(&written.path).unwrap(), b"blocked\n");
+    }
+
+    #[test]
+    fn the_same_root_keeps_its_value_across_preparation() {
+        let data = tempfile::tempdir().unwrap();
+        let base = TestBase::new();
+        let (conversation, request_id) = (Uuid::now_v7(), Uuid::now_v7());
+        prepare_storage(&base.config(), data.path()).unwrap();
+        let written = deliver(
+            &base.config(),
+            &request(conversation, request_id, 1, "value\n"),
+            &live_set(conversation),
+        )
+        .unwrap();
+        prepare_storage(&base.config(), data.path()).expect("same root");
+        assert_eq!(std::fs::read(&written.path).unwrap(), b"value\n");
+        assert_eq!(read_fence_file(&base.0, request_id).seen, 1);
+    }
+
+    #[test]
+    fn a_corrupt_root_identity_disables_deliveries() {
+        let data = tempfile::tempdir().unwrap();
+        let base = TestBase::new();
+        std::fs::write(data.path().join("secret-root.json"), b"{not json").unwrap();
+        assert_eq!(
+            prepare_storage(&base.config(), data.path()),
+            Err(Failure::Manifest)
+        );
+        let conversation = Uuid::now_v7();
+        assert_eq!(
+            deliver(
+                &base.config(),
+                &request(conversation, Uuid::now_v7(), 1, "value\n"),
+                &live_set(conversation)
+            )
+            .unwrap_err(),
+            Failure::StorageDisabled
+        );
+        std::fs::remove_file(data.path().join("secret-root.json")).unwrap();
+        prepare_storage(&base.config(), data.path()).expect("a clean identity");
+    }
+
+    #[test]
+    fn a_delivery_that_outlived_its_expiry_is_refused() {
+        // Даже с чистым забором просроченные байты не публикуются: иначе уборка
+        // забора воскресила бы значение, которое хаб уже считает истёкшим.
+        let base = TestBase::new();
+        let config = base.config();
+        let (conversation, request_id) = (Uuid::now_v7(), Uuid::now_v7());
+        let mut late = request(conversation, request_id, 1, "late\n");
+        late.expires_at_ms = now_ms().saturating_sub(1);
+        let failure = deliver(&config, &late, &live_set(conversation)).unwrap_err();
+        assert_eq!(failure, Failure::Expired);
+        assert_eq!(failure.code(), "expired");
+        assert!(
+            !base.0.join(conversation.to_string()).exists(),
+            "no value or manifest is published"
+        );
+    }
+
+    #[test]
+    fn a_fence_is_not_pruned_before_its_last_expiry_plus_the_grace() {
+        let base = TestBase::new();
+        let config = base.config();
+        let (conversation, request_id) = (Uuid::now_v7(), Uuid::now_v7());
+        assert_eq!(
+            revoke(&config, conversation, request_id, 1, "revoked"),
+            Removal::Removed,
+            "a revoke before any delivery fences a future generation"
+        );
+        let fence = read_fence_file(&base.0, request_id);
+        assert!(
+            fence.max_expires_at_ms >= now_ms() + FENCE_TTL_MS - 5_000,
+            "a revoked generation may still arrive with a full TTL"
+        );
+
+        let last = fence.max_expires_at_ms;
+        let swept = sweep(&config, last + FENCE_GRACE_MS - 1_000);
+        assert_eq!(swept.fences, 0);
+        assert!(fence_path(&base.0, request_id).exists());
+
+        let swept = sweep(&config, last + FENCE_GRACE_MS + 1_000);
+        assert_eq!(swept.fences, 1);
+        assert!(!fence_path(&base.0, request_id).exists());
+    }
+
+    #[test]
+    fn a_pruned_fence_cannot_resurrect_an_expired_delivery() {
+        // Атака: отзыв до доставки, подтверждение, уборка забора, поздняя
+        // доставка. Срок поздней доставки уже прошёл, поэтому она отвергается.
+        let base = TestBase::new();
+        let config = base.config();
+        let (conversation, request_id) = (Uuid::now_v7(), Uuid::now_v7());
+        assert_eq!(
+            revoke(&config, conversation, request_id, 1, "revoked"),
+            Removal::Removed
+        );
+        let fence = read_fence_file(&base.0, request_id);
+        let swept = sweep(&config, fence.max_expires_at_ms + FENCE_GRACE_MS + 1_000);
+        assert_eq!(swept.fences, 1);
+        assert!(
+            !fence_path(&base.0, request_id).exists(),
+            "the fence is gone"
+        );
+
+        let mut late = request(conversation, request_id, 1, "resurrected\n");
+        late.expires_at_ms = now_ms().saturating_sub(1);
+        assert_eq!(
+            deliver(&config, &late, &live_set(conversation)).unwrap_err(),
+            Failure::Expired
+        );
+        assert!(!value_path(&base.0, conversation, request_id).exists());
+    }
+
+    #[test]
+    #[test]
     fn a_fence_is_pruned_only_after_25_hours_and_only_without_a_value() {
         let base = TestBase::new();
         let config = base.config();
@@ -1886,7 +2293,7 @@ mod tests {
         assert!(fence_path(&base.0, dead).exists());
 
         // Старый забор без значения убирается; забор со значением — нет.
-        let old = now + FENCE_TTL_MS + 1_000;
+        let old = now + FENCE_TTL_MS + FENCE_GRACE_MS + 1_000;
         let swept = sweep(&config, old);
         assert_eq!(swept.fences, 1);
         assert!(!fence_path(&base.0, dead).exists());

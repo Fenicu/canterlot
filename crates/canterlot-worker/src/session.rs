@@ -795,6 +795,33 @@ impl Worker {
         // Файлы секретов: конфигурация ставится до проверки владения, потому что
         // startup_verify заново проигрывает сохранённые отзывы, а без неё отзыв
         // пошёл бы в каталог по умолчанию.
+        // Корень секретов мог смениться между запусками: прежний и новый
+        // очищаются до записи новой идентичности, иначе старый tmpfs остался бы
+        // с открытым текстом, а отзыв подтвердил бы отсутствие в новом.
+        {
+            let secrets = self.config.secrets.clone();
+            let data_dir = self.config.data_dir.clone();
+            match tokio::task::spawn_blocking(move || {
+                crate::secret::prepare_storage(&secrets, &data_dir)
+            })
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(failure)) => tracing::error!(
+                    kind = "secret_storage_disabled",
+                    reason = failure.code(),
+                    "secret storage is not confirmed; deliveries and revokes are refused"
+                ),
+                Err(_) => {
+                    crate::secret::disable_storage(&self.config.secrets);
+                    tracing::error!(
+                        kind = "secret_storage_disabled",
+                        reason = "join",
+                        "secret storage is not confirmed; deliveries and revokes are refused"
+                    );
+                }
+            }
+        }
         manager.set_secrets(self.config.secrets.clone());
         // Восстановление до приёма любых доставок: брошенные временные файлы,
         // значения без манифеста и неполные публикации убираются раньше, чем
