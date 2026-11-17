@@ -580,6 +580,10 @@ impl Ingest {
             let body = bounded_metadata(body);
             let body = body.as_ref();
             let correlation_id = Uuid::now_v7();
+            let current_epoch = self
+                .registry
+                .as_ref()
+                .and_then(|registry| registry.current_secrets_epoch(machine_id));
             let ignored = match apply_journal_body(
                 &mut tx,
                 machine_id,
@@ -592,20 +596,15 @@ impl Ingest {
             .await
             {
                 Ok(Some(ignored)) => ignored,
-                Ok(None) => match {
-                    let current_epoch = self
-                        .registry
-                        .as_ref()
-                        .and_then(|registry| registry.current_secrets_epoch(machine_id));
-                    apply_body(
-                        &mut tx,
-                        machine_id,
-                        body,
-                        correlation_id,
-                        current_epoch.as_deref(),
-                    )
-                    .await
-                } {
+                Ok(None) => match apply_body(
+                    &mut tx,
+                    machine_id,
+                    body,
+                    correlation_id,
+                    current_epoch.as_deref(),
+                )
+                .await
+                {
                     Ok(ignored) => ignored,
                     Err(error) => {
                         let _ = tx.rollback().await;

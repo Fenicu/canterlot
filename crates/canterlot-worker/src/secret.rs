@@ -2264,7 +2264,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn a_fence_is_pruned_only_after_25_hours_and_only_without_a_value() {
         let base = TestBase::new();
         let config = base.config();

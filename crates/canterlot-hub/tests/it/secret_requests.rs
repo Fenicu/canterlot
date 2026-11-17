@@ -1222,6 +1222,41 @@ async fn an_epoch_change_marks_delivered_requests_lost(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_re_filled_generation_gets_its_own_delivered_message(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let row = fx.open("Дважды переданный").await;
+    let mut worker = fx.connect(CAPS, "epoch-1").await;
+    let journal = Uuid::now_v7();
+    let first = fx.send_value(&mut worker, row.id, "one\n").await;
+    assert_eq!(first.generation, 1);
+    fx.delivered(journal, 1, &first, "/run/one").await;
+    // Потеря без отзыва: карточка снова ждёт владельца, поколение прежнее.
+    sqlx::query("update secret_requests set state='lost', note=$2 where id=$1")
+        .bind(row.id)
+        .bind(secrets::NOTE_LOST)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    let second = fx.send_value(&mut worker, row.id, "two\n").await;
+    assert_eq!(second.generation, 2);
+    fx.delivered(journal, 2, &second, "/run/two").await;
+
+    let prompts: Vec<String> = fx
+        .inputs()
+        .await
+        .into_iter()
+        .filter(|text| text.contains("передан"))
+        .collect();
+    assert_eq!(
+        prompts.len(),
+        2,
+        "each generation has its own agent message: {prompts:?}"
+    );
+    assert!(prompts.iter().any(|text| text.contains("/run/one")));
+    assert!(prompts.iter().any(|text| text.contains("/run/two")));
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn a_removal_receipt_from_another_conversation_is_ignored(pool: PgPool) {
     let fx = Fx::new(pool).await;
     let row = fx.open("Чужой разговор").await;

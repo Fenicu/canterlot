@@ -489,6 +489,7 @@ async fn decline(
         &row,
         &format!("Владелец отказал в секрете «{}».", row.name),
         "declined",
+        row.generation,
         correlation_id,
     )
     .await;
@@ -767,7 +768,15 @@ pub async fn apply_delivered_in_tx(
             row.path.as_deref().unwrap_or_default()
         ),
     };
-    queue_message_in_tx(conn, &row, &text, "delivered", correlation_id).await;
+    queue_message_in_tx(
+        conn,
+        &row,
+        &text,
+        "delivered",
+        row.generation,
+        correlation_id,
+    )
+    .await;
     Ok(())
 }
 
@@ -975,7 +984,7 @@ pub async fn apply_removed_in_tx(
     } else {
         format!("Секрет «{}» отозван, файл удалён.", row.name)
     };
-    queue_message_in_tx(conn, &row, &text, next, correlation_id).await;
+    queue_message_in_tx(conn, &row, &text, next, row.generation, correlation_id).await;
     Ok(())
 }
 
@@ -1691,8 +1700,10 @@ fn parse_uuid(value: &str) -> Option<Uuid> {
     Uuid::parse_str(value).ok()
 }
 
-fn message_key(request_id: Uuid, stage: &str) -> String {
-    format!("secret:{request_id}:{stage}")
+fn message_key(request_id: Uuid, stage: &str, generation: i64) -> String {
+    // Поколение в ключе: повторное заполнение не должно потерять своё сообщение
+    // агенту из-за ключа, уже занятого прежней выдачей.
+    format!("secret:{request_id}:{stage}:{generation}")
 }
 
 async fn queue_agent_message(
@@ -1701,13 +1712,14 @@ async fn queue_agent_message(
     row: &SecretRequestRow,
     text: &str,
     stage: &str,
+    generation: i64,
     correlation_id: Uuid,
 ) {
     let mut tx = match crate::db::begin(pool).await {
         Ok(tx) => tx,
         Err(_) => return,
     };
-    queue_message_in_tx(&mut tx, row, text, stage, correlation_id).await;
+    queue_message_in_tx(&mut tx, row, text, stage, generation, correlation_id).await;
     if tx.commit().await.is_err() {
         tracing::warn!(
             kind = "secret_message_failed",
@@ -1725,6 +1737,7 @@ async fn queue_message_in_tx(
     row: &SecretRequestRow,
     text: &str,
     stage: &str,
+    generation: i64,
     correlation_id: Uuid,
 ) {
     let submitted = submit_input_in_tx(
@@ -1732,7 +1745,7 @@ async fn queue_message_in_tx(
         &SubmitInput {
             owner_id: row.owner_id,
             conversation_id: row.conversation_id,
-            idempotency_key: message_key(row.id, stage),
+            idempotency_key: message_key(row.id, stage, generation),
             content: vec![ContentBlock::Text {
                 text: text.to_owned(),
             }],
@@ -1770,7 +1783,7 @@ async fn queue_message_in_tx(
 
 /// Снимает ещё не отправленное сообщение «передан», чтобы оно не пришло после отзыва.
 async fn withdraw_delivered_message(pool: &PgPool, row: &SecretRequestRow, correlation_id: Uuid) {
-    let key = message_key(row.id, "delivered");
+    let key = message_key(row.id, "delivered", row.generation);
     let input: Option<Uuid> = sqlx::query_scalar(
         "select id from inputs where conversation_id = $1 and idempotency_key = $2 and state = 'queued'",
     )
