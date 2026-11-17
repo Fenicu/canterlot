@@ -634,6 +634,48 @@ async fn a_hub_restart_turns_sending_into_lost_with_an_obligation(pool: PgPool) 
     assert_eq!(fx.obligation(row.id).await, Some((1, "lost".into(), 0)));
 }
 
+/// Стенд возвращается, только когда стартовое восстановление и первая сверка
+/// уже позади: тест не гоняется со службой за одни и те же строки.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_stand_returns_only_after_the_startup_sweep(pool: PgPool) {
+    let seed = testkit::seed(&pool).await;
+    let id = Uuid::now_v7();
+    sqlx::query(
+        "insert into secret_requests
+            (id, conversation_id, owner_id, machine_id, name, purpose, state,
+             generation, send_deadline_at)
+         values ($1, $2, $3, $4, 'Ключ', 'проверка старта', 'sending',
+                 1, now() + interval '60 seconds')",
+    )
+    .bind(id)
+    .bind(seed.conversation_id)
+    .bind(seed.owner_id)
+    .bind(seed.machine_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let hub = testkit::spawn_test_hub(pool.clone(), HubTimers::default()).await;
+    // Живой связи нет, поэтому отправка уже потеряна и обязательство создано.
+    let (state, note): (String, Option<String>) =
+        sqlx::query_as("select state, note from secret_requests where id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(state, "lost");
+    assert_eq!(note.as_deref(), Some(secrets::NOTE_LOST));
+    let obligation: Option<(i64, String)> = sqlx::query_as(
+        "select up_to, reason from secret_revocations where machine_id=$1 and request_id=$2",
+    )
+    .bind(seed.machine_id)
+    .bind(id)
+    .fetch_optional(&pool)
+    .await
+    .unwrap();
+    assert_eq!(obligation, Some((1, "lost".into())));
+    drop(hub);
+}
+
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn re_filling_a_lost_request_supersedes_the_old_generation(pool: PgPool) {
     let fx = Fx::new(pool).await;

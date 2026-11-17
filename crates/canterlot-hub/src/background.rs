@@ -27,6 +27,10 @@ pub struct BackgroundDeps {
     pub owner_push: Option<crate::notify::Sender>,
     /// Опрос страниц статуса провайдеров; `None` — выключен (и у тестовых стендов).
     pub provider_status: Option<crate::config::ProviderStatusConfig>,
+    /// Готовность службы секретов: `true` после стартового восстановления и
+    /// сверки. В бою `None`; тестовый стенд ждёт сигнал, чтобы не гоняться
+    /// со стартовой работой за одни и те же строки.
+    pub secrets_ready: Option<watch::Sender<bool>>,
 }
 
 /// Фоновая служба, завершившаяся паникой.
@@ -57,6 +61,7 @@ impl Background {
             attachments,
             owner_push,
             provider_status,
+            secrets_ready,
         } = deps;
         let bus = crate::bus::EventBus::spawn(pool.clone(), multi_process, stopped.clone());
         let mut tasks = vec![
@@ -136,6 +141,7 @@ impl Background {
                     pool.clone(),
                     registry.clone(),
                     stopped.clone(),
+                    secrets_ready,
                 )),
             ),
         ];

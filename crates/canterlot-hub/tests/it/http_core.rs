@@ -537,6 +537,7 @@ async fn background_services_stop_on_shutdown_and_release_their_locks(pool: PgPo
         attachments: Some((blobs, attachments)),
         owner_push: None,
         provider_status: None,
+        secrets_ready: None,
     });
     tokio::time::sleep(Duration::from_millis(300)).await;
     tokio::time::timeout(Duration::from_secs(10), background.stop())

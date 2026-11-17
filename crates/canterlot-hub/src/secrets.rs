@@ -288,6 +288,16 @@ async fn lock_conversation(
     machine.ok_or(SecretError::ConversationNotFound)
 }
 
+/// Очередь разговора — шаг 6 общего порядка блокировок, разговор — шаг 7:
+/// квитанция ставит агенту сообщение, и очередь берётся до строки разговора.
+async fn lock_queue(conn: &mut PgConnection, conversation_id: Uuid) -> Result<(), sqlx::Error> {
+    sqlx::query("select conversation_id from queue_state where conversation_id = $1 for update")
+        .bind(conversation_id)
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
 async fn lock_request(
     conn: &mut PgConnection,
     id: Uuid,
@@ -718,6 +728,10 @@ pub async fn apply_delivered_in_tx(
         receipt_mismatch("delivered", machine_id, request_id, conversation_id);
         return Ok(());
     }
+    // Очередь — шаг 6 общего порядка блокировок, разговор — шаг 7. Квитанция
+    // ставит агенту сообщение ниже, поэтому очередь берётся первой: иначе
+    // проектор активности и приём журналов ловят взаимную блокировку.
+    lock_queue(conn, conversation_id).await?;
     sqlx::query("select id from conversations where id = $1 for no key update")
         .bind(conversation_id)
         .execute(&mut *conn)
@@ -951,6 +965,8 @@ pub async fn apply_removed_in_tx(
     else {
         return Ok(());
     };
+    // См. `apply_delivered_in_tx`: очередь до строки разговора.
+    lock_queue(conn, conversation_id).await?;
     sqlx::query("select id from conversations where id = $1 for no key update")
         .bind(conversation_id)
         .execute(&mut *conn)
@@ -1437,10 +1453,15 @@ pub async fn recover_after_restart(pool: &PgPool, registry: &Registry) -> Result
 
 /// Служба хаба: восстановление после старта, затем раз в минуту потерянные
 /// доставки, истёкшие файлы и созревшие обязательства.
+///
+/// Стартовая работа выполняется ровно один раз и не повторяется первым тиком
+/// интервала: он назначается на минуту вперёд. `ready` получает `true` после
+/// старта — тестовый стенд ждёт его, чтобы не гоняться со службой.
 pub async fn run(
     pool: PgPool,
     registry: Registry,
     mut stopped: tokio::sync::watch::Receiver<bool>,
+    ready: Option<tokio::sync::watch::Sender<bool>>,
 ) {
     if let Err(error) = recover_after_restart(&pool, &registry).await {
         tracing::error!(
@@ -1450,9 +1471,11 @@ pub async fn run(
         );
     }
     tick_logged(&pool, &registry).await;
-    let mut ticker = tokio::time::interval(Duration::from_secs(60));
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut ticker = tokio::time::interval(Duration::from_secs(60));
+    if let Some(ready) = ready {
+        let _ = ready.send(true);
+    }
+    let period = Duration::from_secs(60);
+    let mut ticker = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
@@ -1589,7 +1612,7 @@ pub async fn emit_due_revocations(pool: &PgPool, registry: &Registry) -> Result<
     }
     let ids: Vec<Uuid> = sqlx::query_scalar(
         "select id from secret_revocations
-         where next_attempt_at <= now() and machine_id = any($1::uuid[])
+         where next_attempt_at <= clock_timestamp() and machine_id = any($1::uuid[])
          order by next_attempt_at, id limit 100",
     )
     .bind(&eligible)
@@ -1603,8 +1626,11 @@ pub async fn emit_due_revocations(pool: &PgPool, registry: &Registry) -> Result<
         let mut tx = crate::db::begin(pool).await?;
         // Читаем поля под замком: между выборкой и блокировкой строку могли
         // удалить или изменить квитанцией, и исчезнувшая строка — не ошибка партии.
+        // Срок сверяется по часам после ожидания замка: `now()` — время начала
+        // транзакции, а строку могли поднять уже после него, и обязательство
+        // ложно выглядело бы незрелым.
         let locked: Option<DueObligation> = sqlx::query_as(
-            "select next_attempt_at <= now(), machine_id, conversation_id, request_id,
+            "select next_attempt_at <= clock_timestamp(), machine_id, conversation_id, request_id,
                     up_to, reason, attempts, max_expires_at_ms
              from secret_revocations where id = $1 for update",
         )
@@ -1697,7 +1723,7 @@ pub async fn emit_due_revocations(pool: &PgPool, registry: &Registry) -> Result<
         sqlx::query(
             "update secret_revocations
              set attempts = attempts + 1,
-                 next_attempt_at = now() + ($2::bigint * interval '1 second'),
+                 next_attempt_at = clock_timestamp() + ($2::bigint * interval '1 second'),
                  updated_at = now()
              where id = $1",
         )

@@ -313,6 +313,7 @@ pub async fn spawn_test_hub_with(pool: PgPool, options: TestHubOptions) -> TestH
     let dictation_timers = dictation_timers.unwrap_or_default();
     let registry = Registry::new(timers.clone());
     let (dispatcher, dispatch_rx) = dispatcher::Dispatcher::channel();
+    let (secrets_ready, mut secrets_started) = tokio::sync::watch::channel(false);
     let mut state =
         grpc::HubGrpc::new(pool.clone(), registry.clone(), installation, timers.clone())
             .with_blob_store(blobs.clone())
@@ -364,7 +365,18 @@ pub async fn spawn_test_hub_with(pool: PgPool, options: TestHubOptions) -> TestH
         attachments: Some((blobs.clone(), attachments.clone())),
         owner_push: None,
         provider_status: None,
+        secrets_ready: Some(secrets_ready),
     });
+    // Стартовая работа службы секретов идёт в фоне: дождёмся её, иначе тест
+    // и служба будут наперегонки менять одни и те же строки.
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        secrets_started
+            .wait_for(|ready| *ready)
+            .await
+            .expect("secret requests service stopped before it was ready");
+    })
+    .await
+    .expect("secret requests startup did not finish within 30 s");
     let (http_addr, app, http_listener) = match http {
         Some(config) => {
             let secret = config

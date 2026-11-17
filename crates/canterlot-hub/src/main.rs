@@ -456,6 +456,7 @@ async fn serve(
         attachments: Some((blobs.clone(), attachments.clone())),
         owner_push,
         provider_status: Some(provider_status),
+        secrets_ready: None,
     });
     let root = tokio_util::sync::CancellationToken::new();
     let trigger = root.clone();
