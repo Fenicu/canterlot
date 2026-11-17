@@ -254,12 +254,35 @@ pw="${CANTERLOT_PW_JSON_REPORT}.json"
 st="${CANTERLOT_STACK_JSON_REPORT}-1.json"
 mkdir -p "${pw%/*}"
 if [[ "$FAKE_WEB_FAIL" == none ]]; then
-  printf "%s\n" "{\"suites\":[]}" >"$pw"
-  printf "%s\n" "{\"suites\":[]}" >"$st"
+  SELECTION="$GATE_STEP_SELECTION" PW_REPORT="$pw" ST_REPORT="$st" MISSING="${FAKE_WEB_MISSING:-}" python3 - <<PY
+import json, os
+missing = os.environ["MISSING"]
+pw_specs, st_specs = [], []
+for line in os.environ["SELECTION"].splitlines():
+    parts = line.split("|")
+    if not parts:
+        continue
+    if parts[0] == "pw" and missing != "pw":
+        project, loc, full = parts[1], parts[2], parts[3]
+        file, _, lineno = loc.rpartition(":")
+        head, sep, tail = full.partition(" › ")
+        pw_specs.append({"file": file, "line": int(lineno), "title": head, "tests": [{"projectName": project, "title": tail, "status": "expected", "results": [{"status": "passed"}]}]})
+    elif parts[0] == "stack" and missing != "stack":
+        loc, full = parts[1], parts[2]
+        file, _, lineno = loc.rpartition(":")
+        head, sep, tail = full.partition(" › ")
+        st_specs.append({"file": file, "line": int(lineno), "title": head, "tests": [{"title": tail, "status": "expected", "results": [{"status": "passed"}]}]})
+def report(specs):
+    return {"suites": [{"specs": specs}]}
+with open(os.environ["PW_REPORT"], "w") as f:
+    json.dump(report(pw_specs), f)
+with open(os.environ["ST_REPORT"], "w") as f:
+    json.dump(report(st_specs), f)
+PY
   exit 0
 fi
-printf "%s\n" "{\"suites\":[{\"specs\":[{\"file\":\"e2e/ui/x.spec.ts\",\"title\":\"x spec\",\"tests\":[{\"projectName\":\"phone\",\"title\":\"flaky title\",\"results\":[{\"status\":\"failed\"}]}]}]}]}" >"$pw"
-printf "%s\n" "{\"suites\":[{\"specs\":[{\"file\":\"e2e/stack/y.spec.ts\",\"title\":\"stack spec\",\"tests\":[{\"title\":\"stack title\",\"results\":[{\"status\":\"timedOut\"}]}]}]}]}" >"$st"
+printf "%s\n" "{\"suites\":[{\"specs\":[{\"file\":\"e2e/ui/x.spec.ts\",\"line\":42,\"title\":\"x spec\",\"tests\":[{\"projectName\":\"phone\",\"title\":\"flaky title\",\"results\":[{\"status\":\"failed\"}]}]},{\"file\":\"e2e/ui/z.spec.ts\",\"line\":9,\"title\":\"z spec\",\"tests\":[{\"projectName\":\"phone\",\"title\":\"second title\",\"results\":[{\"status\":\"failed\"}]}]}]}]}" >"$pw"
+printf "%s\n" "{\"suites\":[{\"specs\":[{\"file\":\"e2e/stack/y.spec.ts\",\"line\":7,\"title\":\"stack spec\",\"tests\":[{\"title\":\"stack title\",\"results\":[{\"status\":\"timedOut\"}]}]}]}]}" >"$st"
 exit 1
 '
 web_env=(
@@ -274,8 +297,9 @@ run 1 "${web_env[@]}" bash "$g6/scripts/gate.sh" --no-attest
 g6short=$(git -C "$g6" rev-parse --short=8 HEAD)
 state6="$g6/.superpowers/gate/$g6short/state.tsv"
 grep -qF $'deploy_fail\tdeploy|release' "$state6" || fail 'нет идентичности упавшего набора выката'
-grep -qF $'pw_fail\tpw|phone|e2e/ui/x.spec.ts|x spec › flaky title' "$state6" || fail 'нет идентичности Playwright из JSON'
-grep -qF $'stack_fail\tstack|e2e/stack/y.spec.ts|stack spec › stack title' "$state6" || fail 'нет идентичности сценария из JSON'
+grep -qF $'pw_fail\tpw|phone|e2e/ui/x.spec.ts:42|x spec › flaky title' "$state6" || fail 'нет идентичности Playwright из JSON'
+grep -qF $'pw_fail\tpw|phone|e2e/ui/z.spec.ts:9|z spec › second title' "$state6" || fail 'нет второй идентичности Playwright из JSON'
+grep -qF $'stack_fail\tstack|e2e/stack/y.spec.ts:7|stack spec › stack title' "$state6" || fail 'нет идентичности сценария из JSON'
 grep -qF $'deploy_failed\ttests' "$state6" || fail 'падение deploy не отнесено к тестам'
 grep -qF $'web_failed\ttests' "$state6" || fail 'падение web не отнесено к тестам'
 export FAKE_DEPLOY_FAIL=none FAKE_WEB_FAIL=none
@@ -283,11 +307,30 @@ export FAKE_DEPLOY_FAIL=none FAKE_WEB_FAIL=none
 run 0 "${web_env[@]}" bash "$g6/scripts/gate.sh" --rerun-failed --no-attest
 if grep -qE '^(npm|check) ' "$GATE_FAKE_CALLS"; then fail 'перезапуск задел прошедшие шаги npm/check'; fi
 grep -qF 'deploy tests [release]' "$GATE_FAKE_CALLS" || fail 'deploy не перезапустил только упавший набор'
-grep -qF 'pw|phone|e2e/ui/x.spec.ts' "$GATE_FAKE_CALLS" || fail 'web не получил идентичность Playwright'
-grep -qF 'stack|e2e/stack/y.spec.ts' "$GATE_FAKE_CALLS" || fail 'web не получил идентичность сценария'
-for id in 'deploy|release' 'pw|phone|e2e/ui/x.spec.ts|x spec › flaky title' 'stack|e2e/stack/y.spec.ts|stack spec › stack title'; do
+[[ $(grep -c '^web ' "$GATE_FAKE_CALLS") == 1 ]] || fail 'Playwright одного проекта не сгруппирован в один вызов'
+grep -qF 'pw|phone|e2e/ui/x.spec.ts:42' "$GATE_FAKE_CALLS" || fail 'web не получил селектор file:line'
+grep -qF 'pw|phone|e2e/ui/z.spec.ts:9' "$GATE_FAKE_CALLS" || fail 'второй селектор не попал в ту же группу'
+grep -qF 'stack|e2e/stack/y.spec.ts:7' "$GATE_FAKE_CALLS" || fail 'web не получил идентичность сценария'
+if grep -qF -- '--grep' "$GATE_FAKE_CALLS"; then fail 'перезапуск снова выбрал тесты по заголовку через --grep'; fi
+for id in 'deploy|release' 'pw|phone|e2e/ui/x.spec.ts:42|x spec › flaky title' \
+          'pw|phone|e2e/ui/z.spec.ts:9|z spec › second title' 'stack|e2e/stack/y.spec.ts:7|stack spec › stack title'; do
     grep -qF "$(printf 'flaky\t%s' "$id")" "$state6" || fail "нет отметки flaky для $id"
 done
+
+# Если отчёт перезапуска не подтвердил прохождение идентичности, гейт обязан
+# провалиться, а не счесть её нестабильной и прошедшей.
+g7="$tmp/g7"
+new_gate_repo "$g7"
+export FAKE_DEPLOY_FAIL=none FAKE_WEB_FAIL=fail
+run 1 "${web_env[@]}" bash "$g7/scripts/gate.sh" --no-attest
+export FAKE_WEB_FAIL=none FAKE_WEB_MISSING=stack
+run 1 "${web_env[@]}" bash "$g7/scripts/gate.sh" --rerun-failed --no-attest
+grep -q 'не подтвердил прохождение' "$out" || { cat "$out" >&2; fail 'нет отказа из-за неподтверждённой идентичности'; }
+grep -qF 'stack|e2e/stack/y.spec.ts:7' "$out" || fail 'в отказе не названа missing-идентичность'
+grep -qF $'rerun_done\tstack|e2e/stack/y.spec.ts:7|stack spec › stack title' \
+    "$g7/.superpowers/gate/$(git -C "$g7" rev-parse --short=8 HEAD)/state.tsv" \
+    || fail 'неподтверждённая идентичность не попала в rerun_done'
+unset FAKE_WEB_MISSING
 
 # Битый индекс: git status падает, и проверка чистоты обязана провалиться, а не
 # пропустить аттестацию из-за пустого вывода.
@@ -295,8 +338,15 @@ printf 'garbage' >"$scratch/.git/index"
 run 1 env CANTERLOT_LEASE_DRY=1 bash "$scratch/scripts/gate.sh"
 grep -q 'грязная' "$out" || { cat "$out" >&2; fail 'битый индекс не остановил гейт'; }
 
+# Выбор упавших тестов по file:line проверяем на настоящих спеках без браузера.
+if [[ -x web/node_modules/.bin/playwright ]]; then
+    bash scripts/gate/test-pw-selection.sh || fail 'выбор Playwright по file:line'
+else
+    printf 'выбор Playwright по file:line: пропущен, нет web/node_modules\n'
+fi
+
 if command -v shellcheck >/dev/null 2>&1; then
-    shellcheck scripts/gate.sh scripts/gate-coverage.sh scripts/gate-remote.sh \
+    shellcheck scripts/gate.sh scripts/gate-coverage.sh scripts/gate/test-pw-selection.sh scripts/gate-remote.sh \
         scripts/gate/in-container.sh scripts/gate/test.sh \
         || fail "shellcheck"
 fi

@@ -184,7 +184,8 @@ PostgreSQL по умолчанию 55441, временный каталог — 
 Каждый прогон — успешный или нет — пишет в `.superpowers/gate/<sha8>/state.tsv`
 машиночитаемое состояние: полный sha, время, признак завершения, коды и
 длительности шагов и идентичности упавших тестов (`rust|binary|test`,
-`pw|project|file|title`, `stack|spec|title`, `deploy|suite`). Падения не по
+`pw|project|file:line|title`, `stack|file:line|title`, `deploy|suite`; строка
+из JSON-отчёта Playwright). Падения не по
 тестам (npm ci, fmt, clippy, сборка, svelte-check, eslint, проверки API,
 токенов и типов) помечаются как `*_failed=other`. После такого прогона
 `scripts/gate.sh --rerun-failed` берёт ту же аренду и перезапускает только то,

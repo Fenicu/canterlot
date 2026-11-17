@@ -155,19 +155,27 @@ lease_self_wrap gate gate bash "$(realpath "$0")" "$@"
 `<ключ><TAB><значение>`: `schema`, полный `sha`, `started`, `finished`,
 `completed`, `mode`, `*_exit`, `*_duration_s`, `*_failed` (`ok`, `tests` или
 `other`) и идентичности упавших тестов — `rust_fail=rust|binary|test`
-(nextest JUnit), `pw_fail=pw|project|file|title` и `stack_fail=stack|spec|title`
-(JSON-репортер Playwright, включается переменными `CANTERLOT_PW_JSON_REPORT`
-и `CANTERLOT_STACK_JSON_REPORT`), `deploy_fail=deploy|suite` (файлы `.rc` набора).
+(nextest JUnit), `pw_fail=pw|project|file:line|title` и
+`stack_fail=stack|file:line|title` (JSON-репортер Playwright, включает переменные
+`CANTERLOT_PW_JSON_REPORT` и `CANTERLOT_STACK_JSON_REPORT`), `deploy_fail=deploy|suite`
+(файлы `.rc` набора). Строка из JSON-отчёта нужна как селектор `file:line`:
+`--grep` в Playwright сравнивается со всей строкой «проект файл describe заголовок
+теги», поэтому точный заголовок им не выбрать.
 Также в состоянии хранятся `rerun_of`, `rerun_done` и `flaky`.
 
 `scripts/gate.sh --rerun-failed` читает состояние предыдущего завершённого
 прогона ровно этого HEAD при чистом дереве, берёт ту же аренду `gate` и
 перезапускает только упавшие шаги: прошедшие не вызываются, шаг с
 `*_failed=tests` получает точный фильтр (`binary_id(=…) & test(=…)` для nextest,
-тот же `--project` и `--grep` с полным заголовком для Playwright, `RUN_SUITES`
+те же `file:line` с группировкой по проекту для Playwright (один вызов на проект
+и один на все сквозные спеки), `RUN_SUITES`
 для наборов выката, путь спеки для сквозных сценариев), шаг с `*_failed=other`
-идёт целиком. Каждая идентичность попадает в `rerun_done`; повторный
+идёт целиком. По новому JSON-отчёту гейт требует, чтобы каждая перезапущенная идентичность
+реально выполнилась и прошла: отсутствующая в отчёте или пропущенная считается
+провалом. Каждая идентичность попадает в `rerun_done`; повторный
 `--rerun-failed` для неё отказывает, а повторное падение проваливает гейт.
+Сам выбор `file:line` без браузера проверяет `scripts/gate/test-pw-selection.sh`
+на настоящих спеках `e2e/ui`.
 При успехе в аттестацию добавляются `rerun_of=<started первого прогона>` и
 `flaky=<идентичность>` для тестов, прошедших только на перезапуске. В конце
 печатается отчёт о нестабильных тестах с напоминанием про

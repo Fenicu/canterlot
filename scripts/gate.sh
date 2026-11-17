@@ -280,39 +280,49 @@ run_gate_step() {
 }
 
 # Перезапуск только упавших Playwright-тестов и сквозных сценариев. Идентичности
-# приходят строками pw|проект|файл|заголовок и stack|файл|заголовок.
+# приходят строками pw|проект|файл:строка|заголовок и stack|файл:строка|заголовок.
+# --grep здесь не годится: Playwright сверяет его со строкой «проект файл describe
+# заголовок теги», соединённой пробелами, поэтому точный заголовок вроде «A › B» не
+# совпадёт. Выбираем тесты по расположению из JSON-отчёта (file:line) — на том же
+# коммите номера строк стабильны — и группируем все локации одного проекта в один
+# вызов. После прогона missing_rerun_ids проверяет, что каждая идентичность реально
+# выполнилась и прошла: пропущенная или пропущенная как skipped — провал.
 web_rerun() {
-    local selection=$1 id kind project file title grep_arg status=0
+    local selection=$1 id kind f1 f2 _ status=0 project
+    local -A pw_loc=()
+    local stack_sel=""
     [[ -f package-lock.json ]] || die 'нет web/package-lock.json'
     export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-${XDG_CACHE_HOME:-$HOME/.cache}/canterlot-playwright}"
     export TOKIO_WORKER_THREADS="${TOKIO_WORKER_THREADS:-4}" RAYON_NUM_THREADS="${RAYON_NUM_THREADS:-4}"
     export MOZ_TASKCONTROLLER_THREADCOUNT="${MOZ_TASKCONTROLLER_THREADCOUNT:-4}" GSETTINGS_BACKEND="${GSETTINGS_BACKEND:-memory}"
     export PORT="${PORT:-$(node -e "const s=require('net').createServer();s.listen(0,'127.0.0.1',()=>{console.log(s.address().port);s.close()})")}"
     export PATH="${HOME}/.cargo/bin:${PATH}"
-    cd web
     while IFS= read -r id; do
         [[ -n "$id" ]] || continue
-        IFS='|' read -r kind a b c <<<"$id"
-        if [[ "$kind" == pw ]]; then
-            project=$a file=$b title=$c
-        else
-            project="" file=$a title=$b
-        fi
-        grep_arg="--grep=^$(grep_escape "$title")$"
+        IFS='|' read -r kind f1 f2 _ <<<"$id"
         case "$kind" in
-            pw) npx --no-install playwright test "$file" "--project=$project" "$grep_arg" || status=1 ;;
-            stack)
-                CANTERLOT_STACK_RUN=1 npx --no-install playwright test "$file" "$grep_arg" || status=1
-                ;;
+            pw) pw_loc[$f1]+="${pw_loc[$f1]:+ }$f2" ;;
+            stack) stack_sel+="${stack_sel:+ }$f1" ;;
         esac
     done <<<"$selection"
+    local -a locations=()
+    cd web
+    for project in "${!pw_loc[@]}"; do
+        read -r -a locations <<<"${pw_loc[$project]}"
+        npx --no-install playwright test "${locations[@]}" "--project=$project" || status=1
+    done
+    if [[ -n "$stack_sel" ]]; then
+        read -r -a locations <<<"$stack_sel"
+        CANTERLOT_STACK_RUN=1 npx --no-install playwright test "${locations[@]}" || status=1
+    fi
     return "$status"
 }
-grep_escape() { printf '%s' "$1" | sed 's/[][\\^$.*+?(){}|]/\\&/g'; }
 
 # --- разбор отчётов в идентичности упавших тестов ------------------------------
-# Идентичности канонические: rust|binary|test, pw|project|file|title,
-# deploy|suite, stack|spec|title. Те же строки идут в состояние и в flaky= аттестации.
+# Идентичности канонические: rust|binary|test, pw|project|file:line|title,
+# deploy|suite, stack|file:line|title. Те же строки идут в состояние и в flaky=
+# аттестации; файл:строка берётся из JSON-отчёта Playwright и служит селектором
+# при перезапуске.
 rust_failures() {
     [[ -f "$junit" ]] || return 0
     python3 - "$junit" <<'PY'
@@ -348,6 +358,8 @@ def walk(suites, out):
     for suite in suites or []:
         for spec in suite.get('specs', []) or []:
             path = spec.get('file', '')
+            if spec.get('line'):
+                path = f"{path}:{spec['line']}"
             spec_title = spec.get('title', '')
             for test in spec.get('tests', []) or []:
                 results = test.get('results', []) or []
@@ -374,6 +386,57 @@ seen = set()
 for item in out:
     if item not in seen:
         seen.add(item)
+        print(item)
+PY
+}
+
+# Проверка перезапуска: печатает ожидаемые идентичности, которых нет среди
+# действительно прошедших в новом JSON-отчёте. Пустой вывод — все прошли.
+missing_rerun_ids() {
+    local kind=$1 prefix=$2 expected=$3 f files=() slot
+    [[ -s "$expected" ]] || return 0
+    [[ -f "$prefix.json" ]] && files+=("$prefix.json")
+    for slot in 1 2 3 4 5 6 7 8; do
+        [[ -f "$prefix-$slot.json" ]] && files+=("$prefix-$slot.json")
+    done
+    python3 - "$kind" "$expected" "${files[@]}" <<'PY'
+import json
+import sys
+
+kind, expected_path = sys.argv[1], sys.argv[2]
+expected = [line.rstrip('\n') for line in open(expected_path) if line.strip()]
+passed = set()
+
+
+def walk(suites):
+    for suite in suites or []:
+        for spec in suite.get('specs', []) or []:
+            path = spec.get('file', '')
+            if spec.get('line'):
+                path = f"{path}:{spec['line']}"
+            spec_title = spec.get('title', '')
+            for test in spec.get('tests', []) or []:
+                statuses = [r.get('status') for r in test.get('results', []) or []]
+                if 'passed' not in statuses or test.get('status') not in ('expected', 'flaky'):
+                    continue
+                title = test.get('title', '')
+                full = f"{spec_title} › {title}" if spec_title and title else (spec_title or title)
+                if kind == 'pw':
+                    project = test.get('projectName') or spec.get('projectName') or ''
+                    passed.add(f"pw|{project}|{path}|{full}")
+                else:
+                    passed.add(f"stack|{path}|{full}")
+        walk(suite.get('suites', []))
+
+
+for path in sys.argv[3:]:
+    try:
+        with open(path) as handle:
+            walk(json.load(handle).get('suites', []))
+    except Exception:
+        continue
+for item in expected:
+    if item not in passed:
         print(item)
 PY
 }
@@ -463,11 +526,26 @@ if [[ "$web_action" != skip ]]; then
     printf '\n==> scripts/check-web.sh --stack (%s)\n' "$web_action"
     s=$SECONDS
     web_status=0
+    if [[ "$web_action" == tests ]]; then
+        printf '%s\n' "${prev_pw[@]}" >"$log_dir/pw-expected.txt"
+        printf '%s\n' "${prev_stack[@]}" >"$log_dir/stack-expected.txt"
+    fi
     run_gate_step web "$step_web" "$web_action" "$web_sel" >"$log_dir/web.log" 2>&1 || web_status=$?
     web_s=$((SECONDS - s))
     printf '    check-web.sh --stack: %ds, код %s\n' "$web_s" "$web_status"
     mapfile -t pw_ids < <(pw_failures "$CANTERLOT_PW_JSON_REPORT")
     mapfile -t stack_ids < <(pw_failures "$CANTERLOT_STACK_JSON_REPORT" stack)
+    if [[ "$web_action" == tests ]]; then
+        mapfile -t pw_missing < <(missing_rerun_ids pw "$CANTERLOT_PW_JSON_REPORT" "$log_dir/pw-expected.txt")
+        mapfile -t stack_missing < <(missing_rerun_ids stack "$CANTERLOT_STACK_JSON_REPORT" "$log_dir/stack-expected.txt")
+        if ((${#pw_missing[@]} + ${#stack_missing[@]})); then
+            printf 'гейт: перезапуск не подтвердил прохождение тестов (провалены, пропущены или не запущены):\n' >&2
+            printf '  %s\n' "${pw_missing[@]}" "${stack_missing[@]}" >&2
+            for id in "${pw_missing[@]}"; do pw_ids+=("$id"); done
+            for id in "${stack_missing[@]}"; do stack_ids+=("$id"); done
+            web_status=1
+        fi
+    fi
 else
     printf '\n==> scripts/check-web.sh --stack: переиспользован прошедший шаг\n'
 fi
