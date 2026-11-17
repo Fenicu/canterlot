@@ -238,6 +238,10 @@ struct Fence {
     /// раньше него забор не убирается, иначе поздняя доставка нашла бы чистый лист.
     #[serde(default)]
     max_expires_at_ms: u64,
+    /// Хотя бы один отзыв пришёл без срока (0): горизонт неизвестен, и убирать
+    /// забор нельзя вовсе — только смена корня.
+    #[serde(default)]
+    unknown_horizon: bool,
 }
 
 impl Fence {
@@ -248,7 +252,14 @@ impl Fence {
             dead: 0,
             updated_at: 0,
             max_expires_at_ms: 0,
+            unknown_horizon: false,
         }
+    }
+
+    /// Старый файл без флага, но с ненулевым `seen`/`dead` и нулевым сроком —
+    /// тоже неизвестный горизонт: такой забор переживает любую уборку.
+    fn horizon_unknown(&self) -> bool {
+        self.unknown_horizon || (self.max_expires_at_ms == 0 && (self.seen > 0 || self.dead > 0))
     }
 }
 
@@ -740,9 +751,20 @@ fn wipe_root(root: &PinnedDir) -> Result<(), Failure> {
     Ok(())
 }
 
-struct RootLock {
+/// Открытый корень под замком: один дескриптор на каталог, даже если пути
+/// разные (`..`, ссылки в предках). Иначе два `flock` на один `.lock` через
+/// разные открытия заблокируют собственный старт.
+struct PreparedRoot {
     dir: PinnedDir,
     _lock: std::fs::File,
+    dev: u64,
+    ino: u64,
+}
+
+impl PreparedRoot {
+    fn identity(&self) -> (u64, u64) {
+        (self.dev, self.ino)
+    }
 }
 
 fn lock_dir(dir: &PinnedDir) -> Result<std::fs::File, Failure> {
@@ -761,29 +783,33 @@ fn lock_dir(dir: &PinnedDir) -> Result<std::fs::File, Failure> {
     Ok(lock)
 }
 
-fn lock_existing_root(path: &Path) -> Result<Option<RootLock>, Failure> {
+/// Открывает корень, сверяет идентичность `(dev, ino)` с уже открытыми и
+/// берёт замок только для нового каталога. Возвращает идентичность, чтобы
+/// вызывающий мог взять тот же дескриптор для уборки.
+fn add_root(roots: &mut Vec<PreparedRoot>, path: &Path) -> Result<Option<(u64, u64)>, Failure> {
     let Some(dir) = open_existing_root_opt(path)? else {
         return Ok(None);
     };
+    let stat = fstat(dir.fd()).map_err(|_| Failure::InsecureDirectory)?;
+    let identity = (stat.st_dev, stat.st_ino);
+    if roots.iter().any(|root| root.identity() == identity) {
+        return Ok(Some(identity));
+    }
     let lock = lock_dir(&dir)?;
-    Ok(Some(RootLock { dir, _lock: lock }))
+    roots.push(PreparedRoot {
+        dir,
+        _lock: lock,
+        dev: stat.st_dev,
+        ino: stat.st_ino,
+    });
+    Ok(Some(identity))
 }
 
-/// Держит замок ещё одного корня, если он существует и ещё не взят.
-fn lock_more(
-    path: &Path,
-    configured: &Path,
-    locked: &mut Vec<PathBuf>,
-    extras: &mut Vec<RootLock>,
-) -> Result<(), Failure> {
-    if path == configured || locked.iter().any(|known| known == path) {
-        return Ok(());
-    }
-    if let Some(lock) = lock_existing_root(path)? {
-        locked.push(path.to_path_buf());
-        extras.push(lock);
-    }
-    Ok(())
+fn root_by_identity(roots: &[PreparedRoot], identity: (u64, u64)) -> Option<&PinnedDir> {
+    roots
+        .iter()
+        .find(|root| root.identity() == identity)
+        .map(|root| &root.dir)
 }
 
 /// Корень по умолчанию: его тоже надо очистить, если файл идентичности потерян,
@@ -799,14 +825,15 @@ fn prepare_storage_inner(
     default_root: Option<&Path>,
 ) -> Result<(), Failure> {
     let (base, root) = open_base(config)?;
-    // Подготовка — тоже операция хранилища: замок настроенного корня, прежнего
-    // записанного и корня по умолчанию держится до записи новой идентичности.
+    let stat = fstat(base.fd()).map_err(|_| Failure::InsecureDirectory)?;
+    let configured_identity = (stat.st_dev, stat.st_ino);
     let configured_lock = lock_dir(&base)?;
-    let configured = RootLock {
+    let mut roots = vec![PreparedRoot {
         dir: base,
         _lock: configured_lock,
-    };
-    let stat = fstat(configured.dir.fd()).map_err(|_| Failure::InsecureDirectory)?;
+        dev: stat.st_dev,
+        ino: stat.st_ino,
+    }];
     let identity = RootIdentity {
         path: root.display().to_string(),
         dev: stat.st_dev,
@@ -814,33 +841,30 @@ fn prepare_storage_inner(
     };
     let data_dir = data_dir_pinned(data_dir)?;
     let recorded = read_root_identity(&data_dir)?;
-    let mut locked = vec![root.clone()];
-    let mut extras = Vec::new();
     match recorded {
         Some(recorded) if recorded == identity => Ok(()),
         Some(recorded) => {
             let previous = PathBuf::from(&recorded.path);
-            lock_more(&previous, &root, &mut locked, &mut extras)?;
-            if previous != root
-                && let Some(previous) = open_existing_root_opt(&previous)?
+            if let Some(previous) = add_root(&mut roots, &previous)?
+                && previous != configured_identity
+                && let Some(previous) = root_by_identity(&roots, previous)
             {
-                wipe_root(&previous)?;
+                wipe_root(previous)?;
             }
             // Настроенный корень тоже может хранить старые значения (например,
             // его вернули после смены).
-            wipe_root(&configured.dir)?;
+            wipe_root(&roots[0].dir)?;
             write_root_identity(&data_dir, &identity)
         }
         None => {
-            if let Some(default) = default_root {
-                lock_more(default, &root, &mut locked, &mut extras)?;
-                if default != root
-                    && let Some(default) = open_existing_root_opt(default)?
-                {
-                    wipe_root(&default)?;
-                }
+            if let Some(default) = default_root
+                && let Some(default) = add_root(&mut roots, default)?
+                && default != configured_identity
+                && let Some(default) = root_by_identity(&roots, default)
+            {
+                wipe_root(default)?;
             }
-            wipe_root(&configured.dir)?;
+            wipe_root(&roots[0].dir)?;
             write_root_identity(&data_dir, &identity)
         }
     }
@@ -1402,7 +1426,8 @@ pub fn sweep(config: &SecretConfig, now: u64) -> Swept {
         let Ok(Some(fence)) = read_fence(&fences, request_id) else {
             continue;
         };
-        if now <= fence.max_expires_at_ms.saturating_add(FENCE_GRACE_MS) {
+        if fence.horizon_unknown() || now <= fence.max_expires_at_ms.saturating_add(FENCE_GRACE_MS)
+        {
             continue;
         }
         if value_exists(&lock, fence.conversation_id, request_id) != Some(false) {
@@ -2000,6 +2025,7 @@ mod tests {
                 dead: 1,
                 updated_at: now_ms(),
                 max_expires_at_ms: 0,
+                unknown_horizon: false,
             },
         );
         let recovered = recover(&config);
@@ -2038,6 +2064,7 @@ mod tests {
                 dead: 0,
                 updated_at: now_ms(),
                 max_expires_at_ms: 0,
+                unknown_horizon: false,
             },
         );
         let recovered = recover(&config);
@@ -2269,6 +2296,47 @@ mod tests {
         )
         .unwrap();
         assert_eq!(std::fs::read(&fresh.path).unwrap(), b"new\n");
+    }
+
+    #[test]
+    fn preparing_an_alias_of_the_default_root_does_not_deadlock() {
+        // Настроенный корень задан через `..` и указывает на тот же каталог, что
+        // и корень по умолчанию. Дедупликация по (dev, ino) обязана взять один
+        // flock, иначе подготовка заблокирует собственный старт.
+        let data = tempfile::tempdir().unwrap();
+        let default = TestBase::new();
+        std::fs::create_dir_all(&default.0).unwrap();
+        std::fs::set_permissions(&default.0, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let default_config = SecretConfig {
+            base_dir: Some(default.0.clone()),
+        };
+        let (conversation, request_id) = (Uuid::now_v7(), Uuid::now_v7());
+        let written = deliver(
+            &default_config,
+            &request(conversation, request_id, 1, "value\n"),
+            &live_set(conversation),
+        )
+        .unwrap();
+        let alias = default.0.join("..").join(default.0.file_name().unwrap());
+        assert_ne!(alias, default.0, "the path strings differ");
+        let data_path = data.path().to_path_buf();
+        let default_path = default.0.clone();
+        let (sent, received) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let config = SecretConfig {
+                base_dir: Some(alias),
+            };
+            let _ = sent.send(prepare_storage_with_default(
+                &config,
+                &data_path,
+                Some(&default_path),
+            ));
+        });
+        let prepared = received
+            .recv_timeout(Duration::from_secs(5))
+            .expect("preparation deadlocked on an alias of the same root");
+        assert_eq!(prepared, Ok(()));
+        assert!(!written.path.exists(), "the one directory is wiped once");
     }
 
     #[test]
@@ -2508,6 +2576,52 @@ mod tests {
             Failure::Expired
         );
         assert!(!value_path(&base.0, conversation, request_id).exists());
+    }
+
+    #[test]
+    fn an_unknown_horizon_is_never_pruned() {
+        // Отзыв без срока (старая строка/старая команда) не даёт оценить
+        // горизонт: забор остаётся навсегда и не пускает позднюю доставку.
+        let base = TestBase::new();
+        let config = base.config();
+        let (conversation, request_id) = (Uuid::now_v7(), Uuid::now_v7());
+        assert_eq!(
+            revoke(&config, conversation, request_id, 1, 0, "revoked"),
+            Removal::Removed
+        );
+        let fence = read_fence_file(&base.0, request_id);
+        assert!(fence.horizon_unknown());
+        let swept = sweep(
+            &config,
+            now_ms().saturating_add(1_000 * 24 * 60 * 60 * 1000),
+        );
+        assert_eq!(swept.fences, 0);
+        assert!(fence_path(&base.0, request_id).exists());
+
+        let mut late = request(conversation, request_id, 1, "resurrected\n");
+        late.expires_at_ms = now_ms().saturating_add(60 * 60 * 1000);
+        assert_eq!(
+            deliver(&config, &late, &live_set(conversation)).unwrap_err(),
+            Failure::StaleAttempt
+        );
+        assert!(!value_path(&base.0, conversation, request_id).exists());
+
+        // Старый файл без флага, но с `seen` и нулевым сроком — тоже неизменяемый.
+        let old = Fence {
+            conversation_id: conversation,
+            seen: 1,
+            dead: 1,
+            updated_at: 1,
+            max_expires_at_ms: 0,
+            unknown_horizon: false,
+        };
+        write_fence_file(&base.0, request_id, &old);
+        let swept = sweep(
+            &config,
+            now_ms().saturating_add(1_000 * 24 * 60 * 60 * 1000),
+        );
+        assert_eq!(swept.fences, 0);
+        assert!(fence_path(&base.0, request_id).exists());
     }
 
     #[test]
