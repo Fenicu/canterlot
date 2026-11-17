@@ -31,7 +31,8 @@
   import { probe } from '#lib/perf/probe.js';
   import type { Component } from 'svelte';
 
-  let { chat, onside }: { chat: ChatStore; onside?: (question: string) => void } = $props();
+  // `hint` — подсказка пустого поля, когда у ленты свой адресат (вопрос в стороне).
+  let { chat, onside, hint }: { chat: ChatStore; onside?: (question: string) => void; hint?: string } = $props();
   const runtime = getRuntime();
   const uploads = sessionUploads();
   let limits = $state<Limits>({
@@ -151,7 +152,7 @@
   // текст остаётся в описании для экранных читалок и у «Подставить».
   let fieldVersion = $state(0);
   let shownSuggestion = $state<string | null>(null);
-  const placeholder = $derived(composerPlaceholder(turnLive, shownSuggestion));
+  const placeholder = $derived(composerPlaceholder(turnLive, shownSuggestion, hint));
 
   $effect(() => {
     if (!node) return;

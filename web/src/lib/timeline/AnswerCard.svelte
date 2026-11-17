@@ -39,7 +39,8 @@
     load,
     interrupt = null,
     leaseWait = null,
-    bookmarks = null
+    bookmarks = null,
+    markable = true
   }: {
     cardKey: string;
     laneRoot?: string;
@@ -58,6 +59,7 @@
     leaseWait?: LeaseWait | null;
     /** Закладки открытого разговора: карточка держит одну отметку на верхнем блоке. */
     bookmarks?: ConversationBookmarks | null;
+    markable?: boolean;
   } = $props();
 
   const all = $derived(entries.flatMap((entry) => (entry.kind === 'block' ? [entry.block] : [])));
@@ -139,7 +141,7 @@
     <footer class="byline" data-role="answer-footer">
       <p><strong>{agent}</strong><time datetime={new Date(head.createdAt).toISOString()} use:timeTip={head.createdAt}>{fmt.clock(head.createdAt)}</time></p>
       <div class="footer-actions">
-        {#if anchor}
+        {#if anchor && markable}
           <IconButton
             icon="bookmark"
             solid={marked}

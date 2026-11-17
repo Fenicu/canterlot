@@ -26,7 +26,7 @@
   import { timeTip } from '#lib/ui/time-tip.js';
   import { waitingForLink } from '#lib/sync/link.js';
 
-  let { input, chat, agentWorking = false, highlight = false, bookmarks = null }: { input: InputView; chat: ChatStore; agentWorking?: boolean; highlight?: boolean; bookmarks?: ConversationBookmarks | null } = $props();
+  let { input, chat, agentWorking = false, highlight = false, bookmarks = null, markable = true }: { input: InputView; chat: ChatStore; agentWorking?: boolean; highlight?: boolean; bookmarks?: ConversationBookmarks | null; markable?: boolean } = $props();
   let ask = $state<string | null>(null);
   let decided = $state<((ok: boolean) => void) | null>(null);
 
@@ -110,7 +110,7 @@
 
   // Правка — в самом пузыре: текст уже на месте, черновик композера не трогаем.
   let editing = $state(false);
-  const canBookmark = $derived(input.id !== null && !editing && input.state === 'accepted');
+  const canBookmark = $derived(markable && input.id !== null && !editing && input.state === 'accepted');
   let editText = $state('');
   let editKept = $state<string[]>([]);
   let editRevision = $state(1);

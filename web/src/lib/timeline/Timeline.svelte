@@ -46,7 +46,8 @@
     feed,
     interrupt = null,
     onOpenPlan,
-    bookmarks = null
+    bookmarks = null,
+    markable = true
   }: {
     chat: ChatStore;
     /** Прерывание идущего хода: кнопка в живой строке хода. Только у ленты разговора. */
@@ -60,6 +61,8 @@
     onOpenPlan?: (orchestratorId: string) => boolean;
     /** Закладки разговора: переключатель в футере карточки ответа и в пузыре владельца. */
     bookmarks?: ConversationBookmarks | null;
+    /** `false` — лента без закладок: копия в стороне не попадает в избранное, кнопки нет совсем. */
+    markable?: boolean;
   } = $props();
   let host = $state<HTMLDivElement | null>(null);
   let controller = $state<ScrollController | null>(null);
@@ -751,7 +754,7 @@
           {#if row.entries[0].input.origin?.kind === 'message' || row.entries[0].input.origin?.kind === 'spawn'}
             <SessionMessageBubble input={row.entries[0].input} {bookmarks} />
           {:else}
-            <UserBubble input={row.entries[0].input} {chat} agentWorking={streaming && row.key === lastInput} highlight={row.key === highlightKey} {bookmarks} />
+            <UserBubble input={row.entries[0].input} {chat} agentWorking={streaming && row.key === lastInput} highlight={row.key === highlightKey} {bookmarks} {markable} />
           {/if}
         {:else if row.kind === 'event' && row.entries[0]?.kind === 'input'}
           <EventEntry input={row.entries[0].input} conversationId={chat.id} open={folds.isOpen(row.key)} onToggle={() => folds.toggle(row.key)} />
@@ -776,7 +779,7 @@
         {:else if row.kind === 'request' && first?.kind === 'request'}
           <RequestCard request={first.request} onDecision={async () => undefined} {harnessId} {permissionMode} {now} open={folds.isOpen(row.key)} onToggle={() => folds.toggle(row.key)} />
         {:else if row.kind === 'answer'}
-          <AnswerCard cardKey={row.key} {laneRoot} entries={row.entries} {folds} {links} {harness} {activeRun} conversationId={chat.id} {now} {onInfo} load={loadBlock} interrupt={feed || laneRoot ? null : interrupt} {leaseWait} {bookmarks} />
+          <AnswerCard cardKey={row.key} {laneRoot} entries={row.entries} {folds} {links} {harness} {activeRun} conversationId={chat.id} {now} {onInfo} load={loadBlock} interrupt={feed || laneRoot ? null : interrupt} {leaseWait} {bookmarks} {markable} />
         {:else if row.kind === 'compaction' && row.entries[0]?.kind === 'compaction'}
           <CompactionRow compaction={row.entries[0].compaction} />
         {/if}
