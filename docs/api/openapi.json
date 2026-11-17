@@ -14208,6 +14208,27 @@
           "images": {
             "type": "boolean"
           },
+          "installed_version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Установленная версия CLI; `null`, если воркер старше `cli_versions_v1`."
+          },
+          "latest_version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Последний выпуск из реестра npm; `null`, если он неизвестен."
+          },
+          "min_version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Минимальная поддерживаемая версия из кода адаптера."
+          },
           "models": {
             "type": "array",
             "items": {
@@ -14231,6 +14252,13 @@
           },
           "title": {
             "type": "string"
+          },
+          "update_command": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Команда обновления для способа установки; хаб её не выполняет."
           }
         }
       },

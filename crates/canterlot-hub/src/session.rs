@@ -34,6 +34,8 @@ pub const CAPABILITY_SIDE_CHAT_V1: &str = "side_chat_v1";
 pub const CAPABILITY_CREDENTIAL_EXPIRY_V1: &str = "credential_expiry_v1";
 /// Воркер присылает сбросы лимитов Codex; без неё старый воркер их не шлёт, а хаб не ждёт.
 pub const CAPABILITY_PROVIDER_CREDITS_V1: &str = "provider_credits_v1";
+/// Отчёт машины несёт версии CLI и команду обновления.
+pub const CAPABILITY_CLI_VERSIONS_V1: &str = "cli_versions_v1";
 
 pub const CAPABILITY_EXEC_V1: &str = "exec_v1";
 pub const CAPABILITY_WORKDIR_SUGGEST_V1: &str = "workdir_suggest_v1";

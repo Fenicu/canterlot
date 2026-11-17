@@ -69,6 +69,14 @@ pub struct HarnessView {
     pub permission_modes: Value,
     #[schema(value_type=Vec<ModelView>)]
     pub models: Value,
+    /// Установленная версия CLI; `null`, если воркер старше `cli_versions_v1`.
+    pub installed_version: Option<String>,
+    /// Последний выпуск из реестра npm; `null`, если он неизвестен.
+    pub latest_version: Option<String>,
+    /// Минимальная поддерживаемая версия из кода адаптера.
+    pub min_version: Option<String>,
+    /// Команда обновления для способа установки; хаб её не выполняет.
+    pub update_command: Option<String>,
 }
 #[derive(Serialize, ToSchema)]
 pub struct CredentialView {
@@ -182,6 +190,10 @@ pub(crate) async fn load_stored(
                         model["resolved"] = json!(resolved);
                     }
                 }
+                let version = |column: &str| -> Result<Option<String>, sqlx::Error> {
+                    let text: String = h.try_get(column)?;
+                    Ok((!text.is_empty()).then_some(text))
+                };
                 Ok(HarnessView {
                     id: harness,
                     title: h.try_get("title")?,
@@ -191,6 +203,10 @@ pub(crate) async fn load_stored(
                     settings_midsession_effort: h.try_get("settings_midsession_effort")?,
                     permission_modes: h.try_get("permission_modes")?,
                     models,
+                    installed_version: version("installed_version")?,
+                    latest_version: version("latest_version")?,
+                    min_version: version("min_version")?,
+                    update_command: version("update_command")?,
                 })
             })
             .collect::<Result<_, _>>()?;

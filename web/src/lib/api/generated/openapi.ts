@@ -2744,12 +2744,20 @@ export interface components {
         HarnessView: {
             id: string;
             images: boolean;
+            /** @description Установленная версия CLI; `null`, если воркер старше `cli_versions_v1`. */
+            installed_version?: string | null;
+            /** @description Последний выпуск из реестра npm; `null`, если он неизвестен. */
+            latest_version?: string | null;
+            /** @description Минимальная поддерживаемая версия из кода адаптера. */
+            min_version?: string | null;
             models: components["schemas"]["ModelView"][];
             permission_modes: string[];
             provider: string;
             settings_midsession: boolean;
             settings_midsession_effort: boolean;
             title: string;
+            /** @description Команда обновления для способа установки; хаб её не выполняет. */
+            update_command?: string | null;
         };
         History: {
             series: components["schemas"]["ProviderSeries"][];

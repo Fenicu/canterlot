@@ -44,6 +44,10 @@ fn replace_nul(report: &mut MachineReport) {
             &mut harness.harness,
             &mut harness.provider,
             &mut harness.title,
+            &mut harness.installed_version,
+            &mut harness.latest_version,
+            &mut harness.min_version,
+            &mut harness.update_command,
         ]);
         texts.extend(&mut harness.permission_modes);
         for model in &mut harness.models {
@@ -107,8 +111,8 @@ pub async fn apply_report_with_capabilities(
             .iter()
             .map(|m| json!({"id":m.id,"title":m.title,"efforts":m.efforts,"images":m.images,"context_window":m.context_window}))
             .collect();
-        sqlx::query("insert into machine_harnesses(machine_id,harness,provider,title,images,settings_midsession,permission_modes,models,settings_midsession_effort) values($1,$2,$3,$4,$5,$6,$7,$8,$9)")
-  .bind(machine_id).bind(&h.harness).bind(&h.provider).bind(&h.title).bind(h.images).bind(h.settings_midsession).bind(json!(h.permission_modes)).bind(json!(models)).bind(h.settings_midsession_effort.unwrap_or(true)).execute(&mut *conn).await?;
+        sqlx::query("insert into machine_harnesses(machine_id,harness,provider,title,images,settings_midsession,permission_modes,models,settings_midsession_effort,installed_version,latest_version,min_version,update_command) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)")
+  .bind(machine_id).bind(&h.harness).bind(&h.provider).bind(&h.title).bind(h.images).bind(h.settings_midsession).bind(json!(h.permission_modes)).bind(json!(models)).bind(h.settings_midsession_effort.unwrap_or(true)).bind(&h.installed_version).bind(&h.latest_version).bind(&h.min_version).bind(&h.update_command).execute(&mut *conn).await?;
     }
     let mut updates = Vec::new();
     for (id, harness, old_title, old_provider) in previous {

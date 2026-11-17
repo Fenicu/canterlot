@@ -1798,6 +1798,80 @@ async fn catalog_changes_publish_new_harness_attributes_in_both_conversation_sco
     );
 }
 
+// Отчёт воркера с новой возможностью проходит через боевой composed-роутер до снимка машины.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn machine_report_cli_versions_reach_the_machine_snapshot(pool: PgPool) {
+    use canterlot_hub::session::CAPABILITY_CLI_VERSIONS_V1;
+    use canterlot_proto::worker::v1::{HarnessInfo, MachineReport, ModelInfo};
+
+    let f = Fixture::new(pool).await;
+    let report = MachineReport {
+        worker_version: "updated".into(),
+        allowed_roots: vec!["/tmp".into()],
+        os: "linux".into(),
+        max_attachment_bytes: canterlot_proto::limits::MAX_ATTACHMENT_BYTES,
+        max_attachments_per_input: canterlot_proto::limits::MAX_ATTACHMENTS_PER_INPUT as u32,
+        harnesses: vec![HarnessInfo {
+            harness: "claude_code".into(),
+            provider: "claude".into(),
+            title: "Claude Code".into(),
+            installed_version: "2.1.311".into(),
+            latest_version: "2.1.320".into(),
+            min_version: "2.1.311".into(),
+            update_command: "claude update".into(),
+            models: vec![ModelInfo {
+                id: "opus[1m]".into(),
+                title: "Opus 1M".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    canterlot_hub::machine_info::apply_report_with_capabilities(
+        &f.pool,
+        f.owner,
+        f.machine,
+        &report,
+        &[CAPABILITY_CLI_VERSIONS_V1.to_owned()],
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+
+    let path = format!("/api/v1/machines/{}", f.machine);
+    let machine = f.request(Method::GET, &path, None, 200).await;
+    let harness = &machine["harnesses"][0];
+    assert_eq!(harness["installed_version"], "2.1.311");
+    assert_eq!(harness["latest_version"], "2.1.320");
+    assert_eq!(harness["min_version"], "2.1.311");
+    assert_eq!(harness["update_command"], "claude update");
+    // Старый воркер шлёт пустые поля: в снимке они отсутствуют.
+    let mut old = report;
+    for h in &mut old.harnesses {
+        h.installed_version.clear();
+        h.latest_version.clear();
+        h.min_version.clear();
+        h.update_command.clear();
+    }
+    canterlot_hub::machine_info::apply_report_with_capabilities(
+        &f.pool,
+        f.owner,
+        f.machine,
+        &old,
+        &[],
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    let machine = f.request(Method::GET, &path, None, 200).await;
+    let harness = &machine["harnesses"][0];
+    assert!(harness["installed_version"].is_null());
+    assert!(harness["latest_version"].is_null());
+    assert!(harness["min_version"].is_null());
+    assert!(harness["update_command"].is_null());
+}
+
 // Картинки и окно контекста у OpenCode свои у каждой модели: отчёт доходит до формы как есть.
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn machine_report_keeps_the_per_model_facts(pool: PgPool) {
