@@ -51,6 +51,12 @@ fn key(fact: &LimitFact) -> Fact {
             window,
             resets_at_ms,
         } => ("reached", *window, None, *resets_at_ms),
+        LimitFact::CredentialExpires { expires_at_ms } => (
+            "credential",
+            LimitWindow::FiveHour,
+            None,
+            Some(*expires_at_ms),
+        ),
     }
 }
 
@@ -70,6 +76,38 @@ fn track(tracker: &mut LimitTracker, lines: &[String]) -> Vec<Fact> {
         }
     }
     facts.iter().map(key).collect()
+}
+
+fn credential(facts: &[LimitFact]) -> Vec<u64> {
+    facts
+        .iter()
+        .filter_map(|fact| match fact {
+            LimitFact::CredentialExpires { expires_at_ms } => Some(*expires_at_ms),
+            _ => None,
+        })
+        .collect()
+}
+
+fn millis(iso: &str) -> u64 {
+    chrono::DateTime::parse_from_rfc3339(iso)
+        .unwrap()
+        .timestamp_millis() as u64
+}
+
+fn credential_facts(
+    parser: &mut Parser,
+    tracker: &mut LimitTracker,
+    frame: serde_json::Value,
+) -> Vec<u64> {
+    let facts: Vec<LimitFact> = parser
+        .feed(&frame.to_string())
+        .into_iter()
+        .filter_map(|parsed| match parsed {
+            Parsed::CredentialExpiry(at) => tracker.on_credential_expiry(&at),
+            _ => None,
+        })
+        .collect();
+    credential(&facts)
 }
 
 fn reached(facts: &[Fact]) -> Vec<(LimitWindow, Option<u64>)> {
@@ -217,7 +255,7 @@ fn fable_weekly_window_is_observed_separate_from_the_weekly_one() {
                 resets_at_ms: resets_at_ms.unwrap_or_default(),
                 ..Default::default()
             }),
-            LimitFact::Reached { .. } => None,
+            LimitFact::Reached { .. } | LimitFact::CredentialExpires { .. } => None,
         })
         .collect();
     assert_eq!(
@@ -613,6 +651,7 @@ impl LimitsSource for AbsenceOnlySource {
                 window: ProtoWindow::FiveHour as i32,
                 observed_machine_ms: 7,
             }],
+            credentials: Vec::new(),
         }
     }
 }
@@ -726,4 +765,39 @@ async fn idle_ticker_requests_a_claude_poll_each_interval() {
         join.await.unwrap().unwrap();
     })
     .await;
+}
+
+/// Кадр `result` называет конец входа claude.ai: воркер передаёт дату один раз на процесс,
+/// повторяет только новую дату (после повторного входа) и молчит, когда поля нет.
+#[test]
+fn result_credential_expiry_is_emitted_once_and_a_new_date_rearms_it() {
+    let mut parser = Parser::new();
+    let mut tracker = LimitTracker::default();
+    let frame = |at: Option<&str>| match at {
+        Some(at) => json!({"type": "result", "subtype": "success", "is_error": false,
+            "credential_expires_at": at}),
+        None => json!({"type": "result", "subtype": "success", "is_error": false}),
+    };
+
+    let first = "2026-12-12T09:00:00Z";
+    assert_eq!(
+        credential_facts(&mut parser, &mut tracker, frame(Some(first))),
+        vec![millis(first)]
+    );
+    // Второй ход того же процесса: дата та же — повтора нет.
+    assert!(
+        credential_facts(&mut parser, &mut tracker, frame(Some(first))).is_empty(),
+        "same date is not repeated"
+    );
+    // Повторный вход дал новую дату: она сообщается как новая.
+    let next = "2027-01-11T09:00:00Z";
+    assert_eq!(
+        credential_facts(&mut parser, &mut tracker, frame(Some(next))),
+        vec![millis(next)]
+    );
+    // Кадр без поля (API-ключ, старый CLI) ничего не сообщает.
+    assert!(
+        credential_facts(&mut parser, &mut tracker, frame(None)).is_empty(),
+        "absent field stays silent"
+    );
 }

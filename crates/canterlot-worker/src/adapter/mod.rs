@@ -277,6 +277,8 @@ pub enum LimitFact {
         window: LimitWindow,
         resets_at_ms: Option<u64>,
     },
+    /// Конец входа провайдера (claude.ai) на этой машине: дата из кадра `result`.
+    CredentialExpires { expires_at_ms: u64 },
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SettingsChange {

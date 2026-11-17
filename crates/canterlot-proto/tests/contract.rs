@@ -837,6 +837,17 @@ fn pilot_records_roundtrip() {
         );
         assert_roundtrip(record);
     }
+    // Поле 47: ключ oneof — два байта varint (378), поэтому проверка отдельная.
+    let credential = ProviderCredential {
+        provider: "claude".into(),
+        expires_at_ms: 1_797_000_000_000,
+        observed_machine_ms: 123000,
+    };
+    let record = RecordBody {
+        body: Some(record_body::Body::ProviderCredential(credential.clone())),
+    };
+    assert_eq!(&record.encode_to_vec()[..2], &[0xFA, 0x02]);
+    assert_roundtrip(record);
     let report = MachineReport {
         worker_version: "0.1.0".into(),
         allowed_roots: vec!["/tmp/w".into()],
@@ -892,6 +903,7 @@ fn pilot_records_roundtrip() {
             window: LimitWindow::FiveHour as i32,
             observed_machine_ms: 1_700_000_000_000,
         }],
+        credentials: vec![credential],
     };
     assert_roundtrip(report.clone());
     assert_roundtrip(metrics.clone());

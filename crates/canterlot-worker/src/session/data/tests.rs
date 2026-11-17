@@ -41,6 +41,7 @@ fn hub_of(new: bool) -> HubRecords {
     HubRecords {
         limits_fable: new,
         prompt_suggestions: new,
+        credential_expiry: new,
     }
 }
 
@@ -162,7 +163,8 @@ fn fable_frame_records() -> Vec<JournalRecord> {
                     })),
                 }),
             }),
-            crate::adapter::LimitFact::Reached { .. } => None,
+            crate::adapter::LimitFact::Reached { .. }
+            | crate::adapter::LimitFact::CredentialExpires { .. } => None,
         })
         .collect()
 }
@@ -363,6 +365,21 @@ fn suggestion(seq: u64) -> JournalRecord {
     }
 }
 
+fn credential(seq: u64) -> JournalRecord {
+    JournalRecord {
+        seq,
+        body: Some(RecordBody {
+            body: Some(record_body::Body::ProviderCredential(
+                canterlot_proto::worker::v1::ProviderCredential {
+                    provider: "claude".into(),
+                    expires_at_ms: 1_797_000_000_000,
+                    observed_machine_ms: 1,
+                },
+            )),
+        }),
+    }
+}
+
 #[test]
 fn capabilities_of_each_connection_decide_the_hub_records() {
     assert_eq!(HubRecords::from_capabilities(&[]), hub_of(false));
@@ -370,6 +387,7 @@ fn capabilities_of_each_connection_decide_the_hub_records() {
         HubRecords::from_capabilities(&[
             "limits_fable_v1".to_owned(),
             "prompt_suggestions_v1".to_owned(),
+            "credential_expiry_v1".to_owned(),
         ]),
         hub_of(true)
     );
@@ -384,6 +402,7 @@ fn a_hub_without_suggestions_gets_a_placeholder_with_the_same_seq() {
             HubRecords {
                 limits_fable: true,
                 prompt_suggestions: false,
+                credential_expiry: true,
             },
         )
         .unwrap(),
@@ -404,6 +423,34 @@ fn a_hub_without_suggestions_gets_a_placeholder_with_the_same_seq() {
         !format!("{records:?}").contains("run the tests"),
         "the owner text never reaches an old hub"
     );
+}
+
+/// Старый хаб не знает дату конца входа: запись становится безвредной отметкой, а журнал идёт дальше.
+#[test]
+fn a_hub_without_credential_expiry_gets_a_placeholder_with_the_same_seq() {
+    let records = wire_records(
+        pack(
+            Uuid::now_v7(),
+            vec![credential(1), record(2, 4)],
+            HubRecords {
+                limits_fable: true,
+                prompt_suggestions: true,
+                credential_expiry: false,
+            },
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        records.iter().map(|record| record.seq).collect::<Vec<_>>(),
+        [1, 2]
+    );
+    let Some(record_body::Body::AdapterDiagnostic(stub)) =
+        records[0].body.as_ref().and_then(|body| body.body.as_ref())
+    else {
+        panic!("a credential record must become a harmless diagnostic");
+    };
+    assert_eq!(stub.kind, "unknown_optional_event");
+    assert_eq!(stub.event_type, "provider_credential_unsupported");
 }
 
 #[test]

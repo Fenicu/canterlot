@@ -479,6 +479,11 @@ impl ClaudeCodeAdapter {
                     .into_iter()
                     .map(AdapterEvent::Limit),
             ),
+            Parsed::CredentialExpiry(at) => {
+                if let Some(fact) = self.limits.on_credential_expiry(&at) {
+                    self.events.push_back(AdapterEvent::Limit(fact));
+                }
+            }
             Parsed::AssistantError { kind, status, text } => {
                 if kind == "rate_limit" {
                     // `rate_limit_info` в этом кадре нет: упор считается тем же путём,

@@ -2686,6 +2686,13 @@ impl Supervisor {
                                 .map(|id| id.to_string())
                                 .unwrap_or_default(),
                         }),
+                        LimitFact::CredentialExpires { expires_at_ms } => Body::ProviderCredential(
+                            canterlot_proto::worker::v1::ProviderCredential {
+                                provider: self.provider.clone(),
+                                expires_at_ms,
+                                observed_machine_ms: now_ms(),
+                            },
+                        ),
                     };
                     self.record(body)?;
                 }

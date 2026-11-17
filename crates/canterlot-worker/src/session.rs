@@ -51,6 +51,8 @@ pub const CAPABILITY_LIMITS_FABLE_V1: &str = "limits_fable_v1";
 pub const CAPABILITY_PROMPT_SUGGESTIONS_V1: &str = "prompt_suggestions_v1";
 pub const CAPABILITY_SIDE_CHAT_V1: &str = "side_chat_v1";
 pub const CAPABILITY_SECRET_REQUESTS_V2: &str = "secret_requests_v2";
+/// Хаб хранит конец входа провайдера из кадра `result`; без неё старая запись не уходит.
+pub const CAPABILITY_CREDENTIAL_EXPIRY_V1: &str = "credential_expiry_v1";
 
 pub const OPTIONAL_CAPABILITIES: &[&str] = &[
     "exec_v1",
@@ -74,6 +76,7 @@ pub const OPTIONAL_CAPABILITIES: &[&str] = &[
     CAPABILITY_PROMPT_SUGGESTIONS_V1,
     CAPABILITY_SIDE_CHAT_V1,
     CAPABILITY_SECRET_REQUESTS_V2,
+    CAPABILITY_CREDENTIAL_EXPIRY_V1,
 ];
 
 #[derive(Clone)]
@@ -1947,7 +1950,7 @@ impl Worker {
                     if !limits_fable {
                         observations.retain(|o| o.window != LimitWindow::WeeklyFable as i32);
                     }
-                    if !observations.is_empty() || !fetched.absent.is_empty() {limits_outbound=Some(ControlUp{msg:Some(control_up::Msg::LimitsReport(LimitsReport{observations,absent:fetched.absent}))});}
+                    if !observations.is_empty() || !fetched.absent.is_empty() || !fetched.credentials.is_empty() {limits_outbound=Some(ControlUp{msg:Some(control_up::Msg::LimitsReport(LimitsReport{observations,absent:fetched.absent,credentials:fetched.credentials}))});}
                 }
                 reply=async{suggest_operation.as_mut().unwrap().await}, if suggest_operation.is_some()=>{
                     suggest_operation=None;suggest_outbound=Some(ControlUp{msg:Some(control_up::Msg::WorkdirSuggestions(reply))});

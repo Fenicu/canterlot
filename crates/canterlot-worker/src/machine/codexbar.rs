@@ -266,6 +266,7 @@ pub fn reading_from_output(
     Ok(LimitsFetch {
         observations,
         absent,
+        credentials: Vec::new(),
     })
 }
 
@@ -389,6 +390,7 @@ impl CodexBarLimitsSource {
                 None => Vec::new(),
             },
             absent: Vec::new(),
+            credentials: Vec::new(),
         }
     }
 

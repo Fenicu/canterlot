@@ -77,6 +77,7 @@ fn fact_key(fact: &LimitFact) -> (&'static str, LimitWindow, Option<u16>, Option
             window,
             resets_at_ms,
         } => ("reached", *window, None, *resets_at_ms),
+        LimitFact::CredentialExpires { .. } => ("credential", LimitWindow::FiveHour, None, None),
     }
 }
 

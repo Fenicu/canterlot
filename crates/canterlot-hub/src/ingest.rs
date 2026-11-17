@@ -1627,6 +1627,7 @@ async fn apply_body(
         | Body::DecisionUnconfirmed(_)
         | Body::LimitObserved(_)
         | Body::LimitReached(_)
+        | Body::ProviderCredential(_)
         | Body::AttachmentReady(_)
         | Body::AttachmentFailed(_)
         | Body::JournalClosed(_)

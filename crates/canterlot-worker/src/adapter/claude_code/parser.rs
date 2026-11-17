@@ -179,6 +179,8 @@ pub enum Parsed {
         is_error: bool,
     },
     RateLimit(serde_json::Value),
+    /// Конец входа claude.ai из кадра `result` (`credential_expires_at`, ISO 8601).
+    CredentialExpiry(String),
     /// Ошибка из кадра `assistant`: у `rate_limit` нет `rate_limit_info`, остальные показываются
     /// строкой в ленте. Текст — данные сообщения.
     AssistantError {
@@ -254,6 +256,7 @@ impl std::fmt::Debug for Parsed {
                 .field("is_error", is_error)
                 .finish(),
             Self::RateLimit(_) => f.write_str("RateLimit"),
+            Self::CredentialExpiry(_) => f.write_str("CredentialExpiry"),
             Self::AssistantError { kind, status, .. } => f
                 .debug_struct("AssistantError")
                 .field("kind", kind)
@@ -1583,6 +1586,14 @@ impl Parser {
     fn feed_result(&mut self, value: &serde_json::Value, out: &mut Vec<Parsed>) {
         let reported_assistant_error = std::mem::take(&mut self.assistant_error_reported);
         let is_error = value.get("is_error").and_then(serde_json::Value::as_bool) == Some(true);
+        // Дата конца входа не зависит от исхода кадра: её несёт и успешный, и ошибочный итог.
+        if let Some(at) = value
+            .get("credential_expires_at")
+            .and_then(serde_json::Value::as_str)
+            .filter(|at| !at.is_empty())
+        {
+            out.push(Parsed::CredentialExpiry(at.to_owned()));
+        }
         if self.is_compact_result(value) {
             // Итог служебного `/compact`: ходу прошлой команды он не принадлежит, расход
             // уже ушёл в границу. Без границы сжатия не было: это отказ.

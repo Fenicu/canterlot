@@ -1040,6 +1040,7 @@ pub(crate) fn requires_pilot(record: &RecordBody) -> bool {
         Some(
             record_body::Body::LimitObserved(_)
                 | record_body::Body::LimitReached(_)
+                | record_body::Body::ProviderCredential(_)
                 | record_body::Body::AttachmentReady(_)
                 | record_body::Body::AttachmentFailed(_)
                 | record_body::Body::BlockMedia(_)

@@ -24,6 +24,8 @@ pub struct LimitTracker {
     reached: [Option<Option<u64>>; 3],
     /// Текущий запрос идёт к модели Fable: только тогда недельное окно Fable к нему применимо.
     fable: bool,
+    /// Уже сообщённая дата конца входа: тот же кадр второго хода её не повторяет.
+    credential: Option<u64>,
 }
 
 /// Модель Fable по полному id (`claude-fable-5-2`) или псевдониму (`fable[1m]`).
@@ -168,6 +170,20 @@ impl LimitTracker {
         })
     }
 
+    /// Дата конца входа claude.ai из `result`: ISO 8601. Один раз на процесс: повтор того же
+    /// значения хода не дублирует, новая дата после повторного входа — новость.
+    pub fn on_credential_expiry(&mut self, at: &str) -> Option<LimitFact> {
+        let parsed = chrono::DateTime::parse_from_rfc3339(at).ok()?;
+        let millis = u64::try_from(parsed.timestamp_millis()).ok()?;
+        if self.credential == Some(millis) {
+            return None;
+        }
+        self.credential = Some(millis);
+        Some(LimitFact::CredentialExpires {
+            expires_at_ms: millis,
+        })
+    }
+
     pub fn snapshot(&self) -> LimitSnapshot {
         self.snapshot.clone()
     }
@@ -208,7 +224,7 @@ mod tests {
     fn blamed(facts: &[LimitFact]) -> Option<LimitWindow> {
         facts.iter().find_map(|fact| match fact {
             LimitFact::Reached { window, .. } => Some(*window),
-            LimitFact::Observed { .. } => None,
+            LimitFact::Observed { .. } | LimitFact::CredentialExpires { .. } => None,
         })
     }
 
@@ -235,7 +251,9 @@ mod tests {
         assert_eq!(
             fact.as_ref().map(|f| match f {
                 LimitFact::Reached { window, .. } => *window,
-                LimitFact::Observed { .. } => unreachable!(),
+                LimitFact::Observed { .. } | LimitFact::CredentialExpires { .. } => {
+                    unreachable!()
+                }
             }),
             Some(LimitWindow::Weekly)
         );
@@ -258,7 +276,9 @@ mod tests {
         assert_ne!(
             fact.as_ref().map(|f| match f {
                 LimitFact::Reached { window, .. } => *window,
-                LimitFact::Observed { .. } => unreachable!(),
+                LimitFact::Observed { .. } | LimitFact::CredentialExpires { .. } => {
+                    unreachable!()
+                }
             }),
             Some(LimitWindow::WeeklyFable)
         );

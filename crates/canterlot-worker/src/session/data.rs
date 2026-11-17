@@ -368,6 +368,7 @@ fn pack(
 pub(super) struct HubRecords {
     pub limits_fable: bool,
     pub prompt_suggestions: bool,
+    pub credential_expiry: bool,
 }
 
 impl HubRecords {
@@ -376,6 +377,7 @@ impl HubRecords {
         Self {
             limits_fable: has(crate::session::CAPABILITY_LIMITS_FABLE_V1),
             prompt_suggestions: has(crate::session::CAPABILITY_PROMPT_SUGGESTIONS_V1),
+            credential_expiry: has(crate::session::CAPABILITY_CREDENTIAL_EXPIRY_V1),
         }
     }
 }
@@ -409,6 +411,9 @@ fn compatible_for_hub(record: JournalRecord, hub: HubRecords) -> JournalRecord {
     match body {
         record_body::Body::PromptSuggested(_) if !hub.prompt_suggestions => {
             placeholder(record.seq, "prompt_suggestion_unsupported")
+        }
+        record_body::Body::ProviderCredential(_) if !hub.credential_expiry => {
+            placeholder(record.seq, "provider_credential_unsupported")
         }
         record_body::Body::LimitObserved(observation)
             if !hub.limits_fable

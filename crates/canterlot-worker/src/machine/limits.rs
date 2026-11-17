@@ -1,4 +1,4 @@
-use canterlot_proto::worker::v1::{LimitAbsence, LimitObservation};
+use canterlot_proto::worker::v1::{LimitAbsence, LimitObservation, ProviderCredential};
 use std::{
     collections::HashMap,
     fmt,
@@ -21,6 +21,8 @@ pub type HubLimitsAge = Arc<dyn Fn(&str) -> Option<Instant> + Send + Sync>;
 pub struct LimitsFetch {
     pub observations: Vec<LimitObservation>,
     pub absent: Vec<LimitAbsence>,
+    /// Конец входа провайдера, если источник его знает: у Claude его приносят сессии, не опрос.
+    pub credentials: Vec<ProviderCredential>,
 }
 
 #[async_trait::async_trait]
@@ -40,6 +42,7 @@ pub trait LimitsSource: Send + Sync {
                 self.poll(provider).await
             },
             absent: Vec::new(),
+            credentials: Vec::new(),
         }
     }
     /// Просьба владельца обновить сейчас (`PollLimits.owner_refresh`).

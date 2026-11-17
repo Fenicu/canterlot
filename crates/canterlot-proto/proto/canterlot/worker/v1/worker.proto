@@ -377,6 +377,8 @@ message RecordBody {
     SecretRemoved secret_removed = 45;
     // Файл не удалось убрать: хаб повторит отзыв, а «отозван» не напишет.
     SecretRemoveFailed secret_remove_failed = 46;
+    // Только при согласованной возможности pilot_v1: конец входа провайдера на машине.
+    ProviderCredential provider_credential = 47;
   }
 }
 
@@ -748,6 +750,16 @@ message LimitAbsence {
 message LimitsReport {
   repeated LimitObservation observations = 1;
   repeated LimitAbsence absent = 2;
+  repeated ProviderCredential credentials = 3;
+}
+
+// Конец входа провайдера на машине: то, что `result` Claude Code называет
+// `credential_expires_at`. Дата необязательна: у API-ключа и старого CLI её нет.
+message ProviderCredential {
+  string provider = 1;
+  // Мс эпохи; 0 — дата неизвестна.
+  uint64 expires_at_ms = 2;
+  uint64 observed_machine_ms = 3;
 }
 
 message PollLimits {
