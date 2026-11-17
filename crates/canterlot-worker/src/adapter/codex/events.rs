@@ -980,6 +980,28 @@ impl Translator {
                 );
                 return out;
             }
+            "imageGeneration" => {
+                let summary = item
+                    .get("revisedPrompt")
+                    .and_then(Value::as_str)
+                    .map(cut120)
+                    .unwrap_or_default();
+                out.push(self.started(
+                    block_id,
+                    BlockKind::ToolCall,
+                    agent,
+                    &model,
+                    parent,
+                    command_id,
+                    Some("image_generation"),
+                    if summary.is_empty() {
+                        None
+                    } else {
+                        Some(&summary)
+                    },
+                ));
+                out.push(self.running_tool("image_generation"));
+            }
             _ => {
                 out.push(self.started(
                     block_id,
@@ -1282,6 +1304,64 @@ impl Translator {
                 if matches!(item_type, "collabAgentToolCall") {
                     out.push(self.item_completed(item));
                 }
+                self.phase = Phase::Generating;
+                out.push(Translated::Event(AdapterEvent::Phase {
+                    phase: Phase::Generating,
+                    tool_name: None,
+                    summary: None,
+                }));
+            }
+            "imageGeneration" => {
+                let status = item
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let prompt = item
+                    .get("revisedPrompt")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let failure = item
+                    .get("failure")
+                    .and_then(|failure| failure.get("type"))
+                    .and_then(Value::as_str);
+                let text = if failure == Some("usageLimitExceeded") {
+                    "Image generation limit reached".to_owned()
+                } else if status != "completed" {
+                    format!("image_generation failed: {status}")
+                } else {
+                    let saved = item
+                        .get("savedPath")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let inline = item
+                        .get("result")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    // Картинка идёт до финала: сопровождение принимает её только вместе с блоком.
+                    if !saved.is_empty() {
+                        out.push(Translated::Event(AdapterEvent::Media {
+                            block_id: block.block_id,
+                            source: MediaSource::Path(PathBuf::from(saved)),
+                        }));
+                        prompt.to_owned()
+                    } else if !inline.is_empty() {
+                        out.push(Translated::Event(AdapterEvent::Media {
+                            block_id: block.block_id,
+                            source: MediaSource::Base64(inline.to_owned()),
+                        }));
+                        prompt.to_owned()
+                    } else if let Some(file_id) = item.get("fileId").and_then(Value::as_str) {
+                        // Хранилище вложений CLI воркеру недоступно: остаётся только имя.
+                        format!("image_generation: file {file_id} unavailable")
+                    } else {
+                        prompt.to_owned()
+                    }
+                };
+                out.push(Translated::Event(AdapterEvent::BlockFinal {
+                    block_id: block.block_id,
+                    text,
+                    summary: None,
+                }));
                 self.phase = Phase::Generating;
                 out.push(Translated::Event(AdapterEvent::Phase {
                     phase: Phase::Generating,

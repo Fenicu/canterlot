@@ -745,6 +745,163 @@ fn image_view_publishes_media_from_path_once() {
     }
 }
 
+/// item/started и item/completed одного элемента `imageGeneration` в главном ходе.
+fn image_generation(started: Value, completed: Value) -> Vec<Translated> {
+    let mut translator = Translator::new("thread-main", "gpt-6-luna");
+    translator.begin_turn("turn-main", command_id());
+    let mut out = translator.feed(
+        "item/started",
+        &json!({"threadId": "thread-main", "turnId": "turn-main", "item": started}),
+    );
+    out.extend(translator.feed(
+        "item/completed",
+        &json!({"threadId": "thread-main", "turnId": "turn-main",
+            "completedAtMs": 2, "item": completed}),
+    ));
+    out
+}
+
+fn image_generation_block(events: &[&AdapterEvent]) -> (Uuid, Option<String>) {
+    events
+        .iter()
+        .find_map(|e| match e {
+            AdapterEvent::BlockStarted {
+                block_id,
+                kind: BlockKind::ToolCall,
+                tool_name,
+                summary,
+                ..
+            } if tool_name.as_deref() == Some("image_generation") => {
+                Some((*block_id, summary.clone()))
+            }
+            _ => None,
+        })
+        .expect("image_generation block")
+}
+
+#[test]
+fn image_generation_completed_with_saved_path_publishes_media_before_final() {
+    let item = |status: &str, saved_path: Option<&str>| {
+        json!({"id": "img-gen", "type": "imageGeneration", "status": status,
+            "savedPath": saved_path, "fileId": "file_1", "result": "",
+            "revisedPrompt": "рыжий кот на подоконнике"})
+    };
+    let out = image_generation(
+        item("inProgress", None),
+        item("completed", Some("/tmp/cat.png")),
+    );
+    let events = events_of(&out);
+    let (block, summary) = image_generation_block(&events);
+    assert_eq!(summary.as_deref(), Some("рыжий кот на подоконнике"));
+    let media_at = events
+        .iter()
+        .position(|e| matches!(e, AdapterEvent::Media { block_id, .. } if *block_id == block))
+        .expect("media of the block");
+    let final_at = events
+        .iter()
+        .position(|e| matches!(e, AdapterEvent::BlockFinal { block_id, .. } if *block_id == block))
+        .expect("final of the block");
+    assert!(media_at < final_at, "media after final: {events:?}");
+    match events[media_at] {
+        AdapterEvent::Media { source, .. } => match source {
+            MediaSource::Path(path) => assert_eq!(path.to_str().unwrap(), "/tmp/cat.png"),
+            other => panic!("expected path, got {other:?}"),
+        },
+        _ => unreachable!(),
+    }
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, AdapterEvent::Media { .. }))
+            .count(),
+        1
+    );
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AdapterEvent::BlockFinal { block_id, text, .. }
+        if *block_id == block && text == "рыжий кот на подоконнике"
+    )));
+}
+
+#[test]
+fn image_generation_completed_with_inline_result_publishes_base64() {
+    let item = |status: &str| {
+        json!({"id": "img-gen", "type": "imageGeneration", "status": status,
+            "savedPath": null, "result": "iVBORw0KGgo="})
+    };
+    let out = image_generation(item("inProgress"), item("completed"));
+    let events = events_of(&out);
+    let (block, summary) = image_generation_block(&events);
+    assert_eq!(summary, None);
+    let media = events
+        .iter()
+        .find_map(|e| match e {
+            AdapterEvent::Media { block_id, source } if *block_id == block => Some(source),
+            _ => None,
+        })
+        .expect("media of the block");
+    match media {
+        MediaSource::Base64(text) => assert_eq!(text, "iVBORw0KGgo="),
+        other => panic!("expected base64, got {other:?}"),
+    }
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AdapterEvent::BlockFinal { block_id, text, .. } if *block_id == block && text.is_empty()
+    )));
+}
+
+#[test]
+fn image_generation_usage_limit_failure_has_no_media() {
+    let item = |status: &str, failure: Value| {
+        json!({"id": "img-gen", "type": "imageGeneration", "status": status,
+            "failure": failure, "revisedPrompt": "кот"})
+    };
+    let out = image_generation(
+        item("inProgress", Value::Null),
+        item(
+            "failed",
+            json!({"type": "usageLimitExceeded", "limitId": "codex"}),
+        ),
+    );
+    let events = events_of(&out);
+    let (block, _) = image_generation_block(&events);
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, AdapterEvent::Media { .. })),
+        "a failed generation has no image: {events:?}"
+    );
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AdapterEvent::BlockFinal { block_id, text, .. }
+        if *block_id == block && text == "Image generation limit reached"
+    )));
+}
+
+#[test]
+fn image_generation_with_only_file_id_notes_it_is_unavailable() {
+    let item = json!({"id": "img-gen", "type": "imageGeneration", "status": "completed",
+        "fileId": "file_42", "result": ""});
+    let out = image_generation(item.clone(), item);
+    let events = events_of(&out);
+    let (block, _) = image_generation_block(&events);
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, AdapterEvent::Media { .. })),
+        "the attachment store is not reachable: {events:?}"
+    );
+    let text = events
+        .iter()
+        .find_map(|e| match e {
+            AdapterEvent::BlockFinal { block_id, text, .. } if *block_id == block => Some(text),
+            _ => None,
+        })
+        .expect("final of the block");
+    assert!(text.contains("file_42"), "the file id is named: {text:?}");
+    assert!(text.to_lowercase().contains("unavailable"), "{text:?}");
+}
+
 #[test]
 fn mcp_tool_call_and_output_delta_blocks() {
     let frames = codex::replay("mcp_tool");

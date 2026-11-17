@@ -215,6 +215,10 @@ describe("first dialog: tool titles", () => {
     expect(toolTitle({ toolName: "todo", summary: "todo, completed" }).argument).toBe("completed");
   });
 
+  it("a_generated_image_row_is_named_in_russian", () => {
+    expect(toolTitle({ toolName: "image_generation", summary: "рыжий кот" })).toEqual({ name: "Картинка", server: "", argument: "рыжий кот" });
+  });
+
   it("mcp_names_lose_the_technical_prefix", () => {
     const own = "mcp__canterlot__canterlot_limits";
     expect(toolTitle({ toolName: own, summary: own })).toEqual({ name: "canterlot_limits", server: "", argument: "" });

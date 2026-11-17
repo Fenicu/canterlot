@@ -17,7 +17,7 @@ use canterlot_worker::{
 
 use canterlot_worker::adapter::codex::home::TempDirPolicy;
 use serde_json::{Value, json};
-use std::{path::PathBuf, time::Duration};
+use std::{path::Path, path::PathBuf, time::Duration};
 use tempfile::TempDir;
 use uuid::Uuid;
 
@@ -810,6 +810,59 @@ async fn tool_blocks_stream_live_and_only_unrequested_commands_get_the_cli_mark(
         let expected = (tool.as_deref() == Some("shell")).then(|| "cli_policy".to_owned());
         assert_eq!(mark, &expected, "{tool:?}: {starts:?}");
     }
+    fake.close().await;
+}
+
+#[tokio::test]
+async fn generated_image_arrives_on_its_block_before_the_final() {
+    let generation = |status: &str, saved: Option<&str>| {
+        json!({"id": "img-gen", "type": "imageGeneration", "status": status,
+            "savedPath": saved, "fileId": "file_1", "result": "",
+            "revisedPrompt": "рыжий кот на подоконнике"})
+    };
+    let mut fake = Fake::new(tool_turn(vec![
+        started(generation("inProgress", None)),
+        completed(generation("completed", Some("/tmp/codex/cat.png"))),
+    ]));
+    fake.start().await;
+    let (_, events) = fake.send("go").await;
+    let block = events
+        .iter()
+        .find_map(|event| match event {
+            AdapterEvent::BlockStarted {
+                block_id,
+                kind: BlockKind::ToolCall,
+                tool_name,
+                summary,
+                ..
+            } if tool_name.as_deref() == Some("image_generation") => {
+                Some((*block_id, summary.clone()))
+            }
+            _ => None,
+        })
+        .expect("image_generation block");
+    assert_eq!(block.1.as_deref(), Some("рыжий кот на подоконнике"));
+    let media_at = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                AdapterEvent::Media { block_id, source }
+                    if *block_id == block.0
+                        && matches!(source, adapter::MediaSource::Path(path) if path == Path::new("/tmp/codex/cat.png"))
+            )
+        })
+        .expect("the generated image reaches the feed");
+    let final_at = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                AdapterEvent::BlockFinal { block_id, .. } if *block_id == block.0
+            )
+        })
+        .expect("final of the block");
+    assert!(media_at < final_at, "media after final: {events:?}");
     fake.close().await;
 }
 

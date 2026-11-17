@@ -308,7 +308,7 @@ export function agentTitle(
 }
 
 export const ASK_TOOL = "AskUserQuestion";
-const TOOL_NAMES: Record<string, string> = { [ASK_TOOL]: "Вопрос" };
+const TOOL_NAMES: Record<string, string> = { [ASK_TOOL]: "Вопрос", image_generation: "Картинка" };
 
 export interface ToolTitle {
   name: string;
