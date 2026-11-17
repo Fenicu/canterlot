@@ -113,7 +113,7 @@ test('sessions_screen_lists_sessions_with_place_ip_and_method', async ({ page },
   await expect(rows.first()).toContainText('Chrome 142 · Android 16 · Pixel 9');
   await expect(rows.first()).toContainText('этот сеанс');
   await expect(rows.nth(1)).toContainText('Рабочий ноутбук');
-  await expect(rows.nth(1)).toContainText('Firefox 159 · Linux · 192.168.1.20 · локальная сеть · был(а) в сети 5 мин назад');
+  await expect(rows.nth(1)).toContainText('Firefox 159 · Linux · 192.168.1.20 · локальная сеть · в сети 5 мин назад');
   await expect(rows.nth(1)).toContainText('вход ключом доступа');
   await expect(rows.nth(2)).toContainText('IP неизвестен');
   await expect(rows.nth(3)).toContainText('Казань, Россия');

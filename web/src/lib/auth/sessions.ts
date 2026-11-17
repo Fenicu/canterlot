@@ -36,14 +36,14 @@ export function sessionTitle(session: Pick<OwnerSession, "name" | "label">): str
   return session.name || session.label || "Неизвестное устройство";
 }
 
-/** «был(а) в сети 5 мин назад». */
+/** «в сети 5 мин назад». */
 export function seenText(iso: string, now: number): string {
   const at = Date.parse(iso);
   const ago = Math.max(0, now - at);
-  if (ago < 60_000) return "был(а) в сети только что";
-  if (ago < 3_600_000) return `был(а) в сети ${Math.floor(ago / 60_000)} мин назад`;
-  if (ago < 86_400_000) return `был(а) в сети ${Math.floor(ago / 3_600_000)} ч назад`;
-  return `был(а) в сети ${fmt.stamp(at, now)}`;
+  if (ago < 60_000) return "в сети только что";
+  if (ago < 3_600_000) return `в сети ${Math.floor(ago / 60_000)} мин назад`;
+  if (ago < 86_400_000) return `в сети ${Math.floor(ago / 3_600_000)} ч назад`;
+  return `в сети ${fmt.stamp(at, now)}`;
 }
 
 /** Склонение: 1 сеанс, 2 сеанса, 5 сеансов. */

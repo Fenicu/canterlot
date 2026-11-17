@@ -36,9 +36,9 @@ describe("auth/sessions", () => {
 
   it("seen_text_is_relative", () => {
     const now = Date.parse("2026-11-12T10:30:00Z");
-    expect(seenText("2026-11-12T10:29:40Z", now)).toBe("был(а) в сети только что");
-    expect(seenText("2026-11-12T10:25:00Z", now)).toBe("был(а) в сети 5 мин назад");
-    expect(seenText("2026-11-12T07:30:00Z", now)).toBe("был(а) в сети 3 ч назад");
+    expect(seenText("2026-11-12T10:29:40Z", now)).toBe("в сети только что");
+    expect(seenText("2026-11-12T10:25:00Z", now)).toBe("в сети 5 мин назад");
+    expect(seenText("2026-11-12T07:30:00Z", now)).toBe("в сети 3 ч назад");
   });
 });
 
