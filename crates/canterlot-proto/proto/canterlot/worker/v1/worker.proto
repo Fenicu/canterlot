@@ -640,6 +640,14 @@ message HarnessInfo {
   repeated string permission_modes = 6;
   repeated ModelInfo models = 7;
   optional bool settings_midsession_effort = 8;
+  // Только при согласованной возможности cli_versions_v1: пусто у старого воркера.
+  string installed_version = 9;
+  // Последний выпуск из dist-tags.latest реестра npm; пусто, если он неизвестен.
+  string latest_version = 10;
+  // Минимальная поддерживаемая версия из кода адаптера, не из конфигурации.
+  string min_version = 11;
+  // Команда обновления для способа установки CLI; воркер её не выполняет.
+  string update_command = 12;
 }
 
 message ModelInfo {

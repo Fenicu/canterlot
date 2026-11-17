@@ -123,7 +123,8 @@ struct Cached {
 static CACHE: OnceLock<Mutex<HashMap<PathBuf, Cached>>> = OnceLock::new();
 
 // `Command` сам ищет голое имя в PATH; для кэша нужен тот же найденный файл.
-fn resolve(executable: &Path) -> Option<PathBuf> {
+// Публичный также нужен, чтобы определить способ установки по каноническому пути.
+pub fn resolve(executable: &Path) -> Option<PathBuf> {
     let found = if executable.is_absolute() || executable.components().count() > 1 {
         executable.to_path_buf()
     } else {

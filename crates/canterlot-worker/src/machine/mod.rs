@@ -1,15 +1,17 @@
-use crate::{adapter::HarnessCatalog, config::WorkerConfig};
+use crate::{adapter::HarnessCatalog, config::WorkerConfig, machine::cli_versions::HarnessVersion};
 use canterlot_proto::{
     limits::{MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS_PER_INPUT},
     worker::v1::{HarnessInfo, MachineReport, ModelInfo},
 };
 use std::{
+    collections::BTreeMap,
     fs::DirBuilder,
     os::unix::fs::DirBuilderExt,
     path::Path,
     time::{SystemTime, UNIX_EPOCH},
 };
 pub mod claude_history;
+pub mod cli_versions;
 pub mod codexbar;
 pub mod hotspots;
 pub mod leaks;
@@ -28,7 +30,34 @@ pub fn now_ms() -> u64 {
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
+/// Новые поля версий уходят только хабу, объявившему `cli_versions_v1`.
+/// Старый хаб получает прежнюю форму отчёта: пустые строки в добавленных полях.
+pub fn gated_report(mut report: MachineReport, capabilities: &[String]) -> MachineReport {
+    if capabilities
+        .iter()
+        .any(|capability| capability == crate::session::CAPABILITY_CLI_VERSIONS_V1)
+    {
+        return report;
+    }
+    for harness in &mut report.harnesses {
+        harness.installed_version.clear();
+        harness.latest_version.clear();
+        harness.min_version.clear();
+        harness.update_command.clear();
+    }
+    report
+}
+
 pub fn build_report(config: &WorkerConfig, catalog: &[HarnessCatalog]) -> MachineReport {
+    build_report_with_versions(config, catalog, &BTreeMap::new())
+}
+
+/// Отчёт с версиями CLI, собранными пробами старта. Без записи о харнессе поля пусты.
+pub fn build_report_with_versions(
+    config: &WorkerConfig,
+    catalog: &[HarnessCatalog],
+    versions: &BTreeMap<String, HarnessVersion>,
+) -> MachineReport {
     let mut roots: Vec<_> = config
         .execution
         .allowed_workdir_roots
@@ -43,25 +72,32 @@ pub fn build_report(config: &WorkerConfig, catalog: &[HarnessCatalog]) -> Machin
         allowed_roots: roots,
         harnesses: catalog
             .iter()
-            .map(|c| HarnessInfo {
-                harness: c.harness.into(),
-                provider: c.provider.into(),
-                title: c.title.into(),
-                images: c.images,
-                settings_midsession: c.settings_midsession,
-                settings_midsession_effort: Some(c.settings_midsession_effort),
-                permission_modes: c.permission_modes.iter().map(|s| (*s).into()).collect(),
-                models: c
-                    .models
-                    .iter()
-                    .map(|m| ModelInfo {
-                        id: m.id.clone(),
-                        title: m.title.clone(),
-                        efforts: m.efforts.to_vec(),
-                        images: m.images,
-                        context_window: m.context_window,
-                    })
-                    .collect(),
+            .map(|c| {
+                let version = versions.get(c.harness);
+                HarnessInfo {
+                    harness: c.harness.into(),
+                    provider: c.provider.into(),
+                    title: c.title.into(),
+                    images: c.images,
+                    settings_midsession: c.settings_midsession,
+                    settings_midsession_effort: Some(c.settings_midsession_effort),
+                    installed_version: version.map_or_else(String::new, |v| v.installed.clone()),
+                    latest_version: version.map_or_else(String::new, |v| v.latest.clone()),
+                    min_version: version.map_or_else(String::new, |v| v.minimum.clone()),
+                    update_command: version.map_or_else(String::new, |v| v.update_command.clone()),
+                    permission_modes: c.permission_modes.iter().map(|s| (*s).into()).collect(),
+                    models: c
+                        .models
+                        .iter()
+                        .map(|m| ModelInfo {
+                            id: m.id.clone(),
+                            title: m.title.clone(),
+                            efforts: m.efforts.to_vec(),
+                            images: m.images,
+                            context_window: m.context_window,
+                        })
+                        .collect(),
+                }
             })
             .collect(),
         max_attachment_bytes: MAX_ATTACHMENT_BYTES,
@@ -118,4 +154,43 @@ fn os_line() -> String {
             .collect::<Vec<_>>()
             .join(".")
     )
+}
+
+#[cfg(test)]
+mod cli_versions_gate_tests {
+    use super::*;
+
+    fn report() -> MachineReport {
+        MachineReport {
+            harnesses: vec![HarnessInfo {
+                harness: "codex".into(),
+                installed_version: "0.164.0".into(),
+                latest_version: "0.167.0".into(),
+                min_version: "0.164.0".into(),
+                update_command: "npm i -g @openai/codex@latest".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn old_peer_gets_no_new_fields() {
+        let report = gated_report(report(), &[]);
+        let h = &report.harnesses[0];
+        assert_eq!(h.installed_version, "");
+        assert_eq!(h.latest_version, "");
+        assert_eq!(h.min_version, "");
+        assert_eq!(h.update_command, "");
+    }
+
+    #[test]
+    fn negotiated_peer_gets_all_new_fields() {
+        let report = gated_report(report(), &["cli_versions_v1".into()]);
+        let h = &report.harnesses[0];
+        assert_eq!(h.installed_version, "0.164.0");
+        assert_eq!(h.latest_version, "0.167.0");
+        assert_eq!(h.min_version, "0.164.0");
+        assert_eq!(h.update_command, "npm i -g @openai/codex@latest");
+    }
 }

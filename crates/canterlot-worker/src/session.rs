@@ -55,6 +55,8 @@ pub const CAPABILITY_SECRET_REQUESTS_V2: &str = "secret_requests_v2";
 pub const CAPABILITY_CREDENTIAL_EXPIRY_V1: &str = "credential_expiry_v1";
 /// Хаб показывает сбросы лимитов Codex; без неё воркер их не шлёт.
 pub const CAPABILITY_PROVIDER_CREDITS_V1: &str = "provider_credits_v1";
+/// В отчёте машины есть версии CLI и команда обновления; без неё поля пусты.
+pub const CAPABILITY_CLI_VERSIONS_V1: &str = "cli_versions_v1";
 
 pub const OPTIONAL_CAPABILITIES: &[&str] = &[
     "exec_v1",
@@ -80,6 +82,7 @@ pub const OPTIONAL_CAPABILITIES: &[&str] = &[
     CAPABILITY_SECRET_REQUESTS_V2,
     CAPABILITY_CREDENTIAL_EXPIRY_V1,
     CAPABILITY_PROVIDER_CREDITS_V1,
+    CAPABILITY_CLI_VERSIONS_V1,
 ];
 
 #[derive(Clone)]
@@ -710,7 +713,10 @@ impl Worker {
         let mut catalogs = catalog::CatalogState::default();
         let mut retry = Vec::new();
         for probe in catalog::Probe::configured(&self.config) {
-            match probe.discover(&self.config.data_dir).await {
+            match probe
+                .discover(&self.config.data_dir, self.catalogs.npm())
+                .await
+            {
                 Ok(slot) => {
                     catalog::log_no_models(&probe, &slot);
                     catalogs.set(slot);
@@ -1375,7 +1381,10 @@ impl Worker {
         let mut machine_outbound = if pilot {
             Some(ControlUp {
                 msg: Some(control_up::Msg::MachineReport(
-                    initial_report.as_ref().clone(),
+                    crate::machine::gated_report(
+                        initial_report.as_ref().clone(),
+                        &accepted.capabilities,
+                    ),
                 )),
             })
         } else {
@@ -1737,7 +1746,10 @@ impl Worker {
                     changed.map_err(|_| WorkerError::Transport)?;
                     let report = catalog_updates.borrow_and_update().clone();
                     machine_outbound = Some(ControlUp {
-                        msg: Some(control_up::Msg::MachineReport(report.as_ref().clone())),
+                        msg: Some(control_up::Msg::MachineReport(crate::machine::gated_report(
+                            report.as_ref().clone(),
+                            &accepted.capabilities,
+                        ))),
                     });
                 }
                 message = inbound.message(), if commands.len() < 32 && polls.len()<8 => {

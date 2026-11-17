@@ -4,6 +4,7 @@
 //! машины проходит, и повтор возвращает каталог в живой поток управления.
 
 use std::{
+    collections::BTreeMap,
     path::Path,
     sync::{Arc, Mutex},
     time::Duration,
@@ -16,10 +17,12 @@ use crate::{
     adapter::{
         HarnessCatalog,
         claude_code::version::{self as claude_version, CliVersion},
+        cli_version,
         codex::{self, CodexCatalog},
         opencode::{self, OpenCodeCatalog},
     },
     config::{ClaudeCodeConfig, CodexConfig, OpenCodeConfig, WorkerConfig},
+    machine::cli_versions::{self, HarnessVersion, LatestVersions, NPM_REGISTRY},
 };
 
 /// Первые паузы повторов, дальше раз в пять минут: сбой обычно кончается сам.
@@ -38,14 +41,24 @@ pub(super) struct CatalogState {
     claude_version: Option<CliVersion>,
     codex: Option<CodexCatalog>,
     opencode: Option<OpenCodeCatalog>,
+    latest: BTreeMap<&'static str, String>,
 }
 
 impl CatalogState {
     pub(super) fn set(&mut self, slot: Slot) {
         match slot {
-            Slot::Claude(version) => self.claude_version = Some(version),
-            Slot::Codex(catalog) => self.codex = Some(catalog),
-            Slot::OpenCode(catalog) => self.opencode = Some(catalog),
+            Slot::Claude { version, latest } => {
+                self.latest.insert("claude_code", latest);
+                self.claude_version = Some(version);
+            }
+            Slot::Codex { catalog, latest } => {
+                self.latest.insert("codex", latest);
+                self.codex = Some(catalog);
+            }
+            Slot::OpenCode { catalog, latest } => {
+                self.latest.insert("opencode", latest);
+                self.opencode = Some(catalog);
+            }
         }
     }
 
@@ -57,13 +70,67 @@ impl CatalogState {
             self.opencode.as_ref(),
         )
     }
+
+    /// Версии одним проходом по успешным пробам: минимум из кода, способ установки
+    /// из разрешённого пути бинарника, последний выпуск из кэша реестра npm.
+    fn versions(&self, config: &WorkerConfig) -> BTreeMap<String, HarnessVersion> {
+        let mut versions = BTreeMap::new();
+        let mut add = |harness: &'static str, executable: &Path, label: Option<&str>| {
+            let Some(label) = label else { return };
+            let resolved =
+                cli_version::resolve(executable).unwrap_or_else(|| executable.to_owned());
+            versions.insert(
+                harness.to_owned(),
+                HarnessVersion {
+                    installed: label.to_owned(),
+                    latest: self.latest.get(harness).cloned().unwrap_or_default(),
+                    minimum: cli_versions::minimum(harness),
+                    update_command: cli_versions::update_command(
+                        harness,
+                        cli_versions::install_method(&resolved),
+                    ),
+                },
+            );
+        };
+        if let Some(cfg) = &config.claude_code {
+            add(
+                "claude_code",
+                &cfg.executable,
+                self.claude_version.as_ref().map(CliVersion::label),
+            );
+        }
+        if let Some(cfg) = &config.codex {
+            add(
+                "codex",
+                &cfg.executable,
+                self.codex.as_ref().map(|c| c.version.label()),
+            );
+        }
+        if let Some(cfg) = &config.opencode {
+            add(
+                "opencode",
+                &cfg.executable,
+                self.opencode.as_ref().map(|c| c.version.label()),
+            );
+        }
+        versions
+    }
 }
 
 /// Каталог одного харнесса из успешной пробы.
 pub(super) enum Slot {
-    Claude(CliVersion),
-    Codex(CodexCatalog),
-    OpenCode(OpenCodeCatalog),
+    Claude {
+        version: CliVersion,
+        latest: String,
+    },
+    Codex {
+        catalog: CodexCatalog,
+        latest: String,
+    },
+    OpenCode {
+        catalog: OpenCodeCatalog,
+        latest: String,
+    },
 }
 
 /// Настроенные харнессы. Выключенный в конфигурации харнесс сюда не попадает:
@@ -90,8 +157,14 @@ impl Probe {
         probes
     }
 
-    pub(super) async fn discover(&self, data_dir: &Path) -> Result<Slot, String> {
+    pub(super) async fn discover(
+        &self,
+        data_dir: &Path,
+        npm: &LatestVersions,
+    ) -> Result<Slot, String> {
         let cache = data_dir.join(".cli-versions.json");
+        let npm_cache = data_dir.join(".npm-latest.json");
+        let now = crate::machine::now_ms();
         match self {
             Self::Claude(cfg) => match claude_version::check_with_cache(
                 &cfg.executable,
@@ -100,17 +173,49 @@ impl Probe {
             )
             .await
             {
-                Ok(version) => Ok(Slot::Claude(version)),
+                Ok(version) => Ok(Slot::Claude {
+                    latest: npm
+                        .fetch(
+                            cli_versions::npm_package("claude_code"),
+                            NPM_REGISTRY,
+                            &npm_cache,
+                            now,
+                        )
+                        .await,
+                    version,
+                }),
                 Err(reason) => Err(format!("{reason:?}")),
             },
-            Self::Codex(cfg) => codex::discover_with_cache(cfg, Some(&cache))
-                .await
-                .map(Slot::Codex)
-                .map_err(|reason| format!("{reason:?}")),
-            Self::OpenCode(cfg) => opencode::discover_with_cache(cfg, data_dir, Some(&cache))
-                .await
-                .map(Slot::OpenCode)
-                .map_err(|reason| format!("{reason:?}")),
+            Self::Codex(cfg) => match codex::discover_with_cache(cfg, Some(&cache)).await {
+                Ok(catalog) => Ok(Slot::Codex {
+                    latest: npm
+                        .fetch(
+                            cli_versions::npm_package("codex"),
+                            NPM_REGISTRY,
+                            &npm_cache,
+                            now,
+                        )
+                        .await,
+                    catalog,
+                }),
+                Err(reason) => Err(format!("{reason:?}")),
+            },
+            Self::OpenCode(cfg) => {
+                match opencode::discover_with_cache(cfg, data_dir, Some(&cache)).await {
+                    Ok(catalog) => Ok(Slot::OpenCode {
+                        latest: npm
+                            .fetch(
+                                cli_versions::npm_package("opencode"),
+                                NPM_REGISTRY,
+                                &npm_cache,
+                                now,
+                            )
+                            .await,
+                        catalog,
+                    }),
+                    Err(reason) => Err(format!("{reason:?}")),
+                }
+            }
         }
     }
 
@@ -151,6 +256,7 @@ impl Probe {
 pub(super) struct Catalogs {
     state: Mutex<CatalogState>,
     report: watch::Sender<Arc<MachineReport>>,
+    npm: LatestVersions,
 }
 
 impl Catalogs {
@@ -158,11 +264,16 @@ impl Catalogs {
         Self {
             state: Mutex::new(CatalogState::default()),
             report: watch::channel(Arc::new(MachineReport::default())).0,
+            npm: LatestVersions::default(),
         }
     }
 
     pub(super) fn subscribe(&self) -> watch::Receiver<Arc<MachineReport>> {
         self.report.subscribe()
+    }
+
+    pub(super) fn npm(&self) -> &LatestVersions {
+        &self.npm
     }
 
     pub(super) fn publish(&self, config: &WorkerConfig, state: CatalogState) {
@@ -178,7 +289,11 @@ impl Catalogs {
     fn emit(&self, config: &WorkerConfig) {
         let report = {
             let state = self.state.lock().expect("catalog lock");
-            crate::machine::build_report(config, &state.harnesses(config))
+            crate::machine::build_report_with_versions(
+                config,
+                &state.harnesses(config),
+                &state.versions(config),
+            )
         };
         self.report.send_replace(Arc::new(report));
     }
@@ -213,7 +328,7 @@ pub(super) async fn retry_until_discovered(
         }
         let result = tokio::select! {
             _ = super::stopped(&mut shutdown) => return,
-            result = probe.discover(&config.data_dir) => result,
+            result = probe.discover(&config.data_dir, catalogs.npm()) => result,
         };
         match result {
             Ok(slot) => {
@@ -243,7 +358,7 @@ pub(super) async fn retry_until_discovered(
 
 pub(super) fn log_no_models(probe: &Probe, slot: &Slot) {
     let (kind, message) = match (probe, slot) {
-        (Probe::OpenCode(_), Slot::OpenCode(catalog)) if catalog.models.is_empty() => {
+        (Probe::OpenCode(_), Slot::OpenCode { catalog, .. }) if catalog.models.is_empty() => {
             ("opencode_no_models", "OpenCode has no available models")
         }
         _ => return,

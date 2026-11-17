@@ -877,6 +877,7 @@ fn pilot_records_roundtrip() {
                 images: Some(true),
                 context_window: Some(1_048_576),
             }],
+            ..Default::default()
         }],
         max_attachment_bytes: 104_857_600,
         max_attachments_per_input: 10,
@@ -1193,6 +1194,32 @@ fn provider_table_maps_harnesses() {
     for &(harness, provider) in HARNESS_PROVIDERS {
         assert_eq!(provider_of(harness), Some(provider));
     }
+}
+
+#[test]
+fn harness_info_cli_versions_roundtrip_and_old_worker_is_empty() {
+    use canterlot_proto::worker::v1::*;
+    let harness = HarnessInfo {
+        harness: "codex".into(),
+        installed_version: "0.164.0".into(),
+        latest_version: "0.167.0".into(),
+        min_version: "0.164.0".into(),
+        update_command: "npm i -g @openai/codex@latest".into(),
+        ..Default::default()
+    };
+    assert_roundtrip(harness.clone());
+    // Пустые поля добавляют ноль байт: старый воркер шлёт прежние провода.
+    let mut old = harness;
+    old.installed_version.clear();
+    old.latest_version.clear();
+    old.min_version.clear();
+    old.update_command.clear();
+    let old_encoded = old.encode_to_vec();
+    let bare = HarnessInfo {
+        harness: "codex".into(),
+        ..Default::default()
+    };
+    assert_eq!(old_encoded, bare.encode_to_vec());
 }
 
 #[test]

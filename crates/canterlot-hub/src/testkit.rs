@@ -692,6 +692,7 @@ pub async fn seed_catalog(pool: &PgPool, machine_id: Uuid) {
                     ..Default::default()
                 })
                 .collect(),
+            ..Default::default()
         }],
         home_dir: String::new(),
         worktree_root: String::new(),
