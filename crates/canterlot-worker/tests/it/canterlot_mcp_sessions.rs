@@ -273,6 +273,21 @@ fn instructions_stay_short() {
 }
 
 #[test]
+fn routing_is_the_default_way_to_pick_a_delegate() {
+    for (tool_set, provider) in PROVIDERS {
+        let text = instructions_of(tool_set, provider);
+        assert!(text.contains("by default pass route"), "{provider}: {text}");
+    }
+    let tools = tools_of(ToolSet::ApproveAndLimits, "claude");
+    let spawn = tools
+        .iter()
+        .find(|tool| tool["name"] == "session_spawn")
+        .expect("session_spawn");
+    let description = spawn["description"].as_str().expect("description");
+    assert!(description.contains("Prefer `route`"), "{description}");
+}
+
+#[test]
 fn plan_tools_have_strict_schemas() {
     let tools = tools_of(ToolSet::LimitsOnly, "codex");
     let schema = |name: &str| {
