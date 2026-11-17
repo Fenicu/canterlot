@@ -42,7 +42,6 @@
 	let error = $state<string | null>(null);
 	let opening = $state(false);
 	let closing = $state(false);
-	const restartState = $derived(closing ? { 'aria-disabled': true } : {});
 
 	async function send(text: string) {
 		const id = chat?.id;
@@ -109,9 +108,7 @@
 		void send(question);
 	});
 
-	const title = $derived(
-		((parent.detail as { title?: string } | null)?.title ?? 'Сессия') + ' · в стороне'
-	);
+	const title = $derived((parent.detail as { title?: string } | null)?.title ?? 'Сессия');
 	const docked = $derived(
 		chat ? [...chat.requests.items.values()].filter(isDocked) : []
 	);
@@ -133,91 +130,87 @@
 
 </script>
 
-	{#snippet restartAction()}
-		<button type="button" class="restart" {...restartState} onclick={() => { if (!closing) void restart(); }}>
-			{closing ? 'Начинаю…' : 'Начать заново'}
-		</button>
-	{/snippet}
+{#snippet restartAction()}
+	<IconButton icon="retry" label="Начать заново" inert={closing} onclick={() => void restart()} />
+{/snippet}
+
+{#snippet body()}
+	<div class="side-body">
+		<div class="side-notes">
+			<StateChip activity={parent.activity as Activity | null} phase={parent.phase} executionState={parentState} now={clock} />
+			{#if error}<p class="error" role="alert">{error}</p>{/if}
+			{#if !chat}
+				<p class="opening">Открываю копию сессии…</p>
+			{:else if freshAt}
+				<p class="service">Начато заново от свежей копии сессии</p>
+			{/if}
+		</div>
+		{#if chat}
+			<Timeline chat={chat} {now} markable={false} />
+			{#each docked as req (req.id)}
+				<RequestCard
+					request={req}
+					arrive
+					{now}
+					harnessId={harnessId}
+					permissionMode={permissionMode}
+					onDecision={async (decision) => {
+						const store = chat;
+						if (store) await store.requests.submitDecision(req.id, decision, store.ops);
+					}}
+				/>
+			{/each}
+			<Composer {chat} hint="Вопрос в стороне…" />
+		{/if}
+	</div>
+{/snippet}
 
 {#if pane.desktop}
-	<aside class="side-panel" aria-label="Боковой чат">
+	<aside class="side-panel" aria-labelledby="side-panel-title">
 		<header>
-			<div class="titles">
-				<h2>{title}</h2>
-				<StateChip activity={parent.activity as Activity | null} phase={parent.phase} executionState={parentState} now={clock} />
-			</div>
+			<h2 id="side-panel-title"><span class="name">{title}</span> <span class="marker">· в стороне</span></h2>
 			<div class="actions">
 				{@render restartAction()}
 				<IconButton icon="close" label="Закрыть боковой чат" onclick={onclose} />
 			</div>
 		</header>
-		<div class="side-body">
-			<StateChip activity={parent.activity as Activity | null} phase={parent.phase} executionState={parentState} now={clock} />
-			{#if error}<p class="error" role="alert">{error}</p>{/if}
-			{#if !chat}
-				<p class="opening">Открываю копию сессии…</p>
-			{:else}
-				{#if freshAt}
-					<p class="service">Начато заново от свежей копии сессии</p>
-				{/if}
-				<Timeline chat={chat} {now} />
-				{#each docked as req (req.id)}
-					<RequestCard
-						request={req}
-						arrive
-						{now}
-						harnessId={harnessId}
-						permissionMode={permissionMode}
-						onDecision={async (decision) => {
-							const store = chat;
-							if (store) await store.requests.submitDecision(req.id, decision, store.ops);
-						}}
-					/>
-				{/each}
-				<Composer {chat} />
-			{/if}
-		</div>
+		{@render body()}
 	</aside>
 {:else}
-	<Sheet open {title} {onclose} actions={restartAction}>
-		<div class="side-body">
-			<StateChip activity={parent.activity as Activity | null} phase={parent.phase} executionState={parentState} now={clock} />
-			{#if error}<p class="error" role="alert">{error}</p>{/if}
-			{#if !chat}
-				<p class="opening">Открываю копию сессии…</p>
-			{:else}
-				{#if freshAt}
-					<p class="service">Начато заново от свежей копии сессии</p>
-				{/if}
-				<Timeline chat={chat} {now} />
-				{#each docked as req (req.id)}
-					<RequestCard
-						request={req}
-						arrive
-						{now}
-						harnessId={harnessId}
-						permissionMode={permissionMode}
-						onDecision={async (decision) => {
-							const store = chat;
-							if (store) await store.requests.submitDecision(req.id, decision, store.ops);
-						}}
-					/>
-				{/each}
-				<Composer {chat} />
-			{/if}
-		</div>
+	<Sheet open {title} marker="в стороне" feed {onclose} actions={restartAction}>
+		{@render body()}
 	</Sheet>
 {/if}
 
 <style>
+	/* Лента и поле стоят как в основном чате: прокручивается сама лента, поле прижато к ней снизу. */
 	.side-body {
+		flex: 1 1 auto;
 		display: flex;
 		flex-direction: column;
-		gap: var(--s4);
 		min-height: 0;
 	}
-	.side-body :global(.timeline) {
-		min-height: 0;
+	.side-body > :global(.feed-wrap) {
+		flex: 0 1 auto;
+		min-height: var(--s15);
+	}
+	/* Панель на всю высоту окна: поле внизу, как у основной ленты. */
+	.side-panel .side-body > :global(.feed-wrap) {
+		flex: 1 1 auto;
+	}
+	/* В основном чате между лентой и полем стоит полоса очереди с отступами: копия держит тот же зазор. */
+	.side-body > :global(.composer) {
+		margin-top: var(--s6);
+	}
+	.side-notes {
+		display: flex;
+		flex-direction: column;
+		gap: var(--s2);
+		flex: none;
+		padding-inline: var(--gutter);
+	}
+	.side-notes:empty {
+		display: none;
 	}
 	.side-panel {
 		position: fixed;
@@ -225,50 +218,43 @@
 		width: var(--sidebar-width);
 		display: flex;
 		flex-direction: column;
-		background: var(--surface);
+		background: var(--chat-bg);
 		border-left: var(--s1) solid var(--line);
 		z-index: 30;
 	}
 	.side-panel header {
+		flex: none;
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
 		gap: var(--s4);
-		padding: var(--s6) var(--s8) var(--s4);
+		padding: var(--s4) var(--s4) var(--s2) var(--s8);
 	}
-	.titles {
+	.side-panel h2 {
+		display: flex;
+		align-items: baseline;
+		gap: var(--s1);
 		min-width: 0;
-	}
-	.titles h2 {
 		margin: 0;
 		font-size: var(--fs-title);
+		white-space: nowrap;
+	}
+	.name {
+		min-width: 0;
 		overflow: hidden;
 		text-overflow: ellipsis;
-		white-space: nowrap;
+	}
+	.marker {
+		flex: none;
+		color: var(--muted);
+		font-size: var(--fs-meta);
+		font-weight: var(--weight-normal);
 	}
 	.actions {
 		display: flex;
 		align-items: center;
-		gap: var(--s4);
+		gap: var(--s2);
 		flex: none;
-	}
-	.side-panel .side-body {
-		padding: 0 var(--s8) var(--s8);
-		overflow-x: hidden;
-		overflow-y: auto;
-	}
-	.restart {
-		min-height: var(--target);
-		padding: 0 var(--s4);
-		border: var(--s1) solid var(--line);
-		white-space: nowrap;
-		border-radius: var(--radius-pill);
-		background: var(--surface);
-		color: var(--text);
-		font-size: var(--fs-sm);
-	}
-	.restart[aria-disabled="true"] {
-		color: var(--muted);
 	}
 	.opening,
 	.service {

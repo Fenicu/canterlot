@@ -3,7 +3,9 @@
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
   import IconButton from './IconButton.svelte';
-  let { open, title, subtitle, routeKey, onclose, actions, children }: { open: boolean; title: string; subtitle?: string; routeKey?: string; onclose: () => void; actions?: Snippet; children: Snippet } = $props();
+  // `marker` — приглушённая пометка в строке заголовка: заголовок тогда держится одной строкой и режется многоточием.
+  // `feed` — лист с лентой чата: фон ленты, тело без своей прокрутки и отступов, прокручивает сама лента.
+  let { open, title, subtitle, marker, feed = false, routeKey, onclose, actions, children }: { open: boolean; title: string; subtitle?: string; marker?: string; feed?: boolean; routeKey?: string; onclose: () => void; actions?: Snippet; children: Snippet } = $props();
   const id = $props.id();
   let dialog: HTMLDialogElement;
   let heading: HTMLHeadingElement | undefined;
@@ -79,9 +81,9 @@
   });
   $effect(() => { if (mounted && entry && routeKey && page.state.sheet !== routeKey) close(); });
 </script>
-<dialog bind:this={dialog} aria-labelledby={id} aria-modal="true" onkeydown={keydown} onpointerdown={(event) => { pressedBackdrop = overBackdrop(event); }} onclick={backdropClick} oncancel={(event) => { event.preventDefault(); close(); }}>
+<dialog bind:this={dialog} class:feed-sheet={feed} aria-labelledby={id} aria-modal="true" onkeydown={keydown} onpointerdown={(event) => { pressedBackdrop = overBackdrop(event); }} onclick={backdropClick} oncancel={(event) => { event.preventDefault(); close(); }}>
   <div class="handle" aria-hidden="true"></div>
-  <header><div class="titles"><h2 id={id} bind:this={heading} tabindex="-1">{title}</h2>{#if subtitle}<p>{subtitle}</p>{/if}</div><div class="sheet-actions">{#if actions}{@render actions()}{/if}<IconButton icon="close" label="Закрыть" onclick={close} /></div></header>
+  <header><div class="titles"><h2 id={id} bind:this={heading} tabindex="-1" class:line={marker}>{#if marker}<span class="name">{title}</span> <span class="marker">· {marker}</span>{:else}{title}{/if}</h2>{#if subtitle}<p>{subtitle}</p>{/if}</div><div class="sheet-actions">{#if actions}{@render actions()}{/if}<IconButton icon="close" label="Закрыть" onclick={close} /></div></header>
   <div class="body">{@render children()}</div>
 </dialog>
 <style>
@@ -104,6 +106,12 @@
   .body:has(> :global([data-sheet-flush])) { padding-bottom: var(--s0); }
   :global([data-layout='desktop']) .body { padding-bottom: var(--s10); }
   :global([data-layout='desktop']) dialog[open] { animation-name: sheet-rise; }
+  h2.line { display: flex; align-items: baseline; gap: var(--s1); min-width: 0; white-space: nowrap; }
+  .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .marker { flex: none; color: var(--muted); font-size: var(--fs-meta); font-weight: var(--weight-normal); }
+  .feed-sheet { padding-inline: var(--s0); background: var(--chat-bg); }
+  .feed-sheet header { min-height: var(--target); padding-inline: var(--s8) var(--s4); }
+  .feed-sheet .body { display: flex; flex-direction: column; padding: var(--s0); margin: var(--s0); overflow: hidden; mask-image: none; }
   @keyframes sheet-enter { from { transform: translateY(100%); } to { transform: none; } }
   @keyframes sheet-rise { from { opacity: 0; transform: translateY(var(--shift-enter)); } to { opacity: 1; transform: none; } }
 </style>
