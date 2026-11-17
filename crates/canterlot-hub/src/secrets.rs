@@ -1587,6 +1587,19 @@ pub async fn emit_due_revocations(pool: &PgPool, registry: &Registry) -> Result<
             continue;
         }
         let mut tx = crate::db::begin(pool).await?;
+        // Обязательство под замком: два параллельных отправителя (тик, сеанс,
+        // отзыв владельца) иначе оба увидят «команды нет» и создадут две.
+        let due: bool = sqlx::query_scalar(
+            "select next_attempt_at <= now() from secret_revocations where id = $1 for update",
+        )
+        .bind(obligation_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !due {
+            // Другой отправитель уже взял это обязательство.
+            tx.commit().await?;
+            continue;
+        }
         // Пока команда этого или большего поколения ждёт воркер, новой не нужно.
         let pending: bool = sqlx::query_scalar(
             "select exists(
