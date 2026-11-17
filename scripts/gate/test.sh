@@ -96,6 +96,52 @@ grep -q 'kind=gate' "$out" || { cat "$out" >&2; fail 'чистая копия н
 run 2 bash "$scratch/scripts/gate.sh" --bogus
 run 0 bash "$scratch/scripts/gate.sh" --help
 
+# --- машиночитаемое состояние полного прогона ---
+# Шаги подменены короткими командами: они пишут те же отчёты, что настоящие шаги,
+# и Notes в журнал вызовов, чтобы тест видел, что именно перезапускалось.
+g2="$tmp/g2"
+mkdir -p "$g2/scripts"
+cp scripts/gate.sh scripts/lease.sh "$g2/scripts/"
+chmod 0755 "$g2/scripts/gate.sh"
+(
+    cd "$g2"
+    git init -q
+    git config user.email gate@example.invalid
+    git config user.name gate
+    git config commit.gpgsign false
+    : >tracked
+    git add tracked scripts
+    git commit -qm init
+)
+export GATE_FAKE_CALLS="$tmp/g2-calls"
+: >"$GATE_FAKE_CALLS"
+# shellcheck disable=SC2016 # подмены исполняются через bash -c, где переменные раскрываются
+fake_npm='echo "npm $GATE_STEP_MODE" >>"$GATE_FAKE_CALLS"; exit 0'
+# shellcheck disable=SC2016
+fake_check='mkdir -p target/nextest/default; printf "%s\n" "<testsuites><testsuite name=\"crate-a\"><testcase name=\"mod::flaky\"><failure/></testcase><testcase name=\"mod::ok\"/></testsuite></testsuites>" >target/nextest/default/junit.xml; echo "check $GATE_STEP_MODE" >>"$GATE_FAKE_CALLS"; exit 1'
+# shellcheck disable=SC2016
+fake_deploy='echo "deploy $GATE_STEP_MODE" >>"$GATE_FAKE_CALLS"; exit 0'
+# shellcheck disable=SC2016
+fake_web='echo "web $GATE_STEP_MODE" >>"$GATE_FAKE_CALLS"; exit 0'
+gate2_env=(
+    env CANTERLOT_NO_LEASE=1 CANTERLOT_GATE_DEPLOY_NEEDED=0
+    CANTERLOT_GATE_STEP_NPM="$fake_npm" CANTERLOT_GATE_STEP_CHECK="$fake_check"
+    CANTERLOT_GATE_STEP_DEPLOY="$fake_deploy" CANTERLOT_GATE_STEP_WEB="$fake_web"
+)
+run 1 "${gate2_env[@]}" bash "$g2/scripts/gate.sh" --no-attest
+short=$(git -C "$g2" rev-parse --short=8 HEAD)
+state="$g2/.superpowers/gate/$short/state.tsv"
+[[ -f "$state" ]] || fail 'нет машиночитаемого состояния прогона'
+grep -qF $'schema\t1' "$state" || fail 'нет schema в состоянии'
+grep -qF "$(printf 'sha\t%s' "$(git -C "$g2" rev-parse HEAD)")" "$state" || fail 'нет полного sha в состоянии'
+grep -qF $'completed\t1' "$state" || fail 'нет признака завершения в состоянии'
+grep -qF $'npm_ci_exit\t0' "$state" || fail 'нет кода npm ci в состоянии'
+grep -qF $'check_exit\t1' "$state" || fail 'нет кода check в состоянии'
+grep -qF $'check_failed\ttests' "$state" || fail 'падение check не отнесено к тестам'
+grep -qF $'rust_fail\trust|crate-a|mod::flaky' "$state" || fail 'нет идентичности упавшего Rust-теста'
+grep -qF $'deploy_exit\tskipped' "$state" || fail 'нет пропущенного deploy в состоянии'
+if grep -qF $'rust_fail\trust|crate-a|mod::ok' "$state"; then fail 'прошедший тест попал в упавшие'; fi
+
 # Битый индекс: git status падает, и проверка чистоты обязана провалиться, а не
 # пропустить аттестацию из-за пустого вывода.
 printf 'garbage' >"$scratch/.git/index"
