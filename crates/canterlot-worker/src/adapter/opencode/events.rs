@@ -2,7 +2,10 @@
 //! события чужих сессий отбрасываются, неизвестный тип даёт одну диагностику.
 
 use super::{
-    super::{AdapterEvent, BlockKind, MediaSource, ModelUsage, Phase, TodoItem, TodoStatus},
+    super::{
+        AdapterEvent, BackgroundKind, BackgroundState, BackgroundTask, BlockKind, MediaSource,
+        ModelUsage, Phase, TodoItem, TodoStatus,
+    },
     failure,
     requests::GLOBAL_SESSION,
 };
@@ -222,6 +225,10 @@ struct OpenText {
 struct Child {
     lane: Option<Uuid>,
     agent: String,
+    /// Своё исполнение потомка идёт: сервер шлёт `session.execution.*` его сессии.
+    running: bool,
+    /// Потомок кончился после конца хода родителя и ещё не назван в фоне.
+    ended: Option<BackgroundState>,
 }
 
 struct Step {
@@ -273,6 +280,9 @@ pub struct Translator {
     progress_sent: u64,
     windows: HashMap<String, u64>,
     unknown: HashSet<String>,
+    /// Последнее отданное сопровождению состояние фоновых потомков и признак «фон идёт».
+    background_sent: Vec<BackgroundTask>,
+    background_on: bool,
 }
 
 /// Текст результата инструмента без исполнения: сервер умер раньше ответа.
@@ -442,6 +452,8 @@ impl Translator {
             progress_sent: 0,
             windows,
             unknown: HashSet::new(),
+            background_sent: Vec::new(),
+            background_on: false,
         }
     }
 
@@ -463,6 +475,8 @@ impl Translator {
         self.children.entry(session).or_insert_with(|| Child {
             lane: None,
             agent: UNNAMED_CHILD.to_owned(),
+            running: false,
+            ended: None,
         });
     }
 
@@ -584,10 +598,94 @@ impl Translator {
     }
 
     /// Команда следующих блоков. Расход не сбрасывается: запуск без ввода, в который влился
-    /// ввод, считается вместе с ним.
-    pub fn begin_run(&mut self, command: Option<Uuid>) {
+    /// ввод, считается вместе с ним. Возвращает переход фона: новый ход скрывает потомков,
+    /// работавших между ходами.
+    pub fn begin_run(&mut self, command: Option<Uuid>) -> Vec<Translated> {
         self.command = command;
         self.last_command = command.or(self.last_command);
+        self.report_background()
+    }
+
+    /// Переход фона после конца хода или отмены запуска. Отдельно от `begin_run` и
+    /// `finish_run`: сопровождение шлёт его сразу за итогом хода.
+    pub fn background_events(&mut self) -> Vec<Translated> {
+        self.report_background()
+    }
+
+    fn child_view(&self, session: &str, child: &Child) -> BackgroundTask {
+        BackgroundTask {
+            task_id: session.to_owned(),
+            kind: BackgroundKind::Agent,
+            block_id: child.lane,
+            parent_task_id: None,
+            description: child.agent.clone(),
+            state: if child.running {
+                BackgroundState::Running
+            } else {
+                child.ended.unwrap_or(BackgroundState::Stopped)
+            },
+        }
+    }
+
+    /// Фон — работающие потомки вне хода родителя. Во время хода сигнала нет: его работу
+    /// показывает фаза, а повтор после `begin_run` не нужен. Список полный: закончившийся
+    /// потомок уходит в нём со своим состоянием один раз.
+    fn report_background(&mut self) -> Vec<Translated> {
+        let idle = self.command.is_none();
+        let mut tasks: Vec<BackgroundTask> = Vec::new();
+        if idle {
+            tasks = self
+                .children
+                .iter()
+                .filter(|(_, child)| child.running || child.ended.is_some())
+                .map(|(session, child)| self.child_view(session, child))
+                .collect();
+            tasks.sort_by(|a, b| a.task_id.cmp(&b.task_id));
+        }
+        let on = idle
+            && tasks
+                .iter()
+                .any(|task| task.state == BackgroundState::Running);
+        if self.background_sent == tasks && self.background_on == on {
+            return Vec::new();
+        }
+        self.background_sent = tasks.clone();
+        self.background_on = on;
+        for child in self.children.values_mut() {
+            child.ended = None;
+        }
+        vec![Translated::Event(AdapterEvent::BackgroundWork {
+            tasks,
+            wake_turn: false,
+        })]
+    }
+
+    /// `session.execution.*` потомка: фон идёт, пока идёт его исполнение, а не ход родителя.
+    fn on_child_execution(&mut self, kind: &str, data: &Value) -> Vec<Translated> {
+        let idle = self.command.is_none();
+        let Some(child) = self.children.get_mut(string_field(data, "sessionID")) else {
+            return Vec::new();
+        };
+        match kind {
+            "session.execution.started" => {
+                child.running = true;
+                child.ended = None;
+            }
+            "session.execution.succeeded" => {
+                child.running = false;
+                child.ended = idle.then_some(BackgroundState::Completed);
+            }
+            "session.execution.failed" => {
+                child.running = false;
+                child.ended = idle.then_some(BackgroundState::Failed);
+            }
+            "session.execution.interrupted" => {
+                child.running = false;
+                child.ended = idle.then_some(BackgroundState::Stopped);
+            }
+            _ => return Vec::new(),
+        }
+        self.report_background()
     }
 
     pub fn finish_run(&mut self, command: Uuid) -> AdapterEvent {
@@ -652,6 +750,10 @@ impl Translator {
         }
         if let Some(out) = self.on_work(kind, data) {
             return out;
+        }
+        // Исполнение потомка — единственный признак того, что фон ещё работает между ходами.
+        if kind.starts_with("session.execution.") && self.is_child(data) {
+            return self.on_child_execution(kind, data);
         }
         if session.is_some_and(|session| session != self.root) {
             return Vec::new();

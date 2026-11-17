@@ -4,7 +4,8 @@
 
 use canterlot_proto::limits::BLOCK_FINAL_INLINE_MAX_BYTES;
 use canterlot_worker::adapter::{
-    AdapterEvent, BlockKind, MediaSource, ModelUsage, Phase, TodoItem, TodoStatus,
+    AdapterEvent, BackgroundKind, BackgroundState, BackgroundTask, BlockKind, MediaSource,
+    ModelUsage, Phase, TodoItem, TodoStatus,
     opencode::{
         VERIFIED_OPENAPI_SHA256, catalog,
         events::{RunFailure, RunOutcome, Translated, Translator, block_id},
@@ -1082,6 +1083,149 @@ fn background_child_keeps_its_open_blocks_over_the_end_of_the_run() {
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].kind, "ToolResult");
     assert_eq!(result[0].agent, "general");
+}
+
+fn execution(kind: &str, session: &str) -> Value {
+    json!({"type": format!("session.execution.{kind}"), "data": {"sessionID": session}})
+}
+
+fn child(translator: &mut Translator, root: &str, session: &str, agent: &str) {
+    translator.feed(&json!({"type": "session.created", "data": {
+        "sessionID": session, "parentID": root, "agent": agent}}));
+}
+
+const ROOT: &str = "ses_root";
+
+type Work = (bool, Vec<BackgroundTask>);
+
+fn background(translated: Vec<Translated>) -> Vec<Work> {
+    adapter_events(translated)
+        .into_iter()
+        .filter_map(|event| match event {
+            AdapterEvent::BackgroundWork { tasks, wake_turn } => Some((wake_turn, tasks)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn only_work(translated: Vec<Translated>) -> Work {
+    let mut lists = background(translated);
+    assert_eq!(lists.len(), 1, "one background report: {lists:?}");
+    lists.remove(0)
+}
+
+#[test]
+fn child_working_after_the_parent_turn_reports_background_work() {
+    let mut translator = Translator::new(ROOT, HashMap::new());
+    let command = Uuid::now_v7();
+    assert!(translator.begin_run(Some(command)).is_empty());
+    child(&mut translator, ROOT, "ses_a", "general");
+    assert!(
+        background(translator.feed(&execution("started", "ses_a"))).is_empty(),
+        "the child starts inside the parent turn"
+    );
+    assert_eq!(
+        outcomes(&translator.feed(&execution("succeeded", ROOT))).len(),
+        1
+    );
+    let _ = translator.finish_run(command);
+    let (wake, tasks) = only_work(translator.background_events());
+    assert!(!wake);
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].task_id, "ses_a");
+    assert_eq!(tasks[0].kind, BackgroundKind::Agent);
+    assert_eq!(tasks[0].state, BackgroundState::Running);
+    assert_eq!(tasks[0].description, "general");
+}
+
+#[test]
+fn last_child_end_turns_background_work_off() {
+    let mut translator = Translator::new(ROOT, HashMap::new());
+    let command = Uuid::now_v7();
+    translator.begin_run(Some(command));
+    child(&mut translator, ROOT, "ses_a", "general");
+    translator.feed(&execution("started", "ses_a"));
+    translator.feed(&execution("succeeded", ROOT));
+    let _ = translator.finish_run(command);
+    assert_eq!(
+        only_work(translator.background_events()).1[0].state,
+        BackgroundState::Running
+    );
+    let (wake, tasks) = only_work(translator.feed(&execution("succeeded", "ses_a")));
+    assert!(!wake);
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].task_id, "ses_a");
+    assert_eq!(tasks[0].state, BackgroundState::Completed);
+    assert!(
+        background(translator.feed(&execution("succeeded", "ses_a"))).is_empty(),
+        "a repeated terminal frame reports nothing new"
+    );
+}
+
+#[test]
+fn failed_child_ends_background_work_as_failed() {
+    let mut translator = Translator::new(ROOT, HashMap::new());
+    let command = Uuid::now_v7();
+    translator.begin_run(Some(command));
+    child(&mut translator, ROOT, "ses_a", "general");
+    translator.feed(&execution("started", "ses_a"));
+    translator.feed(&execution("succeeded", ROOT));
+    let _ = translator.finish_run(command);
+    let _ = translator.background_events();
+    let (_, tasks) = only_work(translator.feed(&execution("failed", "ses_a")));
+    assert_eq!(tasks[0].state, BackgroundState::Failed);
+}
+
+#[test]
+fn child_activity_during_a_parent_turn_reports_no_background_work() {
+    let mut translator = Translator::new(ROOT, HashMap::new());
+    let command = Uuid::now_v7();
+    translator.begin_run(Some(command));
+    child(&mut translator, ROOT, "ses_a", "general");
+    assert!(background(translator.feed(&execution("started", "ses_a"))).is_empty());
+    assert!(
+        background(
+            translator.feed(&json!({"type": "session.text.started", "data": {
+            "sessionID": "ses_a", "assistantMessageID": "msg_1", "ordinal": 0}}))
+        )
+        .is_empty()
+    );
+    assert!(background(translator.feed(&execution("succeeded", "ses_a"))).is_empty());
+    translator.feed(&execution("succeeded", ROOT));
+    let _ = translator.finish_run(command);
+    assert!(
+        background(translator.background_events()).is_empty(),
+        "no child runs after the turn"
+    );
+}
+
+#[test]
+fn a_new_parent_turn_hides_background_work_until_it_ends() {
+    let mut translator = Translator::new(ROOT, HashMap::new());
+    let first = Uuid::now_v7();
+    translator.begin_run(Some(first));
+    child(&mut translator, ROOT, "ses_a", "general");
+    translator.feed(&execution("started", "ses_a"));
+    translator.feed(&execution("succeeded", ROOT));
+    let _ = translator.finish_run(first);
+    assert_eq!(only_work(translator.background_events()).1.len(), 1);
+    let second = Uuid::now_v7();
+    let (wake, tasks) = only_work(translator.begin_run(Some(second)));
+    assert!(!wake);
+    assert!(tasks.is_empty(), "the child is inside the new turn now");
+    assert!(
+        background(
+            translator.feed(&json!({"type": "session.text.started", "data": {
+            "sessionID": "ses_a", "assistantMessageID": "msg_1", "ordinal": 0}}))
+        )
+        .is_empty(),
+        "no repeated signal during the turn"
+    );
+    translator.feed(&execution("succeeded", ROOT));
+    let _ = translator.finish_run(second);
+    let (_, tasks) = only_work(translator.background_events());
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].state, BackgroundState::Running);
 }
 
 type Lists = Vec<(Option<Uuid>, Vec<TodoItem>)>;

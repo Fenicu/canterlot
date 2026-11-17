@@ -1308,8 +1308,12 @@ impl OpenCodeAdapter {
             return;
         };
         self.delivery.adopted = Some(command);
-        if let Some(translator) = self.translator.as_mut() {
-            translator.begin_run(Some(command));
+        let opened = match self.translator.as_mut() {
+            Some(translator) => translator.begin_run(Some(command)),
+            None => Vec::new(),
+        };
+        for item in opened {
+            self.on_translated(item);
         }
         self.events.push_back(AdapterEvent::RunAdopted {
             input_command_id: command,
@@ -1454,8 +1458,19 @@ impl OpenCodeAdapter {
         for reply in self.requests.refuse_all(requests::REFUSED) {
             self.send_refusal(reply);
         }
-        if let Some(translator) = self.translator.as_mut() {
-            self.events.push_back(translator.finish_run(command));
+        let (finished, background) = match self.translator.as_mut() {
+            Some(translator) => (
+                Some(translator.finish_run(command)),
+                translator.background_events(),
+            ),
+            None => (None, Vec::new()),
+        };
+        if let Some(finished) = finished {
+            self.events.push_back(finished);
+        }
+        // Потомки могли работать весь ход: фон начинается сразу за итогом.
+        for item in background {
+            self.on_translated(item);
         }
         self.awaiting_input();
         self.events.extend(follow);
@@ -1535,8 +1550,19 @@ impl OpenCodeAdapter {
             self.delivery.unconfirmed = None;
             self.lookup = None;
         }
-        if let Some(translator) = self.translator.as_mut() {
-            self.events.push_back(translator.finish_run(command));
+        let (finished, background) = match self.translator.as_mut() {
+            Some(translator) => (
+                Some(translator.finish_run(command)),
+                translator.background_events(),
+            ),
+            None => (None, Vec::new()),
+        };
+        if let Some(finished) = finished {
+            self.events.push_back(finished);
+        }
+        // Потомки могли работать весь ход: фон начинается сразу за итогом.
+        for item in background {
+            self.on_translated(item);
         }
         self.awaiting_input();
         let follow = self.judge(&RunOutcome::Failed(failure));
@@ -2206,8 +2232,12 @@ impl OpenCodeAdapter {
         self.delivery.enqueued = false;
         self.delivery.delivered = false;
         self.delivery.foreign = adopted.is_some();
-        if let Some(translator) = self.translator.as_mut() {
-            translator.begin_run(Some(command));
+        let opened = match self.translator.as_mut() {
+            Some(translator) => translator.begin_run(Some(command)),
+            None => Vec::new(),
+        };
+        for item in opened {
+            self.on_translated(item);
         }
         let path = format!("/api/session/{}/prompt", self.session);
         match input::post_with_lock_retry(&http, &path, &body, self.deadline, &self.db_lock_delays)
@@ -2226,8 +2256,12 @@ impl OpenCodeAdapter {
                 self.delivery.active = None;
                 self.delivery.adopted = adopted;
                 self.delivery.foreign = false;
-                if let Some(translator) = self.translator.as_mut() {
-                    translator.begin_run(adopted);
+                let opened = match self.translator.as_mut() {
+                    Some(translator) => translator.begin_run(adopted),
+                    None => Vec::new(),
+                };
+                for item in opened {
+                    self.on_translated(item);
                 }
                 self.restore_settings(previous);
                 self.exit_note = note_owed;
