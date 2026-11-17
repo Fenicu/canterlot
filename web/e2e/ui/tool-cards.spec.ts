@@ -59,11 +59,11 @@ async function cardOf(page: Page, id: string): Promise<Locator> {
   return reveal(page, row(page, id).locator('.feed-card'));
 }
 
-async function shot(page: Page, target: Locator, name: string): Promise<void> {
+async function shot(page: Page, target: Locator, name: string, opts: { moving?: boolean } = {}): Promise<void> {
   if (test.info().project.name !== 'phone') return;
   mkdirSync(SHOTS, { recursive: true });
   await page.mouse.move(0, 0);
-  await target.screenshot({ path: `${SHOTS}/${name}.png`, animations: 'disabled' });
+  await target.screenshot({ path: `${SHOTS}/${name}.png`, animations: opts.moving ? 'allow' : 'disabled' });
 }
 
 test.describe('shell card', () => {
@@ -140,4 +140,48 @@ test.describe('shell card', () => {
     const feedWidth = await feed(page).evaluate((node) => node.scrollWidth - node.clientWidth);
     expect(feedWidth).toBeLessThanOrEqual(0);
   });
+});
+
+/** Имена анимаций на блике навыка: пусто — имя стоит спокойно. */
+async function glints(card: Locator): Promise<string[]> {
+  return card.locator('.glint').evaluate((node) => node.getAnimations().map((item) => (item as CSSAnimation).animationName));
+}
+
+test.describe('skill card', () => {
+  test('a_finished_skill_shows_its_name_plugin_and_args_and_stands_still', async ({ page }) => {
+    const { seed } = await boot(page);
+    const card = await cardOf(page, seed.blocks.skillDone!);
+    await expect(card).toHaveAttribute('data-card', 'skill');
+    await expect(card.locator('[data-role="skill-name"]')).toContainText('test-driven-development');
+    await expect(card.locator('[data-role="skill-plugin"]')).toHaveText('superpowers');
+    await expect(card.locator('[data-role="skill-args"]')).toHaveText('карточки ленты: формат команды и счёт строк');
+    await expect(card.locator('[data-role="card-state"]')).toHaveCount(0);
+    expect(await glints(card)).toEqual([]);
+    const opencode = await cardOf(page, seed.blocks.skillOpencode!);
+    await expect(opencode.locator('[data-role="skill-name"]')).toContainText('frontend-design');
+    await shot(page, card, 'skill-phone');
+  });
+
+  for (const motion of ['full', 'reduced'] as const) {
+    test(`a_running_skill_glints_until_it_loads_${motion}`, async ({ page }) => {
+      if (motion === 'reduced') await page.emulateMedia({ reducedMotion: 'reduce' });
+      const { hub, api, seed } = await boot(page, { working: true });
+      const fresh = streamCall(hub, api, seed.id, seed.run, 'Skill', { skill: 'antislop:antislop-ui' });
+      const card = row(page, fresh.call).locator('.feed-card');
+      await expect(card.locator('[data-role="card-state"]')).toHaveText('идёт');
+      await expect(card.locator('[data-role="skill-name"]')).toHaveAttribute('data-glint', '');
+      if (motion === 'full') {
+        await expect.poll(async () => (await glints(card)).map((name) => name.replace(/^svelte-\w+-/, ''))).toEqual(['skill-glint']);
+        // Снимок посреди прохода блика: полоса акцента на имени.
+        await page.waitForTimeout(700);
+        await shot(page, card, 'skill-running-phone', { moving: true });
+      } else {
+        expect(await glints(card)).toEqual([]);
+      }
+      streamCall(hub, api, seed.id, seed.run, 'Skill', null, { blockId: fresh.call, resultId: fresh.result, result: 'Launching skill: antislop:antislop-ui' });
+      await expect(card.locator('[data-role="card-state"]')).toHaveCount(0);
+      await expect(card.locator('[data-role="skill-name"]')).not.toHaveAttribute('data-glint');
+      expect(await glints(card)).toEqual([]);
+    });
+  }
 });

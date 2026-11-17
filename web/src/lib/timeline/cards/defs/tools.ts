@@ -5,13 +5,26 @@ import type { CardCall, CardLogic } from '../types';
 
 /* ------------------------------------------------------------------ навык */
 
-export const skill: CardLogic<{ name: string; plugin: string }> = {
+export interface SkillData {
+  name: string;
+  /** Плагин или набор навыков: `superpowers` у `superpowers:brainstorming`. */
+  plugin: string;
+  /** Аргументы вызова навыка (Claude Code `args`). */
+  args: string;
+}
+
+export const skill: CardLogic<SkillData> = {
   label: 'Навык',
   parse(call) {
-    const raw = str(call.input.skill) || str(call.input.name) || call.argument;
+    const raw = (str(call.input.skill) || str(call.input.name) || call.argument).trim();
     if (!raw) return null;
     const colon = raw.lastIndexOf(':');
-    return { name: raw.slice(colon + 1).trim(), plugin: colon > 0 ? raw.slice(0, colon) : '' };
+    const args = call.input.args;
+    return {
+      name: raw.slice(colon + 1).trim(),
+      plugin: colon > 0 ? raw.slice(0, colon) : '',
+      args: (typeof args === 'string' ? args : args === undefined || args === null ? '' : JSON.stringify(args)).trim()
+    };
   },
   summary: (_call, data) => `Навык: ${data.name}`
 };

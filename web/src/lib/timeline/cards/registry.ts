@@ -12,6 +12,7 @@ import QuestionCard from './QuestionCard.svelte';
 import SendCard from './SendCard.svelte';
 import SessionsCard from './SessionsCard.svelte';
 import ShellCard from './ShellCard.svelte';
+import SkillCard from './SkillCard.svelte';
 import ShareCard from './ShareCard.svelte';
 import SpawnCard from './SpawnCard.svelte';
 import SubagentCard from './SubagentCard.svelte';
@@ -96,7 +97,7 @@ const REGISTRY: Record<string, CardDef<never>> = {
   'question.ask': card(question, QuestionCard),
   'web.search': card(search),
   'web.fetch': card({ ...fetchPage, link: (_call, data) => ({ text: data.domain, href: data.url, external: true }) }),
-  skill: card(skill),
+  skill: card(skill, SkillCard),
   'shell.exec': card({ ...shell, word: (call, data) => outcomeWord(data.outcome) ?? defaultWord(call) } as CardLogic<ShellData>, ShellCard),
   'meta.tool_search': card(quiet),
   'meta.monitor': card(quiet),

@@ -75,7 +75,7 @@ test('every_card_renders_from_a_seeded_orchestrator_feed', async ({ page }) => {
     ['alarm', 'canterlot.alarm_set', /^Будильник · когда «Карточки ленты» и «Фикс скролла» закончат · до \d{2}:\d{2}$/],
     ['alarmFile', 'canterlot.alarm_set', /^Будильник · «gate» · когда появится \/tmp\/gate\.rc · до \d{2}:\d{2}$/],
     ['alarmList', 'canterlot.alarm_list', /^Будильники: 2 взведены · ближайший в \d{2}:\d{2}$/],
-    ['skill', 'skill', 'Навык: brainstorming'],
+    ['skill', 'skill', 'Навык brainstorming superpowers'],
     ['search', 'web.search', 'Искала: tool call cards chat feed design · 3 ссылки'],
     ['fetch', 'web.fetch', 'Открыла svelte.dev · <svelte:boundary>'],
     ['docs', 'context7.query-docs', 'Документация: svelte — svelte:boundary failed snippet'],

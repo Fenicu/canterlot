@@ -46,6 +46,13 @@ export function seedToolCards(api: FakeHubApi, opts: { now?: number; working?: b
 
   feed.text(run, 'Команды готовы.');
 
+  const skills = api.id();
+  feed.input('Сначала план, потом код');
+  feed.call(skills, 'skillDone', 'Skill', { skill: 'superpowers:test-driven-development', args: 'карточки ленты: формат команды и счёт строк' }, 'Launching skill: superpowers:test-driven-development');
+  feed.text(skills, 'Навык загружен. Беру следующий.');
+  feed.call(skills, 'skillOpencode', 'skill', { name: 'frontend-design' }, '<skill_content name="frontend-design">…</skill_content>');
+  feed.text(skills, 'И ещё один, пока пишу тесты.');
+
   api.histories.set(id, items);
   api.bindConversation(id);
   api.hub.reach(`conversation:${id}`, String(feed.seq));

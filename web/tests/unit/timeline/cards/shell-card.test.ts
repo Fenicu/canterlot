@@ -69,3 +69,20 @@ describe('shell card', () => {
     expect(resolveCard(made('Bash', { nothing: true }, 'out'), NOW)).toBeNull();
   });
 });
+
+describe('skill card', () => {
+  it('claude_skill_splits_plugin_and_keeps_args', () => {
+    const card = resolveCard(made('Skill', { skill: 'superpowers:brainstorming', args: 'карточки ленты' }, 'Launching skill: superpowers:brainstorming'), NOW)!;
+    expect(card.line).toBe('Навык: brainstorming');
+    expect(card.data).toEqual({ name: 'brainstorming', plugin: 'superpowers', args: 'карточки ленты' });
+  });
+
+  it('opencode_skill_reads_its_name', () => {
+    expect(resolveCard(made('skill', { name: 'frontend-design' }, 'ok'), NOW)!.data).toEqual({ name: 'frontend-design', plugin: '', args: '' });
+  });
+
+  it('a_running_skill_reads_as_running', () => {
+    const call = cardCall(callBlock('Skill', { skill: 'x:y' }), null, { root: true, working: true });
+    expect(resolveCard(call, NOW)!.word).toMatchObject({ word: 'идёт', live: true });
+  });
+});
