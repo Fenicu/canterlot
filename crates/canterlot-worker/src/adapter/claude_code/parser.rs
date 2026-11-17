@@ -7,6 +7,7 @@
 //! diagnostic. Partial tool JSON stays buffered until `content_block_stop`.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use super::super::frame_names::object_field_names;
@@ -57,6 +58,16 @@ struct OpenInput {
     id: String,
     buf: String,
 }
+
+/// Последняя фаза работающего инструмента: сводка не меняется от heartbeat, а время
+/// ограничивает запись фаз в журнал.
+struct RunningTool {
+    summary: Option<String>,
+    last_phase: Instant,
+}
+
+/// Один heartbeat на инструмент за это время: чаще журнал и ленту не засоряем.
+const TOOL_PROGRESS_HEARTBEAT: Duration = Duration::from_secs(60);
 
 struct AssembledInput {
     input: Result<serde_json::Value, String>,
@@ -299,6 +310,8 @@ pub struct Parser {
     blocks: HashMap<u64, OpenBlock>,
     tool_blocks: HashMap<String, Uuid>,
     tool_agents: HashMap<String, String>,
+    /// Фаза работающего инструмента: сводка и время последнего heartbeat.
+    running_tools: HashMap<String, RunningTool>,
     /// Сообщения субагента, пришедшие потоком: их целый кадр ничего нового не несёт.
     streamed_messages: HashSet<String>,
     assembler: ToolInputAssembler,
@@ -351,6 +364,7 @@ impl Parser {
             blocks: HashMap::new(),
             tool_blocks: HashMap::new(),
             tool_agents: HashMap::new(),
+            running_tools: HashMap::new(),
             streamed_messages: HashSet::new(),
             assembler: ToolInputAssembler::default(),
             last_usage: None,
@@ -594,6 +608,7 @@ impl Parser {
         self.prev_usage.clear();
         self.tool_blocks.clear();
         self.tool_agents.clear();
+        self.running_tools.clear();
         self.streamed_messages.clear();
         self.blocks.clear();
     }
@@ -727,6 +742,11 @@ impl Parser {
     }
 
     pub fn feed(&mut self, line: &str) -> Vec<Parsed> {
+        self.feed_at(line, Instant::now())
+    }
+
+    /// `now` — источник времени для троттлинга heartbeat инструмента: тесты не спят.
+    pub fn feed_at(&mut self, line: &str, now: Instant) -> Vec<Parsed> {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
             return vec![Parsed::Event(AdapterEvent::Diagnostic {
                 kind: "unparsed_line",
@@ -741,7 +761,7 @@ impl Parser {
         let mut out = Vec::new();
         match frame.get("type").and_then(serde_json::Value::as_str) {
             Some("system") => self.feed_system(&value, &mut out),
-            Some("stream_event") => self.feed_stream(&value, &mut out),
+            Some("stream_event") => self.feed_stream(&value, &mut out, now),
             Some("assistant") => self.feed_assistant(&value, &mut out),
             Some("user") => self.feed_user(&value, &mut out),
             Some("result") => self.feed_result(&value, &mut out),
@@ -763,7 +783,7 @@ impl Parser {
             Some("command_lifecycle") => {
                 self.feed_command_lifecycle(&value, &mut out);
             }
-            Some("tool_progress") => self.feed_tool_progress(&value, &mut out),
+            Some("tool_progress") => self.feed_tool_progress(&value, &mut out, now),
             Some(kind) => {
                 self.note_unknown(&mut out, "", Some(kind), Some(&value));
                 if out.is_empty() {
@@ -793,9 +813,15 @@ impl Parser {
         }
     }
 
-    /// Долгий инструмент жив, а кадров его вывода может не быть: сердцебиение обновляет
-    /// фазу `running_tool`, по ней сопровождение видит прогресс и не считает ход зависшим.
-    fn feed_tool_progress(&self, value: &serde_json::Value, out: &mut Vec<Parsed>) {
+    /// Долгий инструмент жив, а кадров его вывода может не быть: редкий heartbeat обновляет
+    /// фазу `running_tool`, чтобы ход не считался зависшим. Сводка фазы остаётся прежней:
+    /// время работы в неё не попадает, иначе описание вызова теряется в ленте.
+    fn feed_tool_progress(
+        &mut self,
+        value: &serde_json::Value,
+        out: &mut Vec<Parsed>,
+        now: Instant,
+    ) {
         if value
             .get("parent_tool_use_id")
             .is_some_and(|parent| !parent.is_null())
@@ -812,14 +838,38 @@ impl Parser {
             out.push(Parsed::Ignored);
             return;
         };
-        let elapsed = value
-            .get("elapsed_time_seconds")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
+        let Some(id) = value
+            .get("tool_use_id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.is_empty())
+        else {
+            out.push(Parsed::Ignored);
+            return;
+        };
+        let Some(state) = self.running_tools.get_mut(id) else {
+            // Фазы этого вызова ещё не было: первый прогресс может назвать её сразу.
+            self.running_tools.insert(
+                id.to_owned(),
+                RunningTool {
+                    summary: None,
+                    last_phase: now,
+                },
+            );
+            out.push(Parsed::Event(AdapterEvent::Phase {
+                phase: Phase::RunningTool,
+                tool_name: Some(name.to_owned()),
+                summary: None,
+            }));
+            return;
+        };
+        if now.saturating_duration_since(state.last_phase) < TOOL_PROGRESS_HEARTBEAT {
+            return;
+        }
+        state.last_phase = now;
         out.push(Parsed::Event(AdapterEvent::Phase {
             phase: Phase::RunningTool,
             tool_name: Some(name.to_owned()),
-            summary: Some(format!("{elapsed}s")),
+            summary: state.summary.clone(),
         }));
     }
 
@@ -935,7 +985,7 @@ impl Parser {
         }
     }
 
-    fn feed_stream(&mut self, value: &serde_json::Value, out: &mut Vec<Parsed>) {
+    fn feed_stream(&mut self, value: &serde_json::Value, out: &mut Vec<Parsed>, now: Instant) {
         let parent = value
             .get("parent_tool_use_id")
             .and_then(serde_json::Value::as_str);
@@ -1012,6 +1062,14 @@ impl Parser {
                         );
                         self.tool_blocks.insert(id.to_owned(), block_id);
                         self.assembler.start(index, id);
+                        // Сводка фазы у вызова пустая: heartbeat её не меняет.
+                        self.running_tools.insert(
+                            id.to_owned(),
+                            RunningTool {
+                                summary: None,
+                                last_phase: now,
+                            },
+                        );
                         out.push(Parsed::Event(AdapterEvent::BlockStarted {
                             block_id,
                             kind: BlockKind::ToolCall,
@@ -1392,6 +1450,7 @@ impl Parser {
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default()
                 .to_owned();
+            self.running_tools.remove(&tool_use_id);
             let is_error = block
                 .get("is_error")
                 .and_then(serde_json::Value::as_bool)

@@ -10,6 +10,7 @@ use canterlot_worker::adapter::{
     claude_code::parser::{Parsed, Parser},
 };
 use serde_json::{Value, json};
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use crate::fixtures;
@@ -615,25 +616,83 @@ fn result_after_an_assistant_error_keeps_one_visible_failure() {
 }
 
 #[test]
-fn tool_progress_is_a_running_tool_heartbeat() {
-    let frame = |parent: Value| {
+fn tool_progress_is_one_heartbeat_per_minute_with_the_same_summary() {
+    let start = Instant::now();
+    let mut parser = Parser::new();
+    let opened = parser.feed_at(
+        &stream(json!({"type": "content_block_start", "index": 0,
+            "content_block": {"type": "tool_use", "id": "toolu_1", "name": "Bash"}})),
+        start,
+    );
+    let summary = opened
+        .iter()
+        .find_map(|p| match p {
+            Parsed::Event(AdapterEvent::Phase {
+                phase: Phase::RunningTool,
+                summary,
+                ..
+            }) => Some(summary.clone()),
+            _ => None,
+        })
+        .expect("running tool phase");
+    let progress = |parent: Value| {
         json!({"type": "tool_progress", "tool_use_id": "toolu_1", "tool_name": "Bash",
             "parent_tool_use_id": parent, "elapsed_time_seconds": 42})
         .to_string()
     };
-    let parsed = Parser::new().feed(&frame(Value::Null));
+    for seconds in [30, 59] {
+        let parsed = parser.feed_at(&progress(Value::Null), start + Duration::from_secs(seconds));
+        assert!(
+            parsed.is_empty(),
+            "{seconds}s is inside the minute: {parsed:?}"
+        );
+    }
+    let parsed = parser.feed_at(&progress(Value::Null), start + Duration::from_secs(60));
+    match &parsed[..] {
+        [
+            Parsed::Event(AdapterEvent::Phase {
+                phase: Phase::RunningTool,
+                tool_name: Some(name),
+                summary: current,
+            }),
+        ] => {
+            assert_eq!(name, "Bash");
+            assert_eq!(current, &summary, "the heartbeat keeps the phase summary");
+            assert!(
+                current.as_deref().is_none_or(|text| !text.contains("42")),
+                "elapsed time stays out of the summary: {current:?}"
+            );
+        }
+        other => panic!("one heartbeat after a minute, got {other:?}"),
+    }
+    let parsed = parser.feed_at(&progress(Value::Null), start + Duration::from_secs(119));
+    assert!(
+        parsed.is_empty(),
+        "the next minute is throttled: {parsed:?}"
+    );
+    let parsed = parser.feed_at(
+        &progress(json!("toolu_parent")),
+        start + Duration::from_secs(600),
+    );
+    assert!(matches!(parsed[..], [Parsed::Ignored]), "{parsed:?}");
+}
+
+#[test]
+fn first_progress_of_an_unseen_tool_names_its_phase() {
+    let parsed = Parser::new().feed_at(
+        &json!({"type": "tool_progress", "tool_use_id": "toolu_1", "tool_name": "Bash",
+            "parent_tool_use_id": null, "elapsed_time_seconds": 42})
+        .to_string(),
+        Instant::now(),
+    );
     assert!(
         matches!(&parsed[..], [Parsed::Event(AdapterEvent::Phase {
             phase: Phase::RunningTool,
             tool_name: Some(name),
-            summary: Some(summary),
-        })] if name == "Bash" && summary == "42s"),
+            summary: None,
+        })] if name == "Bash"),
         "{parsed:?}"
     );
-    assert!(matches!(
-        Parser::new().feed(&frame(json!("toolu_parent")))[..],
-        [Parsed::Ignored]
-    ));
 }
 
 #[test]
