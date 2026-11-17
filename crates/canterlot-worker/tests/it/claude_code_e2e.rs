@@ -809,6 +809,76 @@ async fn context_overflow_reports_context_exhausted() {
     );
 }
 
+fn assistant_error(kind: &str, status: u16, text: &str) -> Value {
+    json!({"type": "assistant", "error": kind, "api_error_status": status,
+        "message": {"id": "msg_error", "model": "claude-opus-5-5",
+            "content": [{"type": "text", "text": text}], "usage": {}}})
+}
+
+#[tokio::test]
+async fn assistant_billing_error_is_shown_once_with_its_result() {
+    let text = "Your credit balance is too low";
+    let events = error_turn(vec![
+        assistant_error("billing_error", 400, text),
+        result(400, text),
+    ])
+    .await;
+    let errors = events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                AdapterEvent::BlockStarted {
+                    kind: BlockKind::Error,
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(errors, 1, "one failure, one error block: {events:?}");
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AdapterEvent::BlockFinal { text, .. }
+        if text.contains("billing_error") && text.contains("credit balance")
+    )));
+}
+
+#[tokio::test]
+async fn assistant_rate_limit_without_info_reaches_the_limit() {
+    let events = error_turn(vec![
+        assistant_error("rate_limit", 429, "You've hit your limit"),
+        json!({"type": "result", "is_error": false}),
+    ])
+    .await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AdapterEvent::Limit(adapter::LimitFact::Reached { .. })))
+    );
+}
+
+#[tokio::test]
+async fn required_prompt_suggestion_and_command_lifecycle_are_known() {
+    let command = Uuid::now_v7();
+    let events = error_turn(vec![
+        json!({"type": "command_lifecycle", "required": true,
+            "command_uuid": command, "state": "started"}),
+        json!({"type": "prompt_suggestion", "required": true, "suggestion": "next step"}),
+        json!({"type": "result", "is_error": false}),
+    ])
+    .await;
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            AdapterEvent::Diagnostic {
+                kind: "unknown_required_frame",
+                ..
+            }
+        )),
+        "{events:?}"
+    );
+}
+
 #[tokio::test]
 async fn interrupted_turn_finishes_without_error_block() {
     let _sigint =

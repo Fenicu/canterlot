@@ -316,6 +316,8 @@ impl ClaudeCodeAdapter {
                                 | "result"
                                 | "rate_limit_event"
                                 | "control_response"
+                                | "prompt_suggestion"
+                                | "command_lifecycle"
                         )
                     )
                 {
@@ -477,10 +479,41 @@ impl ClaudeCodeAdapter {
                     .into_iter()
                     .map(AdapterEvent::Limit),
             ),
+            Parsed::AssistantError { kind, status, text } => {
+                if kind == "rate_limit" {
+                    // `rate_limit_info` в этом кадре нет: упор считается тем же путём,
+                    // что и 429 итога хода, и повтор с результатом не задваивается.
+                    if let Some(fact) = self
+                        .limits
+                        .on_turn_error(status.or(Some(429)), Some("usage_limit_reached"))
+                    {
+                        self.events.push_back(AdapterEvent::Limit(fact));
+                    }
+                    return;
+                }
+                let detail = text.unwrap_or_default();
+                let lower = detail.to_lowercase();
+                if matches!(
+                    kind.as_str(),
+                    "authentication_failed" | "oauth_org_not_allowed" | "cloud_credential_error"
+                ) || lower.contains("/login")
+                    || lower.contains("log in")
+                    || lower.contains("not logged in")
+                {
+                    self.diagnostic("auth_required", true);
+                }
+                let line = if detail.is_empty() {
+                    format!("assistant error: {kind}")
+                } else {
+                    format!("{kind}: {detail}")
+                };
+                self.error_block(line);
+            }
             Parsed::TurnError {
                 status,
                 error,
                 terminal_reason,
+                visible,
             } => {
                 if terminal_reason
                     .as_deref()
@@ -490,15 +523,19 @@ impl ClaudeCodeAdapter {
                 }
                 let error = error.unwrap_or_else(|| "API error".into());
                 let lower = error.to_lowercase();
-                if status == Some(401)
-                    || lower.contains("/login")
-                    || lower.contains("log in")
-                    || lower.contains("not logged in")
+                if visible
+                    && (status == Some(401)
+                        || lower.contains("/login")
+                        || lower.contains("log in")
+                        || lower.contains("not logged in"))
                 {
                     self.diagnostic("auth_required", true);
                 }
                 if let Some(fact) = self.limits.on_turn_error(status, Some(&error)) {
                     self.events.push_back(AdapterEvent::Limit(fact));
+                }
+                if !visible {
+                    return;
                 }
                 let text = if status == Some(404) || lower.contains("model_not_found") {
                     "model not found".into()

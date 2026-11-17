@@ -31,15 +31,16 @@ const TOOL_LAUNCHED_SUMMARY: &str = "async_launched";
 const MAX_UNKNOWN_TYPES: usize = 64;
 const MAX_TYPE_CHARS: usize = 64;
 
-const IGNORED_SYSTEM: [&str; 5] = [
+const IGNORED_SYSTEM: [&str; 6] = [
     "api_retry",
+    "control_request_progress",
     "task_progress",
     "task_updated",
     "thinking_tokens",
     "commands_changed",
 ];
 const IGNORED_STREAM_EVENTS: [&str; 1] = ["message_stop"];
-const IGNORED_DELTAS: [&str; 1] = ["signature_delta"];
+const IGNORED_DELTAS: [&str; 2] = ["signature_delta", "citations_delta"];
 const IGNORED_USER_BLOCKS: [&str; 2] = ["text", "image"];
 
 /// One open content block, keyed by stream index.
@@ -167,10 +168,19 @@ pub enum Parsed {
         is_error: bool,
     },
     RateLimit(serde_json::Value),
+    /// Ошибка из кадра `assistant`: у `rate_limit` нет `rate_limit_info`, остальные показываются
+    /// строкой в ленте. Текст — данные сообщения.
+    AssistantError {
+        kind: String,
+        status: Option<u16>,
+        text: Option<String>,
+    },
     TurnError {
         status: Option<u16>,
         error: Option<String>,
         terminal_reason: Option<String>,
+        /// Отказ уже показан кадром `assistant`: итог хода его не повторяет.
+        visible: bool,
     },
     ControlResponse {
         request_id: String,
@@ -233,14 +243,21 @@ impl std::fmt::Debug for Parsed {
                 .field("is_error", is_error)
                 .finish(),
             Self::RateLimit(_) => f.write_str("RateLimit"),
+            Self::AssistantError { kind, status, .. } => f
+                .debug_struct("AssistantError")
+                .field("kind", kind)
+                .field("status", status)
+                .finish_non_exhaustive(),
             Self::TurnError {
                 status,
                 terminal_reason,
+                visible,
                 ..
             } => f
                 .debug_struct("TurnError")
                 .field("status", status)
                 .field("terminal_reason", terminal_reason)
+                .field("visible", visible)
                 .finish(),
             Self::ControlResponse {
                 request_id,
@@ -313,6 +330,8 @@ pub struct Parser {
     task_calls: HashMap<String, String>,
     /// Последнее сообщённое: работающие задачи и признак пробуждающего хода.
     background_sent: (Vec<BackgroundTask>, bool),
+    /// Кадр `assistant` уже показал отказ: следующий за ним `result` его не повторяет.
+    assistant_error_reported: bool,
 }
 
 impl Default for Parser {
@@ -348,6 +367,7 @@ impl Parser {
             background: BTreeMap::new(),
             task_calls: HashMap::new(),
             background_sent: (Vec::new(), false),
+            assistant_error_reported: false,
         }
     }
 
@@ -570,6 +590,7 @@ impl Parser {
         self.background.clear();
         self.task_calls.clear();
         self.background_sent = (Vec::new(), false);
+        self.assistant_error_reported = false;
         self.prev_usage.clear();
         self.tool_blocks.clear();
         self.tool_agents.clear();
@@ -742,6 +763,7 @@ impl Parser {
             Some("command_lifecycle") => {
                 self.feed_command_lifecycle(&value, &mut out);
             }
+            Some("tool_progress") => self.feed_tool_progress(&value, &mut out),
             Some(kind) => {
                 self.note_unknown(&mut out, "", Some(kind), Some(&value));
                 if out.is_empty() {
@@ -769,6 +791,36 @@ impl Parser {
             }),
             _ => out.push(Parsed::Ignored),
         }
+    }
+
+    /// Долгий инструмент жив, а кадров его вывода может не быть: сердцебиение обновляет
+    /// фазу `running_tool`, по ней сопровождение видит прогресс и не считает ход зависшим.
+    fn feed_tool_progress(&self, value: &serde_json::Value, out: &mut Vec<Parsed>) {
+        if value
+            .get("parent_tool_use_id")
+            .is_some_and(|parent| !parent.is_null())
+        {
+            // Прогресс субагента не должен менять фазу основного агента.
+            out.push(Parsed::Ignored);
+            return;
+        }
+        let Some(name) = value
+            .get("tool_name")
+            .and_then(serde_json::Value::as_str)
+            .filter(|name| !name.is_empty())
+        else {
+            out.push(Parsed::Ignored);
+            return;
+        };
+        let elapsed = value
+            .get("elapsed_time_seconds")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0);
+        out.push(Parsed::Event(AdapterEvent::Phase {
+            phase: Phase::RunningTool,
+            tool_name: Some(name.to_owned()),
+            summary: Some(format!("{elapsed}s")),
+        }));
     }
 
     fn feed_system(&mut self, value: &serde_json::Value, out: &mut Vec<Parsed>) {
@@ -1237,6 +1289,26 @@ impl Parser {
         if let Some(answer) = Self::answer_frame(value) {
             out.push(answer);
         }
+        if let Some(kind) = assistant_error_kind(value) {
+            let has_limit_info = value
+                .pointer("/api_error_params/rate_limit_info")
+                .is_some_and(|info| info.is_object());
+            if kind != "rate_limit" {
+                self.assistant_error_reported = true;
+                out.push(Parsed::AssistantError {
+                    kind: kind.to_owned(),
+                    status: assistant_error_status(value),
+                    text: assistant_error_text(value),
+                });
+            } else if !has_limit_info {
+                // `rate_limit_info` идёт своим путём ниже: один отказ — один факт лимита.
+                out.push(Parsed::AssistantError {
+                    kind: kind.to_owned(),
+                    status: assistant_error_status(value),
+                    text: None,
+                });
+            }
+        }
         // Ошибка упора несёт `rate_limit_info` отклонённого запроса: из него время сброса.
         if let Some(info) = value
             .get("api_error_params")
@@ -1450,6 +1522,7 @@ impl Parser {
     }
 
     fn feed_result(&mut self, value: &serde_json::Value, out: &mut Vec<Parsed>) {
+        let reported_assistant_error = std::mem::take(&mut self.assistant_error_reported);
         let is_error = value.get("is_error").and_then(serde_json::Value::as_bool) == Some(true);
         if self.is_compact_result(value) {
             // Итог служебного `/compact`: ходу прошлой команды он не принадлежит, расход
@@ -1532,11 +1605,12 @@ impl Parser {
                         .get("api_error_status")
                         .and_then(serde_json::Value::as_u64)
                         .and_then(|status| u16::try_from(status).ok()),
-                    error: turn_error_text(value),
+                    error: result_error_text(value),
                     terminal_reason: value
                         .get("terminal_reason")
                         .and_then(serde_json::Value::as_str)
                         .map(str::to_owned),
+                    visible: !reported_assistant_error,
                 });
             }
         }
@@ -1761,6 +1835,47 @@ fn is_context_overflow(value: &serde_json::Value) -> bool {
     texts
         .iter()
         .any(|text| text.to_lowercase().contains("too long"))
+}
+
+fn assistant_error_kind(value: &serde_json::Value) -> Option<&str> {
+    value
+        .get("error")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            value
+                .pointer("/message/error")
+                .and_then(serde_json::Value::as_str)
+        })
+        .filter(|kind| !kind.is_empty())
+}
+
+fn assistant_error_status(value: &serde_json::Value) -> Option<u16> {
+    value
+        .get("api_error_status")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|status| u16::try_from(status).ok())
+}
+
+fn assistant_error_text(value: &serde_json::Value) -> Option<String> {
+    let texts: Vec<&str> = value
+        .pointer("/message/content")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|block| block.get("type").and_then(serde_json::Value::as_str) == Some("text"))
+        .filter_map(|block| block.get("text").and_then(serde_json::Value::as_str))
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .collect();
+    (!texts.is_empty()).then(|| texts.join("\n"))
+}
+
+fn result_error_text(value: &serde_json::Value) -> Option<String> {
+    match value.get("subtype").and_then(serde_json::Value::as_str) {
+        Some("error_max_turns") => Some("max turns reached".to_owned()),
+        Some("error_max_budget_usd") => Some("budget limit reached".to_owned()),
+        _ => turn_error_text(value),
+    }
 }
 
 fn turn_error_text(value: &serde_json::Value) -> Option<String> {

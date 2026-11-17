@@ -529,6 +529,131 @@ fn unknown_and_non_json_lines_never_end_the_stream() {
 }
 
 #[test]
+fn assistant_error_variants_reach_the_adapter() {
+    let mut parser = Parser::new();
+    let rate = json!({"type": "assistant", "error": "rate_limit", "api_error_status": 429,
+        "message": {"model": "claude-opus-5-5",
+            "content": [{"type": "text", "text": "You've hit your limit"}], "usage": {}}});
+    let parsed = parser.feed(&rate.to_string());
+    assert!(
+        matches!(&parsed[..], [Parsed::AssistantError { kind, status: Some(429), .. }]
+            if kind == "rate_limit"),
+        "{parsed:?}"
+    );
+    let billing = json!({"type": "assistant", "error": "billing_error",
+        "api_error_status": 400,
+        "message": {"content": [
+            {"type": "text", "text": "Your credit balance is too low"}]}});
+    match &parser.feed(&billing.to_string())[..] {
+        [Parsed::AssistantError { kind, text, .. }] => {
+            assert_eq!(kind, "billing_error");
+            assert_eq!(text.as_deref(), Some("Your credit balance is too low"));
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn assistant_rate_limit_with_info_stays_a_limit_fact() {
+    let frames = fixtures::replay_fixture("usage_limit_429");
+    let line = frames
+        .iter()
+        .find(|line| line.contains("\"type\":\"assistant\""))
+        .expect("error assistant frame");
+    let parsed = Parser::new().feed(line);
+    assert!(
+        parsed.iter().any(|p| matches!(p, Parsed::RateLimit(_))),
+        "{parsed:?}"
+    );
+    assert!(
+        !parsed
+            .iter()
+            .any(|p| matches!(p, Parsed::AssistantError { .. })),
+        "the rate_limit_info path stays single: {parsed:?}"
+    );
+}
+
+#[test]
+fn result_turn_and_budget_limits_have_their_own_text() {
+    let text = |subtype: &str| {
+        let frame = json!({"type": "result", "subtype": subtype, "is_error": true});
+        let parsed = Parser::new().feed(&frame.to_string());
+        parsed
+            .iter()
+            .find_map(|p| match p {
+                Parsed::TurnError {
+                    error: Some(text), ..
+                } => Some(text.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{subtype}: {parsed:?}"))
+    };
+    assert_eq!(text("error_max_turns"), "max turns reached");
+    assert_eq!(text("error_max_budget_usd"), "budget limit reached");
+}
+
+#[test]
+fn result_after_an_assistant_error_keeps_one_visible_failure() {
+    let mut parser = Parser::new();
+    let billing = json!({"type": "assistant", "error": "billing_error",
+        "message": {"content": [{"type": "text", "text": "Your credit balance is too low"}]}});
+    parser.feed(&billing.to_string());
+    let result = json!({"type": "result", "subtype": "error_during_execution",
+        "is_error": true, "result": "Your credit balance is too low"});
+    let visible = |parsed: &[Parsed]| {
+        parsed
+            .iter()
+            .find_map(|p| match p {
+                Parsed::TurnError { visible, .. } => Some(*visible),
+                _ => None,
+            })
+            .expect("turn error")
+    };
+    assert!(!visible(&parser.feed(&result.to_string())));
+    // Следующий ход без кадра ошибки снова показывает свой итог.
+    assert!(visible(&parser.feed(&result.to_string())));
+}
+
+#[test]
+fn tool_progress_is_a_running_tool_heartbeat() {
+    let frame = |parent: Value| {
+        json!({"type": "tool_progress", "tool_use_id": "toolu_1", "tool_name": "Bash",
+            "parent_tool_use_id": parent, "elapsed_time_seconds": 42})
+        .to_string()
+    };
+    let parsed = Parser::new().feed(&frame(Value::Null));
+    assert!(
+        matches!(&parsed[..], [Parsed::Event(AdapterEvent::Phase {
+            phase: Phase::RunningTool,
+            tool_name: Some(name),
+            summary: Some(summary),
+        })] if name == "Bash" && summary == "42s"),
+        "{parsed:?}"
+    );
+    assert!(matches!(
+        Parser::new().feed(&frame(json!("toolu_parent")))[..],
+        [Parsed::Ignored]
+    ));
+}
+
+#[test]
+fn control_request_progress_and_citations_are_ignored() {
+    let mut parser = Parser::new();
+    let line = json!({"type": "system", "subtype": "control_request_progress",
+        "request_id": "req_1", "status": "started", "uuid": "u"})
+    .to_string();
+    let parsed = parser.feed(&line);
+    assert_eq!(unknown_names(&parsed), Vec::<String>::new());
+    assert!(matches!(parsed[..], [Parsed::Ignored]), "{parsed:?}");
+    let line = stream(json!({"type": "content_block_delta", "index": 0,
+        "delta": {"type": "citations_delta",
+            "citation": {"type": "web_search_result_location", "url": "https://x"}}}));
+    let parsed = parser.feed(&line);
+    assert_eq!(unknown_names(&parsed), Vec::<String>::new());
+    assert!(parsed.is_empty(), "{parsed:?}");
+}
+
+#[test]
 fn rate_limit_event_is_passed_through_raw() {
     let replay = fixtures::replay_evidence("resume");
     let line = replay
