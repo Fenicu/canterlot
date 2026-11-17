@@ -17965,7 +17965,7 @@
             "oneOf": [
               {
                 "$ref": "#/components/schemas/ProviderStatusView",
-                "description": "Публичный статус провайдера со страницы statuspage; `null`, пока хаб её не опрашивал\nили провайдер без такой страницы (OpenCode, Antigravity)."
+                "description": "Публичный статус провайдера со страницы statuspage; `null`, пока хаб её не опрашивал\nили провайдер без такой страницы (OpenCode)."
               },
               {
                 "type": "null"
