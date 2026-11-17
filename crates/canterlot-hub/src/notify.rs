@@ -34,6 +34,10 @@ pub const KIND_SIGN_IN_FAILURES: &str = "sign_in_failures";
 pub const KIND_SIGN_IN_LOCK: &str = "sign_in_lock";
 /// Сеанс заговорил из новой страны (часть 2: геолокация).
 pub const KIND_SESSION_COUNTRY: &str = "session_country";
+/// Вход Claude Code на машине скоро закончится: один пуш на машину, провайдера и дату.
+pub const KIND_CREDENTIAL_EXPIRY: &str = "credential_expiry";
+/// Claude Code отказал по входу: один пуш на эпизод, новый — после успешного хода.
+pub const KIND_CREDENTIAL_AUTH: &str = "credential_auth";
 /// Экран «Сеансы и вход» в PWA: сюда ведут пуши о входе.
 pub const SIGN_IN_PATH: &str = "/settings/sign-in";
 /// Сводный пуш о неудачах шлётся, когда их за час набралось столько.
@@ -43,6 +47,12 @@ pub const PRIORITY_WAITING: u8 = 8;
 pub const PRIORITY_FAILURE: u8 = 7;
 pub const PRIORITY_TURN_FINISHED: u8 = 5;
 pub const PRIORITY_SIGN_IN: u8 = 8;
+/// Отказ входа требует действия на машине: важнее предупреждения о скором конце входа.
+pub const PRIORITY_CREDENTIAL_AUTH: u8 = 8;
+pub const PRIORITY_CREDENTIAL_EXPIRY: u8 = 7;
+
+/// За сколько до конца входа предупреждать владельца.
+const CREDENTIAL_WARN: TimeDelta = TimeDelta::days(7);
 
 /// Итог старше этого не шлётся: перезапуск хаба переоценивает давно осевшие сессии.
 const FRESH: TimeDelta = TimeDelta::minutes(10);
@@ -249,6 +259,32 @@ pub async fn on_settled_in_tx(
     facts: &SettleFacts,
     evidence: &Evidence,
 ) -> Result<(), sqlx::Error> {
+    // Вход Claude Code: отказ и успешный ход двигают эпизод пуша даже при выключенных
+    // пушах — иначе включённые позже пуши молчали бы об уже случившемся отказе.
+    if let Some((machine_id, harness)) = sqlx::query_as::<_, (Uuid, String)>(
+        "select machine_id,harness from conversations where id=$1",
+    )
+    .bind(conversation_id)
+    .fetch_optional(&mut *conn)
+    .await?
+        && canterlot_proto::harness::provider_of(&harness) == Some("claude")
+    {
+        match (state, evidence) {
+            (Settled::Failed, Evidence::Failed { reason }) if reason == "auth_required" => {
+                credential_auth_required_in_tx(conn, machine_id).await?;
+            }
+            (
+                Settled::Idle,
+                Evidence::Idle {
+                    last_turn_at: Some(_),
+                    ..
+                },
+            ) => {
+                credential_auth_ok_in_tx(conn, machine_id).await?;
+            }
+            _ => {}
+        }
+    }
     let turn_from_owner: bool;
     let owner_mark: Option<DateTime<Utc>>;
     let mut final_mark = None;
@@ -563,8 +599,18 @@ async fn enqueue_auth(
     kind: &str,
     dedupe_key: &str,
     payload: &Value,
-) -> Result<(), sqlx::Error> {
-    sqlx::query(
+) -> Result<bool, sqlx::Error> {
+    let mut conn = pool.acquire().await?;
+    enqueue_auth_in_tx(&mut conn, kind, dedupe_key, payload).await
+}
+
+async fn enqueue_auth_in_tx(
+    conn: &mut PgConnection,
+    kind: &str,
+    dedupe_key: &str,
+    payload: &Value,
+) -> Result<bool, sqlx::Error> {
+    let inserted = sqlx::query(
         "insert into owner_pushes(id,conversation_id,kind,dedupe_key,payload,run_at)
          select $1,null,$2,$3,$4,clock_timestamp() from push_settings
          on conflict(dedupe_key) do nothing",
@@ -573,7 +619,126 @@ async fn enqueue_auth(
     .bind(kind)
     .bind(dedupe_key)
     .bind(payload)
-    .execute(pool)
+    .execute(conn)
+    .await?
+    .rows_affected()
+        > 0;
+    Ok(inserted)
+}
+
+/// Конец входа Claude Code приблизился: один пуш на машину, провайдера и дату.
+/// Повторный вход приносит новую дату и взводит пуш заново. Часы — базы: срок и
+/// отметка «уже сказали» сравниваются в одной транзакции.
+pub async fn credential_expiry_sweep(pool: &PgPool) -> Result<usize, sqlx::Error> {
+    let due: Vec<(Uuid, String, DateTime<Utc>)> = sqlx::query_as(
+        "select pc.machine_id,pc.provider,pc.expires_at
+           from provider_credentials pc join machines m on m.id=pc.machine_id
+          where pc.provider='claude' and pc.expires_at is not null
+            and pc.expires_at <= clock_timestamp() + $1 * interval '1 second'
+            and (pc.warned_expires_at is null or pc.warned_expires_at <> pc.expires_at)
+          order by pc.expires_at",
+    )
+    .bind(CREDENTIAL_WARN.num_seconds() as f64)
+    .fetch_all(pool)
+    .await?;
+    let mut queued = 0;
+    for (machine_id, provider, expires_at) in due {
+        let stamp = expires_at.to_rfc3339_opts(SecondsFormat::Micros, true);
+        let key = format!("{KIND_CREDENTIAL_EXPIRY}:{machine_id}:{provider}:{stamp}");
+        let inserted = enqueue_auth(
+            pool,
+            KIND_CREDENTIAL_EXPIRY,
+            &key,
+            &json!({"machine_id": machine_id, "provider": provider, "expires_at": stamp}),
+        )
+        .await?;
+        // Без [notify.gotify] строки нет: отметку не ставим, иначе включённые позже
+        // пуши так и не сказали бы о дате.
+        if !inserted {
+            let exists: bool =
+                sqlx::query_scalar("select exists(select 1 from owner_pushes where dedupe_key=$1)")
+                    .bind(&key)
+                    .fetch_one(pool)
+                    .await?;
+            if !exists {
+                continue;
+            }
+        }
+        sqlx::query(
+            "update provider_credentials set warned_expires_at=$3
+              where machine_id=$1 and provider=$2 and expires_at=$3",
+        )
+        .bind(machine_id)
+        .bind(&provider)
+        .bind(expires_at)
+        .execute(pool)
+        .await?;
+        queued += 1;
+    }
+    Ok(queued)
+}
+
+/// Claude Code отказал по входу: пуш один на эпизод. Новый эпизод открывает только
+/// успешный ход на этой машине; дребезг того же отказа второго пуша не даёт.
+async fn credential_auth_required_in_tx(
+    conn: &mut PgConnection,
+    machine_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    // Строка входа сериализует два оседания одного отказа в двух разговорах: вставка
+    // новой строки ждёт соседа, затем `for update` держит её до commit.
+    sqlx::query(
+        "insert into provider_credentials(machine_id,provider) values($1,'claude')
+         on conflict(machine_id,provider) do nothing",
+    )
+    .bind(machine_id)
+    .execute(&mut *conn)
+    .await?;
+    let (warned, ok): (Option<DateTime<Utc>>, Option<DateTime<Utc>>) = sqlx::query_as(
+        "select auth_warned_at,auth_ok_at from provider_credentials
+          where machine_id=$1 and provider='claude' for update",
+    )
+    .bind(machine_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    if warned.is_some_and(|warned| ok.is_none_or(|ok| ok <= warned)) {
+        return Ok(false);
+    }
+    let now = Utc::now();
+    let key = format!(
+        "{KIND_CREDENTIAL_AUTH}:{machine_id}:{}",
+        now.to_rfc3339_opts(SecondsFormat::Micros, true)
+    );
+    let inserted = enqueue_auth_in_tx(
+        conn,
+        KIND_CREDENTIAL_AUTH,
+        &key,
+        &json!({"machine_id": machine_id}),
+    )
+    .await?;
+    if inserted {
+        sqlx::query(
+            "update provider_credentials set auth_warned_at=$2
+              where machine_id=$1 and provider='claude'",
+        )
+        .bind(machine_id)
+        .bind(now)
+        .execute(&mut *conn)
+        .await?;
+    }
+    Ok(inserted)
+}
+
+/// Успешный ход Claude на машине: следующий отказ по входу снова достоин пуша.
+async fn credential_auth_ok_in_tx(
+    conn: &mut PgConnection,
+    machine_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "update provider_credentials set auth_ok_at=clock_timestamp()
+          where machine_id=$1 and provider='claude'",
+    )
+    .bind(machine_id)
+    .execute(conn)
     .await?;
     Ok(())
 }
@@ -587,6 +752,7 @@ pub async fn on_sign_in(pool: &PgPool, session_id: Uuid, body: &str) -> Result<(
         &json!({"title": "Новый вход в canterlot", "body": clip(body, DETAIL_CHARS)}),
     )
     .await
+    .map(|_| ())
 }
 
 /// Живой сеанс пришёл из новой страны: один пуш на сеанс и страну.
@@ -603,6 +769,7 @@ pub async fn on_session_country(
         &json!({"title": "Сеанс из новой страны", "body": clip(body, DETAIL_CHARS)}),
     )
     .await
+    .map(|_| ())
 }
 
 /// Неудачная попытка входа: не больше одного сводного пуша в час, когда неудач
@@ -633,6 +800,7 @@ pub async fn on_sign_in_lock(pool: &PgPool) -> Result<(), sqlx::Error> {
         &json!({}),
     )
     .await
+    .map(|_| ())
 }
 
 /// «с 1 адреса», «с 2 адресов», «с 21 адреса».
@@ -657,14 +825,54 @@ async fn compose_auth(
     row: &PushRow,
     app_url: &str,
 ) -> Result<Option<Message>, sqlx::Error> {
-    let (title, body) = match row.kind.as_str() {
+    let (title, body, priority) = match row.kind.as_str() {
+        KIND_CREDENTIAL_EXPIRY | KIND_CREDENTIAL_AUTH => {
+            let Some(machine_id) = row.payload["machine_id"]
+                .as_str()
+                .and_then(|id| id.parse::<Uuid>().ok())
+            else {
+                return Ok(None);
+            };
+            let Some(name): Option<String> =
+                sqlx::query_scalar("select name from machines where id=$1")
+                    .bind(machine_id)
+                    .fetch_optional(pool)
+                    .await?
+            else {
+                return Ok(None);
+            };
+            let name = clip(&name, TITLE_CHARS);
+            if row.kind == KIND_CREDENTIAL_AUTH {
+                (
+                    "Claude Code просит войти заново".to_owned(),
+                    format!("Машина {name}: запустите claude и выполните /login."),
+                    PRIORITY_CREDENTIAL_AUTH,
+                )
+            } else {
+                let Some(expires_at) = row.payload["expires_at"]
+                    .as_str()
+                    .and_then(|at| DateTime::parse_from_rfc3339(at).ok())
+                    .map(|at| at.with_timezone(&Utc))
+                else {
+                    return Ok(None);
+                };
+                let day = local_day(pool, expires_at).await?;
+                (
+                    "Вход в Claude Code заканчивается".to_owned(),
+                    format!(
+                        "Машина {name}: до {day}. Запустите claude на машине и выполните /login."
+                    ),
+                    PRIORITY_CREDENTIAL_EXPIRY,
+                )
+            }
+        }
         KIND_SIGN_IN | KIND_SESSION_COUNTRY => {
             let (Some(title), Some(body)) =
                 (row.payload["title"].as_str(), row.payload["body"].as_str())
             else {
                 return Ok(None);
             };
-            (title.to_owned(), body.to_owned())
+            (title.to_owned(), body.to_owned(), PRIORITY_SIGN_IN)
         }
         KIND_SIGN_IN_FAILURES => {
             let (failures, buckets) = crate::owner_auth::throttle::last_hour(pool).await?;
@@ -674,6 +882,7 @@ async fn compose_auth(
             (
                 "Попытки входа в canterlot".to_owned(),
                 sign_in_failures_text(failures, buckets),
+                PRIORITY_SIGN_IN,
             )
         }
         KIND_SIGN_IN_LOCK => (
@@ -681,14 +890,22 @@ async fn compose_auth(
             "Слишком много неудачных попыток: вход по паролю закрыт на 10 минут \
              для устройств, где вы ещё не входили"
                 .to_owned(),
+            PRIORITY_SIGN_IN,
         ),
         _ => return Ok(None),
     };
     Ok(Some(Message {
         title,
         body,
-        priority: PRIORITY_SIGN_IN,
-        click_url: format!("{app_url}{SIGN_IN_PATH}"),
+        priority,
+        click_url: if matches!(
+            row.kind.as_str(),
+            KIND_CREDENTIAL_EXPIRY | KIND_CREDENTIAL_AUTH
+        ) {
+            format!("{app_url}/machines")
+        } else {
+            format!("{app_url}{SIGN_IN_PATH}")
+        },
     }))
 }
 
@@ -1185,6 +1402,17 @@ async fn local_time(pool: &PgPool, at: DateTime<Utc>) -> Result<String, sqlx::Er
     sqlx::query_scalar(
         "select to_char($1 at time zone coalesce((select timezone from push_settings),'UTC'),
                         'DD.MM HH24:MI')",
+    )
+    .bind(at)
+    .fetch_one(pool)
+    .await
+}
+
+/// Дата в часовом поясе владельца: «12.12», как в подсказках PWA.
+async fn local_day(pool: &PgPool, at: DateTime<Utc>) -> Result<String, sqlx::Error> {
+    sqlx::query_scalar(
+        "select to_char($1 at time zone coalesce((select timezone from push_settings),'UTC'),
+                        'DD.MM')",
     )
     .bind(at)
     .fetch_one(pool)

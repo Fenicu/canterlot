@@ -653,6 +653,12 @@ impl Ingest {
                 Some(Body::LimitObserved(_) | Body::LimitReached(_))
             )
         });
+        let credential_records = batch.records.iter().any(|record| {
+            matches!(
+                record.body.as_ref().and_then(|b| b.body.as_ref()),
+                Some(Body::ProviderCredential(_))
+            )
+        });
         let entry_seq = up_to_seq;
         // Всё заимствованное — в owned: замыкание in_tx требует 'static.
         let pool = self.pool.clone();
@@ -864,6 +870,11 @@ impl Ingest {
         if limit_records {
             // Факт лимита мог поставить пробуждение или правило резерва.
             crate::scheduler::notify_pool(&self.pool);
+        }
+        if credential_records
+            && let Err(error) = crate::notify::credential_expiry_sweep(&self.pool).await
+        {
+            tracing::warn!(kind = "credential_push_failed", reason = %error, "credential push failed");
         }
         if let Some(registry) = &self.registry {
             let providers: BTreeSet<_> = changed_limits.iter().map(|(p, _)| p).collect();
@@ -2445,6 +2456,7 @@ impl crate::grpc::Ingest for Ingest {
             .collect();
         let pool = self.pool.clone();
         let limits = self.limits.clone();
+        let has_credentials = !credentials.is_empty();
         let outcome = crate::db::in_tx(&pool, move |conn| {
             Box::pin(async move {
                 let owner: Uuid = sqlx::query_scalar("select owner_id from machines where id=$1")
@@ -2535,6 +2547,11 @@ impl crate::grpc::Ingest for Ingest {
         let (changed, unmapped) =
             outcome.map_err(|_| tonic::Status::internal("limits_report_database"))?;
         crate::scheduler::notify_pool(&self.pool);
+        if has_credentials
+            && let Err(error) = crate::notify::credential_expiry_sweep(&self.pool).await
+        {
+            tracing::warn!(kind = "credential_push_failed", reason = %error, "credential push failed");
+        }
         self.ignored.fetch_add(unmapped, Ordering::Relaxed);
         if let Some(registry) = &self.registry {
             let providers: BTreeSet<_> = changed.iter().map(|(p, _)| p).collect();

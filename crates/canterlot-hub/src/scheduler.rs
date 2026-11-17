@@ -1516,6 +1516,13 @@ impl Scheduler {
                 }
             }
         }
+        // Предупреждение о конце входа Claude: дата приближается и без новых показаний.
+        if let Err(error) = crate::notify::credential_expiry_sweep(&self.pool).await {
+            log_error(&error);
+            if first.is_none() {
+                first = Some(error);
+            }
+        }
         // Корзина проверяется каждый час: срок меряется часами, а частичный индекс дешёв.
         let now = Utc::now();
         if !self.trash_retention.is_zero()

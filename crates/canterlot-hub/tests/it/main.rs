@@ -33,6 +33,7 @@ mod control;
 mod conversation_delete;
 mod conversation_trash;
 mod conversations_api;
+mod credential_pushes;
 mod credentials;
 mod crunch;
 mod crunch_http;
