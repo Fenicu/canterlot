@@ -1371,6 +1371,30 @@ async fn a_re_filled_generation_gets_its_own_delivered_message(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_delivered_secret_message_shows_the_full_expiry_date(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let row = fx.open("Срок в сообщении").await;
+    let mut worker = fx.connect(CAPS, "epoch-1").await;
+    let deliver = fx.send_value(&mut worker, row.id, "value\n").await;
+    let expires = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(
+        i64::try_from(deliver.expires_at_ms).unwrap(),
+    )
+    .unwrap();
+    fx.delivered(Uuid::now_v7(), 1, &deliver, "/run/a").await;
+
+    let text = fx
+        .inputs()
+        .await
+        .into_iter()
+        .find(|text| text.contains("передан"))
+        .expect("delivered message");
+    assert!(
+        text.contains(&expires.format("%Y-%m-%d %H:%M").to_string()),
+        "expiry must include the date to be unambiguous: {text}"
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn a_removal_receipt_from_another_conversation_is_ignored(pool: PgPool) {
     let fx = Fx::new(pool).await;
     let row = fx.open("Чужой разговор").await;

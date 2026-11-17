@@ -785,7 +785,7 @@ pub async fn apply_delivered_in_tx(
             "Секрет «{}» передан: файл {}, действует до {} UTC.",
             row.name,
             row.path.as_deref().unwrap_or_default(),
-            expires_at.format("%H:%M")
+            expires_at.format("%Y-%m-%d %H:%M")
         ),
         None => format!(
             "Секрет «{}» передан: файл {}.",
