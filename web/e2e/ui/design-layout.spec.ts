@@ -84,7 +84,8 @@ test.describe('поле ввода', () => {
 test.describe('строки инструментов и сессий', () => {
   test('tool_row_keeps_the_name_whole_and_the_status_at_the_right_edge', async ({ page }) => {
     const { api, id } = await boot(page);
-    api.histories.set(id, [block(api, '1', { block_kind: 'tool_call', tool_name: 'Bash', summary: 'cargo test -p canterlot-hub --test stream -- --nocapture reconnect_after_sleep', content: 'ok' })]);
+    // Проверяем именно обычную строку инструмента: у неё нет своей карточки, как у Bash.
+    api.histories.set(id, [block(api, '1', { block_kind: 'tool_call', tool_name: 'mcp__example__inspect', summary: 'cargo test -p canterlot-hub --test stream -- --nocapture reconnect_after_sleep', content: 'ok' })]);
     api.bindConversation(id);
     await page.reload();
     const head = page.locator('.tool .head');
@@ -101,6 +102,15 @@ test.describe('строки инструментов и сессий', () => {
     expect(box.gap).toBeLessThan(24);
     expect(box.ellipsis).toBe('ellipsis');
     expect(box.chevron).toBe(1);
+
+    // У карточки команды слово состояния стоит на том же правом краю.
+    api.histories.set(id, [block(api, '2', { block_kind: 'tool_call', tool_name: 'Bash', summary: 'Команда: cargo test, exit 1', content: 'сбой', state: 'final' })]);
+    api.bindConversation(id);
+    await page.reload();
+    const shell = page.locator('.feed-card[data-card="shell.exec"] .head');
+    await expect(shell).toBeVisible();
+    const shellGap = await shell.evaluate((node) => node.getBoundingClientRect().right - node.querySelector('[data-role="card-state"]')!.getBoundingClientRect().right);
+    expect(shellGap).toBeLessThan(24);
   });
 
   test('session_row_keeps_time_on_the_title_line_and_unread_on_the_model_line', async ({ page }) => {

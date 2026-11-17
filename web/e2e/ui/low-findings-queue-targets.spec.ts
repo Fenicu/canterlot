@@ -299,7 +299,8 @@ for (const width of WIDTHS) {
       api.histories.set(id, [
         ownerInput(api, 1, 'Прогони тесты'),
         block(api, 2, { content: 'Запускаю.', input_command_id: run }),
-        block(api, 3, { block_kind: 'tool_call', tool_name: 'Bash', state: 'streaming', summary: 'cargo test --workspace', content: 'running…', input_command_id: run })
+        // Обычная строка инструмента: карточкой команды она была бы выше и меняла бы замер F-40.
+        block(api, 3, { block_kind: 'tool_call', tool_name: 'mcp__example__inspect', state: 'streaming', summary: 'cargo test --workspace', content: 'running…', input_command_id: run })
       ]);
     });
     const stop = page.locator('[data-working] [data-interrupt]');

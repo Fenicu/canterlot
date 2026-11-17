@@ -298,14 +298,14 @@ test('long_code_line_scrolled_to_the_end_stops_before_the_copy_button', async ({
 });
 test('expanded_tool_output_is_inset_symmetrically_like_the_card_head', async ({ page }) => {
   await boot(page);
-  await page.locator('.tool .head').last().click();
-  await expect(page.locator('.tool .out pre')).toContainText('test result: ok. 3 passed');
+  await page.locator('.feed-card[data-card="shell.exec"] .head .hit').last().click();
+  await expect(page.locator('.feed-card[data-card="shell.exec"] [data-role="card-fold"] .out pre')).toContainText('test result: ok. 3 passed');
   const measured = await page.evaluate(() => {
     // Раскрытый вывод живёт в карточке инструмента, а не в прозе ответа.
-    const tool = [...document.querySelectorAll<HTMLElement>('.tool')].find((node) => node.querySelector('.out'));
+    const tool = [...document.querySelectorAll<HTMLElement>('.feed-card[data-card="shell.exec"]')].find((node) => node.querySelector('[data-role="card-fold"] .out'));
     if (!tool) throw new Error('нет раскрытого вывода инструмента');
     const head = tool.querySelector('.head') as HTMLElement;
-    const out = tool.querySelector('.out') as HTMLElement;
+    const out = tool.querySelector('[data-role="card-fold"] .out') as HTMLElement;
     const toolBox = tool.getBoundingClientRect();
     const outBox = out.getBoundingClientRect();
     return {

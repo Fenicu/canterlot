@@ -30,8 +30,9 @@ async function live(page: Page) {
   return { hub, api, id };
 }
 
-const toolRow = (page: Page, text: string) => page.locator('.tool').filter({ has: page.locator('.head', { hasText: text }) });
-const namedRow = (page: Page, name: string) => page.locator('.tool').filter({ has: page.locator('.name', { hasText: new RegExp(`^${name}$`) }) });
+// Команда и чтение файла теперь свои карточки: ищем по разметке карточки, а не по имени инструмента.
+const shellRow = (page: Page, text: string) => page.locator('.feed-card[data-card="shell.exec"]').filter({ hasText: text });
+const readRow = (page: Page) => page.locator('.feed-card[data-card="file.read"]');
 
 for (const [path, open] of [['after_reload', reloaded], ['live', live]] as const) {
   test.describe(path, () => {
@@ -42,17 +43,17 @@ for (const [path, open] of [['after_reload', reloaded], ['live', live]] as const
       await expect(page.locator('.feed-card[data-card="canterlot.limits"] [data-provider="claude"] [data-window="five"] .pct')).toHaveText(/^осталось\s*ост\.\s*85%$/);
       await expect(page.locator('.card [data-role="answer-footer"] strong').last()).toHaveText('Claude');
       for (const leak of ['rchestrator', 'claude-opus-5-5', 'mcp__', '0,0 с', 'Bash: ', 'Read: ', 'Agent: ', 'инструмент']) {
-        await expect(page.locator('.tool .head, .card [data-role="answer-footer"], .sub')).not.toContainText([leak]);
+        await expect(page.locator('.tool .head, .feed-card:not([data-card="meta.tool_search"]), .card [data-role="answer-footer"], .sub')).not.toContainText([leak]);
       }
       await expect(page.locator('.sub .title')).toHaveText('Субагент · Explore · Opus 5.5');
       await expect(page.locator('.sub .status')).toHaveText('Готово · Find note.txt in check dir');
       await expect(page.locator('.sub .status')).toHaveAttribute('data-state', 'done');
       await expect(page.locator('.sub .pill')).toHaveText('3 с');
-      const bash = toolRow(page, 'sleep 90').last();
-      await expect(bash.locator('.name')).toHaveText('Bash');
-      await expect(bash.locator('.summary')).toHaveText('sleep 90');
+      const bash = shellRow(page, 'sleep 90').last();
+      await expect(bash.locator('[data-role="shell-title"]')).toHaveText('Команда');
+      await expect(bash.locator('pre.code')).toContainText('sleep 90');
       await expect(page.locator('.feed-card[data-card="meta.tool_search"] .lead')).toHaveText('Поиск инструментов');
-      await expect(page.locator('.tool .name', { hasText: 'AskUserQuestion' })).toHaveCount(0);
+      await expect(page.locator('.feed-card:has-text("AskUserQuestion"), .tool:has-text("AskUserQuestion")')).toHaveCount(0);
     });
 
     test('empty_reasoning_takes_no_row_and_reasoning_with_text_stays', async ({ page }) => {
@@ -68,16 +69,16 @@ for (const [path, open] of [['after_reload', reloaded], ['live', live]] as const
 
     test('complete_short_output_offers_nothing_more_and_wraps_inside_the_row', async ({ page }) => {
       await open(page);
-      const echo = toolRow(page, 'echo "Это длинная');
-      await echo.locator('.head').click();
-      await expect(echo.locator('.out pre')).toContainText('Это длинная проверочная строка');
-      await expect(echo.locator('.out')).not.toContainText('строка ·');
+      const echo = shellRow(page, 'echo "Это длинная');
+      await echo.locator('.head .hit').click();
+      await expect(echo.locator('[data-role="card-fold"] .out pre')).toContainText('Это длинная проверочная строка');
+      await expect(echo.locator('[data-role="card-fold"] .out')).not.toContainText('строка ·');
       await expect(echo.getByRole('button', { name: /Показать полностью/ })).toHaveCount(0);
-      await expect(echo.locator('.out pre')).toHaveCSS('white-space', 'pre-wrap');
-      expect(await echo.locator('.out pre').evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
-      const read = namedRow(page, 'Read');
-      await read.locator('.head').click();
-      await expect(read.locator('.out pre')).toContainText('проверка кириллицы');
+      await expect(echo.locator('[data-role="card-fold"] .out pre')).toHaveCSS('white-space', 'pre-wrap');
+      expect(await echo.locator('[data-role="card-fold"] .out pre').evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
+      const read = readRow(page);
+      await read.locator('.head .hit').click();
+      await expect(read.locator('[data-role="card-raw"] .out pre')).toContainText('проверка кириллицы');
       await expect(read.getByRole('button', { name: /Показать полностью/ })).toHaveCount(0);
       await expect(page.locator('[role="log"]')).not.toContainText('0 строк');
     });
@@ -92,27 +93,27 @@ for (const [path, open] of [['after_reload', reloaded], ['live', live]] as const
 
     test('cli_note_about_an_empty_output_reads_as_no_output', async ({ page }) => {
       await open(page);
-      const mkdir = toolRow(page, 'mkdir -p /tmp/canterlot-check');
-      await mkdir.locator('.head').click();
-      await expect(mkdir.locator('.out')).toHaveText('Вывода нет');
+      const mkdir = shellRow(page, 'mkdir -p /tmp/canterlot-check');
+      await mkdir.locator('.head .hit').click();
+      await expect(mkdir.locator('[data-role="card-fold"] .out')).toHaveText('Вывода нет');
     });
 
     test('failed_tool_is_named_and_its_wrapper_is_gone', async ({ page }) => {
       await open(page);
-      const blocked = toolRow(page, 'sleep 90').first();
-      await expect(blocked.locator('.pill')).toHaveText('Ошибка');
-      await expect(blocked.locator('.pill')).toHaveAttribute('data-state', 'error');
-      await blocked.locator('.head').click();
-      await expect(blocked.locator('.out pre')).toContainText('Blocked: standalone sleep 90');
-      await expect(blocked.locator('.out')).not.toContainText('tool_use_error');
+      const blocked = shellRow(page, 'sleep 90').first();
+      await expect(blocked.locator('[data-role="card-state"]')).toHaveText('ошибка');
+      await expect(blocked).toHaveAttribute('data-state', 'error');
+      await blocked.locator('.head .hit').click();
+      await expect(blocked.locator('[data-role="card-fold"] .out pre')).toContainText('Blocked: standalone sleep 90');
+      await expect(blocked.locator('[data-role="card-fold"] .out')).not.toContainText('tool_use_error');
     });
 
     test('background_launch_is_named_instead_of_timed', async ({ page }) => {
       await open(page);
-      const launched = toolRow(page, 'sleep 90').last();
+      const launched = shellRow(page, 'sleep 90').last();
       await expect(launched.locator('.pill')).toHaveText('В фоне');
       await expect(launched.locator('.pill')).toHaveAttribute('data-state', 'background');
-      await expect(toolRow(page, 'sleep 90').first().locator('.pill')).toHaveText('Ошибка');
+      await expect(shellRow(page, 'sleep 90').first().locator('[data-role="card-state"]')).toHaveText('ошибка');
     });
 
     test('owner_message_keeps_its_line_breaks', async ({ page }) => {
@@ -142,20 +143,20 @@ test('file_row_leads_with_the_name_and_the_full_command_opens_above_the_output',
   api.bindConversation(id);
   await installChatRoutes(page, hub, api, OWNER);
   await page.goto(`/c/${id}`);
-  const read = namedRow(page, 'Read');
-  await expect(read.locator('.summary')).toContainText('note.txt');
-  await expect(read.locator('.dir')).toHaveText('/tmp/canterlot-check');
-  const row = toolRow(page, 'mkdir -p');
-  await row.locator('.head').click();
-  await expect(row.locator('.out')).toHaveCount(2);
-  await expect(row.locator('.out').first().locator('.caption')).toHaveText('Команда');
-  await expect(row.locator('.out').first().locator('pre')).toContainText('echo дальше');
-  await expect(row.locator('.out').last()).toHaveText('Вывода нет');
+  const read = readRow(page);
+  await expect(read.locator('[data-role="read-name"]')).toHaveText('note.txt');
+  await expect(read.locator('[data-role="read-dir"]')).toHaveText('/tmp/canterlot-check');
+  const row = shellRow(page, 'mkdir -p');
+  // Длинная команда целиком раскрывается кнопкой и стоит над свёрнутым выводом.
+  await row.getByRole('button', { name: /Вся команда/ }).click();
+  await expect(row.locator('pre.code')).toContainText('echo дальше');
+  await row.locator('.head .hit').click();
+  await expect(row.locator('[data-role="card-fold"] .out')).toHaveText('Вывода нет');
 });
 
 test('quick_steps_show_no_time_and_a_finished_time_has_no_chip', async ({ page }) => {
   await reloaded(page);
-  const bash = toolRow(page, 'printf').first();
+  const bash = shellRow(page, 'printf').first();
   await expect(bash.locator('.pill')).toHaveCount(0);
   const paint = await page.locator('.sub .pill').evaluate((node) => {
     const style = getComputedStyle(node);
@@ -166,7 +167,7 @@ test('quick_steps_show_no_time_and_a_finished_time_has_no_chip', async ({ page }
 
 test('reasoning_rows_share_the_column_of_tool_rows_and_the_feed_fades_at_its_edges', async ({ page }) => {
   await reloaded(page);
-  const tool = await page.locator('.tool .chevron').first().boundingBox();
+  const tool = await page.locator('.feed-card .chevron').first().boundingBox();
   const reasoning = await page.locator('.reasoning .chevron').first().boundingBox();
   expect(Math.abs((tool?.x ?? 0) - (reasoning?.x ?? 99))).toBeLessThanOrEqual(1);
   const mask = await page.locator('.feed').evaluate((node) => {
@@ -468,11 +469,12 @@ test('tail_growth_and_an_opened_row_do_not_move_what_the_reader_is_looking_at', 
   await expect(page.getByRole('button', { name: 'К новым сообщениям' })).toBeVisible();
   const held = await page.locator(`[data-key="${anchor?.key}"]`).boundingBox();
   expect(Math.abs((held?.y ?? -9999) - (anchor?.y ?? 0))).toBeLessThanOrEqual(1);
-  const row = page.locator('.tool .head').filter({ hasText: 'Read' }).last();
+  const row = readRow(page).locator('.head .hit').last();
   await row.scrollIntoViewIfNeeded();
   await page.waitForTimeout(100);
   const before = await row.boundingBox();
-  await row.click();
+  // Кнопка раскрытия лежит поверх шапки: щёлкаем прямо по ней, без фокуса и подскролла Playwright.
+  await row.evaluate((node) => (node as HTMLButtonElement).click());
   await page.waitForTimeout(300);
   const after = await row.boundingBox();
   expect(Math.abs((after?.y ?? -9999) - (before?.y ?? 0))).toBeLessThanOrEqual(1);
@@ -487,9 +489,9 @@ test('long_turn_folds_into_one_row_and_the_final_answer_stays_outside', async ({
   const group = page.locator('.steps');
   await expect(group).toHaveCount(1);
   await expect(group.locator('.surface .name')).toHaveText('58 шагов');
-  await expect(group.locator('.surface .summary')).toHaveText('Bash 44 · Read 14');
+  await expect(group.locator('.surface .summary')).toHaveText('Команда 44 · Чтение 14');
   await expect(group.locator('.surface .pill')).toHaveText('3 мин');
-  await expect(page.locator('.tool')).toHaveCount(0);
+  await expect(page.locator('.feed-card')).toHaveCount(0);
   await expect(page.locator('.reasoning')).toHaveCount(0);
   await expect(page.locator('.prose')).toHaveCount(2);
   const order = await page.locator('.card > .entry').evaluateAll((rows) => rows.map((row) => (row.querySelector('.steps') ? 'group' : 'text')));
@@ -497,13 +499,13 @@ test('long_turn_folds_into_one_row_and_the_final_answer_stays_outside', async ({
   const box = (await group.boundingBox())!;
   await group.locator('.surface .head').click();
   await expect(group.getByRole('button', { name: /Показать ещё \d+ шаг/ })).toBeVisible();
-  await expect(page.locator('.tool').first()).toBeVisible();
+  await expect(page.locator('.feed-card').first()).toBeVisible();
   expect(Math.abs((await group.boundingBox())!.y - box.y)).toBeLessThanOrEqual(1);
   await group.getByRole('button', { name: /Показать ещё/ }).click();
   await expect(group.locator('.reasoning')).toHaveCount(15);
-  await expect(group.locator('.tool')).toHaveCount(58);
+  await expect(group.locator('.feed-card')).toHaveCount(58);
   await group.locator('.surface .head').click();
-  await expect(page.locator('.tool')).toHaveCount(0);
+  await expect(page.locator('.feed-card')).toHaveCount(0);
 });
 
 test('failed_step_shows_on_the_summary_and_inside_the_opened_group', async ({ page }) => {
@@ -518,7 +520,7 @@ test('failed_step_shows_on_the_summary_and_inside_the_opened_group', async ({ pa
   await expect(group.locator('.surface .pill')).toHaveText('Ошибка 1');
   await expect(group.locator('.surface .pill')).toHaveAttribute('data-state', 'error');
   await group.locator('.surface .head').click();
-  await expect(group.locator('.tool .pill[data-state="error"]')).toHaveCount(1);
+  await expect(group.locator('.feed-card[data-state="error"]')).toHaveCount(1);
 });
 
 test('live_turn_folds_steps_without_a_jump_and_keeps_the_running_one_and_the_owner_choice', async ({ page }) => {
@@ -541,7 +543,7 @@ test('live_turn_folds_steps_without_a_jump_and_keeps_the_running_one_and_the_own
     start(call, 'tool_call', 'Bash', null, at(index * 2));
     await finish(call, '', at(index * 2));
     hub.flush();
-    await expect(page.locator('.tool .pill[data-state="running"]')).toHaveCount(1);
+    await expect(page.locator('.feed-card[data-state="running"]')).toHaveCount(1);
     return call;
   };
   const done = async (call: string, index: number) => {
@@ -549,7 +551,7 @@ test('live_turn_folds_steps_without_a_jump_and_keeps_the_running_one_and_the_own
     start(result, 'tool_result', null, call, at(index * 2 + 1));
     await finish(result, 'ok', at(index * 2 + 1));
     hub.flush();
-    await expect(page.locator('.tool .pill[data-state="running"]')).toHaveCount(0);
+    await expect(page.locator('.feed-card[data-state="running"]')).toHaveCount(0);
   };
   const feed = page.locator('.feed');
   const bottom = () => feed.evaluate((el) => el.scrollHeight);
@@ -561,25 +563,25 @@ test('live_turn_folds_steps_without_a_jump_and_keeps_the_running_one_and_the_own
   await page.locator('.steps').evaluate((node) => { (node as HTMLElement & { mark?: boolean }).mark = true; });
   heights.push(await bottom());
   await page.locator('.steps .surface .head').click();
-  await expect(page.locator('.steps .tool')).toHaveCount(2);
+  await expect(page.locator('.steps .feed-card')).toHaveCount(2);
   await page.locator('.steps .surface .head').click();
-  await expect(page.locator('.steps .tool')).toHaveCount(0);
+  await expect(page.locator('.steps .feed-card')).toHaveCount(0);
   await done(third, 2);
   for (let index = 3; index < 6; index++) {
-    const previous = page.locator('.card > .entry .tool');
+    const previous = page.locator('.card > .entry .feed-card');
     await expect(previous).toHaveCount(1);
     await done(await step(index), index);
     await expect(page.locator('.steps .surface .name')).toHaveText(`${index} шага`.replace('5 шага', '5 шагов'));
-    await expect(page.locator('.card > .entry .tool')).toHaveCount(1);
+    await expect(page.locator('.card > .entry .feed-card')).toHaveCount(1);
     heights.push(await bottom());
   }
   expect(new Set(heights).size).toBe(1);
   expect(await page.locator('.steps').evaluate((node) => (node as HTMLElement & { mark?: boolean }).mark)).toBe(true);
   await page.locator('.steps .surface .head').click();
-  await expect(page.locator('.steps .tool')).toHaveCount(5);
+  await expect(page.locator('.steps .feed-card')).toHaveCount(5);
   await done(await step(6), 6);
   await expect(page.locator('.steps .surface .head')).toHaveAttribute('aria-expanded', 'true');
-  await expect(page.locator('.steps .tool')).toHaveCount(6);
+  await expect(page.locator('.steps .feed-card')).toHaveCount(6);
 });
 
 test('wide_code_block_fades_its_cut_edge_and_a_fitting_one_does_not', async ({ page }) => {

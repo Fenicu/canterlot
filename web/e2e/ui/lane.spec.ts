@@ -42,7 +42,7 @@ test('lane_uses_the_same_renderer_as_the_main_chat', async ({ page }) => {
 	// Timeline structure: answer cards, details tool blocks
 	await expect(page.locator('.lane-timeline-container .feed')).toBeVisible();
 	await expect(page.locator('.card').first()).toBeVisible();
-	await expect(page.locator('.tool').first()).toBeVisible();
+	await expect(page.locator('.lane-timeline-container .feed-card').first()).toBeVisible();
 });
 
 test('lane_has_no_composer_and_explains_that_the_result_returns', async ({ page }) => {
@@ -389,7 +389,7 @@ test('lane_of_an_old_subagent_outside_the_loaded_window_shows_its_steps', async 
 
 	await page.goto(`/c/${id}/lane/old-agent`);
 	await expect(page.locator('.lane-screen[data-ready]')).toBeVisible();
-	await expect(page.locator('.tool .summary').filter({ hasText: 'старый шаг 5' })).toBeVisible();
+	await expect(page.locator('.feed-card[data-card="shell.exec"]').filter({ hasText: 'старый шаг 5' })).toBeVisible();
 	await expect(page.locator('.header-title')).toHaveText('Старая разведка');
 	await expect(page.locator('.subtitle')).toContainText('general-purpose');
 	await expect(page.locator('.live-line')).toContainText('Готово');

@@ -309,7 +309,7 @@ test('expanding_a_tool_above_the_viewport_keeps_the_anchor', async ({ page }) =>
   expect(picked).not.toBeNull();
   const key = picked!.key;
   const before = picked!.y;
-  await page.locator('.head').evaluate((node) => (node as HTMLButtonElement).click());
+  await page.locator('.feed-card .head .hit').evaluate((node) => (node as HTMLButtonElement).click());
   // Раскрытие выше окна сдвигает высоты строк: якорь сверяется, когда переход доиграл и лента перемерила строки.
   await expect.poll(() => page.locator('.fold').first().evaluate((el) => el.getAnimations().length)).toBe(0);
   // Прокрутка в Firefox целочисленная, а высоты строк дробные: восстановленный якорь может встать
@@ -660,19 +660,20 @@ test('background_command_is_a_plain_row_with_a_badge_and_runs_until_its_task_end
   if (detail) detail.execution = { state: 'running' };
   api.pushBackground(id, [backgroundTask('b1', call.id, 'bash', 'running')]);
   await page.reload();
-  const row = page.locator('.tool').filter({ hasText: 'sleep 25' });
+  const row = page.locator('.feed-card[data-card="shell.exec"]').filter({ hasText: 'sleep 25' });
   await expect(row).toBeVisible({ timeout: 15_000 });
   await expect(row.getByText('Фоном')).toBeVisible();
-  await expect(row.locator('[data-state="running"]')).toBeVisible();
+  await expect(row).toHaveAttribute('data-state', 'running');
   await expect(page.getByRole('link', { name: /Субагент/ })).toHaveCount(0);
 
   api.pushBackground(id, [backgroundTask('b1', call.id, 'bash', 'failed')]);
-  await expect(row.locator('[data-state="error"]')).toBeVisible();
+  await expect(row).toHaveAttribute('data-state', 'error');
   await expect(row.getByText('Фоном')).toBeVisible();
 
   api.pushBackground(id, [backgroundTask('b1', call.id, 'bash', 'stopped')]);
-  await expect(row.getByText('Прервано')).toBeVisible();
-  await expect(row.locator('[data-state="error"]')).toHaveCount(0);
+  await expect(row.locator('[data-role="card-state"]')).toHaveText('прервано');
+  await expect(row).toHaveAttribute('data-state', 'interrupted');
+  await expect(page.locator('.feed-card[data-state="error"]')).toHaveCount(0);
 });
 
 test('user_bubble_marks_follow_input_state', async ({ page }) => {
@@ -859,14 +860,15 @@ test('interrupted_tool_reads_stopped_like_the_text_next_to_it', async ({ page })
   api.histories.set(id, [call, text]);
   api.bindConversation(id);
   await page.reload();
-  const row = page.locator('.tool').filter({ hasText: 'sleep 90' });
+  const row = page.locator('.feed-card[data-card="shell.exec"]').filter({ hasText: 'sleep 90' });
   await expect(row).toBeVisible({ timeout: 15_000 });
   // Одна остановка — одно слово и один цвет, а не «Ошибка» рядом с «Прервано».
-  await expect(row.locator('.pill')).toHaveText('Прервано');
-  await expect(row.locator('.pill')).toHaveAttribute('data-state', 'stopped');
+  await expect(row.locator('[data-role="card-state"]')).toHaveText('прервано');
+  await expect(row.locator('[data-role="card-state"]')).toHaveAttribute('data-tone', 'warning');
+  await expect(row).toHaveAttribute('data-state', 'interrupted');
   await expect(page.locator('[role="log"] .pill[data-state="error"]')).toHaveCount(0);
   const warning = await page.evaluate(() => { const probe = document.createElement('span'); probe.style.color = 'var(--warning)'; document.body.append(probe); const value = getComputedStyle(probe).color; probe.remove(); return value; });
-  await expect(row.locator('.pill')).toHaveCSS('color', warning);
+  await expect(row.locator('[data-role="card-state"]')).toHaveCSS('color', warning);
 });
 
 test('error_and_warning_blocks_carry_text_not_colour_alone', async ({ page }) => {

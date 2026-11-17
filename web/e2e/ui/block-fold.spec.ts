@@ -37,7 +37,7 @@ async function boot(page: Page) {
 	await installChatRoutes(page, hub, api, OWNER);
 	await page.goto(`/c/${id}`);
 	await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
-	await expect(page.locator('.feed .tool').first()).toBeVisible({ timeout: 15_000 });
+	await expect(page.locator('.feed .feed-card').first()).toBeVisible({ timeout: 15_000 });
 }
 
 /** Уводит ленту от хвоста и выбирает шапку блока посреди экрана. */
@@ -53,7 +53,7 @@ async function pickMiddleHead(page: Page): Promise<string> {
 		.poll(async () => {
 			key = await feed.evaluate((el) => {
 				const box = el.getBoundingClientRect();
-				const heads = [...el.querySelectorAll<HTMLElement>('.tool > .head')];
+				const heads = [...el.querySelectorAll<HTMLElement>('.feed-card > .head')];
 				const head = heads.find((node) => {
 					const top = node.getBoundingClientRect().top;
 					return top > box.top + box.height * 0.25 && top < box.top + box.height * 0.5;
