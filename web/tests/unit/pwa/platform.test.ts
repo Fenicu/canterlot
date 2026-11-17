@@ -31,23 +31,62 @@ test('manifest_is_generated_from_tokens_and_valid', async () => {
   }
 });
 
-test('icons_are_rasterised_from_the_svg_with_token_colours', async () => {
-  const { colouredSvg } = await import('../../../scripts/gen-icons.mjs');
-  const svg = colouredSvg(readFileSync('static/icons/source.svg', 'utf8'), readFileSync('src/lib/styles/tokens.css', 'utf8'));
-  expect(svg).not.toContain('{{');
-  expect(svg).toContain('#183135'); expect(svg).toContain('#00f4ee');
-  const script = readFileSync('scripts/gen-icons.mjs', 'utf8');
-  expect(script).toContain('chromium'); expect(script).toContain('screenshot');
+test('app_html_links_generated_icons_and_never_the_template', async () => {
+  const html = readFileSync('src/app.html', 'utf8');
+  const hrefs = [...html.matchAll(/<link\b[^>]*rel="(?:icon|apple-touch-icon)"[^>]*href="([^"]+)"/g)].map((match) => match[1]!);
+  expect(hrefs).toEqual(['/icons/favicon.svg', '/icons/favicon-32.png', '/icons/apple-touch-icon.png']);
+  for (const href of hrefs) {
+    const body = readFileSync(`static${href}`);
+    expect(body.length, href).toBeGreaterThan(0);
+    expect(body.includes('{{'), `${href} остался шаблоном`).toBe(false);
+  }
+  // SVG-фавикон — тот же замок, что источник; PNG растеризуются из него.
+  expect(readFileSync('static/icons/favicon.svg', 'utf8')).toBe(readFileSync('static/icons/source.svg', 'utf8'));
+  expect(html).not.toContain('/icons/source.svg');
+});
+
+test('generated_icons_have_the_expected_sizes_and_backgrounds', async () => {
+  // @ts-expect-error pngjs используется только для проверки сгенерированных файлов.
+  const { PNG } = await import('pngjs');
+  const png = (name: string) => PNG.sync.read(readFileSync(`static/icons/${name}`));
+  const sizes = { 'favicon-32.png': 32, 'apple-touch-icon.png': 180, 'icon-192.png': 192, 'icon-512.png': 512, 'icon-maskable-512.png': 512 };
+  for (const [name, size] of Object.entries(sizes)) {
+    const icon = png(name);
+    expect([name, icon.width, icon.height]).toEqual([name, size, size]);
+  }
+  expect(readFileSync('static/icons/favicon.svg', 'utf8')).toContain('#141a2e');
+  expect(readFileSync('static/icons/favicon.svg', 'utf8')).toContain('#f2c14e');
+  // iOS скругляет сам: фон apple-touch-icon квадратный, непрозрачный и во весь значок.
+  const touch = png('apple-touch-icon.png');
+  expect([...touch.data.subarray(0, 4)]).toEqual([20, 26, 46, 255]);
+  expect([...touch.data.subarray((180 * 179 + 179) * 4)]).toEqual([20, 26, 46, 255]);
+  // Обычные значки стоят на прозрачных углах скруглённого фона.
+  const rounded = png('icon-192.png');
+  expect(rounded.data[3]).toBe(0);
+  expect([...rounded.data.subarray((10 * 192 + 96) * 4, (10 * 192 + 96) * 4 + 4)]).toEqual([20, 26, 46, 255]);
+});
+
+test('maskable_icon_keeps_the_castle_inside_the_safe_circle', async () => {
   // @ts-expect-error pngjs используется только для проверки сгенерированных файлов.
   const { PNG } = await import('pngjs');
   const png = PNG.sync.read(readFileSync('static/icons/icon-maskable-512.png'));
-  expect([...png.data.subarray(0, 4)]).toEqual([24, 49, 53, 255]);
-  expect(new Set(Array.from({ length: png.width * png.height }, (_, i) => png.data.subarray(i * 4, i * 4 + 4).toString('hex'))).has('00f4eeff')).toBe(true);
-  for (const size of [192, 512]) {
-    const icon = PNG.sync.read(readFileSync(`static/icons/icon-${size}.png`));
-    const dot = (Math.floor(size / 2) * size + Math.floor(size * 336 / 512)) * 4;
-    expect([...icon.data.subarray(dot, dot + 4)]).toEqual([0, 244, 238, 255]);
+  const background = [20, 26, 46, 255];
+  const center = png.width / 2;
+  let minX = Infinity; let minY = Infinity; let maxX = -1; let maxY = -1; let maxRadius = 0;
+  for (let y = 0; y < png.height; y += 1) {
+    for (let x = 0; x < png.width; x += 1) {
+      const i = (y * png.width + x) * 4;
+      if (background.every((value, channel) => png.data[i + channel] === value)) continue;
+      minX = Math.min(minX, x); minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x); maxY = Math.max(maxY, y);
+      maxRadius = Math.max(maxRadius, Math.hypot(x + 0.5 - center, y + 0.5 - center));
+    }
   }
+  const safe = png.width * 0.4;
+  expect(maxX).toBeGreaterThan(minX);
+  expect(maxRadius, `замок ${minX},${minY}..${maxX},${maxY} выходит из круга ${safe}`).toBeLessThanOrEqual(safe);
+  expect(Math.min(minX, minY)).toBeGreaterThan(0);
+  expect(Math.max(maxX, maxY)).toBeLessThan(png.width - 1);
 });
 
 test('incompatible_schema_version_prompts_an_update', async () => {
