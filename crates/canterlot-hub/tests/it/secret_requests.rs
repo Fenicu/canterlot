@@ -124,6 +124,30 @@ impl Fx {
         .unwrap()
     }
 
+    async fn revoke_command(&self, request: Uuid, cap: u64, state: &str) -> Uuid {
+        let id = Uuid::now_v7();
+        sqlx::query(
+            "insert into commands
+                (id, machine_id, conversation_id, execution_id, execution_generation,
+                 kind, payload, delivery_state)
+             values ($1, $2, $3, null, null, 'revoke_secret', $4, $5)",
+        )
+        .bind(id)
+        .bind(self.seed.machine_id)
+        .bind(self.seed.conversation_id)
+        .bind(json!({
+            "request_id": request,
+            "conversation_id": self.seed.conversation_id,
+            "up_to": cap,
+            "reason": "revoked",
+        }))
+        .bind(state)
+        .execute(&self.pool)
+        .await
+        .unwrap();
+        id
+    }
+
     async fn connect(&self, capabilities: &[&str], epoch: &str) -> task3::Client {
         task3::connect_with_epoch(
             &self.hub,
@@ -894,6 +918,220 @@ async fn a_removal_failure_reschedules_the_obligation_and_keeps_revoking(pool: P
     .await
     .unwrap();
     assert!(due, "the retry is not immediate");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_successful_removal_retires_the_revoke_command(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let row = fx.open("Убранная команда").await;
+    sqlx::query("update secret_requests set state='revoking', generation=1 where id=$1")
+        .bind(row.id)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    let command = fx.revoke_command(row.id, 1, "stored_on_machine").await;
+    fx.removed(Uuid::now_v7(), 1, row.id, 1, "revoked").await;
+    let (state, result): (String, Value) =
+        sqlx::query_as("select delivery_state, result from commands where id=$1")
+            .bind(command)
+            .fetch_one(&fx.pool)
+            .await
+            .unwrap();
+    assert_eq!(state, "completed");
+    assert_eq!(result["removed"], true);
+    assert!(fx.obligation(row.id).await.is_none());
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_failed_removal_retires_the_command_and_the_obligation_resends(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let row = fx.open("Повтор после ошибки").await;
+    sqlx::query("update secret_requests set state='revoking', generation=1 where id=$1")
+        .bind(row.id)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "insert into secret_revocations
+            (id, machine_id, conversation_id, request_id, up_to, reason, next_attempt_at)
+         values ($1, $2, $3, $4, 1, 'revoked', now())",
+    )
+    .bind(Uuid::now_v7())
+    .bind(fx.seed.machine_id)
+    .bind(fx.seed.conversation_id)
+    .bind(row.id)
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+    let command = fx.revoke_command(row.id, 1, "stored_on_machine").await;
+
+    cj(
+        &fx.pool,
+        &fx.registry,
+        &fx.seed,
+        Uuid::now_v7(),
+        1,
+        fact_body(record_body::Body::SecretRemoveFailed(
+            canterlot_proto::worker::v1::SecretRemoveFailed {
+                request_id: row.id.to_string(),
+                conversation_id: fx.seed.conversation_id.to_string(),
+                cap: 1,
+                reason: "io".into(),
+            },
+        )),
+    )
+    .await;
+    let state: String = sqlx::query_scalar("select delivery_state from commands where id=$1")
+        .bind(command)
+        .fetch_one(&fx.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        state, "completed",
+        "a stored_on_machine command must not block the retry"
+    );
+
+    // Обязательство — единственный драйвер повтора: снимаем паузу и отправляем.
+    sqlx::query("update secret_revocations set next_attempt_at=now()")
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    let _worker = fx.connect(CAPS, "epoch-1").await;
+    // Соединение могло отправить обязательство само; важен результат, не тик.
+    let _ = secrets::emit_due_revocations(&fx.pool, &fx.registry)
+        .await
+        .unwrap();
+    let pending: i64 = sqlx::query_scalar(
+        "select count(*) from commands
+         where kind='revoke_secret' and delivery_state <> 'completed'",
+    )
+    .fetch_one(&fx.pool)
+    .await
+    .unwrap();
+    assert_eq!(pending, 1, "the retry is a fresh command");
+    let total: i64 = sqlx::query_scalar("select count(*) from commands where kind='revoke_secret'")
+        .fetch_one(&fx.pool)
+        .await
+        .unwrap();
+    assert_eq!(total, 2);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_rejected_revoke_is_retired_and_rescheduled(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let row = fx.open("Отказ воркера").await;
+    sqlx::query("update secret_requests set state='revoking', generation=1 where id=$1")
+        .bind(row.id)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "insert into secret_revocations
+            (id, machine_id, conversation_id, request_id, up_to, reason, next_attempt_at)
+         values ($1, $2, $3, $4, 1, 'revoked', now())",
+    )
+    .bind(Uuid::now_v7())
+    .bind(fx.seed.machine_id)
+    .bind(fx.seed.conversation_id)
+    .bind(row.id)
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+    let command = fx.revoke_command(row.id, 1, "pending").await;
+    let mut tx = canterlot_hub::db::begin(&fx.pool).await.unwrap();
+    secrets::on_revoke_rejected_in_tx(
+        &mut tx,
+        fx.seed.machine_id,
+        command,
+        0,
+        "invalid",
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let state: String = sqlx::query_scalar("select delivery_state from commands where id=$1")
+        .bind(command)
+        .fetch_one(&fx.pool)
+        .await
+        .unwrap();
+    assert_eq!(state, "completed");
+    let attempts: i32 = sqlx::query_scalar(
+        "select attempts from secret_revocations where machine_id=$1 and request_id=$2",
+    )
+    .bind(fx.seed.machine_id)
+    .bind(row.id)
+    .fetch_one(&fx.pool)
+    .await
+    .unwrap();
+    assert_eq!(attempts, 1);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn an_offline_backlog_does_not_starve_a_live_obligation(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let offline = Uuid::now_v7();
+    sqlx::query("insert into machines(id,owner_id,name) values($1,$2,'Офлайн')")
+        .bind(offline)
+        .bind(fx.seed.owner_id)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    for _ in 0..150 {
+        sqlx::query(
+            "insert into secret_revocations
+                (id, machine_id, conversation_id, request_id, up_to, reason, next_attempt_at)
+             values ($1, $2, $3, $4, 1, 'revoked', now())",
+        )
+        .bind(Uuid::now_v7())
+        .bind(offline)
+        .bind(Uuid::now_v7())
+        .bind(Uuid::now_v7())
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    }
+    let _worker = fx.connect(CAPS, "epoch-1").await;
+    let live_request = Uuid::now_v7();
+    sqlx::query(
+        "insert into secret_revocations
+            (id, machine_id, conversation_id, request_id, up_to, reason, next_attempt_at)
+         values ($1, $2, $3, $4, 1, 'revoked', now())",
+    )
+    .bind(Uuid::now_v7())
+    .bind(fx.seed.machine_id)
+    .bind(fx.seed.conversation_id)
+    .bind(live_request)
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+
+    assert_eq!(
+        secrets::emit_due_revocations(&fx.pool, &fx.registry)
+            .await
+            .unwrap(),
+        1,
+        "the live obligation is emitted despite 150 offline ones"
+    );
+    let live: i64 = sqlx::query_scalar(
+        "select count(*) from commands
+         where kind='revoke_secret' and payload->>'request_id'=$1",
+    )
+    .bind(live_request.to_string())
+    .fetch_one(&fx.pool)
+    .await
+    .unwrap();
+    assert_eq!(live, 1);
+    let offline_commands: i64 = sqlx::query_scalar(
+        "select count(*) from commands c join secret_revocations r
+           on r.request_id = (c.payload->>'request_id')::uuid
+         where c.kind='revoke_secret' and r.machine_id=$1",
+    )
+    .bind(offline)
+    .fetch_one(&fx.pool)
+    .await
+    .unwrap();
+    assert_eq!(offline_commands, 0, "offline machines get no command");
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]

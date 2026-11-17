@@ -275,6 +275,31 @@ impl Registry {
         self.timers.secret_attempt
     }
 
+    /// Машины с живым сеансом и согласованной возможностью: обязательства
+    /// секретов адресуются только им, поэтому офлайн-очередь не занимает предел.
+    pub(crate) fn machines_with_capability(&self, capability: &str) -> Vec<Uuid> {
+        self.entries
+            .lock()
+            .expect("session registry lock")
+            .values()
+            .filter(|entry| {
+                !entry.revoked.load(std::sync::atomic::Ordering::SeqCst)
+                    && entry.info.last_heartbeat.elapsed() < self.timers.unavailable_after
+                    && entry.capabilities.iter().any(|known| known == capability)
+            })
+            .map(|entry| entry.info.machine_id)
+            .collect()
+    }
+
+    /// Текущая эпоха хранилища секретов машины; `None` — сеанса нет.
+    pub fn current_secrets_epoch(&self, machine_id: Uuid) -> Option<String> {
+        self.entries
+            .lock()
+            .expect("session registry lock")
+            .get(&machine_id)
+            .and_then(|entry| entry.info.secrets_epoch.clone())
+    }
+
     /// Эпоха хранилища секретов соединения: по ней хаб узнаёт очищенный tmpfs.
     pub fn secrets_epoch_for_connection(
         &self,

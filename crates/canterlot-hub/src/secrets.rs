@@ -793,6 +793,17 @@ pub async fn apply_removed_in_tx(
         return Ok(());
     };
     let cap = fact.cap;
+    // Команда этого или более старого поколения исполнена: повтор теперь ведёт
+    // только обязательство, иначе завершённая команда навсегда занимала бы место
+    // незавершённой и новые попытки не ставились бы.
+    retire_revoke_commands_in_tx(
+        conn,
+        machine_id,
+        request_id,
+        cap,
+        json!({"removed": true, "reason": fact.reason}),
+    )
+    .await?;
     // Старый `cap` не закрывает более новое обязательство.
     sqlx::query(
         "delete from secret_revocations
@@ -874,6 +885,14 @@ pub async fn apply_remove_failed_in_tx(
     let Some(request_id) = parse_uuid(&fact.request_id) else {
         return Ok(());
     };
+    retire_revoke_commands_in_tx(
+        conn,
+        machine_id,
+        request_id,
+        fact.cap,
+        json!({"removed": false, "reason": fact.reason}),
+    )
+    .await?;
     retry_obligation(
         conn,
         machine_id,
@@ -1004,6 +1023,34 @@ async fn raise_revocation_in_tx(
     Ok(())
 }
 
+/// Закрывает команды отзыва, чьё поколение покрыто квитанцией: успех, ошибка
+/// удаления и отказ воркера одинаково снимают команду, а повтор ведёт
+/// обязательство. Иначе `stored_on_machine` навсегда блокировал бы новую попытку.
+async fn retire_revoke_commands_in_tx(
+    conn: &mut PgConnection,
+    machine_id: Uuid,
+    request_id: Uuid,
+    cap: u64,
+    result: serde_json::Value,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "update commands
+         set delivery_state = 'completed', completed_at = coalesce(completed_at, now()),
+             result = $4
+         where machine_id = $1 and kind = 'revoke_secret'
+           and payload->>'request_id' = $2
+           and coalesce((payload->>'up_to')::bigint, 0) <= $3
+           and delivery_state <> 'completed'",
+    )
+    .bind(machine_id)
+    .bind(request_id.to_string())
+    .bind(i64::try_from(cap).unwrap_or(i64::MAX))
+    .bind(result)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
 /// Повтор не удавшегося удаления: пауза растёт от числа отправленных команд,
 /// показатель степени ограничен до умножения на интервал.
 async fn retry_obligation(
@@ -1107,6 +1154,16 @@ pub async fn on_revoke_rejected_in_tx(
         .and_then(serde_json::Value::as_u64)
         .and_then(|value| i64::try_from(value).ok())
         .unwrap_or(0);
+    sqlx::query(
+        "update commands
+         set delivery_state = 'completed', completed_at = coalesce(completed_at, now()),
+             result = jsonb_build_object('rejected', true)
+         where id = $1 and dispatch_attempt = $2 and delivery_state <> 'completed'",
+    )
+    .bind(command_id)
+    .bind(dispatch_attempt)
+    .execute(&mut *conn)
+    .await?;
     retry_obligation(conn, machine_id, request_id, up_to).await?;
     tracing::warn!(
         kind = "secret_revoke_rejected",
@@ -1354,11 +1411,19 @@ pub fn backoff_seconds(attempts: i32) -> u64 {
 /// Отправляет созревшие обязательства живым воркерам `secret_requests_v2`
 /// обычной командой outbox: значения в ней нет, только поколение и каталог.
 pub async fn emit_due_revocations(pool: &PgPool, registry: &Registry) -> Result<u64, sqlx::Error> {
+    // Отбор по живым машинам с v2 идёт до `limit`: очередь офлайн-машин иначе
+    // занимала бы все сто мест и голодом морила готовый отзыв живой машины.
+    let eligible = registry.machines_with_capability(crate::session::CAPABILITY_SECRET_REQUESTS_V2);
+    if eligible.is_empty() {
+        return Ok(0);
+    }
     let rows: Vec<(Uuid, Uuid, Uuid, Uuid, i64, String, i32)> = sqlx::query_as(
         "select id, machine_id, conversation_id, request_id, up_to, reason, attempts
-         from secret_revocations where next_attempt_at <= now()
+         from secret_revocations
+         where next_attempt_at <= now() and machine_id = any($1::uuid[])
          order by next_attempt_at, id limit 100",
     )
+    .bind(&eligible)
     .fetch_all(pool)
     .await?;
     let mut sent = 0u64;
