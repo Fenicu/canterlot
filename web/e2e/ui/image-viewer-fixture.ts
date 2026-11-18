@@ -160,6 +160,20 @@ export async function settled(page: Page): Promise<void> {
   await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 }
 
+/**
+ * Текущая картинка встала в кадр и раскодирована: CSS-перехода ленты (`data-settling`)
+ * больше нет, а кадр текущего слайда готов (`data-ready` после `decode()`).
+ * `settled` их не видит: он следит только за Web Animations, поэтому одноразовые замеры
+ * после листания ждут здесь, а не по таймауту.
+ */
+export async function awaitCurrentImage(page: Page): Promise<void> {
+  await settled(page);
+  await expect
+    .poll(() => page.locator('dialog.viewer .stage').evaluate((stage) => !stage.hasAttribute('data-settling')), { timeout: 15_000 })
+    .toBe(true);
+  await expect(page.locator('dialog.viewer .slide[data-current] .frame[data-ready]')).toBeVisible({ timeout: 15_000 });
+}
+
 export interface FrameState { left: number; top: number; width: number; height: number; scale: number; natural: number; stage: { left: number; top: number; width: number; height: number } }
 
 /** Где сейчас кадр текущей картинки и во сколько раз он увеличен от натуральных пикселей. */

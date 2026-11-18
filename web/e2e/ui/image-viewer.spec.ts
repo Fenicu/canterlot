@@ -1,6 +1,6 @@
 import type { Page } from '@playwright/test';
 import { expect, test } from './fixtures';
-import { Fingers, PICTURES, frameState, openChat, project, settled, thumb, under, viewer, type Source } from './image-viewer-fixture';
+import { Fingers, PICTURES, awaitCurrentImage, frameState, openChat, project, settled, thumb, under, viewer, type Source } from './image-viewer-fixture';
 
 const phone = (name: string) => name === 'phone';
 
@@ -237,15 +237,20 @@ test('swipe_and_arrow_keys_move_between_images_with_the_counter', async ({ page 
     await page.keyboard.press('ArrowRight');
     await expect(counter).toHaveText('2 из 3');
     await page.keyboard.press('ArrowRight');
+    await expect(counter).toHaveText('3 из 3');
+    // На последней картинке лента только пружинит.
     await page.keyboard.press('ArrowRight');
     await expect(counter).toHaveText('3 из 3');
     await page.keyboard.press('ArrowLeft');
     await expect(counter).toHaveText('2 из 3');
+    // Клавиатура не продлевает панель управления: долгое листание под нагрузкой
+    // переживает 3 с простоя (CHROME_IDLE_MS) и прячет кнопки — Tab показывает их обратно.
+    await page.keyboard.press('Tab');
     await dialog.getByRole('button', { name: 'Предыдущая картинка' }).click();
     await expect(counter).toHaveText('1 из 3');
     await expect(dialog.getByRole('button', { name: 'Предыдущая картинка' })).toHaveAttribute('aria-disabled', 'true');
   }
-  await settled(page);
+  await awaitCurrentImage(page);
   // Текущая картинка стоит ровно в кадре после перехода, соседи уже загружены.
   const frame = await frameState(page);
   expect(Math.abs(frame.left + frame.width / 2 - (frame.stage.left + frame.stage.width / 2))).toBeLessThan(2);
