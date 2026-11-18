@@ -1371,6 +1371,22 @@ export interface paths {
         patch: operations["patch__api_v1_groups__id_"];
         trace?: never;
     };
+    "/api/v1/hibernate-settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get__api_v1_hibernate_settings"];
+        put: operations["put__api_v1_hibernate_settings"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/inputs/{id}/cancel": {
         parameters: {
             query?: never;
@@ -2958,6 +2974,13 @@ export interface components {
             /** @description Команда обновления для способа установки; хаб её не выполняет. */
             update_command?: string | null;
         };
+        HibernateSettings: {
+            /**
+             * Format: int32
+             * @description `None` — «Выключено».
+             */
+            idle_minutes?: number | null;
+        };
         History: {
             series: components["schemas"]["ProviderSeries"][];
             /** @description Медианы скорости ответа по моделям; Codex не передаёт времени генерации и сюда не попадает. */
@@ -3924,6 +3947,9 @@ export interface components {
         } | {
             /** @enum {string} */
             reason: "restore_pending";
+        } | {
+            /** @enum {string} */
+            reason: "hibernated";
         } | {
             compaction?: components["schemas"]["CompactionProgress"] | null;
             /** @enum {string} */
@@ -9859,6 +9885,78 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Group"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get__api_v1_hibernate_settings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Настройка усыпления простаивающих сессий */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HibernateSettings"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    put__api_v1_hibernate_settings: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["HibernateSettings"];
+            };
+        };
+        responses: {
+            /** @description Настройка сохранена */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HibernateSettings"];
                 };
             };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */

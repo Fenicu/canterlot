@@ -618,6 +618,8 @@
 	.mark.dashed { outline-style: dashed; }
 	.mark[data-state='fresh'] { --mark-color: var(--muted); }
 	.mark.dim { background: var(--transparent); border: var(--s1) solid var(--muted); }
+	/* Усыплённая сессия: полый холодный кружок, процесс не жив. */
+	.mark[data-state='hibernated'].dim { border-color: var(--blue); }
 	/* Длинное состояние уводит подзаголовок на свою строку, а не сжимает его до буквы. */
 	.sub-row {
 		display: flex;

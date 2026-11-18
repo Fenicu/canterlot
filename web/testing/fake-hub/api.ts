@@ -255,6 +255,7 @@ export class FakeHubApi {
 	/** `null`: пороги лимитов по умолчанию, как у хаба. */
 	limitSettings: components['schemas']['LimitSettings'] | null = null;
 	promptSuggestionsEnabled = true;
+	hibernateIdleMinutes: number | null = 60;
 	readonly promptSuggestions = new Map<string, components['schemas']['PromptSuggestionView']>();
 	readonly limitSettingsKeys: string[] = [];
 	readonly defaultLimitSettings: components['schemas']['LimitSettings'] = {
@@ -763,6 +764,10 @@ export class FakeHubApi {
 		this.promptSuggestionsEnabled = enabled;
 		if (enabled) return;
 		for (const id of [...this.promptSuggestions.keys()]) this.setPromptSuggestion(id, null);
+	}
+
+	setHibernateIdleMinutes(minutes: number | null): void {
+		this.hibernateIdleMinutes = minutes;
 	}
 
 	/** Боковые чаты: строка родителя и его копия живут только в памяти фейка. */

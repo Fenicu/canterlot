@@ -1478,6 +1478,22 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     await route.fulfill({ headers: headers(), json: { enabled: api.promptSuggestionsEnabled } });
   });
 
+  await page.route('**/api/v1/hibernate-settings', async (route) => {
+    const method = route.request().method();
+    if (method === 'GET') {
+      await route.fulfill({ headers: headers(), json: { idle_minutes: api.hibernateIdleMinutes } });
+      return;
+    }
+    if (method !== 'PUT') return route.fallback();
+    if (!route.request().headers()['idempotency-key']) {
+      await route.fulfill({ status: 400, headers: headers(), json: errorBody('invalid_request', 'Нужен Idempotency-Key') });
+      return;
+    }
+    const body = route.request().postDataJSON() as { idle_minutes: number | null };
+    api.setHibernateIdleMinutes(body.idle_minutes);
+    await route.fulfill({ headers: headers(), json: { idle_minutes: api.hibernateIdleMinutes } });
+  });
+
   await page.route('**/api/v1/limit-settings', async (route) => {
     const method = route.request().method();
     if (method === 'GET') {

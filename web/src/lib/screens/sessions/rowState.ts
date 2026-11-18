@@ -1,7 +1,7 @@
 import type { Activity } from './activityText';
 
 /** Что значит состояние сессии для владельца: одно слово и один знак на аватаре. */
-export type RowState = 'running' | 'waiting' | 'paused' | 'stalled' | 'failed' | 'live' | 'fresh' | 'dormant' | 'stopped';
+export type RowState = 'running' | 'waiting' | 'paused' | 'stalled' | 'failed' | 'live' | 'fresh' | 'dormant' | 'stopped' | 'hibernated';
 
 export interface StateMark {
   state: RowState;
@@ -28,7 +28,8 @@ const WORDS: Record<RowState, string> = {
   live: 'На связи',
   fresh: 'Новая',
   dormant: 'Процесс не запущен',
-  stopped: 'Остановлена'
+  stopped: 'Остановлена',
+  hibernated: 'Усыплена'
 };
 
 function mark(state: RowState, patch: Partial<StateMark> = {}): StateMark {
@@ -54,6 +55,8 @@ export function stateMark(activity: Activity): StateMark {
     case 'failed':
       return mark('failed', { halo: '--danger' });
     case 'stopped':
+      // Усыпление — обычная остановка с отдельной причиной, не сбой и не воля владельца.
+      if (evidence.outcome === 'hibernated') return mark('hibernated', { dim: true, dot: '--muted' });
       return mark('stopped', { dim: true });
     case 'idle': {
       if ((evidence.background_work ?? 0) > 0) return mark('running', { halo: '--accent' });

@@ -92,6 +92,8 @@ export function activityLine(
         live: false,
       };
     case "stopped":
+      if (evidence.outcome === "hibernated")
+        return { text: "Усыплена", tone: "default", live: false };
       if (evidence.outcome === "user_stop")
         return { text: "Остановлена вами", tone: "default", live: false };
       if (evidence.outcome === "force_stopped")

@@ -28,6 +28,7 @@
   import SpawnWhitelist from './SpawnWhitelist.svelte';
   import LimitSettings from './LimitSettings.svelte';
   import PromptSuggestionSetting from './PromptSuggestionSetting.svelte';
+  import HibernateSetting from './HibernateSetting.svelte';
   import DictationSettings from './DictationSettings.svelte';
   import RoutingScreen from './RoutingScreen.svelte';
   import UpdatesScreen from './UpdatesScreen.svelte';
@@ -152,6 +153,7 @@
           </div>
         {:else if category === 'limits'}
           <LimitSettings />
+          <div class="setting embedded"><HibernateSetting /></div>
           <a class="link-row" href={resolve('/limits')}><span>История лимитов</span><Icon name="chevron" /></a>
           <SpawnWhitelist routing={href('routing')} />
         {:else if category === 'routing'}

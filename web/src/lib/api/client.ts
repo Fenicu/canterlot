@@ -203,6 +203,20 @@ export function putPromptSuggestionSettings(
   return http("PUT", "/api/v1/prompt-suggestion-settings", body, keyed(key, opts));
 }
 
+export function getHibernateSettings(
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["get__api_v1_hibernate_settings"]>>> {
+  return http("GET", "/api/v1/hibernate-settings", undefined, opts);
+}
+
+export function putHibernateSettings(
+  body: Body<operations["put__api_v1_hibernate_settings"]>,
+  key: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["put__api_v1_hibernate_settings"]>>> {
+  return http("PUT", "/api/v1/hibernate-settings", body, keyed(key, opts));
+}
+
 export function listGroups(
   query?: Query,
   opts?: RequestOptions,

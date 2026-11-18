@@ -165,6 +165,8 @@
   .row.strong .activity .text { font-weight: var(--weight-bold); }
   /* Подвисшая сессия — беда того же ряда, что сбой: красное кольцо и красные слова. */
   .row[data-state='stalled'] .activity .text { color: var(--danger); }
+  /* Усыплена: спокойный холодный тон вместо серой «Остановлена», без значка. */
+  .row[data-state='hibernated'] .activity .text { color: var(--blue); }
   .snoozed { flex: none; color: var(--secondary); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; white-space: nowrap; }
   .plan, .queued { flex: none; max-width: 50%; padding: var(--s0) var(--s3); overflow: hidden; border-radius: var(--radius-pill); background: var(--chip); color: var(--chip-text); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
   .worked { flex: none; color: var(--muted); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; white-space: nowrap; }

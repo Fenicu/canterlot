@@ -35,6 +35,10 @@ describe('stateMark', () => {
     expect(stateMark({ state: 'stopped', evidence: { outcome: 'user_stop' } })).toEqual({ state: 'stopped', word: 'Остановлена', halo: null, dashed: false, dot: null, dim: true, strong: false });
   });
 
+  it('marks a hibernated session with its own word instead of stopped', () => {
+    expect(stateMark({ state: 'stopped', evidence: { outcome: 'hibernated' } })).toEqual({ state: 'hibernated', word: 'Усыплена', halo: null, dashed: false, dot: '--muted', dim: true, strong: false });
+  });
+
   it('falls back to the old reading when the hub does not send process_alive', () => {
     expect(stateMark(idle({ last_turn_at: turn }))).toMatchObject({ state: 'live', dot: '--success', dim: false });
     expect(stateMark(idle({ last_turn_at: null }))).toMatchObject({ state: 'fresh', dot: '--muted', dim: false });

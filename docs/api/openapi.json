@@ -8291,6 +8291,120 @@
         }
       }
     },
+    "/api/v1/hibernate-settings": {
+      "get": {
+        "tags": [
+          "conversations"
+        ],
+        "operationId": "get__api_v1_hibernate_settings",
+        "responses": {
+          "200": {
+            "description": "Настройка усыпления простаивающих сессий",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HibernateSettings"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "conversations"
+        ],
+        "operationId": "put__api_v1_hibernate_settings",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HibernateSettings"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Настройка сохранена",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HibernateSettings"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/inputs/{id}/cancel": {
       "post": {
         "tags": [
@@ -15614,6 +15728,20 @@
           }
         }
       },
+      "HibernateSettings": {
+        "type": "object",
+        "properties": {
+          "idle_minutes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "`None` — «Выключено»."
+          }
+        },
+        "additionalProperties": false
+      },
       "History": {
         "type": "object",
         "required": [
@@ -18915,6 +19043,21 @@
                 "type": "string",
                 "enum": [
                   "restore_pending"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Процесс остановлен хабом после доказанного простоя; следующее сообщение будит сессию.",
+            "required": [
+              "reason"
+            ],
+            "properties": {
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "hibernated"
                 ]
               }
             }

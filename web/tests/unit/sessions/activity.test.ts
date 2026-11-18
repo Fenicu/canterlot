@@ -207,6 +207,9 @@ describe("sessions/activity", () => {
     expect(
       line({ state: "stopped", evidence: { outcome: "force_stopped" } }).text,
     ).toBe("Остановлена принудительно");
+    expect(
+      line({ state: "stopped", evidence: { outcome: "hibernated" } }).text,
+    ).toBe("Усыплена");
   });
 
   it("activity_durations_use_the_server_corrected_clock", () => {
