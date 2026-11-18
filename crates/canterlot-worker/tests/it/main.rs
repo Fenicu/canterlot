@@ -55,6 +55,7 @@ mod canterlot_mcp_presets;
 mod canterlot_mcp_sessions;
 mod capabilities_cli;
 mod claude_code_containment;
+mod precheck;
 mod claude_code_e2e;
 mod claude_code_input;
 mod claude_code_large_result;
