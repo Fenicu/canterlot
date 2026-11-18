@@ -1633,13 +1633,13 @@ impl Scheduler {
     }
 
     pub async fn run(self, shutdown: watch::Receiver<bool>) {
-        // Стартовый возврат: всё `prechecking` прошлого процесса уже никогда
-        // не получит ответ (официант умер вместе с процессом), а `claimed`
-        // можно принять заново сразу, не дожидаясь аренды.
-        if let Err(e) = self.recover_schedules_at_startup().await {
-            log_error(&e);
-        }
+        // Стартовое восстановление — только под синглтоном и только для строк
+        // старше аренды (C): второй хаб не кладёт живую предпроверку первого,
+        // а поздние записи активной приёмки условны (A) и призрак не воскреснет.
         crate::singleton::supervise(&self.pool, "scheduler", shutdown, || async {
+            if let Err(e) = self.recover_schedules_at_startup().await {
+                log_error(&e);
+            }
             loop {
                 let next = match self.tick(Utc::now()).await {
                     Ok(r) => r.next_due,
@@ -1657,7 +1657,9 @@ impl Scheduler {
     async fn recover_schedules_at_startup(&self) -> Result<(), sqlx::Error> {
         let now = Utc::now();
         let mut tx = crate::db::begin(&self.pool).await?;
-        let recovered = crate::schedules::recover_interrupted(&mut tx, None, now).await;
+        let recovered =
+            crate::schedules::recover_interrupted(&mut tx, Some(crate::schedules::RECLAIM_LEASE), now)
+                .await;
         let recovered = match recovered {
             Ok(recovered) => {
                 tx.commit().await?;

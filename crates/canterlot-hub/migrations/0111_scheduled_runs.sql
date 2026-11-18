@@ -41,6 +41,12 @@ create table schedule_runs (
   session_id uuid,
   input_id uuid,
   manual boolean not null default false,
+  run_anyway boolean not null default false,
+  -- Владение приёмкой: кто вправе двигать строку дальше. Восстановление
+  -- забирает его атомарно (compare-and-set), возраст аренды меряется
+  -- от последней смены владельца, а не от создания заявки.
+  attempt_id uuid,
+  lease_at timestamptz,
   idempotency_key text not null,
   detail jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default clock_timestamp(),
@@ -55,6 +61,17 @@ create index schedule_runs_owner_state on schedule_runs (owner_id, state, create
 -- дожидается завершения победителя вместо второго dispatch.
 create unique index schedule_runs_schedule_key
   on schedule_runs (schedule_id, idempotency_key);
+
+-- Владелец-широкий резерв: один ключ клиента — один запуск владельца.
+-- Два Run Now для разных расписаний с тем же ключом не дают два dispatch:
+-- второй разрешается в первый или в конфликт.
+create unique index schedule_runs_owner_key
+  on schedule_runs (owner_id, idempotency_key);
+
+-- Долговечный ограничитель пушей о несработавших запусках: не чаще раза
+-- в час на расписание, переживает перезапуск (в отличие от проверки
+-- по времени постановки в owner_pushes).
+alter table schedules add column last_failure_push_at timestamptz;
 
 -- Пуш о несработавшем расписании не привязан к разговору: чаще всего
 -- сессии нет (ошибка до dispatch). Ограничение «не чаще раза в час»

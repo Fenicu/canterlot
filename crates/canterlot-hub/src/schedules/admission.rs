@@ -20,7 +20,7 @@ use crate::{
 
 use super::{
     ClaimedRun, OverlapPolicy, RunState, Schedule, ScheduleError, ScheduleRun, ScheduleTarget,
-    delay_ms, render_title, set_run_state,
+    delay_ms, render_title,
 };
 
 #[derive(Debug)]
@@ -40,35 +40,46 @@ impl Skip {
     }
 }
 
-type AdmitResult = Result<(Uuid, Uuid, Value), Skip>;
+/// Успех приёма: dispatch уже закоммитил `started` вместе с событием (14),
+/// финалу писать нечего. Неуспех несёт состояние, из которого финал пишет.
+struct AdmitOk;
+struct AdmitStop {
+    skip: Skip,
+    /// Состояние, из которого финал условно пишет (A): `claimed` без
+    /// предпроверки, `prechecking` после неё.
+    from: RunState,
+}
+/// `Superseded` — строкой уже владеет другой (восстановление или вторая
+/// приёмка): ничего не пишем, исход чужой.
+enum AdmitEnd {
+    Stop(AdmitStop),
+    Superseded,
+}
+type AdmitResult = Result<AdmitOk, AdmitEnd>;
+
+fn stop(skip: Skip, from: RunState) -> AdmitEnd {
+    AdmitEnd::Stop(AdmitStop { skip, from })
+}
 
 /// Обработка одного `claimed`-запуска. Все проверки идут вне транзакции тика.
+/// Владение строкой — попытка из заявки (A): каждый переход условный,
+/// проигрыш — молчаливый выход, исход пишет победитель.
 pub async fn admit(scheduler: &Scheduler, claimed: ClaimedRun) {
+    let _guard = super::AdmittingGuard::insert(claimed.run.id);
     let run = claimed.run;
     let schedule = claimed.schedule;
-    let result = admit_inner(scheduler, &schedule, &run, false, false).await;
-    let (state, detail, session_id, input_id, started_at, delay) = match result {
-        Ok((session_id, input_id, dispatch_detail)) => {
-            let started_at = Utc::now();
-            let mut detail = run.detail.clone();
-            merge(&mut detail, dispatch_detail);
-            (
-                RunState::Started,
-                detail,
-                Some(session_id),
-                Some(input_id),
-                Some(started_at),
-                Some(delay_ms(run.scheduled_at, started_at)),
-            )
-        }
-        Err(skip) => {
-            let mut detail = run.detail.clone();
-            merge(&mut detail, skip.detail);
-            (skip.state, detail, None, None, None, None)
-        }
+    let attempt = run.attempt_id;
+    let result = admit_inner(scheduler, &schedule, &run, run.run_anyway, run.manual).await;
+    let finish = match result {
+        // Dispatch закоммитил `started` и событие сам: финалу делать нечего.
+        Ok(_) => return,
+        Err(AdmitEnd::Superseded) => return,
+        Err(AdmitEnd::Stop(stop)) => stop,
     };
-    // Итог и его событие — одна транзакция: наблюдатель никогда не видит
-    // состояние без события и событие без состояния.
+    let mut detail = run.detail.clone();
+    merge(&mut detail, finish.skip.detail);
+    // Финал под замком расписания (порядок B: расписание, затем запуск),
+    // переход условный (A): чужую строку не перезаписываем.
     let mut tx = match crate::db::begin(scheduler.pool()).await {
         Ok(tx) => tx,
         Err(error) => {
@@ -76,35 +87,60 @@ pub async fn admit(scheduler: &Scheduler, claimed: ClaimedRun) {
             return;
         }
     };
-    if let Err(error) = set_run_state(
+    let schedule_exists: bool = match sqlx::query_scalar(
+        "select exists(select 1 from schedules where id=$1 for update)",
+    )
+    .bind(schedule.id)
+    .fetch_one(&mut *tx)
+    .await
+    {
+        Ok(exists) => exists,
+        Err(error) => {
+            let _ = tx.rollback().await;
+            tracing::error!(kind = "schedule_admit_db", error = %crate::dberr::describe(&error), "cannot record run outcome");
+            return;
+        }
+    };
+    if !schedule_exists {
+        // Расписание удалили, пока шёл приём: строка запуска ушла
+        // каскадом, событие о призраке не публикуем.
+        let _ = tx.rollback().await;
+        return;
+    }
+    let moved = match super::transition_run(
         &mut tx,
         run.id,
-        state,
+        finish.from,
+        attempt,
+        finish.skip.state,
         detail.clone(),
-        started_at,
-        delay,
-        session_id,
-        input_id,
+        None,
+        None,
+        None,
+        None,
     )
     .await
     {
-        let _ = tx.rollback().await;
-        if matches!(error, sqlx::Error::RowNotFound) {
-            // Расписание удалили, пока шёл приём: строка запуска ушла
-            // каскадом, событие о призраке не публикуем.
+        Ok(moved) => moved,
+        Err(error) => {
+            let _ = tx.rollback().await;
+            tracing::error!(kind = "schedule_admit_db", error = %crate::dberr::describe(&error), "cannot record run outcome");
             return;
         }
-        tracing::error!(kind = "schedule_admit_db", error = %crate::dberr::describe(&error), "cannot record run outcome");
+    };
+    if !moved {
+        // Строку забрало восстановление или вторая приёмка: исход чужой.
+        let _ = tx.rollback().await;
         return;
     }
     let updated = apply_outcome(
         &run,
-        state,
+        finish.skip.state,
         detail.clone(),
-        session_id,
-        input_id,
-        started_at,
-        delay,
+        None,
+        None,
+        None,
+        None,
     );
     let payload = match serde_json::to_value(&updated) {
         Ok(payload) => payload,
@@ -133,7 +169,7 @@ pub async fn admit(scheduler: &Scheduler, claimed: ClaimedRun) {
         tracing::error!(kind = "schedule_admit_db", error = %crate::dberr::describe(&error), "cannot publish run outcome");
         return;
     }
-    if state == RunState::Failed {
+    if finish.skip.state == RunState::Failed {
         let reason = detail
             .get("reason")
             .and_then(Value::as_str)
@@ -179,6 +215,8 @@ fn apply_outcome(
         session_id,
         input_id,
         manual: run.manual,
+        run_anyway: run.run_anyway,
+        attempt_id: run.attempt_id,
         idempotency_key: run.idempotency_key.clone(),
         detail,
     }
@@ -219,6 +257,12 @@ async fn earlier_blocking(
     .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))
 }
 
+impl From<Skip> for AdmitEnd {
+    fn from(skip: Skip) -> Self {
+        stop(skip, RunState::Claimed)
+    }
+}
+
 async fn admit_inner(
     scheduler: &Scheduler,
     schedule: &Schedule,
@@ -236,6 +280,30 @@ async fn admit_inner(
         .acquire()
         .await
         .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))?;
+    // Продлеваем аренду владения (A): восстановление меряет возраст от
+    // последней смены владельца и не заберёт строку посреди приёма.
+    // Ноль строк — строкой уже владеет другой: выходим молча.
+    {
+        let mut conn = scheduler
+            .pool()
+            .acquire()
+            .await
+            .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))?;
+        let owned = sqlx::query(
+            "update schedule_runs set lease_at=clock_timestamp(),updated_at=clock_timestamp()
+              where id=$1 and state='claimed'
+                and ((attempt_id=$2) or (attempt_id is null and $2 is null))",
+        )
+        .bind(run.id)
+        .bind(run.attempt_id)
+        .execute(&mut *conn)
+        .await
+        .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))?
+        .rows_affected();
+        if owned == 0 {
+            return Err(AdmitEnd::Superseded);
+        }
+    }
     if !run_anyway && !manual && schedule.overlap == OverlapPolicy::Skip {
         let mut conn = scheduler
             .pool()
@@ -243,7 +311,7 @@ async fn admit_inner(
             .await
             .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))?;
         if earlier_blocking(&mut conn, schedule.id, run.id).await? > 0 {
-            return Err(Skip::new(RunState::SkippedOverlap, "earlier_run_in_flight"));
+            return Err(Skip::new(RunState::SkippedOverlap, "earlier_run_in_flight").into());
         }
     }
 
@@ -266,10 +334,10 @@ async fn admit_inner(
             .await
             .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))?;
             let Some((machine_id, conversation_id, workdir)) = row else {
-                return Err(Skip::new(RunState::Failed, "conversation_not_found"));
+                return Err(Skip::new(RunState::Failed, "conversation_not_found").into());
             };
             if workdir.is_empty() {
-                return Err(Skip::new(RunState::Failed, "conversation_not_found"));
+                return Err(Skip::new(RunState::Failed, "conversation_not_found").into());
             }
             (machine_id, Some(conversation_id), Some(workdir))
         }
@@ -278,7 +346,7 @@ async fn admit_inner(
         .registry()
         .ok_or_else(|| Skip::new(RunState::SkippedMachineOffline, "no_registry"))?;
     if registry.command_sender(machine_id).is_none() {
-        return Err(Skip::new(RunState::SkippedMachineOffline, "worker_offline"));
+        return Err(Skip::new(RunState::SkippedMachineOffline, "worker_offline").into());
     }
 
     let mut conn = scheduler
@@ -324,13 +392,14 @@ async fn admit_inner(
         .await?;
         limits_probe = probe;
         if let Some(detail) = skip {
-            return Err(Skip::with(RunState::SkippedLimits, detail));
+            return Err(Skip::with(RunState::SkippedLimits, detail).into());
         }
     }
     // Соединение не держим через ожидание воркера: иначе каждый приём
     // с предпроверкой паркует соединение пула на минуту.
     drop(conn);
 
+    let mut from = RunState::Claimed;
     if !run_anyway && let Some(command) = schedule.precheck.as_deref() {
         precheck(
             scheduler,
@@ -342,6 +411,7 @@ async fn admit_inner(
             existing_workdir.as_deref(),
         )
         .await?;
+        from = RunState::Prechecking;
     }
 
     dispatch(
@@ -353,11 +423,12 @@ async fn admit_inner(
         run_anyway,
         manual,
         limits_probe,
+        from,
     )
     .await
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct ResolvedExecutor {
     harness: String,
     model: String,
@@ -423,7 +494,10 @@ async fn resolve_route(
     let limits = routing::limits_view(conn)
         .await
         .map_err(|_| Skip::new(RunState::Failed, "limits_unavailable"))?;
-    let live = routing::live_counts(conn, schedule.owner_id)
+    // Занятость считаем с корнями (F): запланированные сессии — корни, как
+    // интерактивные. Занятая пара отбрасывает кандидата в маршрутизации,
+    // и выбор падает на свободный запасной, а не в отказ на dispatch.
+    let live = routing::live_counts_with_roots(conn, schedule.owner_id)
         .await
         .map_err(|_| Skip::new(RunState::Failed, "live_counts_unavailable"))?;
     let now = Utc::now();
@@ -446,35 +520,52 @@ async fn resolve_route(
         now,
         request: &request,
         bypass_limits: run_anyway,
+        schedule_rules: true,
     })
     .map_err(|error| match error {
-        RouteError::NoExecutor { considered, reset } => Skip::with(
-            RunState::SkippedLimits,
-            json!({"reason": "no_executor", "considered": considered, "reset": reset}),
-        ),
+        // Только лимитные вердикты — пропуск по лимитам; остальные
+        // (не в списке, не тот уровень, каталога нет) — ошибка расписания.
+        RouteError::NoExecutor { considered, reset } => {
+            let limit_only = !considered.is_empty()
+                && considered.iter().all(|entry| {
+                    matches!(
+                        entry.verdict.as_str(),
+                        "limits_over"
+                            | "projected_over_threshold"
+                            | "quota_paused"
+                            | "limits_unknown"
+                            | "parallel_busy"
+                    )
+                });
+            if limit_only {
+                Skip::with(
+                    RunState::SkippedLimits,
+                    json!({"reason": "no_executor", "considered": considered, "reset": reset}),
+                )
+            } else {
+                Skip::with(
+                    RunState::Failed,
+                    json!({"reason": "no_executor", "considered": considered, "reset": reset}),
+                )
+            }
+        }
         RouteError::UnknownTask { available } => Skip::with(
             RunState::Failed,
             json!({"reason": "unknown_task_type", "available": available}),
         ),
     })?;
-    let preset =
-        routing::resolve_policy_preset(conn, schedule.owner_id, decision.preset.as_deref())
-            .await
-            .map_err(|_| Skip::new(RunState::Failed, "preset_unavailable"))?;
     let _ = run;
-    // Режим, проверенный маршрутизацией, едет и в создание: раньше проверка
-    // видела дочерний запасной (`read_only` при пустом родителе), а создание
-    // с `None` падало в `bypass` по умолчанию.
-    let mode = explicit.clone().unwrap_or_else(|| {
-        crate::session_tools::spawn::resolve_default_mode("", "", &decision.harness)
-    });
-    // Пресет расписания важнее политики: владелец выбрал его в редакторе.
+    // Корневые умолчания нового сеанса (10), а не дочерние и не политика
+    // делегирования: пропущенные режим и пресет — как на экране создания.
+    let mode = explicit
+        .clone()
+        .unwrap_or_else(|| crate::conversations::DEFAULT_PERMISSION_MODE.to_owned());
     let preset = match &schedule.target {
         ScheduleTarget::NewSession {
             preset: schedule_preset,
             ..
-        } => schedule_preset.clone().unwrap_or(preset),
-        ScheduleTarget::ExistingSession { .. } => preset,
+        } => schedule_preset.clone().unwrap_or_else(|| "clean".to_owned()),
+        ScheduleTarget::ExistingSession { .. } => "clean".to_owned(),
     };
     Ok(ResolvedExecutor {
         harness: decision.harness,
@@ -494,6 +585,20 @@ async fn limits_skip(
     config: &LimitsConfig,
     now: DateTime<Utc>,
 ) -> Result<(Option<Value>, Value), Skip> {
+    // Замки раньше чтений (8): в транзакции dispatch они держатся до commit,
+    // поэтому окно не краснеет и удержание не встаёт между чтением и замком.
+    // Вне транзакции каждый оператор и так атомарен, порядок безвреден.
+    if let Some(conversation_id) = existing_conversation {
+        sqlx::query("select conversation_id from queue_state where conversation_id=$1 for update")
+            .bind(conversation_id)
+            .fetch_optional(&mut *conn)
+            .await
+            .map_err(|_| Skip::new(RunState::Failed, "queue_unavailable"))?;
+    } else if !provider.is_empty() {
+        limits::share_provider(conn, provider)
+            .await
+            .map_err(|_| Skip::new(RunState::Failed, "limits_unavailable"))?;
+    }
     let settings = limit_settings::effective(conn, owner_id, config)
         .await
         .map_err(|_| Skip::new(RunState::Failed, "limit_settings_unavailable"))?;
@@ -540,6 +645,7 @@ async fn limits_skip(
         }
     }
     if let Some(conversation_id) = existing_conversation {
+        // Замок уже взят выше: повторное чтение видит то же состояние.
         let (holds, override_active): (sqlx::types::Json<Vec<HoldReason>>, bool) = sqlx::query_as(
             "select hold_reasons,coalesce(reserve_override_until>clock_timestamp(),false)
              from queue_state join conversations on conversations.id=queue_state.conversation_id
@@ -560,10 +666,7 @@ async fn limits_skip(
         {
             return Ok((Some(json!({"reason": "queue_hold", "provider": provider})), probe));
         }
-    } else {
-        limits::share_provider(conn, provider)
-            .await
-            .map_err(|_| Skip::new(RunState::Failed, "limits_unavailable"))?;
+    } else if !provider.is_empty() {
         let holds = crunch_holds(conn, provider).await?;
         if !holds.is_empty() {
             return Ok((
@@ -589,18 +692,26 @@ async fn precheck(
     command: &str,
     machine_id: Uuid,
     existing_workdir: Option<&str>,
-) -> Result<(), Skip> {
+) -> Result<(), AdmitEnd> {
     let attempt_id = Uuid::now_v7();
     let mut conn = scheduler
         .pool()
         .acquire()
         .await
         .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))?;
-    set_run_state(
+    // Условный переход (A): чужую строку не трогаем.
+    let mut detail = run.detail.clone();
+    merge(
+        &mut detail,
+        json!({"precheck_attempt_id": attempt_id, "precheck_started_at": Utc::now()}),
+    );
+    let moved = super::transition_run(
         &mut conn,
         run.id,
+        RunState::Claimed,
+        run.attempt_id,
         RunState::Prechecking,
-        json!({"precheck_attempt_id": attempt_id, "precheck_started_at": Utc::now()}),
+        detail,
         None,
         None,
         None,
@@ -608,14 +719,18 @@ async fn precheck(
     )
     .await
     .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))?;
+    if !moved {
+        return Err(AdmitEnd::Superseded);
+    }
     drop(conn);
+    let fail = |skip: Skip| stop(skip, RunState::Prechecking);
     let (workdir, timeout_seconds) = match &schedule.target {
         ScheduleTarget::NewSession { workdir, .. } => {
             (workdir.clone(), schedule.precheck_timeout_seconds)
         }
         ScheduleTarget::ExistingSession { .. } => {
             let Some(workdir) = existing_workdir else {
-                return Err(Skip::new(RunState::Failed, "conversation_not_found"));
+                return Err(fail(Skip::new(RunState::Failed, "conversation_not_found")));
             };
             (workdir.to_owned(), schedule.precheck_timeout_seconds)
         }
@@ -631,43 +746,46 @@ async fn precheck(
     let reply = match registry.ask_precheck(machine_id, request, wait).await {
         Ok(reply) => reply,
         Err(PrecheckFailure::CapabilityMissing) => {
-            return Err(Skip::with(
+            return Err(fail(Skip::with(
                 RunState::Failed,
                 json!({"reason": "precheck_capability_missing", "capability": CAPABILITY_SCHEDULE_PRECHECK_V1}),
-            ));
+            )));
         }
         Err(PrecheckFailure::NoSession | PrecheckFailure::NoAnswer | PrecheckFailure::Busy) => {
-            return Err(Skip::new(RunState::Failed, "precheck_result_unknown"));
+            return Err(fail(Skip::new(RunState::Failed, "precheck_result_unknown")));
         }
         Err(PrecheckFailure::Invalid) => {
-            return Err(Skip::new(RunState::Failed, "precheck_invalid_attempt"));
+            return Err(fail(Skip::new(RunState::Failed, "precheck_invalid_attempt")));
         }
     };
     if reply.attempt_id != attempt_id.to_string() {
-        return Err(Skip::new(RunState::Failed, "precheck_attempt_mismatch"));
+        return Err(fail(Skip::new(
+            RunState::Failed,
+            "precheck_attempt_mismatch",
+        )));
     }
     match reply.outcome {
         Some(canterlot_proto::worker::v1::precheck_result::Outcome::Finished(finished)) => {
             if finished.exit_code == 0 && !finished.timed_out {
                 Ok(())
             } else {
-                Err(Skip::with(
+                Err(fail(Skip::with(
                     RunState::SkippedPrecheck,
                     json!({
                         "reason": if finished.timed_out { "precheck_timeout" } else { "precheck_nonzero" },
                         "exit_code": finished.exit_code,
                         "output_tail": finished.output_tail,
                     }),
-                ))
+                )))
             }
         }
         Some(canterlot_proto::worker::v1::precheck_result::Outcome::Error(error)) => {
-            Err(Skip::with(
+            Err(fail(Skip::with(
                 RunState::Failed,
                 json!({"reason": "precheck_error", "detail": error.reason}),
-            ))
+            )))
         }
-        None => Err(Skip::new(RunState::Failed, "precheck_empty_reply")),
+        None => Err(fail(Skip::new(RunState::Failed, "precheck_empty_reply"))),
     }
 }
 
@@ -681,7 +799,9 @@ async fn dispatch(
     run_anyway: bool,
     manual: bool,
     limits_probe: Value,
+    from: RunState,
 ) -> AdmitResult {
+    let fail = |skip: Skip| stop(skip, from);
     let mut tx = crate::db::begin(scheduler.pool())
         .await
         .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))?;
@@ -694,56 +814,75 @@ async fn dispatch(
             .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))?;
     let Some(current) = current else {
         let _ = tx.rollback().await;
-        return Err(Skip::new(RunState::SkippedChanged, "schedule_deleted"));
+        return Err(fail(Skip::new(RunState::SkippedChanged, "schedule_deleted")));
     };
+    // Владение строкой (A): чужая приёмка или восстановление уже забрали
+    // запуск — второй сессии не создаём, ничего не перезаписываем.
+    let owned: Option<(String, Option<Uuid>)> =
+        sqlx::query_as("select state,attempt_id from schedule_runs where id=$1")
+            .bind(run.id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))?;
+    let Some((state, attempt)) = owned else {
+        let _ = tx.rollback().await;
+        return Err(fail(Skip::new(RunState::SkippedChanged, "schedule_deleted")));
+    };
+    if state != from.as_str() || attempt != run.attempt_id {
+        let _ = tx.rollback().await;
+        return Err(AdmitEnd::Superseded);
+    }
     // Повтор после сбоя сразу после commit dispatch: не создаём вторую сессию
     // и не ставим второй ввод; возвращаем уже зафиксированные идентификаторы.
-    // Строка запуска читается под замком расписания, после него: две
-    // параллельные приёмки не разойдутся мимо друг друга.
+    // (Состояние `started` при нашем владении сюда попасть не может, но ветвь
+    // оставляем как страховку от повторного вызова после commit.)
     let already: Option<(Uuid, Uuid)> = sqlx::query_as(
-        "select session_id,input_id from schedule_runs where id=$1 and state='started' for update",
+        "select session_id,input_id from schedule_runs where id=$1 and state='started'",
     )
     .bind(run.id)
     .fetch_optional(&mut *tx)
     .await
     .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))?;
-    if let Some((session_id, input_id)) = already {
-        tx.commit()
-            .await
-            .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))?;
-        return Ok((session_id, input_id, json!({"replayed": true})));
+    if already.is_some() {
+        let _ = tx.rollback().await;
+        return Ok(AdmitOk);
     }
     let current = current
         .into_schedule()
-        .map_err(|_| Skip::new(RunState::Failed, "invalid_schedule"))?;
+        .map_err(|_| Skip::new(RunState::Failed, "invalid_schedule"))
+        .map_err(fail)?;
     // Ручной запуск с кнопки разрешён и на приостановленном расписании:
     // важно лишь, что его не правили посреди приёма (ревизия та же).
     // Пауза во время приёма тихого тика — это `skipped_changed`.
     if current.revision != run.claimed_revision {
         let _ = tx.rollback().await;
-        return Err(Skip::new(
+        return Err(fail(Skip::new(
             RunState::SkippedChanged,
             "schedule_revision_changed",
-        ));
+        )));
     }
     if !manual && !run_anyway && !current.enabled {
         let _ = tx.rollback().await;
-        return Err(Skip::new(RunState::SkippedChanged, "schedule_paused"));
+        return Err(fail(Skip::new(RunState::SkippedChanged, "schedule_paused")));
     }
     // Замок владельца как у прочих запускаемых сессий: параллельные приёмки
     // одного владельца упорядочиваются здесь, а не расходятся в две сессии.
     crate::conversations::lock_owner(&mut tx, schedule.owner_id)
         .await
-        .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))?;
+        .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))
+        .map_err(fail)?;
     // Решение о пересечении повторяется под замками dispatch: ранняя проверка
     // в приёме могла пропустить заявку, чей ввод встал в очередь после неё.
     if !run_anyway
         && !manual
         && current.overlap == OverlapPolicy::Skip
-        && earlier_blocking(&mut tx, schedule.id, run.id).await? > 0
+        && earlier_blocking(&mut tx, schedule.id, run.id)
+            .await
+            .map_err(fail)?
+            > 0
     {
         let _ = tx.rollback().await;
-        return Err(Skip::new(RunState::SkippedOverlap, "earlier_run_in_flight"));
+        return Err(fail(Skip::new(RunState::SkippedOverlap, "earlier_run_in_flight")));
     }
     // Пересчёт параллельности с корнями: `live_counts` в маршрутизации видит
     // только детей (`parent_conversation_id is not null`), а запланированные
@@ -752,7 +891,8 @@ async fn dispatch(
     if matches!(&schedule.target, ScheduleTarget::NewSession { .. }) {
         let (policy, _) = routing::load_policy(&mut tx, schedule.owner_id)
             .await
-            .map_err(|_| Skip::new(RunState::Failed, "routing_policy_unavailable"))?;
+            .map_err(|_| Skip::new(RunState::Failed, "routing_policy_unavailable"))
+            .map_err(fail)?;
         let pair = format!("{}/{}", executor.harness, executor.model);
         if let Some(limit) = policy.max_parallel.get(&pair) {
             let busy: i64 = sqlx::query_scalar(
@@ -776,18 +916,39 @@ async fn dispatch(
             .bind(&executor.model)
             .fetch_one(&mut *tx)
             .await
-            .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))?;
+            .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))
+            .map_err(fail)?;
             if busy >= *limit {
                 let _ = tx.rollback().await;
-                return Err(Skip::with(
+                return Err(fail(Skip::with(
                     RunState::SkippedLimits,
                     json!({"reason": "parallel_busy", "pair": pair, "busy": busy, "limit": limit}),
-                ));
+                )));
             }
         }
     }
-    // Повторная проверка лимитов внутри транзакции dispatch под замком
-    // расписания: между ранней проверкой и commit лежит ожидание воркера,
+    // Действующая модель существующей сессии перечитывается здесь (8):
+    // до предпроверки она могла смениться, окно лимитов — вместе с ней.
+    let mut executor = executor.clone();
+    if let ScheduleTarget::ExistingSession { conversation_id } = &schedule.target {
+        let fresh: Option<String> = sqlx::query_scalar(
+            "select coalesce(d.effective_model,'') from conversations c
+              left join conversation_derived d on d.conversation_id = c.id
+              where c.id = $1",
+        )
+        .bind(conversation_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))
+        .map_err(fail)?;
+        if let Some(model) = fresh
+            && !model.is_empty()
+        {
+            executor.model = model;
+        }
+    }
+    // Повторная проверка лимитов внутри транзакции dispatch под замками:
+    // между ранней проверкой и commit лежит ожидание воркера,
     // окна и удержания могли покраснеть. Та же проверка, что и до предпроверки.
     let mut limits_probe = limits_probe;
     if !run_anyway && !provider.is_empty() {
@@ -804,11 +965,12 @@ async fn dispatch(
             scheduler.limits_config(),
             Utc::now(),
         )
-        .await?;
+        .await
+        .map_err(fail)?;
         limits_probe = probe;
         if let Some(detail) = skip {
             let _ = tx.rollback().await;
-            return Err(Skip::with(RunState::SkippedLimits, detail));
+            return Err(fail(Skip::with(RunState::SkippedLimits, detail)));
         }
     }
     let now = Utc::now();
@@ -853,7 +1015,8 @@ async fn dispatch(
                     RunState::Failed,
                     json!({"reason": "create_failed", "detail": format!("{error:?}")}),
                 )
-            })?
+            })
+            .map_err(fail)?
             .conversation_id;
             let submitted = submit_message_in_tx(
                 &mut tx,
@@ -874,7 +1037,8 @@ async fn dispatch(
                     RunState::Failed,
                     json!({"reason": "submit_failed", "detail": format!("{error:?}")}),
                 )
-            })?;
+            })
+            .map_err(fail)?;
             (created, submitted.input_id)
         }
         ScheduleTarget::ExistingSession { conversation_id } => {
@@ -897,7 +1061,8 @@ async fn dispatch(
                     RunState::Failed,
                     json!({"reason": "submit_failed", "detail": format!("{error:?}")}),
                 )
-            })?;
+            })
+            .map_err(fail)?;
             (*conversation_id, submitted.input_id)
         }
     };
@@ -923,9 +1088,14 @@ async fn dispatch(
     {
         final_detail["queue_hold"] = holds;
     }
-    set_run_state(
+    // `started` и его событие — одна транзакция dispatch (14): крах между
+    // commit'ами больше невозможен. Переход условный (A): чужую строку
+    // не перезаписываем.
+    let moved = super::transition_run(
         &mut tx,
         run.id,
+        from,
+        run.attempt_id,
         RunState::Started,
         final_detail.clone(),
         Some(now),
@@ -934,12 +1104,46 @@ async fn dispatch(
         Some(input_id),
     )
     .await
-    .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))?;
+    .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))
+    .map_err(fail)?;
+    if !moved {
+        let _ = tx.rollback().await;
+        return Err(AdmitEnd::Superseded);
+    }
+    let started = apply_outcome(
+        run,
+        RunState::Started,
+        final_detail.clone(),
+        Some(session_id),
+        Some(input_id),
+        Some(now),
+        Some(delay),
+    );
+    let payload = serde_json::to_value(&started)
+        .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))
+        .map_err(fail)?;
+    events::append(
+        &mut tx,
+        NewEvent {
+            scope: Scope::Schedules {
+                owner_id: schedule.owner_id,
+            },
+            kind: "schedule_run_changed",
+            conversation_id: None,
+            execution_id: None,
+            payload,
+            correlation_id: Uuid::now_v7(),
+        },
+    )
+    .await
+    .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))
+    .map_err(fail)?;
     tx.commit()
         .await
-        .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))?;
+        .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))
+        .map_err(fail)?;
     scheduler.dispatcher().trigger(session_id);
-    Ok((session_id, input_id, final_detail))
+    Ok(AdmitOk)
 }
 
 /// Тот же advisory-замок, что `idempotency::run_in_tx`: ключ первым,
@@ -995,9 +1199,10 @@ async fn await_winner_run(
     }
 }
 /// «Запустить сейчас»: тот же приём и dispatch, но под ключом клиента.
-/// Резерв строки запуска атомарен (уникальность `0112_schedule_run_key`):
+/// Резерв строки запуска атомарен (владелец-широкий уникальный индекс):
 /// параллельные запросы с тем же ключом и повтор после обрыва получают
-/// тот же запуск вместо второго dispatch.
+/// тот же запуск вместо второго dispatch; второй ключ на другое расписание
+/// или другой `run_anyway` — конфликт, а не второй dispatch (E).
 pub async fn run_now(
     state: &AppState,
     owner_id: Uuid,
@@ -1009,7 +1214,8 @@ pub async fn run_now(
     let body = json!({"schedule_id": schedule_id, "run_anyway": run_anyway});
     let hash = crate::idempotency::request_hash("run_now", &body);
     // Короткая резервная транзакция: тот же advisory-замок, что `run_in_tx`,
-    // затем поиск/создание резерва. Долгой работы с воркером внутри нет.
+    // затем поиск/создание резерва. Владелец-широкий ключ резервируется
+    // вместе со строкой запуска, до приёма (E). Долгой работы с воркером внутри нет.
     let reserved = {
         let mut tx = crate::db::begin(&state.pool).await?;
         lock_idempotency_key(&mut tx, owner_id, key).await?;
@@ -1037,6 +1243,7 @@ pub async fn run_now(
             now,
             schedule.revision,
             key,
+            run_anyway,
             json!({"manual": true, "run_anyway": run_anyway}),
         )
         .await?;
@@ -1046,14 +1253,17 @@ pub async fn run_now(
                 Some((schedule, run))
             }
             None => {
-                // Чужой резерв с тем же ключом: дожидаемся победителя.
-                let winner = super::get_run_by_key(&mut tx, owner_id, schedule_id, key).await?;
+                // Чужой резерв с тем же владелец-широким ключом: тот же
+                // запуск — дожидаемся победителя, чужой — конфликт.
+                let winner = super::get_run_by_owner_key(&mut tx, owner_id, key).await?;
                 tx.rollback().await?;
                 let Some(winner) = winner else {
                     return Err(ScheduleError::NotFound);
                 };
-                let winner_id = winner.id;
-                return await_winner_run(&state.pool, owner_id, winner_id).await;
+                if winner.schedule_id == schedule_id && winner.run_anyway == run_anyway {
+                    return await_winner_run(&state.pool, owner_id, winner.id).await;
+                }
+                return Err(ScheduleError::Conflict("idempotency_conflict"));
             }
         }
     };
@@ -1061,88 +1271,118 @@ pub async fn run_now(
         return Err(ScheduleError::NotFound);
     };
     let scheduler = state.scheduler.clone();
-    let claimed = ClaimedRun {
-        run: run.clone(),
-        schedule,
-    };
-    let result = admit_inner(&scheduler, &claimed.schedule, &run, run_anyway, true).await;
-    let (state_out, detail, session_id, input_id, started_at, delay) = match result {
-        Ok((session_id, input_id, dispatch_detail)) => {
-            let started_at = Utc::now();
+    let _guard = super::AdmittingGuard::insert(run.id);
+    let result = admit_inner(&scheduler, &schedule, &run, run.run_anyway, run.manual).await;
+    match result {
+        // Dispatch уже закоммитил `started` и событие: фиксируем только
+        // идемпотентный ответ.
+        Ok(_) => {
+            let mut conn = state.pool.acquire().await?;
+            let Some(current) = super::get_run(&mut conn, owner_id, run.id).await? else {
+                return Err(ScheduleError::NotFound);
+            };
+            drop(conn);
+            let mut tx = crate::db::begin(&state.pool).await?;
+            let response = serde_json::to_value(&current)
+                .map_err(|e| ScheduleError::Db(sqlx::Error::Encode(Box::new(e))))?;
+            let recorded =
+                crate::idempotency::record(&mut tx, owner_id, key, "run_now", &hash, &response, None)
+                    .await?;
+            if !recorded {
+                // Гонку резерва мы уже исключили владелец-широким индексом;
+                // чужая запись — только завершённая параллельная операция.
+                let _ = tx.rollback().await;
+                let mut conn = state.pool.acquire().await?;
+                match crate::idempotency::lookup(&mut conn, owner_id, key, "run_now", &hash).await? {
+                    crate::idempotency::Begin::Replay(value) => {
+                        return serde_json::from_value(value)
+                            .map_err(|e| ScheduleError::Db(sqlx::Error::Decode(Box::new(e))));
+                    }
+                    _ => return Err(ScheduleError::Conflict("idempotency_conflict")),
+                }
+            }
+            tx.commit().await?;
+            Ok(current)
+        }
+        Err(AdmitEnd::Superseded) => {
+            // Строку забрало восстановление: исход пишет тихий путь,
+            // дожидаемся его вместо второго dispatch.
+            let mut conn = state.pool.acquire().await?;
+            let winner = super::get_run_by_owner_key(&mut conn, owner_id, key).await?;
+            let Some(winner) = winner else {
+                return Err(ScheduleError::NotFound);
+            };
+            await_winner_run(&state.pool, owner_id, winner.id).await
+        }
+        Err(AdmitEnd::Stop(stop)) => {
             let mut detail = run.detail.clone();
-            merge(&mut detail, dispatch_detail);
-            (
-                RunState::Started,
-                detail,
-                Some(session_id),
-                Some(input_id),
-                Some(started_at),
-                Some(delay_ms(run.scheduled_at, started_at)),
+            merge(&mut detail, stop.skip.detail);
+            let mut tx = crate::db::begin(&state.pool).await?;
+            let schedule_exists: bool = sqlx::query_scalar(
+                "select exists(select 1 from schedules where id=$1 for update)",
             )
+            .bind(schedule.id)
+            .fetch_one(&mut *tx)
+            .await?;
+            if !schedule_exists {
+                let _ = tx.rollback().await;
+                return Err(ScheduleError::NotFound);
+            }
+            let moved = super::transition_run(
+                &mut tx,
+                run.id,
+                stop.from,
+                run.attempt_id,
+                stop.skip.state,
+                detail.clone(),
+                None,
+                None,
+                None,
+                None,
+            )
+            .await?;
+            if !moved {
+                let _ = tx.rollback().await;
+                let mut conn = state.pool.acquire().await?;
+                let winner = super::get_run_by_owner_key(&mut conn, owner_id, key).await?;
+                let Some(winner) = winner else {
+                    return Err(ScheduleError::NotFound);
+                };
+                return await_winner_run(&state.pool, owner_id, winner.id).await;
+            }
+            let updated = apply_outcome(&run, stop.skip.state, detail, None, None, None, None);
+            let response = serde_json::to_value(&updated)
+                .map_err(|e| ScheduleError::Db(sqlx::Error::Encode(Box::new(e))))?;
+            events::append(
+                &mut tx,
+                NewEvent {
+                    scope: Scope::Schedules { owner_id },
+                    kind: "schedule_run_changed",
+                    conversation_id: None,
+                    execution_id: None,
+                    payload: response.clone(),
+                    correlation_id,
+                },
+            )
+            .await?;
+            crate::idempotency::record(&mut tx, owner_id, key, "run_now", &hash, &response, None)
+                .await?;
+            if stop.skip.state == RunState::Failed {
+                let reason = updated
+                    .detail
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("failed");
+                crate::notify::enqueue_schedule_failure_in_tx(
+                    &mut tx,
+                    schedule_id,
+                    &schedule.name,
+                    reason,
+                )
+                .await?;
+            }
+            tx.commit().await?;
+            Ok(updated)
         }
-        Err(skip) => {
-            let mut detail = run.detail.clone();
-            merge(&mut detail, skip.detail);
-            (skip.state, detail, None, None, None, None)
-        }
-    };
-    let mut tx = crate::db::begin(&state.pool).await?;
-    if let Err(error) = set_run_state(
-        &mut tx,
-        run.id,
-        state_out,
-        detail.clone(),
-        started_at,
-        delay,
-        session_id,
-        input_id,
-    )
-    .await
-    {
-        let _ = tx.rollback().await;
-        // Расписание удалили посреди ручного запуска: каскад унёс строку.
-        if matches!(error, sqlx::Error::RowNotFound) {
-            return Err(ScheduleError::NotFound);
-        }
-        return Err(ScheduleError::Db(error));
     }
-    let updated = apply_outcome(
-        &run, state_out, detail, session_id, input_id, started_at, delay,
-    );
-    let response = serde_json::to_value(&updated)
-        .map_err(|e| ScheduleError::Db(sqlx::Error::Encode(Box::new(e))))?;
-    events::append(
-        &mut tx,
-        NewEvent {
-            scope: Scope::Schedules { owner_id },
-            kind: "schedule_run_changed",
-            conversation_id: None,
-            execution_id: None,
-            payload: response.clone(),
-            correlation_id,
-        },
-    )
-    .await?;
-    crate::idempotency::record(&mut tx, owner_id, key, "run_now", &hash, &response, None).await?;
-    if state_out == RunState::Failed {
-        let reason = updated
-            .detail
-            .get("reason")
-            .and_then(Value::as_str)
-            .unwrap_or("failed");
-        crate::notify::enqueue_schedule_failure_in_tx(
-            &mut tx,
-            schedule_id,
-            &claimed.schedule.name,
-            reason,
-        )
-        .await?;
-    }
-    tx.commit().await?;
-    Ok(updated)
 }
-
-#[allow(dead_code)]
-fn _pool_marker(_: &PgPool) {}
-#[allow(dead_code)]
-fn _delta_marker(_: TimeDelta) {}
