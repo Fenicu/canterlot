@@ -25,6 +25,13 @@ describe('shell card', () => {
     expect(shell(made('Bash', { command: 'ls -la' }, ''))!.line).toBe('Команда: ls -la');
   });
 
+  it('opencode_bash_reads_the_description_and_cwd_saved_in_its_call', () => {
+    const card = shell(made('shell', { command: 'echo ready', description: 'Проверка готовности', cwd: '/work/demo' }, 'ready\n'))!;
+    expect(card.line).toBe('Проверка готовности');
+    expect(card.data.cwd).toBe('/work/demo');
+    expect(card.data.command).toBe('echo ready');
+  });
+
   it('claude_failure_takes_the_exit_code_from_the_output', () => {
     const call = cardCall(callBlock('Bash', { command: 'npm test' }), resultBlock('Exit code 2\nFAIL src/a.test.ts', { summary: 'error' }), { root: true });
     const card = shell(call)!;

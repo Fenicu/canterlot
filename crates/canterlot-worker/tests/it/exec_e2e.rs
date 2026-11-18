@@ -2529,15 +2529,16 @@ async fn opencode_stream_cut_and_worker_restart_reach_the_hub_once(pool: PgPool)
     })
     .await;
     let contents: Vec<String> = texts().await.into_iter().map(|(_, text)| text).collect();
+    let call: Value = serde_json::from_str(&contents[0]).expect("the shell call keeps its input");
+    assert_eq!(call["command"], "echo из разрыва");
+    assert_eq!(call["description"], "x");
+    assert!(
+        call["cwd"].as_str().is_some_and(|dir| !dir.is_empty()),
+        "the working directory is in the call"
+    );
     assert_eq!(
-        contents,
-        [
-            "echo из разрыва",
-            "думаю ",
-            "из разрыва\n",
-            "первый кусок",
-            "после разрыва"
-        ]
+        &contents[1..],
+        ["думаю ", "из разрыва\n", "первый кусок", "после разрыва"]
     );
     let bad: i64 = sqlx::query_scalar(
         "select count(*) from events where kind in

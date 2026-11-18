@@ -102,6 +102,7 @@ export function seedToolCards(api: FakeHubApi, opts: { now?: number; working?: b
   feed.call(run, 'shellDenied', 'shell', 'rm -rf web/build web/.svelte-kit', '', { summary: 'rm -rf web/build web/.svelte-kit, declined' });
   feed.text(run, 'Без чистки: тесты воркера.');
   feed.call(run, 'shellCwd', 'Bash', { command: 'cargo test -p canterlot-worker --lib adapter::codex', cwd: '/home/owner/canterlot' }, 'test result: ok. 214 passed; 0 failed');
+  feed.call(run, 'shellOpencode', 'shell', { command: 'echo ready', description: 'Проверка готовности', cwd: '/work/demo' }, 'ready\n', { summary: 'shell: echo ready, exit 0' });
 
   feed.text(run, 'Команды готовы.');
 

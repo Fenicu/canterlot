@@ -283,6 +283,8 @@ pub struct Translator {
     /// Последнее отданное сопровождению состояние фоновых потомков и признак «фон идёт».
     background_sent: Vec<BackgroundTask>,
     background_on: bool,
+    /// Папка исполнения из кадров: у команды она показывает, где её запустили.
+    cwd: Option<String>,
 }
 
 /// Текст результата инструмента без исполнения: сервер умер раньше ответа.
@@ -356,13 +358,34 @@ fn tool_summary(name: &str, input: &Value) -> String {
     cut_end(&summary, SUMMARY_BYTES)
 }
 
-// Текст вызова: команда как есть, остальное сырым входом.
+// Текст вызова: команда как есть; описание и папка идут входом, чтобы карточка их прочла.
 fn call_text(input: &Value) -> String {
-    match input.get("command").and_then(Value::as_str) {
-        Some(command) => command.to_owned(),
-        None if input.is_null() => String::new(),
-        None => input.to_string(),
+    let Some(command) = input.get("command").and_then(Value::as_str) else {
+        return if input.is_null() {
+            String::new()
+        } else {
+            input.to_string()
+        };
+    };
+    let described = input
+        .get("description")
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty());
+    let cwd = ["cwd", "workdir", "workingDirectory"]
+        .iter()
+        .find_map(|key| input.get(*key).and_then(Value::as_str))
+        .filter(|dir| !dir.is_empty());
+    if described.is_none() && cwd.is_none() {
+        return command.to_owned();
     }
+    let mut shown = json!({"command": command});
+    if let Some(text) = described {
+        shown["description"] = Value::String(text.to_owned());
+    }
+    if let Some(dir) = cwd {
+        shown["cwd"] = Value::String(dir.to_owned());
+    }
+    shown.to_string()
 }
 
 fn content_text(data: &Value) -> String {
@@ -454,6 +477,7 @@ impl Translator {
             unknown: HashSet::new(),
             background_sent: Vec::new(),
             background_on: false,
+            cwd: None,
         }
     }
 
@@ -727,6 +751,13 @@ impl Translator {
         };
         let empty = Value::Null;
         let data = event.get("data").unwrap_or(&empty);
+        if let Some(dir) = event
+            .pointer("/location/directory")
+            .and_then(Value::as_str)
+            .filter(|dir| !dir.is_empty())
+        {
+            self.cwd = Some(dir.to_owned());
+        }
         if kind == "session.created" {
             self.on_created(data);
             return Vec::new();
@@ -1152,8 +1183,20 @@ impl Translator {
         if self.tool_finished(data) {
             return Vec::new();
         }
+        let cwd = self.cwd.clone();
         let (_, state) = self.tool_of(data);
         state.input = data.get("input").cloned().unwrap_or(Value::Null);
+        // Карточка команды берёт папку и описание из входа, поэтому кладём их рядом с командой.
+        if matches!(state.name.as_str(), "shell" | "bash")
+            && let Value::Object(input) = &mut state.input
+        {
+            let named = ["cwd", "workdir", "workingDirectory"]
+                .iter()
+                .any(|key| input.contains_key(*key));
+            if !named && let Some(dir) = cwd {
+                input.insert("cwd".to_owned(), Value::String(dir));
+            }
+        }
         let (name, summary) = (state.name.clone(), tool_summary(&state.name, &state.input));
         let mut out = Vec::new();
         self.open_tool(data, &mut out);

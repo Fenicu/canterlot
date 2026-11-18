@@ -717,6 +717,21 @@ fn prompts(env: &Env) -> usize {
         .count()
 }
 
+// Вызов команды несёт вход, а не только команду: папка и описание видны и после разрыва.
+fn cut_midturn_blocks(blocks: &[String]) {
+    let call: Value = serde_json::from_str(&blocks[0]).expect("the shell call keeps its input");
+    assert_eq!(call["command"], "echo из разрыва");
+    assert_eq!(call["description"], "x");
+    assert!(
+        call["cwd"].as_str().is_some_and(|dir| !dir.is_empty()),
+        "the working directory is in the call"
+    );
+    assert_eq!(
+        &blocks[1..],
+        ["думаю ", "из разрыва\n", "первый кусок", "после разрыва"]
+    );
+}
+
 // Разрыв потока под настоящим супервизором: журнал получает каждый блок один раз.
 #[tokio::test]
 async fn stream_cut_through_the_supervisor_keeps_every_block_once() {
@@ -725,16 +740,7 @@ async fn stream_cut_through_the_supervisor_keeps_every_block_once() {
     env.wait_running().await;
     let command = env.deliver("начни").await;
     env.wait_finished(command).await;
-    assert_eq!(
-        assert_each_block_once(&env.bodies),
-        [
-            "echo из разрыва",
-            "думаю ",
-            "из разрыва\n",
-            "первый кусок",
-            "после разрыва"
-        ]
-    );
+    cut_midturn_blocks(&assert_each_block_once(&env.bodies));
     assert_eq!(prompts(&env), 1);
     env.stop().await;
     env.fake().wait_gone().await;
@@ -758,16 +764,7 @@ async fn worker_restart_keeps_the_server_and_every_block_once() {
     env.restart_worker().await;
     env.wait_finished(command).await;
     assert_eq!(env.fake().pids(), pids, "the same server");
-    assert_eq!(
-        assert_each_block_once(&env.bodies),
-        [
-            "echo из разрыва",
-            "думаю ",
-            "из разрыва\n",
-            "первый кусок",
-            "после разрыва"
-        ]
-    );
+    cut_midturn_blocks(&assert_each_block_once(&env.bodies));
     assert_eq!(prompts(&env), 1);
     env.stop().await;
     env.fake().wait_gone().await;

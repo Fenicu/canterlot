@@ -434,6 +434,7 @@ struct ToolView {
     name: String,
     summary: String,
     call: Uuid,
+    call_text: Option<String>,
     result_text: Option<String>,
     final_summary: Option<String>,
 }
@@ -481,6 +482,7 @@ fn tools_of(translated: Vec<Translated>) -> Vec<ToolView> {
             name: tool_name.clone().unwrap_or_default(),
             summary: summary.clone().unwrap_or_default(),
             call: *block_id,
+            call_text: final_of(*block_id).map(|(text, _)| text),
             result_text: result.and_then(final_of).map(|(text, _)| text),
             final_summary: final_of(*block_id).and_then(|(_, summary)| summary),
         });
@@ -524,6 +526,36 @@ fn shell_exit_status_reaches_the_summary() {
         tools[1].final_summary.as_deref(),
         Some("read: note.txt, completed")
     );
+}
+
+// Карточка команды читает вход из текста вызова: описание и папку надо сохранить.
+#[test]
+fn shell_call_keeps_its_description_and_working_directory() {
+    let mut translator = Translator::new("ses_a", HashMap::new());
+    translator.begin_run(Some(Uuid::now_v7()));
+    translator.feed(&json!({"type": "session.tool.input.started", "data": {
+        "sessionID": "ses_a", "assistantMessageID": "msg_1", "id": "call_1", "name": "shell"}}));
+    let mut out = translator.feed(&json!({
+        "type": "session.tool.called",
+        "location": {"directory": "/work/demo"},
+        "data": {
+            "sessionID": "ses_a", "assistantMessageID": "msg_1", "id": "call_1",
+            "input": {"command": "echo hi", "description": "Проверить вывод"}
+        }
+    }));
+    out.extend(
+        translator.feed(&json!({"type": "session.tool.success", "data": {
+            "sessionID": "ses_a", "assistantMessageID": "msg_1", "id": "call_1",
+            "content": [{"type": "text", "text": "hi\n"}], "metadata": {"exit": 0}
+        }})),
+    );
+    let tools = tools_of(out);
+    let text = tools[0].call_text.as_deref().expect("call text");
+    let input: Value = serde_json::from_str(text).expect("the call carries its input as JSON");
+    assert_eq!(input["command"], "echo hi");
+    assert_eq!(input["description"], "Проверить вывод");
+    assert_eq!(input["cwd"], "/work/demo");
+    assert_eq!(tools[0].summary, "shell: echo hi");
 }
 
 // Сосед завершился раньше первого вызова шага: связь идёт по паре (сообщение, id).

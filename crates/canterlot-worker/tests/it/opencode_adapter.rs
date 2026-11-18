@@ -5221,15 +5221,17 @@ async fn stream_cut_loses_no_block_and_duplicates_none() {
     let input = bench.input("начни");
     bench.accepted(&input).await;
     let events = bench.until_finished(input.command_id).await;
+    let blocks = assert_each_block_once(&events);
+    let call: Value = serde_json::from_str(&blocks[0]).expect("the shell call keeps its input");
+    assert_eq!(call["command"], "echo из разрыва");
+    assert_eq!(call["description"], "x");
+    assert!(
+        call["cwd"].as_str().is_some_and(|dir| !dir.is_empty()),
+        "the working directory is in the call"
+    );
     assert_eq!(
-        assert_each_block_once(&events),
-        [
-            "echo из разрыва",
-            "думаю ",
-            "из разрыва\n",
-            "первый кусок",
-            "после разрыва"
-        ]
+        &blocks[1..],
+        ["думаю ", "из разрыва\n", "первый кусок", "после разрыва"]
     );
     assert_eq!(usage_of(&events), (200, 40));
     assert_eq!(prompts(&bench), 1, "no prompt is sent twice");

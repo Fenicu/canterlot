@@ -115,6 +115,10 @@ test.describe('shell card', () => {
     await expect(denied.locator('[data-role="card-state"]')).toHaveAttribute('data-tone', 'warning');
     const cwd = await cardOf(page, seed.blocks.shellCwd!);
     await expect(cwd.locator('[data-role="shell-cwd"]')).toHaveText('/home/owner/canterlot');
+    const opencode = await cardOf(page, seed.blocks.shellOpencode!);
+    await expect(opencode.locator('[data-role="shell-title"]')).toHaveText('Проверка готовности');
+    await expect(opencode.locator('[data-role="shell-cwd"]')).toHaveText('/work/demo');
+    await expect(opencode.locator('[data-role="shell-meta"]')).toContainText('код 0');
   });
 
   test('a_running_command_reads_as_running_and_settles_with_its_output', async ({ page }) => {
