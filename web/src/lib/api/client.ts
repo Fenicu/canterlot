@@ -1432,3 +1432,114 @@ export function reorderMessageSnippets(
 ): Promise<HttpResponse<Ok<operations["put__api_v1_message_snippets_order"]>>> {
   return http("PUT", "/api/v1/message-snippets/order", body, keyed(key, opts));
 }
+
+/** Расписания владельца. */
+export function listSchedules(
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["get__api_v1_schedules"]>>> {
+  return http("GET", "/api/v1/schedules", undefined, opts);
+}
+
+export function createSchedule(
+  body: Body<operations["post__api_v1_schedules"]>,
+  key: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["post__api_v1_schedules"]>>> {
+  return http("POST", "/api/v1/schedules", body, keyed(key, opts));
+}
+
+/** Следующие срабатывания для редактора: пояс передаётся в теле. */
+export function previewSchedule(
+  body: Body<operations["post__api_v1_schedules_preview"]>,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["post__api_v1_schedules_preview"]>>> {
+  return http("POST", "/api/v1/schedules/preview", body, opts);
+}
+
+export function getSchedule(
+  scheduleId: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["get__api_v1_schedules__id_"]>>> {
+  return http("GET", `/api/v1/schedules/${id(scheduleId)}`, undefined, opts);
+}
+
+export function patchSchedule(
+  scheduleId: string,
+  body: Body<operations["patch__api_v1_schedules__id_"]>,
+  key: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["patch__api_v1_schedules__id_"]>>> {
+  return http(
+    "PATCH",
+    `/api/v1/schedules/${id(scheduleId)}`,
+    body,
+    keyed(key, opts),
+  );
+}
+
+export function deleteSchedule(
+  scheduleId: string,
+  key: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["delete__api_v1_schedules__id_"]>>> {
+  return http(
+    "DELETE",
+    `/api/v1/schedules/${id(scheduleId)}`,
+    undefined,
+    keyed(key, opts),
+  );
+}
+
+export function pauseSchedule(
+  scheduleId: string,
+  key: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["post__api_v1_schedules__id__pause"]>>> {
+  return http(
+    "POST",
+    `/api/v1/schedules/${id(scheduleId)}/pause`,
+    undefined,
+    keyed(key, opts),
+  );
+}
+
+export function resumeSchedule(
+  scheduleId: string,
+  key: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["post__api_v1_schedules__id__resume"]>>> {
+  return http(
+    "POST",
+    `/api/v1/schedules/${id(scheduleId)}/resume`,
+    undefined,
+    keyed(key, opts),
+  );
+}
+
+/** `run_anyway` обходит проверки расписания; ключ защищает от повторной постановки в очередь. */
+export function runSchedule(
+  scheduleId: string,
+  body: Body<operations["post__api_v1_schedules__id__run"]>,
+  key: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["post__api_v1_schedules__id__run"]>>> {
+  return http(
+    "POST",
+    `/api/v1/schedules/${id(scheduleId)}/run`,
+    body,
+    keyed(key, opts),
+  );
+}
+
+export function scheduleRuns(
+  scheduleId: string,
+  query?: Query,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["get__api_v1_schedules__id__runs"]>>> {
+  return http(
+    "GET",
+    withQuery(`/api/v1/schedules/${id(scheduleId)}/runs`, query),
+    undefined,
+    opts,
+  );
+}

@@ -32,6 +32,7 @@
   import DictationSettings from './DictationSettings.svelte';
   import SnippetsSettings from './SnippetsSettings.svelte';
   import RoutingScreen from './RoutingScreen.svelte';
+  import SchedulesScreen from './SchedulesScreen.svelte';
   import UpdatesScreen from './UpdatesScreen.svelte';
   import SignInSettings from '../signin/SignInSettings.svelte';
   import { SETTINGS_CATEGORIES, settingsCategory, type SettingsCategory } from './settingsNav.js';
@@ -160,6 +161,8 @@
           <SpawnWhitelist routing={href('routing')} />
         {:else if category === 'routing'}
           <div class="embed"><RoutingScreen embedded /></div>
+        {:else if category === 'schedules'}
+          <SchedulesScreen />
         {:else if category === 'security'}
           <h3 class="group-title">Подключение</h3>
           <div class="group">

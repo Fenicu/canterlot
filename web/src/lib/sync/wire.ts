@@ -4,7 +4,7 @@ export type { ServerOp } from '../api/generated/ServerOp';
 export type { WireEvent as HubEvent } from '../api/generated/events';
 
 export const PROTOCOL_VERSION = 1;
-export type ScopeName = 'conversations' | 'machines' | `conversation:${string}`;
+export type ScopeName = 'conversations' | 'machines' | 'schedules' | `conversation:${string}`;
 export const isSeq = (value: unknown): value is string => typeof value === 'string' && /^\d+$/.test(value);
 export const seq = {
   cmp(a: string, b: string): -1 | 0 | 1 { return BigInt(a) < BigInt(b) ? -1 : BigInt(a) > BigInt(b) ? 1 : 0; },

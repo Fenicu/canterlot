@@ -1,10 +1,10 @@
 <script lang="ts">
   import type { Option } from './types';
-  let { name, label, options, value = $bindable('') }: { name: string; label: string; options: Option[]; value?: string } = $props();
+  let { name, label, options, value = $bindable(''), onchange }: { name: string; label: string; options: Option[]; value?: string; onchange?: (value: string) => void } = $props();
 </script>
 {#if options.length > 0}
   <div role="radiogroup" aria-label={label} class="segmented">
-    {#each options as option (option.value)}<label><input type="radio" {name} value={option.value} bind:group={value} /><span>{option.label}</span></label>{/each}
+    {#each options as option (option.value)}<label><input type="radio" {name} value={option.value} bind:group={value} onchange={() => onchange?.(value)} /><span>{option.label}</span></label>{/each}
   </div>
 {/if}
 <style>

@@ -21,7 +21,7 @@ describe('settingsCategory', () => {
 
 describe('SETTINGS_CATEGORIES', () => {
   it('lists the sections in order with their addresses', () => {
-    expect(SETTINGS_CATEGORIES.map((entry) => entry.title)).toEqual(['Внешний вид', 'Ввод и чтение', 'Лимиты и делегирование', 'Маршрутизация', 'Вход и безопасность', 'Приложение', 'Обновления и модели']);
+    expect(SETTINGS_CATEGORIES.map((entry) => entry.title)).toEqual(['Внешний вид', 'Ввод и чтение', 'Лимиты и делегирование', 'Маршрутизация', 'Расписание', 'Вход и безопасность', 'Приложение', 'Обновления и модели']);
     expect(SETTINGS_CATEGORIES.map((entry) => entry.id)).toContain('updates');
     expect(categoryHref('input')).toBe('/settings?c=input');
   });
