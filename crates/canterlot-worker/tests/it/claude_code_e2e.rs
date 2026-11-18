@@ -3475,13 +3475,18 @@ async fn goal_set_travels_the_input_path_and_its_model_turn_finishes_normally() 
     let line = written
         .lines()
         .find(|line| line.contains("/goal neutral objective"))
-        .unwrap_or_else(|| panic!("the goal command is written as a regular user frame: {written}"));
+        .unwrap_or_else(|| {
+            panic!("the goal command is written as a regular user frame: {written}")
+        });
     let goal_command: Value = serde_json::from_str(line).unwrap();
     let goal_id: Uuid = goal_command["uuid"].as_str().unwrap().parse().unwrap();
     let attributed = events.iter().any(|event| matches!(event,
         AdapterEvent::BlockStarted { kind: adapter::BlockKind::Text, input_command_id: Some(id), .. }
             if *id == goal_id));
-    assert!(attributed, "the model turn belongs to the goal command: {events:?}");
+    assert!(
+        attributed,
+        "the model turn belongs to the goal command: {events:?}"
+    );
     let goal = events.iter().find_map(|event| match event {
         AdapterEvent::Goal { goal: Some(goal) } => Some(goal.clone()),
         _ => None,
@@ -3489,13 +3494,22 @@ async fn goal_set_travels_the_input_path_and_its_model_turn_finishes_normally() 
     let goal = goal.expect("the synthetic reply becomes a goal snapshot");
     assert_eq!(goal.objective, "neutral objective");
     assert_eq!(goal.status, canterlot_proto::goals::GoalStatus::Active);
-    let finished = events.iter().filter(|event| matches!(event,
-        AdapterEvent::RunFinished { input_command_id, .. } if *input_command_id == goal_id)).count();
+    let finished = events
+        .iter()
+        .filter(|event| {
+            matches!(event,
+        AdapterEvent::RunFinished { input_command_id, .. } if *input_command_id == goal_id)
+        })
+        .count();
     assert_eq!(finished, 1, "the triggered turn finishes just once");
 
-    let outcome = tokio::time::timeout(WAIT, f.adapter.goal_command(canterlot_proto::goals::GoalAction::Clear, None, None))
-        .await
-        .expect("clear deadline");
+    let outcome = tokio::time::timeout(
+        WAIT,
+        f.adapter
+            .goal_command(canterlot_proto::goals::GoalAction::Clear, None, None),
+    )
+    .await
+    .expect("clear deadline");
     assert_eq!(outcome, adapter::GoalCommandOutcome::Applied);
     loop {
         let event = f.event().await;

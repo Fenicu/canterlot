@@ -4008,12 +4008,20 @@ async fn goal_autonomous_turns_are_adopted_runs_and_owner_input_waits() {
     // Первый ход начат сервером без нашего turn/start. Пауза даёт время
     // передать ввод владельца, пока ход ещё идёт.
     lines.push(turn_started("thread-main", "turn-goal-1"));
-    lines.extend(agent_message("turn-goal-1", "msg-goal-1", "первый autonomous"));
+    lines.extend(agent_message(
+        "turn-goal-1",
+        "msg-goal-1",
+        "первый autonomous",
+    ));
     lines.push(w("sleep", json!(700)));
     lines.push(turn_end("thread-main", "turn-goal-1", "completed"));
 
     lines.push(turn_started("thread-main", "turn-goal-2"));
-    lines.extend(agent_message("turn-goal-2", "msg-goal-2", "второй autonomous"));
+    lines.extend(agent_message(
+        "turn-goal-2",
+        "msg-goal-2",
+        "второй autonomous",
+    ));
     lines.push(turn_end("thread-main", "turn-goal-2", "completed"));
 
     lines.push(w_in(13, "turn/start", json!({})));
@@ -4042,7 +4050,10 @@ async fn goal_autonomous_turns_are_adopted_runs_and_owner_input_waits() {
     )
     .await
     .expect("goal command deadline");
-    assert_eq!(outcome, canterlot_worker::adapter::GoalCommandOutcome::Applied);
+    assert_eq!(
+        outcome,
+        canterlot_worker::adapter::GoalCommandOutcome::Applied
+    );
 
     let mut events = Vec::new();
     loop {
@@ -4057,9 +4068,13 @@ async fn goal_autonomous_turns_are_adopted_runs_and_owner_input_waits() {
 
     // Ввод, пришедший внутрь автономного хода, не дублируется и не теряется:
     // пока ход идёт, адаптер отказывает, а после конца хода он уйдёт новым ходом.
-    match tokio::time::timeout(WAIT, fake.adapter.transmit(&fake.tx("внутри goal хода"), &fake.group))
-        .await
-        .expect("mid-turn transmit deadline")
+    match tokio::time::timeout(
+        WAIT,
+        fake.adapter
+            .transmit(&fake.tx("внутри goal хода"), &fake.group),
+    )
+    .await
+    .expect("mid-turn transmit deadline")
     {
         TransmitOutcome::Rejected(reason) => assert_eq!(reason, "turn_active", "{reason}"),
         other => panic!("input during autonomous turn must be queued, got {other:?}"),
@@ -4083,10 +4098,16 @@ async fn goal_autonomous_turns_are_adopted_runs_and_owner_input_waits() {
     let second = fake.start_turn("второй ввод").await;
     events.extend(fake.finish(second).await);
 
-    let outcome = tokio::time::timeout(WAIT, fake.adapter.goal_command(GoalAction::Clear, None, None))
-        .await
-        .expect("clear deadline");
-    assert_eq!(outcome, canterlot_worker::adapter::GoalCommandOutcome::Applied);
+    let outcome = tokio::time::timeout(
+        WAIT,
+        fake.adapter.goal_command(GoalAction::Clear, None, None),
+    )
+    .await
+    .expect("clear deadline");
+    assert_eq!(
+        outcome,
+        canterlot_worker::adapter::GoalCommandOutcome::Applied
+    );
     loop {
         let event = fake.event().await;
         let cleared = matches!(event, AdapterEvent::Goal { goal: None });
@@ -4115,12 +4136,18 @@ async fn goal_autonomous_turns_are_adopted_runs_and_owner_input_waits() {
         })
         .collect();
     assert_eq!(
-        phases.iter().filter(|phase| matches!(**phase, Phase::Generating)).count(),
+        phases
+            .iter()
+            .filter(|phase| matches!(**phase, Phase::Generating))
+            .count(),
         2,
         "each autonomous turn opens with generating: {phases:?}"
     );
     assert_eq!(
-        phases.iter().filter(|phase| matches!(**phase, Phase::AwaitingInput)).count(),
+        phases
+            .iter()
+            .filter(|phase| matches!(**phase, Phase::AwaitingInput))
+            .count(),
         4,
         "owner and both autonomous turns finish idle: {phases:?}"
     );
@@ -4139,11 +4166,19 @@ async fn goal_autonomous_turns_are_adopted_runs_and_owner_input_waits() {
                 if *input_command_id == second)
         })
         .count();
-    assert_eq!(second_runs, 1, "the queued owner input is delivered exactly once");
-    let active = events.iter().any(|event| matches!(event,
+    assert_eq!(
+        second_runs, 1,
+        "the queued owner input is delivered exactly once"
+    );
+    let active = events.iter().any(|event| {
+        matches!(event,
         AdapterEvent::Goal { goal: Some(goal) }
             if goal.objective == "neutral objective"
-                && goal.status == canterlot_proto::goals::GoalStatus::Active));
-    assert!(active, "the goal snapshot must reach the stream: {events:?}");
+                && goal.status == canterlot_proto::goals::GoalStatus::Active)
+    });
+    assert!(
+        active,
+        "the goal snapshot must reach the stream: {events:?}"
+    );
     fake.close().await;
 }

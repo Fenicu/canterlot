@@ -18,8 +18,7 @@ use canterlot_hub::{
 };
 use canterlot_proto::worker::v1::{
     BlockFinal, BlockStarted, GoalChanged, GoalState as ProtoGoalState, InputAccepted,
-    JournalOpened, JournalRecords, RunFinished,
-    record_body::Body,
+    JournalOpened, JournalRecords, RunFinished, record_body::Body,
 };
 use chrono::Utc;
 use serde_json::{Value, json};
@@ -290,9 +289,7 @@ fn journal(journal_id: Uuid, seq: &mut u64, bodies: Vec<Body>) -> JournalRecords
                 *seq += 1;
                 canterlot_proto::worker::v1::JournalRecord {
                     seq: *seq,
-                    body: Some(canterlot_proto::worker::v1::RecordBody {
-                        body: Some(body),
-                    }),
+                    body: Some(canterlot_proto::worker::v1::RecordBody { body: Some(body) }),
                 }
             })
             .collect(),
@@ -321,7 +318,12 @@ async fn autonomous_goal_turn_reaches_history_and_ends_the_run(pool: PgPool) {
             "goal-autonomous",
         )
         .await;
-    assert_eq!(response.status, 200, "{}", String::from_utf8_lossy(&response.body));
+    assert_eq!(
+        response.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&response.body)
+    );
 
     let owner_input = submit_input(
         &f.pool,
@@ -452,12 +454,23 @@ async fn autonomous_goal_turn_reaches_history_and_ends_the_run(pool: PgPool) {
             None,
         )
         .await;
-    assert_eq!(response.status, 200, "{}", String::from_utf8_lossy(&response.body));
+    assert_eq!(
+        response.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&response.body)
+    );
     let page: Value = response.json();
     let items = page["items"].as_array().expect("history items");
-    let block = items.iter().find(|item| item["kind"] == "block").unwrap_or_else(|| panic!("{items:?}"));
+    let block = items
+        .iter()
+        .find(|item| item["kind"] == "block")
+        .unwrap_or_else(|| panic!("{items:?}"));
     assert_eq!(block["content"], text);
-    assert_eq!(block["input_command_id"], owner_input.command_id.to_string());
+    assert_eq!(
+        block["input_command_id"],
+        owner_input.command_id.to_string()
+    );
     assert_eq!(block["state"], "final");
 
     let goal = goals::in_snapshot(&mut f.pool.acquire().await.unwrap(), f.conversation)
