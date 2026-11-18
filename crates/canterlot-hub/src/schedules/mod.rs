@@ -1234,10 +1234,12 @@ async fn recover_one(
     let mut tx = crate::db::begin(pool).await?;
     // Сначала расписание (B): удаление идёт тем же порядком.
     let schedule_row: Option<ScheduleRow> =
-        sqlx::query_as("select * from schedules where id=$1 for update")
+        sqlx::query_as("select * from schedules where id=$1 for update skip locked")
             .bind(schedule_id)
             .fetch_optional(&mut *tx)
             .await?;
+    // Заблокированное расписание (или удалённое) пропускаем: одна блокировка
+    // не должна задерживать пачку, строку возьмёт следующий проход.
     let Some(schedule_row) = schedule_row else {
         tx.rollback().await?;
         return Ok(None);

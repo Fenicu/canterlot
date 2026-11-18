@@ -2153,3 +2153,125 @@ async fn run_now_replays_from_history_after_the_key_expired(pool: PgPool) {
         "a different request under the same key conflicts"
     );
 }
+
+/// 8: временный замок расписания (55P03 по `lock_timeout`) не оставляет запуск
+/// в `prechecking` до аренды: итог повторяется ограниченное число раз.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn finalization_retries_a_lock_timeout(pool: PgPool) {
+    use canterlot_hub::schedules::{RunState, admission::write_outcome_retrying};
+    use sqlx::postgres::PgPoolOptions;
+
+    let f = Fixture::new(pool.clone()).await;
+    let id = create(&f, existing(&f), "0 9 * * *").await;
+    let schedule_id = Uuid::parse_str(&id).unwrap();
+    let rid = Uuid::now_v7();
+    let attempt = Uuid::now_v7();
+    sqlx::query(
+        "insert into schedule_runs(id,schedule_id,owner_id,scheduled_at,claimed_revision,state,manual,idempotency_key,attempt_id,lease_at)
+         values($1,$2,$3,now(),1,'prechecking',false,'lock-timeout',$4,now())",
+    )
+    .bind(rid)
+    .bind(schedule_id)
+    .bind(f.seed.owner_id)
+    .bind(attempt)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // Пул с коротким `lock_timeout`, как в боевом пуле (там пять секунд).
+    let short = PgPoolOptions::new()
+        .max_connections(4)
+        .after_connect(|conn, _| {
+            Box::pin(async move {
+                sqlx::query("set lock_timeout = '150ms'").execute(conn).await?;
+                Ok(())
+            })
+        })
+        .connect_with(pool.connect_options().as_ref().clone())
+        .await
+        .unwrap();
+    let mut conn = pool.acquire().await.unwrap();
+    let schedule = canterlot_hub::schedules::get(&mut conn, f.seed.owner_id, schedule_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let run = canterlot_hub::schedules::get_run(&mut conn, f.seed.owner_id, rid)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(conn);
+    let mut holder = pool.begin().await.unwrap();
+    sqlx::query("select id from schedules where id=$1 for update")
+        .bind(schedule_id)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    let release = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        holder.commit().await.unwrap();
+    });
+    write_outcome_retrying(
+        &short,
+        &schedule,
+        &run,
+        RunState::Prechecking,
+        RunState::Failed,
+        &json!({"reason": "database_unavailable"}),
+        Uuid::now_v7(),
+    )
+    .await
+    .expect("a temporary lock is retried");
+    release.await.unwrap();
+    assert_eq!(state(&pool, rid).await.0, "failed");
+}
+
+/// 8: восстановление не ждёт заблокированное расписание: следующее в пачке
+/// обрабатывается сразу.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn recovery_skips_a_locked_schedule(pool: PgPool) {
+    use canterlot_hub::schedules::{RECLAIM_LEASE, recover_interrupted};
+
+    let f = Fixture::new(pool.clone()).await;
+    let now = Utc::now();
+    let mut ids = Vec::new();
+    for name in ["a", "b"] {
+        let id = Uuid::parse_str(&create(&f, existing(&f), &format!("0 {} * * *", if name == "a" { 9 } else { 10 })).await).unwrap();
+        sqlx::query(
+            "insert into schedule_runs(id,schedule_id,owner_id,scheduled_at,claimed_revision,state,manual,idempotency_key,attempt_id,lease_at,updated_at)
+             values($1,$2,$3,$4,1,'claimed',false,$5,$6,$7,$7)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(id)
+        .bind(f.seed.owner_id)
+        .bind(now - TimeDelta::hours(5))
+        .bind(format!("skip-locked-{name}"))
+        .bind(Uuid::now_v7())
+        .bind(now - TimeDelta::hours(3))
+        .execute(&pool)
+        .await
+        .unwrap();
+        ids.push(id);
+    }
+    // Блокируем расписание, чья заявка идёт первой в пачке.
+    let first: Uuid = sqlx::query_scalar(
+        "select schedule_id from schedule_runs order by schedule_id,updated_at,id limit 1",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let mut holder = pool.begin().await.unwrap();
+    sqlx::query("select id from schedules where id=$1 for update")
+        .bind(first)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    let recovered = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        recover_interrupted(&pool, Some(RECLAIM_LEASE), now),
+    )
+    .await
+    .expect("recovery does not wait for a locked schedule")
+    .unwrap();
+    assert_eq!(recovered.len(), 1);
+    assert_ne!(recovered[0].schedule.id, first);
+    holder.rollback().await.unwrap();
+}

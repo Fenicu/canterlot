@@ -94,9 +94,22 @@ pub async fn admit(scheduler: &Scheduler, claimed: ClaimedRun) {
     }
 }
 
+/// Сбой, после которого итог стоит записать ещё раз: временный сбой базы
+/// (взаимоблокировка, сериализация), таймаут замка (`55P03`, обычный исход
+/// кратковременной блокировки расписания) и ошибки пула соединений.
+fn recoverable(error: &sqlx::Error) -> bool {
+    crate::db::TransientError::is_transient(error)
+        || matches!(
+            error,
+            sqlx::Error::Database(db) if db.code().as_deref() == Some("55P03")
+        )
+        || matches!(error, sqlx::Error::PoolTimedOut | sqlx::Error::Io(_))
+}
+
 /// Временный сбой базы не должен оставлять запуск до истечения аренды (5):
-/// финал повторяется несколько раз с короткой паузой.
-async fn write_outcome_retrying(
+/// финал повторяется ограниченное число раз с короткой паузой.
+#[doc(hidden)]
+pub async fn write_outcome_retrying(
     pool: &PgPool,
     schedule: &Schedule,
     run: &ScheduleRun,
@@ -111,7 +124,7 @@ async fn write_outcome_retrying(
         attempt += 1;
         match write_outcome(pool, schedule, run, from, state, detail, correlation_id).await {
             Ok(()) => return Ok(()),
-            Err(error) if attempt < ATTEMPTS && crate::db::TransientError::is_transient(&error) => {
+            Err(error) if attempt < ATTEMPTS && recoverable(&error) => {
                 tokio::time::sleep(crate::db::retry_delay(Uuid::now_v7(), attempt)).await;
             }
             Err(error) => return Err(error),
