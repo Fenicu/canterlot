@@ -1915,6 +1915,45 @@ async fn model_change_during_precheck_is_read_from_the_authoritative_row(pool: P
     worker.abort();
 }
 
+/// Ожидающая, ещё не подтверждённая смена модели уходит с вводом при выдаче,
+/// поэтому окна проверяются по ней: красное окно Fable пропускает запуск.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn pending_model_change_is_checked_against_its_own_limit_window(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
+    sqlx::query(
+        "update conversations set model='claude-sonnet-4-5',
+                pending_settings='{\"model\":\"claude-fable-5\"}'::jsonb where id=$1",
+    )
+    .bind(f.seed.conversation_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    observe(&pool, &f, "claude", limits::Window::WeeklyFable, 990).await;
+    let r = f
+        .client
+        .send(
+            Method::POST,
+            "/api/v1/schedules",
+            Some("pending-fable-create"),
+            Some(json!({
+                "name": "Ожидающая модель",
+                "cron": "0 9 * * *",
+                "target": existing(&f),
+                "prompt": "ожидающая смена",
+            })),
+        )
+        .await;
+    assert_eq!(r.status.as_u16(), 200);
+    let id = r.json::<Value>()["id"].as_str().unwrap().to_owned();
+    due(&pool, &id, Utc::now() - TimeDelta::seconds(30)).await;
+    scheduler(&f).tick(Utc::now()).await.unwrap();
+    let rid = run_id(&pool, &id).await;
+    let detail = wait_state(&pool, rid, "skipped_limits").await;
+    assert_eq!(detail["window"], "weekly_fable", "{detail}");
+    assert_eq!(inputs_with_text(&pool, "ожидающая смена").await, 0);
+}
+
 /// 5: занятость в приёме считается тем же запросом, что в маршрутизации:
 /// сессия с ожидающим толчком держит слот и при явном исполнителе.
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]

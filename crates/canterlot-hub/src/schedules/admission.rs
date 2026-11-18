@@ -1029,13 +1029,18 @@ async fn dispatch(
             .map_err(fail)?;
         // Авторитетная модель под замком очереди: её меняет транзакция
         // подтверждённых настроек, проекция может отставать.
-        let fresh: Option<String> =
-            sqlx::query_scalar("select c.model from conversations c where c.id = $1")
-                .bind(conversation_id)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))
-                .map_err(fail)?;
+        // Ожидающая смена модели уходит с вводом при выдаче (delivery::dispatch),
+        // поэтому окна проверяются по ней, если она есть: решение и выдача
+        // читают одну и ту же строку под одним замком очереди и не расходятся.
+        let fresh: Option<String> = sqlx::query_scalar(
+            "select coalesce(nullif(c.pending_settings->>'model', ''), c.model)
+                   from conversations c where c.id = $1",
+        )
+        .bind(conversation_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))
+        .map_err(fail)?;
         if let Some(model) = fresh
             && !model.is_empty()
         {
