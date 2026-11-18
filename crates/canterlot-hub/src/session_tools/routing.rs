@@ -842,8 +842,10 @@ pub fn route(inputs: RouteInputs<'_>) -> Result<Decision, RouteError> {
         let unlimited = policy.unlimited_models.iter().any(|entry| {
             entry == &resolved.id || *entry == format!("{}/{}", candidate.harness, resolved.id)
         });
+        // Правила расписаний (окна приёма) действуют и на `unlimited_models`:
+        // исключение — про пороги дочерней политики, а не про красное окно.
         if !bypass_limits
-            && !unlimited
+            && (!unlimited || schedule_rules.is_some())
             && let Some((verdict, reason)) = limits_verdict(
                 policy,
                 &provider,
@@ -2533,6 +2535,62 @@ mod tests {
         })
         .unwrap();
         assert_eq!(decision.model, "opencode-go/beam-free");
+    }
+
+    /// Правила расписаний применяются раньше исключения `unlimited_models`:
+    /// красное окно основного кандидата отдаёт выбор зелёному запасному.
+    #[test]
+    fn schedule_rules_apply_before_the_unlimited_exemption() {
+        let candidate = |harness: &str, model: &str| Candidate {
+            harness: harness.to_owned(),
+            model: model.to_owned(),
+            effort: None,
+            levels: None,
+            preset: None,
+            nudge: None,
+            exclude_workdirs: vec![],
+            watchdog_minutes: None,
+        };
+        let mut policy = Policy::default();
+        policy.task_types.insert(
+            "fast".to_owned(),
+            TaskType {
+                title: "Быстро".to_owned(),
+                candidates: vec![
+                    candidate("opencode", "opencode-go/beam-free"),
+                    candidate("claude_code", "opus[1m]"),
+                ],
+                preset: None,
+                isolated: None,
+                expected_minutes: DEFAULT_EXPECTED_MINUTES,
+            },
+        );
+        policy.unlimited_models = vec!["opencode-go/beam-free".to_owned()];
+        let limits = HashMap::from([(
+            "opencode".to_owned(),
+            ProviderView {
+                five_hour: Some(reading(99.0, 5)),
+                ..ProviderView::default()
+            },
+        )]);
+        let decision = route(RouteInputs {
+            policy: &policy,
+            revision: 0,
+            whitelist: &entries(),
+            catalogs: &catalogs(),
+            limits: &limits,
+            live: &HashMap::new(),
+            stale: Duration::from_secs(1800),
+            now: now(),
+            request: &request("fast"),
+            bypass_limits: false,
+            schedule_rules: Some(ScheduleRules {
+                danger_remaining_pct: 5.0,
+                fresh_for: Duration::from_secs(1800),
+            }),
+        })
+        .unwrap();
+        assert_eq!(decision.model, "opus[1m]", "red unlimited primary yields to the backup");
     }
 
     #[test]

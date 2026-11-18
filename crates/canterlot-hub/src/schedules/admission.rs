@@ -950,29 +950,15 @@ async fn dispatch(
             let Some(limit) = policy.max_parallel.get(&pair) else {
                 break;
             };
-            let busy: i64 = sqlx::query_scalar(
-                "select count(*) from conversations c
-                  join conversation_derived d on d.conversation_id = c.id
-                  where c.owner_id = $1 and c.harness = $2 and c.model = $3
-                    and c.trashed_at is null
-                    and (d.activity_state in ('working','stalled')
-                         or (d.activity_state = 'idle' and d.queue_queued > 0)
-                         or (exists (select 1 from executions e
-                                     where e.conversation_id = c.id
-                                       and e.state not in ('stopped','failed','owner_lost'))
-                             and (exists (select 1 from inputs i
-                                          where i.conversation_id = c.id and i.feed_seq is null
-                                            and i.state in ('queued','dispatched','on_machine'))
-                                  or exists (select 1 from queue_state q
-                                             where q.conversation_id = c.id and q.run_slot <> 'free'))))",
-            )
-            .bind(schedule.owner_id)
-            .bind(&executor.harness)
-            .bind(&executor.model)
-            .fetch_one(&mut *tx)
-            .await
-            .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))
-            .map_err(fail)?;
+            // Тот же запрос занятости, что в маршрутизации (с корнями и
+            // ожидающими толчками): иначе явный исполнитель и маршрут расходятся.
+            let busy: i64 = routing::live_counts_with_roots(&mut tx, schedule.owner_id)
+                .await
+                .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))
+                .map_err(fail)?
+                .get(&(executor.harness.clone(), executor.model.clone()))
+                .copied()
+                .unwrap_or(0);
             let injected = super::fault::hit(schedule.id, super::fault::Fault::BusyAfterRouting);
             if busy < *limit && !injected {
                 break;

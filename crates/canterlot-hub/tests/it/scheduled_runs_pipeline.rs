@@ -1853,11 +1853,6 @@ async fn model_change_during_precheck_is_read_from_the_authoritative_row(pool: P
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("update conversation_derived set effective_model='claude-sonnet-4-5' where conversation_id=$1")
-        .bind(f.seed.conversation_id)
-        .execute(&pool)
-        .await
-        .unwrap();
     observe(&pool, &f, "claude", limits::Window::WeeklyFable, 990).await;
     let registry = f.state.registry.clone();
     let machine = f.seed.machine_id;
@@ -1914,4 +1909,57 @@ async fn model_change_during_precheck_is_read_from_the_authoritative_row(pool: P
     assert_eq!(detail["window"], "weekly_fable", "{detail}");
     assert_eq!(inputs_with_text(&pool, "посмотреть коммиты").await, 0);
     worker.abort();
+}
+
+/// 5: занятость в приёме считается тем же запросом, что в маршрутизации:
+/// сессия с ожидающим толчком держит слот и при явном исполнителе.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn dispatch_counts_a_pending_nudge_as_busy_like_routing(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
+    sqlx::query("update machines set availability='available' where id=$1")
+        .bind(f.seed.machine_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("update conversations set harness='synthetic',model='synthetic-small' where id=$1")
+        .bind(f.seed.conversation_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("insert into conversation_derived(conversation_id) values($1) on conflict do nothing")
+        .bind(f.seed.conversation_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "insert into nudge_rules(conversation_id,owner_id,set_by,state) values($1,$2,'owner','pending')",
+    )
+    .bind(f.seed.conversation_id)
+    .bind(f.seed.owner_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("update owners set routing_policy=$2 where id=$1")
+        .bind(f.seed.owner_id)
+        .bind(json!({"max_parallel": {"synthetic/synthetic-small": 1}}))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let id = create(
+        &f,
+        json!({
+            "kind": "new_session",
+            "machine_id": f.seed.machine_id,
+            "workdir": "/tmp/scheduled-nudge",
+            "executor": {"harness": "synthetic", "model": "synthetic-small", "effort": "high"},
+        }),
+        "0 9 * * *",
+    )
+    .await;
+    due(&pool, &id, Utc::now() - TimeDelta::seconds(30)).await;
+    scheduler(&f).tick(Utc::now()).await.unwrap();
+    let rid = run_id(&pool, &id).await;
+    let detail = wait_state(&pool, rid, "skipped_limits").await;
+    assert_eq!(detail["reason"], "parallel_busy", "{detail}");
 }
