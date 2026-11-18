@@ -1563,3 +1563,123 @@ async fn the_alert_card_never_reaches_the_agents_next_prompt(pool: PgPool) {
         "the card stays visible"
     );
 }
+
+/// Тишина длиннее порога общего `stalled`: ход молчит `minutes` минут к моменту `base`.
+async fn silent_for(pool: &PgPool, scene: &Scene, minutes: i64) {
+    let since = scene.base - TimeDelta::minutes(minutes);
+    sqlx::query("update executions set phase_at=$2,last_event_at=$2 where id=$1")
+        .bind(scene.execution)
+        .bind(since)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("update queue_state set run_slot_since=$2 where conversation_id=$1")
+        .bind(scene.seed.conversation_id)
+        .bind(since)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+/// Общий `stalled` пришёл раньше (окно наблюдения ещё грелось), потом вынесен verdict
+/// «завис»: на одну непрерывную тишину один пуш, карточка при этом появляется.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_generic_stalled_push_first_suppresses_the_hang_push_of_the_same_silence(pool: PgPool) {
+    let scene = hung_scene(&pool, "claude_code", false).await;
+    silent_for(&pool, &scene, 40).await;
+    tick_mode(
+        &pool,
+        &scene,
+        scene.base - TimeDelta::seconds(15),
+        HungRescue::Alert,
+    )
+    .await;
+    let first = pushes(&pool, &scene).await;
+    assert_eq!(first.len(), 1, "the generic push goes first: {first:?}");
+    assert!(!first[0].0.starts_with("hung:"), "{}", first[0].0);
+    tick_mode(&pool, &scene, scene.base, HungRescue::Alert).await;
+    let all = pushes(&pool, &scene).await;
+    assert_eq!(all.len(), 1, "no second push for one silence: {all:?}");
+    assert_eq!(
+        notes(&pool, &scene).await.len(),
+        1,
+        "the card still appears"
+    );
+    tick_mode(
+        &pool,
+        &scene,
+        scene.base + TimeDelta::minutes(1),
+        HungRescue::Alert,
+    )
+    .await;
+    assert_eq!(pushes(&pool, &scene).await.len(), 1);
+
+    // Ход ожил и замолчал снова: это уже другая тишина и свой пуш.
+    let resumed = scene.base + TimeDelta::minutes(2);
+    progress(&pool, &scene, resumed).await;
+    tick_mode(&pool, &scene, resumed, HungRescue::Alert).await;
+    let later = resumed + TimeDelta::minutes(11);
+    tick_mode(
+        &pool,
+        &scene,
+        later - TimeDelta::seconds(10),
+        HungRescue::Alert,
+    )
+    .await;
+    tick_mode(&pool, &scene, later, HungRescue::Alert).await;
+    assert_eq!(
+        pushes(&pool, &scene).await.len(),
+        2,
+        "a new silence after progress alerts again"
+    );
+}
+
+/// Verdict «завис» пришёл раньше, потом связь пропала и общий `stalled` перешёл порог
+/// той же тишины: второго пуша нет.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_hang_push_first_suppresses_the_generic_stalled_push_of_the_same_silence(pool: PgPool) {
+    let scene = hung_scene(&pool, "claude_code", false).await;
+    silent_for(&pool, &scene, 25).await;
+    tick_mode(
+        &pool,
+        &scene,
+        scene.base - TimeDelta::seconds(15),
+        HungRescue::Alert,
+    )
+    .await;
+    tick_mode(&pool, &scene, scene.base, HungRescue::Alert).await;
+    let first = pushes(&pool, &scene).await;
+    assert_eq!(first.len(), 1, "{first:?}");
+    assert!(first[0].0.starts_with("hung:"), "{}", first[0].0);
+    sqlx::query("update machines set availability='unavailable',availability_at=$2 where id=$1")
+        .bind(scene.seed.machine_id)
+        .bind(scene.base + TimeDelta::minutes(1))
+        .execute(&pool)
+        .await
+        .unwrap();
+    refresh_with(
+        &pool,
+        &scene,
+        scene.base + TimeDelta::minutes(10),
+        HungRescue::Alert,
+    )
+    .await;
+    sqlx::query("update machines set availability='available',availability_at=$2 where id=$1")
+        .bind(scene.seed.machine_id)
+        .bind(scene.base + TimeDelta::minutes(11))
+        .execute(&pool)
+        .await
+        .unwrap();
+    tick_mode(
+        &pool,
+        &scene,
+        scene.base + TimeDelta::minutes(12),
+        HungRescue::Alert,
+    )
+    .await;
+    assert_eq!(
+        pushes(&pool, &scene).await.len(),
+        1,
+        "silence crossed the generic threshold"
+    );
+}

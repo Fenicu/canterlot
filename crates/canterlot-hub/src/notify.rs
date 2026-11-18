@@ -244,6 +244,11 @@ pub async fn on_hung_in_tx(
     turn_id: Uuid,
     second: bool,
 ) -> Result<(), sqlx::Error> {
+    // Общий `stalled` этой же непрерывной тишины уже дошёл до владельца раньше:
+    // карточка остаётся, второго пуша на одну тишину нет.
+    if same_generic_silence(conn, conversation_id, turn_id).await? {
+        return Ok(());
+    }
     enqueue_in_tx(
         conn,
         conversation_id,
@@ -369,7 +374,13 @@ pub async fn on_settled_in_tx(
             }
             // Сбой пушится один раз на эпизод: дребезг состояния внутри того же
             // исполнения и причины не повторяет пуш.
-            enqueue_failure_in_tx(conn, conversation_id, state, fingerprint, evidence).await?;
+            let silence = if state == Settled::Stalled {
+                silence_scope(conn, conversation_id, facts.last_event_at).await?
+            } else {
+                None
+            };
+            enqueue_failure_in_tx(conn, conversation_id, state, fingerprint, evidence, silence)
+                .await?;
             return Ok(());
         }
         Settled::WaitingForUser | Settled::Stopped => return Ok(()),
@@ -419,6 +430,30 @@ pub async fn on_settled_in_tx(
     Ok(())
 }
 
+/// Пуш общего `stalled` для того же хода и той же тишины: он записал ход и отметку
+/// последнего прогресса (`silence`), а отметка эпизода зависания не новее неё,
+/// то есть между ними прогресса потока не было.
+async fn same_generic_silence(
+    conn: &mut PgConnection,
+    conversation_id: Uuid,
+    turn_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "select exists(
+            select 1 from owner_pushes p
+            join hung_rescues h on h.conversation_id=p.conversation_id
+            where p.conversation_id=$1 and p.kind=$3
+              and p.payload#>>'{silence,turn}'=$2::text
+              and h.progress_mark is not null
+              and h.progress_mark <= (p.payload#>>'{silence,at}')::timestamptz)",
+    )
+    .bind(conversation_id)
+    .bind(turn_id)
+    .bind(KIND_FAILURE)
+    .fetch_one(&mut *conn)
+    .await
+}
+
 /// Открытый эпизод зависания текущего хода, а прогресса потока после него не было:
 /// это та же тишина, о которой владельцу уже сказал пуш зависания.
 async fn same_hang_silence(
@@ -441,6 +476,27 @@ async fn same_hang_silence(
     .await
 }
 
+/// Ход и отметка прогресса, к которым относится общий `stalled`: по ним пуш зависания
+/// того же хода узнаёт, что владелец о этой тишине уже услышал.
+async fn silence_scope(
+    conn: &mut PgConnection,
+    conversation_id: Uuid,
+    last_event_at: Option<DateTime<Utc>>,
+) -> Result<Option<Value>, sqlx::Error> {
+    let Some(at) = last_event_at else {
+        return Ok(None);
+    };
+    let turn: Option<Uuid> = sqlx::query_scalar(
+        "select i.command_id from queue_state q join inputs i on i.id=q.run_slot_input_id
+         where q.conversation_id=$1 and q.run_slot='running'",
+    )
+    .bind(conversation_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(turn
+        .map(|turn| json!({"turn": turn, "at": at.to_rfc3339_opts(SecondsFormat::Micros, true)})))
+}
+
 /// Пуш о сбое привязан к эпизоду: исполнение, состояние и причина. Внутри эпизода
 /// пуш ставится один раз; если владелец прочитал сессию после первой постановки,
 /// новая постановка не делается. Новое исполнение, состояние или причина — новый эпизод.
@@ -450,6 +506,7 @@ async fn enqueue_failure_in_tx(
     state: Settled,
     fingerprint: &str,
     evidence: &Evidence,
+    silence: Option<Value>,
 ) -> Result<(), sqlx::Error> {
     let execution: Option<Uuid> = sqlx::query_scalar(
         "select id from executions where conversation_id=$1
@@ -509,12 +566,16 @@ async fn enqueue_failure_in_tx(
     }
     let key = format!("{KIND_FAILURE}:{conversation_id}:{episode}");
     let evidence = serde_json::to_value(evidence).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
+    let mut payload = json!({"state": state_name(state), "evidence": evidence});
+    if let Some(silence) = silence {
+        payload["silence"] = silence;
+    }
     enqueue_in_tx(
         conn,
         conversation_id,
         KIND_FAILURE,
         &key,
-        &json!({"state": state_name(state), "evidence": evidence}),
+        &payload,
         true,
         false,
     )
