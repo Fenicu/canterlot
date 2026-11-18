@@ -48,6 +48,7 @@ async fn migration_0018_creates_requests_table_with_constraints(
             kind: RequestKind::Permission,
             native_request_id: "perm-test-1".into(),
             request_payload: json!({"action": "bash", "command": "ls -la"}),
+            expires_at: None,
         },
     )
     .await?;
@@ -163,6 +164,7 @@ async fn sole_winner_commits_first_decision_and_concurrent_callers_receive_confl
             kind: RequestKind::Permission,
             native_request_id: "perm-race-1".into(),
             request_payload: json!({"action": "bash", "command": "rm -rf /tmp/test"}),
+            expires_at: None,
         },
     )
     .await?;
@@ -325,6 +327,7 @@ async fn identical_idempotency_key_replays_committed_decision(
             kind: RequestKind::Question,
             native_request_id: "q-idem-1".into(),
             request_payload: json!({"question": "Deploy?"}),
+            expires_at: None,
         },
     )
     .await?;
@@ -419,6 +422,7 @@ async fn decision_on_closed_request_returns_already_closed_conflict(
             kind: RequestKind::Permission,
             native_request_id: "perm-closed-1".into(),
             request_payload: json!({"action": "read"}),
+            expires_at: None,
         },
     )
     .await?;
@@ -493,6 +497,7 @@ async fn decision_with_stale_generation_returns_stale_generation(
             kind: RequestKind::Permission,
             native_request_id: "perm-stale-gen".into(),
             request_payload: json!({"action": "edit"}),
+            expires_at: None,
         },
     )
     .await?;
@@ -566,6 +571,7 @@ async fn lock_order_requests_prevents_deadlocks_under_concurrent_turn_events(
                 },
                 native_request_id: format!("req-interleave-{i}"),
                 request_payload: json!({"idx": i}),
+                expires_at: None,
             },
         )
         .await?;
@@ -688,6 +694,7 @@ async fn spawn_approval_request_is_stored_and_read_back(pool: PgPool) -> Result<
             kind: RequestKind::SpawnApproval,
             native_request_id: "spawn-1".into(),
             request_payload: json!({"harness": "codex"}),
+            expires_at: None,
         },
     )
     .await?;

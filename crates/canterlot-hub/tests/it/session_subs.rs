@@ -1741,6 +1741,7 @@ async fn spawn_approval_does_not_hold_the_queue_or_activity(pool: PgPool) {
             kind: RequestKind::SpawnApproval,
             native_request_id: "spawn:1".into(),
             request_payload: json!({"harness": "claude_code"}),
+            expires_at: None,
         },
     )
     .await

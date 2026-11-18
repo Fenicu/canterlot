@@ -19,3 +19,7 @@ alter table requests add constraint requests_state_check check (state in (
 
 -- Список запуска меняется и через предложение агента: без ревизии нельзя отличить устаревшую карточку.
 alter table owners add column spawn_whitelist_revision bigint not null default 0;
+
+-- Срок предложения настройки хранится вместе с запросом: решение проверяет его
+-- под блокировкой строки, даже если задание истечения ещё не выполнилось.
+alter table requests add column expires_at timestamptz;

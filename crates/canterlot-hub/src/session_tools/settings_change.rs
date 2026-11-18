@@ -146,6 +146,7 @@ async fn open_proposal(
         return Err(ToolError::new(ToolErrorCode::ConversationClosed));
     }
     let id = Uuid::now_v7();
+    let deadline = Utc::now() + EXPIRY;
     let payload =
         serde_json::to_value(&proposal).map_err(|_| ToolError::new(ToolErrorCode::Internal))?;
     requests::create_request_in_tx(
@@ -158,6 +159,7 @@ async fn open_proposal(
             kind: RequestKind::SettingsChange,
             native_request_id: format!("settings:{}", id),
             request_payload: payload.clone(),
+            expires_at: Some(deadline),
         },
     )
     .await?;
@@ -189,7 +191,7 @@ async fn open_proposal(
         &mut tx,
         caller.owner_id,
         caller.conversation_id,
-        Utc::now() + EXPIRY,
+        deadline,
         &json!({"action": "settings_expire", "request_id": id}),
     )
     .await?;

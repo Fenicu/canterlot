@@ -345,6 +345,7 @@ async fn open_request_sets_activity_waiting_for_user_with_question_summary(
             kind: RequestKind::Question,
             native_request_id: "q-test".into(),
             request_payload: question_payload,
+            expires_at: None,
         },
     )
     .await?;
@@ -397,6 +398,7 @@ async fn waiting_for_user_with_open_request_is_immune_from_stalled(pool: PgPool)
             kind: RequestKind::Permission,
             native_request_id: "perm-test".into(),
             request_payload: json!({"tool_name": "Bash", "command": "rm -rf /"}),
+            expires_at: None,
         },
     )
     .await?;
@@ -605,6 +607,7 @@ async fn conversation_snapshot_includes_open_requests(pool: PgPool) -> TestResul
             kind: RequestKind::Question,
             native_request_id: "q-open".into(),
             request_payload: json!({"question": "Are you sure?"}),
+            expires_at: None,
         },
     )
     .await?;
@@ -619,6 +622,7 @@ async fn conversation_snapshot_includes_open_requests(pool: PgPool) -> TestResul
             kind: RequestKind::Permission,
             native_request_id: "perm-closed".into(),
             request_payload: json!({"tool_name": "Bash"}),
+            expires_at: None,
         },
     )
     .await?;
@@ -798,6 +802,7 @@ async fn snapshot_open_requests_include_saved_and_transmitting_requests(
                 kind: RequestKind::Permission,
                 native_request_id: format!("native-{name}"),
                 request_payload: json!({"tool_name": "Bash"}),
+                expires_at: None,
             },
         )
         .await?;

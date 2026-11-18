@@ -670,6 +670,89 @@ async fn outcome_note_is_delivered_once_when_the_job_is_replayed(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn late_approval_of_an_overdue_proposal_is_refused_without_a_scheduler(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let (request, _) = f
+        .proposal(
+            "settings.propose_routing",
+            json!({"policy": routing(), "reason": "поздно", "base_revision": 0}),
+        )
+        .await;
+    // Планировщик не запускался, но срок в базе уже прошёл.
+    sqlx::query("update requests set expires_at=clock_timestamp()-interval '1 second' where id=$1")
+        .bind(request)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let response = f
+        .client
+        .send(
+            Method::POST,
+            &format!(
+                "/api/v1/conversations/{}/requests/{request}/decision",
+                f.conversation
+            ),
+            Some("late-approval"),
+            Some(json!({"kind":"permission","behavior":"allow","message":null})),
+        )
+        .await;
+    assert_eq!(
+        response.status,
+        409,
+        "{}",
+        String::from_utf8_lossy(&response.body)
+    );
+    let body = response.json::<Value>();
+    assert_eq!(body["error"]["code"], "request_not_open");
+    assert_eq!(body["error"]["details"]["reason"], "expired");
+    let stored: Option<Value> = sqlx::query_scalar("select routing_policy from owners where id=$1")
+        .bind(f.owner)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, None);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn approval_after_expiry_job_returns_conflict_not_internal_error(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let (request, _) = f
+        .proposal(
+            "settings.propose_routing",
+            json!({"policy": routing(), "reason": "после срока", "base_revision": 0}),
+        )
+        .await;
+    f.run_job_by_action("settings_expire", Utc::now()).await;
+    assert_eq!(f.request_state(request).await, "expired");
+    let response = f
+        .client
+        .send(
+            Method::POST,
+            &format!(
+                "/api/v1/conversations/{}/requests/{request}/decision",
+                f.conversation
+            ),
+            Some("after-expiry"),
+            Some(json!({"kind":"permission","behavior":"allow","message":null})),
+        )
+        .await;
+    assert_eq!(
+        response.status,
+        409,
+        "{}",
+        String::from_utf8_lossy(&response.body)
+    );
+    assert_eq!(
+        response.json::<Value>()["error"]["code"],
+        "request_not_open"
+    );
+    assert_eq!(
+        response.json::<Value>()["error"]["details"]["reason"],
+        "expired"
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn empty_routing_policy_is_refused_like_on_the_settings_screen(pool: PgPool) {
     let f = Fx::new(pool).await;
     let error = f

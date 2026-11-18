@@ -691,6 +691,16 @@ async fn decision(
                     winner_decision,
                     current_state,
                 } => {
+                    // У закрытой без решения карточки нет победителя: это не конфликт
+                    // двух ответов и не внутренняя ошибка.
+                    if winner_decision.is_null() {
+                        return Err(ApiError::new(ErrorCode::RequestNotOpen).with_details(
+                            super::error::ErrorDetails {
+                                current_state: Some(current_state.as_str().into()),
+                                ..Default::default()
+                            },
+                        ));
+                    }
                     let winner_decision = serde_json::from_value(winner_decision)
                         .map_err(|_| ApiError::new(ErrorCode::Internal))?;
                     return Err(ApiError::new(ErrorCode::DecisionConflict).with_details(

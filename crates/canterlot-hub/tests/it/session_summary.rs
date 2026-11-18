@@ -740,6 +740,7 @@ async fn open_question(pool: &PgPool, f: &Fixture, payload: Value) -> Uuid {
             kind: RequestKind::Question,
             native_request_id: format!("q:{id}"),
             request_payload: payload,
+            expires_at: None,
         },
     )
     .await

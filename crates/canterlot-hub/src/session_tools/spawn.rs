@@ -1090,6 +1090,7 @@ async fn open_card(
             kind: RequestKind::SpawnApproval,
             native_request_id: native_request_id(caller),
             request_payload: payload.clone(),
+            expires_at: None,
         },
     )
     .await?;

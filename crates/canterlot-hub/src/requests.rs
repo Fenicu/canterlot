@@ -120,6 +120,8 @@ pub struct NewRequest {
     pub kind: RequestKind,
     pub native_request_id: String,
     pub request_payload: serde_json::Value,
+    /// Срок предложения настройки; у остальных запросов `null`.
+    pub expires_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -201,13 +203,13 @@ pub async fn create_request_in_tx(
             id, conversation_id, execution_id, generation,
             kind, native_request_id, state, request_payload,
             decision_payload, winner_decision_id, idempotency_key,
-            created_at, updated_at
+            created_at, updated_at, expires_at
         )
         values (
             $1, $2, $3, $4,
             $5, $6, 'open', $7,
             null, null, null,
-            now(), now()
+            now(), now(), $8
         )
         returning
             id, conversation_id, execution_id, generation,
@@ -223,6 +225,7 @@ pub async fn create_request_in_tx(
     .bind(req.kind)
     .bind(&req.native_request_id)
     .bind(&req.request_payload)
+    .bind(req.expires_at)
     .fetch_one(tx)
     .await
 }
@@ -286,6 +289,31 @@ pub async fn save_decision_in_tx(
         return Ok(DecisionResult::AlreadyClosed {
             current_state: row.state,
             reason: "closed_without_decision".into(),
+        });
+    }
+
+    // Срок предложения проверяется под блокировкой строки: задержанное задание
+    // истечения не должно открывать просроченную карточку повторным решением.
+    if row.kind == RequestKind::SettingsChange {
+        let expires_at: Option<DateTime<Utc>> =
+            sqlx::query_scalar("select expires_at from requests where id=$1")
+                .bind(request_id)
+                .fetch_one(&mut *tx)
+                .await?;
+        if expires_at.is_some_and(|at| at <= Utc::now()) {
+            return Ok(DecisionResult::AlreadyClosed {
+                current_state: row.state,
+                reason: "expired".into(),
+            });
+        }
+    }
+
+    // Закрытая без решения карточка не несёт winner_decision: конфликт с null
+    // не должен превращаться в 500 при разборе ответа.
+    if row.state != RequestState::Open && row.decision_payload.is_none() {
+        return Ok(DecisionResult::AlreadyClosed {
+            current_state: row.state,
+            reason: row.state.as_str().into(),
         });
     }
 
