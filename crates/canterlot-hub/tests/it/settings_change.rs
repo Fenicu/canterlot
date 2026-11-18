@@ -670,6 +670,122 @@ async fn outcome_note_is_delivered_once_when_the_job_is_replayed(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn approval_job_takes_the_queue_before_the_request_row(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let (request, _) = f
+        .proposal(
+            "settings.propose_routing",
+            json!({"policy": routing(), "reason": "порядок", "base_revision": 0}),
+        )
+        .await;
+    assert_eq!(f.decide(request, "allow").await, 200);
+    let mut blocker = f.pool.begin().await.unwrap();
+    sqlx::query("select conversation_id from queue_state where conversation_id=$1 for update")
+        .bind(f.conversation)
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let job = ClaimedJob {
+        id: Uuid::now_v7(),
+        kind: JobKind::SessionTask,
+        owner_id: f.owner,
+        conversation_id: Some(f.conversation),
+        run_at: Utc::now(),
+        payload: json!({"action": "settings_change", "request_id": request}),
+        attempts: 0,
+    };
+    let task = {
+        let pool = f.pool.clone();
+        let context = ToolContext {
+            pool: pool.clone(),
+            config: Arc::new(SessionToolsConfig::default()),
+            limits: Arc::new(LimitsConfig::default()),
+            settle: f.context.settle.clone(),
+            alarms_enabled: true,
+            nudge_enabled: true,
+            routing_enabled: true,
+            routing_stale: std::time::Duration::from_secs(1800),
+            routing_queue_horizon: std::time::Duration::from_secs(6 * 3600),
+            spawn_queue: Default::default(),
+            guards: Default::default(),
+            dispatcher: None,
+            registry: f.context.registry.clone(),
+            shutdown: tokio_util::sync::CancellationToken::new(),
+        };
+        tokio::spawn(async move {
+            let mut tx = pool.begin().await.unwrap();
+            let outcome = session_tools::jobs::run_in_tx(
+                &mut tx,
+                &job,
+                Utc::now(),
+                Uuid::now_v7(),
+                None,
+                &context.settle,
+                &Thresholds::from(&canterlot_hub::config::ActivityConfig::default()),
+                None,
+                None,
+                &LimitsConfig::default(),
+                std::time::Duration::from_secs(60),
+            )
+            .await;
+            if outcome.is_ok() {
+                tx.commit().await.unwrap();
+            }
+            outcome.is_ok()
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let unlocked: Option<Uuid> =
+        sqlx::query_scalar("select id from requests where id=$1 for update skip locked")
+            .bind(request)
+            .fetch_optional(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        unlocked,
+        Some(request),
+        "the job must wait on the queue, not hold the request row"
+    );
+    blocker.rollback().await.unwrap();
+    assert!(task.await.unwrap());
+    assert_eq!(f.request_state(request).await, "decision_applied");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn concurrent_decisions_with_different_keys_do_not_deadlock(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let (request, _) = f
+        .proposal(
+            "settings.propose_routing",
+            json!({"policy": routing(), "reason": "гонка", "base_revision": 0}),
+        )
+        .await;
+    let decide = |key: &'static str| {
+        let client = f.client.clone();
+        let path = format!(
+            "/api/v1/conversations/{}/requests/{request}/decision",
+            f.conversation
+        );
+        async move {
+            client
+                .send(
+                    Method::POST,
+                    &path,
+                    Some(key),
+                    Some(json!({"kind":"permission","behavior":"allow","message":null})),
+                )
+                .await
+                .status
+        }
+    };
+    let (first, second) = tokio::join!(decide("race-one"), decide("race-two"));
+    let statuses = [u16::from(first), u16::from(second)];
+    assert_eq!(statuses.iter().filter(|status| **status == 200).count(), 1, "{statuses:?}");
+    assert_eq!(statuses.iter().filter(|status| **status == 409).count(), 1, "{statuses:?}");
+    assert_eq!(f.request_state(request).await, "decision_saved");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn late_approval_of_an_overdue_proposal_is_refused_without_a_scheduler(pool: PgPool) {
     let f = Fx::new(pool).await;
     let (request, _) = f

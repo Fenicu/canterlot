@@ -575,6 +575,8 @@ pub(crate) async fn run_job(
         return Ok(JobOutcome::Cancelled("invalid_payload"));
     };
     crate::conversations::lock_owner(conn, job.owner_id).await?;
+    // Тот же порядок, что у HTTP-решения: очередь, затем строка запроса.
+    send::lock_queue(conn, parent).await?;
     let row: Option<(RequestState, Value, Option<Value>)> = sqlx::query_as(
         "select state,request_payload,decision_payload from requests
           where id=$1 and conversation_id=$2 and kind='settings_change' for update",
