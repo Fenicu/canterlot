@@ -507,14 +507,15 @@ fn validate_decision(
     match (row.kind, decision) {
         // jsonb не принимает \u0000: без проверки решение падало бы в 500.
         (
-            RequestKind::Permission | RequestKind::SpawnApproval,
+            RequestKind::Permission | RequestKind::SpawnApproval | RequestKind::SettingsChange,
             DecisionBody::Permission { message, .. },
         ) if message.as_deref().is_some_and(|text| text.contains('\0')) => {
             Err(invalid_decision(None))
         }
-        (RequestKind::Permission | RequestKind::SpawnApproval, DecisionBody::Permission { .. }) => {
-            Ok(())
-        }
+        (
+            RequestKind::Permission | RequestKind::SpawnApproval | RequestKind::SettingsChange,
+            DecisionBody::Permission { .. },
+        ) => Ok(()),
         (RequestKind::Question, DecisionBody::Question { answers }) => {
             let questions = row
                 .request_payload

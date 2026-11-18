@@ -90,10 +90,12 @@ fn session_tools_listed_for_all_three_providers() {
                 "{provider}: {mcp_name} не говорит, когда не звать: {description}"
             );
         }
+        // Два инструмента чтения настроек и три предложения их изменить.
+        let settings_tools = 5;
         let expected = if tool_set == ToolSet::ApproveAndLimits {
-            2 + 3 + SESSION_TOOLS.len() + 1
+            2 + 3 + SESSION_TOOLS.len() + 1 + settings_tools
         } else {
-            1 + 3 + SESSION_TOOLS.len() + 1
+            1 + 3 + SESSION_TOOLS.len() + 1 + settings_tools
         };
         assert_eq!(tools.len(), expected, "{provider}");
         for required in [
@@ -487,22 +489,38 @@ fn tool_hint_is_appended() {
 }
 
 #[test]
-fn no_tool_touches_the_whitelist() {
+fn no_agent_tool_applies_a_setting_itself() {
+    // Белый список агент читает и может предложить владельцу, но не меняет напрямую.
     for (mcp_name, hub_name) in mcp::AGENT_TOOLS {
         for name in [mcp_name, hub_name] {
             let lower = name.to_ascii_lowercase();
             assert!(
-                !lower.contains("whitelist")
-                    && !lower.contains("allowlist")
-                    && !lower.contains("spawn_list"),
+                !lower.contains("allowlist") && !lower.contains("spawn_list"),
                 "{name}"
             );
+            if lower.contains("whitelist") {
+                assert!(
+                    matches!(
+                        name,
+                        "canterlot_spawn_whitelist"
+                            | "settings.whitelist"
+                            | "settings_propose_whitelist"
+                            | "settings.propose_whitelist"
+                    ),
+                    "{name}"
+                );
+            }
         }
     }
     for (tool_set, provider) in PROVIDERS {
         for tool in tools_of(tool_set, provider) {
-            let schema = tool["inputSchema"].to_string().to_ascii_lowercase();
-            assert!(!schema.contains("whitelist"), "{}: {schema}", tool["name"]);
+            let name = tool["name"].as_str().unwrap();
+            if name.contains("whitelist") {
+                assert!(
+                    name == "canterlot_spawn_whitelist" || name == "settings_propose_whitelist",
+                    "{name}"
+                );
+            }
         }
     }
     // Все имена агентских инструментов хаба — в пространствах presets и sessions.
@@ -516,11 +534,12 @@ fn no_tool_touches_the_whitelist() {
                 || hub_name.starts_with("spawn_queue.")
                 || hub_name.starts_with("plan.")
                 || hub_name.starts_with("history.")
-                || hub_name.starts_with("secrets."),
+                || hub_name.starts_with("secrets.")
+                || hub_name.starts_with("settings."),
             "{hub_name}"
         );
     }
-    assert_eq!(mcp::AGENT_TOOLS.len(), 26);
+    assert_eq!(mcp::AGENT_TOOLS.len(), 31);
 }
 
 #[tokio::test]

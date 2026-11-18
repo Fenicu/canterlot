@@ -17,6 +17,7 @@ use super::{
     conversations::{DecisionAnswer, DecisionBehavior, DecisionBody, DecisionOutcomeView},
     error::{ArchiveReason, ErrorBody, ErrorCode, ErrorDetails, ErrorEnvelope, ErrorScope, Retry},
 };
+use crate::session_tools::settings_change::SettingsChangePayload;
 
 #[derive(OpenApi)]
 #[openapi(
@@ -36,7 +37,8 @@ use super::{
         DecisionBody,
         DecisionAnswer,
         DecisionBehavior,
-        DecisionOutcomeView
+        DecisionOutcomeView,
+        SettingsChangePayload
     ))
 )]
 struct ApiDoc;

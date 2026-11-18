@@ -34,6 +34,10 @@ pub enum RequestState {
     DecisionUnconfirmed,
     DecisionNotApplied,
     ClosedWithoutDecision,
+    /// Настройка изменилась с момента чтения агентом: применять нечего.
+    SettingChanged,
+    Declined,
+    Expired,
 }
 
 impl RequestState {
@@ -46,6 +50,9 @@ impl RequestState {
             Self::DecisionUnconfirmed => "decision_unconfirmed",
             Self::DecisionNotApplied => "decision_not_applied",
             Self::ClosedWithoutDecision => "closed_without_decision",
+            Self::SettingChanged => "setting_changed",
+            Self::Declined => "declined",
+            Self::Expired => "expired",
         }
     }
 }
@@ -62,6 +69,9 @@ impl FromStr for RequestState {
             "decision_unconfirmed" => Ok(Self::DecisionUnconfirmed),
             "decision_not_applied" => Ok(Self::DecisionNotApplied),
             "closed_without_decision" => Ok(Self::ClosedWithoutDecision),
+            "setting_changed" => Ok(Self::SettingChanged),
+            "declined" => Ok(Self::Declined),
+            "expired" => Ok(Self::Expired),
             other => Err(format!("unknown request state: {other}")),
         }
     }
@@ -73,6 +83,7 @@ pub enum RequestKind {
     Permission,
     Question,
     SpawnApproval,
+    SettingsChange,
 }
 
 impl RequestKind {
@@ -81,6 +92,7 @@ impl RequestKind {
             Self::Permission => "permission",
             Self::Question => "question",
             Self::SpawnApproval => "spawn_approval",
+            Self::SettingsChange => "settings_change",
         }
     }
 }
@@ -93,6 +105,7 @@ impl FromStr for RequestKind {
             "permission" => Ok(Self::Permission),
             "question" => Ok(Self::Question),
             "spawn_approval" => Ok(Self::SpawnApproval),
+            "settings_change" => Ok(Self::SettingsChange),
             other => Err(format!("unknown request kind: {other}")),
         }
     }
@@ -308,10 +321,18 @@ pub async fn save_decision_in_tx(
         .fetch_one(&mut *tx)
         .await?;
 
-        // Одобрение запуска выполняет хаб: на машину решение не уходит.
+        // Одобрение запуска и смены настроек выполняет хаб: на машину решение не уходит.
         let command_id = if row.kind == RequestKind::SpawnApproval {
             crate::session_tools::spawn::queue_decision_in_tx(tx, owner_id, conversation_id, row.id)
                 .await?
+        } else if row.kind == RequestKind::SettingsChange {
+            crate::session_tools::settings_change::queue_decision_in_tx(
+                tx,
+                owner_id,
+                conversation_id,
+                row.id,
+            )
+            .await?
         } else {
             let command_id = Uuid::now_v7();
             let command_payload = json!({
@@ -538,6 +559,7 @@ pub(crate) async fn close_for_ended_execution_in_tx(
     let rows: Vec<(Uuid, String, Option<Uuid>, RequestKind, serde_json::Value)> = sqlx::query_as(
         "select id, state, winner_decision_id, kind, request_payload from requests
          where execution_id = $1 and state in ('open', 'decision_saved', 'decision_transmitting')
+           and kind <> 'settings_change'
            and not (kind = 'spawn_approval' and state = 'decision_saved')
          order by id for update",
     )
@@ -612,5 +634,6 @@ pub(crate) async fn close_for_ended_execution_in_tx(
 /// Одобрение запуска ждёт владельца, не останавливая ход родителя.
 pub(crate) const LIVE_OPEN_REQUESTS: &str = "select count(*) from requests r
      join executions e on e.id = r.execution_id
-     where r.conversation_id = $1 and r.state = 'open' and r.kind <> 'spawn_approval'
+     where r.conversation_id = $1 and r.state = 'open'
+       and r.kind not in ('spawn_approval', 'settings_change')
        and e.state not in ('stopped', 'failed', 'owner_lost')";

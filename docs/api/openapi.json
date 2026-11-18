@@ -19789,6 +19789,51 @@
         },
         "additionalProperties": false
       },
+      "SettingsChangePayload": {
+        "type": "object",
+        "description": "Описание payload для OpenAPI: точный JSON-контракт карточке #200 задаёт `SettingsProposal`.",
+        "required": [
+          "setting",
+          "reason",
+          "base_revision",
+          "before",
+          "after"
+        ],
+        "properties": {
+          "after": {
+            "description": "Предлагаемое значение; у пресета — новый текст."
+          },
+          "base_revision": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "before": {
+            "description": "Текущее значение; у пресета — старый текст."
+          },
+          "preset_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Только для `preset`."
+          },
+          "reason": {
+            "type": "string"
+          },
+          "setting": {
+            "type": "string",
+            "description": "`routing`, `whitelist` или `preset` — дискриминант `SettingsProposal`."
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Только для `preset`: название, под которым владелец узнает пресет."
+          }
+        }
+      },
       "SettingsPatch": {
         "type": "object",
         "properties": {

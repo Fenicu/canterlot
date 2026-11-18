@@ -2,7 +2,7 @@
 //! может только владелец через HTTP: у инструментов агента пути сюда на запись нет.
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use sqlx::PgConnection;
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -60,6 +60,21 @@ async fn stored(conn: &mut PgConnection, owner_id: Uuid) -> Result<Option<Value>
 }
 
 pub async fn view(conn: &mut PgConnection, owner_id: Uuid) -> Result<WhitelistView, sqlx::Error> {
+    view_with_revision(conn, owner_id)
+        .await
+        .map(|(view, _)| view)
+}
+
+/// Список и ревизия: агент передаёт base revision в предложении, PWA видит смену.
+pub async fn view_with_revision(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+) -> Result<(WhitelistView, i64), sqlx::Error> {
+    let revision: i64 =
+        sqlx::query_scalar("select spawn_whitelist_revision from owners where id=$1")
+            .bind(owner_id)
+            .fetch_one(&mut *conn)
+            .await?;
     let defaults = default_entries();
     let (entries, is_default) = match stored(conn, owner_id).await? {
         Some(entries) => (
@@ -69,25 +84,42 @@ pub async fn view(conn: &mut PgConnection, owner_id: Uuid) -> Result<WhitelistVi
         ),
         None => (defaults.clone(), true),
     };
-    Ok(WhitelistView {
-        entries,
-        is_default,
-        default_entries: defaults,
-    })
+    Ok((
+        WhitelistView {
+            entries,
+            is_default,
+            default_entries: defaults,
+        },
+        revision,
+    ))
 }
 
-/// `None` возвращает встроенный список.
+/// `None` возвращает встроенный список. Одна запись и событие на каждый вид правки:
+/// владелец в PWA и одобренное агентами предложение меняют список одинаково.
 pub async fn replace(
     conn: &mut PgConnection,
     owner_id: Uuid,
     entries: Option<&[WhitelistEntry]>,
-) -> Result<(), sqlx::Error> {
-    sqlx::query("update owners set spawn_whitelist=$2 where id=$1")
-        .bind(owner_id)
-        .bind(entries.map(sqlx::types::Json))
-        .execute(conn)
-        .await?;
-    Ok(())
+    correlation: Uuid,
+) -> Result<i64, sqlx::Error> {
+    let revision: i64 = sqlx::query_scalar(
+        "update owners set spawn_whitelist=$2, spawn_whitelist_revision=spawn_whitelist_revision+1
+          where id=$1 returning spawn_whitelist_revision",
+    )
+    .bind(owner_id)
+    .bind(entries.map(sqlx::types::Json))
+    .fetch_one(&mut *conn)
+    .await?;
+    crate::conversations::append(
+        conn,
+        crate::events::Scope::Conversations { owner_id },
+        "spawn_whitelist_changed",
+        None,
+        json!({"revision": revision}),
+        correlation,
+    )
+    .await?;
+    Ok(revision)
 }
 
 /// `first_model` нужна для записей `default`.

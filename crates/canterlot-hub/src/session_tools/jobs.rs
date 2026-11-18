@@ -94,11 +94,13 @@ enum Action {
     Nudge,
     SpawnDequeue,
     SpawnAttributes,
+    SettingsChange,
+    SettingsExpire,
 }
 
 impl Action {
     #[cfg(test)]
-    const ALL: [Self; 11] = [
+    const ALL: [Self; 13] = [
         Self::Event,
         Self::MachineEvent,
         Self::Note,
@@ -110,6 +112,8 @@ impl Action {
         Self::Nudge,
         Self::SpawnDequeue,
         Self::SpawnAttributes,
+        Self::SettingsChange,
+        Self::SettingsExpire,
     ];
 
     fn parse(value: &str) -> Option<Self> {
@@ -125,6 +129,8 @@ impl Action {
             "nudge" => Some(Self::Nudge),
             "spawn_dequeue" => Some(Self::SpawnDequeue),
             "spawn_attributes" => Some(Self::SpawnAttributes),
+            "settings_change" => Some(Self::SettingsChange),
+            "settings_expire" => Some(Self::SettingsExpire),
             _ => None,
         }
     }
@@ -277,6 +283,20 @@ pub async fn run_in_tx(
         }
         Action::Spawn => spawn::run_job(conn, job, subscriber, registry, now, correlation_id).await,
         Action::SpawnClose => spawn::close_job(conn, job, subscriber, correlation_id).await,
+        Action::SettingsChange => {
+            crate::session_tools::settings_change::run_job(
+                conn,
+                job,
+                subscriber,
+                now,
+                correlation_id,
+            )
+            .await
+        }
+        Action::SettingsExpire => {
+            crate::session_tools::settings_change::expire_job(conn, job, subscriber, correlation_id)
+                .await
+        }
         Action::Cleanup => {
             Ok(accept::cleanup_job(conn, job, subscriber, now, correlation_id).await?)
         }
@@ -725,6 +745,16 @@ pub async fn abandon_in_tx(
         }
         // Обновление атрибутов нечего закрывать: следующее изменение опубликует их снова.
         Action::SpawnAttributes => Ok(false),
+        Action::SettingsChange | Action::SettingsExpire => {
+            crate::session_tools::settings_change::abandon_in_tx(
+                conn,
+                conversation,
+                payload,
+                correlation_id,
+            )
+            .await
+            .map(|_| false)
+        }
     }
 }
 
@@ -771,6 +801,13 @@ mod tests {
                 Action::SpawnAttributes => json!({
                     "action": "spawn_attributes",
                     "conversation_id": Uuid::now_v7(),
+                }),
+                Action::SettingsChange | Action::SettingsExpire => json!({
+                    "action": match action {
+                        Action::SettingsChange => "settings_change",
+                        _ => "settings_expire",
+                    },
+                    "request_id": Uuid::now_v7(),
                 }),
             };
             abandon_in_tx(

@@ -798,6 +798,115 @@ async fn approval_end_to_end_over_http_and_mcp(pool: PgPool) {
     b.finish().await;
 }
 
+/// Настройку предлагает MCP-инструмент, карточку решает владелец по HTTP, применение и
+/// сообщение агенту идут через те же задания и события, что и у настоящего хаба.
+#[sqlx::test(migrations = "../canterlot-hub/migrations")]
+async fn settings_proposal_end_to_end_over_http_and_mcp(pool: PgPool) {
+    let cli = tempfile::tempdir().unwrap();
+    let executable = cli.path().join("fake-cli");
+    fake_exec::write_executable(&executable, include_str!("support/fake_claude.py"), 0o700);
+    fs::write(
+        cli.path().join("relay-exe"),
+        env!("CARGO_BIN_EXE_canterlot-worker"),
+    )
+    .unwrap();
+    let policy = json!({"task_types":{"review":{"title":"Review","candidates":[
+        {"harness":"claude_code","model":"haiku"}],"expected_minutes":30}}});
+    let call = json!({"jsonrpc": "2.0", "id": 11, "method": "tools/call", "params": {
+        "name": "settings_propose_routing",
+        "arguments": {"policy": policy, "reason": "нужна маршрутизация", "base_revision": 0},
+    }});
+    fs::write(cli.path().join("mcp-calls.json"), json!([call]).to_string()).unwrap();
+    let answer = |extra: &[Value]| {
+        let start = json!({"type": "stream_event", "parent_tool_use_id": null,
+            "user_message_uuids": ["@input"], "event": {"type": "message_start",
+            "message": {"id": "m1", "model": "claude-haiku-test", "usage": {}}}});
+        let finish = json!({"type": "result", "subtype": "success", "is_error": false,
+            "user_message_uuids": ["@input"], "modelUsage": {}});
+        let mut frames = vec![start];
+        frames.extend_from_slice(extra);
+        frames.push(finish);
+        Value::Array(frames).to_string()
+    };
+    for turn in 1..=20 {
+        fs::write(cli.path().join(format!("turn{turn}.json")), answer(&[])).unwrap();
+    }
+    let mut options = options();
+    options.claude_code = Some(ClaudeCodeConfig {
+        executable,
+        ..Default::default()
+    });
+    let mut b = Bench::with(&pool, options).await;
+    let work = b.p.work.clone();
+    let parent = b.session_on("claude_code", "haiku", "low", &work).await;
+    let stdin = cli.path().join("stdin.log");
+    let turns = fs::read_to_string(&stdin).map_or(0, |log| log.lines().count());
+    fs::write(
+        cli.path().join(format!("turn{}.json", turns + 1)),
+        answer(&[json!("@request:0")]),
+    )
+    .unwrap();
+    let submitted = b.p.submit(parent, "Предложи настройку", &[]).await;
+    b.p.accepted(uuid(&submitted["input_id"])).await;
+
+    let replies = cli.path().join("mcp-replies.jsonl");
+    until("MCP answers", async || replies.exists()).await;
+    let reply: Value = serde_json::from_str(fs::read_to_string(&replies).unwrap().trim()).unwrap();
+    assert_eq!(reply["id"], 11);
+    let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("pending_approval"), "{text}");
+    assert!(text.contains("The owner decides in the app"), "{text}");
+    let (request, kind): (Uuid, String) =
+        sqlx::query_as("select id,kind from requests where conversation_id=$1")
+            .bind(parent)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(kind, "settings_change");
+    let payload: Value = sqlx::query_scalar("select request_payload from requests where id=$1")
+        .bind(request)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(payload["setting"], "routing");
+    assert_eq!(payload["reason"], "нужна маршрутизация");
+    assert_eq!(payload["base_revision"], 0);
+    assert!(payload.get("before").is_some(), "{payload}");
+    b.ws.wait_event(
+        "card over WSS",
+        &format!("conversation:{parent}"),
+        "request_opened",
+        |r| r["request_id"] == request.to_string(),
+    )
+    .await;
+    b.decide(parent, request, "allow", Value::Null).await;
+
+    until("routing policy applied", async || {
+        let stored: Option<Value> =
+            sqlx::query_scalar("select routing_policy from owners where id=$1")
+                .bind(b.p.owner)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        stored.is_some()
+    })
+    .await;
+    until("outcome reaches the agent", async || {
+        fs::read_to_string(&stdin)
+            .is_ok_and(|log| log.contains("[canterlot] Your settings_change request"))
+    })
+    .await;
+    let delivered = fs::read_to_string(&stdin).unwrap();
+    assert!(delivered.contains("was allowed"), "{delivered}");
+    let state: String = sqlx::query_scalar("select state from requests where id=$1")
+        .bind(request)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(state, "decision_applied");
+    b.finish().await;
+}
+
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn approval_card_holds_nothing_and_a_refusal_starts_nothing(pool: PgPool) {
     let mut b = Bench::new(&pool).await;

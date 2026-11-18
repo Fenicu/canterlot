@@ -888,6 +888,8 @@ async fn modes_become_session_rules() {
                 {"action": "canterlot_plan_add", "resource": "*", "effect": "allow"},
                 {"action": "canterlot_plan_update", "resource": "*", "effect": "allow"},
                 {"action": "canterlot_history_search", "resource": "*", "effect": "allow"},
+                {"action": "canterlot_canterlot_routing_policy", "resource": "*", "effect": "allow"},
+                {"action": "canterlot_canterlot_spawn_whitelist", "resource": "*", "effect": "allow"},
             ]),
         ),
         (
@@ -911,6 +913,8 @@ async fn modes_become_session_rules() {
                 {"action": "canterlot_plan_add", "resource": "*", "effect": "allow"},
                 {"action": "canterlot_plan_update", "resource": "*", "effect": "allow"},
                 {"action": "canterlot_history_search", "resource": "*", "effect": "allow"},
+                {"action": "canterlot_canterlot_routing_policy", "resource": "*", "effect": "allow"},
+                {"action": "canterlot_canterlot_spawn_whitelist", "resource": "*", "effect": "allow"},
             ]),
         ),
     ] {
@@ -5062,7 +5066,12 @@ async fn relay_sees_the_preset_tools_and_the_opencode_budget() {
             "plan_update",
             "plan_adopt",
             "history_search",
-            "secret_request"
+            "secret_request",
+            "canterlot_routing_policy",
+            "canterlot_spawn_whitelist",
+            "settings_propose_routing",
+            "settings_propose_whitelist",
+            "settings_propose_preset"
         ]
     );
     bench.close(CloseMode::Graceful).await;

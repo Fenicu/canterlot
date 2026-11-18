@@ -1509,6 +1509,10 @@ pub fn waiting_text(kind: &str, payload: &Value) -> String {
             Some(harness) => format!("Ждёт одобрения запуска: {}", clip(harness, 40)),
             None => "Ждёт одобрения запуска".into(),
         },
+        "settings_change" => match text_field(payload, &["setting"]) {
+            Some(setting) => format!("Ждёт решения по настройке: {}", clip(setting, 40)),
+            None => "Ждёт решения по настройке".into(),
+        },
         _ => "Ждёт ответа".into(),
     }
 }
@@ -1652,6 +1656,10 @@ mod tests {
                 &json!({"harness":"codex","brief":"секрет"})
             ),
             "Ждёт одобрения запуска: codex"
+        );
+        assert_eq!(
+            waiting_text("settings_change", &json!({"setting":"routing"})),
+            "Ждёт решения по настройке: routing"
         );
     }
 

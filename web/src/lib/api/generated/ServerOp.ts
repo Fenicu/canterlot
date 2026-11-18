@@ -43,6 +43,7 @@ export type ServerOp =
         | AlarmChanged
         | NudgeChanged
         | RoutingPolicyChanged
+        | SpawnWhitelistChanged
         | SpawnQueueChanged
         | PlanTaskChanged
         | LimitsChanged
@@ -1122,6 +1123,22 @@ export interface RoutingPolicyChanged {
   execution_id: Uuid | null;
   correlation_id: Uuid;
   kind: "routing_policy_changed";
+  payload: {
+    revision?: number;
+  };
+}
+export interface SpawnWhitelistChanged {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "spawn_whitelist_changed";
   payload: {
     revision?: number;
   };

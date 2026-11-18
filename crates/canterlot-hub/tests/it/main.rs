@@ -117,6 +117,7 @@ mod session_tools_read;
 mod session_usage;
 mod session_wait;
 mod settings;
+mod settings_change;
 mod side_chat;
 mod singleton_regressions;
 mod snapshot_boundary;

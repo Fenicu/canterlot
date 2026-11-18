@@ -27,6 +27,7 @@ pub mod routing;
 pub mod search;
 pub mod secret;
 pub mod send;
+pub mod settings_change;
 pub mod settle;
 pub mod spawn;
 pub mod spawn_queue;
@@ -75,6 +76,11 @@ pub const TOOLS: &[&str] = &[
     "plan.adopt",
     "history.search",
     "secrets.request",
+    "settings.routing",
+    "settings.whitelist",
+    "settings.propose_routing",
+    "settings.propose_whitelist",
+    "settings.propose_preset",
 ];
 
 pub fn is_tool(name: &str) -> bool {
@@ -439,6 +445,17 @@ pub async fn call(
         "plan.adopt" => plan::adopt(context, caller, arguments).await,
         "history.search" => search::search(context, caller, arguments).await,
         "secrets.request" => secret::request(context, caller, arguments).await,
+        "settings.routing" => settings_change::routing_policy(context, caller, arguments).await,
+        "settings.whitelist" => settings_change::whitelist(context, caller, arguments).await,
+        "settings.propose_routing" => {
+            settings_change::propose_routing(context, caller, arguments).await
+        }
+        "settings.propose_whitelist" => {
+            settings_change::propose_whitelist(context, caller, arguments).await
+        }
+        "settings.propose_preset" => {
+            settings_change::propose_preset(context, caller, arguments).await
+        }
         _ => Err(ToolError::new(ToolErrorCode::UnknownTool)),
     }
 }

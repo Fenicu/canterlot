@@ -578,6 +578,21 @@ pub async fn get_for(
     })
 }
 
+/// Те же правила текста, что и у экрана настроек: пустой, NUL и лимит байт.
+pub fn validate_text(text: &str, purpose: PresetPurpose) -> Result<(), PresetError> {
+    if text.trim().is_empty() || text.contains('\0') {
+        return Err(PresetError::Invalid { field: "text" });
+    }
+    let limit = match purpose {
+        PresetPurpose::Instructions => MAX_PRESET_TEXT_BYTES,
+        PresetPurpose::Nudge => MAX_NUDGE_TEXT_BYTES,
+    };
+    if text.len() > limit {
+        return Err(PresetError::Invalid { field: "text" });
+    }
+    Ok(())
+}
+
 fn validate_new(
     title: &str,
     description: &str,
@@ -596,16 +611,7 @@ fn validate_new(
             field: "description",
         });
     }
-    if text.trim().is_empty() || text.contains('\0') {
-        return Err(PresetError::Invalid { field: "text" });
-    }
-    let limit = match purpose {
-        PresetPurpose::Instructions => MAX_PRESET_TEXT_BYTES,
-        PresetPurpose::Nudge => MAX_NUDGE_TEXT_BYTES,
-    };
-    if text.len() > limit {
-        return Err(PresetError::Invalid { field: "text" });
-    }
+    validate_text(text, purpose)?;
     Ok((title, description.to_owned()))
 }
 
@@ -752,7 +758,7 @@ async fn with_text(pool: &PgPool, mut preset: Preset) -> Result<Preset, PresetEr
     Ok(preset)
 }
 
-async fn update_in_tx(
+pub(crate) async fn update_in_tx(
     conn: &mut PgConnection,
     owner: Uuid,
     id: Uuid,
@@ -803,19 +809,7 @@ async fn update_in_tx(
         .as_deref()
         .unwrap_or(&current_text_value)
         .to_owned();
-    if patch.text.as_ref().is_some_and(|t| t.trim().is_empty())
-        || new_text.trim().is_empty()
-        || new_text.contains('\0')
-    {
-        return Err(PresetError::Invalid { field: "text" });
-    }
-    let text_limit = match purpose {
-        PresetPurpose::Instructions => MAX_PRESET_TEXT_BYTES,
-        PresetPurpose::Nudge => MAX_NUDGE_TEXT_BYTES,
-    };
-    if new_text.len() > text_limit {
-        return Err(PresetError::Invalid { field: "text" });
-    }
+    validate_text(&new_text, purpose)?;
     let next = current + 1;
     sqlx::query(
         "update instruction_presets set title=$3, description=$4, revision=$5, updated_at=clock_timestamp()

@@ -4394,6 +4394,25 @@ export interface components {
             /** @description 10..1024 байт. */
             new_password: string;
         };
+        /** @description Описание payload для OpenAPI: точный JSON-контракт карточке #200 задаёт `SettingsProposal`. */
+        SettingsChangePayload: {
+            /** @description Предлагаемое значение; у пресета — новый текст. */
+            after: unknown;
+            /** Format: int64 */
+            base_revision: number;
+            /** @description Текущее значение; у пресета — старый текст. */
+            before: unknown;
+            /**
+             * Format: uuid
+             * @description Только для `preset`.
+             */
+            preset_id?: string | null;
+            reason: string;
+            /** @description `routing`, `whitelist` или `preset` — дискриминант `SettingsProposal`. */
+            setting: string;
+            /** @description Только для `preset`: название, под которым владелец узнает пресет. */
+            title?: string | null;
+        };
         SettingsPatch: {
             effort?: string | null;
             instruction_profile?: string | null;

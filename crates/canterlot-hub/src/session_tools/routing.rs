@@ -49,7 +49,7 @@ fn valid_key(key: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Пороги провайдера в процентах расхода.
-#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields, default)]
 pub struct ProviderThresholds {
     pub max_weekly_percent: Option<f64>,
@@ -60,7 +60,7 @@ pub struct ProviderThresholds {
 }
 
 /// Кандидат типа задачи.
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Candidate {
     pub harness: String,
@@ -83,7 +83,7 @@ fn default_expected_minutes() -> i64 {
 }
 
 /// Тип задачи: русское название для PWA и упорядоченные кандидаты.
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TaskType {
     pub title: String,
@@ -104,7 +104,7 @@ pub enum UnknownLimits {
 }
 
 /// Политика маршрутизации владельца. `None` в базе — встроенная политика.
-#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields, default)]
 pub struct Policy {
     pub task_types: BTreeMap<String, TaskType>,
@@ -1188,16 +1188,27 @@ pub async fn load_policy(
     conn: &mut PgConnection,
     owner: Uuid,
 ) -> Result<(Policy, i64), sqlx::Error> {
+    let (stored, revision) = policy_view(conn, owner).await?;
+    let policy = match stored {
+        Some(value) => value,
+        None => builtin(),
+    };
+    Ok((policy, revision))
+}
+
+/// Настройка экрана и base revision: `None` — встроенная политика, а не пустая.
+pub async fn policy_view(
+    conn: &mut PgConnection,
+    owner: Uuid,
+) -> Result<(Option<Policy>, i64), sqlx::Error> {
     let row: Option<(Option<Value>, i64)> =
         sqlx::query_as("select routing_policy,routing_policy_revision from owners where id=$1")
             .bind(owner)
             .fetch_optional(&mut *conn)
             .await?;
     let (stored, revision) = row.unwrap_or((None, 0));
-    let policy = match stored {
-        Some(value) => serde_json::from_value(value).unwrap_or_default(),
-        None => builtin(),
-    };
+    // Как и раньше: нечитаемая политика в базе не валит чтение, а даёт пустую.
+    let policy = stored.map(|value| serde_json::from_value(value).unwrap_or_default());
     Ok((policy, revision))
 }
 

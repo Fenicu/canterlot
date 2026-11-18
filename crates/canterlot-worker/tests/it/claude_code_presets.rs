@@ -326,6 +326,8 @@ fn settings_json_modes_match_the_plan() {
                 "mcp__canterlot__plan_add",
                 "mcp__canterlot__plan_update",
                 "mcp__canterlot__history_search",
+                "mcp__canterlot__canterlot_routing_policy",
+                "mcp__canterlot__canterlot_spawn_whitelist",
             ]},
         })
     );

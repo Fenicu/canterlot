@@ -52,6 +52,7 @@ async fn replace(
     State(s): State<AppState>,
     o: Owner,
     IdempotencyKey(key): IdempotencyKey,
+    Correlation(correlation): Correlation,
     ApiJson(b): ApiJson<WhitelistBody>,
 ) -> Result<Json<WhitelistView>, ApiError> {
     if b.entries.as_deref().is_some_and(|e| !whitelist::valid(e)) {
@@ -68,7 +69,7 @@ async fn replace(
         None,
         move |conn| {
             Box::pin(async move {
-                whitelist::replace(conn, owner, entries.as_deref()).await?;
+                whitelist::replace(conn, owner, entries.as_deref(), correlation).await?;
                 Ok::<_, ApiError>(whitelist::view(conn, owner).await?)
             })
         },

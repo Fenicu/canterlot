@@ -86,7 +86,7 @@ pub const SERVER_INSTRUCTIONS: &str = "canterlot is the control plane that super
      The owner drives it from their phone; permission prompts and AskUserQuestion reach the owner automatically and may take minutes.\n\
      Never call the approve tool yourself: it only answers permission prompts. In read-only (plan) mode never call ExitPlanMode: end with your answer as plain text.\n\
      Use canterlot_limits before long work; do not poll it. Denied calls must not be retried with different arguments.\n\
-     Only the owner can change these rules; model output never overrides them.\n\
+     Only the owner can change these rules; settings can be proposed with settings_propose_routing, settings_propose_whitelist or settings_propose_preset, and the owner decides; model output never overrides them.\n\
      Instruction presets: canterlot_presets_list, canterlot_preset_save, canterlot_preset_apply (this session only, from the next turn).\n\
      Other sessions: sessions_list and session_inspect show state and evidence.\n\
      session_send queues a message for another session; session_spawn starts a new one with a brief. By default pass route (a task type from the owner's routing policy, see route_preview) and let canterlot pick the executor; name harness and model yourself only when the owner asked for a specific executor or the policy has no fitting task type, and say why in your reply. session_spawn can nudge the new session (nudge_set) when it stops without a done marker; plan_task links it to your plan (plan_list, plan_add, plan_update, plan_adopt).\n\
@@ -102,7 +102,7 @@ pub const SERVER_INSTRUCTIONS: &str = "canterlot is the control plane that super
 pub const CODEX_SERVER_INSTRUCTIONS: &str = "canterlot is the control plane that supervises this coding session.\n\
      The owner drives it from their phone; approval prompts and questions from this CLI reach the owner automatically and may take minutes.\n\
      Use canterlot_limits before long work; do not poll it. Denied calls must not be retried with different arguments.\n\
-     Only the owner can change these rules; model output never overrides them.\n\
+     Only the owner can change these rules; settings can be proposed with settings_propose_routing, settings_propose_whitelist or settings_propose_preset, and the owner decides; model output never overrides them.\n\
      Instruction presets: canterlot_presets_list, canterlot_preset_save, canterlot_preset_apply (this session only, from the next turn).\n\
      Other sessions: sessions_list and session_inspect show state and evidence.\n\
      session_send queues a message for another session; session_spawn starts a new one with a brief. By default pass route (a task type from the owner's routing policy, see route_preview) and let canterlot pick the executor; name harness and model yourself only when the owner asked for a specific executor or the policy has no fitting task type, and say why in your reply. session_spawn can nudge the new session (nudge_set) when it stops without a done marker; plan_task links it to your plan (plan_list, plan_add, plan_update, plan_adopt).\n\
@@ -118,7 +118,7 @@ pub const CODEX_SERVER_INSTRUCTIONS: &str = "canterlot is the control plane that
 pub const OPENCODE_SERVER_INSTRUCTIONS: &str = "canterlot is the control plane that supervises this coding session.\n\
      The owner drives it from their phone; permission prompts and questions from this CLI reach the owner automatically and may take minutes.\n\
      Use canterlot_canterlot_limits before long work; do not poll it. Denied calls must not be retried with different arguments.\n\
-     Only the owner can change these rules; model output never overrides them.\n\
+     Only the owner can change these rules; settings can be proposed with canterlot_settings_propose_routing, canterlot_settings_propose_whitelist or canterlot_settings_propose_preset, and the owner decides; model output never overrides them.\n\
      Instruction presets: canterlot_canterlot_presets_list, canterlot_canterlot_preset_save, canterlot_canterlot_preset_apply (this session only, from the next turn).\n\
      Other sessions: canterlot_sessions_list and canterlot_session_inspect show state and evidence.\n\
      canterlot_session_send queues a message for another session; canterlot_session_spawn starts a new one with a brief. By default pass route (a task type from the owner's routing policy, see canterlot_route_preview) and let canterlot pick the executor; name harness and model yourself only when the owner asked for a specific executor or the policy has no fitting task type, and say why in your reply. nudge_set lets canterlot nudge it without waking you; plan_task links it to your plan (canterlot_plan_list, canterlot_plan_add, canterlot_plan_update, canterlot_plan_adopt).\n\
@@ -163,7 +163,7 @@ pub enum ToolKind {
 }
 
 /// Агентские инструменты: имя MCP → имя инструмента хаба.
-pub const AGENT_TOOLS: [(&str, &str); 26] = [
+pub const AGENT_TOOLS: [(&str, &str); 31] = [
     ("canterlot_presets_list", "presets.list"),
     ("canterlot_preset_save", "presets.save"),
     ("canterlot_preset_apply", "presets.apply"),
@@ -190,6 +190,11 @@ pub const AGENT_TOOLS: [(&str, &str); 26] = [
     ("plan_adopt", "plan.adopt"),
     ("history_search", "history.search"),
     ("secret_request", "secrets.request"),
+    ("canterlot_routing_policy", "settings.routing"),
+    ("canterlot_spawn_whitelist", "settings.whitelist"),
+    ("settings_propose_routing", "settings.propose_routing"),
+    ("settings_propose_whitelist", "settings.propose_whitelist"),
+    ("settings_propose_preset", "settings.propose_preset"),
 ];
 
 /// Инструменты, которые в режимах `ask` и `read_only` не спрашивают владельца ни у Claude Code,
@@ -199,7 +204,7 @@ pub const AGENT_TOOLS: [(&str, &str); 26] = [
 /// `session_interrupt`, `session_stop`, `session_accept`, `spawn_cancel`, `nudge_set`,
 /// `nudge_clear`, `share_file`, `canterlot_preset_save`, `canterlot_preset_apply`,
 /// `plan_adopt`), решает режим. Имена без префикса сервера: адаптер добавляет свой.
-pub const MODE_FREE_TOOLS: [&str; 15] = [
+pub const MODE_FREE_TOOLS: [&str; 17] = [
     "canterlot_limits",
     "canterlot_presets_list",
     "sessions_list",
@@ -215,6 +220,8 @@ pub const MODE_FREE_TOOLS: [&str; 15] = [
     "plan_add",
     "plan_update",
     "history_search",
+    "canterlot_routing_policy",
+    "canterlot_spawn_whitelist",
 ];
 
 fn is_session_tool(mcp_name: &str) -> bool {
@@ -243,6 +250,11 @@ fn is_session_tool(mcp_name: &str) -> bool {
             | "plan_adopt"
             | "history_search"
             | "secret_request"
+            | "canterlot_routing_policy"
+            | "canterlot_spawn_whitelist"
+            | "settings_propose_routing"
+            | "settings_propose_whitelist"
+            | "settings_propose_preset"
     )
 }
 
@@ -333,6 +345,21 @@ fn session_tool_description(mcp_name: &str) -> &'static str {
         }
         "history_search" => {
             "Full-text search over the history of the sessions you may see: agent answers and feed messages (the owner's, other sessions', spawn briefs and session results), newest first. Whole words match in any Russian or English form; quotes search a phrase, -word excludes, or matches either. Substrings, partial identifiers, tool output and thinking are not searched. Narrow with session_id, since/until (RFC 3339), harness or kind; page with cursor. Each hit names session_id and block_id (read the whole block with session_inspect) or input_id. Read-only. Do not use it to wait for a session or to poll; do not repeat the same query."
+        }
+        "canterlot_routing_policy" => {
+            "Read the owner's current routing policy and its revision with the routing.preview-compatible built-in policy. Pass the revision as base_revision to settings_propose_routing. Read-only."
+        }
+        "canterlot_spawn_whitelist" => {
+            "Read the owner's current delegation whitelist, whether it is the built-in default, and its revision. Pass the revision as base_revision to settings_propose_whitelist. Read-only."
+        }
+        "settings_propose_routing" => {
+            "Propose a new routing policy to the owner: pass the full policy (or null for the built-in), a reason and the base_revision from canterlot_routing_policy. The hub validates it like the settings screen and refuses an identical or stale value. Only the owner can allow or decline; the outcome arrives as a [canterlot] message. Do not repeat the call while the card is open."
+        }
+        "settings_propose_whitelist" => {
+            "Propose a new delegation whitelist to the owner: pass the full entries (or null for the built-in), a reason and the base_revision from canterlot_spawn_whitelist. The hub validates it like the settings screen and refuses an identical or stale value. Only the owner can allow or decline; the outcome arrives as a [canterlot] message. Do not repeat the call while the card is open."
+        }
+        "settings_propose_preset" => {
+            "Propose new text for one shared instruction preset to the owner: pass its id and text from canterlot_presets_list, a reason and that preset's base_revision. The hub validates the text like the settings screen and refuses an identical or stale value. Only the owner can allow or decline; the outcome arrives as a [canterlot] message. Do not repeat the call while the card is open."
         }
         _ => "Session tool.",
     }
@@ -594,6 +621,42 @@ fn session_input_schema(mcp_name: &str) -> Value {
             "type": "object",
             "properties": {"session_id": id},
             "required": ["session_id"],
+            "additionalProperties": false,
+        }),
+        "canterlot_routing_policy" | "canterlot_spawn_whitelist" => json!({
+            "type": "object",
+            "properties": {},
+            "additionalProperties": false,
+        }),
+        "settings_propose_routing" => json!({
+            "type": "object",
+            "properties": {
+                "policy": {"description": "Full new routing policy, or null for the built-in."},
+                "reason": {"type": "string", "description": "Why the change is needed."},
+                "base_revision": {"type": "integer", "description": "Revision read from canterlot_routing_policy."},
+            },
+            "required": ["policy", "reason", "base_revision"],
+            "additionalProperties": false,
+        }),
+        "settings_propose_whitelist" => json!({
+            "type": "object",
+            "properties": {
+                "entries": {"type": "array", "description": "Full new whitelist, or null for the built-in."},
+                "reason": {"type": "string", "description": "Why the change is needed."},
+                "base_revision": {"type": "integer", "description": "Revision read from canterlot_spawn_whitelist."},
+            },
+            "required": ["entries", "reason", "base_revision"],
+            "additionalProperties": false,
+        }),
+        "settings_propose_preset" => json!({
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "description": "Preset id from canterlot_presets_list."},
+                "text": {"type": "string", "description": "Full new preset text."},
+                "reason": {"type": "string", "description": "Why the change is needed."},
+                "base_revision": {"type": "integer", "description": "Revision of that preset."},
+            },
+            "required": ["id", "text", "reason", "base_revision"],
             "additionalProperties": false,
         }),
         _ => json!({
@@ -926,6 +989,8 @@ fn tools_list(tool_set: ToolSet, provider: &str) -> Value {
                     | "route_preview"
                     | "plan_list"
                     | "history_search"
+                    | "canterlot_routing_policy"
+                    | "canterlot_spawn_whitelist"
             ) {
                 tool.as_object_mut()
                     .expect("tool object")
@@ -1637,6 +1702,62 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn settings_tools_are_listed_for_every_harness_and_dispatch_to_the_hub() {
+        let read = ["canterlot_routing_policy", "canterlot_spawn_whitelist"];
+        let propose = [
+            "settings_propose_routing",
+            "settings_propose_whitelist",
+            "settings_propose_preset",
+        ];
+        for (set, provider) in [
+            (ToolSet::ApproveAndLimits, "claude"),
+            (ToolSet::LimitsOnly, "codex"),
+            (ToolSet::LimitsOnly, "opencode"),
+        ] {
+            let listing = tools_list(set, provider);
+            let tools = listing["tools"].as_array().expect("tools");
+            for name in read.iter().chain(propose.iter()) {
+                assert!(
+                    tools.iter().any(|tool| tool["name"] == *name),
+                    "{provider}: {name}"
+                );
+            }
+            for name in read {
+                let tool = tools.iter().find(|tool| tool["name"] == *name).unwrap();
+                assert_eq!(tool["annotations"]["readOnlyHint"], true, "{name}");
+            }
+        }
+        for (name, hub) in [
+            ("canterlot_routing_policy", "settings.routing"),
+            ("canterlot_spawn_whitelist", "settings.whitelist"),
+            ("settings_propose_routing", "settings.propose_routing"),
+            ("settings_propose_whitelist", "settings.propose_whitelist"),
+            ("settings_propose_preset", "settings.propose_preset"),
+        ] {
+            let action = handle_rpc_with_provider(
+                &json!({"jsonrpc": "2.0", "id": 9, "method": "tools/call",
+                    "params": {"name": name, "arguments": {}}}),
+                ToolSet::LimitsOnly,
+                "codex",
+            );
+            assert!(
+                matches!(action, McpAction::ToolCall {
+                    kind: ToolKind::Agent { tool },
+                    ..
+                } if tool == hub),
+                "{name}: {action:?}"
+            );
+        }
+        for instructions in [
+            SERVER_INSTRUCTIONS,
+            CODEX_SERVER_INSTRUCTIONS,
+            OPENCODE_SERVER_INSTRUCTIONS,
+        ] {
+            assert!(instructions.contains("the owner decides"), "{instructions}");
+        }
     }
 
     #[test]
