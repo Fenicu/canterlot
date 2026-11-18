@@ -4,6 +4,7 @@
 //! python: ждёт методы адаптера, пишет кадры свидетельства с перезаписями id.
 //! Настоящий `codex` не запускается (кроме отметки live smoke владельцем).
 
+use canterlot_proto::goals::GoalAction;
 use canterlot_proto::requests::{DecisionPayload, PermissionBehavior};
 use canterlot_worker::{
     adapter::{
@@ -3841,4 +3842,76 @@ async fn later_side_start_forks_again_instead_of_resuming_the_dead_ephemeral_id(
             .iter()
             .all(|entry| entry["method"] != "thread/resume")
     );
+}
+
+#[tokio::test]
+async fn goal_command_sends_user_provenance_and_reports_snapshot() {
+    let mut lines = handshake("thread-mini");
+    lines.push(w_in(
+        4,
+        "thread/goal/set",
+        json!({
+            "threadId": "thread-mini",
+            "objective": "Подготовить промежуточный отчёт",
+            "status": "active",
+            "tokenBudget": null,
+            "origin": "user"
+        }),
+    ));
+    lines.push(w_out(json!({
+        "id": 4,
+        "result": {"goal": {
+            "threadId": "thread-mini",
+            "objective": "Подготовить промежуточный отчёт",
+            "status": "active",
+            "tokensUsed": 0,
+            "timeUsedSeconds": 0,
+            "tokenBudget": null,
+            "createdAt": 100,
+            "updatedAt": 120
+        }}
+    })));
+    lines.push(w_out(json!({
+        "method": "thread/goal/updated",
+        "params": {"threadId": "thread-mini", "turnId": "turn-mini", "goal": {
+            "threadId": "thread-mini",
+            "objective": "Подготовить промежуточный отчёт",
+            "status": "complete",
+            "tokensUsed": 42,
+            "timeUsedSeconds": 3,
+            "tokenBudget": 1000,
+            "createdAt": 100,
+            "updatedAt": 200
+        }}
+    })));
+    let mut fake = Fake::new(lines);
+    fake.start().await;
+    let outcome = tokio::time::timeout(WAIT, fake.adapter.goal_command(
+        GoalAction::Set,
+        Some("Подготовить промежуточный отчёт"),
+        None,
+    )).await.expect("goal command deadline");
+    assert_eq!(outcome, canterlot_worker::adapter::GoalCommandOutcome::Applied);
+    let entries: Vec<Value> = fake.stdin_log().lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let request = entries.iter().find(|e| e["method"] == "thread/goal/set")
+        .expect("goal set request");
+    assert_eq!(request["params"]["origin"], "user");
+    assert_eq!(request["params"]["objective"], "Подготовить промежуточный отчёт");
+    let mut seen_complete = false;
+    for _ in 0..4 {
+        match fake.event().await {
+            AdapterEvent::Goal { goal: Some(goal) }
+                if goal.status == canterlot_proto::goals::GoalStatus::Complete
+                    && goal.tokens_used == 42 =>
+            {
+                seen_complete = true;
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert!(seen_complete, "goal update must reach the adapter event stream");
+    fake.close().await;
 }

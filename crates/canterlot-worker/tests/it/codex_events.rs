@@ -2235,6 +2235,90 @@ fn goal_cleared_after_resume_is_known_and_silent() {
     let mut translator = Translator::new("01a196b0-d5f1-7af1-8e3f-d8749c706b15", "gpt-6-luna");
     let out = feed_frames(&mut translator, &codex::replay("goal_cleared_live"));
     assert!(events_of(&out).is_empty(), "{out:?}");
+    assert!(
+        out.iter()
+            .any(|t| matches!(t, Translated::Goal { goal: None })),
+        "closed goal must be reported to the hub: {out:?}"
+    );
+}
+
+fn goal_frame(status: &str, tokens: i64, updated: i64) -> serde_json::Value {
+    json!({
+        "threadId": "thread-main",
+        "turnId": "turn-main",
+        "goal": {
+            "threadId": "thread-main",
+            "objective": "Подготовить промежуточный отчёт",
+            "status": status,
+            "tokensUsed": tokens,
+            "timeUsedSeconds": 12,
+            "tokenBudget": 10_000,
+            "createdAt": 1000,
+            "updatedAt": updated
+        }
+    })
+}
+
+fn goals_of(all: &[Translated]) -> Vec<Option<canterlot_proto::goals::GoalState>> {
+    all.iter()
+        .filter_map(|t| match t {
+            Translated::Goal { goal } => Some(goal.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn goal_notifications_carry_the_full_snapshot_until_complete() {
+    let mut translator = Translator::new("thread-main", "gpt-6-luna");
+    let mut all = Vec::new();
+    all.extend(translator.feed("thread/goal/updated", &goal_frame("active", 10, 1010)));
+    all.extend(translator.feed("thread/goal/updated", &goal_frame("blocked", 20, 1020)));
+    all.extend(translator.feed("thread/goal/updated", &goal_frame("complete", 30, 1030)));
+    let goals = goals_of(&all);
+    assert_eq!(goals.len(), 3, "{all:?}");
+    assert_eq!(goals[0].as_ref().unwrap().status, canterlot_proto::goals::GoalStatus::Active);
+    assert_eq!(goals[1].as_ref().unwrap().status, canterlot_proto::goals::GoalStatus::Blocked);
+    let done = goals[2].as_ref().unwrap();
+    assert_eq!(done.status, canterlot_proto::goals::GoalStatus::Complete);
+    assert_eq!(done.tokens_used, 30);
+    assert_eq!(done.token_budget, Some(10_000));
+    assert_eq!(done.updated_at_ms, 1030);
+}
+
+#[test]
+fn goal_cleared_notification_reports_no_goal() {
+    let mut translator = Translator::new("thread-main", "gpt-6-luna");
+    let out = translator.feed(
+        "thread/goal/cleared",
+        &json!({"threadId": "thread-main"}),
+    );
+    assert_eq!(goals_of(&out), vec![None], "{out:?}");
+}
+
+#[test]
+fn malformed_and_unknown_goal_frames_do_not_break_the_turn() {
+    let mut translator = Translator::new("thread-main", "gpt-6-luna");
+    let bad = vec![
+        json!({"threadId": "thread-main", "goal": {"objective": 1, "status": "active"}}),
+        json!({"threadId": "thread-main", "goal": {"objective": "x", "status": "unknown"}}),
+        json!({"threadId": "other", "goal": {"objective": "x", "status": "active"}}),
+    ];
+    for frame in bad {
+        let out = translator.feed("thread/goal/updated", &frame);
+        assert!(goals_of(&out).is_empty(), "{out:?}");
+        assert!(
+            events_of(&out).iter().all(|event| matches!(
+                event,
+                AdapterEvent::Diagnostic {
+                    kind: "codex_goal_invalid" | "unattributed_thread_frame", ..
+                }
+            )),
+            "only an optional diagnostic is allowed: {out:?}"
+        );
+    }
+    let out = translator.feed("thread/goal/updated", &goal_frame("active", 1, 2));
+    assert_eq!(goals_of(&out).len(), 1);
 }
 
 #[test]

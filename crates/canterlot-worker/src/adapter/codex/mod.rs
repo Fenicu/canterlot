@@ -26,13 +26,15 @@ use crate::{
     adapter::{
         Adapter, AdapterError, AdapterEvent, AgentCallResult, BlockKind, Capabilities, CloseMode,
         CompactOutcome, DecisionOutcome, DecisionProof, InstructionMode, InstructionSpec,
-        InterruptOutcome, ModelCatalog, Phase, Proof, SettingsChange, StartSpec, Started,
-        SteerOutcome, Support, Transmission, TransmitOutcome, canterlot_mcp::Broker,
+        GoalCommandOutcome, InterruptOutcome, ModelCatalog, Phase, Proof, SettingsChange,
+        StartSpec, Started, SteerOutcome, Support, Transmission, TransmitOutcome,
+        canterlot_mcp::Broker,
         canterlot_mcp::BrokerEvent, held_tool::HeldTools, reaped,
     },
     config::CodexConfig,
     containment::Containment,
 };
+use canterlot_proto::goals::GoalAction;
 use canterlot_proto::requests::{DecisionPayload, PermissionBehavior};
 use serde_json::{Value, json};
 use std::{
@@ -614,6 +616,7 @@ impl CodexAdapter {
                 self.completed_status.insert(item_id.clone(), status);
                 self.release_item(&item_id, mark);
             }
+            Translated::Goal { goal } => self.events.push_back(AdapterEvent::Goal { goal }),
             Translated::SettingsUpdated(settings) => {
                 if let Some(effective) = self.effective.as_mut() {
                     if let Some(policy) = settings.get("approvalPolicy") {
@@ -2023,6 +2026,68 @@ impl Adapter for CodexAdapter {
             background_work: Support::Supported,
             interrupt_keeps_process: true,
         }
+    }
+
+    fn supports_goals(&self) -> bool {
+        true
+    }
+
+    async fn goal_command(
+        &mut self,
+        action: GoalAction,
+        objective: Option<&str>,
+        token_budget: Option<i64>,
+    ) -> GoalCommandOutcome {
+        if self.eof || self.exited || self.proc.is_none() || self.thread_id().is_empty() {
+            return GoalCommandOutcome::NotApplicable;
+        }
+        let thread_id = self.thread_id();
+        let (method, params) = match action {
+            GoalAction::Clear => (
+                "thread/goal/clear",
+                json!({"threadId": thread_id, "origin": "user"}),
+            ),
+            GoalAction::Pause | GoalAction::Resume | GoalAction::Set => {
+                let status = match action {
+                    GoalAction::Pause => "paused",
+                    GoalAction::Resume | GoalAction::Set => "active",
+                    GoalAction::Clear => unreachable!(),
+                };
+                (
+                    "thread/goal/set",
+                    json!({
+                        "threadId": thread_id,
+                        "objective": objective,
+                        "status": status,
+                        "tokenBudget": token_budget,
+                        // Схема app-server: без provenance пользователь не авторизован.
+                        "origin": "user",
+                    }),
+                )
+            }
+        };
+        let outcome = match self.rpc_round(method, params, self.deadline).await {
+            Some(Ok(value)) => {
+                let goal = if action == GoalAction::Clear {
+                    None
+                } else {
+                    value.get("goal").and_then(Translator::goal_from_value)
+                };
+                self.events.push_back(AdapterEvent::Goal { goal });
+                GoalCommandOutcome::Applied
+            }
+            Some(Err(_)) => {
+                self.events.push_back(AdapterEvent::Diagnostic {
+                    kind: "codex_goal_rejected",
+                    event_type: "codex_goal_rejected".into(),
+                    required: false,
+                    field_names: vec!["code".into()],
+                });
+                GoalCommandOutcome::Failed
+            }
+            None => GoalCommandOutcome::Failed,
+        };
+        outcome
     }
 
     async fn start(

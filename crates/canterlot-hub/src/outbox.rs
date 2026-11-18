@@ -264,7 +264,6 @@ fn to_proto_with_capability(
         .collect();
         // Старый воркер не знает записи PromptSuggested: флаг уходит только вместе с возможностью.
         start.prompt_suggestions &= has(crate::session::CAPABILITY_PROMPT_SUGGESTIONS_V1);
-        start.goals_v1 = has(crate::session::CAPABILITY_GOALS_V1);
     }
     if command.encoded_len() > MAX_MESSAGE_BYTES {
         return Err(OutboxError::ResourceLimit);
@@ -376,11 +375,6 @@ pub fn to_proto(row: &CommandRow) -> Result<Command, OutboxError> {
             prompt_suggestions: row
                 .payload
                 .get("prompt_suggestions")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
-            goals_v1: row
-                .payload
-                .get("goals_v1")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
             worktree: row

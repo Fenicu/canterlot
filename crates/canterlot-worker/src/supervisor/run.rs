@@ -233,8 +233,6 @@ struct Supervisor {
     session_tools_v1: bool,
     /// Хаб включил подсказки и знает запись `PromptSuggested`.
     prompt_suggestions: bool,
-    /// Хаб согласовал возможности goals_v1: записи `GoalChanged` и команды `GoalCommand`.
-    goals_v1: bool,
     /// Ввод хода, после которого CLI может прислать подсказку; передача следующего ввода
     /// его снимает, и запоздавшая подсказка прошлого хода уже не пишется.
     suggestion_turn: Option<Uuid>,
@@ -452,7 +450,6 @@ pub(super) async fn run(exec_dir: PathBuf) -> Result<ExitCode, SupervisorError> 
         background_v1: false,
         session_tools_v1: false,
         prompt_suggestions: false,
-        goals_v1: false,
         suggestion_turn: None,
         git_head: None,
         background_drop_reported: false,
@@ -1827,7 +1824,6 @@ impl Supervisor {
         self.background_v1 = start.background_v1;
         self.session_tools_v1 = start.session_tools_v1;
         self.prompt_suggestions = start.prompt_suggestions && !start.isolate_mcp;
-        self.goals_v1 = start.goals_v1;
         self.workdir = Some(PathBuf::from(&start.workdir));
         if self.session_tools_v1 {
             self.git_head = git_facts::head(Path::new(&start.workdir)).await;
@@ -3111,9 +3107,6 @@ impl Supervisor {
 
     /// Запись SJ — полный снимок цели; пусто означает, что цель снята.
     fn on_goal(&mut self, goal: Option<GoalState>) -> Result<(), SupervisorError> {
-        if !self.goals_v1 {
-            return Ok(());
-        }
         let goal = goal.map(|goal| {
             let goal = goal.bounded();
             canterlot_proto::worker::v1::GoalState {
@@ -3139,12 +3132,10 @@ impl Supervisor {
         &mut self,
         command: canterlot_proto::worker::v1::GoalCommand,
     ) -> Result<(), SupervisorError> {
-        if !self.goals_v1
-            || matches!(
-                self.lifecycle,
-                Lifecycle::Stopping(_) | Lifecycle::Draining { .. }
-            )
-        {
+        if matches!(
+            self.lifecycle,
+            Lifecycle::Stopping(_) | Lifecycle::Draining { .. }
+        ) {
             return Ok(());
         }
         let Some(action) = GoalAction::parse(&command.action) else {
@@ -3826,7 +3817,6 @@ mod tests {
             background_v1: false,
             session_tools_v1: false,
             prompt_suggestions: false,
-            goals_v1: true,
             suggestion_turn: None,
             git_head: None,
             background_drop_reported: false,

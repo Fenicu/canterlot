@@ -5,6 +5,7 @@ use super::super::frame_names::object_field_names;
 use super::super::labels::{command_label, cut_end};
 use super::super::{AdapterEvent, BlockKind, MediaSource, ModelUsage, Phase, TodoItem, TodoStatus};
 use super::rpc::RpcId;
+use canterlot_proto::goals::{GoalState, GoalStatus};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
@@ -128,6 +129,10 @@ pub enum Translated {
         approved_by_cli: bool,
     },
     SettingsUpdated(Value),
+    /// Полный снимок цели; `None` — цель снята.
+    Goal {
+        goal: Option<GoalState>,
+    },
     McpStatus {
         name: String,
         status: String,
@@ -182,6 +187,10 @@ impl fmt::Debug for Translated {
                 .field("approved_by_cli", approved_by_cli)
                 .finish(),
             Translated::SettingsUpdated(_) => f.write_str("SettingsUpdated"),
+            Translated::Goal { goal } => f
+                .debug_struct("Goal")
+                .field("present", &goal.is_some())
+                .finish(),
             Translated::McpStatus { name, status } => f
                 .debug_struct("McpStatus")
                 .field("name", name)
@@ -472,6 +481,8 @@ impl Translator {
             "item/commandExecution/outputDelta" => self.on_output_delta(params),
             "item/fileChange/patchUpdated" => self.on_patch_updated(params),
             "item/mcpToolCall/progress" => self.on_mcp_progress(params),
+            "thread/goal/updated" => self.on_goal_updated(params),
+            "thread/goal/cleared" => self.on_goal_cleared(params),
             "thread/status/changed" => self.on_status_changed(params),
             "thread/tokenUsage/updated" => self.on_token_usage(params),
             "thread/started" => self.on_thread_started(params),
@@ -491,7 +502,6 @@ impl Translator {
             "deprecationNotice" => vec![self.optional("codex_deprecation")],
             "account/updated"
             | "thread/compacted"
-            | "thread/goal/cleared"
             | "turn/moderationMetadata"
             | "remoteControl/status/changed"
             | "thread/readState/changed"
@@ -1674,6 +1684,44 @@ impl Translator {
                 Some(message.to_owned())
             },
         })]
+    }
+
+    /// Разбор `ThreadGoal` из уведомления и ответа `thread/goal/*`. Незнакомый
+    /// статус или отсутствие формулировки не обрывают ход: кадр игнорируется.
+    pub fn goal_from_value(value: &Value) -> Option<GoalState> {
+        let objective = value.get("objective")?.as_str()?.to_owned();
+        let status = GoalStatus::parse(value.get("status")?.as_str()?)?;
+        let number = |key: &str| value.get(key).and_then(Value::as_i64).unwrap_or(0);
+        let optional = |key: &str| value.get(key).and_then(Value::as_i64);
+        Some(
+            GoalState {
+                objective,
+                status,
+                tokens_used: number("tokensUsed"),
+                time_used_seconds: number("timeUsedSeconds"),
+                token_budget: optional("tokenBudget"),
+                turns_used: None,
+                updated_at_ms: optional("updatedAt").unwrap_or_else(|| number("createdAt")),
+            }
+            .bounded(),
+        )
+    }
+
+    fn on_goal_updated(&mut self, params: &Value) -> Vec<Translated> {
+        if !self.is_main(params) {
+            return vec![Translated::Ignored];
+        }
+        match params.get("goal").and_then(Self::goal_from_value) {
+            Some(goal) => vec![Translated::Goal { goal: Some(goal) }],
+            None => vec![self.optional("codex_goal_invalid")],
+        }
+    }
+
+    fn on_goal_cleared(&mut self, params: &Value) -> Vec<Translated> {
+        if !self.is_main(params) {
+            return vec![Translated::Ignored];
+        }
+        vec![Translated::Goal { goal: None }]
     }
 
     fn on_status_changed(&mut self, params: &Value) -> Vec<Translated> {

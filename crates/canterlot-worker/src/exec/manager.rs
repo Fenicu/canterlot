@@ -1654,7 +1654,6 @@ impl Actor {
                 prompt_suggestions: prompt_suggestions_enabled(start),
                 fork_from_native: start.fork_from_native.clone(),
                 canterlot_mcp: start.canterlot_mcp.clone(),
-                goals_v1: start.goals_v1,
             }))
             .await;
         Ok(())

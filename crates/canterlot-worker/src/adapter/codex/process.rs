@@ -95,6 +95,8 @@ pub fn build_args(spec: &LaunchSpec, mode: InstructionMode) -> Result<Vec<OsStri
         "stdio://".into(),
         "--enable".into(),
         "default_mode_request_user_input".into(),
+        "--enable".into(),
+        "goals".into(),
         "--disable".into(),
         "incremental_tools".into(),
     ];

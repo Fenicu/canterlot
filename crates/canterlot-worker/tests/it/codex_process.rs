@@ -144,6 +144,8 @@ fn launch_args_add_only_feature_flag_and_canterlot_mcp() {
             "stdio://".to_string(),
             "--enable".to_string(),
             "default_mode_request_user_input".to_string(),
+            "--enable".to_string(),
+            "goals".to_string(),
             "--disable".to_string(),
             "incremental_tools".to_string(),
             "-c".to_string(),
