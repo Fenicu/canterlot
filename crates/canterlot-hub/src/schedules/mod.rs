@@ -2,6 +2,7 @@
 
 pub mod admission;
 pub mod cron;
+pub mod fault;
 
 use std::fmt;
 
@@ -859,8 +860,8 @@ pub async fn get_run(
     row.map(RunRow::into_run).transpose()
 }
 
-/// Атомарный резерв ручного запуска: один ключ клиента — одна строка
-/// владельца. Проигравший гонку получает `None` и дожидается победителя.
+/// Строка резерва ручного запуска (ключ общей идемпотентности пишет вызывающий
+/// в той же транзакции, см. `admission::reserve_manual`).
 #[allow(clippy::too_many_arguments)]
 pub async fn reserve_run(
     conn: &mut PgConnection,
@@ -876,7 +877,7 @@ pub async fn reserve_run(
     let row: Option<RunRow> = sqlx::query_as(
         "insert into schedule_runs(id,schedule_id,owner_id,scheduled_at,claimed_revision,state,manual,run_anyway,attempt_id,lease_at,idempotency_key,detail)
          values($1,$2,$3,$4,$5,$6,true,$7,$8,clock_timestamp(),$9,$10)
-         on conflict (owner_id, idempotency_key) do nothing returning *",
+         on conflict (owner_id, idempotency_key) where manual do nothing returning *",
     )
     .bind(id)
     .bind(schedule_id)
@@ -893,38 +894,29 @@ pub async fn reserve_run(
     row.map(RunRow::into_run).transpose()
 }
 
-/// Победитель резерва по ключу клиента.
-pub async fn get_run_by_key(
+/// Ответ ручного запуска фиксируется в общем ключе идемпотентности той же
+/// транзакцией, что и итоговый переход строки (3): ключ занят с момента
+/// заявки, а повтор после потерянного ответа читает итог оттуда, не из
+/// журнала запусков, который уборка может обрезать.
+pub async fn finalize_manual_key(
     conn: &mut PgConnection,
     owner_id: Uuid,
-    schedule_id: Uuid,
-    key: &str,
-) -> Result<Option<ScheduleRun>, sqlx::Error> {
-    let row: Option<RunRow> = sqlx::query_as(
-        "select * from schedule_runs where owner_id=$1 and schedule_id=$2 and idempotency_key=$3",
+    run: &ScheduleRun,
+) -> Result<(), sqlx::Error> {
+    if !run.manual {
+        return Ok(());
+    }
+    let response = serde_json::to_value(run).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
+    sqlx::query(
+        "update idempotency_keys set response=$3
+          where owner_id=$1 and key=$2 and operation='run_now'",
     )
     .bind(owner_id)
-    .bind(schedule_id)
-    .bind(key)
-    .fetch_optional(conn)
+    .bind(&run.idempotency_key)
+    .bind(response)
+    .execute(conn)
     .await?;
-    row.map(RunRow::into_run).transpose()
-}
-
-/// Победитель резерва по владелец-широкому ключу (E): второй Run Now
-/// для другого расписания с тем же ключом разрешается в первый.
-pub async fn get_run_by_owner_key(
-    conn: &mut PgConnection,
-    owner_id: Uuid,
-    key: &str,
-) -> Result<Option<ScheduleRun>, sqlx::Error> {
-    let row: Option<RunRow> =
-        sqlx::query_as("select * from schedule_runs where owner_id=$1 and idempotency_key=$2")
-            .bind(owner_id)
-            .bind(key)
-            .fetch_optional(conn)
-            .await?;
-    row.map(RunRow::into_run).transpose()
+    Ok(())
 }
 
 /// Условный переход (A): только из ожидаемого состояния и с ожидаемой

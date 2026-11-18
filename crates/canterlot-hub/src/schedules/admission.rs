@@ -54,6 +54,8 @@ struct AdmitStop {
 enum AdmitEnd {
     Stop(AdmitStop),
     Superseded,
+    /// Имитация гибели процесса (только точки отказа тестов): ничего не пишем.
+    Crashed,
 }
 type AdmitResult = Result<AdmitOk, AdmitEnd>;
 
@@ -73,7 +75,7 @@ pub async fn admit(scheduler: &Scheduler, claimed: ClaimedRun) {
     let finish = match result {
         // Dispatch закоммитил `started` и событие сам: финалу делать нечего.
         Ok(_) => return,
-        Err(AdmitEnd::Superseded) => return,
+        Err(AdmitEnd::Superseded | AdmitEnd::Crashed) => return,
         Err(AdmitEnd::Stop(stop)) => stop,
     };
     let mut detail = run.detail.clone();
@@ -167,6 +169,11 @@ pub async fn admit(scheduler: &Scheduler, claimed: ClaimedRun) {
     {
         let _ = tx.rollback().await;
         tracing::error!(kind = "schedule_admit_db", error = %crate::dberr::describe(&error), "cannot publish run outcome");
+        return;
+    }
+    if let Err(error) = super::finalize_manual_key(&mut tx, schedule.owner_id, &updated).await {
+        let _ = tx.rollback().await;
+        tracing::error!(kind = "schedule_admit_db", error = %crate::dberr::describe(&error), "cannot finalize manual key");
         return;
     }
     if finish.skip.state == RunState::Failed {
@@ -1155,6 +1162,16 @@ async fn dispatch(
     .await
     .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))
     .map_err(fail)?;
+    // Ответ ручного запуска — в той же транзакции (3): после commit
+    // повтор по ключу получает уже начатый запуск, а не второй dispatch.
+    super::finalize_manual_key(&mut tx, schedule.owner_id, &started)
+        .await
+        .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))
+        .map_err(fail)?;
+    if super::fault::hit(schedule.id, super::fault::Fault::BeforeDispatchCommit) {
+        drop(tx);
+        return Err(AdmitEnd::Crashed);
+    }
     tx.commit()
         .await
         .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))
@@ -1184,42 +1201,110 @@ async fn lock_idempotency_key(
     Ok(())
 }
 
-/// Проигравший гонку резерва дожидается исхода победителя и возвращает
-/// тот же запуск: повтор не создаёт второй dispatch. Соединение пула
-/// между опросами не держится.
+/// Ждёт исхода запуска, не держа соединение между опросами.
 async fn await_winner_run(
     pool: &PgPool,
     owner_id: Uuid,
     run_id: Uuid,
 ) -> Result<ScheduleRun, ScheduleError> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
-    let mut conn = pool.acquire().await?;
-    let Some(mut current) = super::get_run(&mut conn, owner_id, run_id).await? else {
-        return Err(ScheduleError::NotFound);
-    };
-    drop(conn);
     loop {
-        if !matches!(current.state, RunState::Claimed | RunState::Prechecking) {
-            return Ok(current);
-        }
-        if std::time::Instant::now() >= deadline {
+        let mut conn = pool.acquire().await?;
+        let Some(current) = super::get_run(&mut conn, owner_id, run_id).await? else {
+            return Err(ScheduleError::NotFound);
+        };
+        drop(conn);
+        if !matches!(current.state, RunState::Claimed | RunState::Prechecking)
+            || std::time::Instant::now() >= deadline
+        {
             return Ok(current);
         }
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        let mut conn = pool.acquire().await?;
-        let refreshed = super::get_run(&mut conn, owner_id, run_id).await?;
-        if let Some(refreshed) = refreshed {
-            current = refreshed;
-        } else {
-            return Err(ScheduleError::NotFound);
-        }
     }
 }
+
+/// Итог резерва ручного запуска.
+pub enum Reservation {
+    /// Строка запуска и ключ заняты этим вызовом: приём за ним.
+    Fresh {
+        schedule: Schedule,
+        run: ScheduleRun,
+    },
+    /// Ключ уже занят тем же запросом: запуск был заявлен раньше.
+    Existing(ScheduleRun),
+}
+
+/// Резерв ручного запуска (3): общий ключ идемпотентности и строка запуска
+/// занимаются одной транзакцией до приёма. Ключ живёт срок идемпотентности
+/// API независимо от журнала запусков, а ответ дописывает итоговая транзакция
+/// приёма или восстановления. Чужая операция с тем же ключом получает конфликт
+/// сразу, а не после начатой сессии.
+pub async fn reserve_manual(
+    pool: &PgPool,
+    owner_id: Uuid,
+    schedule_id: Uuid,
+    key: &str,
+    run_anyway: bool,
+) -> Result<Reservation, ScheduleError> {
+    let body = json!({"schedule_id": schedule_id, "run_anyway": run_anyway});
+    let hash = crate::idempotency::request_hash("run_now", &body);
+    let mut tx = crate::db::begin(pool).await?;
+    lock_idempotency_key(&mut tx, owner_id, key).await?;
+    match crate::idempotency::lookup(&mut tx, owner_id, key, "run_now", &hash).await? {
+        crate::idempotency::Begin::Replay(value) => {
+            let _ = tx.rollback().await;
+            let run = serde_json::from_value(value)
+                .map_err(|e| ScheduleError::Db(sqlx::Error::Decode(Box::new(e))))?;
+            return Ok(Reservation::Existing(run));
+        }
+        crate::idempotency::Begin::Conflict => {
+            let _ = tx.rollback().await;
+            return Err(ScheduleError::Conflict("idempotency_conflict"));
+        }
+        crate::idempotency::Begin::New => {}
+    }
+    let schedule = super::get(&mut tx, owner_id, schedule_id)
+        .await?
+        .ok_or(ScheduleError::NotFound)?;
+    let reserved = super::reserve_run(
+        &mut tx,
+        Uuid::now_v7(),
+        schedule_id,
+        owner_id,
+        Utc::now(),
+        schedule.revision,
+        key,
+        run_anyway,
+        json!({"manual": true, "run_anyway": run_anyway}),
+    )
+    .await?;
+    let Some(run) = reserved else {
+        // Ключ занят ручной строкой без записи ключа: такого не бывает,
+        // пока строки создаёт только эта функция под тем же замком.
+        let _ = tx.rollback().await;
+        return Err(ScheduleError::Conflict("idempotency_conflict"));
+    };
+    let response = serde_json::to_value(&run)
+        .map_err(|e| ScheduleError::Db(sqlx::Error::Encode(Box::new(e))))?;
+    crate::idempotency::record(&mut tx, owner_id, key, "run_now", &hash, &response, None).await?;
+    tx.commit().await?;
+    Ok(Reservation::Fresh { schedule, run })
+}
+
+/// Повтор уже заявленного запуска: дожидаемся исхода или отдаём итог.
+async fn settle_existing(
+    pool: &PgPool,
+    owner_id: Uuid,
+    stored: ScheduleRun,
+) -> Result<ScheduleRun, ScheduleError> {
+    if matches!(stored.state, RunState::Claimed | RunState::Prechecking) {
+        await_winner_run(pool, owner_id, stored.id).await
+    } else {
+        Ok(stored)
+    }
+}
+
 /// «Запустить сейчас»: тот же приём и dispatch, но под ключом клиента.
-/// Резерв строки запуска атомарен (владелец-широкий уникальный индекс):
-/// параллельные запросы с тем же ключом и повтор после обрыва получают
-/// тот же запуск вместо второго dispatch; второй ключ на другое расписание
-/// или другой `run_anyway` — конфликт, а не второй dispatch (E).
 pub async fn run_now(
     state: &AppState,
     owner_id: Uuid,
@@ -1228,111 +1313,31 @@ pub async fn run_now(
     run_anyway: bool,
     correlation_id: Uuid,
 ) -> Result<ScheduleRun, ScheduleError> {
-    let body = json!({"schedule_id": schedule_id, "run_anyway": run_anyway});
-    let hash = crate::idempotency::request_hash("run_now", &body);
-    // Короткая резервная транзакция: тот же advisory-замок, что `run_in_tx`,
-    // затем поиск/создание резерва. Владелец-широкий ключ резервируется
-    // вместе со строкой запуска, до приёма (E). Долгой работы с воркером внутри нет.
-    let reserved = {
-        let mut tx = crate::db::begin(&state.pool).await?;
-        lock_idempotency_key(&mut tx, owner_id, key).await?;
-        match crate::idempotency::lookup(&mut tx, owner_id, key, "run_now", &hash).await? {
-            crate::idempotency::Begin::Replay(value) => {
-                let _ = tx.rollback().await;
-                return serde_json::from_value(value)
-                    .map_err(|e| ScheduleError::Db(sqlx::Error::Decode(Box::new(e))));
+    let (schedule, run) =
+        match reserve_manual(&state.pool, owner_id, schedule_id, key, run_anyway).await? {
+            Reservation::Fresh { schedule, run } => (schedule, run),
+            Reservation::Existing(stored) => {
+                return settle_existing(&state.pool, owner_id, stored).await;
             }
-            crate::idempotency::Begin::Conflict => {
-                let _ = tx.rollback().await;
-                return Err(ScheduleError::Conflict("idempotency_conflict"));
-            }
-            crate::idempotency::Begin::New => {}
-        }
-        let schedule = super::get(&mut tx, owner_id, schedule_id)
-            .await?
-            .ok_or(ScheduleError::NotFound)?;
-        let now = Utc::now();
-        let reserved = super::reserve_run(
-            &mut tx,
-            Uuid::now_v7(),
-            schedule_id,
-            owner_id,
-            now,
-            schedule.revision,
-            key,
-            run_anyway,
-            json!({"manual": true, "run_anyway": run_anyway}),
-        )
-        .await?;
-        match reserved {
-            Some(run) => {
-                tx.commit().await?;
-                Some((schedule, run))
-            }
-            None => {
-                // Чужой резерв с тем же владелец-широким ключом: тот же
-                // запуск — дожидаемся победителя, чужой — конфликт.
-                let winner = super::get_run_by_owner_key(&mut tx, owner_id, key).await?;
-                tx.rollback().await?;
-                let Some(winner) = winner else {
-                    return Err(ScheduleError::NotFound);
-                };
-                if winner.schedule_id == schedule_id && winner.run_anyway == run_anyway {
-                    return await_winner_run(&state.pool, owner_id, winner.id).await;
-                }
-                return Err(ScheduleError::Conflict("idempotency_conflict"));
-            }
-        }
-    };
-    let Some((schedule, run)) = reserved else {
-        return Err(ScheduleError::NotFound);
-    };
+        };
     let scheduler = state.scheduler.clone();
     let _guard = super::AdmittingGuard::insert(run.id);
     let result = admit_inner(&scheduler, &schedule, &run, run.run_anyway, run.manual).await;
     match result {
-        // Dispatch уже закоммитил `started` и событие: фиксируем только
-        // идемпотентный ответ.
+        // Dispatch закоммитил `started`, событие и ответ ключа сам.
         Ok(_) => {
-            let mut conn = state.pool.acquire().await?;
-            let Some(current) = super::get_run(&mut conn, owner_id, run.id).await? else {
-                return Err(ScheduleError::NotFound);
-            };
-            drop(conn);
-            let mut tx = crate::db::begin(&state.pool).await?;
-            let response = serde_json::to_value(&current)
-                .map_err(|e| ScheduleError::Db(sqlx::Error::Encode(Box::new(e))))?;
-            let recorded = crate::idempotency::record(
-                &mut tx, owner_id, key, "run_now", &hash, &response, None,
-            )
-            .await?;
-            if !recorded {
-                // Гонку резерва мы уже исключили владелец-широким индексом;
-                // чужая запись — только завершённая параллельная операция.
-                let _ = tx.rollback().await;
-                let mut conn = state.pool.acquire().await?;
-                match crate::idempotency::lookup(&mut conn, owner_id, key, "run_now", &hash).await?
-                {
-                    crate::idempotency::Begin::Replay(value) => {
-                        return serde_json::from_value(value)
-                            .map_err(|e| ScheduleError::Db(sqlx::Error::Decode(Box::new(e))));
-                    }
-                    _ => return Err(ScheduleError::Conflict("idempotency_conflict")),
-                }
+            if super::fault::hit(schedule_id, super::fault::Fault::LostRunNowResponse) {
+                return Err(ScheduleError::Db(sqlx::Error::PoolClosed));
             }
-            tx.commit().await?;
-            Ok(current)
-        }
-        Err(AdmitEnd::Superseded) => {
-            // Строку забрало восстановление: исход пишет тихий путь,
-            // дожидаемся его вместо второго dispatch.
             let mut conn = state.pool.acquire().await?;
-            let winner = super::get_run_by_owner_key(&mut conn, owner_id, key).await?;
-            let Some(winner) = winner else {
-                return Err(ScheduleError::NotFound);
-            };
-            await_winner_run(&state.pool, owner_id, winner.id).await
+            super::get_run(&mut conn, owner_id, run.id)
+                .await?
+                .ok_or(ScheduleError::NotFound)
         }
+        Err(AdmitEnd::Crashed) => Err(ScheduleError::Db(sqlx::Error::PoolClosed)),
+        // Строку забрало восстановление: исход пишет тихий путь,
+        // дожидаемся его вместо второго dispatch.
+        Err(AdmitEnd::Superseded) => await_winner_run(&state.pool, owner_id, run.id).await,
         Err(AdmitEnd::Stop(stop)) => {
             let mut detail = run.detail.clone();
             merge(&mut detail, stop.skip.detail);
@@ -1361,12 +1366,7 @@ pub async fn run_now(
             .await?;
             if !moved {
                 let _ = tx.rollback().await;
-                let mut conn = state.pool.acquire().await?;
-                let winner = super::get_run_by_owner_key(&mut conn, owner_id, key).await?;
-                let Some(winner) = winner else {
-                    return Err(ScheduleError::NotFound);
-                };
-                return await_winner_run(&state.pool, owner_id, winner.id).await;
+                return await_winner_run(&state.pool, owner_id, run.id).await;
             }
             let updated = apply_outcome(&run, stop.skip.state, detail, None, None, None, None);
             let response = serde_json::to_value(&updated)
@@ -1378,13 +1378,12 @@ pub async fn run_now(
                     kind: "schedule_run_changed",
                     conversation_id: None,
                     execution_id: None,
-                    payload: response.clone(),
+                    payload: response,
                     correlation_id,
                 },
             )
             .await?;
-            crate::idempotency::record(&mut tx, owner_id, key, "run_now", &hash, &response, None)
-                .await?;
+            super::finalize_manual_key(&mut tx, owner_id, &updated).await?;
             if stop.skip.state == RunState::Failed {
                 let reason = updated
                     .detail

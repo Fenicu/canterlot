@@ -56,17 +56,15 @@ create table schedule_runs (
 create index schedule_runs_schedule_time on schedule_runs (schedule_id, scheduled_at desc);
 create index schedule_runs_owner_state on schedule_runs (owner_id, state, created_at desc);
 
--- Резерв ручного запуска: один ключ клиента — один запуск расписания.
--- Параллельные Run Now с тем же ключом упираются в индекс: проигравший
--- дожидается завершения победителя вместо второго dispatch.
-create unique index schedule_runs_schedule_key
-  on schedule_runs (schedule_id, idempotency_key);
-
--- Владелец-широкий резерв: один ключ клиента — один запуск владельца.
--- Два Run Now для разных расписаний с тем же ключом не дают два dispatch:
--- второй разрешается в первый или в конфликт.
-create unique index schedule_runs_owner_key
-  on schedule_runs (owner_id, idempotency_key);
+-- Резерв ручного запуска: один ключ клиента — один запуск владельца.
+-- Уникальность только у ручных строк: ключи срабатываний по расписанию
+-- (`schedule:<id>:<момент>`) устроены по правилу, которое клиент может
+-- повторить, и общий индекс останавливал бы пачку заявок тика.
+-- Срабатывания держатся на паре (расписание, момент) выше.
+-- Основной резерв — запись общих ключей идемпотентности в той же транзакции,
+-- что и строка запуска: она переживает уборку журнала запусков.
+create unique index schedule_runs_owner_manual_key
+  on schedule_runs (owner_id, idempotency_key) where manual;
 
 -- Долговечный ограничитель пушей о несработавших запусках: не чаще раза
 -- в час на расписание, переживает перезапуск (в отличие от проверки

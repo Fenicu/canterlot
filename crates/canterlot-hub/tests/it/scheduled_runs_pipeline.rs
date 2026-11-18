@@ -1140,3 +1140,193 @@ async fn routed_new_session_target_runs_through_the_tick(pool: PgPool) {
     .unwrap();
     assert_eq!(inputs, 1, "the routed session got its first input");
 }
+
+/// 1: ключ клиента Run Now, совпавший с ключом будущего срабатывания другого
+/// расписания, не останавливает пачку заявок тика.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn run_now_key_equal_to_a_future_occurrence_key_does_not_stall_the_tick(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
+    let a = create(&f, existing(&f), "0 9 * * *").await;
+    let b = create(&f, existing(&f), "0 10 * * *").await;
+    let now = Utc::now();
+    due(&pool, &b, now - TimeDelta::seconds(30)).await;
+    let b_next: chrono::DateTime<Utc> =
+        sqlx::query_scalar("select next_fire_at from schedules where id=$1")
+            .bind(Uuid::parse_str(&b).unwrap())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let crafted = format!("schedule:{b}:{}", b_next.to_rfc3339());
+    // По HTTP ключ с «:» не пройдёт проверку формата, поэтому резерв берём
+    // напрямую: инвариант хранилища не должен зависеть от формата заголовка.
+    let reserved = canterlot_hub::schedules::admission::reserve_manual(
+        &pool,
+        f.seed.owner_id,
+        Uuid::parse_str(&a).unwrap(),
+        &crafted,
+        true,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        reserved,
+        canterlot_hub::schedules::admission::Reservation::Fresh { .. }
+    ));
+    scheduler(&f).tick(now).await.unwrap();
+    let rid = run_id(&pool, &b).await;
+    wait_state(&pool, rid, "started").await;
+}
+
+async fn inputs_with_text(pool: &PgPool, text: &str) -> i64 {
+    sqlx::query_scalar("select count(*) from inputs where content->0->>'text'=$1")
+        .bind(text)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// 3: ответ Run Now потерян после commit dispatch; повтор по тому же ключу
+/// возвращает начатый запуск, даже когда журнал запусков уже обрезан.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn lost_run_now_response_replays_the_started_run_after_pruning(pool: PgPool) {
+    use canterlot_hub::schedules::fault::{self, Fault};
+
+    let f = Fixture::new(pool.clone()).await;
+    let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
+    let id = create(&f, existing(&f), "0 9 * * *").await;
+    let schedule = Uuid::parse_str(&id).unwrap();
+    fault::arm(schedule, Fault::LostRunNowResponse);
+    let path = format!("/api/v1/schedules/{id}/run");
+    let lost = f
+        .client
+        .send(
+            Method::POST,
+            &path,
+            Some("lost-key"),
+            Some(json!({"run_anyway": true})),
+        )
+        .await;
+    assert_ne!(lost.status.as_u16(), 200, "the first response is lost");
+    // 200 более новых запусков вытесняют исходную строку из журнала.
+    for n in 0..201 {
+        sqlx::query(
+            "insert into schedule_runs(id,schedule_id,owner_id,scheduled_at,claimed_revision,state,manual,idempotency_key)
+             values($1,$2,$3,now()+make_interval(secs=>$4),1,'skipped_overlap',false,$5)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(schedule)
+        .bind(f.seed.owner_id)
+        .bind(f64::from(n + 10))
+        .bind(format!("newer-{n}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let mut conn = pool.acquire().await.unwrap();
+    canterlot_hub::schedules::prune_runs(&mut conn)
+        .await
+        .unwrap();
+    drop(conn);
+    let replay = f
+        .client
+        .send(
+            Method::POST,
+            &path,
+            Some("lost-key"),
+            Some(json!({"run_anyway": true})),
+        )
+        .await;
+    assert_eq!(
+        replay.status.as_u16(),
+        200,
+        "{}",
+        String::from_utf8_lossy(&replay.body)
+    );
+    assert_eq!(replay.json::<Value>()["state"], "started");
+    assert_eq!(inputs_with_text(&pool, "посмотреть коммиты").await, 1);
+}
+
+/// 3: другая мутация API с тем же ключом получает конфликт, пока запуск идёт,
+/// и Run Now не отвечает 409 после начатой сессии.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn foreign_mutation_cannot_take_a_reserved_run_now_key(pool: PgPool) {
+    use canterlot_hub::schedules::admission::{Reservation, reserve_manual};
+
+    let f = Fixture::new(pool.clone()).await;
+    let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
+    let id = create(&f, existing(&f), "0 9 * * *").await;
+    let schedule = Uuid::parse_str(&id).unwrap();
+    let Reservation::Fresh { .. } =
+        reserve_manual(&pool, f.seed.owner_id, schedule, "shared-key", true)
+            .await
+            .unwrap()
+    else {
+        panic!("first reservation is fresh");
+    };
+    let other = f
+        .client
+        .send(
+            Method::POST,
+            "/api/v1/schedules",
+            Some("shared-key"),
+            Some(json!({
+                "name": "Чужой",
+                "cron": "0 8 * * *",
+                "target": existing(&f),
+                "prompt": "чужой",
+            })),
+        )
+        .await;
+    assert_eq!(
+        other.status.as_u16(),
+        409,
+        "{}",
+        String::from_utf8_lossy(&other.body)
+    );
+}
+
+/// 3: заявленный ручной запуск, который доводит восстановление, тоже
+/// фиксирует ответ ключа: повтор получает начатый запуск, не вторую сессию.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn recovery_dispatched_manual_claim_finalizes_the_key(pool: PgPool) {
+    use canterlot_hub::schedules::admission::{Reservation, reserve_manual};
+
+    let f = Fixture::new(pool.clone()).await;
+    let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
+    let id = create(&f, existing(&f), "0 9 * * *").await;
+    let schedule = Uuid::parse_str(&id).unwrap();
+    let Reservation::Fresh { run, .. } =
+        reserve_manual(&pool, f.seed.owner_id, schedule, "stranded-manual", true)
+            .await
+            .unwrap()
+    else {
+        panic!("fresh");
+    };
+    // Процесс умер после резерва: аренда давно истекла.
+    sqlx::query("update schedule_runs set lease_at=now()-interval '2 hours',updated_at=now()-interval '2 hours' where id=$1")
+        .bind(run.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    scheduler(&f).tick(Utc::now()).await.unwrap();
+    wait_state(&pool, run.id, "started").await;
+    let replay = f
+        .client
+        .send(
+            Method::POST,
+            &format!("/api/v1/schedules/{id}/run"),
+            Some("stranded-manual"),
+            Some(json!({"run_anyway": true})),
+        )
+        .await;
+    assert_eq!(
+        replay.status.as_u16(),
+        200,
+        "{}",
+        String::from_utf8_lossy(&replay.body)
+    );
+    assert_eq!(replay.json::<Value>()["id"], run.id.to_string());
+    assert_eq!(replay.json::<Value>()["state"], "started");
+    assert_eq!(inputs_with_text(&pool, "посмотреть коммиты").await, 1);
+}
