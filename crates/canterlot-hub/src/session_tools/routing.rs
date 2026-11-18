@@ -669,7 +669,61 @@ pub struct RouteInputs<'a> {
     pub bypass_limits: bool,
     /// Правила расписаний (спека §39): только окна 5ч/неделя по свежим
     /// показаниям, неизвестность не пропускает, месячное не смотрим.
-    pub schedule_rules: bool,
+    /// Пороги и прогнозы дочерней политики не применяются: красным окно
+    /// считает тот же предикат, что и приём (`schedule_window_verdict`).
+    pub schedule_rules: Option<ScheduleRules>,
+}
+
+/// Параметры правил расписаний: остаток, ниже которого окно красное.
+#[derive(Clone, Copy, Debug)]
+pub struct ScheduleRules {
+    pub danger_remaining_pct: f64,
+    /// Возраст, после которого показание не свежее (как `limits.stale_after`).
+    pub fresh_for: Duration,
+}
+
+/// Вердикт окон по правилам расписаний.
+#[derive(Debug, PartialEq)]
+pub struct WindowVerdict {
+    /// Первое красное окно и его остаток в процентах.
+    pub red: Option<(&'static str, f64)>,
+    /// Была ли хоть одна свежая и известная оценка.
+    pub known: bool,
+}
+
+/// Одна истина для приёма и маршрутизации (спека §39): окно с прошедшим
+/// сбросом или несвежим показанием не считается; красное — строгое
+/// сравнение остатка с порогом, как в PWA. Свежесть проверяется раньше
+/// красного: давнее высокое показание со сбросом в будущем не отказывает.
+pub fn schedule_window_verdict<'a>(
+    windows: impl IntoIterator<
+        Item = (
+            &'static str,
+            Option<(f64, DateTime<Utc>, Option<DateTime<Utc>>)>,
+        ),
+    >,
+    rules: ScheduleRules,
+    now: DateTime<Utc>,
+) -> WindowVerdict {
+    let fresh = chrono::TimeDelta::from_std(rules.fresh_for).unwrap_or(chrono::TimeDelta::hours(1));
+    let mut known = false;
+    for (name, window) in windows {
+        let Some((used_percent, observed_at, resets_at)) = window else {
+            continue;
+        };
+        if resets_at.is_some_and(|reset| reset <= now) || now - observed_at > fresh {
+            continue;
+        }
+        known = true;
+        let remaining = 100.0 - used_percent;
+        if remaining < rules.danger_remaining_pct {
+            return WindowVerdict {
+                red: Some((name, remaining)),
+                known,
+            };
+        }
+    }
+    WindowVerdict { red: None, known }
 }
 
 /// Чистая функция выбора (§5.2 + §C1 пп. 5–7): уровень, канонизация через каталог,
@@ -1047,7 +1101,7 @@ fn limits_verdict(
     expected_minutes: i64,
     nearest_reset: &mut Option<DateTime<Utc>>,
     fable: bool,
-    schedule_rules: bool,
+    schedule_rules: Option<ScheduleRules>,
 ) -> Option<(&'static str, String)> {
     let thresholds = policy.providers.get(provider);
     let view = view.cloned().unwrap_or_default();
@@ -1064,13 +1118,42 @@ fn limits_verdict(
             .unwrap_or_default();
         return Some(("quota_paused", format!("quota paused{when}")));
     }
-    // Правила расписаний (спека §39): только 5-часовое и недельное окна по
-    // свежим показаниям; неизвестность не пропускает, месячное не смотрим.
-    let unknown = if schedule_rules {
-        UnknownLimits::Allow
-    } else {
-        policy.unknown_limits
-    };
+    // Правила расписаний (спека §39): только 5-часовое и недельное окна (и
+    // Fable для моделей Fable) по свежим показаниям, порог — остаток приёма,
+    // неизвестность не пропускает, месячное и прогнозы не смотрим.
+    if let Some(rules) = schedule_rules {
+        let reading = |window: Option<&WindowReading>| {
+            window.map(|w| (w.used_percent, w.observed_at, w.resets_at))
+        };
+        let mut windows = vec![
+            ("five_hour", reading(view.five_hour.as_ref())),
+            ("weekly", reading(view.weekly.as_ref())),
+        ];
+        if fable {
+            windows.push(("weekly_fable", reading(view.weekly_fable.as_ref())));
+        }
+        let verdict = schedule_window_verdict(windows.iter().cloned(), rules, now);
+        if let Some((name, remaining)) = verdict.red {
+            let source = match name {
+                "five_hour" => view.five_hour.as_ref(),
+                "weekly" => view.weekly.as_ref(),
+                _ => view.weekly_fable.as_ref(),
+            };
+            if let Some(reading) = source {
+                note_reset(nearest_reset, reading, now);
+            }
+            return Some((
+                "limits_over",
+                format!(
+                    "{provider} {name} {}% remaining < {}%",
+                    percent(remaining),
+                    percent(rules.danger_remaining_pct)
+                ),
+            ));
+        }
+        return None;
+    }
+    let unknown = policy.unknown_limits;
     if let Some(reason) = check_window(
         provider,
         "weekly",
@@ -1116,19 +1199,17 @@ fn limits_verdict(
     ) {
         return Some(reason);
     }
-    if !schedule_rules
-        && let Some(reason) = check_window(
-            provider,
-            "monthly",
-            thresholds.and_then(|limits| limits.max_monthly_percent),
-            view.monthly.as_ref(),
-            unknown,
-            stale,
-            now,
-            expected_minutes,
-            nearest_reset,
-        )
-    {
+    if let Some(reason) = check_window(
+        provider,
+        "monthly",
+        thresholds.and_then(|limits| limits.max_monthly_percent),
+        view.monthly.as_ref(),
+        unknown,
+        stale,
+        now,
+        expected_minutes,
+        nearest_reset,
+    ) {
         return Some(reason);
     }
     None
@@ -1557,7 +1638,7 @@ pub async fn preview(
         now,
         request: &request,
         bypass_limits: false,
-        schedule_rules: false,
+        schedule_rules: None,
     }) {
         Ok(decision) => {
             tx.commit().await?;
@@ -1748,7 +1829,7 @@ mod tests {
                     now: now(),
                     request: &req,
                     bypass_limits: false,
-                    schedule_rules: false,
+                    schedule_rules: None,
                 }),
                 Err(RouteError::NoExecutor { .. })
             ),
@@ -1765,7 +1846,7 @@ mod tests {
             now: now(),
             request: &req,
             bypass_limits: true,
-            schedule_rules: false,
+            schedule_rules: None,
         })
         .unwrap();
         assert_eq!(decision.model, "opencode-go/deepseek-v4.1-flash");
@@ -1784,7 +1865,7 @@ mod tests {
             now: now(),
             request: &request("bugfix"),
             bypass_limits: false,
-            schedule_rules: false,
+            schedule_rules: None,
         })
         .unwrap();
         assert_eq!(decision.harness, "opencode");
@@ -1835,7 +1916,7 @@ mod tests {
             now: now(),
             request: &request("review"),
             bypass_limits: bypass,
-            schedule_rules: false,
+            schedule_rules: None,
         })
         .unwrap()
     }
@@ -1949,7 +2030,7 @@ mod tests {
             now: now(),
             request: &with_level,
             bypass_limits: false,
-            schedule_rules: false,
+            schedule_rules: None,
         })
         .unwrap();
         // Beam пропущен по уровню; DeepSeek без effort берёт уровень как усилие.
@@ -1971,7 +2052,7 @@ mod tests {
             now: now(),
             request: &request("bugfix"),
             bypass_limits: false,
-            schedule_rules: false,
+            schedule_rules: None,
         });
         let error = decision.unwrap_err();
         let RouteError::NoExecutor { considered, .. } = error else {
@@ -2000,7 +2081,7 @@ mod tests {
             now: now(),
             request: &request("review"),
             bypass_limits: false,
-            schedule_rules: false,
+            schedule_rules: None,
         })
         .unwrap();
         // claude_code нет в каталоге: выбран codex, а не отсутствующий opus.
@@ -2041,7 +2122,7 @@ mod tests {
             now: now(),
             request: &request("probe"),
             bypass_limits: false,
-            schedule_rules: false,
+            schedule_rules: None,
         })
         .unwrap();
         assert_eq!(decision.model, "opencode-go/deepseek-v4.1-flash");
@@ -2080,7 +2161,7 @@ mod tests {
             now: now(),
             request: &request("probe"),
             bypass_limits: false,
-            schedule_rules: false,
+            schedule_rules: None,
         })
         .unwrap();
         assert_eq!(decision.model, "opus[1m]");
@@ -2119,7 +2200,7 @@ mod tests {
             now: now(),
             request: &request("probe"),
             bypass_limits: false,
-            schedule_rules: false,
+            schedule_rules: None,
         })
         .unwrap();
         assert_eq!(decision.model, "fable[1m]");
@@ -2159,7 +2240,7 @@ mod tests {
             now: now(),
             request: &request("probe"),
             bypass_limits: false,
-            schedule_rules: false,
+            schedule_rules: None,
         })
         .unwrap_err();
         let RouteError::NoExecutor { considered, .. } = error else {
@@ -2181,7 +2262,7 @@ mod tests {
             now: now(),
             request: &request("bugfix"),
             bypass_limits: false,
-            schedule_rules: false,
+            schedule_rules: None,
         })
         .unwrap();
         // DeepSeek и Muse упёрлись в лимит opencode; у claude показаний нет —
@@ -2239,7 +2320,7 @@ mod tests {
             now: now(),
             request: &request("bugfix"),
             bypass_limits: false,
-            schedule_rules: false,
+            schedule_rules: None,
         })
         .unwrap();
         // Оба кандидата opencode пропущены прогнозом; выбран opus.
@@ -2270,7 +2351,7 @@ mod tests {
             now: now(),
             request: &request("bugfix"),
             bypass_limits: false,
-            schedule_rules: false,
+            schedule_rules: None,
         })
         .unwrap();
         assert_eq!(decision.harness, "opencode");
@@ -2297,7 +2378,7 @@ mod tests {
             now: now(),
             request: &request("bugfix"),
             bypass_limits: false,
-            schedule_rules: false,
+            schedule_rules: None,
         })
         .unwrap();
         assert_eq!(decision.harness, "opencode");
@@ -2324,7 +2405,7 @@ mod tests {
             now: now(),
             request: &request("bugfix"),
             bypass_limits: false,
-            schedule_rules: false,
+            schedule_rules: None,
         })
         .unwrap();
         assert!(decision.considered.iter().any(|entry| {
@@ -2397,7 +2478,7 @@ mod tests {
             now: now(),
             request: &request("bugfix"),
             bypass_limits: false,
-            schedule_rules: false,
+            schedule_rules: None,
         })
         .unwrap_err();
         let RouteError::NoExecutor { considered, reset } = error else {
@@ -2448,7 +2529,7 @@ mod tests {
             now: now(),
             request: &request("fast"),
             bypass_limits: false,
-            schedule_rules: false,
+            schedule_rules: None,
         })
         .unwrap();
         assert_eq!(decision.model, "opencode-go/beam-free");
@@ -2476,7 +2557,7 @@ mod tests {
             now: now(),
             request: &request("bugfix"),
             bypass_limits: false,
-            schedule_rules: false,
+            schedule_rules: None,
         })
         .unwrap();
         assert_eq!(decision.model, "opencode-go/deepseek-v4.1-flash");
@@ -2504,7 +2585,7 @@ mod tests {
             now: now(),
             request: &request("bugfix"),
             bypass_limits: false,
-            schedule_rules: false,
+            schedule_rules: None,
         });
         let decision = error_or_next.unwrap();
         assert_ne!(decision.model, "opencode-go/deepseek-v4.1-flash");
@@ -2610,6 +2691,10 @@ mod tests {
         let req = request("one");
         let route_with_rules =
             |limits: &HashMap<String, ProviderView>, schedule_rules: bool, strict_unknown: bool| {
+                let schedule_rules = schedule_rules.then_some(ScheduleRules {
+                    danger_remaining_pct: 5.0,
+                    fresh_for: Duration::from_secs(2100),
+                });
                 let mut policy = single_candidate_policy();
                 if strict_unknown {
                     policy.unknown_limits = UnknownLimits::Skip;
@@ -2665,6 +2750,76 @@ mod tests {
             route_with_rules(&weekly_red, true, true),
             Err(RouteError::NoExecutor { .. })
         ));
+    }
+
+    /// F: пороги и прогнозы дочерней политики к расписаниям не применяются,
+    /// красным окно делает остаток приёма; давнее высокое показание со сбросом
+    /// в будущем не отказывает.
+    #[test]
+    fn schedule_rules_use_the_admission_threshold_not_child_policy() {
+        let req = request("one");
+        let rules = Some(ScheduleRules {
+            danger_remaining_pct: 5.0,
+            fresh_for: Duration::from_secs(2100),
+        });
+        let run = |limits: &HashMap<String, ProviderView>, policy: &Policy| {
+            route(RouteInputs {
+                policy,
+                revision: 0,
+                whitelist: &entries(),
+                catalogs: &catalogs(),
+                limits,
+                live: &HashMap::new(),
+                stale: Duration::from_secs(1800),
+                now: now(),
+                request: &req,
+                bypass_limits: false,
+                schedule_rules: rules,
+            })
+        };
+        // Порога у провайдера нет вовсе, а остаток 3% < 5%: приём отказал бы.
+        let mut no_threshold = single_candidate_policy();
+        no_threshold.providers.clear();
+        let red = HashMap::from([(
+            "opencode".to_owned(),
+            ProviderView {
+                five_hour: Some(reading(97.0, 5)),
+                ..ProviderView::default()
+            },
+        )]);
+        assert!(matches!(
+            run(&red, &no_threshold),
+            Err(RouteError::NoExecutor { .. })
+        ));
+        // Дочерний порог 90% красит 94%, а приём (остаток 6% ≥ 5%) — нет.
+        let mut strict_child = single_candidate_policy();
+        strict_child
+            .providers
+            .get_mut("opencode")
+            .unwrap()
+            .max_five_hour_percent = Some(90.0);
+        let child_red_only = HashMap::from([(
+            "opencode".to_owned(),
+            ProviderView {
+                five_hour: Some(reading(94.0, 5)),
+                ..ProviderView::default()
+            },
+        )]);
+        run(&child_red_only, &strict_child).unwrap();
+        // Давнее показание 99% при сбросе в будущем: свежесть проверяется раньше.
+        let stale_high = HashMap::from([(
+            "opencode".to_owned(),
+            ProviderView {
+                five_hour: Some(WindowReading {
+                    used_percent: 99.0,
+                    observed_at: now() - chrono::TimeDelta::hours(3),
+                    resets_at: Some(now() + chrono::TimeDelta::hours(1)),
+                    forecast: None,
+                }),
+                ..ProviderView::default()
+            },
+        )]);
+        run(&stale_high, &single_candidate_policy()).unwrap();
     }
 
     fn single_candidate_policy() -> Policy {
@@ -2729,7 +2884,7 @@ mod tests {
             now: now(),
             request,
             bypass_limits: false,
-            schedule_rules: false,
+            schedule_rules: None,
         })
     }
 
@@ -2806,7 +2961,7 @@ mod tests {
             now: now(),
             request: &request("one"),
             bypass_limits: false,
-            schedule_rules: false,
+            schedule_rules: None,
         })
     }
 
@@ -2988,7 +3143,7 @@ mod tests {
             now: now(),
             request: &request("bugfix"),
             bypass_limits: false,
-            schedule_rules: false,
+            schedule_rules: None,
         })
         .unwrap();
         // Первый два кандидата на паузе; выбран opus.
@@ -3021,7 +3176,7 @@ mod tests {
             now: now(),
             request: &request("bugfix"),
             bypass_limits: false,
-            schedule_rules: false,
+            schedule_rules: None,
         })
         .unwrap();
         // DeepSeek занят 4 из 4; Muse исключён workdir? Нет: workdir /tmp/w.
@@ -3129,7 +3284,7 @@ mod tests {
             now: now(),
             request: &with_home,
             bypass_limits: false,
-            schedule_rules: false,
+            schedule_rules: None,
         })
         .unwrap();
         // Muse исключён каталогом; DeepSeek первый и проходит.
@@ -3156,7 +3311,7 @@ mod tests {
             now: now(),
             request: &shop,
             bypass_limits: false,
-            schedule_rules: false,
+            schedule_rules: None,
         })
         .unwrap();
         assert_eq!(decision.model, "opencode-go/muse-spark-1.3-contributor");
@@ -3243,7 +3398,7 @@ mod tests {
             now: now(),
             request: &request("nope"),
             bypass_limits: false,
-            schedule_rules: false,
+            schedule_rules: None,
         })
         .unwrap_err();
         let RouteError::UnknownTask { available } = error else {

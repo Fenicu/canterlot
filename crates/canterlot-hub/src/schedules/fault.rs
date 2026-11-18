@@ -11,6 +11,8 @@ pub enum Fault {
     LostRunNowResponse,
     /// Сбой базы в начале dispatch, уже после предпроверки.
     DispatchBeginError,
+    /// Выбранная маршрутом пара оказывается занятой уже под замками dispatch.
+    BusyAfterRouting,
 }
 
 #[cfg(feature = "testkit")]

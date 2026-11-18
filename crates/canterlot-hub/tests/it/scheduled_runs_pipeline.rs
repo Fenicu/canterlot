@@ -3,7 +3,9 @@ use crate::support::task7::Fixture;
 use axum::http::Method;
 use canterlot_hub::{
     delivery::dispatch::{GateInputs, dispatch_next},
-    limits::{DataConfidence, Observation, ObservationSource, Window, record_observation_in_tx},
+    limits::{
+        self, DataConfidence, Observation, ObservationSource, Window, record_observation_in_tx,
+    },
     testkit::{self, FakeSession},
 };
 use canterlot_proto::worker::v1::{PrecheckResult, control_down, precheck_result};
@@ -1461,4 +1463,198 @@ async fn early_dispatch_error_after_precheck_finalizes_from_prechecking(pool: Pg
     let detail = wait_state(&pool, rid, "failed").await;
     assert_eq!(detail["reason"], "database_unavailable");
     worker.abort();
+}
+
+async fn observe(pool: &PgPool, f: &Fixture, provider: &str, window: limits::Window, used: u16) {
+    let now = Utc::now();
+    let mut tx = pool.begin().await.unwrap();
+    record_observation_in_tx(
+        &mut tx,
+        f.seed.owner_id,
+        &Observation {
+            provider: provider.into(),
+            window,
+            used_permille: used,
+            resets_at: Some(now + TimeDelta::hours(3)),
+            observed_at: now,
+            source: ObservationSource::Session,
+            data_confidence: DataConfidence::Exact,
+            machine_id: f.seed.machine_id,
+            execution_id: None,
+        },
+        now,
+        &Default::default(),
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+}
+
+async fn routed_fixture(f: &Fixture, pool: &PgPool, candidates: Value, whitelist: Value) {
+    sqlx::query("update machines set availability='available' where id=$1")
+        .bind(f.seed.machine_id)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "insert into machine_harnesses(machine_id,harness,provider,title,permission_modes,models)
+         values($1,'synthetic-codex','codex','Codex','[\"bypass\",\"owner\"]','[{\"id\":\"synthetic-codex-small\",\"title\":\"S\",\"efforts\":[\"high\"]}]')
+         on conflict do nothing",
+    )
+    .bind(f.seed.machine_id)
+    .execute(pool)
+    .await
+    .unwrap();
+    sqlx::query("update owners set routing_policy=$2, spawn_whitelist=$3 where id=$1")
+        .bind(f.seed.owner_id)
+        .bind(json!({"task_types": {"audit": {"title": "Проверка", "candidates": candidates}}}))
+        .bind(whitelist)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+/// F: основной кандидат без порога дочерней политики, но с красным окном по
+/// правилам приёма, не выбирается: зелёный запасной стартует.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn routing_skips_a_red_primary_without_child_thresholds_for_a_green_backup(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
+    routed_fixture(
+        &f,
+        &pool,
+        json!([
+            {"harness":"synthetic","model":"synthetic-small","effort":"high"},
+            {"harness":"synthetic-codex","model":"synthetic-codex-small","effort":"high"}
+        ]),
+        json!([
+            {"harness":"synthetic","model":"synthetic-small"},
+            {"harness":"synthetic-codex","model":"synthetic-codex-small"}
+        ]),
+    )
+    .await;
+    observe(&pool, &f, "claude", limits::Window::FiveHour, 970).await;
+    let id = create(
+        &f,
+        json!({"kind":"new_session","machine_id":f.seed.machine_id,"workdir":"/tmp/scheduled-backup","route":{"task_type":"audit"}}),
+        "0 9 * * *",
+    )
+    .await;
+    due(&pool, &id, Utc::now() - TimeDelta::seconds(30)).await;
+    scheduler(&f).tick(Utc::now()).await.unwrap();
+    let rid = run_id(&pool, &id).await;
+    wait_state(&pool, rid, "started").await;
+    let harness: String = sqlx::query_scalar(
+        "select c.harness from conversations c join schedule_runs r on r.session_id=c.id where r.id=$1",
+    )
+    .bind(rid)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(harness, "synthetic-codex");
+}
+
+/// F: кандидат стал занятым после маршрутизации (parallel limit under locks):
+/// dispatch выбирает запасного, а не пропускает запуск.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn candidate_that_becomes_busy_after_routing_falls_back(pool: PgPool) {
+    use canterlot_hub::schedules::fault::{self, Fault};
+
+    let f = Fixture::new(pool.clone()).await;
+    let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
+    routed_fixture(
+        &f,
+        &pool,
+        json!([
+            {"harness":"synthetic","model":"synthetic-small","effort":"high"},
+            {"harness":"synthetic-codex","model":"synthetic-codex-small","effort":"high"}
+        ]),
+        json!([
+            {"harness":"synthetic","model":"synthetic-small"},
+            {"harness":"synthetic-codex","model":"synthetic-codex-small"}
+        ]),
+    )
+    .await;
+    sqlx::query("update owners set routing_policy=jsonb_set(routing_policy,'{max_parallel}','{\"synthetic/synthetic-small\":1}') where id=$1")
+        .bind(f.seed.owner_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let id = create(
+        &f,
+        json!({"kind":"new_session","machine_id":f.seed.machine_id,"workdir":"/tmp/scheduled-busy","route":{"task_type":"audit"}}),
+        "0 9 * * *",
+    )
+    .await;
+    // Пара занята только к моменту dispatch: чужая работающая сессия появляется
+    // между маршрутизацией и транзакцией dispatch.
+    fault::arm(Uuid::parse_str(&id).unwrap(), Fault::BusyAfterRouting);
+    due(&pool, &id, Utc::now() - TimeDelta::seconds(30)).await;
+    scheduler(&f).tick(Utc::now()).await.unwrap();
+    let rid = run_id(&pool, &id).await;
+    wait_state(&pool, rid, "started").await;
+    let harness: String = sqlx::query_scalar(
+        "select c.harness from conversations c join schedule_runs r on r.session_id=c.id where r.id=$1",
+    )
+    .bind(rid)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(harness, "synthetic-codex");
+}
+
+/// 4: пятичасовое наблюдение, закоммиченное после чтения зелёных лимитов
+/// диспетчером, но до его commit, не обходит красное окно у существующей сессии.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn observation_landing_during_existing_session_dispatch_turns_it_red(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
+    let id = create(&f, existing(&f), "0 9 * * *").await;
+    // Автор наблюдения держит строку провайдера до commit.
+    let now = Utc::now();
+    let mut writer = pool.begin().await.unwrap();
+    record_observation_in_tx(
+        &mut writer,
+        f.seed.owner_id,
+        &Observation {
+            provider: "claude".into(),
+            window: limits::Window::FiveHour,
+            used_permille: 990,
+            resets_at: Some(now + TimeDelta::hours(3)),
+            observed_at: now,
+            source: ObservationSource::Session,
+            data_confidence: DataConfidence::Exact,
+            machine_id: f.seed.machine_id,
+            execution_id: None,
+        },
+        now,
+        &Default::default(),
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    due(&pool, &id, now - TimeDelta::seconds(30)).await;
+    scheduler(&f).tick(now).await.unwrap();
+    // Приём дошёл до разделяемого замка провайдера и ждёт автора наблюдения.
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let waiting: i64 = sqlx::query_scalar(
+                "select count(*) from pg_stat_activity where wait_event_type='Lock' and datname=current_database()",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if waiting > 0 {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("admission waits for the provider lock");
+    writer.commit().await.unwrap();
+    let rid = run_id(&pool, &id).await;
+    wait_state(&pool, rid, "skipped_limits").await;
+    assert_eq!(inputs_with_text(&pool, "посмотреть коммиты").await, 0);
 }
