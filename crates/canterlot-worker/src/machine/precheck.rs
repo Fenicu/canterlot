@@ -203,8 +203,10 @@ pub async fn run_with(
         }
         Err(()) => None,
     };
+    // Потоки closing по EOF после выхода группы: дать дренажам дочитать хвост,
+    // иначе последняя запись может ещё не попасть в кольцо.
     for task in drains.into_iter().flatten() {
-        task.abort();
+        let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
     }
     let tail = ring.lock().expect("output ring poisoned").clone();
     drop(guard);
