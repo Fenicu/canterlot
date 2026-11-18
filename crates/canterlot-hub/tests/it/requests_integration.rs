@@ -14,7 +14,7 @@ use canterlot_hub::{
 };
 use canterlot_proto::worker::v1::{
     BlockStarted, DecisionApplied, DecisionNotApplied, DecisionTransmissionStarted, JournalOpened,
-    JournalRecord, JournalRecords, RecordBody, RequestOpened, record_body,
+    JournalRecord, JournalRecords, RecordBody, RequestClosed, RequestOpened, record_body,
 };
 use chrono::{TimeDelta, Utc};
 use serde_json::{Value, json};
@@ -79,6 +79,109 @@ fn block_started(id: Uuid, kind: &str) -> record_body::Body {
         kind: kind.into(),
         ..Default::default()
     })
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn worker_journal_cannot_open_hub_owned_requests(pool: PgPool) -> TestResult {
+    let (seed, execution) = setup_running_execution(&pool).await;
+    for kind in ["settings_change", "spawn_approval"] {
+        let request = Uuid::now_v7();
+        let block = Uuid::now_v7();
+        let records = batch(
+            Uuid::now_v7(),
+            vec![
+                opened(&execution),
+                record_body::Body::RequestOpened(RequestOpened {
+                    request_id: request.to_string(),
+                    execution_id: execution.execution_id.to_string(),
+                    generation: execution.generation as u64,
+                    kind: kind.into(),
+                    payload_json: serde_json::to_vec(&json!({"setting":"routing"}))?,
+                }),
+                block_started(block, "text"),
+            ],
+        );
+        Ingest::new(pool.clone())
+            .apply_batch(
+                seed.machine_id,
+                &seed.credential_digest(),
+                JournalKind::Sj,
+                &records,
+            )
+            .await?;
+    }
+    let stored: i64 = sqlx::query_scalar(
+        "select count(*) from requests where kind in ('settings_change','spawn_approval')",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(stored, 0, "worker must not create hub-owned requests");
+    let blocks: i64 = sqlx::query_scalar("select count(*) from blocks where conversation_id=$1")
+        .bind(seed.conversation_id)
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(blocks, 2, "the rest of the journal still moves");
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn worker_journal_cannot_close_hub_owned_requests(pool: PgPool) -> TestResult {
+    let (seed, execution) = setup_running_execution(&pool).await;
+    let mut facts = Vec::new();
+    for (kind, state, winner) in [
+        ("settings_change", "open", None),
+        ("spawn_approval", "decision_saved", Some(Uuid::now_v7())),
+    ] {
+        let request = Uuid::now_v7();
+        sqlx::query(
+            "insert into requests(id,conversation_id,execution_id,generation,kind,
+                native_request_id,state,request_payload,winner_decision_id)
+             values($1,$2,$3,$4,$5,$6,$7,'{}',$8)",
+        )
+        .bind(request)
+        .bind(seed.conversation_id)
+        .bind(execution.execution_id)
+        .bind(execution.generation)
+        .bind(kind)
+        .bind(format!("hub:{request}"))
+        .bind(state)
+        .bind(winner)
+        .execute(&pool)
+        .await?;
+        facts.push(record_body::Body::RequestClosed(RequestClosed {
+            request_id: request.to_string(),
+            reason: "worker_lied".into(),
+        }));
+        facts.push(record_body::Body::DecisionApplied(DecisionApplied {
+            request_id: request.to_string(),
+            decision_id: winner.unwrap_or_else(Uuid::now_v7).to_string(),
+            proof_kind: "text".into(),
+            proof_payload_json: Vec::new(),
+        }));
+    }
+    let records = batch(
+        Uuid::now_v7(),
+        vec![opened(&execution)].into_iter().chain(facts).collect(),
+    );
+    Ingest::new(pool.clone())
+        .apply_batch(
+            seed.machine_id,
+            &seed.credential_digest(),
+            JournalKind::Sj,
+            &records,
+        )
+        .await?;
+    let states: Vec<String> = sqlx::query_scalar(
+        "select state from requests where kind in ('settings_change','spawn_approval') order by kind",
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        states,
+        ["open", "decision_saved"],
+        "worker cannot close hub cards"
+    );
+    Ok(())
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]

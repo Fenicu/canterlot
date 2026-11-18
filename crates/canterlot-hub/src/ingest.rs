@@ -3154,6 +3154,11 @@ async fn apply_request_opened(
     fact: &RequestOpened,
     correlation_id: Uuid,
 ) -> Result<bool, IngestError> {
+    // Карточки одобрения запуска и смены настроек создаёт и закрывает хаб: рабочий
+    // журнал не должен ни открывать их, ни переоткрывать, ни подменять payload.
+    if !matches!(fact.kind.as_str(), "permission" | "question") {
+        return Ok(true);
+    }
     if !fact.execution_id.is_empty() && parse_id(&fact.execution_id)? != run.execution_id {
         return Err(IngestError::ForeignExecution);
     }
@@ -3346,7 +3351,8 @@ async fn locked_request(
 ) -> Result<Option<LockedRequest>, IngestError> {
     let row: Option<(Uuid, Uuid, String, Option<Uuid>)> = sqlx::query_as(
         "select id, conversation_id, state, winner_decision_id from requests
-         where (id = $1 or native_request_id = $2) and execution_id = $3 for update",
+         where (id = $1 or native_request_id = $2) and execution_id = $3
+           and kind in ('permission', 'question') for update",
     )
     .bind(Uuid::parse_str(request_id).ok())
     .bind(request_id)
