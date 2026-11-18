@@ -1764,6 +1764,7 @@ impl Worker {
                 || histories_outbound.is_some()
                 || owner_outbound.is_some()
                 || !probe_outbound.is_empty()
+                || precheck_outbound.is_some()
                 || lease_outbound.is_some()
                 || watch_outbound.is_some()
                 || report_outbound.is_some()
@@ -1801,9 +1802,13 @@ impl Worker {
                         }
                         Some(control_down::Msg::SchedulePrecheck(request)) if precheck_enabled => {
                             if precheck_next.is_some() || precheck_operation.is_some() {
-                                let mut reply = crate::machine::precheck::error("busy");
-                                reply.attempt_id = request.attempt_id;
-                                precheck_outbound = Some(ControlUp{msg:Some(control_up::Msg::PrecheckResult(reply))});
+                                // Завершённый, но ещё не отправленный ответ нельзя затирать
+                                // чужим `busy`: первая попытка тогда молча потеряется.
+                                if precheck_outbound.is_none() {
+                                    let mut reply = crate::machine::precheck::error("busy");
+                                    reply.attempt_id = request.attempt_id;
+                                    precheck_outbound = Some(ControlUp{msg:Some(control_up::Msg::PrecheckResult(reply))});
+                                }
                             } else {
                                 precheck_next = Some(request);
                             }
