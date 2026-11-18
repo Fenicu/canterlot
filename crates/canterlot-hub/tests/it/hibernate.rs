@@ -16,8 +16,7 @@ use canterlot_hub::{
     testkit::{self, Seed, TestClient},
 };
 use canterlot_proto::worker::v1::{
-    ExecutionState as ExecutionFact, JournalRecord, JournalRecords, RecordBody,
-    record_body::Body,
+    ExecutionState as ExecutionFact, JournalRecord, JournalRecords, RecordBody, record_body::Body,
 };
 use chrono::{TimeDelta, Utc};
 use serde_json::{Value, json};
@@ -338,15 +337,17 @@ async fn proven_idle_for_an_hour_hibernates(pool: PgPool) -> TestResult {
         stop_command(&pool, seed.conversation_id).await,
         Some(json!({"force": false, "reason": "hibernated"}))
     );
-    let requested: bool = sqlx::query_scalar("select hibernate_requested from executions where id=$1")
-        .bind(run.execution_id)
-        .fetch_one(&pool)
-        .await?;
+    let requested: bool =
+        sqlx::query_scalar("select hibernate_requested from executions where id=$1")
+            .bind(run.execution_id)
+            .fetch_one(&pool)
+            .await?;
     assert!(requested);
-    let pauses: Value = sqlx::query_scalar("select pause_reasons from queue_state where conversation_id=$1")
-        .bind(seed.conversation_id)
-        .fetch_one(&pool)
-        .await?;
+    let pauses: Value =
+        sqlx::query_scalar("select pause_reasons from queue_state where conversation_id=$1")
+            .bind(seed.conversation_id)
+            .fetch_one(&pool)
+            .await?;
     assert_eq!(pauses, json!([{"reason":"hibernated"}]));
     // Повторный обход не создаёт вторую команду.
     assert_eq!(hibernate::sweep(&pool, &Presence::default()).await?, 0);
@@ -436,10 +437,11 @@ async fn input_during_stop_is_delivered_once_after_resume(pool: PgPool) -> TestR
     .await?;
     assert_eq!(live.len(), 1, "exactly one resumed execution");
     assert_eq!(live[0].1, run.generation + 1);
-    let native: String = sqlx::query_scalar("select native_conversation_id from executions where id=$1")
-        .bind(live[0].0)
-        .fetch_one(&pool)
-        .await?;
+    let native: String =
+        sqlx::query_scalar("select native_conversation_id from executions where id=$1")
+            .bind(live[0].0)
+            .fetch_one(&pool)
+            .await?;
     assert_eq!(native, format!("native-{}", run.execution_id));
 
     // Ввод доставляется тем же сообщением один раз, новым исполнением.
@@ -475,7 +477,9 @@ async fn input_during_stop_is_delivered_once_after_resume(pool: PgPool) -> TestR
         Uuid::now_v7(),
     )
     .await?;
-    assert!(matches!(outcome, DispatchOutcome::Dispatched { input_id, .. } if input_id == submitted.input_id));
+    assert!(
+        matches!(outcome, DispatchOutcome::Dispatched { input_id, .. } if input_id == submitted.input_id)
+    );
     Ok(())
 }
 

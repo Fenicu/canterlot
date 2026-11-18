@@ -6,7 +6,10 @@ use super::{
     error::ApiError,
     extract::ApiJson,
 };
-use crate::{hibernate::{self, HibernateSettings}, idempotency};
+use crate::{
+    hibernate::{self, HibernateSettings},
+    idempotency,
+};
 use axum::{Json, extract::State};
 use utoipa_axum::{router::OpenApiRouter, routes};
 
@@ -15,10 +18,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
 }
 
 #[utoipa::path(get,path="/api/v1/hibernate-settings",tag="conversations",responses((status=200,description="Настройка усыпления простаивающих сессий",body=HibernateSettings)))]
-async fn read(
-    State(s): State<AppState>,
-    o: Owner,
-) -> Result<Json<HibernateSettings>, ApiError> {
+async fn read(State(s): State<AppState>, o: Owner) -> Result<Json<HibernateSettings>, ApiError> {
     Ok(Json(
         hibernate::settings(&mut *s.pool.acquire().await?, o.owner_id).await?,
     ))
@@ -42,9 +42,7 @@ async fn replace(
         None,
         move |conn| {
             Box::pin(async move {
-                Ok::<_, ApiError>(
-                    hibernate::replace_settings_in_tx(conn, owner, &b).await?,
-                )
+                Ok::<_, ApiError>(hibernate::replace_settings_in_tx(conn, owner, &b).await?)
             })
         },
     )

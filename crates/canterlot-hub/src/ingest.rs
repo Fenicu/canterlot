@@ -1944,13 +1944,11 @@ async fn apply_execution_fact(
         return Ok(());
     }
     let hibernated_stop = to == ExecutionState::Stopped
-        && sqlx::query_scalar::<_, bool>(
-            "select hibernate_requested from executions where id=$1",
-        )
-        .bind(execution_id)
-        .fetch_optional(&mut *conn)
-        .await?
-        .unwrap_or(false);
+        && sqlx::query_scalar::<_, bool>("select hibernate_requested from executions where id=$1")
+            .bind(execution_id)
+            .fetch_optional(&mut *conn)
+            .await?
+            .unwrap_or(false);
     match executions::set_state_in_tx(conn, execution_id, to, outcome, correlation_id).await {
         Ok(()) => {
             if hibernated_stop {

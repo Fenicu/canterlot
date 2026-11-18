@@ -60,12 +60,11 @@ pub async fn settings(
     conn: &mut PgConnection,
     owner_id: Uuid,
 ) -> Result<HibernateSettings, sqlx::Error> {
-    let stored: Option<Option<i32>> = sqlx::query_scalar(
-        "select idle_minutes from hibernate_settings where owner_id=$1",
-    )
-    .bind(owner_id)
-    .fetch_optional(&mut *conn)
-    .await?;
+    let stored: Option<Option<i32>> =
+        sqlx::query_scalar("select idle_minutes from hibernate_settings where owner_id=$1")
+            .bind(owner_id)
+            .fetch_optional(&mut *conn)
+            .await?;
     Ok(HibernateSettings {
         idle_minutes: match stored {
             None => Some(DEFAULT_IDLE_MINUTES),
@@ -246,11 +245,7 @@ pub async fn hibernate_in_tx(
         .bind(execution_id)
         .execute(&mut *conn)
         .await?;
-    if !queue
-        .pause_reasons
-        .0
-        .contains(&PauseReason::Hibernated)
-    {
+    if !queue.pause_reasons.0.contains(&PauseReason::Hibernated) {
         queue.pause_reasons.0.push(PauseReason::Hibernated);
     }
     let slot = queue.slot()?;
@@ -275,7 +270,9 @@ pub async fn hibernate_in_tx(
     events::append(
         &mut *conn,
         NewEvent {
-            scope: Scope::Conversation { id: conversation_id },
+            scope: Scope::Conversation {
+                id: conversation_id,
+            },
             kind: "queue_paused",
             conversation_id: Some(conversation_id),
             execution_id: Some(execution_id),
@@ -295,12 +292,11 @@ pub async fn wake_in_tx(
     conversation_id: Uuid,
     correlation_id: Uuid,
 ) -> Result<bool, sqlx::Error> {
-    let pauses: Json<Vec<PauseReason>> = sqlx::query_scalar(
-        "select pause_reasons from queue_state where conversation_id=$1",
-    )
-    .bind(conversation_id)
-    .fetch_one(&mut *conn)
-    .await?;
+    let pauses: Json<Vec<PauseReason>> =
+        sqlx::query_scalar("select pause_reasons from queue_state where conversation_id=$1")
+            .bind(conversation_id)
+            .fetch_one(&mut *conn)
+            .await?;
     let hibernated = pauses.0.contains(&PauseReason::Hibernated);
     let last_hibernate: Option<bool> = sqlx::query_scalar(
         "select hibernate_requested from executions where conversation_id=$1
@@ -312,7 +308,10 @@ pub async fn wake_in_tx(
     if !hibernated && !last_hibernate.unwrap_or(false) {
         return Ok(false);
     }
-    if executions::live(&mut *conn, conversation_id).await?.is_some() {
+    if executions::live(&mut *conn, conversation_id)
+        .await?
+        .is_some()
+    {
         return Ok(false);
     }
     let queued: i64 = sqlx::query_scalar(
@@ -336,13 +335,13 @@ pub async fn wake_in_tx(
             .0
             .retain(|reason| *reason != PauseReason::Hibernated);
         let slot = queue.slot()?;
-        queue
-            .save(&mut *conn, &slot, None, correlation_id)
-            .await?;
+        queue.save(&mut *conn, &slot, None, correlation_id).await?;
         events::append(
             &mut *conn,
             NewEvent {
-                scope: Scope::Conversation { id: conversation_id },
+                scope: Scope::Conversation {
+                    id: conversation_id,
+                },
                 kind: "queue_resumed",
                 conversation_id: Some(conversation_id),
                 execution_id: None,

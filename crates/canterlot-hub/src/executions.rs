@@ -405,11 +405,12 @@ pub async fn set_state_in_tx(
     .bind(execution_id)
     .fetch_one(&mut *conn)
     .await?;
-    let (state, generation, hibernate_requested): (String, i64, bool) =
-        sqlx::query_as("select state, generation, hibernate_requested from executions where id = $1")
-            .bind(execution_id)
-            .fetch_one(&mut *conn)
-            .await?;
+    let (state, generation, hibernate_requested): (String, i64, bool) = sqlx::query_as(
+        "select state, generation, hibernate_requested from executions where id = $1",
+    )
+    .bind(execution_id)
+    .fetch_one(&mut *conn)
+    .await?;
     let from = state
         .parse()
         .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
@@ -675,7 +676,10 @@ fn legal_transition(from: ExecutionState, to: ExecutionState, outcome: Option<&s
                 Stopping,
                 Stopped,
                 Some(
-                    "user_stop" | "normal_exit" | "start_cancelled" | "force_stopped"
+                    "user_stop"
+                        | "normal_exit"
+                        | "start_cancelled"
+                        | "force_stopped"
                         | "hibernated",
                 )
             )
