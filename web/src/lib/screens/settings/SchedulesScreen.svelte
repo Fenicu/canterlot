@@ -109,7 +109,7 @@
           <div class="row-main">
             <strong>{item.name}</strong>
             <span class="meta">{cronHuman(item.cron)}</span>
-            <span class="meta">Далее: {fireTime(item.next_fire_at)} · {item.timezone}</span>
+            <span class="meta">Далее: {fireTime(item.next_fire_at, item.timezone)} (пояс {item.timezone})</span>
             {#if outcome}
               <span class="outcome" data-tone={outcome.tone}>{outcome.word}</span>
             {:else}

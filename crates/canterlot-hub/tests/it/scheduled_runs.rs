@@ -173,3 +173,37 @@ async fn invalid_cron_and_too_frequent_are_refused(pool: sqlx::PgPool) {
     .await;
     assert_eq!(code, 422);
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn defaults_follow_the_owner_push_timezone(pool: sqlx::PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let (code, fallback) = send(
+        &f,
+        Method::GET,
+        "/api/v1/schedules/defaults",
+        "unused",
+        None,
+    )
+    .await;
+    assert_eq!(code, 200, "{fallback}");
+    assert_eq!(fallback["timezone"], "Europe/Moscow");
+
+    sqlx::query(
+        "insert into push_settings(waiting,turn_finished,failures,timezone)
+         values(true,true,true,'Asia/Yekaterinburg')
+         on conflict (singleton) do update set timezone=excluded.timezone",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (code, set) = send(
+        &f,
+        Method::GET,
+        "/api/v1/schedules/defaults",
+        "unused",
+        None,
+    )
+    .await;
+    assert_eq!(code, 200, "{set}");
+    assert_eq!(set["timezone"], "Asia/Yekaterinburg");
+}

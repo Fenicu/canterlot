@@ -11142,6 +11142,54 @@
         }
       }
     },
+    "/api/v1/schedules/defaults": {
+      "get": {
+        "tags": [
+          "schedules"
+        ],
+        "operationId": "get__api_v1_schedules_defaults",
+        "responses": {
+          "200": {
+            "description": "Пояс владельца по умолчанию для нового расписания",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduleDefaults"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/schedules/preview": {
       "post": {
         "tags": [
@@ -21562,6 +21610,19 @@
           }
         },
         "additionalProperties": false
+      },
+      "ScheduleDefaults": {
+        "type": "object",
+        "description": "Значения по умолчанию для редактора расписаний.",
+        "required": [
+          "timezone"
+        ],
+        "properties": {
+          "timezone": {
+            "type": "string",
+            "description": "Пояс владельца из настроек пушей (IANA); без настройки — `Europe/Moscow`."
+          }
+        }
       },
       "ScheduleRun": {
         "type": "object",

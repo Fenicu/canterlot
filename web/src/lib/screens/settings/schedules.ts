@@ -191,6 +191,25 @@ export function runDetails(raw: unknown): RunDetails {
   };
 }
 
+export const FALLBACK_TIMEZONE = "Europe/Moscow";
+
+function validZone(zone: string | null | undefined): zone is string {
+  if (!zone) return false;
+  try {
+    new Intl.DateTimeFormat("ru-RU", { timeZone: zone });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Пояс нового расписания: пояс владельца, затем пояс браузера, затем Москва. */
+export function defaultTimezone(owner?: string | null, browser?: string | null): string {
+  if (validZone(owner)) return owner;
+  if (validZone(browser)) return browser;
+  return FALLBACK_TIMEZONE;
+}
+
 /** Время срабатывания в поясе расписания (или в местном, если пояс не задан). */
 export function fireTime(iso: string, timeZone?: string): string {
   const date = new Date(iso);

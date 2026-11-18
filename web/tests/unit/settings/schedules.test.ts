@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   CRON_PRESETS,
   cronHuman,
+  defaultTimezone,
   fireTime,
   outcomeWord,
   parseCron,
@@ -71,5 +72,19 @@ describe("run detail and times", () => {
     expect(fireTime(iso, "Europe/Moscow")).toMatch(/18 нояб.*12:00/u);
     expect(fireTime(iso, "Not/AZone")).not.toBe("—");
     expect(fireTime("bad")).toBe("—");
+  });
+});
+
+describe("defaultTimezone", () => {
+  it("prefers the owner zone, then the browser zone, then Moscow", () => {
+    expect(defaultTimezone("Asia/Yekaterinburg", "Europe/Berlin")).toBe("Asia/Yekaterinburg");
+    expect(defaultTimezone(null, "Europe/Berlin")).toBe("Europe/Berlin");
+    expect(defaultTimezone("", "")).toBe("Europe/Moscow");
+    expect(defaultTimezone(undefined, undefined)).toBe("Europe/Moscow");
+  });
+
+  it("skips zones the runtime cannot resolve", () => {
+    expect(defaultTimezone("Not/AZone", "Europe/Berlin")).toBe("Europe/Berlin");
+    expect(defaultTimezone("Not/AZone", "Also/Bad")).toBe("Europe/Moscow");
   });
 });

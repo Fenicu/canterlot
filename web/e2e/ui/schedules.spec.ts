@@ -43,6 +43,27 @@ test('new_session_schedule_previews_fires_and_saves_with_a_route', async ({ page
   expect(api.scheduleKeys).toHaveLength(1);
 });
 
+test('new_schedule_defaults_to_the_owner_timezone_and_keeps_saved_zones', async ({ page }) => {
+  const { api } = await open(page, (hub) => { hub.scheduleOwnerTimezone = 'Asia/Yekaterinburg'; });
+  await openNew(page);
+  const editor = page.locator('[data-schedule-editor]');
+  await expect(editor.getByRole('textbox', { name: 'Часовой пояс' })).toHaveValue('Asia/Yekaterinburg');
+  await expect(editor.locator('[data-role="schedule-preview"]')).toContainText('Asia/Yekaterinburg');
+
+  await editor.getByRole('textbox', { name: 'Название' }).fill('Поясной');
+  await editor.getByRole('combobox', { name: 'Машина' }).selectOption({ label: 'workstation' });
+  await fillWorkdir(page, '/srv/canterlot');
+  await editor.getByRole('combobox', { name: 'Тип задачи' }).selectOption('review');
+  await editor.getByRole('textbox', { name: 'Подсказка' }).fill('Проверка пояса');
+  await editor.getByRole('button', { name: 'Сохранить' }).click();
+  await expect(page.locator('[data-schedule-detail]')).toBeVisible();
+  expect([...api.schedules.values()][0]!.timezone).toBe('Asia/Yekaterinburg');
+  await expect(page.locator('[data-schedule-detail]')).toContainText('(пояс Asia/Yekaterinburg)');
+
+  await page.getByRole('button', { name: 'Изменить' }).click();
+  await expect(page.locator('[data-schedule-editor]').getByRole('textbox', { name: 'Часовой пояс' })).toHaveValue('Asia/Yekaterinburg');
+});
+
 test('existing_session_schedule_saves_a_session_target', async ({ page }) => {
   const { api, ids } = await open(page);
   await openNew(page);

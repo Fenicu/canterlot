@@ -275,6 +275,8 @@ export class FakeHubApi {
 	/** Расписания владельца и история их запусков. */
 	readonly schedules = new Map<string, Schedule>();
 	readonly scheduleRuns = new Map<string, ScheduleRun[]>();
+	/** Пояс владельца из настроек пушей: умолчание редактора расписаний. */
+	scheduleOwnerTimezone = 'Europe/Moscow';
 	readonly scheduleKeys: string[] = [];
 	readonly scheduleRunKeys = new Map<string, ScheduleRun>();
 	readonly defaultLimitSettings: components['schemas']['LimitSettings'] = {

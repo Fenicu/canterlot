@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
-  import { createSchedule, getRoutingPolicy, getSchedule, patchSchedule, previewSchedule } from '#lib/api/client.js';
+  import { createSchedule, getRoutingPolicy, getScheduleDefaults, getSchedule, patchSchedule, previewSchedule } from '#lib/api/client.js';
   import { errorText } from '#lib/api/errors.js';
   import { ApiError } from '#lib/api/http.js';
   import { catalogModelLabel } from '#lib/format/modelResolution.js';
@@ -16,7 +16,7 @@
   import { keptHarness, machineProblem, workdirProblem } from '../sessions/newSessionModel.js';
   import { sortPresets, type PresetSummaryLike } from '../presets/presetsModel.js';
   import {
-    CRON_PRESETS, OVERLAP_OPTIONS, fireTime, parseCron, type Schedule, type ScheduleTarget
+    CRON_PRESETS, OVERLAP_OPTIONS, defaultTimezone, fireTime, parseCron, type Schedule, type ScheduleTarget
   } from './schedules.js';
 
   let { schedule = null, runtime, store, done, cancel }: {
@@ -27,7 +27,7 @@
     cancel: () => void;
   } = $props();
 
-  const localZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Europe/Moscow';
+  const browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
   // Форма живёт одной правкой: пропс читаем только один раз при открытии редактора.
   const initial = untrack(() => {
     const target = schedule?.target;
@@ -35,7 +35,7 @@
     return {
       name: schedule?.name ?? '',
       cron: schedule?.cron ?? '0 9 * * *',
-      timezone: schedule?.timezone ?? localZone,
+      timezone: schedule?.timezone ?? defaultTimezone(null, browserZone),
       prompt: schedule?.prompt ?? '',
       precheck: schedule?.precheck ?? '',
       precheckTimeout: schedule?.precheck_timeout_seconds ?? 60,
@@ -141,7 +141,14 @@
       const types = { ...(view.builtin?.task_types ?? {}), ...(view.policy?.task_types ?? {}) };
       taskTypes = Object.entries(types).map(([key, value]) => ({ key, title: value.title ?? key }));
     }).catch(() => undefined);
-    void refreshPreview();
+    // Новое расписание берёт пояс владельца; сохранённое остаётся при своём поясе.
+    if (schedule) { void refreshPreview(); return; }
+    void getScheduleDefaults()
+      .then((response) => {
+        if (timezone === initial.timezone) timezone = defaultTimezone(response.data.timezone, browserZone);
+      })
+      .catch(() => undefined)
+      .finally(() => { void refreshPreview(); });
   });
 
   $effect(() => { void machineId; harness = keptHarness(harnesses, harness); });

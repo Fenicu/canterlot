@@ -1837,6 +1837,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/schedules/defaults": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get__api_v1_schedules_defaults"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/schedules/preview": {
         parameters: {
             query?: never;
@@ -4629,6 +4645,11 @@ export interface components {
             device_id?: string | null;
             /** Format: date-time */
             run_at: string;
+        };
+        /** @description Значения по умолчанию для редактора расписаний. */
+        ScheduleDefaults: {
+            /** @description Пояс владельца из настроек пушей (IANA); без настройки — `Europe/Moscow`. */
+            timezone: string;
         };
         ScheduleRun: {
             /** Format: int64 */
@@ -11649,6 +11670,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get__api_v1_schedules_defaults: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Пояс владельца по умолчанию для нового расписания */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ScheduleDefaults"];
                 };
             };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */

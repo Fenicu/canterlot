@@ -1456,6 +1456,13 @@ export function previewSchedule(
   return http("POST", "/api/v1/schedules/preview", body, opts);
 }
 
+/** Умолчания редактора: пояс владельца из настроек пушей. */
+export function getScheduleDefaults(
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["get__api_v1_schedules_defaults"]>>> {
+  return http("GET", "/api/v1/schedules/defaults", undefined, opts);
+}
+
 export function getSchedule(
   scheduleId: string,
   opts?: RequestOptions,

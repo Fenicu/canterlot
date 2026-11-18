@@ -15,6 +15,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(list, create))
         .routes(routes!(preview))
+        .routes(routes!(defaults))
         .routes(routes!(get, update, delete))
         .routes(routes!(pause))
         .routes(routes!(resume))
@@ -68,6 +69,25 @@ pub struct RunsQuery {
     /// `next_cursor` предыдущей страницы; момент последнего запуска.
     pub cursor: Option<String>,
     pub limit: Option<i64>,
+}
+
+/// Значения по умолчанию для редактора расписаний.
+#[derive(Serialize, ToSchema)]
+pub struct ScheduleDefaults {
+    /// Пояс владельца из настроек пушей (IANA); без настройки — `Europe/Moscow`.
+    pub timezone: String,
+}
+
+#[utoipa::path(get,path="/api/v1/schedules/defaults",tag="schedules",responses((status=200,description="Пояс владельца по умолчанию для нового расписания",body=ScheduleDefaults)))]
+async fn defaults(
+    State(state): State<AppState>,
+    owner: Owner,
+) -> Result<Json<ScheduleDefaults>, ApiError> {
+    // `owner` нужен только для аутентификации маршрута: настройка пушей одна на хаб.
+    let _ = owner;
+    Ok(Json(ScheduleDefaults {
+        timezone: schedules::owner_timezone(&mut *state.pool.acquire().await?).await?,
+    }))
 }
 
 #[utoipa::path(get,path="/api/v1/schedules",tag="schedules",responses((status=200,description="Расписания владельца",body=Vec<Schedule>)))]

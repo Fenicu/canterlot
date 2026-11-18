@@ -1576,6 +1576,11 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     await route.fulfill({ headers: headers(), json: api.createSchedule(body, key) });
   });
 
+  await page.route(/\/api\/v1\/schedules\/defaults$/, async (route) => {
+    if (route.request().method() !== 'GET') return route.fallback();
+    await route.fulfill({ headers: headers(), json: { timezone: api.scheduleOwnerTimezone } });
+  });
+
   await page.route(/\/api\/v1\/schedules\/preview$/, async (route) => {
     if (route.request().method() !== 'POST') return route.fallback();
     const body = route.request().postDataJSON() as { cron?: string; count?: number };
@@ -1630,7 +1635,7 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     }
   });
 
-  await page.route(/\/api\/v1\/schedules\/(?!preview$)[^/]+$/, async (route) => {
+  await page.route(/\/api\/v1\/schedules\/(?!preview$|defaults$)[^/]+$/, async (route) => {
     const method = route.request().method();
     const id = new URL(route.request().url()).pathname.split('/').at(-1) ?? '';
     const key = route.request().headers()['idempotency-key'];

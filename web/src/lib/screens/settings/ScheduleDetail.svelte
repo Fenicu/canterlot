@@ -87,7 +87,7 @@
   <div class="facts">
     <span>Расписание</span><span>{cronHuman(schedule.cron)}</span>
     <span>Пояс</span><span>{schedule.timezone}</span>
-    <span>Следующий запуск</span><span>{fireTime(schedule.next_fire_at, schedule.timezone)}</span>
+    <span>Следующий запуск</span><span>{fireTime(schedule.next_fire_at, schedule.timezone)} (пояс {schedule.timezone})</span>
     <span>Состояние</span><span data-tone={schedule.enabled ? 'ok' : 'warn'}>{schedule.enabled ? 'Включено' : 'На паузе'}</span>
     {#if last}{@const outcome = outcomeWord(last.state)}
       <span>Последний запуск</span><span data-tone={outcome.tone}>{outcome.word}</span>
@@ -103,7 +103,7 @@
   </div>
   <p class="note">«Запустить в любом случае» пропускает предпроверку, проверки лимитов и пересечений; об этом останется запись в истории</p>
 
-  <h3>История запусков</h3>
+  <h3>История запусков <small>(время в поясе {schedule.timezone})</small></h3>
   {#if runs.length === 0 && !error}
     <p class="note">Запусков ещё не было</p>
   {/if}
