@@ -217,6 +217,7 @@ export interface SnapshotData {
   scheduled?: ScheduledMessage[];
   draft?: DraftRecord | null;
   prompt_suggestion?: { text: string } | null;
+  goal?: components["schemas"]["GoalView"] | null;
   alarms?: AlarmView[];
   spawn_queue?: SpawnQueueItemView[];
   nudge?: NudgeRule | null;
@@ -372,6 +373,8 @@ export class ChatStore {
   draftSerial = $state(0);
   /** Подсказка следующего сообщения Claude Code; в черновик не попадает. */
   promptSuggestion = $state<string | null>(null);
+  /** Текущая цель сессии; приходит живыми событиями области разговора. */
+  goal = $state<components["schemas"]["GoalView"] | null>(null);
   alarms = $state<AlarmView[]>([]);
   nudge = $state<NudgeRule | null>(null);
   nudgeEvents = $state<NudgeEvent[]>([]);
@@ -1185,6 +1188,10 @@ export class ChatStore {
         if (event.kind === "prompt_suggestion_changed")
           this.promptSuggestion = event.payload.suggestion?.text ?? null;
         return;
+      case "goal_changed":
+        if (event.kind === "goal_changed")
+          this.goal = event.payload.goal as components["schemas"]["GoalView"] | null;
+        return;
       case "draft_changed":
         if (event.kind === "draft_changed") {
           this.draft = {
@@ -1640,6 +1647,7 @@ export class ChatStore {
     this.draft = data.draft ?? null;
     this.draftSerial += 1;
     this.promptSuggestion = data.prompt_suggestion?.text ?? null;
+    this.goal = data.goal ?? null;
     if (data.alarms && !sameAlarms(this.alarms, data.alarms))
       this.alarms = data.alarms;
     if (data.nudge !== undefined) this.nudge = data.nudge ?? null;

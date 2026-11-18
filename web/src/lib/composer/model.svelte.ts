@@ -14,6 +14,10 @@ import { attachmentKind } from "#lib/timeline/attachments.js";
 import { UploadLimitError } from "#lib/uploads/uploader.js";
 import { validateScheduleTime } from "#lib/composer/schedule.js";
 import { sendNow } from "#lib/timeline/QueueActions.js";
+import { setGoal } from "#lib/api/client.js";
+import { intents } from "#lib/ops/intent.js";
+
+const MAX_GOAL_OBJECTIVE_BYTES = 2048;
 
 /** Хаб отвечает SubmittedInput: идентификатор ввода бывает и в конверте, и наверху. */
 function submittedInputId(result: unknown): string | null {
@@ -269,6 +273,25 @@ export class ComposerModel {
   async send(): Promise<void> {
     if (this.sending || !this.gate.ok) return;
     await this.#press(() => this.#accept());
+  }
+
+  /**
+   * «Отправить как цель»: текст поля становится целью вместо обычного сообщения.
+   * Ответа в ленте нет — состояние приходит живым событием goal_changed.
+   */
+  async sendAsGoal(): Promise<void> {
+    const objective = this.text.trim();
+    if (this.sending || !objective || utf8Length(objective) > MAX_GOAL_OBJECTIVE_BYTES) return;
+    this.sending = true;
+    try {
+      await intents.run(`goal-set:${this.deps.conversationId}`, (key) =>
+        setGoal(this.deps.conversationId, { action: "set", objective }, key),
+      );
+      this.text = "";
+      void this.deps.drafts.clear(this.deps.conversationId).catch(() => undefined);
+    } finally {
+      this.sending = false;
+    }
   }
 
   /**

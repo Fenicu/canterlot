@@ -18,6 +18,7 @@
 	import { stopSession, resumeSession, continueSessionQueue, resolveOwnerLost, controlBusy, clearSnooze } from './controls';
 	import { RESOLVE_WARNING, runLabel } from './pauseCards';
 	import LimitsStrip from '#lib/screens/sessions/LimitsStrip.svelte';
+	import { goalState, goalUsage } from './goalView';
 	import type { ProviderLimits } from '#lib/stores/limits.js';
 	import { limitThresholds } from '#lib/stores/limitThresholds.svelte.js';
 	import { runningCount } from '#lib/stores/delegation.js';
@@ -37,7 +38,7 @@
 	interface DetailLike {
 		title?: string;
 		color?: string | null;
-		harness?: { title?: string; provider?: string };
+		harness?: { title?: string; provider?: string; goals?: boolean };
 		machine?: { name?: string };
 		model?: string;
 		model_resolved?: string | null;
@@ -73,6 +74,7 @@
 		bookmarkCount = 0,
 		onOpenAlarms,
 		onOpenNudge,
+		onOpenGoal,
 		onOpenRoute,
 		onAccept,
 		parentTitle = null,
@@ -97,6 +99,8 @@
 		bookmarkCount?: number;
 		onOpenAlarms?: () => void;
 		onOpenNudge?: () => void;
+		/** Детали цели: только у харнессов, объявивших поддержку. */
+		onOpenGoal?: () => void;
 		/** Решение маршрута, выбравшее исполнителя этой сессии. */
 		onOpenRoute?: () => void;
 		onAccept?: () => void;
@@ -171,6 +175,10 @@
 	const machineName = $derived(detail?.machine?.name || 'workstation');
 	const provider = $derived(detail?.harness?.provider || 'claude');
 	const nudgeText = $derived(chat.nudge ? nudgeStateText(chat.nudge) : '');
+	const goalSupported = $derived(!!detail?.harness?.goals);
+	const goal = $derived(goalSupported ? chat.goal : null);
+	const goalStateView = $derived(goal ? goalState(goal.status) : null);
+	const goalUsageText = $derived(goal ? goalUsage(goal) : '');
 	const route = $derived(asDecision((chat.detail as { routing?: unknown } | null)?.routing));
 	const routeTitle = $derived(route ? routingTitles.title(route.task_type) : '');
 	$effect(() => {
@@ -271,7 +279,7 @@
 
 
 <div class="chat-header" role="region" aria-label="Шапка чата" data-top-chrome>
-	<div class="topbar" class:tall={!!parentId || !!route || !!nudgeText} class:context={!!route || !!nudgeText}>
+	<div class="topbar" class:tall={!!parentId || !!route || !!nudgeText || !!goal} class:context={!!route || !!nudgeText || !!goal}>
 		{#if !pane.desktop}
 			<a
 				class="icon-button back"
@@ -322,6 +330,14 @@
 						<button type="button" class="context-link nudge-link" data-role="nudge-state-line" onclick={onOpenNudge}><span class="context-text">{nudgeText}</span></button>
 					{/if}
 				</div>
+			{/if}
+			{#if goal && goalStateView}
+				<button type="button" class="goal-row" data-role="goal-state-line" data-tone={goalStateView.tone}
+					aria-label={`Цель: ${goal.objective}. ${goalStateView.text}`} onclick={onOpenGoal}>
+					<span class="goal-word">{goalStateView.text}</span>
+					<span class="goal-objective">{goal.objective}</span>
+					{#if goalUsageText}<span class="goal-usage">{goalUsageText}</span>{/if}
+				</button>
 			{/if}
 		</div>
 
@@ -780,6 +796,55 @@
 		font-size: var(--fs-meta);
 		color: var(--danger);
 	}
+	/* Цель — та же тихая строка, что маршрут и автопинок: объектив режется одной
+	   строкой, статус окрашивается словом без значков, 44 px цели растут вниз. */
+	.goal-row {
+		position: relative;
+		display: grid;
+		grid-template-columns: auto minmax(0, 1fr) auto;
+		align-items: center;
+		gap: var(--s2);
+		min-width: 0;
+		max-width: 100%;
+		margin-top: var(--s1);
+		padding: var(--s0);
+		border: var(--s0);
+		background: transparent;
+		font-size: var(--fs-sm);
+		line-height: var(--lh-tight);
+		text-align: left;
+	}
+	.goal-row::after {
+		content: '';
+		position: absolute;
+		left: var(--s0);
+		right: var(--s0);
+		top: var(--s0);
+		height: var(--target);
+	}
+	.goal-word {
+		color: var(--muted);
+		white-space: nowrap;
+	}
+	.goal-row[data-tone='success'] .goal-word { color: var(--success); }
+	.goal-row[data-tone='warning'] .goal-word { color: var(--warning); }
+	.goal-row[data-tone='danger'] .goal-word { color: var(--danger); }
+	.goal-objective {
+		overflow: hidden;
+		white-space: nowrap;
+		text-overflow: ellipsis;
+		color: var(--text);
+	}
+	.goal-usage {
+		color: var(--muted);
+		white-space: nowrap;
+	}
+	.goal-row:hover .goal-objective,
+	.goal-row:focus-visible .goal-objective {
+		text-decoration: underline;
+		text-underline-offset: var(--s1);
+	}
+
 	/* Маршрут и автопинок — одна тихая строка с двумя целями: строка в одну текстовую
 	   высоту, а 44 px каждой цели растут вниз, в запас до полосы лимитов. */
 	.context-row {

@@ -827,6 +827,20 @@ export function stop(
   );
 }
 
+export function setGoal(
+  conversationId: string,
+  body: Body<operations["post__api_v1_conversations__id__goal"]>,
+  key: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["post__api_v1_conversations__id__goal"]>>> {
+  return http(
+    "POST",
+    `/api/v1/conversations/${id(conversationId)}/goal`,
+    body,
+    keyed(key, opts),
+  );
+}
+
 export function resolveOwnerLost(
   conversationId: string,
   key: string,

@@ -33,6 +33,13 @@ export async function stopSession(
   );
 }
 
+/** Остановить цель: та же идемпотентная команда, что и у остальных действий шапки. */
+export async function stopGoal(conversationId: string, key?: string) {
+  return once(`goal-clear:${conversationId}`, key, (used) =>
+    client.setGoal(conversationId, { action: "clear" }, used),
+  );
+}
+
 export async function resumeSession(
   conversationId: string,
   opts?: { continue_queue?: boolean; key?: string },

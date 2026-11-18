@@ -107,6 +107,7 @@
 	let showAlarms = $state(false);
 	let showNudge = $state(false);
 	let showRoute = $state(false);
+	let showGoal = $state(false);
 	let showSheet = $state(false);
 	let showSide = $state(false);
 	let sideQuestion = $state('');
@@ -123,6 +124,7 @@
 	let BookmarksSheet = $state<Component<{ marks: ConversationBookmarks; now: number; onclose: () => void; onpick: (entry: BookmarkView) => void }> | null>(null);
 	let NudgeSheet = $state<Component<{ chat: ChatStore; onclose: () => void }> | null>(null);
 	let RouteSheet = $state<Component<{ chat: ChatStore; onclose: () => void }> | null>(null);
+	let GoalSheet = $state<Component<{ chat: ChatStore; onclose: () => void }> | null>(null);
 	const todos = $derived(chat.todos.lane(null));
 	// Закладки живут, пока открыт разговор: при уходе набор снимается вместе с подпиской ленты.
 	const marks = $derived(sessionBookmarks.get(chat.id));
@@ -152,6 +154,7 @@
 		if (showAlarms && !AlarmsSheet) import('./AlarmsSheet.svelte').then((m) => { AlarmsSheet = m.default; });
 		if (showNudge && !NudgeSheet) import('./NudgeSheet.svelte').then((m) => { NudgeSheet = m.default; });
 		if (showRoute && !RouteSheet) import('./RouteSheet.svelte').then((m) => { RouteSheet = m.default; });
+		if (showGoal && !GoalSheet) import('./GoalSheet.svelte').then((m) => { GoalSheet = m.default; });
 		if (showSide && !SideChat) import('./SideChat.svelte').then((m) => { SideChat = m.default; });
 	});
 	// Список задач показывается не в каждом ходу: панель догружается вместе с ним.
@@ -291,6 +294,7 @@
 		onOpenAlarms={() => (showAlarms = true)}
 		onOpenNudge={() => (showNudge = true)}
 		onOpenRoute={() => (showRoute = true)}
+		onOpenGoal={() => (showGoal = true)}
 		onAccept={() => {
 			acceptError = null;
 			showAccept = true;
@@ -465,6 +469,10 @@
 
 	{#if showRoute && RouteSheet}
 		<RouteSheet {chat} onclose={() => (showRoute = false)} />
+	{/if}
+
+	{#if showGoal && GoalSheet}
+		<GoalSheet {chat} onclose={() => (showGoal = false)} />
 	{/if}
 
 	{#if infoRunId && InfoSheet}

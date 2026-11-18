@@ -160,6 +160,7 @@
   const turnLive = $derived(turnIsLive(chat.activity, chat.queue.run_slot));
   const harnessId = $derived((chat.detail?.harness as { id?: string } | undefined)?.id ?? '');
   const canSteer = $derived(turnLive && steerSupported(harnessId));
+  const goalSupported = $derived(!!(chat.detail?.harness as { goals?: boolean } | null)?.goals);
 
   // Каталог slash-команд берётся только у харнесса этой сессии на её машине.
   const slashCatalog = $derived.by<SlashItem[]>(() => {
@@ -652,6 +653,11 @@
       {#if !(touch && suggestion)}
         <ContextIndicator {chat} />
       {/if}
+      {#if goalSupported}
+        <button type="button" class="goal" class:off={!model.text.trim() || model.sending}
+          aria-label="Отправить как цель" title="Отправить как цель"
+          onclick={() => void model.sendAsGoal()}><Icon name="rocket" /></button>
+      {/if}
       {#if suggestion}
         <p class="sr-only" id={suggestionId}>Подсказка: {suggestion}. {touch ? 'Кнопка «Подставить» вставит её в поле' : 'Tab вставит её в поле'}</p>
       {/if}
@@ -733,8 +739,8 @@
   .composer { display: flex; flex-direction: column; gap: var(--s2); flex: none; max-height: var(--composer-limit); padding: var(--s3) var(--gutter) max(var(--s4), env(safe-area-inset-bottom)); min-width: 0; position: relative; }
   .capsule {
     display: grid;
-    grid-template-columns: auto auto minmax(0, 1fr) auto auto auto;
-    grid-template-areas: 'input input input input input input' 'attach mic context clock steer send';
+    grid-template-columns: auto auto minmax(0, 1fr) auto auto auto auto;
+    grid-template-areas: 'input input input input input input input' 'attach mic context goal clock steer send';
     align-items: center;
     gap: var(--s2);
     min-width: 0;
@@ -747,7 +753,7 @@
   .capsule.receiving { outline: var(--focus-width) dashed var(--accent); outline-offset: var(--s1); background: var(--accent-soft); }
   .dropzone { position: absolute; inset: var(--s1); z-index: 1; display: flex; align-items: center; justify-content: center; margin: 0; border-radius: var(--radius-card); background: var(--accent-soft); color: var(--text); font-size: var(--fs-meta); pointer-events: none; }
   .capsule:has(:global(.tray)) {
-    grid-template-areas: 'tray tray tray tray tray tray' 'input input input input input input' 'attach mic context clock steer send';
+    grid-template-areas: 'tray tray tray tray tray tray tray' 'input input input input input input input' 'attach mic context goal clock steer send';
   }
   .capsule:has(textarea:focus-visible) { outline: var(--focus-width) solid var(--accent); outline-offset: var(--s1); }
   /* Раскрытые подробности контекста не влезают в предел поля: капсула прокручивается сама,
@@ -780,6 +786,8 @@
   .attach { grid-area: attach; display: inline-flex; }
   .mic { grid-area: mic; display: inline-flex; }
   .file { position: absolute; width: var(--s1); height: var(--s1); overflow: hidden; clip-path: inset(50%); }
+  .goal { grid-area: goal; width: var(--target); height: var(--target); border-radius: var(--radius-round); background: var(--transparent); color: var(--secondary); }
+  .goal.off { color: var(--muted); }
   .clock, .send {
     width: var(--target);
     height: var(--target);

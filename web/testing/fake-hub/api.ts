@@ -27,6 +27,7 @@ type BookmarkView = components['schemas']['BookmarkView'];
 type BookmarkPage = components['schemas']['BookmarkPage'];
 type ImagesPage = components['schemas']['ImagesPage'];
 type ImageItem = components['schemas']['ImageItem'];
+type GoalView = components['schemas']['GoalView'];
 
 /** Запись ленты обновлений CLI и моделей, как её отдаёт `GET /api/v1/updates`. */
 export interface FakeUpdate {
@@ -819,6 +820,10 @@ export class FakeHubApi {
 			const list = ev.payload as TodoList;
 			todos.set(list.lane_block_id ?? null, list);
 		}
+		let goal: GoalView | null = null;
+		for (const ev of this.hub.log(`conversation:${id}`)) {
+			if (ev.kind === 'goal_changed') goal = (ev.payload as { goal: GoalView | null }).goal;
+		}
 		const held = this.details.get(id)?.queue as Partial<Record<keyof QueueSnapshot, unknown>> | undefined;
 		let context: SnapshotData['context'];
 		for (const ev of this.hub.log(`conversation:${id}`)) {
@@ -832,6 +837,7 @@ export class FakeHubApi {
 
 		return {
 			detail: this.details.get(id) ?? { id, title: 'Сессия' },
+			goal,
 			queue: {
 				pause_reasons: (held?.pause_reasons ?? []) as QueueSnapshot['pause_reasons'],
 				hold_reasons: (held?.hold_reasons ?? []) as QueueSnapshot['hold_reasons'],
