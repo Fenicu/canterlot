@@ -337,14 +337,22 @@ test('revoked_close_keeps_local_data_until_me_answers_401', async ({ page }) => 
   await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
   await page.evaluate(() => localStorage.setItem('canterlot.theme', 'light'));
   await expect.poll(() => hub.activeConnections).toBeGreaterThan(0);
+  // Повторная проверка входа идёт с растущей паузой (confirmRevoked в runtime.ts),
+  // а часы драйвера и страницы под нагрузкой расходятся: ждём сами запросы /me,
+  // а не спим. Каждый следующий запрос доказывает, что предыдущий ответ обработан,
+  // а данные при этом не стёрты.
+  let meRequests = 0;
+  page.on('request', (request) => { if (request.url().includes('/api/v1/me')) meRequests += 1; });
+  const base = meRequests;
+  const meSent = () => meRequests - base;
   // Закрытие revoked, а /me не отвечает о сеансе: 503, затем обрыв сети.
   hub.auth.meFailure = 503;
   hub.chaos.closeRevoked();
-  await page.waitForTimeout(1_500);
+  await expect.poll(meSent, { timeout: 15_000 }).toBeGreaterThanOrEqual(2);
   await expect(page.getByText('Данные на этом устройстве удалены')).toHaveCount(0);
   expect(await page.evaluate(() => localStorage.getItem('canterlot.theme'))).toBe('light');
   hub.auth.meFailure = 'network';
-  await page.waitForTimeout(2_500);
+  await expect.poll(meSent, { timeout: 15_000 }).toBeGreaterThanOrEqual(3);
   await expect(page.getByText('Данные на этом устройстве удалены')).toHaveCount(0);
   expect(await page.evaluate(() => localStorage.getItem('canterlot.theme'))).toBe('light');
   // Хаб вернулся и подтвердил отзыв владельцем: только теперь данные стираются.
@@ -352,7 +360,7 @@ test('revoked_close_keeps_local_data_until_me_answers_401', async ({ page }) => 
   hub.auth.signedIn = false;
   hub.auth.signOut = { code: 'session_revoked', reason: 'owner' };
   await expect(signIn(page)).toBeVisible({ timeout: 15_000 });
-  await expect(page.getByText('Данные на этом устройстве удалены')).toBeVisible();
+  await expect(page.getByText('Данные на этом устройстве удалены')).toBeVisible({ timeout: 15_000 });
   expect(await page.evaluate(() => Object.keys(localStorage).filter((key) => key.startsWith('canterlot.')))).toEqual([]);
 });
 
