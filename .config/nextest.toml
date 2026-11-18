@@ -65,3 +65,10 @@ retries = 2
 [[profile.default.overrides]]
 filter = 'package(canterlot-worker) & binary(it) & test(=exec_e2e::killed_supervisor_with_nothing_left_fails_and_the_session_resumes)'
 retries = 2
+
+# QUARANTINE: 18.11 дважды упал в проверках слияния под нагрузкой: тест читает состояние
+# запуска, пока приём вне тика ещё идёт. Ожидание по условию уже есть в третьем круге
+# правок расписаний (#190A); снять карантин вместе с его слиянием.
+[[profile.default.overrides]]
+filter = 'package(canterlot-hub) & binary(it) & test(=scheduled_runs_pipeline::red_limits_window_skips_the_run)'
+retries = 2
