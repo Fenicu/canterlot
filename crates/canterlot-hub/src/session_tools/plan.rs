@@ -502,7 +502,10 @@ async fn archive_finished_in_tx(
 }
 
 /// Дешёвая ограниченная уборка завершённых старше недели при любой правке доски.
-async fn archive_old_in_tx(conn: &mut PgConnection, orchestrator: Uuid) -> Result<i64, sqlx::Error> {
+async fn archive_old_in_tx(
+    conn: &mut PgConnection,
+    orchestrator: Uuid,
+) -> Result<i64, sqlx::Error> {
     archive_finished_in_tx(conn, orchestrator, ARCHIVE_CLOSED_DAYS, ARCHIVE_BATCH).await
 }
 

@@ -354,7 +354,10 @@ fn plan_archive_is_documented_for_all_three_providers() {
         for word in ["own plan board", "all_finished", "Do not"] {
             assert!(description.contains(word), "{provider}: {description}");
         }
-        let list = tools.iter().find(|tool| tool["name"] == "plan_list").unwrap();
+        let list = tools
+            .iter()
+            .find(|tool| tool["name"] == "plan_list")
+            .unwrap();
         let description = list["description"].as_str().unwrap();
         for word in ["include_archived", "number"] {
             assert!(description.contains(word), "{provider}: {description}");

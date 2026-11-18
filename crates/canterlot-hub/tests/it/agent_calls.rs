@@ -726,15 +726,23 @@ fn session_tool_error_codes_are_unique_snake_case_with_messages() {
 async fn plan_archive_only_touches_the_callers_board(pool: PgPool) {
     let fx = Fx::new(pool).await;
     assert_eq!(
-        fx.agent("plan.add", json!({"tasks": [{"title": "Закрытая"}]}), &Uuid::now_v7())
-            .await
-            .error_code,
+        fx.agent(
+            "plan.add",
+            json!({"tasks": [{"title": "Закрытая"}]}),
+            &Uuid::now_v7()
+        )
+        .await
+        .error_code,
         ""
     );
     assert_eq!(
-        fx.agent("plan.update", json!({"number": 1, "state": "done"}), &Uuid::now_v7())
-            .await
-            .error_code,
+        fx.agent(
+            "plan.update",
+            json!({"number": 1, "state": "done"}),
+            &Uuid::now_v7()
+        )
+        .await
+        .error_code,
         ""
     );
 
@@ -781,9 +789,13 @@ async fn plan_archive_only_touches_the_callers_board(pool: PgPool) {
 
     // Своя закрытая задача архивируется.
     assert_eq!(
-        fx.agent("plan.archive", json!({"all_finished": true}), &Uuid::now_v7())
-            .await
-            .error_code,
+        fx.agent(
+            "plan.archive",
+            json!({"all_finished": true}),
+            &Uuid::now_v7()
+        )
+        .await
+        .error_code,
         ""
     );
     let archived: bool = sqlx::query_scalar(
