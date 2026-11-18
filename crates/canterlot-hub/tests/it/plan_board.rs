@@ -169,6 +169,34 @@ impl Fx {
         self.task(number).await.0
     }
 
+    async fn archived(&self, number: i32) -> bool {
+        sqlx::query_scalar(
+            "select archived_at is not null from plan_tasks
+             where orchestrator_conversation_id=$1 and number=$2",
+        )
+        .bind(self.orchestrator)
+        .bind(number)
+        .fetch_one(&self.pool)
+        .await
+        .unwrap()
+    }
+
+    /// Закрыть задачу и сделать её «старой» без сна: дата закрытия в базе.
+    async fn finish_at(&self, number: i32, state: &str, days_ago: i64) {
+        sqlx::query(
+            "update plan_tasks set state=$3,
+               updated_at=clock_timestamp()-make_interval(days => $4::int)
+             where orchestrator_conversation_id=$1 and number=$2",
+        )
+        .bind(self.orchestrator)
+        .bind(number)
+        .bind(state)
+        .bind(days_ago as i32)
+        .execute(&self.pool)
+        .await
+        .unwrap();
+    }
+
     async fn refresh(&self, at: DateTime<Utc>) {
         activity::refresh(&self.pool, self.child, at, &thresholds(), Uuid::now_v7())
             .await
@@ -870,6 +898,9 @@ async fn http_plan_and_snapshot_carry_the_contract(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
+    f.call("plan.archive", json!({"numbers": [2]}))
+        .await
+        .unwrap();
     // План делегата и архивного оркестратора в снимок не попадают.
     f.call_as(
         delegate,
@@ -923,6 +954,7 @@ async fn http_plan_and_snapshot_carry_the_contract(pool: PgPool) {
         "created_at",
         "updated_at",
         "revision",
+        "archived",
         "commits",
         "commits_truncated",
         "files_changed",
@@ -933,6 +965,8 @@ async fn http_plan_and_snapshot_carry_the_contract(pool: PgPool) {
     }
     assert_eq!(task["executor_id"], json!(delegate));
     assert_eq!(task["attempts"], 1);
+    // HTTP-чтение владельца возвращает и архив: PWA показывает его по кнопке.
+    assert_eq!(body["tasks"][1]["archived"], true);
     let missing = client
         .send(
             Method::GET,
@@ -1301,4 +1335,209 @@ async fn linking_a_child_and_plan_update_do_not_deadlock(pool: PgPool) {
     assert_eq!(linked.unwrap(), plan::LinkOutcome::Linked { number: 1 });
     let (state, _, executor) = f.task(1).await;
     assert_eq!((state.as_str(), executor), ("in_progress", Some(f.child)));
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn finished_tasks_are_archived_by_number_and_all_finished(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    f.add(&["Первая", "Вторая", "Третья", "Открытая"]).await;
+    f.call("plan.update", json!({"number": 1, "state": "done", "note": "заметка", "findings": ["находка"]}))
+        .await
+        .unwrap();
+    f.call("plan.update", json!({"number": 2, "state": "cancelled"}))
+        .await
+        .unwrap();
+    f.call("plan.update", json!({"number": 3, "state": "done"}))
+        .await
+        .unwrap();
+
+    let by_number = f
+        .call("plan.archive", json!({"numbers": [1, 3]}))
+        .await
+        .unwrap();
+    assert_eq!(by_number["archived"], json!([1, 3]));
+    assert!(f.archived(1).await);
+    assert!(!f.archived(2).await);
+    assert!(f.archived(3).await);
+    assert!(!f.archived(4).await);
+
+    let all = f
+        .call("plan.archive", json!({"all_finished": true}))
+        .await
+        .unwrap();
+    assert_eq!(all["archived"], json!([2]));
+    assert!(f.archived(2).await);
+    assert!(!f.archived(4).await);
+
+    // Архив хранит текст и выводимые поля для истории.
+    let saved: (String, Value) = sqlx::query_as(
+        "select note,findings from plan_tasks
+         where orchestrator_conversation_id=$1 and number=1",
+    )
+    .bind(f.orchestrator)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(saved.0, "заметка");
+    assert_eq!(saved.1, json!(["находка"]));
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn open_tasks_cannot_be_archived(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    f.add(&["Открытая", "В работе"]).await;
+    f.call("plan.update", json!({"number": 2, "state": "in_progress"}))
+        .await
+        .unwrap();
+    for args in [
+        json!({"numbers": [1]}),
+        json!({"numbers": [2]}),
+        json!({"numbers": [1, 2]}),
+    ] {
+        let error = f.call("plan.archive", args).await.unwrap_err();
+        assert_eq!(error.code, Code::InvalidArguments);
+    }
+    assert!(!f.archived(1).await);
+    assert!(!f.archived(2).await);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn plan_add_archives_oldest_finished_tasks_to_make_room(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    for _ in 0..10 {
+        f.call("plan.add", json!({"tasks": vec![json!({"title": "задача"}); 20]}))
+            .await
+            .unwrap();
+    }
+    f.finish_at(1, "done", 2).await;
+    f.finish_at(2, "done", 1).await;
+    let added = f.add(&["Новая"]).await;
+    assert_eq!(added["numbers"], json!([201]));
+    assert!(f.archived(1).await, "самая старая завершённая уходит первой");
+    assert!(!f.archived(2).await);
+    let archived: i64 = sqlx::query_scalar(
+        "select count(*) from plan_tasks
+         where orchestrator_conversation_id=$1 and archived_at is not null",
+    )
+    .bind(f.orchestrator)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(archived, 1);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn plan_add_still_fails_when_nothing_can_be_archived(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    for _ in 0..9 {
+        f.call("plan.add", json!({"tasks": vec![json!({"title": "открытая"}); 20]}))
+            .await
+            .unwrap();
+    }
+    f.call("plan.add", json!({"tasks": vec![json!({"title": "открытая"}); 20]}))
+        .await
+        .unwrap();
+    let error = f.call("plan.add", json!({"tasks": [{"title": "лишняя"}]})).await.unwrap_err();
+    assert_eq!(error.code, Code::PlanFull);
+    let archived: i64 = sqlx::query_scalar(
+        "select count(*) from plan_tasks
+         where orchestrator_conversation_id=$1 and archived_at is not null",
+    )
+    .bind(f.orchestrator)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(archived, 0);
+
+    // Одна закрытая задача не освободит места под две новые: отказ откатывает архивацию.
+    f.finish_at(1, "done", 1).await;
+    let error = f
+        .call("plan.add", json!({"tasks": [{"title": "а"}, {"title": "б"}]}))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, Code::PlanFull);
+    assert!(!f.archived(1).await);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn old_finished_tasks_are_archived_on_any_board_mutation(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    f.add(&["Старая", "Свежая", "Открытая"]).await;
+    f.finish_at(1, "done", 8).await;
+    f.call("plan.update", json!({"number": 2, "state": "done"}))
+        .await
+        .unwrap();
+    f.add(&["После правки"]).await;
+    assert!(f.archived(1).await);
+    assert!(!f.archived(2).await, "свежая завершённая остаётся на доске");
+
+    // Та же уборка идёт и при правке задачи, и при явной архивации.
+    f.finish_at(2, "cancelled", 8).await;
+    f.call("plan.update", json!({"number": 3, "note": "правка"}))
+        .await
+        .unwrap();
+    assert!(f.archived(2).await);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn archived_task_numbers_are_never_reused(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    f.add(&["Первая", "Вторая"]).await;
+    f.call("plan.update", json!({"number": 1, "state": "done"}))
+        .await
+        .unwrap();
+    f.call("plan.archive", json!({"numbers": [1]})).await.unwrap();
+    assert_eq!(f.add(&["Третья"]).await["numbers"], json!([3]));
+    assert!(!f.archived(3).await);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn plan_list_hides_archived_compacts_finished_and_reads_one_in_full(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    f.add(&["В работе", "Готовая", "Отменённая", "В архиве"])
+        .await;
+    f.call("plan.update", json!({"number": 2, "state": "done", "note": "детали", "findings": ["итог"]}))
+        .await
+        .unwrap();
+    f.call("plan.update", json!({"number": 3, "state": "cancelled"}))
+        .await
+        .unwrap();
+    f.call("plan.update", json!({"number": 4, "state": "done"}))
+        .await
+        .unwrap();
+    f.call("plan.archive", json!({"numbers": [4]})).await.unwrap();
+    f.call("plan.update", json!({"number": 1, "state": "in_progress"}))
+        .await
+        .unwrap();
+
+    let list = f.call("plan.list", json!({})).await.unwrap();
+    // Полные подробности только у открытых задач.
+    let tasks = list["tasks"].as_array().unwrap();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0]["number"], 1);
+    let hint = list["hint"].as_str().unwrap();
+    assert!(hint.contains("#1 [in_progress] В работе"), "{hint}");
+    assert!(hint.contains("#2 [done] Готовая"), "{hint}");
+    assert!(hint.contains("#3 [cancelled] Отменённая"), "{hint}");
+    assert!(!hint.contains("#4"), "{hint}: архив скрыт по умолчанию");
+
+    let with_archive = f
+        .call("plan.list", json!({"include_archived": true}))
+        .await
+        .unwrap();
+    assert!(with_archive["hint"].as_str().unwrap().contains("#4 [done, archived] В архиве"));
+    assert_eq!(with_archive["tasks"].as_array().unwrap().len(), 1);
+
+    let one = f.call("plan.list", json!({"number": 4})).await.unwrap();
+    assert_eq!(one["tasks"].as_array().unwrap().len(), 1);
+    assert_eq!(one["tasks"][0]["number"], 4);
+    assert_eq!(one["tasks"][0]["archived"], true);
+
+    let full = f.call("plan.list", json!({"number": 2})).await.unwrap();
+    assert_eq!(full["tasks"][0]["note"], "детали");
+    assert_eq!(full["tasks"][0]["findings"], json!(["итог"]));
+    assert_eq!(full["tasks"][0]["archived"], false);
+
+    let missing = f.call("plan.list", json!({"number": 9})).await.unwrap_err();
+    assert_eq!(missing.code, Code::PlanTaskNotFound);
 }

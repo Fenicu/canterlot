@@ -50,7 +50,8 @@ async fn list(
     if !found {
         return Err(ApiError::new(ErrorCode::NotFound));
     }
-    let rows = plan::rows_of(&mut conn, owner.owner_id, p.orchestrator).await?;
+    // Владелец читает всю доску, включая архив: PWA показывает его по кнопке.
+    let rows = plan::rows_of(&mut conn, owner.owner_id, p.orchestrator, true).await?;
     Ok(Json(PlanList {
         tasks: plan::details(&mut conn, &rows).await?,
     }))

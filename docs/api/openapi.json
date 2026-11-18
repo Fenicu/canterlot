@@ -19629,9 +19629,14 @@
           "attempts",
           "created_at",
           "updated_at",
-          "revision"
+          "revision",
+          "archived"
         ],
         "properties": {
+          "archived": {
+            "type": "boolean",
+            "description": "Задача убрана с доски, но сохранена для истории."
+          },
           "attempts": {
             "type": "integer",
             "format": "int32"

@@ -4047,6 +4047,8 @@ export interface components {
          *     `plan_task_changed`; исполнитель известен клиенту из списка разговоров.
          */
         PlanTask: {
+            /** @description Задача убрана с доски, но сохранена для истории. */
+            archived: boolean;
             /** Format: int32 */
             attempts: number;
             blocker: string | null;

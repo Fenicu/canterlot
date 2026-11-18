@@ -1835,6 +1835,7 @@ export interface PlanTask {
   created_at: Time;
   updated_at: Time;
   revision: number;
+  archived: boolean;
 }
 export interface ScheduleChanged {
   v: 1;

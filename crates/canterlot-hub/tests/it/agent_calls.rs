@@ -720,6 +720,83 @@ fn session_tool_error_codes_are_unique_snake_case_with_messages() {
     }
 }
 
+/// Архивация идёт через боевой composed-роутер: вызывающий выводится из живого
+/// исполнения, и чужой доски она не касается.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn plan_archive_only_touches_the_callers_board(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    assert_eq!(
+        fx.agent("plan.add", json!({"tasks": [{"title": "Закрытая"}]}), &Uuid::now_v7())
+            .await
+            .error_code,
+        ""
+    );
+    assert_eq!(
+        fx.agent("plan.update", json!({"number": 1, "state": "done"}), &Uuid::now_v7())
+            .await
+            .error_code,
+        ""
+    );
+
+    // Другая сессия того же владельца видит свою, пустую доску.
+    let other_conversation = testkit::seed_conversation(&fx.pool, fx.owner, fx.machine).await;
+    sqlx::query("update conversations set model='synthetic-small',effort='high' where id=$1")
+        .bind(other_conversation)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    let other = executions::start(&fx.pool, fx.owner, other_conversation, Uuid::now_v7())
+        .await
+        .unwrap();
+    let foreign = WorkerData::agent_call(
+        &fx.grpc,
+        fx.request(
+            "plan.archive",
+            json!({"numbers": [1]}),
+            &Uuid::now_v7(),
+            Some((other.execution_id, other.generation)),
+            None,
+        ),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(foreign.error_code, "plan_task_not_found");
+
+    // Исполнение без живого владельца роутером не допускается.
+    let stale = WorkerData::agent_call(
+        &fx.grpc,
+        fx.request(
+            "plan.archive",
+            json!({"all_finished": true}),
+            &Uuid::now_v7(),
+            Some((Uuid::now_v7(), other.generation)),
+            None,
+        ),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(stale.error_code, "execution_not_live");
+
+    // Своя закрытая задача архивируется.
+    assert_eq!(
+        fx.agent("plan.archive", json!({"all_finished": true}), &Uuid::now_v7())
+            .await
+            .error_code,
+        ""
+    );
+    let archived: bool = sqlx::query_scalar(
+        "select archived_at is not null from plan_tasks
+         where orchestrator_conversation_id=$1 and number=1",
+    )
+    .bind(fx.conversation)
+    .fetch_one(&fx.pool)
+    .await
+    .unwrap();
+    assert!(archived);
+}
+
 impl Fx {
     async fn set_session(&self, mode: &str, pending: Value, depth: i32) {
         sqlx::query(

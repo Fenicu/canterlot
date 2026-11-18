@@ -44,6 +44,10 @@ pub const MAX_COMMITS: usize = 50;
 pub const SNAPSHOT_ORCHESTRATORS: i64 = 50;
 /// Сколько дней готовые и отменённые задачи остаются в снимке владельца.
 pub const SNAPSHOT_CLOSED_DAYS: i64 = 7;
+/// Через сколько дней завершённая задача уходит в архив при любой правке доски.
+pub const ARCHIVE_CLOSED_DAYS: i64 = 7;
+/// Сколько старых задач убирает одна правка: дёшево и ограничено.
+pub const ARCHIVE_BATCH: i64 = 100;
 
 /// Состояние задачи плана.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -105,6 +109,7 @@ pub struct PlanRow {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub revision: i64,
+    pub archived_at: Option<DateTime<Utc>>,
 }
 
 /// Тексты задачи — данные модели: в журнал идут только размеры.
@@ -140,6 +145,8 @@ pub struct PlanTask {
     pub created_at: String,
     pub updated_at: String,
     pub revision: i64,
+    /// Задача убрана с доски, но сохранена для истории.
+    pub archived: bool,
 }
 
 impl fmt::Debug for PlanTask {
@@ -209,6 +216,7 @@ pub fn view(row: &PlanRow) -> PlanTask {
         created_at: time(row.created_at),
         updated_at: time(row.updated_at),
         revision: row.revision,
+        archived: row.archived_at.is_some(),
     }
 }
 
@@ -408,13 +416,6 @@ async fn set_next(
     Ok(())
 }
 
-async fn task_count(conn: &mut PgConnection, orchestrator: Uuid) -> Result<i64, sqlx::Error> {
-    sqlx::query_scalar("select count(*) from plan_tasks where orchestrator_conversation_id=$1")
-        .bind(orchestrator)
-        .fetch_one(conn)
-        .await
-}
-
 fn full(existing: i64, adding: usize) -> Result<(), ToolError> {
     if existing + adding as i64 > MAX_TASKS {
         return Err(ToolError::with_message(
@@ -431,15 +432,78 @@ pub async fn rows_of(
     conn: &mut PgConnection,
     owner_id: Uuid,
     orchestrator: Uuid,
+    include_archived: bool,
 ) -> Result<Vec<PlanRow>, sqlx::Error> {
     sqlx::query_as(
         "select * from plan_tasks where owner_id=$1 and orchestrator_conversation_id=$2
+           and ($3 or archived_at is null)
          order by number",
     )
     .bind(owner_id)
     .bind(orchestrator)
+    .bind(include_archived)
     .fetch_all(conn)
     .await
+}
+
+/// Одна задача по номеру, архивная в том числе: подробности для истории.
+async fn row_of_number(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    orchestrator: Uuid,
+    number: i32,
+) -> Result<Option<PlanRow>, sqlx::Error> {
+    sqlx::query_as(
+        "select * from plan_tasks where owner_id=$1 and orchestrator_conversation_id=$2
+           and number=$3",
+    )
+    .bind(owner_id)
+    .bind(orchestrator)
+    .bind(number)
+    .fetch_optional(conn)
+    .await
+}
+
+/// Активные задачи: архив в лимите не участвует.
+async fn active_count(conn: &mut PgConnection, orchestrator: Uuid) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
+        "select count(*) from plan_tasks
+         where orchestrator_conversation_id=$1 and archived_at is null",
+    )
+    .bind(orchestrator)
+    .fetch_one(conn)
+    .await
+}
+
+/// Убрать с доски самые старые завершённые задачи, не больше `limit` за вызов.
+/// `days`: только задачи старше срока (уборка при правке) или `0` для любых (место под новые).
+async fn archive_finished_in_tx(
+    conn: &mut PgConnection,
+    orchestrator: Uuid,
+    days: i64,
+    limit: i64,
+) -> Result<i64, sqlx::Error> {
+    let rows: Vec<Uuid> = sqlx::query_scalar(
+        "with oldest as (
+            select id from plan_tasks
+            where orchestrator_conversation_id=$1 and archived_at is null
+              and state in ('done','cancelled')
+              and updated_at < clock_timestamp() - make_interval(days => $2::int)
+            order by updated_at, number limit $3)
+         update plan_tasks set archived_at=clock_timestamp()
+         where id in (select id from oldest) returning id",
+    )
+    .bind(orchestrator)
+    .bind(days as i32)
+    .bind(limit)
+    .fetch_all(conn)
+    .await?;
+    Ok(rows.len() as i64)
+}
+
+/// Дешёвая ограниченная уборка завершённых старше недели при любой правке доски.
+async fn archive_old_in_tx(conn: &mut PgConnection, orchestrator: Uuid) -> Result<i64, sqlx::Error> {
+    archive_finished_in_tx(conn, orchestrator, ARCHIVE_CLOSED_DAYS, ARCHIVE_BATCH).await
 }
 
 /// Выведенные поля: коммиты всех ходов исполнителя (он всегда свежий ребёнок, поэтому
@@ -506,6 +570,7 @@ pub async fn snapshot_views(
            where p.owner_id=$1 and c.owner_id=$1 and c.spawn_depth=0
              and c.side_of is null
              and c.archived_at is null and c.trashed_at is null
+             and p.archived_at is null
              and (p.state not in ('done','cancelled')
                   or p.updated_at > clock_timestamp() - make_interval(days => $2::int))),
          boards as (
@@ -531,9 +596,10 @@ fn compact(tasks: &[PlanTaskDetail]) -> String {
     let mut lines = Vec::with_capacity(tasks.len());
     for task in tasks {
         let mut line = format!(
-            "#{} [{}] {}",
+            "#{} [{}{}] {}",
             task.task.number,
             task.task.state.as_str(),
+            if task.task.archived { ", archived" } else { "" },
             task.task.title
         );
         if let Some(executor) = task.task.executor_id {
@@ -557,20 +623,44 @@ fn compact(tasks: &[PlanTaskDetail]) -> String {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct ListArgs {}
+struct ListArgs {
+    /// Одна задача в полном виде, архивная в том числе.
+    number: Option<i32>,
+    /// Показать в подсказке и архивные задачи.
+    include_archived: Option<bool>,
+}
 
-/// `plan.list`: план вызывающего с выведенными полями.
+/// `plan.list`: план вызывающего. Открытые задачи — подробно, завершённые — одной строкой
+/// в подсказке; полный текст любой задачи даёт `number`.
 pub async fn list(
     context: &ToolContext,
     caller: &Caller,
     arguments: Value,
 ) -> Result<Value, ToolError> {
-    let _: ListArgs = parse_arguments("plan_list", arguments)?;
+    let args: ListArgs = parse_arguments("plan_list", arguments)?;
     let mut conn = context.pool.acquire().await?;
     access::caller_in_tx(&mut conn, caller.owner_id, caller.conversation_id).await?;
-    let rows = rows_of(&mut conn, caller.owner_id, caller.conversation_id).await?;
-    let tasks = details(&mut conn, &rows).await?;
-    let hint = compact(&tasks);
+    if let Some(number) = args.number {
+        let row = row_of_number(&mut conn, caller.owner_id, caller.conversation_id, number)
+            .await?
+            .ok_or_else(|| not_found(number))?;
+        let tasks = details(&mut conn, &[row]).await?;
+        return Ok(json!({"tasks": tasks, "hint": compact(&tasks)}));
+    }
+    let rows = rows_of(
+        &mut conn,
+        caller.owner_id,
+        caller.conversation_id,
+        args.include_archived.unwrap_or(false),
+    )
+    .await?;
+    let all = details(&mut conn, &rows).await?;
+    let hint = compact(&all);
+    // Завершённые задачи (в том числе архивные) видны одной строкой в подсказке.
+    let tasks: Vec<_> = all
+        .into_iter()
+        .filter(|detail| !detail.task.state.is_closed())
+        .collect();
     Ok(json!({"tasks": tasks, "hint": hint}))
 }
 
@@ -618,10 +708,16 @@ async fn add_once(
     access::caller_in_tx(&mut tx, caller.owner_id, caller.conversation_id).await?;
     lock_journal(&mut tx, caller.owner_id).await?;
     let mut next = lock_board(&mut tx, caller.owner_id, caller.conversation_id).await?;
-    full(
-        task_count(&mut tx, caller.conversation_id).await?,
-        cleaned.len(),
-    )?;
+    archive_old_in_tx(&mut tx, caller.conversation_id).await?;
+    let existing = active_count(&mut tx, caller.conversation_id).await?;
+    let deficit = existing + cleaned.len() as i64 - MAX_TASKS;
+    if deficit > 0 {
+        // Освобождаем место самыми старыми завершёнными; если их нет, ошибка как раньше.
+        let freed = archive_finished_in_tx(&mut tx, caller.conversation_id, 0, deficit).await?;
+        if freed < deficit {
+            full(existing - freed, cleaned.len())?;
+        }
+    }
     let mut rows = Vec::with_capacity(cleaned.len());
     for (title, note) in cleaned.iter().cloned() {
         let row: PlanRow = sqlx::query_as(
@@ -703,6 +799,7 @@ async fn update_once(context: &ToolContext, caller: &Caller, edit: &Edit) -> Res
     send::lock_sender(&mut tx, caller.conversation_id).await?;
     access::caller_in_tx(&mut tx, caller.owner_id, caller.conversation_id).await?;
     lock_journal(&mut tx, caller.owner_id).await?;
+    archive_old_in_tx(&mut tx, caller.conversation_id).await?;
     let row: Option<PlanRow> = sqlx::query_as(
         "select * from plan_tasks
          where owner_id=$1 and orchestrator_conversation_id=$2 and number=$3 for update",
@@ -849,10 +946,15 @@ async fn adopt_once(context: &ToolContext, caller: &Caller, from: Uuid) -> Resul
     .bind(args.from_session_id)
     .fetch_all(&mut *tx)
     .await?;
-    full(
-        task_count(&mut tx, caller.conversation_id).await?,
-        moving.len(),
-    )?;
+    archive_old_in_tx(&mut tx, caller.conversation_id).await?;
+    let existing = active_count(&mut tx, caller.conversation_id).await?;
+    let deficit = existing + moving.len() as i64 - MAX_TASKS;
+    if deficit > 0 {
+        let freed = archive_finished_in_tx(&mut tx, caller.conversation_id, 0, deficit).await?;
+        if freed < deficit {
+            full(existing - freed, moving.len())?;
+        }
+    }
     let mut mapping = Vec::with_capacity(moving.len());
     let mut moved = Vec::with_capacity(moving.len());
     for row in moving {
@@ -890,6 +992,92 @@ async fn adopt_once(context: &ToolContext, caller: &Caller, from: Uuid) -> Resul
     Ok(json!({"moved": mapping, "hint": hint}))
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ArchiveArgs {
+    /// Номера закрытых задач своего плана.
+    numbers: Option<Vec<i32>>,
+    /// Все готовые и отменённые задачи своего плана.
+    all_finished: Option<bool>,
+}
+
+/// `plan.archive`: убрать закрытые задачи с доски, сохранив их текст и выводимые поля
+/// для истории. Доска принадлежит вызывающей сессии: чужие задачи здесь недоступны.
+pub async fn archive(
+    context: &ToolContext,
+    caller: &Caller,
+    arguments: Value,
+) -> Result<Value, ToolError> {
+    let args: ArchiveArgs = parse_arguments("plan_archive", arguments)?;
+    let by_numbers = args.numbers.is_some();
+    let all = args.all_finished.unwrap_or(false);
+    if by_numbers == all {
+        return Err(invalid("pass numbers or all_finished: true"));
+    }
+    if let Some(numbers) = &args.numbers
+        && (numbers.is_empty() || numbers.len() > MAX_ADD)
+    {
+        return Err(invalid(format!("pass 1 to {MAX_ADD} numbers")));
+    }
+    retrying(|| archive_once(context, caller, &args)).await
+}
+
+async fn archive_once(
+    context: &ToolContext,
+    caller: &Caller,
+    args: &ArchiveArgs,
+) -> Result<Value, Fail> {
+    let mut tx = crate::db::begin(&context.pool).await?;
+    send::lock_sender(&mut tx, caller.conversation_id).await?;
+    access::caller_in_tx(&mut tx, caller.owner_id, caller.conversation_id).await?;
+    lock_journal(&mut tx, caller.owner_id).await?;
+    archive_old_in_tx(&mut tx, caller.conversation_id).await?;
+    let numbers: Vec<i32> = if args.all_finished.unwrap_or(false) {
+        sqlx::query_scalar(
+            "select number from plan_tasks where owner_id=$1
+               and orchestrator_conversation_id=$2 and archived_at is null
+               and state in ('done','cancelled') order by number",
+        )
+        .bind(caller.owner_id)
+        .bind(caller.conversation_id)
+        .fetch_all(&mut *tx)
+        .await?
+    } else {
+        let asked = args.numbers.as_ref().expect("validated");
+        for number in asked {
+            let row = row_of_number(&mut tx, caller.owner_id, caller.conversation_id, *number)
+                .await?
+                .ok_or_else(|| not_found(*number))?;
+            if !PlanState::parse(&row.state).is_some_and(PlanState::is_closed) {
+                return Err(invalid(format!(
+                    "Task #{number} is {}; close it with plan_update before archiving",
+                    row.state
+                ))
+                .into());
+            }
+        }
+        asked.clone()
+    };
+    let mut archived: Vec<i32> = sqlx::query_scalar(
+        "update plan_tasks set archived_at=clock_timestamp()
+         where owner_id=$1 and orchestrator_conversation_id=$2 and number=any($3)
+           and archived_at is null and state in ('done','cancelled')
+         returning number",
+    )
+    .bind(caller.owner_id)
+    .bind(caller.conversation_id)
+    .bind(&numbers[..])
+    .fetch_all(&mut *tx)
+    .await?;
+    archived.sort_unstable();
+    tx.commit().await?;
+    let hint = format!(
+        "Archived {} task(s); read any of them with plan_list number. Their numbers are not reused.",
+        archived.len()
+    );
+    Ok(json!({"archived": archived, "hint": hint}))
+}
+
 /// Номер задачи из `session_spawn` → её ID, один раз при проверке вызова.
 pub async fn resolve_for_spawn_in_tx(
     conn: &mut PgConnection,
@@ -899,7 +1087,8 @@ pub async fn resolve_for_spawn_in_tx(
 ) -> Result<Uuid, ToolError> {
     let row: Option<(Uuid, String)> = sqlx::query_as(
         "select id,state from plan_tasks
-         where owner_id=$1 and orchestrator_conversation_id=$2 and number=$3",
+         where owner_id=$1 and orchestrator_conversation_id=$2 and number=$3
+           and archived_at is null",
     )
     .bind(owner_id)
     .bind(orchestrator)
