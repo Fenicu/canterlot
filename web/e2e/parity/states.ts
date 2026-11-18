@@ -19,6 +19,7 @@ import { seedPlan } from '../../testing/fixtures/plan';
 import { seedSearch } from '../../testing/fixtures/search';
 import { seedBookmarks } from '../../testing/fixtures/bookmarks';
 import { seedSystemBubbles } from '../../testing/fixtures/system-bubbles';
+import { seedSchedule, seedScheduleRun } from '../../testing/fixtures/schedules';
 
 export type Theme = 'dark' | 'light';
 
@@ -100,6 +101,31 @@ async function sessions(page: Page, route: string, ready: string): Promise<void>
   await installChatRoutes(page, hub, api, OWNER);
   await page.goto(route);
   await expect(page.locator(ready)).toBeVisible({ timeout: 15_000 });
+}
+
+/** Экран расписания: список, редактор с предпросмотром или история с разными исходами. */
+async function schedulesScreen(page: Page, state: 'list' | 'editor' | 'history', viewport = PHONE): Promise<void> {
+  const { api, ids } = await bootSecondary(page, '/settings?c=schedules');
+  const target = { kind: 'new_session' as const, machine_id: ids.machine, workdir: '/srv/canterlot', route: { task_type: 'review' } };
+  const schedule = seedSchedule(api, { target });
+  seedScheduleRun(api, schedule.id, { state: 'skipped_precheck', detail: { precheck_exit_code: 3, precheck_tail: 'нет изменений с прошлого раза' }, delay_ms: null });
+  seedScheduleRun(api, schedule.id, { state: 'failed', detail: { reason: 'машина не ответила' }, session_id: ids.pinned, delay_ms: 5200 });
+  seedScheduleRun(api, schedule.id, { state: 'started', detail: {}, session_id: ids.pinned, delay_ms: 1200 });
+  await page.setViewportSize(viewport);
+  await page.reload();
+  await expect(page.locator('[data-schedules-list] [data-schedule-row]').first()).toBeVisible({ timeout: 15_000 });
+  if (state !== 'list') {
+    await page.locator('[data-schedules-list]').getByRole('link', { name: 'Открыть' }).first().click();
+    await expect(page.locator('[data-schedule-detail]')).toBeVisible();
+    if (state === 'editor') {
+      await page.locator('[data-schedule-detail]').getByRole('button', { name: 'Изменить' }).click();
+      await expect(page.locator('[data-schedule-editor]')).toBeVisible();
+      await page.locator('[data-schedule-editor] [data-role="schedule-preview"]').getByRole('button', { name: 'Показать' }).click();
+      await expect(page.locator('[data-schedule-editor] [data-role="schedule-preview"] li').first()).toBeVisible();
+    } else {
+      await expect(page.locator('[data-schedule-history] [data-run-row]').first()).toBeVisible();
+    }
+  }
 }
 
 /** Редактор маршрутизации с подсветкой пары вне белого списка и раскрытым кандидатом. */
@@ -402,6 +428,8 @@ export const SCREENS: Screen[] = [
     await bootSecondary(page, '/limits');
     await expect(page.locator('[data-secondary-ready]')).toBeVisible();
   }),
+  ...([['schedules-list', 'list', PHONE, 'dark'], ['schedules-editor', 'editor', PHONE, 'light'], ['schedules-history', 'history', PHONE, 'dark'], ['schedules-list-desktop', 'list', DESKTOP, 'light'], ['schedules-editor-desktop', 'editor', DESKTOP, 'dark'], ['schedules-history-desktop', 'history', DESKTOP, 'light']] as const).map(([name, state, viewport, theme]) =>
+    screen(name, false, viewport, theme, (page) => schedulesScreen(page, state, viewport))),
   screen('11-desktop', true, DESKTOP, 'dark', async (page) => {
     const { hub, api } = fresh();
     const { id } = seedMockup11(api);
