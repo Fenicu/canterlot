@@ -270,6 +270,7 @@
 		display: flex;
 		align-items: center;
 		gap: var(--s3);
+		white-space: nowrap;
 		margin: var(--s0);
 		padding: var(--s0) var(--s3);
 		min-height: var(--target);
