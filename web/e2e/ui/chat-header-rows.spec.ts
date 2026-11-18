@@ -112,7 +112,19 @@ async function boot(
 	await page.goto(`/c/${id}`);
 	await expect(page.locator('.screen[data-ready]')).toBeVisible({ timeout: 15_000 });
 	await expect.poll(() => hub.subscribed(`conversation:${id}`), { timeout: 15_000 }).toBe(true);
+	await awaitHeaderSettled(page, opts.variant);
 	return { hub, api, id };
+}
+
+/**
+ * Шрифт и соседняя строка встают позже первого кадра: меряем устоявшуюся раскладку,
+ * а не промежуточную, иначе первое слово маршрута срезает многоточие.
+ */
+async function awaitHeaderSettled(page: Page, variant: Variant): Promise<void> {
+	await page.evaluate(() => document.fonts.ready);
+	if (variant.includes('route')) {
+		await expect.poll(async () => (await geometry(page)).routeFirstWordVisible, { timeout: 15_000 }).toBe(true);
+	}
 }
 
 interface Box {
@@ -459,6 +471,7 @@ test('header_rows_hold_in_every_palette_and_both_themes', async ({ page }, info)
 			await expect(page.locator('.screen[data-ready]')).toBeVisible({ timeout: 15_000 });
 			await expect(page.locator('html')).toHaveAttribute('data-palette', palette.key);
 			await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+			await awaitHeaderSettled(page, 'parent-route-nudge');
 			const g = await geometry(page);
 			expectAlignedWithTitle(g);
 			expectRowsInset(g);
