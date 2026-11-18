@@ -48,6 +48,8 @@ const ALL_ERROR_CODES: ErrorCode[] = [
   "not_pending",
   "schedule_time_out_of_range",
   "too_many_scheduled",
+  "schedule_invalid",
+  "schedule_revision_conflict",
   "machine_not_found",
   "machine_unavailable",
   "machine_offline",
@@ -135,7 +137,7 @@ describe("api/errors", () => {
   });
 
   it("error_actions_cover_every_code_in_the_api_error_table", () => {
-    expect(ALL_ERROR_CODES.length).toBe(82);
+    expect(ALL_ERROR_CODES.length).toBe(84);
 
     for (const code of ALL_ERROR_CODES) {
       const err = new ApiError(
