@@ -20,7 +20,7 @@ use crate::{
 
 use super::{
     ClaimedRun, OverlapPolicy, RunState, Schedule, ScheduleError, ScheduleRun, ScheduleTarget,
-    delay_ms, insert_run, render_title, set_run_state,
+    delay_ms, render_title, set_run_state,
 };
 
 #[derive(Debug)]
@@ -844,7 +844,65 @@ async fn dispatch(
     Ok((session_id, input_id, final_detail))
 }
 
+/// Тот же advisory-замок, что `idempotency::run_in_tx`: ключ первым,
+/// затем доменные строки. Короткая резервная транзакция его не держит
+/// дольше вставки.
+async fn lock_idempotency_key(
+    tx: &mut sqlx::Transaction<'static, sqlx::Postgres>,
+    owner_id: Uuid,
+    key: &str,
+) -> Result<(), sqlx::Error> {
+    use sha2::{Digest, Sha256};
+    let mut lock_hash = Sha256::new();
+    lock_hash.update(b"canterlot:idempotency:");
+    lock_hash.update(owner_id.as_bytes());
+    lock_hash.update(key.as_bytes());
+    let lock_id = i64::from_be_bytes(lock_hash.finalize()[..8].try_into().expect("eight bytes"));
+    sqlx::query("select pg_advisory_xact_lock($1)")
+        .bind(lock_id)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+/// Проигравший гонку резерва дожидается исхода победителя и возвращает
+/// тот же запуск: повтор не создаёт второй dispatch. Соединение пула
+/// между опросами не держится.
+async fn await_winner_run(
+    pool: &PgPool,
+    owner_id: Uuid,
+    run_id: Uuid,
+) -> Result<ScheduleRun, ScheduleError> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+    let mut conn = pool.acquire().await?;
+    let Some(mut current) = super::get_run(&mut conn, owner_id, run_id).await? else {
+        return Err(ScheduleError::NotFound);
+    };
+    drop(conn);
+    loop {
+        if !matches!(
+            current.state,
+            RunState::Claimed | RunState::Prechecking
+        ) {
+            return Ok(current);
+        }
+        if std::time::Instant::now() >= deadline {
+            return Ok(current);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let mut conn = pool.acquire().await?;
+        let refreshed = super::get_run(&mut conn, owner_id, run_id).await?;
+        if let Some(refreshed) = refreshed {
+            current = refreshed;
+        } else {
+            return Err(ScheduleError::NotFound);
+        }
+    }
+}
 /// «Запустить сейчас»: тот же приём и dispatch, но под ключом клиента.
+/// Резерв строки запуска атомарен (уникальность `0112_schedule_run_key`):
+/// параллельные запросы с тем же ключом и повтор после обрыва получают
+/// тот же запуск вместо второго dispatch.
 pub async fn run_now(
     state: &AppState,
     owner_id: Uuid,
@@ -853,37 +911,60 @@ pub async fn run_now(
     run_anyway: bool,
     correlation_id: Uuid,
 ) -> Result<ScheduleRun, ScheduleError> {
-    let mut conn = state.pool.acquire().await?;
     let body = json!({"schedule_id": schedule_id, "run_anyway": run_anyway});
     let hash = crate::idempotency::request_hash("run_now", &body);
-    match crate::idempotency::lookup(&mut conn, owner_id, key, "run_now", &hash).await? {
-        crate::idempotency::Begin::Replay(value) => {
-            return serde_json::from_value(value)
-                .map_err(|e| ScheduleError::Db(sqlx::Error::Decode(Box::new(e))));
+    // Короткая резервная транзакция: тот же advisory-замок, что `run_in_tx`,
+    // затем поиск/создание резерва. Долгой работы с воркером внутри нет.
+    let reserved = {
+        let mut tx = crate::db::begin(&state.pool).await?;
+        lock_idempotency_key(&mut tx, owner_id, key).await?;
+        match crate::idempotency::lookup(&mut tx, owner_id, key, "run_now", &hash).await? {
+            crate::idempotency::Begin::Replay(value) => {
+                let _ = tx.rollback().await;
+                return serde_json::from_value(value)
+                    .map_err(|e| ScheduleError::Db(sqlx::Error::Decode(Box::new(e))));
+            }
+            crate::idempotency::Begin::Conflict => {
+                let _ = tx.rollback().await;
+                return Err(ScheduleError::Conflict("idempotency_conflict"));
+            }
+            crate::idempotency::Begin::New => {}
         }
-        crate::idempotency::Begin::Conflict => {
-            return Err(ScheduleError::Conflict("idempotency_conflict"));
+        let schedule = super::get(&mut tx, owner_id, schedule_id)
+            .await?
+            .ok_or(ScheduleError::NotFound)?;
+        let now = Utc::now();
+        let reserved = super::reserve_run(
+            &mut tx,
+            Uuid::now_v7(),
+            schedule_id,
+            owner_id,
+            now,
+            schedule.revision,
+            key,
+            json!({"manual": true, "run_anyway": run_anyway}),
+        )
+        .await?;
+        match reserved {
+            Some(run) => {
+                tx.commit().await?;
+                Some((schedule, run))
+            }
+            None => {
+                // Чужой резерв с тем же ключом: дожидаемся победителя.
+                let winner = super::get_run_by_key(&mut tx, owner_id, schedule_id, key).await?;
+                tx.rollback().await?;
+                let Some(winner) = winner else {
+                    return Err(ScheduleError::NotFound);
+                };
+                let winner_id = winner.id;
+                return await_winner_run(&state.pool, owner_id, winner_id).await;
+            }
         }
-        crate::idempotency::Begin::New => {}
-    }
-    let schedule = super::get(&mut conn, owner_id, schedule_id)
-        .await?
-        .ok_or(ScheduleError::NotFound)?;
-    let now = Utc::now();
-    let run = insert_run(
-        &mut conn,
-        Uuid::now_v7(),
-        schedule_id,
-        owner_id,
-        now,
-        schedule.revision,
-        RunState::Claimed,
-        true,
-        key,
-        json!({"manual": true, "run_anyway": run_anyway}),
-    )
-    .await?;
-    drop(conn);
+    };
+    let Some((schedule, run)) = reserved else {
+        return Err(ScheduleError::NotFound);
+    };
     let scheduler = state.scheduler.clone();
     let claimed = ClaimedRun {
         run: run.clone(),

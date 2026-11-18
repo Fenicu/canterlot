@@ -49,3 +49,9 @@ create table schedule_runs (
 );
 create index schedule_runs_schedule_time on schedule_runs (schedule_id, scheduled_at desc);
 create index schedule_runs_owner_state on schedule_runs (owner_id, state, created_at desc);
+
+-- Резерв ручного запуска: один ключ клиента — один запуск расписания.
+-- Параллельные Run Now с тем же ключом упираются в индекс: проигравший
+-- дожидается завершения победителя вместо второго dispatch.
+create unique index schedule_runs_schedule_key
+  on schedule_runs (schedule_id, idempotency_key);

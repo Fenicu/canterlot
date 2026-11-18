@@ -507,6 +507,88 @@ async fn replay_after_dispatch_commit_does_not_duplicate_work(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn stranded_claimed_is_readmitted_and_young_prechecking_survives(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
+    let id = create(&f, existing(&f), "0 9 * * *").await;
+    let schedule = Uuid::parse_str(&id).unwrap();
+    let now = Utc::now();
+    // Обрыв после commit заявки, до dispatch: строка `claimed`, приёмка погибла.
+    let rid = Uuid::now_v7();
+    sqlx::query(
+        "insert into schedule_runs(id,schedule_id,owner_id,scheduled_at,claimed_revision,state,manual,idempotency_key)
+         values($1,$2,$3,$4,1,'claimed',false,$5)",
+    )
+    .bind(rid)
+    .bind(schedule)
+    .bind(f.seed.owner_id)
+    .bind(now - TimeDelta::hours(2))
+    .bind("crashed-claim")
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("update schedule_runs set updated_at=$2 where id=$1")
+        .bind(rid)
+        .bind(now - TimeDelta::hours(1))
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Молодая `prechecking` чужой живой приёмки — не наша: тик её не трогает.
+    // На другом расписании, чтобы новое правило пересечений (только более
+    // ранние запуски блокируют) не мешало возврату.
+    let other = create(&f, existing(&f), "0 10 * * *").await;
+    let young = Uuid::now_v7();
+    sqlx::query(
+        "insert into schedule_runs(id,schedule_id,owner_id,scheduled_at,claimed_revision,state,manual,idempotency_key)
+         values($1,$2,$3,$4,1,'prechecking',false,$5)",
+    )
+    .bind(young)
+    .bind(Uuid::parse_str(&other).unwrap())
+    .bind(f.seed.owner_id)
+    .bind(now - TimeDelta::hours(3))
+    .bind("live-prechecking")
+    .execute(&pool)
+    .await
+    .unwrap();
+    scheduler(&f).tick(now).await.unwrap();
+    wait_state(&pool, rid, "started").await;
+    let (state, _): (String, Value) = state(&pool, young).await;
+    assert_eq!(state, "prechecking", "young prechecking is not reaped");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn interrupted_prechecking_is_failed_without_rerun(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let id = create(&f, existing(&f), "0 9 * * *").await;
+    let schedule = Uuid::parse_str(&id).unwrap();
+    let now = Utc::now();
+    // Обрыв посреди предпроверки: воркер уже не ответит, повтор запрещён.
+    let rid = Uuid::now_v7();
+    sqlx::query(
+        "insert into schedule_runs(id,schedule_id,owner_id,scheduled_at,claimed_revision,state,manual,idempotency_key,detail)
+         values($1,$2,$3,$4,1,'prechecking',false,$5,'{}')",
+    )
+    .bind(rid)
+    .bind(schedule)
+    .bind(f.seed.owner_id)
+    .bind(now - TimeDelta::hours(2))
+    .bind("crashed-prechecking")
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("update schedule_runs set updated_at=$2 where id=$1")
+        .bind(rid)
+        .bind(now - TimeDelta::hours(1))
+        .execute(&pool)
+        .await
+        .unwrap();
+    scheduler(&f).tick(now).await.unwrap();
+    let (state, detail) = state(&pool, rid).await;
+    assert_eq!(state, "failed");
+    assert_eq!(detail["reason"], "precheck_result_unknown", "{detail}");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn run_now_is_idempotent_and_run_anyway_bypasses_checks(pool: PgPool) {
     let f = Fixture::new(pool.clone()).await;
     let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
@@ -592,4 +674,54 @@ async fn run_now_is_idempotent_and_run_anyway_bypasses_checks(pool: PgPool) {
         .await;
     assert_eq!(normal.status.as_u16(), 200);
     assert_eq!(normal.json::<Value>()["state"], "skipped_limits");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn concurrent_run_now_with_one_key_dispatches_once(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
+    let r = f
+        .client
+        .send(
+            Method::POST,
+            "/api/v1/schedules",
+            Some("cc-create"),
+            Some(json!({
+                "name": "Гонка",
+                "cron": "0 9 * * 1-5",
+                "target": existing(&f),
+                "prompt": "вместе",
+            })),
+        )
+        .await;
+    assert_eq!(r.status.as_u16(), 200);
+    let id = r.json::<Value>()["id"].as_str().unwrap().to_owned();
+    let path = format!("/api/v1/schedules/{id}/run");
+    let (first, second) = tokio::join!(
+        f.client
+            .send(Method::POST, &path, Some("cc-run"), Some(json!({"run_anyway": false}))),
+        f.client
+            .send(Method::POST, &path, Some("cc-run"), Some(json!({"run_anyway": false}))),
+    );
+    assert_eq!(first.status.as_u16(), 200, "{}", String::from_utf8_lossy(&first.body));
+    assert_eq!(second.status.as_u16(), 200, "{}", String::from_utf8_lossy(&second.body));
+    assert_eq!(
+        first.json::<Value>()["id"],
+        second.json::<Value>()["id"],
+        "one key resolves to one durable run"
+    );
+    let runs: i64 = sqlx::query_scalar("select count(*) from schedule_runs where schedule_id=$1")
+        .bind(Uuid::parse_str(&id).unwrap())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(runs, 1, "no second run row");
+    let inputs: i64 = sqlx::query_scalar(
+        "select count(*) from inputs where conversation_id=$1 and content->0->>'text'='вместе'",
+    )
+    .bind(f.seed.conversation_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(inputs, 1, "no duplicate input");
 }

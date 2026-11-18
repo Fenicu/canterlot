@@ -879,6 +879,55 @@ pub async fn insert_run(
     row.into_run()
 }
 
+/// Атомарный резерв ручного запуска (миграция 0112): один ключ клиента —
+/// одна строка. Проигравший гонку получает `None` и дожидается победителя.
+#[allow(clippy::too_many_arguments)]
+pub async fn reserve_run(
+    conn: &mut PgConnection,
+    id: Uuid,
+    schedule_id: Uuid,
+    owner_id: Uuid,
+    scheduled_at: DateTime<Utc>,
+    claimed_revision: i64,
+    key: &str,
+    detail: Value,
+) -> Result<Option<ScheduleRun>, sqlx::Error> {
+    let row: Option<RunRow> = sqlx::query_as(
+        "insert into schedule_runs(id,schedule_id,owner_id,scheduled_at,claimed_revision,state,manual,idempotency_key,detail)
+         values($1,$2,$3,$4,$5,$6,true,$7,$8)
+         on conflict (schedule_id, idempotency_key) do nothing returning *",
+    )
+    .bind(id)
+    .bind(schedule_id)
+    .bind(owner_id)
+    .bind(scheduled_at)
+    .bind(claimed_revision)
+    .bind(RunState::Claimed.as_str())
+    .bind(key)
+    .bind(detail)
+    .fetch_optional(conn)
+    .await?;
+    row.map(RunRow::into_run).transpose()
+}
+
+/// Победитель резерва по ключу клиента.
+pub async fn get_run_by_key(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    schedule_id: Uuid,
+    key: &str,
+) -> Result<Option<ScheduleRun>, sqlx::Error> {
+    let row: Option<RunRow> = sqlx::query_as(
+        "select * from schedule_runs where owner_id=$1 and schedule_id=$2 and idempotency_key=$3",
+    )
+    .bind(owner_id)
+    .bind(schedule_id)
+    .bind(key)
+    .fetch_optional(conn)
+    .await?;
+    row.map(RunRow::into_run).transpose()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn set_run_state(
     conn: &mut PgConnection,
@@ -1062,6 +1111,75 @@ pub async fn prune_runs(conn: &mut PgConnection) -> Result<u64, sqlx::Error> {
     .execute(conn)
     .await?;
     Ok(result.rows_affected())
+}
+
+/// Возраст, после которого заявка считается брошенной погибшей приёмкой.
+/// Живая приёмка держит `prechecking` не дольше таймаута предпроверки
+/// (до 5 минут) плюс dispatch, поэтому 10 минут никого живого не заденут.
+pub const RECLAIM_LEASE: TimeDelta = TimeDelta::minutes(10);
+
+/// Возврат застрявших заявок после гибели приёмки или перезапуска хаба:
+/// `claimed` отдаются на повторный приём, оборванные `prechecking`
+/// завершаются как `failed` с `precheck_result_unknown` и никогда
+/// не перезапускаются (ответ воркера уже не придёт).
+/// `max_age=None` — все строки (стартовый проход), иначе только старше.
+pub async fn recover_interrupted(
+    conn: &mut PgConnection,
+    max_age: Option<TimeDelta>,
+    now: DateTime<Utc>,
+) -> Result<Vec<ClaimedRun>, sqlx::Error> {
+    let cutoff: Option<DateTime<Utc>> = max_age.map(|age| now - age);
+    let stale: Vec<RunRow> = sqlx::query_as(
+        "select * from schedule_runs
+          where state = 'prechecking'
+            and ($1::timestamptz is null or updated_at < $1)
+          order by updated_at, id limit 32 for update skip locked",
+    )
+    .bind(cutoff)
+    .fetch_all(&mut *conn)
+    .await?;
+    for row in stale {
+        let mut run = row.into_run()?;
+        let detail = json!({"reason": "precheck_result_unknown"});
+        sqlx::query(
+            "update schedule_runs set state='failed',detail=$2,updated_at=clock_timestamp() where id=$1",
+        )
+        .bind(run.id)
+        .bind(&detail)
+        .execute(&mut *conn)
+        .await?;
+        run.state = RunState::Failed;
+        run.detail = detail;
+        run_changed(conn, &run, Uuid::now_v7()).await?;
+    }
+    let rows: Vec<RunRow> = sqlx::query_as(
+        "select * from schedule_runs
+          where state = 'claimed'
+            and ($1::timestamptz is null or updated_at < $1)
+          order by updated_at, id limit 32 for update skip locked",
+    )
+    .bind(cutoff)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut claimed = Vec::new();
+    for row in rows {
+        let run = row.into_run()?;
+        let schedule_row: Option<ScheduleRow> =
+            sqlx::query_as("select * from schedules where id=$1 for update")
+                .bind(run.schedule_id)
+                .fetch_optional(&mut *conn)
+                .await?;
+        let Some(schedule_row) = schedule_row else {
+            // Расписание удалили: строка запуска уйдёт каскадом позже,
+            // приёмка отметит отсутствие как `skipped_changed`.
+            continue;
+        };
+        let Ok(schedule) = schedule_row.into_schedule() else {
+            continue;
+        };
+        claimed.push(ClaimedRun { run, schedule });
+    }
+    Ok(claimed)
 }
 
 /// Сколько попыток ещё в полёте у расписания (для политики `skip`).
