@@ -1335,6 +1335,23 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     await route.fulfill({ headers: headers(), json: [...api.machines.values()] });
   });
 
+  await page.route(/\/api\/v1\/updates(?:\?|$)/, async (route) => {
+    if (route.request().method() !== 'GET') return route.fallback();
+    const url = new URL(route.request().url());
+    const limit = Math.max(1, Math.min(100, Number(url.searchParams.get('limit') ?? 50) || 50));
+    const cursor = url.searchParams.get('cursor') ?? null;
+    const machine = url.searchParams.get('machine') ?? null;
+    const kind = url.searchParams.get('kind') ?? null;
+    api.updatesCalls.push({ limit, cursor, machine, kind });
+    const rows = api.updates
+      .filter((item) => !machine || item.machine === machine)
+      .filter((item) => !kind || item.kind === kind);
+    const offset = cursor ? Number(cursor) || 0 : 0;
+    const items = rows.slice(offset, offset + limit);
+    const next = offset + limit < rows.length ? String(offset + limit) : null;
+    await route.fulfill({ headers: headers(), json: { items, next_cursor: next } });
+  });
+
   await page.route('**/api/v1/spawn-whitelist', async (route) => {
     const method = route.request().method();
     if (method === 'GET') {

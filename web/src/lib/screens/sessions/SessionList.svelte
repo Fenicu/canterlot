@@ -50,6 +50,7 @@
   import SessionSheet from './SessionSheet.svelte';
   import TrashSection from './TrashSection.svelte';
   import TrashToast from './TrashToast.svelte';
+  import UpdatesBanner from './UpdatesBanner.svelte';
   import { installation } from '#lib/pwa/register.js';
   import { openSearch } from '#lib/search/open.svelte.js';
 
@@ -133,6 +134,8 @@
     void browserRuntime().then(async (value) => {
       if (!alive) return;
       runtime = value;
+      // Лента не опрашивается: живые записи приходят событием, а после обрыва список сверяется с API.
+      void value.updates.load();
       // Конфиг обновляет общий реактивный порог для полосы лимитов и пороги диска.
       void loadConfig().then((config) => { diskConfig = config.machines; }).catch(() => undefined);
     }).catch(() => undefined);
@@ -143,6 +146,10 @@
       alive = false;
       releaseTicker();
     };
+  });
+
+  $effect(() => {
+    runtime?.updates.observePhase(runtime.connection.status.phase);
   });
 
   $effect(() => {
@@ -457,6 +464,7 @@
       </div>
     {/if}
   </div>
+  {#if runtime}<UpdatesBanner {runtime} />{/if}
   {#if searchOpen && !rail}
     <SearchBar bind:value={query} onreset={resetSearch} />
   {/if}

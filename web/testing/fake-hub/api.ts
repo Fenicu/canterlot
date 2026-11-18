@@ -28,6 +28,17 @@ type BookmarkPage = components['schemas']['BookmarkPage'];
 type ImagesPage = components['schemas']['ImagesPage'];
 type ImageItem = components['schemas']['ImageItem'];
 
+/** Запись ленты обновлений CLI и моделей, как её отдаёт `GET /api/v1/updates`. */
+export interface FakeUpdate {
+	id: string;
+	kind: string;
+	machine: string;
+	harness: string;
+	created_at: string;
+	payload: Record<string, unknown>;
+	update_command?: string | null;
+}
+
 /** Отказ фиктивного хаба по ревизии: несёт актуальный черновик для ответа 409. */
 export class FakeDraftConflict extends Error {
 	readonly record: DraftRecord;
@@ -144,6 +155,9 @@ export class FakeHubApi {
 	readonly runs = new Map<string, RunInfo>();
 	readonly usage = new Map<string, components['schemas']['SessionUsageView']>();
 	readonly machines = new Map<string, MachineRecord>();
+	/** Лента обновлений и моделей, которую раздаёт фиктивный хаб. */
+	updates: FakeUpdate[] = [];
+	readonly updatesCalls: { limit?: number; cursor?: string | null; machine?: string | null; kind?: string | null }[] = [];
 	directories = ['/home/owner', '/home/owner/projects', '/srv/canterlot', '/srv/canterlot/web', '/srv/canterlot/.git', '/srv/notes'];
 	readonly historyCalls: { machine: string; workdir: string }[] = [];
 	claudeHistoryItems: components['schemas']['ClaudeHistoryView'][] = [
