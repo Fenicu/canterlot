@@ -1903,6 +1903,8 @@ export interface ScheduleRunChanged {
     session_id: Uuid | null;
     input_id: Uuid | null;
     manual: boolean;
+    run_anyway: boolean;
+    attempt_id?: Uuid | null;
     idempotency_key: string;
     detail: {};
   };

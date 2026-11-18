@@ -730,6 +730,8 @@ fn schedule_events_carry_full_payloads() {
         session_id: Some(Uuid::now_v7()),
         input_id: Some(Uuid::now_v7()),
         manual: false,
+        run_anyway: false,
+        attempt_id: None,
         idempotency_key: "schedule:run".into(),
         detail: json!({"provider": "claude", "limits": "known"}),
     };

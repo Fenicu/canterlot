@@ -4652,6 +4652,8 @@ export interface components {
             timezone: string;
         };
         ScheduleRun: {
+            /** Format: uuid */
+            attempt_id?: string | null;
             /** Format: int64 */
             claimed_revision: number;
             /** Format: date-time */
@@ -4665,6 +4667,7 @@ export interface components {
             /** Format: uuid */
             input_id?: string | null;
             manual: boolean;
+            run_anyway: boolean;
             /** Format: uuid */
             schedule_id: string;
             /** Format: date-time */

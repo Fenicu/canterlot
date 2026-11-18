@@ -9877,6 +9877,19 @@
             "manual": {
               "type": "boolean"
             },
+            "run_anyway": {
+              "type": "boolean"
+            },
+            "attempt_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Uuid"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
             "idempotency_key": {
               "type": "string"
             },
@@ -9896,6 +9909,7 @@
             "session_id",
             "input_id",
             "manual",
+            "run_anyway",
             "idempotency_key",
             "detail"
           ]

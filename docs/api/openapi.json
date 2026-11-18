@@ -21634,10 +21634,18 @@
           "state",
           "created_at",
           "manual",
+          "run_anyway",
           "idempotency_key",
           "detail"
         ],
         "properties": {
+          "attempt_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
           "claimed_revision": {
             "type": "integer",
             "format": "int64"
@@ -21669,6 +21677,9 @@
             "format": "uuid"
           },
           "manual": {
+            "type": "boolean"
+          },
+          "run_anyway": {
             "type": "boolean"
           },
           "schedule_id": {

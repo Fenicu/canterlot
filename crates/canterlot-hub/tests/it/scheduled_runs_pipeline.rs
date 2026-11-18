@@ -220,8 +220,8 @@ async fn red_limits_window_skips_the_run(pool: PgPool) {
     due(&pool, &id, now - TimeDelta::seconds(30)).await;
     scheduler(&f).tick(now).await.unwrap();
     let rid = run_id(&pool, &id).await;
-    let (state, detail) = state(&pool, rid).await;
-    assert_eq!(state, "skipped_limits", "{detail}");
+    // Приёмка идёт вне тика: ждать исхода ограниченным опросом, а не разовым чтением.
+    let detail = wait_state(&pool, rid, "skipped_limits").await;
     assert_eq!(detail["window"], "weekly", "{detail}");
 }
 
@@ -904,14 +904,8 @@ async fn weekly_reserve_hold_skips_new_session_run(pool: PgPool) {
     due(&pool, &id, Utc::now() - TimeDelta::seconds(30)).await;
     scheduler(&f).tick(Utc::now()).await.unwrap();
     let rid = run_id(&pool, &id).await;
-    let (state, detail) = state(&pool, rid).await;
-    // Приёмка ждёт исхода в фоне: дождаться терминального состояния.
-    let detail = if state == "started" || state == "claimed" || state == "prechecking" {
-        wait_state(&pool, rid, "skipped_limits").await
-    } else {
-        assert_eq!(state, "skipped_limits", "{detail}");
-        detail
-    };
+    // Приёмка идёт вне тика: ждать исхода ограниченным опросом, а не разовым чтением.
+    let detail = wait_state(&pool, rid, "skipped_limits").await;
     assert_eq!(detail["reason"], "initial_hold", "{detail}");
 }
 
@@ -945,3 +939,200 @@ async fn schedules_deny_unauthenticated_callers(pool: PgPool) {
         .await;
     assert_eq!(refused.status.as_u16(), 401);
 }
+
+/// A: пока приёмка этого хаба держит запуск, восстановление его не тронет.
+/// Снятие стража делает ту же старую строку кандидатом на возврат.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn recovery_skips_a_run_being_admitted_by_this_hub(pool: PgPool) {
+    use canterlot_hub::schedules::{AdmittingGuard, RECLAIM_LEASE, recover_interrupted};
+
+    let f = Fixture::new(pool.clone()).await;
+    let id = create(&f, existing(&f), "0 9 * * *").await;
+    let now = Utc::now();
+    let old = now - TimeDelta::hours(2);
+    let rid = Uuid::now_v7();
+    sqlx::query(
+        "insert into schedule_runs(id,schedule_id,owner_id,scheduled_at,claimed_revision,state,manual,idempotency_key,attempt_id,lease_at)
+         values($1,$2,$3,$4,1,'claimed',false,$5,$6,$7)",
+    )
+    .bind(rid)
+    .bind(Uuid::parse_str(&id).unwrap())
+    .bind(f.seed.owner_id)
+    .bind(old)
+    .bind("guarded-reclaim")
+    .bind(Uuid::now_v7())
+    .bind(old)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let recover = |pool: PgPool| async move {
+        let mut conn = pool.acquire().await.unwrap();
+        recover_interrupted(&mut conn, Some(RECLAIM_LEASE), now)
+            .await
+            .unwrap()
+    };
+    let guard = AdmittingGuard::insert(rid);
+    let first = recover(pool.clone()).await;
+    assert!(
+        !first.iter().any(|run| run.run.id == rid),
+        "a run admitted by this hub is not reclaimed"
+    );
+    drop(guard);
+    let second = recover(pool.clone()).await;
+    assert!(
+        second.iter().any(|run| run.run.id == rid),
+        "after the guard is gone the stale run is reclaimed"
+    );
+}
+
+/// B: удаление держит замок расписания, восстановление — расписание затем
+/// запуск. Оба пути обязаны завершиться, а не сойтись во взаимоблокировке.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn delete_and_recovery_share_one_lock_order(pool: PgPool) {
+    use canterlot_hub::schedules::{RECLAIM_LEASE, recover_interrupted};
+    use std::time::Duration;
+
+    let f = Fixture::new(pool.clone()).await;
+    let id = create(&f, existing(&f), "0 9 * * *").await;
+    let schedule = Uuid::parse_str(&id).unwrap();
+    let now = Utc::now();
+    let rid = Uuid::now_v7();
+    sqlx::query(
+        "insert into schedule_runs(id,schedule_id,owner_id,scheduled_at,claimed_revision,state,manual,idempotency_key,attempt_id,lease_at)
+         values($1,$2,$3,$4,1,'claimed',false,$5,$6,$7)",
+    )
+    .bind(rid)
+    .bind(schedule)
+    .bind(f.seed.owner_id)
+    .bind(now - TimeDelta::hours(2))
+    .bind("delete-race")
+    .bind(Uuid::now_v7())
+    .bind(now - TimeDelta::hours(2))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let path = format!("/api/v1/schedules/{id}");
+    let delete = f.client.send(
+        Method::DELETE,
+        &path,
+        Some("delete-race"),
+        Some(json!({"base_revision": 1})),
+    );
+    let recovered = {
+        let pool = pool.clone();
+        async move {
+            let mut conn = pool.acquire().await.unwrap();
+            recover_interrupted(&mut conn, Some(RECLAIM_LEASE), now)
+                .await
+                .unwrap()
+        }
+    };
+    let (deleted, _) = tokio::time::timeout(Duration::from_secs(15), async {
+        tokio::join!(delete, recovered)
+    })
+    .await
+    .expect("delete and recovery must not deadlock");
+    assert_eq!(deleted.status.as_u16(), 200, "{}", String::from_utf8_lossy(&deleted.body));
+    let runs: i64 = sqlx::query_scalar("select count(*) from schedule_runs where schedule_id=$1")
+        .bind(schedule)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(runs, 0, "delete cascades to runs");
+}
+
+/// 14: `started` и его событие живут в одной транзакции — по завершении
+/// приёмки состояние без события невозможно.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn started_and_its_event_commit_together(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
+    let id = create(&f, existing(&f), "0 9 * * *").await;
+    due(&pool, &id, Utc::now() - TimeDelta::seconds(30)).await;
+    scheduler(&f).tick(Utc::now()).await.unwrap();
+    let rid = run_id(&pool, &id).await;
+    wait_state(&pool, rid, "started").await;
+    let events: Vec<Value> = sqlx::query_scalar(
+        "select payload from events where kind='schedule_run_changed'
+          and payload->>'id'=$1",
+    )
+    .bind(rid.to_string())
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let started: Vec<&Value> = events
+        .iter()
+        .filter(|event| event["state"] == "started")
+        .collect();
+    assert_eq!(started.len(), 1, "exactly one started event: {events:?}");
+}
+
+/// 16: маршрутизированная цель нового сеанса проходит весь путь через тик:
+/// заявка, выбор исполнителя по политике, creation и первый ввод.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn routed_new_session_target_runs_through_the_tick(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
+    sqlx::query("update machines set availability='available' where id=$1")
+        .bind(f.seed.machine_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("update owners set routing_policy=$2, spawn_whitelist=$3 where id=$1")
+        .bind(f.seed.owner_id)
+        .bind(json!({
+            "task_types": {
+                "audit": {"title": "Проверка", "candidates": [
+                    {"harness":"synthetic","model":"synthetic-small","effort":"high"}
+                ]}
+            }
+        }))
+        .bind(json!([{"harness":"synthetic","model":"synthetic-small"}]))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let target = json!({
+        "kind": "new_session",
+        "machine_id": f.seed.machine_id,
+        "workdir": "/tmp/scheduled-routed",
+        "route": {"task_type": "audit"},
+    });
+    let id = create(&f, target, "0 9 * * *").await;
+    let before: i64 = sqlx::query_scalar("select count(*) from conversations where owner_id=$1")
+        .bind(f.seed.owner_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    due(&pool, &id, Utc::now() - TimeDelta::seconds(30)).await;
+    scheduler(&f).tick(Utc::now()).await.unwrap();
+    let rid = run_id(&pool, &id).await;
+    wait_state(&pool, rid, "started").await;
+    let after: i64 = sqlx::query_scalar("select count(*) from conversations where owner_id=$1")
+        .bind(f.seed.owner_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(after, before + 1, "the routed session was created");
+    let (harness, model): (String, String) = sqlx::query_as(
+        "select c.harness,c.model from conversations c
+          join schedule_runs r on r.session_id=c.id where r.id=$1",
+    )
+    .bind(rid)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(harness, "synthetic");
+    assert_eq!(model, "synthetic-small");
+    let inputs: i64 = sqlx::query_scalar(
+        "select count(*) from inputs where conversation_id=(select session_id from schedule_runs where id=$1)
+          and content->0->>'text'='посмотреть коммиты'",
+    )
+    .bind(rid)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(inputs, 1, "the routed session got its first input");
+}
+
