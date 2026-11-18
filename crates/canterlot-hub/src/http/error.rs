@@ -115,6 +115,8 @@ error_codes! {
     NotPending => "not_pending", 409, Browser, Never, "Отложенное сообщение уже обработано";
     ScheduleTimeOutOfRange => "schedule_time_out_of_range", 422, Browser, Never, "Время отправки вне допустимого диапазона";
     TooManyScheduled => "too_many_scheduled", 409, Browser, Never, "Слишком много отложенных сообщений";
+    ScheduleInvalid => "schedule_invalid", 422, Browser, Never, "Некорректное расписание";
+    ScheduleRevisionConflict => "schedule_revision_conflict", 409, Browser, AfterCondition, "Расписание изменено с другого устройства";
     MachineNotFound => "machine_not_found", 404, Browser, Never, "Машина не найдена";
     MachineUnavailable => "machine_unavailable", 409, Delivery, AfterCondition, "Машина недоступна";
     MachineOffline => "machine_offline", 409, Delivery, AfterCondition, "Машина не на связи";

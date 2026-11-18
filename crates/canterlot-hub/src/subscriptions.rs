@@ -36,6 +36,7 @@ pub fn resolve_scope(owner_id: Uuid, wire: &str) -> Result<Scope, ScopeError> {
     match wire {
         "conversations" => Ok(Scope::Conversations { owner_id }),
         "machines" => Ok(Scope::Machines { owner_id }),
+        "schedules" => Ok(Scope::Schedules { owner_id }),
         _ => wire
             .strip_prefix("conversation:")
             .filter(|id| id.len() == 36)
@@ -51,9 +52,9 @@ pub async fn authorize(
     scope: &Scope,
 ) -> Result<bool, sqlx::Error> {
     match scope {
-        Scope::Conversations { owner_id: id } | Scope::Machines { owner_id: id } => {
-            Ok(*id == owner_id)
-        }
+        Scope::Conversations { owner_id: id }
+        | Scope::Machines { owner_id: id }
+        | Scope::Schedules { owner_id: id } => Ok(*id == owner_id),
         Scope::Conversation { id } => {
             sqlx::query_scalar(
                 "select exists(select 1 from conversations where id=$1 and owner_id=$2)",

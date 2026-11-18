@@ -10,6 +10,7 @@ pub enum Scope {
     Conversations { owner_id: Uuid },
     Conversation { id: Uuid },
     Machines { owner_id: Uuid },
+    Schedules { owner_id: Uuid },
 }
 
 impl Scope {
@@ -17,6 +18,7 @@ impl Scope {
         match self {
             Self::Conversations { owner_id } => format!("owner:{owner_id}:conversations"),
             Self::Machines { owner_id } => format!("owner:{owner_id}:machines"),
+            Self::Schedules { owner_id } => format!("owner:{owner_id}:schedules"),
             Self::Conversation { id } => format!("conversation:{id}"),
         }
     }
@@ -337,6 +339,8 @@ pub const CLIENT_KINDS: &[&str] = &[
     "machine_lease_changed",
     "machine_update",
     "plan_task_changed",
+    "schedule_changed",
+    "schedule_run_changed",
     "hidden",
     "oversized",
 ];
@@ -349,6 +353,7 @@ pub fn wire_scope(scope: &Scope) -> String {
     match scope {
         Scope::Conversations { .. } => "conversations".into(),
         Scope::Machines { .. } => "machines".into(),
+        Scope::Schedules { .. } => "schedules".into(),
         Scope::Conversation { id } => format!("conversation:{id}"),
     }
 }
@@ -443,6 +448,8 @@ pub fn project_for_client(events: Vec<StoredEvent>) -> Vec<WireEvent> {
             e.scope.clone()
         } else if e.scope.ends_with(":machines") {
             "machines".into()
+        } else if e.scope.ends_with(":schedules") {
+            "schedules".into()
         } else {
             "conversations".into()
         };

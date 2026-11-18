@@ -289,6 +289,9 @@ async fn range(
         "machines" => Scope::Machines {
             owner_id: o.owner_id,
         },
+        "schedules" => Scope::Schedules {
+            owner_id: o.owner_id,
+        },
         wire => {
             let id = wire
                 .strip_prefix("conversation:")

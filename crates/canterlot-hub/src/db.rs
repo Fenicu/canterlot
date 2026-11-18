@@ -59,6 +59,7 @@ transient_from_db!(
     crate::groups::GroupError,
     crate::presets::PresetError,
     crate::scheduler::ScheduleError,
+    crate::schedules::ScheduleError,
     crate::session_tools::accept::AcceptError,
 );
 
