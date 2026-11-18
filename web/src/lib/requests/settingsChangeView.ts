@@ -199,6 +199,9 @@ function policyDiff(beforeValue: unknown, afterValue: unknown): DiffResult {
       }
     } else {
       const diff = taskDiff(oldTask, newTask);
+      if (diff.lines.length) {
+        lines.push({ mark: 'context', text: `Тип задачи «${text(newTask.title) || key}»` });
+      }
       lines.push(...diff.lines);
       unchanged += diff.unchanged;
     }

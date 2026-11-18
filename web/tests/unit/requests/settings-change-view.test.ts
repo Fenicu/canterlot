@@ -54,20 +54,21 @@ describe('routingDiff', () => {
     const before = policy({ one: task('Тип один', [candidate('h1', 'm1'), candidate('h2', 'm2')]) });
     const after = policy({ one: task('Тип один', [candidate('h2', 'm2'), candidate('h1', 'm1')]) });
     const result = routingDiff(before, after);
-    expect(result.lines).toHaveLength(1);
-    expect(result.lines[0]).toMatchObject({ mark: 'changed' });
-    expect(result.lines[0]!.text).toContain('Порядок кандидатов');
-    expect(result.lines[0]!.text).toContain('h2/m2 → h1/m1');
+    expect(result.lines).toHaveLength(2);
+    expect(result.lines[0]).toEqual({ mark: 'context', text: 'Тип задачи «Тип один»' });
+    expect(result.lines[1]).toMatchObject({ mark: 'changed' });
+    expect(result.lines[1]!.text).toContain('Порядок кандидатов');
+    expect(result.lines[1]!.text).toContain('h2/m2 → h1/m1');
   });
 
   it('только смена усилия: human-readable старое и новое значение', () => {
     const before = policy({ one: task('Тип один', [candidate('h1', 'm1', { effort: 'low' })]) });
     const after = policy({ one: task('Тип один', [candidate('h1', 'm1', { effort: 'high' })]) });
     const result = routingDiff(before, after);
-    expect(result.lines).toHaveLength(1);
-    expect(result.lines[0]!.text).toContain('Усилие');
-    expect(result.lines[0]!.text).toContain('низкое');
-    expect(result.lines[0]!.text).toContain('высокое');
+    expect(result.lines).toHaveLength(2);
+    expect(result.lines[1]!.text).toContain('Усилие');
+    expect(result.lines[1]!.text).toContain('низкое');
+    expect(result.lines[1]!.text).toContain('высокое');
   });
 
   it('автопинг, сторож и порог провайдера описаны по отдельности', () => {
@@ -83,6 +84,24 @@ describe('routingDiff', () => {
     expect(texts.some((text) => text.includes('Автопинг') && text.includes('5'))).toBe(true);
     expect(texts.some((text) => text.includes('Сторож') && text.includes('30') && text.includes('45'))).toBe(true);
     expect(texts.some((text) => text.includes('Порог') && text.includes('70') && text.includes('80'))).toBe(true);
+  });
+
+  it('изменения нескольких типов задач идут под заголовком своего типа', () => {
+    const before = policy({
+      one: task('Тип один', [candidate('h1', 'm1')]),
+      two: task('Тип два', [candidate('h3', 'm3')])
+    });
+    const after = policy({
+      one: task('Тип один', [candidate('h1', 'm1'), candidate('h2', 'm2')]),
+      two: task('Тип два', [])
+    });
+    const lines = routingDiff(before, after).lines;
+    expect(lines.map((line) => [line.mark, line.text])).toEqual([
+      ['context', 'Тип задачи «Тип один»'],
+      ['added', 'Добавлен кандидат h2/m2'],
+      ['context', 'Тип задачи «Тип два»'],
+      ['removed', 'Удалён кандидат h3/m3']
+    ]);
   });
 
   it('тип задачи добавлен и удалён', () => {
