@@ -491,6 +491,7 @@ fn exec_records_roundtrip() {
         "NOT_APPLICABLE",
         "SUPERSEDED",
         "REJECTED_STALE",
+        "TURN_MISMATCH",
     ]
     .into_iter()
     .enumerate()
@@ -539,6 +540,8 @@ fn ipc_messages_roundtrip_and_limit() {
         ipc::control_to_supervisor::Msg::Interrupt(ipc::InterruptRequest {
             command_id: "command".into(),
             dispatch_attempt: 3,
+            expected_turn_id: "turn".into(),
+            progress_checkpoint: 42,
         }),
         ipc::control_to_supervisor::Msg::Stop(ipc::StopRequest {
             command_id: "command".into(),
@@ -906,6 +909,8 @@ fn pilot_records_roundtrip() {
             cpu_permille: 80,
             rss_bytes: 1000,
             descendants: Some(2),
+            cpu_valid: Some(true),
+            cli_alive: Some(true),
         }],
     };
     let limits = LimitsReport {

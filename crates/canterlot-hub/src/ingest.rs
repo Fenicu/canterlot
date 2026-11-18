@@ -920,33 +920,7 @@ impl Ingest {
 }
 
 fn touches_activity(body: &Body) -> bool {
-    matches!(
-        body,
-        Body::PhaseChanged(_)
-            | Body::BlockStarted(_)
-            | Body::BlockDelta(_)
-            | Body::BlockFinal(_)
-            | Body::BlockIncomplete(_)
-            | Body::RunFinished(_)
-            | Body::TransmissionStarted(_)
-            | Body::InputAccepted(_)
-            | Body::LimitObserved(_)
-            | Body::LimitReached(_)
-            | Body::RequestOpened(_)
-            | Body::RequestClosed(_)
-            | Body::DecisionApplied(_)
-            | Body::DecisionNotApplied(_)
-            | Body::TodoUpdated(_)
-            | Body::BackgroundWorkChanged(_)
-            | Body::SessionStuck(_)
-            | Body::CompactionEvent(_)
-            | Body::ContextProgress(_)
-            | Body::CompactionStatus(_)
-            | Body::SecretDelivered(_)
-            | Body::SecretFailed(_)
-            | Body::SecretRemoved(_)
-            | Body::SecretRemoveFailed(_)
-    )
+    canterlot_proto::is_stream_progress(body)
 }
 
 impl Ingest {
@@ -1594,6 +1568,7 @@ async fn apply_body(
                 InterruptState::NotApplicable => "not_applicable",
                 InterruptState::Superseded => "superseded",
                 InterruptState::RejectedStale => "rejected_stale",
+                InterruptState::TurnMismatch => "turn_mismatch",
                 InterruptState::Unspecified => return Err(IngestError::InvalidRecord),
             };
             if let Some(target) = command(conn, machine_id, command_id).await?

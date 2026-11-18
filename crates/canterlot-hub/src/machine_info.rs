@@ -353,6 +353,12 @@ pub(crate) async fn apply_metrics_with_registry(
         .collect();
     let executions:Vec<_>=m.executions.iter().map(|e| {
         let mut row = json!({"execution_id":e.execution_id,"alive":e.alive,"cpu_permille":e.cpu_permille,"rss_bytes":e.rss_bytes});
+        if let Some(valid) = e.cpu_valid {
+            row["cpu_valid"] = json!(valid);
+        }
+        if let Some(alive) = e.cli_alive {
+            row["cli_alive"] = json!(alive);
+        }
         if let Some(descendants) = e.descendants {
             row["descendants"] = json!(descendants);
         }

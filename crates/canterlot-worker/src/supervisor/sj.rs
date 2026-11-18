@@ -37,6 +37,8 @@ pub(super) struct Sj {
     pending: Vec<Vec<u8>>,
     requests: BTreeMap<String, RequestState>,
     closed_reason: Option<String>,
+    /// Номер последней записи, которая свидетельствует о прогрессе хода.
+    progress_seq: u64,
     #[cfg(test)]
     commits: usize,
 }
@@ -60,6 +62,7 @@ impl Sj {
             pending: Vec::new(),
             requests: BTreeMap::new(),
             closed_reason: None,
+            progress_seq: 0,
             #[cfg(test)]
             commits: 0,
         };
@@ -76,6 +79,9 @@ impl Sj {
     }
 
     fn observe(&mut self, seq: u64, body: &Body) {
+        if canterlot_proto::is_stream_progress(body) {
+            self.progress_seq = seq;
+        }
         match body {
             Body::JournalClosed(f) => self.closed_reason = Some(f.reason.clone()),
             Body::RequestOpened(opened) => {
@@ -150,6 +156,10 @@ impl Sj {
 
     pub fn journal_id(&self) -> Uuid {
         self.journal_id
+    }
+
+    pub fn progress_seq(&self) -> u64 {
+        self.progress_seq
     }
 
     pub fn last_seq(&self) -> u64 {

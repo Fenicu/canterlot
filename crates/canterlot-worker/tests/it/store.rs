@@ -219,7 +219,10 @@ fn all_known_command_kinds_store_full_payloads() {
             target_command_id: Uuid::now_v7().to_string(),
             target_dispatch_attempt: 5,
         }),
-        command::Kind::Interrupt(Interrupt {}),
+        command::Kind::Interrupt(Interrupt {
+            expected_turn_id: "turn".into(),
+            progress_checkpoint: 7,
+        }),
         command::Kind::StartExecution(StartExecution {
             conversation_id: Uuid::now_v7().to_string(),
             harness: "codex".into(),

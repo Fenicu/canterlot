@@ -227,6 +227,16 @@ impl MetricsCollector {
                 );
                 rss = rss.saturating_add(p.rss);
             }
+            // Образец CPU доказателен, только если у самого CLI был прошлый замер
+            // с тем же временем старта: после перезапуска воркера или смены pid первая
+            // выборка нуля не доказывает.
+            let cli = execution.members.last().copied();
+            let cli_alive = cli.is_some_and(|(pid, start)| {
+                processes.get(&pid).is_some_and(|p| p.start == start)
+            });
+            let cpu_valid = cli_alive
+                && elapsed.is_some()
+                && cli.is_some_and(|key| self.previous.contains_key(&key));
             let cpu = elapsed.filter(|s| *s > 0.0).map_or(0, |s| {
                 ((delta as f64 / ticks / s * 1000.0).round()).min(u32::MAX as f64) as u32
             });
@@ -236,6 +246,8 @@ impl MetricsCollector {
                 cpu_permille: cpu,
                 rss_bytes: rss,
                 descendants: Some(descendants.min(u32::MAX as usize) as u32),
+                cpu_valid: Some(cpu_valid),
+                cli_alive: Some(cli_alive),
             });
         }
         self.cpu = Some(current);

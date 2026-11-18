@@ -170,6 +170,39 @@ fn execution_cpu_sums_descendants_of_the_cli() {
     assert_eq!(row.rss_bytes, 36 * rustix::param::page_size() as u64);
 }
 #[test]
+fn cpu_sample_is_valid_only_with_a_baseline_for_the_matching_cli() {
+    let dir = fixture();
+    process(dir.path(), 10, 1, 50, 0);
+    let probe = ExecutionProbe {
+        execution_id: Uuid::now_v7(),
+        members: vec![(10, 50)],
+    };
+    let mut c = collector(dir.path());
+    let first = c.sample(std::slice::from_ref(&probe)).unwrap().executions.remove(0);
+    assert_eq!(first.cpu_valid, Some(false), "the first sample has no baseline");
+    assert_eq!(first.cli_alive, Some(true));
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    let second = c.sample(std::slice::from_ref(&probe)).unwrap().executions.remove(0);
+    assert_eq!(second.cpu_valid, Some(true));
+    // CLI с другим временем старта (pid переиспользован) — другой процесс: базы нет.
+    process(dir.path(), 10, 1, 77, 0);
+    let reused = ExecutionProbe {
+        execution_id: probe.execution_id,
+        members: vec![(10, 77)],
+    };
+    let third = c.sample(&[reused]).unwrap().executions.remove(0);
+    assert_eq!(third.cpu_valid, Some(false));
+    // CLI умер, а потомок жив: execution «жив», но CLI нет.
+    process(dir.path(), 11, 10, 78, 0);
+    let gone = ExecutionProbe {
+        execution_id: probe.execution_id,
+        members: vec![(99, 1)],
+    };
+    let row = c.sample(&[gone]).unwrap().executions.remove(0);
+    assert_eq!(row.cli_alive, Some(false));
+    assert_eq!(row.cpu_valid, Some(false));
+}
+#[test]
 fn metrics_message_has_only_whitelisted_labels_and_stays_small() {
     let dir = fixture();
     let sample = collector(dir.path()).sample(&[]).unwrap();

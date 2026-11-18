@@ -2407,12 +2407,14 @@ impl Actor {
                 )
                 .await
             }
-            Some(Kind::Interrupt(_)) => {
+            Some(Kind::Interrupt(interrupt)) => {
                 if live && command.execution_generation == self.generation {
                     if !self
                         .send(down::Msg::Interrupt(InterruptRequest {
                             command_id: cid_text,
                             dispatch_attempt: attempt,
+                            expected_turn_id: interrupt.expected_turn_id,
+                            progress_checkpoint: interrupt.progress_checkpoint,
                         }))
                         .await
                     {

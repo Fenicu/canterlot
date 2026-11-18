@@ -1679,6 +1679,8 @@ async fn two_busy_cpu_samples_after_the_turn_mark_background_work(pool: PgPool) 
                 cpu_permille: 200,
                 rss_bytes: 1,
                 descendants: Some(1),
+                cpu_valid: Some(true),
+                cli_alive: Some(true),
             }],
             ..Default::default()
         };

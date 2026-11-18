@@ -276,7 +276,16 @@ message WithdrawInput {
   uint32 target_dispatch_attempt = 2;
 }
 
-message Interrupt {}
+// Возможность guarded_interrupt_v1: хаб называет ход и отметку прогресса, на
+// которые рассчитан interrupt. Пустой `expected_turn_id` — прежний безусловный
+// interrupt (старый хаб, кнопка владельца «Прервать»).
+message Interrupt {
+  // Идентификатор хода: command_id ввода, который идёт сейчас.
+  string expected_turn_id = 1;
+  // Номер записи журнала сессии, подтверждённой хабом к моменту решения.
+  // Если после неё воркер записал событие потока, ход ожил и прерывать его нельзя.
+  uint64 progress_checkpoint = 2;
+}
 
 // Сжать контекст живой сессии. Тратит токены, поэтому только по действию владельца.
 message CompactSession {}
@@ -626,6 +635,8 @@ enum InterruptState {
   NOT_APPLICABLE = 4;
   SUPERSEDED = 5;
   REJECTED_STALE = 6;
+  // Ход или отметка прогресса уже не совпадают с теми, на которые рассчитан interrupt.
+  TURN_MISMATCH = 7;
 }
 
 message InterruptStatus {
@@ -733,6 +744,11 @@ message ExecutionProcess {
   uint64 rss_bytes = 4;
   // Живые потомки CLI без зомби. Нет поля — старый воркер, неизвестно.
   optional uint32 descendants = 5;
+  // У CLI есть образец потребления CPU за предыдущую выборку: первая выборка
+  // после старта воркера нуля не доказывает. Нет поля — старый воркер.
+  optional bool cpu_valid = 6;
+  // Сам процесс CLI (а не только его потомок) жив.
+  optional bool cli_alive = 7;
 }
 
 // Сторож машины: кэш крупных каталогов сборки, процессы, пережившие свои

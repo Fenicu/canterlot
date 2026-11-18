@@ -978,8 +978,13 @@ impl Supervisor {
                 withdraw.target_dispatch_attempt,
             )?,
             down::Msg::Interrupt(interrupt) => {
-                self.on_interrupt(interrupt.command_id, interrupt.dispatch_attempt)
-                    .await?
+                self.on_interrupt_guarded(
+                    interrupt.command_id,
+                    interrupt.dispatch_attempt,
+                    interrupt.expected_turn_id,
+                    interrupt.progress_checkpoint,
+                )
+                .await?
             }
             down::Msg::Compact(compact) => {
                 self.on_compact(compact.command_id, compact.dispatch_attempt)
@@ -2939,9 +2944,31 @@ impl Supervisor {
         Ok(())
     }
 
+    #[cfg(test)]
     async fn on_interrupt(&mut self, id: String, attempt: u32) -> Result<(), SupervisorError> {
+        self.on_interrupt_guarded(id, attempt, String::new(), 0)
+            .await
+    }
+
+    /// Interrupt, рассчитанный на конкретный ход: пустой `expected_turn` — прежний
+    /// безусловный. Опоздавший interrupt не должен прервать следующий ход или ход,
+    /// который успел ожить: расхождение отвечает `TurnMismatch`, процесс не трогается.
+    async fn on_interrupt_guarded(
+        &mut self,
+        id: String,
+        attempt: u32,
+        expected_turn: String,
+        checkpoint: u64,
+    ) -> Result<(), SupervisorError> {
         if !self.known_interrupts.insert((id.clone(), attempt)) {
             return Ok(());
+        }
+        if !expected_turn.is_empty() {
+            let same_turn = self.active_turn.map(|turn| turn.to_string()).as_deref()
+                == Some(expected_turn.as_str());
+            if !same_turn || self.sj.progress_seq() > checkpoint {
+                return self.interrupt_record(&id, attempt, InterruptState::TurnMismatch);
+            }
         }
         match &self.lifecycle {
             Lifecycle::Stopping(_) | Lifecycle::Draining { .. } => {
@@ -3616,6 +3643,7 @@ mod tests {
         transmit_calls: Vec<Uuid>,
         agent_call_errors: Vec<(Uuid, String)>,
         ack_interrupt: bool,
+        interrupt_calls: u32,
         steer_accept: bool,
         steer_transmitting: bool,
         steer_undetermined: bool,
@@ -3684,6 +3712,7 @@ mod tests {
         }
 
         async fn interrupt(&mut self) -> InterruptOutcome {
+            self.state.lock().unwrap().interrupt_calls += 1;
             if self.state.lock().unwrap().ack_interrupt {
                 InterruptOutcome::Acknowledged
             } else {
@@ -4697,6 +4726,68 @@ mod tests {
             state.lock().unwrap().transmit_calls,
             vec![first.0, second.0]
         );
+    }
+
+    #[tokio::test]
+    async fn guarded_interrupt_for_another_turn_is_refused_without_touching_the_cli() {
+        let (_dir, mut supervisor, state) = test_supervisor();
+        state.lock().unwrap().ack_interrupt = true;
+        queue_owner(&mut supervisor);
+        supervisor.try_transmit().await.unwrap();
+        let checkpoint = supervisor.sj.progress_seq();
+        supervisor
+            .on_interrupt_guarded(
+                "int-1".into(),
+                1,
+                Uuid::now_v7().to_string(),
+                checkpoint,
+            )
+            .await
+            .unwrap();
+        assert_eq!(state.lock().unwrap().interrupt_calls, 0);
+        assert!(!supervisor.aborting_turn && !supervisor.interrupted);
+        assert!(supervisor.pending_interrupts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn guarded_interrupt_after_newer_progress_is_refused() {
+        let (_dir, mut supervisor, state) = test_supervisor();
+        state.lock().unwrap().ack_interrupt = true;
+        let first = queue_owner(&mut supervisor);
+        supervisor.try_transmit().await.unwrap();
+        let checkpoint = supervisor.sj.progress_seq();
+        // Ход ожил после того, как хаб принял решение по старой картине.
+        supervisor
+            .on_adapter_event(AdapterEvent::Phase {
+                phase: crate::adapter::Phase::Generating,
+                tool_name: None,
+                summary: None,
+            })
+            .await
+            .unwrap();
+        assert!(supervisor.sj.progress_seq() > checkpoint);
+        supervisor
+            .on_interrupt_guarded("int-1".into(), 1, first.0.to_string(), checkpoint)
+            .await
+            .unwrap();
+        assert_eq!(state.lock().unwrap().interrupt_calls, 0);
+        assert!(!supervisor.aborting_turn && supervisor.pending_interrupts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn guarded_interrupt_for_the_same_turn_and_checkpoint_goes_through() {
+        let (_dir, mut supervisor, state) = test_supervisor();
+        state.lock().unwrap().ack_interrupt = true;
+        let first = queue_owner(&mut supervisor);
+        supervisor.try_transmit().await.unwrap();
+        let checkpoint = supervisor.sj.progress_seq();
+        supervisor
+            .on_interrupt_guarded("int-1".into(), 1, first.0.to_string(), checkpoint)
+            .await
+            .unwrap();
+        assert_eq!(state.lock().unwrap().interrupt_calls, 1);
+        assert!(supervisor.aborting_turn);
+        assert_eq!(supervisor.pending_interrupts.len(), 1);
     }
 
     fn permission_opened(request_id: &str) -> AdapterEvent {

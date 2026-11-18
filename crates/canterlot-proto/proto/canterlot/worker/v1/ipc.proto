@@ -126,6 +126,9 @@ message DeliverAck {
 message InterruptRequest {
   string command_id = 1;
   uint32 dispatch_attempt = 2;
+  // Те же поля, что у Interrupt в worker.proto; пустой ход — безусловный interrupt.
+  string expected_turn_id = 3;
+  uint64 progress_checkpoint = 4;
 }
 
 message CompactRequest {

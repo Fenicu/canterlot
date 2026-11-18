@@ -147,6 +147,8 @@ async fn execution_cpu_above_one_core_is_accepted(pool: PgPool) -> TestResult {
             cpu_permille: 2400,
             rss_bytes: 4096,
             descendants: Some(3),
+            cpu_valid: Some(true),
+            cli_alive: Some(true),
         },
         ExecutionProcess {
             execution_id: second.to_string(),
@@ -154,6 +156,8 @@ async fn execution_cpu_above_one_core_is_accepted(pool: PgPool) -> TestResult {
             cpu_permille: 1000,
             rss_bytes: 4096,
             descendants: Some(0),
+            cpu_valid: Some(true),
+            cli_alive: Some(true),
         },
     ];
     assert_eq!(
@@ -189,6 +193,8 @@ async fn broken_execution_counter_drops_only_that_entry(pool: PgPool) -> TestRes
             cpu_permille: 2400,
             rss_bytes: 4096,
             descendants: Some(1),
+            cpu_valid: Some(true),
+            cli_alive: Some(true),
         },
         ExecutionProcess {
             execution_id: hot.to_string(),
@@ -196,6 +202,8 @@ async fn broken_execution_counter_drops_only_that_entry(pool: PgPool) -> TestRes
             cpu_permille: 4201,
             rss_bytes: 4096,
             descendants: Some(0),
+            cpu_valid: Some(true),
+            cli_alive: Some(true),
         },
         ExecutionProcess {
             execution_id: huge.to_string(),
@@ -203,6 +211,8 @@ async fn broken_execution_counter_drops_only_that_entry(pool: PgPool) -> TestRes
             cpu_permille: 10,
             rss_bytes: i64::MAX as u64 + 1,
             descendants: Some(0),
+            cpu_valid: Some(true),
+            cli_alive: Some(true),
         },
     ];
     assert_eq!(

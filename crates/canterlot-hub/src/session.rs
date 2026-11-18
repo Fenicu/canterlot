@@ -28,6 +28,8 @@ pub const CAPABILITY_COMPACT_V1: &str = "compact_v1";
 pub const CAPABILITY_BACKGROUND_V1: &str = "background_v1";
 pub const CAPABILITY_SESSION_TOOLS_V1: &str = "session_tools_v1";
 pub const CAPABILITY_SEND_NOW_V1: &str = "send_now_v1";
+/// Воркер проверяет ход и отметку прогресса охранного `interrupt` и отказывает при расхождении.
+pub const CAPABILITY_GUARDED_INTERRUPT_V1: &str = "guarded_interrupt_v1";
 pub const CAPABILITY_OWNER_EXIT_V1: &str = "owner_exit_v1";
 pub const CAPABILITY_PROMPT_SUGGESTIONS_V1: &str = "prompt_suggestions_v1";
 pub const CAPABILITY_SIDE_CHAT_V1: &str = "side_chat_v1";

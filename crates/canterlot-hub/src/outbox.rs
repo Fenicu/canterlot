@@ -233,6 +233,14 @@ fn to_proto_with_capability(
     if row.kind == "steer_input" && !has(crate::session::CAPABILITY_SEND_NOW_V1) {
         return Err(OutboxError::CapabilityMissing);
     }
+    // Старый воркер проигнорировал бы поля ожидаемого хода и прервал бы любой: охранный
+    // interrupt без возможности не выпускаем.
+    if row.kind == "interrupt"
+        && row.payload.get("expected_turn_id").is_some()
+        && !has(crate::session::CAPABILITY_GUARDED_INTERRUPT_V1)
+    {
+        return Err(OutboxError::CapabilityMissing);
+    }
     if row.kind == "goal_command" && !has(crate::session::CAPABILITY_GOALS_V1) {
         return Err(OutboxError::CapabilityMissing);
     }
@@ -434,7 +442,19 @@ pub fn to_proto(row: &CommandRow) -> Result<Command, OutboxError> {
                     .map_err(|_| OutboxError::InvalidCommand)?,
             })
         }
-        "interrupt" => command::Kind::Interrupt(Interrupt {}),
+        "interrupt" => command::Kind::Interrupt(Interrupt {
+            expected_turn_id: row
+                .payload
+                .get("expected_turn_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            progress_checkpoint: row
+                .payload
+                .get("progress_checkpoint")
+                .and_then(Value::as_u64)
+                .unwrap_or_default(),
+        }),
         "steer_input" => {
             let steer: SteerPayload = serde_json::from_value(row.payload.clone())
                 .map_err(|_| OutboxError::InvalidCommand)?;
