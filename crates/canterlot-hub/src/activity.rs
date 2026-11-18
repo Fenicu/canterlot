@@ -312,6 +312,11 @@ pub fn hung_in_generation(i: &ActivityInputs, t: &Thresholds) -> bool {
     let Some(e) = &i.execution else {
         return false;
     };
+    // При испорченной связи проектор всё равно показывает `working("no_link")`:
+    // спасать ход по неполной картине нельзя.
+    if i.link != LinkState::Available {
+        return false;
+    }
     if matches!(e.phase.as_str(), "running_tool" | "context_maintenance") {
         return false;
     }
