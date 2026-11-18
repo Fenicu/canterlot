@@ -120,6 +120,7 @@ export function seedToolCards(api: FakeHubApi, opts: { now?: number; working?: b
   feed.call(files, 'writeClaude', 'Write', { file_path: '/home/owner/canterlot/web/src/lib/timeline/cards/diff.ts', content: NEW_MODULE }, 'File created successfully at: /home/owner/canterlot/web/src/lib/timeline/cards/diff.ts');
   feed.text(files, 'OpenCode правит отчёт.');
   feed.call(files, 'editOpencode', 'edit', { filePath: '/srv/reports/limit.py', oldString: PY_OLD, newString: PY_NEW }, 'Edit applied successfully.');
+  feed.call(files, 'writeOpencode', 'write', { filePath: '/work/demo/new.txt', content: 'x\n' }, 'Created file successfully: /work/demo/new.txt');
   feed.text(files, 'Codex правит воркер и пишет заметку.');
   feed.call(files, 'patchCodex', 'apply_patch', CODEX_DIFF, null, { summary: 'crates/canterlot-worker/src/adapter/codex/events.rs, completed' });
   feed.call(files, 'patchCodexAdd', 'apply_patch', CODEX_ADD, null, { summary: 'docs/bubbles.md, completed' });

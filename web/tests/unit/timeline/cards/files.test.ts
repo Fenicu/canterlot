@@ -51,6 +51,9 @@ describe('edit card', () => {
     const opencode = edit(made('write', { filePath: '/w/b.ts', content: 'x\ny' }, 'Wrote file successfully.'))!;
     expect(opencode.data.kind).toBe('write');
     expect(opencode.line).toBe('Запись b.ts · +2 −0');
+    const fresh = edit(made('write', { filePath: '/w/new.txt', content: 'x\n' }, 'Created file successfully: /w/new.txt'))!;
+    expect(fresh.data.kind).toBe('add');
+    expect(fresh.line).toBe('Новый файл new.txt · +1 −0');
   });
 
   it('codex_file_change_takes_paths_from_the_summary', () => {

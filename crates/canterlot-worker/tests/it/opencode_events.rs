@@ -528,6 +528,33 @@ fn shell_exit_status_reaches_the_summary() {
     );
 }
 
+// Ответ write о создании файла доходит до блока результата: по нему карточка отличит новый файл.
+#[test]
+fn write_creation_result_reaches_the_tool_result() {
+    let mut translator = Translator::new("ses_a", HashMap::new());
+    translator.begin_run(Some(Uuid::now_v7()));
+    translator.feed(&json!({"type": "session.tool.input.started", "data": {
+        "sessionID": "ses_a", "assistantMessageID": "msg_1", "id": "call_1", "name": "write"}}));
+    let mut out = translator.feed(&json!({"type": "session.tool.called", "data": {
+        "sessionID": "ses_a", "assistantMessageID": "msg_1", "id": "call_1",
+        "input": {"path": "new.txt", "content": "x\n"}}}));
+    out.extend(
+        translator.feed(&json!({"type": "session.tool.success", "data": {
+        "sessionID": "ses_a", "assistantMessageID": "msg_1", "id": "call_1",
+        "content": [{"type": "text", "text": "Created file successfully: new.txt"}],
+        "metadata": {"files": [{"file": "new.txt", "status": "created"}], "truncated": false}}})),
+    );
+    let tools = tools_of(out);
+    assert_eq!(
+        tools[0].result_text.as_deref(),
+        Some("Created file successfully: new.txt")
+    );
+    assert_eq!(
+        tools[0].final_summary.as_deref(),
+        Some("write: new.txt, completed")
+    );
+}
+
 // Карточка команды читает вход из текста вызова: описание и папку надо сохранить.
 #[test]
 fn shell_call_keeps_its_description_and_working_directory() {

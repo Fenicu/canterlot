@@ -94,8 +94,9 @@ export function writeData(call: CardCall): EditData | null {
   const content = call.input.content;
   if (!path || typeof content !== 'string') return null;
   const output = call.output;
-  // Claude Code отвечает по-разному на создание и на перезапись; OpenCode — одинаково.
-  const kind: ChangeKind = /^File created successfully/i.test(output) ? 'add' : /has been (?:updated|overwritten)/i.test(output) ? 'overwrite' : 'write';
+  // Claude Code и OpenCode называют создание в ответе; перезапись называют иначе.
+  const created = /^(?:File created|Created file) successfully/i.test(output);
+  const kind: ChangeKind = created ? 'add' : /has been (?:updated|overwritten)/i.test(output) ? 'overwrite' : 'write';
   return finish(call, [file(path, kind, contentLines(content), content)]);
 }
 

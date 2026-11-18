@@ -251,6 +251,9 @@ test.describe('edit and write cards', () => {
     const opencode = await cardOf(page, seed.blocks.editOpencode!);
     await expect(opencode.locator('[data-role="edit-name"]')).toHaveText('limit.py');
     await expect(opencode.locator('[data-role="edit-counts"]')).toHaveText('+3−2');
+    const created = await cardOf(page, seed.blocks.writeOpencode!);
+    await expect(created.locator('[data-role="edit-kind"]')).toHaveText('Новый файл');
+    await expect(created.locator('[data-role="edit-name"]')).toHaveText('new.txt');
     const codex = await cardOf(page, seed.blocks.patchCodex!);
     await expect(codex).toHaveAttribute('data-card', 'file.patch');
     await expect(codex.locator('[data-role="edit-name"]')).toHaveText('events.rs');
