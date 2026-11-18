@@ -58,13 +58,6 @@ retries = 2
 filter = 'package(canterlot-hub) & binary(it) & test(=outbox::degraded_outbox_resends_past_older_unsent_row_without_spinning)'
 retries = 2
 
-# QUARANTINE: дважды 17.11 под нагрузкой (check.sh --fast у Hy4 и проверка слияний 1.40): цена
-# пакета выходит на плато [1532, 1747, 2297, 2297, ...], а не растёт; похоже на смену плана
-# после автоанализа. Повтор разрешён до разбора источника.
-[[profile.default.overrides]]
-filter = 'package(canterlot-hub) & binary(it) & test(=final_fix_hub::sj_ingest_cost_does_not_grow_with_block_size)'
-retries = 2
-
 # QUARANTINE: 18.11 упал в проверке слияния 1.40 под stress-ng (load 80) и 1/5 отдельно под той же
 # нагрузкой: probe запущен дважды вместо одного. Подозрение: tokio::time::pause() в тесте рядом с
 # настоящим дочерним процессом (codexbar/probe) — таймауты срабатывают автопродвижением часов.

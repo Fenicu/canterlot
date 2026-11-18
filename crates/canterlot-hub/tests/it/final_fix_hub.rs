@@ -507,8 +507,13 @@ async fn sj_successful_batch_has_one_commit_and_cursor_update(pool: PgPool) -> T
 /// хаба и их TOAST, а не временем: время под нагрузкой хоста скачет, а счётчики
 /// `pg_stat_get_xact_*` от нагрузки не зависят. Индексы не считаются: их счётчики включают
 /// мёртвые версии горячих строк (`blocks`, `scope_counters`), а сколько их успела убрать
-/// фоновая очистка, зависит от нагрузки. Перезапись накопленного текста или его чтение на
-/// каждую дельту дали бы рост в разы.
+/// фоновая очистка, зависит от нагрузки. Планы тоже не должны меняться по ходу замера:
+/// автоанализ под нагрузкой успевает сработать между пакетами, статистика появляется
+/// на пустом месте, index/seq-выбор на маленьких таблицах переворачивается, и цена пакета
+/// ступенчато растёт ([1532, 1747, 2297, 2297, ...]) при неизменном продукте. Поэтому
+/// замер идёт без статистики: автовакуум (а с ним и автоанализ) выключен на всех таблицах,
+/// планы одинаковы во всех пакетах. Перезапись накопленного текста или его чтение на
+/// каждую дельту всё равно дали бы рост в разы: строки читаются при любом плане.
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn sj_ingest_cost_does_not_grow_with_block_size(pool: PgPool) -> TestResult {
     let mut run = Run::new(&pool).await;
@@ -517,6 +522,17 @@ async fn sj_ingest_cost_does_not_grow_with_block_size(pool: PgPool) -> TestResul
     sqlx::query("create unlogged table ingest_cost (tx bigint not null, phase text not null, tuples bigint not null)")
         .execute(&pool)
         .await?;
+    let tables: Vec<String> =
+        sqlx::query_scalar("select tablename from pg_tables where schemaname = 'public'")
+            .fetch_all(&pool)
+            .await?;
+    for table in &tables {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "alter table {table} set (autovacuum_enabled = false)"
+        )))
+        .execute(&pool)
+        .await?;
+    }
     // Ожидающие счётчики backend'а копят и прошлые, ещё не сброшенные транзакции,
     // поэтому цена пакета считается разностью снимков в начале и в конце его транзакции.
     sqlx::query("create function snapshot_ingest_cost(phase text) returns void language sql as $$ insert into ingest_cost select txid_current(), phase, sum(pg_stat_get_xact_tuples_returned(c.oid) + pg_stat_get_xact_tuples_fetched(c.oid) + pg_stat_get_xact_tuples_inserted(c.oid) + pg_stat_get_xact_tuples_updated(c.oid) + pg_stat_get_xact_tuples_deleted(c.oid)) from pg_class c where c.oid >= 16384 and c.relkind in ('r', 't') and c.oid <> 'ingest_cost'::regclass $$")
