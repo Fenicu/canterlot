@@ -1627,20 +1627,20 @@ async fn server_turn_end_returns_the_phase_to_awaiting_input() {
     let id = fake.start_turn("run").await;
     fake.finish(id).await;
     let mut adopted = false;
-    let mut last = None;
+    let mut finished = false;
     for _ in 0..8 {
         let event = fake.event().await;
         if matches!(event, AdapterEvent::RunAdopted { input_command_id } if input_command_id == id)
         {
             adopted = true;
         }
-        let finished = matches!(event, AdapterEvent::RunFinished { input_command_id, .. }
+        finished = matches!(event, AdapterEvent::RunFinished { input_command_id, .. }
             if input_command_id == id);
-        last = Some(event);
         if adopted && finished {
             break;
         }
     }
+    assert!(finished, "the server turn ends as a run");
     assert!(adopted, "the server-initiated turn must be adopted");
     let last = loop {
         let event = fake.event().await;

@@ -1043,6 +1043,20 @@ impl ClaudeCodeAdapter {
                 }
             }
         }
+        self.deliver_queued(input, settings, &mut restart_later, true)
+            .await
+    }
+
+    /// Запись ввода в очередь и ожидание доказательства — общий путь для сообщений
+    /// владельца и служебных вводов (`/goal`). `note=false` у служебного ввода:
+    /// предупреждение о лимите стало бы частью текста и сломало slash-команду.
+    async fn deliver_queued(
+        &mut self,
+        input: &Transmission,
+        settings: Option<SettingsChange>,
+        restart_later: &mut Option<SettingsChange>,
+        note: bool,
+    ) -> TransmitOutcome {
         self.queue.as_mut().unwrap().enqueue(&Transmission {
             command_id: input.command_id,
             attempt: input.attempt,
@@ -1050,6 +1064,7 @@ impl ClaudeCodeAdapter {
             files: input.files.clone(),
             settings,
         });
+        let weekly = note.then(|| self.limits.snapshot().weekly).flatten();
         let mut limit = Instant::now() + self.wait_bound();
         let mut written = false;
         let mut ready_seen = self.cli_ready;
@@ -1083,7 +1098,7 @@ impl ClaudeCodeAdapter {
             }
             // Ответ раньше init не отвергается: init может прийти следом, дольше срока его не ждут.
             if !queue.is_proven(input.command_id)
-                && let Next::Write(line) = queue.next(self.limits.snapshot().weekly)
+                && let Next::Write(line) = queue.next(weekly)
             {
                 if let Some(active) = queue.active() {
                     self.parser.set_input_command(active.command_id);
@@ -1416,8 +1431,11 @@ impl Adapter for ClaudeCodeAdapter {
         true
     }
 
-    /// `/goal` — локальная команда CLI: уходит тем же stream-json вводом между
-    /// ходами, что и `/compact`. Ответ synthetic-кадром разбирается в `Parsed::Goal`.
+    /// `/goal` — локальная команда CLI, но она же начинает ход модели. Поэтому ввод
+    /// идёт обычным путём очереди: свой `command_id`, доказательство доставки эхом
+    /// и `RunFinished` по концу хода приписываются этой команде, а не предыдущей.
+    /// Ответ synthetic-кадром разбирается в `Parsed::Goal`; снятие цели может обойтись
+    /// без хода модели, поэтому доказательство ждётся и в этом случае.
     /// Пауза и продолжение у Claude Code доступны только агенту (PauseGoalTool),
     /// владельцу slash-команда их не даёт.
     async fn goal_command(
@@ -1442,22 +1460,28 @@ impl Adapter for ClaudeCodeAdapter {
         if busy {
             return GoalCommandOutcome::NotApplicable;
         }
-        let Some(cli) = self.cli.as_mut() else {
-            return GoalCommandOutcome::Failed;
-        };
-        if self.exited || self.eof || !self.cli_ready {
+        if self.cli.is_none() || self.exited || self.eof || !self.cli_ready {
             return GoalCommandOutcome::Failed;
         }
-        let id = Uuid::now_v7();
-        let line = serde_json::json!({
-            "type": "user",
-            "uuid": id.to_string(),
-            "message": {"role": "user", "content": command},
-            "parent_tool_use_id": serde_json::Value::Null,
-        });
-        match timeout(self.deadline, cli.write_line(&line)).await {
-            Ok(Ok(())) => GoalCommandOutcome::Applied,
-            _ => GoalCommandOutcome::Failed,
+        let input = Transmission {
+            command_id: Uuid::now_v7(),
+            attempt: 1,
+            text: command,
+            files: Vec::new(),
+            settings: None,
+        };
+        let mut restart_later = None;
+        let outcome = self
+            .deliver_queued(&input, None, &mut restart_later, false)
+            .await;
+        if matches!(outcome, TransmitOutcome::Undetermined) {
+            self.unconfirmed.insert(input.command_id);
+        }
+        match outcome {
+            TransmitOutcome::Accepted(_) | TransmitOutcome::Undetermined => {
+                GoalCommandOutcome::Applied
+            }
+            TransmitOutcome::Rejected(_) => GoalCommandOutcome::Failed,
         }
     }
 

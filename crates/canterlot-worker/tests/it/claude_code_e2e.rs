@@ -3411,6 +3411,103 @@ async fn goal_command_sends_slash_input_and_publishes_the_reply() {
     assert!(written.contains("/goal Подготовить отчёт"), "{written}");
 }
 
+fn synthetic_goal(text: &str) -> Value {
+    json!({
+        "type": "assistant",
+        "message": {"model": "<synthetic>", "content": [{"type": "text", "text": text}]},
+        "local_command_run": {"command": "goal", "args": "neutral objective"},
+        "local_command_source": format!("<local-command-stdout>{text}</local-command-stdout>"),
+    })
+}
+
+fn goal_model_turn() -> Vec<Value> {
+    vec![
+        json!({"type":"stream_event","user_message_uuids":["@input"],"event":{"type":"message_start","message":{"model":"haiku","usage":{}}}}),
+        json!({"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}}),
+        json!({"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"goal work"}}}),
+        json!({"type":"stream_event","event":{"type":"content_block_stop","index":0}}),
+        json!({"type":"stream_event","event":{"type":"message_stop"}}),
+        json!({"type":"result","subtype":"success","is_error":false,"user_message_uuids":["@input"],"modelUsage":{}}),
+    ]
+}
+
+#[tokio::test]
+async fn goal_set_travels_the_input_path_and_its_model_turn_finishes_normally() {
+    let mut set_turn = vec![
+        json!({"type":"command_lifecycle","command_uuid":"@input","state":"started"}),
+        synthetic_goal("Goal set: neutral objective"),
+    ];
+    set_turn.extend(goal_model_turn());
+    let clear_turn = vec![
+        json!({"type":"command_lifecycle","command_uuid":"@input","state":"started"}),
+        synthetic_goal("Goal cleared: neutral objective"),
+        json!({"type":"result","subtype":"success","is_error":false,"user_message_uuids":["@input"],"modelUsage":{}}),
+    ];
+    let mut f = Fake::new(vec![answer_turn(), set_turn, clear_turn]);
+    f.start().await;
+    let owner = Uuid::now_v7();
+    f.send(&tx(owner)).await;
+    let _ = f.finish().await;
+
+    let outcome = tokio::time::timeout(
+        WAIT,
+        f.adapter.goal_command(
+            canterlot_proto::goals::GoalAction::Set,
+            Some("neutral objective"),
+            None,
+        ),
+    )
+    .await
+    .expect("goal command deadline");
+    assert_eq!(outcome, adapter::GoalCommandOutcome::Applied);
+
+    let mut events = Vec::new();
+    loop {
+        let event = f.event().await;
+        let done = matches!(event, AdapterEvent::RunFinished { input_command_id, .. }
+            if input_command_id != owner);
+        events.push(event);
+        if done {
+            break;
+        }
+    }
+    let written = std::fs::read_to_string(f.dir.path().join("stdin.log")).unwrap();
+    let line = written
+        .lines()
+        .find(|line| line.contains("/goal neutral objective"))
+        .unwrap_or_else(|| panic!("the goal command is written as a regular user frame: {written}"));
+    let goal_command: Value = serde_json::from_str(line).unwrap();
+    let goal_id: Uuid = goal_command["uuid"].as_str().unwrap().parse().unwrap();
+    let attributed = events.iter().any(|event| matches!(event,
+        AdapterEvent::BlockStarted { kind: adapter::BlockKind::Text, input_command_id: Some(id), .. }
+            if *id == goal_id));
+    assert!(attributed, "the model turn belongs to the goal command: {events:?}");
+    let goal = events.iter().find_map(|event| match event {
+        AdapterEvent::Goal { goal: Some(goal) } => Some(goal.clone()),
+        _ => None,
+    });
+    let goal = goal.expect("the synthetic reply becomes a goal snapshot");
+    assert_eq!(goal.objective, "neutral objective");
+    assert_eq!(goal.status, canterlot_proto::goals::GoalStatus::Active);
+    let finished = events.iter().filter(|event| matches!(event,
+        AdapterEvent::RunFinished { input_command_id, .. } if *input_command_id == goal_id)).count();
+    assert_eq!(finished, 1, "the triggered turn finishes just once");
+
+    let outcome = tokio::time::timeout(WAIT, f.adapter.goal_command(canterlot_proto::goals::GoalAction::Clear, None, None))
+        .await
+        .expect("clear deadline");
+    assert_eq!(outcome, adapter::GoalCommandOutcome::Applied);
+    loop {
+        let event = f.event().await;
+        let cleared = matches!(event, AdapterEvent::Goal { goal: None });
+        events.push(event);
+        if cleared {
+            break;
+        }
+    }
+    f.close().await;
+}
+
 #[tokio::test]
 async fn goal_proposal_reaches_the_owner_card_and_a_mismatched_shape_is_refused() {
     // Форма предложения цели не подтверждена живым прогоном: бинарник Claude Code
