@@ -85,7 +85,7 @@ async fn timeout_kills_the_whole_process_group() {
 #[tokio::test]
 async fn output_tail_is_capped_at_four_kilobytes() {
     let dir = tempfile::tempdir().unwrap();
-    let command = "head -c 20000 /dev/zero | tr '\\0' 'a'; printf 'THE-END' >&2";
+    let command = "head -c 20000 /dev/zero | tr '\\0' 'a'; printf 'THE-END'";
     let result = run_with(
         request(dir.path(), command),
         vec![PathBuf::from(dir.path())],
