@@ -79,10 +79,14 @@
 		};
 	});
 
-	const tasks = $derived(runtime?.list.plan.of(orchestratorId) ?? []);
+	// Архив приходит вместе с планом по HTTP, но живёт отдельно: на доске его нет.
+	const allTasks = $derived(runtime?.list.plan.of(orchestratorId, true) ?? []);
+	const tasks = $derived(allTasks.filter((task) => !task.archived));
+	const archivedTasks = $derived(allTasks.filter((task) => task.archived));
 	const groups = $derived(groupTasks(tasks));
 	const opened = new SvelteSet<PlanTaskState>();
 	const expanded = new SvelteSet<string>();
+	let showArchive = $state(false);
 
 	function groupOpen(state: PlanTaskState, folded: boolean): boolean {
 		return folded ? opened.has(state) : !opened.has(state);
@@ -201,6 +205,30 @@
 			{/if}
 		</section>
 	{/each}
+	{#if archivedTasks.length > 0}
+		<button
+			type="button"
+			class="archive-toggle"
+			data-role="plan-archive-toggle"
+			aria-expanded={showArchive}
+			onclick={() => (showArchive = !showArchive)}
+		>
+			<span>{showArchive ? 'Скрыть архив' : 'Показать архив'} ({archivedTasks.length})</span>
+			<span class="chevron" data-open={showArchive ? '' : undefined}><Icon name="chevron" /></span>
+		</button>
+		{#if showArchive}
+			<ul class="tasks" data-role="plan-archive">
+				{#each archivedTasks as task (task.id)}
+					<li class="task archived" data-plan-task={task.number} data-state={task.state} data-archived="true">
+						<div class="head">
+							<span class="title">{taskTitle(task)}</span>
+							<span class="state" data-tone={STATE_TONE[task.state]} data-role="plan-state">{STATE_WORD[task.state]}</span>
+						</div>
+					</li>
+				{/each}
+			</ul>
+		{/if}
+	{/if}
 </div>
 
 <style>
@@ -237,6 +265,23 @@
 		background: var(--transparent);
 		color: var(--muted);
 		text-align: left;
+	}
+	.archive-toggle {
+		display: flex;
+		align-items: center;
+		gap: var(--s3);
+		margin: var(--s0);
+		padding: var(--s0) var(--s3);
+		min-height: var(--target);
+		border-radius: var(--radius-pill);
+		background: var(--transparent);
+		color: var(--muted);
+		font-size: var(--fs-sm);
+		font-weight: var(--weight-medium);
+		text-align: left;
+	}
+	.task.archived .head {
+		color: var(--muted);
 	}
 	.group-title {
 		flex: 1;
@@ -413,7 +458,8 @@
 	}
 	@media (hover: hover) and (pointer: fine) {
 		.head:hover,
-		.group-head.toggle:hover {
+		.group-head.toggle:hover,
+		.archive-toggle:hover {
 			background: var(--hover);
 		}
 		.report:hover {

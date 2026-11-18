@@ -56,15 +56,20 @@ export class PlanModel {
 		this.changes.delete(id);
 	}
 
-	/** Задачи одного плана по номерам: прочитанный план с наложенными живыми задачами. */
-	of(orchestratorId: string): PlanTask[] {
+	/**
+	 * Задачи одного плана по номерам: прочитанный план с наложенными живыми задачами.
+	 * Архив по умолчанию скрыт: он не участвует в полосах, бейджах и сводках.
+	 */
+	of(orchestratorId: string, includeArchived = false): PlanTask[] {
 		const merged: Record<string, PlanTask> = {};
 		for (const task of this.#loaded.get(orchestratorId) ?? []) {
 			const live = this.tasks.get(task.id);
 			merged[task.id] = live && live.revision >= task.revision ? live : task;
 		}
 		for (const task of this.tasks.values()) if (task.orchestrator_id === orchestratorId && !(task.id in merged)) merged[task.id] = task;
-		return Object.values(merged).filter((task) => task.orchestrator_id === orchestratorId).sort((a, b) => a.number - b.number);
+		return Object.values(merged)
+			.filter((task) => task.orchestrator_id === orchestratorId && (includeArchived || !task.archived))
+			.sort((a, b) => a.number - b.number);
 	}
 
 	has(orchestratorId: string): boolean {

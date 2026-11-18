@@ -1137,7 +1137,7 @@ export class FakeHubApi {
 			limits: this.limits,
 			truncated: this.truncated,
 			presets: this.presetList(),
-			plan_tasks: [...this.planTasks.values()]
+			plan_tasks: [...this.planTasks.values()].filter((task) => !task.archived)
 		};
 	}
 
@@ -1156,6 +1156,7 @@ export class FakeHubApi {
 			blocker: null,
 			findings: [],
 			state: 'waiting',
+			archived: false,
 			executor_id: null,
 			attempts: 0,
 			created_at: now,

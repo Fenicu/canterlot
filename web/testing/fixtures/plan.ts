@@ -13,6 +13,7 @@ export interface PlanSeed {
 	reportBlockId: string;
 	reportSeq: number;
 	tasks: PlanTask[];
+	archived?: PlanTask[];
 }
 
 /**
@@ -66,4 +67,25 @@ export function seedPlan(api: FakeHubApi, opts: { reportAt?: number; history?: n
 		report_block_id: null
 	});
 	return { orchestrator, executors: { working, review, failed, accepted }, reportBlockId: report.id, reportSeq: Number(report.created_seq), tasks };
+}
+
+/** Тот же план плюс две архивные задачи с нейтральными названиями. */
+export function seedPlanWithArchive(api: FakeHubApi): PlanSeed {
+	const seed = seedPlan(api);
+	const archived = [
+		api.pushPlanTask({
+			orchestrator_id: seed.orchestrator,
+			title: 'Отчёт по сводке',
+			state: 'done',
+			archived: true,
+			note: 'Завершено и убрано с доски.'
+		}),
+		api.pushPlanTask({
+			orchestrator_id: seed.orchestrator,
+			title: 'Черновик опроса',
+			state: 'cancelled',
+			archived: true
+		})
+	];
+	return { ...seed, archived };
 }

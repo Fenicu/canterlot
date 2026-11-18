@@ -1,7 +1,7 @@
 import type { Page } from '@playwright/test';
 import { FakeHub, FakeHubApi } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
-import { REPORT_TEXT, seedPlan } from '../../testing/fixtures/plan';
+import { REPORT_TEXT, seedPlan, seedPlanWithArchive } from '../../testing/fixtures/plan';
 import { expect, test } from './fixtures';
 
 const OWNER = '00000000-0000-4000-8000-0000000000d1';
@@ -284,6 +284,37 @@ test('snapshot_replaces_the_plan_instead_of_merging', async ({ page }) => {
 	await expect(page.locator('[data-plan-task="1"]')).toHaveCount(0);
 	await expect(page.locator('[data-plan-group="in_review"]')).toHaveCount(0);
 	await expect(page.locator('[data-plan-task="3"]')).toBeVisible();
+});
+
+test('archive_toggle_shows_finished_tasks_read_only', async ({ page }) => {
+	const hub = new FakeHub();
+	const api = new FakeHubApi(hub);
+	const seed = seedPlanWithArchive(api);
+	await installChatRoutes(page, hub, api, OWNER);
+	await page.goto(`/c/${seed.orchestrator}`);
+	await expect(page.locator('[data-ready]').first()).toBeVisible({ timeout: 15_000 });
+	await page.locator('[data-role="plan-strip"] button').click();
+
+	const tab = planTab(page);
+	// Архив не попадает в обычные группы и в полосу оркестратора.
+	await expect(tab.locator('[data-plan-task="8"]')).toHaveCount(0);
+	await expect(tab.locator('[data-plan-task="9"]')).toHaveCount(0);
+	const toggle = tab.getByRole('button', { name: 'Показать архив (2)' });
+	await expect(toggle).toBeVisible();
+
+	await toggle.click();
+	const archive = tab.locator('[data-role="plan-archive"]');
+	await expect(archive.locator('[data-plan-task]')).toHaveCount(2);
+	const done = archive.locator('[data-plan-task="8"]');
+	await expect(done).toContainText('#8 Отчёт по сводке');
+	await expect(done.locator('[data-role="plan-state"]')).toHaveText('готова');
+	await expect(done.locator('button')).toHaveCount(0);
+	await expect(done.locator('a')).toHaveCount(0);
+	await expect(archive.locator('[data-plan-task="9"] [data-role="plan-state"]')).toHaveText('отменена');
+
+	await tab.getByRole('button', { name: 'Скрыть архив (2)' }).click();
+	await expect(archive).toHaveCount(0);
+	await expect(tab.locator('[data-plan-group="done"]')).toBeVisible();
 });
 
 test('delegation_panel_switches_between_tree_and_plan', async ({ page }) => {
