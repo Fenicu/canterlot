@@ -68,6 +68,15 @@ describe('edit card', () => {
     expect(edit(declined)!.word).toEqual({ word: 'отклонено', tone: 'warning' });
   });
 
+  it('codex_empty_new_file_is_a_create_without_a_diff_body', () => {
+    const text = '--- /dev/null\n+++ b/empty.txt\n';
+    const call = cardCall(callBlock('apply_patch', text, { summary: 'empty.txt, completed' }), null, { root: true });
+    const card = edit(call)!;
+    expect(card.data.kind).toBe('add');
+    expect(card.data.files).toEqual([{ path: 'empty.txt', kind: 'add', lines: [], added: 0, removed: 0 }]);
+    expect(card.line).toBe('Новый файл empty.txt · +0 −0');
+  });
+
   it('codex_file_change_over_several_files_keeps_one_shared_diff', () => {
     const call = cardCall(callBlock('apply_patch', '@@ -1 +1 @@\n-a\n+b\n@@ -3 +3,2 @@\n c\n+d\n', { summary: 'a.ts, b.ts, completed' }), null, { root: true });
     const card = edit(call)!;

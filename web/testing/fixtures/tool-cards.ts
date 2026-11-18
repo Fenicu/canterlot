@@ -124,6 +124,8 @@ export function seedToolCards(api: FakeHubApi, opts: { now?: number; working?: b
   feed.text(files, 'Codex правит воркер и пишет заметку.');
   feed.call(files, 'patchCodex', 'apply_patch', CODEX_DIFF, null, { summary: 'crates/canterlot-worker/src/adapter/codex/events.rs, completed' });
   feed.call(files, 'patchCodexAdd', 'apply_patch', CODEX_ADD, null, { summary: 'docs/bubbles.md, completed' });
+  feed.text(files, 'И пустой файл.');
+  feed.call(files, 'patchCodexEmpty', 'apply_patch', '--- /dev/null\n+++ b/empty.md\n', null, { summary: 'empty.md, completed' });
   feed.text(files, 'И конвертом на два файла.');
   feed.call(files, 'patchEnvelope', 'apply_patch', { input: ENVELOPE }, 'Success. Updated the following files:\nM web/src/lib/timeline/cards/copy.ts\nA web/src/lib/timeline/cards/outcome.ts');
   feed.text(files, 'Правки готовы.');

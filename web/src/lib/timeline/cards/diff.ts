@@ -155,10 +155,12 @@ function headerPath(raw: string): string {
   return path.replace(/^[ab]\//, '');
 }
 
-/** Unified diff по файлам; текст без единого куска `@@` — не разница, а содержимое файла. */
+/** Unified diff по файлам; текст без заголовков и кусков `@@` — содержимое файла. */
 export function unifiedSections(text: string): DiffSection[] {
   const lines = splitLines(text);
-  if (!lines.some((line) => line.startsWith('@@'))) return [];
+  const hunk = lines.some((line) => line.startsWith('@@'));
+  const header = lines.some((line, index) => line.startsWith('--- ') && lines[index + 1]?.startsWith('+++ '));
+  if (!hunk && !header) return [];
   const sections: DiffSection[] = [];
   let current: DiffSection | null = null;
   for (let index = 0; index < lines.length; index++) {

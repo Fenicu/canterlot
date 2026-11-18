@@ -265,6 +265,12 @@ test.describe('edit and write cards', () => {
     const added = await cardOf(page, seed.blocks.patchCodexAdd!);
     await expect(added.locator('[data-role="edit-kind"]')).toHaveText('Новый файл');
     await expect(added.locator('[data-role="edit-counts"]')).toHaveText('+3');
+    const empty = await cardOf(page, seed.blocks.patchCodexEmpty!);
+    await expect(empty.locator('[data-role="edit-kind"]')).toHaveText('Новый файл');
+    await expect(empty.locator('[data-role="edit-name"]')).toHaveText('empty.md');
+    await empty.locator('.head .hit').click();
+    await expect(empty.locator('[data-role="card-fold"] pre.code')).toHaveCount(0);
+    await expect(empty.locator('[data-role="card-fold"] .none')).toHaveText('Текста изменений нет');
     const envelope = await cardOf(page, seed.blocks.patchEnvelope!);
     await expect(envelope.locator('[data-role="edit-name"]')).toHaveText('copy.ts');
     await expect(envelope).toContainText('и ещё 1');

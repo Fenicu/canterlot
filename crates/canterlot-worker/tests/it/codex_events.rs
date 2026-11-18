@@ -325,6 +325,19 @@ fn file_change_add_gets_dev_null_header_and_counted_plus_lines() {
 }
 
 #[test]
+fn file_change_empty_add_still_names_the_file() {
+    let changes = vec![json!({
+        "path": "/work/project/empty.txt",
+        "kind": {"type": "add"},
+        "diff": ""
+    })];
+    assert_eq!(
+        file_change_final(changes, Some(DIFF_WORKDIR)),
+        "--- /dev/null\n+++ b/empty.txt\n"
+    );
+}
+
+#[test]
 fn file_change_delete_gets_dev_null_header_and_minus_lines() {
     let changes = vec![json!({
         "path": "/work/project/gone.txt",
