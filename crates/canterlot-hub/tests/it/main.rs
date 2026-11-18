@@ -126,6 +126,7 @@ mod submit;
 mod todos_integration;
 mod tx_rollback;
 mod updates_api;
+mod updates_e2e;
 mod version;
 mod worker_terminal_outcomes;
 #[cfg(all(feature = "testkit", feature = "fault-injection"))]
