@@ -128,4 +128,5 @@ mod supervisor;
 mod supervisor_requests;
 mod version;
 mod version_probe;
+mod wake_turn_e2e;
 mod worktree;

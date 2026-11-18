@@ -102,3 +102,9 @@ adapter wrote, `"out"` is CLI stdout, `"note"` carries MCP traffic
   `set_prompt_suggestions_paused` (`{"paused": true}`), which the CLI accepts.
   The pause itself proved unreliable live (it took effect a turn late), so the
   adapter does not send it.
+- `background_wake_2_1_326.jsonl` — live capture (CLI 2.1.326, haiku, `claude -p`
+  stream-json, empty MCP config): a background `Bash`, the first turn ends, the CLI
+  starts a second turn by itself on the task notification and its `result` carries
+  `origin.kind: "task-notification"`. Scrubbed: session ids, paths, hooks, skills,
+  thinking signatures, usage, `rate_limit_event`, `system/init` down to what the
+  parser reads. The `in` row is written by hand.
