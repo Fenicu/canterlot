@@ -37,6 +37,15 @@ mod time_opt {
     }
 }
 
+/// `Option<Option<String>>`: различать «поле пропущено» (`None`),
+/// явный `null` (`Some(None)` — очистить) и строку (`Some(Some(_))`).
+/// Без этого serde складывает пропуск и `null` в одно `None`.
+fn nullable_string<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<Option<String>>, D::Error> {
+    Ok(Some(Option::<String>::deserialize(d)?))
+}
+
 const MAX_NAME_BYTES: usize = 200;
 const MAX_PRECHECK_BYTES: usize = 4096;
 const DEFAULT_TITLE_TEMPLATE: &str = "{name} · {date}";
@@ -130,7 +139,7 @@ pub struct PatchSchedule {
     pub target: Option<ScheduleTarget>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, deserialize_with = "nullable_string", skip_serializing_if = "Option::is_none")]
     pub precheck: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub precheck_timeout_seconds: Option<i32>,
@@ -766,21 +775,55 @@ pub async fn runs(
     conn: &mut PgConnection,
     owner_id: Uuid,
     schedule_id: Uuid,
-    before: Option<DateTime<Utc>>,
+    before: Option<(DateTime<Utc>, Uuid)>,
     limit: i64,
 ) -> Result<Vec<ScheduleRun>, sqlx::Error> {
+    let (before_at, before_id) = match before {
+        Some((at, id)) => (Some(at), Some(id)),
+        None => (None, None),
+    };
     let rows: Vec<RunRow> = sqlx::query_as(
         "select r.* from schedule_runs r join schedules s on s.id=r.schedule_id
-         where r.owner_id=$1 and r.schedule_id=$2 and ($3::timestamptz is null or r.scheduled_at < $3)
-         order by r.scheduled_at desc,r.id desc limit $4",
+         where r.owner_id=$1 and r.schedule_id=$2
+           and ($3::timestamptz is null or $4::uuid is null
+                or (r.scheduled_at, r.id) < ($3, $4))
+         order by r.scheduled_at desc,r.id desc limit $5",
     )
     .bind(owner_id)
     .bind(schedule_id)
-    .bind(before)
+    .bind(before_at)
+    .bind(before_id)
     .bind(limit)
     .fetch_all(conn)
     .await?;
     rows.into_iter().map(RunRow::into_run).collect()
+}
+
+/// Курсор истории: `scheduled_at` + `id`, без потерь при одинаковых моментах.
+pub fn encode_runs_cursor(run: &ScheduleRun) -> String {
+    format!(
+        "{}:{}",
+        run.scheduled_at
+            .to_rfc3339_opts(chrono::SecondsFormat::Nanos, true),
+        run.id
+    )
+}
+
+/// Старый формат (только время) тоже принимается: тогда идём строго раньше момента.
+pub fn decode_runs_cursor(cursor: &str) -> Option<(DateTime<Utc>, Uuid)> {
+    if let Some((at, id)) = cursor.rsplit_once(':')
+        && let (Ok(at), Ok(id)) = (
+            chrono::DateTime::parse_from_rfc3339(at),
+            Uuid::parse_str(id),
+        )
+    {
+        // Осторожно с `rsplit_once(':')`: у RFC3339 внутри тоже есть двоеточия.
+        // Проверяем, что хвост — именно UUID, иначе считаем курсор старым форматом.
+        return Some((at.with_timezone(&chrono::Utc), id));
+    }
+    chrono::DateTime::parse_from_rfc3339(cursor)
+        .ok()
+        .map(|at| (at.with_timezone(&chrono::Utc), Uuid::nil()))
 }
 
 pub async fn get_run(
@@ -1042,4 +1085,64 @@ pub const ON_TIME_WINDOW: TimeDelta = TimeDelta::minutes(1);
 /// Эффективное окно: `catch_up_minutes`, но не уже пунктуальности.
 pub fn effective_window(catch_up_minutes: i32) -> TimeDelta {
     catch_up_window(catch_up_minutes).max(ON_TIME_WINDOW)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn patch_precheck_distinguishes_missing_null_and_string() {
+        let base = r#"{"base_revision": 1}"#;
+        let patch: PatchSchedule = serde_json::from_str(base).unwrap();
+        assert!(patch.precheck.is_none(), "missing → None");
+
+        let null = r#"{"base_revision": 1, "precheck": null}"#;
+        let patch: PatchSchedule = serde_json::from_str(null).unwrap();
+        assert_eq!(patch.precheck, Some(None), "null → Some(None)");
+
+        let value = r#"{"base_revision": 1, "precheck": "true"}"#;
+        let patch: PatchSchedule = serde_json::from_str(value).unwrap();
+        assert_eq!(
+            patch.precheck,
+            Some(Some("true".to_owned())),
+            "string → Some(Some)"
+        );
+    }
+
+    #[test]
+    fn runs_cursor_round_trips_and_accepts_legacy_time_only() {
+        // Время с миллисекундной точностью: старый формат (миллисекунды)
+        // обязан давать то же значение, новый — бит-в-бит.
+        let at = chrono::DateTime::parse_from_rfc3339("2026-11-18T05:48:30.368Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let run = ScheduleRun {
+            id: Uuid::now_v7(),
+            schedule_id: Uuid::now_v7(),
+            scheduled_at: at,
+            claimed_revision: 1,
+            state: RunState::Claimed,
+            created_at: at,
+            started_at: None,
+            delay_ms: None,
+            session_id: None,
+            input_id: None,
+            manual: false,
+            idempotency_key: String::new(),
+            detail: json!({}),
+        };
+        let cursor = encode_runs_cursor(&run);
+        let (at, id) = decode_runs_cursor(&cursor).expect("new cursor decodes");
+        eprintln!("cursor={cursor} scheduled_at={}", run.scheduled_at);
+        let (at, id) = decode_runs_cursor(&cursor).expect("new cursor decodes");
+        assert_eq!(id, run.id);
+        assert_eq!(at, run.scheduled_at);
+
+        let legacy = run
+            .scheduled_at
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let (at, _) = decode_runs_cursor(&legacy).expect("legacy cursor decodes");
+        assert_eq!(at, run.scheduled_at);
+    }
 }

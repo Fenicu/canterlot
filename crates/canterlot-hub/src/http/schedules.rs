@@ -244,9 +244,8 @@ async fn runs(
     let limit = query.limit.unwrap_or(50).clamp(1, 200);
     let before = match query.cursor.as_deref() {
         Some(cursor) => Some(
-            chrono::DateTime::parse_from_rfc3339(cursor)
-                .map_err(|_| ApiError::new(ErrorCode::InvalidOffset))?
-                .with_timezone(&chrono::Utc),
+            schedules::decode_runs_cursor(cursor)
+                .ok_or_else(|| ApiError::new(ErrorCode::InvalidOffset))?,
         ),
         None => None,
     };
@@ -262,10 +261,12 @@ async fn runs(
     }
     let mut items = schedules::runs(&mut conn, owner.owner_id, id, before, limit + 1).await?;
     let next_cursor = if items.len() as i64 > limit {
-        items.pop().map(|run| {
-            run.scheduled_at
-                .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-        })
+        // Лишний ряд — только признак конца: курсор строим от последнего
+        // ВОЗВРАЩЁННОГО ряда, иначе он потеряется на следующей странице.
+        items.pop();
+        items
+            .last()
+            .map(schedules::encode_runs_cursor)
     } else {
         None
     };
