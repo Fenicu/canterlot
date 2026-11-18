@@ -58,3 +58,10 @@ retries = 2
 filter = 'package(canterlot-hub) & binary(it) & test(=outbox::degraded_outbox_resends_past_older_unsent_row_without_spinning)'
 retries = 2
 
+
+# QUARANTINE: 18.11 проверка слияния 1.40 при load 80: после убийства сопровождения и CLI пришёл
+# один execution_fact_rejected (поздний факт после перехода в failed); отдельно 5/5 под той же
+# нагрузкой. Повтор разрешён до разбора порядка финальных записей.
+[[profile.default.overrides]]
+filter = 'package(canterlot-worker) & binary(it) & test(=exec_e2e::killed_supervisor_with_nothing_left_fails_and_the_session_resumes)'
+retries = 2
