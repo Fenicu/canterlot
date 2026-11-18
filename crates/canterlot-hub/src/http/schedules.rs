@@ -149,12 +149,12 @@ async fn update(
     Correlation(correlation): Correlation,
     ApiJson(patch): ApiJson<PatchSchedule>,
 ) -> Result<Json<Schedule>, ApiError> {
-    let _ = key;
     Ok(Json(
         schedules::update(
             &state.pool,
             owner.owner_id,
             id,
+            &key,
             patch,
             chrono::Utc::now(),
             correlation,
@@ -172,9 +172,8 @@ async fn delete(
     IdempotencyKey(key): IdempotencyKey,
     Correlation(correlation): Correlation,
 ) -> Result<Json<Schedule>, ApiError> {
-    let _ = key;
     Ok(Json(
-        schedules::delete(&state.pool, owner.owner_id, id, correlation)
+        schedules::delete(&state.pool, owner.owner_id, id, &key, correlation)
             .await
             .map_err(map)?,
     ))
@@ -188,9 +187,8 @@ async fn pause(
     IdempotencyKey(key): IdempotencyKey,
     Correlation(correlation): Correlation,
 ) -> Result<Json<Schedule>, ApiError> {
-    let _ = key;
     Ok(Json(
-        schedules::set_enabled(&state.pool, owner.owner_id, id, false, correlation)
+        schedules::set_enabled(&state.pool, owner.owner_id, id, &key, false, correlation)
             .await
             .map_err(map)?,
     ))
@@ -204,9 +202,8 @@ async fn resume(
     IdempotencyKey(key): IdempotencyKey,
     Correlation(correlation): Correlation,
 ) -> Result<Json<Schedule>, ApiError> {
-    let _ = key;
     Ok(Json(
-        schedules::set_enabled(&state.pool, owner.owner_id, id, true, correlation)
+        schedules::set_enabled(&state.pool, owner.owner_id, id, &key, true, correlation)
             .await
             .map_err(map)?,
     ))

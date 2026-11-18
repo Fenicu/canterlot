@@ -206,8 +206,9 @@ async fn admit_inner(
     };
 
     let provider = canterlot_proto::harness::provider_of(&executor.harness).unwrap_or("");
-    if !run_anyway && !provider.is_empty() {
-        if let Some(detail) = limits_skip(
+    if !run_anyway
+        && !provider.is_empty()
+        && let Some(detail) = limits_skip(
             &mut conn,
             schedule.owner_id,
             provider,
@@ -217,9 +218,8 @@ async fn admit_inner(
             Utc::now(),
         )
         .await?
-        {
-            return Err(Skip::with(RunState::SkippedLimits, detail));
-        }
+    {
+        return Err(Skip::with(RunState::SkippedLimits, detail));
     }
 
     if !run_anyway
@@ -596,7 +596,7 @@ async fn dispatch(
                 &SubmitMessage {
                     owner_id: schedule.owner_id,
                     conversation_id: created,
-                    key: run.idempotency_key.clone(),
+                    key: format!("scheduled-input:{}", run.id),
                     content,
                     attachment_ids: Vec::new(),
                     retry_of: None,
@@ -614,7 +614,7 @@ async fn dispatch(
                 &SubmitMessage {
                     owner_id: schedule.owner_id,
                     conversation_id: *conversation_id,
-                    key: run.idempotency_key.clone(),
+                    key: format!("scheduled-input:{}", run.id),
                     content,
                     attachment_ids: Vec::new(),
                     retry_of: None,
@@ -662,15 +662,18 @@ pub async fn run_now(
     correlation_id: Uuid,
 ) -> Result<ScheduleRun, ScheduleError> {
     let mut conn = state.pool.acquire().await?;
-    if let Some(row) = sqlx::query_as::<_, super::RunRow>(
-        "select * from schedule_runs where schedule_id=$1 and idempotency_key=$2",
-    )
-    .bind(schedule_id)
-    .bind(key)
-    .fetch_optional(&mut *conn)
-    .await?
-    {
-        return Ok(row.into_run()?);
+    let body = json!({"schedule_id": schedule_id, "run_anyway": run_anyway});
+    let hash = crate::idempotency::request_hash("run_now", &body);
+    match crate::idempotency::lookup(&mut conn, owner_id, key, "run_now", &hash).await? {
+        crate::idempotency::Begin::Replay(value) => {
+            return serde_json::from_value(value).map_err(|e| {
+                ScheduleError::Db(sqlx::Error::Decode(Box::new(e)))
+            });
+        }
+        crate::idempotency::Begin::Conflict => {
+            return Err(ScheduleError::Conflict("idempotency_conflict"));
+        }
+        crate::idempotency::Begin::New => {}
     }
     let schedule = super::get(&mut conn, owner_id, schedule_id)
         .await?
@@ -718,7 +721,7 @@ pub async fn run_now(
         &mut conn,
         run.id,
         state_out,
-        detail,
+        detail.clone(),
         started_at,
         delay,
         session_id,
@@ -743,6 +746,19 @@ pub async fn run_now(
     updated.input_id = input_id;
     updated.started_at = started_at;
     updated.delay_ms = delay;
+    updated.detail = detail;
+    let response = serde_json::to_value(&updated)
+        .map_err(|e| ScheduleError::Db(sqlx::Error::Encode(Box::new(e))))?;
+    crate::idempotency::record(
+        &mut conn,
+        owner_id,
+        key,
+        "run_now",
+        &hash,
+        &response,
+        None,
+    )
+    .await?;
     Ok(updated)
 }
 

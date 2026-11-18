@@ -41,6 +41,7 @@ const DEFAULT_TITLE_TEMPLATE: &str = "{name} · {date}";
 /// Цель запуска: новая сессия на машине или существующий разговор.
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum ScheduleTarget {
     NewSession {
         machine_id: Uuid,
@@ -363,6 +364,7 @@ pub async fn owner_timezone(conn: &mut PgConnection) -> Result<String, sqlx::Err
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_common(
     name: &str,
     cron: &str,
@@ -555,6 +557,7 @@ pub async fn update(
     pool: &PgPool,
     owner_id: Uuid,
     id: Uuid,
+    key: &str,
     patch: PatchSchedule,
     now: DateTime<Utc>,
     correlation_id: Uuid,
@@ -563,7 +566,7 @@ pub async fn update(
     let value = idempotency::run_in_tx(
         pool,
         owner_id,
-        &format!("schedule-update:{id}:{base_revision}"),
+        key,
         "update_schedule",
         &json!({"id": id, "base_revision": base_revision, "patch": &patch}),
         None,
@@ -668,13 +671,14 @@ pub async fn set_enabled(
     pool: &PgPool,
     owner_id: Uuid,
     id: Uuid,
+    key: &str,
     enabled: bool,
     correlation_id: Uuid,
 ) -> Result<Schedule, ScheduleError> {
     let value = idempotency::run_in_tx(
         pool,
         owner_id,
-        &format!("schedule-enabled:{id}:{enabled}"),
+        key,
         "set_schedule_enabled",
         &json!({"id": id, "enabled": enabled}),
         None,
@@ -709,12 +713,13 @@ pub async fn delete(
     pool: &PgPool,
     owner_id: Uuid,
     id: Uuid,
+    key: &str,
     correlation_id: Uuid,
 ) -> Result<Schedule, ScheduleError> {
     let value = idempotency::run_in_tx(
         pool,
         owner_id,
-        &format!("schedule-delete:{id}"),
+        key,
         "delete_schedule",
         &json!({"id": id}),
         None,
@@ -777,6 +782,7 @@ pub async fn get_run(
     row.map(RunRow::into_run).transpose()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn insert_run(
     conn: &mut PgConnection,
     id: Uuid,
@@ -807,6 +813,7 @@ pub async fn insert_run(
     row.into_run()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn set_run_state(
     conn: &mut PgConnection,
     id: Uuid,

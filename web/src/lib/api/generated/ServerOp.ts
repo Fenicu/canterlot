@@ -72,7 +72,9 @@ export type ServerOp =
         | InstructionPresetChanged
         | CompactionStarted
         | CompactionFinished
-        | ContextChanged;
+        | ContextChanged
+        | ScheduleChanged
+        | ScheduleRunChanged;
     }
   | {
       op: "resync_required";
@@ -1839,5 +1841,51 @@ export interface ContextChanged {
   payload: {
     tokens: number | null;
     window_tokens: number | null;
+  };
+}
+export interface ScheduleChanged {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "schedule_changed";
+  payload: {
+    id: Uuid;
+    conversation_id: Uuid;
+    run_at: Time;
+    content: ContentBlock[];
+    attachment_ids: Uuid[];
+    state: "pending" | "fired" | "cancelled" | "failed";
+    input_id: Uuid | null;
+    attempts: number;
+  };
+}
+export interface ScheduleRunChanged {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "schedule_run_changed";
+  payload: {
+    id: Uuid;
+    conversation_id: Uuid;
+    run_at: Time;
+    content: ContentBlock[];
+    attachment_ids: Uuid[];
+    state: "pending" | "fired" | "cancelled" | "failed";
+    input_id: Uuid | null;
+    attempts: number;
   };
 }

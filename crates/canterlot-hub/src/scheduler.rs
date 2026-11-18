@@ -1541,6 +1541,11 @@ impl Scheduler {
             crate::machine_updates::purge(&self.pool).await.map(|_| ()),
             sqlx::query("delete from limit_snapshots where observed_at < clock_timestamp() - $1 * interval '1 day'").bind(self.history_days as f64).execute(&self.pool).await.map(|_| ()),
             sqlx::query("delete from scheduled_jobs where state in ('fired','cancelled','failed') and updated_at < clock_timestamp() - interval '30 days'").execute(&self.pool).await.map(|_| ()),
+            async {
+                let mut conn = self.pool.acquire().await?;
+                crate::schedules::prune_runs(&mut conn).await.map(|_| ())
+            }
+            .await,
             sqlx::query("delete from alarms where updated_at < clock_timestamp() - interval '30 days' and (state in ('cancelled','expired','failed') or (state='fired' and delivered_input_id is not null))").execute(&self.pool).await.map(|_| ()),
             sqlx::query("delete from machine_outages where ended_at is not null and ended_at < clock_timestamp() - interval '90 days'").execute(&self.pool).await.map(|_| ()),
             sqlx::query("delete from nudge_events where at < clock_timestamp() - interval '30 days'").execute(&self.pool).await.map(|_| ()),

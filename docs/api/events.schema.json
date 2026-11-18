@@ -194,6 +194,12 @@
     },
     {
       "$ref": "#/$defs/plan_task_changed"
+    },
+    {
+      "$ref": "#/$defs/schedule_changed"
+    },
+    {
+      "$ref": "#/$defs/schedule_run_changed"
     }
   ],
   "$defs": {
@@ -213,7 +219,7 @@
     },
     "Scope": {
       "type": "string",
-      "pattern": "^(conversations|machines|conversation:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$"
+      "pattern": "^(conversations|machines|schedules|conversation:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$"
     },
     "ContentBlock": {
       "oneOf": [
@@ -4459,126 +4465,320 @@
     "nudge_changed": {
       "type": "object",
       "properties": {
-        "v": { "const": 1 },
-        "id": { "$ref": "#/$defs/Uuid" },
-        "scope": { "$ref": "#/$defs/Scope" },
-        "scope_seq": { "$ref": "#/$defs/Seq" },
-        "scope_seq_from": { "$ref": "#/$defs/Seq" },
-        "committed_at": { "$ref": "#/$defs/Time" },
-        "committed_at_from": { "$ref": "#/$defs/Time" },
+        "v": {
+          "const": 1
+        },
+        "id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "scope_seq": {
+          "$ref": "#/$defs/Seq"
+        },
+        "scope_seq_from": {
+          "$ref": "#/$defs/Seq"
+        },
+        "committed_at": {
+          "$ref": "#/$defs/Time"
+        },
+        "committed_at_from": {
+          "$ref": "#/$defs/Time"
+        },
         "conversation_id": {
-          "anyOf": [ { "$ref": "#/$defs/Uuid" }, { "type": "null" } ]
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "execution_id": {
-          "anyOf": [ { "$ref": "#/$defs/Uuid" }, { "type": "null" } ]
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
-        "correlation_id": { "$ref": "#/$defs/Uuid" },
-        "kind": { "const": "nudge_changed" },
+        "correlation_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "kind": {
+          "const": "nudge_changed"
+        },
         "payload": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "session_id": { "$ref": "#/$defs/Uuid" },
-            "enabled": { "type": "boolean" },
-            "state": { "type": "string" },
-            "idle_minutes": { "type": "integer" },
-            "background_minutes": { "type": "integer" },
-            "max_consecutive": { "type": "integer" },
-            "max_total": { "type": "integer" },
-            "done_markers": { "type": "array", "items": { "type": "string" } },
+            "session_id": {
+              "$ref": "#/$defs/Uuid"
+            },
+            "enabled": {
+              "type": "boolean"
+            },
+            "state": {
+              "type": "string"
+            },
+            "idle_minutes": {
+              "type": "integer"
+            },
+            "background_minutes": {
+              "type": "integer"
+            },
+            "max_consecutive": {
+              "type": "integer"
+            },
+            "max_total": {
+              "type": "integer"
+            },
+            "done_markers": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
             "context_warn_percent": {
-              "anyOf": [ { "type": "integer" }, { "type": "null" } ]
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "report_file": {
-              "anyOf": [ { "type": "string" }, { "type": "null" } ]
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
-            "set_by": { "type": "string" },
+            "set_by": {
+              "type": "string"
+            },
             "set_by_session": {
-              "anyOf": [ { "$ref": "#/$defs/Uuid" }, { "type": "null" } ]
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Uuid"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "notify_session_id": {
-              "anyOf": [ { "$ref": "#/$defs/Uuid" }, { "type": "null" } ]
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Uuid"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
-            "consecutive": { "type": "integer" },
-            "total": { "type": "integer" },
-            "held": { "type": "boolean" },
-            "detail": { "type": "string" }
+            "consecutive": {
+              "type": "integer"
+            },
+            "total": {
+              "type": "integer"
+            },
+            "held": {
+              "type": "boolean"
+            },
+            "detail": {
+              "type": "string"
+            }
           }
         }
       },
       "required": [
-        "v", "id", "scope", "scope_seq", "scope_seq_from", "committed_at",
-        "committed_at_from", "conversation_id", "execution_id", "correlation_id",
-        "kind", "payload"
+        "v",
+        "id",
+        "scope",
+        "scope_seq",
+        "scope_seq_from",
+        "committed_at",
+        "committed_at_from",
+        "conversation_id",
+        "execution_id",
+        "correlation_id",
+        "kind",
+        "payload"
       ],
       "additionalProperties": false
     },
     "limits_providers_changed": {
       "type": "object",
       "properties": {
-        "v": { "const": 1 },
-        "id": { "$ref": "#/$defs/Uuid" },
-        "scope": { "$ref": "#/$defs/Scope" },
-        "scope_seq": { "$ref": "#/$defs/Seq" },
-        "scope_seq_from": { "$ref": "#/$defs/Seq" },
-        "committed_at": { "$ref": "#/$defs/Time" },
-        "committed_at_from": { "$ref": "#/$defs/Time" },
+        "v": {
+          "const": 1
+        },
+        "id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "scope_seq": {
+          "$ref": "#/$defs/Seq"
+        },
+        "scope_seq_from": {
+          "$ref": "#/$defs/Seq"
+        },
+        "committed_at": {
+          "$ref": "#/$defs/Time"
+        },
+        "committed_at_from": {
+          "$ref": "#/$defs/Time"
+        },
         "conversation_id": {
-          "anyOf": [ { "$ref": "#/$defs/Uuid" }, { "type": "null" } ]
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "execution_id": {
-          "anyOf": [ { "$ref": "#/$defs/Uuid" }, { "type": "null" } ]
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
-        "correlation_id": { "$ref": "#/$defs/Uuid" },
-        "kind": { "const": "limits_providers_changed" },
+        "correlation_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "kind": {
+          "const": "limits_providers_changed"
+        },
         "payload": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "providers": { "type": "array", "items": { "type": "string" } }
+            "providers": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
           },
-          "required": [ "providers" ]
+          "required": [
+            "providers"
+          ]
         }
       },
       "required": [
-        "v", "id", "scope", "scope_seq", "scope_seq_from", "committed_at",
-        "committed_at_from", "conversation_id", "execution_id", "correlation_id",
-        "kind", "payload"
+        "v",
+        "id",
+        "scope",
+        "scope_seq",
+        "scope_seq_from",
+        "committed_at",
+        "committed_at_from",
+        "conversation_id",
+        "execution_id",
+        "correlation_id",
+        "kind",
+        "payload"
       ],
       "additionalProperties": false
     },
     "provider_status_changed": {
       "type": "object",
       "properties": {
-        "v": { "const": 1 },
-        "id": { "$ref": "#/$defs/Uuid" },
-        "scope": { "$ref": "#/$defs/Scope" },
-        "scope_seq": { "$ref": "#/$defs/Seq" },
-        "scope_seq_from": { "$ref": "#/$defs/Seq" },
-        "committed_at": { "$ref": "#/$defs/Time" },
-        "committed_at_from": { "$ref": "#/$defs/Time" },
+        "v": {
+          "const": 1
+        },
+        "id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "scope_seq": {
+          "$ref": "#/$defs/Seq"
+        },
+        "scope_seq_from": {
+          "$ref": "#/$defs/Seq"
+        },
+        "committed_at": {
+          "$ref": "#/$defs/Time"
+        },
+        "committed_at_from": {
+          "$ref": "#/$defs/Time"
+        },
         "conversation_id": {
-          "anyOf": [ { "$ref": "#/$defs/Uuid" }, { "type": "null" } ]
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "execution_id": {
-          "anyOf": [ { "$ref": "#/$defs/Uuid" }, { "type": "null" } ]
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
-        "correlation_id": { "$ref": "#/$defs/Uuid" },
-        "kind": { "const": "provider_status_changed" },
+        "correlation_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "kind": {
+          "const": "provider_status_changed"
+        },
         "payload": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "provider": { "type": "string" },
+            "provider": {
+              "type": "string"
+            },
             "status": {
               "type": "object",
               "additionalProperties": false,
               "properties": {
                 "level": {
-                  "enum": [ "ok", "degraded", "maintenance", "partial_outage", "major_outage", "unknown" ]
+                  "enum": [
+                    "ok",
+                    "degraded",
+                    "maintenance",
+                    "partial_outage",
+                    "major_outage",
+                    "unknown"
+                  ]
                 },
-                "description": { "type": "string" },
-                "components": { "type": "array", "items": { "type": "string" } },
+                "description": {
+                  "type": "string"
+                },
+                "components": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
                 "incidents": {
                   "type": "array",
                   "maxItems": 3,
@@ -4586,63 +4786,154 @@
                     "type": "object",
                     "additionalProperties": false,
                     "properties": {
-                      "name": { "type": "string" },
-                      "url": { "anyOf": [ { "type": "string" }, { "type": "null" } ] }
+                      "name": {
+                        "type": "string"
+                      },
+                      "url": {
+                        "anyOf": [
+                          {
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      }
                     },
-                    "required": [ "name", "url" ]
+                    "required": [
+                      "name",
+                      "url"
+                    ]
                   }
                 },
-                "url": { "type": "string" },
-                "fetched_at": { "anyOf": [ { "$ref": "#/$defs/Time" }, { "type": "null" } ] },
-                "changed_at": { "$ref": "#/$defs/Time" },
-                "stale": { "type": "boolean" }
+                "url": {
+                  "type": "string"
+                },
+                "fetched_at": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/$defs/Time"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "changed_at": {
+                  "$ref": "#/$defs/Time"
+                },
+                "stale": {
+                  "type": "boolean"
+                }
               },
               "required": [
-                "level", "description", "components", "incidents", "url", "fetched_at",
-                "changed_at", "stale"
+                "level",
+                "description",
+                "components",
+                "incidents",
+                "url",
+                "fetched_at",
+                "changed_at",
+                "stale"
               ]
             }
           },
-          "required": [ "provider", "status" ]
+          "required": [
+            "provider",
+            "status"
+          ]
         }
       },
       "required": [
-        "v", "id", "scope", "scope_seq", "scope_seq_from", "committed_at",
-        "committed_at_from", "conversation_id", "execution_id", "correlation_id",
-        "kind", "payload"
+        "v",
+        "id",
+        "scope",
+        "scope_seq",
+        "scope_seq_from",
+        "committed_at",
+        "committed_at_from",
+        "conversation_id",
+        "execution_id",
+        "correlation_id",
+        "kind",
+        "payload"
       ],
       "additionalProperties": false
     },
     "routing_policy_changed": {
       "type": "object",
       "properties": {
-        "v": { "const": 1 },
-        "id": { "$ref": "#/$defs/Uuid" },
-        "scope": { "$ref": "#/$defs/Scope" },
-        "scope_seq": { "$ref": "#/$defs/Seq" },
-        "scope_seq_from": { "$ref": "#/$defs/Seq" },
-        "committed_at": { "$ref": "#/$defs/Time" },
-        "committed_at_from": { "$ref": "#/$defs/Time" },
+        "v": {
+          "const": 1
+        },
+        "id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "scope_seq": {
+          "$ref": "#/$defs/Seq"
+        },
+        "scope_seq_from": {
+          "$ref": "#/$defs/Seq"
+        },
+        "committed_at": {
+          "$ref": "#/$defs/Time"
+        },
+        "committed_at_from": {
+          "$ref": "#/$defs/Time"
+        },
         "conversation_id": {
-          "anyOf": [ { "$ref": "#/$defs/Uuid" }, { "type": "null" } ]
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "execution_id": {
-          "anyOf": [ { "$ref": "#/$defs/Uuid" }, { "type": "null" } ]
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
-        "correlation_id": { "$ref": "#/$defs/Uuid" },
-        "kind": { "const": "routing_policy_changed" },
+        "correlation_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "kind": {
+          "const": "routing_policy_changed"
+        },
         "payload": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "revision": { "type": "integer", "minimum": 0 }
+            "revision": {
+              "type": "integer",
+              "minimum": 0
+            }
           }
         }
       },
       "required": [
-        "v", "id", "scope", "scope_seq", "scope_seq_from", "committed_at",
-        "committed_at_from", "conversation_id", "execution_id", "correlation_id",
-        "kind", "payload"
+        "v",
+        "id",
+        "scope",
+        "scope_seq",
+        "scope_seq_from",
+        "committed_at",
+        "committed_at_from",
+        "conversation_id",
+        "execution_id",
+        "correlation_id",
+        "kind",
+        "payload"
       ],
       "additionalProperties": false
     },
@@ -4682,76 +4973,217 @@
     "spawn_queue_changed": {
       "type": "object",
       "properties": {
-        "v": { "const": 1 },
-        "id": { "$ref": "#/$defs/Uuid" },
-        "scope": { "$ref": "#/$defs/Scope" },
-        "scope_seq": { "$ref": "#/$defs/Seq" },
-        "scope_seq_from": { "$ref": "#/$defs/Seq" },
-        "committed_at": { "$ref": "#/$defs/Time" },
-        "committed_at_from": { "$ref": "#/$defs/Time" },
+        "v": {
+          "const": 1
+        },
+        "id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "scope_seq": {
+          "$ref": "#/$defs/Seq"
+        },
+        "scope_seq_from": {
+          "$ref": "#/$defs/Seq"
+        },
+        "committed_at": {
+          "$ref": "#/$defs/Time"
+        },
+        "committed_at_from": {
+          "$ref": "#/$defs/Time"
+        },
         "conversation_id": {
-          "anyOf": [ { "$ref": "#/$defs/Uuid" }, { "type": "null" } ]
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "execution_id": {
-          "anyOf": [ { "$ref": "#/$defs/Uuid" }, { "type": "null" } ]
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
-        "correlation_id": { "$ref": "#/$defs/Uuid" },
-        "kind": { "const": "spawn_queue_changed" },
+        "correlation_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "kind": {
+          "const": "spawn_queue_changed"
+        },
         "payload": {
           "type": "object",
           "additionalProperties": false,
           "required": [
-            "id", "parent_id", "title", "task_type", "level", "harness", "model",
-            "reason", "detail", "state", "not_before", "expires_at", "attempts",
-            "child_id", "result", "created_at", "updated_at", "position"
+            "id",
+            "parent_id",
+            "title",
+            "task_type",
+            "level",
+            "harness",
+            "model",
+            "reason",
+            "detail",
+            "state",
+            "not_before",
+            "expires_at",
+            "attempts",
+            "child_id",
+            "result",
+            "created_at",
+            "updated_at",
+            "position"
           ],
           "properties": {
-            "id": { "$ref": "#/$defs/Uuid" },
-            "parent_id": { "$ref": "#/$defs/Uuid" },
+            "id": {
+              "$ref": "#/$defs/Uuid"
+            },
+            "parent_id": {
+              "$ref": "#/$defs/Uuid"
+            },
             "title": {
-              "anyOf": [ { "type": "string" }, { "type": "null" } ]
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "task_type": {
-              "anyOf": [ { "type": "string" }, { "type": "null" } ]
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "level": {
               "anyOf": [
-                { "enum": ["low", "medium", "high", "xhigh"] },
-                { "type": "null" }
+                {
+                  "enum": [
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "harness": {
-              "anyOf": [ { "type": "string" }, { "type": "null" } ]
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "model": {
-              "anyOf": [ { "type": "string" }, { "type": "null" } ]
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "reason": {
-              "enum": ["rate", "concurrency", "limits", "resources", "children", "stagger"]
+              "enum": [
+                "rate",
+                "concurrency",
+                "limits",
+                "resources",
+                "children",
+                "stagger"
+              ]
             },
-            "detail": { "type": "object" },
+            "detail": {
+              "type": "object"
+            },
             "state": {
-              "enum": ["queued", "starting", "started", "cancelled", "failed", "expired"]
+              "enum": [
+                "queued",
+                "starting",
+                "started",
+                "cancelled",
+                "failed",
+                "expired"
+              ]
             },
-            "not_before": { "$ref": "#/$defs/Time" },
-            "expires_at": { "$ref": "#/$defs/Time" },
-            "attempts": { "type": "integer", "minimum": 0 },
+            "not_before": {
+              "$ref": "#/$defs/Time"
+            },
+            "expires_at": {
+              "$ref": "#/$defs/Time"
+            },
+            "attempts": {
+              "type": "integer",
+              "minimum": 0
+            },
             "child_id": {
-              "anyOf": [ { "$ref": "#/$defs/Uuid" }, { "type": "null" } ]
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Uuid"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "result": {
-              "anyOf": [ { "type": "object" }, { "type": "null" } ]
+              "anyOf": [
+                {
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
-            "created_at": { "$ref": "#/$defs/Time" },
-            "updated_at": { "$ref": "#/$defs/Time" },
-            "position": { "type": "integer", "minimum": 0 }
+            "created_at": {
+              "$ref": "#/$defs/Time"
+            },
+            "updated_at": {
+              "$ref": "#/$defs/Time"
+            },
+            "position": {
+              "type": "integer",
+              "minimum": 0
+            }
           }
         }
       },
       "required": [
-        "v", "id", "scope", "scope_seq", "scope_seq_from", "committed_at",
-        "committed_at_from", "conversation_id", "execution_id", "correlation_id",
-        "kind", "payload"
+        "v",
+        "id",
+        "scope",
+        "scope_seq",
+        "scope_seq_from",
+        "committed_at",
+        "committed_at_from",
+        "conversation_id",
+        "execution_id",
+        "correlation_id",
+        "kind",
+        "payload"
       ],
       "additionalProperties": false
     },
@@ -4759,64 +5191,172 @@
       "type": "object",
       "additionalProperties": false,
       "required": [
-        "id", "orchestrator_id", "number", "title", "note", "blocker", "findings",
-        "state", "executor_id", "attempts", "created_at", "updated_at", "revision"
+        "id",
+        "orchestrator_id",
+        "number",
+        "title",
+        "note",
+        "blocker",
+        "findings",
+        "state",
+        "executor_id",
+        "attempts",
+        "created_at",
+        "updated_at",
+        "revision"
       ],
       "properties": {
-        "id": { "$ref": "#/$defs/Uuid" },
-        "orchestrator_id": { "$ref": "#/$defs/Uuid" },
-        "number": { "type": "integer", "minimum": 1 },
-        "title": { "type": "string" },
+        "id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "orchestrator_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "number": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "title": {
+          "type": "string"
+        },
         "note": {
-          "anyOf": [ { "type": "string" }, { "type": "null" } ]
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "blocker": {
-          "anyOf": [ { "type": "string" }, { "type": "null" } ]
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
-        "findings": { "type": "array", "items": { "type": "string" } },
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "state": {
-          "enum": ["waiting", "in_progress", "in_review", "done", "cancelled", "blocked"]
+          "enum": [
+            "waiting",
+            "in_progress",
+            "in_review",
+            "done",
+            "cancelled",
+            "blocked"
+          ]
         },
         "executor_id": {
-          "anyOf": [ { "$ref": "#/$defs/Uuid" }, { "type": "null" } ]
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
-        "attempts": { "type": "integer", "minimum": 0 },
-        "created_at": { "$ref": "#/$defs/Time" },
-        "updated_at": { "$ref": "#/$defs/Time" },
-        "revision": { "type": "integer", "minimum": 1 }
+        "attempts": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "created_at": {
+          "$ref": "#/$defs/Time"
+        },
+        "updated_at": {
+          "$ref": "#/$defs/Time"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        }
       }
     },
     "plan_task_changed": {
       "type": "object",
       "properties": {
-        "v": { "const": 1 },
-        "id": { "$ref": "#/$defs/Uuid" },
-        "scope": { "$ref": "#/$defs/Scope" },
-        "scope_seq": { "$ref": "#/$defs/Seq" },
-        "scope_seq_from": { "$ref": "#/$defs/Seq" },
-        "committed_at": { "$ref": "#/$defs/Time" },
-        "committed_at_from": { "$ref": "#/$defs/Time" },
+        "v": {
+          "const": 1
+        },
+        "id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "scope_seq": {
+          "$ref": "#/$defs/Seq"
+        },
+        "scope_seq_from": {
+          "$ref": "#/$defs/Seq"
+        },
+        "committed_at": {
+          "$ref": "#/$defs/Time"
+        },
+        "committed_at_from": {
+          "$ref": "#/$defs/Time"
+        },
         "conversation_id": {
-          "anyOf": [ { "$ref": "#/$defs/Uuid" }, { "type": "null" } ]
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "execution_id": {
-          "anyOf": [ { "$ref": "#/$defs/Uuid" }, { "type": "null" } ]
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
-        "correlation_id": { "$ref": "#/$defs/Uuid" },
-        "kind": { "const": "plan_task_changed" },
+        "correlation_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "kind": {
+          "const": "plan_task_changed"
+        },
         "payload": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["task"],
+          "required": [
+            "task"
+          ],
           "properties": {
-            "task": { "$ref": "#/$defs/PlanTask" }
+            "task": {
+              "$ref": "#/$defs/PlanTask"
+            }
           }
         }
       },
       "required": [
-        "v", "id", "scope", "scope_seq", "scope_seq_from", "committed_at",
-        "committed_at_from", "conversation_id", "execution_id", "correlation_id",
-        "kind", "payload"
+        "v",
+        "id",
+        "scope",
+        "scope_seq",
+        "scope_seq_from",
+        "committed_at",
+        "committed_at_from",
+        "conversation_id",
+        "execution_id",
+        "correlation_id",
+        "kind",
+        "payload"
       ],
       "additionalProperties": false
     },
@@ -7148,6 +7688,12 @@
                 },
                 {
                   "$ref": "#/$defs/context_changed"
+                },
+                {
+                  "$ref": "#/$defs/schedule_changed"
+                },
+                {
+                  "$ref": "#/$defs/schedule_run_changed"
                 }
               ]
             }
@@ -7451,7 +7997,7 @@
             },
             "href": {
               "type": "string",
-              "pattern": "^/api/v1/events\\?scope=(conversations|machines|conversation:[0-9a-f-]{36})&after=[0-9]+&limit=1$"
+              "pattern": "^/api/v1/events\\?scope=(conversations|machines|schedules|conversation:[0-9a-f-]{36})&after=[0-9]+&limit=1$"
             }
           },
           "required": [
@@ -7958,20 +8504,54 @@
         "asks_in_text": {
           "type": "boolean"
         },
-        "alarm_id": { "$ref": "#/$defs/Uuid" },
-        "alarm_key": { "type": "string" },
-        "fired_reason": { "type": "string" },
-        "alarm_path": { "type": "string" },
-        "alarm_size": { "type": "integer" },
-        "armed_at": { "$ref": "#/$defs/Time" },
-        "condition": { "type": "object" },
-        "note": { "type": "string" },
-        "sessions": { "type": "array", "items": { "$ref": "#/$defs/AlarmSession" } },
-        "alarms": { "type": "array", "items": { "$ref": "#/$defs/AlarmEvent" } },
-        "details": { "type": "object" },
-        "machine_id": { "$ref": "#/$defs/Uuid" },
-        "machine_name": { "type": "string" },
-        "resets_at": { "$ref": "#/$defs/Time" }
+        "alarm_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "alarm_key": {
+          "type": "string"
+        },
+        "fired_reason": {
+          "type": "string"
+        },
+        "alarm_path": {
+          "type": "string"
+        },
+        "alarm_size": {
+          "type": "integer"
+        },
+        "armed_at": {
+          "$ref": "#/$defs/Time"
+        },
+        "condition": {
+          "type": "object"
+        },
+        "note": {
+          "type": "string"
+        },
+        "sessions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AlarmSession"
+          }
+        },
+        "alarms": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AlarmEvent"
+          }
+        },
+        "details": {
+          "type": "object"
+        },
+        "machine_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "machine_name": {
+          "type": "string"
+        },
+        "resets_at": {
+          "$ref": "#/$defs/Time"
+        }
       },
       "required": [
         "kind"
@@ -8737,9 +9317,15 @@
     "AlarmSession": {
       "type": "object",
       "properties": {
-        "id": { "$ref": "#/$defs/Uuid" },
-        "title": { "type": "string" },
-        "state": { "type": "string" }
+        "id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "title": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        }
       },
       "required": [
         "id",
@@ -8751,16 +9337,289 @@
     "AlarmEvent": {
       "type": "object",
       "properties": {
-        "alarm_id": { "$ref": "#/$defs/Uuid" },
-        "alarm_key": { "type": "string" },
-        "fired_reason": { "type": "string" },
-        "alarm_path": { "type": "string" },
-        "alarm_size": { "type": "integer" },
-        "armed_at": { "$ref": "#/$defs/Time" },
-        "condition": { "type": "object" },
-        "note": { "type": "string" },
-        "sessions": { "type": "array", "items": { "$ref": "#/$defs/AlarmSession" } }
+        "alarm_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "alarm_key": {
+          "type": "string"
+        },
+        "fired_reason": {
+          "type": "string"
+        },
+        "alarm_path": {
+          "type": "string"
+        },
+        "alarm_size": {
+          "type": "integer"
+        },
+        "armed_at": {
+          "$ref": "#/$defs/Time"
+        },
+        "condition": {
+          "type": "object"
+        },
+        "note": {
+          "type": "string"
+        },
+        "sessions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AlarmSession"
+          }
+        }
       },
+      "additionalProperties": false
+    },
+    "schedule_changed": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "scope_seq": {
+          "$ref": "#/$defs/Seq"
+        },
+        "scope_seq_from": {
+          "$ref": "#/$defs/Seq"
+        },
+        "committed_at": {
+          "$ref": "#/$defs/Time"
+        },
+        "committed_at_from": {
+          "$ref": "#/$defs/Time"
+        },
+        "conversation_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "execution_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "correlation_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "kind": {
+          "const": "schedule_changed"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/Uuid"
+            },
+            "conversation_id": {
+              "$ref": "#/$defs/Uuid"
+            },
+            "run_at": {
+              "$ref": "#/$defs/Time"
+            },
+            "content": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ContentBlock"
+              }
+            },
+            "attachment_ids": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Uuid"
+              }
+            },
+            "state": {
+              "enum": [
+                "pending",
+                "fired",
+                "cancelled",
+                "failed"
+              ]
+            },
+            "input_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Uuid"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "attempts": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "id",
+            "conversation_id",
+            "run_at",
+            "content",
+            "attachment_ids",
+            "state",
+            "input_id",
+            "attempts"
+          ]
+        }
+      },
+      "required": [
+        "v",
+        "id",
+        "scope",
+        "scope_seq",
+        "scope_seq_from",
+        "committed_at",
+        "committed_at_from",
+        "conversation_id",
+        "execution_id",
+        "correlation_id",
+        "kind",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    "schedule_run_changed": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "scope_seq": {
+          "$ref": "#/$defs/Seq"
+        },
+        "scope_seq_from": {
+          "$ref": "#/$defs/Seq"
+        },
+        "committed_at": {
+          "$ref": "#/$defs/Time"
+        },
+        "committed_at_from": {
+          "$ref": "#/$defs/Time"
+        },
+        "conversation_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "execution_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "correlation_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "kind": {
+          "const": "schedule_run_changed"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/Uuid"
+            },
+            "conversation_id": {
+              "$ref": "#/$defs/Uuid"
+            },
+            "run_at": {
+              "$ref": "#/$defs/Time"
+            },
+            "content": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ContentBlock"
+              }
+            },
+            "attachment_ids": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Uuid"
+              }
+            },
+            "state": {
+              "enum": [
+                "pending",
+                "fired",
+                "cancelled",
+                "failed"
+              ]
+            },
+            "input_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Uuid"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "attempts": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "id",
+            "conversation_id",
+            "run_at",
+            "content",
+            "attachment_ids",
+            "state",
+            "input_id",
+            "attempts"
+          ]
+        }
+      },
+      "required": [
+        "v",
+        "id",
+        "scope",
+        "scope_seq",
+        "scope_seq_from",
+        "committed_at",
+        "committed_at_from",
+        "conversation_id",
+        "execution_id",
+        "correlation_id",
+        "kind",
+        "payload"
+      ],
       "additionalProperties": false
     }
   }

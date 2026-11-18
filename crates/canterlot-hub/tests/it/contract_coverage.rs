@@ -305,6 +305,7 @@ fn exempt(method: &str, path: &str) -> bool {
         || (method == "POST" && path == "/api/v1/limits/refresh")
         || (method == "POST" && path == "/api/v1/routing-policy/preview")
         || (method == "POST" && path == "/api/v1/search")
+        || (method == "POST" && path == "/api/v1/schedules/preview")
         // Отметка присутствия — идемпотентный образец: ключ повтора ничего не добавит.
         || (method == "POST" && path == "/api/v1/presence")
         || (method == "PUT" && path.ends_with("/draft"))
@@ -478,6 +479,19 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
                 .to_owned(),
         );
     }
+    let schedule_body = |name: &str| {
+        json!({"name":name,"cron":"0 9 * * 1-5","target":{"kind":"existing_session","conversation_id":id},"prompt":"проверка"})
+    };
+    let schedule = setup(
+        Method::POST,
+        "/api/v1/schedules".into(),
+        "setup_schedule",
+        Some(schedule_body("Проверка")),
+    )
+    .await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     let alarm_id = Uuid::now_v7();
     sqlx::query(
         "insert into alarms(id,owner_id,conversation_id,created_by,kind,fire_at,call_id)
@@ -991,6 +1005,48 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
             ),
             Some(json!({"kind":"permission","behavior":"allow","message":null})),
             Some(json!({"kind":"permission","behavior":"deny","message":null})),
+        ),
+          case(
+            Method::POST,
+            "/api/v1/schedules",
+            "/api/v1/schedules".into(),
+            Some(schedule_body("Первое")),
+            Some(schedule_body("Второе")),
+        ),
+        case(
+            Method::PATCH,
+            "/api/v1/schedules/{id}",
+            format!("/api/v1/schedules/{schedule}"),
+            Some(json!({"base_revision":1,"name":"Правка"})),
+            Some(json!({"base_revision":1,"name":"Другая правка"})),
+        ),
+        case(
+            Method::POST,
+            "/api/v1/schedules/{id}/pause",
+            format!("/api/v1/schedules/{schedule}/pause"),
+            None,
+            None,
+        ),
+        case(
+            Method::POST,
+            "/api/v1/schedules/{id}/resume",
+            format!("/api/v1/schedules/{schedule}/resume"),
+            None,
+            None,
+        ),
+        case(
+            Method::POST,
+            "/api/v1/schedules/{id}/run",
+            format!("/api/v1/schedules/{schedule}/run"),
+            Some(json!({"run_anyway":false})),
+            Some(json!({"run_anyway":true})),
+        ),
+        case(
+            Method::DELETE,
+            "/api/v1/schedules/{id}",
+            format!("/api/v1/schedules/{schedule}"),
+            None,
+            None,
         ),
     ];
 

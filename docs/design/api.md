@@ -17,6 +17,7 @@
 | --- | --- |
 | `owner:{id}:conversations` | `conversations` |
 | `owner:{id}:machines` | `machines` |
+| `owner:{id}:schedules` | `schedules` |
 | `conversation:{id}` | `conversation:<uuid>` |
 
 В кадрах WSS, снимках и `GET /api/v1/events` используются только внешние имена. Области списков разрешаются хабом по аутентифицированному владельцу.
@@ -56,6 +57,8 @@
 | Разговор | `crunch_woken` | Подтверждённое пробуждение |
 | Разговор | `limit_reached` | Факт исчерпания окна |
 | Разговор | `scheduled_changed` | Отложенное сообщение |
+| Расписания | `schedule_changed` | Расписание создано, изменено, поставлено на паузу, возобновлено или удалено: полное представление с новой ревизией |
+| Расписания | `schedule_run_changed` | Попытка запуска сменила состояние: заявка, предпроверка, пропуск, запуск или отказ; в `detail` — причина, код и хвост предпроверки, пропущенные срабатывания, задержка до фиксации в очереди |
 | Разговор | `draft_changed` | Общий черновик поля ввода: `{conversation_id, revision, text, attachment_ids, device_id}`; пустой текст и пустой список вложений означают удаление черновика |
 | Разговор | `prompt_suggestion_changed` | Подсказка следующего сообщения Claude Code: `{conversation_id, suggestion}`; `suggestion` — `{text, execution_id, created_at}` или `null`, когда подсказку стёрли новый ввод, начало хода или выключенная настройка |
 | Разговор | `alarm_changed` | Будильник разговора |
@@ -155,6 +158,8 @@
 | `not_pending` | 409 | `browser` | `never` | Отложенное сообщение уже обработано |
 | `schedule_time_out_of_range` | 422 | `browser` | `never` | Время отправки вне допустимого диапазона |
 | `too_many_scheduled` | 409 | `browser` | `never` | Слишком много отложенных сообщений |
+| `schedule_invalid` | 422 | `browser` | `never` | Некорректное расписание |
+| `schedule_revision_conflict` | 409 | `browser` | `after_condition` | Расписание изменено с другого устройства |
 | `machine_not_found` | 404 | `browser` | `never` | Машина не найдена |
 | `machine_unavailable` | 409 | `delivery` | `after_condition` | Машина недоступна |
 | `machine_offline` | 409 | `delivery` | `after_condition` | Машина не на связи |
@@ -233,6 +238,16 @@
 | `POST /api/v1/conversations/{id}/scheduled` | Запланировать обычный ввод |
 | `PATCH /api/v1/scheduled/{id}` | Изменить время или содержимое до отправки |
 | `DELETE /api/v1/scheduled/{id}` | Отменить до отправки |
+| `GET /api/v1/schedules` | Расписания владельца |
+| `POST /api/v1/schedules` | Создать расписание: cron, пояс, цель и подсказка |
+| `POST /api/v1/schedules/preview` | Следующие N срабатываний для редактора |
+| `GET /api/v1/schedules/{id}` | Расписание по идентификатору |
+| `PATCH /api/v1/schedules/{id}` | Правка с проверкой `base_revision` |
+| `DELETE /api/v1/schedules/{id}` | Удалить расписание вместе с историей |
+| `POST /api/v1/schedules/{id}/pause` | Поставить на паузу |
+| `POST /api/v1/schedules/{id}/resume` | Возобновить |
+| `POST /api/v1/schedules/{id}/run` | Запустить сейчас; `run_anyway` обходит проверки |
+| `GET /api/v1/schedules/{id}/runs` | История запусков с курсором |
 | `GET /api/v1/conversations/{id}/draft` | Общий черновик: текст, готовые вложения, ревизия и время |
 | `PUT /api/v1/conversations/{id}/draft` | Полная замена черновика по `base_revision`; пустой черновик удаляет строку |
 | `GET /api/v1/conversations/{id}/bookmarks` | Все закладки разговора в порядке ленты, до 500 |
@@ -571,7 +586,7 @@ Worker при подготовке исполнения синхронизиру
 
 Ответ диапазона показывает `head` из той же транзакции, что и события. Курсор ниже сохранённого журнала получает `cursor_too_old`, курсор выше головы `cursor_ahead`; `oldest_available_seq` является десятичной строкой (при пустом журнале это `head+1`). Клиент загружает новый снимок и начинает хвост после его `cursor`. До 256 исходных событий проходят через единую `events::project_for_client`; неизвестный вид становится `hidden` с `payload:{}`, `conversation_id:null`, `execution_id:null`. Соседние заглушки одной области с последовательными номерами объединяются: начальные `id`, `correlation_id`, `committed_at_from`, `scope_seq_from` сохраняются, конечные `scope_seq`, `committed_at` берутся из последнего события. Через разрыв, видимое событие или другую область объединение не проходит.
 
-Клиентские виды и формы событий опубликованы в [events.schema.json](../api/events.schema.json), JSON Schema 2020-12. Полный набор: `input_queued`, `input_state_changed`, `queue_state_changed`, `queue_paused`, `queue_resumed`, `execution_state_changed`, `phase_changed`, `run_finished`, `interrupt_state_changed`, `block_started`, `block_delta`, `block_final`, `block_incomplete`, `adapter_diagnostic`, `state_divergence`, `block_revision_gap`, `block_checksum_mismatch`, `block_conflicting_final`, `block_media_attached`, `block_file_attached`, `conversation_created`, `conversation_updated`, `conversation_settings_changed`, `crunch_changed`, `crunch_held`, `crunch_woken`, `derived_changed`, `group_changed`, `instruction_preset_changed`, `scheduled_changed`, `alarm_changed`, `nudge_changed`, `routing_policy_changed`, `spawn_queue_changed`, `plan_task_changed`, `limits_changed`, `limit_reached`, `attachment_state_changed`, `request_opened`, `request_closed`, `request_decided`, `request_transmitting`, `secret_request_changed`, `todo_updated`, `background_work_changed`, `prompt_suggestion_changed`, `compaction_started`, `compaction_finished`, `context_changed`, `conversation_deleted`, `machine_availability_changed`, `machine_report_updated`, `machine_metrics`, `machine_journal_stops_changed`, `machine_watch_changed`, `machine_lease_changed`, `machine_update`, `hidden`, `oversized`. `journal_closed`, `execution_fact_rejected`, `journal_record_mismatch`, `local_state_reset` и неизвестные будущие виды скрыты. Схема содержит также `ClientOp` и `ServerOp`: subscribe/unsubscribe/ping, subscribed/event/resync_required/lagged/unsubscribed/pong/error/close. Транспорт WSS описан ниже, в разделе [«WSS: возобновляемые подписки»](#wss-возобновляемые-подписки).
+Клиентские виды и формы событий опубликованы в [events.schema.json](../api/events.schema.json), JSON Schema 2020-12. Полный набор: `input_queued`, `input_state_changed`, `queue_state_changed`, `queue_paused`, `queue_resumed`, `execution_state_changed`, `phase_changed`, `run_finished`, `interrupt_state_changed`, `block_started`, `block_delta`, `block_final`, `block_incomplete`, `adapter_diagnostic`, `state_divergence`, `block_revision_gap`, `block_checksum_mismatch`, `block_conflicting_final`, `block_media_attached`, `block_file_attached`, `conversation_created`, `conversation_updated`, `conversation_settings_changed`, `crunch_changed`, `crunch_held`, `crunch_woken`, `derived_changed`, `group_changed`, `instruction_preset_changed`, `scheduled_changed`, `schedule_changed`, `schedule_run_changed`, `alarm_changed`, `nudge_changed`, `routing_policy_changed`, `spawn_queue_changed`, `plan_task_changed`, `limits_changed`, `limit_reached`, `attachment_state_changed`, `request_opened`, `request_closed`, `request_decided`, `request_transmitting`, `secret_request_changed`, `todo_updated`, `background_work_changed`, `prompt_suggestion_changed`, `compaction_started`, `compaction_finished`, `context_changed`, `conversation_deleted`, `machine_availability_changed`, `machine_report_updated`, `machine_metrics`, `machine_journal_stops_changed`, `machine_watch_changed`, `machine_lease_changed`, `machine_update`, `hidden`, `oversized`. `journal_closed`, `execution_fact_rejected`, `journal_record_mismatch`, `local_state_reset` и неизвестные будущие виды скрыты. Схема содержит также `ClientOp` и `ServerOp`: subscribe/unsubscribe/ping, subscribed/event/resync_required/lagged/unsubscribed/pong/error/close. Транспорт WSS описан ниже, в разделе [«WSS: возобновляемые подписки»](#wss-возобновляемые-подписки).
 
 ### Метаданные фактов агента
 
@@ -665,6 +680,7 @@ Pump читает журнал только при доступной ёмкос
 | 29 | Пороги лимитов владельца: жёлтый и красный остаток, недельный резерв; хранение на владельца, сразу применяется к удержаниям и окраске в PWA | `GET /api/v1/limit-settings`, `PUT /api/v1/limit-settings`, `limit_thresholds` в `GET /api/v1/config` | `limits_changed` | лимиты |
 | 33 | Собственный вход владельца (ADR-0005): пароль, ключи доступа, вход по QR, ссылка восстановления, сеансы с подписью устройства, местом и отзывом с каскадом, срок бездействия, повторный вход для действий управления, защита от перебора | `GET /api/v1/auth/methods`, `POST /api/v1/auth/password`, `POST /api/v1/auth/recovery`, `POST /api/v1/auth/passkey/start`, `POST /api/v1/auth/passkey/finish`, `POST /api/v1/auth/qr/start`, `POST /api/v1/auth/qr/poll`, `POST /api/v1/auth/qr/inspect`, `POST /api/v1/auth/qr/approve`, `POST /api/v1/auth/qr/deny`, `GET /api/v1/auth/sessions`, `PATCH /api/v1/auth/sessions/{id}`, `DELETE /api/v1/auth/sessions/{id}`, `POST /api/v1/auth/sessions/revoke-others`, `POST /api/v1/auth/logout`, `PATCH /api/v1/auth/settings`, `PUT /api/v1/auth/password`, `POST /api/v1/auth/reauth/password`, `GET /api/v1/auth/passkeys`, `POST /api/v1/auth/passkeys/register/start`, `POST /api/v1/auth/passkeys/register/finish`, `PATCH /api/v1/auth/passkeys/{id}`, `DELETE /api/v1/auth/passkeys/{id}`, `POST /api/v1/auth/reauth/passkey/start`, `POST /api/v1/auth/reauth/passkey/finish` | `close` | вход |
 | 34 | Живая диктовка в поле ввода (кнопка микрофона): поток PCM по WebSocket, живой текст и итог, словарь замен терминов, состояние службы распознавания речи | `GET /api/v1/dictation`, `GET /api/v1/dictation/status`, `GET /api/v1/dictation/terms`, `PUT /api/v1/dictation/terms` | – | диктовка |
+| 36 | Повторяющиеся запуски (план #190): расписания с cron в поясе владельца, цель «новая сессия» через политику маршрутизации или существующий разговор, предпроверка на машине, пропуск по лимитам и пересечению, журнал с задержкой до очереди | `GET /api/v1/schedules`, `POST /api/v1/schedules`, `POST /api/v1/schedules/preview`, `GET /api/v1/schedules/{id}`, `PATCH /api/v1/schedules/{id}`, `DELETE /api/v1/schedules/{id}`, `POST /api/v1/schedules/{id}/pause`, `POST /api/v1/schedules/{id}/resume`, `POST /api/v1/schedules/{id}/run`, `GET /api/v1/schedules/{id}/runs` | `schedule_changed`, `schedule_run_changed` | план #190 |
 | 32 | Избранное: отметка сообщения владельца или верхнего блока ответа, возврат к месту в ленте с телефона и компьютера, общий список по всем разговорам (pilot.md §12.1) | `GET /api/v1/conversations/{id}/bookmarks`, `PUT /api/v1/conversations/{id}/bookmarks/{kind}/{target_id}`, `DELETE /api/v1/conversations/{id}/bookmarks/{kind}/{target_id}`, `GET /api/v1/bookmarks` (`limit`, `cursor`) | `bookmark_changed` | этап 8 |
 | 35 | Лента обновлений и моделей: баннер о новом выпуске, добавленных и удалённых моделях и обновлении CLI, тревога ниже минимума (§11) | `GET /api/v1/updates` (`limit`, `cursor`, `machine`, `kind`) | `machine_update` | обновления и модели |
 

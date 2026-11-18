@@ -62,7 +62,9 @@ export type WireEvent =
   | RoutingPolicyChanged
   | SpawnWhitelistChanged
   | SpawnQueueChanged
-  | PlanTaskChanged;
+  | PlanTaskChanged
+  | ScheduleChanged
+  | ScheduleRunChanged;
 export type Uuid = string;
 export type Scope = string;
 export type Seq = string;
@@ -1801,4 +1803,50 @@ export interface PlanTask {
   created_at: Time;
   updated_at: Time;
   revision: number;
+}
+export interface ScheduleChanged {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "schedule_changed";
+  payload: {
+    id: Uuid;
+    conversation_id: Uuid;
+    run_at: Time;
+    content: ContentBlock[];
+    attachment_ids: Uuid[];
+    state: "pending" | "fired" | "cancelled" | "failed";
+    input_id: Uuid | null;
+    attempts: number;
+  };
+}
+export interface ScheduleRunChanged {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "schedule_run_changed";
+  payload: {
+    id: Uuid;
+    conversation_id: Uuid;
+    run_at: Time;
+    content: ContentBlock[];
+    attachment_ids: Uuid[];
+    state: "pending" | "fired" | "cancelled" | "failed";
+    input_id: Uuid | null;
+    attempts: number;
+  };
 }
