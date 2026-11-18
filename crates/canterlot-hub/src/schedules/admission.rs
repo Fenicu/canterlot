@@ -174,6 +174,33 @@ fn merge(target: &mut Value, extra: Value) {
     }
 }
 
+/// Более ранние запуски, блокирующие данный при политике `skip`:
+/// `claimed/prechecking` или `started`, чей ввод ещё не принят
+/// (`queued/dispatched/on_machine/transmitting`) или чья сессия
+/// работает/ждёт владельца. Поздние заявки ранних не блокируют.
+async fn earlier_blocking(
+    conn: &mut PgConnection,
+    schedule_id: Uuid,
+    run_id: Uuid,
+) -> Result<i64, Skip> {
+    sqlx::query_scalar(
+        "select count(*) from schedule_runs r
+         left join inputs i on i.id = r.input_id
+         left join conversation_derived d on d.conversation_id = r.session_id
+         where r.schedule_id = $1
+           and r.scheduled_at < (select scheduled_at from schedule_runs where id = $2)
+           and (r.state in ('claimed','prechecking')
+                or (r.state = 'started'
+                    and (i.state in ('queued','dispatched','on_machine','transmitting')
+                         or d.activity_state in ('working','waiting_for_user','stalled'))))",
+    )
+    .bind(schedule_id)
+    .bind(run_id)
+    .fetch_one(&mut *conn)
+    .await
+    .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))
+}
+
 async fn admit_inner(
     scheduler: &Scheduler,
     schedule: &Schedule,
@@ -196,26 +223,7 @@ async fn admit_inner(
             .acquire()
             .await
             .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))?;
-        // Блокируют только более ранние запуски: поздняя заявка не отменяет
-        // раннюю. Учитываем не только `claimed/prechecking`, но и `started`,
-        // чей ввод ещё не принят или чья сессия работает/ждёт владельца.
-        let blocking: i64 = sqlx::query_scalar(
-            "select count(*) from schedule_runs r
-             left join inputs i on i.id = r.input_id
-             left join conversation_derived d on d.conversation_id = r.session_id
-             where r.schedule_id = $1
-               and r.scheduled_at < (select scheduled_at from schedule_runs where id = $2)
-               and (r.state in ('claimed','prechecking')
-                    or (r.state = 'started'
-                        and (i.state in ('queued','dispatched','on_machine','transmitting')
-                             or d.activity_state in ('working','waiting_for_user','stalled'))))",
-        )
-        .bind(schedule.id)
-        .bind(run.id)
-        .fetch_one(&mut *conn)
-        .await
-        .unwrap_or(0);
-        if blocking > 0 {
+        if earlier_blocking(&mut conn, schedule.id, run.id).await? > 0 {
             return Err(Skip::new(RunState::SkippedOverlap, "earlier_run_in_flight"));
         }
     }
@@ -706,6 +714,14 @@ async fn dispatch(
     crate::conversations::lock_owner(&mut tx, schedule.owner_id)
         .await
         .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))?;
+    // Решение о пересечении повторяется под замками dispatch: ранняя проверка
+    // в приёме могла пропустить заявку, чей ввод встал в очередь после неё.
+    if !run_anyway && !manual && current.overlap == OverlapPolicy::Skip
+        && earlier_blocking(&mut tx, schedule.id, run.id).await? > 0
+    {
+        let _ = tx.rollback().await;
+        return Err(Skip::new(RunState::SkippedOverlap, "earlier_run_in_flight"));
+    }
     // Пересчёт параллельности с корнями: `live_counts` в маршрутизации видит
     // только детей (`parent_conversation_id is not null`), а запланированные
     // сессии — корни, как и интерактивные. Два расписания под `max_parallel=1`
