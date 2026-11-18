@@ -1619,3 +1619,118 @@ async fn reconcile_report_is_applied_after_earlier_cj_batches(pool: PgPool) -> T
     assert_eq!(reason, "execution_unknown_to_worker");
     Ok(())
 }
+
+fn precheck_request() -> SchedulePrecheck {
+    SchedulePrecheck {
+        attempt_id: Uuid::now_v7().to_string(),
+        workdir: "/tmp".to_owned(),
+        command: "true".to_owned(),
+        timeout_seconds: 5,
+    }
+}
+
+fn precheck_reply(attempt_id: &str) -> PrecheckResult {
+    PrecheckResult {
+        attempt_id: attempt_id.to_owned(),
+        outcome: Some(precheck_result::Outcome::Finished(PrecheckFinished {
+            exit_code: 0,
+            output_tail: String::new(),
+            timed_out: false,
+        })),
+    }
+}
+
+/// Замена управляющего потока по gRPC: ожидание предпроверки старой аренды
+/// просыпается сразу, чужой ответ со старого соединения нового ожидания не
+/// закрывает, а ответ нового потока доходит.
+#[sqlx::test(migrations = "./migrations")]
+async fn precheck_waiter_follows_the_lease_across_stream_replacement(pool: PgPool) {
+    let host = Host::start(
+        pool,
+        HubTimers {
+            handshake: Duration::from_secs(5),
+            degraded_after: Duration::from_secs(1),
+            unavailable_after: Duration::from_secs(3),
+            ..timers()
+        },
+    )
+    .await;
+    let machine = host.machine.machine_id;
+    let mut changes = host.registry.subscribe_changes();
+    let capable = |connection: Uuid| Hello {
+        optional_capabilities: vec!["schedule_precheck_v1".to_owned()],
+        ..host.hello(machine, connection, StreamKind::Control)
+    };
+    let old_connection = Uuid::now_v7();
+    let (old_tx, mut old) = host.control(capable(old_connection)).await;
+    accepted(&mut old).await;
+    let first_request = precheck_request();
+    let waiting_old = tokio::spawn({
+        let registry = host.registry.clone();
+        let request = first_request.clone();
+        async move {
+            registry
+                .ask_precheck(machine, request, Duration::from_secs(300))
+                .await
+        }
+    });
+    let Some(control_down::Msg::SchedulePrecheck(delivered)) = next(&mut old).await.msg else {
+        panic!("the precheck command reaches the first stream");
+    };
+    assert_eq!(delivered.attempt_id, first_request.attempt_id);
+    changed(&mut changes, machine, Availability::Unavailable).await;
+    let new_connection = Uuid::now_v7();
+    let (new_tx, mut new) = host.control(capable(new_connection)).await;
+    accepted(&mut new).await;
+    let outcome = timeout(WAIT, waiting_old)
+        .await
+        .expect("the old waiter wakes when its stream is replaced")
+        .unwrap();
+    assert_eq!(
+        outcome,
+        Err(canterlot_hub::session::PrecheckFailure::NoAnswer)
+    );
+    // Ожидание на новой аренде и «опоздавший» ответ со старого соединения.
+    let second_request = precheck_request();
+    let mut waiting_new = tokio::spawn({
+        let registry = host.registry.clone();
+        let request = second_request.clone();
+        async move {
+            registry
+                .ask_precheck(machine, request, Duration::from_secs(300))
+                .await
+        }
+    });
+    let Some(control_down::Msg::SchedulePrecheck(delivered)) = next(&mut new).await.msg else {
+        panic!("the precheck command reaches the replacement stream");
+    };
+    assert_eq!(delivered.attempt_id, second_request.attempt_id);
+    let _ = old_tx
+        .send(ControlUp {
+            msg: Some(control_up::Msg::PrecheckResult(precheck_reply(
+                &second_request.attempt_id,
+            ))),
+        })
+        .await;
+    assert!(
+        timeout(Duration::from_millis(300), &mut waiting_new)
+            .await
+            .is_err(),
+        "a reply from the replaced stream does not close the new waiter"
+    );
+    send(
+        &new_tx,
+        ControlUp {
+            msg: Some(control_up::Msg::PrecheckResult(precheck_reply(
+                &second_request.attempt_id,
+            ))),
+        },
+    )
+    .await;
+    let reply = timeout(WAIT, waiting_new)
+        .await
+        .expect("the replacement stream answers its own waiter")
+        .unwrap()
+        .expect("reply delivered");
+    assert_eq!(reply.attempt_id, second_request.attempt_id);
+}

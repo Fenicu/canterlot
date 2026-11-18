@@ -886,7 +886,7 @@ impl Registry {
     /// Предпроверка расписания: запрос и ответ связываются номером попытки и машиной.
     /// Аренда и отправитель берутся одним снимком: замена потока между ними
     /// не подменяет чужой ответ.
-    pub(crate) async fn ask_precheck(
+    pub async fn ask_precheck(
         &self,
         machine_id: Uuid,
         request: canterlot_proto::worker::v1::SchedulePrecheck,
