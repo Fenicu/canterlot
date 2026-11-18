@@ -579,3 +579,27 @@ fn dictation_section_is_optional_and_relative_socket_sticks_to_the_config() {
     fs::write(&path, format!("{base}[dictation]\nsockett = 'x'\n")).unwrap();
     assert!(HubConfig::load(&path).is_err());
 }
+
+#[test]
+fn hung_rescue_switch_defaults_to_auto_and_rejects_unknown_values() {
+    use canterlot_hub::config::HungRescue;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hub.toml");
+    fs::write(&path, format!("{PILOT_BASE}[activity]\n")).unwrap();
+    let config = HubConfig::load(&path).unwrap();
+    assert_eq!(config.activity.hung_rescue, HungRescue::Auto);
+    for (value, expected) in [
+        ("auto", HungRescue::Auto),
+        ("alert", HungRescue::Alert),
+        ("off", HungRescue::Off),
+    ] {
+        fs::write(
+            &path,
+            format!("{PILOT_BASE}[activity]\nhung_rescue = '{value}'\n"),
+        )
+        .unwrap();
+        assert_eq!(HubConfig::load(&path).unwrap().activity.hung_rescue, expected);
+    }
+    fs::write(&path, format!("{PILOT_BASE}[activity]\nhung_rescue = 'sometimes'\n")).unwrap();
+    assert!(HubConfig::load(&path).is_err());
+}

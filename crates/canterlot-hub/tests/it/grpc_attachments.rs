@@ -194,6 +194,7 @@ impl Fixture {
                 stalled_generating: config.stalled_generating,
                 stalled_tool: config.stalled_tool,
                 hung_generating: Duration::from_secs(600),
+                hung_rescue: canterlot_hub::config::HungRescue::Auto,
                 idle_quiet: config.idle_quiet,
                 idle_background_max: std::time::Duration::from_secs(15 * 60),
             },

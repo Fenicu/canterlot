@@ -167,6 +167,7 @@ pub fn thresholds() -> canterlot_hub::activity::Thresholds {
         stalled_generating: std::time::Duration::from_secs(300),
         stalled_tool: std::time::Duration::from_secs(1800),
         hung_generating: std::time::Duration::from_secs(600),
+        hung_rescue: canterlot_hub::config::HungRescue::Auto,
         idle_background_max: std::time::Duration::from_secs(15 * 60),
         idle_quiet: std::time::Duration::from_secs(5),
     }

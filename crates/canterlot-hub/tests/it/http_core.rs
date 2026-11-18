@@ -1779,6 +1779,7 @@ async fn config_endpoint_matches_proto_limits_and_config_structs(pool: PgPool) {
         stalled_generating: Duration::from_secs(120),
         stalled_tool: Duration::from_secs(600),
         hung_generating: Duration::from_secs(600),
+        hung_rescue: canterlot_hub::config::HungRescue::Auto,
         ..ActivityConfig::default()
     };
     deps.machines = MachinesConfig {

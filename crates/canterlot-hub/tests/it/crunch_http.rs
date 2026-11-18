@@ -214,6 +214,7 @@ async fn limits_endpoint_exposes_reserve_state_and_holds(pool: PgPool) {
             stalled_generating: Duration::from_secs(300),
             stalled_tool: Duration::from_secs(1800),
             hung_generating: Duration::from_secs(600),
+            hung_rescue: canterlot_hub::config::HungRescue::Auto,
             idle_quiet: Duration::from_secs(5),
             idle_background_max: std::time::Duration::from_secs(15 * 60),
         },

@@ -758,6 +758,18 @@ impl Default for LimitsConfig {
     }
 }
 
+/// Режим спасения зависшего хода (`[activity].hung_rescue`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HungRescue {
+    /// Обнаружение, карточка, пуш и автоматические действия там, где свидетельства надёжны.
+    Auto,
+    /// Обнаружение, карточка и пуш; ни прерываний, ни вливаний без владельца.
+    Alert,
+    /// Verdict «завис в генерации» не выносится: остаётся обычный `stalled`.
+    Off,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ActivityConfig {
@@ -770,6 +782,9 @@ pub struct ActivityConfig {
     /// ход считается зависшим, и его можно спасти. Инструменты не попадают под этот порог.
     #[serde(with = "humantime_serde")]
     pub hung_generating: Duration,
+    /// Что хаб делает с зависшим ходом: `auto` спасает сам, `alert` только
+    /// показывает карточку и шлёт пуш, `off` не выносит verdict вовсе.
+    pub hung_rescue: HungRescue,
     #[serde(with = "humantime_serde")]
     pub tick: Duration,
     #[serde(with = "humantime_serde")]
@@ -789,6 +804,7 @@ impl Default for ActivityConfig {
             stalled_generating: Duration::from_secs(1800),
             stalled_tool: Duration::from_secs(1800),
             hung_generating: Duration::from_secs(600),
+            hung_rescue: HungRescue::Auto,
             tick: Duration::from_secs(15),
             debounce: Duration::from_millis(250),
             idle_quiet: Duration::from_secs(5),

@@ -131,6 +131,7 @@ pub struct Thresholds {
     pub stalled_generating: Duration,
     pub stalled_tool: Duration,
     pub hung_generating: Duration,
+    pub hung_rescue: crate::config::HungRescue,
     pub idle_quiet: Duration,
     pub idle_background_max: Duration,
 }
@@ -140,6 +141,7 @@ impl From<&ActivityConfig> for Thresholds {
             stalled_generating: c.stalled_generating,
             stalled_tool: c.stalled_tool,
             hung_generating: c.hung_generating,
+            hung_rescue: c.hung_rescue,
             idle_quiet: c.idle_quiet,
             idle_background_max: c.idle_background_max,
         }
