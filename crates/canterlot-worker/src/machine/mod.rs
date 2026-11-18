@@ -1,7 +1,14 @@
-use crate::{adapter::HarnessCatalog, config::WorkerConfig, machine::cli_versions::HarnessVersion};
+use crate::{
+    adapter::HarnessCatalog,
+    config::WorkerConfig,
+    machine::{
+        cli_versions::HarnessVersion,
+        slash_catalog::{CatalogEntry, EntryKind},
+    },
+};
 use canterlot_proto::{
     limits::{MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS_PER_INPUT},
-    worker::v1::{HarnessInfo, MachineReport, ModelInfo},
+    worker::v1::{CatalogEntry as ProtoCatalogEntry, HarnessInfo, MachineReport, ModelInfo},
 };
 use std::{
     collections::BTreeMap,
@@ -20,6 +27,7 @@ pub mod metrics;
 mod nofollow;
 pub mod owner_instructions;
 pub mod probe;
+pub mod slash_catalog;
 pub mod share;
 pub mod watch;
 pub mod workdirs;
@@ -33,17 +41,25 @@ pub fn now_ms() -> u64 {
 /// Новые поля версий уходят только хабу, объявившему `cli_versions_v1`.
 /// Старый хаб получает прежнюю форму отчёта: пустые строки в добавленных полях.
 pub fn gated_report(mut report: MachineReport, capabilities: &[String]) -> MachineReport {
-    if capabilities
+    let versions = capabilities
         .iter()
-        .any(|capability| capability == crate::session::CAPABILITY_CLI_VERSIONS_V1)
-    {
+        .any(|capability| capability == crate::session::CAPABILITY_CLI_VERSIONS_V1);
+    let catalog = capabilities
+        .iter()
+        .any(|capability| capability == crate::session::CAPABILITY_SLASH_CATALOG_V1);
+    if versions && catalog {
         return report;
     }
     for harness in &mut report.harnesses {
-        harness.installed_version.clear();
-        harness.latest_version.clear();
-        harness.min_version.clear();
-        harness.update_command.clear();
+        if !versions {
+            harness.installed_version.clear();
+            harness.latest_version.clear();
+            harness.min_version.clear();
+            harness.update_command.clear();
+        }
+        if !catalog {
+            harness.catalog.clear();
+        }
     }
     report
 }
@@ -57,6 +73,32 @@ pub fn build_report_with_versions(
     config: &WorkerConfig,
     catalog: &[HarnessCatalog],
     versions: &BTreeMap<String, HarnessVersion>,
+) -> MachineReport {
+    build_report_with_extras(config, catalog, versions, &BTreeMap::new())
+}
+
+fn proto_catalog(entries: &[CatalogEntry]) -> Vec<ProtoCatalogEntry> {
+    entries
+        .iter()
+        .map(|entry| ProtoCatalogEntry {
+            name: entry.name.clone(),
+            description: entry.description.clone(),
+            kind: match entry.kind {
+                EntryKind::Command => "command",
+                EntryKind::Skill => "skill",
+            }
+            .into(),
+            argument_hint: entry.argument_hint.clone(),
+        })
+        .collect()
+}
+
+/// Отчёт с каталогом slash-команд, собранным фоновыми пробами.
+pub fn build_report_with_extras(
+    config: &WorkerConfig,
+    catalog: &[HarnessCatalog],
+    versions: &BTreeMap<String, HarnessVersion>,
+    catalogs: &BTreeMap<String, Vec<CatalogEntry>>,
 ) -> MachineReport {
     let mut roots: Vec<_> = config
         .execution
@@ -85,6 +127,10 @@ pub fn build_report_with_versions(
                     latest_version: version.map_or_else(String::new, |v| v.latest.clone()),
                     min_version: version.map_or_else(String::new, |v| v.minimum.clone()),
                     update_command: version.map_or_else(String::new, |v| v.update_command.clone()),
+                    catalog: catalogs
+                        .get(c.harness)
+                        .map(|entries| proto_catalog(entries))
+                        .unwrap_or_default(),
                     permission_modes: c.permission_modes.iter().map(|s| (*s).into()).collect(),
                     models: c
                         .models
@@ -159,6 +205,16 @@ fn os_line() -> String {
 #[cfg(test)]
 mod cli_versions_gate_tests {
     use super::*;
+    use crate::machine::slash_catalog::{CatalogEntry, EntryKind};
+
+    fn catalog() -> Vec<ProtoCatalogEntry> {
+        proto_catalog(&[CatalogEntry {
+            name: "review".into(),
+            description: "Review changes".into(),
+            kind: EntryKind::Command,
+            argument_hint: String::new(),
+        }])
+    }
 
     fn report() -> MachineReport {
         MachineReport {
@@ -168,6 +224,7 @@ mod cli_versions_gate_tests {
                 latest_version: "0.167.0".into(),
                 min_version: "0.164.0".into(),
                 update_command: "npm i -g @openai/codex@latest".into(),
+                catalog: catalog(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -182,15 +239,27 @@ mod cli_versions_gate_tests {
         assert_eq!(h.latest_version, "");
         assert_eq!(h.min_version, "");
         assert_eq!(h.update_command, "");
+        assert!(h.catalog.is_empty());
     }
 
     #[test]
     fn negotiated_peer_gets_all_new_fields() {
-        let report = gated_report(report(), &["cli_versions_v1".into()]);
+        let report = gated_report(
+            report(),
+            &["cli_versions_v1".into(), "slash_catalog_v1".into()],
+        );
         let h = &report.harnesses[0];
         assert_eq!(h.installed_version, "0.164.0");
         assert_eq!(h.latest_version, "0.167.0");
         assert_eq!(h.min_version, "0.164.0");
         assert_eq!(h.update_command, "npm i -g @openai/codex@latest");
+        assert_eq!(h.catalog.len(), 1);
+    }
+
+    #[test]
+    fn catalog_is_hidden_without_its_own_capability() {
+        let report = gated_report(report(), &["cli_versions_v1".into()]);
+        assert!(report.harnesses[0].catalog.is_empty());
+        assert_eq!(report.harnesses[0].installed_version, "0.164.0");
     }
 }

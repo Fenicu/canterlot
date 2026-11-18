@@ -22,7 +22,10 @@ use crate::{
         opencode::{self, OpenCodeCatalog},
     },
     config::{ClaudeCodeConfig, CodexConfig, OpenCodeConfig, WorkerConfig},
-    machine::cli_versions::{self, HarnessVersion, LatestVersions, NPM_REGISTRY},
+    machine::{
+        cli_versions::{self, HarnessVersion, LatestVersions, NPM_REGISTRY},
+        slash_catalog::{self, CatalogCache, CatalogEntry, Source},
+    },
 };
 
 /// Первые паузы повторов, дальше раз в пять минут: сбой обычно кончается сам.
@@ -42,6 +45,7 @@ pub(super) struct CatalogState {
     codex: Option<CodexCatalog>,
     opencode: Option<OpenCodeCatalog>,
     latest: BTreeMap<&'static str, String>,
+    catalogs: BTreeMap<String, Vec<CatalogEntry>>,
 }
 
 impl CatalogState {
@@ -131,6 +135,16 @@ pub(super) enum Slot {
         catalog: OpenCodeCatalog,
         latest: String,
     },
+}
+
+impl Slot {
+    pub(super) fn version_label(&self) -> &str {
+        match self {
+            Self::Claude { version, .. } => version.label(),
+            Self::Codex { catalog, .. } => catalog.version.label(),
+            Self::OpenCode { catalog, .. } => catalog.version.label(),
+        }
+    }
 }
 
 /// Настроенные харнессы. Выключенный в конфигурации харнесс сюда не попадает:
@@ -250,6 +264,50 @@ impl Probe {
             Self::OpenCode(_) => "OpenCode",
         }
     }
+
+    fn catalog_source(&self, data_dir: &std::path::Path) -> Source {
+        match self {
+            Self::Claude(cfg) => Source::Claude {
+                executable: cfg.executable.clone(),
+            },
+            Self::Codex(cfg) => Source::Codex {
+                executable: cfg.executable.clone(),
+            },
+            Self::OpenCode(cfg) => Source::OpenCode {
+                cfg: cfg.clone(),
+                data_dir: data_dir.to_owned(),
+            },
+        }
+    }
+}
+
+/// Фоновая проба каталога: не задерживает старт сеанса и отчёт машины.
+/// Каталог берётся из кэша по пути бинарника и версии; отказ означает «нет каталога».
+pub(super) fn spawn_catalog_probe(
+    probe: &Probe,
+    version: &str,
+    config: &WorkerConfig,
+    catalogs: &Arc<Catalogs>,
+    mut shutdown: watch::Receiver<bool>,
+) -> tokio::task::JoinHandle<()> {
+    let source = probe.catalog_source(&config.data_dir);
+    let harness = source.harness().to_owned();
+    let version = version.to_owned();
+    let config = config.clone();
+    let cache = catalogs.slash();
+    let catalogs = catalogs.clone();
+    tokio::spawn(async move {
+        tokio::select! {
+            _ = super::stopped(&mut shutdown) => {}
+            _ = async {
+                if let Some(entries) =
+                    slash_catalog::load(&source, &version, &cache, &config.data_dir).await
+                {
+                    catalogs.publish_catalog(&config, &harness, entries);
+                }
+            } => {}
+        }
+    })
 }
 
 /// Текущий каталог машины и его последний отчёт для хаба.
@@ -257,6 +315,7 @@ pub(super) struct Catalogs {
     state: Mutex<CatalogState>,
     report: watch::Sender<Arc<MachineReport>>,
     npm: LatestVersions,
+    slash: Arc<CatalogCache>,
 }
 
 impl Catalogs {
@@ -265,6 +324,7 @@ impl Catalogs {
             state: Mutex::new(CatalogState::default()),
             report: watch::channel(Arc::new(MachineReport::default())).0,
             npm: LatestVersions::default(),
+            slash: Arc::new(CatalogCache::default()),
         }
     }
 
@@ -274,6 +334,25 @@ impl Catalogs {
 
     pub(super) fn npm(&self) -> &LatestVersions {
         &self.npm
+    }
+
+    pub(super) fn slash(&self) -> Arc<CatalogCache> {
+        Arc::clone(&self.slash)
+    }
+
+    /// Фоновая проба каталога обновляет только свой харнесс и пересылает отчёт.
+    pub(super) fn publish_catalog(
+        &self,
+        config: &WorkerConfig,
+        harness: &str,
+        entries: Vec<CatalogEntry>,
+    ) {
+        self.state
+            .lock()
+            .expect("catalog lock")
+            .catalogs
+            .insert(harness.to_owned(), entries);
+        self.emit(config);
     }
 
     pub(super) fn publish(&self, config: &WorkerConfig, state: CatalogState) {
@@ -289,10 +368,11 @@ impl Catalogs {
     fn emit(&self, config: &WorkerConfig) {
         let report = {
             let state = self.state.lock().expect("catalog lock");
-            crate::machine::build_report_with_versions(
+            crate::machine::build_report_with_extras(
                 config,
                 &state.harnesses(config),
                 &state.versions(config),
+                &state.catalogs,
             )
         };
         self.report.send_replace(Arc::new(report));
@@ -332,8 +412,16 @@ pub(super) async fn retry_until_discovered(
         };
         match result {
             Ok(slot) => {
+                let version = slot.version_label().to_owned();
                 log_no_models(&probe, &slot);
                 catalogs.insert(&config, slot);
+                let _catalog_task = spawn_catalog_probe(
+                    &probe,
+                    &version,
+                    &config,
+                    &catalogs,
+                    shutdown.clone(),
+                );
                 tracing::info!(
                     kind = probe.discovered_kind(),
                     "{} discovered after retry",

@@ -1,4 +1,5 @@
 pub mod broker;
+pub mod catalog;
 pub mod input;
 pub mod limits;
 pub mod mcp;

@@ -57,6 +57,8 @@ pub const CAPABILITY_CREDENTIAL_EXPIRY_V1: &str = "credential_expiry_v1";
 pub const CAPABILITY_PROVIDER_CREDITS_V1: &str = "provider_credits_v1";
 /// В отчёте машины есть версии CLI и команда обновления; без неё поля пусты.
 pub const CAPABILITY_CLI_VERSIONS_V1: &str = "cli_versions_v1";
+/// В отчёте машины есть каталог команд и навыков; без него поле пусто.
+pub const CAPABILITY_SLASH_CATALOG_V1: &str = "slash_catalog_v1";
 
 pub const OPTIONAL_CAPABILITIES: &[&str] = &[
     "exec_v1",
@@ -83,6 +85,7 @@ pub const OPTIONAL_CAPABILITIES: &[&str] = &[
     CAPABILITY_CREDENTIAL_EXPIRY_V1,
     CAPABILITY_PROVIDER_CREDITS_V1,
     CAPABILITY_CLI_VERSIONS_V1,
+    CAPABILITY_SLASH_CATALOG_V1,
 ];
 
 #[derive(Clone)]
@@ -718,8 +721,16 @@ impl Worker {
                 .await
             {
                 Ok(slot) => {
+                    let version = slot.version_label().to_owned();
                     catalog::log_no_models(&probe, &slot);
                     catalogs.set(slot);
+                    self.catalog_tasks.push(catalog::spawn_catalog_probe(
+                        &probe,
+                        &version,
+                        &self.config,
+                        &self.catalogs,
+                        shutdown.clone(),
+                    ));
                 }
                 Err(reason) => {
                     tracing::warn!(

@@ -648,6 +648,17 @@ message HarnessInfo {
   string min_version = 11;
   // Команда обновления для способа установки CLI; воркер её не выполняет.
   string update_command = 12;
+  // Только при согласованной возможности slash_catalog_v1: пусто у старого воркера.
+  repeated CatalogEntry catalog = 13;
+}
+
+// Строка меню slash-команд: имя, короткое описание, вид и подсказка аргумента.
+message CatalogEntry {
+  string name = 1;
+  string description = 2;
+  // "command" или "skill".
+  string kind = 3;
+  string argument_hint = 4;
 }
 
 message ModelInfo {

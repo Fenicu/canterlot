@@ -1223,6 +1223,38 @@ fn harness_info_cli_versions_roundtrip_and_old_worker_is_empty() {
 }
 
 #[test]
+fn harness_info_catalog_roundtrip_and_old_worker_sends_no_bytes() {
+    use canterlot_proto::worker::v1::*;
+    let harness = HarnessInfo {
+        harness: "claude_code".into(),
+        catalog: vec![
+            CatalogEntry {
+                name: "review".into(),
+                description: "Review changes".into(),
+                kind: "command".into(),
+                argument_hint: "[file]".into(),
+            },
+            CatalogEntry {
+                name: "brainstorming".into(),
+                description: "Think first".into(),
+                kind: "skill".into(),
+                argument_hint: String::new(),
+            },
+        ],
+        ..Default::default()
+    };
+    assert_roundtrip(harness.clone());
+    // Пустой каталог добавляет ноль байт: формат старых сторон не меняется.
+    let mut old = harness;
+    old.catalog.clear();
+    let bare = HarnessInfo {
+        harness: "claude_code".into(),
+        ..Default::default()
+    };
+    assert_eq!(old.encode_to_vec(), bare.encode_to_vec());
+}
+
+#[test]
 fn start_execution_capabilities_machine_report_os_and_limits_snapshot_roundtrip() {
     use canterlot_proto::worker::{ipc, v1::*};
     let start = StartExecution {
