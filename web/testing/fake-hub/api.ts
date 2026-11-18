@@ -15,6 +15,7 @@ import type { FakeHub } from './hub';
 import type { components } from '../../src/lib/api/generated/openapi.js';
 
 type PresetSummary = components['schemas']['PresetSummary'];
+type MessageSnippet = components['schemas']['MessageSnippet'];
 type QueueSnapshot = components['schemas']['SnapshotQueueView'];
 export type NudgeRuleView = components['schemas']['NudgeRuleView'];
 export type NudgeEventView = components['schemas']['NudgeEventView'];
@@ -272,12 +273,74 @@ export class FakeHubApi {
 		{ harness: 'claude', model: 'default' }
 	];
 	deletedPresets = new Map<string, FakePreset>();
+	readonly messageSnippets = new Map<string, MessageSnippet>();
 	decisionAutoProgress: boolean | 'transmitting' | 'saved' = true;
 	#seq = 0;
 
 	constructor(readonly hub: FakeHub) {
 		this.hub.setSnapshot('conversations', () => this.listData());
 		this.hub.setSnapshot('machines', () => ({ items: [...this.machines.values()] }));
+	}
+
+	listMessageSnippets(scope: string, projectKey: string): MessageSnippet[] {
+		return [...this.messageSnippets.values()]
+			.filter((item) => item.scope === scope && item.project_key === projectKey)
+			.sort((a, b) => a.position - b.position);
+	}
+
+	createMessageSnippet(body: { scope: string; project_key?: string; title: string; body: string; position?: number | null }): MessageSnippet {
+		const id = crypto.randomUUID();
+		const position = body.position ?? this.listMessageSnippets(body.scope, body.project_key ?? '').length;
+		const snippet: MessageSnippet = {
+			id, scope: body.scope, project_key: body.project_key ?? '', title: body.title, body: body.body,
+			position, revision: 1, created_at: new Date().toISOString(), updated_at: new Date().toISOString()
+		};
+		this.messageSnippets.set(id, snippet);
+		this.publishSnippet(snippet, false);
+		return snippet;
+	}
+
+	patchMessageSnippet(id: string, patch: { title?: string | null; body?: string | null; position?: number | null; base_revision: number }): MessageSnippet | null {
+		const current = this.messageSnippets.get(id);
+		if (!current || patch.base_revision !== current.revision) return null;
+		const next: MessageSnippet = {
+			...current,
+			title: patch.title ?? current.title,
+			body: patch.body ?? current.body,
+			position: patch.position ?? current.position,
+			revision: current.revision + 1,
+			updated_at: new Date().toISOString()
+		};
+		this.messageSnippets.set(id, next);
+		this.publishSnippet(next, false);
+		return next;
+	}
+
+	deleteMessageSnippet(id: string): boolean {
+		const current = this.messageSnippets.get(id);
+		if (!current) return false;
+		this.messageSnippets.delete(id);
+		this.publishSnippet(current, true);
+		return true;
+	}
+
+	reorderMessageSnippets(body: { scope: string; project_key?: string; ids: string[] }): MessageSnippet[] {
+		body.ids.forEach((id, position) => {
+			const current = this.messageSnippets.get(id);
+			if (!current) return;
+			this.messageSnippets.set(id, { ...current, position, revision: current.revision + 1 });
+		});
+		const items = this.listMessageSnippets(body.scope, body.project_key ?? '');
+		for (const item of items) this.publishSnippet(item, false);
+		return items;
+	}
+
+	private publishSnippet(snippet: MessageSnippet, deleted: boolean): void {
+		this.hub.append('conversations', {
+			kind: 'message_snippet_changed',
+			payload: { snippet: deleted ? null : snippet, deleted }
+		});
+		this.hub.flush();
 	}
 
 	spawnWhitelistView(): { entries: { harness: string; model: string }[]; is_default: boolean; default_entries: { harness: string; model: string }[] } {

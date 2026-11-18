@@ -320,6 +320,26 @@ const ERROR_TABLE: Record<ErrorCode, ErrorDescriptor> = {
     action: "none",
     message: "Некорректные инструкции",
   },
+  message_snippet_not_found: {
+    action: "none",
+    message: "Заготовка не найдена",
+  },
+  message_snippet_revision_conflict: {
+    action: "reload",
+    message: "Заготовка уже изменена",
+  },
+  message_snippet_title_taken: {
+    action: "none",
+    message: "Заготовка с таким названием уже есть",
+  },
+  message_snippet_limit_reached: {
+    action: "none",
+    message: "Слишком много заготовок",
+  },
+  message_snippet_invalid: {
+    action: "none",
+    message: "Некорректная заготовка",
+  },
   spawn_whitelist_invalid: {
     action: "none",
     message: "Некорректный белый список",

@@ -1628,6 +1628,54 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/message-snippets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get__api_v1_message_snippets"];
+        put?: never;
+        post: operations["post__api_v1_message_snippets"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/message-snippets/order": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["put__api_v1_message_snippets_order"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/message-snippets/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get__api_v1_message_snippets__id_"];
+        put?: never;
+        post?: never;
+        delete: operations["delete__api_v1_message_snippets__id_"];
+        options?: never;
+        head?: never;
+        patch: operations["patch__api_v1_message_snippets__id_"];
+        trace?: never;
+    };
     "/api/v1/openapi.json": {
         parameters: {
             query?: never;
@@ -2572,6 +2620,14 @@ export interface components {
             title?: string | null;
             workdir: string;
         };
+        CreateSnippetBody: {
+            body: string;
+            /** Format: int32 */
+            position?: number | null;
+            project_key?: string;
+            scope: string;
+            title: string;
+        };
         Created: {
             /** Format: uuid */
             conversation_id: string;
@@ -2729,7 +2785,7 @@ export interface components {
             scope: components["schemas"]["ErrorScope"];
         };
         /** @enum {string} */
-        ErrorCode: "unauthenticated" | "invalid_credentials" | "too_many_attempts" | "session_revoked" | "session_expired" | "reauth_required" | "wrong_password" | "qr_expired" | "qr_approvals_exhausted" | "passkey_rejected" | "no_passkeys" | "passkeys_unavailable" | "origin_rejected" | "invalid_request" | "invalid_offset" | "not_found" | "method_not_allowed" | "idempotency_conflict" | "draft_revision_conflict" | "decision_conflict" | "request_not_open" | "decision_invalid" | "resource_limit" | "not_implemented" | "too_many_requests" | "db_unavailable" | "internal" | "queue_full" | "conversation_closed" | "execution_already_live" | "invalid_state" | "not_pending" | "schedule_time_out_of_range" | "too_many_scheduled" | "schedule_invalid" | "schedule_revision_conflict" | "machine_not_found" | "machine_unavailable" | "machine_offline" | "not_open" | "not_delivered" | "limit" | "capability_missing" | "limits_mismatch" | "harness_unknown" | "model_unknown" | "effort_not_allowed" | "permission_mode_unknown" | "settings_midsession_unsupported" | "profile_unknown" | "workdir_not_allowed" | "resume_harness_unsupported" | "group_not_found" | "group_name_taken" | "archive_active" | "conversation_deleted" | "conversation_live" | "attachment_not_ready" | "attachment_not_uploadable" | "attachment_unsupported" | "attachment_unavailable" | "offset_mismatch" | "upload_in_progress" | "checksum_mismatch" | "attachment_conflict" | "preset_not_found" | "preset_builtin" | "preset_revision_conflict" | "preset_title_taken" | "preset_limit_reached" | "preset_invalid" | "spawn_whitelist_invalid" | "limit_settings_invalid" | "routing_policy_invalid" | "routing_policy_conflict" | "task_type_unknown" | "no_executor_available" | "not_delegated" | "worktree_removed" | "worktree_not_removed" | "too_many_terms" | "term_empty" | "term_too_long" | "duplicate_term";
+        ErrorCode: "unauthenticated" | "invalid_credentials" | "too_many_attempts" | "session_revoked" | "session_expired" | "reauth_required" | "wrong_password" | "qr_expired" | "qr_approvals_exhausted" | "passkey_rejected" | "no_passkeys" | "passkeys_unavailable" | "origin_rejected" | "invalid_request" | "invalid_offset" | "not_found" | "method_not_allowed" | "idempotency_conflict" | "draft_revision_conflict" | "decision_conflict" | "request_not_open" | "decision_invalid" | "resource_limit" | "not_implemented" | "too_many_requests" | "db_unavailable" | "internal" | "queue_full" | "conversation_closed" | "execution_already_live" | "invalid_state" | "not_pending" | "schedule_time_out_of_range" | "too_many_scheduled" | "schedule_invalid" | "schedule_revision_conflict" | "machine_not_found" | "machine_unavailable" | "machine_offline" | "not_open" | "not_delivered" | "limit" | "capability_missing" | "limits_mismatch" | "harness_unknown" | "model_unknown" | "effort_not_allowed" | "permission_mode_unknown" | "settings_midsession_unsupported" | "profile_unknown" | "workdir_not_allowed" | "resume_harness_unsupported" | "group_not_found" | "group_name_taken" | "archive_active" | "conversation_deleted" | "conversation_live" | "attachment_not_ready" | "attachment_not_uploadable" | "attachment_unsupported" | "attachment_unavailable" | "offset_mismatch" | "upload_in_progress" | "checksum_mismatch" | "attachment_conflict" | "preset_not_found" | "preset_builtin" | "preset_revision_conflict" | "preset_title_taken" | "preset_limit_reached" | "preset_invalid" | "message_snippet_not_found" | "message_snippet_revision_conflict" | "message_snippet_title_taken" | "message_snippet_limit_reached" | "message_snippet_invalid" | "spawn_whitelist_invalid" | "limit_settings_invalid" | "routing_policy_invalid" | "routing_policy_conflict" | "task_type_unknown" | "no_executor_available" | "not_delegated" | "worktree_removed" | "worktree_not_removed" | "too_many_terms" | "term_empty" | "term_too_long" | "duplicate_term";
         /** @description Детали ответа владельцу; содержимое решения не должно попадать в журналы ошибок. */
         ErrorDetails: {
             /** @description Разбор кандидатов маршрута (`no_executor_available`): не текст в `reason`. */
@@ -3576,6 +3632,24 @@ export interface components {
             /** Format: int32 */
             width?: number | null;
         };
+        MessageSnippet: {
+            body: string;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: uuid */
+            id: string;
+            /** Format: int32 */
+            position: number;
+            /** @description Канонический workdir для `project`, пустая строка для `global`. */
+            project_key: string;
+            /** Format: int64 */
+            revision: number;
+            /** @description `global` или `project`. */
+            scope: string;
+            title: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
         MethodsView: {
             passkey: boolean;
             password: boolean;
@@ -4352,6 +4426,11 @@ export interface components {
             /** @description До 64 символов; пустая строка снимает имя. */
             name: string;
         };
+        ReorderSnippets: {
+            ids: string[];
+            project_key?: string;
+            scope: string;
+        };
         /**
          * @description Вопрос или разрешение на том месте ленты, где агент его задал: открытый запрос
          *     стоит у поля ввода, решённый остаётся здесь и после перезагрузки.
@@ -5029,6 +5108,14 @@ export interface components {
         UpdatePage: {
             items: components["schemas"]["UpdateView"][];
             next_cursor: string | null;
+        };
+        UpdateSnippetBody: {
+            /** Format: int64 */
+            base_revision: number;
+            body?: string | null;
+            /** Format: int32 */
+            position?: number | null;
+            title?: string | null;
         };
         UpdateView: {
             created_at: string;
@@ -10615,6 +10702,233 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get__api_v1_message_snippets: {
+        parameters: {
+            query?: {
+                /** @description `global` или `project`. */
+                scope?: string;
+                /** @description Канонический workdir сессии; непустой только для `project`. */
+                project_key?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Заготовки владельца в области */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MessageSnippet"][];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    post__api_v1_message_snippets: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateSnippetBody"];
+            };
+        };
+        responses: {
+            /** @description Заготовка создана */
+            201: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MessageSnippet"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    put__api_v1_message_snippets_order: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReorderSnippets"];
+            };
+        };
+        responses: {
+            /** @description Порядок сохранён */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MessageSnippet"][];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get__api_v1_message_snippets__id_: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Заготовка */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MessageSnippet"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    delete__api_v1_message_snippets__id_: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Заготовка удалена */
+            204: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    patch__api_v1_message_snippets__id_: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateSnippetBody"];
+            };
+        };
+        responses: {
+            /** @description Заготовка изменена */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MessageSnippet"];
+                };
             };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
             default: {

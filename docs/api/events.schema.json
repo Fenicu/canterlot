@@ -175,6 +175,9 @@
       "$ref": "#/$defs/instruction_preset_changed"
     },
     {
+      "$ref": "#/$defs/message_snippet_changed"
+    },
+    {
       "$ref": "#/$defs/compaction_started"
     },
     {
@@ -4539,6 +4542,144 @@
       ],
       "additionalProperties": false
     },
+    "MessageSnippet": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "global",
+            "project"
+          ]
+        },
+        "project_key": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "body": {
+          "type": "string"
+        },
+        "position": {
+          "type": "integer"
+        },
+        "revision": {
+          "type": "integer"
+        },
+        "created_at": {
+          "$ref": "#/$defs/Time"
+        },
+        "updated_at": {
+          "$ref": "#/$defs/Time"
+        }
+      },
+      "required": [
+        "id",
+        "scope",
+        "project_key",
+        "title",
+        "body",
+        "position",
+        "revision",
+        "created_at",
+        "updated_at"
+      ],
+      "additionalProperties": false
+    },
+    "message_snippet_changed": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "scope_seq": {
+          "$ref": "#/$defs/Seq"
+        },
+        "scope_seq_from": {
+          "$ref": "#/$defs/Seq"
+        },
+        "committed_at": {
+          "$ref": "#/$defs/Time"
+        },
+        "committed_at_from": {
+          "$ref": "#/$defs/Time"
+        },
+        "conversation_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "execution_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "correlation_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "kind": {
+          "const": "message_snippet_changed"
+        },
+        "payload": {
+          "type": "object",
+          "properties": {
+            "snippet": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/MessageSnippet"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "deleted": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "snippet",
+            "deleted"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "v",
+        "id",
+        "scope",
+        "scope_seq",
+        "scope_seq_from",
+        "committed_at",
+        "committed_at_from",
+        "conversation_id",
+        "execution_id",
+        "correlation_id",
+        "kind",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
     "nudge_changed": {
       "type": "object",
       "properties": {
@@ -7759,6 +7900,9 @@
                 },
                 {
                   "$ref": "#/$defs/instruction_preset_changed"
+                },
+                {
+                  "$ref": "#/$defs/message_snippet_changed"
                 },
                 {
                   "$ref": "#/$defs/compaction_started"

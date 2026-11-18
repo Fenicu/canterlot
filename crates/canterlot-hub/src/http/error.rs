@@ -152,6 +152,11 @@ error_codes! {
     PresetTitleTaken => "preset_title_taken", 409, Browser, Never, "Пресет с таким названием уже есть";
     PresetLimitReached => "preset_limit_reached", 409, Browser, AfterCondition, "Слишком много пресетов";
     PresetInvalid => "preset_invalid", 422, Browser, Never, "Некорректный пресет";
+    MessageSnippetNotFound => "message_snippet_not_found", 404, Browser, Never, "Заготовка не найдена";
+    MessageSnippetRevisionConflict => "message_snippet_revision_conflict", 409, Browser, AfterCondition, "Заготовка уже изменена";
+    MessageSnippetTitleTaken => "message_snippet_title_taken", 409, Browser, Never, "Заготовка с таким названием уже есть";
+    MessageSnippetLimitReached => "message_snippet_limit_reached", 409, Browser, AfterCondition, "Слишком много заготовок";
+    MessageSnippetInvalid => "message_snippet_invalid", 422, Browser, Never, "Некорректная заготовка";
     SpawnWhitelistInvalid => "spawn_whitelist_invalid", 422, Browser, Never, "Некорректный белый список";
     LimitSettingsInvalid => "limit_settings_invalid", 422, Browser, Never, "Некорректные пороги лимитов";
     RoutingPolicyInvalid => "routing_policy_invalid", 422, Browser, Never, "Некорректная политика маршрутизации";
@@ -709,6 +714,30 @@ impl From<crate::presets::PresetError> for ApiError {
             E::LimitReached => Self::new(ErrorCode::PresetLimitReached),
             E::Invalid { field } => {
                 Self::new(ErrorCode::PresetInvalid).with_details(ErrorDetails {
+                    field: Some(field.to_owned()),
+                    ..Default::default()
+                })
+            }
+            E::IdempotencyConflict => Self::new(ErrorCode::IdempotencyConflict),
+            E::Db(e) => e.into(),
+        }
+    }
+}
+
+impl From<crate::message_snippets::MessageSnippetError> for ApiError {
+    fn from(e: crate::message_snippets::MessageSnippetError) -> Self {
+        use crate::message_snippets::MessageSnippetError as E;
+        match e {
+            E::NotFound => Self::new(ErrorCode::MessageSnippetNotFound),
+            E::RevisionConflict { current } => Self::new(ErrorCode::MessageSnippetRevisionConflict)
+                .with_details(ErrorDetails {
+                    current_revision: Some(current),
+                    ..Default::default()
+                }),
+            E::TitleTaken => Self::new(ErrorCode::MessageSnippetTitleTaken),
+            E::LimitReached => Self::new(ErrorCode::MessageSnippetLimitReached),
+            E::Invalid { field } => {
+                Self::new(ErrorCode::MessageSnippetInvalid).with_details(ErrorDetails {
                     field: Some(field.to_owned()),
                     ..Default::default()
                 })

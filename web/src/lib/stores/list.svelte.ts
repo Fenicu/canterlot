@@ -157,6 +157,7 @@ export class ListStore {
   #sub: { release(): void; readonly status: ScopeStatus } | null = null;
   #onDeleted: ((id: string) => void)[] = [];
   #onBookmark: ((change: BookmarkChange) => void)[] = [];
+  #onSnippet: ((payload: { snippet: unknown; deleted: boolean }) => void)[] = [];
 
   constructor(
     private deps: {
@@ -203,6 +204,14 @@ export class ListStore {
     this.#onBookmark.push(fn);
     return () => {
       this.#onBookmark = this.#onBookmark.filter((item) => item !== fn);
+    };
+  }
+
+  /** Заготовки приходят в области списка, но живут в отдельном хранилище PWA. */
+  onSnippet(fn: (payload: { snippet: unknown; deleted: boolean }) => void): () => void {
+    this.#onSnippet.push(fn);
+    return () => {
+      this.#onSnippet = this.#onSnippet.filter((item) => item !== fn);
     };
   }
 
@@ -278,6 +287,10 @@ export class ListStore {
     if (kind === "conversation_deleted" && event.kind === "conversation_deleted") {
       this.#markDeleted(event.payload.id);
       this.counts = event.payload.counts;
+      return;
+    }
+    if (kind === "message_snippet_changed" && event.kind === "message_snippet_changed") {
+      for (const fn of this.#onSnippet) fn(event.payload);
       return;
     }
     if (kind === "bookmark_changed" && event.kind === "bookmark_changed") {

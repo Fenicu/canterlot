@@ -46,6 +46,7 @@ pub mod limit_settings;
 pub mod limits;
 pub mod machines;
 pub mod media;
+pub mod message_snippets;
 pub mod nudge;
 pub mod openapi;
 pub mod plan;
@@ -254,6 +255,7 @@ pub fn api_routes() -> OpenApiRouter<AppState> {
         .merge(crunch::routes())
         .merge(groups::routes())
         .merge(presets::routes())
+        .merge(message_snippets::routes())
         .merge(session_tools::routes())
         .merge(spawn_queue::routes())
         .merge(limit_settings::routes())

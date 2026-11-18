@@ -22,6 +22,7 @@ import {
   type MachineRecord,
 } from "#lib/stores/machines.svelte.js";
 import { UpdatesStore } from "#lib/updates/store.svelte.js";
+import { SnippetsStore } from "#lib/snippets/store.svelte.js";
 import { browserLifecycle } from "#lib/sync/lifecycle.js";
 import type { RangeResult } from "#lib/sync/scope.js";
 import { ConnectionManager } from "#lib/sync/connection.js";
@@ -47,6 +48,7 @@ export interface Runtime {
   list: ListStore;
   machines: MachinesStore;
   updates: UpdatesStore;
+  snippets: SnippetsStore;
 }
 
 let singleton: Runtime | null = null;
@@ -181,6 +183,8 @@ export async function createRuntime(deps: RuntimeDeps): Promise<Runtime> {
       dropConversationBookmarks(id);
     });
     list.onBookmark((change) => applyBookmarkChange(change));
+    const snippets = new SnippetsStore();
+    snippets.bind((fn) => list.onSnippet(fn));
     list.open();
     const machines = new MachinesStore({
       connection,
@@ -229,6 +233,7 @@ export async function createRuntime(deps: RuntimeDeps): Promise<Runtime> {
       list,
       machines,
       updates,
+      snippets,
       dispose() {
         if (disposed) return;
         disposed = true;
@@ -247,6 +252,8 @@ export async function createRuntime(deps: RuntimeDeps): Promise<Runtime> {
         machines.close();
         machines.items.clear();
         updates.reset();
+        snippets.items = [];
+        snippets.loaded = false;
         if (singleton === runtime) singleton = null;
         release();
       },

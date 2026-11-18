@@ -30,6 +30,7 @@
   import PromptSuggestionSetting from './PromptSuggestionSetting.svelte';
   import HibernateSetting from './HibernateSetting.svelte';
   import DictationSettings from './DictationSettings.svelte';
+  import SnippetsSettings from './SnippetsSettings.svelte';
   import RoutingScreen from './RoutingScreen.svelte';
   import UpdatesScreen from './UpdatesScreen.svelte';
   import SignInSettings from '../signin/SignInSettings.svelte';
@@ -147,6 +148,7 @@
             <div class="setting embedded"><PromptSuggestionSetting /></div>
           </div>
           <DictationSettings />
+          <SnippetsSettings />
           <h3 class="group-title">Лента</h3>
           <div class="group">
             <section class="setting"><h3>Рассуждения</h3><p class="note">Вживую показывает хвост мысли, пока агент думает, и складывает его в строку после ответа. Строкой оставляет начало мысли, Раскрыты показывает рассуждение целиком</p><Segmented name="reasoning" label="Рассуждения" options={[{ value: 'line', label: 'Строкой' }, { value: 'live', label: 'Вживую' }, { value: 'expanded', label: 'Раскрыты' }]} bind:value={() => reasoning, setReasoning} /></section>

@@ -80,6 +80,7 @@ mod machine_outage;
 mod machine_updates;
 mod machines;
 mod media;
+mod message_snippets;
 mod model_resolution;
 mod nudge;
 mod nudge_http;

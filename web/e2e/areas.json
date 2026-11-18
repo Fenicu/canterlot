@@ -157,7 +157,8 @@
       "sources": [
         "src/lib/composer/**",
         "src/lib/drafts/**",
-        "src/lib/uploads/**"
+        "src/lib/uploads/**",
+        "src/lib/snippets/**"
       ],
       "specs": [
         "e2e/ui/attachment-intake.spec.ts",
@@ -171,7 +172,8 @@
         "e2e/ui/goal.spec.ts",
         "e2e/ui/low-findings-composer.spec.ts",
         "e2e/ui/send-now.spec.ts",
-        "e2e/ui/upload-xhr.spec.ts"
+        "e2e/ui/upload-xhr.spec.ts",
+        "e2e/ui/snippets.spec.ts"
       ]
     },
     {
@@ -245,7 +247,8 @@
         "e2e/ui/presets.spec.ts",
         "e2e/ui/settings.spec.ts",
         "e2e/ui/spawn-whitelist.spec.ts",
-        "e2e/ui/theme-picker.spec.ts"
+        "e2e/ui/theme-picker.spec.ts",
+        "e2e/ui/snippets.spec.ts"
       ]
     },
     {

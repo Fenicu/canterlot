@@ -85,6 +85,11 @@ const ALL_ERROR_CODES: ErrorCode[] = [
   "preset_title_taken",
   "preset_limit_reached",
   "preset_invalid",
+  "message_snippet_not_found",
+  "message_snippet_revision_conflict",
+  "message_snippet_title_taken",
+  "message_snippet_limit_reached",
+  "message_snippet_invalid",
   "spawn_whitelist_invalid",
   "limit_settings_invalid",
   "routing_policy_invalid",
@@ -137,7 +142,7 @@ describe("api/errors", () => {
   });
 
   it("error_actions_cover_every_code_in_the_api_error_table", () => {
-    expect(ALL_ERROR_CODES.length).toBe(84);
+    expect(ALL_ERROR_CODES.length).toBe(89);
 
     for (const code of ALL_ERROR_CODES) {
       const err = new ApiError(

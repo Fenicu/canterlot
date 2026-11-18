@@ -16,6 +16,7 @@
   import { takeAttachmentNotice } from '#lib/composer/attachmentNotice.js';
   import { getEnterPref } from '#lib/composer/prefs.js';
   import { insertDictated, type DraftAnchor } from '#lib/dictation/insertion.js';
+  import { insertSnippet } from '#lib/snippets/insert.js';
   import { createDictationSession } from '#lib/dictation/live.js';
   import type { DictationSession, DictationView } from '#lib/dictation/session.js';
   import { dictationStatus } from '#lib/dictation/status.svelte.js';
@@ -96,12 +97,29 @@
   let node = $state<HTMLTextAreaElement | null>(null);
   let file = $state<HTMLInputElement | null>(null);
   let later = $state(false);
+  let snippetsOpen = $state(false);
+  let SnippetsSheet = $state<Component<{ open: boolean; projectKey: string; text: string; onclose: () => void; oninsert: (body: string) => void }> | null>(null);
   // Окно «Отправить позже» открывают нечасто: чанк едет только вместе с ним.
   let SendLater = $state<Component<{ open: boolean; now: number; blocked?: boolean; panelId: string; onclose: () => void; onpick: (at: number) => void }> | null>(null);
 
   $effect(() => {
     if (later && !SendLater) import('#lib/composer/SendLater.svelte').then((m) => { SendLater = m.default; });
+    if (snippetsOpen && !SnippetsSheet) import('#lib/composer/SnippetsSheet.svelte').then((m) => { SnippetsSheet = m.default; });
   });
+  const projectKey = $derived((chat.detail?.workdir as string | undefined) ?? '');
+
+  function pickSnippet(body: string): void {
+    const start = node?.selectionStart ?? model.text.length;
+    const end = node?.selectionEnd ?? model.text.length;
+    const result = insertSnippet(model.text, body, start, end);
+    model.text = result.text;
+    model.typed();
+    snippetsOpen = false;
+    void tick().then(() => {
+      node?.focus();
+      node?.setSelectionRange(result.caret, result.caret);
+    });
+  }
   let composing = $state(false);
   let receiving = $state(false);
   let dictation = $state<DictationSession | null>(null);
@@ -664,18 +682,23 @@
       {#if touch && suggestion}
         <button type="button" class="accept" data-suggestion-accept onmousedown={(event) => event.preventDefault()} onclick={acceptSuggestion}>Подставить</button>
       {/if}
-      {#if !touch}
-        <button
-          type="button"
-          class="clock"
-          aria-label="Отправить позже"
-          aria-haspopup="dialog"
-          aria-expanded={later}
-          aria-controls={laterId}
-          onclick={() => (later = !later)}
-        >
-          <Icon name="clock" />
-        </button>
+      {#if !(touch && suggestion)}
+      <span class="tools">
+        <IconButton icon="list" label="Заготовки" expanded={snippetsOpen} onclick={() => (snippetsOpen = !snippetsOpen)} />
+        {#if !touch}
+          <button
+            type="button"
+            class="clock"
+            aria-label="Отправить позже"
+            aria-haspopup="dialog"
+            aria-expanded={later}
+            aria-controls={laterId}
+            onclick={() => (later = !later)}
+          >
+            <Icon name="clock" />
+          </button>
+        {/if}
+      </span>
       {/if}
       {#if canSteer}
         <button
@@ -714,6 +737,15 @@
   </div>
   {#if dictationNotice}<p class="notice" role="status" data-dictation-notice>{dictationNotice}</p>{/if}
   {#if !touch && !dictationView}<p class="hint">{suggestion ? 'Tab: подставить подсказку · ' : ''}Enter: отправить · Shift+Enter: новая строка · Ctrl+Shift+Enter: отправить позже</p>{/if}
+  {#if SnippetsSheet}
+    <SnippetsSheet
+      open={snippetsOpen}
+      {projectKey}
+      text={model.text}
+      onclose={() => (snippetsOpen = false)}
+      oninsert={pickSnippet}
+    />
+  {/if}
   {#if SendLater}
     <SendLater
       open={later}
@@ -784,6 +816,7 @@
   }
   textarea:focus-visible { outline: none; }
   .attach { grid-area: attach; display: inline-flex; }
+  .tools { grid-area: clock; display: inline-flex; gap: var(--s2); }
   .mic { grid-area: mic; display: inline-flex; }
   .file { position: absolute; width: var(--s1); height: var(--s1); overflow: hidden; clip-path: inset(50%); }
   .goal { grid-area: goal; width: var(--target); height: var(--target); border-radius: var(--radius-round); background: var(--transparent); color: var(--secondary); }

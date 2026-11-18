@@ -150,6 +150,10 @@
 		flex: 0 1 var(--gauge-width);
 		min-width: var(--s13);
 	}
+	/* На очень узком экране шкала уступает место подписи и кнопке заготовок. */
+	@media (max-width: 360px) {
+		.track { display: none; }
+	}
 	.label {
 		flex: none;
 	}

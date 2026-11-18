@@ -1494,6 +1494,37 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     await route.fulfill({ headers: headers(), json: { idle_minutes: api.hibernateIdleMinutes } });
   });
 
+  await page.route('**/api/v1/message-snippets**', async (route) => {
+    const method = route.request().method();
+    const url = new URL(route.request().url());
+    const tail = url.pathname.replace('/api/v1/message-snippets', '');
+    if (method === 'GET' && !tail) {
+      await route.fulfill({
+        headers: headers(),
+        json: api.listMessageSnippets(url.searchParams.get('scope') ?? 'global', url.searchParams.get('project_key') ?? '')
+      });
+      return;
+    }
+    if (method === 'POST' && !tail) {
+      await route.fulfill({ status: 201, headers: headers(), json: api.createMessageSnippet(route.request().postDataJSON() as never) });
+      return;
+    }
+    if (method === 'PUT' && tail === '/order') {
+      await route.fulfill({ headers: headers(), json: api.reorderMessageSnippets(route.request().postDataJSON() as never) });
+      return;
+    }
+    const id = tail.replace(/^\//, '');
+    if (method === 'PATCH' && id) {
+      await route.fulfill({ headers: headers(), json: api.patchMessageSnippet(id, route.request().postDataJSON() as never) });
+      return;
+    }
+    if (method === 'DELETE' && id) {
+      await route.fulfill({ status: 204, headers: headers(), body: '' });
+      return;
+    }
+    return route.fallback();
+  });
+
   await page.route('**/api/v1/limit-settings', async (route) => {
     const method = route.request().method();
     if (method === 'GET') {

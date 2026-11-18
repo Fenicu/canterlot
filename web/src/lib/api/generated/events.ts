@@ -56,6 +56,7 @@ export type WireEvent =
   | Oversized
   | QueueResumed
   | InstructionPresetChanged
+  | MessageSnippetChanged
   | CompactionStarted
   | CompactionFinished
   | ContextChanged
@@ -1658,6 +1659,34 @@ export interface PresetOrigin {
   conversation_id: Uuid | null;
   conversation_title: string | null;
   at?: Time | null;
+}
+export interface MessageSnippetChanged {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "message_snippet_changed";
+  payload: {
+    snippet: MessageSnippet | null;
+    deleted: boolean;
+  };
+}
+export interface MessageSnippet {
+  id: Uuid;
+  scope: "global" | "project";
+  project_key: string;
+  title: string;
+  body: string;
+  position: number;
+  revision: number;
+  created_at: Time;
+  updated_at: Time;
 }
 export interface CompactionStarted {
   v: 1;

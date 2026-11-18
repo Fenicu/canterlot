@@ -57,6 +57,7 @@ transient_from_db!(
     crate::crunch::CrunchError,
     crate::executions::ExecutionError,
     crate::groups::GroupError,
+    crate::message_snippets::MessageSnippetError,
     crate::presets::PresetError,
     crate::scheduler::ScheduleError,
     crate::schedules::ScheduleError,

@@ -1363,3 +1363,72 @@ export function listBookmarks(
 ): Promise<HttpResponse<Ok<operations["get__api_v1_bookmarks"]>>> {
   return http("GET", withQuery("/api/v1/bookmarks", query), undefined, opts);
 }
+
+/** Заготовки сообщений владельца в одной области: global или project с ключом workdir. */
+export function listMessageSnippets(
+  scope: "global" | "project" = "global",
+  projectKey = "",
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["get__api_v1_message_snippets"]>>> {
+  return http(
+    "GET",
+    withQuery("/api/v1/message-snippets", { scope, project_key: projectKey }),
+    undefined,
+    opts,
+  );
+}
+
+export function getMessageSnippet(
+  snippetId: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["get__api_v1_message_snippets__id_"]>>> {
+  return http(
+    "GET",
+    `/api/v1/message-snippets/${id(snippetId)}`,
+    undefined,
+    opts,
+  );
+}
+
+export function createMessageSnippet(
+  body: Body<operations["post__api_v1_message_snippets"]>,
+  key: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["post__api_v1_message_snippets"]>>> {
+  return http("POST", "/api/v1/message-snippets", body, keyed(key, opts));
+}
+
+export function patchMessageSnippet(
+  snippetId: string,
+  body: Body<operations["patch__api_v1_message_snippets__id_"]>,
+  key: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["patch__api_v1_message_snippets__id_"]>>> {
+  return http(
+    "PATCH",
+    `/api/v1/message-snippets/${id(snippetId)}`,
+    body,
+    keyed(key, opts),
+  );
+}
+
+export function deleteMessageSnippet(
+  snippetId: string,
+  key: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<void>> {
+  return http(
+    "DELETE",
+    `/api/v1/message-snippets/${id(snippetId)}`,
+    undefined,
+    keyed(key, opts),
+  );
+}
+
+export function reorderMessageSnippets(
+  body: Body<operations["put__api_v1_message_snippets_order"]>,
+  key: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["put__api_v1_message_snippets_order"]>>> {
+  return http("PUT", "/api/v1/message-snippets/order", body, keyed(key, opts));
+}

@@ -423,6 +423,36 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
         .as_str()
         .unwrap()
         .to_owned();
+    let snippet_patch = setup(
+        Method::POST,
+        "/api/v1/message-snippets".into(),
+        "setup_snippet_patch",
+        Some(json!({"scope":"global","title":"Заготовка правки","body":"текст"})),
+    )
+    .await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let snippet_delete = setup(
+        Method::POST,
+        "/api/v1/message-snippets".into(),
+        "setup_snippet_delete",
+        Some(json!({"scope":"global","title":"Заготовка удаления","body":"текст"})),
+    )
+    .await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let snippet_third = setup(
+        Method::POST,
+        "/api/v1/message-snippets".into(),
+        "setup_snippet_third",
+        Some(json!({"scope":"global","title":"Заготовка порядка","body":"текст"})),
+    )
+    .await["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     let input = setup(
         Method::POST,
         format!("/api/v1/conversations/{id}/inputs"),
@@ -822,6 +852,38 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
             Method::DELETE,
             "/api/v1/presets/{id}",
             format!("/api/v1/presets/{preset}"),
+            None,
+            None,
+        ),
+        case(
+            Method::POST,
+            "/api/v1/message-snippets",
+            "/api/v1/message-snippets".into(),
+            Some(json!({"scope":"global","title":"Ещё заготовка","body":"текст"})),
+            Some(json!({"scope":"global","title":"Иная заготовка","body":"текст"})),
+        ),
+        case(
+            Method::PATCH,
+            "/api/v1/message-snippets/{id}",
+            format!("/api/v1/message-snippets/{snippet_patch}"),
+            Some(json!({"title":"Новое название","base_revision":1})),
+            Some(json!({"title":"Другое название","base_revision":1})),
+        ),
+        case(
+            Method::PUT,
+            "/api/v1/message-snippets/order",
+            "/api/v1/message-snippets/order".into(),
+            Some(json!({"scope":"global","ids":[
+                snippet_patch.clone(), snippet_delete.clone(), snippet_third.clone()
+            ]})),
+            Some(json!({"scope":"global","ids":[
+                snippet_third, snippet_patch, snippet_delete
+            ]})),
+        ),
+        case(
+            Method::DELETE,
+            "/api/v1/message-snippets/{id}",
+            format!("/api/v1/message-snippets/{snippet_delete}"),
             None,
             None,
         ),
