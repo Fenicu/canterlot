@@ -104,14 +104,12 @@ pub async fn apply(
             .await?
         }
     };
-    publish(
-        conn,
-        owner_id,
-        run.conversation_id,
-        stored.as_ref(),
-        correlation_id,
-    )
-    .await?;
+    let published = if fact.goal.is_some() {
+        stored.as_ref()
+    } else {
+        None
+    };
+    publish(conn, owner_id, run.conversation_id, published, correlation_id).await?;
     Ok(stored.is_none())
 }
 

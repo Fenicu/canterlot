@@ -4410,6 +4410,102 @@
         }
       }
     },
+    "/api/v1/conversations/{id}/goal": {
+      "post": {
+        "tags": [
+          "conversations"
+        ],
+        "operationId": "post__api_v1_conversations__id__goal",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GoalBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Команда управления целью принята",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GoalOutcome"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Конфликт состояния или отсутствует возможность, причина в details.reason",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/conversations/{id}/groups": {
       "put": {
         "tags": [
@@ -13799,6 +13895,17 @@
               }
             ]
           },
+          "goal": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/GoalView",
+                "description": "Текущая цель разговора; `None` — цели нет."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "history": {
             "$ref": "#/components/schemas/HistoryPage"
           },
@@ -15085,6 +15192,121 @@
           }
         }
       },
+      "GoalBody": {
+        "type": "object",
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "`set`, `clear`, `pause` или `resume`."
+          },
+          "objective": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Обязательно только для `set`."
+          },
+          "token_budget": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          }
+        },
+        "additionalProperties": false
+      },
+      "GoalOutcome": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "requested"
+            ],
+            "properties": {
+              "requested": {
+                "type": "object",
+                "required": [
+                  "command_id"
+                ],
+                "properties": {
+                  "command_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "already_requested"
+            ],
+            "properties": {
+              "already_requested": {
+                "type": "object",
+                "required": [
+                  "command_id"
+                ],
+                "properties": {
+                  "command_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "GoalView": {
+        "type": "object",
+        "required": [
+          "objective",
+          "status",
+          "tokens_used",
+          "time_used_seconds",
+          "updated_at"
+        ],
+        "properties": {
+          "objective": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "time_used_seconds": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "token_budget": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "tokens_used": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "turns_used": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
       "Group": {
         "type": "object",
         "required": [
@@ -15287,6 +15509,10 @@
           "provider"
         ],
         "properties": {
+          "goals": {
+            "type": "boolean",
+            "description": "Поддерживает ли харнесс цели; старые записи без колонки дают `false`."
+          },
           "id": {
             "type": "string"
           },
@@ -15307,6 +15533,7 @@
           "images",
           "settings_midsession",
           "settings_midsession_effort",
+          "goals",
           "permission_modes",
           "models",
           "catalog"
@@ -15318,6 +15545,10 @@
               "$ref": "#/components/schemas/CatalogView"
             },
             "description": "Команды и навыки, которые CLI может выполнить; пусто без `slash_catalog_v1`."
+          },
+          "goals": {
+            "type": "boolean",
+            "description": "Поддерживает ли харнесс цели."
           },
           "id": {
             "type": "string"
@@ -21467,6 +21698,17 @@
                   {
                     "$ref": "#/components/schemas/DraftView",
                     "description": "Общий черновик поля ввода; `None` — черновика нет."
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "goal": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/GoalView",
+                    "description": "Текущая цель разговора; `None` — цели нет."
                   },
                   {
                     "type": "null"

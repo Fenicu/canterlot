@@ -53,6 +53,7 @@ mod final_review;
 mod final_wave;
 mod forwarded_attachment_delete;
 mod git_facts;
+mod goals;
 mod grpc_attachments;
 mod grpc_session;
 mod held_delivery;

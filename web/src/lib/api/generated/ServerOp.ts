@@ -46,6 +46,7 @@ export type ServerOp =
         | SpawnWhitelistChanged
         | SpawnQueueChanged
         | PlanTaskChanged
+        | GoalChanged
         | LimitsChanged
         | LimitsProvidersChanged
         | ProviderStatusChanged
@@ -624,6 +625,7 @@ export interface ConversationCreated {
       id: string;
       title: string;
       provider: string;
+      goals?: boolean;
     };
     workdir: string;
     created_at: Time;
@@ -712,6 +714,7 @@ export interface ConversationUpdated {
       id: string;
       title: string;
       provider: string;
+      goals?: boolean;
     };
     workdir: string;
     created_at: Time;
@@ -1208,6 +1211,31 @@ export interface PlanTask {
   created_at: Time;
   updated_at: Time;
   revision: number;
+}
+export interface GoalChanged {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "goal_changed";
+  payload: {
+    conversation_id: Uuid;
+    goal: null | {
+      objective: string;
+      status: "active" | "paused" | "blocked" | "usage_limited" | "budget_limited" | "complete";
+      tokens_used: number;
+      time_used_seconds: number;
+      token_budget: number | null;
+      turns_used: number | null;
+      updated_at: Time;
+    };
+  };
 }
 export interface LimitsChanged {
   v: 1;

@@ -760,6 +760,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/conversations/{id}/goal": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["post__api_v1_conversations__id__goal"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/conversations/{id}/groups": {
         parameters: {
             query?: never;
@@ -2498,6 +2514,7 @@ export interface components {
             context?: components["schemas"]["ContextSnapshot"] | null;
             detail: components["schemas"]["ConversationDetail"];
             draft?: components["schemas"]["DraftView"] | null;
+            goal?: components["schemas"]["GoalView"] | null;
             history: components["schemas"]["HistoryPage"];
             nudge?: components["schemas"]["NudgeRuleView"] | null;
             nudge_events: components["schemas"]["NudgeEventView"][];
@@ -2829,6 +2846,39 @@ export interface components {
             /** Format: date-time */
             fresh_until: string;
         };
+        GoalBody: {
+            /** @description `set`, `clear`, `pause` или `resume`. */
+            action: string;
+            /** @description Обязательно только для `set`. */
+            objective?: string | null;
+            /** Format: int64 */
+            token_budget?: number | null;
+        };
+        GoalOutcome: {
+            requested: {
+                /** Format: uuid */
+                command_id: string;
+            };
+        } | {
+            already_requested: {
+                /** Format: uuid */
+                command_id: string;
+            };
+        };
+        GoalView: {
+            objective: string;
+            status: string;
+            /** Format: int64 */
+            time_used_seconds: number;
+            /** Format: int64 */
+            token_budget?: number | null;
+            /** Format: int64 */
+            tokens_used: number;
+            /** Format: int64 */
+            turns_used?: number | null;
+            /** Format: date-time */
+            updated_at: string;
+        };
         Group: {
             created_at: string;
             icon?: components["schemas"]["GroupIcon"] | null;
@@ -2880,6 +2930,8 @@ export interface components {
             violations: string[];
         };
         HarnessRef: {
+            /** @description Поддерживает ли харнесс цели; старые записи без колонки дают `false`. */
+            goals?: boolean;
             id: string;
             provider: string;
             title: string;
@@ -2887,6 +2939,8 @@ export interface components {
         HarnessView: {
             /** @description Команды и навыки, которые CLI может выполнить; пусто без `slash_catalog_v1`. */
             catalog: components["schemas"]["CatalogView"][];
+            /** @description Поддерживает ли харнесс цели. */
+            goals: boolean;
             id: string;
             images: boolean;
             /** @description Установленная версия CLI; `null`, если воркер старше `cli_versions_v1`. */
@@ -4699,6 +4753,7 @@ export interface components {
                 context?: components["schemas"]["ContextSnapshot"] | null;
                 detail: components["schemas"]["ConversationDetail"];
                 draft?: components["schemas"]["DraftView"] | null;
+                goal?: components["schemas"]["GoalView"] | null;
                 history: components["schemas"]["HistoryPage"];
                 nudge?: components["schemas"]["NudgeRuleView"] | null;
                 nudge_events: components["schemas"]["NudgeEventView"][];
@@ -7656,6 +7711,58 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["StartedExecution"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    post__api_v1_conversations__id__goal: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GoalBody"];
+            };
+        };
+        responses: {
+            /** @description Команда управления целью принята */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GoalOutcome"];
+                };
+            };
+            /** @description Конфликт состояния или отсутствует возможность, причина в details.reason */
+            409: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */

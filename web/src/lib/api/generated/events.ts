@@ -64,7 +64,8 @@ export type WireEvent =
   | SpawnQueueChanged
   | PlanTaskChanged
   | ScheduleChanged
-  | ScheduleRunChanged;
+  | ScheduleRunChanged
+  | GoalChanged;
 export type Uuid = string;
 export type Scope = string;
 export type Seq = string;
@@ -585,6 +586,7 @@ export interface ConversationCreated {
       id: string;
       title: string;
       provider: string;
+      goals?: boolean;
     };
     workdir: string;
     created_at: Time;
@@ -673,6 +675,7 @@ export interface ConversationUpdated {
       id: string;
       title: string;
       provider: string;
+      goals?: boolean;
     };
     workdir: string;
     created_at: Time;
@@ -1872,5 +1875,30 @@ export interface ScheduleRunChanged {
     manual: boolean;
     idempotency_key: string;
     detail: {};
+  };
+}
+export interface GoalChanged {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "goal_changed";
+  payload: {
+    conversation_id: Uuid;
+    goal: null | {
+      objective: string;
+      status: "active" | "paused" | "blocked" | "usage_limited" | "budget_limited" | "complete";
+      tokens_used: number;
+      time_used_seconds: number;
+      token_budget: number | null;
+      turns_used: number | null;
+      updated_at: Time;
+    };
   };
 }

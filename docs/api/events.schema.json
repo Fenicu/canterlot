@@ -454,6 +454,9 @@
             },
             "provider": {
               "type": "string"
+            },
+            "goals": {
+              "type": "boolean"
             }
           },
           "required": [
@@ -2494,6 +2497,9 @@
                 },
                 "provider": {
                   "type": "string"
+                },
+                "goals": {
+                  "type": "boolean"
                 }
               },
               "required": [
@@ -2828,6 +2834,9 @@
                 },
                 "provider": {
                   "type": "string"
+                },
+                "goals": {
+                  "type": "boolean"
                 }
               },
               "required": [

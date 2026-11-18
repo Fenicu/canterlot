@@ -542,6 +542,7 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
             "workdir_suggest_v1",
             "owner_instructions_v1",
             "send_now_v1",
+            "goals_v1",
         ]
         .into_iter()
         .map(str::to_owned)
@@ -860,6 +861,13 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
             "/api/v1/conversations/{id}/compact",
             format!("/api/v1/conversations/{stuck}/compact"),
             None,
+            None,
+        ),
+        case(
+            Method::POST,
+            "/api/v1/conversations/{id}/goal",
+            format!("/api/v1/conversations/{send_now_conversation}/goal"),
+            Some(json!({"action":"clear"})),
             None,
         ),
         case(
