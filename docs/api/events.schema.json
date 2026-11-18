@@ -9427,56 +9427,83 @@
             "id": {
               "$ref": "#/$defs/Uuid"
             },
-            "conversation_id": {
+            "owner_id": {
               "$ref": "#/$defs/Uuid"
             },
-            "run_at": {
-              "$ref": "#/$defs/Time"
+            "name": {
+              "type": "string"
             },
-            "content": {
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/ContentBlock"
-              }
+            "enabled": {
+              "type": "boolean"
             },
-            "attachment_ids": {
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/Uuid"
-              }
+            "cron": {
+              "type": "string"
             },
-            "state": {
-              "enum": [
-                "pending",
-                "fired",
-                "cancelled",
-                "failed"
-              ]
+            "timezone": {
+              "type": "string"
             },
-            "input_id": {
+            "target": {
+              "type": "object"
+            },
+            "prompt": {
+              "type": "string"
+            },
+            "precheck": {
               "anyOf": [
                 {
-                  "$ref": "#/$defs/Uuid"
+                  "type": "string"
                 },
                 {
                   "type": "null"
                 }
               ]
             },
-            "attempts": {
-              "type": "integer",
-              "minimum": 0
+            "precheck_timeout_seconds": {
+              "type": "integer"
+            },
+            "catch_up_minutes": {
+              "type": "integer"
+            },
+            "overlap": {
+              "enum": [
+                "skip",
+                "allow"
+              ]
+            },
+            "title_template": {
+              "type": "string"
+            },
+            "next_fire_at": {
+              "$ref": "#/$defs/Time"
+            },
+            "created_at": {
+              "$ref": "#/$defs/Time"
+            },
+            "updated_at": {
+              "$ref": "#/$defs/Time"
+            },
+            "revision": {
+              "type": "integer"
             }
           },
           "required": [
             "id",
-            "conversation_id",
-            "run_at",
-            "content",
-            "attachment_ids",
-            "state",
-            "input_id",
-            "attempts"
+            "owner_id",
+            "name",
+            "enabled",
+            "cron",
+            "timezone",
+            "target",
+            "prompt",
+            "precheck",
+            "precheck_timeout_seconds",
+            "catch_up_minutes",
+            "overlap",
+            "title_template",
+            "next_fire_at",
+            "created_at",
+            "updated_at",
+            "revision"
           ]
         }
       },
@@ -9553,30 +9580,60 @@
             "id": {
               "$ref": "#/$defs/Uuid"
             },
-            "conversation_id": {
+            "schedule_id": {
               "$ref": "#/$defs/Uuid"
             },
-            "run_at": {
+            "scheduled_at": {
               "$ref": "#/$defs/Time"
             },
-            "content": {
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/ContentBlock"
-              }
-            },
-            "attachment_ids": {
-              "type": "array",
-              "items": {
-                "$ref": "#/$defs/Uuid"
-              }
+            "claimed_revision": {
+              "type": "integer"
             },
             "state": {
               "enum": [
-                "pending",
-                "fired",
-                "cancelled",
+                "claimed",
+                "prechecking",
+                "started",
+                "skipped_precheck",
+                "skipped_limits",
+                "skipped_overlap",
+                "skipped_machine_offline",
+                "skipped_changed",
+                "missed",
                 "failed"
+              ]
+            },
+            "created_at": {
+              "$ref": "#/$defs/Time"
+            },
+            "started_at": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Time"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "delay_ms": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "session_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Uuid"
+                },
+                {
+                  "type": "null"
+                }
               ]
             },
             "input_id": {
@@ -9589,20 +9646,30 @@
                 }
               ]
             },
-            "attempts": {
-              "type": "integer",
-              "minimum": 0
+            "manual": {
+              "type": "boolean"
+            },
+            "idempotency_key": {
+              "type": "string"
+            },
+            "detail": {
+              "type": "object"
             }
           },
           "required": [
             "id",
-            "conversation_id",
-            "run_at",
-            "content",
-            "attachment_ids",
+            "schedule_id",
+            "scheduled_at",
+            "claimed_revision",
             "state",
+            "created_at",
+            "started_at",
+            "delay_ms",
+            "session_id",
             "input_id",
-            "attempts"
+            "manual",
+            "idempotency_key",
+            "detail"
           ]
         }
       },

@@ -4349,6 +4349,13 @@ export interface components {
         };
         /** @enum {string} */
         Retry: "safe_same_key" | "explicit_new_operation" | "after_condition" | "never";
+        RevisionBody: {
+            /**
+             * Format: int64
+             * @description Ревизия из последнего виденного клиентом состояния (как у PATCH).
+             */
+            base_revision: number;
+        };
         RevokedView: {
             /** @description Отозванные сеансы, включая каскад. */
             revoked: string[];
@@ -11244,7 +11251,11 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RevisionBody"];
+            };
+        };
         responses: {
             /** @description Расписание удалено */
             200: {
@@ -11370,7 +11381,11 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RevisionBody"];
+            };
+        };
         responses: {
             /** @description Расписание на паузе */
             200: {
@@ -11420,7 +11435,11 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RevisionBody"];
+            };
+        };
         responses: {
             /** @description Расписание возобновлено */
             200: {

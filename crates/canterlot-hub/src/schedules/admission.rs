@@ -67,18 +67,21 @@ pub async fn admit(scheduler: &Scheduler, claimed: ClaimedRun) {
             (skip.state, detail, None, None, None, None)
         }
     };
-    let mut conn = match scheduler.pool().acquire().await {
-        Ok(conn) => conn,
+    // Итог и его событие — одна транзакция: наблюдатель никогда не видит
+    // состояние без события и событие без состояния.
+    let mut tx = match crate::db::begin(scheduler.pool()).await {
+        Ok(tx) => tx,
         Err(error) => {
             tracing::error!(kind = "schedule_admit_db", error = %crate::dberr::describe(&error), "cannot record run outcome");
             return;
         }
     };
     if let Err(error) = set_run_state(
-        &mut conn, run.id, state, detail, started_at, delay, session_id, input_id,
+        &mut tx, run.id, state, detail.clone(), started_at, delay, session_id, input_id,
     )
     .await
     {
+        let _ = tx.rollback().await;
         if matches!(error, sqlx::Error::RowNotFound) {
             // Расписание удалили, пока шёл приём: строка запуска ушла
             // каскадом, событие о призраке не публикуем.
@@ -87,9 +90,17 @@ pub async fn admit(scheduler: &Scheduler, claimed: ClaimedRun) {
         tracing::error!(kind = "schedule_admit_db", error = %crate::dberr::describe(&error), "cannot record run outcome");
         return;
     }
-    let payload = json!({"run_id": run.id, "schedule_id": schedule.id, "state": state.as_str()});
+    let updated = apply_outcome(&run, state, detail, session_id, input_id, started_at, delay);
+    let payload = match serde_json::to_value(&updated) {
+        Ok(payload) => payload,
+        Err(error) => {
+            let _ = tx.rollback().await;
+            tracing::error!(kind = "schedule_admit_db", error = %error, "cannot serialize run outcome");
+            return;
+        }
+    };
     if let Err(error) = events::append(
-        &mut conn,
+        &mut tx,
         NewEvent {
             scope: Scope::Schedules {
                 owner_id: schedule.owner_id,
@@ -103,7 +114,40 @@ pub async fn admit(scheduler: &Scheduler, claimed: ClaimedRun) {
     )
     .await
     {
+        let _ = tx.rollback().await;
         tracing::error!(kind = "schedule_admit_db", error = %crate::dberr::describe(&error), "cannot publish run outcome");
+        return;
+    }
+    if let Err(error) = tx.commit().await {
+        tracing::error!(kind = "schedule_admit_db", error = %crate::dberr::describe(&error), "cannot commit run outcome");
+    }
+}
+
+/// Итоговая строка запуска: база из заявки плюс исход приёма.
+#[allow(clippy::too_many_arguments)]
+fn apply_outcome(
+    run: &ScheduleRun,
+    state: RunState,
+    detail: Value,
+    session_id: Option<Uuid>,
+    input_id: Option<Uuid>,
+    started_at: Option<DateTime<Utc>>,
+    delay: Option<i64>,
+) -> ScheduleRun {
+    ScheduleRun {
+        id: run.id,
+        schedule_id: run.schedule_id,
+        scheduled_at: run.scheduled_at,
+        claimed_revision: run.claimed_revision,
+        state,
+        created_at: run.created_at,
+        started_at,
+        delay_ms: delay,
+        session_id,
+        input_id,
+        manual: run.manual,
+        idempotency_key: run.idempotency_key.clone(),
+        detail,
     }
 }
 
@@ -991,9 +1035,9 @@ pub async fn run_now(
             (skip.state, detail, None, None, None, None)
         }
     };
-    let mut conn = state.pool.acquire().await?;
+    let mut tx = crate::db::begin(&state.pool).await?;
     set_run_state(
-        &mut conn,
+        &mut tx,
         run.id,
         state_out,
         detail.clone(),
@@ -1003,28 +1047,31 @@ pub async fn run_now(
         input_id,
     )
     .await?;
+    let updated = apply_outcome(
+        &run,
+        state_out,
+        detail,
+        session_id,
+        input_id,
+        started_at,
+        delay,
+    );
+    let response = serde_json::to_value(&updated)
+        .map_err(|e| ScheduleError::Db(sqlx::Error::Encode(Box::new(e))))?;
     events::append(
-        &mut conn,
+        &mut tx,
         NewEvent {
             scope: Scope::Schedules { owner_id },
             kind: "schedule_run_changed",
             conversation_id: None,
             execution_id: None,
-            payload: json!({"run_id": run.id, "schedule_id": schedule_id, "state": state_out.as_str()}),
+            payload: response.clone(),
             correlation_id,
         },
     )
     .await?;
-    let mut updated = run;
-    updated.state = state_out;
-    updated.session_id = session_id;
-    updated.input_id = input_id;
-    updated.started_at = started_at;
-    updated.delay_ms = delay;
-    updated.detail = detail;
-    let response = serde_json::to_value(&updated)
-        .map_err(|e| ScheduleError::Db(sqlx::Error::Encode(Box::new(e))))?;
-    crate::idempotency::record(&mut conn, owner_id, key, "run_now", &hash, &response, None).await?;
+    crate::idempotency::record(&mut tx, owner_id, key, "run_now", &hash, &response, None).await?;
+    tx.commit().await?;
     Ok(updated)
 }
 

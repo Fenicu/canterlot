@@ -685,3 +685,83 @@ fn idle_activity_process_alive_is_a_boolean_or_absent() {
         json!({"kind": "idle", "last_turn_at": null, "background_work": null, "process_alive": "yes"})
     )));
 }
+
+/// Расписания: хаб публикует полные `Schedule`/`ScheduleRun`, а не короткие
+/// `{run_id, schedule_id, state}` — событие обязано проходить схему.
+#[test]
+fn schedule_events_carry_full_payloads() {
+    use canterlot_hub::schedules::{
+        OverlapPolicy, RunState, Schedule, ScheduleRun, ScheduleTarget,
+    };
+    let owner = Uuid::now_v7();
+    let at = chrono::DateTime::parse_from_rfc3339("2026-11-18T06:00:00.000Z")
+        .unwrap()
+        .with_timezone(&chrono::Utc);
+    let schedule = Schedule {
+        id: Uuid::now_v7(),
+        owner_id: owner,
+        name: "Утренний обзор".into(),
+        enabled: true,
+        cron: "0 9 * * *".into(),
+        timezone: "Europe/Moscow".into(),
+        target: ScheduleTarget::ExistingSession {
+            conversation_id: Uuid::now_v7(),
+        },
+        prompt: "посмотреть коммиты".into(),
+        precheck: None,
+        precheck_timeout_seconds: 60,
+        catch_up_minutes: 30,
+        overlap: OverlapPolicy::Skip,
+        title_template: "{name} · {date}".into(),
+        next_fire_at: at,
+        created_at: at,
+        updated_at: at,
+        revision: 1,
+    };
+    let run = ScheduleRun {
+        id: Uuid::now_v7(),
+        schedule_id: schedule.id,
+        scheduled_at: at,
+        claimed_revision: 1,
+        state: RunState::Started,
+        created_at: at,
+        started_at: Some(at),
+        delay_ms: Some(1000),
+        session_id: Some(Uuid::now_v7()),
+        input_id: Some(Uuid::now_v7()),
+        manual: false,
+        idempotency_key: "schedule:run".into(),
+        detail: json!({"provider": "claude", "limits": "known"}),
+    };
+    let event = |kind: &str, payload: Value| {
+        json!({
+            "v": 1,
+            "id": Uuid::now_v7(),
+            "scope": "schedules",
+            "scope_seq": "3",
+            "scope_seq_from": "3",
+            "committed_at": "2026-11-18T06:00:01.000Z",
+            "committed_at_from": "2026-11-18T06:00:01.000Z",
+            "conversation_id": null,
+            "execution_id": null,
+            "correlation_id": Uuid::now_v7(),
+            "kind": kind,
+            "payload": payload,
+        })
+    };
+    let schedule_schema = validator("schedule_changed");
+    let schedule_event = event(
+        "schedule_changed",
+        serde_json::to_value(&schedule).unwrap(),
+    );
+    assert!(schedule_schema.is_valid(&schedule_event), "{schedule_event}");
+    let run_schema = validator("schedule_run_changed");
+    let run_event = event("schedule_run_changed", serde_json::to_value(&run).unwrap());
+    assert!(run_schema.is_valid(&run_event), "{run_event}");
+    // Короткий остаток прошлого контракта схемой отвергается.
+    let short = event(
+        "schedule_run_changed",
+        json!({"run_id": run.id, "schedule_id": schedule.id, "state": "started"}),
+    );
+    assert!(!run_schema.is_valid(&short));
+}

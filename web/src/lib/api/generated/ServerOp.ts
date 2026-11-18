@@ -1857,13 +1857,22 @@ export interface ScheduleChanged {
   kind: "schedule_changed";
   payload: {
     id: Uuid;
-    conversation_id: Uuid;
-    run_at: Time;
-    content: ContentBlock[];
-    attachment_ids: Uuid[];
-    state: "pending" | "fired" | "cancelled" | "failed";
-    input_id: Uuid | null;
-    attempts: number;
+    owner_id: Uuid;
+    name: string;
+    enabled: boolean;
+    cron: string;
+    timezone: string;
+    target: {};
+    prompt: string;
+    precheck: string | null;
+    precheck_timeout_seconds: number;
+    catch_up_minutes: number;
+    overlap: "skip" | "allow";
+    title_template: string;
+    next_fire_at: Time;
+    created_at: Time;
+    updated_at: Time;
+    revision: number;
   };
 }
 export interface ScheduleRunChanged {
@@ -1880,12 +1889,27 @@ export interface ScheduleRunChanged {
   kind: "schedule_run_changed";
   payload: {
     id: Uuid;
-    conversation_id: Uuid;
-    run_at: Time;
-    content: ContentBlock[];
-    attachment_ids: Uuid[];
-    state: "pending" | "fired" | "cancelled" | "failed";
+    schedule_id: Uuid;
+    scheduled_at: Time;
+    claimed_revision: number;
+    state:
+      | "claimed"
+      | "prechecking"
+      | "started"
+      | "skipped_precheck"
+      | "skipped_limits"
+      | "skipped_overlap"
+      | "skipped_machine_offline"
+      | "skipped_changed"
+      | "missed"
+      | "failed";
+    created_at: Time;
+    started_at: Time | null;
+    delay_ms: number | null;
+    session_id: Uuid | null;
     input_id: Uuid | null;
-    attempts: number;
+    manual: boolean;
+    idempotency_key: string;
+    detail: {};
   };
 }
