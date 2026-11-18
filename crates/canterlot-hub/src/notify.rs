@@ -694,7 +694,10 @@ pub(crate) async fn enqueue_schedule_failure_in_tx(
         "reason": reason,
     });
     let coalesced = sqlx::query(
-        "update owner_pushes set payload=$2,updated_at=clock_timestamp()
+        // Срок годности считается от последнего слитого исхода: свежий сбой,
+        // влившийся в давно ждущий пуш, не должен выбыть как устаревший.
+        "update owner_pushes set payload=$2,created_at=clock_timestamp(),
+            updated_at=clock_timestamp()
           where kind=$1 and state='pending' and payload->>'schedule_id'=$3",
     )
     .bind(KIND_SCHEDULE_FAILED)
@@ -1097,6 +1100,8 @@ struct PushRow {
     attempts: i32,
     visible_defers: i32,
     created_at: DateTime<Utc>,
+    /// Версия строки, которую видел отправитель: условие сброса устаревшего.
+    updated_at: DateTime<Utc>,
     stale: bool,
 }
 
@@ -1221,7 +1226,7 @@ impl Sender {
         now: Instant,
     ) -> Result<DeliveryReport, sqlx::Error> {
         let rows: Vec<PushRow> = sqlx::query_as(
-            "select id,conversation_id,kind,payload,attempts,visible_defers,created_at,
+            "select id,conversation_id,kind,payload,attempts,visible_defers,created_at,updated_at,
                     clock_timestamp()-created_at > $1 * interval '1 second' as stale
              from owner_pushes
              where state='pending' and run_at<=clock_timestamp()
@@ -1234,9 +1239,21 @@ impl Sender {
         let mut report = DeliveryReport::default();
         for row in rows {
             if row.stale {
-                finish(pool, row.id, "dropped", None).await?;
-                warn_dropped(&row, None, "stale");
-                report.dropped += 1;
+                // Условно по версии: слияние свежего исхода после чтения строки
+                // меняет `updated_at`, и такая строка уже не устарела.
+                let dropped = sqlx::query(
+                    "update owner_pushes set state='dropped',updated_at=clock_timestamp()
+                     where id=$1 and state='pending' and updated_at=$2",
+                )
+                .bind(row.id)
+                .bind(row.updated_at)
+                .execute(pool)
+                .await?
+                .rows_affected();
+                if dropped > 0 {
+                    warn_dropped(&row, None, "stale");
+                    report.dropped += 1;
+                }
                 continue;
             }
             // Открытый чат сам по себе не повод бросить пуш: телефон мог уснуть, так и не
@@ -1274,20 +1291,22 @@ impl Sender {
             // Ограничитель пушей о запусках расписания живёт здесь, в момент
             // доставки (6): задержанный первый пуш и поздний второй не
             // оказываются в одном часе.
-            let mut cooldown = None;
-            if row.kind == KIND_SCHEDULE_FAILED {
+            let scheduled = row.kind == KIND_SCHEDULE_FAILED;
+            if scheduled {
                 match schedule_cooldown(pool, &row).await? {
                     Cooldown::Gone => {
                         finish(pool, row.id, "cancelled", Some("schedule_gone")).await?;
                         report.cancelled += 1;
                         continue;
                     }
-                    Cooldown::Active if row.attempts == 0 => {
+                    // Активная метка глушит и повтор: она встаёт вместе с попыткой,
+                    // и раз она жива, прошлая отправка могла дойти.
+                    Cooldown::Active => {
                         finish(pool, row.id, "suppressed", Some("suppressed_cooldown")).await?;
                         report.suppressed += 1;
                         continue;
                     }
-                    other => cooldown = Some(other),
+                    Cooldown::Clear => {}
                 }
             }
             if !self.take_slot() {
@@ -1302,31 +1321,45 @@ impl Sender {
                 .get(usize::try_from(row.attempts).unwrap_or(usize::MAX))
                 .copied()
                 .unwrap_or_default();
-            sqlx::query(
-                "update owner_pushes set attempts=$2,
-                   run_at=clock_timestamp()+$3*interval '1 second',
-                   updated_at=clock_timestamp()
-                 where id=$1 and state='pending'",
-            )
-            .bind(row.id)
-            .bind(attempts)
-            .bind(pause.as_secs_f64())
-            .execute(pool)
-            .await?;
-            // Метка охлаждения встаёт до запроса: потерянный ответ может
-            // означать доставленный пуш, и второй в течение часа не нужен.
-            let stamp = match cooldown {
-                Some(_) => stamp_schedule_push(pool, &row).await?,
-                None => None,
-            };
+            // Попытка, пауза и метка охлаждения фиксируются одной транзакцией до
+            // запроса: потерянное подтверждение или гибель хаба после отправки не
+            // оставят строку, которая обойдёт охлаждение при повторе.
+            let stamp = begin_attempt(pool, &row, attempts, pause, scheduled).await?;
             let result = self.post(&message).await;
-            // Отказ, который точно не доставил пуш, метку возвращает: иначе
-            // потерянный первый пуш глушил бы все следующие до конца часа.
-            // Обрыв без ответа (`Retry(None)`) неоднозначен и метку оставляет.
-            if matches!(&result, Err(Failure::Fatal(_) | Failure::Retry(Some(_))))
-                && let Some(stamp) = stamp
-            {
-                restore_schedule_push(pool, &row, &stamp).await?;
+            if scheduled {
+                // Пуш расписания: неоднозначная доставка (обрыв, таймаут, 408, 5xx
+                // шлюза после приёма апстримом) не повторяется, метка остаётся.
+                // Только определённый отказ возвращает ПРЕЖНЮЮ метку.
+                let ambiguous = matches!(
+                    &result,
+                    Err(Failure::Retry(None | Some(408 | 500..=599)))
+                );
+                if ambiguous {
+                    let status = match &result {
+                        Err(Failure::Retry(status)) => *status,
+                        _ => None,
+                    };
+                    sqlx::query(
+                        "update owner_pushes set state='dropped',last_status=$2,
+                           updated_at=clock_timestamp()
+                         where id=$1 and state='pending'",
+                    )
+                    .bind(row.id)
+                    .bind(match status {
+                        Some(code) => format!("ambiguous_{code}"),
+                        None => "ambiguous_delivery".to_owned(),
+                    })
+                    .execute(pool)
+                    .await?;
+                    warn_dropped(&row, status, "ambiguous_delivery");
+                    report.dropped += 1;
+                    continue;
+                }
+                if matches!(&result, Err(_))
+                    && let Some(stamp) = stamp
+                {
+                    restore_schedule_push(pool, &row, &stamp).await?;
+                }
             }
             match result {
                 Ok(status) => {
@@ -1405,24 +1438,55 @@ async fn schedule_cooldown(pool: &PgPool, row: &PushRow) -> Result<Cooldown, sql
     })
 }
 
-async fn stamp_schedule_push(pool: &PgPool, row: &PushRow) -> Result<Option<Stamp>, sqlx::Error> {
-    let Some(schedule_id) = row
-        .payload
-        .get("schedule_id")
-        .and_then(Value::as_str)
-        .and_then(|id| Uuid::parse_str(id).ok())
-    else {
-        return Ok(None);
-    };
-    let stamp: Option<(Option<DateTime<Utc>>, DateTime<Utc>)> = sqlx::query_as(
-        "with prev as (select last_failure_push_at p from schedules where id=$1 for update)
-         update schedules set last_failure_push_at=clock_timestamp()
-          where id=$1 returning (select p from prev), last_failure_push_at",
+/// Попытка отправки: счётчик, пауза и (для пуша расписания) метка охлаждения
+/// встают одной транзакцией. Прежняя метка читается из подзапроса `for update`
+/// в `from`, а не из CTE: CTE видела бы строку уже после обновления.
+async fn begin_attempt(
+    pool: &PgPool,
+    row: &PushRow,
+    attempts: i32,
+    pause: Duration,
+    stamp: bool,
+) -> Result<Option<Stamp>, sqlx::Error> {
+    let mut tx = crate::db::begin(pool).await?;
+    sqlx::query(
+        "update owner_pushes set attempts=$2,
+           run_at=clock_timestamp()+$3*interval '1 second',
+           updated_at=clock_timestamp()
+         where id=$1 and state='pending'",
     )
-    .bind(schedule_id)
-    .fetch_optional(pool)
+    .bind(row.id)
+    .bind(attempts)
+    .bind(pause.as_secs_f64())
+    .execute(&mut *tx)
     .await?;
-    Ok(stamp.map(|(previous, stamped)| Stamp { previous, stamped }))
+    let stamped = if stamp {
+        match row
+            .payload
+            .get("schedule_id")
+            .and_then(Value::as_str)
+            .and_then(|id| Uuid::parse_str(id).ok())
+        {
+            Some(schedule_id) => {
+                let stamp: Option<(Option<DateTime<Utc>>, DateTime<Utc>)> = sqlx::query_as(
+                    "update schedules s set last_failure_push_at=clock_timestamp()
+                       from (select id,last_failure_push_at p from schedules
+                              where id=$1 for update) old
+                      where s.id=old.id
+                  returning old.p, s.last_failure_push_at",
+                )
+                .bind(schedule_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+                stamp.map(|(previous, stamped)| Stamp { previous, stamped })
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+    tx.commit().await?;
+    Ok(stamped)
 }
 
 async fn restore_schedule_push(

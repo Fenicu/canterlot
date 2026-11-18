@@ -189,3 +189,159 @@ async fn dropped_first_push_does_not_suppress_the_next_failure(pool: PgPool) {
     assert_eq!(sender.deliver_due(&pool).await.unwrap().sent, 1);
     assert_eq!(seen.lock().unwrap().len(), 2);
 }
+
+/// Сервер принимает запрос и обрывает соединение без ответа: доставка неоднозначна.
+async fn dropping_gotify() -> (Arc<std::sync::atomic::AtomicUsize>, String) {
+    use tokio::io::AsyncReadExt;
+    let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let counter = hits.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let counter = counter.clone();
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 8192];
+                // Читаем запрос целиком (заголовки и тело одним куском на практике).
+                let _ = socket.read(&mut buf).await;
+                counter.fetch_add(1, Ordering::SeqCst);
+                drop(socket);
+            });
+        }
+    });
+    (hits, format!("http://{addr}/gotify"))
+}
+
+/// 3: потерянный ответ не повод слать второй раз. Попытка и метка охлаждения
+/// ставятся атомарно, после неоднозначной доставки повтора нет.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn lost_response_is_not_resent(pool: PgPool) {
+    enable(&pool).await;
+    let f = Fixture::new(pool.clone()).await;
+    let id = broken_schedule(&f).await;
+    let (hits, url) = dropping_gotify().await;
+    let (_dir, sender) = sender(&url);
+    fail_once(&f, id).await;
+    for _ in 0..4 {
+        sender.deliver_due(&pool).await.unwrap();
+        // Повтор «созрел»: пауза между попытками не должна прятать второй POST.
+        sqlx::query("update owner_pushes set run_at=clock_timestamp() where state='pending'")
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    assert_eq!(hits.load(Ordering::SeqCst), 1, "ambiguous delivery is not retried");
+    assert_eq!(pending(&pool, id).await, 0, "the row is settled");
+    let stamp: Option<chrono::DateTime<Utc>> =
+        sqlx::query_scalar("select last_failure_push_at from schedules where id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(stamp.is_some(), "an ambiguous send keeps the cooldown");
+}
+
+/// 3: отказ, не доставивший пуш, возвращает ПРЕЖНЮЮ метку, а не NULL.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn definite_rejection_restores_the_previous_stamp(pool: PgPool) {
+    enable(&pool).await;
+    let f = Fixture::new(pool.clone()).await;
+    let id = broken_schedule(&f).await;
+    let status = Arc::new(AtomicU16::new(400));
+    let (_seen, url) = gotify(status).await;
+    let (_dir, sender) = sender(&url);
+    sqlx::query("update schedules set last_failure_push_at=clock_timestamp()-interval '2 hours' where id=$1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let seeded: chrono::DateTime<Utc> =
+        sqlx::query_scalar("select last_failure_push_at from schedules where id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    fail_once(&f, id).await;
+    assert_eq!(sender.deliver_due(&pool).await.unwrap().dropped, 1);
+    let after: Option<chrono::DateTime<Utc>> =
+        sqlx::query_scalar("select last_failure_push_at from schedules where id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(after, Some(seeded), "prior stamp is restored, not NULL");
+}
+
+/// 4: свежий исход, слитый в давно ждущий пуш, продлевает его срок годности.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn coalesced_fresh_failure_is_not_dropped_as_stale(pool: PgPool) {
+    enable(&pool).await;
+    let f = Fixture::new(pool.clone()).await;
+    let id = broken_schedule(&f).await;
+    let (seen, url) = gotify(Arc::new(AtomicU16::new(200))).await;
+    let (_dir, sender) = sender(&url);
+    fail_once(&f, id).await;
+    sqlx::query("update owner_pushes set created_at=created_at-interval '31 minutes' where kind='schedule_failed'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    fail_once(&f, id).await;
+    let report = sender.deliver_due(&pool).await.unwrap();
+    assert_eq!((report.sent, report.dropped), (1, 0), "{report:?}");
+    assert_eq!(seen.lock().unwrap().len(), 1);
+}
+
+/// 4: сброс как устаревшего условен по версии строки, которую видел отправитель.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn stale_drop_loses_to_a_coalesce_that_lands_after_inspection(pool: PgPool) {
+    enable(&pool).await;
+    let f = Fixture::new(pool.clone()).await;
+    let id = broken_schedule(&f).await;
+    let (seen, url) = gotify(Arc::new(AtomicU16::new(200))).await;
+    let (_dir, sender) = sender(&url);
+    fail_once(&f, id).await;
+    sqlx::query("update owner_pushes set created_at=created_at-interval '31 minutes' where kind='schedule_failed'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Слияние держит строку: отправитель увидит её старой, а сбросить не успеет.
+    let mut merge = pool.begin().await.unwrap();
+    sqlx::query("select id from owner_pushes where kind='schedule_failed' for update")
+        .execute(&mut *merge)
+        .await
+        .unwrap();
+    let delivery = {
+        let pool = pool.clone();
+        let sender = sender.clone();
+        tokio::spawn(async move { sender.deliver_due(&pool).await.unwrap() })
+    };
+    for _ in 0..400 {
+        let waiting: i64 = sqlx::query_scalar(
+            "select count(*) from pg_stat_activity where wait_event_type='Lock' and datname=current_database()",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        if waiting > 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    sqlx::query(
+        "update owner_pushes set payload=jsonb_set(payload,'{reason}','\"fresh\"'),
+           created_at=clock_timestamp(),updated_at=clock_timestamp()
+         where kind='schedule_failed'",
+    )
+    .execute(&mut *merge)
+    .await
+    .unwrap();
+    merge.commit().await.unwrap();
+    let report = delivery.await.unwrap();
+    assert_eq!(report.dropped, 0, "a row changed after inspection is not dropped");
+    // Следующий проход шлёт свежий пуш.
+    assert_eq!(sender.deliver_due(&pool).await.unwrap().sent, 1);
+    assert!(seen.lock().unwrap()[0].to_string().contains("fresh"));
+}
