@@ -20,24 +20,54 @@ use canterlot_proto::worker::v1::{
 use rustix::process::Signal;
 use tokio::{io::AsyncReadExt, process::Command, sync::oneshot};
 
-use crate::containment::{Containment, TreeContainment};
-
 /// Сколько последних байтов вывода сохраняется в журнале запуска.
 pub const OUTPUT_TAIL_BYTES: usize = 4096;
 const TERMINATE_GRACE: Duration = Duration::from_millis(200);
 
+/// Область предпроверки: только её дерево (лидер + его группа).
+/// В отличие от `TreeContainment::new()`, привязанного к PID воркера,
+/// здесь членство — ровно группа запущенного `bash`, чужие процессы
+/// воркера (живые CLI, пробы, другие предпроверки) не затрагиваются.
+struct ScopedGroup {
+    pgid: u32,
+    leader_start_ticks: u64,
+    armed: Arc<AtomicBool>,
+}
+
+impl ScopedGroup {
+    fn leader_alive(&self) -> bool {
+        crate::containment::start_ticks(self.pgid)
+            .is_ok_and(|ticks| ticks == self.leader_start_ticks)
+    }
+
+    fn signal_group(&self, signal: Signal) {
+        if !self.leader_alive() {
+            return;
+        }
+        let Some(pid) = i32::try_from(self.pgid).ok().and_then(rustix::process::Pid::from_raw)
+        else {
+            return;
+        };
+        let _ = rustix::process::kill_process_group(pid, signal);
+    }
+
+    async fn terminate(&self, grace: Duration) {
+        self.signal_group(Signal::TERM);
+        tokio::time::sleep(grace).await;
+        self.signal_group(Signal::KILL);
+    }
+}
+
 /// Вся группа убивается, даже если future проверки брошена.
 struct GroupGuard {
-    pid: u32,
-    armed: Arc<AtomicBool>,
+    scope: Option<ScopedGroup>,
 }
 impl Drop for GroupGuard {
     fn drop(&mut self) {
-        if self.armed.swap(false, Ordering::AcqRel) {
-            let _ = rustix::process::kill_process_group(
-                rustix::process::Pid::from_raw(self.pid as i32).expect("valid child pid"),
-                Signal::KILL,
-            );
+        if let Some(scope) = self.scope.take()
+            && scope.armed.swap(false, Ordering::AcqRel)
+        {
+            scope.signal_group(Signal::KILL);
         }
     }
 }
@@ -56,7 +86,7 @@ fn finished(attempt_id: &str, exit_code: i32, tail: Vec<u8>, timed_out: bool) ->
         attempt_id: attempt_id.to_owned(),
         outcome: Some(precheck_result::Outcome::Finished(PrecheckFinished {
             exit_code,
-            output_tail: String::from_utf8_lossy(&tail).into_owned(),
+            output_tail: truncate_tail_to_string(&tail),
             timed_out,
         })),
     }
@@ -118,14 +148,6 @@ pub async fn run_with(
             return result;
         }
     };
-    let containment = match TreeContainment::new() {
-        Ok(containment) => containment,
-        Err(_) => {
-            let mut result = error("containment_unavailable");
-            result.attempt_id = attempt_id;
-            return result;
-        }
-    };
     let mut command = Command::new("bash");
     command
         .arg("-c")
@@ -152,7 +174,7 @@ pub async fn run_with(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    containment.prepare_command(&mut command);
+    command.process_group(0);
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(_) => {
@@ -161,14 +183,27 @@ pub async fn run_with(
             return result;
         }
     };
-    let pid = child.id().expect("spawned child has a pid");
+    let Some(pid) = child.id() else {
+        let mut result = error("spawn_failed");
+        result.attempt_id = attempt_id;
+        return result;
+    };
+    let leader_start_ticks = crate::containment::start_ticks(pid).unwrap_or(0);
     let armed = Arc::new(AtomicBool::new(true));
-    let guard = GroupGuard {
-        pid,
+    let mut guard = GroupGuard {
+        scope: Some(ScopedGroup {
+            pgid: pid,
+            leader_start_ticks,
+            armed: armed.clone(),
+        }),
+    };
+    let scope = ScopedGroup {
+        pgid: pid,
+        leader_start_ticks,
         armed: armed.clone(),
     };
     let ring: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
-    let drains = [
+    let mut drains = [
         child.stdout.take().map(|out| {
             let ring = ring.clone();
             tokio::spawn(drain(out, ring))
@@ -192,11 +227,22 @@ pub async fn run_with(
     };
     let timed_out = outcome.is_err();
     if timed_out {
-        let _ = containment.terminate(TERMINATE_GRACE).await;
+        scope.terminate(TERMINATE_GRACE).await;
     }
     let status = match outcome {
         Ok(Ok(status)) => Some(status),
         Ok(Err(_)) => {
+            // Тот же путь уборки, что и обычно: прибить группу, дочитать
+            // дренажи с отменой, снять охрану, переждать ребёнка.
+            scope.terminate(TERMINATE_GRACE).await;
+            for task in drains.iter_mut().flatten() {
+                let _ = tokio::time::timeout(Duration::from_secs(1), &mut *task).await;
+                task.abort();
+            }
+            guard.scope = None;
+            armed.store(false, Ordering::Release);
+            let _ = child.start_kill();
+            let _ = child.wait().await;
             let mut result = error("wait_failed");
             result.attempt_id = attempt_id;
             return result;
@@ -204,15 +250,19 @@ pub async fn run_with(
         Err(()) => None,
     };
     // Потоки closing по EOF после выхода группы: дать дренажам дочитать хвост,
-    // иначе последняя запись может ещё не попасть в кольцо.
-    for task in drains.into_iter().flatten() {
-        let _ = tokio::time::timeout(Duration::from_secs(1), task).await;
+    // иначе последняя запись может ещё не попасть в кольцо. Отмена вместо
+    // отсоединения: брошенный `JoinHandle` продолжал бы жить в фоне.
+    for task in drains.iter_mut().flatten() {
+        let _ = tokio::time::timeout(Duration::from_secs(1), &mut *task).await;
+        if !task.is_finished() {
+            task.abort();
+        }
     }
-    let tail = ring.lock().expect("output ring poisoned").clone();
-    drop(guard);
+    let tail = truncate_tail(&ring.lock().expect("output ring poisoned"));
+    guard.scope = None;
+    armed.store(false, Ordering::Release);
     let _ = child.start_kill();
     let _ = child.wait().await;
-    let _ = containment.reap_orphans();
     let code = status
         .and_then(|status| status.code())
         .unwrap_or(if timed_out { -1 } else { 1 });
@@ -226,6 +276,27 @@ pub async fn run(request: SchedulePrecheck, roots: Vec<PathBuf>) -> PrecheckResu
 
 /// Записать хвост вывода вRing: отдельная функция для тестов границы UTF-8.
 pub fn tail_bytes(bytes: &[u8]) -> String {
+    truncate_tail_to_string(bytes)
+}
+
+/// Хвост не шире 4 КиБ в кодировке: режем по границе символа и держим
+/// закодированный ответ в бюджете (`U+FFFD` расширяет потерю).
+fn truncate_tail(bytes: &[u8]) -> Vec<u8> {
     let start = bytes.len().saturating_sub(OUTPUT_TAIL_BYTES);
-    String::from_utf8_lossy(&bytes[start..]).into_owned()
+    let mut start = start;
+    while start < bytes.len() && bytes[start] & 0xC0 == 0x80 {
+        start += 1;
+    }
+    bytes[start..].to_vec()
+}
+
+fn truncate_tail_to_string(bytes: &[u8]) -> String {
+    let tail = truncate_tail(bytes);
+    let mut text = String::from_utf8_lossy(&tail).into_owned();
+    while text.len() > OUTPUT_TAIL_BYTES {
+        // Убираем по первому символу, пока закодированный вид в бюджете.
+        let next = text.chars().next().map(|c| c.len_utf8()).unwrap_or(1);
+        text.drain(..next);
+    }
+    text
 }

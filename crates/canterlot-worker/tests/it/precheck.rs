@@ -107,6 +107,58 @@ async fn output_tail_is_capped_at_four_kilobytes() {
 }
 
 #[tokio::test]
+async fn timeout_does_not_kill_sibling_worker_subprocess() {
+    // Соседний «живой CLI»: свой процесс-группа, ребёнок текущего процесса.
+    let mut sibling = tokio::process::Command::new("sleep");
+    sibling.arg("300");
+    sibling.process_group(0);
+    sibling.stdout(std::process::Stdio::null());
+    sibling.stderr(std::process::Stdio::null());
+    let mut sibling = sibling.spawn().expect("sibling spawns");
+    let _sibling_pid = sibling.id().expect("sibling has pid");
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("pid");
+    let command = format!("echo $$ > {}; sleep 300", pid_file.display());
+    let (tx, rx) = oneshot::channel::<()>();
+    let task = tokio::spawn(async move {
+        run_with(
+            request(dir.path(), &command),
+            vec![PathBuf::from(dir.path())],
+            Duration::from_secs(300),
+            Some(rx),
+        )
+        .await
+    });
+    let pid = loop {
+        if let Ok(text) = std::fs::read_to_string(&pid_file)
+            && let Ok(pid) = text.trim().parse::<u32>()
+        {
+            break pid;
+        }
+        tokio::task::yield_now().await;
+    };
+    tx.send(()).unwrap();
+    let result = task.await.unwrap();
+    let outcome = match result.outcome.unwrap() {
+        precheck_result::Outcome::Finished(outcome) => outcome,
+        other => panic!("expected a finished precheck: {other:?}"),
+    };
+    assert!(outcome.timed_out);
+    assert!(
+        !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+        "precheck leader reaped"
+    );
+    // Сосед обязан пережить таймаут предпроверки (не сигнал, не зомби).
+    match sibling.try_wait() {
+        Ok(None) => {}
+        Ok(Some(status)) => panic!("sibling worker subprocess was killed: {status:?}"),
+        Err(error) => panic!("sibling wait failed: {error:?}"),
+    }
+    let _ = sibling.kill();
+    let _ = sibling.wait();
+}
+
+#[tokio::test]
 async fn workdir_outside_allowed_roots_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let result = run_with(
