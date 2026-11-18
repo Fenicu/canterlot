@@ -234,6 +234,7 @@
       "name": "настройки",
       "sources": [
         "src/lib/screens/settings/**",
+        "src/lib/stores/schedules.svelte.ts",
         "src/lib/screens/presets/**",
         "src/lib/screens/signin/**",
         "src/routes/settings/**",
