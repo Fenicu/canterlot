@@ -1106,14 +1106,17 @@ pub async fn claim_due(
     Ok(claimed)
 }
 
-/// Уборка: не больше 200 последних запусков на расписание.
+/// Уборка: не больше 200 последних запусков на расписание, и только
+/// завершённых. Заявленный или идущий запуск (`claimed`, `prechecking`) за
+/// пределом окна остаётся: иначе приёмка теряет владение строкой, а повтор
+/// ручного запуска идёт по ответу, которому не на что опереться.
 pub async fn prune_runs(conn: &mut PgConnection) -> Result<u64, sqlx::Error> {
     let result = sqlx::query(
         "delete from schedule_runs where id in (
            select id from (
-             select id,row_number() over (partition by schedule_id order by scheduled_at desc,id desc) as n
+             select id,state,row_number() over (partition by schedule_id order by scheduled_at desc,id desc) as n
              from schedule_runs
-           ) ranked where n > 200
+           ) ranked where n > 200 and state not in ('claimed','prechecking')
          )",
     )
     .execute(conn)

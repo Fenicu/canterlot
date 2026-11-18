@@ -2036,3 +2036,120 @@ async fn claim_tick_advances_the_cursor_when_the_occurrence_row_exists(pool: PgP
         .unwrap();
     assert_eq!(runs, 1, "no duplicate occurrence row");
 }
+
+/// 7: уборка истории снимает только завершённые запуски: заявленный, но ещё
+/// не принятый запуск под наплывом новых строк остаётся.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn history_pruning_keeps_active_runs(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let id = create(&f, existing(&f), "0 9 * * *").await;
+    let schedule = Uuid::parse_str(&id).unwrap();
+    let old = Uuid::now_v7();
+    sqlx::query(
+        "insert into schedule_runs(id,schedule_id,owner_id,scheduled_at,claimed_revision,state,manual,idempotency_key)
+         values($1,$2,$3,now()-interval '1 day',1,'claimed',false,'old-claimed')",
+    )
+    .bind(old)
+    .bind(schedule)
+    .bind(f.seed.owner_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    for n in 0..201 {
+        sqlx::query(
+            "insert into schedule_runs(id,schedule_id,owner_id,scheduled_at,claimed_revision,state,manual,idempotency_key)
+             values($1,$2,$3,now()+make_interval(secs=>$4),1,'skipped_overlap',false,$5)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(schedule)
+        .bind(f.seed.owner_id)
+        .bind(f64::from(n + 10))
+        .bind(format!("newer-{n}"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let mut conn = pool.acquire().await.unwrap();
+    canterlot_hub::schedules::prune_runs(&mut conn).await.unwrap();
+    drop(conn);
+    let (state, _) = state(&pool, old).await;
+    assert_eq!(state, "claimed", "an active run is never pruned");
+}
+
+/// 7: повтор, прочитавший `claimed` перед финалом, не получает 404, если
+/// уборка успела снять строку: итог берётся из долговечной записи ключа.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn replay_rereads_the_durable_record_when_the_history_row_is_gone(pool: PgPool) {
+    use canterlot_hub::schedules::{
+        RunState,
+        admission::{Reservation, reserve_manual, settle_existing},
+    };
+
+    let f = Fixture::new(pool.clone()).await;
+    let id = create(&f, existing(&f), "0 9 * * *").await;
+    let schedule = Uuid::parse_str(&id).unwrap();
+    let Reservation::Fresh { run, .. } =
+        reserve_manual(&pool, f.seed.owner_id, schedule, "gone-key", true)
+            .await
+            .unwrap()
+    else {
+        panic!("fresh reservation");
+    };
+    // Итог записан в ключ, строку истории уже убрали.
+    let mut finished = run.clone();
+    finished.state = RunState::Started;
+    sqlx::query("update idempotency_keys set response=$3 where owner_id=$1 and key=$2")
+        .bind(f.seed.owner_id)
+        .bind("gone-key")
+        .bind(serde_json::to_value(&finished).unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("delete from schedule_runs where id=$1")
+        .bind(run.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let settled = settle_existing(&pool, f.seed.owner_id, run).await.unwrap();
+    assert_eq!(settled.state, RunState::Started);
+}
+
+/// 11: после общего срока ключа Run Now с тем же запросом получает прежний
+/// запуск из истории, другой запрос под тем же ключом — конфликт.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn run_now_replays_from_history_after_the_key_expired(pool: PgPool) {
+    use canterlot_hub::schedules::{
+        ScheduleError,
+        admission::{Reservation, reserve_manual},
+    };
+
+    let f = Fixture::new(pool.clone()).await;
+    let id = create(&f, existing(&f), "0 9 * * *").await;
+    let schedule = Uuid::parse_str(&id).unwrap();
+    let Reservation::Fresh { run, .. } =
+        reserve_manual(&pool, f.seed.owner_id, schedule, "expired-key", true)
+            .await
+            .unwrap()
+    else {
+        panic!("fresh reservation");
+    };
+    sqlx::query("update schedule_runs set state='started' where id=$1")
+        .bind(run.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("delete from idempotency_keys where owner_id=$1 and key='expired-key'")
+        .bind(f.seed.owner_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    match reserve_manual(&pool, f.seed.owner_id, schedule, "expired-key", true).await {
+        Ok(Reservation::Existing(again)) => assert_eq!(again.id, run.id),
+        other => panic!("expected the retained run, got {:?}", other.map(|_| ())),
+    }
+    let other = reserve_manual(&pool, f.seed.owner_id, schedule, "expired-key", false).await;
+    assert!(
+        matches!(other, Err(ScheduleError::Conflict("idempotency_conflict"))),
+        "a different request under the same key conflicts"
+    );
+}

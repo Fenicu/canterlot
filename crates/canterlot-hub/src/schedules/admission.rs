@@ -1244,17 +1244,22 @@ async fn lock_idempotency_key(
     Ok(())
 }
 
-/// Ждёт исхода запуска, не держа соединение между опросами.
+/// Ждёт исхода запуска, не держа соединение между опросами. Если строка
+/// истории исчезла (уборка успела после финала), итог берётся из долговечной
+/// записи общего ключа: она пишется в той же транзакции, что и итог.
 async fn await_winner_run(
     pool: &PgPool,
     owner_id: Uuid,
     run_id: Uuid,
+    key: &str,
 ) -> Result<ScheduleRun, ScheduleError> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
     loop {
         let mut conn = pool.acquire().await?;
         let Some(current) = super::get_run(&mut conn, owner_id, run_id).await? else {
-            return Err(ScheduleError::NotFound);
+            return durable_run(&mut conn, owner_id, run_id, key)
+                .await?
+                .ok_or(ScheduleError::NotFound);
         };
         drop(conn);
         if !matches!(current.state, RunState::Claimed | RunState::Prechecking)
@@ -1264,6 +1269,30 @@ async fn await_winner_run(
         }
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
+}
+
+/// Ответ Run Now из общего ключа идемпотентности, если он про этот запуск.
+async fn durable_run(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    run_id: Uuid,
+    key: &str,
+) -> Result<Option<ScheduleRun>, ScheduleError> {
+    let stored: Option<serde_json::Value> = sqlx::query_scalar(
+        "select response from idempotency_keys
+          where owner_id=$1 and key=$2 and operation='run_now' and response->>'id'=$3",
+    )
+    .bind(owner_id)
+    .bind(key)
+    .bind(run_id.to_string())
+    .fetch_optional(conn)
+    .await?;
+    stored
+        .map(|value| {
+            serde_json::from_value(value)
+                .map_err(|e| ScheduleError::Db(sqlx::Error::Decode(Box::new(e))))
+        })
+        .transpose()
 }
 
 /// Итог резерва ручного запуска.
@@ -1341,10 +1370,24 @@ async fn reserve_manual_once(
     )
     .await?;
     let Some(run) = reserved else {
-        // Ключ занят ручной строкой без записи ключа: такого не бывает,
-        // пока строки создаёт только эта функция под тем же замком.
+        // Запись общего ключа уже убрана по сроку, а ручная строка истории
+        // осталась: тот же запрос (расписание и `run_anyway`) получает её
+        // обратно, чужой запрос под этим ключом — конфликт.
+        let retained: Option<super::RunRow> = sqlx::query_as(
+            "select * from schedule_runs where owner_id=$1 and idempotency_key=$2 and manual",
+        )
+        .bind(owner_id)
+        .bind(key)
+        .fetch_optional(&mut *tx)
+        .await?;
         let _ = tx.rollback().await;
-        return Err(ScheduleError::Conflict("idempotency_conflict"));
+        let retained = retained.map(super::RunRow::into_run).transpose()?;
+        return match retained {
+            Some(run) if run.schedule_id == schedule_id && run.run_anyway == run_anyway => {
+                Ok(Some(Reservation::Existing(run)))
+            }
+            _ => Err(ScheduleError::Conflict("idempotency_conflict")),
+        };
     };
     let response = serde_json::to_value(&run)
         .map_err(|e| ScheduleError::Db(sqlx::Error::Encode(Box::new(e))))?;
@@ -1364,13 +1407,13 @@ async fn reserve_manual_once(
 }
 
 /// Повтор уже заявленного запуска: дожидаемся исхода или отдаём итог.
-async fn settle_existing(
+pub async fn settle_existing(
     pool: &PgPool,
     owner_id: Uuid,
     stored: ScheduleRun,
 ) -> Result<ScheduleRun, ScheduleError> {
     if matches!(stored.state, RunState::Claimed | RunState::Prechecking) {
-        await_winner_run(pool, owner_id, stored.id).await
+        await_winner_run(pool, owner_id, stored.id, &stored.idempotency_key).await
     } else {
         Ok(stored)
     }
@@ -1409,7 +1452,9 @@ pub async fn run_now(
         Err(AdmitEnd::Crashed) => Err(ScheduleError::Db(sqlx::Error::PoolClosed)),
         // Строку забрало восстановление: исход пишет тихий путь,
         // дожидаемся его вместо второго dispatch.
-        Err(AdmitEnd::Superseded) => await_winner_run(&state.pool, owner_id, run.id).await,
+        Err(AdmitEnd::Superseded) => {
+            await_winner_run(&state.pool, owner_id, run.id, &run.idempotency_key).await
+        }
         Err(AdmitEnd::Stop(stop)) => {
             let mut detail = run.detail.clone();
             merge(&mut detail, stop.skip.detail);
@@ -1424,7 +1469,7 @@ pub async fn run_now(
             )
             .await?;
             // Исход мог записать и другой владелец строки: отвечаем тем, что в базе.
-            await_winner_run(&state.pool, owner_id, run.id).await
+            await_winner_run(&state.pool, owner_id, run.id, &run.idempotency_key).await
         }
     }
 }
