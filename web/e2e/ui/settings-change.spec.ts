@@ -203,7 +203,7 @@ test('waiting_list_names_the_settings_proposal', async ({ page }) => {
   const hub = new FakeHub();
   const api = new FakeHubApi(hub);
   const since = new Date(Date.now() - 12 * 60_000).toISOString();
-  const id = seedConversation(api, {
+  seedConversation(api, {
     title: 'Ожидающая настройка',
     activity: {
       state: 'waiting_for_user',
