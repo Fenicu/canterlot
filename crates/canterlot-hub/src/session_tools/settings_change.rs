@@ -544,6 +544,44 @@ async fn close_request_in_tx(
     Ok(true)
 }
 
+/// Корзина закрывает предложения разговора под уже взятой блокировкой очереди:
+/// сообщение агенту не нужно — его сессию удалили вместе с карточкой.
+pub(crate) async fn on_conversation_trashed_in_tx(
+    conn: &mut PgConnection,
+    conversation: Uuid,
+    correlation: Uuid,
+) -> Result<(), sqlx::Error> {
+    let rows: Vec<(Uuid, Uuid)> = sqlx::query_as(
+        "select id,execution_id from requests where conversation_id=$1
+          and kind='settings_change' and state in ('open','decision_saved') for update",
+    )
+    .bind(conversation)
+    .fetch_all(&mut *conn)
+    .await?;
+    for (id, execution_id) in rows {
+        sqlx::query(
+            "update requests set state='closed_without_decision',updated_at=clock_timestamp()
+              where id=$1",
+        )
+        .bind(id)
+        .execute(&mut *conn)
+        .await?;
+        events::append(
+            conn,
+            NewEvent {
+                scope: Scope::Conversation { id: conversation },
+                kind: "request_closed",
+                conversation_id: Some(conversation),
+                execution_id: Some(execution_id),
+                payload: json!({"request_id": id, "reason": "conversation_trashed"}),
+                correlation_id: correlation,
+            },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 /// Решение владельца: применить с проверкой ревизии или закрыть отказом, затем уведомить.
 pub(crate) async fn run_job(
     conn: &mut PgConnection,
@@ -569,6 +607,14 @@ pub(crate) async fn run_job(
     let Some((RequestState::DecisionSaved, payload, decision)) = row else {
         return Ok(JobOutcome::Done(json!({"skipped": true})));
     };
+    let trashed: bool =
+        sqlx::query_scalar("select trashed_at is not null from conversations where id=$1")
+            .bind(parent)
+            .fetch_one(&mut *conn)
+            .await?;
+    if trashed {
+        return Ok(JobOutcome::Done(json!({"skipped": true})));
+    }
     let Ok(proposal) = serde_json::from_value::<SettingsProposal>(payload) else {
         return Ok(JobOutcome::Cancelled("invalid_payload"));
     };

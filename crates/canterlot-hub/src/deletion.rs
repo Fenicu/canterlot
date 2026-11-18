@@ -726,6 +726,8 @@ async fn trash_in_tx(
     .bind(id)
     .execute(&mut *conn)
     .await?;
+    crate::session_tools::settings_change::on_conversation_trashed_in_tx(conn, id, correlation_id)
+        .await?;
     crate::session_tools::spawn_queue::cancel_for_parent_in_tx(
         conn,
         owner_id,

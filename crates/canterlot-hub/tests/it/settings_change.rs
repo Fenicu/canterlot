@@ -830,6 +830,81 @@ async fn concurrent_decisions_with_different_keys_do_not_deadlock(pool: PgPool) 
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn trashing_the_proposer_closes_the_proposal_and_blocks_decisions(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let (request, _) = f
+        .proposal(
+            "settings.propose_routing",
+            json!({"policy": routing(), "reason": "корзина", "base_revision": 0}),
+        )
+        .await;
+    sqlx::query("update executions set state='stopped' where id=$1")
+        .bind(f.execution)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    canterlot_hub::deletion::trash(
+        &f.pool,
+        f.owner,
+        f.conversation,
+        "trash-settings",
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(f.request_state(request).await, "closed_without_decision");
+    let response = f
+        .client
+        .send(
+            Method::POST,
+            &format!(
+                "/api/v1/conversations/{}/requests/{request}/decision",
+                f.conversation
+            ),
+            Some("after-trash"),
+            Some(json!({"kind":"permission","behavior":"allow","message":null})),
+        )
+        .await;
+    assert_ne!(
+        response.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&response.body)
+    );
+    let stored: Option<Value> = sqlx::query_scalar("select routing_policy from owners where id=$1")
+        .bind(f.owner)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, None, "a trashed proposal must never be applied");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn approval_job_skips_a_trashed_conversation(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let (request, _) = f
+        .proposal(
+            "settings.propose_routing",
+            json!({"policy": routing(), "reason": "корзина", "base_revision": 0}),
+        )
+        .await;
+    assert_eq!(f.decide(request, "allow").await, 200);
+    sqlx::query("update conversations set trashed_at=clock_timestamp() where id=$1")
+        .bind(f.conversation)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    f.run_job_by_action("settings_change", Utc::now()).await;
+    let stored: Option<Value> = sqlx::query_scalar("select routing_policy from owners where id=$1")
+        .bind(f.owner)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, None);
+    assert_eq!(f.request_state(request).await, "decision_saved");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn owner_routing_edit_wins_the_race_with_an_approved_proposal(pool: PgPool) {
     let f = Fx::new(pool).await;
     let (request, _) = f

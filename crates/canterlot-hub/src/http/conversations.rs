@@ -9,6 +9,7 @@ use crate::conversations::{
     ListQuery, NewConversation, SnoozeBody,
 };
 use axum::{Json, extract::State, http::StatusCode};
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use utoipa::{IntoParams, ToSchema};
 use utoipa_axum::{router::OpenApiRouter, routes};
@@ -626,14 +627,14 @@ async fn decision(
             .bind(o.owner_id)
             .fetch_optional(&mut *conn)
             .await?;
-            let owned: Option<Uuid> = sqlx::query_scalar(
-                "select id from conversations where id=$1 and owner_id=$2 for no key update",
+            let owned: Option<Option<DateTime<Utc>>> = sqlx::query_scalar(
+                "select trashed_at from conversations where id=$1 and owner_id=$2 for no key update",
             )
             .bind(id)
             .bind(o.owner_id)
             .fetch_optional(&mut *conn)
             .await?;
-            if owned.is_none() {
+            if owned.is_none_or(|trashed_at| trashed_at.is_some()) {
                 return Err(ApiError::new(ErrorCode::NotFound));
             }
             match idempotency::lookup(&mut *conn, o.owner_id, &key, operation, &hash).await? {
