@@ -497,6 +497,7 @@ export class FakeHubApi {
 			session_id: this.id(),
 			input_id: this.id(),
 			manual: true,
+			run_anyway: runAnyway,
 			idempotency_key: key,
 			detail: { run_anyway: runAnyway, ...(runAnyway ? { note: 'проверки обойдены' } : {}) }
 		};

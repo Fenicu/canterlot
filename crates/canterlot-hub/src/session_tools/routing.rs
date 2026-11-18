@@ -695,7 +695,7 @@ pub struct WindowVerdict {
 /// сбросом или несвежим показанием не считается; красное — строгое
 /// сравнение остатка с порогом, как в PWA. Свежесть проверяется раньше
 /// красного: давнее высокое показание со сбросом в будущем не отказывает.
-pub fn schedule_window_verdict<'a>(
+pub fn schedule_window_verdict(
     windows: impl IntoIterator<
         Item = (
             &'static str,

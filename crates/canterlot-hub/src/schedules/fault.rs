@@ -30,8 +30,7 @@ pub fn armed(schedule_id: Uuid, fault: Fault) -> bool {
     ARMED
         .lock()
         .expect("faults")
-        .iter()
-        .any(|entry| *entry == (schedule_id, fault))
+        .contains(&(schedule_id, fault))
 }
 
 #[cfg(feature = "testkit")]

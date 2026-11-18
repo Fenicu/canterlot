@@ -1286,7 +1286,7 @@ async fn await_winner_run(
 pub enum Reservation {
     /// Строка запуска и ключ заняты этим вызовом: приём за ним.
     Fresh {
-        schedule: Schedule,
+        schedule: Box<Schedule>,
         run: ScheduleRun,
     },
     /// Ключ уже занят тем же запросом: запуск был заявлен раньше.
@@ -1347,7 +1347,10 @@ pub async fn reserve_manual(
         .map_err(|e| ScheduleError::Db(sqlx::Error::Encode(Box::new(e))))?;
     crate::idempotency::record(&mut tx, owner_id, key, "run_now", &hash, &response, None).await?;
     tx.commit().await?;
-    Ok(Reservation::Fresh { schedule, run })
+    Ok(Reservation::Fresh {
+        schedule: Box::new(schedule),
+        run,
+    })
 }
 
 /// Повтор уже заявленного запуска: дожидаемся исхода или отдаём итог.
@@ -1374,7 +1377,7 @@ pub async fn run_now(
 ) -> Result<ScheduleRun, ScheduleError> {
     let (schedule, run) =
         match reserve_manual(&state.pool, owner_id, schedule_id, key, run_anyway).await? {
-            Reservation::Fresh { schedule, run } => (schedule, run),
+            Reservation::Fresh { schedule, run } => (*schedule, run),
             Reservation::Existing(stored) => {
                 return settle_existing(&state.pool, owner_id, stored).await;
             }
