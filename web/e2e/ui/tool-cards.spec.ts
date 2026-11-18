@@ -115,6 +115,7 @@ test.describe('shell card', () => {
     await expect(denied.locator('[data-role="card-state"]')).toHaveAttribute('data-tone', 'warning');
     const cwd = await cardOf(page, seed.blocks.shellCwd!);
     await expect(cwd.locator('[data-role="shell-cwd"]')).toHaveText('/home/owner/canterlot');
+    await expect(cwd.locator('[data-role="shell-meta"]')).toContainText('код 0');
     const opencode = await cardOf(page, seed.blocks.shellOpencode!);
     await expect(opencode.locator('[data-role="shell-title"]')).toHaveText('Проверка готовности');
     await expect(opencode.locator('[data-role="shell-cwd"]')).toHaveText('/work/demo');

@@ -6,6 +6,8 @@ import type { CardCall, StateWord } from './types';
  * Claude Code пишет код в начало ответа (`Exit code 1`) и отказ владельца — текстом ответа.
  */
 const SUMMARY_STATUS = /,\s*(exit (-?\d+)|completed|failed|declined|interrupted|inProgress|in_progress)\s*$/;
+/** Итог результата от воркера: успешный Bash Claude Code называет кодом 0. */
+const RESULT_EXIT = /^exit (-?\d+)$/;
 const CLAUDE_EXIT = /^Exit code (-?\d+)\b/;
 const CLAUDE_DENIED = /^(?:Denied by the owner|Permission to use \S+.* (?:has been|was) denied|The user doesn't want to proceed|.*tool use was rejected)/i;
 
@@ -29,6 +31,8 @@ export function callOutcome(call: CardCall): Outcome {
     const code = status[2] !== undefined ? Number(status[2]) : null;
     return { exit: code, denied: status[1] === 'declined', failed: status[1] === 'failed' };
   }
+  const resultExit = RESULT_EXIT.exec(call.result?.summary?.trim() ?? '');
+  if (resultExit) return { exit: Number(resultExit[1]), denied: false, failed: false };
   const exit = CLAUDE_EXIT.exec(call.output);
   const denied = call.state === 'error' && CLAUDE_DENIED.test(call.output.trim());
   return { exit: exit ? Number(exit[1]) : null, denied, failed: false };

@@ -23,6 +23,8 @@ const TOOL_CALL_SUMMARY_LIMIT: usize = 120;
 /// Сводка результата, завершившегося ошибкой: у результата своей сводки нет, отметка
 /// доходит до ленты без новых полей в протоколе, журнале и истории.
 const TOOL_FAILED_SUMMARY: &str = "error";
+/// Успешный Bash с явным признаком успеха в кадре: карточка покажет код 0.
+const TOOL_EXIT_ZERO_SUMMARY: &str = "exit 0";
 
 /// Сводка результата запуска фоновой задачи: настоящий результат придёт позже. Хаб и лента
 /// не считают такой блок результатом вызова.
@@ -312,6 +314,7 @@ pub struct Parser {
     model_agent: HashMap<String, String>,
     blocks: HashMap<u64, OpenBlock>,
     tool_blocks: HashMap<String, Uuid>,
+    tool_names: HashMap<String, String>,
     tool_agents: HashMap<String, String>,
     /// Фаза работающего инструмента: сводка и время последнего heartbeat.
     running_tools: HashMap<String, RunningTool>,
@@ -366,6 +369,7 @@ impl Parser {
             model_agent: HashMap::new(),
             blocks: HashMap::new(),
             tool_blocks: HashMap::new(),
+            tool_names: HashMap::new(),
             tool_agents: HashMap::new(),
             running_tools: HashMap::new(),
             streamed_messages: HashSet::new(),
@@ -1064,6 +1068,7 @@ impl Parser {
                             },
                         );
                         self.tool_blocks.insert(id.to_owned(), block_id);
+                        self.tool_names.insert(id.to_owned(), name.to_owned());
                         self.assembler.start(index, id);
                         // Сводка фазы у вызова пустая: heartbeat её не меняет.
                         self.running_tools.insert(
@@ -1226,6 +1231,8 @@ impl Parser {
         tool_name: String,
         input: serde_json::Value,
     ) {
+        self.tool_names
+            .insert(tool_use_id.clone(), tool_name.clone());
         if tool_name == "Task" || tool_name == "Agent" {
             self.tool_agents
                 .insert(tool_use_id.clone(), subagent_name(&input));
@@ -1312,6 +1319,8 @@ impl Parser {
                 .to_owned()
         };
         let (tool_use_id, tool_name) = (string("id"), string("name"));
+        self.tool_names
+            .insert(tool_use_id.clone(), tool_name.clone());
         if self.tool_blocks.contains_key(&tool_use_id) {
             return;
         }
@@ -1460,6 +1469,16 @@ impl Parser {
                 .unwrap_or(false);
             let content = block.get("content").cloned().unwrap_or_default();
             let text = tool_result_text(&content);
+            let success_named = block
+                .get("is_error")
+                .is_some_and(|flag| flag.as_bool() == Some(false));
+            let shell_succeeded = success_named
+                && !launched
+                && !text.starts_with("Exit code ")
+                && self
+                    .tool_names
+                    .get(&tool_use_id)
+                    .is_some_and(|name| name == "Bash");
             let parent = self.tool_blocks.get(&tool_use_id).copied();
             let block_id = Uuid::now_v7();
             let (agent, _) = self.agent_of(
@@ -1483,8 +1502,12 @@ impl Parser {
                 text,
                 summary: if is_error {
                     Some(TOOL_FAILED_SUMMARY.to_owned())
+                } else if launched {
+                    Some(TOOL_LAUNCHED_SUMMARY.to_owned())
+                } else if shell_succeeded {
+                    Some(TOOL_EXIT_ZERO_SUMMARY.to_owned())
                 } else {
-                    launched.then(|| TOOL_LAUNCHED_SUMMARY.to_owned())
+                    None
                 },
             }));
             out.push(Parsed::ToolResult {

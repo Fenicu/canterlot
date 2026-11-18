@@ -471,8 +471,8 @@ fn failed_tool_result_is_marked_in_its_summary() {
         .collect();
     assert_eq!(
         marks,
-        [Some("async_launched"), None, None, Some("error")],
-        "the Agent call of this capture ran in the background"
+        [Some("async_launched"), Some("exit 0"), None, Some("error")],
+        "the Agent call of this capture ran in the background; the Bash result named its success"
     );
 }
 
@@ -1023,6 +1023,39 @@ fn tool_final(tool: &str, input: Value) -> (Option<String>, String) {
             _ => None,
         })
         .expect("tool final")
+}
+
+// Успешный Bash не пишет «Exit code 0» в ответ, но кадр явно называет успех: код знаем.
+#[test]
+fn successful_bash_result_names_its_zero_exit_code() {
+    let summarized = |tool: &str, error: Option<bool>| {
+        let mut parser = Parser::new();
+        parser.set_input_command(command_id());
+        let id = Uuid::now_v7().to_string();
+        let start = json!({"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":id.clone(),"name":tool}}});
+        let delta = json!({"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{}"}}});
+        let stop = json!({"type":"stream_event","event":{"type":"content_block_stop","index":0}});
+        for line in [start, delta, stop] {
+            parser.feed(&line.to_string());
+        }
+        let mut result = json!({"type":"tool_result","tool_use_id": id, "content": "hi\n"});
+        if let Some(error) = error {
+            result["is_error"] = Value::Bool(error);
+        }
+        let user = json!({"type":"user","message":{"role":"user","content":[result]},"tool_use_result":{
+            "stdout":"hi\n","stderr":"","interrupted":false,"isImage":false,"noOutputExpected":false}});
+        finals(&parser.feed(&user.to_string()))
+            .into_iter()
+            .find_map(|event| match event {
+                AdapterEvent::BlockFinal { summary, .. } => Some(summary.clone()),
+                _ => None,
+            })
+            .flatten()
+    };
+    assert_eq!(summarized("Bash", Some(false)), Some("exit 0".to_owned()));
+    // Без явного признака успеха код не выдумываем; не командный инструмент его тоже не даёт.
+    assert_eq!(summarized("Bash", None), None);
+    assert_eq!(summarized("Read", Some(false)), None);
 }
 
 #[test]

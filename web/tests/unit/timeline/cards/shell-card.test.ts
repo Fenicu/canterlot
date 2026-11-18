@@ -39,6 +39,14 @@ describe('shell card', () => {
     expect(card.word).toEqual({ word: 'код 2', tone: 'danger' });
   });
 
+  it('claude_success_reports_the_zero_code_named_by_the_worker', () => {
+    const call = cardCall(callBlock('Bash', { command: 'echo hi' }), resultBlock('hi', { summary: 'exit 0' }), { root: true });
+    expect(shell(call)!.data.outcome).toEqual({ exit: 0, denied: false, failed: false });
+    expect(shell(call)!.word).toBeNull();
+    const unknown = cardCall(callBlock('Bash', { command: 'echo hi' }), resultBlock('hi'), { root: true });
+    expect(shell(unknown)!.data.outcome.exit).toBeNull();
+  });
+
   it('claude_denial_reads_as_denied_not_as_an_error', () => {
     const call = cardCall(callBlock('Bash', { command: 'rm -rf build' }), resultBlock('Denied by the owner. Do not retry with different arguments; end your turn or ask the owner what to do.', { summary: 'error' }), { root: true });
     expect(shell(call)!.word).toEqual({ word: 'отклонено', tone: 'warning' });
