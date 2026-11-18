@@ -8729,6 +8729,9 @@
         "nudge_exhausted": {
           "type": "boolean"
         },
+        "turn_hung_action": { "type": "string" },
+        "turn_hung_notice": { "type": "boolean" },
+        "queued_input_id": { "$ref": "#/$defs/Uuid" },
         "asks_in_text": {
           "type": "boolean"
         },

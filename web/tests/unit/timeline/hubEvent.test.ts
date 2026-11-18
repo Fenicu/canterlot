@@ -415,3 +415,15 @@ test('unknown_freshness_has_no_marker_even_with_commits', () => {
   expect(line.marker).toBeNull();
   expect(line.stale).toBe(false);
 });
+
+test('a_hung_turn_feed_row_uses_words_only', () => {
+  expect(
+    eventLine({ kind: 'turn_hung', turn_hung_action: 'interrupted' }, '')
+  ).toBe('Ход завис в генерации, прерван и продолжен');
+  expect(eventLine({ kind: 'turn_hung', turn_hung_action: 'steered' }, '')).toBe(
+    'Ход завис в генерации, влито и продолжено'
+  );
+  expect(
+    eventLine({ kind: 'turn_hung', turn_hung_notice: true, queued_input_id: 'a' }, '')
+  ).toBeNull();
+});

@@ -3276,6 +3276,15 @@ export interface components {
             working_ms?: number | null;
             /** @description `accepted`: `removed`, `none`, `dirty` или `failed`. */
             worktree?: string | null;
+            /** @description `turn_hung`: как спасён ход — `steered`, `interrupted`, `nudged`. */
+            turn_hung_action?: string | null;
+            /** @description `turn_hung`: это карточка владельцу с действиями. */
+            turn_hung_notice?: boolean | null;
+            /**
+             * Format: uuid
+             * @description `turn_hung`: ввод в очереди для кнопки «Влить».
+             */
+            queued_input_id?: string | null;
         };
         ImageItem: {
             /**

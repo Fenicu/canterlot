@@ -221,6 +221,11 @@ export function eventLine(event: HubEvent, title: string): string | null {
       return title ? `${name} удалена` : 'Сессия удалена';
     case 'alarm':
       return alarmEventLine(event);
+    case 'turn_hung':
+      if (event.turn_hung_notice) return null;
+      return event.turn_hung_action === 'steered'
+        ? 'Ход завис в генерации, влито и продолжено'
+        : 'Ход завис в генерации, прерван и продолжен';
     case 'spawn_queue':
       switch (event.state) {
         case 'started':

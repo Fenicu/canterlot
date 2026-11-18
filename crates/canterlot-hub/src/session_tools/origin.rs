@@ -161,6 +161,15 @@ pub struct HubEvent {
     /// `true`: толчки кончились без маркера, итог отпущен правилом.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nudge_exhausted: Option<bool>,
+    /// `turn_hung`: как именно спасён ход — `steered`, `interrupted`, `nudged`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_hung_action: Option<String>,
+    /// `turn_hung`: это карточка владельцу с действиями, а не тихая строка ленты.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_hung_notice: Option<bool>,
+    /// `turn_hung`: ввод в очереди, который можно влить по кнопке «Влить».
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queued_input_id: Option<Uuid>,
     /// Ответ кончается вопросом в тексте, а не карточкой.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub asks_in_text: Option<bool>,

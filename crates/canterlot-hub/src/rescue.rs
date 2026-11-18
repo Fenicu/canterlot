@@ -466,7 +466,7 @@ pub async fn evaluate_in_tx(
                 "chain_depth": 0,
                 "event": {
                     "kind": "turn_hung",
-                    "notice": true,
+                    "turn_hung_notice": true,
                     "session_id": conversation_id,
                     "queued_input_id": queued
                 }
@@ -496,7 +496,7 @@ pub async fn evaluate_in_tx(
             "chain_depth": 0,
             "event": {
                 "kind": "turn_hung",
-                "action": action.as_str(),
+                "turn_hung_action": action.as_str(),
                 "session_id": conversation_id
             }
         });
@@ -535,7 +535,7 @@ pub async fn owner_interrupt_note_in_tx(
         conversation_id,
         owner_id,
         "Ход завис в генерации, прерван".to_owned(),
-        json!({"kind":"event","chain_depth":0,"event":{"kind":"turn_hung","action":"interrupted"}}),
+        json!({"kind":"event","chain_depth":0,"event":{"kind":"turn_hung","turn_hung_action":"interrupted"}}),
         now,
         correlation_id,
     )
@@ -555,7 +555,7 @@ pub async fn owner_steer_note_in_tx(
         conversation_id,
         owner_id,
         "Ход завис в генерации, влито и продолжено".to_owned(),
-        json!({"kind":"event","chain_depth":0,"event":{"kind":"turn_hung","action":"steered"}}),
+        json!({"kind":"event","chain_depth":0,"event":{"kind":"turn_hung","turn_hung_action":"steered"}}),
         now,
         correlation_id,
     )

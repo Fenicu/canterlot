@@ -193,6 +193,9 @@ export interface HubEvent {
   detail?: string;
   nudges?: number;
   nudge_exhausted?: boolean;
+  turn_hung_action?: string;
+  turn_hung_notice?: boolean;
+  queued_input_id?: Uuid;
   asks_in_text?: boolean;
   alarm_id?: Uuid;
   alarm_key?: string;

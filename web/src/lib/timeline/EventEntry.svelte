@@ -4,6 +4,7 @@
   import type { InputView } from '#lib/stores/inputs.js';
   import TextBlock from '#lib/timeline/TextBlock.svelte';
   import SystemBubble from '#lib/timeline/SystemBubble.svelte';
+  import HungTurnCard from '#lib/timeline/HungTurnCard.svelte';
   import { compactSessionContext } from '#lib/screens/chat/controls.js';
   import {
     LEGACY_CAPTION,
@@ -144,6 +145,8 @@
       </div>
     {/if}
   </div>
+{:else if event?.kind === 'turn_hung' && event.turn_hung_notice}
+  <HungTurnCard {conversationId} {event} />
 {:else if line}
   <p class="line" data-event-kind={event?.kind}>{line}</p>
 {:else}

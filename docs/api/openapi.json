@@ -17008,6 +17008,28 @@
               "null"
             ],
             "description": "`accepted`: `removed`, `none`, `dirty` или `failed`."
+          },
+          "turn_hung_action": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`turn_hung`: как спасён ход — `steered`, `interrupted`, `nudged`."
+          },
+          "turn_hung_notice": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "`turn_hung`: это карточка владельцу с действиями."
+          },
+          "queued_input_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "`turn_hung`: ввод в очереди для кнопки «Влить»."
           }
         }
       },
