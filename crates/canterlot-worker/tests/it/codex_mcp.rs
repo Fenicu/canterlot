@@ -21,7 +21,7 @@ fn limits_only_tool_set_lists_only_canterlot_limits() {
     let tools = list.as_reply().expect("tools/list")["result"]["tools"]
         .as_array()
         .expect("tools");
-    assert_eq!(tools.len(), 33);
+    assert_eq!(tools.len(), 34);
     assert_eq!(tools[0]["name"], "canterlot_limits");
     assert_eq!(tools[0]["annotations"]["readOnlyHint"], true);
     let names: Vec<&str> = tools
@@ -31,6 +31,7 @@ fn limits_only_tool_set_lists_only_canterlot_limits() {
     assert!(names.contains(&"canterlot_presets_list"));
     assert!(names.contains(&"canterlot_preset_save"));
     assert!(names.contains(&"canterlot_preset_apply"));
+    assert!(names.contains(&"plan_archive"));
 
     let claude = canterlot_worker::adapter::claude_code::mcp::handle_rpc(&json!({
         "jsonrpc": "2.0",
@@ -40,7 +41,7 @@ fn limits_only_tool_set_lists_only_canterlot_limits() {
     let tools = claude.as_reply().expect("claude tools/list")["result"]["tools"]
         .as_array()
         .expect("tools");
-    assert_eq!(tools.len(), 34);
+    assert_eq!(tools.len(), 35);
     let names: Vec<&str> = tools
         .iter()
         .map(|t| t["name"].as_str().expect("name"))

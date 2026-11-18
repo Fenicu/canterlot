@@ -162,13 +162,14 @@ fn initialize_echoes_protocol_and_lists_approve_and_limits_tools() {
         .as_array()
         .expect("tools array")
         .clone();
-    assert_eq!(tools.len(), 34);
+    assert_eq!(tools.len(), 35);
     let names: Vec<&str> = tools
         .iter()
         .map(|tool| tool["name"].as_str().expect("tool name"))
         .collect();
     assert!(names.contains(&"approve"), "{names:?}");
     assert!(names.contains(&"canterlot_limits"), "{names:?}");
+    assert!(names.contains(&"plan_archive"), "{names:?}");
     let approve = tools.iter().find(|tool| tool["name"] == "approve").unwrap();
     assert_eq!(
         approve["inputSchema"],
