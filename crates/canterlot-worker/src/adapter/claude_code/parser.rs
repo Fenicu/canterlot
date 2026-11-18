@@ -437,6 +437,12 @@ fn todo_item(todo: &serde_json::Value) -> Option<TodoItem> {
     })
 }
 
+/// Какие запуски кончил `result`: принятый пробуждающий ход и команда, которой итог принадлежит.
+struct TurnEnd {
+    adopted: Option<Uuid>,
+    command: Option<Uuid>,
+}
+
 pub struct Parser {
     input_command: Option<Uuid>,
     session_model: Option<String>,
@@ -1691,22 +1697,34 @@ impl Parser {
     /// `origin` или по `user_message_uuids` без этой команды. Сообщение, записанное
     /// раньше его конца, CLI держит у себя, и его собственный `result` идёт следом: тогда
     /// кадр ничего не завершает, а расход достаётся этому `result` как разница счётчиков.
-    fn result_command(&mut self, value: &serde_json::Value, out: &mut Vec<Parsed>) -> Option<Uuid> {
-        let foreign = matches!(
-            Self::answer_frame(value),
-            Some(Parsed::AnswerFrame { user_message_uuids })
-                if !self.input_command.is_some_and(|id| user_message_uuids.contains(&id))
-        );
+    /// Если же CLI взял записанное сообщение в сам пробуждающий ход, `origin` остаётся от
+    /// уведомления, а сообщение названо в `user_message_uuids`: этот итог его собственный.
+    fn result_command(&mut self, value: &serde_json::Value, out: &mut Vec<Parsed>) -> TurnEnd {
+        let answered = match Self::answer_frame(value) {
+            Some(Parsed::AnswerFrame { user_message_uuids }) => Some(user_message_uuids),
+            _ => None,
+        };
+        let own = answered
+            .as_ref()
+            .zip(self.input_command)
+            .is_some_and(|(uuids, id)| uuids.contains(&id));
+        let foreign = answered.is_some() && !own;
         let waking = foreign
-            || value
-                .pointer("/origin/kind")
-                .and_then(serde_json::Value::as_str)
-                == Some("task-notification");
+            || (!own
+                && value
+                    .pointer("/origin/kind")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("task-notification"));
         self.cli_turn = false;
         if !waking && (self.command_open || self.wake.is_none()) {
             self.command_open = false;
-            self.wake = None;
-            return Some(self.input_command.unwrap_or_default());
+            let command = self.input_command.unwrap_or_default();
+            // Пробуждающий ход, принятый до записи сообщения, кончился вместе с ним.
+            let adopted = self.wake.take().filter(|wake| *wake != command);
+            return TurnEnd {
+                adopted,
+                command: Some(command),
+            };
         }
         if self.wake.is_none() && !self.command_open {
             self.adopt_wake_turn(out);
@@ -1719,7 +1737,10 @@ impl Parser {
                 }));
             }
         }
-        self.wake.take()
+        TurnEnd {
+            adopted: None,
+            command: self.wake.take(),
+        }
     }
 
     /// Итог `/compact` кнопки узнаётся по его UUID в `user_message_uuids`. Без списка
@@ -1794,12 +1815,22 @@ impl Parser {
         if let Some(answer) = Self::answer_frame(value) {
             out.push(answer);
         }
-        let finished = self.result_command(value, out);
+        let ended = self.result_command(value, out);
+        let finished = ended.command;
         if !self.command_open {
             out.push(Parsed::Event(AdapterEvent::Phase {
                 phase: Phase::AwaitingInput,
                 tool_name: None,
                 summary: None,
+            }));
+        }
+        if let Some(input_command_id) = ended.adopted {
+            // Расход хода достаётся записанному сообщению: итог у них один.
+            out.push(Parsed::Event(AdapterEvent::RunFinished {
+                input_command_id,
+                usage: Vec::new(),
+                context_tokens: 0,
+                context_window_tokens: 0,
             }));
         }
         if let Some(input_command_id) = finished {

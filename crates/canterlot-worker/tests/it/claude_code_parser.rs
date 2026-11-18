@@ -2208,3 +2208,65 @@ fn goal_objective_is_bounded_and_debug_hides_it() {
         canterlot_proto::goals::MAX_OBJECTIVE_BYTES
     );
 }
+
+fn merged_result(uuid: Uuid) -> String {
+    json!({
+        "type": "result",
+        "subtype": "success",
+        "is_error": false,
+        "user_message_uuids": [uuid],
+        "origin": {"kind": "task-notification", "producer": "session-task", "runId": "r"},
+        "modelUsage": {},
+    })
+    .to_string()
+}
+
+fn awaiting_input(parsed: &[Parsed]) -> bool {
+    parsed.iter().any(|p| {
+        matches!(
+            p,
+            Parsed::Event(AdapterEvent::Phase {
+                phase: Phase::AwaitingInput,
+                ..
+            })
+        )
+    })
+}
+
+// CLI 2.1.326 берёт сообщение, записанное в начале пробуждающего хода, в тот же ход: у `result`
+// остаётся `origin` уведомления, а сообщение названо в `user_message_uuids`.
+#[test]
+fn wake_turn_that_took_the_written_message_finishes_it() {
+    let mut parser = Parser::new();
+    parser.set_input_command(command_id());
+    let parsed = parser.feed(&merged_result(command_id()));
+    assert_eq!(finished(&parsed), [command_id()]);
+    assert!(awaiting_input(&parsed), "the CLI is idle after the result");
+    assert!(!parser.wake_turn_open());
+}
+
+#[test]
+fn adopted_wake_turn_that_took_the_written_message_finishes_both() {
+    let rows = fixtures::replay_fixture_rows("background_wake_2_1_326");
+    let mut parser = Parser::new();
+    let mut before = replay_rows(&mut parser, &rows[..rows.len() - 2]);
+    before.extend(
+        parser.feed(
+            &json!({"type":"stream_event","parent_tool_use_id":null,
+            "event":{"type":"message_start","message":{"id":"w","model":"m","usage":{}}}})
+            .to_string(),
+        ),
+    );
+    // Пробуждающий ход открыт и принят на первую команду; владелец пишет вторую.
+    let first = *adopted(&before).last().expect("the wake turn is adopted");
+    let second = Uuid::now_v7();
+    parser.set_input_command(second);
+    let parsed = parser.feed(&merged_result(second));
+    assert_eq!(
+        finished(&parsed),
+        [first, second],
+        "the adopted run ends, then the message"
+    );
+    assert!(awaiting_input(&parsed));
+    assert!(!parser.wake_turn_open());
+}
