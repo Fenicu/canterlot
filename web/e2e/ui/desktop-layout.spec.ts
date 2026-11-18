@@ -381,7 +381,7 @@ test('settings_open_from_the_rail_corner_in_two_aligned_columns', async ({ page 
   await expect(entry).toHaveAttribute('aria-current', 'page');
   const main = page.locator('main[data-settings]');
   await expect(main).toHaveAttribute('data-settings', 'appearance');
-  await expect(main.getByRole('navigation', { name: 'Разделы настроек' }).getByRole('link')).toHaveCount(6);
+  await expect(main.getByRole('navigation', { name: 'Разделы настроек' }).getByRole('link')).toHaveCount(8);
   // Шапка делит колонки: «Настройки» над списком, название раздела над разделом, верхние края на одной линии.
   const title = (await main.getByRole('heading', { name: 'Настройки', level: 1 }).boundingBox())!;
   const head = (await main.getByRole('heading', { name: 'Внешний вид', level: 2 }).boundingBox())!;
