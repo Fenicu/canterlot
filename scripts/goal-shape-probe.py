@@ -7,6 +7,10 @@
     python3 scripts/goal-shape-probe.py codex      # app-server, без хода модели
     python3 scripts/goal-shape-probe.py claude     # -p stream-json, /goal приведёт к ходу модели
 
+Вариант `claude` запускайте из пустого временного каталога: без `--strict-mcp-config`
+CLI подхватил бы серверы MCP владельца и стал бы менять его файлы. Здесь MCP отключён,
+режим разрешений `default`, число ходов ограничено двумя — правки файлов не производятся.
+
 Можно указать бинарники: CODEX_BIN=... CLAUDE_BIN=... . Таймаут задаётся
 переменной GOAL_PROBE_TIMEOUT (секунды, по умолчанию 30).
 """
@@ -94,60 +98,72 @@ class Probe:
 def probe_codex():
     binary = os.environ.get("CODEX_BIN", "codex")
     p = Probe([binary, "app-server", "--listen", "stdio://", "--enable", "goals"])
-    p.send({"id": 1, "method": "initialize", "params": {"clientInfo": {"name": "goal-shape-probe"}}})
-    p.wait(1)
-    p.send({"method": "initialized", "params": {}})
-    p.send({"id": 2, "method": "thread/start", "params": {}})
-    if not p.wait(2):
-        print("thread/start: no response", file=sys.stderr)
+    try:
+        # app-server 0.169 требует version и experimentalApi, иначе цель не включается.
+        p.send({
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "clientInfo": {"name": "goal-shape-probe", "version": "1.0.0"},
+                "capabilities": {"experimentalApi": True},
+            },
+        })
+        p.wait(1)
+        p.send({"method": "initialized", "params": {}})
+        p.send({"id": 2, "method": "thread/start", "params": {"cwd": os.getcwd()}})
+        if not p.wait(2):
+            print("thread/start: no response", file=sys.stderr)
+            return 1
+        thread = None
+        for frame in p.frames:
+            if frame.get("id") == 2 and isinstance(frame.get("result"), dict):
+                thread = (frame["result"].get("thread") or {}).get("id")
+        if not thread:
+            print("thread/start: no thread id", file=sys.stderr)
+            return 1
+        p.send({
+            "id": 3,
+            "method": "thread/goal/set",
+            "params": {"threadId": thread, "objective": OBJECTIVE, "origin": "user"},
+        })
+        p.wait(3)
+        p.send({"id": 4, "method": "thread/goal/get", "params": {"threadId": thread}})
+        p.wait(4)
+        p.send({"id": 5, "method": "thread/goal/clear", "params": {"threadId": thread, "origin": "user"}})
+        p.wait(5)
+        return 0
+    finally:
+        # Формы уже пришедших кадров нужны и при отказе: по ним видно, где оборвался зонд.
         p.report()
         p.close()
-        return 1
-    thread = None
-    for frame in p.frames:
-        if frame.get("id") == 2 and isinstance(frame.get("result"), dict):
-            thread = (frame["result"].get("thread") or {}).get("id")
-    if not thread:
-        print("thread/start: no thread id", file=sys.stderr)
-        p.close()
-        return 1
-    p.send({
-        "id": 3,
-        "method": "thread/goal/set",
-        "params": {"threadId": thread, "objective": OBJECTIVE, "origin": "user"},
-    })
-    p.wait(3)
-    p.send({"id": 4, "method": "thread/goal/get", "params": {"threadId": thread}})
-    p.wait(4)
-    p.send({"id": 5, "method": "thread/goal/clear", "params": {"threadId": thread, "origin": "user"}})
-    p.wait(5)
-    p.report()
-    p.close()
-    return 0
 
 
 def probe_claude():
-    # Пустой MCP-конфиг: только локальная команда /goal, без серверов владельца.
+    # Запускать из пустого временного каталога: strict MCP и пустой конфиг не дают
+    # CLI подключить серверы владельца, режим default и два хода не правят файлы.
     binary = os.environ.get("CLAUDE_BIN", "claude")
     p = Probe([
         binary, "-p", "--input-format", "stream-json", "--output-format", "stream-json",
-        "--verbose", "--include-partial-messages", "--permission-mode", "acceptEdits",
+        "--verbose", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+        "--permission-mode", "default", "--max-turns", "2",
     ])
-    p.send({
-        "type": "user",
-        "message": {"role": "user", "content": "/goal " + OBJECTIVE},
-        "parent_tool_use_id": None,
-    })
-    time.sleep(min(TIMEOUT, 12))
-    p.send({
-        "type": "user",
-        "message": {"role": "user", "content": "/goal clear"},
-        "parent_tool_use_id": None,
-    })
-    time.sleep(min(TIMEOUT, 6))
-    p.report()
-    p.close()
-    return 0
+    try:
+        p.send({
+            "type": "user",
+            "message": {"role": "user", "content": "/goal " + OBJECTIVE},
+            "parent_tool_use_id": None,
+        })
+        time.sleep(min(TIMEOUT, 12))
+        p.send({
+            "type": "user",
+            "message": {"role": "user", "content": "/goal clear"},
+            "parent_tool_use_id": None,
+        })
+        time.sleep(min(TIMEOUT, 6))
+        return 0
+    finally:
+        p.report()
+        p.close()
 
 
 if __name__ == "__main__":
