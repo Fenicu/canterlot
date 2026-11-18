@@ -58,6 +58,7 @@ pub mod rendition;
 pub mod requests;
 pub mod runs;
 pub mod scheduler;
+pub mod schedules;
 pub mod search;
 pub mod secrets;
 pub mod session;

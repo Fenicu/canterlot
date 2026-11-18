@@ -36,7 +36,9 @@ base64 = "0.23.1"
 bytes = "1.12.1"
 canterlot-proto = { version = "1.0.0", path = "../canterlot-proto" }
 chrono = { version = "0.4.45", features = ["serde"] }
+chrono-tz = "0.10.4"
 clap = { version = "4.6.7", features = ["derive"] }
+cron = "0.17.0"
 flate2 = "1.1.11"
 futures-util = "0.3.34"
 getrandom = "0.4.3"
