@@ -477,6 +477,30 @@ async fn wait_cancel_won(hub: &mut support::ProtocolHub, target: &str) {
     .unwrap();
 }
 
+// Ждёт следующий пакет CJ с итогом CancelWon по цели и возвращает число таких записей в нём.
+async fn next_cancel_won(hub: &mut support::ProtocolHub, target: &str) -> usize {
+    loop {
+        if let support::Observed::Control(message) = hub.event().await
+            && let Some(control_up::Msg::CjRecords(batch)) = message.msg
+        {
+            let won = batch
+                .records
+                .iter()
+                .filter(|record| {
+                    matches!(
+                        record.body.as_ref().and_then(|body| body.body.as_ref()),
+                        Some(record_body::Body::CancelWon(fact))
+                            if fact.command_id == target
+                    )
+                })
+                .count();
+            if won > 0 {
+                return won;
+            }
+        }
+    }
+}
+
 // Команда принята в хранилище и подтверждена хабу, но сеанс оборвался до передачи
 // её исполнению: после переподключения команда должна дойти до исполнения.
 #[tokio::test]
@@ -825,26 +849,17 @@ async fn handled_command_is_not_routed_twice_after_reconnect() {
     hub.fail(Status::unavailable("drop")).await;
     wait_backoff(&mut state).await;
     wait_live(&mut state).await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    let mut won = 0;
-    while let Ok(event) = hub.events.try_recv() {
-        if let support::Observed::Control(message) = event
-            && let Some(control_up::Msg::CjRecords(batch)) = message.msg
-        {
-            won += batch
-                .records
-                .iter()
-                .filter(|record| {
-                    matches!(
-                        record.body.as_ref().and_then(|body| body.body.as_ref()),
-                        Some(record_body::Body::CancelWon(fact))
-                            if fact.command_id == target
-                    )
-                })
-                .count();
-        }
-    }
+    // Неподтверждённый итог переотправляется после переподключения: ждём его по событию,
+    // а не фиксированной паузой (под нагрузкой 2 с не хватало).
+    let won = timeout(Duration::from_secs(8), next_cancel_won(&mut hub, &target))
+        .await
+        .expect("command outcome must be redelivered after reconnect");
     assert_eq!(won, 1, "command outcome must be delivered exactly once");
+    let again = timeout(Duration::from_secs(2), next_cancel_won(&mut hub, &target)).await;
+    assert!(
+        again.is_err(),
+        "command outcome must be delivered exactly once"
+    );
     stop.send_replace(true);
     join.await.unwrap().unwrap();
 }
