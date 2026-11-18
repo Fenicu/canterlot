@@ -1,4 +1,5 @@
 use crate::containment::{Containment, ContainmentError};
+use canterlot_proto::goals::GoalState;
 use canterlot_proto::requests::{AnswerValue, DecisionPayload, PermissionBehavior};
 use canterlot_proto::worker::v1::LimitWindow as ProtoLimitWindow;
 use std::{fmt, path::PathBuf, time::Duration};
@@ -629,6 +630,18 @@ pub enum AdapterEvent {
         context_tokens: u64,
         context_window_tokens: u64,
     },
+    /// Цель исполнения изменилась; `None` — цель снята. Полный снимок, не дельта.
+    Goal {
+        goal: Option<GoalState>,
+    },
+}
+
+/// Итог команды владельца с целью: адаптер сообщает, передал ли он команду в CLI.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GoalCommandOutcome {
+    Applied,
+    NotApplicable,
+    Failed,
 }
 impl fmt::Debug for AdapterEvent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -740,6 +753,10 @@ impl fmt::Debug for AdapterEvent {
                 .field("ok", ok)
                 .finish_non_exhaustive(),
             Self::ContextProgress { .. } => f.write_str("ContextProgress"),
+            Self::Goal { goal } => f
+                .debug_struct("Goal")
+                .field("present", &goal.is_some())
+                .finish(),
             Self::TodoUpdated { lane, items } => f
                 .debug_struct("TodoUpdated")
                 .field("lane", lane)
@@ -805,6 +822,8 @@ pub struct HarnessCatalog {
     pub settings_midsession_effort: bool,
     pub permission_modes: Vec<&'static str>,
     pub models: Vec<ModelCatalog>,
+    /// Харнесс умеет ставить и снимать цель; OpenCode — нет.
+    pub goals: bool,
 }
 // Первая модель харнесса — выбор формы по умолчанию. `haiku[1m]` CLI отказывает в
 // `set_model`, поэтому у Haiku варианта 1M нет. Обычные варианты убраны из каталога,
@@ -840,6 +859,7 @@ pub fn catalog_with(
             images: true,
             settings_midsession: true,
             settings_midsession_effort: true,
+            goals: true,
             permission_modes: vec!["owner", "ask", "bypass", "read_only"],
             models: CLAUDE_MODELS
                 .iter()
@@ -864,6 +884,7 @@ pub fn catalog_with(
             images: true,
             settings_midsession: true,
             settings_midsession_effort: true,
+            goals: true,
             permission_modes: vec!["owner", "ask", "bypass", "read_only"],
             models: catalog.models(),
         });
@@ -890,6 +911,7 @@ pub fn catalog_with(
             images: true,
             settings_midsession: true,
             settings_midsession_effort: true,
+            goals: false,
             permission_modes: vec!["owner", "ask", "bypass", "read_only"],
             models: vec![
                 ModelCatalog {
@@ -975,6 +997,19 @@ pub trait Adapter: Send {
     /// Сжать контекст по действию владельца. Сжимает только адаптер, который это умеет.
     async fn compact(&mut self, _command: Uuid) -> CompactOutcome {
         CompactOutcome::NotApplicable
+    }
+    /// Управление целью. По умолчанию харнесс целей не поддерживает.
+    async fn goal_command(
+        &mut self,
+        _action: canterlot_proto::goals::GoalAction,
+        _objective: Option<&str>,
+        _token_budget: Option<i64>,
+    ) -> GoalCommandOutcome {
+        GoalCommandOutcome::NotApplicable
+    }
+    /// Объявляет цель в отчёте машины: без неё PWA прячет управление целью.
+    fn supports_goals(&self) -> bool {
+        false
     }
     /// Ввод ждёт итога сжатия: служебный ввод этого CLI идёт тем же каналом между
     /// ходами, и чужой итог приписался бы ходу владельца. По умолчанию сжатие

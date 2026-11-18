@@ -74,6 +74,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ".canterlot.worker.v1.SecretFailed",
             ".canterlot.worker.v1.SecretRemoved",
             ".canterlot.worker.v1.SecretRemoveFailed",
+            ".canterlot.worker.v1.GoalState",
+            ".canterlot.worker.v1.GoalChanged",
+            ".canterlot.worker.v1.GoalCommand",
         ])
         .build_server(true)
         .build_client(true)

@@ -20,6 +20,7 @@ message ControlToSupervisor {
     AgentCallResult agent_call_result = 12;
     CompactRequest compact = 13;
     ShareResult share_result = 14;
+    canterlot.worker.v1.GoalCommand goal = 15;
   }
 }
 
@@ -88,6 +89,8 @@ message StartCli {
   string fork_from_native = 17;
   // Профиль MCP canterlot: пусто — обычный набор адаптера, "side" — только мост разрешений и вопросов.
   string canterlot_mcp = 18;
+  // Только при согласованной возможности goals_v1: записи GoalChanged и команды GoalCommand.
+  bool goals_v1 = 19;
 }
 
 // Вызов инструмента агента: сопровождение → управляющий процесс → хаб и обратно.

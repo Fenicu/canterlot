@@ -63,7 +63,31 @@ impl fmt::Debug for command::Kind {
             }
             Self::SteerInput(input) => f.debug_tuple("SteerInput").field(input).finish(),
             Self::RevokeSecret(input) => f.debug_tuple("RevokeSecret").field(input).finish(),
+            Self::GoalCommand(input) => f
+                .debug_struct("GoalCommand")
+                .field("action", &input.action)
+                .finish_non_exhaustive(),
         }
+    }
+}
+
+// Текст цели — данные владельца: в логи не попадает.
+impl fmt::Debug for crate::worker::v1::GoalCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GoalCommand")
+            .field("action", &self.action)
+            .field("objective_bytes", &self.objective.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for crate::worker::v1::GoalChanged {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GoalChanged")
+            .field("execution_id", &self.execution_id)
+            .field("generation", &self.generation)
+            .field("set", &self.goal.is_some())
+            .finish()
     }
 }
 

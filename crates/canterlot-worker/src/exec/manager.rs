@@ -7,7 +7,7 @@ use std::{
 };
 
 use canterlot_proto::{
-    limits::{IPC_CAP_COMPACT, IPC_CAP_STEER, IPC_PROTOCOL_VERSION},
+    limits::{IPC_CAP_COMPACT, IPC_CAP_GOALS, IPC_CAP_STEER, IPC_PROTOCOL_VERSION},
     worker::{
         ipc::{
             CliStarted, CompactRequest, ControlToSupervisor, Deliver, DeliverAck, InterruptRequest,
@@ -1654,6 +1654,7 @@ impl Actor {
                 prompt_suggestions: prompt_suggestions_enabled(start),
                 fork_from_native: start.fork_from_native.clone(),
                 canterlot_mcp: start.canterlot_mcp.clone(),
+                goals_v1: start.goals_v1,
             }))
             .await;
         Ok(())
@@ -2426,6 +2427,20 @@ impl Actor {
                 } else {
                     self.interrupt_status(&command, InterruptState::Superseded)
                         .await
+                }
+            }
+            Some(Kind::GoalCommand(goal)) => {
+                if live && command.execution_generation == self.generation {
+                    if !self.ipc_caps.contains(IPC_CAP_GOALS) {
+                        return reject(&self.shared, &command, CAPABILITY_MISSING).await;
+                    }
+                    if !self.send(down::Msg::Goal(goal)).await {
+                        self.waiting.push_back(command);
+                        return Ok(());
+                    }
+                    self.shared.cj(vec![], self_terminal).await
+                } else {
+                    self.shared.cj(vec![], self_terminal).await
                 }
             }
             Some(Kind::RemoveWorktree(_) | Kind::RevokeSecret(_)) => {

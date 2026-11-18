@@ -124,6 +124,7 @@ pub fn build_report_with_extras(
                     images: c.images,
                     settings_midsession: c.settings_midsession,
                     settings_midsession_effort: Some(c.settings_midsession_effort),
+                    goals: c.goals,
                     installed_version: version.map_or_else(String::new, |v| v.installed.clone()),
                     latest_version: version.map_or_else(String::new, |v| v.latest.clone()),
                     min_version: version.map_or_else(String::new, |v| v.minimum.clone()),

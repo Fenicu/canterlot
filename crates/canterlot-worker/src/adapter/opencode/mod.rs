@@ -126,6 +126,7 @@ impl OpenCodeCatalog {
             images: true,
             settings_midsession: true,
             settings_midsession_effort: true,
+            goals: false,
             permission_modes: vec!["owner", "ask", "bypass", "read_only"],
             models: self
                 .models

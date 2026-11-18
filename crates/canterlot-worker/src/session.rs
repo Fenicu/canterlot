@@ -60,6 +60,8 @@ pub const CAPABILITY_CLI_VERSIONS_V1: &str = "cli_versions_v1";
 /// В отчёте машины есть каталог команд и навыков; без него поле пусто.
 pub const CAPABILITY_SLASH_CATALOG_V1: &str = "slash_catalog_v1";
 pub const CAPABILITY_SCHEDULE_PRECHECK_V1: &str = "schedule_precheck_v1";
+/// Воркер ведёт состояние цели и принимает команды управления ею.
+pub const CAPABILITY_GOALS_V1: &str = canterlot_proto::goals::CAPABILITY_GOALS_V1;
 
 pub const OPTIONAL_CAPABILITIES: &[&str] = &[
     "exec_v1",
@@ -88,6 +90,7 @@ pub const OPTIONAL_CAPABILITIES: &[&str] = &[
     CAPABILITY_CLI_VERSIONS_V1,
     CAPABILITY_SLASH_CATALOG_V1,
     CAPABILITY_SCHEDULE_PRECHECK_V1,
+    CAPABILITY_GOALS_V1,
 ];
 
 #[derive(Clone)]

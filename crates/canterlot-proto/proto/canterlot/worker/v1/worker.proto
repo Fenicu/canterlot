@@ -202,6 +202,8 @@ message Command {
     // Только при согласованной возможности secret_requests_v2: убрать файл секрета
     // до поколения `up_to` включительно. Только метаданные: значения команда не несёт.
     RevokeSecret revoke_secret = 21;
+    // Только при согласованной возможности goals_v1.
+    GoalCommand goal_command = 22;
   }
 }
 
@@ -302,6 +304,8 @@ message StartExecution {
   // Профиль MCP canterlot этого запуска: пусто — обычный набор адаптера,
   // "side" — только мост разрешений и вопросов (без сессий, пресетов, share_file и лимитов).
   string canterlot_mcp = 15;
+  // Только при согласованной возможности goals_v1: записи GoalChanged и команды GoalCommand.
+  bool goals_v1 = 16;
 }
 
 // Изолированная рабочая копия git: путь воркер строит сам из корня рабочих копий.
@@ -383,7 +387,34 @@ message RecordBody {
     SecretRemoveFailed secret_remove_failed = 46;
     // Только при согласованной возможности pilot_v1: конец входа провайдера на машине.
     ProviderCredential provider_credential = 47;
+    // Только при согласованной возможности goals_v1: последнее состояние цели разговора.
+    GoalChanged goal_changed = 48;
   }
+}
+
+// Состояние цели, общее для Codex и Claude Code. Время — миллисекунды UNIX.
+message GoalState {
+  string objective = 1;
+  string status = 2;
+  int64 tokens_used = 3;
+  int64 time_used_seconds = 4;
+  optional int64 token_budget = 5;
+  optional int64 turns_used = 6;
+  int64 updated_at_ms = 7;
+}
+
+// Запись SJ: `goal` пусто, когда цель очищена.
+message GoalChanged {
+  string execution_id = 1;
+  uint64 generation = 2;
+  GoalState goal = 3;
+}
+
+// Действие владельца с целью. `objective` обязательно только для `set`.
+message GoalCommand {
+  string action = 1;
+  string objective = 2;
+  optional int64 token_budget = 3;
 }
 
 // Файл секрета записан. Только метаданные: значения здесь нет.
@@ -654,6 +685,8 @@ message HarnessInfo {
   string update_command = 12;
   // Только при согласованной возможности slash_catalog_v1: пусто у старого воркера.
   repeated CatalogEntry catalog = 13;
+  // Поддерживает ли харнесс цели: Codex и Claude Code — да, OpenCode — нет.
+  bool goals = 14;
 }
 
 // Строка меню slash-команд: имя, короткое описание, вид и подсказка аргумента.

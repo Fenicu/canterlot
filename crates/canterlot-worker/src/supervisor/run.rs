@@ -7,6 +7,7 @@ use std::{
 };
 
 use canterlot_proto::{
+    goals::{GoalAction, GoalState},
     limits::{BLOCK_FINAL_INLINE_MAX_BYTES, IPC_PROTOCOL_VERSION},
     requests::DecisionPayload,
     worker::{
@@ -23,7 +24,7 @@ use canterlot_proto::{
             DecisionUnconfirmed, DeliverDecision, InputAcceptanceUnconfirmed, InputAccepted,
             InputCancelLost, InputCancelWon, InputDispatchDeferred, InputRejected,
             InputTransmissionStarted, InputWithdrawn, InterruptState, InterruptStatus,
-            JournalClosed, JournalOpened, PhaseChanged, PromptSuggested, RequestClosed,
+            GoalChanged, JournalClosed, JournalOpened, PhaseChanged, PromptSuggested, RequestClosed,
             RequestOpened, RunFinished, SessionStuck, TodoItem as ProtoTodoItem,
             TodoStatus as ProtoTodoStatus, TodoUpdated, content_block, record_body::Body,
         },
@@ -51,8 +52,9 @@ use crate::{
     adapter::{
         Adapter, AdapterContext, AdapterEvent, AgentCallResult, BackgroundKind, BackgroundState,
         BackgroundTask, CloseMode, CompactOutcome, DecisionOutcome, InstructionSpec,
-        InterruptOutcome, LimitFact, LocalFile, MediaSource, Phase, SettingsChange, StartSpec,
-        SteerOutcome, TodoStatus, Transmission, TransmitOutcome, frame_names, registry_with,
+        GoalCommandOutcome, InterruptOutcome, LimitFact, LocalFile, MediaSource, Phase,
+        SettingsChange, StartSpec, SteerOutcome, TodoStatus, Transmission, TransmitOutcome,
+        frame_names, registry_with,
     },
     containment::{Containment, ContainmentError, Member, Termination, TreeContainment},
     machine::share::{self, Prepared as PreparedShare, ShareError},
@@ -231,6 +233,8 @@ struct Supervisor {
     session_tools_v1: bool,
     /// Хаб включил подсказки и знает запись `PromptSuggested`.
     prompt_suggestions: bool,
+    /// Хаб согласовал возможности goals_v1: записи `GoalChanged` и команды `GoalCommand`.
+    goals_v1: bool,
     /// Ввод хода, после которого CLI может прислать подсказку; передача следующего ввода
     /// его снимает, и запоздавшая подсказка прошлого хода уже не пишется.
     suggestion_turn: Option<Uuid>,
@@ -448,6 +452,7 @@ pub(super) async fn run(exec_dir: PathBuf) -> Result<ExitCode, SupervisorError> 
         background_v1: false,
         session_tools_v1: false,
         prompt_suggestions: false,
+        goals_v1: false,
         suggestion_turn: None,
         git_head: None,
         background_drop_reported: false,
@@ -983,6 +988,7 @@ impl Supervisor {
                 self.on_compact(compact.command_id, compact.dispatch_attempt)
                     .await?
             }
+            down::Msg::Goal(goal) => self.on_goal_command(goal).await?,
             down::Msg::Stop(stop) => self.on_stop(stop.force).await?,
             down::Msg::ShipFrom(ship) => self.sj.enable_ship(ship.committed_seq),
             down::Msg::SjAck(ack) => self.sj.ack(ack.up_to_seq)?,
@@ -1821,6 +1827,7 @@ impl Supervisor {
         self.background_v1 = start.background_v1;
         self.session_tools_v1 = start.session_tools_v1;
         self.prompt_suggestions = start.prompt_suggestions && !start.isolate_mcp;
+        self.goals_v1 = start.goals_v1;
         self.workdir = Some(PathBuf::from(&start.workdir));
         if self.session_tools_v1 {
             self.git_head = git_facts::head(Path::new(&start.workdir)).await;
@@ -2733,6 +2740,7 @@ impl Supervisor {
                 context_tokens,
                 context_window_tokens,
             } => self.on_context_progress(context_tokens, context_window_tokens)?,
+            AdapterEvent::Goal { goal } => self.on_goal(goal)?,
             AdapterEvent::ContextExhausted => {
                 self.begin_stop(StopCause::ContextExhausted, false)?;
             }
@@ -3099,6 +3107,64 @@ impl Supervisor {
             context_window_tokens,
         }))?;
         Ok(())
+    }
+
+    /// Запись SJ — полный снимок цели; пусто означает, что цель снята.
+    fn on_goal(&mut self, goal: Option<GoalState>) -> Result<(), SupervisorError> {
+        if !self.goals_v1 {
+            return Ok(());
+        }
+        let goal = goal.map(|goal| {
+            let goal = goal.bounded();
+            canterlot_proto::worker::v1::GoalState {
+                objective: goal.objective,
+                status: goal.status.as_str().into(),
+                tokens_used: goal.tokens_used,
+                time_used_seconds: goal.time_used_seconds,
+                token_budget: goal.token_budget,
+                turns_used: goal.turns_used,
+                updated_at_ms: goal.updated_at_ms,
+            }
+        });
+        self.record(Body::GoalChanged(GoalChanged {
+            execution_id: self.spec.execution_id.to_string(),
+            generation: self.spec.generation,
+            goal,
+        }))?;
+        Ok(())
+    }
+
+    /// Команда владельца уходит адаптеру; состояние вернётся событием `Goal`.
+    async fn on_goal_command(
+        &mut self,
+        command: canterlot_proto::worker::v1::GoalCommand,
+    ) -> Result<(), SupervisorError> {
+        if !self.goals_v1
+            || matches!(
+                self.lifecycle,
+                Lifecycle::Stopping(_) | Lifecycle::Draining { .. }
+            )
+        {
+            return Ok(());
+        }
+        let Some(action) = GoalAction::parse(&command.action) else {
+            return Ok(());
+        };
+        if action == GoalAction::Set && command.objective.is_empty() {
+            return Ok(());
+        }
+        let Some(adapter) = self.adapter.as_mut() else {
+            return Ok(());
+        };
+        let objective = (!command.objective.is_empty()).then_some(command.objective.as_str());
+        match adapter
+            .goal_command(action, objective, command.token_budget)
+            .await
+        {
+            GoalCommandOutcome::Applied
+            | GoalCommandOutcome::NotApplicable
+            | GoalCommandOutcome::Failed => Ok(()),
+        }
     }
 
     // Сжатие запускает отдельный период работы: во время хода его не начать.
@@ -3760,6 +3826,7 @@ mod tests {
             background_v1: false,
             session_tools_v1: false,
             prompt_suggestions: false,
+            goals_v1: true,
             suggestion_turn: None,
             git_head: None,
             background_drop_reported: false,
