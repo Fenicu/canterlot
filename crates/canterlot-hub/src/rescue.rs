@@ -201,6 +201,9 @@ async fn row_in_tx(conn: &mut PgConnection, conversation_id: Uuid) -> Result<Row
     .await
 }
 
+/// Дольше этого срока записанное окно пересчёт со старыми часами уже не пропускает.
+const AHEAD_SKIP_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// Окно наблюдения: пока после старта хаба, смены связи или старта исполнения не
 /// набралось двух доказательных выборок подряд, verdict не выносится. Выборка
 /// доказательна, если у самого CLI исполнения есть прошлый замер CPU и он жив.
@@ -216,8 +219,16 @@ pub async fn observe_in_tx(
         return Ok(());
     };
     let row = row_in_tx(conn, conversation_id).await?;
-    if inputs.hang.sample_ahead {
-        // Пересчёт со старыми часами выборку не видит: окно остаётся как записано.
+    // Пересчёт со старыми часами выборку не видит: окно остаётся как записано, но только
+    // пока оно не старше фиксированного срока. Живой пересчёт берёт часы под блокировкой
+    // и сюда не попадает; ряд выборок «из будущего» окно вечно не держит.
+    if inputs.hang.sample_ahead
+        && row.obs_last_at.is_some_and(|last| {
+            now.signed_duration_since(last)
+                .to_std()
+                .is_ok_and(|age| age <= AHEAD_SKIP_MAX_AGE)
+        })
+    {
         inputs.hang.window_ready =
             row.obs_execution_id == Some(execution) && row.obs_samples >= WINDOW_SAMPLES;
         return Ok(());

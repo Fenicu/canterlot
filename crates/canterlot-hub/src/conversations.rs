@@ -1283,10 +1283,9 @@ pub async fn mark_read(
         })
     })
     .await?;
-    activity::refresh_with_metrics(
+    activity::refresh_live(
         pool,
         id,
-        Utc::now(),
         thresholds,
         metrics_stale_after,
         nudge_enabled,

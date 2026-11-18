@@ -861,10 +861,54 @@ pub async fn refresh(
     .await
 }
 
+/// Пересчёт по живым часам: время берётся из базы уже под блокировкой очереди, поэтому
+/// выборка метрик, записанная до неё, никогда не оказывается «впереди» пересчёта.
+pub async fn refresh_live(
+    pool: &PgPool,
+    conversation_id: Uuid,
+    thresholds: &Thresholds,
+    stale_after: Duration,
+    nudge_enabled: bool,
+    correlation_id: Uuid,
+) -> Result<Refresh, sqlx::Error> {
+    refresh_at(
+        pool,
+        conversation_id,
+        None,
+        thresholds,
+        stale_after,
+        nudge_enabled,
+        correlation_id,
+    )
+    .await
+}
+
+/// Пересчёт в заданный момент: шов для тестов с синтетическими часами.
 pub async fn refresh_with_metrics(
     pool: &PgPool,
     conversation_id: Uuid,
     now: DateTime<Utc>,
+    thresholds: &Thresholds,
+    stale_after: Duration,
+    nudge_enabled: bool,
+    correlation_id: Uuid,
+) -> Result<Refresh, sqlx::Error> {
+    refresh_at(
+        pool,
+        conversation_id,
+        Some(now),
+        thresholds,
+        stale_after,
+        nudge_enabled,
+        correlation_id,
+    )
+    .await
+}
+
+async fn refresh_at(
+    pool: &PgPool,
+    conversation_id: Uuid,
+    fixed_now: Option<DateTime<Utc>>,
     thresholds: &Thresholds,
     stale_after: Duration,
     nudge_enabled: bool,
@@ -879,6 +923,14 @@ pub async fn refresh_with_metrics(
         .bind(conversation_id)
         .fetch_one(&mut *conn)
         .await?;
+    let now = match fixed_now {
+        Some(now) => now,
+        None => {
+            sqlx::query_scalar("select clock_timestamp()")
+                .fetch_one(&mut *conn)
+                .await?
+        }
+    };
     let (owner_id, read_seq, model, effort, permission, crunch, mut snoozed_until): (Uuid, i64, String, String, String, bool, Option<DateTime<Utc>>) =
         sqlx::query_as("select owner_id,last_read_seq,model,effort,permission_mode,crunch_enabled,snoozed_until from conversations where id=$1 for no key update")
             .bind(conversation_id)
@@ -1309,10 +1361,9 @@ pub async fn run(
                         }
                     }
                 }
-                if let Err(e) = refresh_with_metrics(
+                if let Err(e) = refresh_live(
                     &pool,
                     id,
-                    Utc::now(),
                     &thresholds,
                     machines.metrics_stale_after,
                     nudge_enabled,

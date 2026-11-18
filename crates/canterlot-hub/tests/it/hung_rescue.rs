@@ -1683,3 +1683,76 @@ async fn a_hang_push_first_suppresses_the_generic_stalled_push_of_the_same_silen
         "silence crossed the generic threshold"
     );
 }
+
+/// Выборка, записанная до блокировки очереди, не бывает «впереди» живого пересчёта: он
+/// берёт часы уже под блокировкой. Две такие выборки подряд дают окно и verdict.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_live_refresh_reads_its_clock_under_the_queue_lock(pool: PgPool) {
+    let scene = hung_scene(&pool, "claude_code", false).await;
+    for _ in 0..2 {
+        // Выборка записана до пересчёта: часы, снятые под блокировкой, её не опережают.
+        sample(&pool, &scene, Utc::now(), true, 0).await;
+        let mut thresholds = thresholds();
+        thresholds.hung_rescue = HungRescue::Alert;
+        activity::refresh_live(
+            &pool,
+            scene.seed.conversation_id,
+            &thresholds,
+            Duration::from_secs(3600),
+            true,
+            Uuid::now_v7(),
+        )
+        .await
+        .unwrap();
+    }
+    let all = pushes(&pool, &scene).await;
+    assert_eq!(all.len(), 1, "the verdict fired: {all:?}");
+    assert!(all[0].0.starts_with("hung:"), "{}", all[0].0);
+}
+
+/// Записанное окно пропускается пересчётом со старыми часами не дольше фиксированного
+/// срока: длинный ряд выборок «из будущего» не держит его вечно и не выносит verdict
+/// по древнему окну.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_stored_window_is_not_kept_alive_forever_by_ahead_samples(pool: PgPool) {
+    let scene = hung_scene(&pool, "claude_code", false).await;
+    let conversation = scene.seed.conversation_id;
+    let samples = |pool: PgPool| async move {
+        sqlx::query_scalar::<_, i32>(
+            "select obs_samples from hung_rescues where conversation_id=$1",
+        )
+        .bind(conversation)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    // Окно набрано давно: два замера десять минут назад.
+    let old = scene.base - TimeDelta::minutes(10);
+    tick_mode(
+        &pool,
+        &scene,
+        old - TimeDelta::seconds(15),
+        HungRescue::Alert,
+    )
+    .await;
+    tick_mode(&pool, &scene, old, HungRescue::Alert).await;
+    let stored = pushes(&pool, &scene).await.len();
+    assert_eq!(samples(pool.clone()).await, 2);
+    // Свежие выборки всё время на 45 секунд впереди часов пересчёта.
+    let mut clock = scene.base;
+    for _ in 0..6 {
+        sample(&pool, &scene, clock + TimeDelta::seconds(45), true, 0).await;
+        refresh_with(&pool, &scene, clock, HungRescue::Alert).await;
+        clock += TimeDelta::seconds(30);
+    }
+    assert_ne!(
+        samples(pool.clone()).await,
+        2,
+        "the ten-minute-old window was not kept by the skip"
+    );
+    assert_eq!(
+        pushes(&pool, &scene).await.len(),
+        stored,
+        "no new verdict from an ancient window"
+    );
+}

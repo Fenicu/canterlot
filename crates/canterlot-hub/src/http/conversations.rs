@@ -1259,10 +1259,9 @@ async fn clear_snooze(
 /// Срок «Отложить» живёт в производной строке и её событии: пересчёт делает его
 /// видимым списку и шапке чата без перечитывания снимка.
 async fn refresh_derived(s: &AppState, id: Uuid, correlation: Uuid) -> Result<(), ApiError> {
-    crate::activity::refresh_with_metrics(
+    crate::activity::refresh_live(
         &s.pool,
         id,
-        chrono::Utc::now(),
         &crate::activity::Thresholds::from(&*s.activity),
         s.machines.metrics_stale_after,
         s.nudge_enabled,
