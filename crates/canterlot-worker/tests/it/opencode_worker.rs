@@ -680,21 +680,18 @@ async fn failed_startup_probe_is_retried_and_updates_the_catalog(pool: PgPool) {
     assert_eq!(harnesses, 0);
     assert_eq!(*stack.state.borrow(), SessionState::Live);
 
-    until_within(
-        Duration::from_secs(10),
-        "opencode catalog after retry",
-        async || {
-            sqlx::query_scalar::<_, i64>(
-                "select count(*) from machine_harnesses where machine_id = $1
+    // Повторный discover сам может идти до DISCOVER_WAIT (20 с): под нагрузкой 10 с не хватало.
+    until("opencode catalog after retry", async || {
+        sqlx::query_scalar::<_, i64>(
+            "select count(*) from machine_harnesses where machine_id = $1
                  and harness = 'opencode' and provider = 'opencode'",
-            )
-            .bind(stack.machine_id)
-            .fetch_one(&pool)
-            .await
-            .unwrap()
-                == 1
-        },
-    )
+        )
+        .bind(stack.machine_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+            == 1
+    })
     .await;
 
     assert_eq!(*stack.state.borrow(), SessionState::Live);
