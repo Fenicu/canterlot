@@ -1812,10 +1812,8 @@ impl Worker {
                                 || !precheck_outbound.is_empty()
                             {
                                 // Слот ответа зарезервирован: новая просьба получает
-                                // `busy` в очередь, готовый ответ не затирается.
-                                let mut reply = crate::machine::precheck::error("busy");
-                                reply.attempt_id = request.attempt_id;
-                                precheck_outbound.push_back(ControlUp{msg:Some(control_up::Msg::PrecheckResult(reply))});
+                                // `busy` в очередь (ограниченную), готовый ответ не затирается.
+                                queue_precheck_busy(&mut precheck_outbound, request.attempt_id);
                             } else {
                                 precheck_next = Some(request);
                             }
@@ -2044,7 +2042,7 @@ impl Worker {
                 }
                 reply=async{precheck_operation.as_mut().unwrap().await}, if precheck_operation.is_some()=>{
                     precheck_operation=None;
-                    precheck_outbound.push_back(ControlUp{msg:Some(control_up::Msg::PrecheckResult(reply))});
+                    queue_precheck_result(&mut precheck_outbound, reply);
                 }
                 result = &mut data_loop => return result,
                 changed = data_attached.changed() => {
@@ -2088,6 +2086,66 @@ enum StoreReply {
     Command(Box<Command>, Accept),
     Ack(u64),
     Batch(u64, Option<Box<(ControlUp, u64)>>, bool),
+}
+
+/// Сколько ответов `busy` держит очередь исходящих предпроверки: при
+/// заторе отправки хаб, не дождавшийся ответа, освобождает слоты и шлёт
+/// новые просьбы, и без предела очередь росла бы вместе с ними.
+const PRECHECK_BUSY_REPLY_CAP: usize = 3;
+
+/// `busy` на лишнюю просьбу. Сверх предела ответ не ставится: хаб сам
+/// завершит такую попытку по таймеру. Место под итог идущей проверки
+/// (`queue_precheck_result`) предела не знает, он всегда принимается.
+fn queue_precheck_busy(outbound: &mut VecDeque<ControlUp>, attempt_id: String) -> bool {
+    if outbound.len() >= PRECHECK_BUSY_REPLY_CAP {
+        return false;
+    }
+    let mut reply = crate::machine::precheck::error("busy");
+    reply.attempt_id = attempt_id;
+    outbound.push_back(ControlUp {
+        msg: Some(control_up::Msg::PrecheckResult(reply)),
+    });
+    true
+}
+
+/// Итог идущей проверки: единственный, зарезервированный слот сверх предела `busy`.
+fn queue_precheck_result(outbound: &mut VecDeque<ControlUp>, reply: PrecheckResult) {
+    outbound.push_back(ControlUp {
+        msg: Some(control_up::Msg::PrecheckResult(reply)),
+    });
+}
+
+#[cfg(test)]
+mod precheck_queue_tests {
+    use super::*;
+
+    fn attempt_of(message: &ControlUp) -> String {
+        match &message.msg {
+            Some(control_up::Msg::PrecheckResult(result)) => result.attempt_id.clone(),
+            other => panic!("not a precheck reply: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn busy_replies_are_bounded_and_the_active_result_keeps_its_slot() {
+        let mut outbound = VecDeque::new();
+        for n in 0..10 {
+            queue_precheck_busy(&mut outbound, format!("busy-{n}"));
+        }
+        assert_eq!(
+            outbound.len(),
+            PRECHECK_BUSY_REPLY_CAP,
+            "busy replies are capped"
+        );
+        let mut result = crate::machine::precheck::error("done");
+        result.attempt_id = "active".to_owned();
+        queue_precheck_result(&mut outbound, result);
+        assert_eq!(outbound.len(), PRECHECK_BUSY_REPLY_CAP + 1);
+        assert_eq!(attempt_of(outbound.back().unwrap()), "active");
+        // Ответ идущей проверки не вытесняется и после новых просьб.
+        assert!(!queue_precheck_busy(&mut outbound, "late".to_owned()));
+        assert!(outbound.iter().any(|m| attempt_of(m) == "active"));
+    }
 }
 
 fn batch_first(message: &ControlUp) -> u64 {
