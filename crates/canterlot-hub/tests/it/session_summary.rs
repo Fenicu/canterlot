@@ -712,6 +712,7 @@ async fn set_activity(pool: &PgPool, id: Uuid, state: S, evidence: E) {
     let thresholds = Thresholds {
         stalled_generating: Duration::from_secs(300),
         stalled_tool: Duration::from_secs(1800),
+        hung_generating: Duration::from_secs(600),
         idle_quiet: Duration::from_secs(5),
         idle_background_max: std::time::Duration::from_secs(15 * 60),
     };
@@ -800,6 +801,7 @@ async fn summary_variants_for_each_state(pool: PgPool) {
             process_alive: Some(true),
             cpu_busy: Some(false),
             link: "available".into(),
+            hung: None,
         },
     )
     .await;
@@ -1147,6 +1149,7 @@ async fn summary_events_deliver_facts_without_changing_text(pool: PgPool) {
             process_alive: Some(true),
             cpu_busy: Some(false),
             link: "available".into(),
+            hung: None,
         },
     )
     .await;

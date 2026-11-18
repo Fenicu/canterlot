@@ -85,6 +85,10 @@ pub enum Evidence {
         process_alive: Option<bool>,
         cpu_busy: Option<bool>,
         link: String,
+        /// Зависание в генерации: живой процесс, пустое дерево, холостой CPU и долгое
+        /// молчание. Старым клиентам поле не пишется, они читают ordinary `stalled`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hung: Option<bool>,
     },
     QuotaPaused {
         reason: String,
@@ -126,6 +130,7 @@ pub struct Activity {
 pub struct Thresholds {
     pub stalled_generating: Duration,
     pub stalled_tool: Duration,
+    pub hung_generating: Duration,
     pub idle_quiet: Duration,
     pub idle_background_max: Duration,
 }
@@ -134,6 +139,7 @@ impl From<&ActivityConfig> for Thresholds {
         Self {
             stalled_generating: c.stalled_generating,
             stalled_tool: c.stalled_tool,
+            hung_generating: c.hung_generating,
             idle_quiet: c.idle_quiet,
             idle_background_max: c.idle_background_max,
         }
@@ -298,6 +304,31 @@ pub fn phase_since(inputs: &ActivityInputs) -> Option<DateTime<Utc>> {
         .and_then(|execution| execution.phase_at.max(inputs.turn_started_at))
 }
 
+/// Ход завис в генерации: фаза не инструмент, все потоковые события давно кончились,
+/// процесс жив, но CPU холостой и живых потомков нет. Инструментальные фазы сюда не
+/// попадают никогда — спящий долгий инструмент доказывает работу деревом процессов.
+/// Отсутствие числа потомков (старый воркер) считается неизвестностью, а не доказательством.
+pub fn hung_in_generation(i: &ActivityInputs, t: &Thresholds) -> bool {
+    let Some(e) = &i.execution else {
+        return false;
+    };
+    if matches!(e.phase.as_str(), "running_tool" | "context_maintenance") {
+        return false;
+    }
+    let Some(process) = i.process else {
+        return false;
+    };
+    if !process.alive || process.cpu_permille >= 50 || !matches!(process.descendants, Some(0)) {
+        return false;
+    }
+    let Some(last) = i.last_event_at.max(e.phase_at).max(i.turn_started_at) else {
+        return false;
+    };
+    (i.now - last)
+        .to_std()
+        .is_ok_and(|silence| silence > t.hung_generating)
+}
+
 pub fn compute(i: &ActivityInputs, t: &Thresholds) -> Activity {
     use ActivityState as S;
     let idle = || Activity {
@@ -418,6 +449,19 @@ pub fn compute(i: &ActivityInputs, t: &Thresholds) -> Activity {
         } else {
             t.stalled_generating
         };
+        if !tool_phase && hung_in_generation(i, t) {
+            return Activity {
+                state: S::Stalled,
+                evidence: Evidence::Stalled {
+                    last_event_at: last.unwrap_or(i.now),
+                    phase: e.phase.clone(),
+                    process_alive: Some(process.alive),
+                    cpu_busy: Some(cpu_busy),
+                    link: "available".into(),
+                    hung: Some(true),
+                },
+            };
+        }
         if let Some(last) = last
             && (i.now - last)
                 .to_std()
@@ -431,6 +475,7 @@ pub fn compute(i: &ActivityInputs, t: &Thresholds) -> Activity {
                     process_alive: Some(process.alive),
                     cpu_busy: Some(cpu_busy),
                     link: "available".into(),
+                    hung: None,
                 },
             };
         }

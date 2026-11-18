@@ -14,6 +14,7 @@ fn thresholds() -> Thresholds {
     Thresholds {
         stalled_generating: Duration::from_secs(1800),
         stalled_tool: Duration::from_secs(1800),
+        hung_generating: Duration::from_secs(600),
         idle_quiet: Duration::from_secs(5),
         idle_background_max: std::time::Duration::from_secs(15 * 60),
     }
@@ -142,6 +143,7 @@ fn state_table_matches_pilot_section_9() {
             process_alive: Some(true),
             cpu_busy: Some(false),
             link: "available".into(),
+            hung: Some(true),
         },
     ));
     let mut i = base.clone();
@@ -231,6 +233,7 @@ fn a_new_turn_after_a_long_idle_counts_silence_from_its_own_start() {
             process_alive: Some(true),
             cpu_busy: Some(false),
             link: "available".into(),
+            hung: Some(true),
         },
         "the stall clock starts at the turn, not at the previous event"
     );
@@ -291,6 +294,12 @@ fn stalled_thresholds_are_generous_for_generation_and_configurable() {
     ] {
         let mut i = inputs();
         i.process.as_mut().unwrap().cpu_permille = 0;
+        // Живой потомок исключает verdict «завис в генерации»: здесь проверяется
+        // именно старый щедрый порог `stalled`, а не новый быстрый порог hang.
+        // У инструментов живое дерево и есть доказательство работы, его не трогаем.
+        if !matches!(phase, "running_tool" | "context_maintenance") {
+            i.process.as_mut().unwrap().descendants = Some(1);
+        }
         i.execution.as_mut().unwrap().phase = phase.into();
         i.now += TimeDelta::seconds(seconds);
         assert_eq!(activity::compute(&i, &thresholds()).state, S::Working);
@@ -302,6 +311,7 @@ fn stalled_thresholds_are_generous_for_generation_and_configurable() {
         let custom = Thresholds {
             stalled_generating: Duration::from_secs(4000),
             stalled_tool: Duration::from_secs(4000),
+            hung_generating: Duration::from_secs(600),
             idle_quiet: Duration::from_secs(5),
             idle_background_max: std::time::Duration::from_secs(15 * 60),
         };
@@ -516,19 +526,20 @@ fn generating_without_progress_is_stalled_only_after_a_generous_threshold() {
     let generous = Thresholds {
         stalled_generating: Duration::from_secs(1800),
         stalled_tool: Duration::from_secs(1800),
+        hung_generating: Duration::from_secs(600),
         idle_quiet: Duration::from_secs(5),
         idle_background_max: std::time::Duration::from_secs(15 * 60),
     };
     let mut i = inputs();
-    i.process = Some(ProcessFacts {
-        alive: true,
-        cpu_permille: 0,
-        descendants: Some(0),
-    });
-    i.now += TimeDelta::seconds(1799);
-    assert_eq!(activity::compute(&i, &generous).state, S::Working);
-    i.now += TimeDelta::seconds(2);
+    // Генерация: ищем исключительно старый порог `stalled`, поэтому дерево живо.
+    i.process.as_mut().unwrap().cpu_permille = 0;
+    i.process.as_mut().unwrap().descendants = Some(1);
+    i.now += TimeDelta::seconds(1801);
     assert_eq!(activity::compute(&i, &generous).state, S::Stalled);
+    assert!(matches!(
+        activity::compute(&i, &generous).evidence,
+        E::Stalled { hung: None, .. }
+    ));
 }
 
 #[test]
@@ -633,4 +644,105 @@ fn idle_without_process_metrics_leaves_the_flag_unknown() {
     ));
     let json = serde_json::to_value(&activity.evidence).unwrap();
     assert!(json.get("process_alive").is_none(), "{json}");
+}
+
+fn silent_generating_turn() -> ActivityInputs {
+    let mut i = inputs();
+    i.process = Some(ProcessFacts {
+        alive: true,
+        cpu_permille: 0,
+        descendants: Some(0),
+    });
+    // Порог `hung_generating` — 10 минут: 601 секунда тишины при живом, но пустом дереве.
+    i.now += TimeDelta::seconds(601);
+    i
+}
+
+#[test]
+fn generating_silence_with_idle_cpu_and_no_descendants_is_hung() {
+    let i = silent_generating_turn();
+    let activity = activity::compute(&i, &thresholds());
+    assert_eq!(activity.state, S::Stalled);
+    assert!(
+        matches!(
+            activity.evidence,
+            E::Stalled {
+                hung: Some(true),
+                ..
+            }
+        ),
+        "{:?}",
+        activity.evidence
+    );
+    let json = serde_json::to_value(&activity.evidence).unwrap();
+    assert_eq!(json["kind"], "stalled");
+    assert_eq!(json["hung"], true);
+}
+
+#[test]
+fn a_hung_turn_needs_more_than_the_threshold() {
+    let mut i = silent_generating_turn();
+    i.now -= TimeDelta::seconds(1);
+    assert_eq!(activity::compute(&i, &thresholds()).state, S::Working);
+}
+
+#[test]
+fn tool_phases_are_never_hung_by_this_feature() {
+    for phase in ["running_tool", "context_maintenance"] {
+        let mut i = silent_generating_turn();
+        i.execution.as_mut().unwrap().phase = phase.into();
+        assert_eq!(activity::compute(&i, &thresholds()).state, S::Working);
+        i.now += TimeDelta::seconds(1200);
+        let activity = activity::compute(&i, &thresholds());
+        assert_eq!(activity.state, S::Stalled);
+        assert!(
+            matches!(activity.evidence, E::Stalled { hung: None, .. }),
+            "a tool stall must not be reported as a generation hang: {:?}",
+            activity.evidence
+        );
+    }
+}
+
+#[test]
+fn busy_cpu_or_live_descendants_are_not_hung() {
+    let mut i = silent_generating_turn();
+    i.process.as_mut().unwrap().cpu_permille = 50;
+    assert_eq!(activity::compute(&i, &thresholds()).state, S::Working);
+    i.process.as_mut().unwrap().cpu_permille = 0;
+    i.process.as_mut().unwrap().descendants = Some(1);
+    assert_eq!(activity::compute(&i, &thresholds()).state, S::Working);
+    i.now += TimeDelta::hours(2);
+    // Живое дерево не исключает обычный `stalled` после старого щедрого порога —
+    // но это точно не новый verdict «завис в генерации».
+    assert!(matches!(
+        activity::compute(&i, &thresholds()).evidence,
+        E::Stalled { hung: None, .. }
+    ));
+}
+
+#[test]
+fn a_recent_stream_event_or_a_dead_process_is_not_hung() {
+    let mut i = silent_generating_turn();
+    i.last_event_at = Some(i.now);
+    i.execution.as_mut().unwrap().phase_at = Some(i.now);
+    i.turn_started_at = Some(i.now);
+    assert_eq!(activity::compute(&i, &thresholds()).state, S::Working);
+    let recent = Some(i.now - TimeDelta::seconds(100));
+    i.last_event_at = recent;
+    i.execution.as_mut().unwrap().phase_at = recent;
+    i.turn_started_at = recent;
+    i.process.as_mut().unwrap().alive = false;
+    assert_eq!(activity::compute(&i, &thresholds()).state, S::Working);
+}
+
+#[test]
+fn the_hang_threshold_is_configurable() {
+    let mut i = silent_generating_turn();
+    let custom = Thresholds {
+        hung_generating: Duration::from_secs(1200),
+        ..thresholds()
+    };
+    assert_eq!(activity::compute(&i, &custom).state, S::Working);
+    i.now += TimeDelta::seconds(600);
+    assert_eq!(activity::compute(&i, &custom).state, S::Stalled);
 }

@@ -1778,6 +1778,7 @@ async fn config_endpoint_matches_proto_limits_and_config_structs(pool: PgPool) {
     deps.activity = ActivityConfig {
         stalled_generating: Duration::from_secs(120),
         stalled_tool: Duration::from_secs(600),
+        hung_generating: Duration::from_secs(600),
         ..ActivityConfig::default()
     };
     deps.machines = MachinesConfig {

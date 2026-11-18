@@ -1672,6 +1672,7 @@ async fn an_open_secret_keeps_the_session_in_waiting_for_user(pool: PgPool) {
         &Thresholds {
             stalled_generating: Duration::from_secs(300),
             stalled_tool: Duration::from_secs(1800),
+            hung_generating: Duration::from_secs(600),
             idle_quiet: Duration::from_secs(5),
             idle_background_max: Duration::from_secs(900),
         },

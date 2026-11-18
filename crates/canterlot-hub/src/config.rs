@@ -766,6 +766,10 @@ pub struct ActivityConfig {
     pub stalled_generating: Duration,
     #[serde(with = "humantime_serde")]
     pub stalled_tool: Duration,
+    /// Молчание генерации с живым, но незагруженным процессом и пустым деревом:
+    /// ход считается зависшим, и его можно спасти. Инструменты не попадают под этот порог.
+    #[serde(with = "humantime_serde")]
+    pub hung_generating: Duration,
     #[serde(with = "humantime_serde")]
     pub tick: Duration,
     #[serde(with = "humantime_serde")]
@@ -784,6 +788,7 @@ impl Default for ActivityConfig {
         Self {
             stalled_generating: Duration::from_secs(1800),
             stalled_tool: Duration::from_secs(1800),
+            hung_generating: Duration::from_secs(600),
             tick: Duration::from_secs(15),
             debounce: Duration::from_millis(250),
             idle_quiet: Duration::from_secs(5),

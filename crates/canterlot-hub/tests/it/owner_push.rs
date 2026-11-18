@@ -1517,6 +1517,7 @@ async fn one_failure_push_per_episode_survives_a_stalled_working_bounce(pool: Pg
         process_alive: Some(true),
         cpu_busy: Some(false),
         link: "available".into(),
+        hung: None,
     };
     settle(
         &pool,
