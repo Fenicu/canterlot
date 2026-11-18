@@ -1163,6 +1163,7 @@ async fn pending_mcp_past_the_deadline_is_a_diagnostic() {
         script
     });
     bench.adapter.set_ready_wait(Duration::from_millis(300));
+    bench.adapter.set_mcp_wait(Duration::from_millis(300));
     bench.start_ok().await;
     assert!(matches!(
         bench.event().await,
@@ -1182,6 +1183,7 @@ fn isolated(replies: Vec<Reply>) -> Bench {
     let mut bench = Bench::new(script);
     bench.spec.isolate_mcp = true;
     bench.adapter.set_ready_wait(Duration::from_millis(300));
+    bench.adapter.set_mcp_wait(Duration::from_millis(300));
     bench
 }
 
@@ -1193,7 +1195,7 @@ fn mcp_reply(body: Value) -> Reply {
 }
 
 #[tokio::test]
-async fn isolated_start_fails_closed_without_proof_of_the_server_list() {
+async fn unproven_server_list_fails_with_a_timeout_reason() {
     let refused = Reply {
         status: 500,
         body: Some(json!({"_tag": "Failure"})),
@@ -1209,7 +1211,7 @@ async fn isolated_start_fails_closed_without_proof_of_the_server_list() {
         ("the list stays empty", mcp_reply(json!({"data": []}))),
     ] {
         let mut bench = isolated(vec![reply]);
-        assert_eq!(bench.fail_reason().await, "mcp_isolation_failed", "{name}");
+        assert_eq!(bench.fail_reason().await, "mcp_not_ready", "{name}");
     }
 }
 
@@ -1220,6 +1222,82 @@ async fn isolated_start_refuses_a_foreign_server() {
         {"name": "nanokvm", "status": {"status": "pending"}},
     ]}))]);
     assert_eq!(bench.fail_reason().await, "mcp_isolation_failed");
+}
+
+/// Пустой список держится дольше срока готовности CLI, а потом приходит настоящий.
+#[tokio::test]
+async fn slow_proof_of_the_mcp_server_list_is_not_an_isolation_failure() {
+    let mut script = session_only();
+    // Пять опросов по 100 мс: доказательство приходит позже срока готовности (200 мс).
+    let mut replies = vec![mcp_reply(json!({"data": []})); 5];
+    replies.push(mcp_reply(json!({"data": [
+        {"name": "canterlot", "status": {"status": "connected"}},
+    ]})));
+    script.set_route("GET", "/api/mcp", replies);
+    let mut bench = Bench::new(script);
+    bench.spec.isolate_mcp = true;
+    bench.adapter.set_ready_wait(Duration::from_millis(200));
+    bench.start_ok().await;
+    bench.close(CloseMode::Graceful).await;
+}
+
+/// Чужой сервер отклоняется на первом же ответе, без ожидания длинного срока.
+#[tokio::test]
+async fn foreign_server_is_refused_without_waiting_for_the_deadline() {
+    let mut bench = isolated(vec![mcp_reply(json!({"data": [
+        {"name": "canterlot", "status": {"status": "pending"}},
+        {"name": "nanokvm", "status": {"status": "connected"}},
+    ]}))]);
+    bench.adapter.set_mcp_wait(Duration::from_secs(90));
+    // Длинный срок задан, но чужой сервер должен отказать на первом же ответе.
+    let failed = bench.adapter.start(&bench.spec, &bench.group).await;
+    assert!(
+        matches!(
+            failed,
+            Err(AdapterError::StartFailed("mcp_isolation_failed"))
+        ),
+        "{failed:?}"
+    );
+}
+
+/// Сервер отвечает, но список так и не доказал изоляцию до срока ожидания MCP.
+#[tokio::test]
+async fn unproven_server_list_past_the_long_deadline_is_mcp_not_ready() {
+    let mut bench = isolated(vec![mcp_reply(json!({"data": []}))]);
+    bench.adapter.set_mcp_wait(Duration::from_millis(300));
+    assert_eq!(bench.fail_reason().await, "mcp_not_ready");
+}
+
+/// Процесс сервера ушёл, пока шло ожидание MCP: связь потеряна, а не timeout изоляции.
+#[tokio::test]
+async fn server_dying_while_waiting_for_mcp_is_server_unreachable() {
+    let mut script = session_only();
+    script.set_route(
+        "GET",
+        "/api/mcp",
+        vec![mcp_reply(json!({"data": [
+            {"name": "canterlot", "status": {"status": "pending"}},
+        ]}))],
+    );
+    script.steps.push(Step::Stall { ms: 50 });
+    script.steps.push(Step::Die {
+        code: 7,
+        kill: false,
+    });
+    let mut bench = Bench::new(script);
+    bench.spec.isolate_mcp = true;
+    bench.adapter.set_ready_wait(Duration::from_millis(300));
+    bench.adapter.set_mcp_wait(Duration::from_secs(5));
+    assert_eq!(bench.fail_reason().await, "server_unreachable");
+    bench.fake.wait_gone().await;
+}
+
+#[tokio::test]
+async fn isolated_start_fails_when_our_mcp_server_reports_failure() {
+    let mut bench = isolated(vec![mcp_reply(json!({"data": [
+        {"name": "canterlot", "status": {"status": "failed", "error": "spawn failed"}},
+    ]}))]);
+    assert_eq!(bench.fail_reason().await, "mcp_not_ready");
 }
 
 #[tokio::test]
@@ -1263,6 +1341,7 @@ fn delegated(replies: Vec<Reply>, owner_has: bool) -> Bench {
                 .adapter
                 .with_delegate_mcp_servers(&["context7".to_owned()]);
             adapter.set_ready_wait(ready_wait);
+            adapter.set_mcp_wait(ready_wait);
             adapter
         },
         ..bench

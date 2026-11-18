@@ -56,6 +56,9 @@ use uuid::Uuid;
 
 /// Строка готовности и ожидание MCP: на проверенной версии доли секунды.
 const READY_WAIT: Duration = Duration::from_secs(20);
+/// Срок, за который MCP-сервер canterlot должен подтвердиться и установить связь.
+/// Под нагрузкой сервер и его relay поднимаются дольше, чем строка готовности CLI.
+const MCP_READY_WAIT: Duration = Duration::from_secs(90);
 const REQUEST_WAIT: Duration = Duration::from_secs(10);
 /// Весь `discover` при старте воркера: запуск сервера, версия и каталог.
 const DISCOVER_WAIT: Duration = Duration::from_secs(20);
@@ -587,6 +590,8 @@ pub struct OpenCodeAdapter {
     cli_version_cache: Option<PathBuf>,
     stop_grace: Duration,
     ready_wait: Duration,
+    /// Срок доказательства изоляции MCP: не зависит от готовности строки CLI.
+    mcp_wait: Duration,
     relay_executable: Option<PathBuf>,
     start_attempted: bool,
     /// Делегированная сессия: ни серверов владельца, ни репозиторной конфигурации.
@@ -677,6 +682,7 @@ impl OpenCodeAdapter {
             cli_version_cache: None,
             stop_grace: Duration::from_secs(5),
             ready_wait: READY_WAIT,
+            mcp_wait: MCP_READY_WAIT,
             relay_executable: None,
             start_attempted: false,
             proc: None,
@@ -741,6 +747,11 @@ impl OpenCodeAdapter {
     /// Срок строки готовности и каждого ожидания на старте.
     pub fn set_ready_wait(&mut self, wait: Duration) {
         self.ready_wait = wait;
+    }
+
+    /// Срок ожидания доказательства изоляции MCP; в тестах короче, чтобы не ждать 90 с.
+    pub fn set_mcp_wait(&mut self, wait: Duration) {
+        self.mcp_wait = wait;
     }
 
     /// Паузы повтора на замке базы: тест не должен ждать настоящие секунды.
@@ -949,8 +960,17 @@ impl OpenCodeAdapter {
         Ok(id.to_owned())
     }
 
+    /// Ждём список MCP: он должен доказать изоляцию и показать наш сервер.
+    /// Чужой сервер — нарушение гарантии и отказ на первом же ответе. Отсутствие
+    /// доказательства под нагрузкой — медленный старт relay, а не нарушение: ждём
+    /// отдельным, более длинным сроком и называем причину иначе.
     async fn wait_mcp(&mut self) -> Result<(), AdapterError> {
-        let limit = Instant::now() + self.ready_wait;
+        let limit = Instant::now()
+            + if self.isolate_mcp {
+                self.mcp_wait
+            } else {
+                self.ready_wait
+            };
         let (state, proven) = loop {
             let (state, proven) = match self.http()?.get("/api/mcp", REQUEST_WAIT).await {
                 Ok(list)
@@ -965,14 +985,19 @@ impl OpenCodeAdapter {
                 }
                 Err(_) => (McpState::Pending, false),
             };
+            // Наш сервер сообщил об отказе: дальнейшее ожидание ничего не изменит.
+            if self.isolate_mcp && state == McpState::Failed {
+                return Err(AdapterError::StartFailed("mcp_not_ready"));
+            }
             if state != McpState::Pending || Instant::now() >= limit {
                 break (state, proven);
             }
             tokio::time::sleep(POLL_EVERY).await;
         };
         // Как у Codex: для делегированной сессии отсутствие проверки значит отказ, а не успех.
+        // Причина отделена от нарушения изоляции: список не успел собраться, а не чужой.
         if self.isolate_mcp && !proven {
-            return Err(AdapterError::StartFailed("mcp_isolation_failed"));
+            return Err(AdapterError::StartFailed("mcp_not_ready"));
         }
         if state == McpState::Connected {
             tokio::time::sleep(MCP_SETTLE).await;
