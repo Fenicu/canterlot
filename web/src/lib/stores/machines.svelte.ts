@@ -3,6 +3,7 @@ import { SvelteMap } from 'svelte/reactivity';
 import type { ConnectionManager } from '#lib/sync/connection.js';
 import type { RangeResult, ScopeApplier, ScopeStatus } from '#lib/sync/scope.js';
 import type { HubEvent } from '#lib/sync/wire.js';
+import { toUpdateItem, type UpdateItem } from '#lib/updates/text.js';
 
 export type MachineMetrics = Pick<components['schemas']['MetricsView'], 'observed_at'> & Partial<components['schemas']['MetricsView']>;
 
@@ -36,6 +37,8 @@ export interface MachineRecord {
 export class MachinesStore {
 	readonly items = new SvelteMap<string, MachineRecord>();
 	unknownKinds = $state(0);
+	/** Живые записи ленты обновлений приходят в области машин, без опроса ленты. */
+	onUpdate: ((item: UpdateItem) => void) | null = null;
 	#sub: { release(): void; readonly status: ScopeStatus } | null = null;
 
 	constructor(
@@ -99,6 +102,10 @@ export class MachinesStore {
 
 	#apply(event: HubEvent): void {
 		const kind = event.kind as string;
+		if (kind === 'machine_update' && event.kind === 'machine_update') {
+			this.onUpdate?.(toUpdateItem(event.payload as unknown as Record<string, unknown>));
+			return;
+		}
 		if (kind === 'machine_availability_changed' && event.kind === 'machine_availability_changed') {
 			const machine = this.items.get(event.payload.machine_id);
 			// Пропавшая машина не подтверждает очередь: хаб снимает её тем же решением.

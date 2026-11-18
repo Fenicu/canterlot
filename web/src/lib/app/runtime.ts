@@ -1,6 +1,7 @@
 import {
   me,
   eventsRange,
+  listUpdates,
   snapshotConversations,
   snapshotMachines,
 } from "#lib/api/client.js";
@@ -20,6 +21,7 @@ import {
   MachinesStore,
   type MachineRecord,
 } from "#lib/stores/machines.svelte.js";
+import { UpdatesStore } from "#lib/updates/store.svelte.js";
 import { browserLifecycle } from "#lib/sync/lifecycle.js";
 import type { RangeResult } from "#lib/sync/scope.js";
 import { ConnectionManager } from "#lib/sync/connection.js";
@@ -44,6 +46,7 @@ export interface Runtime {
   connection: ConnectionManager;
   list: ListStore;
   machines: MachinesStore;
+  updates: UpdatesStore;
 }
 
 let singleton: Runtime | null = null;
@@ -208,6 +211,14 @@ export async function createRuntime(deps: RuntimeDeps): Promise<Runtime> {
       },
     });
     machines.open();
+    const updates = new UpdatesStore({
+      ownerId,
+      storage: typeof localStorage === "undefined"
+        ? { getItem: () => null, setItem: () => {} }
+        : localStorage,
+      api: async (query) => listUpdates({ ...query }),
+    });
+    machines.onUpdate = (item) => updates.push(item);
     const runtime: Runtime = {
       ownerId,
       deviceId,
@@ -217,6 +228,7 @@ export async function createRuntime(deps: RuntimeDeps): Promise<Runtime> {
       connection,
       list,
       machines,
+      updates,
       dispose() {
         if (disposed) return;
         disposed = true;
@@ -234,6 +246,7 @@ export async function createRuntime(deps: RuntimeDeps): Promise<Runtime> {
         list.counts = { all: 0, pinned: 0, archived: 0, trashed: 0, groups: [] };
         machines.close();
         machines.items.clear();
+        updates.reset();
         if (singleton === runtime) singleton = null;
         release();
       },

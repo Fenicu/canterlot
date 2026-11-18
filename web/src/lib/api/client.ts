@@ -285,6 +285,14 @@ export function listMachines(
   return http("GET", "/api/v1/machines", undefined, opts);
 }
 
+/** Лента обновлений CLI и моделей, свежие первыми; курсор — из `next_cursor`. */
+export function listUpdates(
+  query?: Query,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["get__api_v1_updates"]>>> {
+  return http("GET", withQuery("/api/v1/updates", query), undefined, opts);
+}
+
 export function getMachine(
   machineId: string,
   opts?: RequestOptions,

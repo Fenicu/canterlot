@@ -55,6 +55,23 @@ export function isVersionKind(kind: string): boolean {
 	return VERSION_KINDS.has(kind);
 }
 
+/** Приводит запись ленты и полезную нагрузку живого события к одному виду. */
+export function toUpdateItem(raw: Record<string, unknown>): UpdateItem {
+	const payload = (raw.payload && typeof raw.payload === 'object' && !Array.isArray(raw.payload)
+		? raw.payload
+		: {}) as UpdatePayload;
+	const command = typeof raw.update_command === 'string' ? raw.update_command : payload.update_command;
+	return {
+		id: String(raw.id ?? ''),
+		kind: String(raw.kind ?? ''),
+		machine: String(raw.machine ?? ''),
+		harness: String(raw.harness ?? ''),
+		created_at: String(raw.created_at ?? ''),
+		payload,
+		update_command: typeof command === 'string' ? command : null
+	};
+}
+
 /** Ниже поддерживаемой версии — тревога, остальные записи нейтральны. */
 export function updateTone(kind: string): 'warning' | 'neutral' {
 	return kind === 'below_minimum' ? 'warning' : 'neutral';
