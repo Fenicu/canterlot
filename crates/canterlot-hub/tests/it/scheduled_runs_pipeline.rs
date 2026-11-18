@@ -1786,3 +1786,56 @@ async fn wait_crashed(schedule: Uuid, run: Uuid) {
     .await
     .expect("the admission hits the fault and ends");
 }
+
+/// 1: композер выигрывает общий ключ между проверкой и вставкой резерва.
+/// Резерв Run Now не вправе закоммитить заявку: откат и конфликт, строки нет.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn run_now_does_not_commit_a_claim_when_another_operation_wins_the_key(pool: PgPool) {
+    use canterlot_hub::schedules::{ScheduleError, admission::reserve_manual};
+
+    let f = Fixture::new(pool.clone()).await;
+    let id = create(&f, existing(&f), "0 9 * * *").await;
+    let schedule = Uuid::parse_str(&id).unwrap();
+    // «Композер»: вставка ключа в открытой транзакции, ещё не закоммиченная.
+    let mut winner = pool.begin().await.unwrap();
+    sqlx::query(
+        "insert into idempotency_keys(owner_id,key,operation,request_hash,response)
+         values($1,'race-key','submit_input',$2,'{}'::jsonb)",
+    )
+    .bind(f.seed.owner_id)
+    .bind(vec![1u8, 2, 3])
+    .execute(&mut *winner)
+    .await
+    .unwrap();
+    let reserve = {
+        let pool = pool.clone();
+        let owner = f.seed.owner_id;
+        tokio::spawn(async move { reserve_manual(&pool, owner, schedule, "race-key", true).await })
+    };
+    // Резерв дошёл до вставки ключа и ждёт победителя на уникальном индексе.
+    for _ in 0..200 {
+        let waiting: i64 = sqlx::query_scalar(
+            "select count(*) from pg_locks where locktype='transactionid' and not granted",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        if waiting > 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    winner.commit().await.unwrap();
+    let result = reserve.await.unwrap();
+    assert!(
+        matches!(result, Err(ScheduleError::Conflict("idempotency_conflict"))),
+        "foreign winner must give a conflict, got {:?}",
+        result.map(|_| ())
+    );
+    let runs: i64 = sqlx::query_scalar("select count(*) from schedule_runs where schedule_id=$1")
+        .bind(schedule)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(runs, 0, "no committed claim paired with a foreign key");
+}

@@ -909,11 +909,13 @@ pub async fn finalize_manual_key(
     let response = serde_json::to_value(run).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
     sqlx::query(
         "update idempotency_keys set response=$3
-          where owner_id=$1 and key=$2 and operation='run_now'",
+          where owner_id=$1 and key=$2 and operation='run_now'
+            and response->>'id' = $4",
     )
     .bind(owner_id)
     .bind(&run.idempotency_key)
     .bind(response)
+    .bind(run.id.to_string())
     .execute(conn)
     .await?;
     Ok(())

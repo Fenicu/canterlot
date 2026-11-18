@@ -1305,6 +1305,25 @@ pub async fn reserve_manual(
     key: &str,
     run_anyway: bool,
 ) -> Result<Reservation, ScheduleError> {
+    // Проигранная гонка за общий ключ откатывает заявку целиком; победителя
+    // разбирает следующий проход по ключу (повтор или конфликт).
+    for _ in 0..3 {
+        if let Some(reservation) =
+            reserve_manual_once(pool, owner_id, schedule_id, key, run_anyway).await?
+        {
+            return Ok(reservation);
+        }
+    }
+    Err(ScheduleError::Conflict("idempotency_conflict"))
+}
+
+async fn reserve_manual_once(
+    pool: &PgPool,
+    owner_id: Uuid,
+    schedule_id: Uuid,
+    key: &str,
+    run_anyway: bool,
+) -> Result<Option<Reservation>, ScheduleError> {
     let body = json!({"schedule_id": schedule_id, "run_anyway": run_anyway});
     let hash = crate::idempotency::request_hash("run_now", &body);
     let mut tx = crate::db::begin(pool).await?;
@@ -1314,7 +1333,7 @@ pub async fn reserve_manual(
             let _ = tx.rollback().await;
             let run = serde_json::from_value(value)
                 .map_err(|e| ScheduleError::Db(sqlx::Error::Decode(Box::new(e))))?;
-            return Ok(Reservation::Existing(run));
+            return Ok(Some(Reservation::Existing(run)));
         }
         crate::idempotency::Begin::Conflict => {
             let _ = tx.rollback().await;
@@ -1345,12 +1364,19 @@ pub async fn reserve_manual(
     };
     let response = serde_json::to_value(&run)
         .map_err(|e| ScheduleError::Db(sqlx::Error::Encode(Box::new(e))))?;
-    crate::idempotency::record(&mut tx, owner_id, key, "run_now", &hash, &response, None).await?;
+    // Общий ключ арбитрирует гонку уникальным вставлением (композер делает так
+    // же, не беря advisory-замок): без успешной вставки заявку коммитить нельзя.
+    if !crate::idempotency::record(&mut tx, owner_id, key, "run_now", &hash, &response, None)
+        .await?
+    {
+        let _ = tx.rollback().await;
+        return Ok(None);
+    }
     tx.commit().await?;
-    Ok(Reservation::Fresh {
+    Ok(Some(Reservation::Fresh {
         schedule: Box::new(schedule),
         run,
-    })
+    }))
 }
 
 /// Повтор уже заявленного запуска: дожидаемся исхода или отдаём итог.
