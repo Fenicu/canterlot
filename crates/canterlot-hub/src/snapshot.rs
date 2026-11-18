@@ -226,7 +226,7 @@ pub async fn conversation_with_registry(
     let open_requests_rows: Vec<crate::requests::RequestRow> = sqlx::query_as(
         "select r.* from requests r join executions e on e.id = r.execution_id
          where r.conversation_id = $1 and r.state in ('open', 'decision_saved', 'decision_transmitting')
-           and e.state not in ('stopped', 'failed', 'owner_lost')
+           and (e.state not in ('stopped', 'failed', 'owner_lost') or r.kind = 'settings_change')
          order by r.created_at asc, r.id asc",
     )
     .bind(id)

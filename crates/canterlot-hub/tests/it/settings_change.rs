@@ -830,6 +830,60 @@ async fn concurrent_decisions_with_different_keys_do_not_deadlock(pool: PgPool) 
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn proposal_survives_execution_rollover(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let (request, _) = f
+        .proposal(
+            "settings.propose_routing",
+            json!({"policy": routing(), "reason": "после хода", "base_revision": 0}),
+        )
+        .await;
+    sqlx::query("update executions set state='stopped' where id=$1")
+        .bind(f.execution)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    canterlot_hub::executions::start(&f.pool, f.owner, f.conversation, Uuid::now_v7())
+        .await
+        .unwrap();
+    let snapshot = canterlot_hub::snapshot::conversation(&f.pool, f.owner, f.conversation, 100)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        snapshot
+            .data
+            .open_requests
+            .iter()
+            .any(|item| item.id == request),
+        "the proposal is conversation-scoped and stays in the snapshot"
+    );
+    let mut conn = f.pool.acquire().await.unwrap();
+    let page = canterlot_hub::history::page(
+        &mut conn,
+        f.owner,
+        f.conversation,
+        canterlot_hub::history::HistoryCursor::Tail,
+        100,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let state = page.items.iter().find_map(|item| match item {
+        canterlot_hub::history::TimelineItem::Request(row) if row.id == request => {
+            Some(row.state.clone())
+        }
+        _ => None,
+    });
+    assert_eq!(state.as_deref(), Some("open"));
+    drop(conn);
+    assert_eq!(f.decide(request, "allow").await, 200);
+    f.run_job_by_action("settings_change", Utc::now()).await;
+    f.run_job_by_action("note", Utc::now()).await;
+    assert_eq!(f.request_state(request).await, "decision_applied");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn trashing_the_proposer_closes_the_proposal_and_blocks_decisions(pool: PgPool) {
     let f = Fx::new(pool).await;
     let (request, _) = f

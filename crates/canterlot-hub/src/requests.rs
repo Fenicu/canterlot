@@ -266,8 +266,12 @@ pub async fn save_decision_in_tx(
     .await?
     .ok_or(RequestDomainError::NotFound(request_id))?;
 
+    // Предложение настройки живёт в разговоре сутки, а не в одном ходе:
+    // поколение исполнения его не отменяет.
+    let conversation_scoped = row.kind == RequestKind::SettingsChange;
+
     // 3. Проверка поколения выполнения
-    if generation != row.generation {
+    if !conversation_scoped && generation != row.generation {
         return Ok(DecisionResult::StaleGeneration);
     }
 
@@ -278,7 +282,7 @@ pub async fn save_decision_in_tx(
             .fetch_optional(&mut *tx)
             .await?;
 
-    if latest_gen.unwrap_or(row.generation) > row.generation {
+    if !conversation_scoped && latest_gen.unwrap_or(row.generation) > row.generation {
         return Ok(DecisionResult::AlreadyClosed {
             current_state: row.state,
             reason: "generation_advanced".into(),
