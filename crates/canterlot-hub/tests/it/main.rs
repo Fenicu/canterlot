@@ -62,6 +62,7 @@ mod history;
 mod history_search;
 mod http_core;
 mod http_requests;
+mod hung_rescue;
 mod images;
 mod in_tx;
 mod ingest;
