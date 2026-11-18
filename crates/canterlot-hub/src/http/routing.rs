@@ -273,6 +273,7 @@ async fn preview(
         now,
         request: &request,
         bypass_limits: false,
+        schedule_rules: false,
     }) {
         Ok(decision) => {
             let considered = decision.considered.clone();

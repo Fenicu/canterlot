@@ -751,6 +751,7 @@ pub(crate) async fn validate_routed(
         now,
         request: &request,
         bypass_limits: bypass_queue,
+        schedule_rules: false,
     }) {
         Ok(decision) => decision,
         Err(super::routing::RouteError::UnknownTask { available }) => {

@@ -667,6 +667,9 @@ pub struct RouteInputs<'a> {
     pub request: &'a RouteRequest,
     /// «Запустить сейчас»: лимиты провайдеров не оцениваются вовсе.
     pub bypass_limits: bool,
+    /// Правила расписаний (спека §39): только окна 5ч/неделя по свежим
+    /// показаниям, неизвестность не пропускает, месячное не смотрим.
+    pub schedule_rules: bool,
 }
 
 /// Чистая функция выбора (§5.2 + §C1 пп. 5–7): уровень, канонизация через каталог,
@@ -684,6 +687,7 @@ pub fn route(inputs: RouteInputs<'_>) -> Result<Decision, RouteError> {
         now,
         request,
         bypass_limits,
+        schedule_rules,
     } = inputs;
     let task = policy.task_types.get(&request.task_type).ok_or_else(|| {
         let mut available: Vec<String> = policy.task_types.keys().cloned().collect();
@@ -795,6 +799,7 @@ pub fn route(inputs: RouteInputs<'_>) -> Result<Decision, RouteError> {
                 task.expected_minutes,
                 &mut nearest_reset,
                 fable,
+                schedule_rules,
             )
         {
             considered.push(skip(candidate, verdict, reason));
@@ -1042,6 +1047,7 @@ fn limits_verdict(
     expected_minutes: i64,
     nearest_reset: &mut Option<DateTime<Utc>>,
     fable: bool,
+    schedule_rules: bool,
 ) -> Option<(&'static str, String)> {
     let thresholds = policy.providers.get(provider);
     let view = view.cloned().unwrap_or_default();
@@ -1058,7 +1064,13 @@ fn limits_verdict(
             .unwrap_or_default();
         return Some(("quota_paused", format!("quota paused{when}")));
     }
-    let unknown = policy.unknown_limits;
+    // Правила расписаний (спека §39): только 5-часовое и недельное окна по
+    // свежим показаниям; неизвестность не пропускает, месячное не смотрим.
+    let unknown = if schedule_rules {
+        UnknownLimits::Allow
+    } else {
+        policy.unknown_limits
+    };
     if let Some(reason) = check_window(
         provider,
         "weekly",
@@ -1104,17 +1116,19 @@ fn limits_verdict(
     ) {
         return Some(reason);
     }
-    if let Some(reason) = check_window(
-        provider,
-        "monthly",
-        thresholds.and_then(|limits| limits.max_monthly_percent),
-        view.monthly.as_ref(),
-        unknown,
-        stale,
-        now,
-        expected_minutes,
-        nearest_reset,
-    ) {
+    if !schedule_rules
+        && let Some(reason) = check_window(
+            provider,
+            "monthly",
+            thresholds.and_then(|limits| limits.max_monthly_percent),
+            view.monthly.as_ref(),
+            unknown,
+            stale,
+            now,
+            expected_minutes,
+            nearest_reset,
+        )
+    {
         return Some(reason);
     }
     None
@@ -1311,10 +1325,29 @@ pub async fn live_counts(
     conn: &mut PgConnection,
     owner: Uuid,
 ) -> Result<HashMap<(String, String), i64>, sqlx::Error> {
+    live_counts_filtered(conn, owner, true).await
+}
+
+/// Тот же отпечаток, но с корнями (F): запланированные сессии — корни, как
+/// интерактивные. Маршрутизация расписаний видит занятую пару и выбирает
+/// свободный запасной, а не упирается в отказ на dispatch.
+pub async fn live_counts_with_roots(
+    conn: &mut PgConnection,
+    owner: Uuid,
+) -> Result<HashMap<(String, String), i64>, sqlx::Error> {
+    live_counts_filtered(conn, owner, false).await
+}
+
+async fn live_counts_filtered(
+    conn: &mut PgConnection,
+    owner: Uuid,
+    children_only: bool,
+) -> Result<HashMap<(String, String), i64>, sqlx::Error> {
     let rows: Vec<(String, String, i64)> = sqlx::query_as(
         "select c.harness,c.model,count(*) from conversations c
           join conversation_derived d on d.conversation_id=c.id
-          where c.owner_id=$1 and c.parent_conversation_id is not null and c.trashed_at is null
+          where c.owner_id=$1 and c.trashed_at is null
+            and (not $2 or c.parent_conversation_id is not null)
             and (d.activity_state in ('working','stalled')
               or (d.activity_state='idle' and d.queue_queued > 0)
               or exists(select 1 from nudge_rules r
@@ -1333,6 +1366,7 @@ pub async fn live_counts(
           group by c.harness,c.model",
     )
     .bind(owner)
+    .bind(children_only)
     .fetch_all(conn)
     .await?;
     Ok(rows
@@ -1523,6 +1557,7 @@ pub async fn preview(
         now,
         request: &request,
         bypass_limits: false,
+        schedule_rules: false,
     }) {
         Ok(decision) => {
             tx.commit().await?;
@@ -1713,6 +1748,7 @@ mod tests {
                     now: now(),
                     request: &req,
                     bypass_limits: false,
+                    schedule_rules: false,
                 }),
                 Err(RouteError::NoExecutor { .. })
             ),
@@ -1729,6 +1765,7 @@ mod tests {
             now: now(),
             request: &req,
             bypass_limits: true,
+            schedule_rules: false,
         })
         .unwrap();
         assert_eq!(decision.model, "opencode-go/deepseek-v4.1-flash");
@@ -1747,6 +1784,7 @@ mod tests {
             now: now(),
             request: &request("bugfix"),
             bypass_limits: false,
+            schedule_rules: false,
         })
         .unwrap();
         assert_eq!(decision.harness, "opencode");
@@ -1797,6 +1835,7 @@ mod tests {
             now: now(),
             request: &request("review"),
             bypass_limits: bypass,
+            schedule_rules: false,
         })
         .unwrap()
     }
@@ -1910,6 +1949,7 @@ mod tests {
             now: now(),
             request: &with_level,
             bypass_limits: false,
+            schedule_rules: false,
         })
         .unwrap();
         // Beam пропущен по уровню; DeepSeek без effort берёт уровень как усилие.
@@ -1931,6 +1971,7 @@ mod tests {
             now: now(),
             request: &request("bugfix"),
             bypass_limits: false,
+            schedule_rules: false,
         });
         let error = decision.unwrap_err();
         let RouteError::NoExecutor { considered, .. } = error else {
@@ -1959,6 +2000,7 @@ mod tests {
             now: now(),
             request: &request("review"),
             bypass_limits: false,
+            schedule_rules: false,
         })
         .unwrap();
         // claude_code нет в каталоге: выбран codex, а не отсутствующий opus.
@@ -1999,6 +2041,7 @@ mod tests {
             now: now(),
             request: &request("probe"),
             bypass_limits: false,
+            schedule_rules: false,
         })
         .unwrap();
         assert_eq!(decision.model, "opencode-go/deepseek-v4.1-flash");
@@ -2037,6 +2080,7 @@ mod tests {
             now: now(),
             request: &request("probe"),
             bypass_limits: false,
+            schedule_rules: false,
         })
         .unwrap();
         assert_eq!(decision.model, "opus[1m]");
@@ -2075,6 +2119,7 @@ mod tests {
             now: now(),
             request: &request("probe"),
             bypass_limits: false,
+            schedule_rules: false,
         })
         .unwrap();
         assert_eq!(decision.model, "fable[1m]");
@@ -2114,6 +2159,7 @@ mod tests {
             now: now(),
             request: &request("probe"),
             bypass_limits: false,
+            schedule_rules: false,
         })
         .unwrap_err();
         let RouteError::NoExecutor { considered, .. } = error else {
@@ -2135,6 +2181,7 @@ mod tests {
             now: now(),
             request: &request("bugfix"),
             bypass_limits: false,
+            schedule_rules: false,
         })
         .unwrap();
         // DeepSeek и Muse упёрлись в лимит opencode; у claude показаний нет —
@@ -2192,6 +2239,7 @@ mod tests {
             now: now(),
             request: &request("bugfix"),
             bypass_limits: false,
+            schedule_rules: false,
         })
         .unwrap();
         // Оба кандидата opencode пропущены прогнозом; выбран opus.
@@ -2222,6 +2270,7 @@ mod tests {
             now: now(),
             request: &request("bugfix"),
             bypass_limits: false,
+            schedule_rules: false,
         })
         .unwrap();
         assert_eq!(decision.harness, "opencode");
@@ -2248,6 +2297,7 @@ mod tests {
             now: now(),
             request: &request("bugfix"),
             bypass_limits: false,
+            schedule_rules: false,
         })
         .unwrap();
         assert_eq!(decision.harness, "opencode");
@@ -2274,6 +2324,7 @@ mod tests {
             now: now(),
             request: &request("bugfix"),
             bypass_limits: false,
+            schedule_rules: false,
         })
         .unwrap();
         assert!(decision.considered.iter().any(|entry| {
@@ -2346,6 +2397,7 @@ mod tests {
             now: now(),
             request: &request("bugfix"),
             bypass_limits: false,
+            schedule_rules: false,
         })
         .unwrap_err();
         let RouteError::NoExecutor { considered, reset } = error else {
@@ -2396,6 +2448,7 @@ mod tests {
             now: now(),
             request: &request("fast"),
             bypass_limits: false,
+            schedule_rules: false,
         })
         .unwrap();
         assert_eq!(decision.model, "opencode-go/beam-free");
@@ -2423,6 +2476,7 @@ mod tests {
             now: now(),
             request: &request("bugfix"),
             bypass_limits: false,
+            schedule_rules: false,
         })
         .unwrap();
         assert_eq!(decision.model, "opencode-go/deepseek-v4.1-flash");
@@ -2450,6 +2504,7 @@ mod tests {
             now: now(),
             request: &request("bugfix"),
             bypass_limits: false,
+            schedule_rules: false,
         });
         let decision = error_or_next.unwrap();
         assert_ne!(decision.model, "opencode-go/deepseek-v4.1-flash");
@@ -2547,6 +2602,66 @@ mod tests {
         }
     }
 
+    /// Правила расписаний (спека §39, пункт F): неизвестность не пропускает,
+    /// месячное окно не смотрим — только 5ч/неделя по свежим показаниям.
+    /// Красная неделя останавливает и расписания.
+    #[test]
+    fn schedule_rules_allow_unknown_and_ignore_monthly() {
+        let req = request("one");
+        let route_with_rules = |limits: &HashMap<String, ProviderView>, schedule_rules: bool| {
+            route(RouteInputs {
+                policy: &single_candidate_policy(),
+                revision: 0,
+                whitelist: &entries(),
+                catalogs: &catalogs(),
+                limits,
+                live: &HashMap::new(),
+                stale: Duration::from_secs(1800),
+                now: now(),
+                request: &req,
+                bypass_limits: false,
+                schedule_rules,
+            })
+        };
+        // Показаний нет вовсе: обычные правила пропускают кандидата,
+        // правила расписаний — выбирают его.
+        let unknown = HashMap::from([("opencode".to_owned(), ProviderView::default())]);
+        assert!(matches!(
+            route_with_rules(&unknown, false),
+            Err(RouteError::NoExecutor { .. })
+        ));
+        let decision = route_with_rules(&unknown, true).unwrap();
+        assert_eq!(decision.model, "opencode-go/deepseek-v4.1-flash");
+        // Месячное окно красное, неделя и 5ч в норме: обычные правила
+        // пропускают, расписания — выбирают.
+        let monthly_red = HashMap::from([(
+            "opencode".to_owned(),
+            ProviderView {
+                weekly: Some(reading(10.0, 5)),
+                five_hour: Some(reading(10.0, 5)),
+                monthly: Some(reading(99.0, 5)),
+                ..ProviderView::default()
+            },
+        )]);
+        assert!(matches!(
+            route_with_rules(&monthly_red, false),
+            Err(RouteError::NoExecutor { .. })
+        ));
+        route_with_rules(&monthly_red, true).unwrap();
+        // Красная неделя останавливает и расписания.
+        let weekly_red = HashMap::from([(
+            "opencode".to_owned(),
+            ProviderView {
+                weekly: Some(reading(99.0, 5)),
+                ..ProviderView::default()
+            },
+        )]);
+        assert!(matches!(
+            route_with_rules(&weekly_red, true),
+            Err(RouteError::NoExecutor { .. })
+        ));
+    }
+
     fn single_candidate_policy() -> Policy {
         let mut policy = Policy::default();
         policy.task_types.insert(
@@ -2609,6 +2724,7 @@ mod tests {
             now: now(),
             request,
             bypass_limits: false,
+            schedule_rules: false,
         })
     }
 
@@ -2685,6 +2801,7 @@ mod tests {
             now: now(),
             request: &request("one"),
             bypass_limits: false,
+            schedule_rules: false,
         })
     }
 
@@ -2866,6 +2983,7 @@ mod tests {
             now: now(),
             request: &request("bugfix"),
             bypass_limits: false,
+            schedule_rules: false,
         })
         .unwrap();
         // Первый два кандидата на паузе; выбран opus.
@@ -2898,6 +3016,7 @@ mod tests {
             now: now(),
             request: &request("bugfix"),
             bypass_limits: false,
+            schedule_rules: false,
         })
         .unwrap();
         // DeepSeek занят 4 из 4; Muse исключён workdir? Нет: workdir /tmp/w.
@@ -3005,6 +3124,7 @@ mod tests {
             now: now(),
             request: &with_home,
             bypass_limits: false,
+            schedule_rules: false,
         })
         .unwrap();
         // Muse исключён каталогом; DeepSeek первый и проходит.
@@ -3031,6 +3151,7 @@ mod tests {
             now: now(),
             request: &shop,
             bypass_limits: false,
+            schedule_rules: false,
         })
         .unwrap();
         assert_eq!(decision.model, "opencode-go/muse-spark-1.3-contributor");
@@ -3117,6 +3238,7 @@ mod tests {
             now: now(),
             request: &request("nope"),
             bypass_limits: false,
+            schedule_rules: false,
         })
         .unwrap_err();
         let RouteError::UnknownTask { available } = error else {
