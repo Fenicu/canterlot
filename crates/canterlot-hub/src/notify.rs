@@ -680,6 +680,8 @@ pub(crate) async fn enqueue_schedule_failure_in_tx(
     reason: &str,
 ) -> Result<bool, sqlx::Error> {
     // Замок расписания: параллельные исходы одного расписания упорядочены.
+    // Порядок замков общий с попыткой отправки (`begin_attempt`): сначала строка
+    // расписания, затем строка пуша.
     let exists: Option<Uuid> =
         sqlx::query_scalar("select id from schedules where id=$1 for update")
             .bind(schedule_id)
@@ -1447,6 +1449,26 @@ async fn begin_attempt(
     stamp: bool,
 ) -> Result<Option<Stamp>, sqlx::Error> {
     let mut tx = crate::db::begin(pool).await?;
+    // Порядок замков общий с постановкой (`enqueue_schedule_failure_in_tx`):
+    // сначала строка расписания, затем строка пуша. Обратный порядок даёт
+    // взаимную блокировку (40P01) при одновременном слиянии и отправке.
+    let schedule_id = if stamp {
+        row.payload
+            .get("schedule_id")
+            .and_then(Value::as_str)
+            .and_then(|id| Uuid::parse_str(id).ok())
+    } else {
+        None
+    };
+    let previous: Option<Option<DateTime<Utc>>> = match schedule_id {
+        Some(schedule_id) => {
+            sqlx::query_scalar("select last_failure_push_at from schedules where id=$1 for update")
+                .bind(schedule_id)
+                .fetch_optional(&mut *tx)
+                .await?
+        }
+        None => None,
+    };
     sqlx::query(
         "update owner_pushes set attempts=$2,
            run_at=clock_timestamp()+$3*interval '1 second',
@@ -1458,30 +1480,18 @@ async fn begin_attempt(
     .bind(pause.as_secs_f64())
     .execute(&mut *tx)
     .await?;
-    let stamped = if stamp {
-        match row
-            .payload
-            .get("schedule_id")
-            .and_then(Value::as_str)
-            .and_then(|id| Uuid::parse_str(id).ok())
-        {
-            Some(schedule_id) => {
-                let stamp: Option<(Option<DateTime<Utc>>, DateTime<Utc>)> = sqlx::query_as(
-                    "update schedules s set last_failure_push_at=clock_timestamp()
-                       from (select id,last_failure_push_at p from schedules
-                              where id=$1 for update) old
-                      where s.id=old.id
-                  returning old.p, s.last_failure_push_at",
-                )
-                .bind(schedule_id)
-                .fetch_optional(&mut *tx)
-                .await?;
-                stamp.map(|(previous, stamped)| Stamp { previous, stamped })
-            }
-            None => None,
+    let stamped = match (schedule_id, previous) {
+        (Some(schedule_id), Some(previous)) => {
+            let stamped: DateTime<Utc> = sqlx::query_scalar(
+                "update schedules set last_failure_push_at=clock_timestamp()
+                  where id=$1 returning last_failure_push_at",
+            )
+            .bind(schedule_id)
+            .fetch_one(&mut *tx)
+            .await?;
+            Some(Stamp { previous, stamped })
         }
-    } else {
-        None
+        _ => None,
     };
     tx.commit().await?;
     Ok(stamped)
@@ -1914,6 +1924,105 @@ fn log_error(error: &sqlx::Error) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Постановка (слияние) и попытка отправки берут строки в одном порядке:
+    /// расписание, затем пуш. Расписание держит «постановку», попытка ждёт его,
+    /// затем «постановка» идёт к строке пуша: при обратном порядке попытки это
+    /// взаимная блокировка (40P01), при общем порядке обе завершаются.
+    #[sqlx::test(migrations = "./migrations")]
+    async fn enqueue_and_send_attempt_lock_rows_in_one_order(pool: PgPool) {
+        let seed = crate::testkit::seed(&pool).await;
+        configure(
+            &pool,
+            Some(&PushSettings {
+                waiting: true,
+                turn_finished: true,
+                failures: true,
+                timezone: "UTC".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        let schedule = Uuid::now_v7();
+        sqlx::query(
+            "insert into schedules(id,owner_id,name,cron,timezone,target,prompt,next_fire_at)
+             values($1,$2,'s','0 9 * * *','UTC','{\"kind\":\"existing_session\"}','p',now())",
+        )
+        .bind(schedule)
+        .bind(seed.owner_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut conn = pool.acquire().await.unwrap();
+        assert!(
+            enqueue_schedule_failure_in_tx(&mut conn, schedule, "s", "first")
+                .await
+                .unwrap()
+        );
+        drop(conn);
+        let (id, payload, created_at, updated_at): (Uuid, Value, DateTime<Utc>, DateTime<Utc>) =
+            sqlx::query_as(
+                "select id,payload,created_at,updated_at from owner_pushes where kind=$1",
+            )
+            .bind(KIND_SCHEDULE_FAILED)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let row = PushRow {
+            id,
+            conversation_id: None,
+            kind: KIND_SCHEDULE_FAILED.to_owned(),
+            payload,
+            attempts: 0,
+            visible_defers: 0,
+            created_at,
+            updated_at,
+            stale: false,
+        };
+        // Расписание держит «постановка» (она запрашивает его первым).
+        let mut enqueue = pool.begin().await.unwrap();
+        sqlx::query("select id from schedules where id=$1 for update")
+            .bind(schedule)
+            .execute(&mut *enqueue)
+            .await
+            .unwrap();
+        let attempt = {
+            let pool = pool.clone();
+            tokio::spawn(async move {
+                begin_attempt(&pool, &row, 1, Duration::from_secs(60), true).await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let waiting: i64 = sqlx::query_scalar(
+                    "select count(*) from pg_stat_activity
+                      where wait_event_type='Lock' and datname=current_database()",
+                )
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                if waiting > 0 {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the attempt waits on the schedule row");
+        let merged = enqueue_schedule_failure_in_tx(&mut enqueue, schedule, "s", "second").await;
+        assert!(
+            merged.is_ok(),
+            "enqueue must not deadlock: {:?}",
+            merged.as_ref().err().map(crate::dberr::describe)
+        );
+        enqueue.commit().await.unwrap();
+        let stamp = attempt.await.unwrap();
+        assert!(
+            stamp.as_ref().is_ok_and(Option::is_some),
+            "attempt must not deadlock: {:?}",
+            stamp.as_ref().err().map(crate::dberr::describe)
+        );
+    }
 
     #[test]
     fn clip_flattens_and_marks_the_cut() {
