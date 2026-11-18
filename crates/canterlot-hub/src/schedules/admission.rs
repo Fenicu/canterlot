@@ -920,6 +920,19 @@ async fn dispatch(
         .await
         .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))
         .map_err(fail)?;
+    // Порядок замков как у обычного создания: владелец, машина, затем строка
+    // провайдера (лимиты). Иначе создание держит провайдера и ждёт машину, пока
+    // отзыв держит машину и ждёт учётные данные, а приём журнала держит
+    // учётные данные и ждёт провайдера: цикл из трёх транзакций.
+    if let ScheduleTarget::NewSession { machine_id, .. } = &schedule.target {
+        sqlx::query("select id from machines where id=$1 and owner_id=$2 for no key update")
+            .bind(machine_id)
+            .bind(schedule.owner_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))
+            .map_err(fail)?;
+    }
     // Решение о пересечении повторяется под замками dispatch: ранняя проверка
     // в приёме могла пропустить заявку, чей ввод встал в очередь после неё.
     if !run_anyway

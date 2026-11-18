@@ -2275,3 +2275,113 @@ async fn recovery_skips_a_locked_schedule(pool: PgPool) {
     assert_ne!(recovered[0].schedule.id, first);
     holder.rollback().await.unwrap();
 }
+
+async fn lock_waiters(pool: &PgPool) -> i64 {
+    sqlx::query_scalar(
+        "select count(*) from pg_stat_activity where wait_event_type='Lock' and datname=current_database()",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// 9: порядок замков нового сеанса по расписанию — машина раньше провайдера,
+/// как у обычного создания. Три транзакции (создание держит провайдера и ждёт
+/// машину, отзыв держит машину и ждёт учётные данные, приём журнала держит
+/// учётные данные и ждёт провайдера) иначе замыкаются в цикл.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn scheduled_new_session_takes_the_machine_lock_before_the_provider_lock(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
+    sqlx::query("update machines set availability='available' where id=$1")
+        .bind(f.seed.machine_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("insert into machine_credentials(machine_id,token_sha256) values($1,$2)")
+        .bind(f.seed.machine_id)
+        .bind(vec![7u8; 32])
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Строка провайдера существует до гонки: замок берётся на ней.
+    observe(&pool, &f, "claude", limits::Window::FiveHour, 100).await;
+    let id = create(
+        &f,
+        json!({
+            "kind": "new_session",
+            "machine_id": f.seed.machine_id,
+            "workdir": "/tmp/scheduled-cycle",
+            "executor": {"harness": "synthetic", "model": "synthetic-small", "effort": "high"},
+        }),
+        "0 9 * * *",
+    )
+    .await;
+    // Приём журнала: держит учётные данные.
+    let mut ingest = pool.begin().await.unwrap();
+    sqlx::query("update machine_credentials set created_at=created_at where machine_id=$1")
+        .bind(f.seed.machine_id)
+        .execute(&mut *ingest)
+        .await
+        .unwrap();
+    // Отзыв: берёт машину и ждёт учётные данные.
+    let revoke = {
+        let pool = pool.clone();
+        let machine = f.seed.machine_id;
+        tokio::spawn(async move { canterlot_hub::machines::revoke(&pool, machine).await })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while lock_waiters(&pool).await < 1 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("revoke waits on the credential");
+    // Приём расписания дошёл до ожидания замка (машины или провайдера).
+    due(&pool, &id, Utc::now() - TimeDelta::seconds(30)).await;
+    scheduler(&f).tick(Utc::now()).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while lock_waiters(&pool).await < 2 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("admission waits on a lock");
+    // Приём журнала просит провайдера: без правки порядка цикл замкнулся бы.
+    let (owner, machine) = (f.seed.owner_id, f.seed.machine_id);
+    let ingest_task = tokio::spawn(async move {
+        let now = Utc::now();
+        let result = record_observation_in_tx(
+            &mut ingest,
+            owner,
+            &Observation {
+                provider: "claude".into(),
+                window: limits::Window::FiveHour,
+                used_permille: 100,
+                resets_at: Some(now + TimeDelta::hours(3)),
+                observed_at: now,
+                source: ObservationSource::Session,
+                data_confidence: DataConfidence::Exact,
+                machine_id: machine,
+                execution_id: None,
+            },
+            now,
+            &Default::default(),
+            Uuid::now_v7(),
+        )
+        .await;
+        let _ = ingest.commit().await;
+        result
+    });
+    let settled = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let ingest_result = ingest_task.await.unwrap();
+        let revoked = revoke.await.unwrap();
+        (ingest_result, revoked)
+    })
+    .await
+    .expect("no lock cycle: every transaction finishes");
+    assert!(settled.1.is_ok(), "revoke finished: {:?}", settled.1.err());
+    let rid = run_id(&pool, &id).await;
+    let detail = wait_state(&pool, rid, "started").await;
+    assert!(detail.is_object(), "{detail}");
+}
