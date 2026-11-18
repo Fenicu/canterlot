@@ -1186,7 +1186,9 @@ fn admitting_ids() -> Vec<Uuid> {
 /// Возраст аренды меряется от последней смены владельца (`lease_at`),
 /// а не от создания заявки. Строки приёмок этого процесса исключаются
 /// до предела пачки (5): иначе 32 охраняемых строки на малых id вытесняли
-/// бы брошенную заявку позже в очереди.
+/// бы брошенную заявку позже в очереди. Заблокированные расписания
+/// пропускаются в самом выборе (`skip locked`) до предела пачки: 32 заявки под
+/// одним замком не вытесняют остальные.
 /// `max_age=None` — только для стартового прохода под синглтоном (C);
 /// вне синглтона так звать нельзя: второй хаб положил бы живую предпроверку.
 pub async fn recover_interrupted(
@@ -1197,12 +1199,14 @@ pub async fn recover_interrupted(
     let cutoff: Option<DateTime<Utc>> = max_age.map(|age| now - age);
     let guarded = admitting_ids();
     let candidates: Vec<(Uuid, Uuid)> = sqlx::query_as(
-        "select id,schedule_id from schedule_runs
-          where state in ('claimed','prechecking')
+        "select r.id,r.schedule_id from schedule_runs r
+           join schedules s on s.id = r.schedule_id
+          where r.state in ('claimed','prechecking')
             and ($1::timestamptz is null
-                 or coalesce(lease_at, updated_at) < $1)
-            and not (id = any($2))
-          order by schedule_id,updated_at,id limit 32",
+                 or coalesce(r.lease_at, r.updated_at) < $1)
+            and not (r.id = any($2))
+          order by r.schedule_id,r.updated_at,r.id limit 32
+          for update of s skip locked",
     )
     .bind(cutoff)
     .bind(&guarded)

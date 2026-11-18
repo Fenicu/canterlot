@@ -2385,6 +2385,54 @@ async fn recovery_skips_a_locked_schedule(pool: PgPool) {
     holder.rollback().await.unwrap();
 }
 
+/// 8: пачка не заполняется строками заблокированного расписания: 33 заявки
+/// под одним замком не вытесняют восстановление другого расписания.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn recovery_batch_limit_applies_after_skipping_locked_schedules(pool: PgPool) {
+    use canterlot_hub::schedules::{RECLAIM_LEASE, recover_interrupted};
+
+    let f = Fixture::new(pool.clone()).await;
+    let now = Utc::now();
+    let mut ids = Vec::new();
+    for hour in [9, 10] {
+        ids.push(
+            Uuid::parse_str(&create(&f, existing(&f), &format!("0 {hour} * * *")).await).unwrap(),
+        );
+    }
+    ids.sort();
+    let (locked, other) = (ids[0], ids[1]);
+    for (schedule, count) in [(locked, 33), (other, 1)] {
+        for n in 0..count {
+            sqlx::query(
+                "insert into schedule_runs(id,schedule_id,owner_id,scheduled_at,claimed_revision,state,manual,idempotency_key,attempt_id,lease_at,updated_at)
+                 values($1,$2,$3,$4,1,'claimed',false,$5,$6,$7,$7)",
+            )
+            .bind(Uuid::now_v7())
+            .bind(schedule)
+            .bind(f.seed.owner_id)
+            .bind(now - TimeDelta::hours(5) - TimeDelta::minutes(n))
+            .bind(format!("batch-{schedule}-{n}"))
+            .bind(Uuid::now_v7())
+            .bind(now - TimeDelta::hours(3))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+    }
+    let mut holder = pool.begin().await.unwrap();
+    sqlx::query("select id from schedules where id=$1 for update")
+        .bind(locked)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    let recovered = recover_interrupted(&pool, Some(RECLAIM_LEASE), now)
+        .await
+        .unwrap();
+    assert_eq!(recovered.len(), 1, "the other schedule still recovers");
+    assert_eq!(recovered[0].schedule.id, other);
+    holder.rollback().await.unwrap();
+}
+
 /// Ждёт, пока число ожидающих замок сессий удовлетворит условию.
 async fn until_waiters(pool: &PgPool, what: &str, ok: impl Fn(i64) -> bool) {
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
@@ -2489,6 +2537,12 @@ async fn scheduled_new_session_takes_the_machine_lock_before_the_provider_lock(p
     .await
     .expect("no lock cycle: every transaction finishes");
     assert!(settled.1.is_ok(), "revoke finished: {:?}", settled.1.err());
+    // Жертвой взаимной блокировки не должен стать и приём журнала.
+    assert!(
+        settled.0.is_ok(),
+        "observation finished: {:?}",
+        settled.0.err()
+    );
     let rid = run_id(&pool, &id).await;
     let detail = wait_state(&pool, rid, "started").await;
     assert!(detail.is_object(), "{detail}");
