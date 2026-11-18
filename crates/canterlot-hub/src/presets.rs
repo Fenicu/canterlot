@@ -770,7 +770,7 @@ pub(crate) async fn update_in_tx(
     conversations::lock_owner(conn, owner).await?;
     let row = sqlx::query(
         "select revision, title, description from instruction_presets
-         where owner_id=$1 and id=$2 and purpose=$3 and deleted_at is null",
+         where owner_id=$1 and id=$2 and purpose=$3 and deleted_at is null for update",
     )
     .bind(owner)
     .bind(id)

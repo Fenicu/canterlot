@@ -88,14 +88,37 @@ pub async fn view_with_revision(
     ))
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum WhitelistError {
+    #[error("invalid whitelist entries")]
+    Invalid,
+    #[error("whitelist revision conflict: {0}")]
+    Conflict(i64),
+    #[error("database error")]
+    Db(#[from] sqlx::Error),
+}
+
 /// `None` возвращает встроенный список. Одна запись и событие на каждый вид правки:
-/// владелец в PWA и одобренное агентами предложение меняют список одинаково.
+/// владелец в PWA и одобренное агентами предложение меняют список одинаково под одной
+/// блокировкой строки, поэтому одобрение не затрёт параллельную правку владельца.
 pub async fn replace(
     conn: &mut PgConnection,
     owner_id: Uuid,
     entries: Option<&[WhitelistEntry]>,
+    base_revision: Option<i64>,
     correlation: Uuid,
-) -> Result<i64, sqlx::Error> {
+) -> Result<i64, WhitelistError> {
+    if entries.is_some_and(|entries| !valid(entries)) {
+        return Err(WhitelistError::Invalid);
+    }
+    let current: i64 =
+        sqlx::query_scalar("select spawn_whitelist_revision from owners where id=$1 for update")
+            .bind(owner_id)
+            .fetch_one(&mut *conn)
+            .await?;
+    if base_revision.is_some_and(|base| base != current) {
+        return Err(WhitelistError::Conflict(current));
+    }
     let revision: i64 = sqlx::query_scalar(
         "update owners set spawn_whitelist=$2, spawn_whitelist_revision=spawn_whitelist_revision+1
           where id=$1 returning spawn_whitelist_revision",

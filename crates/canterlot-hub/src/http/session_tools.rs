@@ -69,7 +69,17 @@ async fn replace(
         None,
         move |conn| {
             Box::pin(async move {
-                whitelist::replace(conn, owner, entries.as_deref(), correlation).await?;
+                whitelist::replace(conn, owner, entries.as_deref(), None, correlation)
+                    .await
+                    .map_err(|error| match error {
+                        whitelist::WhitelistError::Invalid => {
+                            ApiError::new(ErrorCode::SpawnWhitelistInvalid)
+                        }
+                        whitelist::WhitelistError::Conflict(_) => {
+                            ApiError::new(ErrorCode::Internal)
+                        }
+                        whitelist::WhitelistError::Db(error) => error.into(),
+                    })?;
                 Ok::<_, ApiError>(whitelist::view(conn, owner).await?)
             })
         },

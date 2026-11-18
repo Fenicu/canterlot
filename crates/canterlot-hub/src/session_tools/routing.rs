@@ -1215,14 +1215,34 @@ pub async fn policy_view(
     Ok((policy, revision))
 }
 
-/// Сохранение политики владельцем: проверка, рост ревизии, событие.
+#[derive(Debug, thiserror::Error)]
+pub enum SavePolicyError {
+    #[error("{0}")]
+    Invalid(String),
+    #[error("policy revision conflict: {0}")]
+    Conflict(i64),
+    #[error("database error")]
+    Db(#[from] sqlx::Error),
+}
+
+/// Единая точка записи политики: владелец и одобренное предложение берут одну и ту же
+/// блокировку строки и сверяют base revision, поэтому чужая правка не теряется.
 pub async fn save_policy(
     conn: &mut PgConnection,
     owner: Uuid,
     policy: Option<&Policy>,
-) -> Result<i64, String> {
+    base_revision: Option<i64>,
+) -> Result<i64, SavePolicyError> {
     if let Some(policy) = policy {
-        validate(policy)?;
+        validate(policy).map_err(SavePolicyError::Invalid)?;
+    }
+    let current: i64 =
+        sqlx::query_scalar("select routing_policy_revision from owners where id=$1 for update")
+            .bind(owner)
+            .fetch_one(&mut *conn)
+            .await?;
+    if base_revision.is_some_and(|base| base != current) {
+        return Err(SavePolicyError::Conflict(current));
     }
     let revision: i64 = sqlx::query_scalar(
         "update owners set routing_policy=$2,routing_policy_revision=routing_policy_revision+1
@@ -1231,8 +1251,7 @@ pub async fn save_policy(
     .bind(owner)
     .bind(policy.map(|value| serde_json::to_value(value).unwrap_or(Value::Null)))
     .fetch_one(&mut *conn)
-    .await
-    .map_err(|error| error.to_string())?;
+    .await?;
     Ok(revision)
 }
 

@@ -392,31 +392,6 @@ fn note_job(request: Uuid, resolution: &Resolution) -> Value {
     })
 }
 
-async fn current_revision(
-    conn: &mut PgConnection,
-    owner: Uuid,
-    proposal: &SettingsProposal,
-) -> Result<i64, sqlx::Error> {
-    match proposal {
-        SettingsProposal::Routing { .. } => {
-            let (_, revision) = routing::policy_view(conn, owner).await?;
-            Ok(revision)
-        }
-        SettingsProposal::Whitelist { .. } => {
-            let (_, revision) = whitelist::view_with_revision(conn, owner).await?;
-            Ok(revision)
-        }
-        SettingsProposal::Preset { preset_id, .. } => {
-            sqlx::query_scalar("select revision from instruction_presets where owner_id=$1 and id=$2 and deleted_at is null")
-                .bind(owner)
-                .bind(preset_id)
-                .fetch_optional(&mut *conn)
-                .await
-                .map(|revision| revision.unwrap_or(-1))
-        }
-    }
-}
-
 async fn apply(
     conn: &mut PgConnection,
     owner: Uuid,
@@ -426,31 +401,30 @@ async fn apply(
     correlation: Uuid,
 ) -> Result<Resolution, SubmitError> {
     let base = proposal.base_revision();
-    let current = current_revision(conn, owner, &proposal).await?;
-    if current != base {
-        return Ok(Resolution {
-            state: RequestState::SettingChanged,
-            reason: "setting_changed",
-            text: outcome_text(
-                request,
-                "not applied",
-                &format!(
-                    "The setting changed while the card was open (base revision {base}, current {current}). Read it again and propose the change again."
-                ),
+    let changed = |current: i64| Resolution {
+        state: RequestState::SettingChanged,
+        reason: "setting_changed",
+        text: outcome_text(
+            request,
+            "not applied",
+            &format!(
+                "The setting changed while the card was open (base revision {base}, current {current}). Read it again and propose the change again."
             ),
-        });
-    }
+        ),
+    };
+    let invalid = |message: String| Resolution {
+        state: RequestState::DecisionNotApplied,
+        reason: "invalid_value",
+        text: outcome_text(request, "not applied", &message),
+    };
     let applied = match proposal {
         SettingsProposal::Routing { after, .. } => {
-            let revision = match routing::save_policy(conn, owner, after.as_ref()).await {
+            let revision = match routing::save_policy(conn, owner, after.as_ref(), Some(base)).await
+            {
                 Ok(revision) => revision,
-                Err(message) => {
-                    return Ok(Resolution {
-                        state: RequestState::DecisionNotApplied,
-                        reason: "invalid_value",
-                        text: outcome_text(request, "not applied", &message),
-                    });
-                }
+                Err(routing::SavePolicyError::Conflict(current)) => return Ok(changed(current)),
+                Err(routing::SavePolicyError::Invalid(message)) => return Ok(invalid(message)),
+                Err(routing::SavePolicyError::Db(error)) => return Err(error.into()),
             };
             events::append(
                 conn,
@@ -467,7 +441,14 @@ async fn apply(
             "the routing policy was updated"
         }
         SettingsProposal::Whitelist { after, .. } => {
-            whitelist::replace(conn, owner, after.as_deref(), correlation).await?;
+            match whitelist::replace(conn, owner, after.as_deref(), Some(base), correlation).await {
+                Ok(_) => {}
+                Err(whitelist::WhitelistError::Conflict(current)) => return Ok(changed(current)),
+                Err(whitelist::WhitelistError::Invalid) => {
+                    return Ok(invalid("the whitelist is invalid".to_owned()));
+                }
+                Err(whitelist::WhitelistError::Db(error)) => return Err(error.into()),
+            }
             "the spawn whitelist was updated"
         }
         SettingsProposal::Preset {

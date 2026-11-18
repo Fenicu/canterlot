@@ -88,6 +88,42 @@ impl Fx {
         self.router.clone()
     }
 
+    fn spawn_job(&self, action: &str, request: Uuid) -> tokio::task::JoinHandle<bool> {
+        let pool = self.pool.clone();
+        let context = self.context.clone();
+        let job = ClaimedJob {
+            id: Uuid::now_v7(),
+            kind: JobKind::SessionTask,
+            owner_id: self.owner,
+            conversation_id: Some(self.conversation),
+            run_at: Utc::now(),
+            payload: json!({"action": action, "request_id": request}),
+            attempts: 0,
+        };
+        tokio::spawn(async move {
+            let mut tx = pool.begin().await.unwrap();
+            let outcome = session_tools::jobs::run_in_tx(
+                &mut tx,
+                &job,
+                Utc::now(),
+                Uuid::now_v7(),
+                None,
+                &context.settle,
+                &Thresholds::from(&canterlot_hub::config::ActivityConfig::default()),
+                None,
+                None,
+                &LimitsConfig::default(),
+                std::time::Duration::from_secs(60),
+            )
+            .await;
+            let ok = outcome.is_ok();
+            if ok {
+                tx.commit().await.unwrap();
+            }
+            ok
+        })
+    }
+
     async fn call(&self, tool: &str, args: Value) -> Result<Value, session_tools::ToolError> {
         let caller = Caller {
             owner_id: self.owner,
@@ -780,9 +816,176 @@ async fn concurrent_decisions_with_different_keys_do_not_deadlock(pool: PgPool) 
     };
     let (first, second) = tokio::join!(decide("race-one"), decide("race-two"));
     let statuses = [u16::from(first), u16::from(second)];
-    assert_eq!(statuses.iter().filter(|status| **status == 200).count(), 1, "{statuses:?}");
-    assert_eq!(statuses.iter().filter(|status| **status == 409).count(), 1, "{statuses:?}");
+    assert_eq!(
+        statuses.iter().filter(|status| **status == 200).count(),
+        1,
+        "{statuses:?}"
+    );
+    assert_eq!(
+        statuses.iter().filter(|status| **status == 409).count(),
+        1,
+        "{statuses:?}"
+    );
     assert_eq!(f.request_state(request).await, "decision_saved");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn owner_routing_edit_wins_the_race_with_an_approved_proposal(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let (request, _) = f
+        .proposal(
+            "settings.propose_routing",
+            json!({"policy": routing(), "reason": "гонка", "base_revision": 0}),
+        )
+        .await;
+    assert_eq!(f.decide(request, "allow").await, 200);
+    let mut blocker = f.pool.begin().await.unwrap();
+    sqlx::query("select conversation_id from queue_state where conversation_id=$1 for update")
+        .bind(f.conversation)
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    sqlx::query("select id from owners where id=$1 for update")
+        .bind(f.owner)
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let owner_policy = json!({"task_types":{"owner":{"title":"Владелец","candidates":[
+        {"harness":"claude_code","model":"haiku"}],"expected_minutes":30}}});
+    let edit = {
+        let client = f.client.clone();
+        let body = json!({"policy": owner_policy, "revision": 0});
+        tokio::spawn(async move {
+            client
+                .send(
+                    Method::PUT,
+                    "/api/v1/routing-policy",
+                    Some("owner-race"),
+                    Some(body),
+                )
+                .await
+                .status
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let job = f.spawn_job("settings_change", request);
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    blocker.rollback().await.unwrap();
+    assert_eq!(u16::from(edit.await.unwrap()), 200);
+    assert!(job.await.unwrap());
+    f.run_job_by_action("note", Utc::now()).await;
+    let stored: Option<Value> = sqlx::query_scalar("select routing_policy from owners where id=$1")
+        .bind(f.owner)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    let expected: canterlot_hub::session_tools::routing::Policy =
+        serde_json::from_value(owner_policy).unwrap();
+    assert_eq!(stored, Some(serde_json::to_value(expected).unwrap()));
+    assert_eq!(f.request_state(request).await, "setting_changed");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn owner_whitelist_edit_wins_the_race_with_an_approved_proposal(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let (request, _) = f
+        .proposal(
+            "settings.propose_whitelist",
+            json!({"entries": [{"harness":"codex","model":"default"}], "reason": "гонка", "base_revision": 0}),
+        )
+        .await;
+    assert_eq!(f.decide(request, "allow").await, 200);
+    let mut blocker = f.pool.begin().await.unwrap();
+    sqlx::query("select conversation_id from queue_state where conversation_id=$1 for update")
+        .bind(f.conversation)
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    sqlx::query("select id from owners where id=$1 for update")
+        .bind(f.owner)
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let edit = {
+        let client = f.client.clone();
+        tokio::spawn(async move {
+            client
+                .send(
+                    Method::PUT,
+                    "/api/v1/spawn-whitelist",
+                    Some("owner-race"),
+                    Some(json!({"entries": [{"harness":"claude_code","model":"haiku"}]})),
+                )
+                .await
+                .status
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let job = f.spawn_job("settings_change", request);
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    blocker.rollback().await.unwrap();
+    assert_eq!(u16::from(edit.await.unwrap()), 200);
+    assert!(job.await.unwrap());
+    f.run_job_by_action("note", Utc::now()).await;
+    let stored: Value = sqlx::query_scalar("select spawn_whitelist from owners where id=$1")
+        .bind(f.owner)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, json!([{"harness":"claude_code","model":"haiku"}]));
+    assert_eq!(f.request_state(request).await, "setting_changed");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn owner_preset_edit_wins_the_race_with_an_approved_proposal(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let preset = f.new_preset().await;
+    let (request, _) = f
+        .proposal(
+            "settings.propose_preset",
+            json!({"id": preset.to_string(), "text": "текст агента", "reason": "гонка", "base_revision": 1}),
+        )
+        .await;
+    assert_eq!(f.decide(request, "allow").await, 200);
+    let mut blocker = f.pool.begin().await.unwrap();
+    sqlx::query("select id from instruction_presets where id=$1 for update")
+        .bind(preset)
+        .execute(&mut *blocker)
+        .await
+        .unwrap();
+    let edit = {
+        let client = f.client.clone();
+        let path = format!("/api/v1/presets/{preset}");
+        tokio::spawn(async move {
+            client
+                .send(
+                    Method::PATCH,
+                    &path,
+                    Some("owner-race"),
+                    Some(json!({"text": "текст владельца", "base_revision": 1})),
+                )
+                .await
+                .status
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let job = f.spawn_job("settings_change", request);
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    blocker.rollback().await.unwrap();
+    assert_eq!(u16::from(edit.await.unwrap()), 200);
+    assert!(job.await.unwrap());
+    f.run_job_by_action("note", Utc::now()).await;
+    let text: String = sqlx::query_scalar(
+        "select r.text from instruction_presets p
+           join instruction_preset_revisions r on r.preset_id=p.id and r.revision=p.revision
+          where p.id=$1",
+    )
+    .bind(preset)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(text, "текст владельца");
+    assert_eq!(f.request_state(request).await, "setting_changed");
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]

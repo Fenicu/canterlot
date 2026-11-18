@@ -117,21 +117,20 @@ async fn replace(
         move |conn| {
             let policy = policy.clone();
             Box::pin(async move {
-                let current: i64 =
-                    sqlx::query_scalar("select routing_policy_revision from owners where id=$1")
-                        .bind(owner)
-                        .fetch_one(&mut *conn)
-                        .await?;
-                if current != revision {
-                    return Err(ApiError::new(ErrorCode::RoutingPolicyConflict));
-                }
-                let next = routing::save_policy(conn, owner, policy.as_ref())
+                let next = routing::save_policy(conn, owner, policy.as_ref(), Some(revision))
                     .await
-                    .map_err(|message| {
-                        ApiError::new(ErrorCode::RoutingPolicyInvalid).with_details(ErrorDetails {
+                    .map_err(|error| match error {
+                        routing::SavePolicyError::Invalid(message) => ApiError::new(
+                            ErrorCode::RoutingPolicyInvalid,
+                        )
+                        .with_details(ErrorDetails {
                             reason: Some(message),
                             ..Default::default()
-                        })
+                        }),
+                        routing::SavePolicyError::Conflict(_) => {
+                            ApiError::new(ErrorCode::RoutingPolicyConflict)
+                        }
+                        routing::SavePolicyError::Db(error) => error.into(),
                     })?;
                 events::append(
                     conn,
