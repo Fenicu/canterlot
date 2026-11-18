@@ -101,6 +101,8 @@ message ControlUp {
     // Только при согласованной возможности watchdog_v1. Номер 13 оставлен
     // под состояние очереди тяжёлых задач.
     MachineWatch machine_watch = 14;
+    // Только при согласованной возможности schedule_precheck_v1.
+    PrecheckResult precheck_result = 15;
   }
 }
 
@@ -133,6 +135,8 @@ message ControlDown {
     // Только при согласованной возможности secret_requests_v2: одноразовая передача
     // значения на машину. Это не `Command` и в outbox не попадает.
     SecretDeliver secret_deliver = 11;
+    // Только при согласованной возможности schedule_precheck_v1.
+    SchedulePrecheck schedule_precheck = 12;
   }
 }
 
@@ -892,6 +896,34 @@ message PathProbeNotAllowed {
 }
 
 message PathProbeError {
+  string reason = 1;
+}
+
+// Необязательная возможность schedule_precheck_v1: проверка перед запуском.
+// Хаб шлёт номер попытки, канонический каталог, текст команды и таймаут;
+// воркер отвечает только для этой попытки и своего соединения.
+message SchedulePrecheck {
+  string attempt_id = 1;
+  string workdir = 2;
+  string command = 3;
+  uint32 timeout_seconds = 4;
+}
+
+message PrecheckResult {
+  string attempt_id = 1;
+  oneof outcome {
+    PrecheckFinished finished = 2;
+    PrecheckError error = 3;
+  }
+}
+
+message PrecheckFinished {
+  int32 exit_code = 1;
+  string output_tail = 2;
+  bool timed_out = 3;
+}
+
+message PrecheckError {
   string reason = 1;
 }
 

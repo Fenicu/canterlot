@@ -186,6 +186,10 @@ impl WorkerControl for HubGrpc {
                                 if !state.registry.has_capability(machine_id,crate::session::CAPABILITY_PATH_PROBE_V1){Err(session_log.error(Status::invalid_argument("capability_missing")))?;}
                                 state.registry.finish_probe(machine_id, reply);
                             }
+                            Some(control_up::Msg::PrecheckResult(reply)) => {
+                                if !state.registry.has_capability(machine_id,crate::session::CAPABILITY_SCHEDULE_PRECHECK_V1){Err(session_log.error(Status::invalid_argument("capability_missing")))?;}
+                                state.registry.finish_precheck(machine_id, reply);
+                            }
                             Some(control_up::Msg::OwnerOverview(reply)) => {
                                 if !state.registry.has_capability(machine_id,crate::session::CAPABILITY_OWNER_INSTRUCTIONS_V1){Err(session_log.error(Status::invalid_argument("capability_missing")))?;}
                                 state.registry.finish_owner_overview(machine_id, reply);

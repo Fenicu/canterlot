@@ -59,6 +59,7 @@ pub const CAPABILITY_PROVIDER_CREDITS_V1: &str = "provider_credits_v1";
 pub const CAPABILITY_CLI_VERSIONS_V1: &str = "cli_versions_v1";
 /// В отчёте машины есть каталог команд и навыков; без него поле пусто.
 pub const CAPABILITY_SLASH_CATALOG_V1: &str = "slash_catalog_v1";
+pub const CAPABILITY_SCHEDULE_PRECHECK_V1: &str = "schedule_precheck_v1";
 
 pub const OPTIONAL_CAPABILITIES: &[&str] = &[
     "exec_v1",
@@ -86,6 +87,7 @@ pub const OPTIONAL_CAPABILITIES: &[&str] = &[
     CAPABILITY_PROVIDER_CREDITS_V1,
     CAPABILITY_CLI_VERSIONS_V1,
     CAPABILITY_SLASH_CATALOG_V1,
+    CAPABILITY_SCHEDULE_PRECHECK_V1,
 ];
 
 #[derive(Clone)]
@@ -1300,6 +1302,10 @@ impl Worker {
             .capabilities
             .iter()
             .any(|cap| cap == "path_probe_v1");
+        let precheck_enabled = accepted
+            .capabilities
+            .iter()
+            .any(|cap| cap == CAPABILITY_SCHEDULE_PRECHECK_V1);
         let secret_enabled = accepted
             .capabilities
             .iter()
@@ -1436,6 +1442,11 @@ impl Worker {
         let probe_permits = crate::machine::probe::process_permits();
         type ProbeFuture = Pin<Box<dyn Future<Output = PathProbe> + Send>>;
         let mut probe_operation: Option<ProbeFuture> = None;
+        // Предпроверка расписания: одна попытка за раз, ответ только для неё.
+        let mut precheck_next: Option<SchedulePrecheck> = None;
+        let mut precheck_outbound: Option<ControlUp> = None;
+        type PrecheckFuture = Pin<Box<dyn Future<Output = PrecheckResult> + Send>>;
+        let mut precheck_operation: Option<PrecheckFuture> = None;
         // Чтение инструкций владельца: тоже только последний запрос.
         let mut owner_next: Option<ReadOwnerInstructions> = None;
         let mut owner_outbound: Option<ControlUp> = None;
@@ -1659,6 +1670,12 @@ impl Worker {
                     crate::machine::probe::reply(request_id, outcome)
                 }));
             }
+            if precheck_operation.is_none()
+                && let Some(request) = precheck_next.take()
+            {
+                let roots = self.config.execution.allowed_workdir_roots.clone();
+                precheck_operation = Some(Box::pin(crate::machine::precheck::run(request, roots)));
+            }
             if !report_created && acknowledged >= replay_end {
                 report_created = true;
                 if exec_enabled {
@@ -1782,6 +1799,15 @@ impl Worker {
                                 ))});
                             }
                         }
+                        Some(control_down::Msg::SchedulePrecheck(request)) if precheck_enabled => {
+                            if precheck_next.is_some() || precheck_operation.is_some() {
+                                let mut reply = crate::machine::precheck::error("busy");
+                                reply.attempt_id = request.attempt_id;
+                                precheck_outbound = Some(ControlUp{msg:Some(control_up::Msg::PrecheckResult(reply))});
+                            } else {
+                                precheck_next = Some(request);
+                            }
+                        }
                         Some(control_down::Msg::Command(command)) => { commands.push_back(command); }
                         Some(control_down::Msg::SecretDeliver(request)) if secret_enabled => {
                             // Запись файла коротка и не держит пульс: значение живёт
@@ -1899,6 +1925,7 @@ impl Worker {
                     else if let Some(message)=histories_outbound.take() {message}
                     else if let Some(message)=owner_outbound.take() {message}
                     else if let Some(message)=probe_outbound.pop_front() {message}
+                    else if let Some(message)=precheck_outbound.take() {message}
                     else if let Some(message)=lease_outbound.take() {message}
                     else if let Some(message)=watch_outbound.take() {message}
                     else if let Some(message) = report_outbound.take() {
@@ -2002,6 +2029,10 @@ impl Worker {
                 reply=async{probe_operation.as_mut().unwrap().await}, if probe_operation.is_some()=>{
                     probe_operation=None;probe_queue.finish();
                     probe_outbound.push_back(ControlUp{msg:Some(control_up::Msg::PathProbe(reply))});
+                }
+                reply=async{precheck_operation.as_mut().unwrap().await}, if precheck_operation.is_some()=>{
+                    precheck_operation=None;
+                    precheck_outbound=Some(ControlUp{msg:Some(control_up::Msg::PrecheckResult(reply))});
                 }
                 result = &mut data_loop => return result,
                 changed = data_attached.changed() => {

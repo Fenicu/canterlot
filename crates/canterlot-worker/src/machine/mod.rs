@@ -26,6 +26,7 @@ pub mod limits;
 pub mod metrics;
 mod nofollow;
 pub mod owner_instructions;
+pub mod precheck;
 pub mod probe;
 pub mod share;
 pub mod slash_catalog;

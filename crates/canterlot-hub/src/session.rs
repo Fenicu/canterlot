@@ -49,7 +49,10 @@ pub const CAPABILITY_ALARMS_V1: &str = "alarms_v1";
 pub const CAPABILITY_NUDGE_V1: &str = "nudge_v1";
 pub const CAPABILITY_RESOURCE_LEASE_V1: &str = "resource_lease_v1";
 pub const CAPABILITY_SECRET_REQUESTS_V2: &str = "secret_requests_v2";
+pub const CAPABILITY_SCHEDULE_PRECHECK_V1: &str = "schedule_precheck_v1";
 
+/// Параллельных предпроверок на машину: одна попытка на расписание.
+pub const MAX_PRECHECKS_PER_MACHINE: usize = 4;
 /// Форма спрашивает по одному запросу с паузой на ввод, остальным ждать незачем.
 pub const MAX_SUGGESTS_PER_MACHINE: usize = 4;
 /// Параллельных чтений инструкций владельца на машину.
@@ -95,6 +98,14 @@ type SuggestWaiters = Arc<Mutex<HashMap<(Uuid, Uuid), oneshot::Sender<Vec<String
 type ClaudeHistoryWaiters = Arc<Mutex<HashMap<(Uuid, Uuid), oneshot::Sender<Vec<ClaudeHistory>>>>>;
 type PathProbeWaiters =
     Arc<Mutex<HashMap<(Uuid, Uuid), oneshot::Sender<canterlot_proto::worker::v1::PathProbe>>>>;
+type PrecheckWaiters = Arc<
+    Mutex<
+        HashMap<
+            (Uuid, Uuid),
+            oneshot::Sender<canterlot_proto::worker::v1::PrecheckResult>,
+        >,
+    >,
+>;
 
 /// Прикладная проба живости после просроченной квитанции команды.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,6 +166,7 @@ pub struct Registry {
     suggests: SuggestWaiters,
     histories: ClaudeHistoryWaiters,
     probes: PathProbeWaiters,
+    prechecks: PrecheckWaiters,
     app_probes: Arc<Mutex<HashMap<Uuid, AppProbeState>>>,
     owner_overview: OwnerOverviewWaiters,
     owner_files: OwnerFileWaiters,
@@ -203,6 +215,20 @@ impl Drop for PathProbeSlot {
     }
 }
 
+struct PrecheckSlot {
+    waiters: PrecheckWaiters,
+    key: (Uuid, Uuid),
+}
+
+impl Drop for PrecheckSlot {
+    fn drop(&mut self) {
+        self.waiters
+            .lock()
+            .expect("precheck waiters lock")
+            .remove(&self.key);
+    }
+}
+
 struct OwnerOverviewSlot {
     waiters: OwnerOverviewWaiters,
     key: (Uuid, Uuid),
@@ -245,6 +271,15 @@ pub enum OwnerReadError {
     CapabilityMissing,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrecheckFailure {
+    NoSession,
+    CapabilityMissing,
+    Busy,
+    NoAnswer,
+    Invalid,
+}
+
 /// Итог пробы пути: ответ машины, отсутствие возможности или пропавший сеанс.
 #[derive(Debug)]
 pub enum ProbeReply {
@@ -271,6 +306,7 @@ impl Registry {
             suggests: Arc::default(),
             histories: Arc::default(),
             probes: Arc::default(),
+            prechecks: Arc::default(),
             app_probes: Arc::default(),
             owner_overview: Arc::default(),
             owner_files: Arc::default(),
@@ -794,6 +830,68 @@ impl Registry {
             .lock()
             .expect("probe waiters lock")
             .remove(&(machine_id, request_id));
+        if let Some(waiter) = waiter {
+            let _ = waiter.send(reply);
+        }
+    }
+
+    /// Предпроверка расписания: запрос и ответ связываются номером попытки и машиной.
+    pub(crate) async fn ask_precheck(
+        &self,
+        machine_id: Uuid,
+        request: canterlot_proto::worker::v1::SchedulePrecheck,
+        wait: std::time::Duration,
+    ) -> Result<canterlot_proto::worker::v1::PrecheckResult, PrecheckFailure> {
+        if self.session_info(machine_id).is_none() {
+            return Err(PrecheckFailure::NoSession);
+        }
+        if !self.has_capability(machine_id, CAPABILITY_SCHEDULE_PRECHECK_V1) {
+            return Err(PrecheckFailure::CapabilityMissing);
+        }
+        let Some(sender) = self.command_sender(machine_id) else {
+            return Err(PrecheckFailure::NoSession);
+        };
+        let attempt_id = Uuid::parse_str(&request.attempt_id).map_err(|_| PrecheckFailure::Invalid)?;
+        let key = (machine_id, attempt_id);
+        let (answer, answered) = oneshot::channel();
+        {
+            let mut waiters = self.prechecks.lock().expect("precheck waiters lock");
+            if waiters.keys().filter(|(id, _)| *id == machine_id).count() >= MAX_PRECHECKS_PER_MACHINE {
+                return Err(PrecheckFailure::Busy);
+            }
+            waiters.insert(key, answer);
+        }
+        let _slot = PrecheckSlot {
+            waiters: self.prechecks.clone(),
+            key,
+        };
+        let message = ControlDown {
+            msg: Some(control_down::Msg::SchedulePrecheck(request)),
+        };
+        if sender.try_send(message).is_err() {
+            return Err(PrecheckFailure::Busy);
+        }
+        tokio::time::timeout(wait, answered)
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .ok_or(PrecheckFailure::NoAnswer)
+    }
+
+    /// Ответ принимается только от машины, которую спросили, и только для живой попытки.
+    pub fn finish_precheck(
+        &self,
+        machine_id: Uuid,
+        reply: canterlot_proto::worker::v1::PrecheckResult,
+    ) {
+        let Ok(attempt_id) = Uuid::parse_str(&reply.attempt_id) else {
+            return;
+        };
+        let waiter = self
+            .prechecks
+            .lock()
+            .expect("precheck waiters lock")
+            .remove(&(machine_id, attempt_id));
         if let Some(waiter) = waiter {
             let _ = waiter.send(reply);
         }
