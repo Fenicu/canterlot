@@ -651,6 +651,7 @@ async fn precheck(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn dispatch(
     scheduler: &Scheduler,
     schedule: &Schedule,

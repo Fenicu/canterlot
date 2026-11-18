@@ -1265,8 +1265,6 @@ mod tests {
         };
         let cursor = encode_runs_cursor(&run);
         let (at, id) = decode_runs_cursor(&cursor).expect("new cursor decodes");
-        eprintln!("cursor={cursor} scheduled_at={}", run.scheduled_at);
-        let (at, id) = decode_runs_cursor(&cursor).expect("new cursor decodes");
         assert_eq!(id, run.id);
         assert_eq!(at, run.scheduled_at);
 

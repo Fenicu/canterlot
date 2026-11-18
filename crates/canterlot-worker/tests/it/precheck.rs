@@ -154,8 +154,8 @@ async fn timeout_does_not_kill_sibling_worker_subprocess() {
         Ok(Some(status)) => panic!("sibling worker subprocess was killed: {status:?}"),
         Err(error) => panic!("sibling wait failed: {error:?}"),
     }
-    let _ = sibling.kill();
-    let _ = sibling.wait();
+    let _ = sibling.kill().await;
+    let _ = sibling.wait().await;
 }
 
 #[tokio::test]
