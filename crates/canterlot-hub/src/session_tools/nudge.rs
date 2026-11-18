@@ -1150,6 +1150,150 @@ pub async fn run_job_in_tx(
     })))
 }
 
+/// Итог толчка спасения зависшего хода.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RescueNudge {
+    Sent {
+        input_id: Uuid,
+    },
+    /// Правила нет, оно выключено или не следит: толчка не будет.
+    NotEligible,
+    /// Строку автора правила держит удаление: решение откладывается, ничего не записано.
+    Busy,
+    /// Предел серии, исчерпание или потеря права писать: правило сдано, толчка нет.
+    Exhausted(&'static str),
+}
+
+/// Толчок автопинка вместо обычного ожидания, когда ход завис: те же проверки, что у
+/// задания толчка (правило включено и следит, право писать, `max_consecutive` и
+/// `max_total`), тот же счётчик и событие. Ключ ввода привязан к ходу и эпизоду, поэтому
+/// пересозданное правило со сброшенным счётчиком не подхватит чужой ввод.
+/// Вызывается под очередью цели; строку автора берёт без ожидания.
+pub async fn rescue_nudge_in_tx(
+    conn: &mut PgConnection,
+    target: Uuid,
+    turn_id: Uuid,
+    episode_no: i32,
+    text: &str,
+    now: DateTime<Utc>,
+    correlation_id: Uuid,
+) -> Result<RescueNudge, SubmitError> {
+    let Some(mut rule) = rule_locked_in_tx(conn, target).await? else {
+        return Ok(RescueNudge::NotEligible);
+    };
+    if !rule.enabled || !matches!(rule.state.as_str(), "watching" | "pending") {
+        return Ok(RescueNudge::NotEligible);
+    }
+    let mut sessions = Vec::new();
+    if let Some(session) = access::session_in_tx(conn, rule.owner_id, target).await? {
+        sessions.push(session);
+    }
+    if rule.set_by == "agent"
+        && let Some(author) = rule.set_by_conversation
+    {
+        let locked: Option<Uuid> = sqlx::query_scalar(
+            "select id from conversations where id=$1 and owner_id=$2 and trashed_at is null
+             for key share skip locked",
+        )
+        .bind(author)
+        .bind(rule.owner_id)
+        .fetch_optional(&mut *conn)
+        .await?;
+        if locked.is_none() {
+            let exists: bool = sqlx::query_scalar(
+                "select exists(select 1 from conversations where id=$1 and owner_id=$2
+                                and trashed_at is null)",
+            )
+            .bind(author)
+            .bind(rule.owner_id)
+            .fetch_one(&mut *conn)
+            .await?;
+            if exists {
+                return Ok(RescueNudge::Busy);
+            }
+        } else if let Some(session) = access::session_in_tx(conn, rule.owner_id, author).await? {
+            sessions.push(session);
+        }
+    }
+    let signals = Signals {
+        no_marker: true,
+        ..Signals::default()
+    };
+    if let Some(reason) = permission_problem(conn, &rule, &sessions).await? {
+        exhaust_in_tx(conn, &mut rule, &signals, Some(reason), now, correlation_id).await?;
+        return Ok(RescueNudge::Exhausted(reason));
+    }
+    let consecutive = rule.consecutive + 1;
+    if consecutive > rule.max_consecutive || rule.total >= rule.max_total {
+        exhaust_in_tx(
+            conn,
+            &mut rule,
+            &signals,
+            Some("gave_up"),
+            now,
+            correlation_id,
+        )
+        .await?;
+        return Ok(RescueNudge::Exhausted("gave_up"));
+    }
+    let attempt = rule.total + 1;
+    let depth = access::current_depth(conn, target).await?;
+    let event = origin::HubEvent {
+        kind: "hung".to_owned(),
+        session_id: Some(target),
+        ..origin::HubEvent::default()
+    };
+    let origin = json!({
+        "kind": "nudge",
+        "rule_id": target,
+        "attempt": attempt,
+        "max": rule.max_consecutive,
+        "signals": {"hung_generation": true, "no_marker": true},
+        "chain_depth": depth,
+        "event": event,
+    });
+    let submitted = submit_input_in_tx(
+        conn,
+        &SubmitInput {
+            owner_id: rule.owner_id,
+            conversation_id: target,
+            idempotency_key: format!("rescue-nudge:{target}:{turn_id}:{episode_no}"),
+            content: vec![ContentBlock::Text {
+                text: text.to_owned(),
+            }],
+            received_at: now,
+            correlation_id,
+            origin: Some(origin),
+        },
+    )
+    .await?;
+    let row: RuleRow = sqlx::query_as(
+        "update nudge_rules set state='watching',held_fingerprint=null,consecutive=$2,
+             total=$3,updated_at=$4
+         where conversation_id=$1 returning *",
+    )
+    .bind(target)
+    .bind(consecutive)
+    .bind(attempt)
+    .bind(now)
+    .fetch_one(&mut *conn)
+    .await?;
+    record_event_in_tx(
+        conn,
+        &row,
+        attempt,
+        &signals,
+        "nudged",
+        Some(submitted.input_id),
+        now,
+    )
+    .await?;
+    changed_in_tx(conn, &row, correlation_id, Some("nudged")).await?;
+    Ok(RescueNudge::Sent {
+        input_id: submitted.input_id,
+    })
+}
+
 /// Снять ожидающие задания толчка. `skip locked` не ждёт строку, которую уже
 /// выбрал планировщик: отпечаток всё равно сделает такое задание устаревшим.
 async fn cancel_pending_jobs_in_tx(

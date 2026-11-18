@@ -1581,6 +1581,14 @@ async fn apply_body(
                 );
                 sqlx::query("update commands set last_status = $2, delivery_state = case when $3 then 'completed' else delivery_state end, completed_at = case when $3 then coalesce(completed_at, now()) else completed_at end, result = case when $3 then jsonb_build_object('status', $2::text) else result end where id = $1")
                     .bind(command_id).bind(status).bind(terminal).execute(&mut *conn).await?;
+                crate::rescue::on_interrupt_status_in_tx(
+                    conn,
+                    command_id,
+                    status,
+                    chrono::Utc::now(),
+                    correlation_id,
+                )
+                .await?;
                 if let Some(execution_id) = target.execution_id
                     && let Some(run) = owned_execution(conn, machine_id, execution_id, None).await?
                 {

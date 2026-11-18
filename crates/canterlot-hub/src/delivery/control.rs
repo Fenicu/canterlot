@@ -248,8 +248,14 @@ pub async fn request_stop(
     .await
 }
 
-/// Прерывание внутри уже открытой транзакции: используется автоматическим спасением
-/// зависшего хода, чтобы не брать вторую транзакцию под блокировкой очереди.
+/// На какой ход и какую отметку прогресса рассчитано автоматическое прерывание.
+#[derive(Clone, Copy, Debug)]
+pub struct InterruptGuard {
+    pub turn_id: Uuid,
+    pub progress_checkpoint: u64,
+}
+
+/// Прерывание внутри уже открытой транзакции: кнопка владельца и обычные вызовы.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn request_stop_in_tx(
     conn: &mut PgConnection,
@@ -258,8 +264,39 @@ pub(crate) async fn request_stop_in_tx(
     idempotency_key: &str,
     correlation_id: Uuid,
 ) -> Result<StopOutcome, ControlError> {
+    request_stop_guarded_in_tx(
+        conn,
+        owner_id,
+        conversation_id,
+        idempotency_key,
+        correlation_id,
+        None,
+    )
+    .await
+}
+
+/// Прерывание с охраной хода: воркер выполняет его, только если идёт тот же ход и после
+/// отметки не было прогресса. Ключ идемпотентности обязан называть ход и эпизод:
+/// прежний результат другого хода повторять нельзя. Команда с охраной берётся только
+/// своя, а не любая невыполненная: старый interrupt прошлого хода не заменяет новый.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn request_stop_guarded_in_tx(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    conversation_id: Uuid,
+    idempotency_key: &str,
+    correlation_id: Uuid,
+    guard: Option<InterruptGuard>,
+) -> Result<StopOutcome, ControlError> {
     const OPERATION: &str = "request_stop";
-    let hash = idempotency::request_hash(OPERATION, &json!({"conversation_id": conversation_id}));
+    // Прежний хеш без охраны сохраняет повтор старых ключей.
+    let hash = match guard {
+        None => idempotency::request_hash(OPERATION, &json!({"conversation_id": conversation_id})),
+        Some(guard) => idempotency::request_hash(
+            OPERATION,
+            &json!({"conversation_id": conversation_id, "turn_id": guard.turn_id}),
+        ),
+    };
     {
         let queue = lock_conversation(&mut *conn, owner_id, conversation_id).await?;
         if let Some(outcome) =
@@ -275,20 +312,29 @@ pub(crate) async fn request_stop_in_tx(
         let slot = queue.slot()?;
         let live = executions::live(&mut *conn, conversation_id).await?;
         let interrupt_command_id = if let Some((execution_id, generation, _)) = live {
+            let expected = guard.map(|g| g.turn_id.to_string());
             let existing: Option<Uuid> = sqlx::query_scalar(
                 "select id from commands where conversation_id = $1 and kind = 'interrupt'
              and execution_id = $2 and execution_generation = $3 and delivery_state <> 'completed'
+             and payload->>'expected_turn_id' is not distinct from $4
              order by created_at, id limit 1",
             )
             .bind(conversation_id)
             .bind(execution_id)
             .bind(generation)
+            .bind(&expected)
             .fetch_optional(&mut *conn)
             .await?;
             Some(if let Some(existing) = existing {
                 existing
             } else {
                 let command_id = Uuid::now_v7();
+                let mut payload =
+                    json!({"execution_id": execution_id, "execution_generation": generation});
+                if let Some(guard) = guard {
+                    payload["expected_turn_id"] = json!(guard.turn_id);
+                    payload["progress_checkpoint"] = json!(guard.progress_checkpoint);
+                }
                 let machine_id: Uuid = sqlx::query_scalar(
                     "insert into commands (id, machine_id, conversation_id, execution_id,
                                        execution_generation, kind, payload, delivery_state)
@@ -299,7 +345,7 @@ pub(crate) async fn request_stop_in_tx(
                 .bind(conversation_id)
                 .bind(execution_id)
                 .bind(generation)
-                .bind(json!({"execution_id": execution_id, "execution_generation": generation}))
+                .bind(payload)
                 .fetch_one(&mut *conn)
                 .await?;
                 notify_outbox(&mut *conn, machine_id).await?;

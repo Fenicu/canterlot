@@ -122,6 +122,16 @@ impl fmt::Debug for Evidence {
     }
 }
 
+impl Evidence {
+    /// Признак «завис в генерации» у свидетельства `stalled`.
+    pub fn hung_flag(&self) -> Option<bool> {
+        match self {
+            Self::Stalled { hung, .. } => *hung,
+            _ => None,
+        }
+    }
+}
+
 pub struct Activity {
     pub state: ActivityState,
     pub evidence: Evidence,
@@ -173,6 +183,42 @@ pub struct ProcessFacts {
     /// Живые потомки CLI без зомби; у старого воркера поля нет.
     pub descendants: Option<u32>,
 }
+/// Свидетельства для verdict «завис в генерации», которых нет в обычных признаках сессии.
+#[derive(Clone, Debug, Default)]
+pub struct HangFacts {
+    /// `command_id` ввода, который идёт в слоте `running`: устойчивое имя хода.
+    /// Хода без слота (CLI начал его сам) имени не имеет и под verdict не попадает.
+    pub turn_id: Option<Uuid>,
+    /// Последняя подтверждённая хабом запись журнала сессии: охранный interrupt
+    /// несёт её воркеру, и тот отказывает, если после неё был прогресс.
+    pub progress_checkpoint: u64,
+    /// Выборка метрик, по которой читаются `ProcessFacts`.
+    pub sample: Option<SampleFacts>,
+    pub execution_id: Option<Uuid>,
+    /// Когда создано исполнение: выборки до этого момента ему не принадлежат.
+    pub execution_created_at: Option<DateTime<Utc>>,
+    /// С какого момента связь с машиной доступна (смена доступности, в том числе
+    /// после переподключения воркера).
+    pub link_since: Option<DateTime<Utc>>,
+    /// Окно наблюдения после старта хаба, переподключения или старта исполнения
+    /// собрало не меньше двух подряд идущих доказательных выборок CPU того же CLI.
+    pub window_ready: bool,
+}
+
+/// Одна выборка метрик машины для исполнения.
+#[derive(Clone, Copy, Debug)]
+pub struct SampleFacts {
+    pub observed_at: DateTime<Utc>,
+    /// У CLI был прошлый замер CPU: без него ноль ничего не доказывает.
+    /// `None` — воркер старой версии.
+    pub cpu_valid: Option<bool>,
+    pub cli_alive: Option<bool>,
+}
+
+/// Сколько доказательных выборок подряд нужно после старта хаба, переподключения
+/// воркера или старта исполнения, прежде чем молчание превращается в verdict.
+pub const WINDOW_SAMPLES: i32 = 2;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LinkState {
     Available,
@@ -203,6 +249,7 @@ pub struct ActivityInputs {
     pub question_summary: Option<String>,
     /// Место исполнения в очереди тяжёлых задач по свежему состоянию машины.
     pub lease_wait: Option<crate::leases::LeaseWait>,
+    pub hang: HangFacts,
 }
 
 pub fn extract_request_summary(
@@ -306,34 +353,62 @@ pub fn phase_since(inputs: &ActivityInputs) -> Option<DateTime<Utc>> {
         .and_then(|execution| execution.phase_at.max(inputs.turn_started_at))
 }
 
-/// Ход завис в генерации: фаза не инструмент, все потоковые события давно кончились,
-/// процесс жив, но CPU холостой и живых потомков нет. Инструментальные фазы сюда не
-/// попадают никогда — спящий долгий инструмент доказывает работу деревом процессов.
-/// Отсутствие числа потомков (старый воркер) считается неизвестностью, а не доказательством.
-pub fn hung_in_generation(i: &ActivityInputs, t: &Thresholds) -> bool {
-    let Some(e) = &i.execution else {
-        return false;
-    };
-    // При испорченной связи проектор всё равно показывает `working("no_link")`:
-    // спасать ход по неполной картине нельзя.
+/// Ход, который хаб считает зависшим в генерации.
+#[derive(Clone, Copy, Debug)]
+pub struct HungTurn {
+    pub turn_id: Uuid,
+    /// С какого момента длится тишина.
+    pub silent_since: DateTime<Utc>,
+}
+
+/// Единственное условие «завис в генерации»: его читают и проекция активности, и
+/// спасение. Нужен идущий ход слота `running` с устойчивым именем и фаза `generating`
+/// у живого исполнения; любое известное ожидание или удержание исключает verdict
+/// (запрос или разрешение владельца, доставка вложений, очередь аренды, запуск и
+/// остановка, лимиты и «кранч», сон). Процесс должен быть жив и холост, потомков нет,
+/// а окно наблюдения после старта хаба, переподключения или старта исполнения собрано.
+/// Отсутствие числа потомков (старый воркер) — неизвестность, а не доказательство.
+pub fn hung_turn(i: &ActivityInputs, t: &Thresholds) -> Option<HungTurn> {
+    if t.hung_rescue == crate::config::HungRescue::Off {
+        return None;
+    }
+    let e = i.execution.as_ref()?;
+    if e.state != ExecutionState::Running || e.phase != "generating" {
+        return None;
+    }
+    // При испорченной связи проектор всё равно показывает `working("no_link")`.
     if i.link != LinkState::Available {
-        return false;
+        return None;
     }
-    if matches!(e.phase.as_str(), "running_tool" | "context_maintenance") {
-        return false;
-    }
-    let Some(process) = i.process else {
-        return false;
+    let turn_id = match (&i.queue.slot, i.hang.turn_id) {
+        (RunSlot::Running { .. }, Some(turn)) if !i.wake_turn => turn,
+        _ => return None,
     };
+    if i.open_requests > 0
+        || i.open_secret_requests > 0
+        || i.awaiting_attachments
+        || i.lease_wait.is_some()
+        || i.background_work.is_some()
+        || !i.queue.hold_reasons.is_empty()
+        || !i.queue.pause_reasons.is_empty()
+    {
+        return None;
+    }
+    let process = i.process?;
     if !process.alive || process.cpu_permille >= 50 || !matches!(process.descendants, Some(0)) {
-        return false;
+        return None;
     }
-    let Some(last) = i.last_event_at.max(e.phase_at).max(i.turn_started_at) else {
-        return false;
-    };
+    if !i.hang.window_ready {
+        return None;
+    }
+    let last = i.last_event_at.max(e.phase_at).max(i.turn_started_at)?;
     (i.now - last)
         .to_std()
         .is_ok_and(|silence| silence > t.hung_generating)
+        .then_some(HungTurn {
+            turn_id,
+            silent_since: last,
+        })
 }
 
 pub fn compute(i: &ActivityInputs, t: &Thresholds) -> Activity {
@@ -456,7 +531,7 @@ pub fn compute(i: &ActivityInputs, t: &Thresholds) -> Activity {
         } else {
             t.stalled_generating
         };
-        if !tool_phase && hung_in_generation(i, t) {
+        if !tool_phase && hung_turn(i, t).is_some() {
             return Activity {
                 state: S::Stalled,
                 evidence: Evidence::Stalled {
@@ -563,7 +638,7 @@ pub async fn load_inputs(
     now: DateTime<Utc>,
     stale_after: Duration,
 ) -> Result<ActivityInputs, sqlx::Error> {
-    let q=sqlx::query("select q.*,m.availability from queue_state q join conversations c on c.id=q.conversation_id join machines m on m.id=c.machine_id where q.conversation_id=$1")
+    let q=sqlx::query("select q.*,m.availability,m.availability_at from queue_state q join conversations c on c.id=q.conversation_id join machines m on m.id=c.machine_id where q.conversation_id=$1")
         .bind(conversation_id).fetch_one(&mut *conn).await?;
     let slot = RunSlot::from_columns(
         q.try_get("run_slot")?,
@@ -581,9 +656,24 @@ pub async fn load_inputs(
     let mut last_event_at = None;
     let mut wake_turn = false;
     let mut lease_wait = None;
+    let mut hang = HangFacts {
+        link_since: q.try_get("availability_at")?,
+        ..HangFacts::default()
+    };
+    hang.turn_id = match &slot {
+        RunSlot::Running { input_id } => {
+            sqlx::query_scalar("select command_id from inputs where id=$1")
+                .bind(input_id)
+                .fetch_optional(&mut *conn)
+                .await?
+        }
+        _ => None,
+    };
     let execution = if let Some(e) = latest {
         let id: Uuid = e.try_get("id")?;
         wake_turn = e.try_get("wake_turn")?;
+        hang.execution_id = Some(id);
+        hang.execution_created_at = Some(e.try_get("created_at")?);
         lease_wait = crate::leases::wait_of(&mut *conn, id, now).await?;
         last_event_at = e
             .try_get::<Option<DateTime<Utc>>, _>("last_event_at")?
@@ -597,9 +687,9 @@ pub async fn load_inputs(
                 .await?;
         last_event_at = last_event_at.max(block_progress);
         let detail: Option<Value> = e.try_get("phase_detail")?;
-        let metrics:Option<Value>=sqlx::query_scalar("select mm.executions from machine_metrics mm join conversations c on c.machine_id=mm.machine_id where c.id=$1 and mm.observed_at <= $2 and mm.observed_at > $2 - $3 * interval '1 second'")
+        let metrics:Option<(Value, DateTime<Utc>)>=sqlx::query_as("select mm.executions, mm.observed_at from machine_metrics mm join conversations c on c.machine_id=mm.machine_id where c.id=$1 and mm.observed_at <= $2 and mm.observed_at > $2 - $3 * interval '1 second'")
             .bind(conversation_id).bind(now).bind(stale_after.as_secs_f64()).fetch_optional(&mut *conn).await?;
-        if let Some(metrics) = metrics
+        if let Some((metrics, observed_at)) = metrics
             && let Some(found) = metrics.as_array().and_then(|items| {
                 items
                     .iter()
@@ -615,7 +705,20 @@ pub async fn load_inputs(
                     .as_u64()
                     .map(|value| value.min(u32::MAX as u64) as u32),
             });
+            hang.sample = Some(SampleFacts {
+                observed_at,
+                cpu_valid: found["cpu_valid"].as_bool(),
+                cli_alive: found["cli_alive"].as_bool(),
+            });
         }
+        hang.progress_checkpoint = sqlx::query_scalar::<_, Option<i64>>(
+            "select max(committed_seq) from journal_cursors where execution_id=$1",
+        )
+        .bind(id)
+        .fetch_one(&mut *conn)
+        .await?
+        .unwrap_or(0)
+        .max(0) as u64;
         let state: String = e.try_get("state")?;
         Some(ExecutionFacts {
             state: state
@@ -716,6 +819,7 @@ pub async fn load_inputs(
         wake_turn,
         question_summary,
         lease_wait,
+        hang,
     })
 }
 
@@ -767,7 +871,11 @@ pub async fn refresh_with_metrics(
             .bind(conversation_id)
             .fetch_one(&mut *conn)
             .await?;
-    let inputs = load_inputs(&mut *conn, conversation_id, now, stale_after).await?;
+    let mut inputs = load_inputs(&mut *conn, conversation_id, now, stale_after).await?;
+    // Окно наблюдения ведётся до вердикта: без двух доказательных выборок подряд
+    // после старта хаба, переподключения или старта исполнения verdict не выносится.
+    crate::rescue::observe_in_tx(&mut *conn, conversation_id, &mut inputs, stale_after, now)
+        .await?;
     let activity = compute(&inputs, &thresholds);
     // Спасение зависшего хода идёт под той же блокировкой очереди, что и проекция:
     // решение принимается по тем же признакам и не может обгонять приём журнала.
@@ -810,11 +918,11 @@ pub async fn refresh_with_metrics(
     );
     let woke_by_owner = owner_needed
         && old_activity_state.as_deref() != Some(activity.state.as_str());
-    if snoozed_until.is_some_and(|until| until <= now) || woke_by_owner {
-        sqlx::query("update conversations set snoozed_until=null where id=$1")
-            .bind(conversation_id)
-            .execute(&mut *conn)
-            .await?;
+    // Снятие «отложить» пишется вместе с `last_activity_at` ниже, одним UPDATE: второе
+    // изменение той же строки ребёнка в этой транзакции заставило бы Postgres заново
+    // брать `KEY SHARE` на строку родителя, а её держит удаление родителя.
+    let snooze_cleared = snoozed_until.is_some_and(|until| until <= now) || woke_by_owner;
+    if snooze_cleared {
         snoozed_until = None;
     }
     let pauses = json!(inputs.queue.pause_reasons);
@@ -877,15 +985,25 @@ pub async fn refresh_with_metrics(
         {
             sqlx::query("update conversation_derived d set updated_at=clock_timestamp() where d.conversation_id=$1 and d.updated_at < (select max(e.committed_at) from events e where e.scope='conversation:'||d.conversation_id::text and e.kind not in ('block_delta','derived_changed','scheduled_changed'))")
                 .bind(conversation_id).execute(&mut *conn).await?;
+            if snooze_cleared {
+                sqlx::query("update conversations set snoozed_until=null where id=$1")
+                    .bind(conversation_id)
+                    .execute(&mut *conn)
+                    .await?;
+            }
             let fired = evaluate_subscriptions(&mut *conn, conversation_id, &activity, &inputs, since, &thresholds, nudge_enabled).await?;
             return Ok((Refresh::Unchanged, fired));
         }
     }
-    sqlx::query("update conversations set last_activity_at=$2 where id=$1")
-        .bind(conversation_id)
-        .bind(last_activity)
-        .execute(&mut *conn)
-        .await?;
+    sqlx::query(
+        "update conversations set last_activity_at=$2,
+             snoozed_until=case when $3 then null else snoozed_until end where id=$1",
+    )
+    .bind(conversation_id)
+    .bind(last_activity)
+    .bind(snooze_cleared)
+    .execute(&mut *conn)
+    .await?;
     sqlx::query("insert into conversation_derived(conversation_id,activity_state,activity_evidence,activity_since,unread_count,queue_queued,pause_reasons,hold_reasons,last_activity_at,effective_model,effective_effort,effective_permission_mode,crunch_enabled,effective_model_resolved,preview,preview_turn_at,snoozed_until) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) on conflict(conversation_id) do update set effective_model_resolved=excluded.effective_model_resolved,preview=excluded.preview,preview_turn_at=excluded.preview_turn_at,snoozed_until=excluded.snoozed_until, activity_state=excluded.activity_state,activity_evidence=excluded.activity_evidence,activity_since=excluded.activity_since,unread_count=excluded.unread_count,queue_queued=excluded.queue_queued,pause_reasons=excluded.pause_reasons,hold_reasons=excluded.hold_reasons,last_activity_at=excluded.last_activity_at,effective_model=excluded.effective_model,effective_effort=excluded.effective_effort,effective_permission_mode=excluded.effective_permission_mode,crunch_enabled=excluded.crunch_enabled,updated_at=clock_timestamp()")
         .bind(conversation_id).bind(activity.state.as_str()).bind(&evidence).bind(since).bind(unread as i32).bind(inputs.queue.queued as i32).bind(&pauses).bind(&holds).bind(last_activity).bind(&model).bind(&effort).bind(&permission).bind(crunch).bind(&resolved).bind(&preview).bind(turn_at).bind(snoozed_until).execute(&mut *conn).await?;
     // Конкретная модель приходит, только когда известна: без неё объект настроек прежний.
@@ -926,6 +1044,11 @@ pub async fn refresh_with_metrics(
         })
     })
     .await?;
+    // Заметка родителю уходит после фиксации ребёнка и без ожидания блокировки
+    // родителя: удаление родителя держит его строку и потом отвязывает детей.
+    if crate::rescue::flush_parent_note(pool, conversation_id).await? {
+        crate::scheduler::notify_pool(pool);
+    }
     if fired {
         crate::scheduler::notify_pool(pool);
     }
@@ -1002,7 +1125,7 @@ async fn evaluate_subscriptions(
 /// ставшая `idle` корневая сессия идёт в обход столько же, сколько живёт свежесть пуша.
 /// Превью старых сессий обход не пересчитывает: его тихо дописывает `backfill_previews`.
 async fn sweep(pool: &PgPool) -> Result<Vec<Uuid>, sqlx::Error> {
-    sqlx::query_scalar("select c.id from conversations c left join conversation_derived d on d.conversation_id=c.id where d.conversation_id is null or d.activity_state in ('working','stalled','waiting_for_user') or exists(select 1 from session_subscriptions s where s.target_id=c.id and s.closed_at is null) or exists(select 1 from alarms a where a.state='armed' and a.condition->'session_ids' ? c.id::text) or exists(select 1 from plan_tasks p where p.executor_conversation_id=c.id and p.state='in_progress') or exists(select 1 from nudge_rules nr where nr.conversation_id=c.id and nr.state in ('watching','pending')) or exists(select 1 from executions e where e.conversation_id=c.id and e.state in ('created','starting','running','stopping')) or d.updated_at < (select max(e.committed_at) from events e where e.scope='conversation:'||c.id::text and e.kind not in ('block_delta','derived_changed','scheduled_changed','alarm_changed')) or (c.parent_conversation_id is null and d.activity_state='idle' and d.updated_at > now()-interval '10 minutes' and exists(select 1 from push_settings ps where ps.turn_finished)) order by c.id").fetch_all(pool).await
+    sqlx::query_scalar("select c.id from conversations c left join conversation_derived d on d.conversation_id=c.id where d.conversation_id is null or d.activity_state in ('working','stalled','waiting_for_user') or exists(select 1 from session_subscriptions s where s.target_id=c.id and s.closed_at is null) or exists(select 1 from alarms a where a.state='armed' and a.condition->'session_ids' ? c.id::text) or exists(select 1 from plan_tasks p where p.executor_conversation_id=c.id and p.state='in_progress') or exists(select 1 from hung_rescues h where h.conversation_id=c.id and h.parent_note is not null) or exists(select 1 from nudge_rules nr where nr.conversation_id=c.id and nr.state in ('watching','pending')) or exists(select 1 from executions e where e.conversation_id=c.id and e.state in ('created','starting','running','stopping')) or d.updated_at < (select max(e.committed_at) from events e where e.scope='conversation:'||c.id::text and e.kind not in ('block_delta','derived_changed','scheduled_changed','alarm_changed')) or (c.parent_conversation_id is null and d.activity_state='idle' and d.updated_at > now()-interval '10 minutes' and exists(select 1 from push_settings ps where ps.turn_finished)) order by c.id").fetch_all(pool).await
 }
 
 /// Сколько сессий за один обход получают превью, посчитанное до этого релиза.
@@ -1041,6 +1164,22 @@ pub async fn backfill_previews(pool: &PgPool, limit: i64) -> Result<u64, sqlx::E
     Ok(filled)
 }
 
+/// Когда этот процесс хаба начал вести проекцию активности (мс Unix, 0 — не вёл).
+/// Выборки метрик, снятые до этого момента, окно наблюдения для verdict не засчитывает:
+/// после рестарта хаба молчание нельзя оценивать по картине до него.
+static PROJECTOR_STARTED_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+pub fn mark_projector_started(at: DateTime<Utc>) {
+    PROJECTOR_STARTED_MS.store(at.timestamp_millis(), std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn projector_started() -> Option<DateTime<Utc>> {
+    match PROJECTOR_STARTED_MS.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => None,
+        ms => DateTime::from_timestamp_millis(ms),
+    }
+}
+
 pub async fn run(
     pool: PgPool,
     bus: EventBus,
@@ -1050,6 +1189,7 @@ pub async fn run(
     shutdown: watch::Receiver<bool>,
 ) {
     crate::singleton::supervise(&pool, "activity", shutdown, || async {
+        mark_projector_started(Utc::now());
         if !nudge_enabled
             && let Err(error) =
                 crate::session_tools::nudge::disable_all_on_startup(&pool, Utc::now()).await

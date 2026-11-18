@@ -2,8 +2,8 @@ use std::time::Duration;
 
 use canterlot_hub::{
     activity::{
-        self, ActivityInputs, ActivityState as S, Evidence as E, ExecutionFacts, LinkState,
-        ProcessFacts, QueueFacts, Thresholds,
+        self, ActivityInputs, ActivityState as S, Evidence as E, ExecutionFacts, HangFacts,
+        LinkState, ProcessFacts, QueueFacts, Thresholds,
     },
     model::{CompactionProgress, ExecutionState, HoldReason, PauseReason, RunSlot},
 };
@@ -58,6 +58,11 @@ fn inputs() -> ActivityInputs {
         wake_turn: false,
         question_summary: None,
         lease_wait: None,
+        hang: HangFacts {
+            turn_id: Some(Uuid::now_v7()),
+            window_ready: true,
+            ..HangFacts::default()
+        },
     }
 }
 
@@ -658,6 +663,8 @@ fn silent_generating_turn() -> ActivityInputs {
     });
     // Порог `hung_generating` — 10 минут: 601 секунда тишины при живом, но пустом дереве.
     i.now += TimeDelta::seconds(601);
+    i.hang.turn_id = Some(Uuid::now_v7());
+    i.hang.window_ready = true;
     i
 }
 
@@ -748,4 +755,83 @@ fn the_hang_threshold_is_configurable() {
     assert_eq!(activity::compute(&i, &custom).state, S::Working);
     i.now += TimeDelta::seconds(600);
     assert_eq!(activity::compute(&i, &custom).state, S::Stalled);
+}
+
+fn is_hung(i: &ActivityInputs) -> bool {
+    activity::hung_turn(i, &thresholds()).is_some()
+}
+
+#[test]
+fn one_predicate_requires_a_running_generation_turn_with_a_stable_identity() {
+    assert!(is_hung(&silent_generating_turn()));
+    let cases: Vec<(&str, Box<dyn Fn(&mut ActivityInputs)>)> = vec![
+        ("no turn identity", Box::new(|i| i.hang.turn_id = None)),
+        ("slot free", Box::new(|i| i.queue.slot = RunSlot::Free)),
+        (
+            "slot dispatching",
+            Box::new(|i| {
+                i.queue.slot = RunSlot::Dispatching {
+                    input_id: Uuid::now_v7(),
+                    attempt: 1,
+                }
+            }),
+        ),
+        ("wake turn", Box::new(|i| i.wake_turn = true)),
+        (
+            "window not ready",
+            Box::new(|i| i.hang.window_ready = false),
+        ),
+        (
+            "execution stopping",
+            Box::new(|i| i.execution.as_mut().unwrap().state = ExecutionState::Stopping),
+        ),
+        (
+            "execution starting",
+            Box::new(|i| i.execution.as_mut().unwrap().state = ExecutionState::Starting),
+        ),
+        (
+            "waiting for permission",
+            Box::new(|i| i.execution.as_mut().unwrap().phase = "awaiting_permission".into()),
+        ),
+        ("owner request", Box::new(|i| i.open_requests = 1)),
+        ("secret request", Box::new(|i| i.open_secret_requests = 1)),
+        ("attachments", Box::new(|i| i.awaiting_attachments = true)),
+        ("background work", Box::new(|i| i.background_work = Some(1))),
+        (
+            "quota hold",
+            Box::new(|i| i.queue.hold_reasons = vec![HoldReason::NoLiveExecution]),
+        ),
+        (
+            "limit pause",
+            Box::new(|i| {
+                i.queue.pause_reasons = vec![PauseReason::SessionStuck { compaction: None }]
+            }),
+        ),
+        ("link degraded", Box::new(|i| i.link = LinkState::Degraded)),
+    ];
+    for (name, change) in cases {
+        let mut i = silent_generating_turn();
+        change(&mut i);
+        assert!(!is_hung(&i), "{name} must not be a hang");
+        assert_ne!(
+            activity::compute(&i, &thresholds()).evidence.hung_flag(),
+            Some(true),
+            "{name} must not project a hung verdict"
+        );
+    }
+}
+
+#[test]
+fn the_rescue_switch_off_removes_the_verdict_and_alert_keeps_it() {
+    let i = silent_generating_turn();
+    let off = Thresholds {
+        hung_rescue: canterlot_hub::config::HungRescue::Off,
+        ..thresholds()
+    };
+    assert!(activity::hung_turn(&i, &off).is_none());
+    let alert = Thresholds {
+        hung_rescue: canterlot_hub::config::HungRescue::Alert,
+        ..thresholds()
+    };
+    assert!(activity::hung_turn(&i, &alert).is_some());
 }

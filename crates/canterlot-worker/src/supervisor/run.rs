@@ -4736,12 +4736,7 @@ mod tests {
         supervisor.try_transmit().await.unwrap();
         let checkpoint = supervisor.sj.progress_seq();
         supervisor
-            .on_interrupt_guarded(
-                "int-1".into(),
-                1,
-                Uuid::now_v7().to_string(),
-                checkpoint,
-            )
+            .on_interrupt_guarded("int-1".into(), 1, Uuid::now_v7().to_string(), checkpoint)
             .await
             .unwrap();
         assert_eq!(state.lock().unwrap().interrupt_calls, 0);

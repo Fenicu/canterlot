@@ -213,6 +213,7 @@ error_reasons! {
     InvalidIdempotencyKey => "invalid_idempotency_key", InvalidRequest;
     InputNotQueued => "input_not_queued", InvalidState;
     NoRunningTurn => "no_running_turn", InvalidState;
+    HungEpisodeResolved => "hung_episode_resolved", InvalidState;
     RequestOpen => "request_open", InvalidState;
     Compacting => "compacting", InvalidState;
     UnsupportedHarness => "unsupported_harness", InvalidState;
@@ -875,6 +876,7 @@ mod tests {
             "revision_conflict",
             "steer_in_flight",
             "no_running_turn",
+            "hung_episode_resolved",
             "request_open",
             "compacting",
             "unsupported_harness",

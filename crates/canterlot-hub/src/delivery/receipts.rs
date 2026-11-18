@@ -434,6 +434,17 @@ pub async fn apply_input_receipt_in_tx(
             .execute(&mut *conn)
             .await?;
     }
+    if steer {
+        // Вливание спасения зависшего хода считается состоявшимся только по квитанции.
+        crate::rescue::on_steer_receipt_in_tx(
+            conn,
+            command_id,
+            input_state != InputState::Queued,
+            chrono::Utc::now(),
+            correlation_id,
+        )
+        .await?;
+    }
     Ok(ApplyOutcome::Applied { input_state })
 }
 

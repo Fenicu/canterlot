@@ -30,6 +30,9 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(read))
         .routes(routes!(decision))
         .routes(routes!(interrupt))
+        .routes(routes!(hung_episode))
+        .routes(routes!(hung_interrupt))
+        .routes(routes!(hung_steer))
         .routes(routes!(usage))
         .routes(routes!(owner_inputs))
         .routes(routes!(compact))
@@ -220,6 +223,73 @@ async fn interrupt(
     let result = crate::delivery::control::request_stop(&s.pool, o.owner_id, id, &key, c)
         .await
         .map_err(ApiError::from);
+    let result = deleted_or(&s, o.owner_id, id, result).await?;
+    s.dispatcher.trigger(id);
+    Ok(Json(result))
+}
+
+#[utoipa::path(get,path="/api/v1/conversations/{id}/hung-episodes/{episode_id}",tag="conversations",params(("id"=Uuid,Path),("episode_id"=Uuid,Path)),responses((status=200,description="Состояние карточки «Ход завис»: open или причина закрытия",body=crate::rescue::EpisodeView)))]
+async fn hung_episode(
+    State(s): State<AppState>,
+    o: Owner,
+    ApiPath((id, episode_id)): ApiPath<(Uuid, Uuid)>,
+) -> Result<Json<crate::rescue::EpisodeView>, ApiError> {
+    crate::rescue::episode_state(&s.pool, o.owner_id, id, episode_id)
+        .await?
+        .map(Json)
+        .ok_or_else(|| ApiError::new(ErrorCode::NotFound))
+}
+
+#[utoipa::path(post,path="/api/v1/conversations/{id}/hung-episodes/{episode_id}/interrupt",tag="conversations",params(("id"=Uuid,Path),("episode_id"=Uuid,Path),("Idempotency-Key"=String,Header)),responses((status=200,description="Зависший ход прерван",body=crate::delivery::control::StopOutcome),(status=409,description="Карточка закрыта, причина hung_episode_resolved",body=super::error::ErrorEnvelope)))]
+async fn hung_interrupt(
+    State(s): State<AppState>,
+    o: Owner,
+    ApiPath((id, episode_id)): ApiPath<(Uuid, Uuid)>,
+    IdempotencyKey(key): IdempotencyKey,
+    Correlation(c): Correlation,
+) -> Result<Json<crate::delivery::control::StopOutcome>, ApiError> {
+    let machine: Option<Uuid> =
+        sqlx::query_scalar("select machine_id from conversations where id=$1 and owner_id=$2")
+            .bind(id)
+            .bind(o.owner_id)
+            .fetch_optional(&s.pool)
+            .await?;
+    let guarded = machine.is_some_and(|machine| {
+        s.registry
+            .capabilities(machine)
+            .iter()
+            .any(|capability| capability == crate::session::CAPABILITY_GUARDED_INTERRUPT_V1)
+    });
+    let result =
+        crate::rescue::owner_interrupt(&s.pool, o.owner_id, id, episode_id, &key, c, guarded)
+            .await
+            .map_err(ApiError::from);
+    let result = deleted_or(&s, o.owner_id, id, result).await?;
+    s.dispatcher.trigger(id);
+    Ok(Json(result))
+}
+
+#[utoipa::path(post,path="/api/v1/conversations/{id}/hung-episodes/{episode_id}/steer",tag="conversations",params(("id"=Uuid,Path),("episode_id"=Uuid,Path),("Idempotency-Key"=String,Header)),responses((status=200,description="Ожидающий ввод влит в зависший ход",body=crate::delivery::control::SendNowOutcome),(status=409,description="Карточка закрыта, причина hung_episode_resolved",body=super::error::ErrorEnvelope)))]
+async fn hung_steer(
+    State(s): State<AppState>,
+    o: Owner,
+    ApiPath((id, episode_id)): ApiPath<(Uuid, Uuid)>,
+    IdempotencyKey(key): IdempotencyKey,
+    Correlation(c): Correlation,
+) -> Result<Json<crate::delivery::control::SendNowOutcome>, ApiError> {
+    let machine: Option<Uuid> =
+        sqlx::query_scalar("select machine_id from conversations where id=$1 and owner_id=$2")
+            .bind(id)
+            .bind(o.owner_id)
+            .fetch_optional(&s.pool)
+            .await?;
+    let capabilities = machine
+        .map(|machine| s.registry.capabilities(machine))
+        .unwrap_or_default();
+    let result =
+        crate::rescue::owner_steer(&s.pool, o.owner_id, id, episode_id, &key, c, capabilities)
+            .await
+            .map_err(ApiError::from);
     let result = deleted_or(&s, o.owner_id, id, result).await?;
     s.dispatcher.trigger(id);
     Ok(Json(result))

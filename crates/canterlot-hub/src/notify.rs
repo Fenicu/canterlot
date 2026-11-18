@@ -234,21 +234,25 @@ pub async fn on_request_opened_in_tx(
     .await
 }
 
-/// Ход завис в генерации: один пуш на эпизод, только если владелец включил
-/// уведомления о сбоях. Повторное зависание в том же ходе шлёт отдельный пуш
-/// с собственным ключом, но тоже не чаще одного.
+/// Ход завис в генерации: единственный путь пуша о зависании. Ключ называет разговор и
+/// ход, поэтому зависание следующего хода того же исполнения не глушится, а второе
+/// зависание того же хода получает свой пуш. Обычный путь `stalled` для verdict
+/// «завис» пуш не ставит.
 pub async fn on_hung_in_tx(
     conn: &mut PgConnection,
     conversation_id: Uuid,
-    episode: Uuid,
+    turn_id: Uuid,
     second: bool,
 ) -> Result<(), sqlx::Error> {
     enqueue_in_tx(
         conn,
         conversation_id,
         KIND_FAILURE,
-        &format!("hung:{episode}:{}", if second { "second" } else { "first" }),
-        &json!({"kind": "hung", "second": second}),
+        &format!(
+            "hung:{conversation_id}:{turn_id}:{}",
+            if second { "second" } else { "first" }
+        ),
+        &json!({"state": "hung", "evidence": {"kind": "hung", "second": second}}),
         false,
         false,
     )
@@ -345,6 +349,17 @@ pub async fn on_settled_in_tx(
         },
         Settled::Failed | Settled::OwnerLost | Settled::Stalled | Settled::QuotaPaused => {
             if facts.now - facts.since > FRESH {
+                return Ok(());
+            }
+            // Зависание в генерации уведомляет спасение хода: у него ключ по ходу и текст
+            // про зависание, второй пуш «застряла» об одном и том же не нужен.
+            if matches!(
+                evidence,
+                Evidence::Stalled {
+                    hung: Some(true),
+                    ..
+                }
+            ) {
                 return Ok(());
             }
             // Сбой пушится один раз на эпизод: дребезг состояния внутри того же
@@ -1763,6 +1778,10 @@ pub fn all_done_text(answer: Option<&str>) -> String {
 
 pub fn failure_text(state: &str, evidence: &Value, local_time: Option<&str>) -> String {
     match state {
+        "hung" if evidence["second"].as_bool() == Some(true) => {
+            "Ход снова завис в генерации и остаётся зависшим".into()
+        }
+        "hung" => "Ход завис в генерации".into(),
         "stalled" => match local_time {
             Some(at) => format!("Застряла: нет событий с {at}"),
             None => "Застряла".into(),
@@ -1919,5 +1938,13 @@ mod tests {
             "Пауза по лимиту до 10.11 14:00"
         );
         assert_eq!(failure_text("stalled", &json!({}), None), "Застряла");
+        assert_eq!(
+            failure_text("hung", &json!({"kind":"hung","second":false}), None),
+            "Ход завис в генерации"
+        );
+        assert_eq!(
+            failure_text("hung", &json!({"kind":"hung","second":true}), None),
+            "Ход снова завис в генерации и остаётся зависшим"
+        );
     }
 }

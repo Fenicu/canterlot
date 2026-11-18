@@ -598,8 +598,15 @@ fn hung_rescue_switch_defaults_to_auto_and_rejects_unknown_values() {
             format!("{PILOT_BASE}[activity]\nhung_rescue = '{value}'\n"),
         )
         .unwrap();
-        assert_eq!(HubConfig::load(&path).unwrap().activity.hung_rescue, expected);
+        assert_eq!(
+            HubConfig::load(&path).unwrap().activity.hung_rescue,
+            expected
+        );
     }
-    fs::write(&path, format!("{PILOT_BASE}[activity]\nhung_rescue = 'sometimes'\n")).unwrap();
+    fs::write(
+        &path,
+        format!("{PILOT_BASE}[activity]\nhung_rescue = 'sometimes'\n"),
+    )
+    .unwrap();
     assert!(HubConfig::load(&path).is_err());
 }

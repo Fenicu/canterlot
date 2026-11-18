@@ -167,6 +167,9 @@ pub struct HubEvent {
     /// `turn_hung`: это карточка владельцу с действиями, а не тихая строка ленты.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub turn_hung_notice: Option<bool>,
+    /// `turn_hung`: эпизод зависания, к которому привязаны кнопки карточки.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_hung_episode: Option<Uuid>,
     /// `turn_hung`: ввод в очереди, который можно влить по кнопке «Влить».
     #[serde(skip_serializing_if = "Option::is_none")]
     pub queued_input_id: Option<Uuid>,

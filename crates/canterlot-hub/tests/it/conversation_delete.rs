@@ -292,9 +292,9 @@ async fn seed_everything(f: &Fixture, conversation: Uuid, machine: Uuid, group: 
     .await;
     exec(
         pool,
-        "insert into hung_rescues(conversation_id,execution_id,turn_started_at)
-         values($1,$2,now())",
-        &[conversation, execution],
+        "insert into hung_rescues(conversation_id,execution_id,turn_id)
+         values($1,$2,$3)",
+        &[conversation, execution, Uuid::now_v7()],
     )
     .await;
     // Потомок и подписки в обе стороны: после удаления остаются потомок без родителя и ничего больше.

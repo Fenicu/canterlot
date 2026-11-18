@@ -178,11 +178,23 @@ fn cpu_sample_is_valid_only_with_a_baseline_for_the_matching_cli() {
         members: vec![(10, 50)],
     };
     let mut c = collector(dir.path());
-    let first = c.sample(std::slice::from_ref(&probe)).unwrap().executions.remove(0);
-    assert_eq!(first.cpu_valid, Some(false), "the first sample has no baseline");
+    let first = c
+        .sample(std::slice::from_ref(&probe))
+        .unwrap()
+        .executions
+        .remove(0);
+    assert_eq!(
+        first.cpu_valid,
+        Some(false),
+        "the first sample has no baseline"
+    );
     assert_eq!(first.cli_alive, Some(true));
     std::thread::sleep(std::time::Duration::from_millis(20));
-    let second = c.sample(std::slice::from_ref(&probe)).unwrap().executions.remove(0);
+    let second = c
+        .sample(std::slice::from_ref(&probe))
+        .unwrap()
+        .executions
+        .remove(0);
     assert_eq!(second.cpu_valid, Some(true));
     // CLI с другим временем старта (pid переиспользован) — другой процесс: базы нет.
     process(dir.path(), 10, 1, 77, 0);
