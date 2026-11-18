@@ -33,7 +33,10 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use super::{ExecError, Shared, SjRelay, lost, maintenance, open, procfs, spawn};
+use super::{
+    AdapterConfig, ExecError, Shared, SjRelay, SupervisorSpecParams, lost, maintenance, open,
+    procfs, spawn, supervisor_spec_toml,
+};
 use crate::{
     adapter,
     attachments::{AttachmentStore, FetchError, RetryPolicy},
@@ -1156,6 +1159,35 @@ async fn decision_rejected(
         .await
 }
 
+/// Добавляет к базовой спеке таблицы включённых адаптеров и серверы MCP для делегата.
+/// Именно эта функция наполняет spec.toml в воркере; проверка формы вызывает её же.
+pub(crate) fn insert_spec_tables(
+    spec: &mut toml::Value,
+    adapters: &AdapterConfig,
+    delegate_mcp_servers: &[String],
+) -> Result<(), ExecError> {
+    let table = spec.as_table_mut().ok_or(ExecError::Verify("spec"))?;
+    if let Some(cfg) = &adapters.claude_code {
+        let cfg = toml::Value::try_from(cfg).map_err(|_| ExecError::Verify("claude_code"))?;
+        table.insert("claude_code".into(), cfg);
+    }
+    if let Some(cfg) = &adapters.codex {
+        let cfg = toml::Value::try_from(cfg).map_err(|_| ExecError::Verify("codex"))?;
+        table.insert("codex".into(), cfg);
+    }
+    if let Some(cfg) = &adapters.opencode {
+        let cfg = toml::Value::try_from(cfg).map_err(|_| ExecError::Verify("opencode"))?;
+        table.insert("opencode".into(), cfg);
+    }
+    if !delegate_mcp_servers.is_empty() {
+        table.insert(
+            "delegate_mcp_servers".into(),
+            toml::Value::try_from(delegate_mcp_servers).map_err(|_| ExecError::Verify("spec"))?,
+        );
+    }
+    Ok(())
+}
+
 pub(super) struct Actor {
     shared: Arc<Shared>,
     id: Uuid,
@@ -1463,44 +1495,21 @@ impl Actor {
             .clone();
         let delegate_mcp_servers = self.shared.config.delegate_mcp_servers.clone();
         let prepared = tokio::task::spawn_blocking(move || {
-            let prepared = spawn::prepare(
-                &data_dir,
-                id,
+            let spec = supervisor_spec_toml(&SupervisorSpecParams {
+                execution_id: id,
                 generation,
                 conversation_id,
                 agent_nice,
-                &timers,
-                runtime_dir.as_deref(),
-            )?;
-            let spec_path = prepared.dir.join("spec.toml");
-            let mut spec: toml::Value = toml::from_str(&fs::read_to_string(&spec_path)?)
-                .map_err(|_| ExecError::Verify("spec"))?;
-            let table = spec.as_table_mut().ok_or(ExecError::Verify("spec"))?;
-            if let Some(cfg) = adapters.claude_code {
-                let cfg =
-                    toml::Value::try_from(cfg).map_err(|_| ExecError::Verify("claude_code"))?;
-                table.insert("claude_code".into(), cfg);
-            }
-            if let Some(cfg) = adapters.codex {
-                let cfg = toml::Value::try_from(cfg).map_err(|_| ExecError::Verify("codex"))?;
-                table.insert("codex".into(), cfg);
-            }
-            if let Some(cfg) = adapters.opencode {
-                let cfg = toml::Value::try_from(cfg).map_err(|_| ExecError::Verify("opencode"))?;
-                table.insert("opencode".into(), cfg);
-            }
-            if !delegate_mcp_servers.is_empty() {
-                table.insert(
-                    "delegate_mcp_servers".into(),
-                    toml::Value::try_from(delegate_mcp_servers)
-                        .map_err(|_| ExecError::Verify("spec"))?,
-                );
-            }
-            fs::write(
-                &spec_path,
-                toml::to_string(&spec).map_err(|_| ExecError::Verify("spec"))?,
-            )?;
-            fs::File::open(&spec_path)?.sync_all()?;
+                timers: &timers,
+                data_dir: &data_dir,
+                runtime_dir: runtime_dir.as_deref(),
+                claude_code: adapters.claude_code,
+                codex: adapters.codex,
+                opencode: adapters.opencode,
+                delegate_mcp_servers: &delegate_mcp_servers,
+            })?;
+            let prepared = spawn::prepare(&data_dir, id, runtime_dir.as_deref(), &spec)?;
+            fs::File::open(prepared.dir.join("spec.toml"))?.sync_all()?;
             Ok::<_, ExecError>(prepared)
         })
         .await

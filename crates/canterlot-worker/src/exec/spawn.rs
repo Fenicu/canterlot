@@ -90,23 +90,58 @@ fn millis(value: Duration) -> String {
     format!("\"{}ms\"", value.as_millis())
 }
 
-pub(super) fn prepare(
+/// Путь сокета IPC: общий каталог runtime или каталог исполнения.
+pub(crate) fn socket_path(
     data_dir: &Path,
+    execution_id: Uuid,
+    runtime_dir: Option<&Path>,
+) -> Result<PathBuf, ExecError> {
+    let socket = match runtime_dir {
+        Some(runtime) => runtime
+            .join("canterlot")
+            .join(format!("{execution_id}.sock")),
+        None => data_dir
+            .join("executions")
+            .join(execution_id.to_string())
+            .join("ipc.sock"),
+    };
+    validate_socket_path(&socket)?;
+    Ok(socket)
+}
+
+/// Базовая часть spec.toml до вставки таблиц адаптеров: поля исполнения, timers,
+/// сокет и общий кэш проб версий CLI. Отсюда же берёт её публичный сборщик спек.
+pub(crate) fn base_spec_toml(
     execution_id: Uuid,
     generation: u64,
     conversation_id: Uuid,
     agent_nice: u32,
     timers: &SupervisorTimers,
+    socket: &Path,
+    version_cache: &Path,
+) -> String {
+    let core = format!(
+        "execution_id = \"{execution_id}\"\ngeneration = {generation}\nconversation_id = \"{conversation_id}\"\nprotocol_version = {IPC_PROTOCOL_VERSION}\nagent_nice = {agent_nice}\n\n[timers]\nattach_wait = {}\nready_deadline = {}\ntransmit_deadline = {}\ncli_version_probe = {}\nstop_grace = {}\nstop_retry = {}\n",
+        millis(timers.attach_wait),
+        millis(timers.ready_deadline),
+        millis(timers.transmit_deadline),
+        millis(timers.cli_version_probe),
+        millis(timers.stop_grace),
+        millis(timers.stop_retry),
+    );
+    let socket_spec = toml::Value::String(socket.to_string_lossy().into_owned()).to_string();
+    let cache_spec = toml::Value::String(version_cache.to_string_lossy().into_owned()).to_string();
+    format!("ipc_socket = {socket_spec}\nversion_cache = {cache_spec}\n{core}")
+}
+
+/// Готовит каталог исполнения и пишет уже собранную `supervisor_spec_toml` приватным файлом.
+pub(super) fn prepare(
+    data_dir: &Path,
+    execution_id: Uuid,
     runtime_dir: Option<&Path>,
+    spec: &str,
 ) -> Result<Prepared, ExecError> {
-    let dir = data_dir.join("executions").join(execution_id.to_string());
-    let socket = match runtime_dir {
-        Some(runtime) => runtime
-            .join("canterlot")
-            .join(format!("{execution_id}.sock")),
-        None => dir.join("ipc.sock"),
-    };
-    validate_socket_path(&socket)?;
+    let socket = socket_path(data_dir, execution_id, runtime_dir)?;
     if let Some(runtime) = runtime_dir {
         let path = runtime.join("canterlot");
         fs::DirBuilder::new()
@@ -138,24 +173,6 @@ pub(super) fn prepare(
     fs::File::open(&root)?.sync_all()?;
     let secret: [u8; 32] = rand::random();
     private_file(&dir.join("secret"), &secret)?;
-    let spec = format!(
-        "execution_id = \"{execution_id}\"\ngeneration = {generation}\nconversation_id = \"{conversation_id}\"\nprotocol_version = {IPC_PROTOCOL_VERSION}\nagent_nice = {agent_nice}\n\n[timers]\nattach_wait = {}\nready_deadline = {}\ntransmit_deadline = {}\ncli_version_probe = {}\nstop_grace = {}\nstop_retry = {}\n",
-        millis(timers.attach_wait),
-        millis(timers.ready_deadline),
-        millis(timers.transmit_deadline),
-        millis(timers.cli_version_probe),
-        millis(timers.stop_grace),
-        millis(timers.stop_retry),
-    );
-    let socket_spec = toml::Value::String(socket.to_string_lossy().into_owned()).to_string();
-    let cache_spec = toml::Value::String(
-        data_dir
-            .join(".cli-versions.json")
-            .to_string_lossy()
-            .into_owned(),
-    )
-    .to_string();
-    let spec = format!("ipc_socket = {socket_spec}\nversion_cache = {cache_spec}\n{spec}");
     private_file(&dir.join("spec.toml"), spec.as_bytes())?;
     fs::File::open(&dir)?.sync_all()?;
     Ok(Prepared {

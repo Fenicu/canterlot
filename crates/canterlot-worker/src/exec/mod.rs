@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     io,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -21,7 +21,10 @@ use uuid::Uuid;
 
 use crate::{
     attachments::AttachmentSource,
-    config::{ExecutionConfig, WorkerAttachmentsConfig},
+    config::{
+        ClaudeCodeConfig, CodexConfig, ExecutionConfig, OpenCodeConfig, SupervisorTimers,
+        WorkerAttachmentsConfig,
+    },
     media::MediaSink,
     session::WorkerError,
     session_store::StoreClient,
@@ -42,6 +45,47 @@ use manager::{Msg, Start};
 pub struct SjRelay {
     pub journal_id: Uuid,
     pub records: Vec<JournalRecord>,
+}
+
+/// Входные данные сборщика спеки: то, что воркер берёт из конфигурации исполнения.
+pub struct SupervisorSpecParams<'a> {
+    pub execution_id: Uuid,
+    pub generation: u64,
+    pub conversation_id: Uuid,
+    pub agent_nice: u32,
+    pub timers: &'a SupervisorTimers,
+    pub data_dir: &'a Path,
+    pub runtime_dir: Option<&'a Path>,
+    pub claude_code: Option<ClaudeCodeConfig>,
+    pub codex: Option<CodexConfig>,
+    pub opencode: Option<OpenCodeConfig>,
+    pub delegate_mcp_servers: &'a [String],
+}
+
+/// Собирает spec.toml ровно тем путём, что и воркер при запуске сопровождения:
+/// базовая часть из `spawn::base_spec_toml`, таблицы адаптеров и MCP из
+/// `manager::insert_spec_tables`, сериализация `toml::to_string`. Этот же сборщик
+/// вызывается в `manager::spawn_sequence` перед записью файла, поэтому проверка
+/// формы не может разойтись с тем, что воркер реально пишет на диск.
+pub fn supervisor_spec_toml(params: &SupervisorSpecParams<'_>) -> Result<String, ExecError> {
+    let socket = spawn::socket_path(params.data_dir, params.execution_id, params.runtime_dir)?;
+    let base = spawn::base_spec_toml(
+        params.execution_id,
+        params.generation,
+        params.conversation_id,
+        params.agent_nice,
+        params.timers,
+        &socket,
+        &params.data_dir.join(".cli-versions.json"),
+    );
+    let mut spec: toml::Value = toml::from_str(&base).map_err(|_| ExecError::Verify("spec"))?;
+    let adapters = AdapterConfig {
+        claude_code: params.claude_code.clone(),
+        codex: params.codex.clone(),
+        opencode: params.opencode.clone(),
+    };
+    manager::insert_spec_tables(&mut spec, &adapters, params.delegate_mcp_servers)?;
+    toml::to_string(&spec).map_err(|_| ExecError::Verify("spec"))
 }
 
 #[derive(Debug, thiserror::Error)]
