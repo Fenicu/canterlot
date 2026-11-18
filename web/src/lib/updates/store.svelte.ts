@@ -8,6 +8,7 @@ import {
 	type DismissStorage
 } from '#lib/updates/dismiss.js';
 import { toUpdateItem, type UpdateItem } from '#lib/updates/text.js';
+import { SvelteMap } from 'svelte/reactivity';
 
 export interface UpdatesQuery {
 	limit: number;
@@ -33,7 +34,7 @@ export class UpdatesStore {
 	#phase = '';
 	#busy = false;
 	/** Записи, пришедшие живым событием после последнего чтения ленты. */
-	#live = new Map<string, UpdateItem>();
+	#live = new SvelteMap<string, UpdateItem>();
 
 	constructor(private deps: UpdatesDeps) {
 		this.dismissed = readDismiss(deps.ownerId, deps.storage);
