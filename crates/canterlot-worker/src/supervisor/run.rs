@@ -2989,6 +2989,18 @@ impl Supervisor {
             return Ok(());
         }
         if !expected_turn.is_empty() {
+            // Охрана сверяется с журналом после событий адаптера, которые уже готовы:
+            // цикл мог выбрать управляющее сообщение раньше записи прогресса.
+            for _ in 0..64 {
+                if self.adapter_exited || matches!(self.lifecycle, Lifecycle::Draining { .. }) {
+                    break;
+                }
+                let Some(event) = ready_adapter_event(&mut self.adapter).await else {
+                    break;
+                };
+                self.on_adapter_event(event).await?;
+            }
+            self.sj.flush()?;
             let same_turn = self.active_turn.map(|turn| turn.to_string()).as_deref()
                 == Some(expected_turn.as_str());
             if !same_turn || self.sj.progress_seq() > checkpoint {
@@ -3674,6 +3686,8 @@ mod tests {
         steer_undetermined: bool,
         refused: Vec<String>,
         compact_calls: usize,
+        /// События, которые адаптер уже отдал бы без ожидания.
+        ready_events: std::collections::VecDeque<AdapterEvent>,
     }
 
     struct StubAdapter {
@@ -3775,7 +3789,11 @@ mod tests {
         }
 
         async fn next_event(&mut self) -> AdapterEvent {
-            std::future::pending().await
+            let ready = self.state.lock().unwrap().ready_events.pop_front();
+            match ready {
+                Some(event) => event,
+                None => std::future::pending().await,
+            }
         }
 
         async fn agent_call_result(&mut self, call_id: Uuid, result: AgentCallResult) {
@@ -4788,6 +4806,32 @@ mod tests {
             .await
             .unwrap();
         assert!(supervisor.sj.progress_seq() > checkpoint);
+        supervisor
+            .on_interrupt_guarded("int-1".into(), 1, first.0.to_string(), checkpoint)
+            .await
+            .unwrap();
+        assert_eq!(state.lock().unwrap().interrupt_calls, 0);
+        assert!(!supervisor.aborting_turn && supervisor.pending_interrupts.is_empty());
+    }
+
+    /// Событие прогресса уже готово у адаптера, но ещё не записано в журнал: охрана не
+    /// должна решать по картине до него, иначе прервёт ход, который ожил.
+    #[tokio::test]
+    async fn guarded_interrupt_sees_a_ready_but_unjournaled_progress_event() {
+        let (_dir, mut supervisor, state) = test_supervisor();
+        state.lock().unwrap().ack_interrupt = true;
+        let first = queue_owner(&mut supervisor);
+        supervisor.try_transmit().await.unwrap();
+        let checkpoint = supervisor.sj.progress_seq();
+        state
+            .lock()
+            .unwrap()
+            .ready_events
+            .push_back(AdapterEvent::Phase {
+                phase: crate::adapter::Phase::Generating,
+                tool_name: None,
+                summary: None,
+            });
         supervisor
             .on_interrupt_guarded("int-1".into(), 1, first.0.to_string(), checkpoint)
             .await

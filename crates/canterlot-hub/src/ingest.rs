@@ -1569,6 +1569,7 @@ async fn apply_body(
                 InterruptState::Superseded => "superseded",
                 InterruptState::RejectedStale => "rejected_stale",
                 InterruptState::TurnMismatch => "turn_mismatch",
+                InterruptState::GuardUnsupported => "guard_unsupported",
                 InterruptState::Unspecified => return Err(IngestError::InvalidRecord),
             };
             if let Some(target) = command(conn, machine_id, command_id).await?

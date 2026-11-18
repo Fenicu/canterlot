@@ -637,6 +637,9 @@ enum InterruptState {
   REJECTED_STALE = 6;
   // Ход или отметка прогресса уже не совпадают с теми, на которые рассчитан interrupt.
   TURN_MISMATCH = 7;
+  // Охранный interrupt нечем проверить: сопровождение исполнения его охрану не понимает
+  // (пережило обновление воркера). Процесс не тронут.
+  GUARD_UNSUPPORTED = 8;
 }
 
 message InterruptStatus {

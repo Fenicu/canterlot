@@ -950,7 +950,12 @@ pub async fn on_interrupt_status_in_tx(
                 conversation_id,
                 owner_id,
                 format!("rescue-refused:{conversation_id}:{command_id}"),
-                "Ход завис в генерации, прерывание не принято: ход уже изменился".to_owned(),
+                if status == "guard_unsupported" {
+                    "Ход завис в генерации, прерывание не принято: сопровождение исполнения не проверяет ход, обновите воркер или прервите ход вручную"
+                } else {
+                    "Ход завис в генерации, прерывание не принято: ход уже изменился"
+                }
+                .to_owned(),
                 turn_event("refused", conversation_id, episode),
                 now,
                 correlation_id,
@@ -1087,30 +1092,25 @@ pub async fn owner_interrupt(
     let key = idempotency_key.to_owned();
     crate::db::in_tx(pool, move |conn| {
         Box::pin(async move {
-            owner_gate_in_tx(conn, owner_id, conversation_id, episode_id).await?;
-            let (turn, execution): (Uuid, Option<Uuid>) = sqlx::query_as(
-                "select turn_id,execution_id from hung_rescues where conversation_id=$1",
-            )
-            .bind(conversation_id)
-            .fetch_one(&mut *conn)
-            .await?;
-            let checkpoint: Option<i64> = sqlx::query_scalar(
-                "select max(committed_seq) from journal_cursors where execution_id=$1",
-            )
-            .bind(execution)
-            .fetch_one(&mut *conn)
-            .await?;
-            let guard = guarded.then_some(InterruptGuard {
-                turn_id: turn,
-                progress_checkpoint: checkpoint.unwrap_or(0).max(0) as u64,
-            });
+            let card = owner_gate_in_tx(conn, owner_id, conversation_id, episode_id).await?;
+            // Кнопка карточки без охраны у воркера могла бы прервать ход, который уже ожил:
+            // отказываем. Обычное «Прервать» в чате остаётся владельцу.
+            if !guarded {
+                return Err(control::ControlError::InvalidRequest {
+                    reason: "capability_missing",
+                });
+            }
+            let guard = InterruptGuard {
+                turn_id: card.turn_id,
+                progress_checkpoint: card.checkpoint,
+            };
             let outcome = control::request_stop_guarded_in_tx(
                 conn,
                 owner_id,
                 conversation_id,
                 &key,
                 correlation_id,
-                guard,
+                Some(guard),
             )
             .await?;
             let command = outcome_command(&outcome);
@@ -1142,15 +1142,23 @@ pub async fn owner_steer(
     let key = idempotency_key.to_owned();
     crate::db::in_tx(pool, move |conn| {
         Box::pin(async move {
-            owner_gate_in_tx(conn, owner_id, conversation_id, episode_id).await?;
-            let input: Option<Uuid> = sqlx::query_scalar(
-                "select id from inputs where conversation_id=$1 and state='queued'
-                 and not service_note order by input_seq limit 1",
-            )
-            .bind(conversation_id)
-            .fetch_optional(&mut *conn)
-            .await?;
-            let Some(input) = input else {
+            let card = owner_gate_in_tx(conn, owner_id, conversation_id, episode_id).await?;
+            // Влить можно только тот ввод, который показала карточка, и пока он в очереди:
+            // другой ввод в голове очереди карточке не принадлежит.
+            let still_queued: bool = match card.input_id {
+                Some(input) => {
+                    sqlx::query_scalar(
+                        "select exists(select 1 from inputs where id=$1 and conversation_id=$2
+                         and state='queued' and not service_note)",
+                    )
+                    .bind(input)
+                    .bind(conversation_id)
+                    .fetch_one(&mut *conn)
+                    .await?
+                }
+                None => false,
+            };
+            let Some(input) = card.input_id.filter(|_| still_queued) else {
                 return Err(control::ControlError::InvalidRequest {
                     reason: "input_not_queued",
                 });
@@ -1180,13 +1188,22 @@ pub async fn owner_steer(
     .await
 }
 
-/// Очередь разговора — первой, как у проектора; потом эпизод должен быть открыт.
+/// Что карточка фиксирует об эпизоде: ход, отметка журнала и ввод очереди.
+struct CardFacts {
+    turn_id: Uuid,
+    checkpoint: u64,
+    input_id: Option<Uuid>,
+}
+
+/// Очередь разговора — первой, как у проектора; потом эпизод должен быть открыт, а ход
+/// не продвинуться: между записью прогресса в журнал и закрытием эпизода проектором
+/// карточка ещё «открыта», но действовать по ней уже нельзя.
 async fn owner_gate_in_tx(
     conn: &mut PgConnection,
     owner_id: Uuid,
     conversation_id: Uuid,
     episode_id: Uuid,
-) -> Result<(), control::ControlError> {
+) -> Result<CardFacts, control::ControlError> {
     let found: Option<Uuid> = sqlx::query_scalar(
         "select q.conversation_id from queue_state q join conversations c on c.id=q.conversation_id
          where q.conversation_id=$1 and c.owner_id=$2 for update of q",
@@ -1198,13 +1215,49 @@ async fn owner_gate_in_tx(
     if found.is_none() {
         return Err(control::ControlError::NotFound);
     }
+    let resolved = || control::ControlError::InvalidRequest {
+        reason: "hung_episode_resolved",
+    };
     let view = episode_state_in_tx(conn, conversation_id, episode_id).await?;
     if view.state != "open" {
-        return Err(control::ControlError::InvalidRequest {
-            reason: "hung_episode_resolved",
-        });
+        return Err(resolved());
     }
-    Ok(())
+    type Stored = (
+        Option<Uuid>,
+        Option<Uuid>,
+        Option<DateTime<Utc>>,
+        Option<i64>,
+        Option<Uuid>,
+    );
+    let (turn, execution, mark, checkpoint, input_id): Stored = sqlx::query_as(
+        "select turn_id,execution_id,progress_mark,progress_checkpoint,card_input_id
+         from hung_rescues where conversation_id=$1",
+    )
+    .bind(conversation_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    let (Some(turn_id), Some(execution), Some(mark), Some(checkpoint)) =
+        (turn, execution, mark, checkpoint)
+    else {
+        return Err(resolved());
+    };
+    let advanced: bool = sqlx::query_scalar(
+        "select coalesce((select max(committed_seq) from journal_cursors where execution_id=$1),0) > $2
+            or coalesce((select last_event_at > $3 from executions where id=$1),false)",
+    )
+    .bind(execution)
+    .bind(checkpoint)
+    .bind(mark)
+    .fetch_one(&mut *conn)
+    .await?;
+    if advanced {
+        return Err(resolved());
+    }
+    Ok(CardFacts {
+        turn_id,
+        checkpoint: checkpoint.max(0) as u64,
+        input_id,
+    })
 }
 
 pub async fn episode_state(

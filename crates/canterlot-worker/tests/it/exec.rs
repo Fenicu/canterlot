@@ -3143,6 +3143,46 @@ async fn supervisor_without_capabilities_gets_no_compact_or_steer() {
     env.stop().await;
 }
 
+// Сопровождение, пережившее обновление воркера, поля охраны игнорирует и прервало бы любой
+// ход: охранный interrupt ему не пересылается, хаб получает отказ, обычный interrupt идёт.
+#[cfg(feature = "fault-injection")]
+#[tokio::test]
+async fn supervisor_without_the_guard_capability_gets_no_guarded_interrupt() {
+    use canterlot_proto::worker::v1::InterruptState;
+    let mut env = Env::new().await;
+    env.manager().strip_ipc_capabilities();
+    env.hub_session();
+    env.start(1).await;
+    env.wait_running().await;
+    let guarded = Uuid::now_v7();
+    env.send(command(
+        guarded,
+        1,
+        env.execution,
+        1,
+        Kind::Interrupt(Interrupt {
+            expected_turn_id: Uuid::now_v7().to_string(),
+            progress_checkpoint: 0,
+        }),
+    ))
+    .await;
+    let cj = env
+        .wait_cj("the guarded interrupt is refused", |cj| {
+            cj.iter().any(|b| {
+                matches!(b, Body::InterruptStatus(f)
+                    if f.command_id == guarded.to_string()
+                        && f.state == InterruptState::GuardUnsupported as i32)
+            })
+        })
+        .await;
+    assert!(
+        !cj.iter().any(|b| matches!(b, Body::InterruptStatus(f)
+            if f.command_id == guarded.to_string() && f.state == InterruptState::SentToAgent as i32)),
+        "the supervisor never saw the interrupt"
+    );
+    env.stop().await;
+}
+
 #[tokio::test]
 async fn supervisor_with_capabilities_gets_compact() {
     let mut env = Env::new().await;

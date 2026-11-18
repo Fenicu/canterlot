@@ -934,7 +934,36 @@ async fn a_locked_parent_defers_the_note_instead_of_waiting(pool: PgPool) {
     assert_eq!(parent_jobs(&pool, &scene).await.len(), 1);
 }
 
-async fn http_scene(pool: &PgPool) -> (testkit::TestHub, testkit::TestClient, Scene) {
+async fn http_scene(pool: &PgPool) -> (testkit::TestHub, testkit::TestClient, Scene, Link) {
+    http_scene_with(pool, &["pilot_v1", "send_now_v1", "guarded_interrupt_v1"]).await
+}
+
+/// Живое управляющее соединение воркера в реестре хаба. Проверка отзыва учётных данных
+/// раз в секунду снимает тестовое соединение без настоящих учётных данных, поэтому тест
+/// восстанавливает его перед каждым действием карточки.
+struct Link {
+    machine: Uuid,
+    capabilities: Vec<String>,
+    lease: Option<canterlot_hub::session::TestLease>,
+}
+
+impl Link {
+    fn ensure(&mut self, hub: &testkit::TestHub) {
+        if hub.registry.capabilities(self.machine) != self.capabilities {
+            self.lease = None;
+            self.lease = Some(
+                hub.registry
+                    .connect_for_tests(self.machine, &self.capabilities),
+            );
+        }
+    }
+}
+
+/// Сцена с HTTP и живым воркером с заданным набором возможностей.
+async fn http_scene_with(
+    pool: &PgPool,
+    capabilities: &[&str],
+) -> (testkit::TestHub, testkit::TestClient, Scene, Link) {
     // Фоновый проектор хаба в этих тестах только наблюдает (`off`): решения о зависании
     // принимают явные пересчёты теста с заданным моментом, а не гонка с часами проектора.
     let hub = testkit::spawn_test_hub_with(
@@ -963,7 +992,16 @@ async fn http_scene(pool: &PgPool) -> (testkit::TestHub, testkit::TestClient, Sc
     let client = testkit::TestClient::over_socket(hub.http_addr())
         .await
         .as_owner();
-    (hub, client, scene)
+    let mut link = Link {
+        machine: machine.machine_id,
+        capabilities: capabilities
+            .iter()
+            .map(|capability| (*capability).to_owned())
+            .collect(),
+        lease: None,
+    };
+    link.ensure(&hub);
+    (hub, client, scene, link)
 }
 
 /// Доказательные выборки после старта фонового проектора хаба, по часам теста, пока не
@@ -1008,7 +1046,7 @@ async fn episode_of(pool: &PgPool, scene: &Scene) -> Uuid {
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn card_actions_are_bound_to_their_episode(pool: PgPool) {
     use axum::http::{Method, StatusCode};
-    let (hub, client, scene) = http_scene(&pool).await;
+    let (hub, client, scene, mut link) = http_scene(&pool).await;
     // Отметки сразу после старта фонового проектора, но уже в прошлом его часов.
     tick_until_episode(&pool, &scene).await;
     let episode = episode_of(&pool, &scene).await;
@@ -1024,12 +1062,14 @@ async fn card_actions_are_bound_to_their_episode(pool: PgPool) {
         scene.seed.conversation_id,
         Uuid::now_v7()
     );
+    link.ensure(&hub);
     let refused = client
         .send(Method::POST, &wrong, Some("wrong-1"), None)
         .await;
     assert_eq!(refused.status, StatusCode::CONFLICT);
     assert_eq!(harmful(&pool, &scene).await, 0);
     // Действие по открытой карточке.
+    link.ensure(&hub);
     let done = client
         .send(
             Method::POST,
@@ -1042,6 +1082,7 @@ async fn card_actions_are_bound_to_their_episode(pool: PgPool) {
     assert_eq!(commands_of(&pool, &scene, "interrupt").await.len(), 1);
     let state: Value = client.send(Method::GET, &base, None, None).await.json();
     assert_eq!(state["state"], "owner_interrupt");
+    link.ensure(&hub);
     let again = client
         .send(
             Method::POST,
@@ -1064,7 +1105,7 @@ async fn card_actions_are_bound_to_their_episode(pool: PgPool) {
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn an_old_card_cannot_stop_a_later_turn(pool: PgPool) {
     use axum::http::{Method, StatusCode};
-    let (hub, client, scene) = http_scene(&pool).await;
+    let (hub, client, scene, _link) = http_scene(&pool).await;
     // Отметки сразу после старта фонового проектора, но уже в прошлом его часов.
     tick_until_episode(&pool, &scene).await;
     let episode = episode_of(&pool, &scene).await;
@@ -1294,4 +1335,132 @@ async fn a_refusal_does_not_open_a_second_episode_without_progress(pool: PgPool)
     tick(&pool, &scene, second).await;
     assert_ne!(episode_of(&pool, &scene).await, episode);
     assert_eq!(pushes(&pool, &scene).await.len(), 2);
+}
+
+/// Между записью прогресса в журнал и закрытием эпизода проектором карточка ещё «открыта»:
+/// кнопки отказывают по сохранённой отметке эпизода и не читают новый курсор журнала.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_card_of_an_advanced_episode_is_refused_before_the_projector_closes_it(pool: PgPool) {
+    use axum::http::{Method, StatusCode};
+    let (hub, client, scene, mut link) = http_scene(&pool).await;
+    let queued = queued_input(&pool, &scene).await;
+    tick_until_episode(&pool, &scene).await;
+    let episode = episode_of(&pool, &scene).await;
+    let base = format!(
+        "/api/v1/conversations/{}/hung-episodes/{episode}",
+        scene.seed.conversation_id
+    );
+    // Журнал ушёл вперёд (ход ожил), проектор эпизод ещё не закрыл.
+    sqlx::query("update journal_cursors set committed_seq=committed_seq+3 where execution_id=$1")
+        .bind(scene.execution)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let state: Value = client.send(Method::GET, &base, None, None).await.json();
+    assert_eq!(state["state"], "open", "the projector has not run yet");
+    for (path, key) in [("interrupt", "adv-int"), ("steer", "adv-steer")] {
+        link.ensure(&hub);
+        let response = client
+            .send(Method::POST, &format!("{base}/{path}"), Some(key), None)
+            .await;
+        assert_eq!(response.status, StatusCode::CONFLICT, "{path}");
+        let body: Value = response.json();
+        assert_eq!(
+            body["error"]["details"]["reason"], "hung_episode_resolved",
+            "{path}: {body}"
+        );
+    }
+    assert_eq!(harmful(&pool, &scene).await, 0);
+    let state: String = sqlx::query_scalar("select state from inputs where id=$1")
+        .bind(queued)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(state, "queued");
+    drop(hub);
+}
+
+/// «Влить» привязана к вводу карточки: если его отменили, новый ввод в голове очереди
+/// не подменяет его.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn steer_is_bound_to_the_cards_input_and_never_picks_a_new_head(pool: PgPool) {
+    use axum::http::{Method, StatusCode};
+    let (hub, client, scene, mut link) = http_scene(&pool).await;
+    let original = queued_input(&pool, &scene).await;
+    tick_until_episode(&pool, &scene).await;
+    let episode = episode_of(&pool, &scene).await;
+    let path = format!(
+        "/api/v1/conversations/{}/hung-episodes/{episode}/steer",
+        scene.seed.conversation_id
+    );
+    sqlx::query("update inputs set state='cancelled' where id=$1")
+        .bind(original)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let newer = queued_input(&pool, &scene).await;
+    link.ensure(&hub);
+    let response = client.send(Method::POST, &path, Some("gone-1"), None).await;
+    assert_eq!(response.status, StatusCode::CONFLICT);
+    let body: Value = response.json();
+    assert_eq!(
+        body["error"]["details"]["reason"], "input_not_queued",
+        "{body}"
+    );
+    assert_eq!(
+        harmful(&pool, &scene).await,
+        0,
+        "the new head was not steered"
+    );
+    let state: String = sqlx::query_scalar("select state from inputs where id=$1")
+        .bind(newer)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(state, "queued");
+    drop(hub);
+}
+
+/// Воркер без охранного interrupt (или сопровождение, не понимающее охрану, — оно
+/// отвечает отказом на стороне воркера): карточка не прерывает вслепую.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_card_never_interrupts_through_a_worker_without_the_guard(pool: PgPool) {
+    use axum::http::{Method, StatusCode};
+    let (hub, client, scene, mut link) = http_scene_with(&pool, &["pilot_v1", "send_now_v1"]).await;
+    tick_until_episode(&pool, &scene).await;
+    let episode = episode_of(&pool, &scene).await;
+    link.ensure(&hub);
+    let response = client
+        .send(
+            Method::POST,
+            &format!(
+                "/api/v1/conversations/{}/hung-episodes/{episode}/interrupt",
+                scene.seed.conversation_id
+            ),
+            Some("legacy-1"),
+            None,
+        )
+        .await;
+    assert_eq!(response.status, StatusCode::CONFLICT);
+    let body: Value = response.json();
+    assert_eq!(
+        body["error"]["details"]["reason"], "capability_missing",
+        "{body}"
+    );
+    assert_eq!(harmful(&pool, &scene).await, 0);
+    // Карточка осталась открытой: обычное «Прервать» в чате у владельца есть всегда.
+    let state: Value = client
+        .send(
+            Method::GET,
+            &format!(
+                "/api/v1/conversations/{}/hung-episodes/{episode}",
+                scene.seed.conversation_id
+            ),
+            None,
+            None,
+        )
+        .await
+        .json();
+    assert_eq!(state["state"], "open");
+    drop(hub);
 }

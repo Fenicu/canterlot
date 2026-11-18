@@ -66,12 +66,16 @@ pub const IPC_CAP_COMPACT: &str = "compact_v1";
 pub const IPC_CAP_STEER: &str = "steer_v1";
 /// Сопровождение принимает `goal` с командой `GoalCommand`.
 pub const IPC_CAP_GOALS: &str = "goals_v1";
+/// Сопровождение проверяет охрану `InterruptRequest` (`expected_turn_id`, `progress_checkpoint`)
+/// по готовым событиям адаптера. Старое сопровождение поля игнорирует и прервало бы любой ход.
+pub const IPC_CAP_GUARDED_INTERRUPT: &str = "guarded_interrupt_v1";
 /// Всё, что объявляет эта сборка в `Attached.ipc_capabilities`.
 pub const IPC_CAPABILITIES: &[&str] = &[
     IPC_CAP_IGNORE_UNKNOWN,
     IPC_CAP_COMPACT,
     IPC_CAP_STEER,
     IPC_CAP_GOALS,
+    IPC_CAP_GUARDED_INTERRUPT,
 ];
 pub const MAX_SJ_BATCH_RECORDS: usize = 256;
 pub const MAX_BLOCK_DELTA_BYTES: usize = 16_384;

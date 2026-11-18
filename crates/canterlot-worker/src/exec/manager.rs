@@ -7,7 +7,10 @@ use std::{
 };
 
 use canterlot_proto::{
-    limits::{IPC_CAP_COMPACT, IPC_CAP_GOALS, IPC_CAP_STEER, IPC_PROTOCOL_VERSION},
+    limits::{
+        IPC_CAP_COMPACT, IPC_CAP_GOALS, IPC_CAP_GUARDED_INTERRUPT, IPC_CAP_STEER,
+        IPC_PROTOCOL_VERSION,
+    },
     worker::{
         ipc::{
             CliStarted, CompactRequest, ControlToSupervisor, Deliver, DeliverAck, InterruptRequest,
@@ -2409,6 +2412,15 @@ impl Actor {
             }
             Some(Kind::Interrupt(interrupt)) => {
                 if live && command.execution_generation == self.generation {
+                    // Сопровождение, пережившее обновление воркера, поля охраны игнорирует и
+                    // прервало бы любой ход: охранный interrupt ему не пересылаем.
+                    if !interrupt.expected_turn_id.is_empty()
+                        && !self.ipc_caps.contains(IPC_CAP_GUARDED_INTERRUPT)
+                    {
+                        return self
+                            .interrupt_status(&command, InterruptState::GuardUnsupported)
+                            .await;
+                    }
                     if !self
                         .send(down::Msg::Interrupt(InterruptRequest {
                             command_id: cid_text,
