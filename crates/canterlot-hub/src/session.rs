@@ -904,14 +904,14 @@ impl Registry {
             .map(|info| info.connection_id);
         let waiter = {
             let mut waiters = self.prechecks.lock().expect("precheck waiters lock");
-            match waiters.remove(&(machine_id, attempt_id)) {
-                Some((stored, waiter))
-                    if stored == connection_id && live.is_some_and(|live| live == stored) =>
-                {
-                    Some(waiter)
-                }
-                Some((_, _)) => None,
-                None => None,
+            let key = (machine_id, attempt_id);
+            let matches = waiters.get(&key).is_some_and(|(stored, _)| {
+                *stored == connection_id && live == Some(connection_id)
+            });
+            if matches {
+                waiters.remove(&key).map(|(_, waiter)| waiter)
+            } else {
+                None
             }
         };
         if let Some(waiter) = waiter {
@@ -1464,5 +1464,122 @@ mod tests {
         assert!(!registry.is_reconciled(machine));
         registry.mark_reconciled(machine, replacement);
         assert!(registry.is_reconciled(machine));
+    }
+
+    fn precheck_request() -> canterlot_proto::worker::v1::SchedulePrecheck {
+        canterlot_proto::worker::v1::SchedulePrecheck {
+            attempt_id: Uuid::now_v7().to_string(),
+            workdir: "/tmp".into(),
+            command: "true".into(),
+            timeout_seconds: 60,
+        }
+    }
+
+    fn precheck_reply(
+        attempt: &str,
+    ) -> canterlot_proto::worker::v1::PrecheckResult {
+        canterlot_proto::worker::v1::PrecheckResult {
+            attempt_id: attempt.to_owned(),
+            outcome: Some(
+                canterlot_proto::worker::v1::precheck_result::Outcome::Finished(
+                    canterlot_proto::worker::v1::PrecheckFinished {
+                        exit_code: 0,
+                        output_tail: String::new(),
+                        timed_out: false,
+                    },
+                ),
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn precheck_reply_is_bound_to_the_asking_connection() {
+        let registry = Registry::new(HubTimers::default());
+        let machine = Uuid::now_v7();
+        let connection = Uuid::now_v7();
+        let (_lease, mut commands) = registry.register(machine, connection, vec![]).unwrap();
+        registry.mark_accepted(machine, connection, &[CAPABILITY_SCHEDULE_PRECHECK_V1.to_owned()]);
+        let request = precheck_request();
+        let attempt = request.attempt_id.clone();
+        let waiting = tokio::spawn({
+            let registry = registry.clone();
+            async move {
+                registry
+                    .ask_precheck(machine, request, std::time::Duration::from_secs(5))
+                    .await
+            }
+        });
+        // Замена потока забирает команду, но ответить за чужую попытку не может.
+        let down = tokio::time::timeout(std::time::Duration::from_secs(5), commands.recv())
+            .await
+            .expect("precheck command sent")
+            .expect("command channel open");
+        assert!(matches!(
+            down.msg,
+            Some(canterlot_proto::worker::v1::control_down::Msg::SchedulePrecheck(_))
+        ));
+        registry.finish_precheck(machine, Uuid::now_v7(), precheck_reply(&attempt));
+        assert!(!waiting.is_finished(), "foreign connection cannot complete");
+        registry.finish_precheck(machine, connection, precheck_reply(&Uuid::now_v7().to_string()));
+        // Чужой номер попытки тоже не подходит.
+        let completed = tokio::time::timeout(std::time::Duration::from_millis(100), waiting).await;
+        assert!(completed.is_err(), "wrong attempt id leaves the waiter");
+    }
+
+    #[tokio::test]
+    async fn precheck_waiter_dies_with_the_connection() {
+        let registry = Registry::new(HubTimers::default());
+        let machine = Uuid::now_v7();
+        let connection = Uuid::now_v7();
+        let (_lease, _commands) = registry.register(machine, connection, vec![]).unwrap();
+        registry.mark_accepted(machine, connection, &[CAPABILITY_SCHEDULE_PRECHECK_V1.to_owned()]);
+        let waiting = tokio::spawn({
+            let registry = registry.clone();
+            async move {
+                registry
+                    .ask_precheck(machine, precheck_request(), std::time::Duration::from_secs(30))
+                    .await
+            }
+        });
+        tokio::task::yield_now().await;
+        registry.revoke(machine, connection);
+        // Обрыв соединения гасит ожидание сразу, а не через полный таймаут.
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), waiting)
+            .await
+            .expect("waiter resolves")
+            .expect("ask task runs");
+        assert_eq!(outcome, Err(PrecheckFailure::NoAnswer));
+    }
+
+    #[tokio::test]
+    async fn precheck_without_capability_or_answer_fails_fast() {
+        let registry = Registry::new(HubTimers::default());
+        let machine = Uuid::now_v7();
+        let connection = Uuid::now_v7();
+        let (_lease, _commands) = registry.register(machine, connection, vec![]).unwrap();
+        registry.mark_accepted(machine, connection, &["pilot_v1".to_owned()]);
+        assert_eq!(
+            registry
+                .ask_precheck(machine, precheck_request(), std::time::Duration::from_secs(1))
+                .await,
+            Err(PrecheckFailure::CapabilityMissing)
+        );
+        registry.mark_accepted(machine, connection, &[CAPABILITY_SCHEDULE_PRECHECK_V1.to_owned()]);
+        assert_eq!(
+            registry
+                .ask_precheck(
+                    machine,
+                    precheck_request(),
+                    std::time::Duration::from_millis(50)
+                )
+                .await,
+            Err(PrecheckFailure::NoAnswer)
+        );
+        assert_eq!(
+            registry
+                .ask_precheck(Uuid::now_v7(), precheck_request(), std::time::Duration::from_secs(1))
+                .await,
+            Err(PrecheckFailure::NoSession)
+        );
     }
 }

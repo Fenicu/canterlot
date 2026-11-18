@@ -737,8 +737,7 @@ async fn failed_runs_push_once_per_schedule_per_hour(pool: PgPool) {
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn concurrent_run_now_with_one_key_dispatches_once(pool: PgPool) {
-    let f = Fixture::new(pool.clone()).await;
-    let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
+    let f = Fixture::new(pool.clone()).await;    let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
     let r = f
         .client
         .send(
@@ -783,4 +782,113 @@ async fn concurrent_run_now_with_one_key_dispatches_once(pool: PgPool) {
     .await
     .unwrap();
     assert_eq!(inputs, 1, "no duplicate input");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn undelivered_input_and_working_session_block_overlap(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
+    let id = create(&f, existing(&f), "0 9 * * *").await;
+    // Первый запуск уходит в работу, ввод никем не забирается.
+    due(&pool, &id, Utc::now() - TimeDelta::seconds(30)).await;
+    scheduler(&f).tick(Utc::now()).await.unwrap();
+    let first = run_id(&pool, &id).await;
+    wait_state(&pool, first, "started").await;
+    // Второй тик видит недоставленный ввод первого запуска.
+    due(&pool, &id, Utc::now() - TimeDelta::seconds(30)).await;
+    scheduler(&f).tick(Utc::now()).await.unwrap();
+    let second = run_id(&pool, &id).await;
+    assert_ne!(first, second);
+    wait_state(&pool, second, "skipped_overlap").await;
+    // Работающая сессия тоже блокирует, даже если ввод уже приняли.
+    let input: Uuid = sqlx::query_scalar("select input_id from schedule_runs where id=$1")
+        .bind(first)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    sqlx::query("update inputs set state='accepted' where id=$1")
+        .bind(input)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "insert into conversation_derived(conversation_id, activity_state)
+         values($1,'working')
+         on conflict(conversation_id) do update set activity_state='working'",
+    )
+    .bind(f.seed.conversation_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    due(&pool, &id, Utc::now() - TimeDelta::seconds(30)).await;
+    scheduler(&f).tick(Utc::now()).await.unwrap();
+    let third = run_id(&pool, &id).await;
+    assert_ne!(second, third);
+    let (state, detail) = state(&pool, third).await;
+    assert_eq!(state, "skipped_overlap", "{detail}");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn weekly_reserve_hold_skips_new_session_run(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
+    sqlx::query(
+        "insert into provider_limits(provider, weekly_reserve_active)
+         values('claude', true)
+         on conflict(provider) do update set weekly_reserve_active=true",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let target = json!({
+        "kind": "new_session",
+        "machine_id": f.seed.machine_id,
+        "workdir": "/tmp/scheduled-reserve",
+        "executor": {"harness": "synthetic", "model": "synthetic-small", "effort": "high"},
+    });
+    let id = create(&f, target, "0 9 * * *").await;
+    due(&pool, &id, Utc::now() - TimeDelta::seconds(30)).await;
+    scheduler(&f).tick(Utc::now()).await.unwrap();
+    let rid = run_id(&pool, &id).await;
+    let (state, detail) = state(&pool, rid).await;
+    // Приёмка ждёт исхода в фоне: дождаться терминального состояния.
+    let detail = if state == "started" || state == "claimed" || state == "prechecking" {
+        wait_state(&pool, rid, "skipped_limits").await
+    } else {
+        assert_eq!(state, "skipped_limits", "{detail}");
+        detail
+    };
+    assert_eq!(detail["reason"], "initial_hold", "{detail}");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn schedules_deny_unauthenticated_callers(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let anonymous = canterlot_hub::testkit::TestClient::in_process(canterlot_hub::http::router(
+        f.state.clone(),
+    ))
+    .with_header("Origin", canterlot_hub::testkit::TEST_ORIGIN)
+    .with_header("X-Canterlot-Client", "1");
+    for (method, path) in [
+        (Method::GET, "/api/v1/schedules".to_owned()),
+        (
+            Method::POST,
+            "/api/v1/schedules".to_owned(),
+        ),
+        (
+            Method::GET,
+            format!("/api/v1/schedules/{}/runs", Uuid::now_v7()),
+        ),
+    ] {
+        let refused = anonymous.send(method.clone(), &path, None, None).await;
+        assert_eq!(refused.status.as_u16(), 401, "{path}");
+    }
+    let forged = canterlot_hub::testkit::TestClient::in_process(canterlot_hub::http::router(
+        f.state.clone(),
+    ))
+    .with_header("Origin", canterlot_hub::testkit::TEST_ORIGIN)
+    .with_header("X-Canterlot-Client", "1")
+    .with_session("no-such-session");
+    let refused = forged.send(Method::GET, "/api/v1/schedules", None, None).await;
+    assert_eq!(refused.status.as_u16(), 401);
 }
