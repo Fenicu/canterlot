@@ -83,7 +83,8 @@ async fn worker_without_exec_capability_echo_rejects_start() {
             "credential_expiry_v1",
             "provider_credits_v1",
             "cli_versions_v1",
-            "slash_catalog_v1"
+            "slash_catalog_v1",
+            "schedule_precheck_v1"
         ]
     );
     hub.send(ControlDown {
