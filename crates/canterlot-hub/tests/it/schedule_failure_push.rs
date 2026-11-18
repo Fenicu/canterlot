@@ -322,18 +322,22 @@ async fn stale_drop_loses_to_a_coalesce_that_lands_after_inspection(pool: PgPool
         let sender = sender.clone();
         tokio::spawn(async move { sender.deliver_due(&pool).await.unwrap() })
     };
-    for _ in 0..400 {
-        let waiting: i64 = sqlx::query_scalar(
-            "select count(*) from pg_stat_activity where wait_event_type='Lock' and datname=current_database()",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        if waiting > 0 {
-            break;
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let waiting: i64 = sqlx::query_scalar(
+                "select count(*) from pg_stat_activity where wait_event_type='Lock' and datname=current_database()",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if waiting > 0 {
+                return;
+            }
+            tokio::task::yield_now().await;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
+    })
+    .await
+    .expect("the stale drop waits on the row");
     sqlx::query(
         "update owner_pushes set payload=jsonb_set(payload,'{reason}','\"fresh\"'),
            created_at=clock_timestamp(),updated_at=clock_timestamp()

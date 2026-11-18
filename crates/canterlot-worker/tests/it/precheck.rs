@@ -447,7 +447,7 @@ async fn setsid_helper_is_contained(how: &'static str) {
     }
     let gone = tokio::time::timeout(Duration::from_secs(5), async {
         while alive(helper) {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::task::yield_now().await;
         }
     })
     .await

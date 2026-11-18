@@ -1813,18 +1813,22 @@ async fn run_now_does_not_commit_a_claim_when_another_operation_wins_the_key(poo
         tokio::spawn(async move { reserve_manual(&pool, owner, schedule, "race-key", true).await })
     };
     // Резерв дошёл до вставки ключа и ждёт победителя на уникальном индексе.
-    for _ in 0..200 {
-        let waiting: i64 = sqlx::query_scalar(
-            "select count(*) from pg_locks where locktype='transactionid' and not granted",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        if waiting > 0 {
-            break;
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let waiting: i64 = sqlx::query_scalar(
+                "select count(*) from pg_locks where locktype='transactionid' and not granted",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if waiting > 0 {
+                return;
+            }
+            tokio::task::yield_now().await;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-    }
+    })
+    .await
+    .expect("reservation waits for the winner");
     winner.commit().await.unwrap();
     let result = reserve.await.unwrap();
     assert!(
@@ -2217,10 +2221,17 @@ async fn finalization_retries_a_lock_timeout(pool: PgPool) {
         .execute(&mut *holder)
         .await
         .unwrap();
-    let release = tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        holder.commit().await.unwrap();
-    });
+    // Замок отпускается после того, как таймаут сработал хотя бы раз: ожидание,
+    // его отказ и повторное ожидание второй попытки.
+    let release = {
+        let pool = pool.clone();
+        tokio::spawn(async move {
+            until_waiters(&pool, "first attempt waits", |n| n >= 1).await;
+            until_waiters(&pool, "first attempt timed out", |n| n == 0).await;
+            until_waiters(&pool, "second attempt waits", |n| n >= 1).await;
+            holder.commit().await.unwrap();
+        })
+    };
     write_outcome_retrying(
         &short,
         &schedule,
@@ -2296,6 +2307,17 @@ async fn recovery_skips_a_locked_schedule(pool: PgPool) {
     holder.rollback().await.unwrap();
 }
 
+/// Ждёт, пока число ожидающих замок сессий удовлетворит условию.
+async fn until_waiters(pool: &PgPool, what: &str, ok: impl Fn(i64) -> bool) {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while !ok(lock_waiters(pool).await) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{what}"));
+}
+
 async fn lock_waiters(pool: &PgPool) -> i64 {
     sqlx::query_scalar(
         "select count(*) from pg_stat_activity where wait_event_type='Lock' and datname=current_database()",
@@ -2350,23 +2372,11 @@ async fn scheduled_new_session_takes_the_machine_lock_before_the_provider_lock(p
         let machine = f.seed.machine_id;
         tokio::spawn(async move { canterlot_hub::machines::revoke(&pool, machine).await })
     };
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        while lock_waiters(&pool).await < 1 {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("revoke waits on the credential");
+    until_waiters(&pool, "revoke waits on the credential", |n| n >= 1).await;
     // Приём расписания дошёл до ожидания замка (машины или провайдера).
     due(&pool, &id, Utc::now() - TimeDelta::seconds(30)).await;
     scheduler(&f).tick(Utc::now()).await.unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        while lock_waiters(&pool).await < 2 {
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("admission waits on a lock");
+    until_waiters(&pool, "admission waits on a lock", |n| n >= 2).await;
     // Приём журнала просит провайдера: без правки порядка цикл замкнулся бы.
     let (owner, machine) = (f.seed.owner_id, f.seed.machine_id);
     let ingest_task = tokio::spawn(async move {
@@ -2570,7 +2580,10 @@ async fn routed_new_session_stalled_on_hub_a_is_finished_once_by_hub_b(pool: PgP
         let scheduler = scheduler(&f);
         tokio::spawn(async move { admit(&scheduler, stalled).await })
     };
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    // Приёмка успела бы дойти до конца за это число переключений, если бы не затвор.
+    for _ in 0..200 {
+        tokio::task::yield_now().await;
+    }
     assert!(!late.is_finished(), "admission on hub A is stalled");
     sqlx::query("update schedule_runs set lease_at=now()-interval '2 hours',updated_at=now()-interval '2 hours' where id=$1")
         .bind(rid)
