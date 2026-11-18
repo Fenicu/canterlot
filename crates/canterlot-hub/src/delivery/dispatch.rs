@@ -376,6 +376,8 @@ pub async fn dispatch_next(
 /// Служебные строки, накопившиеся до этого ввода, идут агенту одним коротким блоком
 /// перед текстом владельца или событием. Сами они хода не начинали; приставка
 /// снимается здесь, при выдаче, поэтому правка ожидающего ввода их не теряет.
+/// Карточка «Ход завис» (`turn_hung_notice`) адресована только владельцу: она остаётся
+/// в ленте и к агенту не идёт никогда.
 async fn prepend_service_notes(
     conn: &mut PgConnection,
     conversation_id: Uuid,
@@ -385,6 +387,7 @@ async fn prepend_service_notes(
     let notes: Vec<(Uuid, Value)> = sqlx::query_as(
         "select id,content from inputs
          where conversation_id=$1 and service_note and note_attached_to is null
+           and coalesce(origin#>>'{event,turn_hung_notice}','') <> 'true'
          order by input_seq for update",
     )
     .bind(conversation_id)

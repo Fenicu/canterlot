@@ -1480,3 +1480,86 @@ async fn a_refresh_with_a_stale_clock_does_not_erase_the_observation_window(pool
     assert_eq!(samples(pool.clone(), conversation).await, 2);
     assert_eq!(harmful(&pool, &scene).await, 1, "the window completed");
 }
+
+/// Карточка «Ход завис» в режиме alert нужна только владельцу: она видна в ленте, но
+/// следующий выданный ввод агента её текст не несёт.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn the_alert_card_never_reaches_the_agents_next_prompt(pool: PgPool) {
+    let scene = hung_scene(&pool, "claude_code", false).await;
+    tick_mode(
+        &pool,
+        &scene,
+        scene.base - TimeDelta::seconds(15),
+        HungRescue::Alert,
+    )
+    .await;
+    tick_mode(&pool, &scene, scene.base, HungRescue::Alert).await;
+    let card = notes(&pool, &scene).await;
+    assert_eq!(card.len(), 1, "the card is on the timeline");
+    let hang_text = card[0].0.clone();
+    assert!(!hang_text.is_empty());
+
+    // Ход закончился, владелец пишет следующее сообщение.
+    sqlx::query("update inputs set state='accepted' where conversation_id=$1 and not service_note")
+        .bind(scene.seed.conversation_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "update queue_state set run_slot='free',run_slot_input_id=null,run_slot_since=now()
+         where conversation_id=$1",
+    )
+    .bind(scene.seed.conversation_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    submit_input(
+        &pool,
+        SubmitInput {
+            owner_id: scene.seed.owner_id,
+            conversation_id: scene.seed.conversation_id,
+            idempotency_key: "owner:after-card".to_owned(),
+            content: vec![ContentBlock::Text {
+                text: "neutral owner message".into(),
+            }],
+            received_at: Utc::now(),
+            correlation_id: Uuid::now_v7(),
+            origin: None,
+        },
+    )
+    .await
+    .unwrap();
+    let outcome = canterlot_hub::delivery::dispatch::dispatch_next(
+        &pool,
+        scene.seed.conversation_id,
+        canterlot_hub::delivery::dispatch::GateInputs {
+            machine_available: true,
+            machine_reconciled: true,
+            session_capabilities: Vec::new(),
+        },
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    let canterlot_hub::delivery::dispatch::DispatchOutcome::Dispatched { command_id, .. } = outcome
+    else {
+        panic!("the owner message did not dispatch: {outcome:?}");
+    };
+    let payload: Value = sqlx::query_scalar("select payload from commands where id=$1")
+        .bind(command_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let content = payload["content"].to_string();
+    assert!(content.contains("neutral owner message"), "{content}");
+    assert!(
+        !content.contains(&hang_text),
+        "the card text must not reach the agent: {content}"
+    );
+    assert_eq!(payload["content"].as_array().unwrap().len(), 1, "{content}");
+    assert_eq!(
+        notes(&pool, &scene).await.len(),
+        1,
+        "the card stays visible"
+    );
+}
