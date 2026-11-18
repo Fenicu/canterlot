@@ -290,6 +290,13 @@ async fn seed_everything(f: &Fixture, conversation: Uuid, machine: Uuid, group: 
         &[Uuid::now_v7(), conversation, owner, input],
     )
     .await;
+    exec(
+        pool,
+        "insert into hung_rescues(conversation_id,execution_id,turn_started_at)
+         values($1,$2,now())",
+        &[conversation, execution],
+    )
+    .await;
     // Потомок и подписки в обе стороны: после удаления остаются потомок без родителя и ничего больше.
     let delegate = f.conversation().await;
     exec(

@@ -2869,6 +2869,11 @@ export interface components {
             question?: string | null;
         } | {
             cpu_busy?: boolean | null;
+            /**
+             * @description Зависание в генерации: живой процесс, пустое дерево, холостой CPU и долгое
+             *     молчание. Старым клиентам поле не пишется, они читают ordinary `stalled`.
+             */
+            hung?: boolean | null;
             /** @enum {string} */
             kind: "stalled";
             /** Format: date-time */
@@ -3245,6 +3250,11 @@ export interface components {
             process_alive?: boolean | null;
             provider?: string | null;
             question?: string | null;
+            /**
+             * Format: uuid
+             * @description `turn_hung`: ввод в очереди, который можно влить по кнопке «Влить».
+             */
+            queued_input_id?: string | null;
             reason?: string | null;
             /** Format: uuid */
             request_id?: string | null;
@@ -3264,6 +3274,10 @@ export interface components {
             tokens_in?: number | null;
             /** Format: int64 */
             tokens_out?: number | null;
+            /** @description `turn_hung`: как именно спасён ход — `steered`, `interrupted`, `nudged`. */
+            turn_hung_action?: string | null;
+            /** @description `turn_hung`: это карточка владельцу с действиями, а не тихая строка ленты. */
+            turn_hung_notice?: boolean | null;
             /** Format: int64 */
             turns?: number | null;
             /** Format: date-time */
@@ -3276,15 +3290,6 @@ export interface components {
             working_ms?: number | null;
             /** @description `accepted`: `removed`, `none`, `dirty` или `failed`. */
             worktree?: string | null;
-            /** @description `turn_hung`: как спасён ход — `steered`, `interrupted`, `nudged`. */
-            turn_hung_action?: string | null;
-            /** @description `turn_hung`: это карточка владельцу с действиями. */
-            turn_hung_notice?: boolean | null;
-            /**
-             * Format: uuid
-             * @description `turn_hung`: ввод в очереди для кнопки «Влить».
-             */
-            queued_input_id?: string | null;
         };
         ImageItem: {
             /**

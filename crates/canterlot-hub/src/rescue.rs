@@ -93,6 +93,8 @@ pub fn plan(
     }
 }
 
+type EpisodeRow = (Option<Uuid>, Option<DateTime<Utc>>, bool, bool, bool);
+
 #[derive(Clone, Copy)]
 struct Episode {
     active: bool,
@@ -108,7 +110,7 @@ async fn episode_in_tx(
     turn: DateTime<Utc>,
     now: DateTime<Utc>,
 ) -> Result<Episode, sqlx::Error> {
-    let row: Option<(Option<Uuid>, Option<DateTime<Utc>>, bool, bool, bool)> = sqlx::query_as(
+    let row: Option<EpisodeRow> = sqlx::query_as(
         "select execution_id,turn_started_at,episode_active,rescued,second_notified
          from hung_rescues where conversation_id=$1",
     )
@@ -461,16 +463,15 @@ pub async fn evaluate_in_tx(
             nudge_in_tx(conn, conversation_id, owner_id, now, correlation_id).await?
         }
         RescueAction::Notice => {
-            let origin = json!({
-                "kind": "event",
-                "chain_depth": 0,
-                "event": {
-                    "kind": "turn_hung",
-                    "turn_hung_notice": true,
-                    "session_id": conversation_id,
-                    "queued_input_id": queued
-                }
+            let mut event = json!({
+                "kind": "turn_hung",
+                "turn_hung_notice": true,
+                "session_id": conversation_id
             });
+            if let Some(input_id) = queued {
+                event["queued_input_id"] = json!(input_id);
+            }
+            let origin = json!({"kind": "event", "chain_depth": 0, "event": event});
             note_in_tx(
                 conn,
                 conversation_id,

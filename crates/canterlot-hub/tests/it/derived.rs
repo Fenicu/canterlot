@@ -216,8 +216,10 @@ async fn stalled_is_detected_by_the_tick_without_any_event(pool: PgPool) {
 #[sqlx::test(migrations = "./migrations")]
 async fn stalled_never_changes_execution_queue_or_commands(pool: PgPool) {
     let (s, e) = running(&pool).await;
+    // Живой потомок исключает новый verdict «завис в генерации»: проверяем,
+    // что обычный щедрый `stalled` по-прежнему ничего не меняет в очередях.
     sqlx::query("insert into machine_metrics(machine_id,observed_at,machine_time_ms,cpu_cores,cpu_permille,mem_total_bytes,mem_available_bytes,load1_centi,load5_centi,load15_centi,disks,executions) values($1,clock_timestamp(),1,1,100,100,50,0,0,0,'[]',$2)")
-        .bind(s.machine_id).bind(json!([{"execution_id":e,"alive":true,"cpu_permille":0,"descendants":0}]))
+        .bind(s.machine_id).bind(json!([{"execution_id":e,"alive":true,"cpu_permille":0,"descendants":1}]))
         .execute(&pool).await.unwrap();
     let snapshot = "select jsonb_build_object('executions',(select jsonb_agg(to_jsonb(e)) from executions e),'queue',(select jsonb_agg(to_jsonb(q)) from queue_state q),'commands',(select jsonb_agg(to_jsonb(c)) from commands c))";
     let before: Value = sqlx::query_scalar(snapshot).fetch_one(&pool).await.unwrap();

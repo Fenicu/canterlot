@@ -323,7 +323,7 @@ async fn owner_root_without_a_rule_gets_a_notice_and_one_push(pool: PgPool) {
     let notes = notes(&pool, &scene).await;
     assert_eq!(notes.len(), 1);
     assert_eq!(notes[0]["event"]["kind"], "turn_hung");
-    assert_eq!(notes[0]["event"]["notice"], true);
+    assert_eq!(notes[0]["event"]["turn_hung_notice"], true);
     let pushes: i64 = sqlx::query_scalar(
         "select count(*) from owner_pushes where conversation_id=$1 and dedupe_key like 'hung:%'",
     )

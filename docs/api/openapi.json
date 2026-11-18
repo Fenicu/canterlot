@@ -15578,6 +15578,13 @@
                   "null"
                 ]
               },
+              "hung": {
+                "type": [
+                  "boolean",
+                  "null"
+                ],
+                "description": "Зависание в генерации: живой процесс, пустое дерево, холостой CPU и долгое\nмолчание. Старым клиентам поле не пишется, они читают ordinary `stalled`."
+              },
               "kind": {
                 "type": "string",
                 "enum": [
@@ -16906,6 +16913,14 @@
               "null"
             ]
           },
+          "queued_input_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "`turn_hung`: ввод в очереди, который можно влить по кнопке «Влить»."
+          },
           "reason": {
             "type": [
               "string",
@@ -16974,6 +16989,20 @@
             ],
             "format": "int64"
           },
+          "turn_hung_action": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`turn_hung`: как именно спасён ход — `steered`, `interrupted`, `nudged`."
+          },
+          "turn_hung_notice": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "`turn_hung`: это карточка владельцу с действиями, а не тихая строка ленты."
+          },
           "turns": {
             "type": [
               "integer",
@@ -17008,28 +17037,6 @@
               "null"
             ],
             "description": "`accepted`: `removed`, `none`, `dirty` или `failed`."
-          },
-          "turn_hung_action": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "`turn_hung`: как спасён ход — `steered`, `interrupted`, `nudged`."
-          },
-          "turn_hung_notice": {
-            "type": [
-              "boolean",
-              "null"
-            ],
-            "description": "`turn_hung`: это карточка владельцу с действиями."
-          },
-          "queued_input_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "uuid",
-            "description": "`turn_hung`: ввод в очереди для кнопки «Влить»."
           }
         }
       },
