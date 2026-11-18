@@ -57,12 +57,6 @@ function addCss(id: string, css: string): () => void {
   }
 }
 
-function svgWidth(markup: string): number {
-  const box = /viewBox="[-\d.]+\s+[-\d.]+\s+([\d.]+)/.exec(markup);
-  const width = box ? Number(box[1]) : 0;
-  return Number.isFinite(width) && width > 0 ? Math.min(Math.round(width), 1200) : 0;
-}
-
 /**
  * Заменяет завершённые блоки ```mermaid на переключатель «Код / Диаграмма».
  * Пока блок идёт, разметка не трогается: исходник остаётся обычным кодом.
@@ -100,8 +94,12 @@ export function mermaidWithin(node: HTMLElement, value: MermaidBlockInput) {
       const parsed = new DOMParser().parseFromString(result.markup, 'image/svg+xml');
       instance.view.replaceChildren(document.importNode(parsed.documentElement, true));
       instance.disposeCss?.();
-      const width = svgWidth(result.markup);
-      const sizing = width > 0 ? `#${instance.id} svg{width:100%;min-width:${width}px;height:auto;max-width:none}` : '';
+      // Естественный размер из viewBox/max-width: маленькие схемы не растягиваются,
+      // широкие остаются читаемыми и прокручиваются внутри .mermaid-view.
+      const natural = result.natural;
+      const sizing = natural
+        ? `#${instance.id} svg{width:${natural.width}px;min-width:min(${natural.width}px,640px);max-width:100%;height:auto}`
+        : '';
       instance.disposeCss = addCss(instance.id, `${result.css}\n${sizing}`);
       instance.failed = false;
       instance.ready = true;

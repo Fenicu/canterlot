@@ -47,6 +47,27 @@ for (const project of ['phone', 'desktop']) {
     }));
     expect(inserted.styleTags).toBe(0);
     expect(inserted.styleAttrs).toBe(0);
+
+    // Схема остаётся естественного размера: подписи не крупнее текста ленты,
+    // а на десктопе маленькая схема не растягивается на всю колонку.
+    const metrics = await wrap.locator('.mermaid-view svg').evaluate((svg) => {
+      const prose = svg.closest('.prose') as HTMLElement;
+      const label = svg.querySelector('text');
+      const body = prose.querySelector('p');
+      return {
+        width: svg.getBoundingClientRect().width,
+        column: prose.getBoundingClientRect().width,
+        label: label ? Number.parseFloat(getComputedStyle(label).fontSize) : 0,
+        body: body ? Number.parseFloat(getComputedStyle(body).fontSize) : 0
+      };
+    });
+    if (info.project.name === 'desktop') {
+      expect(metrics.width, `SVG ${metrics.width} vs колонка ${metrics.column}`).toBeLessThan(metrics.column);
+    }
+    expect(metrics.label, 'размер подписи узла').toBeGreaterThan(0);
+    expect(metrics.body, 'размер текста ленты').toBeGreaterThan(0);
+    expect(metrics.label, `подпись ${metrics.label}px vs текст ${metrics.body}px`).toBeLessThanOrEqual(metrics.body * 1.3);
+
     const before = await page.locator('article.card').last().evaluate((node) => ({
       card: node.scrollWidth - node.clientWidth,
       prose: (node.querySelector('.prose') as HTMLElement).scrollWidth - (node.querySelector('.prose') as HTMLElement).clientWidth

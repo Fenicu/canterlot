@@ -40,14 +40,17 @@ describe("mermaidThemeVariables", () => {
       "--raised": "#303030",
       "--text": "#e0e0e0",
       "--line": "#404040",
+      "--muted": "#9aa0a6",
       "--accent": "#7aa2f7"
     };
     const variables = mermaidThemeVariables((name) => colors[name] ?? "");
     expect(variables.background).toBe("#101010");
     expect(variables.primaryColor).toBe("#202020");
     expect(variables.primaryTextColor).toBe("#e0e0e0");
-    expect(variables.primaryBorderColor).toBe("#404040");
-    expect(variables.lineColor).toBe("#404040");
+    expect(variables.primaryBorderColor).toBe("#9aa0a6");
+    expect(variables.nodeBorder).toBe("#9aa0a6");
+    expect(variables.lineColor).toBe("#9aa0a6");
+    expect(variables.clusterBorder).toBe("#9aa0a6");
     expect(variables.secondaryColor).toBe("#303030");
   });
 
@@ -62,11 +65,15 @@ describe("mermaidThemeVariables", () => {
 describe("extractSvgCss", () => {
   it("moves the inline style element and style attributes into an external css string", () => {
     const svg =
-      '<svg id="m-1" viewBox="0 0 10 10">' +
+      '<svg id="m-1" width="100%" viewBox="-8 -8 120 40" style="max-width: 480px">' +
       '<style>#m-1 .label{fill:#111}</style>' +
       '<rect x="1" y="1" width="2" height="2" style="fill:red;stroke:blue"/>' +
       '<path d="M0 0 L1 1"/></svg>';
-    const { markup, css } = extractSvgCss(svg);
+    const { markup, css, natural } = extractSvgCss(svg);
+    expect(natural).toEqual({ width: 480, height: 40 });
+    expect(markup).toContain('width="480"');
+    expect(markup).toContain('height="40"');
+    expect(markup).not.toContain('width="100%"');
     expect(markup).not.toContain("<style");
     expect(markup).not.toContain("style=");
     expect(css).toContain("#m-1 .label{fill:#111}");

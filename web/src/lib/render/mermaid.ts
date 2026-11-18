@@ -29,7 +29,7 @@ const FALLBACK = {
   surface: 'canvas',
   raised: 'canvas',
   text: 'canvastext',
-  line: 'gray',
+  muted: 'gray',
   accent: 'highlight'
 };
 
@@ -45,29 +45,30 @@ export function mermaidThemeVariables(
   const surface = color('--surface', FALLBACK.surface);
   const raised = color('--raised', FALLBACK.raised);
   const text = color('--text', FALLBACK.text);
-  const line = color('--line', FALLBACK.line);
+  // Границы и линии рисуются приглушённым текстом: сам --line на тёмной теме почти не виден.
+  const muted = color('--muted', FALLBACK.muted);
   const accent = color('--accent', FALLBACK.accent);
   return {
     background,
     primaryColor: surface,
     primaryTextColor: text,
-    primaryBorderColor: line,
+    primaryBorderColor: muted,
     secondaryColor: raised,
     tertiaryColor: background,
-    lineColor: line,
+    lineColor: muted,
     textColor: text,
     mainBkg: surface,
     secondBkg: raised,
-    border1: line,
+    border1: muted,
     border2: accent,
-    nodeBorder: line,
+    nodeBorder: muted,
     clusterBkg: raised,
-    clusterBorder: line,
+    clusterBorder: muted,
     edgeLabelBackground: surface,
     titleColor: text,
     labelBackground: surface,
     noteBkgColor: raised,
-    noteBorderColor: line
+    noteBorderColor: muted
   };
 }
 
@@ -80,14 +81,31 @@ function cssId(id: string): string {
  * таблицы, поэтому правила выносятся в строку, которую вызывающий помещает в
  * constructable stylesheet (её CSP не блокирует).
  */
-export function extractSvgCss(svg: string): { markup: string; css: string } {
+export interface NaturalSize { width: number; height: number }
+
+export function extractSvgCss(svg: string): { markup: string; css: string; natural: NaturalSize | null } {
   if (typeof DOMParser === 'undefined' || typeof XMLSerializer === 'undefined') {
-    return { markup: svg, css: '' };
+    return { markup: svg, css: '', natural: null };
   }
   const doc = new DOMParser().parseFromString(svg, 'image/svg+xml');
   const root = doc.documentElement;
-  if (root.nodeName.toLowerCase() !== 'svg') return { markup: '', css: '' };
+  if (root.nodeName.toLowerCase() !== 'svg') return { markup: '', css: '', natural: null };
   const id = cssId(root.getAttribute('id') ?? '');
+  // Mermaid ставит width="100%" и max-width в инлайн-стиле. Без max-width картинка
+  // растягивается на всю колонку, и подписи становятся в разы крупнее текста ленты.
+  // Переносим естественный размер в атрибуты: новых инлайн-стилей при этом нет.
+  const maxWidth = /max-width:\s*([\d.]+)px/i.exec(root.getAttribute('style') ?? '');
+  const box = (root.getAttribute('viewBox') ?? '').trim().split(/[\s,]+/).map(Number);
+  const width = Number(maxWidth?.[1] ?? box[2]);
+  const height = Number(box[3]);
+  const natural: NaturalSize | null =
+    Number.isFinite(width) && width > 0 && Number.isFinite(height) && height > 0
+      ? { width: Math.round(width), height: Math.round(height) }
+      : null;
+  if (natural) {
+    root.setAttribute('width', String(natural.width));
+    root.setAttribute('height', String(natural.height));
+  }
   const rules: string[] = [];
   for (const style of Array.from(root.querySelectorAll('style'))) {
     rules.push(style.textContent ?? '');
@@ -112,7 +130,7 @@ export function extractSvgCss(svg: string): { markup: string; css: string } {
   const markup = new XMLSerializer()
     .serializeToString(root)
     .replace(/\sstyle="[^"]*"/g, '');
-  return { markup, css: rules.join('\n') };
+  return { markup, css: rules.join('\n'), natural };
 }
 
 let svgPurify: DOMPurifyInstance | undefined;
@@ -156,6 +174,7 @@ export function loadMermaid(): Promise<MermaidModule> {
 interface Prepared {
   markup: string;
   css: string;
+  natural: NaturalSize | null;
 }
 
 const MAX_CACHED = 24;
@@ -188,7 +207,8 @@ export async function renderMermaidSvg(
   const extracted = extractSvgCss(svg);
   const result: Prepared = {
     markup: sanitizeSvg(extracted.markup),
-    css: extracted.css
+    css: extracted.css,
+    natural: extracted.natural
   };
   if (result.markup.includes('<svg')) {
     prepared.set(cacheKey, result);
