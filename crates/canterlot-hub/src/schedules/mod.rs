@@ -1152,121 +1152,162 @@ fn is_admitting(id: &Uuid) -> bool {
         .contains(id)
 }
 
+fn admitting_ids() -> Vec<Uuid> {
+    ADMITTING_RUNS
+        .lock()
+        .expect("admitting runs lock")
+        .iter()
+        .copied()
+        .collect()
+}
+
 /// Возврат застрявших заявок после гибели приёмки или перезапуска хаба:
 /// `claimed` отдаются на повторный приём (со сменой владельца), оборванные
 /// `prechecking` завершаются как `failed` с `precheck_result_unknown` и никогда
 /// не перезапускаются (ответ воркера уже не придёт).
-/// Порядок замков — сначала расписание, потом запуск (B): удаление держит
-/// тот же порядок (расписание, затем каскад), взаимоблокировки нет.
+/// Каждый кандидат идёт в своей короткой транзакции (2): счётчик событий
+/// владельца отпускается до замка следующего расписания, поэтому удаление
+/// другого расписания не сходится с восстановлением в цикл ожидания, а сбой
+/// одного кандидата не откатывает остальных. Порядок замков внутри
+/// транзакции — расписание, затем запуск, как у удаления.
 /// Возраст аренды меряется от последней смены владельца (`lease_at`),
-/// а не от создания заявки. Активных приёмок этого процесса не трогаем (A).
+/// а не от создания заявки. Строки приёмок этого процесса исключаются
+/// до предела пачки (5): иначе 32 охраняемых строки на малых id вытесняли
+/// бы брошенную заявку позже в очереди.
 /// `max_age=None` — только для стартового прохода под синглтоном (C);
 /// вне синглтона так звать нельзя: второй хаб положил бы живую предпроверку.
 pub async fn recover_interrupted(
-    conn: &mut PgConnection,
+    pool: &PgPool,
     max_age: Option<TimeDelta>,
     now: DateTime<Utc>,
 ) -> Result<Vec<ClaimedRun>, sqlx::Error> {
     let cutoff: Option<DateTime<Utc>> = max_age.map(|age| now - age);
-    // Кандидаты без замков: замки берём ниже строго по порядку
-    // (расписание, затем запуск), упорядоченно по расписанию.
+    let guarded = admitting_ids();
     let candidates: Vec<(Uuid, Uuid)> = sqlx::query_as(
         "select id,schedule_id from schedule_runs
           where state in ('claimed','prechecking')
             and ($1::timestamptz is null
                  or coalesce(lease_at, updated_at) < $1)
+            and not (id = any($2))
           order by schedule_id,updated_at,id limit 32",
     )
     .bind(cutoff)
-    .fetch_all(&mut *conn)
+    .bind(&guarded)
+    .fetch_all(pool)
     .await?;
     let mut claimed = Vec::new();
     for (run_id, schedule_id) in candidates {
-        if is_admitting(&run_id) {
-            continue;
+        match recover_one(pool, run_id, schedule_id, cutoff).await {
+            Ok(Some(run)) => claimed.push(run),
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(
+                    kind = "schedule_recover_failed",
+                    error = %crate::dberr::describe(&error),
+                    "recovery of one run failed; the rest continue"
+                );
+            }
         }
-        // Сначала расписание (B): удаление идёт тем же порядком.
-        let schedule_row: Option<ScheduleRow> =
-            sqlx::query_as("select * from schedules where id=$1 for update")
-                .bind(schedule_id)
-                .fetch_optional(&mut *conn)
-                .await?;
-        let Some(schedule_row) = schedule_row else {
-            continue;
-        };
-        let Ok(schedule) = schedule_row.into_schedule() else {
-            continue;
-        };
-        if is_admitting(&run_id) {
-            continue;
-        }
-        // Затем запуск — атомарная смена владельца / условное завершение
-        // (compare-and-set по состоянию и возрасту аренды).
-        let state: Option<String> =
-            sqlx::query_scalar("select state from schedule_runs where id=$1")
-                .bind(run_id)
-                .fetch_optional(&mut *conn)
-                .await?;
-        match state.as_deref() {
-            Some("prechecking") => {
-                let detail = json!({"reason": "precheck_result_unknown"});
-                let updated = sqlx::query(
-                    "update schedule_runs set state='failed',detail=$2,updated_at=clock_timestamp()
-                      where id=$1 and state='prechecking'
-                        and ($3::timestamptz is null or coalesce(lease_at, updated_at) < $3)",
-                )
-                .bind(run_id)
-                .bind(&detail)
-                .bind(cutoff)
-                .execute(&mut *conn)
-                .await?
-                .rows_affected();
-                if updated == 0 {
-                    continue;
-                }
+    }
+    Ok(claimed)
+}
+
+async fn recover_one(
+    pool: &PgPool,
+    run_id: Uuid,
+    schedule_id: Uuid,
+    cutoff: Option<DateTime<Utc>>,
+) -> Result<Option<ClaimedRun>, sqlx::Error> {
+    let mut tx = crate::db::begin(pool).await?;
+    // Сначала расписание (B): удаление идёт тем же порядком.
+    let schedule_row: Option<ScheduleRow> =
+        sqlx::query_as("select * from schedules where id=$1 for update")
+            .bind(schedule_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let Some(schedule_row) = schedule_row else {
+        tx.rollback().await?;
+        return Ok(None);
+    };
+    let Ok(schedule) = schedule_row.into_schedule() else {
+        tx.rollback().await?;
+        return Ok(None);
+    };
+    if is_admitting(&run_id) {
+        tx.rollback().await?;
+        return Ok(None);
+    }
+    let state: Option<String> = sqlx::query_scalar("select state from schedule_runs where id=$1")
+        .bind(run_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let result = match state.as_deref() {
+        Some("prechecking") => {
+            let detail = json!({"reason": "precheck_result_unknown"});
+            let updated = sqlx::query(
+                "update schedule_runs set state='failed',detail=$2,updated_at=clock_timestamp()
+                  where id=$1 and state='prechecking'
+                    and ($3::timestamptz is null or coalesce(lease_at, updated_at) < $3)",
+            )
+            .bind(run_id)
+            .bind(&detail)
+            .bind(cutoff)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+            if updated == 0 {
+                None
+            } else {
                 let mut run: ScheduleRun =
                     sqlx::query_as::<_, RunRow>("select * from schedule_runs where id=$1")
                         .bind(run_id)
-                        .fetch_one(&mut *conn)
+                        .fetch_one(&mut *tx)
                         .await?
                         .into_run()?;
                 run.state = RunState::Failed;
                 run.detail = detail.clone();
-                run_changed(conn, &run, Uuid::now_v7()).await?;
+                run_changed(&mut tx, &run, Uuid::now_v7()).await?;
+                // Итог ручного запуска пишется в ключ идемпотентности той же
+                // транзакцией (3).
+                finalize_manual_key(&mut tx, schedule.owner_id, &run).await?;
                 // Оборванная предпроверка — тоже несработавший запуск (15):
                 // пуш встаёт в той же транзакции восстановления.
                 crate::notify::enqueue_schedule_failure_in_tx(
-                    conn,
+                    &mut tx,
                     schedule.id,
                     &schedule.name,
                     "precheck_result_unknown",
                 )
                 .await?;
+                None
             }
-            Some("claimed") => {
-                let attempt = Uuid::now_v7();
-                let row: Option<RunRow> = sqlx::query_as(
-                    "update schedule_runs
-                        set attempt_id=$2,lease_at=clock_timestamp(),updated_at=clock_timestamp()
-                      where id=$1 and state='claimed'
-                        and ($3::timestamptz is null or coalesce(lease_at, updated_at) < $3)
-                      returning *",
-                )
-                .bind(run_id)
-                .bind(attempt)
-                .bind(cutoff)
-                .fetch_optional(&mut *conn)
-                .await?;
-                let Some(row) = row else {
-                    continue;
-                };
-                let run = row.into_run()?;
-                claimed.push(ClaimedRun { run, schedule });
-            }
-            _ => {}
         }
-    }
-    Ok(claimed)
+        Some("claimed") => {
+            let attempt = Uuid::now_v7();
+            let row: Option<RunRow> = sqlx::query_as(
+                "update schedule_runs
+                    set attempt_id=$2,lease_at=clock_timestamp(),updated_at=clock_timestamp()
+                  where id=$1 and state='claimed'
+                    and ($3::timestamptz is null or coalesce(lease_at, updated_at) < $3)
+                  returning *",
+            )
+            .bind(run_id)
+            .bind(attempt)
+            .bind(cutoff)
+            .fetch_optional(&mut *tx)
+            .await?;
+            match row {
+                Some(row) => Some(ClaimedRun {
+                    run: row.into_run()?,
+                    schedule,
+                }),
+                None => None,
+            }
+        }
+        _ => None,
+    };
+    tx.commit().await?;
+    Ok(result)
 }
 
 /// Сколько попыток ещё в полёте у расписания (для политики `skip`).

@@ -70,7 +70,6 @@ pub async fn admit(scheduler: &Scheduler, claimed: ClaimedRun) {
     let _guard = super::AdmittingGuard::insert(claimed.run.id);
     let run = claimed.run;
     let schedule = claimed.schedule;
-    let attempt = run.attempt_id;
     let result = admit_inner(scheduler, &schedule, &run, run.run_anyway, run.manual).await;
     let finish = match result {
         // Dispatch закоммитил `started` и событие сам: финалу делать нечего.
@@ -80,79 +79,91 @@ pub async fn admit(scheduler: &Scheduler, claimed: ClaimedRun) {
     };
     let mut detail = run.detail.clone();
     merge(&mut detail, finish.skip.detail);
-    // Финал под замком расписания (порядок B: расписание, затем запуск),
-    // переход условный (A): чужую строку не перезаписываем.
-    let mut tx = match crate::db::begin(scheduler.pool()).await {
-        Ok(tx) => tx,
-        Err(error) => {
-            tracing::error!(kind = "schedule_admit_db", error = %crate::dberr::describe(&error), "cannot record run outcome");
-            return;
-        }
-    };
-    let schedule_exists: bool = match sqlx::query_scalar(
-        "select exists(select 1 from schedules where id=$1 for update)",
+    if let Err(error) = write_outcome_retrying(
+        scheduler.pool(),
+        &schedule,
+        &run,
+        finish.from,
+        finish.skip.state,
+        &detail,
+        Uuid::now_v7(),
     )
-    .bind(schedule.id)
-    .fetch_one(&mut *tx)
     .await
     {
-        Ok(exists) => exists,
-        Err(error) => {
-            let _ = tx.rollback().await;
-            tracing::error!(kind = "schedule_admit_db", error = %crate::dberr::describe(&error), "cannot record run outcome");
-            return;
+        tracing::error!(kind = "schedule_admit_db", error = %crate::dberr::describe(&error), "cannot record run outcome");
+    }
+}
+
+/// Временный сбой базы не должен оставлять запуск до истечения аренды (5):
+/// финал повторяется несколько раз с короткой паузой.
+async fn write_outcome_retrying(
+    pool: &PgPool,
+    schedule: &Schedule,
+    run: &ScheduleRun,
+    from: RunState,
+    state: RunState,
+    detail: &Value,
+    correlation_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    const ATTEMPTS: u32 = 4;
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        match write_outcome(pool, schedule, run, from, state, detail, correlation_id).await {
+            Ok(()) => return Ok(()),
+            Err(error) if attempt < ATTEMPTS && crate::db::TransientError::is_transient(&error) => {
+                tokio::time::sleep(crate::db::retry_delay(Uuid::now_v7(), attempt)).await;
+            }
+            Err(error) => return Err(error),
         }
-    };
+    }
+}
+
+/// Итог приёма одной транзакцией: под замком расписания (порядок B:
+/// расписание, затем запуск), переход условный (A): чужую строку не
+/// перезаписываем. `Ok` и при проигрыше владения — исход тогда чужой.
+async fn write_outcome(
+    pool: &PgPool,
+    schedule: &Schedule,
+    run: &ScheduleRun,
+    from: RunState,
+    state: RunState,
+    detail: &Value,
+    correlation_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    let mut tx = crate::db::begin(pool).await?;
+    let schedule_exists: bool =
+        sqlx::query_scalar("select exists(select 1 from schedules where id=$1 for update)")
+            .bind(schedule.id)
+            .fetch_one(&mut *tx)
+            .await?;
     if !schedule_exists {
         // Расписание удалили, пока шёл приём: строка запуска ушла
         // каскадом, событие о призраке не публикуем.
-        let _ = tx.rollback().await;
-        return;
+        tx.rollback().await?;
+        return Ok(());
     }
-    let moved = match super::transition_run(
+    let moved = super::transition_run(
         &mut tx,
         run.id,
-        finish.from,
-        attempt,
-        finish.skip.state,
+        from,
+        run.attempt_id,
+        state,
         detail.clone(),
         None,
         None,
         None,
         None,
     )
-    .await
-    {
-        Ok(moved) => moved,
-        Err(error) => {
-            let _ = tx.rollback().await;
-            tracing::error!(kind = "schedule_admit_db", error = %crate::dberr::describe(&error), "cannot record run outcome");
-            return;
-        }
-    };
+    .await?;
     if !moved {
         // Строку забрало восстановление или вторая приёмка: исход чужой.
-        let _ = tx.rollback().await;
-        return;
+        tx.rollback().await?;
+        return Ok(());
     }
-    let updated = apply_outcome(
-        &run,
-        finish.skip.state,
-        detail.clone(),
-        None,
-        None,
-        None,
-        None,
-    );
-    let payload = match serde_json::to_value(&updated) {
-        Ok(payload) => payload,
-        Err(error) => {
-            let _ = tx.rollback().await;
-            tracing::error!(kind = "schedule_admit_db", error = %error, "cannot serialize run outcome");
-            return;
-        }
-    };
-    if let Err(error) = events::append(
+    let updated = apply_outcome(run, state, detail.clone(), None, None, None, None);
+    let payload = serde_json::to_value(&updated).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
+    events::append(
         &mut tx,
         NewEvent {
             scope: Scope::Schedules {
@@ -162,41 +173,20 @@ pub async fn admit(scheduler: &Scheduler, claimed: ClaimedRun) {
             conversation_id: None,
             execution_id: None,
             payload,
-            correlation_id: Uuid::now_v7(),
+            correlation_id,
         },
     )
-    .await
-    {
-        let _ = tx.rollback().await;
-        tracing::error!(kind = "schedule_admit_db", error = %crate::dberr::describe(&error), "cannot publish run outcome");
-        return;
-    }
-    if let Err(error) = super::finalize_manual_key(&mut tx, schedule.owner_id, &updated).await {
-        let _ = tx.rollback().await;
-        tracing::error!(kind = "schedule_admit_db", error = %crate::dberr::describe(&error), "cannot finalize manual key");
-        return;
-    }
-    if finish.skip.state == RunState::Failed {
+    .await?;
+    super::finalize_manual_key(&mut tx, schedule.owner_id, &updated).await?;
+    if state == RunState::Failed {
         let reason = detail
             .get("reason")
             .and_then(Value::as_str)
             .unwrap_or("failed");
-        if let Err(error) = crate::notify::enqueue_schedule_failure_in_tx(
-            &mut tx,
-            schedule.id,
-            &schedule.name,
-            reason,
-        )
-        .await
-        {
-            let _ = tx.rollback().await;
-            tracing::error!(kind = "schedule_admit_db", error = %crate::dberr::describe(&error), "cannot queue failure push");
-            return;
-        }
+        crate::notify::enqueue_schedule_failure_in_tx(&mut tx, schedule.id, &schedule.name, reason)
+            .await?;
     }
-    if let Err(error) = tx.commit().await {
-        tracing::error!(kind = "schedule_admit_db", error = %crate::dberr::describe(&error), "cannot commit run outcome");
-    }
+    tx.commit().await
 }
 
 /// Итоговая строка запуска: база из заявки плюс исход приёма.
@@ -817,16 +807,22 @@ async fn dispatch(
     from: RunState,
 ) -> AdmitResult {
     let fail = |skip: Skip| stop(skip, from);
-    let mut tx = crate::db::begin(scheduler.pool())
-        .await
-        .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))?;
+    let begun = if super::fault::hit(schedule.id, super::fault::Fault::DispatchBeginError) {
+        Err(sqlx::Error::PoolTimedOut)
+    } else {
+        crate::db::begin(scheduler.pool()).await
+    };
+    let mut tx = begun
+        .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))
+        .map_err(fail)?;
     let current: Option<super::ScheduleRow> =
         sqlx::query_as("select * from schedules where id=$1 and owner_id=$2 for update")
             .bind(schedule.id)
             .bind(schedule.owner_id)
             .fetch_optional(&mut *tx)
             .await
-            .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))?;
+            .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))
+            .map_err(fail)?;
     let Some(current) = current else {
         let _ = tx.rollback().await;
         return Err(fail(Skip::new(
@@ -841,7 +837,8 @@ async fn dispatch(
             .bind(run.id)
             .fetch_optional(&mut *tx)
             .await
-            .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))?;
+            .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))
+            .map_err(fail)?;
     let Some((state, attempt)) = owned else {
         let _ = tx.rollback().await;
         return Err(fail(Skip::new(
@@ -863,7 +860,8 @@ async fn dispatch(
     .bind(run.id)
     .fetch_optional(&mut *tx)
     .await
-    .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))?;
+    .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))
+    .map_err(fail)?;
     if already.is_some() {
         let _ = tx.rollback().await;
         return Ok(AdmitOk);
@@ -1341,65 +1339,18 @@ pub async fn run_now(
         Err(AdmitEnd::Stop(stop)) => {
             let mut detail = run.detail.clone();
             merge(&mut detail, stop.skip.detail);
-            let mut tx = crate::db::begin(&state.pool).await?;
-            let schedule_exists: bool =
-                sqlx::query_scalar("select exists(select 1 from schedules where id=$1 for update)")
-                    .bind(schedule.id)
-                    .fetch_one(&mut *tx)
-                    .await?;
-            if !schedule_exists {
-                let _ = tx.rollback().await;
-                return Err(ScheduleError::NotFound);
-            }
-            let moved = super::transition_run(
-                &mut tx,
-                run.id,
+            write_outcome_retrying(
+                &state.pool,
+                &schedule,
+                &run,
                 stop.from,
-                run.attempt_id,
                 stop.skip.state,
-                detail.clone(),
-                None,
-                None,
-                None,
-                None,
+                &detail,
+                correlation_id,
             )
             .await?;
-            if !moved {
-                let _ = tx.rollback().await;
-                return await_winner_run(&state.pool, owner_id, run.id).await;
-            }
-            let updated = apply_outcome(&run, stop.skip.state, detail, None, None, None, None);
-            let response = serde_json::to_value(&updated)
-                .map_err(|e| ScheduleError::Db(sqlx::Error::Encode(Box::new(e))))?;
-            events::append(
-                &mut tx,
-                NewEvent {
-                    scope: Scope::Schedules { owner_id },
-                    kind: "schedule_run_changed",
-                    conversation_id: None,
-                    execution_id: None,
-                    payload: response,
-                    correlation_id,
-                },
-            )
-            .await?;
-            super::finalize_manual_key(&mut tx, owner_id, &updated).await?;
-            if stop.skip.state == RunState::Failed {
-                let reason = updated
-                    .detail
-                    .get("reason")
-                    .and_then(Value::as_str)
-                    .unwrap_or("failed");
-                crate::notify::enqueue_schedule_failure_in_tx(
-                    &mut tx,
-                    schedule_id,
-                    &schedule.name,
-                    reason,
-                )
-                .await?;
-            }
-            tx.commit().await?;
-            Ok(updated)
+            // Исход мог записать и другой владелец строки: отвечаем тем, что в базе.
+            await_winner_run(&state.pool, owner_id, run.id).await
         }
     }
 }

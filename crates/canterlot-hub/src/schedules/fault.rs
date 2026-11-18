@@ -9,6 +9,8 @@ pub enum Fault {
     BeforeDispatchCommit,
     /// Гибель после commit dispatch, до ответа клиенту «Запустить сейчас».
     LostRunNowResponse,
+    /// Сбой базы в начале dispatch, уже после предпроверки.
+    DispatchBeginError,
 }
 
 #[cfg(feature = "testkit")]

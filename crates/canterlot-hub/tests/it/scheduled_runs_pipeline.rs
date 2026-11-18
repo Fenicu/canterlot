@@ -967,8 +967,7 @@ async fn recovery_skips_a_run_being_admitted_by_this_hub(pool: PgPool) {
     .unwrap();
 
     let recover = |pool: PgPool| async move {
-        let mut conn = pool.acquire().await.unwrap();
-        recover_interrupted(&mut conn, Some(RECLAIM_LEASE), now)
+        recover_interrupted(&pool, Some(RECLAIM_LEASE), now)
             .await
             .unwrap()
     };
@@ -986,66 +985,101 @@ async fn recovery_skips_a_run_being_admitted_by_this_hub(pool: PgPool) {
     );
 }
 
-/// B: удаление держит замок расписания, восстановление — расписание затем
-/// запуск. Оба пути обязаны завершиться, а не сойтись во взаимоблокировке.
+/// B/2: пока удаление второго расписания держит его замок, восстановление
+/// первого обязано завершиться и отпустить счётчик событий владельца: один
+/// короткий проход на расписание, без цикла ожидания и без отката пачки.
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn delete_and_recovery_share_one_lock_order(pool: PgPool) {
+async fn recovery_of_one_schedule_does_not_hold_the_event_counter_for_the_next(pool: PgPool) {
     use canterlot_hub::schedules::{RECLAIM_LEASE, recover_interrupted};
     use std::time::Duration;
 
     let f = Fixture::new(pool.clone()).await;
-    let id = create(&f, existing(&f), "0 9 * * *").await;
-    let schedule = Uuid::parse_str(&id).unwrap();
+    let a = Uuid::parse_str(&create(&f, existing(&f), "0 9 * * *").await).unwrap();
+    let b = Uuid::parse_str(&create(&f, existing(&f), "0 10 * * *").await).unwrap();
+    assert!(a < b, "candidates are visited in schedule id order");
     let now = Utc::now();
-    let rid = Uuid::now_v7();
-    sqlx::query(
-        "insert into schedule_runs(id,schedule_id,owner_id,scheduled_at,claimed_revision,state,manual,idempotency_key,attempt_id,lease_at)
-         values($1,$2,$3,$4,1,'claimed',false,$5,$6,$7)",
-    )
-    .bind(rid)
-    .bind(schedule)
-    .bind(f.seed.owner_id)
-    .bind(now - TimeDelta::hours(2))
-    .bind("delete-race")
-    .bind(Uuid::now_v7())
-    .bind(now - TimeDelta::hours(2))
-    .execute(&pool)
-    .await
-    .unwrap();
-
-    let path = format!("/api/v1/schedules/{id}");
-    let delete = f.client.send(
-        Method::DELETE,
-        &path,
-        Some("delete-race"),
-        Some(json!({"base_revision": 1})),
-    );
-    let recovered = {
+    let mut runs = Vec::new();
+    for (n, schedule) in [a, b].into_iter().enumerate() {
+        let rid = Uuid::now_v7();
+        sqlx::query(
+            "insert into schedule_runs(id,schedule_id,owner_id,scheduled_at,claimed_revision,state,manual,idempotency_key,attempt_id,lease_at)
+             values($1,$2,$3,$4,1,'prechecking',false,$5,$6,$7)",
+        )
+        .bind(rid)
+        .bind(schedule)
+        .bind(f.seed.owner_id)
+        .bind(now - TimeDelta::hours(2))
+        .bind(format!("two-schedules-{n}"))
+        .bind(Uuid::now_v7())
+        .bind(now - TimeDelta::hours(2))
+        .execute(&pool)
+        .await
+        .unwrap();
+        runs.push(rid);
+    }
+    // «Удаление» B: держит замок расписания и будет писать событие.
+    let mut deleting = pool.begin().await.unwrap();
+    sqlx::query("select id from schedules where id=$1 for update")
+        .bind(b)
+        .fetch_one(&mut *deleting)
+        .await
+        .unwrap();
+    let recovery = {
         let pool = pool.clone();
-        async move {
-            let mut conn = pool.acquire().await.unwrap();
-            recover_interrupted(&mut conn, Some(RECLAIM_LEASE), now)
+        tokio::spawn(async move {
+            recover_interrupted(&pool, Some(RECLAIM_LEASE), now)
                 .await
                 .unwrap()
-        }
+        })
     };
-    let (deleted, _) = tokio::time::timeout(Duration::from_secs(15), async {
-        tokio::join!(delete, recovered)
+    // Восстановление A закоммитилось, хотя B ещё занято удалением.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if state(&pool, runs[0]).await.0 == "failed" {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
     })
     .await
-    .expect("delete and recovery must not deadlock");
+    .expect("recovery of A must commit while B is locked by a delete");
+    // Удаление пишет событие владельца (счётчик свободен) и завершается.
+    canterlot_hub::events::append(
+        &mut deleting,
+        canterlot_hub::events::NewEvent {
+            scope: canterlot_hub::events::Scope::Schedules {
+                owner_id: f.seed.owner_id,
+            },
+            kind: "schedule_changed",
+            conversation_id: None,
+            execution_id: None,
+            payload: json!({"deleted": true}),
+            correlation_id: Uuid::now_v7(),
+        },
+    )
+    .await
+    .unwrap();
+    sqlx::query("delete from schedules where id=$1")
+        .bind(b)
+        .execute(&mut *deleting)
+        .await
+        .unwrap();
+    deleting.commit().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(15), recovery)
+        .await
+        .expect("recovery finishes after the delete")
+        .unwrap();
     assert_eq!(
-        deleted.status.as_u16(),
-        200,
-        "{}",
-        String::from_utf8_lossy(&deleted.body)
+        state(&pool, runs[0]).await.0,
+        "failed",
+        "A's recovery was kept"
     );
-    let runs: i64 = sqlx::query_scalar("select count(*) from schedule_runs where schedule_id=$1")
-        .bind(schedule)
+    let remaining: i64 = sqlx::query_scalar("select count(*) from schedule_runs where id=$1")
+        .bind(runs[1])
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(runs, 0, "delete cascades to runs");
+    assert_eq!(remaining, 0, "delete cascaded to B's run");
 }
 
 /// 14: `started` и его событие живут в одной транзакции — по завершении
@@ -1329,4 +1363,102 @@ async fn recovery_dispatched_manual_claim_finalizes_the_key(pool: PgPool) {
     assert_eq!(replay.json::<Value>()["id"], run.id.to_string());
     assert_eq!(replay.json::<Value>()["state"], "started");
     assert_eq!(inputs_with_text(&pool, "посмотреть коммиты").await, 1);
+}
+
+/// 5: охраняемые строки не расходуют предел пачки восстановления:
+/// брошенная заявка позади 32 охраняемых всё равно возвращается.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn guarded_runs_do_not_starve_recovery_of_an_abandoned_claim(pool: PgPool) {
+    use canterlot_hub::schedules::{AdmittingGuard, RECLAIM_LEASE, recover_interrupted};
+
+    let f = Fixture::new(pool.clone()).await;
+    let id = create(&f, existing(&f), "0 9 * * *").await;
+    let schedule = Uuid::parse_str(&id).unwrap();
+    let now = Utc::now();
+    let mut guards = Vec::new();
+    let mut abandoned = Uuid::nil();
+    for n in 0..33 {
+        let rid = Uuid::now_v7();
+        sqlx::query(
+            "insert into schedule_runs(id,schedule_id,owner_id,scheduled_at,claimed_revision,state,manual,idempotency_key,attempt_id,lease_at,updated_at)
+             values($1,$2,$3,$4,1,'claimed',false,$5,$6,$7,$7)",
+        )
+        .bind(rid)
+        .bind(schedule)
+        .bind(f.seed.owner_id)
+        .bind(now - TimeDelta::hours(5) + TimeDelta::minutes(n))
+        .bind(format!("starve-{n}"))
+        .bind(Uuid::now_v7())
+        .bind(now - TimeDelta::hours(3) + TimeDelta::minutes(n))
+        .execute(&pool)
+        .await
+        .unwrap();
+        if n < 32 {
+            guards.push(AdmittingGuard::insert(rid));
+        } else {
+            abandoned = rid;
+        }
+    }
+    let recovered = recover_interrupted(&pool, Some(RECLAIM_LEASE), now)
+        .await
+        .unwrap();
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].run.id, abandoned);
+    drop(guards);
+}
+
+/// 5: сбой базы в начале dispatch после предпроверки пишет итог из
+/// `prechecking`, а не пытается писать из `claimed` (запись ушла бы в пустоту).
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn early_dispatch_error_after_precheck_finalizes_from_prechecking(pool: PgPool) {
+    use canterlot_hub::schedules::fault::{self, Fault};
+
+    let f = Fixture::new(pool.clone()).await;
+    let mut session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
+    let registry = f.state.registry.clone();
+    let machine = f.seed.machine_id;
+    let connection = registry.session_info(machine).unwrap().connection_id;
+    let worker = tokio::spawn(async move {
+        while let Some(down) = session.commands.recv().await {
+            if let Some(control_down::Msg::SchedulePrecheck(request)) = down.msg {
+                registry.finish_precheck(
+                    machine,
+                    connection,
+                    PrecheckResult {
+                        attempt_id: request.attempt_id,
+                        outcome: Some(precheck_result::Outcome::Finished(
+                            canterlot_proto::worker::v1::PrecheckFinished {
+                                exit_code: 0,
+                                output_tail: String::new(),
+                                timed_out: false,
+                            },
+                        )),
+                    },
+                );
+            }
+        }
+    });
+    let r = f
+        .client
+        .send(
+            Method::POST,
+            "/api/v1/schedules",
+            Some("early-dispatch"),
+            Some(json!({
+                "name": "Ранний сбой",
+                "cron": "0 9 * * *",
+                "target": existing(&f),
+                "prompt": "не дойдёт",
+                "precheck": "true",
+            })),
+        )
+        .await;
+    let id = r.json::<Value>()["id"].as_str().unwrap().to_owned();
+    fault::arm(Uuid::parse_str(&id).unwrap(), Fault::DispatchBeginError);
+    due(&pool, &id, Utc::now() - TimeDelta::seconds(30)).await;
+    scheduler(&f).tick(Utc::now()).await.unwrap();
+    let rid = run_id(&pool, &id).await;
+    let detail = wait_state(&pool, rid, "failed").await;
+    assert_eq!(detail["reason"], "database_unavailable");
+    worker.abort();
 }

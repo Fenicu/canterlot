@@ -799,25 +799,12 @@ impl Scheduler {
         // Возврат брошенных заявок: погибшая приёмка или перезапуск хаба
         // между commit'ами. `claimed` идут на повторный приём, оборванные
         // `prechecking` уже завершены как `failed` внутри.
-        let recovered = {
-            let mut tx = crate::db::begin(&self.pool).await?;
-            let recovered = crate::schedules::recover_interrupted(
-                &mut tx,
-                Some(crate::schedules::RECLAIM_LEASE),
-                now,
-            )
-            .await;
-            match recovered {
-                Ok(recovered) => {
-                    tx.commit().await?;
-                    recovered
-                }
-                Err(error) => {
-                    let _ = tx.rollback().await;
-                    return Err(error);
-                }
-            }
-        };
+        let recovered = crate::schedules::recover_interrupted(
+            &self.pool,
+            Some(crate::schedules::RECLAIM_LEASE),
+            now,
+        )
+        .await?;
         for claimed_run in recovered {
             let scheduler = self.clone();
             tokio::spawn(async move {
@@ -1656,23 +1643,12 @@ impl Scheduler {
 
     async fn recover_schedules_at_startup(&self) -> Result<(), sqlx::Error> {
         let now = Utc::now();
-        let mut tx = crate::db::begin(&self.pool).await?;
         let recovered = crate::schedules::recover_interrupted(
-            &mut tx,
+            &self.pool,
             Some(crate::schedules::RECLAIM_LEASE),
             now,
         )
-        .await;
-        let recovered = match recovered {
-            Ok(recovered) => {
-                tx.commit().await?;
-                recovered
-            }
-            Err(error) => {
-                let _ = tx.rollback().await;
-                return Err(error);
-            }
-        };
+        .await?;
         for claimed_run in recovered {
             let scheduler = self.clone();
             tokio::spawn(async move {
