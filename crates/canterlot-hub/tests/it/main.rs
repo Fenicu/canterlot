@@ -104,6 +104,7 @@ mod reserve_settings;
 mod resume_at_reset;
 mod retention_keyset;
 mod routing;
+mod schedule_failure_push;
 mod scheduled_runs;
 mod scheduled_runs_pipeline;
 mod scheduler;

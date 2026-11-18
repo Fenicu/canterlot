@@ -631,11 +631,12 @@ async fn enqueue_auth_in_tx(
     Ok(inserted)
 }
 
-/// Несработавший запуск расписания: пуш владельцу не чаще раза в час на
-/// расписание. Ограничитель — долговечная метка `last_failure_push_at` на
-/// строке расписания (15): проверка по времени постановки пропускала бы
-/// задержанный первый пуш и второй в пределах часа. Проверка и запись метки
-/// идут в той же транзакции, что и исход. Вызывать только для `failed`.
+/// Несработавший запуск расписания: ожидающие пуши сливаются по расписанию.
+/// Постановка пуш не ограничивает (6): метка `last_failure_push_at` двигается
+/// при отправке, а не при постановке, и «не чаще раза в час» проверяет
+/// отправитель в момент доставки (`Sender::schedule_cooldown`). Если пуш
+/// расписания уже ждёт отправки (или повтора), новый исход только обновляет
+/// причину в нём. Вызывать только для `failed`.
 pub(crate) async fn enqueue_schedule_failure_in_tx(
     conn: &mut PgConnection,
     schedule_id: Uuid,
@@ -643,38 +644,39 @@ pub(crate) async fn enqueue_schedule_failure_in_tx(
     reason: &str,
 ) -> Result<bool, sqlx::Error> {
     // Замок расписания: параллельные исходы одного расписания упорядочены.
-    let last: Option<DateTime<Utc>> =
-        sqlx::query_scalar("select last_failure_push_at from schedules where id=$1 for update")
+    let exists: Option<Uuid> =
+        sqlx::query_scalar("select id from schedules where id=$1 for update")
             .bind(schedule_id)
             .fetch_optional(&mut *conn)
-            .await?
-            .flatten();
-    if last.is_some_and(|at| Utc::now() - at < SCHEDULE_FAILURE_WINDOW) {
+            .await?;
+    if exists.is_none() {
         return Ok(false);
     }
-    let pushed = enqueue_auth_in_tx(
+    let payload = json!({
+        "schedule_id": schedule_id,
+        "schedule_name": schedule_name,
+        "reason": reason,
+    });
+    let coalesced = sqlx::query(
+        "update owner_pushes set payload=$2,updated_at=clock_timestamp()
+          where kind=$1 and state='pending' and payload->>'schedule_id'=$3",
+    )
+    .bind(KIND_SCHEDULE_FAILED)
+    .bind(&payload)
+    .bind(schedule_id.to_string())
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
+    if coalesced > 0 {
+        return Ok(false);
+    }
+    enqueue_auth_in_tx(
         conn,
         KIND_SCHEDULE_FAILED,
         &format!("{KIND_SCHEDULE_FAILED}:{schedule_id}:{}", Uuid::now_v7()),
-        &json!({
-            "schedule_id": schedule_id,
-            "schedule_name": schedule_name,
-            "reason": reason,
-        }),
+        &payload,
     )
-    .await?;
-    if pushed {
-        // Метка двигается только вместе с постановкой: задержанный пуш
-        // не сжимает окно следующего.
-        sqlx::query(
-            "update schedules set last_failure_push_at=clock_timestamp()
-              where id=$1",
-        )
-        .bind(schedule_id)
-        .execute(&mut *conn)
-        .await?;
-    }
-    Ok(pushed)
+    .await
 }
 
 /// Человекочитаемая причина несработавшего запуска для пуша.
@@ -1233,6 +1235,25 @@ impl Sender {
                 report.cancelled += 1;
                 continue;
             };
+            // Ограничитель пушей о запусках расписания живёт здесь, в момент
+            // доставки (6): задержанный первый пуш и поздний второй не
+            // оказываются в одном часе.
+            let mut cooldown = None;
+            if row.kind == KIND_SCHEDULE_FAILED {
+                match schedule_cooldown(pool, &row).await? {
+                    Cooldown::Gone => {
+                        finish(pool, row.id, "cancelled", Some("schedule_gone")).await?;
+                        report.cancelled += 1;
+                        continue;
+                    }
+                    Cooldown::Active if row.attempts == 0 => {
+                        finish(pool, row.id, "suppressed", Some("suppressed_cooldown")).await?;
+                        report.suppressed += 1;
+                        continue;
+                    }
+                    other => cooldown = Some(other),
+                }
+            }
             if !self.take_slot() {
                 report.deferred += 1;
                 break;
@@ -1256,7 +1277,22 @@ impl Sender {
             .bind(pause.as_secs_f64())
             .execute(pool)
             .await?;
-            match self.post(&message).await {
+            // Метка охлаждения встаёт до запроса: потерянный ответ может
+            // означать доставленный пуш, и второй в течение часа не нужен.
+            let stamp = match cooldown {
+                Some(_) => stamp_schedule_push(pool, &row).await?,
+                None => None,
+            };
+            let result = self.post(&message).await;
+            // Отказ, который точно не доставил пуш, метку возвращает: иначе
+            // потерянный первый пуш глушил бы все следующие до конца часа.
+            // Обрыв без ответа (`Retry(None)`) неоднозначен и метку оставляет.
+            if matches!(&result, Err(Failure::Fatal(_) | Failure::Retry(Some(_))))
+                && let Some(stamp) = stamp
+            {
+                restore_schedule_push(pool, &row, &stamp).await?;
+            }
+            match result {
                 Ok(status) => {
                     finish(pool, row.id, "sent", Some(&status.to_string())).await?;
                     report.sent += 1;
@@ -1294,6 +1330,88 @@ impl Sender {
         }
         Ok(report)
     }
+}
+
+enum Cooldown {
+    /// Расписание удалено: пуш не нужен.
+    Gone,
+    /// Последний пуш о расписании ушёл меньше часа назад.
+    Active,
+    Clear,
+}
+
+struct Stamp {
+    previous: Option<DateTime<Utc>>,
+    stamped: DateTime<Utc>,
+}
+
+async fn schedule_cooldown(pool: &PgPool, row: &PushRow) -> Result<Cooldown, sqlx::Error> {
+    let Some(schedule_id) = row
+        .payload
+        .get("schedule_id")
+        .and_then(Value::as_str)
+        .and_then(|id| Uuid::parse_str(id).ok())
+    else {
+        return Ok(Cooldown::Gone);
+    };
+    let found: Option<bool> = sqlx::query_scalar(
+        "select coalesce(clock_timestamp()-last_failure_push_at < $2 * interval '1 second', false)
+           from schedules where id=$1",
+    )
+    .bind(schedule_id)
+    .bind(SCHEDULE_FAILURE_WINDOW.num_seconds() as f64)
+    .fetch_optional(pool)
+    .await?;
+    Ok(match found {
+        None => Cooldown::Gone,
+        Some(true) => Cooldown::Active,
+        Some(false) => Cooldown::Clear,
+    })
+}
+
+async fn stamp_schedule_push(pool: &PgPool, row: &PushRow) -> Result<Option<Stamp>, sqlx::Error> {
+    let Some(schedule_id) = row
+        .payload
+        .get("schedule_id")
+        .and_then(Value::as_str)
+        .and_then(|id| Uuid::parse_str(id).ok())
+    else {
+        return Ok(None);
+    };
+    let stamp: Option<(Option<DateTime<Utc>>, DateTime<Utc>)> = sqlx::query_as(
+        "with prev as (select last_failure_push_at p from schedules where id=$1 for update)
+         update schedules set last_failure_push_at=clock_timestamp()
+          where id=$1 returning (select p from prev), last_failure_push_at",
+    )
+    .bind(schedule_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(stamp.map(|(previous, stamped)| Stamp { previous, stamped }))
+}
+
+async fn restore_schedule_push(
+    pool: &PgPool,
+    row: &PushRow,
+    stamp: &Stamp,
+) -> Result<(), sqlx::Error> {
+    let Some(schedule_id) = row
+        .payload
+        .get("schedule_id")
+        .and_then(Value::as_str)
+        .and_then(|id| Uuid::parse_str(id).ok())
+    else {
+        return Ok(());
+    };
+    sqlx::query(
+        "update schedules set last_failure_push_at=$2
+          where id=$1 and last_failure_push_at=$3",
+    )
+    .bind(schedule_id)
+    .bind(stamp.previous)
+    .bind(stamp.stamped)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 /// Владелец уже прочитал событие, из-за которого поставлен пуш.

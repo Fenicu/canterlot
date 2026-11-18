@@ -88,7 +88,7 @@ fn existing(f: &Fixture) -> Value {
     json!({"kind": "existing_session", "conversation_id": f.seed.conversation_id})
 }
 
-fn scheduler(f: &Fixture) -> canterlot_hub::scheduler::Scheduler {
+pub(crate) fn scheduler(f: &Fixture) -> canterlot_hub::scheduler::Scheduler {
     canterlot_hub::scheduler::Scheduler::new(
         f.pool.clone(),
         f.state.dispatcher.clone(),

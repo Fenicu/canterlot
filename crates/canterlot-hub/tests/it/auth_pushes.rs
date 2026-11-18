@@ -24,7 +24,7 @@ pub(crate) async fn enable(pool: &PgPool) {
     .unwrap();
 }
 
-fn sender(url: &str) -> (tempfile::TempDir, Sender) {
+pub(crate) fn sender(url: &str) -> (tempfile::TempDir, Sender) {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("token"), "gotify-test-token\n").unwrap();
     let path = dir.path().join("hub.toml");
