@@ -47,6 +47,17 @@ pub struct HubConfig {
     pub provider_status: ProviderStatusConfig,
     #[serde(default)]
     pub dictation: DictationConfig,
+    /// Что загрузка подменила в конфигурации. Подписчик журнала к этому моменту ещё не
+    /// установлен, поэтому предупреждения выдаёт `log_startup_warnings` после него.
+    #[serde(skip)]
+    pub startup_warnings: Vec<StartupWarning>,
+}
+
+/// Предупреждение загрузки конфигурации, которое надо показать в журнале.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartupWarning {
+    /// `[activity].hung_rescue = "auto"` принято как `alert`.
+    HungRescueAutoUnavailable,
 }
 
 /// `[dictation]`: живая диктовка в PWA через службу распознавания речи.
@@ -141,6 +152,19 @@ impl fmt::Debug for ConfigError {
 impl std::error::Error for ConfigError {}
 
 impl HubConfig {
+    /// Пишет предупреждения загрузки; вызывать после установки подписчика журнала.
+    pub fn log_startup_warnings(&self) {
+        for warning in &self.startup_warnings {
+            match warning {
+                StartupWarning::HungRescueAutoUnavailable => tracing::warn!(
+                    kind = "hung_rescue_auto_unavailable",
+                    configured = "auto",
+                    effective = "alert",
+                    "[activity].hung_rescue = \"auto\" is not available in this release; behaving as \"alert\""
+                ),
+            }
+        }
+    }
     pub fn load(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
         let path = path.as_ref();
         let text = fs::read_to_string(path).map_err(|_| ConfigError {
@@ -160,12 +184,9 @@ impl HubConfig {
             }
         })?;
         if config.activity.hung_rescue == HungRescue::Auto {
-            tracing::warn!(
-                kind = "hung_rescue_auto_unavailable",
-                configured = "auto",
-                effective = "alert",
-                "[activity].hung_rescue = \"auto\" is not available in this release; behaving as \"alert\""
-            );
+            config
+                .startup_warnings
+                .push(StartupWarning::HungRescueAutoUnavailable);
             config.activity.hung_rescue = HungRescue::Alert;
         }
         let base = path.parent().unwrap_or_else(|| Path::new("."));

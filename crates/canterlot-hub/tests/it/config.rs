@@ -637,3 +637,24 @@ fn auto_hung_rescue_never_reaches_the_projector_thresholds() {
     };
     assert_eq!(Thresholds::from(&off).hung_rescue, HungRescue::Off);
 }
+
+#[test]
+fn hung_rescue_auto_is_reported_as_a_startup_warning_and_maps_to_alert() {
+    use canterlot_hub::config::{HungRescue, StartupWarning};
+    let base = "database_url_file = 'db'\ngrpc_listen = '127.0.0.1:7443'\ntls_cert = 'cert'\ntls_key = 'key'\nmanifest = 'manifest'\n";
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hub.toml");
+    fs::write(&path, format!("{base}[activity]\nhung_rescue = 'auto'\n")).unwrap();
+    let config = HubConfig::load(&path).unwrap();
+    assert_eq!(config.activity.hung_rescue, HungRescue::Alert);
+    assert_eq!(
+        config.startup_warnings,
+        vec![StartupWarning::HungRescueAutoUnavailable]
+    );
+    for mode in ["alert", "off"] {
+        fs::write(&path, format!("{base}[activity]\nhung_rescue = '{mode}'\n")).unwrap();
+        assert!(HubConfig::load(&path).unwrap().startup_warnings.is_empty());
+    }
+    fs::write(&path, base).unwrap();
+    assert!(HubConfig::load(&path).unwrap().startup_warnings.is_empty());
+}

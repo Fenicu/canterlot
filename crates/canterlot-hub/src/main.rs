@@ -213,6 +213,7 @@ async fn run(args: Args) -> Result<(), String> {
                         })),
                 )
                 .init();
+            config.log_startup_warnings();
             installation::check_manifest(&config.manifest).map_err(|error| error.to_string())?;
             db::MIGRATOR
                 .run(&pool)
