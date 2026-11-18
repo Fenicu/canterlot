@@ -255,6 +255,26 @@ impl Fx {
     }
 }
 
+/// Ждём, пока фоновые транзакции действительно встанут в очередь за блокировкой,
+/// не пользуясь временем: тест не должен зависеть от скорости машины.
+async fn wait_for_lock_waiters(pool: &PgPool, count: i64) {
+    for _ in 0..20_000 {
+        let waiting: i64 = sqlx::query_scalar(
+            "select count(*) from pg_stat_activity
+              where wait_event_type='Lock' and state='active'
+                and query not ilike '%pg_stat_activity%'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        if waiting >= count {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("{count} lock waiters never appeared");
+}
+
 fn routing() -> Value {
     json!({"task_types":{"review":{"title":"Проверка","candidates":[
         {"harness":"claude_code","model":"sonnet[1m]"}],"expected_minutes":30}}})
@@ -736,7 +756,7 @@ async fn approval_job_takes_the_queue_before_the_request_row(pool: PgPool) {
             pool: pool.clone(),
             config: Arc::new(SessionToolsConfig::default()),
             limits: Arc::new(LimitsConfig::default()),
-            settle: f.context.settle.clone(),
+            settle: f.context.settle,
             alarms_enabled: true,
             nudge_enabled: true,
             routing_enabled: true,
@@ -770,7 +790,7 @@ async fn approval_job_takes_the_queue_before_the_request_row(pool: PgPool) {
             outcome.is_ok()
         })
     };
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    wait_for_lock_waiters(&f.pool, 1).await;
     let unlocked: Option<Uuid> =
         sqlx::query_scalar("select id from requests where id=$1 for update skip locked")
             .bind(request)
@@ -996,9 +1016,9 @@ async fn owner_routing_edit_wins_the_race_with_an_approved_proposal(pool: PgPool
                 .status
         })
     };
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    wait_for_lock_waiters(&f.pool, 1).await;
     let job = f.spawn_job("settings_change", request);
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    wait_for_lock_waiters(&f.pool, 2).await;
     blocker.rollback().await.unwrap();
     assert_eq!(u16::from(edit.await.unwrap()), 200);
     assert!(job.await.unwrap());
@@ -1049,9 +1069,9 @@ async fn owner_whitelist_edit_wins_the_race_with_an_approved_proposal(pool: PgPo
                 .status
         })
     };
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    wait_for_lock_waiters(&f.pool, 1).await;
     let job = f.spawn_job("settings_change", request);
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    wait_for_lock_waiters(&f.pool, 2).await;
     blocker.rollback().await.unwrap();
     assert_eq!(u16::from(edit.await.unwrap()), 200);
     assert!(job.await.unwrap());
@@ -1097,9 +1117,9 @@ async fn owner_preset_edit_wins_the_race_with_an_approved_proposal(pool: PgPool)
                 .status
         })
     };
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    wait_for_lock_waiters(&f.pool, 1).await;
     let job = f.spawn_job("settings_change", request);
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    wait_for_lock_waiters(&f.pool, 2).await;
     blocker.rollback().await.unwrap();
     assert_eq!(u16::from(edit.await.unwrap()), 200);
     assert!(job.await.unwrap());
