@@ -581,15 +581,16 @@ fn dictation_section_is_optional_and_relative_socket_sticks_to_the_config() {
 }
 
 #[test]
-fn hung_rescue_switch_defaults_to_auto_and_rejects_unknown_values() {
+fn hung_rescue_defaults_to_alert_and_auto_is_downgraded_to_alert() {
     use canterlot_hub::config::HungRescue;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("hub.toml");
     fs::write(&path, format!("{PILOT_BASE}[activity]\n")).unwrap();
     let config = HubConfig::load(&path).unwrap();
-    assert_eq!(config.activity.hung_rescue, HungRescue::Auto);
+    assert_eq!(config.activity.hung_rescue, HungRescue::Alert);
     for (value, expected) in [
-        ("auto", HungRescue::Auto),
+        // 1.40: автоматическое спасение недоступно из конфигурации, `auto` ведёт себя как `alert`.
+        ("auto", HungRescue::Alert),
         ("alert", HungRescue::Alert),
         ("off", HungRescue::Off),
     ] {
@@ -609,4 +610,30 @@ fn hung_rescue_switch_defaults_to_auto_and_rejects_unknown_values() {
     )
     .unwrap();
     assert!(HubConfig::load(&path).is_err());
+}
+
+#[test]
+fn auto_hung_rescue_never_reaches_the_projector_thresholds() {
+    use canterlot_hub::{
+        activity::Thresholds,
+        config::{ActivityConfig, HungRescue},
+    };
+    let config = ActivityConfig {
+        hung_rescue: HungRescue::Auto,
+        ..Default::default()
+    };
+    assert_eq!(
+        Thresholds::from(&config).hung_rescue,
+        HungRescue::Alert,
+        "automatic rescue is compiled but unreachable from configuration"
+    );
+    assert_eq!(
+        Thresholds::from(&ActivityConfig::default()).hung_rescue,
+        HungRescue::Alert
+    );
+    let off = ActivityConfig {
+        hung_rescue: HungRescue::Off,
+        ..Default::default()
+    };
+    assert_eq!(Thresholds::from(&off).hung_rescue, HungRescue::Off);
 }

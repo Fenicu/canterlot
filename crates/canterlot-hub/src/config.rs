@@ -159,6 +159,15 @@ impl HubConfig {
                 location: Some((line, column)),
             }
         })?;
+        if config.activity.hung_rescue == HungRescue::Auto {
+            tracing::warn!(
+                kind = "hung_rescue_auto_unavailable",
+                configured = "auto",
+                effective = "alert",
+                "[activity].hung_rescue = \"auto\" is not available in this release; behaving as \"alert\""
+            );
+            config.activity.hung_rescue = HungRescue::Alert;
+        }
         let base = path.parent().unwrap_or_else(|| Path::new("."));
         for path in [
             &mut config.database_url_file,
@@ -782,8 +791,9 @@ pub struct ActivityConfig {
     /// ход считается зависшим, и его можно спасти. Инструменты не попадают под этот порог.
     #[serde(with = "humantime_serde")]
     pub hung_generating: Duration,
-    /// Что хаб делает с зависшим ходом: `auto` спасает сам, `alert` только
-    /// показывает карточку и шлёт пуш, `off` не выносит verdict вовсе.
+    /// Что хаб делает с зависшим ходом: `alert` (по умолчанию) показывает карточку и
+    /// шлёт пуш, `off` не выносит verdict вовсе. `auto` в 1.40 не предлагается:
+    /// значение принимается и ведёт себя как `alert` (см. [`Self::effective_hung_rescue`]).
     pub hung_rescue: HungRescue,
     #[serde(with = "humantime_serde")]
     pub tick: Duration,
@@ -798,13 +808,24 @@ pub struct ActivityConfig {
     pub idle_background_max: Duration,
 }
 
+impl ActivityConfig {
+    /// Режим, который действительно работает. Автоматические пути спасения остаются
+    /// в коде, но из конфигурации недоступны, пока не закрыты пробелы безопасности.
+    pub fn effective_hung_rescue(&self) -> HungRescue {
+        match self.hung_rescue {
+            HungRescue::Auto => HungRescue::Alert,
+            other => other,
+        }
+    }
+}
+
 impl Default for ActivityConfig {
     fn default() -> Self {
         Self {
             stalled_generating: Duration::from_secs(1800),
             stalled_tool: Duration::from_secs(1800),
             hung_generating: Duration::from_secs(600),
-            hung_rescue: HungRescue::Auto,
+            hung_rescue: HungRescue::Alert,
             tick: Duration::from_secs(15),
             debounce: Duration::from_millis(250),
             idle_quiet: Duration::from_secs(5),

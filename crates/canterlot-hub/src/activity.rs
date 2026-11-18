@@ -151,7 +151,7 @@ impl From<&ActivityConfig> for Thresholds {
             stalled_generating: c.stalled_generating,
             stalled_tool: c.stalled_tool,
             hung_generating: c.hung_generating,
-            hung_rescue: c.hung_rescue,
+            hung_rescue: c.effective_hung_rescue(),
             idle_quiet: c.idle_quiet,
             idle_background_max: c.idle_background_max,
         }
