@@ -2112,7 +2112,7 @@ async fn a_hung_turn_is_interrupted_through_the_real_worker_channel(pool: PgPool
         &["instructions_v1", "pilot_v1", "guarded_interrupt_v1"],
     )
     .await;
-    let started = crate::support::projector_running().await;
+    let started = crate::support::projector_running(&pool).await;
     let turn = input(&pool, &hub, conversation).await;
     let deliver = worker.command().await;
     assert_eq!(deliver.command_id, turn.command_id.to_string());

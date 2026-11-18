@@ -11,10 +11,11 @@ pub mod task9;
 /// старта. Выборки метрик раньше него окно наблюдения не засчитывает, а выборка из будущего
 /// относительно часов фонового пересчёта ему невидима и сбросила бы окно: поэтому тест берёт
 /// отметки сразу после старта, но уже в прошлом.
-pub async fn projector_running() -> chrono::DateTime<chrono::Utc> {
+pub async fn projector_running(pool: &sqlx::PgPool) -> chrono::DateTime<chrono::Utc> {
+    let database = canterlot_hub::activity::database_of(pool);
     tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
-            if let Some(started) = canterlot_hub::activity::projector_started()
+            if let Some(started) = canterlot_hub::activity::projector_started(&database)
                 && chrono::Utc::now() > started + chrono::TimeDelta::milliseconds(100)
             {
                 return started;

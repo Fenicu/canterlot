@@ -207,8 +207,11 @@ pub async fn observe_in_tx(
         return Ok(());
     };
     let row = row_in_tx(conn, conversation_id).await?;
+    let database: String = sqlx::query_scalar("select current_database()")
+        .fetch_one(&mut *conn)
+        .await?;
     let floor = [
-        crate::activity::projector_started(),
+        crate::activity::projector_started(&database),
         inputs.hang.link_since,
         inputs.hang.execution_created_at,
     ]

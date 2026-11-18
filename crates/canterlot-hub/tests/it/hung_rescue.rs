@@ -919,10 +919,18 @@ async fn a_locked_parent_defers_the_note_instead_of_waiting(pool: PgPool) {
 }
 
 async fn http_scene(pool: &PgPool) -> (testkit::TestHub, testkit::TestClient, Scene) {
-    let hub = testkit::spawn_test_hub_http(
+    // Фоновый проектор хаба в этих тестах только наблюдает (`off`): решения о зависании
+    // принимают явные пересчёты теста с заданным моментом, а не гонка с часами проектора.
+    let hub = testkit::spawn_test_hub_with(
         pool.clone(),
-        canterlot_hub::config::HubTimers::default(),
-        testkit::test_http_config(),
+        testkit::TestHubOptions {
+            http: Some(testkit::test_http_config()),
+            activity: canterlot_hub::config::ActivityConfig {
+                hung_rescue: HungRescue::Off,
+                ..Default::default()
+            },
+            ..Default::default()
+        },
     )
     .await;
     let owner = hub.installation.owner_id;
@@ -942,6 +950,35 @@ async fn http_scene(pool: &PgPool) -> (testkit::TestHub, testkit::TestClient, Sc
     (hub, client, scene)
 }
 
+/// Доказательные выборки после старта фонового проектора хаба, по часам теста, пока не
+/// откроется эпизод. Фоновый проектор живёт своей жизнью (сбрасывает окно, пока считает
+/// связь машины недоступной), поэтому тест повторяет пару выборок, а не рассчитывает на гонку.
+async fn tick_until_episode(pool: &PgPool, scene: &Scene) {
+    crate::support::projector_running(pool).await;
+    for _ in 0..40 {
+        sqlx::query("update machines set availability='available',availability_at=$2 where id=$1")
+            .bind(scene.seed.machine_id)
+            .bind(scene.base - TimeDelta::hours(1))
+            .execute(pool)
+            .await
+            .unwrap();
+        for _ in 0..2 {
+            tokio::time::sleep(Duration::from_millis(15)).await;
+            tick(pool, scene, Utc::now()).await;
+        }
+        let opened: Option<Uuid> =
+            sqlx::query_scalar("select episode_id from hung_rescues where conversation_id=$1")
+                .bind(scene.seed.conversation_id)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        if opened.is_some() {
+            return;
+        }
+    }
+    panic!("no hang episode opened");
+}
+
 async fn episode_of(pool: &PgPool, scene: &Scene) -> Uuid {
     sqlx::query_scalar("select episode_id from hung_rescues where conversation_id=$1")
         .bind(scene.seed.conversation_id)
@@ -957,9 +994,7 @@ async fn card_actions_are_bound_to_their_episode(pool: PgPool) {
     use axum::http::{Method, StatusCode};
     let (hub, client, scene) = http_scene(&pool).await;
     // Отметки сразу после старта фонового проектора, но уже в прошлом его часов.
-    let started = crate::support::projector_running().await;
-    tick(&pool, &scene, started + TimeDelta::milliseconds(10)).await;
-    tick(&pool, &scene, started + TimeDelta::milliseconds(20)).await;
+    tick_until_episode(&pool, &scene).await;
     let episode = episode_of(&pool, &scene).await;
     let base = format!(
         "/api/v1/conversations/{}/hung-episodes/{episode}",
@@ -1015,9 +1050,7 @@ async fn an_old_card_cannot_stop_a_later_turn(pool: PgPool) {
     use axum::http::{Method, StatusCode};
     let (hub, client, scene) = http_scene(&pool).await;
     // Отметки сразу после старта фонового проектора, но уже в прошлом его часов.
-    let started = crate::support::projector_running().await;
-    tick(&pool, &scene, started + TimeDelta::milliseconds(10)).await;
-    tick(&pool, &scene, started + TimeDelta::milliseconds(20)).await;
+    tick_until_episode(&pool, &scene).await;
     let episode = episode_of(&pool, &scene).await;
     // Ход закончился, пошёл другой.
     let next = queued_input(&pool, &scene).await;
@@ -1071,7 +1104,10 @@ async fn an_old_card_cannot_stop_a_later_turn(pool: PgPool) {
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn samples_from_before_the_hub_started_do_not_count(pool: PgPool) {
     let scene = hung_scene(&pool, "claude_code", true).await;
-    activity::mark_projector_started(scene.base + TimeDelta::seconds(5));
+    activity::mark_projector_started(
+        &activity::database_of(&pool),
+        scene.base + TimeDelta::seconds(5),
+    );
     tick(&pool, &scene, scene.base - TimeDelta::seconds(10)).await;
     tick(&pool, &scene, scene.base).await;
     assert_eq!(
@@ -1087,6 +1123,4 @@ async fn samples_from_before_the_hub_started_do_not_count(pool: PgPool) {
     );
     tick(&pool, &scene, scene.base + TimeDelta::seconds(20)).await;
     assert_eq!(harmful(&pool, &scene).await, 1);
-    // Возврат безвредного порога: счётчик общий на процесс.
-    activity::mark_projector_started(chrono::DateTime::from_timestamp_millis(1).unwrap());
 }

@@ -1164,20 +1164,35 @@ pub async fn backfill_previews(pool: &PgPool, limit: i64) -> Result<u64, sqlx::E
     Ok(filled)
 }
 
-/// Когда этот процесс хаба начал вести проекцию активности (мс Unix, 0 — не вёл).
-/// Выборки метрик, снятые до этого момента, окно наблюдения для verdict не засчитывает:
-/// после рестарта хаба молчание нельзя оценивать по картине до него.
-static PROJECTOR_STARTED_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+/// Когда хаб начал вести проекцию активности в этой базе (мс Unix). Выборки метрик,
+/// снятые до этого момента, окно наблюдения для verdict не засчитывает: после рестарта
+/// хаба молчание нельзя оценивать по картине до него. Отметка привязана к имени базы,
+/// а не к процессу: хабы с разными базами в одном процессе (тесты) друг другу не мешают.
+static PROJECTOR_STARTED_MS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, i64>>,
+> = std::sync::LazyLock::new(Default::default);
 
-pub fn mark_projector_started(at: DateTime<Utc>) {
-    PROJECTOR_STARTED_MS.store(at.timestamp_millis(), std::sync::atomic::Ordering::Relaxed);
+pub fn mark_projector_started(database: &str, at: DateTime<Utc>) {
+    PROJECTOR_STARTED_MS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(database.to_owned(), at.timestamp_millis());
 }
 
-pub fn projector_started() -> Option<DateTime<Utc>> {
-    match PROJECTOR_STARTED_MS.load(std::sync::atomic::Ordering::Relaxed) {
-        0 => None,
-        ms => DateTime::from_timestamp_millis(ms),
-    }
+pub fn projector_started(database: &str) -> Option<DateTime<Utc>> {
+    let ms = *PROJECTOR_STARTED_MS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(database)?;
+    DateTime::from_timestamp_millis(ms)
+}
+
+/// Имя базы пула для отметки старта проектора.
+pub fn database_of(pool: &PgPool) -> String {
+    pool.connect_options()
+        .get_database()
+        .unwrap_or_default()
+        .to_owned()
 }
 
 pub async fn run(
@@ -1189,7 +1204,7 @@ pub async fn run(
     shutdown: watch::Receiver<bool>,
 ) {
     crate::singleton::supervise(&pool, "activity", shutdown, || async {
-        mark_projector_started(Utc::now());
+        mark_projector_started(&database_of(&pool), Utc::now());
         if !nudge_enabled
             && let Err(error) =
                 crate::session_tools::nudge::disable_all_on_startup(&pool, Utc::now()).await
