@@ -31,6 +31,11 @@ fn map(error: schedules::ScheduleError) -> ApiError {
         }
         schedules::ScheduleError::Invalid(_) => ApiError::new(ErrorCode::ScheduleInvalid),
         schedules::ScheduleError::Conflict(_) => ApiError::new(ErrorCode::IdempotencyConflict),
+        // Ручная финализация после каскадного удаления: строка запуска ушла
+        // вместе с расписанием, это 404, а не 500.
+        schedules::ScheduleError::Db(sqlx::Error::RowNotFound) => {
+            ApiError::new(ErrorCode::NotFound)
+        }
         schedules::ScheduleError::Db(error) => error.into(),
     }
 }

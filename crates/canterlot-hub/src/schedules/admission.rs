@@ -1087,7 +1087,7 @@ pub async fn run_now(
         }
     };
     let mut tx = crate::db::begin(&state.pool).await?;
-    set_run_state(
+    if let Err(error) = set_run_state(
         &mut tx,
         run.id,
         state_out,
@@ -1097,7 +1097,15 @@ pub async fn run_now(
         session_id,
         input_id,
     )
-    .await?;
+    .await
+    {
+        let _ = tx.rollback().await;
+        // Расписание удалили посреди ручного запуска: каскад унёс строку.
+        if matches!(error, sqlx::Error::RowNotFound) {
+            return Err(ScheduleError::NotFound);
+        }
+        return Err(ScheduleError::Db(error));
+    }
     let updated = apply_outcome(
         &run, state_out, detail, session_id, input_id, started_at, delay,
     );
