@@ -710,6 +710,22 @@ impl Scheduler {
         self.service.notify.notify_one();
     }
 
+    pub(crate) fn pool(&self) -> &PgPool {
+        &self.pool
+    }
+    pub(crate) fn registry(&self) -> Option<&Registry> {
+        self.registry.as_ref()
+    }
+    pub(crate) fn dispatcher(&self) -> &Dispatcher {
+        &self.dispatcher
+    }
+    pub(crate) fn limits_config(&self) -> &LimitsConfig {
+        &self.limits
+    }
+    pub(crate) fn routing_stale(&self) -> Duration {
+        self.routing_stale
+    }
+
     /// Готовая проба пути для этого задания, если она ему нужна.
     async fn prepare_probe(
         &self,
@@ -756,6 +772,30 @@ impl Scheduler {
     pub async fn tick(&self, now: DateTime<Utc>) -> Result<TickReport, sqlx::Error> {
         crunch::expire_pending(&self.pool, now).await?;
         crate::side::sweep(&self.pool, now).await?;
+        // Заявление расписаний — короткая транзакция; работа с воркерами идёт вне тика.
+        let claimed = {
+            let mut tx = crate::db::begin(&self.pool).await?;
+            let claimed = crate::schedules::claim_due(&mut tx, now, 32).await;
+            match claimed {
+                Ok(claimed) => {
+                    tx.commit().await?;
+                    claimed
+                }
+                Err(error) => {
+                    let _ = tx.rollback().await;
+                    return Err(error);
+                }
+            }
+        };
+        for claimed_run in claimed {
+            if claimed_run.run.state == crate::schedules::RunState::Missed {
+                continue;
+            }
+            let scheduler = self.clone();
+            tokio::spawn(async move {
+                crate::schedules::admission::admit(&scheduler, claimed_run).await;
+            });
+        }
         let mut report = TickReport::default();
         loop {
             let mut tx = crate::db::begin(&self.pool).await?;

@@ -224,6 +224,7 @@ pub struct ScheduleRun {
     pub session_id: Option<Uuid>,
     pub input_id: Option<Uuid>,
     pub manual: bool,
+    pub idempotency_key: String,
     pub detail: Value,
 }
 
@@ -290,6 +291,7 @@ struct RunRow {
     session_id: Option<Uuid>,
     input_id: Option<Uuid>,
     manual: bool,
+    idempotency_key: String,
     detail: Value,
     created_at: DateTime<Utc>,
 }
@@ -307,6 +309,7 @@ impl RunRow {
             session_id: self.session_id,
             input_id: self.input_id,
             manual: self.manual,
+            idempotency_key: self.idempotency_key,
             detail: self.detail,
         })
     }
@@ -759,6 +762,21 @@ pub async fn runs(
     rows.into_iter().map(RunRow::into_run).collect()
 }
 
+pub async fn get_run(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    id: Uuid,
+) -> Result<Option<ScheduleRun>, sqlx::Error> {
+    let row: Option<RunRow> = sqlx::query_as(
+        "select * from schedule_runs where id=$1 and owner_id=$2",
+    )
+    .bind(id)
+    .bind(owner_id)
+    .fetch_optional(conn)
+    .await?;
+    row.map(RunRow::into_run).transpose()
+}
+
 pub async fn insert_run(
     conn: &mut PgConnection,
     id: Uuid,
@@ -814,6 +832,137 @@ pub async fn set_run_state(
     .execute(conn)
     .await?;
     Ok(())
+}
+
+/// Заявление, готовое к приёму вне тика.
+#[derive(Clone, Debug)]
+pub struct ClaimedRun {
+    pub run: ScheduleRun,
+    pub schedule: Schedule,
+}
+
+async fn run_changed(conn: &mut PgConnection, run: &ScheduleRun, correlation_id: Uuid) -> Result<(), sqlx::Error> {
+    let owner_id = run_detail_owner(conn, run.id).await?;
+    events::append(
+        conn,
+        NewEvent {
+            scope: Scope::Schedules { owner_id },
+            kind: "schedule_run_changed",
+            conversation_id: None,
+            execution_id: None,
+            payload: serde_json::to_value(run).map_err(|e| sqlx::Error::Encode(Box::new(e)))?,
+            correlation_id,
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+async fn run_detail_owner(conn: &mut PgConnection, run_id: Uuid) -> Result<Uuid, sqlx::Error> {
+    sqlx::query_scalar("select owner_id from schedule_runs where id=$1")
+        .bind(run_id)
+        .fetch_one(conn)
+        .await
+}
+
+/// Короткая транзакция тика: выбрать просроченные срабатывания, записать один
+/// запуск на последнее из них и сдвинуть `next_fire_at`. Повтор тика или
+/// перезапуск не создаст вторую строку благодаря уникальности пары.
+pub async fn claim_due(
+    conn: &mut PgConnection,
+    now: DateTime<Utc>,
+    limit: i64,
+) -> Result<Vec<ClaimedRun>, sqlx::Error> {
+    let rows: Vec<ScheduleRow> = sqlx::query_as(
+        "select * from schedules where enabled and next_fire_at<=$1
+         order by next_fire_at,id for update skip locked limit $2",
+    )
+    .bind(now)
+    .bind(limit)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut claimed = Vec::new();
+    for row in rows {
+        let schedule = match row.into_schedule() {
+            Ok(schedule) => schedule,
+            Err(error) => {
+                tracing::warn!(kind = "schedule_claim_invalid_row", error = %error, "schedule skipped");
+                continue;
+            }
+        };
+        let parsed = match CronSchedule::parse(&schedule.cron) {
+            Ok(parsed) => parsed,
+            Err(_) => continue,
+        };
+        let tz = match cron::timezone(&schedule.timezone) {
+            Ok(tz) => tz,
+            Err(_) => continue,
+        };
+        let mut occurrences = Vec::new();
+        let mut cursor = schedule.next_fire_at;
+        while cursor <= now && occurrences.len() < 100_000 {
+            occurrences.push(cursor);
+            match parsed.next_after(cursor, tz) {
+                Some(next) => cursor = next,
+                None => break,
+            }
+        }
+        if occurrences.is_empty() {
+            continue;
+        }
+        let window = catch_up_window(schedule.catch_up_minutes);
+        let within: Vec<DateTime<Utc>> = occurrences
+            .iter()
+            .copied()
+            .filter(|at| now - *at <= window)
+            .collect();
+        let (scheduled_at, missed_before, state) = match within.last().copied() {
+            Some(at) => (
+                at,
+                occurrences.iter().filter(|other| **other < at).count(),
+                RunState::Claimed,
+            ),
+            None => (
+                *occurrences.last().unwrap(),
+                occurrences.len(),
+                RunState::Missed,
+            ),
+        };
+        let detail = json!({"missed_before": missed_before});
+        let run_id = Uuid::now_v7();
+        let key = format!("schedule:{}:{}", schedule.id, scheduled_at.to_rfc3339());
+        let row: Option<RunRow> = sqlx::query_as(
+            "insert into schedule_runs(id,schedule_id,owner_id,scheduled_at,claimed_revision,
+                state,idempotency_key,detail)
+             values($1,$2,$3,$4,$5,$6,$7,$8)
+             on conflict (schedule_id,scheduled_at) do nothing returning *",
+        )
+        .bind(run_id)
+        .bind(schedule.id)
+        .bind(schedule.owner_id)
+        .bind(scheduled_at)
+        .bind(schedule.revision)
+        .bind(state.as_str())
+        .bind(&key)
+        .bind(&detail)
+        .fetch_optional(&mut *conn)
+        .await?;
+        let Some(row) = row else {
+            continue;
+        };
+        let run = row.into_run()?;
+        run_changed(conn, &run, Uuid::now_v7()).await?;
+        let next_fire = parsed
+            .next_after(*occurrences.last().unwrap(), tz)
+            .unwrap_or(now + TimeDelta::days(366));
+        sqlx::query("update schedules set next_fire_at=$2,updated_at=clock_timestamp() where id=$1")
+            .bind(schedule.id)
+            .bind(next_fire)
+            .execute(&mut *conn)
+            .await?;
+        claimed.push(ClaimedRun { run, schedule });
+    }
+    Ok(claimed)
 }
 
 /// Уборка: не больше 200 последних запусков на расписание.

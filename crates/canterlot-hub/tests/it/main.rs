@@ -103,6 +103,7 @@ mod retention_keyset;
 mod routing;
 mod scheduler;
 mod scheduled_runs;
+mod scheduled_runs_pipeline;
 mod schema;
 mod secret_requests;
 mod security;

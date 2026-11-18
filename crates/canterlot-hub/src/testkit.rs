@@ -126,11 +126,16 @@ pub async fn test_app_deps(
     let (attachments, blobs) = test_blob_store(directory.path());
     let timers = crate::config::HubTimers::default();
     let (dispatcher, _rx) = crate::dispatcher::Dispatcher::channel();
-    let scheduler =
-        crate::scheduler::Scheduler::new(pool.clone(), dispatcher.clone(), Default::default());
+    let registry = crate::session::Registry::new(timers);
+    let scheduler = crate::scheduler::Scheduler::new(
+        pool.clone(),
+        dispatcher.clone(),
+        Default::default(),
+    )
+    .with_limits(registry.clone(), Default::default());
     let deps = crate::http::AppDeps {
         pool,
-        registry: crate::session::Registry::new(timers),
+        registry,
         installation,
         dispatcher,
         scheduler,
