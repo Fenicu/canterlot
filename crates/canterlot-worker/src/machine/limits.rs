@@ -471,9 +471,35 @@ pub fn codex_limits_route(
     live: LiveLimits,
     hub_age: HubLimitsAge,
 ) -> Arc<dyn LimitsSource> {
-    let probe = Arc::new(CodexRateLimitsSource::new(codex, live, hub_age));
+    codex_limits_route_with_clock(
+        codex,
+        codexbar_path,
+        limits_interval,
+        live,
+        hub_age,
+        Instant::now,
+    )
+}
+
+/// Тот же маршрут с подставными часами: тест двигает время, не останавливая Tokio.
+pub fn codex_limits_route_with_clock(
+    codex: &CodexConfig,
+    codexbar_path: Option<PathBuf>,
+    limits_interval: Duration,
+    live: LiveLimits,
+    hub_age: HubLimitsAge,
+    clock: impl Fn() -> Instant + Send + Sync + 'static,
+) -> Arc<dyn LimitsSource> {
+    let clock: Arc<dyn Fn() -> Instant + Send + Sync + 'static> = Arc::new(clock);
+    let probe = Arc::new(
+        CodexRateLimitsSource::new(codex, live, hub_age).with_clock({
+            let clock = clock.clone();
+            move || clock()
+        }),
+    );
     Arc::new(CodexLimitsSource {
-        codexbar: CodexBarLimitsSource::new(codexbar_path, limits_interval, Some(probe.clone())),
+        codexbar: CodexBarLimitsSource::new(codexbar_path, limits_interval, Some(probe.clone()))
+            .with_shared_clock(clock),
         probe,
         credits_interval: limits_interval,
     })

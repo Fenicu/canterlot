@@ -352,6 +352,15 @@ impl CodexBarLimitsSource {
         self
     }
 
+    /// Общие часы маршрута: codexbar и probe обязаны мерить интервалы одним временем.
+    pub fn with_shared_clock(
+        mut self,
+        clock: Arc<dyn Fn() -> Instant + Send + Sync + 'static>,
+    ) -> Self {
+        self.clock = clock;
+        self
+    }
+
     /// Один запуск без учёта интервала.
     pub async fn fetch(&self, provider: &str) -> Result<LimitsFetch, CodexBarError> {
         let executable = locate(self.configured.as_deref()).ok_or(CodexBarError::Missing)?;

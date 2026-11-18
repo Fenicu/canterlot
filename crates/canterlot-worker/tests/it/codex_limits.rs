@@ -22,7 +22,7 @@ use canterlot_worker::{
     config::CodexConfig,
     machine::limits::{
         CodexRateLimitsSource, HubLimitsAge, LimitsFetch, LimitsSource, LiveLimits,
-        RoutedLimitsSource, codex_limits_route,
+        RoutedLimitsSource, codex_limits_route, codex_limits_route_with_clock,
     },
 };
 use serde_json::{Value, json};
@@ -846,11 +846,17 @@ async fn codex_route_probes_credits_at_most_once_per_interval() {
         executable: server.executable.clone(),
         ..CodexConfig::default()
     };
-    let source = codex_route(
+    // Двигаем только часы маршрута: пауза Tokio автопродвигает таймер ожидания потомка
+    // и под нагрузкой заставляет codexbar ошибиться, после чего probe уходит второй раз.
+    let clock = TestClock::new();
+    let time = clock.0.clone();
+    let source = codex_limits_route_with_clock(
         &config,
-        fake_codexbar(dir.path(), true),
+        Some(fake_codexbar(dir.path(), true)),
         Duration::from_secs(900),
+        LiveLimits::default(),
         no_hub_age(),
+        move || *time.lock().unwrap(),
     );
     assert_eq!(
         source
@@ -860,8 +866,7 @@ async fn codex_route_probes_credits_at_most_once_per_interval() {
             .len(),
         1
     );
-    tokio::time::pause();
-    tokio::time::advance(Duration::from_secs(30)).await;
+    clock.advance(Duration::from_secs(30));
     assert!(
         source
             .poll_refresh("codex")
