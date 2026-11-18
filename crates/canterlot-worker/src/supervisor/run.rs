@@ -600,6 +600,9 @@ async fn adapter_event(adapter: &mut Option<Box<dyn Adapter>>, gone: bool) -> Ad
     }
 }
 
+/// Сколько готовых событий адаптера охрана interrupt разбирает до решения.
+const GUARD_DRAIN_BUDGET: usize = 64;
+
 async fn ready_adapter_event(adapter: &mut Option<Box<dyn Adapter>>) -> Option<AdapterEvent> {
     let adapter = adapter.as_mut()?;
     let mut event = adapter.next_event();
@@ -2991,7 +2994,8 @@ impl Supervisor {
         if !expected_turn.is_empty() {
             // Охрана сверяется с журналом после событий адаптера, которые уже готовы:
             // цикл мог выбрать управляющее сообщение раньше записи прогресса.
-            for _ in 0..64 {
+            let mut budget_exhausted = false;
+            for drained in 0..=GUARD_DRAIN_BUDGET {
                 if self.adapter_exited || matches!(self.lifecycle, Lifecycle::Draining { .. }) {
                     break;
                 }
@@ -2999,8 +3003,14 @@ impl Supervisor {
                     break;
                 };
                 self.on_adapter_event(event).await?;
+                // Бюджет вышел, а готовые события ещё есть: картина неполная, а ход,
+                // который мог ожить, прерывать нельзя. Охрана закрывается отказом.
+                budget_exhausted = drained == GUARD_DRAIN_BUDGET;
             }
             self.sj.flush()?;
+            if budget_exhausted {
+                return self.interrupt_record(&id, attempt, InterruptState::TurnMismatch);
+            }
             let same_turn = self.active_turn.map(|turn| turn.to_string()).as_deref()
                 == Some(expected_turn.as_str());
             if !same_turn || self.sj.progress_seq() > checkpoint {
@@ -4838,6 +4848,53 @@ mod tests {
             .unwrap();
         assert_eq!(state.lock().unwrap().interrupt_calls, 0);
         assert!(!supervisor.aborting_turn && supervisor.pending_interrupts.is_empty());
+    }
+
+    /// Готовых событий больше, чем бюджет охраны: решать по неполной картине нельзя,
+    /// interrupt отклоняется, процесс не трогается.
+    #[tokio::test]
+    async fn guarded_interrupt_refuses_when_more_ready_events_remain_than_the_budget() {
+        let (_dir, mut supervisor, state) = test_supervisor();
+        state.lock().unwrap().ack_interrupt = true;
+        let first = queue_owner(&mut supervisor);
+        supervisor.try_transmit().await.unwrap();
+        let checkpoint = supervisor.sj.progress_seq();
+        for _ in 0..(GUARD_DRAIN_BUDGET + 10) {
+            state
+                .lock()
+                .unwrap()
+                .ready_events
+                .push_back(AdapterEvent::Progress);
+        }
+        supervisor
+            .on_interrupt_guarded("int-1".into(), 1, first.0.to_string(), checkpoint)
+            .await
+            .unwrap();
+        assert_eq!(state.lock().unwrap().interrupt_calls, 0);
+        assert!(!supervisor.aborting_turn && supervisor.pending_interrupts.is_empty());
+    }
+
+    /// Ровно столько готовых событий, сколько вмещает бюджет, и ни одного сверх него:
+    /// картина полная, охрана решает как обычно.
+    #[tokio::test]
+    async fn guarded_interrupt_with_exactly_the_budget_of_ready_events_still_decides() {
+        let (_dir, mut supervisor, state) = test_supervisor();
+        state.lock().unwrap().ack_interrupt = true;
+        let first = queue_owner(&mut supervisor);
+        supervisor.try_transmit().await.unwrap();
+        let checkpoint = supervisor.sj.progress_seq();
+        for _ in 0..GUARD_DRAIN_BUDGET {
+            state
+                .lock()
+                .unwrap()
+                .ready_events
+                .push_back(AdapterEvent::Progress);
+        }
+        supervisor
+            .on_interrupt_guarded("int-1".into(), 1, first.0.to_string(), checkpoint)
+            .await
+            .unwrap();
+        assert!(state.lock().unwrap().ready_events.is_empty());
     }
 
     #[tokio::test]
