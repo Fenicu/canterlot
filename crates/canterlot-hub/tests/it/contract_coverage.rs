@@ -1022,15 +1022,15 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
             Method::POST,
             "/api/v1/schedules/{id}/pause",
             format!("/api/v1/schedules/{schedule}/pause"),
-            None,
-            None,
+            Some(json!({"base_revision":2})),
+            Some(json!({"base_revision":999})),
         ),
         case(
             Method::POST,
             "/api/v1/schedules/{id}/resume",
             format!("/api/v1/schedules/{schedule}/resume"),
-            None,
-            None,
+            Some(json!({"base_revision":3})),
+            Some(json!({"base_revision":999})),
         ),
         case(
             Method::POST,
@@ -1043,8 +1043,8 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
             Method::DELETE,
             "/api/v1/schedules/{id}",
             format!("/api/v1/schedules/{schedule}"),
-            None,
-            None,
+            Some(json!({"base_revision":4})),
+            Some(json!({"base_revision":999})),
         ),
     ];
 

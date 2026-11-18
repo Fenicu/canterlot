@@ -79,6 +79,11 @@ pub async fn admit(scheduler: &Scheduler, claimed: ClaimedRun) {
     )
     .await
     {
+        if matches!(error, sqlx::Error::RowNotFound) {
+            // Расписание удалили, пока шёл приём: строка запуска ушла
+            // каскадом, событие о призраке не публикуем.
+            return;
+        }
         tracing::error!(kind = "schedule_admit_db", error = %crate::dberr::describe(&error), "cannot record run outcome");
         return;
     }
@@ -117,6 +122,15 @@ async fn admit_inner(
     run_anyway: bool,
     manual: bool,
 ) -> AdmitResult {
+    // Граница параллельных приёмов: каждый приём держит соединение лишь
+    // короткими участками, но предпроверка ждёт воркер до минуты.
+    // Без семафора 32 заявленных тиком приёма занимают весь пул.
+    static ADMIT_SEMAPHORE: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    let semaphore = ADMIT_SEMAPHORE.get_or_init(|| tokio::sync::Semaphore::new(8));
+    let _permit = semaphore
+        .acquire()
+        .await
+        .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))?;
     if !run_anyway && !manual && schedule.overlap == OverlapPolicy::Skip {
         let mut conn = scheduler
             .pool()
@@ -215,6 +229,9 @@ async fn admit_inner(
     {
         return Err(Skip::with(RunState::SkippedLimits, detail));
     }
+    // Соединение не держим через ожидание воркера: иначе каждый приём
+    // с предпроверкой паркует соединение пула на минуту.
+    drop(conn);
 
     if !run_anyway && let Some(command) = schedule.precheck.as_deref() {
         precheck(
@@ -229,7 +246,7 @@ async fn admit_inner(
         .await?;
     }
 
-    dispatch(scheduler, schedule, run, &executor, provider, run_anyway).await
+    dispatch(scheduler, schedule, run, &executor, provider, run_anyway, manual).await
 }
 
 #[derive(Debug)]
@@ -529,25 +546,11 @@ async fn dispatch(
     executor: &ResolvedExecutor,
     provider: &str,
     run_anyway: bool,
+    manual: bool,
 ) -> AdmitResult {
     let mut tx = crate::db::begin(scheduler.pool())
         .await
         .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))?;
-    // Повтор после сбоя сразу после commit dispatch: не создаём вторую сессию
-    // и не ставим второй ввод; возвращаем уже зафиксированные идентификаторы.
-    let already: Option<(Uuid, Uuid)> = sqlx::query_as(
-        "select session_id,input_id from schedule_runs where id=$1 and state='started'",
-    )
-    .bind(run.id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))?;
-    if let Some((session_id, input_id)) = already {
-        tx.commit()
-            .await
-            .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))?;
-        return Ok((session_id, input_id, json!({"replayed": true})));
-    }
     let current: Option<super::ScheduleRow> =
         sqlx::query_as("select * from schedules where id=$1 and owner_id=$2 for update")
             .bind(schedule.id)
@@ -559,15 +562,39 @@ async fn dispatch(
         let _ = tx.rollback().await;
         return Err(Skip::new(RunState::SkippedChanged, "schedule_deleted"));
     };
+    // Повтор после сбоя сразу после commit dispatch: не создаём вторую сессию
+    // и не ставим второй ввод; возвращаем уже зафиксированные идентификаторы.
+    // Строка запуска читается под замком расписания, после него: две
+    // параллельные приёмки не разойдутся мимо друг друга.
+    let already: Option<(Uuid, Uuid)> = sqlx::query_as(
+        "select session_id,input_id from schedule_runs where id=$1 and state='started' for update",
+    )
+    .bind(run.id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))?;
+    if let Some((session_id, input_id)) = already {
+        tx.commit()
+            .await
+            .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))?;
+        return Ok((session_id, input_id, json!({"replayed": true})));
+    }
     let current = current
         .into_schedule()
         .map_err(|_| Skip::new(RunState::Failed, "invalid_schedule"))?;
-    if !current.enabled || current.revision != run.claimed_revision {
+    // Ручной запуск с кнопки разрешён и на приостановленном расписании:
+    // важно лишь, что его не правили посреди приёма (ревизия та же).
+    // Пауза во время приёма тихого тика — это `skipped_changed`.
+    if current.revision != run.claimed_revision {
         let _ = tx.rollback().await;
         return Err(Skip::new(
             RunState::SkippedChanged,
             "schedule_revision_changed",
         ));
+    }
+    if !manual && !run_anyway && !current.enabled {
+        let _ = tx.rollback().await;
+        return Err(Skip::new(RunState::SkippedChanged, "schedule_paused"));
     }
     let now = Utc::now();
     let content = vec![ContentBlock::Text {

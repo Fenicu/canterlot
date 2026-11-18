@@ -166,48 +166,81 @@ async fn update(
     ))
 }
 
-#[utoipa::path(delete,path="/api/v1/schedules/{id}",tag="schedules",params(("id"=Uuid,Path,description="Расписание"),("Idempotency-Key"=String,Header,description="Ключ операции")),responses((status=200,description="Расписание удалено",body=Schedule),(status=404,description="Расписание не найдено",body=ErrorEnvelope)))]
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RevisionBody {
+    /// Ревизия из последнего виденного клиентом состояния (как у PATCH).
+    pub base_revision: i64,
+}
+
+#[utoipa::path(delete,path="/api/v1/schedules/{id}",tag="schedules",params(("id"=Uuid,Path,description="Расписание"),("Idempotency-Key"=String,Header,description="Ключ операции")),request_body=RevisionBody,responses((status=200,description="Расписание удалено",body=Schedule),(status=404,description="Расписание не найдено",body=ErrorEnvelope)))]
 async fn delete(
     State(state): State<AppState>,
     owner: Owner,
     ApiPath(id): ApiPath<Uuid>,
     IdempotencyKey(key): IdempotencyKey,
     Correlation(correlation): Correlation,
+    ApiJson(body): ApiJson<RevisionBody>,
 ) -> Result<Json<Schedule>, ApiError> {
     Ok(Json(
-        schedules::delete(&state.pool, owner.owner_id, id, &key, correlation)
-            .await
-            .map_err(map)?,
+        schedules::delete(
+            &state.pool,
+            owner.owner_id,
+            id,
+            &key,
+            body.base_revision,
+            correlation,
+        )
+        .await
+        .map_err(map)?,
     ))
 }
 
-#[utoipa::path(post,path="/api/v1/schedules/{id}/pause",tag="schedules",params(("id"=Uuid,Path,description="Расписание"),("Idempotency-Key"=String,Header,description="Ключ операции")),responses((status=200,description="Расписание на паузе",body=Schedule),(status=404,description="Расписание не найдено",body=ErrorEnvelope)))]
+#[utoipa::path(post,path="/api/v1/schedules/{id}/pause",tag="schedules",params(("id"=Uuid,Path,description="Расписание"),("Idempotency-Key"=String,Header,description="Ключ операции")),request_body=RevisionBody,responses((status=200,description="Расписание на паузе",body=Schedule),(status=404,description="Расписание не найдено",body=ErrorEnvelope)))]
 async fn pause(
     State(state): State<AppState>,
     owner: Owner,
     ApiPath(id): ApiPath<Uuid>,
     IdempotencyKey(key): IdempotencyKey,
     Correlation(correlation): Correlation,
+    ApiJson(body): ApiJson<RevisionBody>,
 ) -> Result<Json<Schedule>, ApiError> {
     Ok(Json(
-        schedules::set_enabled(&state.pool, owner.owner_id, id, &key, false, correlation)
-            .await
-            .map_err(map)?,
+        schedules::set_enabled(
+            &state.pool,
+            owner.owner_id,
+            id,
+            &key,
+            false,
+            body.base_revision,
+            correlation,
+        )
+        .await
+        .map_err(map)?,
     ))
 }
 
-#[utoipa::path(post,path="/api/v1/schedules/{id}/resume",tag="schedules",params(("id"=Uuid,Path,description="Расписание"),("Idempotency-Key"=String,Header,description="Ключ операции")),responses((status=200,description="Расписание возобновлено",body=Schedule),(status=404,description="Расписание не найдено",body=ErrorEnvelope)))]
+#[utoipa::path(post,path="/api/v1/schedules/{id}/resume",tag="schedules",params(("id"=Uuid,Path,description="Расписание"),("Idempotency-Key"=String,Header,description="Ключ операции")),request_body=RevisionBody,responses((status=200,description="Расписание возобновлено",body=Schedule),(status=404,description="Расписание не найдено",body=ErrorEnvelope)))]
 async fn resume(
     State(state): State<AppState>,
     owner: Owner,
     ApiPath(id): ApiPath<Uuid>,
     IdempotencyKey(key): IdempotencyKey,
     Correlation(correlation): Correlation,
+    ApiJson(body): ApiJson<RevisionBody>,
 ) -> Result<Json<Schedule>, ApiError> {
     Ok(Json(
-        schedules::set_enabled(&state.pool, owner.owner_id, id, &key, true, correlation)
-            .await
-            .map_err(map)?,
+        schedules::set_enabled(
+            &state.pool,
+            owner.owner_id,
+            id,
+            &key,
+            true,
+            body.base_revision,
+            correlation,
+        )
+        .await
+        .map_err(map)?,
     ))
 }
 

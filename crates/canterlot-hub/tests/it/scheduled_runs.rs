@@ -83,7 +83,7 @@ async fn create_list_get_update_and_delete_a_schedule(pool: sqlx::PgPool) {
         Method::DELETE,
         &format!("/api/v1/schedules/{id}"),
         "s-delete",
-        None,
+        Some(json!({"base_revision": 2})),
     )
     .await;
     assert_eq!(code, 200);
@@ -117,7 +117,7 @@ async fn pause_resume_and_preview(pool: sqlx::PgPool) {
         Method::POST,
         &format!("/api/v1/schedules/{id}/pause"),
         "p-pause",
-        None,
+        Some(json!({"base_revision": 1})),
     )
     .await;
     assert_eq!(code, 200, "{paused}");
@@ -127,7 +127,7 @@ async fn pause_resume_and_preview(pool: sqlx::PgPool) {
         Method::POST,
         &format!("/api/v1/schedules/{id}/resume"),
         "p-resume",
-        None,
+        Some(json!({"base_revision": 2})),
     )
     .await;
     assert_eq!(code, 200, "{resumed}");

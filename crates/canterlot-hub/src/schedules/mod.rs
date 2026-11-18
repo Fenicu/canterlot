@@ -697,6 +697,7 @@ pub async fn set_enabled(
     id: Uuid,
     key: &str,
     enabled: bool,
+    base_revision: i64,
     correlation_id: Uuid,
 ) -> Result<Schedule, ScheduleError> {
     let value = idempotency::run_in_tx(
@@ -704,7 +705,7 @@ pub async fn set_enabled(
         owner_id,
         key,
         "set_schedule_enabled",
-        &json!({"id": id, "enabled": enabled}),
+        &json!({"id": id, "enabled": enabled, "base_revision": base_revision}),
         None,
         move |conn| {
             Box::pin(async move {
@@ -715,6 +716,9 @@ pub async fn set_enabled(
                         .fetch_optional(&mut *conn)
                         .await?;
                 let mut schedule = row.ok_or(ScheduleError::NotFound)?.into_schedule()?;
+                if schedule.revision != base_revision {
+                    return Err(ScheduleError::StaleRevision);
+                }
                 schedule.enabled = enabled;
                 schedule.revision += 1;
                 sqlx::query("update schedules set enabled=$2,revision=$3,updated_at=clock_timestamp() where id=$1")
@@ -738,6 +742,7 @@ pub async fn delete(
     owner_id: Uuid,
     id: Uuid,
     key: &str,
+    base_revision: i64,
     correlation_id: Uuid,
 ) -> Result<Schedule, ScheduleError> {
     let value = idempotency::run_in_tx(
@@ -745,7 +750,7 @@ pub async fn delete(
         owner_id,
         key,
         "delete_schedule",
-        &json!({"id": id}),
+        &json!({"id": id, "base_revision": base_revision}),
         None,
         move |conn| {
             Box::pin(async move {
@@ -757,6 +762,9 @@ pub async fn delete(
                 .fetch_optional(&mut *conn)
                 .await?;
                 let schedule = row.ok_or(ScheduleError::NotFound)?.into_schedule()?;
+                if schedule.revision != base_revision {
+                    return Err(ScheduleError::StaleRevision);
+                }
                 sqlx::query("delete from schedules where id=$1")
                     .bind(id)
                     .execute(&mut *conn)
@@ -882,7 +890,7 @@ pub async fn set_run_state(
     session_id: Option<Uuid>,
     input_id: Option<Uuid>,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    let result = sqlx::query(
         "update schedule_runs set state=$2,detail=$3,started_at=coalesce($4,started_at),
             delay_ms=coalesce($5,delay_ms),session_id=coalesce($6,session_id),
             input_id=coalesce($7,input_id),updated_at=clock_timestamp() where id=$1",
@@ -896,6 +904,11 @@ pub async fn set_run_state(
     .bind(input_id)
     .execute(conn)
     .await?;
+    if result.rows_affected() == 0 {
+        // Расписание удалили, каскад унёс и запуск: молчаливого успеха
+        // быть не должно, иначе дальше ляжет событие о призраке.
+        return Err(sqlx::Error::RowNotFound);
+    }
     Ok(())
 }
 

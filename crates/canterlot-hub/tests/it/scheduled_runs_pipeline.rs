@@ -138,7 +138,12 @@ async fn tick_claims_once_and_queues_one_input(pool: PgPool) {
 async fn missed_occurrences_are_counted_in_one_run(pool: PgPool) {
     let f = Fixture::new(pool.clone()).await;
     let id = create(&f, existing(&f), "0 9 * * *").await;
-    let now = Utc::now();
+    // Фиксированный момент вместо `Utc::now()`: тест шёл через `now - 2 дня`,
+    // и запуск в 09:00–09:30 по Москве видел сегодняшний 09:00 в окне
+    // catch-up и заявлял `claimed` вместо `missed`.
+    let now = chrono::DateTime::parse_from_rfc3339("2026-11-10T12:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc);
     due(&pool, &id, now - TimeDelta::days(2)).await;
     scheduler(&f).tick(now).await.unwrap();
     let rid = run_id(&pool, &id).await;
@@ -227,6 +232,10 @@ async fn precheck_exit_zero_starts_and_nonzero_skips(pool: PgPool) {
         testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
     let registry = f.state.registry.clone();
     let machine = f.seed.machine_id;
+    let connection = registry
+        .session_info(machine)
+        .expect("fake session registered")
+        .connection_id;
     let worker = tokio::spawn(async move {
         while let Some(down) = session.commands.recv().await {
             if let Some(control_down::Msg::SchedulePrecheck(request)) = down.msg {
@@ -237,6 +246,7 @@ async fn precheck_exit_zero_starts_and_nonzero_skips(pool: PgPool) {
                 };
                 registry.finish_precheck(
                     machine,
+                    connection,
                     PrecheckResult {
                         attempt_id: request.attempt_id,
                         outcome: Some(precheck_result::Outcome::Finished(
