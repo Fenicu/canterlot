@@ -1927,11 +1927,13 @@ async fn dispatch_counts_a_pending_nudge_as_busy_like_routing(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("insert into conversation_derived(conversation_id) values($1) on conflict do nothing")
-        .bind(f.seed.conversation_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "insert into conversation_derived(conversation_id) values($1) on conflict do nothing",
+    )
+    .bind(f.seed.conversation_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     sqlx::query(
         "insert into nudge_rules(conversation_id,owner_id,set_by,state) values($1,$2,'owner','pending')",
     )
@@ -2007,7 +2009,10 @@ async fn manual_run_with_the_same_timestamp_does_not_suppress_the_cron_occurrenc
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(cron, 1, "the cron occurrence is claimed beside the manual run");
+    assert_eq!(
+        cron, 1,
+        "the cron occurrence is claimed beside the manual run"
+    );
 }
 
 /// 6: если строка срабатывания уже есть, тик всё равно двигает `next_fire_at`.
@@ -2028,7 +2033,10 @@ async fn claim_tick_advances_the_cursor_when_the_occurrence_row_exists(pool: PgP
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert!(next > Utc::now(), "cursor moved past the existing occurrence: {next}");
+    assert!(
+        next > Utc::now(),
+        "cursor moved past the existing occurrence: {next}"
+    );
     let runs: i64 = sqlx::query_scalar("select count(*) from schedule_runs where schedule_id=$1")
         .bind(schedule)
         .fetch_one(&pool)
@@ -2070,7 +2078,9 @@ async fn history_pruning_keeps_active_runs(pool: PgPool) {
         .unwrap();
     }
     let mut conn = pool.acquire().await.unwrap();
-    canterlot_hub::schedules::prune_runs(&mut conn).await.unwrap();
+    canterlot_hub::schedules::prune_runs(&mut conn)
+        .await
+        .unwrap();
     drop(conn);
     let (state, _) = state(&pool, old).await;
     assert_eq!(state, "claimed", "an active run is never pruned");
@@ -2182,7 +2192,9 @@ async fn finalization_retries_a_lock_timeout(pool: PgPool) {
         .max_connections(4)
         .after_connect(|conn, _| {
             Box::pin(async move {
-                sqlx::query("set lock_timeout = '150ms'").execute(conn).await?;
+                sqlx::query("set lock_timeout = '150ms'")
+                    .execute(conn)
+                    .await?;
                 Ok(())
             })
         })
@@ -2234,7 +2246,15 @@ async fn recovery_skips_a_locked_schedule(pool: PgPool) {
     let now = Utc::now();
     let mut ids = Vec::new();
     for name in ["a", "b"] {
-        let id = Uuid::parse_str(&create(&f, existing(&f), &format!("0 {} * * *", if name == "a" { 9 } else { 10 })).await).unwrap();
+        let id = Uuid::parse_str(
+            &create(
+                &f,
+                existing(&f),
+                &format!("0 {} * * *", if name == "a" { 9 } else { 10 }),
+            )
+            .await,
+        )
+        .unwrap();
         sqlx::query(
             "insert into schedule_runs(id,schedule_id,owner_id,scheduled_at,claimed_revision,state,manual,idempotency_key,attempt_id,lease_at,updated_at)
              values($1,$2,$3,$4,1,'claimed',false,$5,$6,$7,$7)",
@@ -2384,4 +2404,243 @@ async fn scheduled_new_session_takes_the_machine_lock_before_the_provider_lock(p
     let rid = run_id(&pool, &id).await;
     let detail = wait_state(&pool, rid, "started").await;
     assert!(detail.is_object(), "{detail}");
+}
+
+/// Второй хаб: собственный реестр сессий, своя сессия воркера и свой планировщик
+/// на той же базе. Считает предпроверки, которые дошли до его воркера.
+struct SecondHub {
+    scheduler: canterlot_hub::scheduler::Scheduler,
+    prechecks: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    _worker: tokio::task::JoinHandle<()>,
+}
+
+fn second_hub(f: &Fixture) -> SecondHub {
+    use canterlot_hub::session::Registry;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let registry = Registry::new(Default::default());
+    let mut session = testkit::fake_session(&registry, f.seed.machine_id, &caps(), true);
+    let machine = f.seed.machine_id;
+    let connection = registry.session_info(machine).unwrap().connection_id;
+    let prechecks = std::sync::Arc::new(AtomicUsize::new(0));
+    let counter = prechecks.clone();
+    let reply = registry.clone();
+    let worker = tokio::spawn(async move {
+        while let Some(down) = session.commands.recv().await {
+            if let Some(control_down::Msg::SchedulePrecheck(request)) = down.msg {
+                counter.fetch_add(1, Ordering::SeqCst);
+                reply.finish_precheck(
+                    machine,
+                    connection,
+                    PrecheckResult {
+                        attempt_id: request.attempt_id,
+                        outcome: Some(precheck_result::Outcome::Finished(
+                            canterlot_proto::worker::v1::PrecheckFinished {
+                                exit_code: 0,
+                                output_tail: String::new(),
+                                timed_out: false,
+                            },
+                        )),
+                    },
+                );
+            }
+        }
+        drop(session);
+    });
+    let scheduler = canterlot_hub::scheduler::Scheduler::new(
+        f.pool.clone(),
+        f.state.dispatcher.clone(),
+        Default::default(),
+    )
+    .with_limits(registry, Default::default());
+    SecondHub {
+        scheduler,
+        prechecks,
+        _worker: worker,
+    }
+}
+
+async fn routed_schedule(f: &Fixture, pool: &PgPool, precheck: Option<&str>) -> String {
+    routed_fixture(
+        f,
+        pool,
+        json!([
+            {"harness":"synthetic","model":"synthetic-small","effort":"high"},
+            {"harness":"synthetic-codex","model":"synthetic-codex-small","effort":"high"}
+        ]),
+        json!([
+            {"harness":"synthetic","model":"synthetic-small"},
+            {"harness":"synthetic-codex","model":"synthetic-codex-small"}
+        ]),
+    )
+    .await;
+    let r = f
+        .client
+        .send(
+            Method::POST,
+            "/api/v1/schedules",
+            Some(&format!("routed-{}", Uuid::now_v7())),
+            Some(json!({
+                "name": "Маршрут и отказ",
+                "cron": "0 9 * * *",
+                "target": {"kind":"new_session","machine_id":f.seed.machine_id,"workdir":"/tmp/scheduled-failover","route":{"task_type":"audit"}},
+                "prompt": "посмотреть коммиты",
+                "precheck": precheck,
+            })),
+        )
+        .await;
+    assert_eq!(
+        r.status.as_u16(),
+        200,
+        "{}",
+        String::from_utf8_lossy(&r.body)
+    );
+    r.json::<Value>()["id"].as_str().unwrap().to_owned()
+}
+
+async fn conversations_of_runs(pool: &PgPool, schedule: &str) -> i64 {
+    sqlx::query_scalar(
+        "select count(distinct r.session_id) from schedule_runs r where r.schedule_id=$1 and r.session_id is not null",
+    )
+    .bind(Uuid::parse_str(schedule).unwrap())
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+async fn titled_conversations(pool: &PgPool, owner: Uuid) -> i64 {
+    sqlx::query_scalar("select count(*) from conversations where owner_id=$1 and workdir='/tmp/scheduled-failover'")
+        .bind(owner)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// 12: маршрутизируемая цель «новая сессия». Хаб A заявил запуск, его приёмка
+/// застряла (управляемая остановка) дольше аренды; независимый хаб B со своим
+/// реестром и своим воркером доводит запуск. Опоздавшая приёмка A, отпущенная
+/// после завершения B, ничего не делает: одна предпроверка на всех воркерах,
+/// одна сессия, один ввод.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn routed_new_session_stalled_on_hub_a_is_finished_once_by_hub_b(pool: PgPool) {
+    use canterlot_hub::schedules::{admission::admit, claim_due, fault};
+    use std::sync::atomic::Ordering;
+
+    let f = Fixture::new(pool.clone()).await;
+    // Хаб A: свой воркер на f.state.registry, считает предпроверки.
+    let mut session_a = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
+    let checks_a = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let registry_a = f.state.registry.clone();
+    let machine = f.seed.machine_id;
+    let connection_a = registry_a.session_info(machine).unwrap().connection_id;
+    let counter_a = checks_a.clone();
+    let worker_a = tokio::spawn(async move {
+        while let Some(down) = session_a.commands.recv().await {
+            if let Some(control_down::Msg::SchedulePrecheck(request)) = down.msg {
+                counter_a.fetch_add(1, Ordering::SeqCst);
+                registry_a.finish_precheck(
+                    machine,
+                    connection_a,
+                    PrecheckResult {
+                        attempt_id: request.attempt_id,
+                        outcome: Some(precheck_result::Outcome::Finished(
+                            canterlot_proto::worker::v1::PrecheckFinished {
+                                exit_code: 0,
+                                output_tail: String::new(),
+                                timed_out: false,
+                            },
+                        )),
+                    },
+                );
+            }
+        }
+    });
+    let hub_b = second_hub(&f);
+    let id = routed_schedule(&f, &pool, Some("true")).await;
+    let schedule = Uuid::parse_str(&id).unwrap();
+    due(&pool, &id, Utc::now() - TimeDelta::seconds(30)).await;
+    let mut conn = pool.acquire().await.unwrap();
+    let claimed = claim_due(&mut conn, Utc::now(), 32).await.unwrap();
+    drop(conn);
+    let stalled = claimed.into_iter().next().expect("hub A claimed the run");
+    let rid = stalled.run.id;
+    // Приёмка A стоит на затворе: заявка заявлена, дальше не идёт.
+    let gate = fault::arm_stall(schedule);
+    let late = {
+        let scheduler = scheduler(&f);
+        tokio::spawn(async move { admit(&scheduler, stalled).await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(!late.is_finished(), "admission on hub A is stalled");
+    sqlx::query("update schedule_runs set lease_at=now()-interval '2 hours',updated_at=now()-interval '2 hours' where id=$1")
+        .bind(rid)
+        .execute(&pool)
+        .await
+        .unwrap();
+    hub_b.scheduler.tick(Utc::now()).await.unwrap();
+    wait_state(&pool, rid, "started").await;
+    // Только теперь A оживает: старая попытка не даёт ему ничего сделать.
+    gate.notify_one();
+    tokio::time::timeout(std::time::Duration::from_secs(10), late)
+        .await
+        .expect("stalled admission ends")
+        .unwrap();
+    let total_prechecks = checks_a.load(Ordering::SeqCst) + hub_b.prechecks.load(Ordering::SeqCst);
+    assert_eq!(total_prechecks, 1, "exactly one precheck across both hubs");
+    assert_eq!(hub_b.prechecks.load(Ordering::SeqCst), 1, "hub B ran it");
+    assert_eq!(
+        titled_conversations(&pool, f.seed.owner_id).await,
+        1,
+        "one conversation"
+    );
+    assert_eq!(conversations_of_runs(&pool, &id).await, 1);
+    assert_eq!(
+        inputs_with_text(&pool, "посмотреть коммиты").await,
+        1,
+        "one input"
+    );
+    worker_a.abort();
+}
+
+/// 12: тот же маршрут без предпроверки, но гибель приёмки A перед commit
+/// dispatch; независимый хаб B довершает ровно одну сессию с одним вводом.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn routed_new_session_crash_before_commit_fails_over_to_hub_b(pool: PgPool) {
+    use canterlot_hub::schedules::fault::{self, Fault};
+
+    let f = Fixture::new(pool.clone()).await;
+    let _session_a = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
+    let hub_b = second_hub(&f);
+    let id = routed_schedule(&f, &pool, None).await;
+    let schedule = Uuid::parse_str(&id).unwrap();
+    fault::arm(schedule, Fault::BeforeDispatchCommit);
+    due(&pool, &id, Utc::now() - TimeDelta::seconds(30)).await;
+    scheduler(&f).tick(Utc::now()).await.unwrap();
+    let rid = run_id(&pool, &id).await;
+    wait_crashed(schedule, rid).await;
+    assert_eq!(state(&pool, rid).await.0, "claimed");
+    assert_eq!(
+        titled_conversations(&pool, f.seed.owner_id).await,
+        0,
+        "rolled back"
+    );
+    assert_eq!(inputs_with_text(&pool, "посмотреть коммиты").await, 0);
+    sqlx::query("update schedule_runs set lease_at=now()-interval '2 hours',updated_at=now()-interval '2 hours' where id=$1")
+        .bind(rid)
+        .execute(&pool)
+        .await
+        .unwrap();
+    hub_b.scheduler.tick(Utc::now()).await.unwrap();
+    wait_state(&pool, rid, "started").await;
+    assert_eq!(
+        titled_conversations(&pool, f.seed.owner_id).await,
+        1,
+        "one conversation"
+    );
+    assert_eq!(
+        inputs_with_text(&pool, "посмотреть коммиты").await,
+        1,
+        "one input"
+    );
+    assert_eq!(hub_b.prechecks.load(std::sync::atomic::Ordering::SeqCst), 0);
 }

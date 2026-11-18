@@ -2590,7 +2590,10 @@ mod tests {
             }),
         })
         .unwrap();
-        assert_eq!(decision.model, "opus[1m]", "red unlimited primary yields to the backup");
+        assert_eq!(
+            decision.model, "opus[1m]",
+            "red unlimited primary yields to the backup"
+        );
     }
 
     #[test]

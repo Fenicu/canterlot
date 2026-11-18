@@ -48,6 +48,41 @@ pub(crate) fn hit(schedule_id: Uuid, fault: Fault) -> bool {
     }
 }
 
+/// Управляемая остановка приёмки: заявка уже у хаба, а приёмка ещё не началась
+/// (стоит в очереди на семафор). Тест держит затвор и отпускает его сам.
+#[cfg(feature = "testkit")]
+static STALLS: std::sync::Mutex<Vec<(Uuid, std::sync::Arc<tokio::sync::Notify>)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Взвести остановку приёмки расписания; приёмка ждёт `notify_one` на затворе.
+#[cfg(feature = "testkit")]
+pub fn arm_stall(schedule_id: Uuid) -> std::sync::Arc<tokio::sync::Notify> {
+    let gate = std::sync::Arc::new(tokio::sync::Notify::new());
+    STALLS
+        .lock()
+        .expect("stalls")
+        .push((schedule_id, gate.clone()));
+    gate
+}
+
+#[cfg(feature = "testkit")]
+pub(crate) async fn stall(schedule_id: Uuid) {
+    let gate = {
+        let mut stalls = STALLS.lock().expect("stalls");
+        stalls
+            .iter()
+            .position(|(id, _)| *id == schedule_id)
+            .map(|index| stalls.remove(index).1)
+    };
+    if let Some(gate) = gate {
+        gate.notified().await;
+    }
+}
+
+#[cfg(not(feature = "testkit"))]
+#[inline]
+pub(crate) async fn stall(_schedule_id: Uuid) {}
+
 #[cfg(not(feature = "testkit"))]
 #[inline]
 pub(crate) fn hit(_schedule_id: Uuid, _fault: Fault) -> bool {

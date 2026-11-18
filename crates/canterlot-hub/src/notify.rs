@@ -1330,10 +1330,8 @@ impl Sender {
                 // Пуш расписания: неоднозначная доставка (обрыв, таймаут, 408, 5xx
                 // шлюза после приёма апстримом) не повторяется, метка остаётся.
                 // Только определённый отказ возвращает ПРЕЖНЮЮ метку.
-                let ambiguous = matches!(
-                    &result,
-                    Err(Failure::Retry(None | Some(408 | 500..=599)))
-                );
+                let ambiguous =
+                    matches!(&result, Err(Failure::Retry(None | Some(408 | 500..=599))));
                 if ambiguous {
                     let status = match &result {
                         Err(Failure::Retry(status)) => *status,

@@ -233,7 +233,11 @@ async fn lost_response_is_not_resent(pool: PgPool) {
             .await
             .unwrap();
     }
-    assert_eq!(hits.load(Ordering::SeqCst), 1, "ambiguous delivery is not retried");
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        1,
+        "ambiguous delivery is not retried"
+    );
     assert_eq!(pending(&pool, id).await, 0, "the row is settled");
     let stamp: Option<chrono::DateTime<Utc>> =
         sqlx::query_scalar("select last_failure_push_at from schedules where id=$1")
@@ -340,7 +344,10 @@ async fn stale_drop_loses_to_a_coalesce_that_lands_after_inspection(pool: PgPool
     .unwrap();
     merge.commit().await.unwrap();
     let report = delivery.await.unwrap();
-    assert_eq!(report.dropped, 0, "a row changed after inspection is not dropped");
+    assert_eq!(
+        report.dropped, 0,
+        "a row changed after inspection is not dropped"
+    );
     // Следующий проход шлёт свежий пуш.
     assert_eq!(sender.deliver_due(&pool).await.unwrap().sent, 1);
     assert!(seen.lock().unwrap()[0].to_string().contains("fresh"));

@@ -67,6 +67,8 @@ fn stop(skip: Skip, from: RunState) -> AdmitEnd {
 /// Владение строкой — попытка из заявки (A): каждый переход условный,
 /// проигрыш — молчаливый выход, исход пишет победитель.
 pub async fn admit(scheduler: &Scheduler, claimed: ClaimedRun) {
+    // Точка управляемой остановки тестов: заявка есть, приёмка ещё не начата.
+    super::fault::stall(claimed.schedule.id).await;
     let _guard = super::AdmittingGuard::insert(claimed.run.id);
     let run = claimed.run;
     let schedule = claimed.schedule;
@@ -367,13 +369,12 @@ async fn admit_inner(
     let executor = if let Some(conversation_id) = existing_conversation {
         // Модель — из авторитетной строки: проекция `conversation_derived`
         // отстаёт от подтверждённой смены настроек.
-        let row: (String, Option<String>) = sqlx::query_as(
-            "select c.harness, c.model from conversations c where c.id = $1",
-        )
-        .bind(conversation_id)
-        .fetch_one(&mut *conn)
-        .await
-        .map_err(|_| Skip::new(RunState::Failed, "conversation_not_found"))?;
+        let row: (String, Option<String>) =
+            sqlx::query_as("select c.harness, c.model from conversations c where c.id = $1")
+                .bind(conversation_id)
+                .fetch_one(&mut *conn)
+                .await
+                .map_err(|_| Skip::new(RunState::Failed, "conversation_not_found"))?;
         ResolvedExecutor {
             harness: row.0,
             // Окно Fable существующей сессии — по её действующей модели.
@@ -1028,12 +1029,13 @@ async fn dispatch(
             .map_err(fail)?;
         // Авторитетная модель под замком очереди: её меняет транзакция
         // подтверждённых настроек, проекция может отставать.
-        let fresh: Option<String> = sqlx::query_scalar("select c.model from conversations c where c.id = $1")
-        .bind(conversation_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))
-        .map_err(fail)?;
+        let fresh: Option<String> =
+            sqlx::query_scalar("select c.model from conversations c where c.id = $1")
+                .bind(conversation_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))
+                .map_err(fail)?;
         if let Some(model) = fresh
             && !model.is_empty()
         {
