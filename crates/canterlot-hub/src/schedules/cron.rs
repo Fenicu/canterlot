@@ -66,16 +66,28 @@ impl CronSchedule {
         // cron тогда перебирает именно локальные минуты, а перевод в зонуbelow
         // явно обрабатывает дыры и повторы DST.
         let wall: DateTime<Utc> = DateTime::from_naive_utc_and_offset(local, Utc);
-        let mut iter = self.schedule.after(&wall);
+        // Повторный час: первое и второе вхождение делят одну «фальшивую»
+        // минуту. Если стена уже прошла её, `after(&wall)` пропустит оба.
+        // Начинаем на 2 часа раньше и отбрасываем прошлое по реальному `after`.
+        let start = wall - TimeDelta::hours(2);
+        let mut iter = self.schedule.after(&start);
         for _ in 0..366 * 24 * 60 {
             let candidate = iter.next()?;
             let naive = candidate.naive_utc();
-            match timezone.from_local_datetime(&naive) {
-                chrono::LocalResult::Single(at) => return Some(at.with_timezone(&Utc)),
-                chrono::LocalResult::Ambiguous(earlier, _later) => {
-                    return Some(earlier.with_timezone(&Utc));
+            // Повторный час даёт два кандидата: ранний и поздний UTC.
+            // Прошедшие моменты отбрасываем, иначе осенний повтор вернёт
+            // уже случившийся первый час вместо будущего второго.
+            let candidates: Vec<DateTime<Utc>> = match timezone.from_local_datetime(&naive) {
+                chrono::LocalResult::Single(at) => vec![at.with_timezone(&Utc)],
+                chrono::LocalResult::Ambiguous(earlier, later) => {
+                    vec![earlier.with_timezone(&Utc), later.with_timezone(&Utc)]
                 }
                 chrono::LocalResult::None => continue,
+            };
+            for at in candidates {
+                if at > after {
+                    return Some(at);
+                }
             }
         }
         None
@@ -191,6 +203,28 @@ mod tests {
             .unwrap();
         assert_eq!(next, utc(2026, 10, 25, 0, 30));
         assert_eq!(next.hour(), 0);
+    }
+
+    #[test]
+    fn repeated_hour_skips_past_candidate_after_first_occurrence() {
+        let schedule = CronSchedule::parse("30 2 * * *").unwrap();
+        let berlin = timezone("Europe/Berlin").unwrap();
+        // После первого вхождения (00:30Z) следующее — второе (01:30Z), а не прошлое.
+        assert_eq!(
+            schedule.next_after(utc(2026, 10, 25, 0, 40), berlin),
+            Some(utc(2026, 10, 25, 1, 30))
+        );
+        // После 01:10Z (местные 02:10 второго часа) кандидат 00:30Z в прошлом:
+        // выбираем будущее 01:30Z.
+        assert_eq!(
+            schedule.next_after(utc(2026, 10, 25, 1, 10), berlin),
+            Some(utc(2026, 10, 25, 1, 30))
+        );
+        // После второго вхождения — следующий день.
+        assert_eq!(
+            schedule.next_after(utc(2026, 10, 25, 1, 40), berlin),
+            Some(utc(2026, 10, 26, 1, 30))
+        );
     }
 
     #[test]

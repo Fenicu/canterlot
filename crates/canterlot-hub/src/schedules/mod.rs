@@ -936,7 +936,7 @@ pub async fn claim_due(
         if occurrences.is_empty() {
             continue;
         }
-        let window = catch_up_window(schedule.catch_up_minutes);
+        let window = effective_window(schedule.catch_up_minutes);
         let within: Vec<DateTime<Utc>> = occurrences
             .iter()
             .copied()
@@ -1032,4 +1032,14 @@ pub fn delay_ms(scheduled_at: DateTime<Utc>, committed_at: DateTime<Utc>) -> i64
 /// Задержка, с которой тик видит просроченное срабатывание.
 pub fn catch_up_window(catch_up_minutes: i32) -> TimeDelta {
     TimeDelta::minutes(i64::from(catch_up_minutes))
+}
+
+/// Тик идёт не чаще раза в минуту: срабатывание, опоздавшее меньше чем
+/// на окно punctuality, всё ещё считается текущим даже при `catch_up=0`.
+/// Ноль отключает повтор старых пропусков, но не отменяет текущий запуск.
+pub const ON_TIME_WINDOW: TimeDelta = TimeDelta::minutes(1);
+
+/// Эффективное окно: `catch_up_minutes`, но не уже пунктуальности.
+pub fn effective_window(catch_up_minutes: i32) -> TimeDelta {
+    catch_up_window(catch_up_minutes).max(ON_TIME_WINDOW)
 }
