@@ -2675,3 +2675,66 @@ async fn ended_execution_settles_its_open_steers(pool: PgPool) -> TestResult {
     );
     Ok(())
 }
+
+/// Поздняя квитанция interrupt спасения против удаления разговора: удаление держит
+/// блокировку очереди и потом удаляет строки команд, а приём квитанции обязан брать
+/// очередь раньше строки команды, иначе две транзакции ждут друг друга.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_late_interrupt_receipt_does_not_deadlock_with_conversation_deletion(
+    pool: PgPool,
+) -> TestResult {
+    let (seed, execution, _) = setup(&pool).await;
+    let interrupt = control_command(&pool, &seed, &execution, "interrupt").await;
+    sqlx::query(
+        "insert into hung_rescues(conversation_id,pending_kind,pending_command_id,pending_action,pending_since)
+         values($1,'interrupt',$2,'interrupted',now())",
+    )
+    .bind(seed.conversation_id)
+    .bind(interrupt)
+    .execute(&pool)
+    .await?;
+    // Удаление: очередь заблокирована, строки команд ещё на месте.
+    let mut deleting = pool.begin().await?;
+    sqlx::query("select 1 from queue_state where conversation_id=$1 for update")
+        .bind(seed.conversation_id)
+        .fetch_one(&mut *deleting)
+        .await?;
+    let receipt = {
+        let pool = pool.clone();
+        let machine = seed.machine_id;
+        let digest = seed.credential_digest();
+        tokio::spawn(async move {
+            Ingest::new(pool)
+                .apply_batch(
+                    machine,
+                    &digest,
+                    JournalKind::Cj,
+                    &batch(
+                        Uuid::now_v7(),
+                        vec![record_body::Body::InterruptStatus(InterruptStatus {
+                            command_id: interrupt.to_string(),
+                            dispatch_attempt: 0,
+                            state: InterruptState::Superseded.into(),
+                        })],
+                    ),
+                )
+                .await
+        })
+    };
+    // Квитанция успела дойти до своей первой блокировки.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    sqlx::query("delete from hung_rescues where conversation_id=$1")
+        .bind(seed.conversation_id)
+        .execute(&mut *deleting)
+        .await?;
+    sqlx::query("delete from commands where id=$1")
+        .bind(interrupt)
+        .execute(&mut *deleting)
+        .await?;
+    deleting.commit().await?;
+    let applied = tokio::time::timeout(std::time::Duration::from_secs(10), receipt)
+        .await
+        .expect("the late receipt must not wait on the deleting transaction")?;
+    assert!(applied.is_ok(), "{applied:?}");
+    Ok(())
+}

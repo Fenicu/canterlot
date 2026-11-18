@@ -1572,6 +1572,10 @@ async fn apply_body(
                 InterruptState::GuardUnsupported => "guard_unsupported",
                 InterruptState::Unspecified => return Err(IngestError::InvalidRecord),
             };
+            // Очередь раньше строки команды: удаление разговора держит очередь и затем
+            // удаляет команды, а обратный порядок (команда, потом очередь через
+            // обратный вызов спасения) замкнул бы две транзакции друг на друга.
+            lock_command_queue(conn, command_id).await?;
             if let Some(target) = command(conn, machine_id, command_id).await?
                 && target.kind == "interrupt"
                 && target.dispatch_attempt == attempt(fact.dispatch_attempt)?
