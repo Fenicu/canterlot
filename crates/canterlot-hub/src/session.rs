@@ -555,6 +555,39 @@ impl Registry {
         })
     }
 
+    /// Управляющий канал и аренда предпроверки одним снимком: отправитель,
+    /// соединение и наличие возможности берутся под одним замком, замена
+    /// потока между отдельными снимками невозможна.
+    fn precheck_channel(
+        &self,
+        machine_id: Uuid,
+    ) -> Option<(mpsc::Sender<ControlDown>, Uuid, bool)> {
+        let mut entries = self.entries.lock().expect("session registry lock");
+        let entry = entries.get_mut(&machine_id)?;
+        if self.refresh(entry) == Availability::Unavailable {
+            return None;
+        }
+        let has_capability = entry
+            .capabilities
+            .iter()
+            .any(|capability| capability == CAPABILITY_SCHEDULE_PRECHECK_V1);
+        Some((
+            entry.commands.clone(),
+            entry.info.connection_id,
+            has_capability,
+        ))
+    }
+
+    /// Будит ожидания ровно той аренды, что закончилась: отправители
+    /// бросаются, `ask_precheck` сразу получает `NoAnswer`. Чужое соединение
+    /// не трогается даже при гонке замены между проверкой записи и зачисткой.
+    fn cancel_prechecks_for_connection(&self, machine_id: Uuid, connection_id: Uuid) {
+        self.prechecks
+            .lock()
+            .expect("precheck waiters lock")
+            .retain(|(id, _), (stored, _)| *id != machine_id || *stored != connection_id);
+    }
+
     /// Подсказка рабочей папки от живого воркера. Нет сеанса с возможностью, занято или
     /// вышел срок: пустой список, форма остаётся со свободным вводом.
     pub async fn suggest_workdirs(
@@ -819,16 +852,18 @@ impl Registry {
             .get(&machine_id)
             .filter(|entry| entry.info.connection_id == connection_id)
         else {
+            drop(entries);
+            // Замена уже зарегистрировалась: чужое ожидание не трогаем,
+            // своё будим, чтобы не висеть до таймера.
+            self.cancel_prechecks_for_connection(machine_id, connection_id);
             return false;
         };
         entry.cancel.cancel();
         drop(entries);
         // Оборванное соединение не оставляет ожидание до таймера:
         // отправитель бросается, `ask_precheck` сразу получает `NoAnswer`.
-        self.prechecks
-            .lock()
-            .expect("precheck waiters lock")
-            .retain(|(id, _), _| *id != machine_id);
+        // Зачистка строго по соединению: ожидание замены переживает отбой старого.
+        self.cancel_prechecks_for_connection(machine_id, connection_id);
         true
     }
 
@@ -848,25 +883,22 @@ impl Registry {
     }
 
     /// Предпроверка расписания: запрос и ответ связываются номером попытки и машиной.
+    /// Аренда и отправитель берутся одним снимком: замена потока между ними
+    /// не подменяет чужой ответ.
     pub(crate) async fn ask_precheck(
         &self,
         machine_id: Uuid,
         request: canterlot_proto::worker::v1::SchedulePrecheck,
         wait: std::time::Duration,
     ) -> Result<canterlot_proto::worker::v1::PrecheckResult, PrecheckFailure> {
-        let connection_id = self
-            .session_info(machine_id)
-            .map(|info| info.connection_id)
-            .ok_or(PrecheckFailure::NoSession)?;
-        if self.session_info(machine_id).is_none() {
-            return Err(PrecheckFailure::NoSession);
-        }
-        if !self.has_capability(machine_id, CAPABILITY_SCHEDULE_PRECHECK_V1) {
-            return Err(PrecheckFailure::CapabilityMissing);
-        }
-        let Some(sender) = self.command_sender(machine_id) else {
+        let Some((sender, connection_id, has_capability)) =
+            self.precheck_channel(machine_id)
+        else {
             return Err(PrecheckFailure::NoSession);
         };
+        if !has_capability {
+            return Err(PrecheckFailure::CapabilityMissing);
+        }
         let attempt_id =
             Uuid::parse_str(&request.attempt_id).map_err(|_| PrecheckFailure::Invalid)?;
         let key = (machine_id, attempt_id);
@@ -1093,6 +1125,10 @@ impl Registry {
             .get(&machine_id)
             .is_some_and(|entry| entry.info.connection_id == connection_id)
         {
+            drop(entries);
+            // Замена уже зарегистрировалась: чужое ожидание не трогаем,
+            // своё будим, чтобы не висеть до таймера.
+            self.cancel_prechecks_for_connection(machine_id, connection_id);
             return;
         }
         let entry = entries.remove(&machine_id).expect("current session");
@@ -1103,10 +1139,7 @@ impl Registry {
         }
         let _ = self.changes.send((machine_id, Availability::Unavailable));
         drop(entries);
-        self.prechecks
-            .lock()
-            .expect("precheck waiters lock")
-            .retain(|(id, _), _| *id != machine_id);
+        self.cancel_prechecks_for_connection(machine_id, connection_id);
     }
 
     fn refresh(&self, entry: &mut SessionEntry) -> Availability {
@@ -1183,6 +1216,7 @@ impl Registry {
                 registry: self.clone(),
                 machine_id,
                 key,
+                connection_id,
                 cancel,
                 revoked,
             },
@@ -1278,6 +1312,7 @@ pub(crate) struct ControlLease {
     registry: Registry,
     pub machine_id: Uuid,
     pub key: Uuid,
+    connection_id: Uuid,
     pub cancel: CancellationToken,
     revoked: Arc<AtomicBool>,
 }
@@ -1305,6 +1340,10 @@ impl Drop for ControlLease {
                 .changes
                 .send((self.machine_id, Availability::Unavailable));
         }
+        drop(entries);
+        // Обрыв потока будит ровно своё ожидание: чужое соединение не трогаем.
+        self.registry
+            .cancel_prechecks_for_connection(self.machine_id, self.connection_id);
     }
 }
 
@@ -1571,6 +1610,78 @@ mod tests {
             .expect("waiter resolves")
             .expect("ask task runs");
         assert_eq!(outcome, Err(PrecheckFailure::NoAnswer));
+    }
+
+    #[tokio::test]
+    async fn precheck_lease_drop_wakes_old_waiter() {
+        let registry = Registry::new(HubTimers::default());
+        let machine = Uuid::now_v7();
+        let connection = Uuid::now_v7();
+        let (lease, mut commands) = registry.register(machine, connection, vec![]).unwrap();
+        registry.mark_accepted(
+            machine,
+            connection,
+            &[CAPABILITY_SCHEDULE_PRECHECK_V1.to_owned()],
+        );
+        let waiting = tokio::spawn({
+            let registry = registry.clone();
+            async move {
+                registry
+                    .ask_precheck(
+                        machine,
+                        precheck_request(),
+                        std::time::Duration::from_secs(30),
+                    )
+                    .await
+            }
+        });
+        // Команда ушла в старый поток: ждём её, чтобы вставка ожидания точно была.
+        let down = tokio::time::timeout(std::time::Duration::from_secs(5), commands.recv())
+            .await
+            .expect("precheck command sent")
+            .expect("command channel open");
+        assert!(matches!(
+            down.msg,
+            Some(canterlot_proto::worker::v1::control_down::Msg::SchedulePrecheck(_))
+        ));
+        drop(lease);
+        let replacement = Uuid::now_v7();
+        let (_replacement_lease, _replacement_commands) =
+            registry.register(machine, replacement, vec![]).unwrap();
+        // Обрыв потока будит старое ожидание сразу, а не через полный таймаут.
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), waiting)
+            .await
+            .expect("old waiter wakes on stream drop")
+            .expect("ask task runs");
+        assert_eq!(outcome, Err(PrecheckFailure::NoAnswer));
+    }
+
+    #[tokio::test]
+    async fn precheck_replacement_waiter_survives_old_disconnect() {
+        use tokio::sync::oneshot;
+        let registry = Registry::new(HubTimers::default());
+        let machine = Uuid::now_v7();
+        let old = Uuid::now_v7();
+        let (_lease, _commands) = registry.register(machine, old, vec![]).unwrap();
+        // Гонка замены: ожидание нового соединения вставлено между проверкой
+        // записи и зачисткой ожиданий в `disconnect_control`.
+        let replacement = Uuid::now_v7();
+        let attempt = Uuid::now_v7();
+        let (answer, mut answered) = oneshot::channel();
+        registry
+            .prechecks
+            .lock()
+            .expect("precheck waiters lock")
+            .insert((machine, attempt), (replacement, answer));
+        registry.disconnect_control(machine, old);
+        // Зачистка по машине роняла и чужое ожидание; теперь живо только своё.
+        assert!(
+            matches!(
+                answered.try_recv(),
+                Err(oneshot::error::TryRecvError::Empty)
+            ),
+            "replacement waiter survives the old disconnect"
+        );
     }
 
     #[tokio::test]
