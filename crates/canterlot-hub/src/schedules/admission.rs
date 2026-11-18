@@ -1304,7 +1304,9 @@ async fn await_winner_run(
     }
 }
 
-/// Ответ Run Now из общего ключа идемпотентности, если он про этот запуск.
+/// Ответ Run Now из общего ключа идемпотентности, если он про этот запуск и
+/// расписание ещё есть: после его удаления запись ключа не оживляет запуск,
+/// которого каскад уже лишил строки (повтор получает `NotFound`).
 async fn durable_run(
     conn: &mut PgConnection,
     owner_id: Uuid,
@@ -1312,8 +1314,10 @@ async fn durable_run(
     key: &str,
 ) -> Result<Option<ScheduleRun>, ScheduleError> {
     let stored: Option<serde_json::Value> = sqlx::query_scalar(
-        "select response from idempotency_keys
-          where owner_id=$1 and key=$2 and operation='run_now' and response->>'id'=$3",
+        "select response from idempotency_keys k
+          where k.owner_id=$1 and k.key=$2 and k.operation='run_now' and k.response->>'id'=$3
+            and exists (select 1 from schedules s
+                         where s.id = (k.response->>'schedule_id')::uuid and s.owner_id=$1)",
     )
     .bind(owner_id)
     .bind(key)

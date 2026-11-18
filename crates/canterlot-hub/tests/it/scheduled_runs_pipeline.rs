@@ -2207,6 +2207,45 @@ async fn run_now_replays_from_history_after_the_key_expired(pool: PgPool) {
     );
 }
 
+/// 7: повтор Run Now после удаления расписания (каскад убрал активный запуск)
+/// отвечает так же, как для удалённого расписания, а не прежним `claimed`.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn run_now_replay_after_the_schedule_was_deleted_is_not_found(pool: PgPool) {
+    use canterlot_hub::schedules::admission::{Reservation, reserve_manual};
+
+    let f = Fixture::new(pool.clone()).await;
+    let id = create(&f, existing(&f), "0 9 * * *").await;
+    let schedule = Uuid::parse_str(&id).unwrap();
+    let Reservation::Fresh { run, .. } =
+        reserve_manual(&pool, f.seed.owner_id, schedule, "deleted-key", true)
+            .await
+            .unwrap()
+    else {
+        panic!("fresh reservation");
+    };
+    assert_eq!(run.state, canterlot_hub::schedules::RunState::Claimed);
+    sqlx::query("delete from schedules where id=$1")
+        .bind(schedule)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let replay = f
+        .client
+        .send(
+            Method::POST,
+            &format!("/api/v1/schedules/{id}/run"),
+            Some("deleted-key"),
+            Some(json!({"run_anyway": true})),
+        )
+        .await;
+    assert_eq!(
+        replay.status.as_u16(),
+        404,
+        "{}",
+        String::from_utf8_lossy(&replay.body)
+    );
+}
+
 /// 8: временный замок расписания (55P03 по `lock_timeout`) не оставляет запуск
 /// в `prechecking` до аренды: итог повторяется ограниченное число раз.
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
