@@ -203,6 +203,10 @@ pub struct HangFacts {
     /// Окно наблюдения после старта хаба, переподключения или старта исполнения
     /// собрало не меньше двух подряд идущих доказательных выборок CPU того же CLI.
     pub window_ready: bool,
+    /// В базе уже лежит выборка новее `now` этого пересчёта: он взял часы до ожидания
+    /// блокировки очереди и её не видит. Это отсутствие данных у пересчёта, а не
+    /// доказательство, и окно наблюдения он не меняет.
+    pub sample_ahead: bool,
 }
 
 /// Одна выборка метрик машины для исполнения.
@@ -689,6 +693,15 @@ pub async fn load_inputs(
         let detail: Option<Value> = e.try_get("phase_detail")?;
         let metrics:Option<(Value, DateTime<Utc>)>=sqlx::query_as("select mm.executions, mm.observed_at from machine_metrics mm join conversations c on c.machine_id=mm.machine_id where c.id=$1 and mm.observed_at <= $2 and mm.observed_at > $2 - $3 * interval '1 second'")
             .bind(conversation_id).bind(now).bind(stale_after.as_secs_f64()).fetch_optional(&mut *conn).await?;
+        if metrics.is_none() {
+            hang.sample_ahead = sqlx::query_scalar(
+                "select exists(select 1 from machine_metrics mm join conversations c on c.machine_id=mm.machine_id where c.id=$1 and mm.observed_at > $2)",
+            )
+            .bind(conversation_id)
+            .bind(now)
+            .fetch_one(&mut *conn)
+            .await?;
+        }
         if let Some((metrics, observed_at)) = metrics
             && let Some(found) = metrics.as_array().and_then(|items| {
                 items

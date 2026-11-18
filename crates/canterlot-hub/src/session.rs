@@ -269,6 +269,7 @@ impl Drop for OwnerFileSlot {
 pub struct TestLease {
     _lease: ControlLease,
     _commands: mpsc::Receiver<ControlDown>,
+    _data: Option<DataLease>,
 }
 
 /// Ошибка чтения инструкций владельца: нет сеанса, нет возможности или вышел срок.
@@ -511,14 +512,34 @@ impl Registry {
     /// Тестовый шов: зарегистрировать машину с capabilities без полного handshake.
     #[cfg(feature = "testkit")]
     pub fn connect_for_tests(&self, machine_id: Uuid, capabilities: &[String]) -> TestLease {
+        self.connect_for_tests_with_credential(machine_id, capabilities, Vec::new())
+    }
+
+    /// То же с дайджестом действующего токена машины: поток данных подключён (машина
+    /// `available`), проверка отзыва учётных данных
+    /// (раз в секунду) такое соединение не снимает, и оно живёт, пока жив guard.
+    #[cfg(feature = "testkit")]
+    pub fn connect_for_tests_with_credential(
+        &self,
+        machine_id: Uuid,
+        capabilities: &[String],
+        credential: Vec<u8>,
+    ) -> TestLease {
         let connection = Uuid::now_v7();
         let (lease, commands) = self
-            .register(machine_id, connection, Vec::new())
+            .register(machine_id, connection, credential.clone())
             .expect("test slot free");
         self.mark_accepted(machine_id, connection, capabilities);
+        // Поток данных подключён только при настоящем токене: без него машина `degraded`.
+        let data = if credential.is_empty() {
+            None
+        } else {
+            self.attach_data(machine_id, connection, &credential)
+        };
         TestLease {
             _lease: lease,
             _commands: commands,
+            _data: data,
         }
     }
 

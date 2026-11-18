@@ -12,6 +12,7 @@ use canterlot_hub::{
 };
 use chrono::{DateTime, TimeDelta, Utc};
 use serde_json::{Value, json};
+use sha2::Digest as _;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -934,36 +935,27 @@ async fn a_locked_parent_defers_the_note_instead_of_waiting(pool: PgPool) {
     assert_eq!(parent_jobs(&pool, &scene).await.len(), 1);
 }
 
-async fn http_scene(pool: &PgPool) -> (testkit::TestHub, testkit::TestClient, Scene, Link) {
+async fn http_scene(
+    pool: &PgPool,
+) -> (
+    testkit::TestHub,
+    testkit::TestClient,
+    Scene,
+    canterlot_hub::session::TestLease,
+) {
     http_scene_with(pool, &["pilot_v1", "send_now_v1", "guarded_interrupt_v1"]).await
-}
-
-/// Живое управляющее соединение воркера в реестре хаба. Проверка отзыва учётных данных
-/// раз в секунду снимает тестовое соединение без настоящих учётных данных, поэтому тест
-/// восстанавливает его перед каждым действием карточки.
-struct Link {
-    machine: Uuid,
-    capabilities: Vec<String>,
-    lease: Option<canterlot_hub::session::TestLease>,
-}
-
-impl Link {
-    fn ensure(&mut self, hub: &testkit::TestHub) {
-        if hub.registry.capabilities(self.machine) != self.capabilities {
-            self.lease = None;
-            self.lease = Some(
-                hub.registry
-                    .connect_for_tests(self.machine, &self.capabilities),
-            );
-        }
-    }
 }
 
 /// Сцена с HTTP и живым воркером с заданным набором возможностей.
 async fn http_scene_with(
     pool: &PgPool,
     capabilities: &[&str],
-) -> (testkit::TestHub, testkit::TestClient, Scene, Link) {
+) -> (
+    testkit::TestHub,
+    testkit::TestClient,
+    Scene,
+    canterlot_hub::session::TestLease,
+) {
     // Фоновый проектор хаба в этих тестах только наблюдает (`off`): решения о зависании
     // принимают явные пересчёты теста с заданным моментом, а не гонка с часами проектора.
     let hub = testkit::spawn_test_hub_with(
@@ -982,6 +974,27 @@ async fn http_scene_with(
     let machine = canterlot_hub::machines::add(pool, owner, "synthetic")
         .await
         .unwrap();
+    // Машина подключена по-настоящему (действующий токен), и фоновая проекция доступности
+    // записывает `available` до сцены (явным вызовом проекции): после этого она ничего не меняет, а значит,
+    // не сдвигает начало связи и не сбрасывает окно наблюдения посреди проверки.
+    let credential = sha2::Sha256::digest(machine.token.as_bytes()).to_vec();
+    let lease = hub.registry.connect_for_tests_with_credential(
+        machine.machine_id,
+        &capabilities
+            .iter()
+            .map(|capability| (*capability).to_owned())
+            .collect::<Vec<_>>(),
+        credential,
+    );
+    canterlot_hub::machine_info::project_availability(pool, &hub.registry, Uuid::now_v7())
+        .await
+        .unwrap();
+    let settled: String = sqlx::query_scalar("select availability from machines where id=$1")
+        .bind(machine.machine_id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    assert_eq!(settled, "available");
     let conversation = testkit::seed_conversation(pool, owner, machine.machine_id).await;
     let seed = Seed {
         owner_id: owner,
@@ -992,44 +1005,17 @@ async fn http_scene_with(
     let client = testkit::TestClient::over_socket(hub.http_addr())
         .await
         .as_owner();
-    let mut link = Link {
-        machine: machine.machine_id,
-        capabilities: capabilities
-            .iter()
-            .map(|capability| (*capability).to_owned())
-            .collect(),
-        lease: None,
-    };
-    link.ensure(&hub);
-    (hub, client, scene, link)
+    (hub, client, scene, lease)
 }
 
-/// Доказательные выборки после старта фонового проектора хаба, по часам теста, пока не
-/// откроется эпизод. Фоновый проектор живёт своей жизнью (сбрасывает окно, пока считает
-/// связь машины недоступной), поэтому тест повторяет пару выборок, а не рассчитывает на гонку.
-async fn tick_until_episode(pool: &PgPool, scene: &Scene) {
+/// Две доказательные выборки после старта фонового проектора хаба, по часам теста.
+/// Машина сцены подключена по-настоящему (см. [`http_scene_with`]), поэтому фоновая
+/// проекция доступности ей ничего не меняет и окно наблюдения не сбрасывает.
+async fn two_ticks_after_projector_start(pool: &PgPool, scene: &Scene) {
     crate::support::projector_running(pool).await;
-    for _ in 0..40 {
-        sqlx::query("update machines set availability='available',availability_at=$2 where id=$1")
-            .bind(scene.seed.machine_id)
-            .bind(scene.base - TimeDelta::hours(1))
-            .execute(pool)
-            .await
-            .unwrap();
-        for _ in 0..2 {
-            tick(pool, scene, Utc::now()).await;
-        }
-        let opened: Option<Uuid> =
-            sqlx::query_scalar("select episode_id from hung_rescues where conversation_id=$1")
-                .bind(scene.seed.conversation_id)
-                .fetch_one(pool)
-                .await
-                .unwrap();
-        if opened.is_some() {
-            return;
-        }
+    for _ in 0..2 {
+        tick(pool, scene, Utc::now()).await;
     }
-    panic!("no hang episode opened");
 }
 
 async fn episode_of(pool: &PgPool, scene: &Scene) -> Uuid {
@@ -1045,9 +1031,9 @@ async fn episode_of(pool: &PgPool, scene: &Scene) -> Uuid {
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn card_actions_are_bound_to_their_episode(pool: PgPool) {
     use axum::http::{Method, StatusCode};
-    let (hub, client, scene, mut link) = http_scene(&pool).await;
+    let (hub, client, scene, _lease) = http_scene(&pool).await;
     // Отметки сразу после старта фонового проектора, но уже в прошлом его часов.
-    tick_until_episode(&pool, &scene).await;
+    two_ticks_after_projector_start(&pool, &scene).await;
     let episode = episode_of(&pool, &scene).await;
     let base = format!(
         "/api/v1/conversations/{}/hung-episodes/{episode}",
@@ -1061,14 +1047,12 @@ async fn card_actions_are_bound_to_their_episode(pool: PgPool) {
         scene.seed.conversation_id,
         Uuid::now_v7()
     );
-    link.ensure(&hub);
     let refused = client
         .send(Method::POST, &wrong, Some("wrong-1"), None)
         .await;
     assert_eq!(refused.status, StatusCode::CONFLICT);
     assert_eq!(harmful(&pool, &scene).await, 0);
     // Действие по открытой карточке.
-    link.ensure(&hub);
     let done = client
         .send(
             Method::POST,
@@ -1081,7 +1065,6 @@ async fn card_actions_are_bound_to_their_episode(pool: PgPool) {
     assert_eq!(commands_of(&pool, &scene, "interrupt").await.len(), 1);
     let state: Value = client.send(Method::GET, &base, None, None).await.json();
     assert_eq!(state["state"], "owner_interrupt");
-    link.ensure(&hub);
     let again = client
         .send(
             Method::POST,
@@ -1104,9 +1087,9 @@ async fn card_actions_are_bound_to_their_episode(pool: PgPool) {
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn an_old_card_cannot_stop_a_later_turn(pool: PgPool) {
     use axum::http::{Method, StatusCode};
-    let (hub, client, scene, _link) = http_scene(&pool).await;
+    let (hub, client, scene, _lease) = http_scene(&pool).await;
     // Отметки сразу после старта фонового проектора, но уже в прошлом его часов.
-    tick_until_episode(&pool, &scene).await;
+    two_ticks_after_projector_start(&pool, &scene).await;
     let episode = episode_of(&pool, &scene).await;
     // Ход закончился, пошёл другой.
     let next = queued_input(&pool, &scene).await;
@@ -1341,9 +1324,9 @@ async fn a_refusal_does_not_open_a_second_episode_without_progress(pool: PgPool)
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn a_card_of_an_advanced_episode_is_refused_before_the_projector_closes_it(pool: PgPool) {
     use axum::http::{Method, StatusCode};
-    let (hub, client, scene, mut link) = http_scene(&pool).await;
+    let (hub, client, scene, _lease) = http_scene(&pool).await;
     let queued = queued_input(&pool, &scene).await;
-    tick_until_episode(&pool, &scene).await;
+    two_ticks_after_projector_start(&pool, &scene).await;
     let episode = episode_of(&pool, &scene).await;
     let base = format!(
         "/api/v1/conversations/{}/hung-episodes/{episode}",
@@ -1358,7 +1341,6 @@ async fn a_card_of_an_advanced_episode_is_refused_before_the_projector_closes_it
     let state: Value = client.send(Method::GET, &base, None, None).await.json();
     assert_eq!(state["state"], "open", "the projector has not run yet");
     for (path, key) in [("interrupt", "adv-int"), ("steer", "adv-steer")] {
-        link.ensure(&hub);
         let response = client
             .send(Method::POST, &format!("{base}/{path}"), Some(key), None)
             .await;
@@ -1384,9 +1366,9 @@ async fn a_card_of_an_advanced_episode_is_refused_before_the_projector_closes_it
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn steer_is_bound_to_the_cards_input_and_never_picks_a_new_head(pool: PgPool) {
     use axum::http::{Method, StatusCode};
-    let (hub, client, scene, mut link) = http_scene(&pool).await;
+    let (hub, client, scene, _lease) = http_scene(&pool).await;
     let original = queued_input(&pool, &scene).await;
-    tick_until_episode(&pool, &scene).await;
+    two_ticks_after_projector_start(&pool, &scene).await;
     let episode = episode_of(&pool, &scene).await;
     let path = format!(
         "/api/v1/conversations/{}/hung-episodes/{episode}/steer",
@@ -1398,7 +1380,6 @@ async fn steer_is_bound_to_the_cards_input_and_never_picks_a_new_head(pool: PgPo
         .await
         .unwrap();
     let newer = queued_input(&pool, &scene).await;
-    link.ensure(&hub);
     let response = client.send(Method::POST, &path, Some("gone-1"), None).await;
     assert_eq!(response.status, StatusCode::CONFLICT);
     let body: Value = response.json();
@@ -1425,10 +1406,9 @@ async fn steer_is_bound_to_the_cards_input_and_never_picks_a_new_head(pool: PgPo
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn a_card_never_interrupts_through_a_worker_without_the_guard(pool: PgPool) {
     use axum::http::{Method, StatusCode};
-    let (hub, client, scene, mut link) = http_scene_with(&pool, &["pilot_v1", "send_now_v1"]).await;
-    tick_until_episode(&pool, &scene).await;
+    let (hub, client, scene, _lease) = http_scene_with(&pool, &["pilot_v1", "send_now_v1"]).await;
+    two_ticks_after_projector_start(&pool, &scene).await;
     let episode = episode_of(&pool, &scene).await;
-    link.ensure(&hub);
     let response = client
         .send(
             Method::POST,
@@ -1462,4 +1442,41 @@ async fn a_card_never_interrupts_through_a_worker_without_the_guard(pool: PgPool
         .json();
     assert_eq!(state["state"], "open");
     drop(hub);
+}
+
+/// Пересчёт, чьи часы отстали от уже записанной выборки (он взял `now` до ожидания блокировки
+/// очереди, а за это время пришла новая выборка), не видит её и не должен стирать окно
+/// наблюдения: это отсутствие данных у самого пересчёта, а не доказательство тишины процесса.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_refresh_with_a_stale_clock_does_not_erase_the_observation_window(pool: PgPool) {
+    let scene = hung_scene(&pool, "claude_code", true).await;
+    let samples = |pool: PgPool, scene: Uuid| async move {
+        sqlx::query_scalar::<_, i32>(
+            "select obs_samples from hung_rescues where conversation_id=$1",
+        )
+        .bind(scene)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    let conversation = scene.seed.conversation_id;
+    tick(&pool, &scene, scene.base - TimeDelta::seconds(15)).await;
+    assert_eq!(samples(pool.clone(), conversation).await, 1);
+    // Новая выборка уже в базе, а пересчёт считает по часам, которые её ещё не достигли.
+    sample(&pool, &scene, scene.base, true, 0).await;
+    refresh_with(
+        &pool,
+        &scene,
+        scene.base - TimeDelta::seconds(5),
+        HungRescue::Auto,
+    )
+    .await;
+    assert_eq!(
+        samples(pool.clone(), conversation).await,
+        1,
+        "the stale refresh kept the window"
+    );
+    refresh_with(&pool, &scene, scene.base, HungRescue::Auto).await;
+    assert_eq!(samples(pool.clone(), conversation).await, 2);
+    assert_eq!(harmful(&pool, &scene).await, 1, "the window completed");
 }

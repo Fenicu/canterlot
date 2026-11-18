@@ -216,6 +216,12 @@ pub async fn observe_in_tx(
         return Ok(());
     };
     let row = row_in_tx(conn, conversation_id).await?;
+    if inputs.hang.sample_ahead {
+        // Пересчёт со старыми часами выборку не видит: окно остаётся как записано.
+        inputs.hang.window_ready =
+            row.obs_execution_id == Some(execution) && row.obs_samples >= WINDOW_SAMPLES;
+        return Ok(());
+    }
     let database: String = sqlx::query_scalar("select current_database()")
         .fetch_one(&mut *conn)
         .await?;
