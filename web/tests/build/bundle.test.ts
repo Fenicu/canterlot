@@ -76,6 +76,7 @@ test('bundle_budget_holds', async (ctx) => {
     markdown: /linkify/,
     dompurify: /DOMPurify/,
     'html-to-image': /foreignObject/,
+    mermaid: /flowchart-v2/,
     mammoth: /wordprocessingml\/2006\/main/,
     'read-excel-file': /XLS_FILE_NOT_SUPPORTED/
   };

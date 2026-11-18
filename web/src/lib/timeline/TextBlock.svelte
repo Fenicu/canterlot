@@ -2,11 +2,13 @@
   import { onDestroy, untrack } from 'svelte';
   import { edgeFade } from '#lib/render/edgeFade.js';
   import { highlightWithin } from '#lib/render/highlight.js';
+  import { mermaidWithin } from '#lib/render/mermaidBlock.js';
   import Html from '#lib/render/Html.svelte';
   import { sharedMarkdown } from '#lib/render/markdown.js';
   import { caretInTail, markRevealWords, TextReveal } from '#lib/render/reveal.js';
   import { StreamingMarkdown } from '#lib/render/streamingMarkdown.js';
   import { durationMs, motionScale, prefersReducedMotion } from '#lib/motion.js';
+  import { theme } from '#lib/theme.js';
   import type { BlockModel } from '#lib/stores/blocks.js';
 
   let {
@@ -21,6 +23,7 @@
   const reveal = new TextReveal();
 
   const streaming = $derived(block.state === 'streaming' || block.state === 'stale');
+  const themeKey = $derived(`${theme.effective}:${theme.palette}`);
   const finalKey = $derived(
     streaming
       ? undefined
@@ -176,7 +179,9 @@
   }
 </script>
 
-<div class="text prose" data-block={block.id} use:highlightFinal={streaming ? null : block.text} use:edgeFade>
+<div class="text prose" data-block={block.id}
+     use:highlightFinal={streaming ? null : block.text}
+     use:mermaidWithin={{ streaming, themeKey }} use:edgeFade>
   {#each rendered.chunks as chunk (chunk.id)}
     <Html html={chunk.html} copy source={streaming ? undefined : block.text} final={!streaming} />
   {/each}
@@ -193,4 +198,24 @@
 <style>
   .text { min-width: 0; }
   .tail > :global(div), .tail > :global(div > p:last-child) { display: inline; }
+
+  :global(.mermaid-block) { max-width: 100%; min-width: 0; margin-block: var(--gutter); }
+  :global(.mermaid-toolbar) { display: flex; gap: var(--gutter); }
+  :global(.mermaid-tab) {
+    min-height: var(--target);
+    padding-inline: var(--gutter);
+    border: var(--hairline) solid var(--line);
+    border-radius: var(--radius-sm);
+    background: var(--transparent);
+    color: var(--secondary);
+    font-size: var(--fs-sm);
+  }
+  :global(.mermaid-tab[aria-pressed="true"]) {
+    border-color: var(--accent);
+    color: var(--text);
+  }
+  :global(.mermaid-view) { max-width: 100%; overflow-x: auto; }
+  :global(.mermaid-view svg) { display: block; }
+  :global(.mermaid-error) { color: var(--secondary); font-size: var(--fs-sm); }
+  :global(.mermaid-source-hidden) { display: none; }
 </style>

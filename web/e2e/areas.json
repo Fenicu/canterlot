@@ -128,6 +128,7 @@
         "e2e/ui/lane.spec.ts",
         "e2e/ui/linked-title-rows.spec.ts",
         "e2e/ui/live-turn.spec.ts",
+        "e2e/ui/mermaid.spec.ts",
         "e2e/ui/low-findings-queue-targets.spec.ts",
         "e2e/ui/owner-commands.spec.ts",
         "e2e/ui/owner-messages.spec.ts",

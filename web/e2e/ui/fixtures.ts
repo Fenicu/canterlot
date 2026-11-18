@@ -9,6 +9,11 @@ export const test = base.extend({
       window.addEventListener('securitypolicyviolation', (event) => {
         // axe-core для части проверок вставляет свой <style>: это нарушение самого сканера, не приложения.
         if (event.violatedDirective.startsWith('style-src') && event.blockedURI === 'inline' && 'axe' in window) return;
+        // Mermaid во время render размечает свой временный DOM инлайн-стилями: это его
+        // внутренняя кухня, а не вставляемая разметка. Спеки диаграмм включают флаг и
+        // отдельно проверяют, что вставленный SVG не содержит инлайн-стилей и <style>.
+        if (event.violatedDirective.startsWith('style-src') && event.blockedURI === 'inline' &&
+            (window as unknown as { __mermaidCspAllowed?: boolean }).__mermaidCspAllowed) return;
         const list = ((window as unknown as { __csp?: string[] }).__csp ??= []);
         list.push(`${event.violatedDirective} ${event.blockedURI}`);
       });

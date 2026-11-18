@@ -37,6 +37,7 @@
     "jsqr": "1.4.0",
     "mammoth": "1.13.0",
     "markdown-it": "15.0.3",
+    "mermaid": "12.3.0",
     "read-excel-file": "9.3.14",
     "svelte": "5.57.3",
     "uqr": "0.1.3"
