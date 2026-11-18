@@ -35,13 +35,18 @@ struct ScopedGroup {
 }
 
 impl ScopedGroup {
-    fn leader_alive(&self) -> bool {
-        crate::containment::start_ticks(self.pgid)
-            .is_ok_and(|ticks| ticks == self.leader_start_ticks)
+    fn pid_reused(&self) -> bool {
+        if self.leader_start_ticks == 0 {
+            return false;
+        }
+        match crate::containment::start_ticks(self.pgid) {
+            Ok(ticks) => ticks != self.leader_start_ticks,
+            Err(_) => false,
+        }
     }
 
     fn signal_group(&self, signal: Signal) {
-        if !self.leader_alive() {
+        if self.pid_reused() {
             return;
         }
         let Some(pid) = i32::try_from(self.pgid)
@@ -57,6 +62,74 @@ impl ScopedGroup {
         self.signal_group(Signal::TERM);
         tokio::time::sleep(grace).await;
         self.signal_group(Signal::KILL);
+    }
+
+    async fn kill_and_reap(&self) {
+        self.signal_group(Signal::KILL);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if !group_has_members(self.pgid) {
+                break;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+}
+
+/// Живые участники группы предпроверки по `pgrp`: лидер уже может быть
+/// перебран, а фоновые потомки ещё сидят с тем же `pgid`. Зомби не в счёт:
+/// их статус уже снят убийством, а перебирает их чужой поджидатель.
+fn group_has_members(pgid: u32) -> bool {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid_str) = name.to_str() else {
+            continue;
+        };
+        if pid_str.parse::<u32>().is_err() {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(entry.path().join("stat")) else {
+            continue;
+        };
+        let Some(end) = text.rfind(')') else {
+            continue;
+        };
+        let fields: Vec<&str> = text[end + 1..].split_whitespace().collect();
+        if fields.first().is_some_and(|state| *state == "Z" || *state == "X") {
+            continue;
+        }
+        if fields.get(2).and_then(|s| s.parse::<u32>().ok()) == Some(pgid) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Дренажи вывода убиваются и при обрыве future: брошенный `JoinHandle`
+/// иначе продолжал бы жить в фоне, держа трубы открытыми.
+struct DrainSet {
+    tasks: Option<Vec<tokio::task::JoinHandle<()>>>,
+}
+
+impl DrainSet {
+    fn take(&mut self) -> Vec<tokio::task::JoinHandle<()>> {
+        self.tasks.take().unwrap_or_default()
+    }
+}
+
+impl Drop for DrainSet {
+    fn drop(&mut self) {
+        if let Some(tasks) = self.tasks.as_mut() {
+            for task in tasks {
+                task.abort();
+            }
+        }
     }
 }
 
@@ -241,16 +314,23 @@ pub async fn run_with(
         armed: armed.clone(),
     };
     let ring: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
-    let mut drains = [
-        child.stdout.take().map(|out| {
-            let ring = ring.clone();
-            tokio::spawn(drain(out, ring))
-        }),
-        child.stderr.take().map(|err| {
-            let ring = ring.clone();
-            tokio::spawn(drain(err, ring))
-        }),
-    ];
+    let mut drain_set = DrainSet {
+        tasks: Some(
+            [
+                child.stdout.take().map(|out| {
+                    let ring = ring.clone();
+                    tokio::spawn(drain(out, ring))
+                }),
+                child.stderr.take().map(|err| {
+                    let ring = ring.clone();
+                    tokio::spawn(drain(err, ring))
+                }),
+            ]
+            .into_iter()
+            .flatten()
+            .collect(),
+        ),
+    };
     let wait = child.wait();
     let outcome = if let Some(signal) = timeout_signal {
         tokio::select! {
@@ -267,13 +347,15 @@ pub async fn run_with(
     if timed_out {
         scope.terminate(TERMINATE_GRACE).await;
     }
+    // Вся группа прибивается на каждом пути выхода: вышедший `bash` уже
+    // перебран, а его фоновые потомки ещё сидят с тем же `pgid`.
+    scope.kill_and_reap().await;
     let status = match outcome {
         Ok(Ok(status)) => Some(status),
         Ok(Err(_)) => {
             // Тот же путь уборки, что и обычно: прибить группу, дочитать
             // дренажи с отменой, снять охрану, переждать ребёнка.
-            scope.terminate(TERMINATE_GRACE).await;
-            for task in drains.iter_mut().flatten() {
+            for task in drain_set.take().iter_mut() {
                 let _ = tokio::time::timeout(Duration::from_secs(1), &mut *task).await;
                 task.abort();
             }
@@ -290,7 +372,7 @@ pub async fn run_with(
     // Потоки closing по EOF после выхода группы: дать дренажам дочитать хвост,
     // иначе последняя запись может ещё не попасть в кольцо. Отмена вместо
     // отсоединения: брошенный `JoinHandle` продолжал бы жить в фоне.
-    for task in drains.iter_mut().flatten() {
+    for task in drain_set.take().iter_mut() {
         let _ = tokio::time::timeout(Duration::from_secs(1), &mut *task).await;
         if !task.is_finished() {
             task.abort();

@@ -12,6 +12,31 @@ fn request(dir: &std::path::Path, command: &str) -> SchedulePrecheck {
     }
 }
 
+/// Жив ли процесс: зомби уже убит, его `/proc` ещё виден чужому поджидателю.
+fn process_alive(pid: u32) -> bool {
+    let Ok(text) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    let Some(end) = text.rfind(')') else {
+        return false;
+    };
+    let state = text[end + 1..].split_whitespace().next().unwrap_or("");
+    state != "Z" && state != "X" && state != "x"
+}
+
+async fn wait_for_gone(pid: u32, what: &str) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if !process_alive(pid) {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect(what);
+}
+
 #[tokio::test]
 async fn precheck_inherits_only_the_allowed_environment() {
     let dir = tempfile::tempdir().unwrap();
@@ -172,6 +197,87 @@ async fn workdir_outside_allowed_roots_is_rejected() {
         precheck_result::Outcome::Error(error) => assert_eq!(error.reason, "workdir_not_allowed"),
         other => panic!("expected a rejected workdir: {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn background_descendant_is_killed_on_normal_exit() {
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("bg.pid");
+    let command = format!("sleep 30 & echo $! > {}", pid_file.display());
+    let result = run_with(
+        request(dir.path(), &command),
+        vec![PathBuf::from(dir.path())],
+        Duration::from_secs(10),
+        None,
+    )
+    .await;
+    let outcome = match result.outcome {
+        Some(precheck_result::Outcome::Finished(outcome)) => outcome,
+        other => panic!("expected a finished precheck: {other:?}"),
+    };
+    assert_eq!(outcome.exit_code, 0, "{}", outcome.output_tail);
+    assert!(!outcome.timed_out);
+    let pid: u32 = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(text) = std::fs::read_to_string(&pid_file)
+                && let Ok(pid) = text.trim().parse::<u32>()
+            {
+                return pid;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("background pid appears");
+    wait_for_gone(pid, "background descendant is reaped after normal exit").await;
+}
+
+#[tokio::test]
+async fn background_descendant_is_killed_on_cancel() {
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("bg-cancel.pid");
+    let command = format!("sleep 30 & echo $! > {}", pid_file.display());
+    let task = tokio::spawn(async move {
+        run_with(
+            request(dir.path(), &command),
+            vec![PathBuf::from(dir.path())],
+            Duration::from_secs(30),
+            None,
+        )
+        .await
+    });
+    let pid: u32 = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(text) = std::fs::read_to_string(&pid_file)
+                && let Ok(pid) = text.trim().parse::<u32>()
+            {
+                return pid;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("background pid appears");
+    task.abort();
+    let _ = task.await;
+    let gone = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if !process_alive(pid) {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .is_ok();
+    if !gone {
+        let _ = tokio::process::Command::new("kill")
+            .arg("-KILL")
+            .arg(pid.to_string())
+            .output()
+            .await;
+    }
+    assert!(gone, "background descendant is reaped after cancel");
 }
 
 #[tokio::test]
