@@ -163,6 +163,9 @@ pub struct HarnessRef {
     pub id: String,
     pub title: String,
     pub provider: String,
+    /// Поддерживает ли харнесс цели; старые записи без колонки дают `false`.
+    #[serde(default)]
+    pub goals: bool,
 }
 /// Закрепление сессии внутри одной группы; глобальное `pinned` живёт отдельно.
 #[derive(Clone, Serialize, Deserialize, ToSchema)]
@@ -373,7 +376,7 @@ fn optional_time(row: &PgRow, col: &str) -> Result<Option<String>, sqlx::Error> 
 }
 
 const SELECT:&str="select c.*,m.name machine_name,m.capabilities,m.availability,
- h.title harness_title,h.provider,
+ h.title harness_title,h.provider,coalesce(h.goals,false) harness_goals,
  coalesce(d.effective_model,'') effective_model,coalesce(d.effective_model_resolved,'') effective_model_resolved,coalesce(d.effective_effort,'') effective_effort,
  coalesce(d.effective_permission_mode,'') effective_permission_mode,coalesce(d.crunch_enabled,false) derived_crunch,
  coalesce(d.activity_state,'idle') activity_state,coalesce(nullif(d.activity_evidence,'{}'),'{\"kind\":\"idle\",\"last_turn_at\":null,\"background_work\":null}') activity_evidence,
@@ -419,6 +422,9 @@ fn item(row: &PgRow) -> Result<ListItem, sqlx::Error> {
                 provider: row
                     .try_get::<Option<String>, _>("provider")?
                     .unwrap_or_default(),
+                goals: row
+                    .try_get::<Option<bool>, _>("harness_goals")?
+                    .unwrap_or(false),
             },
             workdir: row.try_get("workdir")?,
             created_at: time(row.try_get("created_at")?),

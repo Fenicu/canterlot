@@ -27,6 +27,7 @@ pub mod events;
 pub mod executions;
 #[cfg(feature = "fault-injection")]
 pub mod fault_injection;
+pub mod goals;
 pub mod groups;
 pub mod grpc;
 pub mod history;

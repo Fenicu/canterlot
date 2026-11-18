@@ -38,6 +38,8 @@ pub const CAPABILITY_PROVIDER_CREDITS_V1: &str = "provider_credits_v1";
 pub const CAPABILITY_CLI_VERSIONS_V1: &str = "cli_versions_v1";
 /// Отчёт машины несёт каталог команд и навыков харнесса.
 pub const CAPABILITY_SLASH_CATALOG_V1: &str = "slash_catalog_v1";
+/// Воркер ведёт состояние цели и принимает команды управления ею.
+pub const CAPABILITY_GOALS_V1: &str = canterlot_proto::goals::CAPABILITY_GOALS_V1;
 
 pub const CAPABILITY_EXEC_V1: &str = "exec_v1";
 pub const CAPABILITY_WORKDIR_SUGGEST_V1: &str = "workdir_suggest_v1";

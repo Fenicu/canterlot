@@ -1703,6 +1703,7 @@ async fn apply_body(
         | Body::CompactionEvent(_)
         | Body::ContextProgress(_)
         | Body::PromptSuggested(_)
+        | Body::GoalChanged(_)
         | Body::SessionStuck(_) => return Err(IngestError::InvalidRecord),
         Body::SecretDelivered(fact) => {
             crate::secrets::apply_delivered_in_tx(
@@ -2849,6 +2850,7 @@ async fn apply_journal_body(
             | Body::CompactionEvent(_)
             | Body::ContextProgress(_)
             | Body::PromptSuggested(_)
+            | Body::GoalChanged(_)
             | Body::SessionStuck(_)
     ) {
         return Ok(None);
@@ -2925,6 +2927,15 @@ async fn apply_journal_body(
             return Err(IngestError::ForeignExecution);
         }
         return crate::prompt_suggestions::apply(conn, &run, fact, correlation_id)
+            .await
+            .map(Some)
+            .map_err(pilot_error);
+    }
+    if let Body::GoalChanged(fact) = body {
+        if parse_id(&fact.execution_id)? != run.execution_id {
+            return Err(IngestError::ForeignExecution);
+        }
+        return crate::goals::apply(conn, &run, fact, correlation_id)
             .await
             .map(Some)
             .map_err(pilot_error);

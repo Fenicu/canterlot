@@ -73,6 +73,7 @@ pub const KNOWN_OPTIONAL_CAPABILITIES: &[&str] = &[
     CAPABILITY_CLI_VERSIONS_V1,
     CAPABILITY_SLASH_CATALOG_V1,
     CAPABILITY_SCHEDULE_PRECHECK_V1,
+    crate::session::CAPABILITY_GOALS_V1,
 ];
 
 #[tonic::async_trait]

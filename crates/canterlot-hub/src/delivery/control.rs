@@ -62,6 +62,13 @@ pub enum CompactOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalOutcome {
+    Requested { command_id: Uuid },
+    AlreadyRequested { command_id: Uuid },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ContinueOutcome {
     pub removed: Vec<PauseReason>,
     pub remaining: Vec<PauseReason>,
@@ -378,6 +385,117 @@ pub async fn request_compaction(
                     .save(&mut *conn, &slot, Some(execution_id), correlation_id)
                     .await?;
                 CompactOutcome::Requested { command_id }
+            };
+            record(
+                &mut *conn,
+                owner_id,
+                &idempotency_key,
+                OPERATION,
+                &hash,
+                conversation_id,
+                &outcome,
+            )
+            .await?;
+            Ok(outcome)
+        })
+    })
+    .await
+}
+
+/// Управление целью идёт командой адаптеру; состояние вернётся записью SJ. Команда
+/// идемпотентна по ключу владельца и по уже выданной команде того же поколения.
+pub async fn request_goal(
+    pool: &PgPool,
+    owner_id: Uuid,
+    conversation_id: Uuid,
+    action: canterlot_proto::goals::GoalAction,
+    objective: Option<&str>,
+    token_budget: Option<i64>,
+    idempotency_key: &str,
+    _correlation_id: Uuid,
+    machine_capabilities: &[String],
+) -> Result<GoalOutcome, ControlError> {
+    idempotency::validate_key(idempotency_key)
+        .map_err(|reason| ControlError::InvalidRequest { reason })?;
+    if action == canterlot_proto::goals::GoalAction::Set {
+        let Some(text) = objective else {
+            return Err(ControlError::InvalidRequest { reason: "objective_required" });
+        };
+        if text.is_empty() || text.len() > canterlot_proto::goals::MAX_OBJECTIVE_BYTES {
+            return Err(ControlError::InvalidRequest { reason: "objective_invalid" });
+        }
+    } else if objective.is_some() {
+        return Err(ControlError::InvalidRequest { reason: "objective_unexpected" });
+    }
+    if token_budget.is_some_and(|budget| budget <= 0) {
+        return Err(ControlError::InvalidRequest { reason: "budget_invalid" });
+    }
+    const OPERATION: &str = "request_goal";
+    let hash = idempotency::request_hash(
+        OPERATION,
+        &json!({"conversation_id": conversation_id, "action": action.as_str(),
+                "objective": objective, "token_budget": token_budget}),
+    );
+    let idempotency_key = idempotency_key.to_owned();
+    let machine_capabilities = machine_capabilities.to_owned();
+    let objective = objective.map(str::to_owned);
+    crate::db::in_tx(pool, move |conn| {
+        Box::pin(async move {
+            let _queue = lock_conversation(&mut *conn, owner_id, conversation_id).await?;
+            if let Some(outcome) =
+                lookup(&mut *conn, owner_id, &idempotency_key, OPERATION, &hash).await?
+            {
+                return Ok(outcome);
+            }
+            let (harness, machine_id): (String, Uuid) = sqlx::query_as(
+                "select harness, machine_id from conversations where id = $1 and owner_id = $2",
+            )
+            .bind(conversation_id)
+            .bind(owner_id)
+            .fetch_optional(&mut *conn)
+            .await?
+            .ok_or(ControlError::NotFound)?;
+            if !matches!(harness.as_str(), "codex" | "claude_code") {
+                return Err(ControlError::InvalidRequest { reason: "unsupported_harness" });
+            }
+            if !machine_capabilities.iter().any(|cap| cap == crate::session::CAPABILITY_GOALS_V1) {
+                return Err(ControlError::InvalidRequest { reason: "capability_missing" });
+            }
+            let Some((execution_id, generation, _)) =
+                executions::live(&mut *conn, conversation_id).await?
+            else {
+                return Err(ControlError::InvalidRequest { reason: "no_live_execution" });
+            };
+            let existing: Option<Uuid> = sqlx::query_scalar(
+                "select id from commands where conversation_id = $1 and kind = 'goal_command'
+                 and execution_id = $2 and execution_generation = $3
+                 and delivery_state <> 'completed' order by created_at, id limit 1",
+            )
+            .bind(conversation_id)
+            .bind(execution_id)
+            .bind(generation)
+            .fetch_optional(&mut *conn)
+            .await?;
+            let outcome = if let Some(command_id) = existing {
+                GoalOutcome::AlreadyRequested { command_id }
+            } else {
+                let command_id = Uuid::now_v7();
+                sqlx::query(
+                    "insert into commands (id, machine_id, conversation_id, execution_id,
+                                   execution_generation, kind, payload, delivery_state)
+                     values ($1, $2, $3, $4, $5, 'goal_command', $6, 'pending')",
+                )
+                .bind(command_id)
+                .bind(machine_id)
+                .bind(conversation_id)
+                .bind(execution_id)
+                .bind(generation)
+                .bind(json!({"action": action.as_str(), "objective": objective,
+                             "token_budget": token_budget}))
+                .execute(&mut *conn)
+                .await?;
+                notify_outbox(&mut *conn, machine_id).await?;
+                GoalOutcome::Requested { command_id }
             };
             record(
                 &mut *conn,

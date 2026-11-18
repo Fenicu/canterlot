@@ -33,6 +33,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(usage))
         .routes(routes!(owner_inputs))
         .routes(routes!(compact))
+        .routes(routes!(goal))
         .routes(routes!(stop))
         .routes(routes!(continue_queue))
         .routes(routes!(resolve_owner_lost))
@@ -379,6 +380,50 @@ async fn send_now(
         o.owner_id,
         id,
         input_id,
+        &key,
+        c,
+        &capabilities.unwrap_or_default(),
+    )
+    .await
+    .map_err(ApiError::from);
+    Ok(Json(deleted_or(&s, o.owner_id, id, result).await?))
+}
+
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GoalBody {
+    /// `set`, `clear`, `pause` или `resume`.
+    pub action: String,
+    /// Обязательно только для `set`.
+    pub objective: Option<String>,
+    pub token_budget: Option<i64>,
+}
+
+#[utoipa::path(post,path="/api/v1/conversations/{id}/goal",tag="conversations",params(("id"=Uuid,Path),("Idempotency-Key"=String,Header)),request_body=GoalBody,responses((status=200,description="Команда управления целью принята",body=crate::delivery::control::GoalOutcome),(status=409,description="Конфликт состояния или отсутствует возможность, причина в details.reason",body=super::error::ErrorEnvelope)))]
+async fn goal(
+    State(s): State<AppState>,
+    o: Owner,
+    ApiPath(id): ApiPath<Uuid>,
+    IdempotencyKey(key): IdempotencyKey,
+    Correlation(c): Correlation,
+    ApiJson(body): ApiJson<GoalBody>,
+) -> Result<Json<crate::delivery::control::GoalOutcome>, ApiError> {
+    let action = canterlot_proto::goals::GoalAction::parse(&body.action)
+        .ok_or_else(|| ApiError::new(ErrorCode::InvalidRequest))?;
+    let machine_id: Option<Uuid> =
+        sqlx::query_scalar("select machine_id from conversations where id = $1 and owner_id = $2")
+            .bind(id)
+            .bind(o.owner_id)
+            .fetch_optional(&s.pool)
+            .await?;
+    let capabilities = machine_id.map(|machine| s.registry.capabilities(machine));
+    let result = crate::delivery::control::request_goal(
+        &s.pool,
+        o.owner_id,
+        id,
+        action,
+        body.objective.as_deref(),
+        body.token_budget,
         &key,
         c,
         &capabilities.unwrap_or_default(),

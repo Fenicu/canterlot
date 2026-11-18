@@ -125,8 +125,8 @@ pub async fn apply_report_with_capabilities(
             .iter()
             .map(|e| json!({"name":e.name,"description":e.description,"kind":e.kind,"argument_hint":e.argument_hint}))
             .collect();
-        sqlx::query("insert into machine_harnesses(machine_id,harness,provider,title,images,settings_midsession,permission_modes,models,settings_midsession_effort,installed_version,latest_version,min_version,update_command,catalog) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)")
-  .bind(machine_id).bind(&h.harness).bind(&h.provider).bind(&h.title).bind(h.images).bind(h.settings_midsession).bind(json!(h.permission_modes)).bind(json!(models)).bind(h.settings_midsession_effort.unwrap_or(true)).bind(&h.installed_version).bind(&h.latest_version).bind(&h.min_version).bind(&h.update_command).bind(json!(catalog)).execute(&mut *conn).await?;
+        sqlx::query("insert into machine_harnesses(machine_id,harness,provider,title,images,settings_midsession,permission_modes,models,settings_midsession_effort,installed_version,latest_version,min_version,update_command,catalog,goals) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)")
+  .bind(machine_id).bind(&h.harness).bind(&h.provider).bind(&h.title).bind(h.images).bind(h.settings_midsession).bind(json!(h.permission_modes)).bind(json!(models)).bind(h.settings_midsession_effort.unwrap_or(true)).bind(&h.installed_version).bind(&h.latest_version).bind(&h.min_version).bind(&h.update_command).bind(json!(catalog)).bind(h.goals).execute(&mut *conn).await?;
     }
     let versions_enabled = capabilities
         .iter()

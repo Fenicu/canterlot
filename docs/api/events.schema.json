@@ -200,6 +200,9 @@
     },
     {
       "$ref": "#/$defs/schedule_run_changed"
+    },
+    {
+      "$ref": "#/$defs/goal_changed"
     }
   ],
   "$defs": {
@@ -4462,6 +4465,71 @@
       ],
       "additionalProperties": false
     },
+    "goal_changed": {
+      "type": "object",
+      "properties": {
+        "v": { "const": 1 },
+        "id": { "$ref": "#/$defs/Uuid" },
+        "scope": { "$ref": "#/$defs/Scope" },
+        "scope_seq": { "$ref": "#/$defs/Seq" },
+        "scope_seq_from": { "$ref": "#/$defs/Seq" },
+        "committed_at": { "$ref": "#/$defs/Time" },
+        "committed_at_from": { "$ref": "#/$defs/Time" },
+        "conversation_id": {
+          "anyOf": [ { "$ref": "#/$defs/Uuid" }, { "type": "null" } ]
+        },
+        "execution_id": {
+          "anyOf": [ { "$ref": "#/$defs/Uuid" }, { "type": "null" } ]
+        },
+        "correlation_id": { "$ref": "#/$defs/Uuid" },
+        "kind": { "const": "goal_changed" },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "conversation_id": { "$ref": "#/$defs/Uuid" },
+            "goal": {
+              "anyOf": [
+                { "type": "null" },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "objective": { "type": "string" },
+                    "status": {
+                      "enum": [
+                        "active", "paused", "blocked", "usage_limited",
+                        "budget_limited", "complete"
+                      ]
+                    },
+                    "tokens_used": { "type": "integer" },
+                    "time_used_seconds": { "type": "integer" },
+                    "token_budget": {
+                      "anyOf": [ { "type": "integer" }, { "type": "null" } ]
+                    },
+                    "turns_used": {
+                      "anyOf": [ { "type": "integer" }, { "type": "null" } ]
+                    },
+                    "updated_at": { "$ref": "#/$defs/Time" }
+                  },
+                  "required": [
+                    "objective", "status", "tokens_used", "time_used_seconds",
+                    "token_budget", "turns_used", "updated_at"
+                  ]
+                }
+              ]
+            }
+          },
+          "required": ["conversation_id", "goal"]
+        }
+      },
+      "required": [
+        "v", "id", "scope", "scope_seq", "scope_seq_from", "committed_at",
+        "committed_at_from", "conversation_id", "execution_id", "correlation_id",
+        "kind", "payload"
+      ],
+      "additionalProperties": false
+    },
     "nudge_changed": {
       "type": "object",
       "properties": {
@@ -7607,6 +7675,9 @@
                 },
                 {
                   "$ref": "#/$defs/plan_task_changed"
+                },
+                {
+                  "$ref": "#/$defs/goal_changed"
                 },
                 {
                   "$ref": "#/$defs/limits_changed"
