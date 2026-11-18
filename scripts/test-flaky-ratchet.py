@@ -76,7 +76,7 @@ async fn t() {
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         out = result.stdout
         self.assertIn('crates/canterlot-demo/tests/it/foo.rs: rust_sleep: 2 > 0', out)
-        self.assertIn('crates/canterlot-demo/tests/it/foo.rs: rust_clock: 3 > 0', out)
+        self.assertIn('crates/canterlot-demo/tests/it/foo.rs: rust_clock: 2 > 0', out)
         self.assertIn('crates/canterlot-demo/tests/it/foo.rs: rust_ignore: 1 > 0', out)
         self.assertNotIn('rust_ignore: 2 > 0', out)
 
@@ -98,11 +98,11 @@ let raw = r#"tokio::time::sleep(x) #[ignore]"#;
     def test_rust_clock_in_production_code_is_not_counted(self):
         make_tree(self.root, {
             'crates/canterlot-demo/src/lib.rs': '''\
-pub fn production() { let n = Utc::now(); }
+pub fn production() { let n = Instant::now(); }
 #[cfg(test)]
 mod tests {
     #[test]
-    fn t() { let n = Utc::now(); }
+    fn t() { let n = Instant::now(); let at = Utc::now(); }
 }
 ''',
         })

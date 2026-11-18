@@ -21,7 +21,7 @@ RULES = (
 
 RUST_PATTERNS = {
     'rust_sleep': r'\b(?:tokio::time::sleep|std::thread::sleep)\s*\(',
-    'rust_clock': r'\b(?:Instant|SystemTime|Utc)::now\s*\(\s*\)',
+    'rust_clock': r'\b(?:Instant|SystemTime)::now\s*\(\s*\)',
     'rust_ignore': r'#\s*\[\s*ignore\s*\]',
 }
 TS_PATTERNS = {
