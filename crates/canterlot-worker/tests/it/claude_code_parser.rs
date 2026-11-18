@@ -2270,3 +2270,44 @@ fn adopted_wake_turn_that_took_the_written_message_finishes_both() {
     assert!(awaiting_input(&parsed));
     assert!(!parser.wake_turn_open());
 }
+
+/// Размышление без видимого текста и повтор запроса — признаки жизни хода: хаб не должен
+/// принимать их за тишину и спасать ход, который ещё думает.
+#[test]
+fn reasoning_and_retry_frames_report_liveness() {
+    let mut parser = Parser::new();
+    parser.set_input_command(command_id());
+    for frame in [
+        json!({"type":"system","subtype":"thinking_tokens","tokens":128,"session_id":"s"}),
+        json!({"type":"system","subtype":"api_retry","attempt":1,"max_retries":5,"session_id":"s"}),
+    ] {
+        let parsed = parser.feed(&frame.to_string());
+        assert!(
+            parsed
+                .iter()
+                .any(|p| matches!(p, Parsed::Event(AdapterEvent::Progress))),
+            "{frame}: {parsed:?}"
+        );
+    }
+}
+
+#[test]
+fn an_empty_thinking_delta_reports_liveness_without_a_blank_block_delta() {
+    let mut parser = Parser::new();
+    parser.set_input_command(command_id());
+    let start = json!({"type":"stream_event","session_id":"s","parent_tool_use_id":null,
+        "event":{"type":"content_block_start","index":0,
+                 "content_block":{"type":"thinking","thinking":""}}});
+    parser.feed(&start.to_string());
+    let delta = json!({"type":"stream_event","session_id":"s","parent_tool_use_id":null,
+        "event":{"type":"content_block_delta","index":0,
+                 "delta":{"type":"thinking_delta","thinking":""}}});
+    let parsed = parser.feed(&delta.to_string());
+    assert!(
+        parsed
+            .iter()
+            .any(|p| matches!(p, Parsed::Event(AdapterEvent::Progress))),
+        "{parsed:?}"
+    );
+    assert!(deltas(&parsed).is_empty(), "no empty delta is shipped");
+}

@@ -3004,8 +3004,14 @@ async fn apply_journal_body(
             if parse_id(&fact.execution_id)? != run.execution_id { return Err(IngestError::ForeignExecution); }
             sqlx::query("select conversation_id from queue_state where conversation_id = $1 for update")
                 .bind(run.conversation_id).execute(&mut *conn).await?;
+            let detail = json!({"phase":fact.phase,"tool_name":crate::blocks::non_empty(&fact.tool_name),"summary":crate::blocks::non_empty(&fact.summary)});
+            // Повтор той же фазы — сигнал жизни хода от воркера: он обновляет только
+            // `last_event_at` (в `touched`), а отметка начала фазы и поток событий не меняются.
+            let repeated: bool = sqlx::query_scalar("select exists(select 1 from executions where id = $1 and state not in ('stopped', 'failed') and phase is not distinct from $2 and phase_detail is not distinct from $3)")
+                .bind(run.execution_id).bind(&fact.phase).bind(&detail).fetch_one(&mut *conn).await?;
+            if repeated { return Ok(Some(false)); }
             let changed = sqlx::query("update executions set phase = $2, phase_at = clock_timestamp(), phase_detail=$3 where id = $1 and state not in ('stopped', 'failed')")
-                .bind(run.execution_id).bind(&fact.phase).bind(json!({"phase":fact.phase,"tool_name":crate::blocks::non_empty(&fact.tool_name),"summary":crate::blocks::non_empty(&fact.summary)})).execute(&mut *conn).await?.rows_affected();
+                .bind(run.execution_id).bind(&fact.phase).bind(&detail).execute(&mut *conn).await?.rows_affected();
             if changed == 0 { return Ok(Some(true)); }
             execution_event(conn, &run, "phase_changed", json!({"phase": fact.phase,"tool_name":crate::blocks::non_empty(&fact.tool_name),"summary":crate::blocks::non_empty(&fact.summary)}), correlation_id).await?;
             return Ok(Some(false));

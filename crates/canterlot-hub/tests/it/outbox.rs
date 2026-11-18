@@ -2183,7 +2183,10 @@ async fn a_hung_turn_is_interrupted_through_the_real_worker_channel(pool: PgPool
     hub.dispatcher.trigger(conversation);
     let interrupt = worker.command().await;
     let Some(command::Kind::Interrupt(guard)) = &interrupt.kind else {
-        panic!("the worker must receive an interrupt, got {:?}", interrupt.kind);
+        panic!(
+            "the worker must receive an interrupt, got {:?}",
+            interrupt.kind
+        );
     };
     assert_eq!(guard.expected_turn_id, turn.command_id.to_string());
     assert_eq!(guard.progress_checkpoint, 17);
@@ -2251,12 +2254,11 @@ async fn a_worker_refusal_of_a_stale_interrupt_is_surfaced(pool: PgPool) {
         &["instructions_v1", "pilot_v1", "guarded_interrupt_v1"],
     )
     .await;
-    let execution: Uuid =
-        sqlx::query_scalar("select id from executions where conversation_id=$1")
-            .bind(conversation)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let execution: Uuid = sqlx::query_scalar("select id from executions where conversation_id=$1")
+        .bind(conversation)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     let turn = Uuid::now_v7();
     let outcome = canterlot_hub::db::in_tx::<_, canterlot_hub::delivery::control::ControlError, _>(
         &pool,
@@ -2301,5 +2303,88 @@ async fn a_worker_refusal_of_a_stale_interrupt_is_surfaced(pool: PgPool) {
     assert_eq!(status.as_deref(), Some("turn_mismatch"));
     assert_eq!(state, "completed");
     let _ = execution;
+    stop(hub).await;
+}
+
+/// Повтор той же фазы от воркера — сигнал жизни хода: он двигает молчание, но не отметку
+/// фазы и не множит события.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_repeated_phase_is_liveness_and_keeps_the_phase_mark(pool: PgPool) {
+    let hub = spawn_test_hub(pool.clone(), timers()).await;
+    let (machine, conversation) = setup(&pool, &hub).await;
+    let mut worker = Worker::connect(&hub, &machine).await;
+    let execution: Uuid = sqlx::query_scalar("select id from executions where conversation_id=$1")
+        .bind(conversation)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let phase = |seq: u64| JournalRecord {
+        seq,
+        body: Some(RecordBody {
+            body: Some(record_body::Body::PhaseChanged(PhaseChanged {
+                execution_id: execution.to_string(),
+                phase: "generating".into(),
+                ..Default::default()
+            })),
+        }),
+    };
+    let journal_id = Uuid::now_v7();
+    sqlx::query(
+        "insert into journal_cursors(machine_id,journal_id,kind,committed_seq,execution_id)
+         values($1,$2,'sj',0,$3)",
+    )
+    .bind(machine.machine_id)
+    .bind(journal_id)
+    .bind(execution)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let journal = journal_id.to_string();
+    let send = |records: Vec<JournalRecord>| {
+        let data = worker.data.clone();
+        let journal = journal.clone();
+        async move {
+            data.send(DataUp {
+                msg: Some(data_up::Msg::SjRecords(JournalRecords {
+                    journal_id: journal,
+                    records,
+                })),
+            })
+            .await
+            .unwrap();
+        }
+    };
+    send(vec![phase(1)]).await;
+    let ack = worker.data_down.message().await.unwrap().unwrap();
+    assert!(matches!(ack.msg, Some(data_down::Msg::SjAck(_))));
+    let (phase_at, last_event): (chrono::DateTime<Utc>, chrono::DateTime<Utc>) =
+        sqlx::query_as("select phase_at,last_event_at from executions where id=$1")
+            .bind(execution)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    send(vec![phase(2)]).await;
+    let ack = worker.data_down.message().await.unwrap().unwrap();
+    assert!(matches!(ack.msg, Some(data_down::Msg::SjAck(_))));
+    let (phase_at_after, last_event_after): (chrono::DateTime<Utc>, chrono::DateTime<Utc>) =
+        sqlx::query_as("select phase_at,last_event_at from executions where id=$1")
+            .bind(execution)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(phase_at, phase_at_after, "the phase mark does not move");
+    assert!(
+        last_event_after > last_event,
+        "but the stream progress does"
+    );
+    let changes: i64 = sqlx::query_scalar(
+        "select count(*) from events where kind='phase_changed' and execution_id=$1",
+    )
+    .bind(execution)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(changes, 1, "a repeat is not a new phase event");
     stop(hub).await;
 }

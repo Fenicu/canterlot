@@ -509,6 +509,10 @@ pub enum AdapterEvent {
         tool_name: Option<String>,
         summary: Option<String>,
     },
+    /// Ход жив, хотя видимого вывода нет: размышление без текста, повтор запроса,
+    /// начало рассуждения. Сопровождение редко пишет его в журнал как прогресс, чтобы хаб
+    /// не принял думающий ход за зависший.
+    Progress,
     BlockStarted {
         block_id: Uuid,
         kind: BlockKind,
@@ -662,6 +666,7 @@ impl fmt::Debug for AdapterEvent {
                 .debug_struct("Phase")
                 .field("phase", phase)
                 .finish_non_exhaustive(),
+            Self::Progress => f.write_str("Progress"),
             Self::BlockStarted {
                 block_id,
                 kind,

@@ -2511,3 +2511,21 @@ fn untracked_turn_end_closes_a_manual_compaction_without_its_completion() {
             .any(|t| matches!(t, Translated::UntrackedTurnEnded))
     );
 }
+
+/// Рассуждение началось, а видимых дельт ещё нет: это уже признак жизни хода.
+#[test]
+fn reasoning_start_reports_liveness_before_the_first_visible_delta() {
+    let mut translator = Translator::new("thread-main", "gpt-6-luna");
+    translator.begin_turn("turn-main", command_id());
+    let out = translator.feed(
+        "item/started",
+        &json!({"threadId":"thread-main","turnId":"turn-main",
+                "item":{"type":"reasoning","id":"item-r1","summary":[],"content":[]}}),
+    );
+    assert!(
+        events_of(&out)
+            .iter()
+            .any(|event| matches!(event, AdapterEvent::Progress)),
+        "{out:?}"
+    );
+}

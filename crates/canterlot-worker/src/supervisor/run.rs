@@ -65,6 +65,8 @@ use crate::{
 const MAX_PENDING_MEDIA: usize = 32;
 /// Период уборки зомби усыновлённых процессов: они занимают лимит процессов владельца.
 const ORPHAN_REAP_PERIOD: Duration = Duration::from_secs(30);
+/// Как редко сигнал жизни хода (размышление без текста, повтор запроса) пишется в журнал.
+const PROGRESS_REEMIT: Duration = Duration::from_secs(30);
 /// Период снимка участников: он находит потомков, потерявших метку группы.
 const GROUP_RECORD_PERIOD: Duration = Duration::from_secs(5);
 /// Подготовка файла и ожидание очереди: срок не должен истекать, пока передача
@@ -243,6 +245,10 @@ struct Supervisor {
     todo_drop_reported: bool,
     provider: String,
     open_blocks: BTreeMap<Uuid, OpenBlock>,
+    /// Последняя записанная фаза и время последней записи прогресса: по ним редкий
+    /// сигнал жизни хода повторяет фазу, не двигая её отметку на хабе.
+    last_phase: Option<PhaseChanged>,
+    last_progress_record: Option<Instant>,
     known_interrupts: HashSet<(String, u32)>,
     pending_interrupts: Vec<(String, u32)>,
     known_compactions: HashSet<(String, u32)>,
@@ -456,6 +462,8 @@ pub(super) async fn run(exec_dir: PathBuf) -> Result<ExitCode, SupervisorError> 
         todo_drop_reported: false,
         provider: String::new(),
         open_blocks: BTreeMap::new(),
+        last_phase: None,
+        last_progress_record: None,
         known_interrupts: HashSet::new(),
         pending_interrupts: Vec::new(),
         known_compactions: HashSet::new(),
@@ -624,6 +632,9 @@ async fn terminate_result(
 
 impl Supervisor {
     fn record(&mut self, body: Body) -> Result<u64, SupervisorError> {
+        if canterlot_proto::is_stream_progress(&body) {
+            self.last_progress_record = Some(Instant::now());
+        }
         self.sj.append(bounded_record(self.spec.execution_id, body))
     }
 
@@ -2505,14 +2516,28 @@ impl Supervisor {
                     return Ok(());
                 }
                 let ready = matches!(phase, Phase::AwaitingInput);
-                self.record(Body::PhaseChanged(PhaseChanged {
+                let changed = PhaseChanged {
                     execution_id: self.spec.execution_id.to_string(),
                     phase: snake(&phase),
                     tool_name: tool_name.unwrap_or_default(),
                     summary: summary.unwrap_or_default(),
-                }))?;
+                };
+                self.last_phase = Some(changed.clone());
+                self.record(Body::PhaseChanged(changed))?;
                 if ready {
                     self.ready = true;
+                }
+            }
+            AdapterEvent::Progress => {
+                // Сигнал жизни хода повторяет текущую фазу: хаб видит свежий прогресс, а
+                // отметку начала фазы (`phase_at`) не двигает, потому что фаза та же.
+                if self.active_turn.is_some()
+                    && self
+                        .last_progress_record
+                        .is_none_or(|at| at.elapsed() >= PROGRESS_REEMIT)
+                    && let Some(phase) = self.last_phase.clone()
+                {
+                    self.record(Body::PhaseChanged(phase))?;
                 }
             }
             AdapterEvent::BlockStarted {
@@ -3852,6 +3877,8 @@ mod tests {
             todo_drop_reported: false,
             provider: "claude_code".into(),
             open_blocks: BTreeMap::new(),
+            last_phase: None,
+            last_progress_record: None,
             known_interrupts: HashSet::new(),
             pending_interrupts: Vec::new(),
             known_compactions: HashSet::new(),
@@ -4783,6 +4810,35 @@ mod tests {
         assert_eq!(state.lock().unwrap().interrupt_calls, 1);
         assert!(supervisor.aborting_turn);
         assert_eq!(supervisor.pending_interrupts.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn adapter_progress_is_journaled_as_stream_progress_without_moving_the_phase() {
+        let (_dir, mut supervisor, _state) = test_supervisor();
+        queue_owner(&mut supervisor);
+        supervisor.try_transmit().await.unwrap();
+        supervisor
+            .on_adapter_event(AdapterEvent::Phase {
+                phase: crate::adapter::Phase::Generating,
+                tool_name: None,
+                summary: None,
+            })
+            .await
+            .unwrap();
+        let after_phase = supervisor.sj.progress_seq();
+        // Первый сигнал жизни сразу после смены фазы лишний: запись уже свежая.
+        supervisor
+            .on_adapter_event(AdapterEvent::Progress)
+            .await
+            .unwrap();
+        assert_eq!(supervisor.sj.progress_seq(), after_phase);
+        // Через интервал сигнал записывается: хаб видит, что ход жив.
+        supervisor.last_progress_record = Some(Instant::now() - PROGRESS_REEMIT * 2);
+        supervisor
+            .on_adapter_event(AdapterEvent::Progress)
+            .await
+            .unwrap();
+        assert!(supervisor.sj.progress_seq() > after_phase);
     }
 
     fn permission_opened(request_id: &str) -> AdapterEvent {

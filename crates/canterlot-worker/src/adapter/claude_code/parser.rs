@@ -36,14 +36,14 @@ const TOOL_LAUNCHED_SUMMARY: &str = "async_launched";
 const MAX_UNKNOWN_TYPES: usize = 64;
 const MAX_TYPE_CHARS: usize = 64;
 
-const IGNORED_SYSTEM: [&str; 6] = [
-    "api_retry",
+const IGNORED_SYSTEM: [&str; 4] = [
     "control_request_progress",
     "task_progress",
     "task_updated",
-    "thinking_tokens",
     "commands_changed",
 ];
+/// Кадры `system`, которые сообщают, что ход жив, хотя вывода нет.
+const LIVENESS_SYSTEM: [&str; 2] = ["api_retry", "thinking_tokens"];
 const IGNORED_STREAM_EVENTS: [&str; 1] = ["message_stop"];
 const IGNORED_DELTAS: [&str; 2] = ["signature_delta", "citations_delta"];
 const IGNORED_USER_BLOCKS: [&str; 2] = ["text", "image"];
@@ -1122,6 +1122,9 @@ impl Parser {
                     out.push(Parsed::Ignored);
                 }
             }
+            Some(kind) if LIVENESS_SYSTEM.contains(&kind) => {
+                out.push(Parsed::Event(AdapterEvent::Progress));
+            }
             Some(kind) if !IGNORED_SYSTEM.contains(&kind) => {
                 self.note_unknown(out, "system", Some(kind), Some(value));
                 if out.is_empty() {
@@ -1264,6 +1267,13 @@ impl Parser {
                     }
                     Some("thinking_delta") => {
                         if let Some(text) = delta
+                            .and_then(|delta| delta.get("thinking"))
+                            .and_then(serde_json::Value::as_str)
+                            && text.is_empty()
+                        {
+                            // Пустое приращение: вывода нет, но ход думает.
+                            out.push(Parsed::Event(AdapterEvent::Progress));
+                        } else if let Some(text) = delta
                             .and_then(|delta| delta.get("thinking"))
                             .and_then(serde_json::Value::as_str)
                             && let Some(block) = self.blocks.get_mut(&index)

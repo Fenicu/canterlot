@@ -817,7 +817,8 @@ impl Translator {
                     pending_diff: String::new(),
                 },
             );
-            return vec![Translated::Ignored];
+            // Блок откроется на первой дельте, но ход уже думает: это признак жизни.
+            return vec![Translated::Event(AdapterEvent::Progress)];
         }
         // Сжатие потомка главный контекст не трогает: эпизод открывает только главный поток.
         if item_type == "contextCompaction" {
