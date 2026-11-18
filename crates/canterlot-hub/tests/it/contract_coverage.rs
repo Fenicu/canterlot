@@ -771,6 +771,13 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
         ),
         case(
             Method::PUT,
+            "/api/v1/hibernate-settings",
+            "/api/v1/hibernate-settings".into(),
+            Some(json!({"idle_minutes":30})),
+            Some(json!({"idle_minutes":60})),
+        ),
+        case(
+            Method::PUT,
             "/api/v1/dictation/terms",
             "/api/v1/dictation/terms".into(),
             Some(json!({"terms":[{"pattern":"мейн","replacement":"main"}]})),

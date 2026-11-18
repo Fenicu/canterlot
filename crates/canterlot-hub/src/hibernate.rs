@@ -86,12 +86,12 @@ pub async fn replace_settings_in_tx(
     owner_id: Uuid,
     value: &HibernateSettings,
 ) -> Result<(), sqlx::Error> {
-    if let Some(minutes) = value.idle_minutes {
-        if !(1..=1440).contains(&minutes) {
-            return Err(sqlx::Error::InvalidArgument(
-                "idle_minutes must be between 1 and 1440".into(),
-            ));
-        }
+    if let Some(minutes) = value.idle_minutes
+        && !(1..=1440).contains(&minutes)
+    {
+        return Err(sqlx::Error::InvalidArgument(
+            "idle_minutes must be between 1 and 1440".into(),
+        ));
     }
     sqlx::query(
         "insert into hibernate_settings(owner_id,idle_minutes,updated_at)
