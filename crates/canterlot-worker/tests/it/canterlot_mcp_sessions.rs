@@ -19,7 +19,7 @@ const PROVIDERS: [(ToolSet, &str); 3] = [
     (ToolSet::LimitsOnly, "opencode"),
 ];
 
-const SESSION_TOOLS: [(&str, &str); 23] = [
+const SESSION_TOOLS: [(&str, &str); 24] = [
     ("sessions_list", "sessions.list"),
     ("session_inspect", "sessions.inspect"),
     ("session_send", "sessions.send"),
@@ -40,6 +40,7 @@ const SESSION_TOOLS: [(&str, &str); 23] = [
     ("plan_list", "plan.list"),
     ("plan_add", "plan.add"),
     ("plan_update", "plan.update"),
+    ("plan_archive", "plan.archive"),
     ("plan_adopt", "plan.adopt"),
     ("history_search", "history.search"),
     ("secret_request", "secrets.request"),
@@ -299,7 +300,23 @@ fn plan_tools_have_strict_schemas() {
             .unwrap_or_else(|| panic!("нет {name}"))["inputSchema"]
             .clone()
     };
-    assert_eq!(schema("plan_list")["properties"], json!({}));
+    assert_eq!(
+        schema("plan_list")["properties"]["number"]["type"],
+        json!("integer")
+    );
+    assert_eq!(
+        schema("plan_list")["properties"]["include_archived"]["default"],
+        json!(false)
+    );
+    assert_eq!(schema("plan_archive")["additionalProperties"], json!(false));
+    assert_eq!(
+        schema("plan_archive")["properties"]["numbers"]["maxItems"],
+        json!(20)
+    );
+    assert_eq!(
+        schema("plan_archive")["properties"]["all_finished"]["type"],
+        json!("boolean")
+    );
     assert_eq!(schema("plan_add")["required"], json!(["tasks"]));
     assert_eq!(schema("plan_add")["properties"]["tasks"]["maxItems"], 20);
     assert_eq!(
@@ -323,6 +340,30 @@ fn plan_tools_have_strict_schemas() {
         schema("session_spawn")["properties"]["plan_task"]["type"],
         "integer"
     );
+}
+
+#[test]
+fn plan_archive_is_documented_for_all_three_providers() {
+    for (tool_set, provider) in PROVIDERS {
+        let tools = tools_of(tool_set, provider);
+        let archive = tools
+            .iter()
+            .find(|tool| tool["name"] == "plan_archive")
+            .unwrap_or_else(|| panic!("{provider}: нет plan_archive"));
+        let description = archive["description"].as_str().unwrap();
+        for word in ["own plan board", "all_finished", "Do not"] {
+            assert!(description.contains(word), "{provider}: {description}");
+        }
+        let list = tools.iter().find(|tool| tool["name"] == "plan_list").unwrap();
+        let description = list["description"].as_str().unwrap();
+        for word in ["include_archived", "number"] {
+            assert!(description.contains(word), "{provider}: {description}");
+        }
+        assert!(
+            instructions_of(tool_set, provider).contains("plan_archive"),
+            "{provider}"
+        );
+    }
 }
 
 #[test]
@@ -539,7 +580,7 @@ fn no_agent_tool_applies_a_setting_itself() {
             "{hub_name}"
         );
     }
-    assert_eq!(mcp::AGENT_TOOLS.len(), 31);
+    assert_eq!(mcp::AGENT_TOOLS.len(), 32);
 }
 
 #[tokio::test]
