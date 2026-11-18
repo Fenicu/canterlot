@@ -7,7 +7,8 @@ export const SETTINGS_CATEGORIES = [
   { id: 'limits', title: 'Лимиты и делегирование', hint: 'Пороги, резерв, запуск без вопроса' },
   { id: 'routing', title: 'Маршрутизация', hint: 'Кого брать для каждого типа задачи' },
   { id: 'security', title: 'Вход и безопасность', hint: 'Подключение, сеансы, ключи, выход' },
-  { id: 'app', title: 'Приложение', hint: 'Версии, обновления, установка' }
+  { id: 'app', title: 'Приложение', hint: 'Версии, обновления, установка' },
+  { id: 'updates', title: 'Обновления и модели', hint: 'Лента CLI и каталогов моделей' }
 ] as const;
 
 export type SettingsCategory = (typeof SETTINGS_CATEGORIES)[number]['id'];

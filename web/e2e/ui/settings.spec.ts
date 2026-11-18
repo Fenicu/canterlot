@@ -48,7 +48,7 @@ test('settings_list_drills_into_a_category_and_back_on_the_phone', async ({ page
   await bootSecondary(page, '/settings');
   const main = page.locator('main');
   const nav = main.getByRole('navigation', { name: 'Разделы настроек' });
-  await expect(nav.getByRole('link')).toHaveText([/^Внешний вид/, /^Ввод и чтение/, /^Лимиты и делегирование/, /^Маршрутизация/, /^Вход и безопасность/, /^Приложение/]);
+  await expect(nav.getByRole('link')).toHaveText([/^Внешний вид/, /^Ввод и чтение/, /^Лимиты и делегирование/, /^Маршрутизация/, /^Вход и безопасность/, /^Приложение/, /^Обновления и модели/]);
   await expect(main.locator('[data-settings-pane]')).toHaveCount(0);
   await nav.getByRole('link', { name: /^Ввод и чтение/ }).click();
   await expect(page).toHaveURL(/\/settings\?c=input$/);

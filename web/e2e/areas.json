@@ -378,6 +378,16 @@
       ]
     },
     {
+      "name": "лента обновлений и моделей",
+      "sources": [
+        "src/lib/updates/**"
+      ],
+      "specs": [
+        "e2e/ui/updates-banner.spec.ts",
+        "e2e/ui/updates-feed.spec.ts"
+      ]
+    },
+    {
       "name": "PWA и обновления",
       "sources": [
         "src/lib/pwa/**",

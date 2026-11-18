@@ -30,6 +30,7 @@
   import PromptSuggestionSetting from './PromptSuggestionSetting.svelte';
   import DictationSettings from './DictationSettings.svelte';
   import RoutingScreen from './RoutingScreen.svelte';
+  import UpdatesScreen from './UpdatesScreen.svelte';
   import SignInSettings from '../signin/SignInSettings.svelte';
   import { SETTINGS_CATEGORIES, settingsCategory, type SettingsCategory } from './settingsNav.js';
   import { motionPref, reasoningPref, saveMotion, saveReasoningPref, type MotionPref, type ReasoningPref } from './preferences.js';
@@ -189,6 +190,8 @@
           </div>
           <a class="link-row" href={resolve('/changes')}><span>История изменений</span><Icon name="chevron" /></a>
           <a class="link-row" href={resolve('/machines')}><span>Машины</span><Icon name="chevron" /></a>
+        {:else if category === 'updates'}
+          <UpdatesScreen />
         {/if}
       </div>
     {/if}
