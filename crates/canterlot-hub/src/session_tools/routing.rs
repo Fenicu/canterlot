@@ -2608,29 +2608,34 @@ mod tests {
     #[test]
     fn schedule_rules_allow_unknown_and_ignore_monthly() {
         let req = request("one");
-        let route_with_rules = |limits: &HashMap<String, ProviderView>, schedule_rules: bool| {
-            route(RouteInputs {
-                policy: &single_candidate_policy(),
-                revision: 0,
-                whitelist: &entries(),
-                catalogs: &catalogs(),
-                limits,
-                live: &HashMap::new(),
-                stale: Duration::from_secs(1800),
-                now: now(),
-                request: &req,
-                bypass_limits: false,
-                schedule_rules,
-            })
-        };
-        // Показаний нет вовсе: обычные правила пропускают кандидата,
-        // правила расписаний — выбирают его.
+        let route_with_rules =
+            |limits: &HashMap<String, ProviderView>, schedule_rules: bool, strict_unknown: bool| {
+                let mut policy = single_candidate_policy();
+                if strict_unknown {
+                    policy.unknown_limits = UnknownLimits::Skip;
+                }
+                route(RouteInputs {
+                    policy: &policy,
+                    revision: 0,
+                    whitelist: &entries(),
+                    catalogs: &catalogs(),
+                    limits,
+                    live: &HashMap::new(),
+                    stale: Duration::from_secs(1800),
+                    now: now(),
+                    request: &req,
+                    bypass_limits: false,
+                    schedule_rules,
+                })
+            };
+        // Показаний нет вовсе: строгие обычные правила пропускают кандидата,
+        // правила расписаний — выбирают его даже при строгой политике.
         let unknown = HashMap::from([("opencode".to_owned(), ProviderView::default())]);
         assert!(matches!(
-            route_with_rules(&unknown, false),
+            route_with_rules(&unknown, false, true),
             Err(RouteError::NoExecutor { .. })
         ));
-        let decision = route_with_rules(&unknown, true).unwrap();
+        let decision = route_with_rules(&unknown, true, true).unwrap();
         assert_eq!(decision.model, "opencode-go/deepseek-v4.1-flash");
         // Месячное окно красное, неделя и 5ч в норме: обычные правила
         // пропускают, расписания — выбирают.
@@ -2644,10 +2649,10 @@ mod tests {
             },
         )]);
         assert!(matches!(
-            route_with_rules(&monthly_red, false),
+            route_with_rules(&monthly_red, false, true),
             Err(RouteError::NoExecutor { .. })
         ));
-        route_with_rules(&monthly_red, true).unwrap();
+        route_with_rules(&monthly_red, true, true).unwrap();
         // Красная неделя останавливает и расписания.
         let weekly_red = HashMap::from([(
             "opencode".to_owned(),
@@ -2657,7 +2662,7 @@ mod tests {
             },
         )]);
         assert!(matches!(
-            route_with_rules(&weekly_red, true),
+            route_with_rules(&weekly_red, true, true),
             Err(RouteError::NoExecutor { .. })
         ));
     }
