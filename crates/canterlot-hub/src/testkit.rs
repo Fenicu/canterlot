@@ -127,12 +127,9 @@ pub async fn test_app_deps(
     let timers = crate::config::HubTimers::default();
     let (dispatcher, _rx) = crate::dispatcher::Dispatcher::channel();
     let registry = crate::session::Registry::new(timers);
-    let scheduler = crate::scheduler::Scheduler::new(
-        pool.clone(),
-        dispatcher.clone(),
-        Default::default(),
-    )
-    .with_limits(registry.clone(), Default::default());
+    let scheduler =
+        crate::scheduler::Scheduler::new(pool.clone(), dispatcher.clone(), Default::default())
+            .with_limits(registry.clone(), Default::default());
     let deps = crate::http::AppDeps {
         pool,
         registry,

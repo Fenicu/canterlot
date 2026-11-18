@@ -103,7 +103,11 @@ impl CronSchedule {
     }
 
     /// Проверка минимального интервала на реальных соседних моментах за неделю.
-    pub fn validate_min_interval(&self, from: DateTime<Utc>, timezone: Tz) -> Result<(), CronError> {
+    pub fn validate_min_interval(
+        &self,
+        from: DateTime<Utc>,
+        timezone: Tz,
+    ) -> Result<(), CronError> {
         let limit = from + INTERVAL_HORIZON;
         let mut previous: Option<DateTime<Utc>> = None;
         let mut cursor = from;
@@ -156,8 +160,14 @@ mod tests {
         let schedule = CronSchedule::parse("0 9 * * *").unwrap();
         let berlin = timezone("Europe/Berlin").unwrap();
         // 09:00 Berlin in winter is 08:00 UTC, in summer 07:00 UTC.
-        assert_eq!(schedule.next_after(utc(2026, 1, 5, 0, 0), berlin), Some(utc(2026, 1, 5, 8, 0)));
-        assert_eq!(schedule.next_after(utc(2026, 7, 5, 0, 0), berlin), Some(utc(2026, 7, 5, 7, 0)));
+        assert_eq!(
+            schedule.next_after(utc(2026, 1, 5, 0, 0), berlin),
+            Some(utc(2026, 1, 5, 8, 0))
+        );
+        assert_eq!(
+            schedule.next_after(utc(2026, 7, 5, 0, 0), berlin),
+            Some(utc(2026, 7, 5, 7, 0))
+        );
     }
 
     #[test]
@@ -165,7 +175,9 @@ mod tests {
         let schedule = CronSchedule::parse("30 2 * * *").unwrap();
         let berlin = timezone("Europe/Berlin").unwrap();
         // 02:30 on 2026-03-29 does not exist in Berlin; the next one is 2026-03-30.
-        let next = schedule.next_after(utc(2026, 3, 28, 1, 30), berlin).unwrap();
+        let next = schedule
+            .next_after(utc(2026, 3, 28, 1, 30), berlin)
+            .unwrap();
         assert_eq!(next, utc(2026, 3, 30, 0, 30));
     }
 
@@ -174,7 +186,9 @@ mod tests {
         let schedule = CronSchedule::parse("30 2 * * *").unwrap();
         let berlin = timezone("Europe/Berlin").unwrap();
         // 02:30 on 2026-10-25 happens twice: 00:30Z and 01:30Z. Always the first.
-        let next = schedule.next_after(utc(2026, 10, 24, 0, 30), berlin).unwrap();
+        let next = schedule
+            .next_after(utc(2026, 10, 24, 0, 30), berlin)
+            .unwrap();
         assert_eq!(next, utc(2026, 10, 25, 0, 30));
         assert_eq!(next.hour(), 0);
     }

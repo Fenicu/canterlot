@@ -25,7 +25,9 @@ pub fn routes() -> OpenApiRouter<AppState> {
 fn map(error: schedules::ScheduleError) -> ApiError {
     match error {
         schedules::ScheduleError::NotFound => ApiError::new(ErrorCode::NotFound),
-        schedules::ScheduleError::StaleRevision => ApiError::new(ErrorCode::ScheduleRevisionConflict),
+        schedules::ScheduleError::StaleRevision => {
+            ApiError::new(ErrorCode::ScheduleRevisionConflict)
+        }
         schedules::ScheduleError::Invalid(_) => ApiError::new(ErrorCode::ScheduleInvalid),
         schedules::ScheduleError::Conflict(_) => ApiError::new(ErrorCode::IdempotencyConflict),
         schedules::ScheduleError::Db(error) => error.into(),
@@ -249,11 +251,12 @@ async fn runs(
         None => None,
     };
     let mut conn = state.pool.acquire().await?;
-    let exists: bool = sqlx::query_scalar("select exists(select 1 from schedules where id=$1 and owner_id=$2)")
-        .bind(id)
-        .bind(owner.owner_id)
-        .fetch_one(&mut *conn)
-        .await?;
+    let exists: bool =
+        sqlx::query_scalar("select exists(select 1 from schedules where id=$1 and owner_id=$2)")
+            .bind(id)
+            .bind(owner.owner_id)
+            .fetch_one(&mut *conn)
+            .await?;
     if !exists {
         return Err(ApiError::new(ErrorCode::NotFound));
     }

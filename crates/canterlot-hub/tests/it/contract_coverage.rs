@@ -479,9 +479,7 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
                 .to_owned(),
         );
     }
-    let schedule_body = |name: &str| {
-        json!({"name":name,"cron":"0 9 * * 1-5","target":{"kind":"existing_session","conversation_id":id},"prompt":"проверка"})
-    };
+    let schedule_body = |name: &str| json!({"name":name,"cron":"0 9 * * 1-5","target":{"kind":"existing_session","conversation_id":id},"prompt":"проверка"});
     let schedule = setup(
         Method::POST,
         "/api/v1/schedules".into(),
@@ -1006,7 +1004,7 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
             Some(json!({"kind":"permission","behavior":"allow","message":null})),
             Some(json!({"kind":"permission","behavior":"deny","message":null})),
         ),
-          case(
+        case(
             Method::POST,
             "/api/v1/schedules",
             "/api/v1/schedules".into(),

@@ -23,7 +23,10 @@ mod time_opt {
     use chrono::{DateTime, Utc};
     use serde::{Deserialize, Deserializer, Serializer};
 
-    pub fn serialize<S: Serializer>(value: &Option<DateTime<Utc>>, s: S) -> Result<S::Ok, S::Error> {
+    pub fn serialize<S: Serializer>(
+        value: &Option<DateTime<Utc>>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
         match value {
             Some(at) => crate::activity::time::serialize(at, s),
             None => s.serialize_none(),
@@ -251,8 +254,8 @@ struct ScheduleRow {
 }
 impl ScheduleRow {
     fn into_schedule(self) -> Result<Schedule, sqlx::Error> {
-        let target = serde_json::from_value(self.target)
-            .map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+        let target =
+            serde_json::from_value(self.target).map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
         let overlap = match self.overlap.as_str() {
             "skip" => OverlapPolicy::Skip,
             "allow" => OverlapPolicy::Allow,
@@ -442,7 +445,8 @@ async fn changed(
             kind,
             conversation_id: None,
             execution_id: None,
-            payload: serde_json::to_value(schedule).map_err(|e| sqlx::Error::Encode(Box::new(e)))?,
+            payload: serde_json::to_value(schedule)
+                .map_err(|e| sqlx::Error::Encode(Box::new(e)))?,
             correlation_id,
         },
     )
@@ -473,7 +477,9 @@ pub async fn create(
         req.precheck.as_deref(),
         req.precheck_timeout_seconds.unwrap_or(60),
         req.catch_up_minutes.unwrap_or(30),
-        req.title_template.as_deref().unwrap_or(DEFAULT_TITLE_TEMPLATE),
+        req.title_template
+            .as_deref()
+            .unwrap_or(DEFAULT_TITLE_TEMPLATE),
         now,
     )?;
     let next_fire_at = parsed
@@ -532,16 +538,25 @@ pub async fn create(
     Ok(value)
 }
 
-pub async fn get(conn: &mut PgConnection, owner_id: Uuid, id: Uuid) -> Result<Option<Schedule>, sqlx::Error> {
-    let row: Option<ScheduleRow> = sqlx::query_as("select * from schedules where id=$1 and owner_id=$2")
-        .bind(id)
-        .bind(owner_id)
-        .fetch_optional(conn)
-        .await?;
+pub async fn get(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    id: Uuid,
+) -> Result<Option<Schedule>, sqlx::Error> {
+    let row: Option<ScheduleRow> =
+        sqlx::query_as("select * from schedules where id=$1 and owner_id=$2")
+            .bind(id)
+            .bind(owner_id)
+            .fetch_optional(conn)
+            .await?;
     row.map(ScheduleRow::into_schedule).transpose()
 }
 
-pub async fn list(conn: &mut PgConnection, owner_id: Uuid, limit: i64) -> Result<Vec<Schedule>, sqlx::Error> {
+pub async fn list(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    limit: i64,
+) -> Result<Vec<Schedule>, sqlx::Error> {
     let rows: Vec<ScheduleRow> = sqlx::query_as(
         "select * from schedules where owner_id=$1 order by created_at desc,id desc limit $2",
     )
@@ -725,12 +740,13 @@ pub async fn delete(
         None,
         move |conn| {
             Box::pin(async move {
-                let row: Option<ScheduleRow> =
-                    sqlx::query_as("select * from schedules where id=$1 and owner_id=$2 for update")
-                        .bind(id)
-                        .bind(owner_id)
-                        .fetch_optional(&mut *conn)
-                        .await?;
+                let row: Option<ScheduleRow> = sqlx::query_as(
+                    "select * from schedules where id=$1 and owner_id=$2 for update",
+                )
+                .bind(id)
+                .bind(owner_id)
+                .fetch_optional(&mut *conn)
+                .await?;
                 let schedule = row.ok_or(ScheduleError::NotFound)?.into_schedule()?;
                 sqlx::query("delete from schedules where id=$1")
                     .bind(id)
@@ -772,13 +788,12 @@ pub async fn get_run(
     owner_id: Uuid,
     id: Uuid,
 ) -> Result<Option<ScheduleRun>, sqlx::Error> {
-    let row: Option<RunRow> = sqlx::query_as(
-        "select * from schedule_runs where id=$1 and owner_id=$2",
-    )
-    .bind(id)
-    .bind(owner_id)
-    .fetch_optional(conn)
-    .await?;
+    let row: Option<RunRow> =
+        sqlx::query_as("select * from schedule_runs where id=$1 and owner_id=$2")
+            .bind(id)
+            .bind(owner_id)
+            .fetch_optional(conn)
+            .await?;
     row.map(RunRow::into_run).transpose()
 }
 
@@ -848,7 +863,11 @@ pub struct ClaimedRun {
     pub schedule: Schedule,
 }
 
-async fn run_changed(conn: &mut PgConnection, run: &ScheduleRun, correlation_id: Uuid) -> Result<(), sqlx::Error> {
+async fn run_changed(
+    conn: &mut PgConnection,
+    run: &ScheduleRun,
+    correlation_id: Uuid,
+) -> Result<(), sqlx::Error> {
     let owner_id = run_detail_owner(conn, run.id).await?;
     events::append(
         conn,
@@ -962,11 +981,13 @@ pub async fn claim_due(
         let next_fire = parsed
             .next_after(*occurrences.last().unwrap(), tz)
             .unwrap_or(now + TimeDelta::days(366));
-        sqlx::query("update schedules set next_fire_at=$2,updated_at=clock_timestamp() where id=$1")
-            .bind(schedule.id)
-            .bind(next_fire)
-            .execute(&mut *conn)
-            .await?;
+        sqlx::query(
+            "update schedules set next_fire_at=$2,updated_at=clock_timestamp() where id=$1",
+        )
+        .bind(schedule.id)
+        .bind(next_fire)
+        .execute(&mut *conn)
+        .await?;
         claimed.push(ClaimedRun { run, schedule });
     }
     Ok(claimed)
@@ -1000,9 +1021,7 @@ pub async fn in_flight(conn: &mut PgConnection, schedule_id: Uuid) -> Result<i64
 /// Тип шаблона:
 pub fn render_title(template: &str, name: &str, at: DateTime<Utc>) -> String {
     let date = at.format("%d.%m").to_string();
-    template
-        .replace("{name}", name)
-        .replace("{date}", &date)
+    template.replace("{name}", name).replace("{date}", &date)
 }
 
 /// Сколько времени прошло от запланированного момента до подтверждённой очереди.

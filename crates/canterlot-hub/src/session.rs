@@ -98,14 +98,8 @@ type SuggestWaiters = Arc<Mutex<HashMap<(Uuid, Uuid), oneshot::Sender<Vec<String
 type ClaudeHistoryWaiters = Arc<Mutex<HashMap<(Uuid, Uuid), oneshot::Sender<Vec<ClaudeHistory>>>>>;
 type PathProbeWaiters =
     Arc<Mutex<HashMap<(Uuid, Uuid), oneshot::Sender<canterlot_proto::worker::v1::PathProbe>>>>;
-type PrecheckWaiters = Arc<
-    Mutex<
-        HashMap<
-            (Uuid, Uuid),
-            oneshot::Sender<canterlot_proto::worker::v1::PrecheckResult>,
-        >,
-    >,
->;
+type PrecheckWaiters =
+    Arc<Mutex<HashMap<(Uuid, Uuid), oneshot::Sender<canterlot_proto::worker::v1::PrecheckResult>>>>;
 
 /// Прикладная проба живости после просроченной квитанции команды.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -851,12 +845,15 @@ impl Registry {
         let Some(sender) = self.command_sender(machine_id) else {
             return Err(PrecheckFailure::NoSession);
         };
-        let attempt_id = Uuid::parse_str(&request.attempt_id).map_err(|_| PrecheckFailure::Invalid)?;
+        let attempt_id =
+            Uuid::parse_str(&request.attempt_id).map_err(|_| PrecheckFailure::Invalid)?;
         let key = (machine_id, attempt_id);
         let (answer, answered) = oneshot::channel();
         {
             let mut waiters = self.prechecks.lock().expect("precheck waiters lock");
-            if waiters.keys().filter(|(id, _)| *id == machine_id).count() >= MAX_PRECHECKS_PER_MACHINE {
+            if waiters.keys().filter(|(id, _)| *id == machine_id).count()
+                >= MAX_PRECHECKS_PER_MACHINE
+            {
                 return Err(PrecheckFailure::Busy);
             }
             waiters.insert(key, answer);

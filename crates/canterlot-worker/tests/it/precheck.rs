@@ -28,7 +28,11 @@ async fn precheck_inherits_only_the_allowed_environment() {
         other => panic!("expected a finished precheck: {other:?}"),
     };
     assert_eq!(outcome.exit_code, 0, "{}", outcome.output_tail);
-    let names: Vec<&str> = outcome.output_tail.split(',').filter(|s| !s.is_empty()).collect();
+    let names: Vec<&str> = outcome
+        .output_tail
+        .split(',')
+        .filter(|s| !s.is_empty())
+        .collect();
     for name in ["HOME", "LANG", "PATH", "USER"] {
         assert!(names.contains(&name), "missing {name}: {:?}", names);
     }
@@ -72,7 +76,10 @@ async fn timeout_kills_the_whole_process_group() {
     };
     assert!(outcome.timed_out);
     assert_eq!(outcome.exit_code, -1);
-    assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists(), "process group leader reaped");
+    assert!(
+        !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+        "process group leader reaped"
+    );
 }
 
 #[tokio::test]
@@ -92,7 +99,11 @@ async fn output_tail_is_capped_at_four_kilobytes() {
     };
     assert_eq!(outcome.exit_code, 0);
     assert!(outcome.output_tail.len() <= OUTPUT_TAIL_BYTES);
-    assert!(outcome.output_tail.ends_with("THE-END"), "{}", &outcome.output_tail[outcome.output_tail.len().saturating_sub(40)..]);
+    assert!(
+        outcome.output_tail.ends_with("THE-END"),
+        "{}",
+        &outcome.output_tail[outcome.output_tail.len().saturating_sub(40)..]
+    );
 }
 
 #[tokio::test]

@@ -11,8 +11,7 @@ use crate::{
     delivery::ContentBlock,
     events::{self, NewEvent, Scope},
     http::AppState,
-    limit_settings,
-    limits,
+    limit_settings, limits,
     model::HoldReason,
     scheduler::Scheduler,
     session::{CAPABILITY_SCHEDULE_PRECHECK_V1, PrecheckFailure},
@@ -76,14 +75,7 @@ pub async fn admit(scheduler: &Scheduler, claimed: ClaimedRun) {
         }
     };
     if let Err(error) = set_run_state(
-        &mut conn,
-        run.id,
-        state,
-        detail,
-        started_at,
-        delay,
-        session_id,
-        input_id,
+        &mut conn, run.id, state, detail, started_at, delay, session_id, input_id,
     )
     .await
     {
@@ -126,9 +118,11 @@ async fn admit_inner(
     manual: bool,
 ) -> AdmitResult {
     if !run_anyway && !manual && schedule.overlap == OverlapPolicy::Skip {
-        let mut conn = scheduler.pool().acquire().await.map_err(|_| {
-            Skip::new(RunState::Failed, "database_unavailable")
-        })?;
+        let mut conn = scheduler
+            .pool()
+            .acquire()
+            .await
+            .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))?;
         if in_flight(&mut conn, schedule.id).await.unwrap_or(0) > 1 {
             return Err(Skip::new(RunState::SkippedOverlap, "earlier_run_in_flight"));
         }
@@ -177,10 +171,7 @@ async fn admit_inner(
         .registry()
         .ok_or_else(|| Skip::new(RunState::SkippedMachineOffline, "no_registry"))?;
     if registry.command_sender(machine_id).is_none() {
-        return Err(Skip::new(
-            RunState::SkippedMachineOffline,
-            "worker_offline",
-        ));
+        return Err(Skip::new(RunState::SkippedMachineOffline, "worker_offline"));
     }
 
     let mut conn = scheduler
@@ -222,9 +213,7 @@ async fn admit_inner(
         return Err(Skip::with(RunState::SkippedLimits, detail));
     }
 
-    if !run_anyway
-        && let Some(command) = schedule.precheck.as_deref()
-    {
+    if !run_anyway && let Some(command) = schedule.precheck.as_deref() {
         precheck(scheduler, registry, run, schedule, command, machine_id).await?;
     }
 
@@ -281,7 +270,9 @@ async fn resolve_route(
         .map_err(|_| Skip::new(RunState::Failed, "routing_policy_unavailable"))?;
     let (machine_id, workdir) = match &schedule.target {
         ScheduleTarget::NewSession {
-            machine_id, workdir, ..
+            machine_id,
+            workdir,
+            ..
         } => (*machine_id, workdir.clone()),
         _ => unreachable!(),
     };
@@ -329,9 +320,10 @@ async fn resolve_route(
             json!({"reason": "unknown_task_type", "available": available}),
         ),
     })?;
-    let preset = routing::resolve_policy_preset(conn, schedule.owner_id, decision.preset.as_deref())
-        .await
-        .map_err(|_| Skip::new(RunState::Failed, "preset_unavailable"))?;
+    let preset =
+        routing::resolve_policy_preset(conn, schedule.owner_id, decision.preset.as_deref())
+            .await
+            .map_err(|_| Skip::new(RunState::Failed, "preset_unavailable"))?;
     let _ = run;
     Ok(ResolvedExecutor {
         harness: decision.harness,
@@ -413,7 +405,9 @@ async fn limits_skip(
             .map_err(|_| Skip::new(RunState::Failed, "limits_unavailable"))?;
         let holds = crunch_holds(conn, provider).await?;
         if !holds.is_empty() {
-            return Ok(Some(json!({"reason": "initial_hold", "provider": provider})));
+            return Ok(Some(
+                json!({"reason": "initial_hold", "provider": provider}),
+            ));
         }
     }
     let _ = detail;
@@ -457,7 +451,9 @@ async fn precheck(
         ScheduleTarget::NewSession { workdir, .. } => {
             (workdir.clone(), schedule.precheck_timeout_seconds)
         }
-        ScheduleTarget::ExistingSession { .. } => (String::new(), schedule.precheck_timeout_seconds),
+        ScheduleTarget::ExistingSession { .. } => {
+            (String::new(), schedule.precheck_timeout_seconds)
+        }
     };
     let request = canterlot_proto::worker::v1::SchedulePrecheck {
         attempt_id: attempt_id.to_string(),
@@ -465,7 +461,8 @@ async fn precheck(
         command: command.to_owned(),
         timeout_seconds: timeout_seconds as u32,
     };
-    let wait = std::time::Duration::from_secs(timeout_seconds as u64) + std::time::Duration::from_secs(5);
+    let wait =
+        std::time::Duration::from_secs(timeout_seconds as u64) + std::time::Duration::from_secs(5);
     let reply = match registry.ask_precheck(machine_id, request, wait).await {
         Ok(reply) => reply,
         Err(PrecheckFailure::CapabilityMissing) => {
@@ -499,10 +496,12 @@ async fn precheck(
                 ))
             }
         }
-        Some(canterlot_proto::worker::v1::precheck_result::Outcome::Error(error)) => Err(Skip::with(
-            RunState::Failed,
-            json!({"reason": "precheck_error", "detail": error.reason}),
-        )),
+        Some(canterlot_proto::worker::v1::precheck_result::Outcome::Error(error)) => {
+            Err(Skip::with(
+                RunState::Failed,
+                json!({"reason": "precheck_error", "detail": error.reason}),
+            ))
+        }
         None => Err(Skip::new(RunState::Failed, "precheck_empty_reply")),
     }
 }
@@ -533,14 +532,13 @@ async fn dispatch(
             .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))?;
         return Ok((session_id, input_id, json!({"replayed": true})));
     }
-    let current: Option<super::ScheduleRow> = sqlx::query_as(
-        "select * from schedules where id=$1 and owner_id=$2 for update",
-    )
-    .bind(schedule.id)
-    .bind(schedule.owner_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))?;
+    let current: Option<super::ScheduleRow> =
+        sqlx::query_as("select * from schedules where id=$1 and owner_id=$2 for update")
+            .bind(schedule.id)
+            .bind(schedule.owner_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))?;
     let Some(current) = current else {
         let _ = tx.rollback().await;
         return Err(Skip::new(RunState::SkippedChanged, "schedule_deleted"));
@@ -550,7 +548,10 @@ async fn dispatch(
         .map_err(|_| Skip::new(RunState::Failed, "invalid_schedule"))?;
     if !current.enabled || current.revision != run.claimed_revision {
         let _ = tx.rollback().await;
-        return Err(Skip::new(RunState::SkippedChanged, "schedule_revision_changed"));
+        return Err(Skip::new(
+            RunState::SkippedChanged,
+            "schedule_revision_changed",
+        ));
     }
     let now = Utc::now();
     let content = vec![ContentBlock::Text {
@@ -589,7 +590,12 @@ async fn dispatch(
                 scheduler.registry().expect("registry checked earlier"),
             )
             .await
-            .map_err(|error| Skip::with(RunState::Failed, json!({"reason": "create_failed", "detail": format!("{error:?}")})))?
+            .map_err(|error| {
+                Skip::with(
+                    RunState::Failed,
+                    json!({"reason": "create_failed", "detail": format!("{error:?}")}),
+                )
+            })?
             .conversation_id;
             let submitted = submit_message_in_tx(
                 &mut tx,
@@ -605,7 +611,12 @@ async fn dispatch(
                 Uuid::now_v7(),
             )
             .await
-            .map_err(|error| Skip::with(RunState::Failed, json!({"reason": "submit_failed", "detail": format!("{error:?}")})))?;
+            .map_err(|error| {
+                Skip::with(
+                    RunState::Failed,
+                    json!({"reason": "submit_failed", "detail": format!("{error:?}")}),
+                )
+            })?;
             (created, submitted.input_id)
         }
         ScheduleTarget::ExistingSession { conversation_id } => {
@@ -623,7 +634,12 @@ async fn dispatch(
                 Uuid::now_v7(),
             )
             .await
-            .map_err(|error| Skip::with(RunState::Failed, json!({"reason": "submit_failed", "detail": format!("{error:?}")})))?;
+            .map_err(|error| {
+                Skip::with(
+                    RunState::Failed,
+                    json!({"reason": "submit_failed", "detail": format!("{error:?}")}),
+                )
+            })?;
             (*conversation_id, submitted.input_id)
         }
     };
@@ -666,9 +682,8 @@ pub async fn run_now(
     let hash = crate::idempotency::request_hash("run_now", &body);
     match crate::idempotency::lookup(&mut conn, owner_id, key, "run_now", &hash).await? {
         crate::idempotency::Begin::Replay(value) => {
-            return serde_json::from_value(value).map_err(|e| {
-                ScheduleError::Db(sqlx::Error::Decode(Box::new(e)))
-            });
+            return serde_json::from_value(value)
+                .map_err(|e| ScheduleError::Db(sqlx::Error::Decode(Box::new(e))));
         }
         crate::idempotency::Begin::Conflict => {
             return Err(ScheduleError::Conflict("idempotency_conflict"));
@@ -694,7 +709,10 @@ pub async fn run_now(
     .await?;
     drop(conn);
     let scheduler = state.scheduler.clone();
-    let claimed = ClaimedRun { run: run.clone(), schedule };
+    let claimed = ClaimedRun {
+        run: run.clone(),
+        schedule,
+    };
     let result = admit_inner(&scheduler, &claimed.schedule, &run, run_anyway, true).await;
     let (state_out, detail, session_id, input_id, started_at, delay) = match result {
         Ok((session_id, input_id, dispatch_detail)) => {
@@ -749,16 +767,7 @@ pub async fn run_now(
     updated.detail = detail;
     let response = serde_json::to_value(&updated)
         .map_err(|e| ScheduleError::Db(sqlx::Error::Encode(Box::new(e))))?;
-    crate::idempotency::record(
-        &mut conn,
-        owner_id,
-        key,
-        "run_now",
-        &hash,
-        &response,
-        None,
-    )
-    .await?;
+    crate::idempotency::record(&mut conn, owner_id, key, "run_now", &hash, &response, None).await?;
     Ok(updated)
 }
 

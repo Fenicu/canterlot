@@ -132,10 +132,22 @@ pub async fn run_with(
         .arg(&request.command)
         .current_dir(workdir)
         .env_clear()
-        .env("PATH", std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into()))
-        .env("HOME", std::env::var_os("HOME").unwrap_or_else(|| "/".into()))
-        .env("LANG", std::env::var_os("LANG").unwrap_or_else(|| "C.UTF-8".into()))
-        .env("USER", std::env::var_os("USER").unwrap_or_else(|| "worker".into()))
+        .env(
+            "PATH",
+            std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into()),
+        )
+        .env(
+            "HOME",
+            std::env::var_os("HOME").unwrap_or_else(|| "/".into()),
+        )
+        .env(
+            "LANG",
+            std::env::var_os("LANG").unwrap_or_else(|| "C.UTF-8".into()),
+        )
+        .env(
+            "USER",
+            std::env::var_os("USER").unwrap_or_else(|| "worker".into()),
+        )
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

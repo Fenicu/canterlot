@@ -13,7 +13,12 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 fn caps() -> Vec<&'static str> {
-    vec!["pilot_v1", "instructions_v1", "session_tools_v1", "schedule_precheck_v1"]
+    vec![
+        "pilot_v1",
+        "instructions_v1",
+        "session_tools_v1",
+        "schedule_precheck_v1",
+    ]
 }
 
 async fn create(f: &Fixture, target: Value, cron: &str) -> String {
@@ -31,7 +36,12 @@ async fn create(f: &Fixture, target: Value, cron: &str) -> String {
             })),
         )
         .await;
-    assert_eq!(r.status.as_u16(), 200, "{}", String::from_utf8_lossy(&r.body));
+    assert_eq!(
+        r.status.as_u16(),
+        200,
+        "{}",
+        String::from_utf8_lossy(&r.body)
+    );
     r.json::<Value>()["id"].as_str().unwrap().to_owned()
 }
 
@@ -53,11 +63,13 @@ async fn state(pool: &PgPool, run_id: Uuid) -> (String, Value) {
 }
 
 async fn run_id(pool: &PgPool, schedule_id: &str) -> Uuid {
-    sqlx::query_scalar("select id from schedule_runs where schedule_id=$1 order by created_at desc limit 1")
-        .bind(Uuid::parse_str(schedule_id).unwrap())
-        .fetch_one(pool)
-        .await
-        .unwrap()
+    sqlx::query_scalar(
+        "select id from schedule_runs where schedule_id=$1 order by created_at desc limit 1",
+    )
+    .bind(Uuid::parse_str(schedule_id).unwrap())
+    .fetch_one(pool)
+    .await
+    .unwrap()
 }
 
 async fn wait_state(pool: &PgPool, id: Uuid, expected: &str) -> Value {
@@ -104,20 +116,21 @@ async fn tick_claims_once_and_queues_one_input(pool: PgPool) {
     .await
     .unwrap();
     assert_eq!(inputs, 1);
-    let runs: i64 =
-        sqlx::query_scalar("select count(*) from schedule_runs where schedule_id=$1")
-            .bind(Uuid::parse_str(&id).unwrap())
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let runs: i64 = sqlx::query_scalar("select count(*) from schedule_runs where schedule_id=$1")
+        .bind(Uuid::parse_str(&id).unwrap())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(runs, 1);
-    scheduler(&f).tick(now + TimeDelta::seconds(1)).await.unwrap();
-    let runs: i64 =
-        sqlx::query_scalar("select count(*) from schedule_runs where schedule_id=$1")
-            .bind(Uuid::parse_str(&id).unwrap())
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    scheduler(&f)
+        .tick(now + TimeDelta::seconds(1))
+        .await
+        .unwrap();
+    let runs: i64 = sqlx::query_scalar("select count(*) from schedule_runs where schedule_id=$1")
+        .bind(Uuid::parse_str(&id).unwrap())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(runs, 1, "second tick must not re-claim");
 }
 
@@ -132,12 +145,11 @@ async fn missed_occurrences_are_counted_in_one_run(pool: PgPool) {
     let (state, detail) = state(&pool, rid).await;
     assert_eq!(state, "missed");
     assert!(detail["missed_before"].as_i64().unwrap() >= 2, "{detail}");
-    let runs: i64 =
-        sqlx::query_scalar("select count(*) from schedule_runs where schedule_id=$1")
-            .bind(Uuid::parse_str(&id).unwrap())
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let runs: i64 = sqlx::query_scalar("select count(*) from schedule_runs where schedule_id=$1")
+        .bind(Uuid::parse_str(&id).unwrap())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(runs, 1);
 }
 
@@ -211,13 +223,18 @@ async fn red_limits_window_skips_the_run(pool: PgPool) {
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn precheck_exit_zero_starts_and_nonzero_skips(pool: PgPool) {
     let f = Fixture::new(pool.clone()).await;
-    let mut session: FakeSession = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
+    let mut session: FakeSession =
+        testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
     let registry = f.state.registry.clone();
     let machine = f.seed.machine_id;
     let worker = tokio::spawn(async move {
         while let Some(down) = session.commands.recv().await {
             if let Some(control_down::Msg::SchedulePrecheck(request)) = down.msg {
-                let exit = if request.command.contains("fail") { 3 } else { 0 };
+                let exit = if request.command.contains("fail") {
+                    3
+                } else {
+                    0
+                };
                 registry.finish_precheck(
                     machine,
                     PrecheckResult {
@@ -258,7 +275,11 @@ async fn precheck_exit_zero_starts_and_nonzero_skips(pool: PgPool) {
         due(&pool, &id, Utc::now() - TimeDelta::seconds(30)).await;
         scheduler(&f).tick(Utc::now()).await.unwrap();
         let rid = run_id(&pool, &id).await;
-        let expected = if command.contains("fail") { "skipped_precheck" } else { "started" };
+        let expected = if command.contains("fail") {
+            "skipped_precheck"
+        } else {
+            "started"
+        };
         let detail = wait_state(&pool, rid, expected).await;
         if expected == "skipped_precheck" {
             assert_eq!(detail["exit_code"], 3);
@@ -270,7 +291,8 @@ async fn precheck_exit_zero_starts_and_nonzero_skips(pool: PgPool) {
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn new_session_target_creates_a_session_and_delivers_first_input(pool: PgPool) {
     let f = Fixture::new(pool.clone()).await;
-    let mut session: FakeSession = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
+    let mut session: FakeSession =
+        testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
     sqlx::query("update machines set availability='available' where id=$1")
         .bind(f.seed.machine_id)
         .execute(&pool)
@@ -298,12 +320,11 @@ async fn new_session_target_creates_a_session_and_delivers_first_input(pool: PgP
         .await
         .unwrap();
     assert_eq!(after, before + 1, "a new session was created");
-    let session_id: Uuid =
-        sqlx::query_scalar("select session_id from schedule_runs where id=$1")
-            .bind(rid)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let session_id: Uuid = sqlx::query_scalar("select session_id from schedule_runs where id=$1")
+        .bind(rid)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     let input_id: Uuid = sqlx::query_scalar("select input_id from schedule_runs where id=$1")
         .bind(rid)
         .fetch_one(&pool)
@@ -337,7 +358,10 @@ async fn new_session_target_creates_a_session_and_delivers_first_input(pool: PgP
     .await
     .unwrap();
     let command = format!("{outcome:?}");
-    assert!(command.contains(&input_id.to_string()), "first input dispatched: {command}");
+    assert!(
+        command.contains(&input_id.to_string()),
+        "first input dispatched: {command}"
+    );
     let delivered: i64 = sqlx::query_scalar(
         "select count(*) from commands where execution_id=$1 and delivery_state in ('pending','dispatched','on_machine')",
     )
@@ -345,7 +369,10 @@ async fn new_session_target_creates_a_session_and_delivers_first_input(pool: PgP
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert!(delivered >= 1, "the first input became a command for the worker");
+    assert!(
+        delivered >= 1,
+        "the first input became a command for the worker"
+    );
     let _ = &mut session;
 }
 
@@ -361,20 +388,18 @@ async fn rollback_before_claim_commit_reclaims_exactly_once(pool: PgPool) {
         .unwrap();
     assert_eq!(claimed.len(), 1);
     tx.rollback().await.unwrap();
-    let runs: i64 =
-        sqlx::query_scalar("select count(*) from schedule_runs where schedule_id=$1")
-            .bind(Uuid::parse_str(&id).unwrap())
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let runs: i64 = sqlx::query_scalar("select count(*) from schedule_runs where schedule_id=$1")
+        .bind(Uuid::parse_str(&id).unwrap())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(runs, 0, "rolled-back claim left no run");
     scheduler(&f).tick(now).await.unwrap();
-    let runs: i64 =
-        sqlx::query_scalar("select count(*) from schedule_runs where schedule_id=$1")
-            .bind(Uuid::parse_str(&id).unwrap())
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let runs: i64 = sqlx::query_scalar("select count(*) from schedule_runs where schedule_id=$1")
+        .bind(Uuid::parse_str(&id).unwrap())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(runs, 1, "next tick claims once");
 }
 
@@ -426,10 +451,11 @@ async fn replay_after_dispatch_commit_does_not_duplicate_work(pool: PgPool) {
             .unwrap(),
     );
     let mut conn = pool.acquire().await.unwrap();
-    let schedule = canterlot_hub::schedules::get(&mut conn, f.seed.owner_id, Uuid::parse_str(&id).unwrap())
-        .await
-        .unwrap()
-        .unwrap();
+    let schedule =
+        canterlot_hub::schedules::get(&mut conn, f.seed.owner_id, Uuid::parse_str(&id).unwrap())
+            .await
+            .unwrap()
+            .unwrap();
     let run = canterlot_hub::schedules::get_run(&mut conn, f.seed.owner_id, rid)
         .await
         .unwrap()
@@ -523,7 +549,12 @@ async fn run_now_is_idempotent_and_run_anyway_bypasses_checks(pool: PgPool) {
             Some(json!({"run_anyway": true})),
         )
         .await;
-    assert_eq!(first.status.as_u16(), 200, "{}", String::from_utf8_lossy(&first.body));
+    assert_eq!(
+        first.status.as_u16(),
+        200,
+        "{}",
+        String::from_utf8_lossy(&first.body)
+    );
     let first_id = first.json::<Value>()["id"].as_str().unwrap().to_owned();
     assert_eq!(first.json::<Value>()["state"], "started");
     let replay = f
@@ -535,7 +566,11 @@ async fn run_now_is_idempotent_and_run_anyway_bypasses_checks(pool: PgPool) {
             Some(json!({"run_anyway": true})),
         )
         .await;
-    assert_eq!(replay.json::<Value>()["id"], first_id, "client key is idempotent");
+    assert_eq!(
+        replay.json::<Value>()["id"],
+        first_id,
+        "client key is idempotent"
+    );
     let normal = f
         .client
         .send(
