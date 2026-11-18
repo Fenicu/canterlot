@@ -101,9 +101,17 @@ struct RoutingArgs {
     base_revision: i64,
 }
 
+/// `null` — сброс ко встроенному списку; пропущенное поле не сбрасывает молча.
+fn required_nullable<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Vec<whitelist::WhitelistEntry>>, D::Error> {
+    Option::deserialize(deserializer)
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WhitelistArgs {
+    #[serde(deserialize_with = "required_nullable")]
     entries: Option<Vec<whitelist::WhitelistEntry>>,
     reason: String,
     base_revision: i64,

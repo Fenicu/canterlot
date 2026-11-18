@@ -17,6 +17,7 @@ use uuid::Uuid;
 struct Fx {
     pool: PgPool,
     context: ToolContext,
+    router: axum::Router,
     client: TestClient,
     agent_client: TestClient,
     owner: Uuid,
@@ -71,6 +72,7 @@ impl Fx {
         Self {
             pool,
             context,
+            router: router.clone(),
             client: TestClient::in_process(router.clone()).as_owner(),
             agent_client: TestClient::in_process(router)
                 .with_header("Origin", testkit::TEST_ORIGIN)
@@ -80,6 +82,10 @@ impl Fx {
             execution,
             _dir: dir,
         }
+    }
+
+    fn router(&self) -> axum::Router {
+        self.router.clone()
     }
 
     async fn call(&self, tool: &str, args: Value) -> Result<Value, session_tools::ToolError> {
@@ -661,6 +667,96 @@ async fn outcome_note_is_delivered_once_when_the_job_is_replayed(pool: PgPool) {
         1,
         "a replayed durable job must not notify twice: {notes:?}"
     );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn empty_routing_policy_is_refused_like_on_the_settings_screen(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let error = f
+        .call(
+            "settings.propose_routing",
+            json!({"policy": {"task_types": {}}, "reason": "пусто", "base_revision": 0}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code.as_str(), "invalid_arguments", "{error:?}");
+    assert!(error.message.contains("task type"), "{}", error.message);
+    let response = f
+        .client
+        .send(
+            Method::PUT,
+            "/api/v1/routing-policy",
+            Some("empty-policy"),
+            Some(json!({"policy": {"task_types": {}}, "revision": 0})),
+        )
+        .await;
+    assert_eq!(
+        response.status,
+        422,
+        "{}",
+        String::from_utf8_lossy(&response.body)
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn whitelist_proposal_requires_the_entries_field(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    f.client
+        .send(
+            Method::PUT,
+            "/api/v1/spawn-whitelist",
+            Some("custom-whitelist"),
+            Some(json!({"entries": [{"harness": "claude_code", "model": "haiku"}]})),
+        )
+        .await;
+    let error = f
+        .call(
+            "settings.propose_whitelist",
+            json!({"reason": "сброс", "base_revision": 1}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code.as_str(), "invalid_arguments", "{error:?}");
+    assert!(error.message.contains("entries"), "{}", error.message);
+    let requests: i64 =
+        sqlx::query_scalar("select count(*) from requests where kind='settings_change'")
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(requests, 0);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn worker_credential_cannot_decide_a_settings_proposal(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let (request, _) = f
+        .proposal(
+            "settings.propose_routing",
+            json!({"policy": routing(), "reason": "x", "base_revision": 0}),
+        )
+        .await;
+    let worker = TestClient::in_process(f.router())
+        .with_header("Origin", testkit::TEST_ORIGIN)
+        .with_header("X-Canterlot-Client", "1")
+        .with_header("Authorization", "Bearer worker-machine-token");
+    let response = worker
+        .send(
+            Method::POST,
+            &format!(
+                "/api/v1/conversations/{}/requests/{request}/decision",
+                f.conversation
+            ),
+            Some("worker-decision"),
+            Some(json!({"kind":"permission","behavior":"allow","message":null})),
+        )
+        .await;
+    assert_eq!(
+        response.status,
+        401,
+        "{}",
+        String::from_utf8_lossy(&response.body)
+    );
+    assert_eq!(f.request_state(request).await, "open");
 }
 
 #[test]

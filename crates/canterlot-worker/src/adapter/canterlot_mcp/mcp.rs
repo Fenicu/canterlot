@@ -641,7 +641,7 @@ fn session_input_schema(mcp_name: &str) -> Value {
         "settings_propose_whitelist" => json!({
             "type": "object",
             "properties": {
-                "entries": {"type": "array", "description": "Full new whitelist, or null for the built-in."},
+                "entries": {"type": "array", "nullable": true, "description": "Full new whitelist, or null for the built-in."},
                 "reason": {"type": "string", "description": "Why the change is needed."},
                 "base_revision": {"type": "integer", "description": "Revision read from canterlot_spawn_whitelist."},
             },
@@ -767,11 +767,16 @@ fn check_arguments(schema: &Value, arguments: &Value) -> Result<(), String> {
         }
     }
     for (key, value) in object {
-        let kind = properties
-            .and_then(|properties| properties.get(key))
+        let spec = properties.and_then(|properties| properties.get(key));
+        let kind = spec
             .and_then(|spec| spec.get("type"))
             .and_then(Value::as_str);
         let Some(kind) = kind else { continue };
+        if value.is_null()
+            && spec.is_some_and(|spec| spec.get("nullable") == Some(&Value::Bool(true)))
+        {
+            continue;
+        }
         let ok = match kind {
             "string" => value.is_string(),
             "boolean" => value.is_boolean(),
@@ -1758,6 +1763,28 @@ mod tests {
         ] {
             assert!(instructions.contains("the owner decides"), "{instructions}");
         }
+    }
+
+    #[test]
+    fn whitelist_proposal_schema_accepts_null_entries() {
+        let tools = tools_list(ToolSet::LimitsOnly, "codex");
+        let tool = tools["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "settings_propose_whitelist")
+            .unwrap();
+        assert_eq!(
+            tool["inputSchema"]["properties"]["entries"]["nullable"],
+            true
+        );
+        assert!(
+            check_arguments(
+                &tool["inputSchema"],
+                &json!({"entries": null, "reason": "r", "base_revision": 0})
+            )
+            .is_ok()
+        );
     }
 
     #[test]

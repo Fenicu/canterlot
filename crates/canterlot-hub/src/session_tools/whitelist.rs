@@ -52,31 +52,25 @@ pub fn valid(entries: &[WhitelistEntry]) -> bool {
         })
 }
 
-async fn stored(conn: &mut PgConnection, owner_id: Uuid) -> Result<Option<Value>, sqlx::Error> {
-    sqlx::query_scalar("select spawn_whitelist from owners where id=$1")
-        .bind(owner_id)
-        .fetch_one(conn)
-        .await
-}
-
 pub async fn view(conn: &mut PgConnection, owner_id: Uuid) -> Result<WhitelistView, sqlx::Error> {
     view_with_revision(conn, owner_id)
         .await
         .map(|(view, _)| view)
 }
 
-/// Список и ревизия: агент передаёт base revision в предложении, PWA видит смену.
+/// Список и ревизия одним запросом: значение и версия не успеют разойтись между чтениями.
 pub async fn view_with_revision(
     conn: &mut PgConnection,
     owner_id: Uuid,
 ) -> Result<(WhitelistView, i64), sqlx::Error> {
-    let revision: i64 =
-        sqlx::query_scalar("select spawn_whitelist_revision from owners where id=$1")
+    let row: Option<(Option<Value>, i64)> =
+        sqlx::query_as("select spawn_whitelist,spawn_whitelist_revision from owners where id=$1")
             .bind(owner_id)
-            .fetch_one(&mut *conn)
+            .fetch_optional(&mut *conn)
             .await?;
+    let (stored, revision) = row.unwrap_or((None, 0));
     let defaults = default_entries();
-    let (entries, is_default) = match stored(conn, owner_id).await? {
+    let (entries, is_default) = match stored {
         Some(entries) => (
             serde_json::from_value(entries)
                 .map_err(|error| sqlx::Error::Decode(Box::new(error)))?,

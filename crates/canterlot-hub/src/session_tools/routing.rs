@@ -131,6 +131,9 @@ fn check_percent(value: Option<f64>, what: &str) -> Result<(), String> {
 /// до 8 кандидатов, ключи `[a-z0-9_]{1,32}`. Пары вне белого списка сохраняются:
 /// маршрут их пропустит.
 pub fn validate(policy: &Policy) -> Result<(), String> {
+    if policy.task_types.is_empty() {
+        return Err("at least one task type is required".to_owned());
+    }
     if policy.task_types.len() > MAX_TASK_TYPES {
         return Err(format!(
             "too many task types: {} > {MAX_TASK_TYPES}",
