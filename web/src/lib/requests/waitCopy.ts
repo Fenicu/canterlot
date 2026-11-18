@@ -3,7 +3,7 @@ import { fmt } from '#lib/format/ru.js';
 /** Ожидание дольше порога красит подпись: десять минут — уже повод вмешаться. */
 export const WAIT_WARN_MS = 10 * 60_000;
 
-export type WaitKind = 'permission' | 'question' | 'elicitation' | 'spawn_approval' | 'unknown';
+export type WaitKind = 'permission' | 'question' | 'elicitation' | 'spawn_approval' | 'settings_change' | 'unknown';
 
 export interface WaitFacts {
   kind: WaitKind;
@@ -70,6 +70,7 @@ export function waitFactsFromRequest(kind: string, payload: unknown, createdAt: 
     return { kind: 'permission', tool: permissionToolName(payload) || null, createdAt: timeMs(createdAt) };
   }
   if (kind === 'spawn_approval') return { kind: 'spawn_approval', createdAt: timeMs(createdAt) };
+  if (kind === 'settings_change') return { kind: 'settings_change', createdAt: timeMs(createdAt) };
   return { kind: 'question', options: questionOptionCount(payload), createdAt: timeMs(createdAt) };
 }
 
@@ -99,7 +100,7 @@ export function waitFactsFromActivity(activity: {
   const phase = text(ev.phase);
   const summary = text(ev.question);
   const createdAt = timeMs(ev.request_created_at) ?? timeMs(activity.since);
-  if (explicit === 'permission' || explicit === 'question' || explicit === 'elicitation' || explicit === 'spawn_approval') {
+  if (explicit === 'permission' || explicit === 'question' || explicit === 'elicitation' || explicit === 'spawn_approval' || explicit === 'settings_change') {
     return {
       kind: explicit,
       tool: text(ev.request_tool) || (explicit === 'permission' ? toolFromSummary(summary) : null),
@@ -146,6 +147,9 @@ export function waitStatusText(facts: WaitFacts, now: number): string {
     case 'spawn_approval':
       parts.push('Ждёт одобрения запуска');
       break;
+    case 'settings_change':
+      parts.push('Ждёт решения по настройке');
+      break;
     default:
       parts.push('Ждёт ответа');
   }
@@ -162,7 +166,9 @@ export function waitHeadText(facts: WaitFacts, now: number): string {
         ? 'Запрос MCP-сервера'
         : facts.kind === 'spawn_approval'
           ? 'Запрос на запуск'
-          : facts.kind === 'permission'
+          : facts.kind === 'settings_change'
+            ? 'Предложение настройки'
+            : facts.kind === 'permission'
             ? 'Запрос разрешения'
             : 'Запрос';
   const age = waitAge(facts, now);

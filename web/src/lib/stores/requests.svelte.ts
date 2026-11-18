@@ -15,11 +15,11 @@ export type RequestClientState =
   | 'not_applied'
   | 'closed';
 
-export type RequestKind = 'permission' | 'question' | 'spawn_approval';
+export type RequestKind = 'permission' | 'question' | 'spawn_approval' | 'settings_change';
 
-/** Неизвестный вид запроса остаётся вопросом, а карточка одобрения запуска имеет свой вид. */
+/** Неизвестный вид запроса остаётся вопросом, одобрение запуска и настройки имеют свои карточки. */
 export function requestKind(raw: unknown): RequestKind {
-  return raw === 'permission' || raw === 'spawn_approval' ? raw : 'question';
+  return raw === 'permission' || raw === 'spawn_approval' || raw === 'settings_change' ? raw : 'question';
 }
 
 export interface RequestItem {
@@ -103,18 +103,41 @@ export class RequestsModel {
         state = 'transmitting';
       } else if (rawState === 'decision_unconfirmed' || rawState === 'unconfirmed') {
         state = 'unconfirmed';
-      } else if (rawState === 'decision_applied' || rawState === 'applied') {
+      } else if (rawState === 'decision_applied' || rawState === 'applied' || rawState === 'allowed') {
         state = 'applied';
       } else if (rawState === 'decision_not_applied' || rawState === 'not_applied') {
         state = 'not_applied';
-      } else if (rawState === 'closed_without_decision' || rawState === 'closed') {
+      } else if (
+        rawState === 'closed_without_decision' ||
+        rawState === 'closed' ||
+        rawState === 'setting_changed' ||
+        rawState === 'expired' ||
+        rawState === 'declined' ||
+        rawState === 'conversation_trashed'
+      ) {
         state = 'closed';
       } else if (rawState === 'sending') {
         state = 'sending';
       }
       const winnerDecision = r.decision_payload ?? r.winner_decision ?? r.winnerDecision;
       const createdAt = typeof r.created_at === 'string' ? r.created_at : typeof r.createdAt === 'string' ? r.createdAt : undefined;
-      const closedReason = typeof r.reason === 'string' ? r.reason : (typeof r.closed_reason === 'string' ? r.closed_reason : undefined);
+      const stateReasons: Record<string, string> = {
+        allowed: 'allowed',
+        applied: 'applied',
+        decision_applied: 'applied',
+        declined: 'declined',
+        setting_changed: 'setting_changed',
+        expired: 'expired',
+        not_applied: 'not_applied',
+        decision_not_applied: 'not_applied',
+        closed_without_decision: 'closed',
+        conversation_trashed: 'conversation_trashed'
+      };
+      const closedReason = typeof r.reason === 'string'
+        ? r.reason
+        : typeof r.closed_reason === 'string'
+          ? r.closed_reason
+          : stateReasons[rawState];
 
       const existing = this.items.get(id);
       if (existing) {
@@ -243,6 +266,12 @@ export class RequestsModel {
       // У решения, не дошедшего до агента, хаб передаёт причину работника, а не `not_applied`.
       const decided = item.state === 'saved' || item.state === 'transmitting';
       item.closedReason = reason;
+      if (item.kind === 'settings_change') {
+        if (reason === 'allowed' || reason === 'applied') item.state = 'applied';
+        else if (reason === 'setting_changed' || reason === 'expired' || reason === 'declined' || reason === 'conversation_trashed') item.state = 'closed';
+        else item.state = 'not_applied';
+        return;
+      }
       if (reason === 'applied') {
         item.state = 'applied';
       } else if (reason === 'unconfirmed') {

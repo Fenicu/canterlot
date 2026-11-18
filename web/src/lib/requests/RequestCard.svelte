@@ -7,6 +7,8 @@
   import QuestionCard from './QuestionCard.svelte';
   import SpawnApprovalCard from './SpawnApprovalCard.svelte';
   import { spawnApprovalView } from './spawnApprovalView';
+  import SettingsChangeCard from './SettingsChangeCard.svelte';
+  import { settingsChangeView, settingsOutcome } from './settingsChangeView';
   import { firstArrival } from './arrival';
   import type { RequestItem } from '#lib/stores/requests.svelte.js';
   import type { DecisionBody } from '#lib/api/client.js';
@@ -72,6 +74,16 @@
         return 'Потерян владелец исполнения';
       case 'generation_advanced':
         return 'Исполнение сменилось';
+      case 'allowed':
+        return 'применено';
+      case 'declined':
+        return 'отклонено';
+      case 'setting_changed':
+        return 'настройка изменилась';
+      case 'expired':
+        return 'истекло';
+      case 'conversation_trashed':
+        return 'сессия удалена';
       default:
         return 'Запрос закрыт';
     }
@@ -95,14 +107,20 @@
     }
   });
 
+  const settingsResult = $derived(request.kind === 'settings_change' ? settingsOutcome(request.closedReason) : undefined);
+
   const trackState = $derived.by((): StageState => {
     if (request.state === 'applied') return 'done';
+    if (settingsResult) {
+      return settingsResult.tone === 'warning' || settingsResult.tone === 'quiet' ? 'held' : 'error';
+    }
     if (request.state === 'closed' || request.state === 'not_applied') return 'error';
     return 'active';
   });
 
   const trackReason = $derived.by(() => {
     if (trackState !== 'error') return undefined;
+    if (settingsResult) return settingsResult.word;
     const reason = translateReason(request.closedReason);
     if (request.state !== 'not_applied') return reason;
     return reason === 'Запрос закрыт' || reason === 'не применено' ? 'не применено' : `не применено: ${reason}`;
@@ -110,6 +128,7 @@
 
   const trackStatus = $derived.by(() => {
     if (request.state === 'applied') return 'применено';
+    if (settingsResult) return settingsResult.word;
     if (request.state === 'unconfirmed') return 'Передано агенту, подтверждения нет';
     return undefined;
   });
@@ -120,6 +139,7 @@
     const payload = (request.payload ?? {}) as Record<string, unknown>;
     if (request.kind === 'permission') return String(payload.tool_name ?? '');
     if (request.kind === 'spawn_approval') return spawnApprovalView(payload).facts.slice(0, 2).map((fact) => fact.value).join(' · ');
+    if (request.kind === 'settings_change') return settingsChangeView(payload).title;
     const nested = payload.payload as Record<string, unknown> | undefined;
     const first = ((payload.questions ?? nested?.questions) as Array<Record<string, unknown>> | undefined)?.[0];
     return String(first?.text ?? first?.question ?? payload.text ?? payload.question ?? '');
@@ -127,6 +147,7 @@
 
   const answerText = $derived.by(() => {
     const winner = request.winnerDecision as Record<string, unknown> | undefined;
+    if (request.kind === 'settings_change') return settingsOutcome(request.closedReason).word;
     if (request.kind === 'permission' || request.kind === 'spawn_approval') {
       if (winner?.behavior === 'allow') return 'Разрешено';
       if (winner?.behavior === 'deny') return 'Отклонено';
@@ -174,13 +195,15 @@
 
 {#if request.state === 'applied'}
   <div class="applied" data-collapsed={shown ? undefined : 'true'} data-expanded={shown ? 'true' : undefined}>
-    <StepHead name={request.kind === 'permission' ? 'Разрешение' : request.kind === 'spawn_approval' ? 'Запуск сессии' : 'Вопрос'} detail={subject} status={answerText} state="answer" open={shown} ontoggle={toggle} />
+    <StepHead name={request.kind === 'permission' ? 'Разрешение' : request.kind === 'spawn_approval' ? 'Запуск сессии' : request.kind === 'settings_change' ? 'Изменение настройки' : 'Вопрос'} detail={subject} status={answerText} state="answer" open={shown} ontoggle={toggle} />
     {#if shown}
       <div class="applied-body">
         {#if request.kind === 'permission'}
           <PermissionCard {request} {onDecision} {harnessId} {permissionMode} {now} disabled={true} />
         {:else if request.kind === 'spawn_approval'}
           <SpawnApprovalCard {request} {onDecision} disabled={true} />
+        {:else if request.kind === 'settings_change'}
+          <SettingsChangeCard {request} {onDecision} disabled={true} />
         {:else}
           <QuestionCard {request} {onDecision} {now} disabled={true} readonly />
         {/if}
@@ -217,6 +240,8 @@
       <PermissionCard {request} {onDecision} {harnessId} {permissionMode} {now} disabled={request.state !== 'open'} />
     {:else if request.kind === 'spawn_approval'}
       <SpawnApprovalCard {request} {onDecision} disabled={request.state !== 'open'} />
+    {:else if request.kind === 'settings_change'}
+      <SettingsChangeCard {request} {onDecision} disabled={request.state !== 'open'} />
     {:else}
       <QuestionCard {request} {onDecision} {now} disabled={request.state !== 'open'} />
     {/if}
