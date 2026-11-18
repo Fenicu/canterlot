@@ -75,6 +75,7 @@ mod machine_disk;
 mod machine_info;
 mod machine_lease;
 mod machine_outage;
+mod machine_updates;
 mod machines;
 mod media;
 mod model_resolution;
@@ -124,6 +125,7 @@ mod spawn_queue;
 mod submit;
 mod todos_integration;
 mod tx_rollback;
+mod updates_api;
 mod version;
 mod worker_terminal_outcomes;
 #[cfg(all(feature = "testkit", feature = "fault-injection"))]

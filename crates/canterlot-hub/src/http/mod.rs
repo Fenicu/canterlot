@@ -62,6 +62,7 @@ pub mod signin_passkeys;
 pub mod signin_qr;
 pub mod snapshot;
 pub mod spawn_queue;
+pub mod updates;
 pub mod ws;
 
 pub use crate::attachments::UPLOAD_CHUNK_BYTES;
@@ -256,6 +257,7 @@ pub fn api_routes() -> OpenApiRouter<AppState> {
         .merge(prompt_suggestions::routes())
         .merge(dictation::routes())
         .merge(machines::routes())
+        .merge(updates::routes())
         .merge(limits::routes())
         .merge(snapshot::routes())
         .merge(history::routes())

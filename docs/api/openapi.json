@@ -10910,6 +10910,131 @@
         }
       }
     },
+    "/api/v1/updates": {
+      "get": {
+        "tags": [
+          "machines"
+        ],
+        "operationId": "get__api_v1_updates",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "1–100, по умолчанию 50.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "`next_cursor` предыдущей страницы.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "machine",
+            "in": "query",
+            "description": "Имя машины; необязательно.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "description": "Вид события; необязательно.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Лента обновлений CLI и моделей, свежие первыми",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpdatePage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неверный курсор, фильтр или размер страницы",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Требуется вход владельца",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/ws": {
       "get": {
         "tags": [
@@ -20660,6 +20785,65 @@
           "allow",
           "skip"
         ]
+      },
+      "UpdatePage": {
+        "type": "object",
+        "required": [
+          "items",
+          "next_cursor"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UpdateView"
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "UpdateView": {
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "machine",
+          "harness",
+          "created_at",
+          "payload"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string"
+          },
+          "harness": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "machine": {
+            "type": "string",
+            "description": "Имя машины из каталога владельца."
+          },
+          "payload": {},
+          "update_command": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Команда обновления для видов версий; хаб её не выполняет."
+          }
+        }
       },
       "UploadOffer": {
         "type": "object",

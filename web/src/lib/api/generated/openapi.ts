@@ -1837,6 +1837,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/updates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get__api_v1_updates"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/ws": {
         parameters: {
             query?: never;
@@ -4653,6 +4669,22 @@ export interface components {
         TodoStatus: "pending" | "in_progress" | "completed" | "cancelled";
         /** @enum {string} */
         UnknownLimits: "allow" | "skip";
+        UpdatePage: {
+            items: components["schemas"]["UpdateView"][];
+            next_cursor: string | null;
+        };
+        UpdateView: {
+            created_at: string;
+            harness: string;
+            /** Format: uuid */
+            id: string;
+            kind: string;
+            /** @description Имя машины из каталога владельца. */
+            machine: string;
+            payload: unknown;
+            /** @description Команда обновления для видов версий; хаб её не выполняет. */
+            update_command?: string | null;
+        };
         UploadOffer: {
             /** Format: int64 */
             offset: number;
@@ -11053,6 +11085,70 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["WhitelistView"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get__api_v1_updates: {
+        parameters: {
+            query?: {
+                /** @description 1–100, по умолчанию 50. */
+                limit?: number;
+                /** @description `next_cursor` предыдущей страницы. */
+                cursor?: string;
+                /** @description Имя машины; необязательно. */
+                machine?: string;
+                /** @description Вид события; необязательно. */
+                kind?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Лента обновлений CLI и моделей, свежие первыми */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UpdatePage"];
+                };
+            };
+            /** @description Неверный курсор, фильтр или размер страницы */
+            400: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Требуется вход владельца */
+            401: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */

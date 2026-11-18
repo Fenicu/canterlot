@@ -1498,6 +1498,7 @@ impl Scheduler {
     pub async fn maintenance(&self) -> Result<(), sqlx::Error> {
         let results = [
             events::purge_older_than(&self.pool, Duration::from_secs(7 * 86400)).await.map(|_| ()),
+            crate::machine_updates::purge(&self.pool).await.map(|_| ()),
             sqlx::query("delete from limit_snapshots where observed_at < clock_timestamp() - $1 * interval '1 day'").bind(self.history_days as f64).execute(&self.pool).await.map(|_| ()),
             sqlx::query("delete from scheduled_jobs where state in ('fired','cancelled','failed') and updated_at < clock_timestamp() - interval '30 days'").execute(&self.pool).await.map(|_| ()),
             sqlx::query("delete from alarms where updated_at < clock_timestamp() - interval '30 days' and (state in ('cancelled','expired','failed') or (state='fired' and delivered_input_id is not null))").execute(&self.pool).await.map(|_| ()),

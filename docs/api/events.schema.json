@@ -157,6 +157,9 @@
       "$ref": "#/$defs/machine_lease_changed"
     },
     {
+      "$ref": "#/$defs/machine_update"
+    },
+    {
       "$ref": "#/$defs/hidden"
     },
     {
@@ -7081,6 +7084,9 @@
                   "$ref": "#/$defs/machine_lease_changed"
                 },
                 {
+                  "$ref": "#/$defs/machine_update"
+                },
+                {
                   "$ref": "#/$defs/hidden"
                 },
                 {
@@ -8443,6 +8449,105 @@
           "required": [
             "machine_id",
             "lease"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "v",
+        "id",
+        "scope",
+        "scope_seq",
+        "scope_seq_from",
+        "committed_at",
+        "committed_at_from",
+        "conversation_id",
+        "execution_id",
+        "correlation_id",
+        "kind",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    "machine_update": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "scope_seq": {
+          "$ref": "#/$defs/Seq"
+        },
+        "scope_seq_from": {
+          "$ref": "#/$defs/Seq"
+        },
+        "committed_at": {
+          "$ref": "#/$defs/Time"
+        },
+        "committed_at_from": {
+          "$ref": "#/$defs/Time"
+        },
+        "conversation_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "execution_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "correlation_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "kind": {
+          "const": "machine_update"
+        },
+        "payload": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/Uuid"
+            },
+            "kind": {
+              "type": "string"
+            },
+            "machine": {
+              "type": "string"
+            },
+            "harness": {
+              "type": "string"
+            },
+            "created_at": {
+              "$ref": "#/$defs/Time"
+            },
+            "payload": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "machine",
+            "harness",
+            "created_at",
+            "payload"
           ],
           "additionalProperties": false
         }

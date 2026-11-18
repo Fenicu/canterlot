@@ -50,6 +50,7 @@ export type WireEvent =
   | MachineJournalStopsChanged
   | MachineWatchChanged
   | MachineLeaseChanged
+  | MachineUpdate
   | Hidden
   | PhaseChanged
   | Oversized
@@ -1520,6 +1521,27 @@ export interface LeaseEntry {
   requested_at: Time | null;
   position: number | null;
   dir: string;
+}
+export interface MachineUpdate {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "machine_update";
+  payload: {
+    id: Uuid;
+    kind: string;
+    machine: string;
+    harness: string;
+    created_at: Time;
+    payload: {};
+  };
 }
 export interface Hidden {
   v: 1;

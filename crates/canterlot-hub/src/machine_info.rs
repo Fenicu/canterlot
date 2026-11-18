@@ -100,6 +100,7 @@ pub async fn apply_report_with_capabilities(
     sqlx::query("update machines set capabilities=$9,worker_version=$2,allowed_roots=$3,containment=$4,os=$5,reported_at=clock_timestamp(),limits_ok=$6,home_dir=nullif($7,''),worktree_root=nullif($8,'') where id=$1")
  .bind(machine_id).bind(&report.worker_version).bind(json!(report.allowed_roots)).bind(&report.containment).bind(&report.os).bind(report.max_attachment_bytes==MAX_ATTACHMENT_BYTES && report.max_attachments_per_input as usize==MAX_ATTACHMENTS_PER_INPUT).bind(&report.home_dir).bind(&report.worktree_root).bind(&capabilities).execute(&mut *conn).await?;
     let offered = crate::limits::offered_providers(&mut *conn, owner_id).await?;
+    let harness_state = crate::machine_updates::previous_for_report(&mut *conn, machine_id).await?;
     sqlx::query("delete from machine_harnesses where machine_id=$1")
         .bind(machine_id)
         .execute(&mut *conn)
@@ -114,6 +115,19 @@ pub async fn apply_report_with_capabilities(
         sqlx::query("insert into machine_harnesses(machine_id,harness,provider,title,images,settings_midsession,permission_modes,models,settings_midsession_effort,installed_version,latest_version,min_version,update_command) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)")
   .bind(machine_id).bind(&h.harness).bind(&h.provider).bind(&h.title).bind(h.images).bind(h.settings_midsession).bind(json!(h.permission_modes)).bind(json!(models)).bind(h.settings_midsession_effort.unwrap_or(true)).bind(&h.installed_version).bind(&h.latest_version).bind(&h.min_version).bind(&h.update_command).execute(&mut *conn).await?;
     }
+    let versions_enabled = capabilities
+        .iter()
+        .any(|capability| capability == crate::session::CAPABILITY_CLI_VERSIONS_V1);
+    crate::machine_updates::generate_in_tx(
+        &mut *conn,
+        owner_id,
+        machine_id,
+        &harness_state,
+        &report,
+        versions_enabled,
+        correlation_id,
+    )
+    .await?;
     let mut updates = Vec::new();
     for (id, harness, old_title, old_provider) in previous {
         let current = report.harnesses.iter().find(|h| h.harness == harness);
