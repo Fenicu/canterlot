@@ -848,8 +848,38 @@ async fn undelivered_input_and_working_session_block_overlap(pool: PgPool) {
     scheduler(&f).tick(Utc::now()).await.unwrap();
     let third = run_id(&pool, &id).await;
     assert_ne!(second, third);
-    let (state, detail) = state(&pool, third).await;
-    assert_eq!(state, "skipped_overlap", "{detail}");
+    wait_state(&pool, third, "skipped_overlap").await;
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn acceptance_unconfirmed_input_blocks_overlap(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
+    let id = create(&f, existing(&f), "0 9 * * *").await;
+    due(&pool, &id, Utc::now() - TimeDelta::seconds(30)).await;
+    scheduler(&f).tick(Utc::now()).await.unwrap();
+    let first = run_id(&pool, &id).await;
+    wait_state(&pool, first, "started").await;
+    let input: Uuid = sqlx::query_scalar("select input_id from schedule_runs where id=$1")
+        .bind(first)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    sqlx::query("update inputs set state='acceptance_unconfirmed' where id=$1")
+        .bind(input)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("update conversation_derived set activity_state='idle' where conversation_id=$1")
+        .bind(f.seed.conversation_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    due(&pool, &id, Utc::now() - TimeDelta::seconds(30)).await;
+    scheduler(&f).tick(Utc::now()).await.unwrap();
+    let second = run_id(&pool, &id).await;
+    assert_ne!(first, second);
+    wait_state(&pool, second, "skipped_overlap").await;
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]

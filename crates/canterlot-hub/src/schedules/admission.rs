@@ -194,8 +194,8 @@ fn merge(target: &mut Value, extra: Value) {
 
 /// Более ранние запуски, блокирующие данный при политике `skip`:
 /// `claimed/prechecking` или `started`, чей ввод ещё не принят
-/// (`queued/dispatched/on_machine/transmitting`) или чья сессия
-/// работает/ждёт владельца. Поздние заявки ранних не блокируют.
+/// (`queued/dispatched/on_machine/transmitting/acceptance_unconfirmed`)
+/// или чья сессия работает/ждёт владельца. Поздние заявки ранних не блокируют.
 async fn earlier_blocking(
     conn: &mut PgConnection,
     schedule_id: Uuid,
@@ -209,7 +209,7 @@ async fn earlier_blocking(
            and r.scheduled_at < (select scheduled_at from schedule_runs where id = $2)
            and (r.state in ('claimed','prechecking')
                 or (r.state = 'started'
-                    and (i.state in ('queued','dispatched','on_machine','transmitting')
+                    and (i.state in ('queued','dispatched','on_machine','transmitting','acceptance_unconfirmed')
                          or d.activity_state in ('working','waiting_for_user','stalled'))))",
     )
     .bind(schedule_id)
