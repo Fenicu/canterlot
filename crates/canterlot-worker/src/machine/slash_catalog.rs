@@ -282,11 +282,9 @@ impl Source {
                 .map_err(|error| format!("{error:?}"))?;
                 Ok(parse_codex(&reply))
             }
-            Self::OpenCode { cfg, data_dir } => {
-                crate::adapter::opencode::catalog_probe(cfg, data_dir)
-                    .await
-                    .map_err(|_| "opencode_catalog".to_owned())
-            }
+            Self::OpenCode { cfg, data_dir } => crate::adapter::opencode::catalog_probe(cfg, data_dir)
+                .await
+                .ok_or_else(|| "opencode_catalog".to_owned()),
         }
     }
 }
@@ -455,7 +453,7 @@ mod tests {
     #[test]
     fn entries_cut_long_text_on_a_character_boundary_and_require_a_name() {
         let long = "x".repeat(500);
-        let entries = vec![
+        let entries = [
             entry("ok", &long, EntryKind::Command, &long).unwrap(),
             entry(" /slash ", "опис", EntryKind::Skill, "арг").unwrap(),
         ];

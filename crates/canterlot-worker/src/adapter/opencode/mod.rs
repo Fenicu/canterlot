@@ -283,28 +283,28 @@ async fn probe_models(
 
 /// Каталог команд и навыков: короткий сервер, `GET /api/command` и `GET /api/skill`.
 /// Ответы не journalются: наружу уходят только имя, описание и вид записи.
-pub async fn catalog_probe(cfg: &OpenCodeConfig, data_dir: &Path) -> Result<Vec<crate::machine::slash_catalog::CatalogEntry>, ()> {
+pub async fn catalog_probe(cfg: &OpenCodeConfig, data_dir: &Path) -> Option<Vec<crate::machine::slash_catalog::CatalogEntry>> {
     let layout = DataLayout::for_worker(cfg, data_dir);
     let mut env = prepared_env(cfg, &layout, layout.tmp())
         .await
-        .map_err(drop)?;
+        .ok()?;
     let password = format!("opencode-catalog-{}", uuid::Uuid::now_v7());
     env.push(("OPENCODE_PASSWORD".into(), password.clone().into()));
     let mut proc = ServerProcess::spawn_probe(&cfg.executable, &layout.tmp(), &env)
         .await
-        .map_err(drop)?;
+        .ok()?;
     let result = async {
-        let base = proc.ready_url(READY_WAIT).await.map_err(drop)?;
-        let http = Http::new(base, password).await.map_err(drop)?;
+        let base = proc.ready_url(READY_WAIT).await.ok()?;
+        let http = Http::new(base, password).await.ok()?;
         let commands = models_reply(&http, "/api/command", DISCOVER_WAIT)
             .await
-            .map_err(drop)?;
+            .ok()?;
         let skills = models_reply(&http, "/api/skill", DISCOVER_WAIT)
             .await
-            .map_err(drop)?;
+            .ok()?;
         let mut entries = crate::machine::slash_catalog::parse_opencode_commands(&commands);
         entries.extend(crate::machine::slash_catalog::parse_opencode_skills(&skills));
-        Ok(entries)
+        Some(entries)
     }
     .await;
     proc.close_stdin();
