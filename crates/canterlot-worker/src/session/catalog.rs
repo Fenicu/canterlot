@@ -415,13 +415,8 @@ pub(super) async fn retry_until_discovered(
                 let version = slot.version_label().to_owned();
                 log_no_models(&probe, &slot);
                 catalogs.insert(&config, slot);
-                let _catalog_task = spawn_catalog_probe(
-                    &probe,
-                    &version,
-                    &config,
-                    &catalogs,
-                    shutdown.clone(),
-                );
+                let _catalog_task =
+                    spawn_catalog_probe(&probe, &version, &config, &catalogs, shutdown.clone());
                 tracing::info!(
                     kind = probe.discovered_kind(),
                     "{} discovered after retry",

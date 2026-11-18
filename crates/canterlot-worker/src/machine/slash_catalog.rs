@@ -103,8 +103,18 @@ pub fn parse_codex(reply: &Value) -> Vec<CatalogEntry> {
     // JSON-RPC сырая строка несёт `result`, зонд адаптера отдаёт уже его содержимое.
     let reply = reply.get("result").unwrap_or(reply);
     let mut out = Vec::new();
-    for group in reply.get("data").and_then(Value::as_array).into_iter().flatten() {
-        for skill in group.get("skills").and_then(Value::as_array).into_iter().flatten() {
+    for group in reply
+        .get("data")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        for skill in group
+            .get("skills")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
             if skill.get("enabled").and_then(Value::as_bool) == Some(false) {
                 continue;
             }
@@ -200,7 +210,11 @@ impl CatalogCache {
             );
     }
 
-    pub fn from_disk(path: &Path, key: &CacheKey, now_ms: u64) -> Option<Option<Vec<CatalogEntry>>> {
+    pub fn from_disk(
+        path: &Path,
+        key: &CacheKey,
+        now_ms: u64,
+    ) -> Option<Option<Vec<CatalogEntry>>> {
         disk_read(path)
             .into_iter()
             .find(|row| &row.key == key)
@@ -282,9 +296,11 @@ impl Source {
                 .map_err(|error| format!("{error:?}"))?;
                 Ok(parse_codex(&reply))
             }
-            Self::OpenCode { cfg, data_dir } => crate::adapter::opencode::catalog_probe(cfg, data_dir)
-                .await
-                .ok_or_else(|| "opencode_catalog".to_owned()),
+            Self::OpenCode { cfg, data_dir } => {
+                crate::adapter::opencode::catalog_probe(cfg, data_dir)
+                    .await
+                    .ok_or_else(|| "opencode_catalog".to_owned())
+            }
         }
     }
 }
@@ -325,10 +341,7 @@ fn parse_opencode(reply: &Value, kind: EntryKind) -> Vec<CatalogEntry> {
         .flatten()
         .filter_map(|row| {
             let name = row.get("name").and_then(Value::as_str)?;
-            let description = row
-                .get("description")
-                .and_then(Value::as_str)
-                .unwrap_or("");
+            let description = row.get("description").and_then(Value::as_str).unwrap_or("");
             entry(name, description, kind, "")
         })
         .collect()
@@ -373,10 +386,7 @@ mod tests {
             {"name":"off","description":"no","enabled":false},
             {"name":"default","description":"implicit"}
         ]}]});
-        let names: Vec<_> = parse_codex(&disabled)
-            .into_iter()
-            .map(|e| e.name)
-            .collect();
+        let names: Vec<_> = parse_codex(&disabled).into_iter().map(|e| e.name).collect();
         assert_eq!(names, ["on", "default"]);
     }
 
@@ -389,7 +399,10 @@ mod tests {
         let cmd = parse_opencode_commands(&commands);
         let skill = parse_opencode_skills(&skills);
         assert!(cmd.iter().all(|e| e.kind == EntryKind::Command));
-        assert!(cmd.iter().any(|e| e.name == "review" && !e.description.is_empty()));
+        assert!(
+            cmd.iter()
+                .any(|e| e.name == "review" && !e.description.is_empty())
+        );
         assert!(skill.iter().all(|e| e.kind == EntryKind::Skill));
         assert!(skill.iter().any(|e| e.name == "format-docs"));
         assert!(skill.iter().all(|e| e.name.len() <= MAX_NAME));

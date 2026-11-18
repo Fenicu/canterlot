@@ -4,11 +4,7 @@
 use super::process::build_env;
 use crate::machine::slash_catalog::{CatalogEntry, parse_claude};
 use rustix::process::{Pid, Signal, kill_process_group};
-use std::{
-    path::Path,
-    process::Stdio,
-    time::Duration,
-};
+use std::{path::Path, process::Stdio, time::Duration};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::Command,
@@ -49,24 +45,24 @@ pub async fn catalog_probe(executable: &Path) -> Result<Vec<CatalogEntry>, Strin
     let work = async {
         let mut cmd = Command::new(executable);
         cmd.args([
-                "-p",
-                "--input-format",
-                "stream-json",
-                "--output-format",
-                "stream-json",
-                "--verbose",
-                "--strict-mcp-config",
-                "--settings",
-                r#"{"permissions":{"allow":[]}}"#,
-                "--system-prompt-snapshot",
-                "off",
-            ])
-            .envs(build_env(std::env::vars_os()))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .process_group(0);
+            "-p",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--strict-mcp-config",
+            "--settings",
+            r#"{"permissions":{"allow":[]}}"#,
+            "--system-prompt-snapshot",
+            "off",
+        ])
+        .envs(build_env(std::env::vars_os()))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .process_group(0);
         let mut child = cmd.spawn().map_err(|e| e.to_string())?;
         let mut group = GroupKill::of(&child);
         let mut stdin = child.stdin.take().ok_or("no_stdin")?;

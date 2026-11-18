@@ -27,8 +27,8 @@ pub mod metrics;
 mod nofollow;
 pub mod owner_instructions;
 pub mod probe;
-pub mod slash_catalog;
 pub mod share;
+pub mod slash_catalog;
 pub mod watch;
 pub mod workdirs;
 
