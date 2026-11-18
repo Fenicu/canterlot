@@ -20,7 +20,7 @@ use crate::{
 
 use super::{
     ClaimedRun, OverlapPolicy, RunState, Schedule, ScheduleError, ScheduleRun, ScheduleTarget,
-    delay_ms, in_flight, insert_run, render_title, set_run_state,
+    delay_ms, insert_run, render_title, set_run_state,
 };
 
 #[derive(Debug)]
@@ -137,23 +137,27 @@ async fn admit_inner(
             .acquire()
             .await
             .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))?;
-        if in_flight(&mut conn, schedule.id).await.unwrap_or(0) > 1 {
-            return Err(Skip::new(RunState::SkippedOverlap, "earlier_run_in_flight"));
-        }
-        let delivered: i64 = sqlx::query_scalar(
-            "select count(*) from schedule_runs r join inputs i on i.id=r.input_id
-             where r.schedule_id=$1 and r.id<>$2 and i.state='queued'",
+        // Блокируют только более ранние запуски: поздняя заявка не отменяет
+        // раннюю. Учитываем не только `claimed/prechecking`, но и `started`,
+        // чей ввод ещё не принят или чья сессия работает/ждёт владельца.
+        let blocking: i64 = sqlx::query_scalar(
+            "select count(*) from schedule_runs r
+             left join inputs i on i.id = r.input_id
+             left join conversation_derived d on d.conversation_id = r.session_id
+             where r.schedule_id = $1
+               and r.scheduled_at < (select scheduled_at from schedule_runs where id = $2)
+               and (r.state in ('claimed','prechecking')
+                    or (r.state = 'started'
+                        and (i.state in ('queued','dispatched','on_machine','transmitting')
+                             or d.activity_state in ('working','waiting_for_user','stalled'))))",
         )
         .bind(schedule.id)
         .bind(run.id)
         .fetch_one(&mut *conn)
         .await
         .unwrap_or(0);
-        if delivered > 0 {
-            return Err(Skip::new(
-                RunState::SkippedOverlap,
-                "earlier_input_not_delivered",
-            ));
+        if blocking > 0 {
+            return Err(Skip::new(RunState::SkippedOverlap, "earlier_run_in_flight"));
         }
     }
 
@@ -197,14 +201,19 @@ async fn admit_inner(
         .await
         .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))?;
     let executor = if let Some(conversation_id) = existing_conversation {
-        let harness: String = sqlx::query_scalar("select harness from conversations where id=$1")
-            .bind(conversation_id)
-            .fetch_one(&mut *conn)
-            .await
-            .map_err(|_| Skip::new(RunState::Failed, "conversation_not_found"))?;
+        let row: (String, Option<String>) = sqlx::query_as(
+            "select c.harness, d.effective_model from conversations c
+             left join conversation_derived d on d.conversation_id = c.id
+             where c.id = $1",
+        )
+        .bind(conversation_id)
+        .fetch_one(&mut *conn)
+        .await
+        .map_err(|_| Skip::new(RunState::Failed, "conversation_not_found"))?;
         ResolvedExecutor {
-            harness,
-            model: String::new(),
+            harness: row.0,
+            // Окно Fable существующей сессии — по её действующей модели.
+            model: row.1.unwrap_or_default(),
             effort: String::new(),
             preset: "clean".to_owned(),
             mode: None,
@@ -214,9 +223,10 @@ async fn admit_inner(
     };
 
     let provider = canterlot_proto::harness::provider_of(&executor.harness).unwrap_or("");
-    if !run_anyway
-        && !provider.is_empty()
-        && let Some(detail) = limits_skip(
+    // Зонд лимитов (`known`/`unknown`) едет в журнал запуска дальше.
+    let mut limits_probe = json!({"limits": "unknown"});
+    if !run_anyway && !provider.is_empty() {
+        let (skip, probe) = limits_skip(
             &mut conn,
             schedule.owner_id,
             provider,
@@ -225,9 +235,11 @@ async fn admit_inner(
             scheduler.limits_config(),
             Utc::now(),
         )
-        .await?
-    {
-        return Err(Skip::with(RunState::SkippedLimits, detail));
+        .await?;
+        limits_probe = probe;
+        if let Some(detail) = skip {
+            return Err(Skip::with(RunState::SkippedLimits, detail));
+        }
     }
     // Соединение не держим через ожидание воркера: иначе каждый приём
     // с предпроверкой паркует соединение пула на минуту.
@@ -246,7 +258,17 @@ async fn admit_inner(
         .await?;
     }
 
-    dispatch(scheduler, schedule, run, &executor, provider, run_anyway, manual).await
+    dispatch(
+        scheduler,
+        schedule,
+        run,
+        &executor,
+        provider,
+        run_anyway,
+        manual,
+        limits_probe,
+    )
+    .await
 }
 
 #[derive(Debug)]
@@ -354,12 +376,26 @@ async fn resolve_route(
             .await
             .map_err(|_| Skip::new(RunState::Failed, "preset_unavailable"))?;
     let _ = run;
+    // Режим, проверенный маршрутизацией, едет и в создание: раньше проверка
+    // видела дочерний запасной (`read_only` при пустом родителе), а создание
+    // с `None` падало в `bypass` по умолчанию.
+    let mode = explicit.clone().unwrap_or_else(|| {
+        crate::session_tools::spawn::resolve_default_mode("", "", &decision.harness)
+    });
+    // Пресет расписания важнее политики: владелец выбрал его в редакторе.
+    let preset = match &schedule.target {
+        ScheduleTarget::NewSession {
+            preset: schedule_preset,
+            ..
+        } => schedule_preset.clone().unwrap_or(preset),
+        ScheduleTarget::ExistingSession { .. } => preset,
+    };
     Ok(ResolvedExecutor {
         harness: decision.harness,
         model: decision.model,
         effort: decision.effort,
         preset,
-        mode: explicit,
+        mode: Some(mode),
     })
 }
 
@@ -371,17 +407,21 @@ async fn limits_skip(
     existing_conversation: Option<Uuid>,
     config: &LimitsConfig,
     now: DateTime<Utc>,
-) -> Result<Option<Value>, Skip> {
+) -> Result<(Option<Value>, Value), Skip> {
     let settings = limit_settings::effective(conn, owner_id, config)
         .await
         .map_err(|_| Skip::new(RunState::Failed, "limit_settings_unavailable"))?;
     let all = limits::current(conn)
         .await
         .map_err(|_| Skip::new(RunState::Failed, "limits_unavailable"))?;
-    let mut detail = json!({"limits": "unknown"});
+    // Строгое сравнение остатка в промилле, как PWA (`remainingPct`):
+    // целое деление роняло 951‰ при пороге 5% в «не красное».
+    let mut probe = json!({"limits": "unknown"});
     if let Some(entry) = all.iter().find(|entry| entry.provider == provider) {
         let mut known = false;
-        let fable = model.to_ascii_lowercase().contains("fable");
+        // Окно Fable — только для Claude-моделей Fable, как в маршрутизации.
+        let fable =
+            provider == "claude" && model.to_ascii_lowercase().contains("fable");
         let mut windows: Vec<(&str, Option<&limits::WindowState>)> = vec![
             ("five_hour", entry.five_hour.as_ref()),
             ("weekly", entry.weekly.as_ref()),
@@ -391,20 +431,25 @@ async fn limits_skip(
         }
         for (name, window) in windows {
             let Some(window) = window else { continue };
+            // Окно с прошедшим сбросом несвежее, даже если показание недавнее.
+            if window.resets_at.is_some_and(|reset| reset <= now) {
+                continue;
+            }
             let fresh = TimeDelta::from_std(config.stale_after).unwrap_or(TimeDelta::hours(1));
             if now - window.observed_at > fresh {
                 continue;
             }
             known = true;
-            let remaining = 100_i32 - i32::from(window.used_permille) / 10;
-            if remaining < i32::from(settings.danger_remaining_pct) {
-                return Ok(Some(
-                    json!({"reason": "red_window", "window": name, "remaining_pct": remaining}),
+            let remaining = 100.0 - f64::from(window.used_permille) / 10.0;
+            if remaining < f64::from(settings.danger_remaining_pct) {
+                return Ok((
+                    Some(json!({"reason": "red_window", "window": name, "remaining_pct": remaining})),
+                    probe,
                 ));
             }
         }
         if known {
-            detail = json!({"limits": "known"});
+            probe = json!({"limits": "known"});
         }
     }
     if let Some(conversation_id) = existing_conversation {
@@ -426,7 +471,7 @@ async fn limits_skip(
                 )
             })
         {
-            return Ok(Some(json!({"reason": "queue_hold", "provider": provider})));
+            return Ok((Some(json!({"reason": "queue_hold", "provider": provider})), probe));
         }
     } else {
         limits::share_provider(conn, provider)
@@ -434,13 +479,13 @@ async fn limits_skip(
             .map_err(|_| Skip::new(RunState::Failed, "limits_unavailable"))?;
         let holds = crunch_holds(conn, provider).await?;
         if !holds.is_empty() {
-            return Ok(Some(
-                json!({"reason": "initial_hold", "provider": provider}),
+            return Ok((
+                Some(json!({"reason": "initial_hold", "provider": provider})),
+                probe,
             ));
         }
     }
-    let _ = detail;
-    Ok(None)
+    Ok((None, probe))
 }
 
 async fn crunch_holds(conn: &mut PgConnection, provider: &str) -> Result<Vec<HoldReason>, Skip> {
@@ -547,6 +592,7 @@ async fn dispatch(
     provider: &str,
     run_anyway: bool,
     manual: bool,
+    limits_probe: Value,
 ) -> AdmitResult {
     let mut tx = crate::db::begin(scheduler.pool())
         .await
@@ -595,6 +641,77 @@ async fn dispatch(
     if !manual && !run_anyway && !current.enabled {
         let _ = tx.rollback().await;
         return Err(Skip::new(RunState::SkippedChanged, "schedule_paused"));
+    }
+    // Замок владельца как у прочих запускаемых сессий: параллельные приёмки
+    // одного владельца упорядочиваются здесь, а не расходятся в две сессии.
+    crate::conversations::lock_owner(&mut tx, schedule.owner_id)
+        .await
+        .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))?;
+    // Пересчёт параллельности с корнями: `live_counts` в маршрутизации видит
+    // только детей (`parent_conversation_id is not null`), а запланированные
+    // сессии — корни, как и интерактивные. Два расписания под `max_parallel=1`
+    // иначе проходят проверку одновременно.
+    if matches!(&schedule.target, ScheduleTarget::NewSession { .. }) {
+        let (policy, _) = routing::load_policy(&mut tx, schedule.owner_id)
+            .await
+            .map_err(|_| Skip::new(RunState::Failed, "routing_policy_unavailable"))?;
+        let pair = format!("{}/{}", executor.harness, executor.model);
+        if let Some(limit) = policy.max_parallel.get(&pair) {
+            let busy: i64 = sqlx::query_scalar(
+                "select count(*) from conversations c
+                  join conversation_derived d on d.conversation_id = c.id
+                  where c.owner_id = $1 and c.harness = $2 and c.model = $3
+                    and c.trashed_at is null
+                    and (d.activity_state in ('working','stalled')
+                         or (d.activity_state = 'idle' and d.queue_queued > 0)
+                         or (exists (select 1 from executions e
+                                     where e.conversation_id = c.id
+                                       and e.state not in ('stopped','failed','owner_lost'))
+                             and (exists (select 1 from inputs i
+                                          where i.conversation_id = c.id and i.feed_seq is null
+                                            and i.state in ('queued','dispatched','on_machine'))
+                                  or exists (select 1 from queue_state q
+                                             where q.conversation_id = c.id and q.run_slot <> 'free'))))",
+            )
+            .bind(schedule.owner_id)
+            .bind(&executor.harness)
+            .bind(&executor.model)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))?;
+            if busy >= *limit {
+                let _ = tx.rollback().await;
+                return Err(Skip::with(
+                    RunState::SkippedLimits,
+                    json!({"reason": "parallel_busy", "pair": pair, "busy": busy, "limit": limit}),
+                ));
+            }
+        }
+    }
+    // Повторная проверка лимитов внутри транзакции dispatch под замком
+    // расписания: между ранней проверкой и commit лежит ожидание воркера,
+    // окна и удержания могли покраснеть. Та же проверка, что и до предпроверки.
+    let mut limits_probe = limits_probe;
+    if !run_anyway && !provider.is_empty() {
+        let existing = match &schedule.target {
+            ScheduleTarget::ExistingSession { conversation_id } => Some(*conversation_id),
+            ScheduleTarget::NewSession { .. } => None,
+        };
+        let (skip, probe) = limits_skip(
+            &mut tx,
+            schedule.owner_id,
+            provider,
+            &executor.model,
+            existing,
+            scheduler.limits_config(),
+            Utc::now(),
+        )
+        .await?;
+        limits_probe = probe;
+        if let Some(detail) = skip {
+            let _ = tx.rollback().await;
+            return Err(Skip::with(RunState::SkippedLimits, detail));
+        }
     }
     let now = Utc::now();
     let content = vec![ContentBlock::Text {
@@ -687,11 +804,27 @@ async fn dispatch(
         }
     };
     let delay = delay_ms(run.scheduled_at, now);
-    let final_detail = if run_anyway {
+    // «Запустить в любом случае» обходит приёмку, но crunch всё равно может
+    // держать поставленный ввод: фиксируем удержание в журнале запуска.
+    let mut final_detail = if run_anyway {
         json!({"reason": "run_anyway", "provider": provider})
     } else {
-        json!({"provider": provider})
+        let mut base = json!({"provider": provider});
+        merge(&mut base, limits_probe);
+        base
     };
+    if run_anyway
+        && let Ok(holds) = sqlx::query_scalar::<_, Value>(
+            "select to_jsonb(hold_reasons) from queue_state where conversation_id=$1",
+        )
+        .bind(session_id)
+        .fetch_optional(&mut *tx)
+        .await
+        && let Some(holds) = holds
+        && holds != json!([])
+    {
+        final_detail["queue_hold"] = holds;
+    }
     set_run_state(
         &mut tx,
         run.id,
