@@ -529,6 +529,8 @@ async fn background_services_stop_on_shutdown_and_release_their_locks(pool: PgPo
             Default::default(),
         ),
         activity: Default::default(),
+        hibernate: Default::default(),
+        presence: Default::default(),
         machines: Default::default(),
         session_tools: Default::default(),
         nudge_enabled: true,

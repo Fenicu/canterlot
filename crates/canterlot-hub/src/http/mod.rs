@@ -38,6 +38,7 @@ pub mod drafts;
 pub mod error;
 pub mod extract;
 pub mod groups;
+pub mod hibernate;
 pub mod health;
 pub mod history;
 pub mod layers;
@@ -257,6 +258,7 @@ pub fn api_routes() -> OpenApiRouter<AppState> {
         .merge(spawn_queue::routes())
         .merge(limit_settings::routes())
         .merge(prompt_suggestions::routes())
+        .merge(hibernate::routes())
         .merge(dictation::routes())
         .merge(machines::routes())
         .merge(updates::routes())

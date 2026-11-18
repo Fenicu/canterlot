@@ -29,6 +29,7 @@ pub mod executions;
 pub mod fault_injection;
 pub mod goals;
 pub mod groups;
+pub mod hibernate;
 pub mod grpc;
 pub mod history;
 pub mod http;

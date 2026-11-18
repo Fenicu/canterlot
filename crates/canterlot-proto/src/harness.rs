@@ -20,3 +20,11 @@ pub fn harnesses_of(provider: &str) -> Vec<&'static str> {
         .filter_map(|&(harness, name)| (name == provider).then_some(harness))
         .collect()
 }
+
+/// Все известные харнессы умеют возобновлять беседу по нативному id. Неизвестный харнесс
+/// Resume не поддерживает: такую сессию нельзя усыплять — её нечем будет разбудить.
+pub fn supports_resume(harness: &str) -> bool {
+    HARNESS_PROVIDERS
+        .iter()
+        .any(|&(name, _)| name == harness)
+}

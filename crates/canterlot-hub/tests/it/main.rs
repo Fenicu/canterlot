@@ -57,6 +57,7 @@ mod goals;
 mod grpc_attachments;
 mod grpc_session;
 mod held_delivery;
+mod hibernate;
 mod history;
 mod history_search;
 mod http_core;

@@ -134,6 +134,8 @@ pub enum PauseReason {
     },
     OwnerLost,
     RestorePending,
+    /// Процесс остановлен хабом после доказанного простоя; следующее сообщение будит сессию.
+    Hibernated,
     /// Один и тот же отказ провайдера подряд. Причина отказа неизвестна.
     SessionStuck {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -159,6 +161,7 @@ impl PauseReason {
             Self::UnconfirmedDelivery { .. } => "unconfirmed_delivery",
             Self::OwnerLost => "owner_lost",
             Self::RestorePending => "restore_pending",
+            Self::Hibernated => "hibernated",
             Self::SessionStuck { .. } => "session_stuck",
         }
     }
@@ -181,6 +184,7 @@ impl FromStr for PauseReason {
             "owner_lost" => Ok(Self::OwnerLost),
             "session_stuck" => Ok(Self::SessionStuck { compaction: None }),
             "restore_pending" => Ok(Self::RestorePending),
+            "hibernated" => Ok(Self::Hibernated),
             _ => Err(ModelError::UnknownValue {
                 kind: "pause reason",
                 value: value.into(),

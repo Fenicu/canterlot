@@ -405,8 +405,8 @@ pub async fn set_state_in_tx(
     .bind(execution_id)
     .fetch_one(&mut *conn)
     .await?;
-    let (state, generation): (String, i64) =
-        sqlx::query_as("select state, generation from executions where id = $1")
+    let (state, generation, hibernate_requested): (String, i64, bool) =
+        sqlx::query_as("select state, generation, hibernate_requested from executions where id = $1")
             .bind(execution_id)
             .fetch_one(&mut *conn)
             .await?;
@@ -418,6 +418,14 @@ pub async fn set_state_in_tx(
     }
     let reclaimed = outcome == Some(OWNER_RECLAIMED);
     let outcome = outcome.filter(|_| !reclaimed);
+    // Усыпление — не сбой и не воля владельца остановить сессию: воркер сообщает
+    // обычный `user_stop`, а хаб сохраняет отдельную причину, по которой PWA показывает
+    // «усыплена», а следующее сообщение будит беседу.
+    let stored_outcome = if to == ExecutionState::Stopped && hibernate_requested {
+        Some("hibernated")
+    } else {
+        outcome
+    };
     if reclaimed {
         queue
             .pause_reasons
@@ -461,8 +469,8 @@ pub async fn set_state_in_tx(
         }),
         ExecutionState::Stopped | ExecutionState::Failed => {
             if !matches!(
-                outcome,
-                Some("user_stop" | "start_cancelled" | "force_stopped")
+                stored_outcome,
+                Some("user_stop" | "start_cancelled" | "force_stopped" | "hibernated")
             ) {
                 add_once(
                     &mut queue.pause_reasons.0,
@@ -509,7 +517,7 @@ pub async fn set_state_in_tx(
     sqlx::query("update executions set state = $2, outcome = $3, phase = case when $2 in ('stopped', 'failed') then null else phase end, phase_at = case when $2 in ('stopped', 'failed') then null else phase_at end, phase_detail=case when $2 in ('stopped','failed') then null else phase_detail end, updated_at = now() where id = $1")
         .bind(execution_id)
         .bind(to.as_str())
-        .bind(outcome)
+        .bind(stored_outcome)
         .execute(&mut *conn)
         .await?;
     queue
@@ -522,7 +530,7 @@ pub async fn set_state_in_tx(
             execution_id,
             generation,
             to,
-            outcome,
+            stored_outcome,
             correlation_id,
         ),
     )
@@ -666,7 +674,10 @@ fn legal_transition(from: ExecutionState, to: ExecutionState, outcome: Option<&s
             | (
                 Stopping,
                 Stopped,
-                Some("user_stop" | "normal_exit" | "start_cancelled" | "force_stopped")
+                Some(
+                    "user_stop" | "normal_exit" | "start_cancelled" | "force_stopped"
+                        | "hibernated",
+                )
             )
             | (
                 Stopping,

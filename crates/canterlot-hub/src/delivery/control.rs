@@ -1085,7 +1085,10 @@ async fn target_command(
     Ok(command_id)
 }
 
-async fn notify_outbox(conn: &mut PgConnection, machine_id: Uuid) -> Result<(), sqlx::Error> {
+pub(crate) async fn notify_outbox(
+    conn: &mut PgConnection,
+    machine_id: Uuid,
+) -> Result<(), sqlx::Error> {
     sqlx::query("select pg_notify('canterlot_outbox', $1::text)")
         .bind(machine_id.to_string())
         .execute(conn)

@@ -26,6 +26,8 @@ pub struct HubConfig {
     #[serde(default)]
     pub activity: ActivityConfig,
     #[serde(default)]
+    pub hibernate: crate::hibernate::HibernateConfig,
+    #[serde(default)]
     pub scheduler: SchedulerConfig,
     #[serde(default)]
     pub attachments: AttachmentsConfig,

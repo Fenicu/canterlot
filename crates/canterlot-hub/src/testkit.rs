@@ -359,6 +359,8 @@ pub async fn spawn_test_hub_with(pool: PgPool, options: TestHubOptions) -> TestH
         dispatch_rx,
         scheduler: scheduler.clone(),
         activity: activity.clone(),
+        hibernate: Default::default(),
+        presence: Default::default(),
         machines: machines.clone(),
         session_tools: session_tools.clone(),
         nudge_enabled: true,

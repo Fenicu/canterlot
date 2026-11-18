@@ -958,6 +958,9 @@ async fn submit_attempt(
         .bind(event.committed_at)
         .execute(&mut *conn)
         .await?;
+    // Усыплённая сессия будится следующим вводом. Если остановка ещё в полёте, живое
+    // исполнение не даст стартовать новое; тогда разбудит завершение остановки.
+    crate::hibernate::wake_in_tx(conn, req.conversation_id, req.correlation_id).await?;
     let response =
         serde_json::to_value(&submitted).map_err(|error| sqlx::Error::Encode(Box::new(error)))?;
     if idempotency::record(

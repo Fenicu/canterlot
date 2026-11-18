@@ -11,6 +11,8 @@ pub struct BackgroundDeps {
     pub dispatch_rx: mpsc::Receiver<Uuid>,
     pub scheduler: crate::scheduler::Scheduler,
     pub activity: crate::config::ActivityConfig,
+    pub hibernate: crate::hibernate::HibernateConfig,
+    pub presence: crate::presence::Presence,
     pub machines: crate::config::MachinesConfig,
     pub session_tools: crate::config::SessionToolsConfig,
     /// Выключатель `[orchestrator.nudge]`: шлюз автопинка в проекторе цели.
@@ -53,6 +55,8 @@ impl Background {
             dispatch_rx,
             scheduler,
             activity,
+            hibernate,
+            presence,
             machines,
             session_tools,
             nudge_enabled,
@@ -73,6 +77,15 @@ impl Background {
                     activity,
                     machines.clone(),
                     nudge_enabled,
+                    stopped.clone(),
+                )),
+            ),
+            (
+                "hibernate_task_error",
+                tokio::spawn(crate::hibernate::run(
+                    pool.clone(),
+                    presence,
+                    hibernate.sweep,
                     stopped.clone(),
                 )),
             ),
