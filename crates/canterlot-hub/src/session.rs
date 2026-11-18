@@ -36,6 +36,8 @@ pub const CAPABILITY_CREDENTIAL_EXPIRY_V1: &str = "credential_expiry_v1";
 pub const CAPABILITY_PROVIDER_CREDITS_V1: &str = "provider_credits_v1";
 /// Отчёт машины несёт версии CLI и команду обновления.
 pub const CAPABILITY_CLI_VERSIONS_V1: &str = "cli_versions_v1";
+/// Отчёт машины несёт каталог команд и навыков харнесса.
+pub const CAPABILITY_SLASH_CATALOG_V1: &str = "slash_catalog_v1";
 
 pub const CAPABILITY_EXEC_V1: &str = "exec_v1";
 pub const CAPABILITY_WORKDIR_SUGGEST_V1: &str = "workdir_suggest_v1";

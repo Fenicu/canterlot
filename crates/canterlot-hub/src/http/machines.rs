@@ -77,6 +77,9 @@ pub struct HarnessView {
     pub min_version: Option<String>,
     /// Команда обновления для способа установки; хаб её не выполняет.
     pub update_command: Option<String>,
+    /// Команды и навыки, которые CLI может выполнить; пусто без `slash_catalog_v1`.
+    #[schema(value_type=Vec<CatalogView>)]
+    pub catalog: Value,
 }
 #[derive(Serialize, ToSchema)]
 pub struct CredentialView {
@@ -207,6 +210,7 @@ pub(crate) async fn load_stored(
                     latest_version: version("latest_version")?,
                     min_version: version("min_version")?,
                     update_command: version("update_command")?,
+                    catalog: h.try_get("catalog")?,
                 })
             })
             .collect::<Result<_, _>>()?;
@@ -642,6 +646,18 @@ fn owner_reason(reason: &str) -> String {
     } else {
         String::new()
     }
+}
+
+#[derive(ToSchema)]
+pub struct CatalogView {
+    /// Имя без ведущего слеша: вставляется как `/<name> `.
+    pub name: String,
+    /// Короткое описание для подсказки в меню.
+    pub description: String,
+    /// `command` или `skill`.
+    pub kind: String,
+    /// Подсказка аргумента, если CLI её сообщает.
+    pub argument_hint: String,
 }
 
 #[derive(ToSchema)]

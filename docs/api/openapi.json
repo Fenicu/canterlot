@@ -12328,6 +12328,33 @@
         },
         "additionalProperties": false
       },
+      "CatalogView": {
+        "type": "object",
+        "required": [
+          "name",
+          "description",
+          "kind",
+          "argument_hint"
+        ],
+        "properties": {
+          "argument_hint": {
+            "type": "string",
+            "description": "Подсказка аргумента, если CLI её сообщает."
+          },
+          "description": {
+            "type": "string",
+            "description": "Короткое описание для подсказки в меню."
+          },
+          "kind": {
+            "type": "string",
+            "description": "`command` или `skill`."
+          },
+          "name": {
+            "type": "string",
+            "description": "Имя без ведущего слеша: вставляется как `/<name> `."
+          }
+        }
+      },
       "ClaudeHistoryList": {
         "type": "object",
         "required": [
@@ -14324,9 +14351,17 @@
           "settings_midsession",
           "settings_midsession_effort",
           "permission_modes",
-          "models"
+          "models",
+          "catalog"
         ],
         "properties": {
+          "catalog": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CatalogView"
+            },
+            "description": "Команды и навыки, которые CLI может выполнить; пусто без `slash_catalog_v1`."
+          },
           "id": {
             "type": "string"
           },

@@ -1872,6 +1872,83 @@ async fn machine_report_cli_versions_reach_the_machine_snapshot(pool: PgPool) {
     assert!(harness["update_command"].is_null());
 }
 
+// Каталог slash-команд проходит через боевой composed-роутер: отчёт воркера -> хаб -> снимок.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn machine_report_slash_catalog_reaches_the_machine_snapshot(pool: PgPool) {
+    use canterlot_hub::session::CAPABILITY_SLASH_CATALOG_V1;
+    use canterlot_proto::worker::v1::{CatalogEntry, HarnessInfo, MachineReport};
+
+    let f = Fixture::new(pool).await;
+    let report = MachineReport {
+        worker_version: "updated".into(),
+        os: "linux".into(),
+        max_attachment_bytes: canterlot_proto::limits::MAX_ATTACHMENT_BYTES,
+        max_attachments_per_input: canterlot_proto::limits::MAX_ATTACHMENTS_PER_INPUT as u32,
+        harnesses: vec![HarnessInfo {
+            harness: "codex".into(),
+            provider: "codex".into(),
+            title: "Codex".into(),
+            catalog: vec![
+                CatalogEntry {
+                    name: "review".into(),
+                    description: "Review changes".into(),
+                    kind: "command".into(),
+                    argument_hint: "[file]".into(),
+                },
+                CatalogEntry {
+                    name: "example-skill".into(),
+                    description: "Style rules".into(),
+                    kind: "skill".into(),
+                    argument_hint: String::new(),
+                },
+            ],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    canterlot_hub::machine_info::apply_report_with_capabilities(
+        &f.pool,
+        f.owner,
+        f.machine,
+        &report,
+        &[CAPABILITY_SLASH_CATALOG_V1.to_owned()],
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+
+    let path = format!("/api/v1/machines/{}", f.machine);
+    let machine = f.request(Method::GET, &path, None, 200).await;
+    let catalog = &machine["harnesses"][0]["catalog"];
+    assert_eq!(catalog.as_array().unwrap().len(), 2);
+    assert_eq!(catalog[0]["name"], "review");
+    assert_eq!(catalog[0]["kind"], "command");
+    assert_eq!(catalog[0]["argument_hint"], "[file]");
+    assert_eq!(catalog[1]["name"], "example-skill");
+    assert_eq!(catalog[1]["kind"], "skill");
+
+    // Без возможности воркер шлёт пустой каталог: в снимке пустой массив, отказ не ломает API.
+    let mut old = report;
+    for h in &mut old.harnesses {
+        h.catalog.clear();
+    }
+    canterlot_hub::machine_info::apply_report_with_capabilities(
+        &f.pool,
+        f.owner,
+        f.machine,
+        &old,
+        &[],
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    let machine = f.request(Method::GET, &path, None, 200).await;
+    assert_eq!(
+        machine["harnesses"][0]["catalog"].as_array().unwrap().len(),
+        0
+    );
+}
+
 // Картинки и окно контекста у OpenCode свои у каждой модели: отчёт доходит до формы как есть.
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn machine_report_keeps_the_per_model_facts(pool: PgPool) {

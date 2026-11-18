@@ -2237,6 +2237,16 @@ export interface components {
             /** Format: int64 */
             watchdog_minutes?: number | null;
         };
+        CatalogView: {
+            /** @description Подсказка аргумента, если CLI её сообщает. */
+            argument_hint: string;
+            /** @description Короткое описание для подсказки в меню. */
+            description: string;
+            /** @description `command` или `skill`. */
+            kind: string;
+            /** @description Имя без ведущего слеша: вставляется как `/<name> `. */
+            name: string;
+        };
         ClaudeHistoryList: {
             histories: components["schemas"]["ClaudeHistoryView"][];
         };
@@ -2758,6 +2768,8 @@ export interface components {
             title: string;
         };
         HarnessView: {
+            /** @description Команды и навыки, которые CLI может выполнить; пусто без `slash_catalog_v1`. */
+            catalog: components["schemas"]["CatalogView"][];
             id: string;
             images: boolean;
             /** @description Установленная версия CLI; `null`, если воркер старше `cli_versions_v1`. */
