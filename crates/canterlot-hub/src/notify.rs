@@ -1980,7 +1980,7 @@ mod tests {
             stale: false,
         };
         // Расписание держит «постановка» (она запрашивает его первым).
-        let mut enqueue = pool.begin().await.unwrap();
+        let mut enqueue = crate::db::begin(&pool).await.unwrap();
         sqlx::query("select id from schedules where id=$1 for update")
             .bind(schedule)
             .execute(&mut *enqueue)
