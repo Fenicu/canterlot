@@ -632,27 +632,28 @@ async fn enqueue_auth_in_tx(
 }
 
 /// Несработавший запуск расписания: пуш владельцу не чаще раза в час на
-/// расписание (катящееся окно, проверка в той же транзакции, что и запись
-/// исхода). Вызывать только для исхода `failed`.
+/// расписание. Ограничитель — долговечная метка `last_failure_push_at` на
+/// строке расписания (15): проверка по времени постановки пропускала бы
+/// задержанный первый пуш и второй в пределах часа. Проверка и запись метки
+/// идут в той же транзакции, что и исход. Вызывать только для `failed`.
 pub(crate) async fn enqueue_schedule_failure_in_tx(
     conn: &mut PgConnection,
     schedule_id: Uuid,
     schedule_name: &str,
     reason: &str,
 ) -> Result<bool, sqlx::Error> {
-    let recent: bool = sqlx::query_scalar(
-        "select exists(select 1 from owner_pushes where kind='schedule_failed'
-          and payload->>'schedule_id' = $1
-          and created_at > clock_timestamp() - make_interval(secs => $2))",
+    // Замок расписания: параллельные исходы одного расписания упорядочены.
+    let last: Option<DateTime<Utc>> = sqlx::query_scalar(
+        "select last_failure_push_at from schedules where id=$1 for update",
     )
-    .bind(schedule_id.to_string())
-    .bind(SCHEDULE_FAILURE_WINDOW.num_seconds() as f64)
-    .fetch_one(&mut *conn)
-    .await?;
-    if recent {
+    .bind(schedule_id)
+    .fetch_optional(&mut *conn)
+    .await?
+    .flatten();
+    if last.is_some_and(|at| Utc::now() - at < SCHEDULE_FAILURE_WINDOW) {
         return Ok(false);
     }
-    enqueue_auth_in_tx(
+    let pushed = enqueue_auth_in_tx(
         conn,
         KIND_SCHEDULE_FAILED,
         &format!("{KIND_SCHEDULE_FAILED}:{schedule_id}:{}", Uuid::now_v7()),
@@ -662,7 +663,19 @@ pub(crate) async fn enqueue_schedule_failure_in_tx(
             "reason": reason,
         }),
     )
-    .await
+    .await?;
+    if pushed {
+        // Метка двигается только вместе с постановкой: задержанный пуш
+        // не сжимает окно следующего.
+        sqlx::query(
+            "update schedules set last_failure_push_at=clock_timestamp()
+              where id=$1",
+        )
+        .bind(schedule_id)
+        .execute(&mut *conn)
+        .await?;
+    }
+    Ok(pushed)
 }
 
 /// Человекочитаемая причина несработавшего запуска для пуша.
