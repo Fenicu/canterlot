@@ -445,9 +445,6 @@
     "web/e2e/ui/api-error-shots.spec.ts": {
       "ts_wait": 3
     },
-    "web/e2e/ui/block-fold.spec.ts": {
-      "ts_setTimeout": 1
-    },
     "web/e2e/ui/bookmarks.spec.ts": {
       "ts_wait": 1
     },
@@ -560,7 +557,7 @@
       "ts_wait": 1
     },
     "web/e2e/ui/sign-in.spec.ts": {
-      "ts_wait": 4
+      "ts_wait": 2
     },
     "web/e2e/ui/small-layout-fixes.spec.ts": {
       "ts_skip": 2,
