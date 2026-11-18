@@ -221,6 +221,13 @@ async fn seed_everything(f: &Fixture, conversation: Uuid, machine: Uuid, group: 
     .await;
     exec(
         pool,
+        "insert into conversation_goals(conversation_id,generation,objective,status)
+         values($1,1,'goal-' || $1::text,'active')",
+        &[conversation],
+    )
+    .await;
+    exec(
+        pool,
         "insert into compactions(id,conversation_id,execution_id,trigger,pre_tokens,ok,created_seq,finished_at)
          values($1,$2,$3,'auto',1,true,1,now())",
         &[compaction, conversation, execution],
@@ -452,6 +459,7 @@ async fn seed_everything(f: &Fixture, conversation: Uuid, machine: Uuid, group: 
     .map(Uuid::to_string)
     .chain([
         format!("native-{conversation}"),
+        format!("goal-{conversation}"),
         format!("секретный заголовок {conversation}"),
     ])
     .collect();
