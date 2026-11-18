@@ -362,6 +362,11 @@ pub async fn on_settled_in_tx(
             ) {
                 return Ok(());
             }
+            // Тот же непрерывный молчащий ход уже получил пуш о зависании: возврат связи
+            // и греющееся окно наблюдения не должны добавлять второй, общий.
+            if same_hang_silence(conn, conversation_id, facts.last_event_at).await? {
+                return Ok(());
+            }
             // Сбой пушится один раз на эпизод: дребезг состояния внутри того же
             // исполнения и причины не повторяет пуш.
             enqueue_failure_in_tx(conn, conversation_id, state, fingerprint, evidence).await?;
@@ -412,6 +417,28 @@ pub async fn on_settled_in_tx(
         clear_owner_waiting(conn, conversation_id, owner_mark).await?;
     }
     Ok(())
+}
+
+/// Открытый эпизод зависания текущего хода, а прогресса потока после него не было:
+/// это та же тишина, о которой владельцу уже сказал пуш зависания.
+async fn same_hang_silence(
+    conn: &mut PgConnection,
+    conversation_id: Uuid,
+    last_event_at: Option<DateTime<Utc>>,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "select exists(
+            select 1 from hung_rescues h
+            join queue_state q on q.conversation_id=h.conversation_id and q.run_slot='running'
+            join inputs i on i.id=q.run_slot_input_id
+            where h.conversation_id=$1 and h.episode_active and h.turn_id=i.command_id
+              and h.progress_mark is not null
+              and ($2::timestamptz is null or $2 <= h.progress_mark))",
+    )
+    .bind(conversation_id)
+    .bind(last_event_at)
+    .fetch_one(&mut *conn)
+    .await
 }
 
 /// Пуш о сбое привязан к эпизоду: исполнение, состояние и причина. Внутри эпизода

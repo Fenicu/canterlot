@@ -9,10 +9,19 @@ create table hung_rescues (
   -- Прогресс потока на момент открытия эпизода: эпизод закрывается только более
   -- новым прогрессом или концом хода, а не любым провалом условия verdict.
   progress_mark timestamptz,
+  -- Отметка прогресса журнала сессии (max committed_seq) на момент открытия эпизода:
+  -- кнопки карточки отказывают, если журнал ушёл дальше.
+  progress_checkpoint bigint,
+  -- Ввод очереди, на который смотрит кнопка «Влить» карточки.
+  card_input_id uuid,
   episode_no integer not null default 0,
   episode_id uuid,
   episode_active boolean not null default false,
-  -- Автоматическое действие или уведомление этого хода уже было.
+  -- Ход уже предупредил владельца или получил действие: второе зависание того же хода
+  -- получает только пуш. Сам по себе ввода не создаёт ни для какой сессии.
+  alerted boolean not null default false,
+  -- Автоматическое спасение подтверждено квитанцией воркера. Только после него
+  -- родитель получает заметку; режим `alert` этот признак не ставит никогда.
   rescued boolean not null default false,
   second_notified boolean not null default false,
   -- Владелец или гонка закрыли карточку эпизода.

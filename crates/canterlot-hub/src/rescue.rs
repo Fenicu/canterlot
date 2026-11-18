@@ -156,8 +156,16 @@ pub fn plan(
     }
 }
 
-/// Ожидающее действие: разговор, действие, владелец, эпизод и ход.
-type PendingRow = (Uuid, Option<String>, Uuid, Option<Uuid>, Option<Uuid>);
+/// Ожидающее действие: разговор, действие, владелец, эпизод, ход и причина закрытия
+/// карточки (`None` у автоматического действия, `owner_*` у действия владельца).
+type PendingRow = (
+    Uuid,
+    Option<String>,
+    Uuid,
+    Option<Uuid>,
+    Option<Uuid>,
+    Option<String>,
+);
 /// Эпизод для карточки: его номер, активность, причина закрытия и ход.
 type EpisodeRow = (Option<Uuid>, bool, Option<String>, Option<Uuid>);
 
@@ -168,6 +176,7 @@ struct Row {
     progress_mark: Option<DateTime<Utc>>,
     episode_no: i32,
     episode_active: bool,
+    alerted: bool,
     rescued: bool,
     second_notified: bool,
     obs_execution_id: Option<Uuid>,
@@ -184,7 +193,7 @@ async fn row_in_tx(conn: &mut PgConnection, conversation_id: Uuid) -> Result<Row
         .await?;
     sqlx::query_as(
         "select execution_id,turn_id,progress_mark,episode_no,episode_active,
-                rescued,second_notified,obs_execution_id,obs_since,obs_last_at,obs_samples,pending_command_id
+                alerted,rescued,second_notified,obs_execution_id,obs_since,obs_last_at,obs_samples,pending_command_id
          from hung_rescues where conversation_id=$1",
     )
     .bind(conversation_id)
@@ -369,7 +378,7 @@ pub async fn evaluate_in_tx(
         // Новый ход: счётчики хода обнуляются, номер эпизода идёт дальше.
         sqlx::query(
             "update hung_rescues set execution_id=$2,turn_id=$3,progress_mark=null,
-                 episode_active=false,rescued=false,second_notified=false,resolved=null,
+                 episode_active=false,alerted=false,rescued=false,second_notified=false,resolved=null,
                  pending_kind=null,pending_command_id=null,pending_action=null,
                  pending_since=null,updated_at=$4 where conversation_id=$1",
         )
@@ -383,6 +392,7 @@ pub async fn evaluate_in_tx(
         row.turn_id = Some(turn_id);
         row.progress_mark = None;
         row.episode_active = false;
+        row.alerted = false;
         row.rescued = false;
         row.second_notified = false;
     }
@@ -418,29 +428,40 @@ pub async fn evaluate_in_tx(
         .bind(conversation_id)
         .fetch_one(&mut *conn)
         .await?;
-    let open_episode = |active: bool, rescued: bool, second: bool| {
+    let queued: Option<Uuid> = sqlx::query_scalar(
+        "select id from inputs where conversation_id=$1 and state='queued' and not service_note
+         order by input_seq limit 1",
+    )
+    .bind(conversation_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let checkpoint = i64::try_from(inputs.hang.progress_checkpoint).unwrap_or(i64::MAX);
+    let open_episode = |second: bool, card_input: Option<Uuid>| {
         let progress = inputs.last_event_at.or(Some(hung.silent_since));
         sqlx::query(
-            "update hung_rescues set episode_no=$2,episode_id=$3,episode_active=$4,rescued=$5,
-                 second_notified=$6,resolved=null,progress_mark=$7,updated_at=$8
+            "update hung_rescues set episode_no=$2,episode_id=$3,episode_active=true,alerted=true,
+                 second_notified=$4,resolved=null,progress_mark=$5,progress_checkpoint=$6,
+                 card_input_id=$7,updated_at=$8
              where conversation_id=$1",
         )
         .bind(conversation_id)
         .bind(episode_no)
         .bind(episode_id)
-        .bind(active)
-        .bind(rescued)
         .bind(second)
         .bind(progress)
+        .bind(checkpoint)
+        .bind(card_input)
         .bind(now)
     };
 
-    if row.rescued {
-        // Второе зависание того же хода: автоматических действий больше нет.
-        open_episode(true, true, true).execute(&mut *conn).await?;
+    if row.alerted || row.rescued {
+        // Второе зависание того же хода: автоматических действий больше нет, только пуш.
+        // Заметка родителю нужна лишь после подтверждённого автоматического спасения:
+        // предупреждение само не создаёт ввода ни в одной сессии.
+        open_episode(true, queued).execute(&mut *conn).await?;
         if !row.second_notified {
             notify::on_hung_in_tx(conn, conversation_id, turn_id, true).await?;
-            if parent.is_some() {
+            if parent.is_some() && row.rescued {
                 let text = format!(
                     "[canterlot] Session {conversation_id} hung in generation again after the \
                      rescue; the turn is still hung and was not interrupted a second time. \
@@ -457,13 +478,6 @@ pub async fn evaluate_in_tx(
             .bind(machine_id)
             .fetch_one(&mut *conn)
             .await?;
-    let queued: Option<Uuid> = sqlx::query_scalar(
-        "select id from inputs where conversation_id=$1 and state='queued' and not service_note
-         order by input_seq limit 1",
-    )
-    .bind(conversation_id)
-    .fetch_optional(&mut *conn)
-    .await?;
     let rule_active: bool = sqlx::query_scalar(
         "select exists(select 1 from nudge_rules where conversation_id=$1
                        and enabled and state in ('watching','pending'))",
@@ -533,7 +547,7 @@ pub async fn evaluate_in_tx(
     match attempt {
         Attempt::Retry => Ok(RescueAction::None),
         Attempt::Done { action, pending } => {
-            open_episode(true, true, false).execute(&mut *conn).await?;
+            open_episode(false, queued).execute(&mut *conn).await?;
             if let Some((kind, command_id)) = pending {
                 sqlx::query(
                     "update hung_rescues set pending_kind=$2,pending_command_id=$3,
@@ -550,7 +564,7 @@ pub async fn evaluate_in_tx(
             Ok(action)
         }
         Attempt::Notice => {
-            open_episode(true, true, false).execute(&mut *conn).await?;
+            open_episode(false, queued).execute(&mut *conn).await?;
             let mut event = json!({
                 "kind": "turn_hung",
                 "turn_hung_notice": true,
@@ -845,9 +859,9 @@ pub async fn on_interrupt_status_in_tx(
     correlation_id: Uuid,
 ) -> Result<(), sqlx::Error> {
     lock_queue_of_pending(conn, command_id).await?;
-    let Some((conversation_id, action, owner_id, episode, turn)): Option<PendingRow> =
+    let Some((conversation_id, action, owner_id, episode, turn, resolved)): Option<PendingRow> =
         sqlx::query_as(
-            "select h.conversation_id,h.pending_action,c.owner_id,h.episode_id,h.turn_id
+            "select h.conversation_id,h.pending_action,c.owner_id,h.episode_id,h.turn_id,h.resolved
          from hung_rescues h join conversations c on c.id=h.conversation_id
          where h.pending_command_id=$1 and h.pending_kind='interrupt'
          for update of h",
@@ -861,14 +875,19 @@ pub async fn on_interrupt_status_in_tx(
     match status {
         "sent_to_agent" => return Ok(()),
         "acknowledged" | "completed" => {
+            // Автоматическое спасение подтверждено; прерывание по кнопке владельца
+            // спасением не считается и родителю ничего не пишет.
+            let automatic = resolved.is_none();
             sqlx::query(
                 "update hung_rescues set pending_kind=null,pending_command_id=null,
-                     pending_action=null,pending_since=null,last_outcome=$2,updated_at=$3
+                     pending_action=null,pending_since=null,last_outcome=$2,
+                     rescued=rescued or $4,updated_at=$3
                  where conversation_id=$1",
             )
             .bind(conversation_id)
             .bind(action.as_deref())
             .bind(now)
+            .bind(automatic)
             .execute(&mut *conn)
             .await?;
             let parent: Option<Uuid> =
@@ -886,7 +905,7 @@ pub async fn on_interrupt_status_in_tx(
                 .await?;
                 queued
             };
-            if parent.is_some() && !continues {
+            if automatic && parent.is_some() && !continues {
                 let text = format!(
                     "[canterlot] Session {conversation_id} hung in generation and was \
                      interrupted; continue it from where it stopped."
@@ -913,12 +932,19 @@ pub async fn on_interrupt_status_in_tx(
             sqlx::query(
                 "update hung_rescues set pending_kind=null,pending_command_id=null,
                      pending_action=null,pending_since=null,last_outcome='refused',
-                     episode_active=false,updated_at=$2 where conversation_id=$1",
+                     resolved='refused',updated_at=$2 where conversation_id=$1",
             )
             .bind(conversation_id)
             .bind(now)
             .execute(&mut *conn)
             .await?;
+            // Эпизод остаётся занятым до нового прогресса: та же тишина не открывает
+            // второй эпизод. Владельцу об отказе автоматического действия — один пуш.
+            if resolved.is_none()
+                && let Some(turn) = turn
+            {
+                notify::on_hung_in_tx(conn, conversation_id, turn, false).await?;
+            }
             note_in_tx(
                 conn,
                 conversation_id,
@@ -935,6 +961,9 @@ pub async fn on_interrupt_status_in_tx(
     Ok(())
 }
 
+/// Ожидающее вливание: разговор, владелец, эпизод, ход и причина закрытия карточки.
+type SteerRow = (Uuid, Uuid, Option<Uuid>, Option<Uuid>, Option<String>);
+
 /// Квитанция на вливание: отложенное или отклонённое вливание не считается спасением,
 /// ввод остаётся в очереди за зависшим ходом, и это видно в ленте.
 pub async fn on_steer_receipt_in_tx(
@@ -945,9 +974,9 @@ pub async fn on_steer_receipt_in_tx(
     correlation_id: Uuid,
 ) -> Result<(), sqlx::Error> {
     lock_queue_of_pending(conn, command_id).await?;
-    let Some((conversation_id, owner_id, episode)): Option<(Uuid, Uuid, Option<Uuid>)> =
+    let Some((conversation_id, owner_id, episode, turn, resolved)): Option<SteerRow> =
         sqlx::query_as(
-            "select h.conversation_id,c.owner_id,h.episode_id
+            "select h.conversation_id,c.owner_id,h.episode_id,h.turn_id,h.resolved
              from hung_rescues h join conversations c on c.id=h.conversation_id
              where h.pending_command_id=$1 and h.pending_kind='steer' for update of h",
         )
@@ -957,17 +986,27 @@ pub async fn on_steer_receipt_in_tx(
     else {
         return Ok(());
     };
+    let automatic = resolved.is_none();
     sqlx::query(
         "update hung_rescues set pending_kind=null,pending_command_id=null,pending_action=null,
-             pending_since=null,last_outcome=$2,episode_active=case when $3 then episode_active else false end,
+             pending_since=null,last_outcome=$2,
+             rescued=rescued or ($3 and $5),
+             resolved=case when $3 then resolved else 'refused' end,
              updated_at=$4 where conversation_id=$1",
     )
     .bind(conversation_id)
     .bind(if delivered { "steered" } else { "refused" })
     .bind(delivered)
     .bind(now)
+    .bind(automatic)
     .execute(&mut *conn)
     .await?;
+    if !delivered
+        && automatic
+        && let Some(turn) = turn
+    {
+        notify::on_hung_in_tx(conn, conversation_id, turn, false).await?;
+    }
     let (text, kind) = if delivered {
         ("Ход завис в генерации, влито и продолжено", "steered")
     } else {

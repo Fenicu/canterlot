@@ -186,6 +186,22 @@ async fn tick(pool: &PgPool, scene: &Scene, at: DateTime<Utc>) {
 }
 
 /// Первая выборка окна: сама по себе verdict не даёт.
+/// Выборка и пересчёт в заданном режиме.
+async fn tick_mode(pool: &PgPool, scene: &Scene, at: DateTime<Utc>, mode: HungRescue) {
+    sample(pool, scene, at, true, 0).await;
+    refresh_with(pool, scene, at, mode).await;
+}
+
+/// Новый прогресс потока: событие исполнения в момент `at`.
+async fn progress(pool: &PgPool, scene: &Scene, at: DateTime<Utc>) {
+    sqlx::query("update executions set last_event_at=$2 where id=$1")
+        .bind(scene.execution)
+        .bind(at)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
 async fn warm(pool: &PgPool, scene: &Scene) {
     tick(pool, scene, scene.base - TimeDelta::seconds(15)).await;
 }
@@ -766,11 +782,11 @@ async fn the_rescue_is_confirmed_by_the_worker_receipt_and_a_refusal_is_visible(
         "a refusal is not a rescue"
     );
     assert!(parent_jobs(&pool, &scene).await.is_empty());
-    // Отказ закрыл эпизод; следующая тишина этого хода уже уведомляет, а не прерывает снова.
+    // Отказ уведомляет владельца один раз и не открывает второй эпизод в той же тишине.
     tick(&pool, &scene, scene.base + TimeDelta::seconds(10)).await;
     assert_eq!(commands_of(&pool, &scene, "interrupt").await.len(), 1);
     assert_eq!(pushes(&pool, &scene).await.len(), 1);
-    assert!(pushes(&pool, &scene).await[0].0.ends_with(":second"));
+    assert!(pushes(&pool, &scene).await[0].0.ends_with(":first"));
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
@@ -1123,4 +1139,159 @@ async fn samples_from_before_the_hub_started_do_not_count(pool: PgPool) {
     );
     tick(&pool, &scene, scene.base + TimeDelta::seconds(20)).await;
     assert_eq!(harmful(&pool, &scene).await, 1);
+}
+
+/// Режим `alert` ни при каких обстоятельствах сам не создаёт ввод ни в одной сессии:
+/// ни заметки родителю, ни толчка, ни вливания, ни прерывания. Второе зависание того
+/// же хода (после прогресса) тоже только карточка и пуш.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn alert_mode_never_creates_an_input_for_any_session(pool: PgPool) {
+    let scene = hung_scene(&pool, "claude_code", true).await;
+    let parent = scene.parent.unwrap();
+    // Родитель простаивает: заметка разбудила бы его новым ходом.
+    let inputs_before: i64 =
+        sqlx::query_scalar("select count(*) from inputs where conversation_id=$1")
+            .bind(parent)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    tick_mode(
+        &pool,
+        &scene,
+        scene.base - TimeDelta::seconds(15),
+        HungRescue::Alert,
+    )
+    .await;
+    tick_mode(&pool, &scene, scene.base, HungRescue::Alert).await;
+    assert_eq!(pushes(&pool, &scene).await.len(), 1, "the first alert");
+    // Ребёнок продолжил и завис снова.
+    let resumed = scene.base + TimeDelta::minutes(1);
+    progress(&pool, &scene, resumed).await;
+    tick_mode(&pool, &scene, resumed, HungRescue::Alert).await;
+    let second = resumed + TimeDelta::minutes(11);
+    tick_mode(
+        &pool,
+        &scene,
+        second - TimeDelta::seconds(10),
+        HungRescue::Alert,
+    )
+    .await;
+    tick_mode(&pool, &scene, second, HungRescue::Alert).await;
+    let all = pushes(&pool, &scene).await;
+    assert_eq!(
+        all.len(),
+        2,
+        "the second hang still alerts the owner: {all:?}"
+    );
+    assert_eq!(harmful(&pool, &scene).await, 0);
+    assert!(
+        parent_jobs(&pool, &scene).await.is_empty(),
+        "no parent note job"
+    );
+    let pending_note: i64 = sqlx::query_scalar(
+        "select count(*) from hung_rescues where conversation_id=$1 and parent_note is not null",
+    )
+    .bind(scene.seed.conversation_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(pending_note, 0);
+    let inputs_after: i64 =
+        sqlx::query_scalar("select count(*) from inputs where conversation_id=$1")
+            .bind(parent)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(inputs_after, inputs_before, "an idle parent is not woken");
+    let rescued: bool =
+        sqlx::query_scalar("select rescued from hung_rescues where conversation_id=$1")
+            .bind(scene.seed.conversation_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(!rescued, "an alert is not an automatic rescue");
+}
+
+/// Один непрерывный зависший ход шлёт владельцу один пуш: обрыв связи в той же тишине
+/// и обычный `stalled` после переподключения второго пуша не дают.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn one_continuous_hang_sends_one_push_across_a_reconnect(pool: PgPool) {
+    let scene = hung_scene(&pool, "claude_code", false).await;
+    tick_mode(
+        &pool,
+        &scene,
+        scene.base - TimeDelta::seconds(15),
+        HungRescue::Alert,
+    )
+    .await;
+    tick_mode(&pool, &scene, scene.base, HungRescue::Alert).await;
+    assert_eq!(pushes(&pool, &scene).await.len(), 1);
+    // Связь пропала на полчаса той же тишины и вернулась: окно наблюдения греется заново.
+    sqlx::query("update machines set availability='unavailable',availability_at=$2 where id=$1")
+        .bind(scene.seed.machine_id)
+        .bind(scene.base + TimeDelta::minutes(5))
+        .execute(&pool)
+        .await
+        .unwrap();
+    refresh_with(
+        &pool,
+        &scene,
+        scene.base + TimeDelta::minutes(30),
+        HungRescue::Alert,
+    )
+    .await;
+    sqlx::query("update machines set availability='available',availability_at=$2 where id=$1")
+        .bind(scene.seed.machine_id)
+        .bind(scene.base + TimeDelta::minutes(31))
+        .execute(&pool)
+        .await
+        .unwrap();
+    tick_mode(
+        &pool,
+        &scene,
+        scene.base + TimeDelta::minutes(32),
+        HungRescue::Alert,
+    )
+    .await;
+    let all = pushes(&pool, &scene).await;
+    assert_eq!(
+        all.len(),
+        1,
+        "no generic stalled push for the same silence: {all:?}"
+    );
+    tick_mode(
+        &pool,
+        &scene,
+        scene.base + TimeDelta::minutes(33),
+        HungRescue::Alert,
+    )
+    .await;
+    assert_eq!(pushes(&pool, &scene).await.len(), 1);
+}
+
+/// Отказ воркера не открывает второй эпизод без нового прогресса.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_refusal_does_not_open_a_second_episode_without_progress(pool: PgPool) {
+    let scene = hung_scene(&pool, "claude_code", true).await;
+    warm(&pool, &scene).await;
+    tick(&pool, &scene, scene.base).await;
+    let command = commands_of(&pool, &scene, "interrupt").await[0].0;
+    confirm_interrupt(&pool, command, "turn_mismatch").await;
+    let episode = episode_of(&pool, &scene).await;
+    for step in [10, 20, 30] {
+        tick(&pool, &scene, scene.base + TimeDelta::seconds(step)).await;
+    }
+    assert_eq!(episode_of(&pool, &scene).await, episode, "same episode");
+    assert_eq!(commands_of(&pool, &scene, "interrupt").await.len(), 1);
+    let all = pushes(&pool, &scene).await;
+    assert_eq!(all.len(), 1, "one push for the whole silence: {all:?}");
+    // Новый прогресс закрывает эпизод; следующая тишина — новая.
+    let resumed = scene.base + TimeDelta::minutes(2);
+    progress(&pool, &scene, resumed).await;
+    tick(&pool, &scene, resumed).await;
+    let second = resumed + TimeDelta::minutes(11);
+    tick(&pool, &scene, second - TimeDelta::seconds(10)).await;
+    tick(&pool, &scene, second).await;
+    assert_ne!(episode_of(&pool, &scene).await, episode);
+    assert_eq!(pushes(&pool, &scene).await.len(), 2);
 }
