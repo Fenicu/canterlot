@@ -2721,8 +2721,20 @@ async fn a_late_interrupt_receipt_does_not_deadlock_with_conversation_deletion(
                 .await
         })
     };
-    // Квитанция успела дойти до своей первой блокировки.
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    // Квитанция дошла до блокировки и ждёт: опрос состояния базы, а не пауза.
+    let mut waiting = 0_i64;
+    for _ in 0..5000 {
+        waiting = sqlx::query_scalar(
+            "select count(*) from pg_stat_activity
+             where datname = current_database() and wait_event_type = 'Lock'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        if waiting > 0 {
+            break;
+        }
+    }
+    assert!(waiting > 0, "the receipt never reached a lock wait");
     sqlx::query("delete from hung_rescues where conversation_id=$1")
         .bind(seed.conversation_id)
         .execute(&mut *deleting)

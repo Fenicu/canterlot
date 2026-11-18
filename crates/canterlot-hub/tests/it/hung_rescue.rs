@@ -1017,7 +1017,6 @@ async fn tick_until_episode(pool: &PgPool, scene: &Scene) {
             .await
             .unwrap();
         for _ in 0..2 {
-            tokio::time::sleep(Duration::from_millis(15)).await;
             tick(pool, scene, Utc::now()).await;
         }
         let opened: Option<Uuid> =
