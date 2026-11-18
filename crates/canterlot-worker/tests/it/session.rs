@@ -2234,8 +2234,7 @@ async fn hello_and_heartbeat_carry_the_machine_clock() {
 }
 
 #[tokio::test]
-async fn machine_watch_goes_out_at_once_when_free_disk_crosses_the_warn_threshold() {
-    use canterlot_proto::worker::v1::control_up::Msg;
+async fn machine_watch_goes_out_at_once_when_free_disk_crosses_the_warn_threshold() {    use canterlot_proto::worker::v1::control_up::Msg;
     assert!(canterlot_worker::session::OPTIONAL_CAPABILITIES.contains(&"watchdog_v1"));
     let (mut hub, store) = ProtocolHub::start(Behavior {
         capabilities: vec!["pilot_v1".into(), "watchdog_v1".into()],
@@ -2264,5 +2263,98 @@ async fn machine_watch_goes_out_at_once_when_free_disk_crosses_the_warn_threshol
         watch.leaked.is_empty(),
         "no released executions in a fresh store"
     );
+    stop_worker(stop, join).await;
+}
+
+#[tokio::test]
+async fn precheck_backpressure_second_busy_first_intact() {
+    use canterlot_proto::worker::v1::{SchedulePrecheck, control_up, precheck_result};
+    use crate::support::{Behavior, Observed};
+    // Пауза чтения после первого батча держит исходящий канал воркера
+    // забитым: ответ первой проверки висит в `precheck_outbound`, пока
+    // вторая просьба уже пришла. Без зарезервированного слота вторая
+    // проверка стартовала бы поверх первой и затёрла её ответ.
+    // Большой журнал гарантирует настоящий затор: мелкие кадры уходят
+    // в буферы TCP, а 16 МБ батчей — нет.
+    let (mut hub, store) = ProtocolHub::start(Behavior {
+        capabilities: vec!["schedule_precheck_v1".into()],
+        pause_after_first_batch: Duration::from_secs(3),
+        ..Default::default()
+    })
+    .await;
+    hub.config.timers.range_ack = Duration::from_secs(5);
+    hub.config.timers.heartbeat_ack = Duration::from_secs(5);
+    let path = hub.config.data_dir.clone();
+    let store = seed_backlog(store, &path, 80, 200_000);
+    hub.config.execution.allowed_workdir_roots = vec![hub.config.data_dir.clone()];
+    let workdir = hub.config.data_dir.to_string_lossy().into_owned();
+    let (stop, mut state, join) = start(hub.config.clone(), store);
+    wait_state(&mut state, SessionState::Live).await;
+    let first = SchedulePrecheck {
+        attempt_id: Uuid::now_v7().to_string(),
+        workdir: workdir.clone(),
+        command: "true".into(),
+        timeout_seconds: 30,
+    };
+    let second = SchedulePrecheck {
+        attempt_id: Uuid::now_v7().to_string(),
+        workdir,
+        command: "true".into(),
+        timeout_seconds: 30,
+    };
+    let first_id = first.attempt_id.clone();
+    let second_id = second.attempt_id.clone();
+    hub.send(ControlDown {
+        msg: Some(control_down::Msg::SchedulePrecheck(first)),
+    })
+    .await;
+    hub.send(ControlDown {
+        msg: Some(control_down::Msg::SchedulePrecheck(second)),
+    })
+    .await;
+    let mut first_reply = None;
+    let mut second_reply = None;
+    let mut seen = Vec::new();
+    timeout(Duration::from_secs(20), async {
+        loop {
+            if first_reply.is_some() && second_reply.is_some() {
+                break;
+            }
+            let event = hub.event().await;
+            let Observed::Control(message) = event else {
+                continue;
+            };
+            let Some(control_up::Msg::PrecheckResult(reply)) = message.msg else {
+                continue;
+            };
+            seen.push(reply.attempt_id.clone());
+            if reply.attempt_id == first_id {
+                first_reply = Some(reply);
+            } else if reply.attempt_id == second_id {
+                second_reply = Some(reply);
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("both precheck replies arrive despite backpressure; seen: {seen:?}"));
+    let first_outcome = first_reply
+        .expect("first reply present")
+        .outcome
+        .expect("first outcome present");
+    let second_outcome = second_reply
+        .expect("second reply present")
+        .outcome
+        .expect("second outcome present");
+    match first_outcome {
+        precheck_result::Outcome::Finished(finished) => {
+            assert_eq!(finished.exit_code, 0, "{}", finished.output_tail);
+            assert!(!finished.timed_out);
+        }
+        other => panic!("first reply intact: {other:?}"),
+    }
+    match second_outcome {
+        precheck_result::Outcome::Error(error) => assert_eq!(error.reason, "busy"),
+        other => panic!("second request refused while reply pending: {other:?}"),
+    }
     stop_worker(stop, join).await;
 }

@@ -1445,9 +1445,11 @@ impl Worker {
         let probe_permits = crate::machine::probe::process_permits();
         type ProbeFuture = Pin<Box<dyn Future<Output = PathProbe> + Send>>;
         let mut probe_operation: Option<ProbeFuture> = None;
-        // Предпроверка расписания: одна попытка за раз, ответ только для неё.
+        // Предпроверка расписания: одна попытка за раз с зарезервированным
+        // слотом ответа; новая просьба при занятом слоте получает `busy`,
+        // готовый ответ никогда не затирается.
         let mut precheck_next: Option<SchedulePrecheck> = None;
-        let mut precheck_outbound: Option<ControlUp> = None;
+        let mut precheck_outbound: VecDeque<ControlUp> = VecDeque::new();
         type PrecheckFuture = Pin<Box<dyn Future<Output = PrecheckResult> + Send>>;
         let mut precheck_operation: Option<PrecheckFuture> = None;
         // Чтение инструкций владельца: тоже только последний запрос.
@@ -1674,6 +1676,7 @@ impl Worker {
                 }));
             }
             if precheck_operation.is_none()
+                && precheck_outbound.is_empty()
                 && let Some(request) = precheck_next.take()
             {
                 let roots = self.config.execution.allowed_workdir_roots.clone();
@@ -1767,7 +1770,7 @@ impl Worker {
                 || histories_outbound.is_some()
                 || owner_outbound.is_some()
                 || !probe_outbound.is_empty()
-                || precheck_outbound.is_some()
+                || !precheck_outbound.is_empty()
                 || lease_outbound.is_some()
                 || watch_outbound.is_some()
                 || report_outbound.is_some()
@@ -1804,14 +1807,15 @@ impl Worker {
                             }
                         }
                         Some(control_down::Msg::SchedulePrecheck(request)) if precheck_enabled => {
-                            if precheck_next.is_some() || precheck_operation.is_some() {
-                                // Завершённый, но ещё не отправленный ответ нельзя затирать
-                                // чужим `busy`: первая попытка тогда молча потеряется.
-                                if precheck_outbound.is_none() {
-                                    let mut reply = crate::machine::precheck::error("busy");
-                                    reply.attempt_id = request.attempt_id;
-                                    precheck_outbound = Some(ControlUp{msg:Some(control_up::Msg::PrecheckResult(reply))});
-                                }
+                            if precheck_next.is_some()
+                                || precheck_operation.is_some()
+                                || !precheck_outbound.is_empty()
+                            {
+                                // Слот ответа зарезервирован: новая просьба получает
+                                // `busy` в очередь, готовый ответ не затирается.
+                                let mut reply = crate::machine::precheck::error("busy");
+                                reply.attempt_id = request.attempt_id;
+                                precheck_outbound.push_back(ControlUp{msg:Some(control_up::Msg::PrecheckResult(reply))});
                             } else {
                                 precheck_next = Some(request);
                             }
@@ -1933,7 +1937,7 @@ impl Worker {
                     else if let Some(message)=histories_outbound.take() {message}
                     else if let Some(message)=owner_outbound.take() {message}
                     else if let Some(message)=probe_outbound.pop_front() {message}
-                    else if let Some(message)=precheck_outbound.take() {message}
+                    else if let Some(message)=precheck_outbound.pop_front() {message}
                     else if let Some(message)=lease_outbound.take() {message}
                     else if let Some(message)=watch_outbound.take() {message}
                     else if let Some(message) = report_outbound.take() {
@@ -2040,7 +2044,7 @@ impl Worker {
                 }
                 reply=async{precheck_operation.as_mut().unwrap().await}, if precheck_operation.is_some()=>{
                     precheck_operation=None;
-                    precheck_outbound=Some(ControlUp{msg:Some(control_up::Msg::PrecheckResult(reply))});
+                    precheck_outbound.push_back(ControlUp{msg:Some(control_up::Msg::PrecheckResult(reply))});
                 }
                 result = &mut data_loop => return result,
                 changed = data_attached.changed() => {
