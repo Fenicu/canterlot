@@ -79,6 +79,11 @@ async fn version_parsing_and_classification() {
         check(&exe).await.unwrap(),
         CliVersion::Verified("0.167.0".into())
     );
+    let exe = fake_version_script(&td, "codex-cli 0.169.0");
+    assert_eq!(
+        check(&exe).await.unwrap(),
+        CliVersion::Verified("0.169.0".into())
+    );
     let exe = fake_version_script(&td, "codex-cli 0.165.2");
     assert_eq!(
         check(&exe).await.unwrap(),
