@@ -166,6 +166,7 @@ mod tests {
                 "canterlot_plan_list",
                 "canterlot_plan_add",
                 "canterlot_plan_update",
+                "canterlot_plan_archive",
             ] {
                 assert!(allowed(mode, tool), "{mode:?} {tool}");
             }
