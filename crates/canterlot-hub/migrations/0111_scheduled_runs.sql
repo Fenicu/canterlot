@@ -1,6 +1,8 @@
 -- Повторяющиеся запуски владельца: расписания и журнал их попыток.
 -- Ревизия строки защищает правку от устаревшего редактора, как у черновиков и пресетов.
--- Пара (расписание, момент) уникальна: параллельные тики и перезапуск не удвоят запуск.
+-- Пара (расписание, момент) уникальна среди срабатываний по расписанию: параллельные
+-- тики и перезапуск не удвоят запуск. Ручные запуски в неё не входят: их момент —
+-- время нажатия, и совпадение с моментом срабатывания не должно его подавлять.
 create table schedules (
   id uuid primary key,
   owner_id uuid not null references owners(id),
@@ -50,9 +52,10 @@ create table schedule_runs (
   idempotency_key text not null,
   detail jsonb not null default '{}'::jsonb,
   created_at timestamptz not null default clock_timestamp(),
-  updated_at timestamptz not null default clock_timestamp(),
-  unique (schedule_id, scheduled_at)
+  updated_at timestamptz not null default clock_timestamp()
 );
+create unique index schedule_runs_occurrence on schedule_runs (schedule_id, scheduled_at)
+  where not manual;
 create index schedule_runs_schedule_time on schedule_runs (schedule_id, scheduled_at desc);
 create index schedule_runs_owner_state on schedule_runs (owner_id, state, created_at desc);
 

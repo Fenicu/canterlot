@@ -1963,3 +1963,76 @@ async fn dispatch_counts_a_pending_nudge_as_busy_like_routing(pool: PgPool) {
     let detail = wait_state(&pool, rid, "skipped_limits").await;
     assert_eq!(detail["reason"], "parallel_busy", "{detail}");
 }
+
+async fn insert_run_at(
+    pool: &PgPool,
+    f: &Fixture,
+    schedule: Uuid,
+    at: chrono::DateTime<Utc>,
+    manual: bool,
+    key: &str,
+) {
+    sqlx::query(
+        "insert into schedule_runs(id,schedule_id,owner_id,scheduled_at,claimed_revision,state,manual,idempotency_key)
+         values($1,$2,$3,$4,1,'started',$5,$6)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(schedule)
+    .bind(f.seed.owner_id)
+    .bind(at)
+    .bind(manual)
+    .bind(key)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// 6: ручной запуск с тем же моментом, что у срабатывания по расписанию, его
+/// не подавляет: уникальность момента действует только для срабатываний.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn manual_run_with_the_same_timestamp_does_not_suppress_the_cron_occurrence(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
+    let id = create(&f, existing(&f), "0 9 * * *").await;
+    let schedule = Uuid::parse_str(&id).unwrap();
+    let at = Utc::now() - TimeDelta::seconds(30);
+    let at = chrono::DateTime::from_timestamp_micros(at.timestamp_micros()).unwrap();
+    insert_run_at(&pool, &f, schedule, at, true, "manual-same-time").await;
+    due(&pool, &id, at).await;
+    scheduler(&f).tick(Utc::now()).await.unwrap();
+    let cron: i64 = sqlx::query_scalar(
+        "select count(*) from schedule_runs where schedule_id=$1 and not manual",
+    )
+    .bind(schedule)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(cron, 1, "the cron occurrence is claimed beside the manual run");
+}
+
+/// 6: если строка срабатывания уже есть, тик всё равно двигает `next_fire_at`.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn claim_tick_advances_the_cursor_when_the_occurrence_row_exists(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
+    let id = create(&f, existing(&f), "0 9 * * *").await;
+    let schedule = Uuid::parse_str(&id).unwrap();
+    let at = Utc::now() - TimeDelta::seconds(30);
+    let at = chrono::DateTime::from_timestamp_micros(at.timestamp_micros()).unwrap();
+    insert_run_at(&pool, &f, schedule, at, false, "cron-existing").await;
+    due(&pool, &id, at).await;
+    scheduler(&f).tick(Utc::now()).await.unwrap();
+    let next: chrono::DateTime<Utc> =
+        sqlx::query_scalar("select next_fire_at from schedules where id=$1")
+            .bind(schedule)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(next > Utc::now(), "cursor moved past the existing occurrence: {next}");
+    let runs: i64 = sqlx::query_scalar("select count(*) from schedule_runs where schedule_id=$1")
+        .bind(schedule)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(runs, 1, "no duplicate occurrence row");
+}

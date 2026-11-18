@@ -1066,7 +1066,7 @@ pub async fn claim_due(
             "insert into schedule_runs(id,schedule_id,owner_id,scheduled_at,claimed_revision,
                 state,manual,run_anyway,attempt_id,lease_at,idempotency_key,detail)
              values($1,$2,$3,$4,$5,$6,false,false,$7,clock_timestamp(),$8,$9)
-             on conflict (schedule_id,scheduled_at) do nothing returning *",
+             on conflict (schedule_id,scheduled_at) where not manual do nothing returning *",
         )
         .bind(run_id)
         .bind(schedule.id)
@@ -1079,11 +1079,16 @@ pub async fn claim_due(
         .bind(&detail)
         .fetch_optional(&mut *conn)
         .await?;
-        let Some(row) = row else {
-            continue;
+        // Срабатывание уже записано (повтор или параллельный тик): строку не
+        // дублируем, но курсор всё равно двигаем, иначе тик застрянет на нём.
+        let run = match row {
+            Some(row) => {
+                let run = row.into_run()?;
+                run_changed(conn, &run, Uuid::now_v7()).await?;
+                Some(run)
+            }
+            None => None,
         };
-        let run = row.into_run()?;
-        run_changed(conn, &run, Uuid::now_v7()).await?;
         let next_fire = parsed
             .next_after(*occurrences.last().unwrap(), tz)
             .unwrap_or(now + TimeDelta::days(366));
@@ -1094,7 +1099,9 @@ pub async fn claim_due(
         .bind(next_fire)
         .execute(&mut *conn)
         .await?;
-        claimed.push(ClaimedRun { run, schedule });
+        if let Some(run) = run {
+            claimed.push(ClaimedRun { run, schedule });
+        }
     }
     Ok(claimed)
 }
