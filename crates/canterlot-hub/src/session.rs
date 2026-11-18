@@ -561,7 +561,7 @@ impl Registry {
     fn precheck_channel(
         &self,
         machine_id: Uuid,
-    ) -> Option<(mpsc::Sender<ControlDown>, Uuid, bool)> {
+    ) -> Option<(mpsc::Sender<ControlDown>, Uuid, bool, CancellationToken)> {
         let mut entries = self.entries.lock().expect("session registry lock");
         let entry = entries.get_mut(&machine_id)?;
         if self.refresh(entry) == Availability::Unavailable {
@@ -575,6 +575,7 @@ impl Registry {
             entry.commands.clone(),
             entry.info.connection_id,
             has_capability,
+            entry.cancel.clone(),
         ))
     }
 
@@ -891,7 +892,8 @@ impl Registry {
         request: canterlot_proto::worker::v1::SchedulePrecheck,
         wait: std::time::Duration,
     ) -> Result<canterlot_proto::worker::v1::PrecheckResult, PrecheckFailure> {
-        let Some((sender, connection_id, has_capability)) = self.precheck_channel(machine_id)
+        let Some((sender, connection_id, has_capability, lease)) =
+            self.precheck_channel(machine_id)
         else {
             return Err(PrecheckFailure::NoSession);
         };
@@ -901,6 +903,10 @@ impl Registry {
         let attempt_id =
             Uuid::parse_str(&request.attempt_id).map_err(|_| PrecheckFailure::Invalid)?;
         let key = (machine_id, attempt_id);
+        // Аренда уже закончилась между снимком и регистрацией: ждать некого.
+        if lease.is_cancelled() {
+            return Err(PrecheckFailure::NoAnswer);
+        }
         let (answer, answered) = oneshot::channel();
         {
             let mut waiters = self.prechecks.lock().expect("precheck waiters lock");
@@ -921,11 +927,14 @@ impl Registry {
         if sender.try_send(message).is_err() {
             return Err(PrecheckFailure::Busy);
         }
-        tokio::time::timeout(wait, answered)
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .ok_or(PrecheckFailure::NoAnswer)
+        // Ожидание привязано к токену захваченной аренды: обрыв, замена потока
+        // или отзыв до или после регистрации будят его сразу, а не по таймеру.
+        tokio::select! {
+            reply = tokio::time::timeout(wait, answered) => {
+                reply.ok().and_then(Result::ok).ok_or(PrecheckFailure::NoAnswer)
+            }
+            () = lease.cancelled() => Err(PrecheckFailure::NoAnswer),
+        }
     }
 
     /// Ответ принимается только от машины, которую спросили, и только для живой попытки.
@@ -1652,6 +1661,34 @@ mod tests {
             .await
             .expect("old waiter wakes on stream drop")
             .expect("ask task runs");
+        assert_eq!(outcome, Err(PrecheckFailure::NoAnswer));
+    }
+
+    /// Отбой пришёл между снимком аренды и регистрацией ожидания, а старый
+    /// получатель ещё жив: команда уходит в буфер, ответа не будет. Ожидание
+    /// привязано к токену захваченной аренды и просыпается сразу.
+    #[tokio::test]
+    async fn precheck_asked_on_a_cancelled_lease_does_not_wait_for_the_timer() {
+        let registry = Registry::new(HubTimers::default());
+        let machine = Uuid::now_v7();
+        let connection = Uuid::now_v7();
+        let (_lease, _commands) = registry.register(machine, connection, vec![]).unwrap();
+        registry.mark_accepted(
+            machine,
+            connection,
+            &[CAPABILITY_SCHEDULE_PRECHECK_V1.to_owned()],
+        );
+        assert!(registry.disconnect_control(machine, connection));
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            registry.ask_precheck(
+                machine,
+                precheck_request(),
+                std::time::Duration::from_secs(300),
+            ),
+        )
+        .await
+        .expect("cancelled lease resolves at once");
         assert_eq!(outcome, Err(PrecheckFailure::NoAnswer));
     }
 
