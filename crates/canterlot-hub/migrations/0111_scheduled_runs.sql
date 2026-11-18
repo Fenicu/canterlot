@@ -37,7 +37,8 @@ create table schedule_runs (
   )),
   started_at timestamptz,
   delay_ms bigint,
-  session_id uuid references conversations(id) on delete set null,
+  -- Идентификатор сессии исторический: сессия может быть удалена, журнал живёт дальше.
+  session_id uuid,
   input_id uuid,
   manual boolean not null default false,
   idempotency_key text not null,
