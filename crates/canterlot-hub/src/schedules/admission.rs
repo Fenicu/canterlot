@@ -143,16 +143,16 @@ async fn admit_inner(
         }
     }
 
-    let (machine_id, existing_conversation) = match &schedule.target {
-        ScheduleTarget::NewSession { machine_id, .. } => (*machine_id, None),
+    let (machine_id, existing_conversation, existing_workdir) = match &schedule.target {
+        ScheduleTarget::NewSession { machine_id, .. } => (*machine_id, None, None),
         ScheduleTarget::ExistingSession { conversation_id } => {
             let mut conn = scheduler
                 .pool()
                 .acquire()
                 .await
                 .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))?;
-            let row: Option<(Uuid, Uuid)> = sqlx::query_as(
-                "select c.machine_id,q.conversation_id from conversations c
+            let row: Option<(Uuid, Uuid, String)> = sqlx::query_as(
+                "select c.machine_id,q.conversation_id,c.workdir from conversations c
                  join queue_state q on q.conversation_id=c.id
                  where c.id=$1 and c.owner_id=$2 and c.trashed_at is null",
             )
@@ -161,10 +161,13 @@ async fn admit_inner(
             .fetch_optional(&mut *conn)
             .await
             .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))?;
-            let Some((machine_id, conversation_id)) = row else {
+            let Some((machine_id, conversation_id, workdir)) = row else {
                 return Err(Skip::new(RunState::Failed, "conversation_not_found"));
             };
-            (machine_id, Some(conversation_id))
+            if workdir.is_empty() {
+                return Err(Skip::new(RunState::Failed, "conversation_not_found"));
+            }
+            (machine_id, Some(conversation_id), Some(workdir))
         }
     };
     let registry = scheduler
@@ -214,7 +217,16 @@ async fn admit_inner(
     }
 
     if !run_anyway && let Some(command) = schedule.precheck.as_deref() {
-        precheck(scheduler, registry, run, schedule, command, machine_id).await?;
+        precheck(
+            scheduler,
+            registry,
+            run,
+            schedule,
+            command,
+            machine_id,
+            existing_workdir.as_deref(),
+        )
+        .await?;
     }
 
     dispatch(scheduler, schedule, run, &executor, provider, run_anyway).await
@@ -427,6 +439,7 @@ async fn precheck(
     schedule: &Schedule,
     command: &str,
     machine_id: Uuid,
+    existing_workdir: Option<&str>,
 ) -> Result<(), Skip> {
     let attempt_id = Uuid::now_v7();
     let mut conn = scheduler
@@ -452,7 +465,10 @@ async fn precheck(
             (workdir.clone(), schedule.precheck_timeout_seconds)
         }
         ScheduleTarget::ExistingSession { .. } => {
-            (String::new(), schedule.precheck_timeout_seconds)
+            let Some(workdir) = existing_workdir else {
+                return Err(Skip::new(RunState::Failed, "conversation_not_found"));
+            };
+            (workdir.to_owned(), schedule.precheck_timeout_seconds)
         }
     };
     let request = canterlot_proto::worker::v1::SchedulePrecheck {
