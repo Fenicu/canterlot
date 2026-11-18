@@ -24,6 +24,7 @@ const task = {
   created_at: '2026-10-01T00:00:00.000Z',
   updated_at: '2026-10-01T00:00:00.000Z',
   revision: 3,
+  archived: false,
   commits: [],
   commits_truncated: false,
   files_changed: 0,

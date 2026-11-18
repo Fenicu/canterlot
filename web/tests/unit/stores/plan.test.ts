@@ -22,6 +22,7 @@ function task(patch: Partial<PlanTask> = {}): PlanTask {
 		created_at: '2026-11-08T10:00:00.000Z',
 		updated_at: '2026-11-08T10:00:00.000Z',
 		revision: 1,
+		archived: false,
 		...patch
 	};
 }

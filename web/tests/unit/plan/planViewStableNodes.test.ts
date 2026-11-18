@@ -26,6 +26,7 @@ const base = {
   created_at: '2026-10-01T00:00:00.000Z',
   updated_at: '2026-10-01T00:00:00.000Z',
   revision: 3,
+  archived: false,
   commits: [{ sha: 'a1b2c3d4e5', subject: 'Коммит' }],
   commits_truncated: false,
   files_changed: 2,
