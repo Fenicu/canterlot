@@ -172,6 +172,14 @@ const ERROR_TABLE: Record<ErrorCode, ErrorDescriptor> = {
     action: "none",
     message: "Слишком много отложенных сообщений",
   },
+  schedule_invalid: {
+    action: "none",
+    message: "Некорректное расписание",
+  },
+  schedule_revision_conflict: {
+    action: "none",
+    message: "Расписание изменено с другого устройства",
+  },
   machine_not_found: {
     action: "none",
     message: "Машина не найдена",
