@@ -28,6 +28,8 @@
   import { getRuntime } from '#lib/app/runtime.js';
   import { sessionUploads } from '#lib/screens/chat/open.js';
   import type { ChatStore } from '#lib/stores/chat.svelte.js';
+  import SlashPicker from '#lib/composer/SlashPicker.svelte';
+  import { filterSlashCatalog, insertSlash, slashQuery, type SlashItem } from '#lib/composer/slash.js';
   import Icon from '#lib/ui/Icon.svelte';
   import IconButton from '#lib/ui/IconButton.svelte';
   import { probe } from '#lib/perf/probe.js';
@@ -125,6 +127,7 @@
   const reasonId = $props.id();
   const laterId = `${reasonId}-later`;
   const suggestionId = `${reasonId}-suggestion`;
+  const slashId = `${reasonId}-slash`;
 
   const uploadsPending = $derived.by(() => {
     void ticker.now;
@@ -157,6 +160,36 @@
   const turnLive = $derived(turnIsLive(chat.activity, chat.queue.run_slot));
   const harnessId = $derived((chat.detail?.harness as { id?: string } | undefined)?.id ?? '');
   const canSteer = $derived(turnLive && steerSupported(harnessId));
+
+  // Каталог slash-команд берётся только у харнесса этой сессии на её машине.
+  const slashCatalog = $derived.by<SlashItem[]>(() => {
+    const machineId = (chat.detail as { machine?: { id?: string } } | null)?.machine?.id;
+    if (!machineId || !harnessId) return [];
+    const entry = runtime.machines.items
+      .get(machineId)
+      ?.harnesses.find((item) => item.id === harnessId);
+    return (entry?.catalog ?? []).map((item) => ({
+      name: item.name,
+      description: item.description,
+      kind: item.kind,
+      argument_hint: item.argument_hint
+    }));
+  });
+  const slashQueryText = $derived(slashQuery(model.text));
+  let slashDismissed = $state(false);
+  let slashActive = $state(0);
+  const slashItems = $derived(
+    slashQueryText !== null && slashCatalog.length > 0 && !slashDismissed
+      ? filterSlashCatalog(slashCatalog, slashQueryText)
+      : []
+  );
+  const slashOpen = $derived(slashItems.length > 0);
+
+  $effect(() => {
+    void slashQueryText;
+    slashDismissed = false;
+    slashActive = 0;
+  });
 
   // Подсказка живёт в placeholder, а placeholder не прокручивается: длинная подсказка уходила
   // под кнопки и резалась посреди строки. Показываем целые строки с многоточием, а полный
@@ -322,7 +355,44 @@
     model.typed();
   }
 
+  function pickSlash(item: SlashItem) {
+    const text = insertSlash(item.name);
+    model.text = text;
+    if (node) {
+      node.value = text;
+      node.focus();
+      node.setSelectionRange(text.length, text.length);
+    }
+    model.typed();
+    void model.flushDraft();
+    slashDismissed = true;
+  }
+
   function onKey(event: KeyboardEvent) {
+    if (slashOpen) {
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        event.preventDefault();
+        const step = event.key === 'ArrowDown' ? 1 : -1;
+        slashActive =
+          slashActive < 0 && step < 0
+            ? slashItems.length - 1
+            : (slashActive + step + slashItems.length) % slashItems.length;
+        document.getElementById(`${slashId}-${slashActive}`)?.scrollIntoView({ block: 'nearest' });
+        return;
+      }
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        const chosen = slashItems[slashActive];
+        if (chosen) pickSlash(chosen);
+        return;
+      }
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        slashDismissed = true;
+        return;
+      }
+    }
     if (suggestion && !touch && acceptsWithTab({
       key: event.key,
       shiftKey: event.shiftKey,
@@ -566,6 +636,9 @@
         placeholder={placeholder}
         aria-label="Сообщение"
         aria-describedby={suggestion ? `${reasonId} ${suggestionId}` : reasonId}
+        aria-autocomplete={slashOpen ? 'list' : undefined}
+        aria-controls={slashOpen ? slashId : undefined}
+        aria-activedescendant={slashOpen && slashActive >= 0 ? `${slashId}-${slashActive}` : undefined}
         oncompositionstart={() => (composing = true)}
         oncompositionend={() => (composing = false)}
         onkeydown={onKey}
@@ -645,6 +718,15 @@
       onpick={(at) => model.sendLater(at)}
     />
   {/if}
+  <SlashPicker
+    items={slashItems}
+    active={slashActive}
+    query={slashQueryText ?? ''}
+    anchor={node}
+    listId={slashId}
+    onpick={pickSlash}
+    onclose={() => (slashDismissed = true)}
+  />
 </section>
 
 <style>

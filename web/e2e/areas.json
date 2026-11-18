@@ -161,6 +161,7 @@
       "specs": [
         "e2e/ui/attachment-intake.spec.ts",
         "e2e/ui/composer-draft.spec.ts",
+        "e2e/ui/composer-slash.spec.ts",
         "e2e/ui/composer-interrupt.spec.ts",
         "e2e/ui/composer-stack-bound.spec.ts",
         "e2e/ui/composer-suggestion.spec.ts",
