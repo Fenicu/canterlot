@@ -796,6 +796,34 @@ impl Scheduler {
                 crate::schedules::admission::admit(&scheduler, claimed_run).await;
             });
         }
+        // Возврат брошенных заявок: погибшая приёмка или перезапуск хаба
+        // между commit'ами. `claimed` идут на повторный приём, оборванные
+        // `prechecking` уже завершены как `failed` внутри.
+        let recovered = {
+            let mut tx = crate::db::begin(&self.pool).await?;
+            let recovered = crate::schedules::recover_interrupted(
+                &mut tx,
+                Some(crate::schedules::RECLAIM_LEASE),
+                now,
+            )
+            .await;
+            match recovered {
+                Ok(recovered) => {
+                    tx.commit().await?;
+                    recovered
+                }
+                Err(error) => {
+                    let _ = tx.rollback().await;
+                    return Err(error);
+                }
+            }
+        };
+        for claimed_run in recovered {
+            let scheduler = self.clone();
+            tokio::spawn(async move {
+                crate::schedules::admission::admit(&scheduler, claimed_run).await;
+            });
+        }
         let mut report = TickReport::default();
         loop {
             let mut tx = crate::db::begin(&self.pool).await?;
@@ -1605,6 +1633,12 @@ impl Scheduler {
     }
 
     pub async fn run(self, shutdown: watch::Receiver<bool>) {
+        // Стартовый возврат: всё `prechecking` прошлого процесса уже никогда
+        // не получит ответ (официант умер вместе с процессом), а `claimed`
+        // можно принять заново сразу, не дожидаясь аренды.
+        if let Err(e) = self.recover_schedules_at_startup().await {
+            log_error(&e);
+        }
         crate::singleton::supervise(&self.pool, "scheduler", shutdown, || async {
             loop {
                 let next = match self.tick(Utc::now()).await {
@@ -1618,6 +1652,29 @@ impl Scheduler {
             }
         })
         .await;
+    }
+
+    async fn recover_schedules_at_startup(&self) -> Result<(), sqlx::Error> {
+        let now = Utc::now();
+        let mut tx = crate::db::begin(&self.pool).await?;
+        let recovered = crate::schedules::recover_interrupted(&mut tx, None, now).await;
+        let recovered = match recovered {
+            Ok(recovered) => {
+                tx.commit().await?;
+                recovered
+            }
+            Err(error) => {
+                let _ = tx.rollback().await;
+                return Err(error);
+            }
+        };
+        for claimed_run in recovered {
+            let scheduler = self.clone();
+            tokio::spawn(async move {
+                crate::schedules::admission::admit(&scheduler, claimed_run).await;
+            });
+        }
+        Ok(())
     }
 
     /// Срок хранения и уборка идут своей службой: долгий проход по журналу событий
