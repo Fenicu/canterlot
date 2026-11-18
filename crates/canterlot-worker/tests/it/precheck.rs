@@ -453,6 +453,12 @@ async fn setsid_helper_is_contained(how: &'static str) {
     .await
     .is_ok();
     assert!(gone, "a setsid helper does not survive the check ({how})");
+    // Помощник убит и не остаётся зомби под subreaper (уборка снимает статус).
+    wait_for_gone(
+        helper,
+        "a killed setsid helper is reaped, not left a zombie",
+    )
+    .await;
 }
 
 #[tokio::test]

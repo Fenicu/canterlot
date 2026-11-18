@@ -159,9 +159,14 @@ fn scope_members(pgid: u32, marker: &str) -> Vec<ScopeMember> {
 /// Убивает всех живых участников области и ждёт, пока они исчезнут;
 /// усыновлённых зомби (когда этот процесс — ближайший subreaper) снимает.
 /// Лидера не трогаем: его статус ждёт владелец `Child`.
+///
+/// Убитых помощников запоминаем по pid и времени старта: убитый зомби уже не
+/// входит в область (отдельная сессия, окружение недоступно), и без записи его
+/// статус никто бы не снял.
 async fn sweep(pgid: u32, marker: &str) {
     let deadline = tokio::time::Instant::now() + SWEEP_DEADLINE;
     let me = std::process::id();
+    let mut signalled: HashMap<u32, u64> = HashMap::new();
     loop {
         let mut live = false;
         for member in scope_members(pgid, marker) {
@@ -178,6 +183,9 @@ async fn sweep(pgid: u32, marker: &str) {
                     .is_ok_and(|ticks| ticks == member.start_ticks)
                 {
                     let _ = rustix::process::kill_process(pid, Signal::KILL);
+                    if member.pid != pgid {
+                        signalled.insert(member.pid, member.start_ticks);
+                    }
                 }
             } else if member.parent == me && member.pid != pgid {
                 let _ = rustix::process::waitid(
@@ -186,6 +194,32 @@ async fn sweep(pgid: u32, marker: &str) {
                 );
             }
         }
+        // Записанные: снимаем статус тем, кто стал зомби вне области, и ждём
+        // тех, кто ещё не успел умереть.
+        signalled.retain(|&pid, ticks| {
+            if crate::containment::start_ticks(pid).is_ok_and(|now| now == *ticks) {
+                let Some(raw) = i32::try_from(pid)
+                    .ok()
+                    .and_then(rustix::process::Pid::from_raw)
+                else {
+                    return false;
+                };
+                match rustix::process::waitid(
+                    rustix::process::WaitId::Pid(raw),
+                    rustix::process::WaitIdOptions::EXITED | rustix::process::WaitIdOptions::NOHANG,
+                ) {
+                    // Статус не готов: процесс ещё умирает.
+                    Ok(None) => {
+                        live = true;
+                        true
+                    }
+                    // Снят, либо не наш потомок (ECHILD): дальше убирает init.
+                    Ok(Some(_)) | Err(_) => false,
+                }
+            } else {
+                false
+            }
+        });
         if !live || tokio::time::Instant::now() >= deadline {
             return;
         }
