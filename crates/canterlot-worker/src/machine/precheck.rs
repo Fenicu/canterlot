@@ -101,7 +101,10 @@ fn group_has_members(pgid: u32) -> bool {
             continue;
         };
         let fields: Vec<&str> = text[end + 1..].split_whitespace().collect();
-        if fields.first().is_some_and(|state| *state == "Z" || *state == "X") {
+        if fields
+            .first()
+            .is_some_and(|state| *state == "Z" || *state == "X")
+        {
             continue;
         }
         if fields.get(2).and_then(|s| s.parse::<u32>().ok()) == Some(pgid) {

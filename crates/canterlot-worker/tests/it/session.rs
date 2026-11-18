@@ -2234,7 +2234,8 @@ async fn hello_and_heartbeat_carry_the_machine_clock() {
 }
 
 #[tokio::test]
-async fn machine_watch_goes_out_at_once_when_free_disk_crosses_the_warn_threshold() {    use canterlot_proto::worker::v1::control_up::Msg;
+async fn machine_watch_goes_out_at_once_when_free_disk_crosses_the_warn_threshold() {
+    use canterlot_proto::worker::v1::control_up::Msg;
     assert!(canterlot_worker::session::OPTIONAL_CAPABILITIES.contains(&"watchdog_v1"));
     let (mut hub, store) = ProtocolHub::start(Behavior {
         capabilities: vec!["pilot_v1".into(), "watchdog_v1".into()],
@@ -2268,8 +2269,8 @@ async fn machine_watch_goes_out_at_once_when_free_disk_crosses_the_warn_threshol
 
 #[tokio::test]
 async fn precheck_backpressure_second_busy_first_intact() {
-    use canterlot_proto::worker::v1::{SchedulePrecheck, control_up, precheck_result};
     use crate::support::{Behavior, Observed};
+    use canterlot_proto::worker::v1::{SchedulePrecheck, control_up, precheck_result};
     // Пауза чтения после первого батча держит исходящий канал воркера
     // забитым: ответ первой проверки висит в `precheck_outbound`, пока
     // вторая просьба уже пришла. Без зарезервированного слота вторая
@@ -2336,7 +2337,9 @@ async fn precheck_backpressure_second_busy_first_intact() {
         }
     })
     .await
-    .unwrap_or_else(|_| panic!("both precheck replies arrive despite backpressure; seen: {seen:?}"));
+    .unwrap_or_else(|_| {
+        panic!("both precheck replies arrive despite backpressure; seen: {seen:?}")
+    });
     let first_outcome = first_reply
         .expect("first reply present")
         .outcome

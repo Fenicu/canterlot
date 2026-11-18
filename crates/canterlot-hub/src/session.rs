@@ -891,8 +891,7 @@ impl Registry {
         request: canterlot_proto::worker::v1::SchedulePrecheck,
         wait: std::time::Duration,
     ) -> Result<canterlot_proto::worker::v1::PrecheckResult, PrecheckFailure> {
-        let Some((sender, connection_id, has_capability)) =
-            self.precheck_channel(machine_id)
+        let Some((sender, connection_id, has_capability)) = self.precheck_channel(machine_id)
         else {
             return Err(PrecheckFailure::NoSession);
         };
