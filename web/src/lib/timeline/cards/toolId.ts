@@ -38,6 +38,7 @@ const CANTERLOT_TOOLS: Record<string, string> = {
   plan_add: 'plan_add',
   plan_update: 'plan_update',
   plan_adopt: 'plan_adopt',
+  plan_archive: 'plan_archive',
   history_search: 'history_search',
   secret_request: 'secret_request'
 };
