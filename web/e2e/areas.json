@@ -322,7 +322,8 @@
         "e2e/ui/low-findings-question-card.spec.ts",
         "e2e/ui/request-card-overflow.spec.ts",
         "e2e/ui/requests.spec.ts",
-        "e2e/ui/secret-request.spec.ts"
+        "e2e/ui/secret-request.spec.ts",
+        "e2e/ui/settings-change.spec.ts"
       ]
     },
     {

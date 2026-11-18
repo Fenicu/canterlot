@@ -107,7 +107,12 @@
     }
   });
 
-  const settingsResult = $derived(request.kind === 'settings_change' ? settingsOutcome(request.closedReason) : undefined);
+  const settingsSettled = $derived(
+    request.kind === 'settings_change' &&
+    (request.state === 'applied' || request.state === 'closed' ||
+      request.state === 'not_applied' || request.state === 'unconfirmed')
+  );
+  const settingsResult = $derived(settingsSettled ? settingsOutcome(request.closedReason) : undefined);
 
   const trackState = $derived.by((): StageState => {
     if (request.state === 'applied') return 'done';
@@ -194,7 +199,7 @@
 </script>
 
 {#if request.state === 'applied'}
-  <div class="applied" data-collapsed={shown ? undefined : 'true'} data-expanded={shown ? 'true' : undefined}>
+  <div class="applied" data-collapsed={shown ? undefined : 'true'} data-expanded={shown ? 'true' : undefined} data-outcome={request.kind === 'settings_change' ? answerText : undefined} data-tone={settingsResult?.tone}>
     <StepHead name={request.kind === 'permission' ? 'Разрешение' : request.kind === 'spawn_approval' ? 'Запуск сессии' : request.kind === 'settings_change' ? 'Изменение настройки' : 'Вопрос'} detail={subject} status={answerText} state="answer" open={shown} ontoggle={toggle} />
     {#if shown}
       <div class="applied-body">
