@@ -2,10 +2,15 @@
 //!
 //! Команда приходит от владельца, поэтому воркер не доверяет ей: каталог
 //! канонизуется и ограничен разрешёнными корнями, наследуется только минимальное
-//! окружение, оба потока читаются с ограничением по хвосту, а вся группа процессов
-//! убивается и убирается по таймауту или при завершении проверки.
+//! окружение, оба потока читаются с ограничением по хвосту, а вся область
+//! проверки убивается и убирается по таймауту, при завершении и при отмене.
+//! Область — не только группа процессов: помощник, ушедший в свою сессию
+//! (`setsid`), и его потомки опознаются по метке `CANTERLOT_PRECHECK_GROUP` в
+//! окружении (тот же приём, что у метки группы исполнений, см. `containment`)
+//! и по цепочке родителей.
 
 use std::{
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -23,6 +28,26 @@ use tokio::{io::AsyncReadExt, process::Command, sync::oneshot};
 /// Сколько последних байтов вывода сохраняется в журнале запуска.
 pub const OUTPUT_TAIL_BYTES: usize = 4096;
 const TERMINATE_GRACE: Duration = Duration::from_millis(200);
+/// Метка области проверки: её наследуют все потомки, в том числе ушедшие в
+/// свои сессии и усыновлённые после выхода `bash`.
+const MARKER_ENV: &str = "CANTERLOT_PRECHECK_GROUP";
+/// Сколько ждём исчезновения всей области после убийства.
+const SWEEP_DEADLINE: Duration = Duration::from_secs(3);
+
+/// Уникальная метка одной проверки.
+fn new_marker(attempt_id: &str) -> String {
+    use std::sync::atomic::AtomicU64;
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!(
+        "{attempt_id}:{}:{nanos}:{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    )
+}
 
 /// Область предпроверки: только её дерево (лидер + его группа).
 /// В отличие от `TreeContainment::new()`, привязанного к PID воркера,
@@ -32,6 +57,7 @@ struct ScopedGroup {
     pgid: u32,
     leader_start_ticks: u64,
     armed: Arc<AtomicBool>,
+    marker: String,
 }
 
 impl ScopedGroup {
@@ -66,71 +92,94 @@ impl ScopedGroup {
 
     async fn kill_and_reap(&self) {
         self.signal_group(Signal::KILL);
-        wait_group_gone_and_reap(self.pgid).await;
+        sweep(self.pgid, &self.marker).await;
     }
 }
 
-/// Участники группы предпроверки по `pgrp`: лидер уже может быть перебран, а
-/// фоновые потомки ещё сидят с тем же `pgid`.
-struct GroupMember {
+/// Участник области проверки.
+struct ScopeMember {
     pid: u32,
     parent: u32,
+    start_ticks: u64,
     zombie: bool,
 }
 
-fn group_members(pgid: u32) -> Vec<GroupMember> {
-    let Ok(entries) = std::fs::read_dir("/proc") else {
+/// Область проверки: процессы её группы (`pgrp`), носители метки в окружении
+/// (помощники в своих сессиях и усыновлённые потомки) и все их потомки по
+/// цепочке родителей. Сам воркер и чужие процессы в область не входят.
+fn scope_members(pgid: u32, marker: &str) -> Vec<ScopeMember> {
+    let Ok(table) = crate::containment::process_table() else {
         return Vec::new();
     };
-    let mut out = Vec::new();
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(pid) = name.to_str().and_then(|name| name.parse::<u32>().ok()) else {
-            continue;
-        };
-        let Ok(text) = std::fs::read_to_string(entry.path().join("stat")) else {
-            continue;
-        };
-        let Some(end) = text.rfind(')') else {
-            continue;
-        };
-        let fields: Vec<&str> = text[end + 1..].split_whitespace().collect();
-        // Поля после `)`: состояние, ppid, pgrp.
-        if fields.get(2).and_then(|s| s.parse::<u32>().ok()) != Some(pgid) {
+    let me = std::process::id();
+    let mut found: HashSet<u32> = HashSet::new();
+    for (pid, info) in &table {
+        if *pid == me {
             continue;
         }
-        out.push(GroupMember {
-            pid,
-            parent: fields
-                .get(1)
-                .and_then(|s| s.parse::<u32>().ok())
-                .unwrap_or(0),
-            zombie: fields
-                .first()
-                .is_some_and(|state| *state == "Z" || *state == "X"),
-        });
+        let in_group = info.group == pgid;
+        let marked = !in_group
+            && !info.zombie
+            && crate::containment::read_env_marker(*pid, info.member.start_ticks, MARKER_ENV)
+                .as_deref()
+                == Some(marker);
+        if in_group || marked {
+            found.insert(*pid);
+        }
     }
-    out
+    // Потомки найденных: помощник без метки (очищенное окружение), но под
+    // известным родителем.
+    loop {
+        let before = found.len();
+        for (pid, info) in &table {
+            if *pid != me && !found.contains(pid) && found.contains(&info.parent) {
+                found.insert(*pid);
+            }
+        }
+        if found.len() == before {
+            break;
+        }
+    }
+    let by_pid: HashMap<u32, &crate::containment::Stat> =
+        table.iter().map(|(k, v)| (*k, v)).collect();
+    found
+        .into_iter()
+        .filter_map(|pid| {
+            let info = by_pid.get(&pid)?;
+            Some(ScopeMember {
+                pid,
+                parent: info.parent,
+                start_ticks: info.member.start_ticks,
+                zombie: info.zombie,
+            })
+        })
+        .collect()
 }
 
-/// Ждёт, пока в группе не останется живых, и снимает статус усыновлённых
-/// потомков: когда этот процесс — ближайший subreaper, убитые потомки
-/// `bash` остаются его зомби, и никто, кроме него, их не заберёт. Лидера
-/// не трогаем: его статус ждёт владелец `Child`.
-async fn wait_group_gone_and_reap(pgid: u32) {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+/// Убивает всех живых участников области и ждёт, пока они исчезнут;
+/// усыновлённых зомби (когда этот процесс — ближайший subreaper) снимает.
+/// Лидера не трогаем: его статус ждёт владелец `Child`.
+async fn sweep(pgid: u32, marker: &str) {
+    let deadline = tokio::time::Instant::now() + SWEEP_DEADLINE;
     let me = std::process::id();
     loop {
         let mut live = false;
-        for member in group_members(pgid) {
+        for member in scope_members(pgid, marker) {
+            let Some(pid) = i32::try_from(member.pid)
+                .ok()
+                .and_then(rustix::process::Pid::from_raw)
+            else {
+                continue;
+            };
             if !member.zombie {
                 live = true;
-            } else if member.parent == me
-                && member.pid != pgid
-                && let Some(pid) = i32::try_from(member.pid)
-                    .ok()
-                    .and_then(rustix::process::Pid::from_raw)
-            {
+                // Тот же процесс, что в снимке: pid мог смениться.
+                if crate::containment::start_ticks(member.pid)
+                    .is_ok_and(|ticks| ticks == member.start_ticks)
+                {
+                    let _ = rustix::process::kill_process(pid, Signal::KILL);
+                }
+            } else if member.parent == me && member.pid != pgid {
                 let _ = rustix::process::waitid(
                     rustix::process::WaitId::Pid(pid),
                     rustix::process::WaitIdOptions::EXITED | rustix::process::WaitIdOptions::NOHANG,
@@ -190,7 +239,8 @@ impl Drop for GroupGuard {
             // всё равно надо снять, поэтому уборку доводит отдельная задача.
             if let Ok(runtime) = tokio::runtime::Handle::try_current() {
                 let pgid = scope.pgid;
-                runtime.spawn(async move { wait_group_gone_and_reap(pgid).await });
+                let marker = scope.marker.clone();
+                runtime.spawn(async move { sweep(pgid, &marker).await });
             }
         }
     }
@@ -308,6 +358,7 @@ pub async fn run_with(
         }
         format!("/proc/self/fd/{raw}")
     };
+    let marker = new_marker(&attempt_id);
     let mut command = Command::new("bash");
     command
         .arg("-c")
@@ -330,6 +381,7 @@ pub async fn run_with(
             "USER",
             std::env::var_os("USER").unwrap_or_else(|| "worker".into()),
         )
+        .env(MARKER_ENV, &marker)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -355,12 +407,14 @@ pub async fn run_with(
             pgid: pid,
             leader_start_ticks,
             armed: armed.clone(),
+            marker: marker.clone(),
         }),
     };
     let scope = ScopedGroup {
         pgid: pid,
         leader_start_ticks,
         armed: armed.clone(),
+        marker,
     };
     let ring: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
     let mut drain_set = DrainSet {

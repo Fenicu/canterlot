@@ -116,7 +116,7 @@ pub struct TreeContainment {
 pub(crate) struct Stat {
     pub member: Member,
     pub parent: u32,
-    group: u32,
+    pub group: u32,
     pub session: u32,
     pub zombie: bool,
 }
@@ -169,8 +169,13 @@ pub fn start_ticks(pid: u32) -> Result<u64, ContainmentError> {
 /// `environ`: pid мог смениться между опознанием и чтением, тогда ответ — `None`.
 /// Закрытый от чтения или исчезнувший процесс метки не показывает.
 pub fn read_marker(pid: u32, start_ticks: u64) -> Option<String> {
+    read_env_marker(pid, start_ticks, GROUP_MARKER_ENV)
+}
+
+/// То же чтение для произвольной метки (предпроверки расписаний ставят свою).
+pub fn read_env_marker(pid: u32, start_ticks: u64, variable: &str) -> Option<String> {
     let bytes = fs::read(format!("/proc/{pid}/environ")).ok()?;
-    let prefix = format!("{GROUP_MARKER_ENV}=");
+    let prefix = format!("{variable}=");
     let value = bytes
         .split(|byte| *byte == 0)
         .find_map(|entry| entry.strip_prefix(prefix.as_bytes()))

@@ -60,8 +60,12 @@ async fn precheck_inherits_only_the_allowed_environment() {
     for name in ["HOME", "LANG", "PATH", "USER"] {
         assert!(names.contains(&name), "missing {name}: {:?}", names);
     }
+    // Единственная своя переменная — метка области уборки этой проверки.
     assert!(
-        !outcome.output_tail.contains("CANTERLOT"),
+        !outcome
+            .output_tail
+            .replace("CANTERLOT_PRECHECK_GROUP", "")
+            .contains("CANTERLOT"),
         "no inherited canterlot variables: {}",
         outcome.output_tail
     );
@@ -389,4 +393,79 @@ fn pipe_fds() -> usize {
                 .count()
         })
         .unwrap_or(0)
+}
+
+/// Процесс жив: записи нет или он зомби — значит, ушёл.
+fn alive(pid: u32) -> bool {
+    match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(text) => text
+            .rfind(')')
+            .and_then(|end| text[end + 1..].split_whitespace().next().map(str::to_owned))
+            .is_some_and(|state| state != "Z" && state != "X"),
+        Err(_) => false,
+    }
+}
+
+/// Помощник в своей сессии (`setsid`) не переживает проверку. Тест ничего
+/// не убивает сам: уборка идёт только из боевой точки входа `run_with`.
+/// `sleep 40` истекает сам, если уборка сломана, и не засоряет машину.
+async fn setsid_helper_is_contained(how: &'static str) {
+    adopt_orphans();
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("helper.pid");
+    // Лидер выходит сразу или висит: помощник живёт отдельно от группы лидера.
+    let tail = if how == "exit" { "exit 0" } else { "sleep 300" };
+    let command = format!(
+        "setsid sleep 40 >/dev/null 2>&1 & echo $! > {}; {tail}",
+        pid_file.display()
+    );
+    let (tx, rx) = oneshot::channel::<()>();
+    let root = dir.path().to_path_buf();
+    let task = tokio::spawn(async move {
+        run_with(
+            request(&root, &command),
+            vec![root.clone()],
+            Duration::from_secs(30),
+            if how == "timeout" { Some(rx) } else { None },
+        )
+        .await
+    });
+    let helper = read_pid(&pid_file).await;
+    assert!(alive(helper), "the helper runs before the check ends");
+    match how {
+        "timeout" => {
+            let _ = tx.send(());
+            let _ = task.await;
+        }
+        "cancel" => {
+            task.abort();
+            let _ = task.await;
+        }
+        _ => {
+            let _ = task.await;
+        }
+    }
+    let gone = tokio::time::timeout(Duration::from_secs(5), async {
+        while alive(helper) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .is_ok();
+    assert!(gone, "a setsid helper does not survive the check ({how})");
+}
+
+#[tokio::test]
+async fn setsid_helper_does_not_survive_a_finished_check() {
+    setsid_helper_is_contained("exit").await;
+}
+
+#[tokio::test]
+async fn setsid_helper_does_not_survive_a_timeout() {
+    setsid_helper_is_contained("timeout").await;
+}
+
+#[tokio::test]
+async fn setsid_helper_does_not_survive_a_cancel() {
+    setsid_helper_is_contained("cancel").await;
 }
