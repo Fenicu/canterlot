@@ -308,6 +308,9 @@ fn exempt(method: &str, path: &str) -> bool {
         || (method == "POST" && path == "/api/v1/schedules/preview")
         // Отметка присутствия — идемпотентный образец: ключ повтора ничего не добавит.
         || (method == "POST" && path == "/api/v1/presence")
+        // Действия карточки «Ход завис» нужен открытый эпизод зависания: ключ повтора и
+        // привязка к эпизоду проверены в hung_rescue.rs (`card_actions_are_bound_to_their_episode`).
+        || (method == "POST" && path.contains("/hung-episodes/"))
         || (method == "PUT" && path.ends_with("/draft"))
         || (matches!(method, "POST" | "DELETE") && path.ends_with("/side"))
         || (matches!(method, "PUT" | "DELETE") && path.contains("/bookmarks/"))

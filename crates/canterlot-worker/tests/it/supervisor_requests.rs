@@ -312,6 +312,7 @@ async fn turn_interrupt_while_request_pending_records_request_closed() {
     h.send(down::Msg::Interrupt(InterruptRequest {
         command_id: Uuid::now_v7().to_string(),
         dispatch_attempt: 1,
+        ..Default::default()
     }))
     .await;
     h.wait(|b| matches!(b, Body::RequestClosed(f) if f.request_id == request && f.reason == "interrupted")).await;

@@ -156,6 +156,11 @@ pub fn plan(
     }
 }
 
+/// Ожидающее действие: разговор, действие, владелец, эпизод и ход.
+type PendingRow = (Uuid, Option<String>, Uuid, Option<Uuid>, Option<Uuid>);
+/// Эпизод для карточки: его номер, активность, причина закрытия и ход.
+type EpisodeRow = (Option<Uuid>, bool, Option<String>, Option<Uuid>);
+
 #[derive(sqlx::FromRow, Clone)]
 struct Row {
     execution_id: Option<Uuid>,
@@ -340,18 +345,18 @@ pub async fn evaluate_in_tx(
     let same_turn = row.execution_id == Some(execution_id)
         && current_turn.is_some()
         && row.turn_id == current_turn;
-    if current_turn.is_none() || !same_turn {
-        if row.episode_active || row.pending_command_id.is_some() {
-            sqlx::query(
-                "update hung_rescues set episode_active=false,pending_kind=null,
-                     pending_command_id=null,pending_action=null,pending_since=null,
-                     updated_at=$2 where conversation_id=$1",
-            )
-            .bind(conversation_id)
-            .bind(now)
-            .execute(&mut *conn)
-            .await?;
-        }
+    if (current_turn.is_none() || !same_turn)
+        && (row.episode_active || row.pending_command_id.is_some())
+    {
+        sqlx::query(
+            "update hung_rescues set episode_active=false,pending_kind=null,
+                 pending_command_id=null,pending_action=null,pending_since=null,
+                 updated_at=$2 where conversation_id=$1",
+        )
+        .bind(conversation_id)
+        .bind(now)
+        .execute(&mut *conn)
+        .await?;
     }
     let Some(turn_id) = current_turn else {
         return Ok(RescueAction::None);
@@ -837,21 +842,16 @@ pub async fn on_interrupt_status_in_tx(
     correlation_id: Uuid,
 ) -> Result<(), sqlx::Error> {
     lock_queue_of_pending(conn, command_id).await?;
-    let Some((conversation_id, action, owner_id, episode, turn)): Option<(
-        Uuid,
-        Option<String>,
-        Uuid,
-        Option<Uuid>,
-        Option<Uuid>,
-    )> = sqlx::query_as(
-        "select h.conversation_id,h.pending_action,c.owner_id,h.episode_id,h.turn_id
+    let Some((conversation_id, action, owner_id, episode, turn)): Option<PendingRow> =
+        sqlx::query_as(
+            "select h.conversation_id,h.pending_action,c.owner_id,h.episode_id,h.turn_id
          from hung_rescues h join conversations c on c.id=h.conversation_id
          where h.pending_command_id=$1 and h.pending_kind='interrupt'
          for update of h",
-    )
-    .bind(command_id)
-    .fetch_optional(&mut *conn)
-    .await?
+        )
+        .bind(command_id)
+        .fetch_optional(&mut *conn)
+        .await?
     else {
         return Ok(());
     };
@@ -999,7 +999,7 @@ pub async fn episode_state_in_tx(
     conversation_id: Uuid,
     episode_id: Uuid,
 ) -> Result<EpisodeView, sqlx::Error> {
-    let live: Option<(Option<Uuid>, bool, Option<String>, Option<Uuid>)> = sqlx::query_as(
+    let live: Option<EpisodeRow> = sqlx::query_as(
         "select h.episode_id,h.episode_active,h.resolved,h.turn_id from hung_rescues h
          where h.conversation_id=$1",
     )

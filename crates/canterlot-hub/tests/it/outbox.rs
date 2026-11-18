@@ -14,7 +14,7 @@ use canterlot_hub::{
     testkit::{self, TestHub, spawn_test_hub},
 };
 use canterlot_proto::{limits::MAX_MESSAGE_BYTES, worker::v1::*};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use tokio::{sync::mpsc, time::timeout};
@@ -165,12 +165,19 @@ impl Worker {
 
     /// Ближайший interrupt; переотправленные под нагрузкой команды ввода пропускаются.
     async fn interrupt_command(&mut self) -> Command {
-        loop {
-            let command = self.command().await;
-            if matches!(command.kind, Some(command::Kind::Interrupt(_))) {
-                return command;
+        // Предел щедрый: под нагрузкой станка доставка занимает секунды, а не миллисекунды.
+        timeout(Duration::from_secs(30), async {
+            loop {
+                let message = self.down.message().await.unwrap().unwrap();
+                if let Some(control_down::Msg::Command(command)) = message.msg
+                    && matches!(command.kind, Some(command::Kind::Interrupt(_)))
+                {
+                    return command;
+                }
             }
-        }
+        })
+        .await
+        .expect("the interrupt must reach the worker")
     }
 
     /// Ближайшая прикладная проба; переотправленные команды пропускаются.
@@ -2105,6 +2112,7 @@ async fn a_hung_turn_is_interrupted_through_the_real_worker_channel(pool: PgPool
         &["instructions_v1", "pilot_v1", "guarded_interrupt_v1"],
     )
     .await;
+    let started = crate::support::projector_running().await;
     let turn = input(&pool, &hub, conversation).await;
     let deliver = worker.command().await;
     assert_eq!(deliver.command_id, turn.command_id.to_string());
@@ -2118,7 +2126,9 @@ async fn a_hung_turn_is_interrupted_through_the_real_worker_channel(pool: PgPool
             .unwrap();
     }
     // Ход идёт, а поток давно молчит: свидетельства те же, что присылает воркер.
-    let base = Utc::now() + chrono::TimeDelta::hours(1);
+    // Настоящие часы: фоновый проектор тестового хаба считает по ним и не должен видеть
+    // выборки из будущего (иначе сбросил бы окно наблюдения между моими пересчётами).
+    let base = Utc::now();
     let ago = base - chrono::TimeDelta::minutes(11);
     let execution: Uuid = sqlx::query_scalar(
         "update executions set phase='generating',phase_at=$2,last_event_at=$2,
@@ -2163,7 +2173,8 @@ async fn a_hung_turn_is_interrupted_through_the_real_worker_channel(pool: PgPool
         idle_quiet: Duration::from_secs(5),
         idle_background_max: Duration::from_secs(900),
     };
-    for at in [base - chrono::TimeDelta::seconds(10), base] {
+    for step in 1..=2 {
+        let at = started + chrono::TimeDelta::milliseconds(10 * step);
         sqlx::query(
             "insert into machine_metrics(machine_id,observed_at,machine_time_ms,cpu_cores,cpu_permille,
                mem_total_bytes,mem_available_bytes,load1_centi,load5_centi,load15_centi,disks,executions)
@@ -2191,7 +2202,35 @@ async fn a_hung_turn_is_interrupted_through_the_real_worker_channel(pool: PgPool
         .unwrap();
     }
     hub.dispatcher.trigger(conversation);
-    let interrupt = worker.interrupt_command().await;
+    let interrupt = match timeout(Duration::from_secs(12), worker.interrupt_command()).await {
+        Ok(command) => command,
+        Err(_) => {
+            let commands: Vec<(String, String, Option<String>)> = sqlx::query_as(
+                "select kind,delivery_state,last_status from commands where conversation_id=$1 order by created_at",
+            )
+            .bind(conversation)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+            let rescue: Option<(i32, bool, i32, Option<DateTime<Utc>>)> = sqlx::query_as(
+                "select episode_no,episode_active,obs_samples,obs_since from hung_rescues where conversation_id=$1",
+            )
+            .bind(conversation)
+            .fetch_optional(&pool)
+            .await
+            .unwrap();
+            let machine_row: (String, Option<DateTime<Utc>>) =
+                sqlx::query_as("select availability,availability_at from machines where id=$1")
+                    .bind(machine.machine_id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            panic!(
+                "no interrupt reached the worker: commands={commands:?} rescue={rescue:?} machine={machine_row:?} base={base} registry={:?}",
+                hub.registry.availability(machine.machine_id)
+            );
+        }
+    };
     let Some(command::Kind::Interrupt(guard)) = &interrupt.kind else {
         panic!(
             "the worker must receive an interrupt, got {:?}",
@@ -2231,7 +2270,7 @@ async fn a_hung_turn_is_interrupted_through_the_real_worker_channel(pool: PgPool
     activity::refresh_with_metrics(
         &pool,
         conversation,
-        base + chrono::TimeDelta::seconds(5),
+        started + chrono::TimeDelta::milliseconds(30),
         &thresholds,
         Duration::from_secs(7200),
         true,
@@ -2373,7 +2412,6 @@ async fn a_repeated_phase_is_liveness_and_keeps_the_phase_mark(pool: PgPool) {
             .fetch_one(&pool)
             .await
             .unwrap();
-    tokio::time::sleep(Duration::from_millis(20)).await;
     send(vec![phase(2)]).await;
     let ack = worker.data_down.message().await.unwrap().unwrap();
     assert!(matches!(ack.msg, Some(data_down::Msg::SjAck(_))));

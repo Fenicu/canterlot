@@ -764,7 +764,8 @@ fn is_hung(i: &ActivityInputs) -> bool {
 #[test]
 fn one_predicate_requires_a_running_generation_turn_with_a_stable_identity() {
     assert!(is_hung(&silent_generating_turn()));
-    let cases: Vec<(&str, Box<dyn Fn(&mut ActivityInputs)>)> = vec![
+    type Change = Box<dyn Fn(&mut ActivityInputs)>;
+    let cases: Vec<(&str, Change)> = vec![
         ("no turn identity", Box::new(|i| i.hang.turn_id = None)),
         ("slot free", Box::new(|i| i.queue.slot = RunSlot::Free)),
         (

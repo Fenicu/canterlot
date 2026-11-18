@@ -4832,8 +4832,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(supervisor.sj.progress_seq(), after_phase);
-        // Через интервал сигнал записывается: хаб видит, что ход жив.
-        supervisor.last_progress_record = Some(Instant::now() - PROGRESS_REEMIT * 2);
+        // Записи прогресса давно не было: сигнал записывается, хаб видит, что ход жив.
+        supervisor.last_progress_record = None;
         supervisor
             .on_adapter_event(AdapterEvent::Progress)
             .await

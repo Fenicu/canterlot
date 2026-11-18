@@ -2129,7 +2129,7 @@ async fn interrupt_for_old_generation_is_rejected_stale() {
         1,
         env.execution,
         1,
-        Kind::Interrupt(Interrupt {}),
+        Kind::Interrupt(Interrupt::default()),
     ))
     .await;
     let gone = Uuid::now_v7();
@@ -2138,7 +2138,7 @@ async fn interrupt_for_old_generation_is_rejected_stale() {
         1,
         Uuid::now_v7(),
         2,
-        Kind::Interrupt(Interrupt {}),
+        Kind::Interrupt(Interrupt::default()),
     ))
     .await;
     let live = Uuid::now_v7();
@@ -2147,7 +2147,7 @@ async fn interrupt_for_old_generation_is_rejected_stale() {
         1,
         env.execution,
         2,
-        Kind::Interrupt(Interrupt {}),
+        Kind::Interrupt(Interrupt::default()),
     ))
     .await;
     let cj = env
@@ -2589,7 +2589,7 @@ async fn wave_w_failed_control_writes_are_retried_after_reattach() {
                 target_command_id: target.to_string(),
                 target_dispatch_attempt: 1,
             }),
-            "interrupt" => Kind::Interrupt(Interrupt {}),
+            "interrupt" => Kind::Interrupt(Interrupt::default()),
             _ => Kind::StopExecution(StopExecution { force: true }),
         };
         let cmd = command(Uuid::now_v7(), 1, env.execution, 1, kind);

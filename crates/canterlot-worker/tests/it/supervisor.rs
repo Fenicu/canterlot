@@ -833,6 +833,7 @@ async fn interrupt_not_applicable_without_a_turn() {
             .send(down::Msg::Interrupt(InterruptRequest {
                 command_id: id.to_string(),
                 dispatch_attempt: 1,
+                ..Default::default()
             }))
             .await;
     }
@@ -884,6 +885,7 @@ async fn interrupt_during_adopted_wake_turn_is_sent_to_agent() {
         .send(down::Msg::Interrupt(InterruptRequest {
             command_id: interrupt.to_string(),
             dispatch_attempt: 1,
+            ..Default::default()
         }))
         .await;
     let bodies = harness
@@ -933,6 +935,7 @@ async fn interrupt_keeps_or_exits_process_by_profile() {
         .send(down::Msg::Interrupt(InterruptRequest {
             command_id: interrupt.to_string(),
             dispatch_attempt: 1,
+            ..Default::default()
         }))
         .await;
     let bodies = keeps
@@ -976,6 +979,7 @@ async fn interrupt_keeps_or_exits_process_by_profile() {
         .send(down::Msg::Interrupt(InterruptRequest {
             command_id: interrupt.to_string(),
             dispatch_attempt: 1,
+            ..Default::default()
         }))
         .await;
     let bodies = exits
@@ -1767,6 +1771,7 @@ async fn wave_w_closed_is_last_record_and_detached_drain_waits_for_ack() {
             canterlot_proto::worker::ipc::InterruptRequest {
                 command_id: Uuid::now_v7().to_string(),
                 dispatch_attempt: 1,
+                ..Default::default()
             },
         ))
         .await;
@@ -2822,6 +2827,7 @@ async fn unknown_control_message_keeps_the_link_and_capabilities_are_advertised(
         .send(down::Msg::Interrupt(InterruptRequest {
             command_id: id.to_string(),
             dispatch_attempt: 1,
+            ..Default::default()
         }))
         .await;
     harness

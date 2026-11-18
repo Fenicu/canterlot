@@ -189,7 +189,6 @@ fn cpu_sample_is_valid_only_with_a_baseline_for_the_matching_cli() {
         "the first sample has no baseline"
     );
     assert_eq!(first.cli_alive, Some(true));
-    std::thread::sleep(std::time::Duration::from_millis(20));
     let second = c
         .sample(std::slice::from_ref(&probe))
         .unwrap()

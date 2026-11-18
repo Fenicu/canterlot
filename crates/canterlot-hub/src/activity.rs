@@ -1173,7 +1173,7 @@ pub fn mark_projector_started(at: DateTime<Utc>) {
     PROJECTOR_STARTED_MS.store(at.timestamp_millis(), std::sync::atomic::Ordering::Relaxed);
 }
 
-pub(crate) fn projector_started() -> Option<DateTime<Utc>> {
+pub fn projector_started() -> Option<DateTime<Utc>> {
     match PROJECTOR_STARTED_MS.load(std::sync::atomic::Ordering::Relaxed) {
         0 => None,
         ms => DateTime::from_timestamp_millis(ms),

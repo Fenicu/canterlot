@@ -855,15 +855,30 @@ async fn rescue_does_not_deadlock_with_a_concurrent_parent_delete(pool: PgPool) 
         })
     };
     sample(&pool, &scene, scene.base, true, 0).await;
-    // Удаление, как в `deletion.rs`: после строки родителя обновляет ребёнка.
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Спасение либо уже закончилось, либо ждёт чужую блокировку: тогда в `pg_stat_activity`
+    // виден ожидающий бэкенд. Удаление, как в `deletion.rs`, отвязывает ребёнка только
+    // после этого.
+    let mut rescue = rescue;
+    loop {
+        let waiting: i64 = sqlx::query_scalar(
+            "select count(*) from pg_stat_activity where wait_event_type='Lock'
+               and datname=current_database()",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        if waiting > 0 || rescue.is_finished() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
     sqlx::query("update conversations set parent_conversation_id=null where id=$1")
         .bind(scene.seed.conversation_id)
         .execute(&mut *deleting)
         .await
         .expect("the delete is not deadlocked by the rescue");
     deleting.commit().await.unwrap();
-    let result = tokio::time::timeout(Duration::from_secs(10), rescue)
+    let result = tokio::time::timeout(Duration::from_secs(10), &mut rescue)
         .await
         .expect("the rescue finishes")
         .unwrap();
@@ -941,9 +956,10 @@ async fn episode_of(pool: &PgPool, scene: &Scene) -> Uuid {
 async fn card_actions_are_bound_to_their_episode(pool: PgPool) {
     use axum::http::{Method, StatusCode};
     let (hub, client, scene) = http_scene(&pool).await;
-    // Проектор тестового хаба стартовал только что: выборки раньше его старта окно не копят.
-    tick(&pool, &scene, scene.base + TimeDelta::seconds(10)).await;
-    tick(&pool, &scene, scene.base + TimeDelta::seconds(20)).await;
+    // Отметки сразу после старта фонового проектора, но уже в прошлом его часов.
+    let started = crate::support::projector_running().await;
+    tick(&pool, &scene, started + TimeDelta::milliseconds(10)).await;
+    tick(&pool, &scene, started + TimeDelta::milliseconds(20)).await;
     let episode = episode_of(&pool, &scene).await;
     let base = format!(
         "/api/v1/conversations/{}/hung-episodes/{episode}",
@@ -998,9 +1014,10 @@ async fn card_actions_are_bound_to_their_episode(pool: PgPool) {
 async fn an_old_card_cannot_stop_a_later_turn(pool: PgPool) {
     use axum::http::{Method, StatusCode};
     let (hub, client, scene) = http_scene(&pool).await;
-    // Проектор тестового хаба стартовал только что: выборки раньше его старта окно не копят.
-    tick(&pool, &scene, scene.base + TimeDelta::seconds(10)).await;
-    tick(&pool, &scene, scene.base + TimeDelta::seconds(20)).await;
+    // Отметки сразу после старта фонового проектора, но уже в прошлом его часов.
+    let started = crate::support::projector_running().await;
+    tick(&pool, &scene, started + TimeDelta::milliseconds(10)).await;
+    tick(&pool, &scene, started + TimeDelta::milliseconds(20)).await;
     let episode = episode_of(&pool, &scene).await;
     // Ход закончился, пошёл другой.
     let next = queued_input(&pool, &scene).await;
@@ -1022,7 +1039,12 @@ async fn an_old_card_cannot_stop_a_later_turn(pool: PgPool) {
         scene.seed.conversation_id
     );
     let state: Value = client.send(Method::GET, &path, None, None).await.json();
-    assert_eq!(state["state"], "turn_ended");
+    // Закрыла ли эпизод сама проверка запроса или фоновый пересчёт, зависит от порядка;
+    // важно, что открытым он не остаётся.
+    assert!(
+        matches!(state["state"].as_str(), Some("turn_ended" | "progress")),
+        "{state}"
+    );
     let response = client
         .send(
             Method::POST,

@@ -1524,7 +1524,7 @@ async fn interrupt_goes_through_the_supervisor() {
     })
     .await;
     let stop = Uuid::now_v7();
-    env.send(env.command(stop, Kind::Interrupt(Interrupt {})))
+    env.send(env.command(stop, Kind::Interrupt(Interrupt::default())))
         .await;
     env.wait("interrupt completed", |bodies| {
         bodies
@@ -1593,7 +1593,7 @@ async fn autonomous_run_is_a_turn_for_the_supervisor() {
     })
     .await;
     let stop = Uuid::now_v7();
-    env.send(env.command(stop, Kind::Interrupt(Interrupt {})))
+    env.send(env.command(stop, Kind::Interrupt(Interrupt::default())))
         .await;
     env.wait("interrupt completed", |bodies| {
         bodies
