@@ -501,12 +501,19 @@ async fn resolve_route(
         .await
         .map_err(|_| Skip::new(RunState::Failed, "live_counts_unavailable"))?;
     let now = Utc::now();
+    // Корневые умолчания нового сеанса (10): пропущенный режим — режим
+    // создания (`bypass`), а не дочерний (`read_only`). Иначе маршрутизация
+    // отбрасывает харнесс, у которого нет дочернего режима, хотя creation
+    // потом всё равно поставил бы `bypass`.
+    let mode = explicit
+        .clone()
+        .unwrap_or_else(|| crate::conversations::DEFAULT_PERMISSION_MODE.to_owned());
     let request = RouteRequest {
         task_type,
         level,
         parent_harness: String::new(),
         parent_mode: String::new(),
-        explicit_mode: explicit.clone(),
+        explicit_mode: Some(mode.clone()),
         workdir,
     };
     let decision = routing::route(RouteInputs {
@@ -555,11 +562,7 @@ async fn resolve_route(
         ),
     })?;
     let _ = run;
-    // Корневые умолчания нового сеанса (10), а не дочерние и не политика
-    // делегирования: пропущенные режим и пресет — как на экране создания.
-    let mode = explicit
-        .clone()
-        .unwrap_or_else(|| crate::conversations::DEFAULT_PERMISSION_MODE.to_owned());
+    // Пресет расписания важнее политики: владелец выбрал его в редакторе.
     let preset = match &schedule.target {
         ScheduleTarget::NewSession {
             preset: schedule_preset,
