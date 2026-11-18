@@ -297,9 +297,7 @@ async fn runs(
         // Лишний ряд — только признак конца: курсор строим от последнего
         // ВОЗВРАЩЁННОГО ряда, иначе он потеряется на следующей странице.
         items.pop();
-        items
-            .last()
-            .map(schedules::encode_runs_cursor)
+        items.last().map(schedules::encode_runs_cursor)
     } else {
         None
     };

@@ -159,7 +159,8 @@ async fn timeout_does_not_kill_sibling_worker_subprocess() {
 }
 
 #[tokio::test]
-async fn workdir_outside_allowed_roots_is_rejected() {    let dir = tempfile::tempdir().unwrap();
+async fn workdir_outside_allowed_roots_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
     let result = run_with(
         request(dir.path(), "true"),
         vec![PathBuf::from("/definitely/not/a/root")],

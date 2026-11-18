@@ -139,7 +139,11 @@ pub struct PatchSchedule {
     pub target: Option<ScheduleTarget>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
-    #[serde(default, deserialize_with = "nullable_string", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "nullable_string",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub precheck: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub precheck_timeout_seconds: Option<i32>,

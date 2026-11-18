@@ -99,7 +99,15 @@ type ClaudeHistoryWaiters = Arc<Mutex<HashMap<(Uuid, Uuid), oneshot::Sender<Vec<
 type PathProbeWaiters =
     Arc<Mutex<HashMap<(Uuid, Uuid), oneshot::Sender<canterlot_proto::worker::v1::PathProbe>>>>;
 type PrecheckWaiters = Arc<
-    Mutex<HashMap<(Uuid, Uuid), (Uuid, oneshot::Sender<canterlot_proto::worker::v1::PrecheckResult>)>>,
+    Mutex<
+        HashMap<
+            (Uuid, Uuid),
+            (
+                Uuid,
+                oneshot::Sender<canterlot_proto::worker::v1::PrecheckResult>,
+            ),
+        >,
+    >,
 >;
 
 /// Прикладная проба живости после просроченной квитанции команды.
@@ -899,15 +907,13 @@ impl Registry {
         };
         // Попытка привязана к аренде управляющего соединения, захваченной
         // при отправке: замена потока не может завершить чужое ожидание.
-        let live = self
-            .session_info(machine_id)
-            .map(|info| info.connection_id);
+        let live = self.session_info(machine_id).map(|info| info.connection_id);
         let waiter = {
             let mut waiters = self.prechecks.lock().expect("precheck waiters lock");
             let key = (machine_id, attempt_id);
-            let matches = waiters.get(&key).is_some_and(|(stored, _)| {
-                *stored == connection_id && live == Some(connection_id)
-            });
+            let matches = waiters
+                .get(&key)
+                .is_some_and(|(stored, _)| *stored == connection_id && live == Some(connection_id));
             if matches {
                 waiters.remove(&key).map(|(_, waiter)| waiter)
             } else {
@@ -1475,9 +1481,7 @@ mod tests {
         }
     }
 
-    fn precheck_reply(
-        attempt: &str,
-    ) -> canterlot_proto::worker::v1::PrecheckResult {
+    fn precheck_reply(attempt: &str) -> canterlot_proto::worker::v1::PrecheckResult {
         canterlot_proto::worker::v1::PrecheckResult {
             attempt_id: attempt.to_owned(),
             outcome: Some(
@@ -1498,7 +1502,11 @@ mod tests {
         let machine = Uuid::now_v7();
         let connection = Uuid::now_v7();
         let (_lease, mut commands) = registry.register(machine, connection, vec![]).unwrap();
-        registry.mark_accepted(machine, connection, &[CAPABILITY_SCHEDULE_PRECHECK_V1.to_owned()]);
+        registry.mark_accepted(
+            machine,
+            connection,
+            &[CAPABILITY_SCHEDULE_PRECHECK_V1.to_owned()],
+        );
         let request = precheck_request();
         let attempt = request.attempt_id.clone();
         let waiting = tokio::spawn({
@@ -1520,7 +1528,11 @@ mod tests {
         ));
         registry.finish_precheck(machine, Uuid::now_v7(), precheck_reply(&attempt));
         assert!(!waiting.is_finished(), "foreign connection cannot complete");
-        registry.finish_precheck(machine, connection, precheck_reply(&Uuid::now_v7().to_string()));
+        registry.finish_precheck(
+            machine,
+            connection,
+            precheck_reply(&Uuid::now_v7().to_string()),
+        );
         // Чужой номер попытки тоже не подходит.
         let completed = tokio::time::timeout(std::time::Duration::from_millis(100), waiting).await;
         assert!(completed.is_err(), "wrong attempt id leaves the waiter");
@@ -1532,12 +1544,20 @@ mod tests {
         let machine = Uuid::now_v7();
         let connection = Uuid::now_v7();
         let (_lease, _commands) = registry.register(machine, connection, vec![]).unwrap();
-        registry.mark_accepted(machine, connection, &[CAPABILITY_SCHEDULE_PRECHECK_V1.to_owned()]);
+        registry.mark_accepted(
+            machine,
+            connection,
+            &[CAPABILITY_SCHEDULE_PRECHECK_V1.to_owned()],
+        );
         let waiting = tokio::spawn({
             let registry = registry.clone();
             async move {
                 registry
-                    .ask_precheck(machine, precheck_request(), std::time::Duration::from_secs(30))
+                    .ask_precheck(
+                        machine,
+                        precheck_request(),
+                        std::time::Duration::from_secs(30),
+                    )
                     .await
             }
         });
@@ -1560,11 +1580,19 @@ mod tests {
         registry.mark_accepted(machine, connection, &["pilot_v1".to_owned()]);
         assert_eq!(
             registry
-                .ask_precheck(machine, precheck_request(), std::time::Duration::from_secs(1))
+                .ask_precheck(
+                    machine,
+                    precheck_request(),
+                    std::time::Duration::from_secs(1)
+                )
                 .await,
             Err(PrecheckFailure::CapabilityMissing)
         );
-        registry.mark_accepted(machine, connection, &[CAPABILITY_SCHEDULE_PRECHECK_V1.to_owned()]);
+        registry.mark_accepted(
+            machine,
+            connection,
+            &[CAPABILITY_SCHEDULE_PRECHECK_V1.to_owned()],
+        );
         assert_eq!(
             registry
                 .ask_precheck(
@@ -1577,7 +1605,11 @@ mod tests {
         );
         assert_eq!(
             registry
-                .ask_precheck(Uuid::now_v7(), precheck_request(), std::time::Duration::from_secs(1))
+                .ask_precheck(
+                    Uuid::now_v7(),
+                    precheck_request(),
+                    std::time::Duration::from_secs(1)
+                )
                 .await,
             Err(PrecheckFailure::NoSession)
         );

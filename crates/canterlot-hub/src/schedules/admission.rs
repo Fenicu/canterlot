@@ -77,7 +77,14 @@ pub async fn admit(scheduler: &Scheduler, claimed: ClaimedRun) {
         }
     };
     if let Err(error) = set_run_state(
-        &mut tx, run.id, state, detail.clone(), started_at, delay, session_id, input_id,
+        &mut tx,
+        run.id,
+        state,
+        detail.clone(),
+        started_at,
+        delay,
+        session_id,
+        input_id,
     )
     .await
     {
@@ -90,7 +97,15 @@ pub async fn admit(scheduler: &Scheduler, claimed: ClaimedRun) {
         tracing::error!(kind = "schedule_admit_db", error = %crate::dberr::describe(&error), "cannot record run outcome");
         return;
     }
-    let updated = apply_outcome(&run, state, detail.clone(), session_id, input_id, started_at, delay);
+    let updated = apply_outcome(
+        &run,
+        state,
+        detail.clone(),
+        session_id,
+        input_id,
+        started_at,
+        delay,
+    );
     let payload = match serde_json::to_value(&updated) {
         Ok(payload) => payload,
         Err(error) => {
@@ -119,7 +134,10 @@ pub async fn admit(scheduler: &Scheduler, claimed: ClaimedRun) {
         return;
     }
     if state == RunState::Failed {
-        let reason = detail.get("reason").and_then(Value::as_str).unwrap_or("failed");
+        let reason = detail
+            .get("reason")
+            .and_then(Value::as_str)
+            .unwrap_or("failed");
         if let Err(error) = crate::notify::enqueue_schedule_failure_in_tx(
             &mut tx,
             schedule.id,
@@ -211,7 +229,8 @@ async fn admit_inner(
     // Граница параллельных приёмов: каждый приём держит соединение лишь
     // короткими участками, но предпроверка ждёт воркер до минуты.
     // Без семафора 32 заявленных тиком приёма занимают весь пул.
-    static ADMIT_SEMAPHORE: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    static ADMIT_SEMAPHORE: std::sync::OnceLock<tokio::sync::Semaphore> =
+        std::sync::OnceLock::new();
     let semaphore = ADMIT_SEMAPHORE.get_or_init(|| tokio::sync::Semaphore::new(8));
     let _permit = semaphore
         .acquire()
@@ -487,8 +506,7 @@ async fn limits_skip(
     if let Some(entry) = all.iter().find(|entry| entry.provider == provider) {
         let mut known = false;
         // Окно Fable — только для Claude-моделей Fable, как в маршрутизации.
-        let fable =
-            provider == "claude" && model.to_ascii_lowercase().contains("fable");
+        let fable = provider == "claude" && model.to_ascii_lowercase().contains("fable");
         let mut windows: Vec<(&str, Option<&limits::WindowState>)> = vec![
             ("five_hour", entry.five_hour.as_ref()),
             ("weekly", entry.weekly.as_ref()),
@@ -510,7 +528,9 @@ async fn limits_skip(
             let remaining = 100.0 - f64::from(window.used_permille) / 10.0;
             if remaining < f64::from(settings.danger_remaining_pct) {
                 return Ok((
-                    Some(json!({"reason": "red_window", "window": name, "remaining_pct": remaining})),
+                    Some(
+                        json!({"reason": "red_window", "window": name, "remaining_pct": remaining}),
+                    ),
                     probe,
                 ));
             }
@@ -717,7 +737,9 @@ async fn dispatch(
         .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))?;
     // Решение о пересечении повторяется под замками dispatch: ранняя проверка
     // в приёме могла пропустить заявку, чей ввод встал в очередь после неё.
-    if !run_anyway && !manual && current.overlap == OverlapPolicy::Skip
+    if !run_anyway
+        && !manual
+        && current.overlap == OverlapPolicy::Skip
         && earlier_blocking(&mut tx, schedule.id, run.id).await? > 0
     {
         let _ = tx.rollback().await;
@@ -956,10 +978,7 @@ async fn await_winner_run(
     };
     drop(conn);
     loop {
-        if !matches!(
-            current.state,
-            RunState::Claimed | RunState::Prechecking
-        ) {
+        if !matches!(current.state, RunState::Claimed | RunState::Prechecking) {
             return Ok(current);
         }
         if std::time::Instant::now() >= deadline {
@@ -1080,13 +1099,7 @@ pub async fn run_now(
     )
     .await?;
     let updated = apply_outcome(
-        &run,
-        state_out,
-        detail,
-        session_id,
-        input_id,
-        started_at,
-        delay,
+        &run, state_out, detail, session_id, input_id, started_at, delay,
     );
     let response = serde_json::to_value(&updated)
         .map_err(|e| ScheduleError::Db(sqlx::Error::Encode(Box::new(e))))?;

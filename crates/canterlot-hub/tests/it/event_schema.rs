@@ -750,11 +750,11 @@ fn schedule_events_carry_full_payloads() {
         })
     };
     let schedule_schema = validator("schedule_changed");
-    let schedule_event = event(
-        "schedule_changed",
-        serde_json::to_value(&schedule).unwrap(),
+    let schedule_event = event("schedule_changed", serde_json::to_value(&schedule).unwrap());
+    assert!(
+        schedule_schema.is_valid(&schedule_event),
+        "{schedule_event}"
     );
-    assert!(schedule_schema.is_valid(&schedule_event), "{schedule_event}");
     let run_schema = validator("schedule_run_changed");
     let run_event = event("schedule_run_changed", serde_json::to_value(&run).unwrap());
     assert!(run_schema.is_valid(&run_event), "{run_event}");

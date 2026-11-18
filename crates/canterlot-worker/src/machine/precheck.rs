@@ -44,7 +44,9 @@ impl ScopedGroup {
         if !self.leader_alive() {
             return;
         }
-        let Some(pid) = i32::try_from(self.pgid).ok().and_then(rustix::process::Pid::from_raw)
+        let Some(pid) = i32::try_from(self.pgid)
+            .ok()
+            .and_then(rustix::process::Pid::from_raw)
         else {
             return;
         };

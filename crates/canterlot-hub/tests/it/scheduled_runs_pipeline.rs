@@ -706,7 +706,12 @@ async fn failed_runs_push_once_per_schedule_per_hour(pool: PgPool) {
             })),
         )
         .await;
-    assert_eq!(r.status.as_u16(), 200, "{}", String::from_utf8_lossy(&r.body));
+    assert_eq!(
+        r.status.as_u16(),
+        200,
+        "{}",
+        String::from_utf8_lossy(&r.body)
+    );
     let id = r.json::<Value>()["id"].as_str().unwrap().to_owned();
     for round in 0..2 {
         due(&pool, &id, Utc::now() - TimeDelta::seconds(30)).await;
@@ -737,7 +742,8 @@ async fn failed_runs_push_once_per_schedule_per_hour(pool: PgPool) {
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn concurrent_run_now_with_one_key_dispatches_once(pool: PgPool) {
-    let f = Fixture::new(pool.clone()).await;    let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
+    let f = Fixture::new(pool.clone()).await;
+    let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
     let r = f
         .client
         .send(
@@ -756,13 +762,31 @@ async fn concurrent_run_now_with_one_key_dispatches_once(pool: PgPool) {
     let id = r.json::<Value>()["id"].as_str().unwrap().to_owned();
     let path = format!("/api/v1/schedules/{id}/run");
     let (first, second) = tokio::join!(
-        f.client
-            .send(Method::POST, &path, Some("cc-run"), Some(json!({"run_anyway": false}))),
-        f.client
-            .send(Method::POST, &path, Some("cc-run"), Some(json!({"run_anyway": false}))),
+        f.client.send(
+            Method::POST,
+            &path,
+            Some("cc-run"),
+            Some(json!({"run_anyway": false}))
+        ),
+        f.client.send(
+            Method::POST,
+            &path,
+            Some("cc-run"),
+            Some(json!({"run_anyway": false}))
+        ),
     );
-    assert_eq!(first.status.as_u16(), 200, "{}", String::from_utf8_lossy(&first.body));
-    assert_eq!(second.status.as_u16(), 200, "{}", String::from_utf8_lossy(&second.body));
+    assert_eq!(
+        first.status.as_u16(),
+        200,
+        "{}",
+        String::from_utf8_lossy(&first.body)
+    );
+    assert_eq!(
+        second.status.as_u16(),
+        200,
+        "{}",
+        String::from_utf8_lossy(&second.body)
+    );
     assert_eq!(
         first.json::<Value>()["id"],
         second.json::<Value>()["id"],
@@ -871,10 +895,7 @@ async fn schedules_deny_unauthenticated_callers(pool: PgPool) {
     .with_header("X-Canterlot-Client", "1");
     for (method, path) in [
         (Method::GET, "/api/v1/schedules".to_owned()),
-        (
-            Method::POST,
-            "/api/v1/schedules".to_owned(),
-        ),
+        (Method::POST, "/api/v1/schedules".to_owned()),
         (
             Method::GET,
             format!("/api/v1/schedules/{}/runs", Uuid::now_v7()),
@@ -889,6 +910,8 @@ async fn schedules_deny_unauthenticated_callers(pool: PgPool) {
     .with_header("Origin", canterlot_hub::testkit::TEST_ORIGIN)
     .with_header("X-Canterlot-Client", "1")
     .with_session("no-such-session");
-    let refused = forged.send(Method::GET, "/api/v1/schedules", None, None).await;
+    let refused = forged
+        .send(Method::GET, "/api/v1/schedules", None, None)
+        .await;
     assert_eq!(refused.status.as_u16(), 401);
 }
