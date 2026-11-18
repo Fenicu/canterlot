@@ -93,8 +93,9 @@ fn finished(attempt_id: &str, exit_code: i32, tail: Vec<u8>, timed_out: bool) ->
 }
 
 /// Канонический каталог внутри разрешённых корней.
-async fn canonical_workdir(workdir: &str, roots: Vec<PathBuf>) -> Result<PathBuf, &'static str> {
+async fn canonical_workdir(workdir: &str, roots: &[PathBuf]) -> Result<PathBuf, &'static str> {
     let workdir = workdir.to_owned();
+    let roots = roots.to_owned();
     tokio::task::spawn_blocking(move || {
         if workdir.is_empty() || !workdir.starts_with('/') {
             return Err("invalid_workdir");
@@ -140,7 +141,7 @@ pub async fn run_with(
     timeout_signal: Option<oneshot::Receiver<()>>,
 ) -> PrecheckResult {
     let attempt_id = request.attempt_id.clone();
-    let workdir = match canonical_workdir(&request.workdir, roots).await {
+    let workdir = match canonical_workdir(&request.workdir, &roots).await {
         Ok(path) => path,
         Err(reason) => {
             let mut result = error(reason);
@@ -148,11 +149,46 @@ pub async fn run_with(
             return result;
         }
     };
+    // Прибиваем проверенный каталог дескриптором: запуск идёт через
+    // `/proc/self/fd/N`, поэтому подмена пути между проверкой и запуском
+    // не уводит исполнение наружу. Дескриптор живёт до конца spawn.
+    let dir_fd = match super::nofollow::open_dir(&workdir) {
+        Ok(fd) => fd,
+        Err(_) => {
+            let mut result = error("workdir_not_allowed");
+            result.attempt_id = attempt_id;
+            return result;
+        }
+    };
+    let fd_cwd = {
+        use std::os::fd::AsRawFd;
+        let raw = dir_fd.as_raw_fd();
+        let target =
+            std::fs::read_link(format!("/proc/self/fd/{raw}")).map_err(|_| "workdir_not_allowed");
+        let target = match target {
+            Ok(target) => target,
+            Err(reason) => {
+                let mut result = error(reason);
+                result.attempt_id = attempt_id;
+                return result;
+            }
+        };
+        let inside = roots
+            .iter()
+            .filter_map(|root| std::fs::canonicalize(root).ok())
+            .any(|root| target.starts_with(&root));
+        if !inside {
+            let mut result = error("workdir_not_allowed");
+            result.attempt_id = attempt_id;
+            return result;
+        }
+        format!("/proc/self/fd/{raw}")
+    };
     let mut command = Command::new("bash");
     command
         .arg("-c")
         .arg(&request.command)
-        .current_dir(workdir)
+        .current_dir(fd_cwd)
         .env_clear()
         .env(
             "PATH",

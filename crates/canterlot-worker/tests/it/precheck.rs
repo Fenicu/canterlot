@@ -159,8 +159,7 @@ async fn timeout_does_not_kill_sibling_worker_subprocess() {
 }
 
 #[tokio::test]
-async fn workdir_outside_allowed_roots_is_rejected() {
-    let dir = tempfile::tempdir().unwrap();
+async fn workdir_outside_allowed_roots_is_rejected() {    let dir = tempfile::tempdir().unwrap();
     let result = run_with(
         request(dir.path(), "true"),
         vec![PathBuf::from("/definitely/not/a/root")],
@@ -172,4 +171,27 @@ async fn workdir_outside_allowed_roots_is_rejected() {
         precheck_result::Outcome::Error(error) => assert_eq!(error.reason, "workdir_not_allowed"),
         other => panic!("expected a rejected workdir: {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn precheck_runs_in_the_pinned_workdir() {
+    let dir = tempfile::tempdir().unwrap();
+    let canonical = std::fs::canonicalize(dir.path()).unwrap();
+    let result = run_with(
+        request(dir.path(), "pwd"),
+        vec![PathBuf::from(dir.path())],
+        Duration::from_secs(10),
+        None,
+    )
+    .await;
+    let outcome = match result.outcome.unwrap() {
+        precheck_result::Outcome::Finished(outcome) => outcome,
+        other => panic!("expected a finished precheck: {other:?}"),
+    };
+    assert_eq!(outcome.exit_code, 0, "{}", outcome.output_tail);
+    assert!(
+        outcome.output_tail.trim_end() == canonical.to_string_lossy(),
+        "cwd is the validated dir, got: {}",
+        outcome.output_tail
+    );
 }
