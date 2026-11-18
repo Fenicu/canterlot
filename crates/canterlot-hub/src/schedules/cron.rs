@@ -79,8 +79,10 @@ impl CronSchedule {
             // уже случившийся первый час вместо будущего второго.
             let candidates: Vec<DateTime<Utc>> = match timezone.from_local_datetime(&naive) {
                 chrono::LocalResult::Single(at) => vec![at.with_timezone(&Utc)],
-                chrono::LocalResult::Ambiguous(earlier, later) => {
-                    vec![earlier.with_timezone(&Utc), later.with_timezone(&Utc)]
+                // Повторная локальная минута срабатывает один раз, в ранний
+                // момент UTC (спека §1): позднее вхождение не возвращаем никогда.
+                chrono::LocalResult::Ambiguous(earlier, _) => {
+                    vec![earlier.with_timezone(&Utc)]
                 }
                 chrono::LocalResult::None => continue,
             };
@@ -206,21 +208,20 @@ mod tests {
     }
 
     #[test]
-    fn repeated_hour_skips_past_candidate_after_first_occurrence() {
+    fn repeated_hour_fires_once_at_the_earlier_instant() {
         let schedule = CronSchedule::parse("30 2 * * *").unwrap();
         let berlin = timezone("Europe/Berlin").unwrap();
-        // После первого вхождения (00:30Z) следующее — второе (01:30Z), а не прошлое.
+        // Повторная локальная минута срабатывает один раз, в ранний момент UTC.
+        // Между двумя вхождениями и после второго — следующий день
+        // (26.10 уже без DST: 02:30 = 01:30Z).
         assert_eq!(
             schedule.next_after(utc(2026, 10, 25, 0, 40), berlin),
-            Some(utc(2026, 10, 25, 1, 30))
+            Some(utc(2026, 10, 26, 1, 30))
         );
-        // После 01:10Z (местные 02:10 второго часа) кандидат 00:30Z в прошлом:
-        // выбираем будущее 01:30Z.
         assert_eq!(
             schedule.next_after(utc(2026, 10, 25, 1, 10), berlin),
-            Some(utc(2026, 10, 25, 1, 30))
+            Some(utc(2026, 10, 26, 1, 30))
         );
-        // После второго вхождения — следующий день.
         assert_eq!(
             schedule.next_after(utc(2026, 10, 25, 1, 40), berlin),
             Some(utc(2026, 10, 26, 1, 30))
