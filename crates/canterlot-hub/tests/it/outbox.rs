@@ -163,6 +163,16 @@ impl Worker {
         command
     }
 
+    /// Ближайший interrupt; переотправленные под нагрузкой команды ввода пропускаются.
+    async fn interrupt_command(&mut self) -> Command {
+        loop {
+            let command = self.command().await;
+            if matches!(command.kind, Some(command::Kind::Interrupt(_))) {
+                return command;
+            }
+        }
+    }
+
     /// Ближайшая прикладная проба; переотправленные команды пропускаются.
     async fn probe(&mut self) -> ProbePath {
         timeout(Duration::from_secs(3), async {
@@ -2181,7 +2191,7 @@ async fn a_hung_turn_is_interrupted_through_the_real_worker_channel(pool: PgPool
         .unwrap();
     }
     hub.dispatcher.trigger(conversation);
-    let interrupt = worker.command().await;
+    let interrupt = worker.interrupt_command().await;
     let Some(command::Kind::Interrupt(guard)) = &interrupt.kind else {
         panic!(
             "the worker must receive an interrupt, got {:?}",
@@ -2289,7 +2299,7 @@ async fn a_worker_refusal_of_a_stale_interrupt_is_surfaced(pool: PgPool) {
         panic!("an interrupt must be requested");
     };
     hub.dispatcher.trigger(conversation);
-    let interrupt = worker.command().await;
+    let interrupt = worker.interrupt_command().await;
     assert_eq!(interrupt.command_id, command_id.to_string());
     worker
         .interrupt_receipt(&interrupt, &[InterruptState::TurnMismatch])

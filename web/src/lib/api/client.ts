@@ -758,6 +758,60 @@ export function interrupt(
   );
 }
 
+/** Состояние карточки «Ход завис»: `open` или причина, по которой она закрыта. */
+export function hungEpisode(
+  conversationId: string,
+  episodeId: string,
+  opts?: RequestOptions,
+): Promise<
+  HttpResponse<
+    Ok<operations["get__api_v1_conversations__id__hung_episodes__episode_id_"]>
+  >
+> {
+  return http(
+    "GET",
+    `/api/v1/conversations/${id(conversationId)}/hung-episodes/${id(episodeId)}`,
+    undefined,
+    opts,
+  );
+}
+
+export function hungInterrupt(
+  conversationId: string,
+  episodeId: string,
+  key: string,
+  opts?: RequestOptions,
+): Promise<
+  HttpResponse<
+    Ok<operations["post__api_v1_conversations__id__hung_episodes__episode_id__interrupt"]>
+  >
+> {
+  return http(
+    "POST",
+    `/api/v1/conversations/${id(conversationId)}/hung-episodes/${id(episodeId)}/interrupt`,
+    undefined,
+    keyed(key, opts),
+  );
+}
+
+export function hungSteer(
+  conversationId: string,
+  episodeId: string,
+  key: string,
+  opts?: RequestOptions,
+): Promise<
+  HttpResponse<
+    Ok<operations["post__api_v1_conversations__id__hung_episodes__episode_id__steer"]>
+  >
+> {
+  return http(
+    "POST",
+    `/api/v1/conversations/${id(conversationId)}/hung-episodes/${id(episodeId)}/steer`,
+    undefined,
+    keyed(key, opts),
+  );
+}
+
 export function sendNow(
   conversationId: string,
   inputId: string,

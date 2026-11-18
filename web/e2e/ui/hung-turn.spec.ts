@@ -23,7 +23,17 @@ function hungInput(api: FakeHubApi, event: Record<string, unknown>): HistoryInpu
   } as HistoryInput;
 }
 
-async function boot(page: Page, event: Record<string, unknown>) {
+const EPISODE = '00000000-0000-4000-8000-0000000000c1';
+const EPISODE_PATH = '**/api/v1/conversations/*/hung-episodes/*';
+
+async function episodeState(page: Page, state: string) {
+  await page.route(EPISODE_PATH, async (route) => {
+    if (route.request().method() !== 'GET') return route.fallback();
+    await route.fulfill({ json: { episode_id: EPISODE, state } });
+  });
+}
+
+async function boot(page: Page, event: Record<string, unknown>, episode: string | null = null) {
   const phone = test.info().project.name === 'phone';
   await page.setViewportSize({ width: phone ? 384 : 1280, height: 844 });
   const hub = new FakeHub();
@@ -31,6 +41,8 @@ async function boot(page: Page, event: Record<string, unknown>) {
   const id = seedConversation(api, { title: 'Сессия' });
   api.histories.set(id, [hungInput(api, event)]);
   await installChatRoutes(page, hub, api, OWNER);
+  // После общих маршрутов: последний зарегистрированный отвечает первым.
+  if (episode) await episodeState(page, episode);
   await page.goto(`/c/${id}`);
   await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
   return { id };
@@ -45,12 +57,17 @@ test('a rescued hung turn is a quiet feed row', async ({ page }) => {
 
 test('the owner hung card offers steer and interrupt', async ({ page }) => {
   const queued = '00000000-0000-4000-8000-0000000000e1';
-  await boot(page, {
-    kind: 'turn_hung',
-    turn_hung_notice: true,
-    session_id: 'a',
-    queued_input_id: queued
-  });
+  await boot(
+    page,
+    {
+      kind: 'turn_hung',
+      turn_hung_notice: true,
+      turn_hung_episode: EPISODE,
+      session_id: 'a',
+      queued_input_id: queued
+    },
+    'open'
+  );
   const card = page.locator('[data-role="hung-card"]');
   await expect(card).toBeVisible();
   await expect(card).toContainText('Ход завис');
@@ -59,22 +76,80 @@ test('the owner hung card offers steer and interrupt', async ({ page }) => {
   await expect(steer).toBeVisible();
   await expect(interrupt).toBeVisible();
 
-  let steered = false;
-  await page.route('**/api/v1/conversations/*/inputs/*/send-now', async (route) => {
-    steered = true;
+  let steered = '';
+  await page.route('**/api/v1/conversations/*/hung-episodes/*/steer', async (route) => {
+    steered = route.request().url();
     await route.fulfill({ json: { requested: { steer_command_id: '00000000-0000-4000-8000-0000000000f1' } } });
   });
   await steer.click();
   await expect(card.locator('[data-role="hung-done"]')).toContainText('Влито в ход');
-  expect(steered).toBe(true);
-
-  await interrupt.click();
-  await expect(card.locator('[data-role="hung-done"]')).toContainText('Ход прерван');
+  expect(steered).toContain(`/hung-episodes/${EPISODE}/steer`);
+  // Действие закрыло эпизод: вторая кнопка больше не действует.
+  await expect(interrupt).toBeDisabled();
 });
 
 test('without a queued input the card offers interrupt only', async ({ page }) => {
-  await boot(page, { kind: 'turn_hung', turn_hung_notice: true, session_id: 'a' });
+  await boot(
+    page,
+    { kind: 'turn_hung', turn_hung_notice: true, turn_hung_episode: EPISODE, session_id: 'a' },
+    'open'
+  );
   const card = page.locator('[data-role="hung-card"]');
   await expect(card.locator('[data-action="steer"]')).toHaveCount(0);
-  await expect(card.locator('[data-action="interrupt"] button')).toBeVisible();
+  const interrupt = card.locator('[data-action="interrupt"] button');
+  await expect(interrupt).toBeEnabled();
+  let hit = '';
+  await page.route('**/api/v1/conversations/*/hung-episodes/*/interrupt', async (route) => {
+    hit = route.request().url();
+    await route.fulfill({ json: { requested: { interrupt_command_id: '00000000-0000-4000-8000-0000000000f2' } } });
+  });
+  await interrupt.click();
+  await expect(card.locator('[data-role="hung-done"]')).toContainText('Ход прерван');
+  expect(hit).toContain(`/hung-episodes/${EPISODE}/interrupt`);
+});
+
+test('a resolved card is not actionable', async ({ page }) => {
+  await boot(
+    page,
+    {
+      kind: 'turn_hung',
+      turn_hung_notice: true,
+      turn_hung_episode: EPISODE,
+      session_id: 'a',
+      queued_input_id: '00000000-0000-4000-8000-0000000000e1'
+    },
+    'turn_ended'
+  );
+  const card = page.locator('[data-role="hung-card"]');
+  await expect(card.locator('[data-role="hung-resolved"]')).toContainText('Ход закончился');
+  await expect(card.locator('[data-action="steer"]')).toHaveCount(0);
+  await expect(card.locator('[data-action="interrupt"] button')).toBeDisabled();
+});
+
+test('a click on a card that was closed meanwhile shows it as resolved', async ({ page }) => {
+  await boot(
+    page,
+    { kind: 'turn_hung', turn_hung_notice: true, turn_hung_episode: EPISODE, session_id: 'a' },
+    'open'
+  );
+  const card = page.locator('[data-role="hung-card"]');
+  await page.route('**/api/v1/conversations/*/hung-episodes/*/interrupt', async (route) => {
+    await route.fulfill({
+      status: 409,
+      json: {
+        error: {
+          code: 'invalid_state',
+          message: 'Некорректное состояние',
+          scope: 'browser',
+          retry: 'never',
+          correlation_id: '00000000-0000-4000-8000-0000000000f1',
+          details: { reason: 'hung_episode_resolved' }
+        }
+      }
+    });
+  });
+  await card.locator('[data-action="interrupt"] button').click();
+  await expect(card.locator('[data-role="hung-resolved"]')).toBeVisible();
+  await expect(card.locator('[data-role="hung-failed"]')).toHaveCount(0);
+  await expect(card.locator('[data-action="interrupt"] button')).toBeDisabled();
 });

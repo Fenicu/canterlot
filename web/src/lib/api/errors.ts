@@ -410,6 +410,7 @@ export const REASON_TEXT: Record<ErrorReason, string> = {
   invalid_idempotency_key: "Повтор не совпал с исходной отправкой, отправьте заново",
   input_not_queued: "Сообщение уже ушло из очереди",
   no_running_turn: "Ход уже кончился: сообщение уйдёт следующим",
+  hung_episode_resolved: "Карточка устарела: ход уже продолжился или закончился",
   request_open: "Дождитесь ответа на запрос",
   compacting: "Дождитесь конца сжатия",
   unsupported_harness: "Харнесс этой сессии так не умеет",

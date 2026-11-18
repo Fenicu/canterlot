@@ -8731,6 +8731,7 @@
         },
         "turn_hung_action": { "type": "string" },
         "turn_hung_notice": { "type": "boolean" },
+        "turn_hung_episode": { "$ref": "#/$defs/Uuid" },
         "queued_input_id": { "$ref": "#/$defs/Uuid" },
         "asks_in_text": {
           "type": "boolean"
