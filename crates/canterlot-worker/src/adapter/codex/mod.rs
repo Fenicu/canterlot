@@ -189,6 +189,9 @@ pub struct CodexAdapter {
     unconfirmed: HashSet<Uuid>,
     /// turn/start без разобранного ответа: в пути или опоздал к сроку.
     pending_turn: Option<PendingTurn>,
+    /// Последняя команда владельца: ходы, начатые CLI сам (например, по цели),
+    /// приписываются ей тем же путём, что и пробуждающие ходы других харнессов.
+    last_command: Option<Uuid>,
     /// Кнопка «Сжать контекст» запустила `thread/compact/start`: ближайший эпизод ручной.
     compact_manual: bool,
     /// Команда сжатия ждёт итога парой `contextCompaction`: им она и закрывается.
@@ -289,6 +292,7 @@ impl CodexAdapter {
             proof_seen: false,
             unconfirmed: HashSet::new(),
             pending_turn: None,
+            last_command: None,
             compact_manual: false,
             compact_pending: None,
             compact_turn: false,
@@ -656,6 +660,20 @@ impl CodexAdapter {
                 {
                     self.outbox.adopt(&turn_id, command_id);
                     self.begin_turn(&turn_id, command_id);
+                } else if self.outbox.active().is_none() && self.pending_turn.is_none() {
+                    // Ход начат самим app-server: цель продолжает работать без нашего
+                    // turn/start. Приписываем его последней команде владельца и открываем
+                    // как обычный приписанный ход — так блоки, фазы и RunFinished не
+                    // теряются, а сессия показывает работу до конца хода.
+                    if let Some(command_id) = self.last_command {
+                        self.events.push_back(AdapterEvent::RunAdopted {
+                            input_command_id: command_id,
+                        });
+                        self.outbox.attach(&turn_id, command_id);
+                        self.begin_turn(&turn_id, command_id);
+                    } else {
+                        self.diagnostic("autonomous_run_unattributed", false);
+                    }
                 }
             }
             Translated::Event(event) => self.on_block_event(event),
@@ -1768,6 +1786,9 @@ impl CodexAdapter {
         if self.turn_running() {
             return TransmitOutcome::Rejected("turn_active".into());
         }
+        // Команда становится последней только после прохода проверок: автономные
+        // ходы приписываются вводу, который действительно дошёл до app-server.
+        self.last_command = Some(input.command_id);
         if input.attempt > 1 {
             let Ok(found) = self.history_lookup(&input.command_id.to_string()).await else {
                 // Codex не дедуплицирует clientUserMessageId: повтор вслепую дал бы
