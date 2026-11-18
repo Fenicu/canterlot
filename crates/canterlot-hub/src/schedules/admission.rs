@@ -567,7 +567,9 @@ async fn resolve_route(
         ScheduleTarget::NewSession {
             preset: schedule_preset,
             ..
-        } => schedule_preset.clone().unwrap_or_else(|| "clean".to_owned()),
+        } => schedule_preset
+            .clone()
+            .unwrap_or_else(|| "clean".to_owned()),
         ScheduleTarget::ExistingSession { .. } => "clean".to_owned(),
     };
     Ok(ResolvedExecutor {
@@ -758,7 +760,10 @@ async fn precheck(
             return Err(fail(Skip::new(RunState::Failed, "precheck_result_unknown")));
         }
         Err(PrecheckFailure::Invalid) => {
-            return Err(fail(Skip::new(RunState::Failed, "precheck_invalid_attempt")));
+            return Err(fail(Skip::new(
+                RunState::Failed,
+                "precheck_invalid_attempt",
+            )));
         }
     };
     if reply.attempt_id != attempt_id.to_string() {
@@ -817,7 +822,10 @@ async fn dispatch(
             .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))?;
     let Some(current) = current else {
         let _ = tx.rollback().await;
-        return Err(fail(Skip::new(RunState::SkippedChanged, "schedule_deleted")));
+        return Err(fail(Skip::new(
+            RunState::SkippedChanged,
+            "schedule_deleted",
+        )));
     };
     // Владение строкой (A): чужая приёмка или восстановление уже забрали
     // запуск — второй сессии не создаём, ничего не перезаписываем.
@@ -829,7 +837,10 @@ async fn dispatch(
             .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))?;
     let Some((state, attempt)) = owned else {
         let _ = tx.rollback().await;
-        return Err(fail(Skip::new(RunState::SkippedChanged, "schedule_deleted")));
+        return Err(fail(Skip::new(
+            RunState::SkippedChanged,
+            "schedule_deleted",
+        )));
     };
     if state != from.as_str() || attempt != run.attempt_id {
         let _ = tx.rollback().await;
@@ -885,7 +896,10 @@ async fn dispatch(
             > 0
     {
         let _ = tx.rollback().await;
-        return Err(fail(Skip::new(RunState::SkippedOverlap, "earlier_run_in_flight")));
+        return Err(fail(Skip::new(
+            RunState::SkippedOverlap,
+            "earlier_run_in_flight",
+        )));
     }
     // Пересчёт параллельности с корнями: `live_counts` в маршрутизации видит
     // только детей (`parent_conversation_id is not null`), а запланированные
@@ -1288,15 +1302,17 @@ pub async fn run_now(
             let mut tx = crate::db::begin(&state.pool).await?;
             let response = serde_json::to_value(&current)
                 .map_err(|e| ScheduleError::Db(sqlx::Error::Encode(Box::new(e))))?;
-            let recorded =
-                crate::idempotency::record(&mut tx, owner_id, key, "run_now", &hash, &response, None)
-                    .await?;
+            let recorded = crate::idempotency::record(
+                &mut tx, owner_id, key, "run_now", &hash, &response, None,
+            )
+            .await?;
             if !recorded {
                 // Гонку резерва мы уже исключили владелец-широким индексом;
                 // чужая запись — только завершённая параллельная операция.
                 let _ = tx.rollback().await;
                 let mut conn = state.pool.acquire().await?;
-                match crate::idempotency::lookup(&mut conn, owner_id, key, "run_now", &hash).await? {
+                match crate::idempotency::lookup(&mut conn, owner_id, key, "run_now", &hash).await?
+                {
                     crate::idempotency::Begin::Replay(value) => {
                         return serde_json::from_value(value)
                             .map_err(|e| ScheduleError::Db(sqlx::Error::Decode(Box::new(e))));
@@ -1321,12 +1337,11 @@ pub async fn run_now(
             let mut detail = run.detail.clone();
             merge(&mut detail, stop.skip.detail);
             let mut tx = crate::db::begin(&state.pool).await?;
-            let schedule_exists: bool = sqlx::query_scalar(
-                "select exists(select 1 from schedules where id=$1 for update)",
-            )
-            .bind(schedule.id)
-            .fetch_one(&mut *tx)
-            .await?;
+            let schedule_exists: bool =
+                sqlx::query_scalar("select exists(select 1 from schedules where id=$1 for update)")
+                    .bind(schedule.id)
+                    .fetch_one(&mut *tx)
+                    .await?;
             if !schedule_exists {
                 let _ = tx.rollback().await;
                 return Err(ScheduleError::NotFound);

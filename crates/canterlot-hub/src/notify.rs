@@ -643,13 +643,12 @@ pub(crate) async fn enqueue_schedule_failure_in_tx(
     reason: &str,
 ) -> Result<bool, sqlx::Error> {
     // Замок расписания: параллельные исходы одного расписания упорядочены.
-    let last: Option<DateTime<Utc>> = sqlx::query_scalar(
-        "select last_failure_push_at from schedules where id=$1 for update",
-    )
-    .bind(schedule_id)
-    .fetch_optional(&mut *conn)
-    .await?
-    .flatten();
+    let last: Option<DateTime<Utc>> =
+        sqlx::query_scalar("select last_failure_push_at from schedules where id=$1 for update")
+            .bind(schedule_id)
+            .fetch_optional(&mut *conn)
+            .await?
+            .flatten();
     if last.is_some_and(|at| Utc::now() - at < SCHEDULE_FAILURE_WINDOW) {
         return Ok(false);
     }

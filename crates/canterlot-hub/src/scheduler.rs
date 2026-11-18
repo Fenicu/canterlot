@@ -1657,9 +1657,12 @@ impl Scheduler {
     async fn recover_schedules_at_startup(&self) -> Result<(), sqlx::Error> {
         let now = Utc::now();
         let mut tx = crate::db::begin(&self.pool).await?;
-        let recovered =
-            crate::schedules::recover_interrupted(&mut tx, Some(crate::schedules::RECLAIM_LEASE), now)
-                .await;
+        let recovered = crate::schedules::recover_interrupted(
+            &mut tx,
+            Some(crate::schedules::RECLAIM_LEASE),
+            now,
+        )
+        .await;
         let recovered = match recovered {
             Ok(recovered) => {
                 tx.commit().await?;

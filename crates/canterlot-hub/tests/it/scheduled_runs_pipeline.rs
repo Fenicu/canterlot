@@ -1034,7 +1034,12 @@ async fn delete_and_recovery_share_one_lock_order(pool: PgPool) {
     })
     .await
     .expect("delete and recovery must not deadlock");
-    assert_eq!(deleted.status.as_u16(), 200, "{}", String::from_utf8_lossy(&deleted.body));
+    assert_eq!(
+        deleted.status.as_u16(),
+        200,
+        "{}",
+        String::from_utf8_lossy(&deleted.body)
+    );
     let runs: i64 = sqlx::query_scalar("select count(*) from schedule_runs where schedule_id=$1")
         .bind(schedule)
         .fetch_one(&pool)
@@ -1135,4 +1140,3 @@ async fn routed_new_session_target_runs_through_the_tick(pool: PgPool) {
     .unwrap();
     assert_eq!(inputs, 1, "the routed session got its first input");
 }
-

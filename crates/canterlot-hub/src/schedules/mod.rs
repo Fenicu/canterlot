@@ -918,13 +918,12 @@ pub async fn get_run_by_owner_key(
     owner_id: Uuid,
     key: &str,
 ) -> Result<Option<ScheduleRun>, sqlx::Error> {
-    let row: Option<RunRow> = sqlx::query_as(
-        "select * from schedule_runs where owner_id=$1 and idempotency_key=$2",
-    )
-    .bind(owner_id)
-    .bind(key)
-    .fetch_optional(conn)
-    .await?;
+    let row: Option<RunRow> =
+        sqlx::query_as("select * from schedule_runs where owner_id=$1 and idempotency_key=$2")
+            .bind(owner_id)
+            .bind(key)
+            .fetch_optional(conn)
+            .await?;
     row.map(RunRow::into_run).transpose()
 }
 
@@ -1233,13 +1232,12 @@ pub async fn recover_interrupted(
                 if updated == 0 {
                     continue;
                 }
-                let mut run: ScheduleRun = sqlx::query_as::<_, RunRow>(
-                    "select * from schedule_runs where id=$1",
-                )
-                .bind(run_id)
-                .fetch_one(&mut *conn)
-                .await?
-                .into_run()?;
+                let mut run: ScheduleRun =
+                    sqlx::query_as::<_, RunRow>("select * from schedule_runs where id=$1")
+                        .bind(run_id)
+                        .fetch_one(&mut *conn)
+                        .await?
+                        .into_run()?;
                 run.state = RunState::Failed;
                 run.detail = detail.clone();
                 run_changed(conn, &run, Uuid::now_v7()).await?;
