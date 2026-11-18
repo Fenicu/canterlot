@@ -7,8 +7,10 @@
 //! diagnostic. Partial tool JSON stays buffered until `content_block_stop`.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
+
+use canterlot_proto::goals::{GoalState, GoalStatus};
 
 use super::super::frame_names::object_field_names;
 use super::super::labels::{command_label, cut_end, path_tail};
@@ -208,6 +210,10 @@ pub enum Parsed {
     CompactResultConsumed {
         ok: bool,
     },
+    /// Полный снимок цели из синтетического ответа `/goal`; `None` — цель снята.
+    Goal {
+        goal: Option<GoalState>,
+    },
     Ignored,
 }
 
@@ -289,9 +295,132 @@ impl std::fmt::Debug for Parsed {
                 .debug_struct("CompactResultConsumed")
                 .field("ok", ok)
                 .finish(),
+            Self::Goal { goal } => f
+                .debug_struct("Goal")
+                .field("present", &goal.is_some())
+                .finish(),
             Self::Ignored => f.write_str("Ignored"),
         }
     }
+}
+
+/// Тексты синтетического ответа `/goal` приходят в кадре `assistant` (поле
+/// `local_command_source`) или в `result`. Внешний `None` — это не ответ `/goal`,
+/// внутренний `None` — цель снята. Неизвестный текст не меняет состояние.
+pub fn goal_from_frame(value: &serde_json::Value, now_ms: i64) -> Option<Option<GoalState>> {
+    let kind = value.get("type").and_then(serde_json::Value::as_str)?;
+    if kind != "assistant" && kind != "result" {
+        return None;
+    }
+    let synthetic = value
+        .get("local_command_source")
+        .is_some()
+        || value.get("local_command_run").is_some()
+        || value.get("local_command").is_some()
+        || value
+            .get("message")
+            .and_then(|m| m.get("model"))
+            .and_then(serde_json::Value::as_str)
+            == Some("<synthetic>");
+    if !synthetic {
+        return None;
+    }
+    let mut texts: Vec<&str> = Vec::new();
+    if let Some(text) = value.get("result").and_then(serde_json::Value::as_str) {
+        texts.push(text);
+    }
+    if let Some(blocks) = value
+        .get("message")
+        .and_then(|m| m.get("content"))
+        .and_then(serde_json::Value::as_array)
+    {
+        for block in blocks {
+            if let Some(text) = block.get("text").and_then(serde_json::Value::as_str) {
+                texts.push(text);
+            }
+        }
+    }
+    for text in texts {
+        if let Some(goal) = goal_from_text(text, now_ms) {
+            return Some(goal);
+        }
+    }
+    None
+}
+
+fn goal_from_text(text: &str, now_ms: i64) -> Option<Option<GoalState>> {
+    let first = text.trim().lines().next().unwrap_or_default().trim();
+    if first.starts_with("No goal set")
+        || first.starts_with("Goal cleared:")
+        || first.starts_with("Goal cleared after an unrecoverable error (")
+    {
+        return Some(None);
+    }
+    // Ограничение длины условия и приглашение продолжить — информация, состояние не трогаем.
+    if first.starts_with("Goal condition is limited to")
+        || first.starts_with("Send a message to continue")
+    {
+        return None;
+    }
+    let (prefix, status) = if let Some(rest) = first.strip_prefix("Goal set: ") {
+        (rest, GoalStatus::Active)
+    } else if let Some(rest) = first.strip_prefix("Goal active: ") {
+        (rest, GoalStatus::Active)
+    } else if let Some(rest) = first.strip_prefix("Goal paused: ") {
+        (rest, GoalStatus::Paused)
+    } else {
+        return None;
+    };
+    let turns = turns_of(prefix);
+    let objective = prefix
+        .rsplit_once(" (")
+        .filter(|(_, tail)| tail.contains("turn"))
+        .map_or(prefix, |(head, _)| head)
+        .trim()
+        .to_owned();
+    if objective.is_empty() {
+        return None;
+    }
+    Some(Some(
+        GoalState {
+            objective,
+            status,
+            tokens_used: 0,
+            time_used_seconds: 0,
+            token_budget: None,
+            turns_used: turns,
+            updated_at_ms: now_ms,
+        }
+        .bounded(),
+    ))
+}
+
+fn turns_of(text: &str) -> Option<i64> {
+    let bytes = text.as_bytes();
+    for start in 0..bytes.len() {
+        if !bytes[start].is_ascii_digit() || (start > 0 && bytes[start - 1].is_ascii_digit()) {
+            continue;
+        }
+        let mut end = start;
+        while end < bytes.len() && bytes[end].is_ascii_digit() {
+            end += 1;
+        }
+        let tail = &text[end..];
+        if tail.starts_with(" turn") {
+            return text[start..end].parse().ok();
+        }
+    }
+    None
+}
+
+pub fn goal_now_ms() -> i64 {
+    i64::try_from(
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    )
+    .unwrap_or(i64::MAX)
 }
 
 /// Незнакомое состояние не должно терять пункт: он показывается как ожидающий.
@@ -798,6 +927,9 @@ impl Parser {
                 }
             }
             _ => out.push(Parsed::Ignored),
+        }
+        if let Some(goal) = goal_from_frame(&value, goal_now_ms()) {
+            out.push(Parsed::Goal { goal });
         }
         out
     }

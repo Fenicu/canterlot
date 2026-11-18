@@ -3372,3 +3372,108 @@ async fn fork_reforks_when_the_side_record_is_gone() {
         .unwrap();
     fake.permit.take();
 }
+
+#[tokio::test]
+async fn goal_command_sends_slash_input_and_publishes_the_reply() {
+    let reply = json!({
+        "type": "assistant",
+        "message": {"model": "<synthetic>", "content": [
+            {"type": "text", "text": "Goal set: Подготовить отчёт"}
+        ]},
+        "local_command_run": {"command": "goal", "args": "Подготовить отчёт"},
+        "local_command_source": "<local-command-stdout>Goal set: Подготовить отчёт</local-command-stdout>"
+    });
+    let mut f = Fake::new(vec![answer_turn(), vec![reply]]);
+    f.start().await;
+    let id = Uuid::now_v7();
+    f.send(&tx(id)).await;
+    let _ = f.finish().await;
+    let outcome = tokio::time::timeout(WAIT, f.adapter.goal_command(
+        canterlot_proto::goals::GoalAction::Set,
+        Some("Подготовить отчёт"),
+        None,
+    )).await.expect("goal command deadline");
+    assert_eq!(outcome, adapter::GoalCommandOutcome::Applied);
+    let goal = loop {
+        match f.event().await {
+            AdapterEvent::Goal { goal: Some(goal) } => break goal,
+            _ => {}
+        }
+    };
+    assert_eq!(goal.objective, "Подготовить отчёт");
+    assert_eq!(goal.status, canterlot_proto::goals::GoalStatus::Active);
+    f.close().await;
+    let written = std::fs::read_to_string(f.dir.path().join("stdin.log")).unwrap();
+    assert!(written.contains("/goal Подготовить отчёт"), "{written}");
+}
+
+#[tokio::test]
+async fn goal_proposal_reaches_the_owner_card_and_a_mismatched_shape_is_refused() {
+    // Форма предложения цели не подтверждена живым прогоном: бинарник Claude Code
+    // отображает "goal proposal" как permission. Проверяем, что честный вызов
+    // `approve` с tool_name SetGoal доходит до карточки, а поддельный — нет.
+    let id = Uuid::now_v7();
+    let call = json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"approve",
+        "arguments":{"tool_name":"SetGoal","input":{"condition":"Подготовить отчёт"},"tool_use_id":"toolu_goal"},
+        "_meta":{"claudecode/toolUseId":"toolu_goal"}}});
+    let mut f = with_mcp_call(
+        call,
+        vec![
+            json!({"type":"stream_event","user_message_uuid":id,"event":{"type":"message_start","message":{"model":"haiku","usage":{}}}}),
+            json!("@request:0"),
+            json!({"type":"result","subtype":"success","is_error":false,"user_message_uuids":[id]}),
+        ],
+    );
+    f.start().await;
+    f.send(&tx(id)).await;
+    let mut seen = false;
+    loop {
+        match f.event().await {
+            AdapterEvent::RequestOpened { request_id, kind, payload } => {
+                assert_eq!(kind, "permission");
+                assert_eq!(payload["tool_name"], "SetGoal");
+                let decision = DecisionPayload::Permission {
+                    behavior: PermissionBehavior::Deny,
+                    message: None,
+                };
+                assert!(matches!(
+                    tokio::time::timeout(WAIT, f.adapter.deliver_decision(&request_id, &decision))
+                        .await.unwrap(),
+                    adapter::DecisionOutcome::Applied(_)
+                ));
+                seen = true;
+            }
+            AdapterEvent::RunFinished { .. } => break,
+            _ => {}
+        }
+    }
+    assert!(seen, "goal proposal must reach the owner card");
+    assert_eq!(mcp_reply_text(&f)["behavior"], "deny");
+    f.close().await;
+
+    // Вызов без совпадающего `_meta` не должен ни открывать карточку, ни висеть.
+    let id = Uuid::now_v7();
+    let forged = json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"approve",
+        "arguments":{"tool_name":"SetGoal","input":{},"tool_use_id":"toolu_forged"},
+        "_meta":{"claudecode/toolUseId":"toolu_other"}}});
+    let mut f = with_mcp_call(
+        forged,
+        vec![
+            json!({"type":"stream_event","user_message_uuid":id,"event":{"type":"message_start","message":{"model":"haiku","usage":{}}}}),
+            json!("@request:0"),
+            json!({"type":"result","subtype":"success","is_error":false,"user_message_uuids":[id]}),
+        ],
+    );
+    f.start().await;
+    f.send(&tx(id)).await;
+    loop {
+        match f.event().await {
+            AdapterEvent::RequestOpened { .. } => panic!("forged proposal reached the owner"),
+            AdapterEvent::RunFinished { .. } => break,
+            _ => {}
+        }
+    }
+    let reply = std::fs::read_to_string(f.dir.path().join("mcp-replies.jsonl")).unwrap();
+    assert!(reply.contains("-32602"), "forged call must be refused: {reply}");
+    f.close().await;
+}

@@ -22,6 +22,7 @@ use crate::{
     containment::{Containment, Member},
 };
 use canterlot_proto::{
+    goals::GoalAction,
     requests::{DecisionPayload, PermissionBehavior},
     worker::v1::{LimitObservation, LimitsSnapshot},
 };
@@ -447,6 +448,7 @@ impl ClaudeCodeAdapter {
                     self.events.push_back(AdapterEvent::Compacted { ok });
                 }
             }
+            Parsed::Goal { goal } => self.events.push_back(AdapterEvent::Goal { goal }),
             Parsed::ToolCallComplete {
                 block_id,
                 tool_use_id,
@@ -1409,6 +1411,56 @@ impl Adapter for ClaudeCodeAdapter {
             interrupt_keeps_process: true,
         }
     }
+
+    fn supports_goals(&self) -> bool {
+        true
+    }
+
+    /// `/goal` — локальная команда CLI: уходит тем же stream-json вводом между
+    /// ходами, что и `/compact`. Ответ synthetic-кадром разбирается в `Parsed::Goal`.
+    /// Пауза и продолжение у Claude Code доступны только агенту (PauseGoalTool),
+    /// владельцу slash-команда их не даёт.
+    async fn goal_command(
+        &mut self,
+        action: GoalAction,
+        objective: Option<&str>,
+        _token_budget: Option<i64>,
+    ) -> GoalCommandOutcome {
+        let command = match action {
+            GoalAction::Set => match objective {
+                Some(text) if !text.trim().is_empty() => format!("/goal {}", text.trim()),
+                _ => return GoalCommandOutcome::NotApplicable,
+            },
+            GoalAction::Clear => "/goal clear".to_owned(),
+            GoalAction::Pause | GoalAction::Resume => return GoalCommandOutcome::NotApplicable,
+        };
+        let busy = self
+            .queue
+            .as_ref()
+            .is_some_and(|queue| queue.active().is_some())
+            || self.parser.wake_turn_open();
+        if busy {
+            return GoalCommandOutcome::NotApplicable;
+        }
+        let Some(cli) = self.cli.as_mut() else {
+            return GoalCommandOutcome::Failed;
+        };
+        if self.exited || self.eof || !self.cli_ready {
+            return GoalCommandOutcome::Failed;
+        }
+        let id = Uuid::now_v7();
+        let line = serde_json::json!({
+            "type": "user",
+            "uuid": id.to_string(),
+            "message": {"role": "user", "content": command},
+            "parent_tool_use_id": serde_json::Value::Null,
+        });
+        match timeout(self.deadline, cli.write_line(&line)).await {
+            Ok(Ok(())) => GoalCommandOutcome::Applied,
+            _ => GoalCommandOutcome::Failed,
+        }
+    }
+
     async fn start(
         &mut self,
         spec: &StartSpec,

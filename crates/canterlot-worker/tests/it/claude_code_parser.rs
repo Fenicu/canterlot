@@ -2114,3 +2114,95 @@ fn prompt_suggestion_debug_hides_the_text() {
     assert!(!debug.contains("PRIVATE_SUGGESTION"), "{debug}");
     assert!(debug.contains("text_bytes"));
 }
+
+fn goal_frame(text: &str) -> String {
+    json!({
+        "type": "assistant",
+        "message": {"model": "<synthetic>", "content": [{"type": "text", "text": text}]},
+        "local_command_run": {"command": "goal", "args": ""},
+        "local_command_source": "<local-command-stdout></local-command-stdout>"
+    })
+    .to_string()
+}
+
+fn goal_of(parsed: &[Parsed]) -> Option<Option<canterlot_proto::goals::GoalState>> {
+    parsed.iter().find_map(|item| match item {
+        Parsed::Goal { goal } => Some(goal.clone()),
+        _ => None,
+    })
+}
+
+#[test]
+fn goal_set_and_active_replies_become_one_snapshot() {
+    for (text, turns) in [
+        ("Goal set: Подготовить отчёт", None),
+        ("Goal active: Подготовить отчёт (3 turns)", Some(3)),
+    ] {
+        let mut parser = Parser::new();
+        let parsed = parser.feed(&goal_frame(text));
+        let goal = goal_of(&parsed).unwrap_or_else(|| panic!("no goal in {parsed:?}")).unwrap();
+        assert_eq!(goal.objective, "Подготовить отчёт");
+        assert_eq!(goal.status, canterlot_proto::goals::GoalStatus::Active);
+        assert_eq!(goal.turns_used, turns);
+    }
+}
+
+#[test]
+fn goal_paused_reply_keeps_objective_and_status() {
+    let text = "Goal paused: Подготовить отчёт (2 turns)\nSend a message to continue, or run /goal clear.\nClaude's reason: waiting for input";
+    let mut parser = Parser::new();
+    let parsed = parser.feed(&goal_frame(text));
+    let goal = goal_of(&parsed).unwrap().unwrap();
+    assert_eq!(goal.objective, "Подготовить отчёт");
+    assert_eq!(goal.status, canterlot_proto::goals::GoalStatus::Paused);
+    assert_eq!(goal.turns_used, Some(2));
+}
+
+#[test]
+fn goal_clear_replies_remove_the_state() {
+    for text in [
+        "Goal cleared: Подготовить отчёт",
+        "No goal set",
+        "Goal cleared after an unrecoverable error (context_limit): \"Подготовить отчёт\". Run /goal again to continue.",
+    ] {
+        let mut parser = Parser::new();
+        let parsed = parser.feed(&goal_frame(text));
+        assert_eq!(goal_of(&parsed), Some(None), "text: {text}");
+    }
+}
+
+#[test]
+fn goal_limit_notice_and_unknown_text_do_not_change_state() {
+    for text in [
+        "Goal condition is limited to 2048 characters (got 3000)",
+        "Send a message to continue, or run /goal clear.",
+        "Something unrelated happened",
+    ] {
+        let mut parser = Parser::new();
+        let parsed = parser.feed(&goal_frame(text));
+        assert_eq!(goal_of(&parsed), None, "text: {text}");
+    }
+}
+
+#[test]
+fn goal_text_outside_a_synthetic_command_is_ignored() {
+    let mut parser = Parser::new();
+    let frame = json!({
+        "type": "assistant",
+        "message": {"model": "model-mini", "content": [{"type": "text", "text": "Goal set: not a command"}]}
+    });
+    let parsed = parser.feed(&frame.to_string());
+    assert_eq!(goal_of(&parsed), None, "{parsed:?}");
+}
+
+#[test]
+fn goal_objective_is_bounded_and_debug_hides_it() {
+    let text = format!("Goal set: {}", "ц".repeat(3000));
+    let mut parser = Parser::new();
+    let parsed = parser.feed(&goal_frame(&text));
+    let goal = goal_of(&parsed).unwrap().unwrap();
+    assert_eq!(
+        goal.objective.len(),
+        canterlot_proto::goals::MAX_OBJECTIVE_BYTES
+    );
+}
