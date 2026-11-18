@@ -163,7 +163,7 @@ test('share_file_card_opens_the_media_viewer', async ({ page }) => {
   await share.locator('a.thumb').click();
   const dialog = page.locator('dialog[open]');
   await expect(dialog).toHaveAttribute('aria-label', 'Файл');
-  await expect(dialog.locator('img')).toBeVisible();
+  await expect(dialog.locator('.slide[data-current] img.full')).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(dialog).toHaveCount(0);
 });
