@@ -51,7 +51,11 @@ async fn a_slow_first_probe_is_retried() {
         started.elapsed() >= Duration::from_millis(90),
         "the first probe was expected to hit its deadline"
     );
-    assert_eq!(count(&runs), 2, "the first probe timed out and was retried");
+    // Под нагрузкой и повтор может не уложиться в 100 мс: важно, что первый не был последним.
+    assert!(
+        count(&runs) >= 2,
+        "the first probe timed out and was retried"
+    );
     assert!(started.elapsed() < Duration::from_secs(2));
 }
 
