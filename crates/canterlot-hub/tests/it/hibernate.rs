@@ -22,7 +22,6 @@ use canterlot_proto::worker::v1::{
 use chrono::{TimeDelta, Utc};
 use serde_json::{Value, json};
 use sqlx::PgPool;
-use tokio::time::Instant;
 use uuid::Uuid;
 
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
@@ -296,7 +295,7 @@ blocked!(unresumable_harness_blocks, block_unresumable);
 async fn visible_chat_blocks(pool: PgPool) -> TestResult {
     let (seed, _run) = setup(&pool).await;
     let presence = Presence::default();
-    presence.report(seed.conversation_id, "phone", true, Instant::now());
+    presence.report(seed.conversation_id, "phone", true, testkit::clock_now());
     assert_eq!(hibernate::sweep(&pool, &presence).await?, 0);
     assert!(stop_command(&pool, seed.conversation_id).await.is_none());
     Ok(())
