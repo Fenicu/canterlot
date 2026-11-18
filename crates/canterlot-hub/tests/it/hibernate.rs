@@ -522,12 +522,9 @@ async fn owner_message_through_http_wakes_and_replies(pool: PgPool) -> TestResul
             Some(json!({"content":[{"type":"text","text":"wake"}]})),
         )
         .await;
-    assert_eq!(
-        response.status.as_u16(),
-        201,
-        "{:?}",
-        response.json::<Value>()
-    );
+    let submitted: Value = response.json();
+    assert_eq!(response.status.as_u16(), 201, "{submitted:?}");
+    let input_id: Uuid = serde_json::from_value(submitted["input_id"].clone())?;
 
     // Синтетический воркер подтверждает остановку; сессия возобновляется по нативному id.
     let journal = Uuid::now_v7();
@@ -560,6 +557,30 @@ async fn owner_message_through_http_wakes_and_replies(pool: PgPool) -> TestResul
     .fetch_one(&pool)
     .await?;
     assert_eq!(delivered, 2, "the original start and the wake-up start");
+    let resumed_id: Uuid = sqlx::query_scalar(
+        "select id from executions where conversation_id=$1 order by generation desc limit 1",
+    )
+    .bind(conversation_id)
+    .fetch_one(&pool)
+    .await?;
+    for next in [ExecutionState::Starting, ExecutionState::Running] {
+        executions::set_state(&pool, resumed_id, next, None, Uuid::now_v7()).await?;
+    }
+    let dispatched = dispatch_next(
+        &pool,
+        conversation_id,
+        GateInputs {
+            machine_available: true,
+            machine_reconciled: true,
+            session_capabilities: vec!["pilot_v1".into()],
+        },
+        Uuid::now_v7(),
+    )
+    .await?;
+    assert!(
+        matches!(dispatched, DispatchOutcome::Dispatched { input_id: id, .. } if id == input_id),
+        "the owner's message reaches the resumed execution"
+    );
     drop(dir);
     Ok(())
 }
