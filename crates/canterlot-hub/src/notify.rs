@@ -1353,7 +1353,7 @@ impl Sender {
                     report.dropped += 1;
                     continue;
                 }
-                if matches!(&result, Err(_))
+                if result.is_err()
                     && let Some(stamp) = stamp
                 {
                     restore_schedule_push(pool, &row, &stamp).await?;
