@@ -216,6 +216,10 @@ error_reasons! {
     SteerInFlight => "steer_in_flight", InvalidState;
     EmptyContent => "empty_content", InvalidRequest;
     ContentTooLong => "content_too_long", InvalidRequest;
+    ObjectiveRequired => "objective_required", InvalidRequest;
+    ObjectiveInvalid => "objective_invalid", InvalidRequest;
+    ObjectiveUnexpected => "objective_unexpected", InvalidRequest;
+    BudgetInvalid => "budget_invalid", InvalidRequest;
     AttachmentUnavailable => "attachment_unavailable", AttachmentUnavailable;
     AttachmentNotReady => "attachment_not_ready", AttachmentNotReady;
     AttachmentNotFound => "attachment_not_found", AttachmentUnavailable;

@@ -2065,7 +2065,7 @@ impl Adapter for CodexAdapter {
                 )
             }
         };
-        let outcome = match self.rpc_round(method, params, self.deadline).await {
+        match self.rpc_round(method, params, self.deadline).await {
             Some(Ok(value)) => {
                 let goal = if action == GoalAction::Clear {
                     None
@@ -2085,8 +2085,7 @@ impl Adapter for CodexAdapter {
                 GoalCommandOutcome::Failed
             }
             None => GoalCommandOutcome::Failed,
-        };
-        outcome
+        }
     }
 
     async fn start(

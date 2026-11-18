@@ -3400,9 +3400,8 @@ async fn goal_command_sends_slash_input_and_publishes_the_reply() {
     .expect("goal command deadline");
     assert_eq!(outcome, adapter::GoalCommandOutcome::Applied);
     let goal = loop {
-        match f.event().await {
-            AdapterEvent::Goal { goal: Some(goal) } => break goal,
-            _ => {}
+        if let AdapterEvent::Goal { goal: Some(goal) } = f.event().await {
+            break goal;
         }
     };
     assert_eq!(goal.objective, "Подготовить отчёт");

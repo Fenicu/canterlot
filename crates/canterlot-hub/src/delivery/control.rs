@@ -404,6 +404,7 @@ pub async fn request_compaction(
 
 /// Управление целью идёт командой адаптеру; состояние вернётся записью SJ. Команда
 /// идемпотентна по ключу владельца и по уже выданной команде того же поколения.
+#[allow(clippy::too_many_arguments)]
 pub async fn request_goal(
     pool: &PgPool,
     owner_id: Uuid,

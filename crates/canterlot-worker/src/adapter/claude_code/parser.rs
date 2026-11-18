@@ -360,15 +360,19 @@ fn goal_from_text(text: &str, now_ms: i64) -> Option<Option<GoalState>> {
     {
         return None;
     }
-    let (prefix, status) = if let Some(rest) = first.strip_prefix("Goal set: ") {
-        (rest, GoalStatus::Active)
-    } else if let Some(rest) = first.strip_prefix("Goal active: ") {
-        (rest, GoalStatus::Active)
-    } else if let Some(rest) = first.strip_prefix("Goal paused: ") {
-        (rest, GoalStatus::Paused)
-    } else {
-        return None;
-    };
+    let (prefix, status) = first
+        .strip_prefix("Goal set: ")
+        .map(|rest| (rest, GoalStatus::Active))
+        .or_else(|| {
+            first
+                .strip_prefix("Goal active: ")
+                .map(|rest| (rest, GoalStatus::Active))
+        })
+        .or_else(|| {
+            first
+                .strip_prefix("Goal paused: ")
+                .map(|rest| (rest, GoalStatus::Paused))
+        })?;
     let turns = turns_of(prefix);
     let objective = prefix
         .rsplit_once(" (")
