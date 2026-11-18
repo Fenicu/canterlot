@@ -111,6 +111,12 @@ python3 scripts/flaky-ratchet.py check
 python3 scripts/test-flaky-ratchet.py -q
 stage_done "храповик флейковых паттернов"
 
+# Адреса resolved в лок-файлах: приватное зеркало не должно уезжать в репозиторий.
+stage "реестр в лок-файлах"
+python3 scripts/lockfile-registry-check.py
+python3 scripts/test-lockfile-registry-check.py -q
+stage_done "реестр в лок-файлах"
+
 if ((all)); then
     stage "версия"
     bash scripts/check-version.sh
