@@ -1,3 +1,3 @@
-//! Алиас общего JSON-RPC клиента: формат `codex app-server` и ACP разбирает один модуль.
+//! Алиас общего JSON-RPC клиента: формат `codex app-server` разбирает модуль `adapter::jsonrpc`.
 
 pub use crate::adapter::jsonrpc::*;

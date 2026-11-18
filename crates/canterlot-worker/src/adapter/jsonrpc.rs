@@ -1,5 +1,5 @@
 // Классификация строк JSON-RPC: ответ, уведомление или запрос сервера.
-// Формат общий для `codex app-server` и ACP (`agy acp`): на проводе встречается и
+// Формат `codex app-server`: на проводе встречается и
 // `jsonrpc:"2.0"`, и кадр без него, поэтому решают только `id`/`method`. Значения
 // параметров могут нести текст сообщений, так что Debug здесь вручную и показывает
 // только имена и наличие.
@@ -164,13 +164,6 @@ impl RpcClient {
         )
     }
 
-    /// Запрос с явной версией протокола: ACP пишет `jsonrpc:"2.0"` в каждом кадре.
-    pub fn request_v2(&mut self, method: &'static str, params: Value) -> (i64, Value) {
-        let (id, mut message) = self.request(method, params);
-        message["jsonrpc"] = Value::String("2.0".into());
-        (id, message)
-    }
-
     pub fn notification(method: &str, params: Value) -> Value {
         serde_json::json!({ "method": method, "params": params })
     }
@@ -249,10 +242,9 @@ mod tests {
     #[test]
     fn client_numbers_requests_and_tracks_pending() {
         let mut rpc = RpcClient::new();
-        let (first, message) = rpc.request_v2("initialize", serde_json::json!({}));
-        let (second, _) = rpc.request("session/new", serde_json::json!({}));
+        let (first, _) = rpc.request("initialize", serde_json::json!({}));
+        let (second, _) = rpc.request("thread/start", serde_json::json!({}));
         assert_eq!((first, second), (0, 1));
-        assert_eq!(message["jsonrpc"], "2.0");
         assert_eq!(rpc.resolve(&RpcId::Int(first)), Some("initialize"));
         assert_eq!(rpc.resolve(&RpcId::Int(first)), None);
         rpc.forget(second);
