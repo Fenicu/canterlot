@@ -1619,7 +1619,7 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     }
   });
 
-  await page.route(/\/api\/v1\/schedules\/[^/]+\/runs$/, async (route) => {
+  await page.route(/\/api\/v1\/schedules\/[^/]+\/runs(?:\?.*)?$/, async (route) => {
     if (route.request().method() !== 'GET') return route.fallback();
     const url = new URL(route.request().url());
     const id = url.pathname.split('/')[4] ?? '';
@@ -1630,7 +1630,7 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     }
   });
 
-  await page.route(/\/api\/v1\/schedules\/[^/]+$/, async (route) => {
+  await page.route(/\/api\/v1\/schedules\/(?!preview$)[^/]+$/, async (route) => {
     const method = route.request().method();
     const id = new URL(route.request().url()).pathname.split('/').at(-1) ?? '';
     const key = route.request().headers()['idempotency-key'];

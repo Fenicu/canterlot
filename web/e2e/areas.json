@@ -245,6 +245,7 @@
         "e2e/ui/limit-settings.spec.ts",
         "e2e/ui/owner-instructions.spec.ts",
         "e2e/ui/presets.spec.ts",
+        "e2e/ui/schedules.spec.ts",
         "e2e/ui/settings.spec.ts",
         "e2e/ui/spawn-whitelist.spec.ts",
         "e2e/ui/theme-picker.spec.ts",

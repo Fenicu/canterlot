@@ -83,7 +83,7 @@
 <section data-schedules class="schedules" aria-label="Расписание">
   {#if edit === 'new' || editing}
     {#if runtime}
-      <ScheduleEditor schedule={editing} {runtime} {store} done={() => location.assign(href(editing ? `&view=${encodeURIComponent(editing.id)}` : ''))} cancel={() => location.assign(href())} />
+      <ScheduleEditor schedule={editing} {runtime} {store} done={(id) => location.assign(href(`&view=${encodeURIComponent(id)}`))} cancel={() => location.assign(href())} />
     {:else}<p>Открываю форму…</p>{/if}
   {:else if view && selected}
     {#if runtime}

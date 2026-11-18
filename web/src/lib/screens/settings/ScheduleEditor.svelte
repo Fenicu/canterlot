@@ -23,7 +23,7 @@
     schedule: Schedule | null;
     runtime: Runtime;
     store: SchedulesStore;
-    done: () => void;
+    done: (scheduleId: string) => void;
     cancel: () => void;
   } = $props();
 
@@ -236,10 +236,15 @@
       catch_up_minutes: catchUp ?? 30, overlap, title_template: titleTemplate.trim() || '{name} · {date}'
     };
     try {
-      if (schedule) await patchSchedule(schedule.id, { ...body, base_revision: baseRevision }, opKey);
-      else await createSchedule(body, opKey);
-      await store.load();
-      done();
+      if (schedule) {
+        await patchSchedule(schedule.id, { ...body, base_revision: baseRevision }, opKey);
+        await store.load();
+        done(schedule.id);
+      } else {
+        const created = await createSchedule(body, opKey);
+        await store.load();
+        done(created.data.id);
+      }
     } catch (err) {
       if (err instanceof ApiError && err.code === 'schedule_revision_conflict') {
         conflict = true;
