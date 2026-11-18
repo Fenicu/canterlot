@@ -53,6 +53,16 @@
     return false;
   }
 
+  /** Причина отказа хаба: кнопка не сработала, а карточка осталась открытой. */
+  function refusedBecause(error: unknown, fallback: string): string {
+    const reason = error instanceof ApiError ? error.details?.reason : undefined;
+    if (reason === 'capability_missing') {
+      return 'Воркер не умеет безопасно прерывать из карточки: обновите воркер или нажмите «Прервать» в чате';
+    }
+    if (reason === 'input_not_queued') return 'Сообщение уже ушло из очереди';
+    return fallback;
+  }
+
   async function steer() {
     if (!canSteer || busy || !episodeId) return;
     busy = 'steer';
@@ -64,7 +74,8 @@
       done = 'Влито в ход';
       resolved = 'owner_steer';
     } catch (error) {
-      if (!closedBy(error)) failed = 'Не удалось влить: сообщение уйдёт следующим ходом';
+      if (!closedBy(error))
+        failed = refusedBecause(error, 'Не удалось влить: сообщение уйдёт следующим ходом');
     } finally {
       busy = null;
     }
@@ -81,7 +92,7 @@
       done = 'Ход прерван';
       resolved = 'owner_interrupt';
     } catch (error) {
-      if (!closedBy(error)) failed = 'Не удалось прервать ход';
+      if (!closedBy(error)) failed = refusedBecause(error, 'Не удалось прервать ход');
     } finally {
       busy = null;
     }

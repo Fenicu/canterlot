@@ -153,3 +153,32 @@ test('a click on a card that was closed meanwhile shows it as resolved', async (
   await expect(card.locator('[data-role="hung-failed"]')).toHaveCount(0);
   await expect(card.locator('[data-action="interrupt"] button')).toBeDisabled();
 });
+
+test('a worker without the guarded interrupt refuses the card button with a clear reason', async ({
+  page
+}) => {
+  await boot(
+    page,
+    { kind: 'turn_hung', turn_hung_notice: true, turn_hung_episode: EPISODE, session_id: 'a' },
+    'open'
+  );
+  const card = page.locator('[data-role="hung-card"]');
+  await page.route('**/api/v1/conversations/*/hung-episodes/*/interrupt', async (route) => {
+    await route.fulfill({
+      status: 409,
+      json: {
+        error: {
+          code: 'capability_missing',
+          message: 'Требуется обновление воркера',
+          scope: 'delivery',
+          retry: 'after_condition',
+          correlation_id: '00000000-0000-4000-8000-0000000000f2',
+          details: { reason: 'capability_missing' }
+        }
+      }
+    });
+  });
+  await card.locator('[data-action="interrupt"] button').click();
+  await expect(card.locator('[data-role="hung-failed"]')).toContainText('обновите воркер');
+  await expect(card.locator('[data-action="interrupt"] button')).toBeEnabled();
+});
