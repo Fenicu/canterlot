@@ -1556,6 +1556,112 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     await route.fulfill({ headers: headers(), json: api.limitSettingsView() });
   });
 
+  await page.route(/\/api\/v1\/schedules$/, async (route) => {
+    const method = route.request().method();
+    if (method === 'GET') {
+      await route.fulfill({ headers: headers(), json: [...api.schedules.values()] });
+      return;
+    }
+    if (method !== 'POST') return route.fallback();
+    const key = route.request().headers()['idempotency-key'];
+    if (!key) {
+      await route.fulfill({ status: 400, headers: headers(), json: errorBody('invalid_request', 'Нужен Idempotency-Key') });
+      return;
+    }
+    const body = route.request().postDataJSON() as Parameters<typeof api.createSchedule>[0];
+    if (!body?.name || !body.cron || !body.prompt || !body.target) {
+      await route.fulfill({ status: 422, headers: headers(), json: errorBody('schedule_invalid', 'Некорректное расписание') });
+      return;
+    }
+    await route.fulfill({ headers: headers(), json: api.createSchedule(body, key) });
+  });
+
+  await page.route(/\/api\/v1\/schedules\/preview$/, async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback();
+    const body = route.request().postDataJSON() as { cron?: string; count?: number };
+    if (!body?.cron || api.scheduleNextFires(body.cron, 1).length === 0) {
+      await route.fulfill({ status: 422, headers: headers(), json: errorBody('schedule_invalid', 'Некорректное выражение cron') });
+      return;
+    }
+    await route.fulfill({ headers: headers(), json: api.scheduleNextFires(body.cron, Math.max(1, Math.min(20, body.count ?? 5))) });
+  });
+
+  for (const action of ['pause', 'resume'] as const) {
+    await page.route(new RegExp(`/api/v1/schedules/[^/]+/${action}$`), async (route) => {
+      if (route.request().method() !== 'POST') return route.fallback();
+      const key = route.request().headers()['idempotency-key'];
+      if (!key) {
+        await route.fulfill({ status: 400, headers: headers(), json: errorBody('invalid_request', 'Нужен Idempotency-Key') });
+        return;
+      }
+      const id = new URL(route.request().url()).pathname.split('/')[4] ?? '';
+      try {
+        await route.fulfill({ headers: headers(), json: api.setScheduleEnabled(id, action === 'resume', key) });
+      } catch {
+        await route.fulfill({ status: 404, headers: headers(), json: errorBody('not_found', 'Расписание не найдено') });
+      }
+    });
+  }
+
+  await page.route(/\/api\/v1\/schedules\/[^/]+\/run$/, async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback();
+    const key = route.request().headers()['idempotency-key'];
+    if (!key) {
+      await route.fulfill({ status: 400, headers: headers(), json: errorBody('invalid_request', 'Нужен Idempotency-Key') });
+      return;
+    }
+    const id = new URL(route.request().url()).pathname.split('/')[4] ?? '';
+    const body = (route.request().postDataJSON() ?? {}) as { run_anyway?: boolean };
+    try {
+      await route.fulfill({ headers: headers(), json: api.runSchedule(id, key, body.run_anyway === true) });
+    } catch {
+      await route.fulfill({ status: 404, headers: headers(), json: errorBody('not_found', 'Расписание не найдено') });
+    }
+  });
+
+  await page.route(/\/api\/v1\/schedules\/[^/]+\/runs$/, async (route) => {
+    if (route.request().method() !== 'GET') return route.fallback();
+    const url = new URL(route.request().url());
+    const id = url.pathname.split('/')[4] ?? '';
+    try {
+      await route.fulfill({ headers: headers(), json: api.scheduleRunPage(id, url.searchParams.get('cursor') ?? undefined, Number(url.searchParams.get('limit') ?? 100)) });
+    } catch {
+      await route.fulfill({ status: 404, headers: headers(), json: errorBody('not_found', 'Расписание не найдено') });
+    }
+  });
+
+  await page.route(/\/api\/v1\/schedules\/[^/]+$/, async (route) => {
+    const method = route.request().method();
+    const id = new URL(route.request().url()).pathname.split('/').at(-1) ?? '';
+    const key = route.request().headers()['idempotency-key'];
+    if (method === 'GET') {
+      try { await route.fulfill({ headers: headers(), json: api.getSchedule(id) }); }
+      catch { await route.fulfill({ status: 404, headers: headers(), json: errorBody('not_found', 'Расписание не найдено') }); }
+      return;
+    }
+    if (!key) {
+      await route.fulfill({ status: 400, headers: headers(), json: errorBody('invalid_request', 'Нужен Idempotency-Key') });
+      return;
+    }
+    try {
+      if (method === 'PATCH') {
+        const body = route.request().postDataJSON() as Parameters<typeof api.patchSchedule>[1];
+        await route.fulfill({ headers: headers(), json: api.patchSchedule(id, body, key) });
+      } else if (method === 'DELETE') {
+        api.deleteSchedule(id, key);
+        await route.fulfill({ headers: headers(), json: api.getScheduleOrNull(id) ?? { id } });
+      } else return route.fallback();
+    } catch (error) {
+      const conflict = error instanceof Error && error.name === 'FakeScheduleConflict';
+      await route.fulfill({
+        status: conflict ? 409 : 404,
+        headers: headers(),
+        json: errorBody(conflict ? 'schedule_revision_conflict' : 'not_found', conflict ? 'Расписание изменено с другого устройства' : 'Расписание не найдено',
+          conflict ? { current_revision: (error as { current?: number }).current } : undefined)
+      });
+    }
+  });
+
   await page.route(/\/api\/v1\/presets(?:\?.*)?$/, async (route) => {
     const method = route.request().method();
     if (method === 'GET') {

@@ -13,6 +13,7 @@ import type { DraftRecord } from '../../src/lib/drafts/sync';
 import type { SecretRequestAnswer, SecretRequestView } from '../../src/lib/requests/secretRequest';
 import type { FakeHub } from './hub';
 import type { components } from '../../src/lib/api/generated/openapi.js';
+import { parseCron } from '../../src/lib/screens/settings/schedules.js';
 
 type PresetSummary = components['schemas']['PresetSummary'];
 type MessageSnippet = components['schemas']['MessageSnippet'];
@@ -29,6 +30,10 @@ type BookmarkPage = components['schemas']['BookmarkPage'];
 type ImagesPage = components['schemas']['ImagesPage'];
 type ImageItem = components['schemas']['ImageItem'];
 type GoalView = components['schemas']['GoalView'];
+type Schedule = components['schemas']['Schedule'];
+type ScheduleRun = components['schemas']['ScheduleRun'];
+type NewSchedule = components['schemas']['NewSchedule'];
+type PatchSchedule = components['schemas']['PatchSchedule'];
 
 /** Запись ленты обновлений CLI и моделей, как её отдаёт `GET /api/v1/updates`. */
 export interface FakeUpdate {
@@ -49,6 +54,14 @@ export class FakeDraftConflict extends Error {
 		super('draft_revision_conflict');
 		this.name = 'FakeDraftConflict';
 		this.record = record;
+	}
+}
+
+/** Отказ правки расписания по устаревшей ревизии: несёт актуальную версию для ответа 409. */
+export class FakeScheduleConflict extends Error {
+	constructor(readonly current: number) {
+		super('schedule_revision_conflict');
+		this.name = 'FakeScheduleConflict';
 	}
 }
 
@@ -259,6 +272,11 @@ export class FakeHubApi {
 	hibernateIdleMinutes: number | null = 60;
 	readonly promptSuggestions = new Map<string, components['schemas']['PromptSuggestionView']>();
 	readonly limitSettingsKeys: string[] = [];
+	/** Расписания владельца и история их запусков. */
+	readonly schedules = new Map<string, Schedule>();
+	readonly scheduleRuns = new Map<string, ScheduleRun[]>();
+	readonly scheduleKeys: string[] = [];
+	readonly scheduleRunKeys = new Map<string, ScheduleRun>();
 	readonly defaultLimitSettings: components['schemas']['LimitSettings'] = {
 		warn_remaining_pct: 20,
 		danger_remaining_pct: 5,
@@ -353,6 +371,145 @@ export class FakeHubApi {
 
 	routingPolicyView(): { policy: unknown | null; revision: number; builtin: unknown } {
 		return { policy: this.routingPolicy, revision: this.routingPolicyRevision, builtin: this.builtinRoutingPolicy };
+	}
+
+	/** Пять следующих срабатываний: минутный шаг по тем же полям, что и у редактора. */
+	scheduleNextFires(cron: string, count: number): string[] {
+		const parsed = parseCron(cron);
+		if (!parsed) return [];
+		const at = new Date();
+		at.setSeconds(0, 0);
+		at.setMinutes(at.getMinutes() + 1);
+		const out: string[] = [];
+		for (let step = 0; step < 60 * 24 * 8 && out.length < count; step++) {
+			if (parsed.minute.includes(at.getMinutes()) && parsed.hour.includes(at.getHours())
+				&& parsed.dom.includes(at.getDate()) && parsed.month.includes(at.getMonth() + 1)
+				&& parsed.dow.some((value) => value % 7 === at.getDay())) out.push(at.toISOString());
+			at.setMinutes(at.getMinutes() + 1);
+		}
+		return out;
+	}
+
+	private emitSchedule(schedule: Schedule): void {
+		this.hub.append('schedules', { kind: 'schedule_changed', payload: structuredClone(schedule) });
+		this.hub.flush();
+	}
+
+	private emitRun(run: ScheduleRun): void {
+		this.hub.append('schedules', { kind: 'schedule_run_changed', payload: structuredClone(run) });
+		this.hub.flush();
+	}
+
+	makeSchedule(body: NewSchedule, id = this.id(), revision = 1): Schedule {
+		const now = new Date().toISOString();
+		const fires = this.scheduleNextFires(body.cron, 5);
+		return {
+			id,
+			owner_id: '00000000-0000-4000-8000-0000000000d1',
+			name: body.name,
+			enabled: true,
+			cron: body.cron,
+			timezone: body.timezone ?? 'UTC',
+			target: body.target,
+			prompt: body.prompt,
+			precheck: body.precheck ?? null,
+			precheck_timeout_seconds: body.precheck_timeout_seconds ?? 60,
+			catch_up_minutes: body.catch_up_minutes ?? 30,
+			overlap: body.overlap ?? 'skip',
+			title_template: body.title_template ?? '{name} · {date}',
+			next_fire_at: fires[0] ?? new Date(Date.now() + 3_600_000).toISOString(),
+			created_at: now,
+			updated_at: now,
+			revision
+		};
+	}
+
+	createSchedule(body: NewSchedule, key: string): Schedule {
+		this.scheduleKeys.push(key);
+		const schedule = this.makeSchedule(body);
+		this.schedules.set(schedule.id, schedule);
+		this.scheduleRuns.set(schedule.id, []);
+		this.emitSchedule(schedule);
+		return schedule;
+	}
+
+	getSchedule(id: string): Schedule {
+		const schedule = this.schedules.get(id);
+		if (!schedule) throw new Error('not_found');
+		return schedule;
+	}
+
+	getScheduleOrNull(id: string): Schedule | null {
+		return this.schedules.get(id) ?? null;
+	}
+
+	patchSchedule(id: string, body: PatchSchedule, key: string): Schedule {
+		this.scheduleKeys.push(key);
+		const current = this.getSchedule(id);
+		if (body.base_revision !== current.revision) throw new FakeScheduleConflict(current.revision);
+		const next: Schedule = { ...current, updated_at: new Date().toISOString(), revision: current.revision + 1 };
+		const fields = ['name', 'cron', 'timezone', 'target', 'prompt', 'precheck', 'precheck_timeout_seconds', 'catch_up_minutes', 'overlap', 'title_template'] as const;
+		for (const field of fields) {
+			const value = body[field];
+			if (value !== undefined) (next as unknown as Record<string, unknown>)[field] = value;
+		}
+		if (body.cron !== undefined || body.timezone !== undefined) {
+			next.next_fire_at = this.scheduleNextFires(next.cron, 5)[0] ?? next.next_fire_at;
+		}
+		this.schedules.set(id, next);
+		this.emitSchedule(next);
+		return next;
+	}
+
+	setScheduleEnabled(id: string, enabled: boolean, key: string): Schedule {
+		this.scheduleKeys.push(key);
+		const current = this.getSchedule(id);
+		const next: Schedule = { ...current, enabled, revision: current.revision + 1, updated_at: new Date().toISOString() };
+		this.schedules.set(id, next);
+		this.emitSchedule(next);
+		return next;
+	}
+
+	deleteSchedule(id: string, key: string): void {
+		this.scheduleKeys.push(key);
+		const current = this.getSchedule(id);
+		this.schedules.delete(id);
+		this.scheduleRuns.delete(id);
+		this.emitSchedule(current);
+	}
+
+	runSchedule(id: string, key: string, runAnyway: boolean): ScheduleRun {
+		const existing = this.scheduleRunKeys.get(key);
+		if (existing) return existing;
+		const schedule = this.getSchedule(id);
+		const now = new Date().toISOString();
+		const run: ScheduleRun = {
+			id: this.id(),
+			schedule_id: id,
+			scheduled_at: now,
+			claimed_revision: schedule.revision,
+			state: 'started',
+			created_at: now,
+			started_at: now,
+			delay_ms: 1200,
+			session_id: this.id(),
+			input_id: this.id(),
+			manual: true,
+			idempotency_key: key,
+			detail: { run_anyway: runAnyway, ...(runAnyway ? { note: 'проверки обойдены' } : {}) }
+		};
+		this.scheduleRunKeys.set(key, run);
+		this.scheduleRuns.set(id, [run, ...(this.scheduleRuns.get(id) ?? [])]);
+		this.emitRun(run);
+		return run;
+	}
+
+	scheduleRunPage(id: string, cursor?: string, limit = 100): { items: ScheduleRun[]; next_cursor: string | null } {
+		this.getSchedule(id);
+		const rows = this.scheduleRuns.get(id) ?? [];
+		const offset = cursor ? Number(cursor) || 0 : 0;
+		const items = rows.slice(offset, offset + limit);
+		return { items: structuredClone(items), next_cursor: offset + limit < rows.length ? String(offset + limit) : null };
 	}
 
 	/** Проверка полей, которые хаб отклоняет с `routing_policy_invalid`: пока это `expected_minutes` (5..1440). */

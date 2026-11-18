@@ -96,7 +96,7 @@ export class FakeHub {
   receive(session: HubSession, op: ClientOp): void {
     if (session.closed || session.blocked) return;
     if (op?.op === 'subscribe' && typeof op.scope === 'string' && typeof op.id === 'string'
-      && !/^(conversations|machines|conversation:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/.test(op.scope)) {
+      && !/^(conversations|machines|schedules|conversation:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/.test(op.scope)) {
       this.emit(session, { op: 'error', id: op.id.slice(0, 128), code: 'bad_scope' }); return;
     }
     if (!checkClient(op)) {
