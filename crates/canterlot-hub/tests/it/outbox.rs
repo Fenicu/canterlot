@@ -2077,6 +2077,7 @@ async fn input_dispatched_for_pilot_waits_when_the_session_lacks_it(pool: PgPool
 /// именем хода и отметкой прогресса, отвечает квитанциями, и только тогда в ленте появляется
 /// строка о спасении, а родитель получает заметку.
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+#[ignore = "автоматическое спасение выключено в 1.40: фоновый проектор в режиме alert опережает сцену с Auto; вернуть вместе с автоматикой в 1.41"]
 async fn a_hung_turn_is_interrupted_through_the_real_worker_channel(pool: PgPool) {
     use canterlot_hub::{
         activity,
