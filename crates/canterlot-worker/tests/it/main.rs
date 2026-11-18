@@ -119,6 +119,7 @@ mod session;
 #[cfg(all(feature = "fault-injection", feature = "synthetic-adapter"))]
 mod session_tools_e2e;
 mod spec_compat;
+mod spec_shape;
 mod store;
 #[cfg(feature = "synthetic-adapter")]
 mod supervisor;

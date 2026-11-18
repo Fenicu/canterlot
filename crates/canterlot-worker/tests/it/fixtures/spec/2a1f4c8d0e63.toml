@@ -1,0 +1,25 @@
+ipc_socket = "/data/ipc/spec-fixture.sock"
+execution_id = "00000000-0000-4000-8000-000000000001"
+generation = 1
+conversation_id = "00000000-0000-4000-8000-000000000002"
+protocol_version = 1
+
+[claude_code]
+allow_paid_model_poll = false
+executable = "claude"
+
+[codex]
+executable = "codex"
+rate_limits_poll_interval_s = 300
+
+[opencode]
+executable = "opencode"
+providers = []
+refuse_paths = []
+
+[timers]
+attach_wait = "30000ms"
+ready_deadline = "30000ms"
+stop_grace = "5000ms"
+stop_retry = "2000ms"
+transmit_deadline = "10000ms"
