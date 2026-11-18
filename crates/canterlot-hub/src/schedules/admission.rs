@@ -352,10 +352,10 @@ async fn admit_inner(
         .await
         .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))?;
     let executor = if let Some(conversation_id) = existing_conversation {
+        // Модель — из авторитетной строки: проекция `conversation_derived`
+        // отстаёт от подтверждённой смены настроек.
         let row: (String, Option<String>) = sqlx::query_as(
-            "select c.harness, d.effective_model from conversations c
-             left join conversation_derived d on d.conversation_id = c.id
-             where c.id = $1",
+            "select c.harness, c.model from conversations c where c.id = $1",
         )
         .bind(conversation_id)
         .fetch_one(&mut *conn)
@@ -1014,11 +1014,9 @@ async fn dispatch(
             .await
             .map_err(|_| Skip::new(RunState::Failed, "queue_unavailable"))
             .map_err(fail)?;
-        let fresh: Option<String> = sqlx::query_scalar(
-            "select coalesce(d.effective_model,'') from conversations c
-              left join conversation_derived d on d.conversation_id = c.id
-              where c.id = $1",
-        )
+        // Авторитетная модель под замком очереди: её меняет транзакция
+        // подтверждённых настроек, проекция может отставать.
+        let fresh: Option<String> = sqlx::query_scalar("select c.model from conversations c where c.id = $1")
         .bind(conversation_id)
         .fetch_optional(&mut *tx)
         .await

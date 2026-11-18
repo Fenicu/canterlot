@@ -1839,3 +1839,79 @@ async fn run_now_does_not_commit_a_claim_when_another_operation_wins_the_key(poo
         .unwrap();
     assert_eq!(runs, 0, "no committed claim paired with a foreign key");
 }
+
+/// 2: подтверждённая смена модели на Fable во время предпроверки. Проекция
+/// `conversation_derived` не обновлена (держим её), но dispatch читает
+/// авторитетную `conversations.model` под замком очереди и видит красное окно.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn model_change_during_precheck_is_read_from_the_authoritative_row(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let mut session: FakeSession =
+        testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
+    sqlx::query("update conversations set model='claude-sonnet-4-5' where id=$1")
+        .bind(f.seed.conversation_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("update conversation_derived set effective_model='claude-sonnet-4-5' where conversation_id=$1")
+        .bind(f.seed.conversation_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    observe(&pool, &f, "claude", limits::Window::WeeklyFable, 990).await;
+    let registry = f.state.registry.clone();
+    let machine = f.seed.machine_id;
+    let connection = registry.session_info(machine).unwrap().connection_id;
+    let conversation = f.seed.conversation_id;
+    let worker_pool = pool.clone();
+    let worker = tokio::spawn(async move {
+        while let Some(down) = session.commands.recv().await {
+            if let Some(control_down::Msg::SchedulePrecheck(request)) = down.msg {
+                // Настройки приняты воркером: меняется только авторитетная строка.
+                sqlx::query("update conversations set model='claude-fable-5' where id=$1")
+                    .bind(conversation)
+                    .execute(&worker_pool)
+                    .await
+                    .unwrap();
+                registry.finish_precheck(
+                    machine,
+                    connection,
+                    PrecheckResult {
+                        attempt_id: request.attempt_id,
+                        outcome: Some(precheck_result::Outcome::Finished(
+                            canterlot_proto::worker::v1::PrecheckFinished {
+                                exit_code: 0,
+                                output_tail: String::new(),
+                                timed_out: false,
+                            },
+                        )),
+                    },
+                );
+            }
+        }
+    });
+    let r = f
+        .client
+        .send(
+            Method::POST,
+            "/api/v1/schedules",
+            Some("fable-create"),
+            Some(json!({
+                "name": "Смена модели",
+                "cron": "0 9 * * *",
+                "target": existing(&f),
+                "prompt": "посмотреть коммиты",
+                "precheck": "true",
+            })),
+        )
+        .await;
+    assert_eq!(r.status.as_u16(), 200);
+    let id = r.json::<Value>()["id"].as_str().unwrap().to_owned();
+    due(&pool, &id, Utc::now() - TimeDelta::seconds(30)).await;
+    scheduler(&f).tick(Utc::now()).await.unwrap();
+    let rid = run_id(&pool, &id).await;
+    let detail = wait_state(&pool, rid, "skipped_limits").await;
+    assert_eq!(detail["window"], "weekly_fable", "{detail}");
+    assert_eq!(inputs_with_text(&pool, "посмотреть коммиты").await, 0);
+    worker.abort();
+}
