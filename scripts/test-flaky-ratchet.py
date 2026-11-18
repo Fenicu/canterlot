@@ -150,6 +150,19 @@ const t = `test.skip(cond); retries: 2`;
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('нарушений нет', result.stdout)
 
+    def test_web_retries_with_quarantine_comment_is_not_counted(self):
+        make_tree(self.root, {
+            'web/e2e/ui/foo.spec.ts': '''\
+// QUARANTINE: причина карантина
+retries: 2,
+''',
+        })
+        write_baseline(self.baseline, {})
+        result = self.check()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('нарушений нет', result.stdout)
+        self.assertNotIn('web_retries', result.stdout)
+
     def test_nextest_retries_requires_quarantine_above_override(self):
         make_tree(self.root, {
             '.config/nextest.toml': '''\
