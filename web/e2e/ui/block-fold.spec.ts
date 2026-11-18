@@ -96,14 +96,27 @@ async function slices(page: Page, key: string, act: () => Promise<unknown>, budg
 		const out = { head: [] as number[], fold: [] as number[] };
 		for (const share of [0.1, 0.3, 0.6]) {
 			animation.currentTime = total * share;
-			await frame();
-			await frame();
-			out.head.push(document.querySelector(`${row} .head`)!.getBoundingClientRect().top);
-			out.fold.push(fold.getBoundingClientRect().height);
+			// Под нагрузкой лента догоняет новую высоту несколько кадров: замер пишется,
+			// когда шапка встала, а не через фиксированные кадры.
+			const started = performance.now();
+			let previous = Number.POSITIVE_INFINITY;
+			for (;;) {
+				await frame();
+				await frame();
+				const head = document.querySelector(`${row} .head`)!.getBoundingClientRect().top;
+				const height = fold.getBoundingClientRect().height;
+				if (Math.abs(head - previous) < 0.5 || performance.now() - started > 5_000) {
+					out.head.push(head);
+					out.fold.push(height);
+					break;
+				}
+				previous = head;
+			}
 		}
-		animation.play();
-		// Переход доигрывает до конца: следующее действие не должно попасть в его середину.
-		await Promise.race([animation.finished.catch(() => {}), new Promise((resolve) => setTimeout(resolve, 3_000))]);
+		// Переход закрывается сразу в конечное состояние: ждать нечему, и следующее
+		// действие не попадёт в его середину.
+		animation.finish();
+		await animation.finished.catch(() => {});
 		return out;
 	}, row);
 }
@@ -115,6 +128,11 @@ for (const motion of ['full', 'reduced'] as const) {
 		test.setTimeout(60_000);
 		if (motion === 'reduced') await page.emulateMedia({ reducedMotion: 'reduce' });
 		await boot(page);
+		if (motion === 'full') {
+			// Медленный переход, чтобы срез застал его на месте: загруженный браузер иначе
+			// успевает доиграть 240 мс между кадрами опроса (как в session-row-fold.spec.ts).
+			await page.evaluate(() => document.documentElement.style.setProperty('--motion-scale', '8'));
+		}
 		const key = await pickMiddleHead(page);
 		const head = page.locator(`[data-row][data-key="${key}"] .head`);
 		const top = await headTop(page, key);
@@ -130,14 +148,16 @@ for (const motion of ['full', 'reduced'] as const) {
 		}
 		await expect(page.locator(`[data-row][data-key="${key}"] .fold`)).toBeVisible();
 		await expect.poll(() => page.locator(`[data-row][data-key="${key}"] .fold`).evaluate((el) => el.getAnimations().length)).toBe(0);
-		expect(Math.abs((await headTop(page, key)) - top)).toBeLessThanOrEqual(1.5);
+		await expect.poll(async () => Math.abs((await headTop(page, key)) - top)).toBeLessThanOrEqual(1.5);
 		// Виртуализатор знает итоговую высоту: соседние строки стоят вплотную, без зазора и наезда.
-		const gap = await page.evaluate((key) => {
-			const row = document.querySelector<HTMLElement>(`[data-row][data-key="${key}"]`)!;
-			const next = row.nextElementSibling as HTMLElement;
-			return next.getBoundingClientRect().top - row.getBoundingClientRect().bottom;
-		}, key);
-		expect(Math.abs(gap)).toBeLessThanOrEqual(1);
+		await expect.poll(async () => {
+			const gap = await page.evaluate((key) => {
+				const row = document.querySelector<HTMLElement>(`[data-row][data-key="${key}"]`)!;
+				const next = row.nextElementSibling as HTMLElement;
+				return next.getBoundingClientRect().top - row.getBoundingClientRect().bottom;
+			}, key);
+			return Math.abs(gap);
+		}).toBeLessThanOrEqual(1);
 
 		const closing = await slices(page, key, () => head.click(), motion === 'reduced' ? 1_500 : 8_000);
 		if (motion === 'reduced') expect(closing).toBeNull();
@@ -148,7 +168,7 @@ for (const motion of ['full', 'reduced'] as const) {
 			for (const y of closing!.head) expect(Math.abs(y - top)).toBeLessThanOrEqual(1.5);
 		}
 		await expect(page.locator(`[data-row][data-key="${key}"] .fold`)).toHaveCount(0);
-		expect(Math.abs((await headTop(page, key)) - top)).toBeLessThanOrEqual(1.5);
+		await expect.poll(async () => Math.abs((await headTop(page, key)) - top)).toBeLessThanOrEqual(1.5);
 	});
 }
 
