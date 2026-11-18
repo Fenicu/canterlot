@@ -12,22 +12,21 @@ fn request(dir: &std::path::Path, command: &str) -> SchedulePrecheck {
     }
 }
 
-/// Жив ли процесс: зомби уже убит, его `/proc` ещё виден чужому поджидателю.
-fn process_alive(pid: u32) -> bool {
-    let Ok(text) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
-        return false;
-    };
-    let Some(end) = text.rfind(')') else {
-        return false;
-    };
-    let state = text[end + 1..].split_whitespace().next().unwrap_or("");
-    state != "Z" && state != "X" && state != "x"
+/// Этот процесс усыновляет осиротевших потомков `bash`: без снятия статуса
+/// они остаются зомби, и тест «убит» не отличил бы их от настоящей уборки.
+fn adopt_orphans() {
+    rustix::process::set_child_subreaper(rustix::process::Pid::from_raw(1)).unwrap();
+}
+
+/// Статус снят: записи в `/proc` больше нет (зомби её ещё держит).
+fn reaped(pid: u32) -> bool {
+    !std::path::Path::new(&format!("/proc/{pid}")).exists()
 }
 
 async fn wait_for_gone(pid: u32, what: &str) {
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if !process_alive(pid) {
+            if reaped(pid) {
                 return;
             }
             tokio::task::yield_now().await;
@@ -201,6 +200,7 @@ async fn workdir_outside_allowed_roots_is_rejected() {
 
 #[tokio::test]
 async fn background_descendant_is_killed_on_normal_exit() {
+    adopt_orphans();
     let dir = tempfile::tempdir().unwrap();
     let pid_file = dir.path().join("bg.pid");
     let command = format!("sleep 30 & echo $! > {}", pid_file.display());
@@ -229,11 +229,16 @@ async fn background_descendant_is_killed_on_normal_exit() {
     })
     .await
     .expect("background pid appears");
-    wait_for_gone(pid, "background descendant is reaped after normal exit").await;
+    wait_for_gone(
+        pid,
+        "background descendant is reaped (not a zombie) after normal exit",
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn background_descendant_is_killed_on_cancel() {
+    adopt_orphans();
     let dir = tempfile::tempdir().unwrap();
     let pid_file = dir.path().join("bg-cancel.pid");
     let command = format!("sleep 30 & echo $! > {}", pid_file.display());
@@ -262,7 +267,7 @@ async fn background_descendant_is_killed_on_cancel() {
     let _ = task.await;
     let gone = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if !process_alive(pid) {
+            if reaped(pid) {
                 return;
             }
             tokio::task::yield_now().await;
@@ -301,4 +306,87 @@ async fn precheck_runs_in_the_pinned_workdir() {
         "cwd is the validated dir, got: {}",
         outcome.output_tail
     );
+}
+
+/// Дренажи остаются под охраной набора до конца итогового ожидания: отмена
+/// посреди него закрывает трубы, а не оставляет задачи жить в фоне.
+#[tokio::test]
+async fn cancel_during_the_final_drain_join_aborts_the_drains() {
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("keeper.pid");
+    let leader_file = dir.path().join("leader.pid");
+    // Хранитель труб уходит в свою сессию: группа предпроверки его не убьёт,
+    // и дренаж не дождётся EOF, пока итоговое ожидание не истечёт.
+    let command = format!(
+        "echo $$ > {}; setsid sleep 30 & echo $! > {}",
+        leader_file.display(),
+        pid_file.display()
+    );
+    let pipes_before = pipe_fds();
+    let task = tokio::spawn({
+        let dir = dir.path().to_path_buf();
+        async move {
+            run_with(
+                request(&dir, &command),
+                vec![dir.clone()],
+                Duration::from_secs(30),
+                None,
+            )
+            .await
+        }
+    });
+    let keeper = read_pid(&pid_file).await;
+    let leader = read_pid(&leader_file).await;
+    // Лидер ушёл: предпроверка в итоговом ожидании дренажей.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !reaped(leader) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("leader exits");
+    task.abort();
+    let _ = task.await;
+    let closed = tokio::time::timeout(Duration::from_secs(5), async {
+        while pipe_fds() > pipes_before {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .is_ok();
+    let _ = tokio::process::Command::new("kill")
+        .arg("-KILL")
+        .arg(keeper.to_string())
+        .output()
+        .await;
+    assert!(closed, "drain tasks are aborted with the cancelled future");
+}
+
+async fn read_pid(path: &std::path::Path) -> u32 {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Ok(text) = std::fs::read_to_string(path)
+                && let Ok(pid) = text.trim().parse::<u32>()
+            {
+                return pid;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("pid file appears")
+}
+
+fn pipe_fds() -> usize {
+    std::fs::read_dir("/proc/self/fd")
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|entry| {
+                    std::fs::read_link(entry.path())
+                        .is_ok_and(|target| target.to_string_lossy().starts_with("pipe:"))
+                })
+                .count()
+        })
+        .unwrap_or(0)
 }

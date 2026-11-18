@@ -66,34 +66,28 @@ impl ScopedGroup {
 
     async fn kill_and_reap(&self) {
         self.signal_group(Signal::KILL);
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        loop {
-            if !group_has_members(self.pgid) {
-                break;
-            }
-            if tokio::time::Instant::now() >= deadline {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        wait_group_gone_and_reap(self.pgid).await;
     }
 }
 
-/// Живые участники группы предпроверки по `pgrp`: лидер уже может быть
-/// перебран, а фоновые потомки ещё сидят с тем же `pgid`. Зомби не в счёт:
-/// их статус уже снят убийством, а перебирает их чужой поджидатель.
-fn group_has_members(pgid: u32) -> bool {
+/// Участники группы предпроверки по `pgrp`: лидер уже может быть перебран, а
+/// фоновые потомки ещё сидят с тем же `pgid`.
+struct GroupMember {
+    pid: u32,
+    parent: u32,
+    zombie: bool,
+}
+
+fn group_members(pgid: u32) -> Vec<GroupMember> {
     let Ok(entries) = std::fs::read_dir("/proc") else {
-        return false;
+        return Vec::new();
     };
+    let mut out = Vec::new();
     for entry in entries.flatten() {
         let name = entry.file_name();
-        let Some(pid_str) = name.to_str() else {
+        let Some(pid) = name.to_str().and_then(|name| name.parse::<u32>().ok()) else {
             continue;
         };
-        if pid_str.parse::<u32>().is_err() {
-            continue;
-        }
         let Ok(text) = std::fs::read_to_string(entry.path().join("stat")) else {
             continue;
         };
@@ -101,17 +95,53 @@ fn group_has_members(pgid: u32) -> bool {
             continue;
         };
         let fields: Vec<&str> = text[end + 1..].split_whitespace().collect();
-        if fields
-            .first()
-            .is_some_and(|state| *state == "Z" || *state == "X")
-        {
+        // Поля после `)`: состояние, ppid, pgrp.
+        if fields.get(2).and_then(|s| s.parse::<u32>().ok()) != Some(pgid) {
             continue;
         }
-        if fields.get(2).and_then(|s| s.parse::<u32>().ok()) == Some(pgid) {
-            return true;
-        }
+        out.push(GroupMember {
+            pid,
+            parent: fields
+                .get(1)
+                .and_then(|s| s.parse::<u32>().ok())
+                .unwrap_or(0),
+            zombie: fields
+                .first()
+                .is_some_and(|state| *state == "Z" || *state == "X"),
+        });
     }
-    false
+    out
+}
+
+/// Ждёт, пока в группе не останется живых, и снимает статус усыновлённых
+/// потомков: когда этот процесс — ближайший subreaper, убитые потомки
+/// `bash` остаются его зомби, и никто, кроме него, их не заберёт. Лидера
+/// не трогаем: его статус ждёт владелец `Child`.
+async fn wait_group_gone_and_reap(pgid: u32) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+    let me = std::process::id();
+    loop {
+        let mut live = false;
+        for member in group_members(pgid) {
+            if !member.zombie {
+                live = true;
+            } else if member.parent == me
+                && member.pid != pgid
+                && let Some(pid) = i32::try_from(member.pid)
+                    .ok()
+                    .and_then(rustix::process::Pid::from_raw)
+            {
+                let _ = rustix::process::waitid(
+                    rustix::process::WaitId::Pid(pid),
+                    rustix::process::WaitIdOptions::EXITED | rustix::process::WaitIdOptions::NOHANG,
+                );
+            }
+        }
+        if !live || tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 /// Дренажи вывода убиваются и при обрыве future: брошенный `JoinHandle`
@@ -121,8 +151,18 @@ struct DrainSet {
 }
 
 impl DrainSet {
-    fn take(&mut self) -> Vec<tokio::task::JoinHandle<()>> {
-        self.tasks.take().unwrap_or_default()
+    /// Дочитать дренажи с отсрочкой, не вынимая дескрипторы из набора:
+    /// отмена future посреди ожидания роняет набор, а `Drop` отменяет задачи.
+    async fn join(&mut self, per_task: Duration) {
+        if let Some(tasks) = self.tasks.as_mut() {
+            for task in tasks.iter_mut() {
+                let _ = tokio::time::timeout(per_task, &mut *task).await;
+                if !task.is_finished() {
+                    task.abort();
+                }
+            }
+        }
+        self.tasks = None;
     }
 }
 
@@ -146,6 +186,12 @@ impl Drop for GroupGuard {
             && scope.armed.swap(false, Ordering::AcqRel)
         {
             scope.signal_group(Signal::KILL);
+            // Отмена future: синхронно ждать нельзя, но усыновлённых потомков
+            // всё равно надо снять, поэтому уборку доводит отдельная задача.
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                let pgid = scope.pgid;
+                runtime.spawn(async move { wait_group_gone_and_reap(pgid).await });
+            }
         }
     }
 }
@@ -358,10 +404,7 @@ pub async fn run_with(
         Ok(Err(_)) => {
             // Тот же путь уборки, что и обычно: прибить группу, дочитать
             // дренажи с отменой, снять охрану, переждать ребёнка.
-            for task in drain_set.take().iter_mut() {
-                let _ = tokio::time::timeout(Duration::from_secs(1), &mut *task).await;
-                task.abort();
-            }
+            drain_set.join(Duration::from_secs(1)).await;
             guard.scope = None;
             armed.store(false, Ordering::Release);
             let _ = child.start_kill();
@@ -375,12 +418,7 @@ pub async fn run_with(
     // Потоки closing по EOF после выхода группы: дать дренажам дочитать хвост,
     // иначе последняя запись может ещё не попасть в кольцо. Отмена вместо
     // отсоединения: брошенный `JoinHandle` продолжал бы жить в фоне.
-    for task in drain_set.take().iter_mut() {
-        let _ = tokio::time::timeout(Duration::from_secs(1), &mut *task).await;
-        if !task.is_finished() {
-            task.abort();
-        }
-    }
+    drain_set.join(Duration::from_secs(1)).await;
     let tail = truncate_tail(&ring.lock().expect("output ring poisoned"));
     guard.scope = None;
     armed.store(false, Ordering::Release);
