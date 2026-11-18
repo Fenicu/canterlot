@@ -98,8 +98,9 @@ type SuggestWaiters = Arc<Mutex<HashMap<(Uuid, Uuid), oneshot::Sender<Vec<String
 type ClaudeHistoryWaiters = Arc<Mutex<HashMap<(Uuid, Uuid), oneshot::Sender<Vec<ClaudeHistory>>>>>;
 type PathProbeWaiters =
     Arc<Mutex<HashMap<(Uuid, Uuid), oneshot::Sender<canterlot_proto::worker::v1::PathProbe>>>>;
-type PrecheckWaiters =
-    Arc<Mutex<HashMap<(Uuid, Uuid), oneshot::Sender<canterlot_proto::worker::v1::PrecheckResult>>>>;
+type PrecheckWaiters = Arc<
+    Mutex<HashMap<(Uuid, Uuid), (Uuid, oneshot::Sender<canterlot_proto::worker::v1::PrecheckResult>)>>,
+>;
 
 /// Прикладная проба живости после просроченной квитанции команды.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -811,6 +812,13 @@ impl Registry {
             return false;
         };
         entry.cancel.cancel();
+        drop(entries);
+        // Оборванное соединение не оставляет ожидание до таймера:
+        // отправитель бросается, `ask_precheck` сразу получает `NoAnswer`.
+        self.prechecks
+            .lock()
+            .expect("precheck waiters lock")
+            .retain(|(id, _), _| *id != machine_id);
         true
     }
 
@@ -836,6 +844,10 @@ impl Registry {
         request: canterlot_proto::worker::v1::SchedulePrecheck,
         wait: std::time::Duration,
     ) -> Result<canterlot_proto::worker::v1::PrecheckResult, PrecheckFailure> {
+        let connection_id = self
+            .session_info(machine_id)
+            .map(|info| info.connection_id)
+            .ok_or(PrecheckFailure::NoSession)?;
         if self.session_info(machine_id).is_none() {
             return Err(PrecheckFailure::NoSession);
         }
@@ -856,7 +868,7 @@ impl Registry {
             {
                 return Err(PrecheckFailure::Busy);
             }
-            waiters.insert(key, answer);
+            waiters.insert(key, (connection_id, answer));
         }
         let _slot = PrecheckSlot {
             waiters: self.prechecks.clone(),
@@ -879,16 +891,29 @@ impl Registry {
     pub fn finish_precheck(
         &self,
         machine_id: Uuid,
+        connection_id: Uuid,
         reply: canterlot_proto::worker::v1::PrecheckResult,
     ) {
         let Ok(attempt_id) = Uuid::parse_str(&reply.attempt_id) else {
             return;
         };
-        let waiter = self
-            .prechecks
-            .lock()
-            .expect("precheck waiters lock")
-            .remove(&(machine_id, attempt_id));
+        // Попытка привязана к аренде управляющего соединения, захваченной
+        // при отправке: замена потока не может завершить чужое ожидание.
+        let live = self
+            .session_info(machine_id)
+            .map(|info| info.connection_id);
+        let waiter = {
+            let mut waiters = self.prechecks.lock().expect("precheck waiters lock");
+            match waiters.remove(&(machine_id, attempt_id)) {
+                Some((stored, waiter))
+                    if stored == connection_id && live.is_some_and(|live| live == stored) =>
+                {
+                    Some(waiter)
+                }
+                Some((_, _)) => None,
+                None => None,
+            }
+        };
         if let Some(waiter) = waiter {
             let _ = waiter.send(reply);
         }
@@ -1069,6 +1094,11 @@ impl Registry {
             data.cancel();
         }
         let _ = self.changes.send((machine_id, Availability::Unavailable));
+        drop(entries);
+        self.prechecks
+            .lock()
+            .expect("precheck waiters lock")
+            .retain(|(id, _), _| *id != machine_id);
     }
 
     fn refresh(&self, entry: &mut SessionEntry) -> Availability {
