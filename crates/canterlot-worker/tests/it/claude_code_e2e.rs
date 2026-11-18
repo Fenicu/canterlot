@@ -3388,11 +3388,16 @@ async fn goal_command_sends_slash_input_and_publishes_the_reply() {
     let id = Uuid::now_v7();
     f.send(&tx(id)).await;
     let _ = f.finish().await;
-    let outcome = tokio::time::timeout(WAIT, f.adapter.goal_command(
-        canterlot_proto::goals::GoalAction::Set,
-        Some("Подготовить отчёт"),
-        None,
-    )).await.expect("goal command deadline");
+    let outcome = tokio::time::timeout(
+        WAIT,
+        f.adapter.goal_command(
+            canterlot_proto::goals::GoalAction::Set,
+            Some("Подготовить отчёт"),
+            None,
+        ),
+    )
+    .await
+    .expect("goal command deadline");
     assert_eq!(outcome, adapter::GoalCommandOutcome::Applied);
     let goal = loop {
         match f.event().await {
@@ -3429,7 +3434,11 @@ async fn goal_proposal_reaches_the_owner_card_and_a_mismatched_shape_is_refused(
     let mut seen = false;
     loop {
         match f.event().await {
-            AdapterEvent::RequestOpened { request_id, kind, payload } => {
+            AdapterEvent::RequestOpened {
+                request_id,
+                kind,
+                payload,
+            } => {
                 assert_eq!(kind, "permission");
                 assert_eq!(payload["tool_name"], "SetGoal");
                 let decision = DecisionPayload::Permission {
@@ -3438,7 +3447,8 @@ async fn goal_proposal_reaches_the_owner_card_and_a_mismatched_shape_is_refused(
                 };
                 assert!(matches!(
                     tokio::time::timeout(WAIT, f.adapter.deliver_decision(&request_id, &decision))
-                        .await.unwrap(),
+                        .await
+                        .unwrap(),
                     adapter::DecisionOutcome::Applied(_)
                 ));
                 seen = true;
@@ -3474,6 +3484,9 @@ async fn goal_proposal_reaches_the_owner_card_and_a_mismatched_shape_is_refused(
         }
     }
     let reply = std::fs::read_to_string(f.dir.path().join("mcp-replies.jsonl")).unwrap();
-    assert!(reply.contains("-32602"), "forged call must be refused: {reply}");
+    assert!(
+        reply.contains("-32602"),
+        "forged call must be refused: {reply}"
+    );
     f.close().await;
 }

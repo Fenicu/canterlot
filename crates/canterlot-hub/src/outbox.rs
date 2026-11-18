@@ -464,10 +464,7 @@ pub fn to_proto(row: &CommandRow) -> Result<Command, OutboxError> {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_owned(),
-            token_budget: row
-                .payload
-                .get("token_budget")
-                .and_then(Value::as_i64),
+            token_budget: row.payload.get("token_budget").and_then(Value::as_i64),
         }),
         "remove_worktree" => {
             let remove: RemoveWorktreePayload = serde_json::from_value(row.payload.clone())

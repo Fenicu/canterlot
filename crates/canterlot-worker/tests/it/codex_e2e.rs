@@ -3886,19 +3886,34 @@ async fn goal_command_sends_user_provenance_and_reports_snapshot() {
     })));
     let mut fake = Fake::new(lines);
     fake.start().await;
-    let outcome = tokio::time::timeout(WAIT, fake.adapter.goal_command(
-        GoalAction::Set,
-        Some("Подготовить промежуточный отчёт"),
-        None,
-    )).await.expect("goal command deadline");
-    assert_eq!(outcome, canterlot_worker::adapter::GoalCommandOutcome::Applied);
-    let entries: Vec<Value> = fake.stdin_log().lines()
+    let outcome = tokio::time::timeout(
+        WAIT,
+        fake.adapter.goal_command(
+            GoalAction::Set,
+            Some("Подготовить промежуточный отчёт"),
+            None,
+        ),
+    )
+    .await
+    .expect("goal command deadline");
+    assert_eq!(
+        outcome,
+        canterlot_worker::adapter::GoalCommandOutcome::Applied
+    );
+    let entries: Vec<Value> = fake
+        .stdin_log()
+        .lines()
         .filter_map(|line| serde_json::from_str(line).ok())
         .collect();
-    let request = entries.iter().find(|e| e["method"] == "thread/goal/set")
+    let request = entries
+        .iter()
+        .find(|e| e["method"] == "thread/goal/set")
         .expect("goal set request");
     assert_eq!(request["params"]["origin"], "user");
-    assert_eq!(request["params"]["objective"], "Подготовить промежуточный отчёт");
+    assert_eq!(
+        request["params"]["objective"],
+        "Подготовить промежуточный отчёт"
+    );
     let mut seen_complete = false;
     for _ in 0..4 {
         match fake.event().await {
@@ -3912,6 +3927,9 @@ async fn goal_command_sends_user_provenance_and_reports_snapshot() {
             _ => {}
         }
     }
-    assert!(seen_complete, "goal update must reach the adapter event stream");
+    assert!(
+        seen_complete,
+        "goal update must reach the adapter event stream"
+    );
     fake.close().await;
 }

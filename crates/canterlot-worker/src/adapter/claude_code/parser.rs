@@ -312,9 +312,7 @@ pub fn goal_from_frame(value: &serde_json::Value, now_ms: i64) -> Option<Option<
     if kind != "assistant" && kind != "result" {
         return None;
     }
-    let synthetic = value
-        .get("local_command_source")
-        .is_some()
+    let synthetic = value.get("local_command_source").is_some()
         || value.get("local_command_run").is_some()
         || value.get("local_command").is_some()
         || value

@@ -419,16 +419,24 @@ pub async fn request_goal(
         .map_err(|reason| ControlError::InvalidRequest { reason })?;
     if action == canterlot_proto::goals::GoalAction::Set {
         let Some(text) = objective else {
-            return Err(ControlError::InvalidRequest { reason: "objective_required" });
+            return Err(ControlError::InvalidRequest {
+                reason: "objective_required",
+            });
         };
         if text.is_empty() || text.len() > canterlot_proto::goals::MAX_OBJECTIVE_BYTES {
-            return Err(ControlError::InvalidRequest { reason: "objective_invalid" });
+            return Err(ControlError::InvalidRequest {
+                reason: "objective_invalid",
+            });
         }
     } else if objective.is_some() {
-        return Err(ControlError::InvalidRequest { reason: "objective_unexpected" });
+        return Err(ControlError::InvalidRequest {
+            reason: "objective_unexpected",
+        });
     }
     if token_budget.is_some_and(|budget| budget <= 0) {
-        return Err(ControlError::InvalidRequest { reason: "budget_invalid" });
+        return Err(ControlError::InvalidRequest {
+            reason: "budget_invalid",
+        });
     }
     const OPERATION: &str = "request_goal";
     let hash = idempotency::request_hash(
@@ -456,15 +464,24 @@ pub async fn request_goal(
             .await?
             .ok_or(ControlError::NotFound)?;
             if !matches!(harness.as_str(), "codex" | "claude_code") {
-                return Err(ControlError::InvalidRequest { reason: "unsupported_harness" });
+                return Err(ControlError::InvalidRequest {
+                    reason: "unsupported_harness",
+                });
             }
-            if !machine_capabilities.iter().any(|cap| cap == crate::session::CAPABILITY_GOALS_V1) {
-                return Err(ControlError::InvalidRequest { reason: "capability_missing" });
+            if !machine_capabilities
+                .iter()
+                .any(|cap| cap == crate::session::CAPABILITY_GOALS_V1)
+            {
+                return Err(ControlError::InvalidRequest {
+                    reason: "capability_missing",
+                });
             }
             let Some((execution_id, generation, _)) =
                 executions::live(&mut *conn, conversation_id).await?
             else {
-                return Err(ControlError::InvalidRequest { reason: "no_live_execution" });
+                return Err(ControlError::InvalidRequest {
+                    reason: "no_live_execution",
+                });
             };
             let existing: Option<Uuid> = sqlx::query_scalar(
                 "select id from commands where conversation_id = $1 and kind = 'goal_command'

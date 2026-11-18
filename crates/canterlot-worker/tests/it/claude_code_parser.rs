@@ -2140,7 +2140,9 @@ fn goal_set_and_active_replies_become_one_snapshot() {
     ] {
         let mut parser = Parser::new();
         let parsed = parser.feed(&goal_frame(text));
-        let goal = goal_of(&parsed).unwrap_or_else(|| panic!("no goal in {parsed:?}")).unwrap();
+        let goal = goal_of(&parsed)
+            .unwrap_or_else(|| panic!("no goal in {parsed:?}"))
+            .unwrap();
         assert_eq!(goal.objective, "Подготовить отчёт");
         assert_eq!(goal.status, canterlot_proto::goals::GoalStatus::Active);
         assert_eq!(goal.turns_used, turns);

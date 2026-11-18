@@ -2277,8 +2277,14 @@ fn goal_notifications_carry_the_full_snapshot_until_complete() {
     all.extend(translator.feed("thread/goal/updated", &goal_frame("complete", 30, 1030)));
     let goals = goals_of(&all);
     assert_eq!(goals.len(), 3, "{all:?}");
-    assert_eq!(goals[0].as_ref().unwrap().status, canterlot_proto::goals::GoalStatus::Active);
-    assert_eq!(goals[1].as_ref().unwrap().status, canterlot_proto::goals::GoalStatus::Blocked);
+    assert_eq!(
+        goals[0].as_ref().unwrap().status,
+        canterlot_proto::goals::GoalStatus::Active
+    );
+    assert_eq!(
+        goals[1].as_ref().unwrap().status,
+        canterlot_proto::goals::GoalStatus::Blocked
+    );
     let done = goals[2].as_ref().unwrap();
     assert_eq!(done.status, canterlot_proto::goals::GoalStatus::Complete);
     assert_eq!(done.tokens_used, 30);
@@ -2289,10 +2295,7 @@ fn goal_notifications_carry_the_full_snapshot_until_complete() {
 #[test]
 fn goal_cleared_notification_reports_no_goal() {
     let mut translator = Translator::new("thread-main", "gpt-6-luna");
-    let out = translator.feed(
-        "thread/goal/cleared",
-        &json!({"threadId": "thread-main"}),
-    );
+    let out = translator.feed("thread/goal/cleared", &json!({"threadId": "thread-main"}));
     assert_eq!(goals_of(&out), vec![None], "{out:?}");
 }
 
@@ -2311,7 +2314,8 @@ fn malformed_and_unknown_goal_frames_do_not_break_the_turn() {
             events_of(&out).iter().all(|event| matches!(
                 event,
                 AdapterEvent::Diagnostic {
-                    kind: "codex_goal_invalid" | "unattributed_thread_frame", ..
+                    kind: "codex_goal_invalid" | "unattributed_thread_frame",
+                    ..
                 }
             )),
             "only an optional diagnostic is allowed: {out:?}"

@@ -5,8 +5,7 @@ use axum::http::Method;
 use canterlot_hub::{
     blocks::ExecutionRef,
     events::{self, ReadAfter, Scope},
-    executions,
-    goals,
+    executions, goals,
     http::{self, AppState},
     model::ExecutionState,
     testkit::{self, TestClient},
@@ -65,7 +64,10 @@ impl F {
         let client = TestClient::in_process(http::router(AppState::new(deps))).as_owner();
         let lease = registry.connect_for_tests(
             machine,
-            &capabilities.iter().map(|c| (*c).to_owned()).collect::<Vec<_>>(),
+            &capabilities
+                .iter()
+                .map(|c| (*c).to_owned())
+                .collect::<Vec<_>>(),
         );
         Self {
             pool,
@@ -111,13 +113,14 @@ impl F {
     async fn goal_events(&self) -> Vec<Value> {
         let ReadAfter::Events(rows) = events::read_after(
             &self.pool,
-            &Scope::Conversations { owner_id: self.owner },
+            &Scope::Conversations {
+                owner_id: self.owner,
+            },
             0,
             100,
         )
         .await
-        .unwrap()
-        else {
+        .unwrap() else {
             panic!("resync required");
         };
         rows.into_iter()
@@ -151,7 +154,12 @@ async fn owner_command_goes_to_the_worker_and_adapter_event_updates_all_devices(
             "goal-set-1",
         )
         .await;
-    assert_eq!(response.status, 200, "{}", String::from_utf8_lossy(&response.body));
+    assert_eq!(
+        response.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&response.body)
+    );
     let outcome: Value = response.json();
     assert!(
         outcome["requested"]["command_id"].is_string()
@@ -224,7 +232,12 @@ async fn goal_command_without_capability_is_refused_clearly(pool: PgPool) {
             "goal-no-capability",
         )
         .await;
-    assert_eq!(response.status, 409, "{}", String::from_utf8_lossy(&response.body));
+    assert_eq!(
+        response.status,
+        409,
+        "{}",
+        String::from_utf8_lossy(&response.body)
+    );
     let error: Value = response.json();
     assert_eq!(error["error"]["code"], "capability_missing");
     let count: i64 = sqlx::query_scalar(

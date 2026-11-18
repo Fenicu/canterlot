@@ -48,12 +48,11 @@ pub async fn apply(
 ) -> Result<bool, sqlx::Error> {
     let generation = i64::try_from(fact.generation)
         .map_err(|_| sqlx::Error::InvalidArgument("invalid goal_changed: generation".into()))?;
-    let Some((owner_id, harness)): Option<(Uuid, String)> = sqlx::query_as(
-        "select owner_id, harness from conversations where id = $1",
-    )
-    .bind(run.conversation_id)
-    .fetch_optional(&mut *conn)
-    .await?
+    let Some((owner_id, harness)): Option<(Uuid, String)> =
+        sqlx::query_as("select owner_id, harness from conversations where id = $1")
+            .bind(run.conversation_id)
+            .fetch_optional(&mut *conn)
+            .await?
     else {
         return Ok(true);
     };
@@ -109,7 +108,14 @@ pub async fn apply(
     } else {
         None
     };
-    publish(conn, owner_id, run.conversation_id, published, correlation_id).await?;
+    publish(
+        conn,
+        owner_id,
+        run.conversation_id,
+        published,
+        correlation_id,
+    )
+    .await?;
     Ok(stored.is_none())
 }
 
@@ -152,18 +158,28 @@ pub async fn publish(
     goal: Option<&GoalView>,
     correlation_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    events::append(
-        conn,
-        NewEvent {
-            scope: Scope::Conversations { owner_id },
-            kind: "goal_changed",
-            conversation_id: Some(conversation_id),
-            execution_id: None,
-            payload: json!({"conversation_id": conversation_id, "goal": goal}),
-            correlation_id,
+    let payload = json!({"conversation_id": conversation_id, "goal": goal});
+    // Список владельца обновляет шапку на всех устройствах; область разговора
+    // доставляет то же состояние открытому чату без перехода через список.
+    for scope in [
+        Scope::Conversations { owner_id },
+        Scope::Conversation {
+            id: conversation_id,
         },
-    )
-    .await?;
+    ] {
+        events::append(
+            conn,
+            NewEvent {
+                scope,
+                kind: "goal_changed",
+                conversation_id: Some(conversation_id),
+                execution_id: None,
+                payload: payload.clone(),
+                correlation_id,
+            },
+        )
+        .await?;
+    }
     Ok(())
 }
 
