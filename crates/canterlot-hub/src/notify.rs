@@ -40,6 +40,11 @@ pub const KIND_CREDENTIAL_EXPIRY: &str = "credential_expiry";
 pub const KIND_CREDENTIAL_AUTH: &str = "credential_auth";
 /// Экран «Сеансы и вход» в PWA: сюда ведут пуши о входе.
 pub const SIGN_IN_PATH: &str = "/settings/sign-in";
+/// Запуск расписания провалился: один пуш на расписание в катящийся час.
+/// Сессии обычно нет (ошибка до dispatch), поэтому разговор не привязывается.
+pub const KIND_SCHEDULE_FAILED: &str = "schedule_failed";
+/// Катящееся окно троттлинга пушей о несработавших расписаниях.
+const SCHEDULE_FAILURE_WINDOW: TimeDelta = TimeDelta::hours(1);
 /// Сводный пуш о неудачах шлётся, когда их за час набралось столько.
 const SIGN_IN_FAILURE_THRESHOLD: i64 = 5;
 
@@ -626,6 +631,65 @@ async fn enqueue_auth_in_tx(
     Ok(inserted)
 }
 
+/// Несработавший запуск расписания: пуш владельцу не чаще раза в час на
+/// расписание (катящееся окно, проверка в той же транзакции, что и запись
+/// исхода). Вызывать только для исхода `failed`.
+pub(crate) async fn enqueue_schedule_failure_in_tx(
+    conn: &mut PgConnection,
+    schedule_id: Uuid,
+    schedule_name: &str,
+    reason: &str,
+) -> Result<bool, sqlx::Error> {
+    let recent: bool = sqlx::query_scalar(
+        "select exists(select 1 from owner_pushes where kind='schedule_failed'
+          and payload->>'schedule_id' = $1
+          and created_at > clock_timestamp() - make_interval(secs => $2))",
+    )
+    .bind(schedule_id.to_string())
+    .bind(SCHEDULE_FAILURE_WINDOW.num_seconds() as f64)
+    .fetch_one(&mut *conn)
+    .await?;
+    if recent {
+        return Ok(false);
+    }
+    enqueue_auth_in_tx(
+        conn,
+        KIND_SCHEDULE_FAILED,
+        &format!("{KIND_SCHEDULE_FAILED}:{schedule_id}:{}", Uuid::now_v7()),
+        &json!({
+            "schedule_id": schedule_id,
+            "schedule_name": schedule_name,
+            "reason": reason,
+        }),
+    )
+    .await
+}
+
+/// Человекочитаемая причина несработавшего запуска для пуша.
+fn schedule_failure_text(reason: &str) -> String {
+    match reason {
+        "precheck_result_unknown" => "предпроверка не дождалась воркера",
+        "precheck_capability_missing" => "воркер не умеет делать предпроверку",
+        "precheck_invalid_attempt" => "внутренняя ошибка предпроверки",
+        "precheck_attempt_mismatch" => "ответ предпроверки не совпал с попыткой",
+        "precheck_error" => "ошибка запуска предпроверки",
+        "create_failed" => "не создалась сессия",
+        "submit_failed" => "не поставился ввод",
+        "conversation_not_found" => "разговор пропал или удалён",
+        "database_unavailable" => "база была недоступна",
+        "invalid_schedule" => "расписание повреждено",
+        "limit_settings_unavailable" | "limits_unavailable" => "не прочитались лимиты",
+        "routing_policy_unavailable" => "не прочиталась политика маршрутизации",
+        "machine_catalog_unavailable" => "не прочитался каталог машины",
+        "whitelist_unavailable" => "не прочитался белый список",
+        "live_counts_unavailable" => "не посчиталась занятость",
+        "preset_unavailable" => "не разрешился пресет",
+        "queue_unavailable" => "не прочиталась очередь",
+        other => return format!("внутренняя ошибка ({other})"),
+    }
+    .to_owned()
+}
+
 /// Конец входа Claude Code приблизился: один пуш на машину, провайдера и дату.
 /// Повторный вход приносит новую дату и взводит пуш заново. Часы — базы: срок и
 /// отметка «уже сказали» сравниваются в одной транзакции.
@@ -892,20 +956,34 @@ async fn compose_auth(
                 .to_owned(),
             PRIORITY_SIGN_IN,
         ),
+        KIND_SCHEDULE_FAILED => {
+            let name = row.payload["schedule_name"]
+                .as_str()
+                .unwrap_or("Расписание");
+            let reason = row.payload["reason"].as_str().unwrap_or("failed");
+            (
+                format!("Расписание «{}» не запустилось", clip(name, TITLE_CHARS)),
+                format!("Причина: {}.", schedule_failure_text(reason)),
+                PRIORITY_FAILURE,
+            )
+        }
         _ => return Ok(None),
+    };
+    let click_url = if matches!(
+        row.kind.as_str(),
+        KIND_CREDENTIAL_EXPIRY | KIND_CREDENTIAL_AUTH
+    ) {
+        format!("{app_url}/machines")
+    } else if row.kind == KIND_SCHEDULE_FAILED {
+        format!("{app_url}/settings")
+    } else {
+        format!("{app_url}{SIGN_IN_PATH}")
     };
     Ok(Some(Message {
         title,
         body,
         priority,
-        click_url: if matches!(
-            row.kind.as_str(),
-            KIND_CREDENTIAL_EXPIRY | KIND_CREDENTIAL_AUTH
-        ) {
-            format!("{app_url}/machines")
-        } else {
-            format!("{app_url}{SIGN_IN_PATH}")
-        },
+        click_url,
     }))
 }
 

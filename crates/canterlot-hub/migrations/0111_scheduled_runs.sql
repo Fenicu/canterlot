@@ -55,3 +55,14 @@ create index schedule_runs_owner_state on schedule_runs (owner_id, state, create
 -- дожидается завершения победителя вместо второго dispatch.
 create unique index schedule_runs_schedule_key
   on schedule_runs (schedule_id, idempotency_key);
+
+-- Пуш о несработавшем расписании не привязан к разговору: чаще всего
+-- сессии нет (ошибка до dispatch). Ограничение «не чаще раза в час»
+-- держит код постановки, а не ключ: ключ уникален на запуск.
+alter table owner_pushes drop constraint owner_pushes_kind_check;
+alter table owner_pushes add constraint owner_pushes_kind_check check (
+  (kind in ('waiting', 'turn_finished', 'failure') and conversation_id is not null)
+  or (kind in ('sign_in', 'sign_in_failures', 'sign_in_lock', 'session_country',
+               'credential_expiry', 'credential_auth', 'schedule_failed')
+      and conversation_id is null)
+);

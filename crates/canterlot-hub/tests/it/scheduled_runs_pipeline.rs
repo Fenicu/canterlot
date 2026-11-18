@@ -677,6 +677,65 @@ async fn run_now_is_idempotent_and_run_anyway_bypasses_checks(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn failed_runs_push_once_per_schedule_per_hour(pool: PgPool) {
+    use canterlot_hub::notify::{self, PushSettings};
+    notify::configure(
+        &pool,
+        Some(&PushSettings {
+            waiting: true,
+            turn_finished: true,
+            failures: true,
+            timezone: "UTC".into(),
+        }),
+    )
+    .await
+    .unwrap();
+    let f = Fixture::new(pool.clone()).await;
+    // Несуществующий разговор: приём падает до воркера.
+    let r = f
+        .client
+        .send(
+            Method::POST,
+            "/api/v1/schedules",
+            Some("fp-create"),
+            Some(json!({
+                "name": "Битая цель",
+                "cron": "0 9 * * *",
+                "target": {"kind": "existing_session", "conversation_id": Uuid::now_v7()},
+                "prompt": "не дойдёт",
+            })),
+        )
+        .await;
+    assert_eq!(r.status.as_u16(), 200, "{}", String::from_utf8_lossy(&r.body));
+    let id = r.json::<Value>()["id"].as_str().unwrap().to_owned();
+    for round in 0..2 {
+        due(&pool, &id, Utc::now() - TimeDelta::seconds(30)).await;
+        scheduler(&f).tick(Utc::now()).await.unwrap();
+        let rid = run_id(&pool, &id).await;
+        wait_state(&pool, rid, "failed").await;
+        let pushes: i64 = sqlx::query_scalar(
+            "select count(*) from owner_pushes where kind='schedule_failed'
+             and payload->>'schedule_id'=$1",
+        )
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(pushes, 1, "round {round}: one push per rolling hour");
+    }
+    let payload: Value = sqlx::query_scalar(
+        "select payload from owner_pushes where kind='schedule_failed'
+         and payload->>'schedule_id'=$1",
+    )
+    .bind(&id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(payload["schedule_name"], "Битая цель");
+    assert!(payload["reason"].as_str().is_some());
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn concurrent_run_now_with_one_key_dispatches_once(pool: PgPool) {
     let f = Fixture::new(pool.clone()).await;
     let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);

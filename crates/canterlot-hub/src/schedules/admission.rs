@@ -90,7 +90,7 @@ pub async fn admit(scheduler: &Scheduler, claimed: ClaimedRun) {
         tracing::error!(kind = "schedule_admit_db", error = %crate::dberr::describe(&error), "cannot record run outcome");
         return;
     }
-    let updated = apply_outcome(&run, state, detail, session_id, input_id, started_at, delay);
+    let updated = apply_outcome(&run, state, detail.clone(), session_id, input_id, started_at, delay);
     let payload = match serde_json::to_value(&updated) {
         Ok(payload) => payload,
         Err(error) => {
@@ -117,6 +117,21 @@ pub async fn admit(scheduler: &Scheduler, claimed: ClaimedRun) {
         let _ = tx.rollback().await;
         tracing::error!(kind = "schedule_admit_db", error = %crate::dberr::describe(&error), "cannot publish run outcome");
         return;
+    }
+    if state == RunState::Failed {
+        let reason = detail.get("reason").and_then(Value::as_str).unwrap_or("failed");
+        if let Err(error) = crate::notify::enqueue_schedule_failure_in_tx(
+            &mut tx,
+            schedule.id,
+            &schedule.name,
+            reason,
+        )
+        .await
+        {
+            let _ = tx.rollback().await;
+            tracing::error!(kind = "schedule_admit_db", error = %crate::dberr::describe(&error), "cannot queue failure push");
+            return;
+        }
     }
     if let Err(error) = tx.commit().await {
         tracing::error!(kind = "schedule_admit_db", error = %crate::dberr::describe(&error), "cannot commit run outcome");
@@ -1071,6 +1086,20 @@ pub async fn run_now(
     )
     .await?;
     crate::idempotency::record(&mut tx, owner_id, key, "run_now", &hash, &response, None).await?;
+    if state_out == RunState::Failed {
+        let reason = updated
+            .detail
+            .get("reason")
+            .and_then(Value::as_str)
+            .unwrap_or("failed");
+        crate::notify::enqueue_schedule_failure_in_tx(
+            &mut tx,
+            schedule_id,
+            &claimed.schedule.name,
+            reason,
+        )
+        .await?;
+    }
     tx.commit().await?;
     Ok(updated)
 }
