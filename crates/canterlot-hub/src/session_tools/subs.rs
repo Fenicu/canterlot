@@ -368,7 +368,7 @@ pub async fn queue_note_in_tx(
     .await
 }
 
-pub(super) async fn insert_job(
+pub(crate) async fn insert_job(
     conn: &mut PgConnection,
     owner_id: Uuid,
     subscriber_id: Uuid,

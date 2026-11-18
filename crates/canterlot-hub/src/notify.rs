@@ -234,6 +234,27 @@ pub async fn on_request_opened_in_tx(
     .await
 }
 
+/// Ход завис в генерации: один пуш на эпизод, только если владелец включил
+/// уведомления о сбоях. Повторное зависание в том же ходе шлёт отдельный пуш
+/// с собственным ключом, но тоже не чаще одного.
+pub async fn on_hung_in_tx(
+    conn: &mut PgConnection,
+    conversation_id: Uuid,
+    episode: Uuid,
+    second: bool,
+) -> Result<(), sqlx::Error> {
+    enqueue_in_tx(
+        conn,
+        conversation_id,
+        KIND_FAILURE,
+        &format!("hung:{episode}:{}", if second { "second" } else { "first" }),
+        &json!({"kind": "hung", "second": second}),
+        false,
+        false,
+    )
+    .await
+}
+
 /// Агент просит секрет: пуш говорит, что именно нужно владельцу. Значение в
 /// пуш не попадает — его ещё нет, а имя пришло из аргументов инструмента.
 pub async fn on_secret_request_opened_in_tx(

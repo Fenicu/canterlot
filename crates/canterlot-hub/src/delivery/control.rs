@@ -232,77 +232,99 @@ pub async fn request_stop(
 ) -> Result<StopOutcome, ControlError> {
     idempotency::validate_key(idempotency_key)
         .map_err(|reason| ControlError::InvalidRequest { reason })?;
-    const OPERATION: &str = "request_stop";
-    let hash = idempotency::request_hash(OPERATION, &json!({"conversation_id": conversation_id}));
     let idempotency_key = idempotency_key.to_owned();
     crate::db::in_tx(pool, move |conn| {
         Box::pin(async move {
-            let queue = lock_conversation(&mut *conn, owner_id, conversation_id).await?;
-            if let Some(outcome) =
-                lookup(&mut *conn, owner_id, &idempotency_key, OPERATION, &hash).await?
-            {
-                return Ok(outcome);
-            }
-            // Прерывание останавливает только текущий ход: очередь продолжает жить,
-            // а `owner_stop_input_seq` не даёт автоматически возобновить именно его.
-            mark_owner_stop(&mut *conn, conversation_id, false).await?;
-            crate::crunch::clear_resume_in_tx(&mut *conn, conversation_id, None, correlation_id)
-                .await?;
-            let slot = queue.slot()?;
-            let live = executions::live(&mut *conn, conversation_id).await?;
-            let interrupt_command_id = if let Some((execution_id, generation, _)) = live {
-                let existing: Option<Uuid> = sqlx::query_scalar(
-                    "select id from commands where conversation_id = $1 and kind = 'interrupt'
-             and execution_id = $2 and execution_generation = $3 and delivery_state <> 'completed'
-             order by created_at, id limit 1",
-                )
-                .bind(conversation_id)
-                .bind(execution_id)
-                .bind(generation)
-                .fetch_optional(&mut *conn)
-                .await?;
-                Some(if let Some(existing) = existing {
-                    existing
-                } else {
-                    let command_id = Uuid::now_v7();
-                    let machine_id: Uuid = sqlx::query_scalar(
-                        "insert into commands (id, machine_id, conversation_id, execution_id,
-                                       execution_generation, kind, payload, delivery_state)
-                 select $1, machine_id, id, $3, $4, 'interrupt', $5, 'pending'
-                 from conversations where id = $2 returning machine_id",
-                    )
-                    .bind(command_id)
-                    .bind(conversation_id)
-                    .bind(execution_id)
-                    .bind(generation)
-                    .bind(json!({"execution_id": execution_id, "execution_generation": generation}))
-                    .fetch_one(&mut *conn)
-                    .await?;
-                    notify_outbox(&mut *conn, machine_id).await?;
-                    command_id
-                })
-            } else {
-                None
-            };
-            let withdraw_command_id = withdraw_dispatch(&mut *conn, &slot).await?;
-            let outcome = StopOutcome::Requested {
-                interrupt_command_id,
-                withdraw_command_id,
-            };
-            record(
+            request_stop_in_tx(
                 &mut *conn,
                 owner_id,
-                &idempotency_key,
-                OPERATION,
-                &hash,
                 conversation_id,
-                &outcome,
+                &idempotency_key,
+                correlation_id,
             )
-            .await?;
-            Ok(outcome)
+            .await
         })
     })
     .await
+}
+
+/// Прерывание внутри уже открытой транзакции: используется автоматическим спасением
+/// зависшего хода, чтобы не брать вторую транзакцию под блокировкой очереди.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn request_stop_in_tx(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    conversation_id: Uuid,
+    idempotency_key: &str,
+    correlation_id: Uuid,
+) -> Result<StopOutcome, ControlError> {
+    const OPERATION: &str = "request_stop";
+    let hash = idempotency::request_hash(OPERATION, &json!({"conversation_id": conversation_id}));
+    {
+        let queue = lock_conversation(&mut *conn, owner_id, conversation_id).await?;
+        if let Some(outcome) =
+            lookup(&mut *conn, owner_id, idempotency_key, OPERATION, &hash).await?
+        {
+            return Ok(outcome);
+        }
+        // Прерывание останавливает только текущий ход: очередь продолжает жить,
+        // а `owner_stop_input_seq` не даёт автоматически возобновить именно его.
+        mark_owner_stop(&mut *conn, conversation_id, false).await?;
+        crate::crunch::clear_resume_in_tx(&mut *conn, conversation_id, None, correlation_id)
+            .await?;
+        let slot = queue.slot()?;
+        let live = executions::live(&mut *conn, conversation_id).await?;
+        let interrupt_command_id = if let Some((execution_id, generation, _)) = live {
+            let existing: Option<Uuid> = sqlx::query_scalar(
+                "select id from commands where conversation_id = $1 and kind = 'interrupt'
+             and execution_id = $2 and execution_generation = $3 and delivery_state <> 'completed'
+             order by created_at, id limit 1",
+            )
+            .bind(conversation_id)
+            .bind(execution_id)
+            .bind(generation)
+            .fetch_optional(&mut *conn)
+            .await?;
+            Some(if let Some(existing) = existing {
+                existing
+            } else {
+                let command_id = Uuid::now_v7();
+                let machine_id: Uuid = sqlx::query_scalar(
+                    "insert into commands (id, machine_id, conversation_id, execution_id,
+                                       execution_generation, kind, payload, delivery_state)
+                 select $1, machine_id, id, $3, $4, 'interrupt', $5, 'pending'
+                 from conversations where id = $2 returning machine_id",
+                )
+                .bind(command_id)
+                .bind(conversation_id)
+                .bind(execution_id)
+                .bind(generation)
+                .bind(json!({"execution_id": execution_id, "execution_generation": generation}))
+                .fetch_one(&mut *conn)
+                .await?;
+                notify_outbox(&mut *conn, machine_id).await?;
+                command_id
+            })
+        } else {
+            None
+        };
+        let withdraw_command_id = withdraw_dispatch(&mut *conn, &slot).await?;
+        let outcome = StopOutcome::Requested {
+            interrupt_command_id,
+            withdraw_command_id,
+        };
+        record(
+            &mut *conn,
+            owner_id,
+            idempotency_key,
+            OPERATION,
+            &hash,
+            conversation_id,
+            &outcome,
+        )
+        .await?;
+        Ok(outcome)
+    }
 }
 
 fn set_compaction(queue: &mut LockedQueue, wanted: Option<CompactionProgress>) -> bool {
@@ -1136,113 +1158,142 @@ pub async fn request_send_now(
 ) -> Result<SendNowOutcome, ControlError> {
     idempotency::validate_key(idempotency_key)
         .map_err(|reason| ControlError::InvalidRequest { reason })?;
+    let idempotency_key = idempotency_key.to_owned();
+    let machine_capabilities = machine_capabilities.to_owned();
+    crate::db::in_tx(pool, move |conn| {
+        Box::pin(async move {
+            request_send_now_in_tx(
+                &mut *conn,
+                owner_id,
+                conversation_id,
+                input_id,
+                &idempotency_key,
+                correlation_id,
+                &machine_capabilities,
+            )
+            .await
+        })
+    })
+    .await
+}
+
+/// «Отправить сейчас» внутри открытой транзакции: спасатель зависит от блокировки
+/// очереди и не может открыть вторую транзакцию.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn request_send_now_in_tx(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    conversation_id: Uuid,
+    input_id: Uuid,
+    idempotency_key: &str,
+    correlation_id: Uuid,
+    machine_capabilities: &[String],
+) -> Result<SendNowOutcome, ControlError> {
     const OPERATION: &str = "request_send_now";
     let hash = idempotency::request_hash(
         OPERATION,
         &json!({"conversation_id": conversation_id, "input_id": input_id}),
     );
-    let idempotency_key = idempotency_key.to_owned();
-    let machine_capabilities = machine_capabilities.to_owned();
-    crate::db::in_tx(pool, move |conn| {
-        Box::pin(async move {
-            let queue = lock_conversation(&mut *conn, owner_id, conversation_id).await?;
-            if let Some(outcome) =
-                lookup(&mut *conn, owner_id, &idempotency_key, OPERATION, &hash).await?
-            {
-                return Ok(outcome);
-            }
-            if queue.closed {
-                return Err(ControlError::InvalidRequest {
-                    reason: "conversation_closed",
-                });
-            }
-            let input: Option<(String, Uuid, Value)> = sqlx::query_as(
-                "select i.state, i.command_id, i.content from inputs i
+    {
+        let queue = lock_conversation(&mut *conn, owner_id, conversation_id).await?;
+        if let Some(outcome) =
+            lookup(&mut *conn, owner_id, idempotency_key, OPERATION, &hash).await?
+        {
+            return Ok(outcome);
+        }
+        if queue.closed {
+            return Err(ControlError::InvalidRequest {
+                reason: "conversation_closed",
+            });
+        }
+        let input: Option<(String, Uuid, Value)> = sqlx::query_as(
+            "select i.state, i.command_id, i.content from inputs i
                  where i.id = $1 and i.conversation_id = $2",
-            )
-            .bind(input_id)
-            .bind(conversation_id)
-            .fetch_optional(&mut *conn)
-            .await?;
-            let (state, deliver_command_id, content) = input.ok_or(ControlError::NotFound)?;
-            if state != InputState::Queued.as_str() {
-                return Err(ControlError::InvalidRequest {
-                    reason: "input_not_queued",
-                });
-            }
-            // Ход идёт, только если слот занят им и исполнение живое.
-            let live = executions::live(&mut *conn, conversation_id).await?;
-            let (execution_id, generation, exec_state) = live.ok_or(ControlError::InvalidRequest {
+        )
+        .bind(input_id)
+        .bind(conversation_id)
+        .fetch_optional(&mut *conn)
+        .await?;
+        let (state, deliver_command_id, content) = input.ok_or(ControlError::NotFound)?;
+        if state != InputState::Queued.as_str() {
+            return Err(ControlError::InvalidRequest {
+                reason: "input_not_queued",
+            });
+        }
+        // Ход идёт, только если слот занят им и исполнение живое.
+        let live = executions::live(&mut *conn, conversation_id).await?;
+        let (execution_id, generation, exec_state) = live.ok_or(ControlError::InvalidRequest {
+            reason: "no_running_turn",
+        })?;
+        if !matches!(exec_state, ExecutionState::Running) {
+            return Err(ControlError::InvalidRequest {
                 reason: "no_running_turn",
-            })?;
-            if !matches!(exec_state, ExecutionState::Running) {
+            });
+        }
+        if !matches!(queue.slot()?, RunSlot::Running { .. }) {
+            return Err(ControlError::InvalidRequest {
+                reason: "no_running_turn",
+            });
+        }
+        let running_input_id = match queue.slot()? {
+            RunSlot::Running { input_id } => input_id,
+            _ => {
                 return Err(ControlError::InvalidRequest {
                     reason: "no_running_turn",
                 });
             }
-            if !matches!(queue.slot()?, RunSlot::Running { .. }) {
-                return Err(ControlError::InvalidRequest {
-                    reason: "no_running_turn",
-                });
-            }
-            let running_input_id = match queue.slot()? {
-                RunSlot::Running { input_id } => input_id,
-                _ => {
-                    return Err(ControlError::InvalidRequest {
-                        reason: "no_running_turn",
-                    });
-                }
-            };
-            let running_command_id: Uuid =
-                sqlx::query_scalar("select command_id from inputs where id = $1")
-                    .bind(running_input_id)
-                    .fetch_one(&mut *conn)
-                    .await?;
-            let (harness, machine_id): (String, Uuid) =
-                sqlx::query_as("select harness, machine_id from conversations where id = $1")
-                    .bind(conversation_id)
-                    .fetch_one(&mut *conn)
-                    .await?;
-            if !matches!(
-                harness.as_str(),
-                "claude_code" | "codex" | "opencode"
-            ) {
-                return Err(ControlError::InvalidRequest {
-                    reason: "unsupported_harness",
-                });
-            }
-            if !machine_capabilities
-                .iter()
-                .any(|capability| capability == crate::session::CAPABILITY_SEND_NOW_V1)
-            {
-                return Err(ControlError::InvalidRequest {
-                    reason: "capability_missing",
-                });
-            }
-            // Открытый запрос или сжатие: вливать некуда, отказ с подписью.
-            let open_requests: i64 = sqlx::query_scalar(crate::requests::LIVE_OPEN_REQUESTS)
+        };
+        let running_command_id: Uuid =
+            sqlx::query_scalar("select command_id from inputs where id = $1")
+                .bind(running_input_id)
+                .fetch_one(&mut *conn)
+                .await?;
+        let (harness, machine_id): (String, Uuid) =
+            sqlx::query_as("select harness, machine_id from conversations where id = $1")
                 .bind(conversation_id)
                 .fetch_one(&mut *conn)
                 .await?;
-            let awaiting: bool = sqlx::query_scalar::<_, Option<bool>>(
-                "select phase in ('awaiting_permission', 'awaiting_answer') from executions
-                 where id = $1",
-            )
-            .bind(execution_id)
+        if !matches!(harness.as_str(), "claude_code" | "codex" | "opencode") {
+            return Err(ControlError::InvalidRequest {
+                reason: "unsupported_harness",
+            });
+        }
+        if !machine_capabilities
+            .iter()
+            .any(|capability| capability == crate::session::CAPABILITY_SEND_NOW_V1)
+        {
+            return Err(ControlError::InvalidRequest {
+                reason: "capability_missing",
+            });
+        }
+        // Открытый запрос или сжатие: вливать некуда, отказ с подписью.
+        let open_requests: i64 = sqlx::query_scalar(crate::requests::LIVE_OPEN_REQUESTS)
+            .bind(conversation_id)
             .fetch_one(&mut *conn)
-            .await?
-            .unwrap_or(false);
-            if open_requests > 0 || awaiting {
-                return Err(ControlError::InvalidRequest {
-                    reason: "request_open",
-                });
-            }
-            if queue.hold_reasons.0.contains(&HoldReason::ContextMaintenance) {
-                return Err(ControlError::InvalidRequest {
-                    reason: "compacting",
-                });
-            }
-            let compacting: bool = sqlx::query_scalar(
+            .await?;
+        let awaiting: bool = sqlx::query_scalar::<_, Option<bool>>(
+            "select phase in ('awaiting_permission', 'awaiting_answer') from executions
+                 where id = $1",
+        )
+        .bind(execution_id)
+        .fetch_one(&mut *conn)
+        .await?
+        .unwrap_or(false);
+        if open_requests > 0 || awaiting {
+            return Err(ControlError::InvalidRequest {
+                reason: "request_open",
+            });
+        }
+        if queue
+            .hold_reasons
+            .0
+            .contains(&HoldReason::ContextMaintenance)
+        {
+            return Err(ControlError::InvalidRequest {
+                reason: "compacting",
+            });
+        }
+        let compacting: bool = sqlx::query_scalar(
                 "select exists(select 1 from commands where conversation_id = $1
                  and kind = 'compact_session' and execution_id = $2 and delivery_state <> 'completed')",
             )
@@ -1250,33 +1301,33 @@ pub async fn request_send_now(
             .bind(execution_id)
             .fetch_one(&mut *conn)
             .await?;
-            if compacting {
-                return Err(ControlError::InvalidRequest {
-                    reason: "compacting",
-                });
-            }
-            // Повтор другим ключом: та же команда, нового хода нет.
-            let existing: Option<Uuid> = sqlx::query_scalar(
-                "select id from commands where kind = 'steer_input' and target_command_id = $1
+        if compacting {
+            return Err(ControlError::InvalidRequest {
+                reason: "compacting",
+            });
+        }
+        // Повтор другим ключом: та же команда, нового хода нет.
+        let existing: Option<Uuid> = sqlx::query_scalar(
+            "select id from commands where kind = 'steer_input' and target_command_id = $1
                  and delivery_state <> 'completed' order by created_at, id limit 1",
-            )
-            .bind(deliver_command_id)
-            .fetch_optional(&mut *conn)
-            .await?;
-            let outcome = if let Some(existing) = existing {
-                SendNowOutcome::AlreadyRequested {
-                    steer_command_id: existing,
-                }
-            } else {
-                let attachment_ids: Value = sqlx::query_scalar(
+        )
+        .bind(deliver_command_id)
+        .fetch_optional(&mut *conn)
+        .await?;
+        let outcome = if let Some(existing) = existing {
+            SendNowOutcome::AlreadyRequested {
+                steer_command_id: existing,
+            }
+        } else {
+            let attachment_ids: Value = sqlx::query_scalar(
                     "select coalesce(payload->'attachment_ids', '[]'::jsonb) from commands where id = $1",
                 )
                 .bind(deliver_command_id)
                 .fetch_optional(&mut *conn)
                 .await?
                 .unwrap_or(Value::Array(Vec::new()));
-                let steer_command_id = Uuid::now_v7();
-                sqlx::query(
+            let steer_command_id = Uuid::now_v7();
+            sqlx::query(
                     "insert into commands (id, machine_id, conversation_id, execution_id,
                                    execution_generation, kind, payload, target_command_id, delivery_state,
                                    dispatch_attempt)
@@ -1297,43 +1348,41 @@ pub async fn request_send_now(
                 .bind(deliver_command_id)
                 .execute(&mut *conn)
                 .await?;
-                notify_outbox(&mut *conn, machine_id).await?;
-                // Другие вкладки видят, что ввод уже вливается.
-                events::append(
-                    &mut *conn,
-                    NewEvent {
-                        scope: Scope::Conversation {
-                            id: conversation_id,
-                        },
-                        kind: "input_state_changed",
-                        conversation_id: Some(conversation_id),
-                        execution_id: Some(execution_id),
-                        payload: json!({
-                            "input_id": input_id,
-                            "state": "queued",
-                            "cause": "steer_requested",
-                            "command_id": steer_command_id,
-                        }),
-                        correlation_id,
-                    },
-                )
-                .await?;
-                SendNowOutcome::Requested { steer_command_id }
-            };
-            record(
+            notify_outbox(&mut *conn, machine_id).await?;
+            // Другие вкладки видят, что ввод уже вливается.
+            events::append(
                 &mut *conn,
-                owner_id,
-                &idempotency_key,
-                OPERATION,
-                &hash,
-                conversation_id,
-                &outcome,
+                NewEvent {
+                    scope: Scope::Conversation {
+                        id: conversation_id,
+                    },
+                    kind: "input_state_changed",
+                    conversation_id: Some(conversation_id),
+                    execution_id: Some(execution_id),
+                    payload: json!({
+                        "input_id": input_id,
+                        "state": "queued",
+                        "cause": "steer_requested",
+                        "command_id": steer_command_id,
+                    }),
+                    correlation_id,
+                },
             )
             .await?;
-            Ok(outcome)
-        })
-    })
-    .await
+            SendNowOutcome::Requested { steer_command_id }
+        };
+        record(
+            &mut *conn,
+            owner_id,
+            idempotency_key,
+            OPERATION,
+            &hash,
+            conversation_id,
+            &outcome,
+        )
+        .await?;
+        Ok(outcome)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]

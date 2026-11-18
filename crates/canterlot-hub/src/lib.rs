@@ -59,6 +59,7 @@ pub mod prompt_suggestions;
 pub mod provider_status;
 pub mod rendition;
 pub mod requests;
+pub mod rescue;
 pub mod runs;
 pub mod scheduler;
 pub mod schedules;

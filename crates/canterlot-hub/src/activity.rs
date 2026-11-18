@@ -762,6 +762,25 @@ pub async fn refresh_with_metrics(
             .await?;
     let inputs = load_inputs(&mut *conn, conversation_id, now, stale_after).await?;
     let activity = compute(&inputs, &thresholds);
+    // Спасение зависшего хода идёт под той же блокировкой очереди, что и проекция:
+    // решение принимается по тем же признакам и не может обгонять приём журнала.
+    let rescued = crate::rescue::evaluate_in_tx(
+        &mut *conn,
+        conversation_id,
+        &inputs,
+        &thresholds,
+        now,
+        correlation_id,
+    )
+    .await?;
+    if rescued != crate::rescue::RescueAction::None {
+        tracing::info!(
+            kind = "hung_turn_rescued",
+            %conversation_id,
+            action = rescued.as_str(),
+            "a hung turn was rescued"
+        );
+    }
     let evidence =
         serde_json::to_value(&activity.evidence).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
     let unread:i64=sqlx::query_scalar("select count(*) from blocks where conversation_id=$1 and kind in ('text','warning','error') and state in ('streaming','final') and created_seq>$2").bind(conversation_id).bind(read_seq).fetch_one(&mut *conn).await?;
