@@ -24,6 +24,16 @@ pub fn arm(schedule_id: Uuid, fault: Fault) {
     ARMED.lock().expect("faults").push((schedule_id, fault));
 }
 
+/// Осталась ли точка взведённой (ещё не сработала).
+#[cfg(feature = "testkit")]
+pub fn armed(schedule_id: Uuid, fault: Fault) -> bool {
+    ARMED
+        .lock()
+        .expect("faults")
+        .iter()
+        .any(|entry| *entry == (schedule_id, fault))
+}
+
 #[cfg(feature = "testkit")]
 pub(crate) fn hit(schedule_id: Uuid, fault: Fault) -> bool {
     let mut armed = ARMED.lock().expect("faults");

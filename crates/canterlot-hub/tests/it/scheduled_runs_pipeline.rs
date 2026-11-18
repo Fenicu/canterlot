@@ -1658,3 +1658,131 @@ async fn observation_landing_during_existing_session_dispatch_turns_it_red(pool:
     wait_state(&pool, rid, "skipped_limits").await;
     assert_eq!(inputs_with_text(&pool, "посмотреть коммиты").await, 0);
 }
+
+/// 8: два хаба на одной базе. Первый заявил запуск и «завис» за семафором
+/// приёма дольше аренды; второй по восстановлению забирает строку и доводит
+/// её. Опоздавшая приёмка первого не делает ни второй предпроверки, ни
+/// второй сессии: на воркере ровно одна предпроверка, в базе ровно один ввод.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn second_hub_takes_over_a_stalled_admission_with_one_precheck_and_one_session(pool: PgPool) {
+    use canterlot_hub::schedules::{admission::admit, claim_due};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let f = Fixture::new(pool.clone()).await;
+    let mut session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
+    let registry = f.state.registry.clone();
+    let machine = f.seed.machine_id;
+    let connection = registry.session_info(machine).unwrap().connection_id;
+    let prechecks = std::sync::Arc::new(AtomicUsize::new(0));
+    let worker = tokio::spawn({
+        let prechecks = prechecks.clone();
+        async move {
+            while let Some(down) = session.commands.recv().await {
+                if let Some(control_down::Msg::SchedulePrecheck(request)) = down.msg {
+                    prechecks.fetch_add(1, Ordering::SeqCst);
+                    registry.finish_precheck(
+                        machine,
+                        connection,
+                        PrecheckResult {
+                            attempt_id: request.attempt_id,
+                            outcome: Some(precheck_result::Outcome::Finished(
+                                canterlot_proto::worker::v1::PrecheckFinished {
+                                    exit_code: 0,
+                                    output_tail: String::new(),
+                                    timed_out: false,
+                                },
+                            )),
+                        },
+                    );
+                }
+            }
+        }
+    });
+    let r = f
+        .client
+        .send(
+            Method::POST,
+            "/api/v1/schedules",
+            Some("two-hubs"),
+            Some(json!({
+                "name": "Два хаба",
+                "cron": "0 9 * * *",
+                "target": existing(&f),
+                "prompt": "один раз",
+                "precheck": "true",
+            })),
+        )
+        .await;
+    let id = r.json::<Value>()["id"].as_str().unwrap().to_owned();
+    due(&pool, &id, Utc::now() - TimeDelta::seconds(30)).await;
+    // Хаб A заявил запуск; его приёмка ещё не пошла (стоит за семафором).
+    let now = Utc::now();
+    let mut conn = pool.acquire().await.unwrap();
+    let claimed_by_a = claim_due(&mut conn, now, 32).await.unwrap();
+    drop(conn);
+    assert_eq!(claimed_by_a.len(), 1);
+    let stalled = claimed_by_a.into_iter().next().unwrap();
+    let rid = stalled.run.id;
+    // Аренда A истекла: A «умер» с точки зрения других хабов.
+    sqlx::query("update schedule_runs set lease_at=now()-interval '2 hours',updated_at=now()-interval '2 hours' where id=$1")
+        .bind(rid)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Хаб B (отдельный планировщик на той же базе) восстанавливает и доводит запуск.
+    scheduler(&f).tick(Utc::now()).await.unwrap();
+    wait_state(&pool, rid, "started").await;
+    assert_eq!(prechecks.load(Ordering::SeqCst), 1);
+    // Опоздавшая приёмка A просыпается со старой попыткой: ничего не делает.
+    admit(&scheduler(&f), stalled).await;
+    assert_eq!(prechecks.load(Ordering::SeqCst), 1, "no second precheck");
+    assert_eq!(inputs_with_text(&pool, "один раз").await, 1);
+    let sessions: i64 =
+        sqlx::query_scalar("select count(*) from schedule_runs where id=$1 and state='started'")
+            .bind(rid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(sessions, 1);
+    worker.abort();
+}
+
+/// 8: гибель процесса до commit dispatch (точка отказа): запуск остаётся
+/// `claimed`, восстановление после аренды доводит его ровно до одной сессии.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn crash_before_dispatch_commit_is_recovered_into_exactly_one_session(pool: PgPool) {
+    use canterlot_hub::schedules::fault::{self, Fault};
+
+    let f = Fixture::new(pool.clone()).await;
+    let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
+    let id = create(&f, existing(&f), "0 9 * * *").await;
+    fault::arm(Uuid::parse_str(&id).unwrap(), Fault::BeforeDispatchCommit);
+    due(&pool, &id, Utc::now() - TimeDelta::seconds(30)).await;
+    scheduler(&f).tick(Utc::now()).await.unwrap();
+    let rid = run_id(&pool, &id).await;
+    // Приёмка «умерла» до commit: ни сессии, ни ввода, строка не продвинулась.
+    wait_crashed(Uuid::parse_str(&id).unwrap(), rid).await;
+    let (state, _) = state(&pool, rid).await;
+    assert_eq!(state, "claimed");
+    assert_eq!(inputs_with_text(&pool, "посмотреть коммиты").await, 0);
+    sqlx::query("update schedule_runs set lease_at=now()-interval '2 hours',updated_at=now()-interval '2 hours' where id=$1")
+        .bind(rid)
+        .execute(&pool)
+        .await
+        .unwrap();
+    scheduler(&f).tick(Utc::now()).await.unwrap();
+    wait_state(&pool, rid, "started").await;
+    assert_eq!(inputs_with_text(&pool, "посмотреть коммиты").await, 1);
+}
+
+/// Ждёт, пока точка отказа сработала и приёмка выбыла из реестра процесса.
+async fn wait_crashed(schedule: Uuid, run: Uuid) {
+    use canterlot_hub::schedules::{fault, is_admitting};
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while fault::armed(schedule, fault::Fault::BeforeDispatchCommit) || is_admitting(&run) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the admission hits the fault and ends");
+}

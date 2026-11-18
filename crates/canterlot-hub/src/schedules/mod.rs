@@ -1145,7 +1145,8 @@ impl Drop for AdmittingGuard {
     }
 }
 
-fn is_admitting(id: &Uuid) -> bool {
+/// Ведёт ли этот процесс приёмку строки прямо сейчас.
+pub fn is_admitting(id: &Uuid) -> bool {
     ADMITTING_RUNS
         .lock()
         .expect("admitting runs lock")
