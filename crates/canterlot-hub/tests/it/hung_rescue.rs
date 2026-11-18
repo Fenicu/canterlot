@@ -37,6 +37,10 @@ struct Scene {
 
 async fn hung_scene(pool: &PgPool, harness: &str, with_parent: bool) -> Scene {
     let seed = testkit::seed(pool).await;
+    hung_scene_for(pool, harness, with_parent, seed).await
+}
+
+async fn hung_scene_for(pool: &PgPool, harness: &str, with_parent: bool, seed: Seed) -> Scene {
     sqlx::query(
         "insert into push_settings(singleton,waiting,turn_finished,failures)
          values(true,true,true,true) on conflict(singleton) do nothing",
@@ -897,4 +901,133 @@ async fn a_locked_parent_defers_the_note_instead_of_waiting(pool: PgPool) {
             .unwrap()
     );
     assert_eq!(parent_jobs(&pool, &scene).await.len(), 1);
+}
+
+async fn http_scene(pool: &PgPool) -> (testkit::TestHub, testkit::TestClient, Scene) {
+    let hub = testkit::spawn_test_hub_http(
+        pool.clone(),
+        canterlot_hub::config::HubTimers::default(),
+        testkit::test_http_config(),
+    )
+    .await;
+    let owner = hub.installation.owner_id;
+    let machine = canterlot_hub::machines::add(pool, owner, "synthetic").await.unwrap();
+    let conversation = testkit::seed_conversation(pool, owner, machine.machine_id).await;
+    let seed = Seed {
+        owner_id: owner,
+        machine_id: machine.machine_id,
+        conversation_id: conversation,
+    };
+    let scene = hung_scene_for(pool, "opencode", false, seed).await;
+    let client = testkit::TestClient::over_socket(hub.http_addr()).await.as_owner();
+    (hub, client, scene)
+}
+
+async fn episode_of(pool: &PgPool, scene: &Scene) -> Uuid {
+    sqlx::query_scalar("select episode_id from hung_rescues where conversation_id=$1")
+        .bind(scene.seed.conversation_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// Кнопки карточки привязаны к эпизоду: пока он открыт, действуют; закрытая карточка
+/// (действие выполнено, ход сменился) отвечает отказом и ничего не прерывает.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn card_actions_are_bound_to_their_episode(pool: PgPool) {
+    use axum::http::{Method, StatusCode};
+    let (hub, client, scene) = http_scene(&pool).await;
+    // Проектор тестового хаба стартовал только что: выборки раньше его старта окно не копят.
+    tick(&pool, &scene, scene.base + TimeDelta::seconds(10)).await;
+    tick(&pool, &scene, scene.base + TimeDelta::seconds(20)).await;
+    let episode = episode_of(&pool, &scene).await;
+    let base = format!(
+        "/api/v1/conversations/{}/hung-episodes/{episode}",
+        scene.seed.conversation_id
+    );
+    let state: Value = client.send(Method::GET, &base, None, None).await.json();
+    assert_eq!(state["state"], "open");
+    // Чужой или выдуманный эпизод не действует.
+    let wrong = format!(
+        "/api/v1/conversations/{}/hung-episodes/{}/interrupt",
+        scene.seed.conversation_id,
+        Uuid::now_v7()
+    );
+    let refused = client.send(Method::POST, &wrong, Some("wrong-1"), None).await;
+    assert_eq!(refused.status, StatusCode::CONFLICT);
+    assert_eq!(harmful(&pool, &scene).await, 0);
+    // Действие по открытой карточке.
+    let done = client
+        .send(Method::POST, &format!("{base}/interrupt"), Some("card-1"), None)
+        .await;
+    assert_eq!(done.status, StatusCode::OK, "{:?}", done.body);
+    assert_eq!(commands_of(&pool, &scene, "interrupt").await.len(), 1);
+    let state: Value = client.send(Method::GET, &base, None, None).await.json();
+    assert_eq!(state["state"], "owner_interrupt");
+    let again = client
+        .send(Method::POST, &format!("{base}/interrupt"), Some("card-2"), None)
+        .await;
+    assert_eq!(again.status, StatusCode::CONFLICT);
+    let body: Value = again.json();
+    assert_eq!(body["error"]["details"]["reason"], "hung_episode_resolved", "{body}");
+    assert_eq!(commands_of(&pool, &scene, "interrupt").await.len(), 1);
+    drop(hub);
+}
+
+/// Вчерашняя карточка не прервёт сегодняшний ход.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn an_old_card_cannot_stop_a_later_turn(pool: PgPool) {
+    use axum::http::{Method, StatusCode};
+    let (hub, client, scene) = http_scene(&pool).await;
+    // Проектор тестового хаба стартовал только что: выборки раньше его старта окно не копят.
+    tick(&pool, &scene, scene.base + TimeDelta::seconds(10)).await;
+    tick(&pool, &scene, scene.base + TimeDelta::seconds(20)).await;
+    let episode = episode_of(&pool, &scene).await;
+    // Ход закончился, пошёл другой.
+    let next = queued_input(&pool, &scene).await;
+    sqlx::query("update inputs set state='dispatched' where id=$1")
+        .bind(next)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "update queue_state set run_slot='running',run_slot_input_id=$2 where conversation_id=$1",
+    )
+    .bind(scene.seed.conversation_id)
+    .bind(next)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let path = format!(
+        "/api/v1/conversations/{}/hung-episodes/{episode}",
+        scene.seed.conversation_id
+    );
+    let state: Value = client.send(Method::GET, &path, None, None).await.json();
+    assert_eq!(state["state"], "turn_ended");
+    let response = client
+        .send(Method::POST, &format!("{path}/interrupt"), Some("old-card"), None)
+        .await;
+    assert_eq!(response.status, StatusCode::CONFLICT);
+    let response = client
+        .send(Method::POST, &format!("{path}/steer"), Some("old-card-steer"), None)
+        .await;
+    assert_eq!(response.status, StatusCode::CONFLICT);
+    assert_eq!(harmful(&pool, &scene).await, 0);
+    drop(hub);
+}
+
+/// После старта хаба молчание нельзя оценивать по выборкам до него: нужны две новые.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn samples_from_before_the_hub_started_do_not_count(pool: PgPool) {
+    let scene = hung_scene(&pool, "claude_code", true).await;
+    activity::mark_projector_started(scene.base + TimeDelta::seconds(5));
+    tick(&pool, &scene, scene.base - TimeDelta::seconds(10)).await;
+    tick(&pool, &scene, scene.base).await;
+    assert_eq!(harmful(&pool, &scene).await, 0, "both samples predate the hub start");
+    tick(&pool, &scene, scene.base + TimeDelta::seconds(10)).await;
+    assert_eq!(harmful(&pool, &scene).await, 0, "one fresh sample is not a window");
+    tick(&pool, &scene, scene.base + TimeDelta::seconds(20)).await;
+    assert_eq!(harmful(&pool, &scene).await, 1);
+    // Возврат безвредного порога: счётчик общий на процесс.
+    activity::mark_projector_started(chrono::DateTime::from_timestamp_millis(1).unwrap());
 }

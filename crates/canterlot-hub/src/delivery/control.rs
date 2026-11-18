@@ -280,7 +280,7 @@ pub(crate) async fn request_stop_in_tx(
 /// прежний результат другого хода повторять нельзя. Команда с охраной берётся только
 /// своя, а не любая невыполненная: старый interrupt прошлого хода не заменяет новый.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn request_stop_guarded_in_tx(
+pub async fn request_stop_guarded_in_tx(
     conn: &mut PgConnection,
     owner_id: Uuid,
     conversation_id: Uuid,

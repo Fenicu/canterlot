@@ -276,6 +276,43 @@ impl Worker {
             Some(data_down::Msg::SjAck(JournalRangeAck { up_to_seq: 2, .. }))
         ));
     }
+
+    /// Квитанция воркера на interrupt: записи журнала сессии с состояниями.
+    async fn interrupt_receipt(&mut self, command: &Command, states: &[InterruptState]) {
+        let records: Vec<JournalRecord> = states
+            .iter()
+            .enumerate()
+            .map(|(index, state)| JournalRecord {
+                seq: index as u64 + 1,
+                body: Some(RecordBody {
+                    body: Some(record_body::Body::InterruptStatus(InterruptStatus {
+                        command_id: command.command_id.clone(),
+                        dispatch_attempt: command.dispatch_attempt,
+                        state: *state as i32,
+                    })),
+                }),
+            })
+            .collect();
+        let last = records.len() as u64;
+        self.data
+            .send(DataUp {
+                msg: Some(data_up::Msg::SjRecords(JournalRecords {
+                    journal_id: Uuid::now_v7().to_string(),
+                    records,
+                })),
+            })
+            .await
+            .unwrap();
+        let ack = timeout(Duration::from_secs(3), self.data_down.message())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            ack.msg,
+            Some(data_down::Msg::SjAck(JournalRangeAck { up_to_seq, .. })) if up_to_seq == last
+        ));
+    }
 }
 
 async fn setup(pool: &PgPool, hub: &TestHub) -> (NewMachine, Uuid) {
@@ -2015,5 +2052,254 @@ async fn input_dispatched_for_pilot_waits_when_the_session_lacks_it(pool: PgPool
         json!([]),
         "capability_missing is computed, not stored"
     );
+    stop(hub).await;
+}
+
+/// Спасение зависшего хода через собранный хаб: проектор активности, outbox, настоящий
+/// канал gRPC с воркером, квитанция воркера и её приём. Воркер получает охранный interrupt с
+/// именем хода и отметкой прогресса, отвечает квитанциями, и только тогда в ленте появляется
+/// строка о спасении, а родитель получает заметку.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_hung_turn_is_interrupted_through_the_real_worker_channel(pool: PgPool) {
+    use canterlot_hub::{
+        activity,
+        delivery::receipts::{InputReceipt, apply_input_receipt},
+    };
+    let hub = spawn_test_hub(pool.clone(), timers()).await;
+    let (machine, conversation) = setup(&pool, &hub).await;
+    let owner = hub.installation.owner_id;
+    sqlx::query("update conversations set harness='claude_code' where id=$1")
+        .bind(conversation)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let parent = testkit::seed_conversation(&pool, owner, machine.machine_id).await;
+    sqlx::query("update conversations set parent_conversation_id=$2,spawn_depth=1 where id=$1")
+        .bind(conversation)
+        .bind(parent)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "insert into push_settings(singleton,waiting,turn_finished,failures)
+         values(true,true,true,true) on conflict(singleton) do nothing",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let journal = Uuid::now_v7();
+    let mut worker = Worker::connect_with_capabilities(
+        &hub,
+        &machine,
+        journal,
+        &["instructions_v1", "pilot_v1", "guarded_interrupt_v1"],
+    )
+    .await;
+    let turn = input(&pool, &hub, conversation).await;
+    let deliver = worker.command().await;
+    assert_eq!(deliver.command_id, turn.command_id.to_string());
+    for receipt in [
+        InputReceipt::Stored,
+        InputReceipt::TransmissionStarted,
+        InputReceipt::Accepted,
+    ] {
+        apply_input_receipt(&pool, turn.command_id, 1, receipt, Uuid::now_v7())
+            .await
+            .unwrap();
+    }
+    // Ход идёт, а поток давно молчит: свидетельства те же, что присылает воркер.
+    let base = Utc::now() + chrono::TimeDelta::hours(1);
+    let ago = base - chrono::TimeDelta::minutes(11);
+    let execution: Uuid = sqlx::query_scalar(
+        "update executions set phase='generating',phase_at=$2,last_event_at=$2,
+             created_at=$3 where conversation_id=$1 returning id",
+    )
+    .bind(conversation)
+    .bind(ago)
+    .bind(base - chrono::TimeDelta::hours(2))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query("update queue_state set run_slot_since=$2 where conversation_id=$1")
+        .bind(conversation)
+        .bind(ago)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "update machines set capabilities=array['pilot_v1','guarded_interrupt_v1'],
+           availability='available',availability_at=$2 where id=$1",
+    )
+    .bind(machine.machine_id)
+    .bind(base - chrono::TimeDelta::hours(2))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "insert into journal_cursors(machine_id,journal_id,kind,committed_seq,execution_id)
+         values($1,$2,'sj',17,$3)",
+    )
+    .bind(machine.machine_id)
+    .bind(Uuid::now_v7())
+    .bind(execution)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let thresholds = activity::Thresholds {
+        stalled_generating: Duration::from_secs(1800),
+        stalled_tool: Duration::from_secs(1800),
+        hung_generating: Duration::from_secs(600),
+        hung_rescue: canterlot_hub::config::HungRescue::Auto,
+        idle_quiet: Duration::from_secs(5),
+        idle_background_max: Duration::from_secs(900),
+    };
+    for at in [base - chrono::TimeDelta::seconds(10), base] {
+        sqlx::query(
+            "insert into machine_metrics(machine_id,observed_at,machine_time_ms,cpu_cores,cpu_permille,
+               mem_total_bytes,mem_available_bytes,load1_centi,load5_centi,load15_centi,disks,executions)
+             values($1,$2,1,1,100,100,50,0,0,0,'[]',$3)
+             on conflict(machine_id) do update set observed_at=excluded.observed_at,
+               machine_time_ms=excluded.machine_time_ms,executions=excluded.executions",
+        )
+        .bind(machine.machine_id)
+        .bind(at)
+        .bind(json!([{"execution_id": execution, "alive": true, "cpu_permille": 0,
+                      "descendants": 0, "cpu_valid": true, "cli_alive": true}]))
+        .execute(&pool)
+        .await
+        .unwrap();
+        activity::refresh_with_metrics(
+            &pool,
+            conversation,
+            at,
+            &thresholds,
+            Duration::from_secs(7200),
+            true,
+            Uuid::now_v7(),
+        )
+        .await
+        .unwrap();
+    }
+    hub.dispatcher.trigger(conversation);
+    let interrupt = worker.command().await;
+    let Some(command::Kind::Interrupt(guard)) = &interrupt.kind else {
+        panic!("the worker must receive an interrupt, got {:?}", interrupt.kind);
+    };
+    assert_eq!(guard.expected_turn_id, turn.command_id.to_string());
+    assert_eq!(guard.progress_checkpoint, 17);
+    assert_eq!(interrupt.execution_id, execution.to_string());
+    // До квитанции ход не считается спасённым: ни строки в ленте, ни заметки родителю.
+    let rescued_rows = || async {
+        sqlx::query_scalar::<_, i64>(
+            "select count(*) from inputs where conversation_id=$1 and service_note
+               and content->0->>'text' like '%прерван и продолжен%'",
+        )
+        .bind(conversation)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    assert_eq!(rescued_rows().await, 0);
+    worker
+        .interrupt_receipt(
+            &interrupt,
+            &[InterruptState::SentToAgent, InterruptState::Acknowledged],
+        )
+        .await;
+    assert_eq!(rescued_rows().await, 1, "the receipt confirms the rescue");
+    let (pending, outcome): (Option<Uuid>, Option<String>) = sqlx::query_as(
+        "select pending_command_id,last_outcome from hung_rescues where conversation_id=$1",
+    )
+    .bind(conversation)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!((pending, outcome.as_deref()), (None, Some("interrupted")));
+    activity::refresh_with_metrics(
+        &pool,
+        conversation,
+        base + chrono::TimeDelta::seconds(5),
+        &thresholds,
+        Duration::from_secs(7200),
+        true,
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    let notes: Vec<String> = sqlx::query_scalar(
+        "select payload->>'text' from scheduled_jobs where conversation_id=$1
+           and payload->>'action'='note'",
+    )
+    .bind(parent)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    stop(hub).await;
+}
+
+/// Воркер отказал: ход уже ушёл дальше. Отказ виден в ленте, а не выдаётся за спасение.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_worker_refusal_of_a_stale_interrupt_is_surfaced(pool: PgPool) {
+    let hub = spawn_test_hub(pool.clone(), timers()).await;
+    let (machine, conversation) = setup(&pool, &hub).await;
+    let owner = hub.installation.owner_id;
+    let mut worker = Worker::connect_with_capabilities(
+        &hub,
+        &machine,
+        Uuid::now_v7(),
+        &["instructions_v1", "pilot_v1", "guarded_interrupt_v1"],
+    )
+    .await;
+    let execution: Uuid =
+        sqlx::query_scalar("select id from executions where conversation_id=$1")
+            .bind(conversation)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let turn = Uuid::now_v7();
+    let outcome = canterlot_hub::db::in_tx::<_, canterlot_hub::delivery::control::ControlError, _>(
+        &pool,
+        move |conn| {
+            Box::pin(async move {
+                canterlot_hub::delivery::control::request_stop_guarded_in_tx(
+                    conn,
+                    owner,
+                    conversation,
+                    "guarded-1",
+                    Uuid::now_v7(),
+                    Some(canterlot_hub::delivery::control::InterruptGuard {
+                        turn_id: turn,
+                        progress_checkpoint: 3,
+                    }),
+                )
+                .await
+            })
+        },
+    )
+    .await
+    .unwrap();
+    let canterlot_hub::delivery::control::StopOutcome::Requested {
+        interrupt_command_id: Some(command_id),
+        ..
+    } = outcome
+    else {
+        panic!("an interrupt must be requested");
+    };
+    hub.dispatcher.trigger(conversation);
+    let interrupt = worker.command().await;
+    assert_eq!(interrupt.command_id, command_id.to_string());
+    worker
+        .interrupt_receipt(&interrupt, &[InterruptState::TurnMismatch])
+        .await;
+    let (status, state): (Option<String>, String) =
+        sqlx::query_as("select last_status,delivery_state from commands where id=$1")
+            .bind(command_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(status.as_deref(), Some("turn_mismatch"));
+    assert_eq!(state, "completed");
+    let _ = execution;
     stop(hub).await;
 }
