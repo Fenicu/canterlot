@@ -2801,11 +2801,13 @@ async fn routed_new_session_crash_before_commit_fails_over_to_hub_b(pool: PgPool
     assert_eq!(hub_b.prechecks.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
 
-/// 12: хаб A держит сторож приёмки и гибнет до dispatch. Пока сторож жив,
-/// хаб B строку не трогает; когда A потерян (задача оборвана, сторож снят),
-/// B берёт строку: ровно один разговор и один ввод, выдача через воркер B.
+/// 12: покрытие сторожа приёмки в одном процессе. Два планировщика здесь делят один
+/// статический реестр `ADMITTING_RUNS`, поэтому «хаб B» видит сторож «хаба A» так, как его
+/// не увидел бы настоящий второй процесс: тест проверяет, что строку со сторожем тик не
+/// берёт, а после снятия сторожа берёт, и ровно один разговор и один ввод. Межпроцессный
+/// захват (аренда без общего сторожа) он не проверяет.
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn hub_b_takes_over_an_admission_guarded_and_lost_by_hub_a(pool: PgPool) {
+async fn same_process_guard_holds_the_row_until_the_guard_is_dropped(pool: PgPool) {
     use canterlot_hub::schedules::{admission::admit, claim_due, fault, is_admitting};
 
     let f = Fixture::new(pool.clone()).await;
