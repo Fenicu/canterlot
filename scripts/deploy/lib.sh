@@ -303,12 +303,18 @@ _plan_file_hash() {
 # Канонический текст плана выката, общий у dry-run, репетиции и боевого прогона:
 # зависит только от цели, развёрнутой базы, содержимого dist, конфигурации выката
 # и текста самого toolkit. $1 цель, $2 каталог dist/<цель>, $3..$5 развёрнутые
-# hub web worker.
+# hub web worker; $6 skip-ct-backup — план без vzdump (другой хэш: токен привязан к флагу).
 plan_text() {
-    local sha="$1" dist_dir="$2" b_hub="$3" b_web="$4" b_worker="$5" f toolkit
+    local sha="$1" dist_dir="$2" b_hub="$3" b_web="$4" b_worker="$5" skip_vz="${6:-}" f toolkit step2 step3
     toolkit="$(for f in cutover.sh lib.sh verify.sh retain.sh preflight.sh target-check.sh deploy.conf; do
         printf '%s %s\n' "$(_plan_file_hash "${DEPLOY_DIR}/${f}")" "${f}"
     done | sha256sum | cut -c1-12)"
+    step2="  2 fresh vzdump of CT ${HUB_CTID} while hub and worker run (notes pre-${sha}-<ts>); the control worker is exactly the unit MainPID"
+    step3="  3 read gates and the session inventory again (vzdump takes up to a minute)"
+    if [ "${skip_vz}" = "skip-ct-backup" ]; then
+        step2="  2 vzdump of CT ${HUB_CTID} skipped (no migration changed; the quiesced pg_dump of step 5 is the restore point); the control worker is exactly the unit MainPID"
+        step3="  3 read gates and the session inventory again (no vzdump ran, the gates are not dropped)"
+    fi
     printf '%s\n' \
         "plan v3 target=${sha}" \
         "baseline hub=${b_hub} web=${b_web} worker=${b_worker}" \
@@ -318,8 +324,8 @@ plan_text() {
         "toolkit=${toolkit} retain=${RETAIN_COUNT}" \
         "steps:" \
         "  1 preflight snapshot (local state file) and target check (staged trees, dist, DB not ahead); reserve ${sha} and the previous releases on every host" \
-        "  2 fresh vzdump of CT ${HUB_CTID} while hub and worker run (notes pre-${sha}-<ts>); the control worker is exactly the unit MainPID" \
-        "  3 read gates and the session inventory again (vzdump takes up to a minute)" \
+        "${step2}" \
+        "${step3}" \
         "  4 stop worker ${WORKER_UNIT} (sessions keep running); prove no control worker is left" \
         "  5 quiesced pg_dump canterlot-pre-${sha}-<ts>.dump, verified readable" \
         "  6 hub flip ${b_hub} -> ${sha} under the host lock, one restart of ${HUB_UNIT}; readyz, migrations, exe, NRestarts" \
@@ -535,6 +541,7 @@ deployed_sha() {
 #   path=fast|rehearsed|full   fast — без репетиции и без vzdump; rehearsed — репетиция
 #                              есть, vzdump нет; full — как раньше (репетиция и vzdump)
 #   rehearsal=skip|run  vzdump=skip|run  reasons=<все причины через "; ">
+#   vzdump_reason=<почему vzdump пропущен; пусто, если не пропущен>
 # Репетиция пропускается, только если не менялись миграции (crates/canterlot-hub/migrations/)
 # и обвязка выката (scripts/deploy/, release.sh, build-release.sh, publish-release.sh);
 # vzdump — только если не менялись миграции. Любая неясность (релиз не определён, компоненты на
@@ -587,9 +594,12 @@ fastpath_eval() {
         fi
     fi
     if [ -n "${full_reason}" ]; then rehearsal=run; backup=run; reasons="${full_reason}"; fi
+    local backup_reason=""
+    [ "${backup}" != skip ] || backup_reason="no migration added or changed between the live ${b_hub} and ${target}"
     local path_name=full
     if [ "${rehearsal}" = skip ]; then path_name=fast; elif [ "${backup}" = skip ]; then path_name=rehearsed; fi
-    printf 'path=%s\nrehearsal=%s\nvzdump=%s\nreasons=%s\n' "${path_name}" "${rehearsal}" "${backup}" "$(printf '%s' "${reasons}" | tr '\n\r=' '  :')"
+    printf 'path=%s\nrehearsal=%s\nvzdump=%s\nreasons=%s\nvzdump_reason=%s\n' "${path_name}" "${rehearsal}" "${backup}" \
+        "$(printf '%s' "${reasons}" | tr '\n\r=' '  :')" "$(printf '%s' "${backup_reason}" | tr '\n\r=' '  :')"
 }
 
 # Ни один управляющий процесс прод-воркера не должен жить. Кандидат — процесс, у
