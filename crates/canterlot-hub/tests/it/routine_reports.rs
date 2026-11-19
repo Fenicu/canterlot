@@ -1587,7 +1587,21 @@ async fn cleanup_takes_the_owner_lock_before_the_copy_row(pool: PgPool) {
         let pool = pool.clone();
         tokio::spawn(async move { canterlot_hub::routines::sweep(&pool, Utc::now()).await })
     };
-    tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+    // Уборка дошла до замка владельца и стоит на нём.
+    let mut waiting = false;
+    for _ in 0..20_000 {
+        waiting = sqlx::query_scalar(
+            "select exists(select 1 from pg_locks where locktype='advisory' and not granted)",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        if waiting {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(waiting, "cleanup never reached the owner lock");
     let locked_by_cleanup =
         sqlx::query("select id from conversations where id=$1 for update nowait")
             .bind(copy)
