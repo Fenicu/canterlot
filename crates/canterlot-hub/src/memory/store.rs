@@ -598,7 +598,7 @@ pub async fn search(
     let limit = i64::from(limit.clamp(1, config.search_limit.max(1)));
     // Сначала не истёкшие; среди них грубый ранг двух конфигураций, затем свой проект,
     // записи домена и чужие проекты, затем новизна. Пустой запрос даёт самые новые.
-    let rows: Vec<(Uuid, String, Option<String>, String, String, DateTime<Utc>, bool)> =
+    let rows: Vec<SearchRaw> =
         sqlx::query_as(
             "with q as (
                select pg_catalog.websearch_to_tsquery('pg_catalog.russian'::pg_catalog.regconfig, $5) as ru,
@@ -636,19 +636,28 @@ pub async fn search(
         .await?;
     Ok(rows
         .into_iter()
-        .map(
-            |(id, kind, project, subject, excerpt, updated_at, expired)| SearchRow {
-                id,
-                kind,
-                level: Level::of(project.as_deref()),
-                project_label: project.as_deref().map(label_of),
-                subject,
-                excerpt,
-                updated_at,
-                expired,
-            },
-        )
+        .map(|row| SearchRow {
+            id: row.id,
+            kind: row.kind,
+            level: Level::of(row.project.as_deref()),
+            project_label: row.project.as_deref().map(label_of),
+            subject: row.subject,
+            excerpt: row.excerpt,
+            updated_at: row.updated_at,
+            expired: row.expired,
+        })
         .collect())
+}
+
+#[derive(sqlx::FromRow)]
+struct SearchRaw {
+    id: Uuid,
+    kind: String,
+    project: Option<String>,
+    subject: String,
+    excerpt: String,
+    updated_at: DateTime<Utc>,
+    expired: bool,
 }
 
 /// Запись по идентификатору. Агент видит только активные записи своего домена; с `widen`
