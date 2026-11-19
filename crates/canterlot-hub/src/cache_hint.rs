@@ -85,20 +85,23 @@ pub fn hint(
     })
 }
 
+/// (модель, агент, вход, выход, чтение кеша, запись кеша).
+type UsageRow = (String, String, i64, i64, i64, i64);
+
 fn is_main(agent: &str) -> bool {
     matches!(agent, "orchestrator" | "main")
 }
 
 /// Главная модель хода: строка основного агента, а без неё самая крупная.
-fn main_side(rows: &[(String, String, i64, i64, i64, i64)]) -> Option<Side> {
-    let weight = |row: &&(String, String, i64, i64, i64, i64)| row.2 + row.3 + row.4 + row.5;
+fn main_side(rows: &[UsageRow]) -> Option<Side> {
+    let weight = |row: &&UsageRow| row.2 + row.3 + row.4 + row.5;
     let pick = rows
         .iter()
         .filter(|row| is_main(&row.1))
         .max_by_key(weight)
         .or_else(|| rows.iter().max_by_key(weight))?;
     let model = &pick.0;
-    let sum = |field: fn(&(String, String, i64, i64, i64, i64)) -> i64| {
+    let sum = |field: fn(&UsageRow) -> i64| {
         rows.iter()
             .filter(|row| row.0 == *model)
             .map(field)
@@ -113,7 +116,7 @@ fn main_side(rows: &[(String, String, i64, i64, i64, i64)]) -> Option<Side> {
     })
 }
 
-type UsageRows = Vec<(String, String, i64, i64, i64, i64)>;
+type UsageRows = Vec<UsageRow>;
 
 async fn usage_rows(conn: &mut PgConnection, run: Uuid) -> Result<UsageRows, sqlx::Error> {
     sqlx::query_as(
