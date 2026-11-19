@@ -1,5 +1,28 @@
 pub static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
+/// Каждая миграция, вшитая в бинарь: версия, описание и контрольная сумма в hex
+/// (та же, что sqlx пишет в `_sqlx_migrations.checksum`). Выкат сверяет этот список
+/// с применёнными миграциями живой базы, чтобы решить, нужен ли vzdump.
+pub fn migration_manifest_json() -> String {
+    let rows: Vec<serde_json::Value> = MIGRATOR
+        .migrations
+        .iter()
+        .map(|migration| {
+            let checksum: String = migration
+                .checksum
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            serde_json::json!({
+                "version": migration.version,
+                "description": migration.description,
+                "checksum": checksum,
+            })
+        })
+        .collect();
+    serde_json::json!({ "migrations": rows }).to_string()
+}
+
 use std::time::Duration;
 
 use futures_util::future::BoxFuture;
@@ -176,6 +199,39 @@ pub async fn connect(url: &str) -> Result<sqlx::PgPool, sqlx::Error> {
 mod tests {
     use super::*;
     use sqlx::{Connection as _, postgres::PgListener};
+
+    #[test]
+    fn manifest_lists_every_embedded_migration_with_its_checksum() {
+        let manifest: serde_json::Value = serde_json::from_str(&migration_manifest_json()).unwrap();
+        let rows = manifest["migrations"].as_array().unwrap();
+        let on_disk = std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/migrations"))
+            .unwrap()
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(".sql")
+            })
+            .count();
+        assert_eq!(rows.len(), on_disk, "the manifest must hold every file");
+        assert_eq!(rows.len(), MIGRATOR.migrations.len());
+        let versions: Vec<i64> = rows
+            .iter()
+            .map(|r| r["version"].as_i64().unwrap())
+            .collect();
+        assert!(versions.windows(2).all(|w| w[0] < w[1]), "versions ascend");
+        for (row, migration) in rows.iter().zip(MIGRATOR.migrations.iter()) {
+            let hex = row["checksum"].as_str().unwrap();
+            assert_eq!(hex.len(), migration.checksum.len() * 2);
+            assert!(
+                hex.bytes()
+                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+            );
+            assert_eq!(row["description"].as_str().unwrap(), migration.description);
+        }
+    }
 
     /// Пул из одного соединения: так брошенная транзакция достанется следующему
     /// началу, а не затеряется среди свободных соединений.

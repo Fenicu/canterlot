@@ -45,6 +45,21 @@ enum Command {
     },
     /// Печатает документ OpenAPI (содержимое docs/api/openapi.json) без конфига и базы.
     Openapi,
+    /// Миграции, вшитые в этот бинарь (без конфига и базы).
+    Migrations {
+        #[command(subcommand)]
+        command: MigrationsCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum MigrationsCommand {
+    /// Печатает JSON со всеми вшитыми миграциями: версия, описание, контрольная сумма.
+    Manifest {
+        /// Формат вывода один, флаг оставлен для явности вызова из выката.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -141,6 +156,16 @@ async fn run(args: Args) -> Result<(), String> {
             return write!(std::io::stdout().lock(), "{}", http::openapi::render())
                 .map_err(|_| "output_error".to_owned());
         }
+        Command::Migrations {
+            command: MigrationsCommand::Manifest { .. },
+        } => {
+            return writeln!(
+                std::io::stdout().lock(),
+                "{}",
+                db::migration_manifest_json()
+            )
+            .map_err(|_| "output_error".to_owned());
+        }
         Command::Init(config) | Command::Serve(config) => config,
         Command::Machine { command } => match command {
             MachineCommand::Add { config, .. }
@@ -234,7 +259,9 @@ async fn run(args: Args) -> Result<(), String> {
                 .map_err(|_| "presets_seed_error".to_owned())?;
             serve(pool.clone(), config, installation).await?;
         }
-        Command::Openapi => unreachable!("handled before the config is loaded"),
+        Command::Openapi | Command::Migrations { .. } => {
+            unreachable!("handled before the config is loaded")
+        }
         Command::Geoip { .. } => unreachable!("handled before the database is opened"),
         Command::Auth { command } => {
             use canterlot_hub::owner_auth::cli;
