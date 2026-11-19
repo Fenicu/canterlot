@@ -21807,6 +21807,14 @@
       "RunBody": {
         "type": "object",
         "properties": {
+          "report_conversation_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Повтор карточки отчёта: разговор карточки. Хаб запускает расписание, только если оно\nпо-прежнему собирает отчёт по этой сессии, иначе отказ `schedule_invalid` по полю `target`."
+          },
           "run_anyway": {
             "type": "boolean",
             "description": "«Запустить в любом случае»: обходит проверки расписания."

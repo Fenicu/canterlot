@@ -150,6 +150,25 @@ test('failed_card_explains_the_reason_and_retry_runs_the_schedule_now', async ({
   expect(api.routineDismissals).toEqual([{ conversation: id, report: REPORT }]);
 });
 
+test('stale_failed_card_refuses_the_retry_and_keeps_only_dismiss', async ({ page }) => {
+  const { api, id } = await boot(page, {
+    seed: (hub, conversation) => {
+      hub.putRoutineReport(conversation, {
+        id: REPORT, schedule_id: SCHEDULE, state: 'failed', created_at: AFTER_ALL,
+        error: { reason: 'turn_timeout', message: 'Копия не закончила отчёт за 60 минут' }
+      });
+    }
+  });
+  // Расписание перенацелили на обычное сообщение в сессию: старая карточка осталась в ленте.
+  api.schedules.get(SCHEDULE)!.target = { kind: 'existing_session', conversation_id: id };
+  await card(page).getByRole('button', { name: 'Повторить' }).click();
+  await expect(card(page).getByRole('alert')).toContainText('больше не собирает отчёт по этой сессии');
+  await expect(card(page).getByRole('button', { name: 'Повторить' })).toHaveCount(0);
+  expect(api.scheduleRuns.get(SCHEDULE)?.length ?? 0).toBe(0);
+  await card(page).getByRole('button', { name: 'Завершить' }).click();
+  await expect(card(page)).toHaveCount(0);
+});
+
 test('deep_link_scrolls_to_the_card_and_highlights_it_briefly', async ({ page }) => {
   await boot(page, {
     history: 160,

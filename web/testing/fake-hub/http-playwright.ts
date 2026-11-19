@@ -1630,7 +1630,12 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
       return;
     }
     const id = new URL(route.request().url()).pathname.split('/')[4] ?? '';
-    const body = (route.request().postDataJSON() ?? {}) as { run_anyway?: boolean };
+    const body = (route.request().postDataJSON() ?? {}) as { run_anyway?: boolean; report_conversation_id?: string };
+    const target = api.schedules.get(id)?.target;
+    if (body.report_conversation_id && !(target?.kind === 'session_report' && target.conversation_id === body.report_conversation_id)) {
+      await route.fulfill({ status: 422, headers: headers(), json: errorBody('schedule_invalid', 'Некорректное расписание', { field: 'target' }) });
+      return;
+    }
     try {
       await route.fulfill({ headers: headers(), json: api.runSchedule(id, key, body.run_anyway === true) });
     } catch {

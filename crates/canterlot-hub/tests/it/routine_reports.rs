@@ -1756,3 +1756,60 @@ async fn deleting_a_schedule_stops_its_copy_and_dismisses_the_open_card(pool: Pg
     assert!(card_copy(&pool, card).await.is_none());
     assert!(routine_pushes(&pool).await.is_empty());
 }
+
+/// Карточка со старой ошибкой после смены цели расписания: «Повторить» не может отправить
+/// сообщение в настоящую сессию. Хаб сверяет цель с разговором карточки сам.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_stale_retry_is_refused_when_the_schedule_no_longer_reports_this_session(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let _session = session(&f);
+    let parent = f.seed.conversation_id;
+    let schedule = make_schedule(&f, "Стендап").await;
+    let revision: i64 = sqlx::query_scalar("select revision from schedules where id=$1")
+        .bind(schedule)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let r = f
+        .client
+        .send(
+            Method::PATCH,
+            &format!("/api/v1/schedules/{schedule}"),
+            Some(&format!("retarget-{}", Uuid::now_v7())),
+            Some(json!({
+                "base_revision": revision,
+                "target": {"kind": "existing_session", "conversation_id": parent},
+            })),
+        )
+        .await;
+    assert_eq!(
+        r.status.as_u16(),
+        200,
+        "{}",
+        String::from_utf8_lossy(&r.body)
+    );
+    let refused = f
+        .client
+        .send(
+            Method::POST,
+            &format!("/api/v1/schedules/{schedule}/run"),
+            Some(&format!("stale-retry-{}", Uuid::now_v7())),
+            Some(json!({"run_anyway": false, "report_conversation_id": parent})),
+        )
+        .await;
+    assert_eq!(
+        refused.status.as_u16(),
+        422,
+        "{}",
+        String::from_utf8_lossy(&refused.body)
+    );
+    let body = refused.json::<Value>();
+    assert_eq!(body["error"]["code"], "schedule_invalid", "{body}");
+    assert_eq!(body["error"]["details"]["field"], "target", "{body}");
+    let runs: i64 = sqlx::query_scalar("select count(*) from schedule_runs where schedule_id=$1")
+        .bind(schedule)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(runs, 0, "a refused retry must not start a run");
+}

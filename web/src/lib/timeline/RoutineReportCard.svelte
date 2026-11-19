@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy } from 'svelte';
   import { dismissRoutineReport, runSchedule } from '#lib/api/client.js';
+  import { ApiError } from '#lib/api/http.js';
   import { errorText } from '#lib/api/errors.js';
   import { fmt } from '#lib/format/ru.js';
   import { intents } from '#lib/ops/intent.js';
@@ -21,6 +22,8 @@
   let busy = $state<'dismiss' | 'retry' | null>(null);
   let failed = $state('');
   let notice = $state('');
+  /** Хаб отказал в повторе: расписание перенацелено, карточку можно только завершить. */
+  let stale = $state(false);
   let copied = $state('');
   let timer: ReturnType<typeof setTimeout> | null = null;
 
@@ -46,9 +49,14 @@
     failed = '';
     notice = '';
     try {
-      await intents.run(`routine-retry:${report.id}`, (key) => runSchedule(report.schedule_id, { run_anyway: false }, key));
+      await intents.run(`routine-retry:${report.id}`, (key) => runSchedule(report.schedule_id, { run_anyway: false, report_conversation_id: report.conversation_id }, key));
       notice = 'Запуск принят';
     } catch (error) {
+      if (error instanceof ApiError && error.code === 'schedule_invalid' && error.details?.field === 'target') {
+        stale = true;
+        failed = 'Рутина больше не собирает отчёт по этой сессии. Карточку можно только завершить';
+        return;
+      }
       failed = errorText(error, 'Не удалось запустить рутину. Повторите той же кнопкой');
     } finally {
       busy = null;
@@ -95,8 +103,8 @@
   {:else}
     <p class="error" data-role="routine-error">{failureText(report.error)}</p>
     <div class="actions">
-      <Button variant="primary" busy={busy === 'retry'} onclick={() => void retry()}>Повторить</Button>
-      <Button busy={busy === 'dismiss'} onclick={() => void dismiss()}>Завершить</Button>
+      {#if !stale}<Button variant="primary" busy={busy === 'retry'} onclick={() => void retry()}>Повторить</Button>{/if}
+      <Button variant={stale ? 'primary' : undefined} busy={busy === 'dismiss'} onclick={() => void dismiss()}>Завершить</Button>
     </div>
   {/if}
   {#if notice}<p class="note" role="status">{notice}</p>{/if}
