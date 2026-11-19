@@ -145,3 +145,38 @@ test('feed_line_has_no_hint_when_the_hub_names_none', async ({ page }) => {
   await expect(page.locator('[data-role="run-cost"]').first()).toBeVisible();
   await expect(page.locator('[data-role="cache-hint"]')).toHaveCount(0);
 });
+
+test('run_split_by_a_compaction_shows_the_cost_line_under_the_last_card_only', async ({ page }) => {
+  const { hub, api, id, runId } = boot();
+  await installChatRoutes(page, hub, api);
+  await page.goto(`/c/${id}`);
+  await expect(page.locator('.screen[data-ready]')).toBeVisible();
+  await expect(page.locator('[data-role="run-cost"]')).toHaveCount(1);
+
+  api.pushCompaction(id, { ok: true });
+  hub.flush();
+  await expect(page.getByText('Контекст сжат автоматически')).toBeVisible();
+  const blockId = api.id();
+  const text = 'Продолжаю после сжатия';
+  hub.append(`conversation:${id}`, {
+    kind: 'block_started',
+    conversation_id: id,
+    payload: { input_command_id: runId, parent_block_id: null, agent: 'claude', model: 'opus-5.5', tool_name: null, summary: null, approved_by: null, block_id: blockId, rev: 0, kind: 'text' }
+  });
+  const digest = await page.evaluate(async (value) => {
+    const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+    return [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  }, text);
+  hub.append(`conversation:${id}`, {
+    kind: 'block_final',
+    conversation_id: id,
+    payload: { block_id: blockId, rev: 1, text, checksum: digest, text_omitted: false, summary: null }
+  });
+  hub.flush();
+
+  const cards = page.locator('.card');
+  await expect(cards).toHaveCount(2);
+  await expect(page.locator('[data-role="run-cost"]')).toHaveCount(1);
+  await expect(cards.nth(1).locator('[data-role="run-cost"]')).toHaveCount(1);
+  await expect(cards.nth(0).locator('[data-role="run-cost"]')).toHaveCount(0);
+});
