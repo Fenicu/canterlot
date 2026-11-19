@@ -62,3 +62,6 @@ alter table owner_pushes add constraint owner_pushes_kind_check check (
 -- Чем кончился ход по версии адаптера. Прерванный и упавший ход тоже присылают `run_finished`,
 -- поэтому завершённая строка хода успеха не доказывает; пусто у старого воркера.
 alter table runs add column outcome text check (outcome in ('completed', 'failed', 'interrupted'));
+-- Граница текстов хода: последняя последовательность блоков на момент `run_finished`.
+-- Продолжение под тем же идентификатором команды дописывает блоки позже и в отчёт не входит.
+alter table runs add column last_block_seq bigint;

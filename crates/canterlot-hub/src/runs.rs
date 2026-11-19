@@ -227,7 +227,7 @@ pub async fn finish_in_tx(
     if let Some(provider) = provider {
         lock_provider_runs(conn, provider, started).await?;
     }
-    let changed=sqlx::query("update runs set finished_at=started_at+($2::bigint * interval '1 millisecond'),duration_ms=$2,outcome=$7,context_tokens=$3,context_window_tokens=$4,weekly_after_permille=(select weekly_used_permille from provider_limits where provider=runs.provider),exact=exact and $5,git=coalesce($6,git),forced_close=false,working_ms=null where input_command_id=$1 and (finished_at is null or forced_close)")
+    let changed=sqlx::query("update runs set finished_at=started_at+($2::bigint * interval '1 millisecond'),duration_ms=$2,outcome=$7,last_block_seq=(select max(created_seq) from blocks where conversation_id=(select conversation_id from runs where input_command_id=$1)),context_tokens=$3,context_window_tokens=$4,weekly_after_permille=(select weekly_used_permille from provider_limits where provider=runs.provider),exact=exact and $5,git=coalesce($6,git),forced_close=false,working_ms=null where input_command_id=$1 and (finished_at is null or forced_close)")
         .bind(command).bind(duration).bind(number(fact.context_tokens)?).bind(number(fact.context_window_tokens)?).bind(now - at <= EXACT_WINDOW).bind(git_json(fact)?).bind(outcome_of(fact.end)).execute(&mut *conn).await?.rows_affected();
     if changed == 0 {
         if fact.adopted {

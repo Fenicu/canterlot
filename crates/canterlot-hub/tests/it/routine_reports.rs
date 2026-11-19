@@ -376,9 +376,11 @@ async fn record_copy_run(pool: &PgPool, copy: Uuid, finished: bool, forced: bool
     .unwrap();
     sqlx::query(
         "insert into runs(input_command_id,execution_id,conversation_id,provider,finished_at,
-                          duration_ms,forced_close,outcome)
+                          duration_ms,forced_close,outcome,last_block_seq)
          select i.command_id,$2,$1,'claude',case when $3 then clock_timestamp() end,
-                case when $3 then 1000 end,$4,case when $3 and not $4 then 'completed' end
+                case when $3 then 1000 end,$4,case when $3 and not $4 then 'completed' end,
+                case when $3 then coalesce((select max(created_seq) from blocks
+                                             where conversation_id=$1),0) end
            from inputs i where i.conversation_id=$1 and i.command_id is not null
          on conflict do nothing",
     )
@@ -1162,7 +1164,7 @@ async fn a_turn_that_is_just_starting_is_not_an_empty_report(pool: PgPool) {
     // Ход закончился с ответом: отчёт собран.
     finish_copy_turn(&pool, copy, "Всё спокойно.").await;
     sqlx::query(
-        "update runs set finished_at=clock_timestamp(),duration_ms=1,outcome='completed' where conversation_id=$1",
+        "update runs set finished_at=clock_timestamp(),duration_ms=1,outcome='completed',last_block_seq=(select max(created_seq) from blocks where conversation_id=$1) where conversation_id=$1",
     )
     .bind(copy)
     .execute(&pool)
@@ -2384,4 +2386,36 @@ async fn a_fresh_sending_marker_keeps_the_push_out_of_the_send_path(pool: PgPool
                 .unwrap();
         assert_eq!(state, "pending", "dropped too early at {age} s");
     }
+}
+
+/// Codex может принять продолжение под тем же идентификатором команды: после конца отчётного
+/// хода оно дописывает свой текст. Отчёт берётся из блоков самого хода, а не «последнего
+/// текста после ввода».
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_continuation_after_the_completed_turn_does_not_replace_the_report(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let _session = session(&f);
+    with_native(&f).await;
+    let schedule = make_schedule(&f, "Стендап").await;
+    let run = fire(&f, schedule).await;
+    let copy = copies(&pool, f.seed.conversation_id).await.remove(0).0;
+    finish_copy_turn(&pool, copy, "Итог отчётного хода").await;
+    let execution: Uuid = sqlx::query_scalar("select id from executions where conversation_id=$1")
+        .bind(copy)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "insert into blocks(block_id,execution_id,conversation_id,kind,state,rev,content,created_seq)
+         values($1,$2,$3,'text','final',1,'Недописанное продолжение',2000)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(execution)
+    .bind(copy)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sweep(&f).await;
+    let (_, detail) = run_state(&pool, run).await;
+    assert_eq!(detail["report"]["text"], "Итог отчётного хода", "{detail}");
 }
