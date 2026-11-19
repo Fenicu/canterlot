@@ -857,6 +857,26 @@ async fn remove_in_tx(
     owner_id: Uuid,
     copy_id: Uuid,
 ) -> Result<Removal, sqlx::Error> {
+    // Порядок приёма журнала: курсор раньше очереди. Исполнение копии уже остановилось, но
+    // `JournalClosed` мог ещё не прийти: хвост последней пачки приём держит под курсором и
+    // ждёт очередь, а жёсткое удаление, взяв очередь первой, замкнулось бы с ним. Открытый
+    // журнал откладывает удаление на следующий тик.
+    let open_journals: Vec<bool> = sqlx::query_scalar(
+        "select not jc.closed and not jc.discarded
+           from journal_cursors jc join executions e on e.id=jc.execution_id
+          where e.conversation_id=$1 order by jc.journal_id for update of jc",
+    )
+    .bind(copy_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    // Живое исполнение журнал держит открытым само: ему сначала нужна остановка ниже.
+    if open_journals.contains(&true)
+        && crate::executions::live(&mut *conn, copy_id)
+            .await?
+            .is_none()
+    {
+        return Ok(Removal::Pending { backoff: false });
+    }
     // Очередь копии раньше строки разговора, как в удалении и в отпускании ввода.
     let queued: Option<Uuid> = sqlx::query_scalar(
         "select conversation_id from queue_state where conversation_id=$1 for update",

@@ -2496,3 +2496,105 @@ async fn a_worker_without_run_outcome_never_gets_a_report(pool: PgPool) {
     assert_eq!(detail["reason"], "report_capability_missing", "{detail}");
     assert!(copies(&pool, f.seed.conversation_id).await.is_empty());
 }
+
+/// Курсор журнала остановившейся копии: хвост последней пачки ещё может приходить.
+async fn open_journal_of(f: &Fixture, copy: Uuid) -> Uuid {
+    let execution: Uuid = sqlx::query_scalar("select id from executions where conversation_id=$1")
+        .bind(copy)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    let journal = Uuid::now_v7();
+    sqlx::query(
+        "insert into journal_cursors(machine_id,journal_id,kind,committed_seq,execution_id,closed)
+         values($1,$2,'sj',5,$3,false)",
+    )
+    .bind(f.seed.machine_id)
+    .bind(journal)
+    .bind(execution)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    journal
+}
+
+/// Исполнение уже `stopped`, а `JournalClosed` ещё не пришёл: жёсткое удаление копии ждёт
+/// следующего тика, а не встаёт на курсор, который держит приём хвоста.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn cleanup_waits_for_the_journal_of_a_stopped_copy_to_close(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let schedule = make_schedule_without_session(&f, "Стендап").await;
+    let (card, copy) = stray_copy(&f, schedule, Some("stopped")).await;
+    let journal = open_journal_of(&f, copy).await;
+    canterlot_hub::routines::sweep(&pool, Utc::now())
+        .await
+        .unwrap();
+    assert_eq!(
+        card_copy(&pool, card).await,
+        Some(copy),
+        "deleted with an open journal"
+    );
+    sqlx::query("update journal_cursors set closed=true where journal_id=$1")
+        .bind(journal)
+        .execute(&pool)
+        .await
+        .unwrap();
+    canterlot_hub::routines::sweep(&pool, Utc::now())
+        .await
+        .unwrap();
+    assert!(card_copy(&pool, card).await.is_none());
+}
+
+/// Приём берёт курсор журнала раньше очереди; уборка идёт тем же порядком, иначе приём хвоста
+/// и жёсткое удаление замыкались друг на друге.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn cleanup_takes_the_journal_cursor_before_the_copy_queue(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let schedule = make_schedule_without_session(&f, "Стендап").await;
+    let (_card, copy) = stray_copy(&f, schedule, Some("stopped")).await;
+    let journal = open_journal_of(&f, copy).await;
+    sqlx::query("update journal_cursors set closed=true where journal_id=$1")
+        .bind(journal)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // «Приём хвоста»: курсор взят, очередь ещё нет.
+    let mut ingest = canterlot_hub::db::begin(&pool).await.unwrap();
+    sqlx::query("select 1 from journal_cursors where journal_id=$1 for update")
+        .bind(journal)
+        .execute(&mut *ingest)
+        .await
+        .unwrap();
+    let sweeper = {
+        let pool = pool.clone();
+        tokio::spawn(async move { canterlot_hub::routines::sweep(&pool, Utc::now()).await })
+    };
+    let mut waiting = false;
+    for _ in 0..20_000 {
+        waiting = sqlx::query_scalar(
+            "select exists(select 1 from pg_locks l join pg_stat_activity a on a.pid=l.pid
+                            where not l.granted and l.locktype in ('transactionid','tuple')
+                              and a.datname=current_database())",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        if waiting {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(waiting, "cleanup never waited on the journal cursor");
+    let queue_taken_first =
+        sqlx::query("select 1 from queue_state where conversation_id=$1 for update nowait")
+            .bind(copy)
+            .execute(&mut *ingest)
+            .await
+            .is_err();
+    assert!(
+        !queue_taken_first,
+        "cleanup took the queue before the journal cursor"
+    );
+    ingest.rollback().await.unwrap();
+    sweeper.await.unwrap().unwrap();
+}
