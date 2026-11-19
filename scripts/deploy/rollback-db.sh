@@ -146,14 +146,42 @@ if [ -z "${EXPECT_SYS}${EXPECT_OID}" ]; then
     EXPECT_SYS="$(printf '%s\n' "${ID_FILE}" | sed -n 's/^system_identifier=//p' | sed -n 1p)"
     EXPECT_OID="$(printf '%s\n' "${ID_FILE}" | sed -n 's/^database_oid=//p' | sed -n 1p)"
 fi
+# Фаза восстановления лежит рядом с дампом (<дамп>.restore-phase): verified, dropped, created <новый oid>,
+# restored <oid>. dropdb и createdb меняют oid базы, поэтому повтор той же команды после частичного
+# восстановления принимает ТОЛЬКО записанный oid; чужой oid без записи — отказ.
+PHASE_FILE="${DUMP}.restore-phase"
+RESTORE_PHASE=""
+RESTORE_OID=""
+if PH_RAW="$(ssh_hub "cat '${PHASE_FILE}'" 2>/dev/null)"; then
+    RESTORE_PHASE="$(printf '%s\n' "${PH_RAW}" | sed -n 1p | cut -d' ' -f1)"
+    RESTORE_OID="$(printf '%s\n' "${PH_RAW}" | sed -n 1p | cut -s -d' ' -f2)"
+    case "${RESTORE_PHASE}" in
+        verified | dropped | created | restored) ;;
+        *) die "unreadable restore phase '${RESTORE_PHASE}' in ${PHASE_FILE}: refusing before the hub stops" ;;
+    esac
+    log "an earlier restore of this dump left the phase '${RESTORE_PHASE}${RESTORE_OID:+ ${RESTORE_OID}}': continuing from it"
+fi
 if [ -z "${EXPECT_SYS}" ] || [ -z "${EXPECT_OID}" ]; then
     log "WARNING: no recorded cluster identity for ${DUMP} (no --expect-system-id/--expect-db-oid, no ${DUMP}.identity): the cluster is NOT verified; read the target before going on"
+elif [ "${RESTORE_PHASE}" = "dropped" ]; then
+    # База снесена: соединиться можно только с обслуживающей postgres. Кластер всё равно сверяется.
+    CUR_SYS="$(ssh_hub "runuser -u postgres -- psql -h '${HUB_PG_SOCKET}' -d postgres -tAc \"select system_identifier::text from pg_control_system()\"")" || die "cannot read the cluster identity through the postgres database: refusing to touch the database"
+    [ "${CUR_SYS}" = "${EXPECT_SYS}" ] || die "the cluster at ${HUB_PG_SOCKET} has system identifier ${CUR_SYS}, the dump was taken from ${EXPECT_SYS}: refusing before the hub stops (wrong cluster)"
+    log "cluster identity verified through the postgres database: system identifier ${EXPECT_SYS}; ${HUB_PG_DB} is missing (phase dropped)"
 else
     CUR_ID="$(pg_identity)" || die "cannot read the cluster identity of ${HUB_PG_DB} on ${HUB_PG_SOCKET}: refusing to touch the database"
     [ "${CUR_ID% *}" = "${EXPECT_SYS}" ] || die "the cluster at ${HUB_PG_SOCKET} has system identifier ${CUR_ID% *}, the dump was taken from ${EXPECT_SYS}: refusing before the hub stops (wrong cluster)"
-    [ "${CUR_ID#* }" = "${EXPECT_OID}" ] || die "the database ${HUB_PG_DB} has database oid ${CUR_ID#* }, the dump was taken from oid ${EXPECT_OID}: refusing before the hub stops"
-    log "cluster identity verified: system identifier ${EXPECT_SYS}, database oid ${EXPECT_OID}"
+    if [ "${CUR_ID#* }" = "${EXPECT_OID}" ]; then
+        log "cluster identity verified: system identifier ${EXPECT_SYS}, database oid ${EXPECT_OID}"
+    elif [ -n "${RESTORE_OID}" ] && { [ "${RESTORE_PHASE}" = "created" ] || [ "${RESTORE_PHASE}" = "restored" ]; } && [ "${CUR_ID#* }" = "${RESTORE_OID}" ]; then
+        log "cluster identity verified: system identifier ${EXPECT_SYS}; replacement database oid ${RESTORE_OID} recorded by the earlier restore (phase ${RESTORE_PHASE}) accepted"
+    else
+        die "the database ${HUB_PG_DB} has database oid ${CUR_ID#* }, the dump was taken from oid ${EXPECT_OID}${RESTORE_OID:+ (an earlier restore recorded ${RESTORE_OID})}: refusing before the hub stops"
+    fi
 fi
+write_phase() {
+    run_write "restore phase ${1%% *}" ssh_hub "printf '%s\n' '$1' >'${PHASE_FILE}'" || die "cannot record the restore phase '$1' in ${PHASE_FILE}"
+}
 
 log "rollback-db: refusing unless the worker is provably stopped"
 assert_worker_stopped "before any change"
@@ -221,12 +249,27 @@ log "restoring ${DUMP} (dropdb + createdb + full pg_restore --exit-on-error)"
 # Последняя сверка ровно перед dropdb: между ранней проверкой и этой точкой
 # воркер мог появиться (auto-restart, ручной запуск, осиротевший процесс).
 assert_worker_stopped "immediately before dropdb"
-if ssh_hub "runuser -u postgres -- dropdb -h '${HUB_PG_SOCKET}' '${HUB_PG_DB}' && runuser -u postgres -- createdb -h '${HUB_PG_SOCKET}' -O '${HUB_PG_USER}' '${HUB_PG_DB}' && runuser -u postgres -- pg_restore --exit-on-error -h '${HUB_PG_SOCKET}' -d '${HUB_PG_DB}' '${DUMP}'"; then
-    log "pg_restore done"
-else
-    log "pg_restore FAILED: refusing to start anything on a partial database. Needs the owner loudly"
+# Шаги по отдельности, фаза записывается после каждого: сбой посреди восстановления не теряет, где мы.
+# Фаза created (база создана, но частично залита) продолжается с dropdb: --exit-on-error не
+# восстанавливает поверх частичных данных.
+write_phase "verified"
+restore_fail() {
+    log "$1: refusing to start anything on a partial database. The phase is '$(ssh_hub "cat '${PHASE_FILE}'" 2>/dev/null || echo unknown)' in ${PHASE_FILE}: run the same command again to continue. Needs the owner loudly"
     exit 1
+}
+if [ "${RESTORE_PHASE}" != "dropped" ]; then
+    DB_EXISTS="$(ssh_hub "runuser -u postgres -- psql -h '${HUB_PG_SOCKET}' -d postgres -tAc \"select 1 from pg_database where datname = '${HUB_PG_DB}'\"")" || restore_fail "cannot ask the cluster whether ${HUB_PG_DB} exists"
+    if [ "${DB_EXISTS}" = "1" ]; then
+        ssh_hub "runuser -u postgres -- dropdb -h '${HUB_PG_SOCKET}' '${HUB_PG_DB}'" || restore_fail "dropdb FAILED"
+    fi
+    write_phase "dropped"
 fi
+ssh_hub "runuser -u postgres -- createdb -h '${HUB_PG_SOCKET}' -O '${HUB_PG_USER}' '${HUB_PG_DB}'" || restore_fail "createdb FAILED"
+NEW_ID="$(pg_identity)" || restore_fail "cannot read the identity of the recreated database"
+write_phase "created ${NEW_ID#* }"
+ssh_hub "runuser -u postgres -- pg_restore --exit-on-error -h '${HUB_PG_SOCKET}' -d '${HUB_PG_DB}' '${DUMP}'" || restore_fail "pg_restore FAILED"
+write_phase "restored ${NEW_ID#* }"
+log "pg_restore done"
 
 log "starting hub"
 run_write "start hub" hub_locked 'systemctl start "$1"' "${HUB_UNIT}" || die "hub failed to start after restore"

@@ -14,7 +14,8 @@ if [ -n "${FAKE_PG_SOCKET:-}" ]; then
     fi
 fi
 if [ "${name}" = "dropdb" ] && [ -n "${FAKE_DROPDB_HOOK:-}" ]; then bash "${FAKE_DROPDB_HOOK}" || true; fi
+if [ "${name}" = "createdb" ] && [ "${FAKE_FAIL_CREATEDB:-0}" = "1" ]; then echo "fake-createdb: injected failure" >&2; exit 1; fi
 case "${name}" in
     dropdb) rm -f "${FAKE_ROOT}/state/db.txt" ;;
-    createdb) : >"${FAKE_ROOT}/state/db.txt" ;;
+    createdb) : >"${FAKE_ROOT}/state/db.txt"; printf '16500\n' >"${FAKE_ROOT}/state/db-oid" ;;
 esac
