@@ -837,6 +837,30 @@ export class RowsCache {
 }
 
 /**
+ * Карточки, которые не последние в своём ходе (ход разрезан сжатием контекста): ключ карточки
+ * и ходы, где она не последняя. Карточки без номера хода сюда не попадают.
+ */
+export function nonLastRunCards(rows: Row[]): Map<string, string[]> {
+  const last = new Map<string, string>();
+  const perCard: { key: string; runs: string[] }[] = [];
+  for (const row of rows) {
+    if (row.kind !== "answer") continue;
+    const runs = new Set<string>();
+    for (const entry of row.entries) {
+      if (entry.kind === "block" && entry.block.inputCommandId) runs.add(entry.block.inputCommandId);
+    }
+    for (const run of runs) last.set(run, row.key);
+    perCard.push({ key: row.key, runs: [...runs] });
+  }
+  const result = new Map<string, string[]>();
+  for (const { key, runs } of perCard) {
+    const earlier = runs.filter((run) => last.get(run) !== key);
+    if (earlier.length > 0) result.set(key, earlier);
+  }
+  return result;
+}
+
+/**
  * Карточки хода, который идёт сейчас, но не последние: живая строка и «Прервать» только у
  * последней, а прежние (ход разрезан сжатием контекста) остаются завершёнными, даже если
  * в них висит блок в `streaming`.
@@ -844,12 +868,7 @@ export class RowsCache {
 export function settledRunCards(rows: Row[], activeRun: string | null): Set<string> {
   const settled = new Set<string>();
   if (activeRun === null) return settled;
-  const own = rows.filter(
-    (row) =>
-      row.kind === "answer" &&
-      row.entries.some((entry) => entry.kind === "block" && entry.block.inputCommandId === activeRun),
-  );
-  for (const row of own.slice(0, -1)) settled.add(row.key);
+  for (const [key, runs] of nonLastRunCards(rows)) if (runs.includes(activeRun)) settled.add(key);
   return settled;
 }
 

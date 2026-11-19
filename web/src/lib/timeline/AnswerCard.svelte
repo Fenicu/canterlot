@@ -36,6 +36,7 @@
     harness,
     activeRun = null,
     settled = false,
+    notLast = false,
     conversationId,
     now,
     onInfo,
@@ -56,6 +57,7 @@
     activeRun?: string | null;
     /** Ход идёт дальше в более поздней карточке (его разрезало сжатие): здесь живой строки нет. */
     settled?: boolean;
+    notLast?: boolean;
     conversationId: string;
     now: number;
     onInfo?: (runId: string) => void;
@@ -89,7 +91,7 @@
   const agent = $derived(agentTitle(head?.agent ?? '', harness));
   const working = $derived(!settled && activeRun !== null && head?.inputCommandId === activeRun);
   const live = $derived(working || streaming);
-  const cost = $derived(run && !live ? costs?.get(run) : undefined);
+  const cost = $derived(run && !live && !notLast ? costs?.get(run) : undefined);
   const costText = $derived(cost ? costLine(cost.usage, cost.limit) : '');
   const hintText = $derived(cost ? cacheHintText(cost.cache_hint) : null);
   // Рассуждение само показывает «Рассуждает» с часами: строка хода не повторяет текст, но остаётся с «Прервать».
