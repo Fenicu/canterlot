@@ -62,7 +62,7 @@ test('feed_line_updates_when_the_cost_of_a_finished_turn_arrives_late', async ({
     conversation_id: id,
     payload: {
       run_id: runId,
-      usage: [{ model: 'mystery-model', agent: 'orchestrator', input_tokens: 10, output_tokens: 5, cache_read_tokens: 0, cache_write_tokens: 0, cost_micro_usd: null, cost_source: null }],
+      usage: [{ model: 'mystery-model', agent: 'orchestrator', input_tokens: 10, output_tokens: 5, cache_read_tokens: 0, cache_write_tokens: 0, cost_micro_usd: null, cost_source: null, cost_complete: true }],
       limit: null,
       cache_hint: null
     }
@@ -75,7 +75,7 @@ test('feed_line_updates_when_the_cost_of_a_finished_turn_arrives_late', async ({
     conversation_id: id,
     payload: {
       run_id: runId,
-      usage: [{ model: 'opencode-go/beam-free', agent: 'orchestrator', input_tokens: 10, output_tokens: 5, cache_read_tokens: 0, cache_write_tokens: 0, cost_micro_usd: 0, cost_source: 'cli' }],
+      usage: [{ model: 'opencode-go/beam-free', agent: 'orchestrator', input_tokens: 10, output_tokens: 5, cache_read_tokens: 0, cache_write_tokens: 0, cost_micro_usd: 0, cost_source: 'cli', cost_complete: true }],
       limit: null,
       cache_hint: null
     }
@@ -129,7 +129,7 @@ test('feed_line_shows_the_cache_hint_without_overflow_or_a_broken_line', async (
     conversation_id: id,
     payload: {
       run_id: runId,
-      usage: [{ model: 'claude-opus-5-5', agent: 'orchestrator', input_tokens: 10, output_tokens: 5, cache_read_tokens: 0, cache_write_tokens: 9000, cost_micro_usd: 5000, cost_source: 'cli' }],
+      usage: [{ model: 'claude-opus-5-5', agent: 'orchestrator', input_tokens: 10, output_tokens: 5, cache_read_tokens: 0, cache_write_tokens: 9000, cost_micro_usd: 5000, cost_source: 'cli', cost_complete: true }],
       limit: null,
       cache_hint: { kind: 'model_changed', idle_minutes: null }
     }
