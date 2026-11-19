@@ -43,6 +43,9 @@ fn price_of_config(config: &PriceConfig) -> Price {
     }
 }
 
+/// Провайдеры, с которых снята таблица: их префикс — псевдоним голого имени.
+const TABLE_PROVIDERS: &[&str] = &["openai", "opencode-go"];
+
 #[derive(Debug, Clone, Default)]
 pub struct PriceBook {
     overrides: BTreeMap<String, Price>,
@@ -58,8 +61,13 @@ impl PriceBook {
         }
     }
 
+    /// Совпадение только по точному id или по явному псевдониму: голое имя и то же имя под
+    /// провайдером таблицы (`openai/`, `opencode-go/`). Чужой провайдер — цена неизвестна.
     pub fn price_of(&self, model: &str) -> Option<Price> {
-        let tail = model.rsplit('/').next().unwrap_or(model);
+        let tail = model
+            .split_once('/')
+            .filter(|(provider, _)| TABLE_PROVIDERS.contains(provider))
+            .map_or(model, |(_, bare)| bare);
         [model, tail]
             .into_iter()
             .find_map(|name| self.overrides.get(name).copied())
@@ -403,6 +411,44 @@ mod tests {
             book.cost_micro_usd("gpt-6.1-sol", MILLION)
         );
         assert!(book.cost_micro_usd("openai/gpt-6.1-sol", MILLION).is_some());
+    }
+
+    #[test]
+    fn foreign_provider_does_not_inherit_the_bare_rate() {
+        let book = PriceBook::default();
+        assert!(book.price_of("gpt-5").is_some());
+        assert_eq!(book.price_of("other-provider/gpt-5"), None);
+        assert_eq!(book.cost_micro_usd("other-provider/gpt-5", MILLION), None);
+        assert_eq!(book.price_of("a/b/gpt-5"), None);
+    }
+
+    #[test]
+    fn table_providers_are_known_aliases_of_the_bare_name() {
+        let book = PriceBook::default();
+        assert_eq!(book.price_of("openai/gpt-5"), book.price_of("gpt-5"));
+        assert_eq!(book.price_of("opencode-go/gpt-5"), book.price_of("gpt-5"));
+    }
+
+    #[test]
+    fn bare_override_follows_the_same_rule() {
+        let overrides: BTreeMap<String, PriceConfig> =
+            toml::from_str("[\"my-model\"]\ninput = 3.0\noutput = 4.0\n").unwrap();
+        let book = PriceBook::with_overrides(&overrides);
+        assert!(book.price_of("my-model").is_some());
+        assert!(book.price_of("openai/my-model").is_some());
+        assert_eq!(book.price_of("other-provider/my-model"), None);
+    }
+
+    #[test]
+    fn qualified_override_is_an_exact_id() {
+        let overrides: BTreeMap<String, PriceConfig> =
+            toml::from_str("[\"other-provider/gpt-5\"]\ninput = 1.0\noutput = 2.0\n").unwrap();
+        let book = PriceBook::with_overrides(&overrides);
+        assert!(book.cost_micro_usd("other-provider/gpt-5", MILLION).is_some());
+        assert_ne!(
+            book.price_of("other-provider/gpt-5"),
+            PriceBook::default().price_of("gpt-5")
+        );
     }
 
     #[test]
