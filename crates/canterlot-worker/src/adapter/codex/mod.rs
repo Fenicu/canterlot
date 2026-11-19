@@ -1681,19 +1681,19 @@ impl CodexAdapter {
             }
             _ => {
                 self.unconfirmed.remove(&pending.command_id);
-                self.finish_without_turn(pending.command_id);
+                self.finish_without_turn(pending.command_id, RunEnd::Failed);
             }
         }
     }
 
     // Ввод закрыт без хода: конца хода от сервера не будет.
-    fn finish_without_turn(&mut self, command_id: Uuid) {
+    fn finish_without_turn(&mut self, command_id: Uuid, end: RunEnd) {
         self.events.push_back(AdapterEvent::RunFinished {
             input_command_id: command_id,
             usage: Vec::new(),
             context_tokens: 0,
             context_window_tokens: 0,
-            end: RunEnd::Failed,
+            end,
         });
         self.events.push_back(AdapterEvent::Phase {
             phase: Phase::AwaitingInput,
@@ -1799,7 +1799,7 @@ impl CodexAdapter {
             let Ok(found) = self.history_lookup(&input.command_id.to_string()).await else {
                 // Codex не дедуплицирует clientUserMessageId: повтор вслепую дал бы
                 // второй ход. Исход решает владелец.
-                self.finish_without_turn(input.command_id);
+                self.finish_without_turn(input.command_id, RunEnd::Failed);
                 return TransmitOutcome::Undetermined;
             };
             if let Some((turn, status)) = found {
@@ -1810,7 +1810,14 @@ impl CodexAdapter {
                     self.outbox.attach(&turn, input.command_id);
                     self.begin_turn(&turn, input.command_id);
                 } else {
-                    self.finish_without_turn(input.command_id);
+                    self.finish_without_turn(
+                        input.command_id,
+                        match status.as_deref() {
+                            Some("completed") => RunEnd::Completed,
+                            Some("interrupted") => RunEnd::Interrupted,
+                            _ => RunEnd::Failed,
+                        },
+                    );
                 }
                 return TransmitOutcome::Accepted(Proof {
                     command_id: input.command_id,
