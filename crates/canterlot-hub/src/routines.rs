@@ -438,19 +438,33 @@ pub async fn sweep(pool: &PgPool, now: DateTime<Utc>) -> Result<(), sqlx::Error>
 }
 
 async fn collect_one(pool: &PgPool, id: Uuid, now: DateTime<Utc>) -> Result<(), sqlx::Error> {
-    let schedule_id: Option<Uuid> =
-        sqlx::query_scalar("select schedule_id from routine_reports where id=$1")
+    let seen: Option<CardRow> =
+        sqlx::query_as("select * from routine_reports where id=$1 and state='pending'")
             .bind(id)
             .fetch_optional(pool)
             .await?;
-    let Some(schedule_id) = schedule_id else {
+    let Some(seen) = seen else {
         return Ok(());
     };
+    // Всё, что нужно для суждения, читается одним снимком: слот, ввод, запись хода и
+    // исполнения копии меняются разными транзакциями, и сочетание чтений из разных
+    // моментов выдавало бы начинающийся ход за пустой.
+    let facts = {
+        let mut snapshot =
+            crate::db::begin_with(pool, "begin isolation level repeatable read read only").await?;
+        let facts = observe(&mut snapshot, &seen).await;
+        snapshot.rollback().await?;
+        facts?
+    };
+    let verdict = decide(&seen, &facts, now);
+    if matches!(verdict, Verdict::Wait) {
+        return Ok(());
+    }
     let mut tx = crate::db::begin(pool).await?;
     // Порядок замков как у приёма запуска: расписание, затем карточка и запуск.
     let schedule: Option<(Uuid,)> =
         sqlx::query_as("select owner_id from schedules where id=$1 for update skip locked")
-            .bind(schedule_id)
+            .bind(seen.schedule_id)
             .fetch_optional(&mut *tx)
             .await?;
     if schedule.is_none() {
@@ -466,16 +480,18 @@ async fn collect_one(pool: &PgPool, id: Uuid, now: DateTime<Utc>) -> Result<(), 
         tx.rollback().await?;
         return Ok(());
     };
-    match judge(&mut tx, &card, now).await? {
+    match verdict {
         Verdict::Wait => {
             tx.rollback().await?;
         }
         Verdict::Started => {
-            sqlx::query("update routine_reports set turn_started_at=$2 where id=$1")
-                .bind(card.id)
-                .bind(now)
-                .execute(&mut *tx)
-                .await?;
+            sqlx::query(
+                "update routine_reports set turn_started_at=$2 where id=$1 and turn_started_at is null",
+            )
+            .bind(card.id)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
             tx.commit().await?;
         }
         Verdict::Ready(text) => {
@@ -490,16 +506,36 @@ async fn collect_one(pool: &PgPool, id: Uuid, now: DateTime<Utc>) -> Result<(), 
     Ok(())
 }
 
-async fn judge(
-    conn: &mut PgConnection,
-    card: &CardRow,
-    now: DateTime<Utc>,
-) -> Result<Verdict, sqlx::Error> {
-    let Some(copy_id) = card.copy_id else {
-        return Ok(Verdict::Failed("copy_lost"));
+/// Что видно у копии в один момент.
+struct Facts {
+    /// Копии нет, она в корзине или у неё нет очереди.
+    lost: bool,
+    input_state: Option<String>,
+    parent_busy: bool,
+    /// Запись хода входного ввода закрыта штатным `run_finished`. Слот и состояние ввода
+    /// этого не доказывают: свободный слот бывает и до начала хода, и после обрыва.
+    run_completed: bool,
+    live: bool,
+    ever_started: bool,
+    /// Последний ответ копии после ввода отчёта; читается только у завершённого хода.
+    text: Option<String>,
+}
+
+async fn observe(conn: &mut PgConnection, card: &CardRow) -> Result<Facts, sqlx::Error> {
+    let mut facts = Facts {
+        lost: true,
+        input_state: None,
+        parent_busy: false,
+        run_completed: false,
+        live: false,
+        ever_started: false,
+        text: None,
     };
-    let copy: Option<(Option<DateTime<Utc>>, String, bool)> = sqlx::query_as(
-        "select c.trashed_at, q.run_slot,
+    let Some(copy_id) = card.copy_id else {
+        return Ok(facts);
+    };
+    let copy: Option<(Option<DateTime<Utc>>, bool)> = sqlx::query_as(
+        "select c.trashed_at,
                 q.hold_reasons @> '[{\"reason\":\"side_parent_busy\"}]'::jsonb
            from conversations c join queue_state q on q.conversation_id=c.id
           where c.id=$1",
@@ -507,71 +543,88 @@ async fn judge(
     .bind(copy_id)
     .fetch_optional(&mut *conn)
     .await?;
-    let Some((trashed_at, run_slot, parent_busy)) = copy else {
-        return Ok(Verdict::Failed("copy_lost"));
+    let Some((trashed_at, parent_busy)) = copy else {
+        return Ok(facts);
     };
     if trashed_at.is_some() {
-        return Ok(Verdict::Failed("copy_lost"));
+        return Ok(facts);
     }
-    let input: Option<(Uuid, String, i64)> = sqlx::query_as(
-        "select id,state,created_seq from inputs where conversation_id=$1
-          order by created_seq limit 1",
+    let input: Option<(String, i64, bool)> = sqlx::query_as(
+        "select i.state, i.created_seq,
+                exists(select 1 from runs r
+                        where r.input_command_id=i.command_id
+                          and r.finished_at is not null and not r.forced_close)
+           from inputs i where i.conversation_id=$1 order by i.created_seq limit 1",
     )
     .bind(copy_id)
     .fetch_optional(&mut *conn)
     .await?;
-    let Some((_, input_state, input_seq)) = input else {
-        return Ok(Verdict::Failed("copy_lost"));
+    let Some((input_state, input_seq, run_completed)) = input else {
+        return Ok(facts);
     };
-    match input_state.as_str() {
-        "rejected" | "cancelled" => return Ok(Verdict::Failed("input_rejected")),
-        // Ход принят и слот свободен: ход кончился, ответ в блоках копии.
-        "accepted" if run_slot == "free" => {
-            let query = format!(
-                "select content from blocks
-                  where conversation_id=$1 and kind='text' and parent_block_id is null
-                    and state='final' and btrim(content)<>'' and created_seq>=$2 and {}
-                  order by created_seq desc, created_at desc limit 1",
-                crate::agents::main_agent_filter("agent")
-            );
-            let text: Option<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(query))
-                .bind(copy_id)
-                .bind(input_seq)
-                .fetch_optional(&mut *conn)
-                .await?;
-            return Ok(match text {
-                Some(text) => Verdict::Ready(clip(text.trim())),
-                None => Verdict::Failed("empty_report"),
-            });
-        }
-        _ => {}
-    }
-    let live = crate::executions::live(&mut *conn, copy_id)
+    facts.lost = false;
+    facts.parent_busy = parent_busy;
+    facts.run_completed = run_completed;
+    facts.input_state = Some(input_state);
+    facts.live = crate::executions::live(&mut *conn, copy_id)
         .await?
         .is_some();
-    let ever_started: bool =
+    facts.ever_started =
         sqlx::query_scalar("select exists(select 1 from executions where conversation_id=$1)")
             .bind(copy_id)
             .fetch_one(&mut *conn)
             .await?;
-    if !live && ever_started {
-        return Ok(Verdict::Failed("copy_failed"));
+    if run_completed {
+        let query = format!(
+            "select content from blocks
+              where conversation_id=$1 and kind='text' and parent_block_id is null
+                and state='final' and btrim(content)<>'' and created_seq>=$2 and {}
+              order by created_seq desc, created_at desc limit 1",
+            crate::agents::main_agent_filter("agent")
+        );
+        facts.text = sqlx::query_scalar(sqlx::AssertSqlSafe(query))
+            .bind(copy_id)
+            .bind(input_seq)
+            .fetch_optional(&mut *conn)
+            .await?;
+    }
+    Ok(facts)
+}
+
+fn decide(card: &CardRow, facts: &Facts, now: DateTime<Utc>) -> Verdict {
+    if facts.lost {
+        return Verdict::Failed("copy_lost");
+    }
+    let input_state = facts.input_state.as_deref().unwrap_or_default();
+    if matches!(input_state, "rejected" | "cancelled") {
+        return Verdict::Failed("input_rejected");
+    }
+    // Отчёт публикуется только у хода, о конце которого есть запись: без неё ответ мог
+    // быть промежуточной репликой оборванного хода, а пустой слот — просто не начавшимся ходом.
+    if facts.run_completed {
+        return match &facts.text {
+            Some(text) => Verdict::Ready(clip(text.trim())),
+            None => Verdict::Failed("empty_report"),
+        };
+    }
+    if !facts.live && facts.ever_started {
+        return Verdict::Failed("copy_failed");
     }
     if input_state == "queued" {
         // Ход не начался: OpenCode ждёт простоя родителя, остальное — очередь копии.
         if now - card.created_at > START_LIMIT {
-            return Ok(Verdict::Failed(if parent_busy {
+            return Verdict::Failed(if facts.parent_busy {
                 "parent_busy_timeout"
             } else {
                 "copy_not_started"
-            }));
+            });
         }
-        return Ok(Verdict::Wait);
+        return Verdict::Wait;
     }
     match card.turn_started_at {
-        None => Ok(Verdict::Started),
-        Some(started) if now - started > TURN_LIMIT => Ok(Verdict::Failed("turn_timeout")),
-        Some(_) => Ok(Verdict::Wait),
+        None => Verdict::Started,
+        Some(started) if now - started > TURN_LIMIT => Verdict::Failed("turn_timeout"),
+        Some(_) => Verdict::Wait,
     }
 }
 

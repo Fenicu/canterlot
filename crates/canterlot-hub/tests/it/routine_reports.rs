@@ -364,6 +364,33 @@ async fn open_cards(pool: &PgPool, schedule: Uuid) -> Vec<Card> {
         .collect()
 }
 
+/// Запись хода копии в `runs`: `finished` — ход закончился штатно (`run_finished`),
+/// `forced` — исполнение умерло посреди хода, и строку закрыл переход исполнения.
+async fn record_copy_run(pool: &PgPool, copy: Uuid, finished: bool, forced: bool) {
+    let execution: Uuid = sqlx::query_scalar(
+        "select id from executions where conversation_id=$1 order by generation desc limit 1",
+    )
+    .bind(copy)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "insert into runs(input_command_id,execution_id,conversation_id,provider,finished_at,
+                          duration_ms,forced_close)
+         select i.command_id,$2,$1,'claude',case when $3 then clock_timestamp() end,
+                case when $3 then 1000 end,$4
+           from inputs i where i.conversation_id=$1 and i.command_id is not null
+         on conflict do nothing",
+    )
+    .bind(copy)
+    .bind(execution)
+    .bind(finished)
+    .bind(forced)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
 /// Копия отчёта в тесте: ход «закончился» ответом `answer` (как после `run_finished`).
 async fn finish_copy_turn(pool: &PgPool, copy: Uuid, answer: &str) {
     let execution: Uuid = match sqlx::query_scalar(
@@ -414,6 +441,7 @@ async fn finish_copy_turn(pool: &PgPool, copy: Uuid, answer: &str) {
         .await
         .unwrap();
     }
+    record_copy_run(pool, copy, true, false).await;
 }
 
 async fn sweep(f: &Fixture) {
@@ -1100,8 +1128,77 @@ async fn a_finished_turn_without_text_fails_the_run(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
+    record_copy_run(&pool, copy, true, false).await;
     sweep(&f).await;
     failed_run_and_card(&f, schedule, run, "empty_report").await;
+}
+
+/// Гонка сборщика: слот ещё свободен, ввод уже принят, а ход только начинается. Раньше
+/// отсутствие текста объявлялось `empty_report`, и здоровую копию останавливали.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_turn_that_is_just_starting_is_not_an_empty_report(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let _session = session(&f);
+    with_native(&f).await;
+    let schedule = make_schedule(&f, "Стендап").await;
+    let run = fire(&f, schedule).await;
+    let copy = copies(&pool, f.seed.conversation_id).await.remove(0).0;
+    sqlx::query("update inputs set state='accepted' where conversation_id=$1")
+        .bind(copy)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("update queue_state set run_slot='free',run_slot_input_id=null,run_slot_attempt=null where conversation_id=$1")
+        .bind(copy)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Запись хода открыта (`run_started`), конца ещё нет.
+    record_copy_run(&pool, copy, false, false).await;
+    sweep(&f).await;
+    assert_eq!(run_state(&pool, run).await.0, "started");
+    let open = open_cards(&pool, schedule).await;
+    assert_eq!(open[0].state, "pending", "{:?}", open[0].error);
+    // Ход закончился с ответом: отчёт собран.
+    finish_copy_turn(&pool, copy, "Всё спокойно.").await;
+    sqlx::query(
+        "update runs set finished_at=clock_timestamp(),duration_ms=1 where conversation_id=$1",
+    )
+    .bind(copy)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sweep(&f).await;
+    assert_eq!(open_cards(&pool, schedule).await[0].state, "ready");
+}
+
+/// Копия упала после приёма ввода: слот освободил переход исполнения, а раньше сказанная
+/// реплика не итог хода. Отчётом она не становится.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn an_aborted_turn_does_not_publish_an_earlier_text_block(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let _session = session(&f);
+    with_native(&f).await;
+    let schedule = make_schedule(&f, "Стендап").await;
+    let run = fire(&f, schedule).await;
+    let copy = copies(&pool, f.seed.conversation_id).await.remove(0).0;
+    finish_copy_turn(&pool, copy, "Полуготовый отчёт").await;
+    // Ход оборван: запись хода закрыта принудительно, исполнение упало.
+    sqlx::query("update runs set finished_at=clock_timestamp(),duration_ms=1,forced_close=true where conversation_id=$1")
+        .bind(copy)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("update executions set state='failed' where conversation_id=$1")
+        .bind(copy)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sweep(&f).await;
+    failed_run_and_card(&f, schedule, run, "copy_failed").await;
+    assert!(routine_pushes(&pool).await.is_empty());
+    let (_, detail) = run_state(&pool, run).await;
+    assert!(detail["report"].get("text").is_none(), "{detail}");
 }
 
 // ---------------------------------------------------------------------------
