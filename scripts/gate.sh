@@ -292,7 +292,7 @@ web_rerun() {
     local selection=$1 id kind f1 f2 _ status=0 project
     local -A pw_loc=()
     local stack_sel=""
-    [[ -f package-lock.json ]] || die 'нет web/package-lock.json'
+    [[ -f web/package-lock.json ]] || die 'нет web/package-lock.json'
     export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-${XDG_CACHE_HOME:-$HOME/.cache}/canterlot-playwright}"
     export TOKIO_WORKER_THREADS="${TOKIO_WORKER_THREADS:-4}" RAYON_NUM_THREADS="${RAYON_NUM_THREADS:-4}"
     export MOZ_TASKCONTROLLER_THREADCOUNT="${MOZ_TASKCONTROLLER_THREADCOUNT:-4}" GSETTINGS_BACKEND="${GSETTINGS_BACKEND:-memory}"
