@@ -2351,3 +2351,37 @@ async fn a_report_push_stranded_mid_send_is_not_resent_after_a_restart(pool: PgP
             .unwrap();
     assert_eq!(state, "dropped");
 }
+
+/// Строка с отметкой отправки, которой нет и трёх минут, ни при каком перезапуске не уходит
+/// в POST повторно: первая попытка могла дойти, а пауза повтора (60 с) короче грейса.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_fresh_sending_marker_keeps_the_push_out_of_the_send_path(pool: PgPool) {
+    use std::sync::atomic::Ordering;
+    crate::auth_pushes::enable(&pool).await;
+    let f = Fixture::new(pool.clone()).await;
+    let _session = session(&f);
+    with_native(&f).await;
+    let schedule = make_schedule(&f, "Стендап").await;
+    ready_card(&f, schedule, "Отчёт").await;
+    for age in [61, 120, 179] {
+        sqlx::query(
+            "update owner_pushes set state='pending',last_status='sending',attempts=1,
+               updated_at=clock_timestamp()-make_interval(secs=>$1),run_at=clock_timestamp()
+             where kind='routine_report'",
+        )
+        .bind(f64::from(age))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let (hits, url) = crate::schedule_failure_push::dropping_gotify().await;
+        let (_dir, sender) = crate::auth_pushes::sender(&url);
+        sender.deliver_due(&pool).await.unwrap();
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "resent at {age} s");
+        let state: String =
+            sqlx::query_scalar("select state from owner_pushes where kind='routine_report'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(state, "pending", "dropped too early at {age} s");
+    }
+}
