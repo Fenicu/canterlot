@@ -93,10 +93,12 @@ fn session_tools_listed_for_all_three_providers() {
         }
         // Два инструмента чтения настроек и три предложения их изменить.
         let settings_tools = 5;
+        // memory_search, memory_get, memory_write, memory_update, memory_delete.
+        let memory_tools = 5;
         let expected = if tool_set == ToolSet::ApproveAndLimits {
-            2 + 3 + SESSION_TOOLS.len() + 1 + settings_tools
+            2 + 3 + SESSION_TOOLS.len() + 1 + settings_tools + memory_tools
         } else {
-            1 + 3 + SESSION_TOOLS.len() + 1 + settings_tools
+            1 + 3 + SESSION_TOOLS.len() + 1 + settings_tools + memory_tools
         };
         assert_eq!(tools.len(), expected, "{provider}");
         for required in [
