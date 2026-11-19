@@ -1903,7 +1903,7 @@ pub async fn owner_update(
     validate_owner(update)?;
     let now = Utc::now();
     send::lock_queue(tx, target_id).await?;
-    access::session_in_tx(tx, owner_id, target_id)
+    access::session_any_in_tx(tx, owner_id, target_id)
         .await?
         .ok_or_else(|| ToolError::new(ToolErrorCode::SessionNotFound))?;
     check_text_preset_in_tx(tx, owner_id, update.text_preset.as_deref()).await?;
@@ -1990,7 +1990,7 @@ pub async fn owner_clear(
 ) -> Result<bool, ToolError> {
     let now = Utc::now();
     send::lock_queue(tx, target_id).await?;
-    access::session_in_tx(tx, owner_id, target_id)
+    access::session_any_in_tx(tx, owner_id, target_id)
         .await?
         .ok_or_else(|| ToolError::new(ToolErrorCode::SessionNotFound))?;
     let Some(mut rule) = rule_locked_in_tx(tx, target_id).await? else {
