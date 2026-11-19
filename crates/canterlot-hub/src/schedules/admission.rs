@@ -70,6 +70,8 @@ pub async fn admit(scheduler: &Scheduler, claimed: ClaimedRun) {
     // Точка управляемой остановки тестов: заявка есть, приёмка ещё не начата.
     super::fault::stall(claimed.schedule.id).await;
     let _guard = super::AdmittingGuard::insert(claimed.run.id);
+    // Точка управляемой остановки тестов: сторож взят, dispatch ещё не начат.
+    super::fault::stall_guarded(claimed.schedule.id).await;
     let run = claimed.run;
     let schedule = claimed.schedule;
     let result = admit_inner(scheduler, &schedule, &run, run.run_anyway, run.manual).await;

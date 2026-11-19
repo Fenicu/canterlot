@@ -79,6 +79,40 @@ pub(crate) async fn stall(schedule_id: Uuid) {
     }
 }
 
+/// Управляемая остановка уже под сторожем приёмки: хаб ведёт строку, но до dispatch не дошёл.
+#[cfg(feature = "testkit")]
+static GUARDED_STALLS: std::sync::Mutex<Vec<(Uuid, std::sync::Arc<tokio::sync::Notify>)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Взвести остановку под сторожем; приёмка ждёт `notify_one` на затворе.
+#[cfg(feature = "testkit")]
+pub fn arm_guarded_stall(schedule_id: Uuid) -> std::sync::Arc<tokio::sync::Notify> {
+    let gate = std::sync::Arc::new(tokio::sync::Notify::new());
+    GUARDED_STALLS
+        .lock()
+        .expect("guarded stalls")
+        .push((schedule_id, gate.clone()));
+    gate
+}
+
+#[cfg(feature = "testkit")]
+pub(crate) async fn stall_guarded(schedule_id: Uuid) {
+    let gate = {
+        let mut stalls = GUARDED_STALLS.lock().expect("guarded stalls");
+        stalls
+            .iter()
+            .position(|(id, _)| *id == schedule_id)
+            .map(|index| stalls.remove(index).1)
+    };
+    if let Some(gate) = gate {
+        gate.notified().await;
+    }
+}
+
+#[cfg(not(feature = "testkit"))]
+#[inline]
+pub(crate) async fn stall_guarded(_schedule_id: Uuid) {}
+
 #[cfg(not(feature = "testkit"))]
 #[inline]
 pub(crate) async fn stall(_schedule_id: Uuid) {}

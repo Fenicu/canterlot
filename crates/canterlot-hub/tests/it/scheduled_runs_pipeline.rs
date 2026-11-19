@@ -2548,12 +2548,15 @@ async fn scheduled_new_session_takes_the_machine_lock_before_the_provider_lock(p
     assert!(detail.is_object(), "{detail}");
 }
 
-/// Второй хаб: собственный реестр сессий, своя сессия воркера и свой планировщик
-/// на той же базе. Считает предпроверки, которые дошли до его воркера.
+/// Второй хаб: собственный реестр сессий, своя сессия воркера, свой диспетчер
+/// доставки и свой планировщик на той же базе. Считает предпроверки, которые
+/// дошли до его воркера.
 struct SecondHub {
     scheduler: canterlot_hub::scheduler::Scheduler,
     prechecks: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     _worker: tokio::task::JoinHandle<()>,
+    _dispatcher: tokio::task::JoinHandle<()>,
+    _stop: tokio::sync::watch::Sender<bool>,
 }
 
 fn second_hub(f: &Fixture) -> SecondHub {
@@ -2589,16 +2592,24 @@ fn second_hub(f: &Fixture) -> SecondHub {
         }
         drop(session);
     });
-    let scheduler = canterlot_hub::scheduler::Scheduler::new(
+    let (dispatcher, dispatch_rx) = canterlot_hub::dispatcher::Dispatcher::channel();
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let dispatch_loop = tokio::spawn(canterlot_hub::dispatcher::run(
         f.pool.clone(),
-        f.state.dispatcher.clone(),
+        registry.clone(),
+        dispatch_rx,
         Default::default(),
-    )
-    .with_limits(registry, Default::default());
+        stopped,
+    ));
+    let scheduler =
+        canterlot_hub::scheduler::Scheduler::new(f.pool.clone(), dispatcher, Default::default())
+            .with_limits(registry, Default::default());
     SecondHub {
         scheduler,
         prechecks,
         _worker: worker,
+        _dispatcher: dispatch_loop,
+        _stop: stop,
     }
 }
 
@@ -2788,4 +2799,85 @@ async fn routed_new_session_crash_before_commit_fails_over_to_hub_b(pool: PgPool
         "one input"
     );
     assert_eq!(hub_b.prechecks.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+/// 12: хаб A держит сторож приёмки и гибнет до dispatch. Пока сторож жив,
+/// хаб B строку не трогает; когда A потерян (задача оборвана, сторож снят),
+/// B берёт строку: ровно один разговор и один ввод, выдача через воркер B.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn hub_b_takes_over_an_admission_guarded_and_lost_by_hub_a(pool: PgPool) {
+    use canterlot_hub::schedules::{admission::admit, claim_due, fault, is_admitting};
+
+    let f = Fixture::new(pool.clone()).await;
+    let _session_a = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
+    let hub_b = second_hub(&f);
+    let id = routed_schedule(&f, &pool, None).await;
+    let schedule = Uuid::parse_str(&id).unwrap();
+    due(&pool, &id, Utc::now() - TimeDelta::seconds(30)).await;
+    let mut conn = pool.acquire().await.unwrap();
+    let claimed = claim_due(&mut conn, Utc::now(), 32).await.unwrap();
+    drop(conn);
+    let held = claimed.into_iter().next().expect("hub A claimed the run");
+    let rid = held.run.id;
+    // Приёмка A берёт сторож и встаёт на затворе, который никто не отпустит.
+    let _gate = fault::arm_guarded_stall(schedule);
+    let task = {
+        let scheduler = scheduler(&f);
+        tokio::spawn(async move { admit(&scheduler, held).await })
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while !is_admitting(&rid) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("hub A takes the admission guard");
+    sqlx::query("update schedule_runs set lease_at=now()-interval '2 hours',updated_at=now()-interval '2 hours' where id=$1")
+        .bind(rid)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Аренда истекла, но сторож жив: B строку не берёт (попытка владения прежняя).
+    let attempt_of = |pool: PgPool| async move {
+        sqlx::query_scalar::<_, Option<Uuid>>("select attempt_id from schedule_runs where id=$1")
+            .bind(rid)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    let attempt_before = attempt_of(pool.clone()).await;
+    hub_b.scheduler.tick(Utc::now()).await.unwrap();
+    assert_eq!(state(&pool, rid).await.0, "claimed", "guarded row is left");
+    assert_eq!(
+        attempt_of(pool.clone()).await,
+        attempt_before,
+        "hub B did not take over the guarded row"
+    );
+    assert_eq!(titled_conversations(&pool, f.seed.owner_id).await, 0);
+    // A потерян: задача оборвана вместе со сторожем.
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    assert!(!is_admitting(&rid), "the guard went away with hub A");
+    hub_b.scheduler.tick(Utc::now()).await.unwrap();
+    wait_state(&pool, rid, "started").await;
+    assert_eq!(
+        titled_conversations(&pool, f.seed.owner_id).await,
+        1,
+        "one conversation"
+    );
+    assert_eq!(conversations_of_runs(&pool, &id).await, 1);
+    assert_eq!(
+        inputs_with_text(&pool, "посмотреть коммиты").await,
+        1,
+        "one input"
+    );
+    let executions: i64 = sqlx::query_scalar(
+        "select count(*) from executions e join conversations c on c.id=e.conversation_id
+          where c.owner_id=$1 and c.workdir='/tmp/scheduled-failover'",
+    )
+    .bind(f.seed.owner_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(executions, 1, "one execution");
 }
