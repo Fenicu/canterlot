@@ -1993,3 +1993,66 @@ async fn migration_stores_working_time_of_closed_runs(pool: PgPool) -> TestResul
     assert_eq!(stored_working(&pool, &open).await, None);
     Ok(())
 }
+
+// Строка цены под ответом приходит вместе с историей, а конец хода, в том числе поздний
+// (запуск без ввода), обновляет её событием: клиент не ходит за ценой на каждый ход.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn history_carries_run_costs_and_finish_announces_them(pool: PgPool) -> TestResult {
+    let mut r = Run::new(&pool).await;
+    let i = r.input(&pool).await;
+    let ms = Utc::now().timestamp_millis();
+    r.send(vec![accepted(i.command_id, ms)]).await;
+    r.send(vec![Body::BlockStarted(BlockStarted {
+        block_id: Uuid::now_v7().to_string(),
+        kind: "text".into(),
+        agent: "main".into(),
+        model: "claude-opus-5-5".into(),
+        input_command_id: i.command_id.to_string(),
+        ..Default::default()
+    })])
+    .await;
+    let Body::RunFinished(mut fact) = finished(&r, i.command_id, ms + 1000) else {
+        unreachable!()
+    };
+    fact.usage = vec![
+        priced("claude-opus-5-5", 40, Some(620_000)),
+        priced("mystery-model", 3, None),
+    ];
+    r.send(vec![Body::RunFinished(fact.clone())]).await;
+    let mut conn = pool.acquire().await?;
+    let page = canterlot_hub::history::page(
+        &mut conn,
+        r.seed.owner_id,
+        r.seed.conversation_id,
+        canterlot_hub::history::HistoryCursor::Tail,
+        50,
+    )
+    .await?
+    .unwrap();
+    let page = serde_json::to_value(&page)?;
+    let run = &page["runs"][0];
+    assert_eq!(run["run_id"], i.command_id.to_string());
+    assert_eq!(run["usage"][0]["model"], "claude-opus-5-5");
+    assert_eq!(run["usage"][0]["cost_micro_usd"], 620_000);
+    assert_eq!(run["usage"][0]["cost_source"], "cli");
+    assert_eq!(run["usage"][1]["cost_micro_usd"], Value::Null);
+    let announced: Vec<Value> = sqlx::query_scalar(
+        "select payload from events where kind='run_cost_updated' order by scope_seq",
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(announced.len(), 1);
+    assert_eq!(announced[0]["run_id"], i.command_id.to_string());
+    let mut adopted = fact.clone();
+    adopted.adopted = true;
+    adopted.usage = vec![priced("claude-opus-5-5", 1, Some(50))];
+    r.send(vec![Body::RunFinished(adopted)]).await;
+    let announced: Vec<Value> = sqlx::query_scalar(
+        "select payload from events where kind='run_cost_updated' order by scope_seq",
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(announced.len(), 2, "a late finish announces the run again");
+    assert_eq!(announced[1]["usage"][0]["cost_micro_usd"], 620_050);
+    Ok(())
+}

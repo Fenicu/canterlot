@@ -285,6 +285,7 @@ pub const CLIENT_KINDS: &[&str] = &[
     "execution_state_changed",
     "phase_changed",
     "run_finished",
+    "run_cost_updated",
     "interrupt_state_changed",
     "block_started",
     "block_delta",

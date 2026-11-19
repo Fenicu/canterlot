@@ -22,6 +22,9 @@
       "$ref": "#/$defs/run_finished"
     },
     {
+      "$ref": "#/$defs/run_cost_updated"
+    },
+    {
       "$ref": "#/$defs/interrupt_state_changed"
     },
     {
@@ -1242,6 +1245,174 @@
           "required": [
             "input_id",
             "input_command_id"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "v",
+        "id",
+        "scope",
+        "scope_seq",
+        "scope_seq_from",
+        "committed_at",
+        "committed_at_from",
+        "conversation_id",
+        "execution_id",
+        "correlation_id",
+        "kind",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    "run_cost_updated": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "scope_seq": {
+          "$ref": "#/$defs/Seq"
+        },
+        "scope_seq_from": {
+          "$ref": "#/$defs/Seq"
+        },
+        "committed_at": {
+          "$ref": "#/$defs/Time"
+        },
+        "committed_at_from": {
+          "$ref": "#/$defs/Time"
+        },
+        "conversation_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "execution_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "correlation_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "kind": {
+          "const": "run_cost_updated"
+        },
+        "payload": {
+          "type": "object",
+          "properties": {
+            "run_id": {
+              "$ref": "#/$defs/Uuid"
+            },
+            "usage": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "model": {
+                    "type": "string"
+                  },
+                  "agent": {
+                    "type": "string"
+                  },
+                  "input_tokens": {
+                    "type": "integer"
+                  },
+                  "output_tokens": {
+                    "type": "integer"
+                  },
+                  "cache_read_tokens": {
+                    "type": "integer"
+                  },
+                  "cache_write_tokens": {
+                    "type": "integer"
+                  },
+                  "cost_micro_usd": {
+                    "oneOf": [
+                      {
+                        "type": "integer"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "cost_source": {
+                    "oneOf": [
+                      {
+                        "enum": [
+                          "cli",
+                          "prices"
+                        ]
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "model",
+                  "agent",
+                  "input_tokens",
+                  "output_tokens",
+                  "cache_read_tokens",
+                  "cache_write_tokens",
+                  "cost_micro_usd",
+                  "cost_source"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "limit": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "provider": {
+                      "type": "string"
+                    },
+                    "weekly_delta_permille": {
+                      "type": "integer"
+                    },
+                    "exact": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "provider",
+                    "weekly_delta_permille",
+                    "exact"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "run_id",
+            "usage",
+            "limit"
           ],
           "additionalProperties": false
         }
@@ -7996,6 +8167,9 @@
                 },
                 {
                   "$ref": "#/$defs/run_finished"
+                },
+                {
+                  "$ref": "#/$defs/run_cost_updated"
                 },
                 {
                   "$ref": "#/$defs/interrupt_state_changed"

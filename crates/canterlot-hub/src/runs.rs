@@ -222,6 +222,7 @@ pub async fn finish_in_tx(
     if changed == 0 {
         if fact.adopted {
             add_adopted(conn, command, fact, prices).await?;
+            announce_cost(conn, command, run).await?;
         }
         return Ok(());
     }
@@ -235,6 +236,37 @@ pub async fn finish_in_tx(
     if let Some(provider) = provider {
         refresh_overlap(conn, provider, started).await?;
     }
+    announce_cost(conn, command, run).await?;
+    Ok(())
+}
+
+/// Расход хода изменился: клиент обновляет строку цены под ответом без запроса.
+async fn announce_cost(
+    conn: &mut PgConnection,
+    command: Uuid,
+    run: &ExecutionRef,
+) -> Result<(), sqlx::Error> {
+    let Some(view) = crate::history::run_costs(conn, run.conversation_id, &[command])
+        .await?
+        .pop()
+    else {
+        return Ok(());
+    };
+    let payload = serde_json::to_value(&view).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
+    crate::events::append(
+        conn,
+        crate::events::NewEvent {
+            scope: crate::events::Scope::Conversation {
+                id: run.conversation_id,
+            },
+            kind: "run_cost_updated",
+            conversation_id: Some(run.conversation_id),
+            execution_id: Some(run.execution_id),
+            payload,
+            correlation_id: Uuid::now_v7(),
+        },
+    )
+    .await?;
     Ok(())
 }
 
