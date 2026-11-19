@@ -1080,6 +1080,8 @@ enum CostSource {
   COST_SOURCE_UNSPECIFIED = 0;
   COST_SOURCE_CLI = 1;
   COST_SOURCE_PRICES = 2;
+  // CLI назвал цену лишь части шагов: cost_micro_usd — известная часть, нижняя граница.
+  COST_SOURCE_CLI_PARTIAL = 3;
 }
 
 message SettingsOverride {

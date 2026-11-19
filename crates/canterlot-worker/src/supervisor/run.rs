@@ -2662,7 +2662,11 @@ impl Supervisor {
                             cache_write_tokens: u.cache_write_tokens,
                             cost_micro_usd: u.cost_micro_usd,
                             cost_source: if u.cost_micro_usd.is_some() {
-                                canterlot_proto::worker::v1::CostSource::Cli as i32
+                                if u.cost_partial {
+                                    canterlot_proto::worker::v1::CostSource::CliPartial as i32
+                                } else {
+                                    canterlot_proto::worker::v1::CostSource::Cli as i32
+                                }
                             } else {
                                 canterlot_proto::worker::v1::CostSource::Unspecified as i32
                             },

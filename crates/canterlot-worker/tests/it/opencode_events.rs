@@ -203,6 +203,7 @@ fn usage_keeps_the_recorded_token_split() {
             cache_read_tokens: 30,
             cache_write_tokens: 0,
             cost_micro_usd: Some(0),
+            cost_partial: false,
         }]
     );
     assert_eq!(context_tokens, 100);
@@ -1036,6 +1037,7 @@ fn child_tokens_are_counted_under_its_agent_and_never_touch_the_context() {
             cache_read_tokens: 60,
             cache_write_tokens: 0,
             cost_micro_usd: Some(0),
+            cost_partial: false,
         }
     );
     assert_eq!(line("orchestrator").input_tokens, 140, "two parent steps");
@@ -1919,4 +1921,21 @@ fn free_model_reports_zero_cost_not_unknown() {
 fn steps_without_cost_leave_the_cost_unknown() {
     let usage = run_steps(&[None]);
     assert_eq!(usage[0].cost_micro_usd, None);
+    assert!(!usage[0].cost_partial);
+}
+
+#[test]
+fn mixed_priced_and_unpriced_steps_report_a_known_lower_bound() {
+    let usage = run_steps(&[Some(0.012), None, Some(0.0305)]);
+    assert_eq!(usage[0].cost_micro_usd, Some(42_500));
+    assert!(usage[0].cost_partial, "the unpriced step makes the sum partial");
+}
+
+#[test]
+fn fully_priced_steps_are_not_partial() {
+    let usage = run_steps(&[Some(0.012), Some(0.0305)]);
+    assert!(!usage[0].cost_partial);
+    let free = run_steps(&[Some(0.0), None]);
+    assert_eq!(free[0].cost_micro_usd, Some(0));
+    assert!(free[0].cost_partial, "a free step next to an unpriced one is still partial");
 }

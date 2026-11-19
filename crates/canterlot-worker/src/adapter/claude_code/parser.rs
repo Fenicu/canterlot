@@ -1934,6 +1934,7 @@ impl Parser {
                 cache_read_tokens: get("cacheReadInputTokens"),
                 cache_write_tokens: get("cacheCreationInputTokens"),
                 cost_micro_usd: cost_micro(model),
+                cost_partial: false,
             };
             let prev = self.prev_usage.insert(name.clone(), seen.clone());
             let delta = |now: u64, was: u64| now.saturating_sub(was);
@@ -1945,6 +1946,7 @@ impl Parser {
                 cache_read_tokens: 0,
                 cache_write_tokens: 0,
                 cost_micro_usd: None,
+                cost_partial: false,
             });
             // Цена накопительная: за ход берём прирост к последнему верному замеру модели. Нет
             // замера — цена хода неизвестна, а база остаётся; расход за пропуск целиком уходит в
@@ -1973,6 +1975,7 @@ impl Parser {
                 cache_read_tokens: delta(seen.cache_read_tokens, was.cache_read_tokens),
                 cache_write_tokens: delta(seen.cache_write_tokens, was.cache_write_tokens),
                 cost_micro_usd,
+                cost_partial: false,
             });
         }
         usage
