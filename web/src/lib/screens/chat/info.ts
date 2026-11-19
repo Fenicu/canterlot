@@ -169,7 +169,7 @@ export function summarizeRun(
   for (const u of usageList) {
     if (!u.model || (u.input_tokens ?? 0) + (u.output_tokens ?? 0) + (u.cache_read_tokens ?? 0) + (u.cache_write_tokens ?? 0) === 0) continue;
     const source = u.cost_source === "cli" ? "по данным CLI" : u.cost_source === "prices" ? "по таблице цен" : null;
-    costs.push({ model: modelLabel(u.model), money: costMoney(u.cost_micro_usd), source });
+    costs.push({ model: modelLabel(u.model), money: costMoney(u.cost_micro_usd, (u as { cost_complete?: boolean }).cost_complete !== false), source });
   }
 
   return {
