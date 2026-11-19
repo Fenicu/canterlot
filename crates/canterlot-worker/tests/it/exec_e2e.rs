@@ -1542,7 +1542,24 @@ async fn killed_supervisor_with_nothing_left_fails_and_the_session_resumes(pool:
     fixture.wait_state("failed").await;
     assert_eq!(fixture.outcome().await.as_deref(), Some("supervisor_died"));
     assert!(fixture.paused("fatal_error").await);
-    assert_eq!(fixture.event_count("execution_fact_rejected").await, 0);
+    // Сопровождение успевает записать `stopping` до смерти, а воркер сообщает `owner_lost` по
+    // другому каналу: поздний `stopping` после `owner_lost` хаб штатно отклоняет как поздний факт
+    // (внутреннее событие, клиенту оно скрыто). Другой отказ — настоящая ошибка порядка.
+    let rejected: Vec<String> = sqlx::query_scalar(
+        "select payload::text from events where execution_id = $1 and kind = 'execution_fact_rejected'",
+    )
+    .bind(fixture.execution)
+    .fetch_all(&fixture.pool)
+    .await
+    .unwrap();
+    for payload in rejected {
+        let payload: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(
+            (payload["from"].as_str(), payload["to"].as_str()),
+            (Some("owner_lost"), Some("stopping")),
+            "only the late stopping of the dead supervisor may be rejected: {payload}"
+        );
+    }
     // Финал записей догоняет смену состояния под нагрузкой: ждём условие, а не миг.
     until("nothing keeps streaming after the exit", async || {
         sqlx::query_scalar::<_, i64>(
