@@ -119,6 +119,7 @@ mod send_now;
 mod service_notes;
 mod session_accept;
 mod session_api;
+mod session_domains;
 mod session_send;
 mod session_spawn;
 mod session_subs;

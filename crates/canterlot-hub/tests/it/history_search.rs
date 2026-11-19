@@ -937,7 +937,10 @@ async fn search_queries_use_the_gin_indexes(pool: PgPool) {
                     .bind(shape.until)
                     .bind(None::<&str>)
                     .bind(shape.blocks)
-                    .bind(shape.inputs);
+                    .bind(shape.inputs)
+                    // Область памяти агента включена: форма запроса вызова инструмента.
+                    .bind(true)
+                    .bind(Some("work"));
             query = if page {
                 query
                     .bind(None::<DateTime<Utc>>)

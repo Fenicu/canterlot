@@ -632,12 +632,15 @@ pub async fn list(conn: &mut PgConnection, q: &ListQuery) -> Result<ListPage, sq
         counts: counts(conn, q.owner_id).await?,
     })
 }
-/// Список для инструмента агента: `family` сужает его до семьи делегированной сессии.
+/// Список для инструмента агента: `family` сужает его до семьи делегированной сессии,
+/// `domain` оставляет разговоры только домена вызывающего.
 pub struct AgentListQuery {
     pub owner_id: Uuid,
     pub family: Option<Vec<Uuid>>,
     pub state: Option<activity::ActivityState>,
     pub include_archived: bool,
+    /// Домен памяти вызывающего; без домена видны одни разговоры без домена.
+    pub domain: Option<String>,
     pub limit: i64,
 }
 pub async fn agent_list(
@@ -653,6 +656,8 @@ pub async fn agent_list(
             .push_bind(family.clone())
             .push(")");
     }
+    sql.push(" and c.memory_domain is not distinct from ")
+        .push_bind(q.domain.clone());
     if !q.include_archived {
         sql.push(" and c.archived_at is null");
     }

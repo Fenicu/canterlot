@@ -23546,6 +23546,7 @@
           "model_unknown",
           "effort_not_allowed",
           "workdir_not_allowed",
+          "domain_mismatch",
           "profile_unknown",
           "conversation_closed",
           "queue_full",

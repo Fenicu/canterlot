@@ -627,6 +627,7 @@ async fn side_hidden_from_agent_sessions_and_machine_sessions(pool: PgPool) {
             family: None,
             state: None,
             include_archived: true,
+            domain: None,
             limit: 50,
         },
     )
@@ -678,6 +679,7 @@ async fn side_hidden_from_search_bookmarks_presets_and_plan(pool: PgPool) {
             owner_id: f.owner,
             text: "боковойуникальный".into(),
             family: None,
+            domain: None,
             conversation_id: None,
             since: None,
             until: None,
