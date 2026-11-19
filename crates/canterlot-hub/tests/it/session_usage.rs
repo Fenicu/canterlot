@@ -58,6 +58,17 @@ impl Fixture {
     }
 
     async fn run(&self, conversation: Uuid, model: &str, tokens: (i64, i64, i64, i64)) {
+        self.run_costed(conversation, model, tokens, None).await;
+    }
+
+    /// Ход с ценой в микродолларах; `None` — цена хода неизвестна.
+    async fn run_costed(
+        &self,
+        conversation: Uuid,
+        model: &str,
+        tokens: (i64, i64, i64, i64),
+        cost: Option<i64>,
+    ) {
         sqlx::query(
             "insert into executions(id,conversation_id,generation,state,outcome)
              values($1,$2,1,'stopped','user_stop')
@@ -98,8 +109,8 @@ impl Fixture {
         .await
         .unwrap();
         sqlx::query(
-            "insert into run_model_usage(input_command_id,model,agent,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens)
-             values($1,$2,'main',$3,$4,$5,$6)",
+            "insert into run_model_usage(input_command_id,model,agent,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,cost_micro_usd,cost_source)
+             values($1,$2,'main',$3,$4,$5,$6,$7,case when $7::bigint is null then null else 'cli' end)",
         )
         .bind(command)
         .bind(model)
@@ -107,6 +118,7 @@ impl Fixture {
         .bind(tokens.1)
         .bind(tokens.2)
         .bind(tokens.3)
+        .bind(cost)
         .execute(&self.pool)
         .await
         .unwrap();
@@ -336,4 +348,57 @@ async fn deleting_the_parent_removes_its_rollup(pool: PgPool) {
     .await
     .unwrap();
     assert_eq!(left, 0);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn cost_sums_known_turns_and_counts_unknown_ones(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let child = f.child(f.conversation).await;
+    f.run_costed(f.conversation, "opus", (100, 10, 0, 0), Some(620_000))
+        .await;
+    f.run_costed(f.conversation, "haiku", (50, 5, 0, 0), Some(10_000))
+        .await;
+    f.run_costed(f.conversation, "mystery", (50, 5, 0, 0), None)
+        .await;
+    f.run_costed(f.conversation, "opus", (10, 1, 0, 0), Some(0))
+        .await;
+    f.run_costed(child, "mystery", (1, 1, 0, 0), None).await;
+    f.run_costed(child, "opus", (1, 1, 0, 0), Some(5)).await;
+
+    let usage = f.usage(f.conversation).await;
+    assert_eq!(usage["session"]["cost_micro_usd"], 630_000);
+    assert_eq!(usage["session"]["unknown_cost_turns"], 1);
+    assert_eq!(model(&usage, "session", "opus")["cost_micro_usd"], 620_000);
+    assert_eq!(model(&usage, "session", "mystery")["cost_micro_usd"], 0);
+    assert_eq!(usage["delegates"]["cost_micro_usd"], 5);
+    assert_eq!(usage["delegates"]["unknown_cost_turns"], 1);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn deletion_fold_keeps_cost_and_unknown_turns(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let child = f.child(f.conversation).await;
+    let grandchild = f.child(child).await;
+    f.run_costed(child, "opus", (100, 10, 0, 0), Some(300_000))
+        .await;
+    f.run_costed(child, "mystery", (1, 1, 0, 0), None).await;
+    f.run_costed(grandchild, "opus", (5, 5, 0, 0), Some(7))
+        .await;
+    let before = f.usage(f.conversation).await;
+
+    deletion::delete_retained(&f.pool, None, f.owner, grandchild, Uuid::now_v7())
+        .await
+        .unwrap();
+    deletion::delete_retained(&f.pool, None, f.owner, child, Uuid::now_v7())
+        .await
+        .unwrap();
+
+    let after = f.usage(f.conversation).await;
+    assert_eq!(after["delegates"]["cost_micro_usd"], 300_007);
+    assert_eq!(after["delegates"]["unknown_cost_turns"], 1);
+    assert_eq!(after["delegates"]["turns"], before["delegates"]["turns"]);
+    assert_eq!(
+        model(&after, "delegates", "opus")["cost_micro_usd"],
+        300_007
+    );
 }
