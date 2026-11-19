@@ -286,8 +286,9 @@ run_gate_step() {
 # заголовок теги», соединённой пробелами, поэтому точный заголовок вроде «A › B» не
 # совпадёт. Выбираем тесты по расположению из JSON-отчёта (file:line) — на том же
 # коммите номера строк стабильны — и группируем все локации одного проекта в один
-# вызов. После прогона missing_rerun_ids проверяет, что каждая идентичность реально
-# выполнилась и прошла: пропущенная или пропущенная как skipped — провал.
+# вызов. У каждого вызова свой отчёт <база>-N.json, его читают pw_failures и
+# missing_rerun_ids. После прогона missing_rerun_ids проверяет, что каждая идентичность
+# реально выполнилась и прошла: пропущенная или пропущенная как skipped — провал.
 web_rerun() {
     local selection=$1 id kind f1 f2 _ status=0 project
     local -A pw_loc=()
@@ -307,10 +308,13 @@ web_rerun() {
         esac
     done <<<"$selection"
     local -a locations=()
+    local slot=0
     cd web
     for project in "${!pw_loc[@]}"; do
+        slot=$((slot + 1))
         read -r -a locations <<<"${pw_loc[$project]}"
-        npx --no-install playwright test "${locations[@]}" "--project=$project" || status=1
+        CANTERLOT_PW_JSON_REPORT="$CANTERLOT_PW_JSON_REPORT-$slot" \
+            npx --no-install playwright test "${locations[@]}" "--project=$project" || status=1
     done
     if [[ -n "$stack_sel" ]]; then
         read -r -a locations <<<"$stack_sel"

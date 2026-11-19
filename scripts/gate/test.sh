@@ -332,6 +332,28 @@ grep -qF $'rerun_done\tstack|e2e/stack/y.spec.ts:7|stack spec › stack title' \
     || fail 'неподтверждённая идентичность не попала в rerun_done'
 unset FAKE_WEB_MISSING
 
+# Настоящий web_rerun: упавшие тесты в двух проектах Playwright. Вызовы по проектам
+# не должны писать отчёт в один файл, иначе второй затирает первый (гейт 1.42.0).
+g8="$tmp/g8"
+new_gate_repo "$g8"
+mkdir -p "$g8/web" "$tmp/fake-bin"
+: >"$g8/web/package-lock.json"
+cp scripts/gate/fake-check-web.sh "$g8/scripts/check-web.sh"
+cp scripts/gate/fake-npx "$tmp/fake-bin/npx"
+chmod 0755 "$tmp/fake-bin/npx"
+git -C "$g8" add web/package-lock.json scripts/check-web.sh
+git -C "$g8" commit -qm web
+web_real_env=(
+    env CANTERLOT_NO_LEASE=1 CANTERLOT_GATE_DEPLOY_NEEDED=0 PORT=1 PATH="$tmp/fake-bin:$PATH"
+    CANTERLOT_GATE_STEP_NPM="$fake_npm" CANTERLOT_GATE_STEP_CHECK="$fake_check_pass"
+)
+: >"$GATE_FAKE_CALLS"
+run 1 "${web_real_env[@]}" bash "$g8/scripts/gate.sh" --no-attest
+run 0 "${web_real_env[@]}" bash "$g8/scripts/gate.sh" --rerun-failed --no-attest
+[[ $(grep -c '^npx ' "$GATE_FAKE_CALLS") == 2 ]] || fail 'web_rerun не вызвал Playwright по разу на проект'
+grep -qF 'npx phone ui/x.spec.ts:42' "$GATE_FAKE_CALLS" || fail 'web_rerun не перезапустил тест телефона'
+grep -qF 'npx desktop ui/w.spec.ts:5' "$GATE_FAKE_CALLS" || fail 'web_rerun не перезапустил тест десктопа'
+
 # Битый индекс: git status падает, и проверка чистоты обязана провалиться, а не
 # пропустить аттестацию из-за пустого вывода.
 printf 'garbage' >"$scratch/.git/index"
@@ -347,7 +369,7 @@ fi
 
 if command -v shellcheck >/dev/null 2>&1; then
     shellcheck scripts/gate.sh scripts/gate-coverage.sh scripts/gate/test-pw-selection.sh scripts/gate-remote.sh \
-        scripts/gate/in-container.sh scripts/gate/test.sh \
+        scripts/gate/in-container.sh scripts/gate/test.sh scripts/gate/fake-npx scripts/gate/fake-check-web.sh \
         || fail "shellcheck"
 fi
 
