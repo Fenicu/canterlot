@@ -415,7 +415,7 @@ skip_eligibility() {
     local comp now base
     for comp in hub web worker; do
         now="$(deployed_sha "${comp}")"
-        eval "base=\${BASE_$(printf '%s' "${comp}" | tr 'a-z' 'A-Z')}"
+        case "${comp}" in hub) base="${BASE_HUB}" ;; web) base="${BASE_WEB}" ;; *) base="${BASE_WORKER}" ;; esac
         [ "${now}" = "${base}" ] || fast_refuse "the ${comp} link changed during the preflight (was ${base}, now ${now})"
     done
     if ! BASELINE_WHY="$(baseline_verify "${BASE_HUB}" "${BASE_WEB}" "${BASE_WORKER}" 2>&1)"; then
