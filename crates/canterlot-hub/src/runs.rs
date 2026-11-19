@@ -359,8 +359,8 @@ fn usage_cost(
 ) -> (Option<i64>, Option<&'static str>, bool) {
     let known = |micro: u64| i64::try_from(micro).unwrap_or(i64::MAX);
     if let Some(micro) = usage.cost_micro_usd {
-        let partial = usage.cost_source
-            == canterlot_proto::worker::v1::CostSource::CliPartial as i32;
+        let partial =
+            usage.cost_source == canterlot_proto::worker::v1::CostSource::CliPartial as i32;
         return (Some(known(micro)), Some("cli"), !partial);
     }
     let tokens = crate::pricing::Tokens {

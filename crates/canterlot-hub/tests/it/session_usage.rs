@@ -438,7 +438,10 @@ async fn a_partly_priced_turn_keeps_its_known_sum_and_counts_as_incomplete(pool:
     let usage = f.usage(f.conversation).await;
     assert_eq!(usage["session"]["cost_micro_usd"], 1_030_000);
     assert_eq!(usage["session"]["unknown_cost_turns"], 1);
-    assert_eq!(model(&usage, "session", "opencode")["cost_micro_usd"], 410_000);
+    assert_eq!(
+        model(&usage, "session", "opencode")["cost_micro_usd"],
+        410_000
+    );
     assert_eq!(usage["delegates"]["cost_micro_usd"], 9);
     assert_eq!(usage["delegates"]["unknown_cost_turns"], 1);
 }

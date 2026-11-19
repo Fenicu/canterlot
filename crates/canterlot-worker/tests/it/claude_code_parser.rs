@@ -2454,10 +2454,7 @@ fn missing_cost_usd_stays_unknown_not_zero() {
 
 /// Цена модели за ход по последовательности накопительных замеров `costUSD`:
 /// `None` — замера в кадре нет.
-fn costs_over_turns(
-    parser: &mut Parser,
-    samples: &[Option<f64>],
-) -> Vec<Option<u64>> {
+fn costs_over_turns(parser: &mut Parser, samples: &[Option<f64>]) -> Vec<Option<u64>> {
     samples
         .iter()
         .map(|sample| {
@@ -2467,9 +2464,8 @@ fn costs_over_turns(
             if let Some(usd) = sample {
                 model["costUSD"] = json!(usd);
             }
-            let usage = turn_usage_of(
-                &parser.feed(&cost_turn(command, json!({"claude-opus-5-5": model}))),
-            );
+            let usage =
+                turn_usage_of(&parser.feed(&cost_turn(command, json!({"claude-opus-5-5": model}))));
             usage[0].cost_micro_usd
         })
         .collect()

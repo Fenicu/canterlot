@@ -144,11 +144,10 @@ async fn unpriced_adopted_segment_keeps_the_known_cost_as_incomplete(pool: PgPoo
     adopted.adopted = true;
     adopted.usage = vec![priced("claude-opus-5-5", 1, None)];
     r.send(vec![Body::RunFinished(adopted)]).await;
-    let row: (Option<i64>, Option<String>, bool) = sqlx::query_as(
-        "select cost_micro_usd,cost_source,cost_complete from run_model_usage",
-    )
-    .fetch_one(&pool)
-    .await?;
+    let row: (Option<i64>, Option<String>, bool) =
+        sqlx::query_as("select cost_micro_usd,cost_source,cost_complete from run_model_usage")
+            .fetch_one(&pool)
+            .await?;
     assert_eq!(row, (Some(100), Some("cli".into()), false));
     // Дальнейшая полная часть неполноту не снимает.
     let mut more = first.clone();
@@ -185,7 +184,12 @@ async fn partial_cli_cost_is_stored_as_known_and_incomplete(pool: PgPool) -> Tes
         rows,
         vec![
             ("opencode-full".into(), Some(7), Some("cli".into()), true),
-            ("opencode-model".into(), Some(410_000), Some("cli".into()), false),
+            (
+                "opencode-model".into(),
+                Some(410_000),
+                Some("cli".into()),
+                false
+            ),
         ]
     );
     Ok(())

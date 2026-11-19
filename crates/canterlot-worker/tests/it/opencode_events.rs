@@ -1928,7 +1928,10 @@ fn steps_without_cost_leave_the_cost_unknown() {
 fn mixed_priced_and_unpriced_steps_report_a_known_lower_bound() {
     let usage = run_steps(&[Some(0.012), None, Some(0.0305)]);
     assert_eq!(usage[0].cost_micro_usd, Some(42_500));
-    assert!(usage[0].cost_partial, "the unpriced step makes the sum partial");
+    assert!(
+        usage[0].cost_partial,
+        "the unpriced step makes the sum partial"
+    );
 }
 
 #[test]
@@ -1937,5 +1940,8 @@ fn fully_priced_steps_are_not_partial() {
     assert!(!usage[0].cost_partial);
     let free = run_steps(&[Some(0.0), None]);
     assert_eq!(free[0].cost_micro_usd, Some(0));
-    assert!(free[0].cost_partial, "a free step next to an unpriced one is still partial");
+    assert!(
+        free[0].cost_partial,
+        "a free step next to an unpriced one is still partial"
+    );
 }

@@ -444,7 +444,10 @@ mod tests {
         let overrides: BTreeMap<String, PriceConfig> =
             toml::from_str("[\"other-provider/gpt-5\"]\ninput = 1.0\noutput = 2.0\n").unwrap();
         let book = PriceBook::with_overrides(&overrides);
-        assert!(book.cost_micro_usd("other-provider/gpt-5", MILLION).is_some());
+        assert!(
+            book.cost_micro_usd("other-provider/gpt-5", MILLION)
+                .is_some()
+        );
         assert_ne!(
             book.price_of("other-provider/gpt-5"),
             PriceBook::default().price_of("gpt-5")
