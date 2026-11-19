@@ -39,6 +39,7 @@ fn replace_nul(report: &mut MachineReport) {
         &mut report.worktree_root,
     ];
     texts.extend(&mut report.allowed_roots);
+    texts.extend(&mut report.memory_work_roots);
     for harness in &mut report.harnesses {
         texts.extend([
             &mut harness.harness,
@@ -105,8 +106,8 @@ pub async fn apply_report_with_capabilities(
          from conversations c left join machine_harnesses h on h.machine_id=c.machine_id and h.harness=c.harness
          where c.machine_id=$1 and c.owner_id=$2 order by c.id",
     ).bind(machine_id).bind(owner_id).fetch_all(&mut *conn).await?;
-    sqlx::query("update machines set capabilities=$9,worker_version=$2,allowed_roots=$3,containment=$4,os=$5,reported_at=clock_timestamp(),limits_ok=$6,home_dir=nullif($7,''),worktree_root=nullif($8,'') where id=$1")
- .bind(machine_id).bind(&report.worker_version).bind(json!(report.allowed_roots)).bind(&report.containment).bind(&report.os).bind(report.max_attachment_bytes==MAX_ATTACHMENT_BYTES && report.max_attachments_per_input as usize==MAX_ATTACHMENTS_PER_INPUT).bind(&report.home_dir).bind(&report.worktree_root).bind(&capabilities).execute(&mut *conn).await?;
+    sqlx::query("update machines set capabilities=$9,worker_version=$2,allowed_roots=$3,containment=$4,os=$5,reported_at=clock_timestamp(),limits_ok=$6,home_dir=nullif($7,''),worktree_root=nullif($8,''),memory_work_roots=case when 'memory_scope_v1'=any($9) then $10 end where id=$1")
+ .bind(machine_id).bind(&report.worker_version).bind(json!(report.allowed_roots)).bind(&report.containment).bind(&report.os).bind(report.max_attachment_bytes==MAX_ATTACHMENT_BYTES && report.max_attachments_per_input as usize==MAX_ATTACHMENTS_PER_INPUT).bind(&report.home_dir).bind(&report.worktree_root).bind(&capabilities).bind(json!(report.memory_work_roots)).execute(&mut *conn).await?;
     let offered = crate::limits::offered_providers(&mut *conn, owner_id).await?;
     let harness_state = crate::machine_updates::previous_for_report(&mut *conn, machine_id).await?;
     sqlx::query("delete from machine_harnesses where machine_id=$1")

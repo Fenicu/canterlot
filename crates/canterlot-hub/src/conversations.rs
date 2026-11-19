@@ -90,6 +90,9 @@ pub enum CreateError {
     WorkdirNotAllowed,
     #[error("group not found")]
     GroupNotFound,
+    /// Каталог делегата из другого домена памяти, чем у родителя.
+    #[error("domain mismatch")]
+    DomainMismatch,
     #[error("invalid request")]
     Invalid(&'static str),
     #[error("idempotency conflict")]
@@ -1455,6 +1458,17 @@ pub(crate) async fn create_in_tx(
     {
         return Err(CreateError::Invalid("attributes"));
     }
+    // Область памяти ставится той же вставкой, что и строка. Рабочая копия классифицируется
+    // по исходному каталогу (`req.workdir`), а не по пути копии.
+    let (memory_domain, memory_project) = match req.parent {
+        Some(parent) => crate::memory::child_scope(conn, parent.id, &req.workdir, req.machine_id)
+            .await
+            .map_err(|e| match e {
+                crate::memory::ScopeError::DomainMismatch => CreateError::DomainMismatch,
+                crate::memory::ScopeError::Db(e) => CreateError::Db(e),
+            })?,
+        None => crate::memory::root_scope(conn, req.machine_id, &req.workdir).await?,
+    };
     // Строка провайдера `for share` раньше очереди: правило резерва видит новый разговор или наоборот.
     let mut holds = vec![HoldReason::NoLiveExecution];
     if let Some(provider) = canterlot_proto::harness::provider_of(&req.harness) {
@@ -1483,9 +1497,9 @@ pub(crate) async fn create_in_tx(
     } else {
         req.crunch.resume_text.as_deref()
     };
-    sqlx::query("insert into conversations(id,owner_id,machine_id,harness,workdir,title,title_source,color,model,effort,permission_mode,instruction_profile,instruction_preset_revision,crunch_enabled,crunch_resume_text,parent_conversation_id,spawn_depth,worktree,continued_from_at) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)")
+    sqlx::query("insert into conversations(id,owner_id,machine_id,harness,workdir,title,title_source,color,model,effort,permission_mode,instruction_profile,instruction_preset_revision,crunch_enabled,crunch_resume_text,parent_conversation_id,spawn_depth,worktree,continued_from_at,memory_domain,memory_project) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)")
             .bind(id).bind(req.owner_id).bind(req.machine_id).bind(&req.harness).bind(workdir).bind(if user{title}else{"Новая сессия"}).bind(if user{"user"}else{"auto"}).bind(&req.color).bind(&req.model).bind(&req.effort).bind(permission).bind(reference.as_str()).bind(revision).bind(req.crunch.enabled).bind(resume)
-            .bind(req.parent.map(|parent| parent.id)).bind(req.parent.map_or(0, |parent| parent.spawn_depth)).bind(isolated.as_ref().map(|(_, row)| row)).bind(continued_from_at).execute(&mut *conn).await?;
+            .bind(req.parent.map(|parent| parent.id)).bind(req.parent.map_or(0, |parent| parent.spawn_depth)).bind(isolated.as_ref().map(|(_, row)| row)).bind(continued_from_at).bind(memory_domain.map(crate::memory::MemoryDomain::as_str)).bind(memory_project).execute(&mut *conn).await?;
     // Путь рабочей копии одноразовый: на экране новой сессии ему делать нечего.
     if isolated.is_none() {
         remember_workdir(&mut *conn, req.owner_id, req.machine_id, &req.workdir).await?;

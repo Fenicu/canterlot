@@ -101,6 +101,7 @@ pub enum ToolErrorCode {
     ModelUnknown,
     EffortNotAllowed,
     WorkdirNotAllowed,
+    DomainMismatch,
     PermissionModeTooWide,
     ProfileUnknown,
     MachineUnavailable,
@@ -129,7 +130,7 @@ pub enum ToolErrorCode {
 }
 
 impl ToolErrorCode {
-    pub const ALL: [Self; 35] = [
+    pub const ALL: [Self; 36] = [
         Self::UnknownTool,
         Self::SessionNotFound,
         Self::ReadOnlySession,
@@ -140,6 +141,7 @@ impl ToolErrorCode {
         Self::ModelUnknown,
         Self::EffortNotAllowed,
         Self::WorkdirNotAllowed,
+        Self::DomainMismatch,
         Self::PermissionModeTooWide,
         Self::ProfileUnknown,
         Self::MachineUnavailable,
@@ -179,6 +181,7 @@ impl ToolErrorCode {
             Self::ModelUnknown => "model_unknown",
             Self::EffortNotAllowed => "effort_not_allowed",
             Self::WorkdirNotAllowed => "workdir_not_allowed",
+            Self::DomainMismatch => "domain_mismatch",
             Self::PermissionModeTooWide => "permission_mode_too_wide",
             Self::ProfileUnknown => "profile_unknown",
             Self::MachineUnavailable => "machine_unavailable",
@@ -219,6 +222,7 @@ impl ToolErrorCode {
             Self::ModelUnknown => "Unknown model",
             Self::EffortNotAllowed => "This effort is not available for the model",
             Self::WorkdirNotAllowed => "This working directory is not allowed",
+            Self::DomainMismatch => "The working directory belongs to another memory domain",
             Self::PermissionModeTooWide => "The mode is wider than the parent session's",
             Self::ProfileUnknown => "Unknown instruction preset",
             Self::MachineUnavailable => "The machine is not available",
@@ -271,6 +275,9 @@ impl ToolErrorCode {
             Self::EffortNotAllowed => "Lower effort, or pass no effort for the model default.",
             Self::WorkdirNotAllowed => {
                 "Pass a workdir under the allowed roots, or omit it to use this session's."
+            }
+            Self::DomainMismatch => {
+                "Omit workdir, or pass one inside this session's own memory domain."
             }
             Self::PermissionModeTooWide => {
                 "Pass a mode no wider than this session's, or ask the owner to approve."

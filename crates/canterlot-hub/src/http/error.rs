@@ -653,6 +653,8 @@ impl From<crate::conversations::CreateError> for ApiError {
             E::ProfileUnknown => ErrorCode::ProfileUnknown,
             E::WorkdirNotAllowed => ErrorCode::WorkdirNotAllowed,
             E::ResumeHarnessUnsupported => ErrorCode::ResumeHarnessUnsupported,
+            // Делегата с родителем создаёт только спавн; у владельца родителя нет.
+            E::DomainMismatch => return invalid_field("workdir"),
             E::GroupNotFound => ErrorCode::GroupNotFound,
             E::Invalid(field) => return invalid_field(field),
             E::IdempotencyConflict => ErrorCode::IdempotencyConflict,

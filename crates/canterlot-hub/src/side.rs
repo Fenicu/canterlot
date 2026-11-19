@@ -233,9 +233,11 @@ pub(crate) async fn insert_copy_in_tx(
         "insert into conversations
            (id,owner_id,machine_id,harness,workdir,title,title_source,model,effort,
             permission_mode,instruction_profile,instruction_preset_revision,
-            crunch_enabled,parent_conversation_id,spawn_depth,side_of,side_kind)
-         values($1,$2,$3,$4,$5,$6,'auto',$7,$8,'read_only','clean',null,
-                false,null,0,$9,$10)",
+            crunch_enabled,parent_conversation_id,spawn_depth,side_of,side_kind,
+            memory_domain,memory_project)
+         select $1,$2,$3,$4,$5,$6,'auto',$7,$8,'read_only','clean',null,
+                false,null,0,$9,$10,p.memory_domain,p.memory_project
+           from conversations p where p.id=$9",
     )
     .bind(id)
     .bind(owner_id)

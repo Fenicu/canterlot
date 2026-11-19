@@ -47,6 +47,7 @@ pub mod machine_updates;
 pub mod machine_watch;
 pub mod machines;
 pub mod media;
+pub mod memory;
 pub mod message_snippets;
 pub mod model;
 pub mod model_resolution;

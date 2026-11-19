@@ -382,6 +382,7 @@ fn create_error(error: CreateError) -> ToolError {
         CreateError::WorkdirNotAllowed | CreateError::ResumeHarnessUnsupported => {
             ToolErrorCode::WorkdirNotAllowed
         }
+        CreateError::DomainMismatch => ToolErrorCode::DomainMismatch,
         CreateError::PermissionModeUnknown
         | CreateError::GroupNotFound
         | CreateError::Invalid(_)
