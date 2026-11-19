@@ -137,6 +137,15 @@ worker_locked() {
 # $3 путь current. Печатает целевую ссылку после flip.
 # shellcheck disable=SC2016,SC2034 # удалённый скрипт раскрывает свои позиционные аргументы; константа используется в cutover/rollback-db
 HUB_FLIP_SCRIPT='cd "$1" && test -x "releases/$2/bin/canterlot-hub" && test -f "releases/$2/RELEASE" && test -f "releases/$2/SHA256SUMS" && ln -s "releases/$2" current.new && mv -T current.new current && readlink "$3"'
+# Те же flip вперёд, но только из одобренного состояния: внутри lock ссылка обязана вести на
+# ожидаемый прежний релиз (последний аргумент), иначе ничего не меняется. Ручной частичный выкат
+# между проверкой и flip не затирается молча.
+# shellcheck disable=SC2016,SC2034 # удалённый скрипт раскрывает свои позиционные аргументы
+HUB_FLIP_FWD_SCRIPT='test "$(readlink "$3")" = "releases/$4" && '"${HUB_FLIP_SCRIPT}"
+# shellcheck disable=SC2016,SC2034 # удалённый скрипт; $1 корень, $2 новый релиз, $3 ожидаемый прежний
+WORKER_FLIP_FWD_SCRIPT='cd "$1" && test "$(readlink current)" = "releases/$3" && ln -s "releases/$2" current.new && mv -T current.new current'
+# shellcheck disable=SC2016,SC2034 # удалённый скрипт; $1 корень, $2 новый, $3 путь build, $4 ожидаемый прежний
+WEB_FLIP_FWD_SCRIPT='cd "$1" && test "$(readlink build)" = "releases/$4" && ln -s "releases/$2" build.new && mv -T build.new build && readlink "$3"'
 # Печатаемый ручной текст ssh-команды: host + одна цитированная удалённая команда.
 ssh_cmd_text() { printf 'ssh %s %s' "$1" "$(shq "$2")"; }
 
@@ -303,12 +312,19 @@ _plan_file_hash() {
 # Канонический текст плана выката, общий у dry-run, репетиции и боевого прогона:
 # зависит только от цели, развёрнутой базы, содержимого dist, конфигурации выката
 # и текста самого toolkit. $1 цель, $2 каталог dist/<цель>, $3..$5 развёрнутые
-# hub web worker.
+# hub web worker; $6 skip-ct-backup — план без vzdump (другой хэш: токен привязан к флагу); $7 — полный
+# хэш HEAD проверяемого чекаута (только в режимах без vzdump).
 plan_text() {
-    local sha="$1" dist_dir="$2" b_hub="$3" b_web="$4" b_worker="$5" f toolkit
-    toolkit="$(for f in cutover.sh lib.sh verify.sh retain.sh preflight.sh target-check.sh deploy.conf; do
+    local sha="$1" dist_dir="$2" b_hub="$3" b_web="$4" b_worker="$5" skip_vz="${6:-}" checkout="${7:-}" f toolkit step2 step3
+    toolkit="$(for f in cutover.sh lib.sh verify.sh retain.sh preflight.sh target-check.sh deploy.conf fastpath-classify.py migration-compare.py toolkit-bound.py; do
         printf '%s %s\n' "$(_plan_file_hash "${DEPLOY_DIR}/${f}")" "${f}"
     done | sha256sum | cut -c1-12)"
+    step2="  2 fresh vzdump of CT ${HUB_CTID} while hub and worker run (notes pre-${sha}-<ts>); the control worker is exactly the unit MainPID"
+    step3="  3 read gates and the session inventory again (vzdump takes up to a minute)"
+    if [ "${skip_vz}" = "skip-ct-backup" ]; then
+        step2="  2 vzdump of CT ${HUB_CTID} skipped (no migration changed; the quiesced pg_dump of step 5 is the restore point); the control worker is exactly the unit MainPID"
+        step3="  3 read gates and the session inventory again (no vzdump ran, the gates are not dropped)"
+    fi
     printf '%s\n' \
         "plan v3 target=${sha}" \
         "baseline hub=${b_hub} web=${b_web} worker=${b_worker}" \
@@ -318,8 +334,8 @@ plan_text() {
         "toolkit=${toolkit} retain=${RETAIN_COUNT}" \
         "steps:" \
         "  1 preflight snapshot (local state file) and target check (staged trees, dist, DB not ahead); reserve ${sha} and the previous releases on every host" \
-        "  2 fresh vzdump of CT ${HUB_CTID} while hub and worker run (notes pre-${sha}-<ts>); the control worker is exactly the unit MainPID" \
-        "  3 read gates and the session inventory again (vzdump takes up to a minute)" \
+        "${step2}" \
+        "${step3}" \
         "  4 stop worker ${WORKER_UNIT} (sessions keep running); prove no control worker is left" \
         "  5 quiesced pg_dump canterlot-pre-${sha}-<ts>.dump, verified readable" \
         "  6 hub flip ${b_hub} -> ${sha} under the host lock, one restart of ${HUB_UNIT}; readyz, migrations, exe, NRestarts" \
@@ -330,6 +346,8 @@ plan_text() {
         " 11 maintenance check (sockets, exec dirs, leftovers, env record); verify.sh twice incl. loopback Caddy probe and harness catalog" \
         " 12 geoip: canterlot-hub geoip update on the hub when [auth.geoip].path (canterlot-hub geoip path) is missing or older than ${GEOIP_MAX_AGE_DAYS} days (soft)" \
         " 13 retention: keep ${RETAIN_COUNT} per component + every live release; literal paths re-checked right before deletion"
+    # Режимы без vzdump: проверяемый чекаут входит в план (токен репетиции с другим --source не годится).
+    [ -z "${checkout}" ] || printf 'checkout=%s\n' "${checkout}"
 }
 plan_hash() { plan_text "$@" | sha256sum | cut -c1-12; }
 
@@ -516,18 +534,170 @@ migration_lock_risks() {
 # Пустой ответ (обрыв ssh, битая ссылка) — громкая смерть, а не пустая строка,
 # которую вызывающий прочитал бы как «всё хорошо».
 deployed_sha() {
-    local out
+    local raw out
+    # Статус каждого чтения проверяется явно: вызывающие часто стоят под `||`, где errexit
+    # выключен, а конвейер `ssh | sed` отдавал статус sed и пропускал обрыв транспорта.
     case "$1" in
-        hub) out="$(ssh_hub "readlink '${HUB_CURRENT}'" </dev/null | sed 's|.*/||')" ;;
-        web) out="$(ssh_web "readlink '${WEB_BUILD_LINK}'" </dev/null | sed 's|.*/||')" ;;
-        worker) out="$(readlink "${WORKER_CURRENT}" | sed 's|.*/||')" ;;
+        hub) raw="$(ssh_hub "readlink '${HUB_CURRENT}'" </dev/null)" || die "cannot read the hub current link (ssh failed)" ;;
+        web) raw="$(ssh_web "readlink '${WEB_BUILD_LINK}'" </dev/null)" || die "cannot read the web build link (ssh failed)" ;;
+        worker) raw="$(readlink "${WORKER_CURRENT}")" || die "cannot read the worker current link" ;;
         *) die "unknown component: $1" ;;
     esac
+    out="${raw##*/}"
     [ -n "${out}" ] || die "cannot read current release for $1"
     # Имя пришло с хоста (или из файловой системы): до shell-текста оно доходит
     # только после проверки формата.
     require_release_id "${out}"
     printf '%s' "${out}"
+}
+
+# Полный хэш исходника развёрнутого релиза: строка source= из RELEASE каталога релиза хаба
+# (его пишет сборка). Пустой вывод и код 1 — нет файла, нет строки, не 40 hex, не совпадает
+# с именем релиза или оборвался ssh.
+deployed_source_full() {
+    local rel="$1" raw line
+    [[ "${rel}" =~ ^[0-9a-f]{12}$ ]] || return 1
+    raw="$(ssh_hub "cat '${HUB_RELEASES}/${rel}/RELEASE'" </dev/null)" || return 1
+    line="$(printf '%s\n' "${raw}" | grep -E '^source=[0-9a-f]{40}$' | sed -n 1,2p)" || return 1
+    [ "$(printf '%s\n' "${line}" | wc -l)" = "1" ] || return 1
+    line="${line#source=}"
+    [ "${line:0:12}" = "${rel}" ] || return 1
+    printf '%s' "${line}"
+}
+
+# Базовое состояние до выката согласовано: ссылки каждого компонента ведут в существующие
+# релизы, работающий хаб и воркер запущены из них, а раздаваемый PWA — именно тот
+# релиз веба, на который указывает ссылка. $1..$3 — имена релизов hub web worker.
+# При расхождении печатает причину в stderr и возвращает 1; сбой любого чтения — тоже 1.
+baseline_verify() {
+    local hub="$1" web="$2" worker="$3" pid exe served
+    ssh_hub "test -x '${HUB_RELEASES}/${hub}/bin/canterlot-hub' && test -f '${HUB_RELEASES}/${hub}/RELEASE'" </dev/null \
+        || { echo "the hub link points at ${hub}, which has no complete release directory" >&2; return 1; }
+    pid="$(ssh_hub "systemctl show '${HUB_UNIT}' -p MainPID --value" </dev/null)" || { echo "cannot read the hub MainPID" >&2; return 1; }
+    case "${pid}" in '' | 0 | *[!0-9]*) echo "the hub has no running process (MainPID '${pid}')" >&2; return 1 ;; esac
+    exe="$(ssh_hub "readlink '/proc/${pid}/exe'" </dev/null)" || { echo "cannot read the hub process executable" >&2; return 1; }
+    [ "${exe}" = "${HUB_RELEASES}/${hub}/bin/canterlot-hub" ] \
+        || { echo "the running hub executable ${exe} is not from the linked release ${hub}" >&2; return 1; }
+    [ -x "${WORKER_RELEASES}/${worker}/bin/canterlot-worker" ] \
+        || { echo "the worker link points at ${worker}, which has no binary" >&2; return 1; }
+    pid="$(unit_main_pid)"
+    case "${pid}" in '' | 0) echo "the worker has no running process" >&2; return 1 ;; esac
+    exe="$(proc_exe "${pid}")"
+    [ "${exe}" = "${WORKER_RELEASES}/${worker}/bin/canterlot-worker" ] \
+        || { echo "the running worker executable '${exe}' is not from the linked release ${worker}" >&2; return 1; }
+    ssh_web "test -d '${WEB_RELEASES}/${web}/_app'" </dev/null \
+        || { echo "the web link points at ${web}, which has no build" >&2; return 1; }
+    served="$(container_pwa_sha)" || { echo "cannot read the served PWA version" >&2; return 1; }
+    sha_match "${served}" "${web}" || { echo "the served PWA is ${served:-unknown}, not the linked web release ${web}" >&2; return 1; }
+    return 0
+}
+
+# Замок прогона: fd 8 держит flock на DEPLOY_LOCK_FILE до выхода процесса (дочерние скрипты наследуют
+# дескриптор, поэтому замок живёт и пока работает любой из них). Занят — отказ с кодом deploy_locked.
+take_deploy_lock() {
+    local what="$1"
+    mkdir -p "$(dirname "${DEPLOY_LOCK_FILE}")" 2>/dev/null || true  # lint: local-temp
+    exec 8>>"${DEPLOY_LOCK_FILE}" || { fail_mark; fail_code deploy_locked; die_after "cannot open the deploy lock ${DEPLOY_LOCK_FILE}"; }
+    if ! flock -n 8; then
+        fail_mark
+        fail_code deploy_locked
+        die_after "deploy_locked: another cutover or rollback holds ${DEPLOY_LOCK_FILE}: ${what} does not start (wait for it to finish, or read its log)"
+    fi
+}
+
+# Идентичность кластера и базы, как её видит суперпользователь по явному сокету: "<system_identifier> <oid базы>".
+# Печатается тем же сокетом и той же базой, что берут проверка, дамп и восстановление.
+pg_identity() {
+    local out
+    out="$(ssh_hub "runuser -u postgres -- psql -h '${HUB_PG_SOCKET}' -d '${HUB_PG_DB}' -tAc \"select (select system_identifier::text from pg_control_system()) || ' ' || (select oid::text from pg_database where datname = current_database())\"")" || return 1
+    [[ "${out}" =~ ^[0-9]+\ [0-9]+$ ]] || return 1
+    printf '%s' "${out}"
+}
+
+# Быстрый путь выпуска. Решает по точным хэшам коммитов и git diff между развёрнутым
+# релизом и целью, какие шаги можно не делать, и печатает ключ=значение:
+#   path=fast|rehearsed|full   fast — без репетиции и без vzdump; rehearsed — репетиция
+#                              есть, vzdump нет; full — как раньше (репетиция и vzdump)
+#   rehearsal=skip|run  vzdump=skip|run  reasons=<все причины через "; ">
+#   vzdump_reason=<почему vzdump пропущен; пусто, если не пропущен>
+# Классификация файлов — fastpath-classify.py (NUL-разделённый diff со статусом, без
+# переименований, без объектов-замен): быстрый путь только если каждый изменённый
+# файл в списке прикладного кода; изменились миграции или их загрузка — full. Это
+# предварительное решение по git: что реально вшито в бинарь, сверяет с живой базой
+# сам cutover.sh (манифест миграций хаба), и только он разрешает пропустить vzdump.
+# Любая неясность (релиз не определён, компоненты на разных релизах, хэши не
+# полные или не совпадают с именами релизов, классификатор упал или ответил
+# противоречиво, развёрнутый не предок цели) даёт full. Только читает; код возврата 0.
+# $1 каталог git-репозитория, $2 полный хэш цели, $3 полный хэш развёрнутого,
+# $4..$6 имена развёрнутых hub web worker (12 hex).
+fastpath_eval() {
+    local src="$1" target="$2" live="$3" b_hub="$4" b_web="$5" b_worker="$6"
+    local rehearsal=skip backup=skip reasons="" full_reason="" cls="" c
+    local ancestor="" mig="" other="" changed="" key n
+    fastpath_full() { full_reason="${full_reason:+${full_reason}; }$1"; }
+    for c in "${b_hub}" "${b_web}" "${b_worker}"; do
+        if ! [[ "${c}" =~ ^[0-9a-f]{12}$ ]]; then
+            fastpath_full "the live release cannot be determined (hub '${b_hub}', web '${b_web}', worker '${b_worker}')"
+            break
+        fi
+    done
+    if [ -z "${full_reason}" ]; then
+        if [ "${b_hub}" != "${b_web}" ] || [ "${b_hub}" != "${b_worker}" ]; then
+            fastpath_full "hub, web and worker are on different releases (${b_hub}, ${b_web}, ${b_worker})"
+        elif ! [[ "${live}" =~ ^[0-9a-f]{40}$ && "${target}" =~ ^[0-9a-f]{40}$ ]]; then
+            fastpath_full "the live or the target commit id is not a full 40-hex id (live '${live}', target '${target}')"
+        elif [ "${live:0:12}" != "${b_hub}" ]; then
+            fastpath_full "the live source id ${live:0:12} does not match the live release name ${b_hub}"
+        elif [ "${live}" = "${target}" ]; then
+            fastpath_full "the target equals the live release ${b_hub}"
+        fi
+    fi
+    if [ -z "${full_reason}" ]; then
+        cls="$(python3 -I "${DEPLOY_DIR}/fastpath-classify.py" "${src}" "${live}" "${target}" 2>&1)" || {
+            fastpath_full "the git diff of ${live:0:12}..${target:0:12} could not be classified: $(printf '%s' "${cls}" | tr '\n' ' ' | cut -c1-200)"
+            cls=""
+        }
+        if [ -z "${cls}" ] && [ -z "${full_reason}" ]; then
+            fastpath_full "the classifier of the git diff failed or printed nothing"
+        fi
+    fi
+    if [ -z "${full_reason}" ]; then
+        # Ровно по одной строке каждого ключа: неполный или противоречивый ответ — отказ.
+        for key in ancestor migration_inputs other changed; do
+            n="$(printf '%s\n' "${cls}" | grep -c "^${key}=" || true)"
+            if [ "${n}" != "1" ]; then fastpath_full "the classifier answer is incomplete or contradictory (key ${key} seen ${n} times)"; fi
+        done
+    fi
+    if [ -z "${full_reason}" ]; then
+        ancestor="$(printf '%s\n' "${cls}" | sed -n 's/^ancestor=//p')"
+        mig="$(printf '%s\n' "${cls}" | sed -n 's/^migration_inputs=//p')"
+        other="$(printf '%s\n' "${cls}" | sed -n 's/^other=//p')"
+        changed="$(printf '%s\n' "${cls}" | sed -n 's/^changed=//p')"
+        case "${ancestor}" in
+            yes) ;;
+            no) fastpath_full "the live release ${live:0:12} is not an ancestor of the target ${target:0:12}" ;;
+            *) fastpath_full "the classifier answer is not understood (ancestor '${ancestor}')" ;;
+        esac
+        [[ "${changed}" =~ ^[0-9]+$ ]] || fastpath_full "the classifier answer is not understood (changed '${changed}')"
+    fi
+    if [ -z "${full_reason}" ]; then
+        if [ -n "${mig}" ]; then
+            rehearsal=run; backup=run
+            reasons="migration inputs changed since ${live:0:12}: ${mig}"
+        fi
+        if [ -n "${other}" ]; then
+            rehearsal=run
+            reasons="${reasons:+${reasons}; }changed outside the application-code allowlist since ${live:0:12}: ${other}"
+        fi
+        [ -n "${reasons}" ] || reasons="all ${changed} changed files are allowlisted application code (no migration input, no deploy tooling) between the live ${live:0:12} and ${target:0:12}"
+    fi
+    if [ -n "${full_reason}" ]; then rehearsal=run; backup=run; reasons="${full_reason}"; fi
+    local backup_reason=""
+    [ "${backup}" != skip ] || backup_reason="no migration input changed between the live ${live:0:12} and ${target:0:12} (git); the cutover compares the hub manifest with the database"
+    local path_name=full
+    if [ "${rehearsal}" = skip ]; then path_name=fast; elif [ "${backup}" = skip ]; then path_name=rehearsed; fi
+    printf 'path=%s\nrehearsal=%s\nvzdump=%s\nreasons=%s\nvzdump_reason=%s\n' "${path_name}" "${rehearsal}" "${backup}" \
+        "$(printf '%s' "${reasons}" | tr '\n\r=' '  :')" "$(printf '%s' "${backup_reason}" | tr '\n\r=' '  :')"
 }
 
 # Ни один управляющий процесс прод-воркера не должен жить. Кандидат — процесс, у
@@ -640,8 +810,9 @@ find_control_worker() {
 # Версия PWA внутри контейнера Caddy: голый sha без JSON-обёртки.
 # Пустой ответ (контейнер молчит, файла нет) — пустая строка, не UNKNOWN-ловушка.
 container_pwa_sha() {
-    ssh_web "docker exec caddy cat '${WEB_CONTAINER_VERSION_JSON}'" 2>/dev/null \
-        | sed -n 's/.*"version"[ ]*:[ ]*"\([0-9a-zA-Z]\+\)".*/\1/p'
+    local raw
+    raw="$(ssh_web "docker exec caddy cat '${WEB_CONTAINER_VERSION_JSON}'" 2>/dev/null)" || return 1
+    printf '%s\n' "${raw}" | sed -n 's/.*"version"[ ]*:[ ]*"\([0-9a-zA-Z]\+\)".*/\1/p'
 }
 
 # Зомби — не живой процесс: сопровождение-зомби нельзя считать ни живым,

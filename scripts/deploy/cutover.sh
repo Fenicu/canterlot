@@ -26,6 +26,17 @@ fi
 #   cutover.sh --execute SHA --confirm TOKEN [--source DIR] [--dist DIR] [--state FILE]
 #       боевой прогон. Токен — из dry-run или репетиции того же релиза и того же
 #       плана (хэш plan_text), не старше 2 часов.
+#   cutover.sh --execute SHA --fast [--source DIR] [--dist DIR] [--state FILE]
+#       боевой прогон без токена и без vzdump, для выпуска без миграций и без правок
+#       обвязки выката. Токен заменяет не вера в аргумент, а пересчёт здесь же из
+#       --source (fastpath_eval в lib.sh): развёрнутые hub/web/worker на одном релизе,
+#       он предок цели, в git diff нет ни миграций, ни scripts/deploy и скриптов выпуска;
+#       база уже на последней миграции релиза. Иначе отказ до первой записи
+#       (fast_path_refused). Всё остальное — ворота, предпроверка, инвентарь, стоп,
+#       pg_dump с проверкой чтения — те же, что у боевого прогона по токену.
+#   --skip-ct-backup (репетиция, dry-run, боевой прогон по токену): без vzdump; допустим,
+#       только если миграции не менялись (пересчёт оттуда же); план и токен привязаны
+#       к флагу. Точка отката — проверенный pg_dump после стопа воркера.
 #
 # Политика отката (решение владельца: никакой автоматики по базе), по записанным
 # фактам (vzdump, стоп воркера, проверенный дамп, ссылка хаба, живой новый воркер):
@@ -71,6 +82,10 @@ REHEARSE=0
 ALLOW_SKIPPED=0
 SHADOW=0
 ALLOW_SAME_TARGET=0
+FAST=0
+SKIP_VZDUMP=0
+VZDUMP_SKIP_REASON=""
+FASTPATH_REASONS=""
 PLAN_HASH=""
 PHASE=""
 # --- файл результата: машиночитаемый итог любого выхода (его читает release.sh) ---
@@ -183,7 +198,10 @@ write_result() {
             started_at "${RESULT_STARTED}" \
             finished_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             phase "${PHASE:-}" \
+            confirm "$(if [ "${FAST}" = "1" ]; then printf fast; elif [ "$(result_mode)" = "execute" ]; then printf token; fi)" \
             vzdump_done "$(yn "$((VZDUMP_DONE * restore))")" \
+            vzdump_skipped "$(yn "${SKIP_VZDUMP}")" \
+            vzdump_skip_reason "$(one_line "${VZDUMP_SKIP_REASON}")" \
             worker_stopped "$(yn "$((WORKER_STOPPED * restore))")" \
             dump_verified "$(yn "$((DUMP_VERIFIED * restore))")" \
             hub_flipped "$(yn "$((HUB_FLIPPED * restore))")" \
@@ -201,6 +219,8 @@ write_result() {
             worker_stop_at "$([ "${restore}" = "1" ] && printf '%s' "${WORKER_STOP_ISO:-}")" \
             vzdump_notes "$([ "$((VZDUMP_DONE * restore))" = "1" ] && printf 'pre-%s-%s' "${SHA}" "${RUN_TS}")" \
             vzdump_archive "$([ "$((VZDUMP_DONE * restore))" = "1" ] && printf '%s' "${VZ_ARCHIVE:-}")" \
+            pg_system_identifier "$([ "${restore}" = "1" ] && printf '%s' "${DB_SYSID:-}")" \
+            pg_database_oid "$([ "${restore}" = "1" ] && printf '%s' "${DB_OID:-}")" \
             dump "$([ "$((DUMP_VERIFIED * restore))" = "1" ] && printf '%s/%s' "${HUB_BACKUP_DIR}" "${RUN_DUMP}")" \
             stop_block "${RESULT_STOP_BLOCK}" \
             log "${RESULT_LOG}"
@@ -244,6 +264,8 @@ while (($#)); do
         --shadow) SHADOW=1; shift ;;
         --execute) EXECUTE_ID="$2"; shift 2 ;;
         --confirm) CONFIRM="$2"; shift 2 ;;
+        --fast) FAST=1; shift ;;
+        --skip-ct-backup) SKIP_VZDUMP=1; shift ;;
         --result) RESULT_FILE="$2"; shift 2 ;;
         -*) die "unknown flag: $1" ;;
         *) SHA="$(short_sha "$1")"; shift ;;
@@ -254,6 +276,8 @@ export XDG_RUNTIME_DIR
 result_soft_log_start
 
 [ "${DRY_RUN}${REHEARSE}" != "11" ] || die "--dry-run and --rehearse are separate modes: pick one"
+[ "${FAST}" = "0" ] || [ "${DRY_RUN}${REHEARSE}" = "00" ] || die "--fast belongs to the real run (--execute): a dry-run or rehearsal has no token to replace (use --skip-ct-backup there)"
+[ "${FAST}" = "0" ] || [ -z "${CONFIRM}" ] || die "--fast replaces --confirm: pass one of them"
 # Целевой релиз НИКОГДА не подменяется развёрнутым: dry-run и репетиция проверяют
 # именно цель, а развёрнутый релиз — это база.
 if [ "${DRY_RUN}" = "1" ] || [ "${REHEARSE}" = "1" ]; then
@@ -269,7 +293,7 @@ else
         || die "--execute ${EXECUTE_ID} contradicts positional sha ${SHA}"
     SHA="$(short_sha "${EXECUTE_ID}")"
     require_release_id "${SHA}"
-    [ -n "${CONFIRM}" ] || die "real cutover requires --confirm <token> printed by --dry-run or --rehearse of the same plan within $((CONFIRM_TTL / 3600)) h"
+    [ -n "${CONFIRM}" ] || [ "${FAST}" = "1" ] || die "real cutover requires --confirm <token> printed by --dry-run or --rehearse of the same plan within $((CONFIRM_TTL / 3600)) h"
     [ "${SHADOW}" = "0" ] || die "--shadow is a dry-run/rehearsal flag and cannot be used for a real cutover"
 fi
 require_release_id "${SHA}"
@@ -286,12 +310,31 @@ else
     STATE_FILE="${STATE_FILE:-/tmp/canterlot-deploy-${SHA}.state}"
 fi
 
+# Боевой прогон держит замок от начала (до чтения базового состояния и предпроверки) до выхода:
+# второй cutover или rollback-db не может ни пройти те же проверки, ни принять чужой flip за свой.
+if [ "${DRY_RUN}" = "0" ] && [ "${REHEARSE}" = "0" ]; then
+    PHASE="lock"
+    take_deploy_lock "this cutover"
+    PHASE=""
+fi
 # План и его хэш считаются ДО любого действия, одинаково во всех режимах.
 BASE_HUB="$(deployed_sha hub)"
 BASE_WEB="$(deployed_sha web)"
 BASE_WORKER="$(deployed_sha worker)"
-PLAN_HASH="$(plan_hash "${SHA}" "${DIST}" "${BASE_HUB}" "${BASE_WEB}" "${BASE_WORKER}")"
-if [ "${DRY_RUN}" = "0" ] && [ "${REHEARSE}" = "0" ]; then
+# --fast и --skip-ct-backup: условия пересчитывает skip_eligibility ниже (после предпроверки
+# цели, до первой записи); здесь флаги только входят в хэш плана.
+[ "${FAST}" = "0" ] || SKIP_VZDUMP=1
+PLAN_VZ=""
+CHECKOUT_HEAD=""
+if [ "${SKIP_VZDUMP}" = "1" ]; then
+    PLAN_VZ="skip-ct-backup"
+    # Проверяемый чекаут входит в план обоих режимов пропуска: предпроверка читает структуры
+    # конфигов из него, и токен репетиции по одному коммиту не должен открывать прогон по другому.
+    CHECKOUT_HEAD="$(git -C "${SOURCE_DIR}" rev-parse HEAD 2>/dev/null)" || die "cannot read the checkout identity (git rev-parse HEAD) of ${SOURCE_DIR}"
+    [[ "${CHECKOUT_HEAD}" =~ ^[0-9a-f]{40}$ ]] || die "the checkout identity of ${SOURCE_DIR} is not a full commit id"
+fi
+PLAN_HASH="$(plan_hash "${SHA}" "${DIST}" "${BASE_HUB}" "${BASE_WEB}" "${BASE_WORKER}" "${PLAN_VZ}" "${CHECKOUT_HEAD}")"
+if [ "${FAST}" = "0" ] && [ "${DRY_RUN}" = "0" ] && [ "${REHEARSE}" = "0" ]; then
     # Проверка токена — до любой записи: phase=token в результате это доказывает.
     PHASE="token"
     if ! TOKEN_PROBLEM="$(confirm_token_check "${CONFIRM}" "${SHA}" "${PLAN_HASH}")"; then
@@ -344,14 +387,120 @@ print_token() {
     RESULT_TOKEN="${token}"
     RESULT_TOKEN_UNTIL="$(date -u -d "@$((now + CONFIRM_TTL))" +%Y-%m-%dT%H:%M:%SZ)"
     printf '  CONFIRM=%s   # plan %s, valid until %s\n' "${token}" "${PLAN_HASH}" "${until}"
-    printf '  real run:  scripts/deploy/cutover.sh --execute %s --confirm %s --source %s --dist %s\n' \
-        "${SHA}" "${token}" "${SOURCE_DIR}" "${DIST_BASE:-${REPO_ROOT}/dist}"
+    printf '  real run:  scripts/deploy/cutover.sh --execute %s --confirm %s%s --source %s --dist %s\n' \
+        "${SHA}" "${token}" "$([ "${SKIP_VZDUMP}" = "1" ] && printf ' --skip-ct-backup')" "${SOURCE_DIR}" "${DIST_BASE:-${REPO_ROOT}/dist}"
 }
 
 # Провал осмотра БД — громкая смерть, а не пустой результат.
 hub_psql() { ssh_hub "runuser -u canterlot -- psql -h '${HUB_PG_SOCKET}' -d '${HUB_PG_DB}' -tAc \"$1\"" || die "hub DB query failed"; }
 # Вариант без die: для отчёта, где провал запроса — тоже данные.
 hub_psql_soft() { ssh_hub "runuser -u canterlot -- psql -h '${HUB_PG_SOCKET}' -d '${HUB_PG_DB}' -tAc \"$1\"" 2>/dev/null || echo UNKNOWN; }
+
+# --- пропуск репетиции и vzdump (--fast, --skip-ct-backup): проверки до первой записи ---
+# Условия пересчитываются здесь из --source и живой системы, а не берутся у вызывающего.
+# Отказ быстрому пути (fast_path_refused, phase=eligibility) — это «иди полным путём», он
+# случается до резервов, остановок и дампов. Расхождение базы с бинарём (migration_mismatch)
+# и чужая база (db_identity) — обычный жёсткий отказ без перехода на полный путь.
+ELIG_WHAT=""
+fast_refuse() {
+    PHASE="eligibility"
+    fail_mark
+    fail_code fast_path_refused
+    die_after "refusing ${ELIG_WHAT}: $1"
+}
+# База, которую смотрят проверка, дамп и восстановление, — та, к которой подключён работающий
+# хаб: в ней есть клиентские соединения пользователя хаба. Иначе при нескольких кластерах дамп
+# и проверка могли бы взять одну базу, а хаб работать с другой.
+db_identity_check() {
+    local n
+    n="$(hub_psql "select count(*) from pg_stat_activity where datname = current_database() and usename = '${HUB_PG_USER}' and backend_type = 'client backend' and pid <> pg_backend_pid()")"
+    case "${n}" in
+        '' | *[!0-9]* | 0)
+            PHASE="eligibility"
+            fail_mark
+            fail_code db_identity
+            die_after "no connection of the running hub (user ${HUB_PG_USER}) in database ${HUB_PG_DB} on socket ${HUB_PG_SOCKET}: this may not be the database the hub runs on" ;;
+    esac
+    # Тот же пользователь и имя базы бывают и в чужом кластере: сверяем идентификатор кластера с
+    # закреплённым (HUB_PG_SYSTEM_ID) или с записанным у последнего дампа.
+    local id sys expected="${HUB_PG_SYSTEM_ID:-}" last
+    id="$(pg_identity)" || { PHASE="eligibility"; fail_mark; fail_code db_identity; die_after "cannot read the cluster identity of ${HUB_PG_DB} on ${HUB_PG_SOCKET}"; }
+    sys="${id% *}"
+    if [ -z "${expected}" ]; then
+        last="$(ssh_hub "ls -1t '${HUB_BACKUP_DIR}'/*.identity 2>/dev/null" | sed -n 1p)" || last=""
+        if [ -n "${last}" ]; then
+            expected="$(ssh_hub "cat '${last}'" 2>/dev/null | sed -n 's/^system_identifier=//p' | sed -n 1p)" || expected=""
+        fi
+    fi
+    if [ -n "${expected}" ] && [ "${sys}" != "${expected}" ]; then
+        PHASE="eligibility"
+        fail_mark
+        fail_code db_identity
+        die_after "the cluster at ${HUB_PG_SOCKET} has system identifier ${sys}, but ${expected} is expected (pinned or recorded with the last dump): this is not the cluster of the running hub"
+    fi
+    log "database identity: ${HUB_PG_DB} on ${HUB_PG_SOCKET} has ${n} connection(s) of the running hub (user ${HUB_PG_USER}); dump and restore use the same socket and database"
+}
+skip_eligibility() {
+    local live_full target_full fp reh vz tb manifest rows cmp n rel_last man_max saved_phase="${PHASE}"
+    [ "${FAST}" = "1" ] || [ "${SKIP_VZDUMP}" = "1" ] || return 0
+    if [ "${FAST}" = "1" ]; then ELIG_WHAT="the fast path"; else ELIG_WHAT="to skip the vzdump"; fi
+    PHASE="eligibility"
+    local comp now base
+    for comp in hub web worker; do
+        now="$(deployed_sha "${comp}")"
+        case "${comp}" in hub) base="${BASE_HUB}" ;; web) base="${BASE_WEB}" ;; *) base="${BASE_WORKER}" ;; esac
+        [ "${now}" = "${base}" ] || fast_refuse "the ${comp} link changed during the preflight (was ${base}, now ${now})"
+    done
+    if ! BASELINE_WHY="$(baseline_verify "${BASE_HUB}" "${BASE_WEB}" "${BASE_WORKER}" 2>&1)"; then
+        fast_refuse "the live baseline is inconsistent: ${BASELINE_WHY}"
+    fi
+    live_full="$(deployed_source_full "${BASE_HUB}")" || live_full=""
+    target_full="$(sed -n 's/^source=\([0-9a-f]\{40\}\)$/\1/p' "${DIST}/RELEASE" 2>/dev/null | sed -n 1p)" || target_full=""
+    fp="$(fastpath_eval "${SOURCE_DIR}" "${target_full}" "${live_full}" "${BASE_HUB}" "${BASE_WEB}" "${BASE_WORKER}")"
+    reh="$(printf '%s\n' "${fp}" | sed -n 's/^rehearsal=//p')"
+    vz="$(printf '%s\n' "${fp}" | sed -n 's/^vzdump=//p')"
+    FASTPATH_REASONS="$(printf '%s\n' "${fp}" | sed -n 's/^reasons=//p')"
+    [ "${vz}" = "skip" ] || fast_refuse "${FASTPATH_REASONS}"
+    [ "${FAST}" = "0" ] || [ "${reh}" = "skip" ] || fast_refuse "a rehearsal and a token are needed: ${FASTPATH_REASONS}"
+    # Чекаут и исполняемая обвязка — это цель, в обоих режимах пропуска (в быстром вместе с классификацией).
+    tb="$(python3 -I "${SCRIPT_DIR}/toolkit-bound.py" "${SOURCE_DIR}" "${target_full}" "${SCRIPT_DIR}" 2>&1)" \
+        || fast_refuse "the checkout and the executing toolkit are not bound to the target: ${tb}"
+    db_identity_check
+    # Бинарь цели — чужой для этого прогона код: запускается от учётной записи службы под пределом
+    # времени, не от root (проверка байтов залитого дерева сделана target-check до этого).
+    manifest="$(ssh_hub "runuser -u '${HUB_SERVICE_USER}' -- timeout ${MANIFEST_TIMEOUT} '${HUB_RELEASES}/${SHA}/bin/canterlot-hub' migrations manifest --json")" \
+        || fast_refuse "the target hub binary cannot print its migrations manifest (as ${HUB_SERVICE_USER}, within ${MANIFEST_TIMEOUT} s)"
+    # Манифест обязан сходиться с RELEASE артефакта ДО любой записи: расхождение — негодный артефакт.
+    rel_last="$(sed -n 's/^migrations_last=\([0-9]*\).*/\1/p' "${DIST}/RELEASE" 2>/dev/null | sed -n 1p | sed 's/^0*//')" || rel_last=""
+    man_max="$(python3 -I -c 'import json,sys; print(max(int(m["version"]) for m in json.loads(sys.argv[1])["migrations"]))' "${manifest}" 2>/dev/null)" \
+        || fast_refuse "the migrations manifest of the target hub binary is not understood"
+    if [ -z "${rel_last}" ] || [ "${man_max}" != "${rel_last}" ]; then
+        PHASE="eligibility"
+        fail_mark
+        fail_code manifest_release_mismatch
+        die_after "invalid artifact: the target hub binary embeds migrations up to ${man_max}, but RELEASE says migrations_last ${rel_last:-unreadable}: stopping before any write"
+    fi
+    rows="$(hub_psql "select version::text || ' ' || encode(checksum, 'hex') || ' ' || success::int::text from _sqlx_migrations order by version")"
+    cmp="$(python3 -I "${SCRIPT_DIR}/migration-compare.py" "${manifest}" "${rows}" 2>&1)" \
+        || fast_refuse "the migrations manifest could not be compared with the database: ${cmp}"
+    case "${cmp}" in
+        equal) ;;
+        pending*) fast_refuse "the target hub binary embeds migrations the database has not applied (versions ${cmp#pending }): the full path (rehearsal and vzdump) is needed" ;;
+        *)
+            PHASE="eligibility"
+            fail_mark
+            fail_code migration_mismatch
+            die_after "the live database and the target hub binary disagree on migrations (${cmp#mismatch }): manual review, not a release" ;;
+    esac
+    n="$(printf '%s\n' "${manifest}" | grep -o '"version"' | wc -l | tr -d ' ')"
+    VZDUMP_SKIP_REASON="the target hub manifest (${n} migrations) equals the live database's applied migrations (same versions and checksums, all successful, none pending)"
+    if [ "${FAST}" = "1" ]; then
+        log "fast path: no confirm token, no rehearsal, no vzdump; recomputed from ${SOURCE_DIR}: ${FASTPATH_REASONS}; ${VZDUMP_SKIP_REASON}; the checkout and the executing toolkit are bound to ${target_full:0:12}; every gate and preflight check of the real run still runs; plan ${PLAN_HASH}"
+    else
+        log "vzdump skip allowed: ${VZDUMP_SKIP_REASON}"
+    fi
+    PHASE="${saved_phase}"
+}
 
 # --- сугубо читаемые проверки, общие для dry-run и боевого прогона ---
 read_gates() {
@@ -496,6 +645,7 @@ if [ "${DRY_RUN}" = "1" ]; then
         hard "target-check failed for ${SHA}"
         NOT_RUN=1
     fi
+    skip_eligibility
     read_gates || log "dry-run: a read gate above reported a problem (see SOFT-FAIL)"
     pwa_read_gates || log "dry-run: a pwa gate above reported a problem (see SOFT-FAIL)"
     log "dry-run: baseline checks below run against the DEPLOYED release (hub=${DRY_BASE_HUB}); the target was checked above"
@@ -533,13 +683,18 @@ if [ "${DRY_RUN}" = "1" ]; then
         hard "verify --dry-run failed"
         NOT_RUN=1
     fi
+    if [ "${SKIP_VZDUMP}" = "1" ]; then
+        DRY_VZ_STEP="no vzdump (skipped, no migration changed); read gates and the session inventory again before the stop"
+    else
+        DRY_VZ_STEP="fresh vzdump (notes pre-${SHA}-<ts>) while hub and worker run; then read gates and the session inventory again"
+    fi
     cat <<EOF
 dry-run plan for ${SHA} (write steps are NOT RUN by design):
   baseline (deployed): hub=${DRY_BASE_HUB} web=${DRY_BASE_WEB} worker=${DRY_BASE_WORKER}
   target checked read-only: dist (SHA256SUMS, source=, versions, glibc, openapi, EXPECT), staged dirs on every host, migrations, CSP
   NOT RUN (write steps, never executed by a dry-run; --rehearse prints each one as WOULD-WRITE):
    - preflight snapshot/state file
-   - fresh vzdump (notes pre-${SHA}-<ts>) while hub and worker run; then read gates and the session inventory again
+   - ${DRY_VZ_STEP}
    - worker stop (systemctl --user stop ${WORKER_UNIT}); session processes keep running
    - quiesced pg_dump canterlot-pre-${SHA}-<ts>.dump, verified
    - hub flip: cd ${HUB_BASE} && ln -s releases/${SHA} + mv -T; restart ${HUB_UNIT} once
@@ -552,8 +707,12 @@ dry-run plan for ${SHA} (write steps are NOT RUN by design):
    - retention (retain.sh --apply --keep ${SHA} ...)
   WOULD RUN (only if the gates pass and the token matches this plan):
 EOF
-    plan_text "${SHA}" "${DIST}" "${BASE_HUB}" "${BASE_WEB}" "${BASE_WORKER}" | sed 's/^/   | /'
-    echo "  rollback points would be: this run's vzdump + pg_dump (manual restore only, see report on failure)"
+    plan_text "${SHA}" "${DIST}" "${BASE_HUB}" "${BASE_WEB}" "${BASE_WORKER}" "${PLAN_VZ}" | sed 's/^/   | /'
+    if [ "${SKIP_VZDUMP}" = "1" ]; then
+        echo "  rollback point would be: this run's quiesced pg_dump (manual restore only, see report on failure); no vzdump"
+    else
+        echo "  rollback points would be: this run's vzdump + pg_dump (manual restore only, see report on failure)"
+    fi
     if [ "${NOT_RUN}" != "0" ] && [ "${ALLOW_SKIPPED}" = "0" ]; then
         log "dry-run FAIL: a read-only preflight/verify gate did not run (use --allow-skipped only to acknowledge a known gap)"
     fi
@@ -591,6 +750,7 @@ run_child "${SCRIPT_DIR}/preflight.sh" "${SHA}" --source "${SOURCE_DIR}" --dist 
 fail_mark
 run_child "${SCRIPT_DIR}/target-check.sh" "${SHA}" --source "${SOURCE_DIR}" --dist "${DIST_BASE:-${REPO_ROOT}/dist}" \
     || die_after "target check failed for ${SHA}: refusing before any write"
+skip_eligibility
 
 # CSP, который уйдёт в canterlot.env.<sha>, обязан быть выведен из финального PWA-билда
 # этого же dist: проверка до любого изменения (урок 1.5.0).
@@ -604,6 +764,13 @@ fi
 PREV_HUB_SHA="$(deployed_sha hub)"
 PREV_WEB_SHA="$(deployed_sha web)"
 PREV_WORKER_SHA="$(deployed_sha worker)"
+# Базовое состояние одобрено в начале прогона (и в токене репетиции): ссылки не должны уйти за
+# время предпроверки (ручной частичный выкат), иначе дальше пошли бы по устаревшим данным.
+if [ "${PREV_HUB_SHA}" != "${BASE_HUB}" ] || [ "${PREV_WEB_SHA}" != "${BASE_WEB}" ] || [ "${PREV_WORKER_SHA}" != "${BASE_WORKER}" ]; then
+    fail_mark
+    fail_code baseline_drift
+    die_after "the deployed releases changed after they were approved (hub ${BASE_HUB} -> ${PREV_HUB_SHA}, web ${BASE_WEB} -> ${PREV_WEB_SHA}, worker ${BASE_WORKER} -> ${PREV_WORKER_SHA}): run again"
+fi
 if is_rehearse; then
     HUB_EXPECT="${PREV_HUB_SHA}"
     WEB_EXPECT="${PREV_WEB_SHA}"
@@ -678,9 +845,32 @@ RUN_DUMP="canterlot-pre-${SHA}-${RUN_TS}.dump"
 if systemctl --user is-active --quiet "${WORKER_UNIT}"; then WORKER_WAS_ACTIVE=1; fi
 
 facts_line() {
-    printf 'vzdump done=%s, worker stopped (verified)=%s, dump verified=%s, hub flip started=%s, hub link read back=%s, new worker live=%s' \
-        "$(yn "${VZDUMP_DONE}")" "$(yn "${WORKER_STOPPED}")" "$(yn "${DUMP_VERIFIED}")" \
+    printf 'vzdump done=%s%s, worker stopped (verified)=%s, dump verified=%s, hub flip started=%s, hub link read back=%s, new worker live=%s' \
+        "$(yn "${VZDUMP_DONE}")" "$([ "${SKIP_VZDUMP}" = "1" ] && printf ' (skipped: %s)' "${VZDUMP_SKIP_REASON}")" "$(yn "${WORKER_STOPPED}")" "$(yn "${DUMP_VERIFIED}")" \
         "$(yn "${HUB_FLIP_STARTED}")" "$(yn "${HUB_FLIPPED}")" "$(yn "${WORKER_PROVEN}")"
+}
+
+# Одобренная база перед стопом: те же релизы по ссылкам, а при пропуске vzdump (--fast,
+# --skip-ct-backup) ещё и согласие процессов и раздаваемого PWA с ссылками. Расхождение — отказ
+# до остановки воркера (flip вперёд дополнительно сверяют ожидаемый прежний релиз под lock).
+baseline_recheck() {
+    local comp now base why
+    for comp in hub web worker; do
+        now="$(deployed_sha "${comp}")"
+        case "${comp}" in hub) base="${PREV_HUB_SHA}" ;; web) base="${PREV_WEB_SHA}" ;; *) base="${PREV_WORKER_SHA}" ;; esac
+        if [ "${now}" != "${base}" ]; then
+            fail_mark
+            fail_code baseline_drift
+            cutover_hard_after "the ${comp} link changed after it was approved (was ${base}, now ${now}): refusing before the worker stop"
+        fi
+    done
+    if [ "${SKIP_VZDUMP}" = "1" ] && ! is_rehearse; then
+        if ! why="$(baseline_verify "${PREV_HUB_SHA}" "${PREV_WEB_SHA}" "${PREV_WORKER_SHA}" 2>&1)"; then
+            fail_mark
+            fail_code baseline_drift
+            cutover_hard_after "the live baseline changed after it was approved: ${why}"
+        fi
+    fi
 }
 
 # Управляющий воркер до стопа: ровно процесс MainPID юнита и ничего больше
@@ -785,6 +975,32 @@ report_block() {
         worker-live) printf 'STOP-AND-REPORT (phase %s): automation halted; the new worker is live on %s, so recovery is forward-only.\n' "${PHASE}" "${SHA}" ;;
         *) printf 'STOP-AND-REPORT (phase %s): automation halted, nothing else will be touched.\n' "${PHASE}" ;;
     esac
+    local vzdump_state_line vzdump_fallback dump_state_line
+    if [ "${DUMP_VERIFIED}" = "1" ]; then
+        dump_state_line="${HUB_BACKUP_DIR}/${RUN_DUMP} (quiesced after the worker stop, verified readable before the hub flip)"
+    else
+        dump_state_line="none usable: this run did not finish a verified dump before this stop (a file named ${HUB_BACKUP_DIR}/${RUN_DUMP} may exist: do not trust it without review)"
+    fi
+    if [ "${SKIP_VZDUMP}" = "1" ]; then
+        if [ "${DUMP_VERIFIED}" = "1" ]; then
+            vzdump_state_line="none (skipped: ${VZDUMP_SKIP_REASON}); the verified dump above is this run's only restore point"
+            vzdump_fallback="       There is no vzdump from this run (skipped: no migration changed), so the quiesced dump is the only restore point of this run."
+        else
+            vzdump_state_line="none (skipped: ${VZDUMP_SKIP_REASON}); and this run has no verified dump either"
+            vzdump_fallback="       This run has no restore point at all (no vzdump, no verified dump): decide with the owner before any step below."
+        fi
+    elif [ "${VZDUMP_DONE}" != "1" ]; then
+        vzdump_state_line="none: the vzdump had not completed before this stop"
+        if [ "${DUMP_VERIFIED}" = "1" ]; then
+            vzdump_fallback="       This run has no completed vzdump, so the verified dump is its only restore point."
+        else
+            vzdump_fallback="       This run has neither a completed vzdump nor a verified dump: decide with the owner before any step below."
+        fi
+    else
+        vzdump_state_line="notes pre-${SHA}-${RUN_TS}${VZ_ARCHIVE:+, archive ${VZ_ARCHIVE}} (whole CT, taken earlier, while the worker still ran)"
+        vzdump_fallback="       The vzdump above is a separate, earlier whole-CT restore point: restoring it loses what the worker
+       wrote between the vzdump and its stop, so it is the fallback when the dump itself is unusable:"
+    fi
     cat <<EOF
   facts: $(facts_line)
   live state:
@@ -795,8 +1011,8 @@ report_block() {
     web build          = ${web_link} (was releases/${PREV_WEB_SHA})
     live executions    = ${live_n} (sessions keep running in their supervisors and buffer journals)
     speech unit        = ${SPEECH_UNIT}: ${speech_now} (dictation only, never blocks recovery)
-    this run's dump   = ${HUB_BACKUP_DIR}/${RUN_DUMP} (quiesced after the worker stop, verified readable before the hub flip: $(yn "${DUMP_VERIFIED}"))
-    this run's vzdump = notes pre-${SHA}-${RUN_TS}${VZ_ARCHIVE:+, archive ${VZ_ARCHIVE}} (whole CT, taken earlier, while the worker still ran)
+    this run's dump   = ${dump_state_line}
+    this run's vzdump = ${vzdump_state_line}
 EOF
     case "${stage}" in
         pre-flip)
@@ -851,9 +1067,8 @@ EOF
          ${speech_back_cmd}
     2. hub broken after a new migration (e.g. 0088_provider_status, 0091_dictation_terms): full DB restore
        from this run's verified quiesced dump (manual only; rollback-db.sh also brings ${SPEECH_UNIT} in line with the release).
-       The vzdump above is a separate, earlier whole-CT restore point: restoring it loses what the worker
-       wrote between the vzdump and its stop, so it is the fallback when the dump itself is unusable:
-         scripts/deploy/rollback-db.sh '${HUB_BACKUP_DIR}/${RUN_DUMP}' --to ${PREV_HUB_SHA}
+${vzdump_fallback}
+         scripts/deploy/rollback-db.sh '${HUB_BACKUP_DIR}/${RUN_DUMP}' --to ${PREV_HUB_SHA}${DB_SYSID:+ --expect-system-id ${DB_SYSID} --expect-db-oid ${DB_OID}}
          # it refuses while the worker is active, stops the hub, runs dropdb + createdb -O canterlot
          # + pg_restore --exit-on-error, starts the old hub and checks readyz loudly; on a failed
          # restore it starts nothing. Never start the worker on a restored DB by hand without review.
@@ -1069,39 +1284,51 @@ rehearse_start_wait_scenarios() {
 }
 
 log "deployed hub release before cutover: ${PREV_HUB_SHA}"
-log "order: vzdump (everything runs) -> read gates + session inventory again -> worker stop -> quiesced pg_dump + verify -> hub flip + restart -> worker flip + start + live -> PWA flip + Caddy recreate -> speech, chunk merge, maintenance, verify x2, geoip, retention"
+if [ "${SKIP_VZDUMP}" = "1" ]; then
+    log "order: (no vzdump) -> read gates + session inventory again -> worker stop -> quiesced pg_dump + verify -> hub flip + restart -> worker flip + start + live -> PWA flip + Caddy recreate -> speech, chunk merge, maintenance, verify x2, geoip, retention"
+else
+    log "order: vzdump (everything runs) -> read gates + session inventory again -> worker stop -> quiesced pg_dump + verify -> hub flip + restart -> worker flip + start + live -> PWA flip + Caddy recreate -> speech, chunk merge, maintenance, verify x2, geoip, retention"
+fi
 
 # 1. vzdump снимается, пока всё работает: снимок CT атомарен и не требует тишины
 # писателей. Несущая точка восстановления — проверенный pg_dump после стопа воркера.
+# Без миграций (--fast, --skip-ct-backup) vzdump не снимается: ворота и инвентарь ниже всё
+# равно идут заново, перед самым стопом.
 control_worker_exact "before vzdump" || cutover_hard "control-worker scan before vzdump: refusing to start the cutover"
-log "fresh vzdump of CT ${HUB_CTID} while hub and worker run (notes pre-${SHA}-${RUN_TS})"
-PHASE="backing-up"
-VZDUMP_STARTED=1
-VZ_OUT="$(run_write "vzdump" ssh_pmx "vzdump ${HUB_CTID} --mode snapshot --storage ${PBS_STORAGE} --notes-template 'pre-${SHA}-${RUN_TS}' 2>&1")" \
-    || { printf '%s\n' "${VZ_OUT}" | tail -5 >&2; cutover_hard "vzdump failed"; }
-if is_rehearse; then
-    log "rehearse: vzdump not run"
+if [ "${SKIP_VZDUMP}" = "1" ]; then
+    REGATE_LABEL="before the worker stop"
+    log "vzdump skipped: ${VZDUMP_SKIP_REASON}; the restore point is the quiesced pg_dump taken after the worker stop"
 else
-    case "${VZ_OUT}" in
-        *"Backup job finished successfully"*) ;;
-        *) printf '%s\n' "${VZ_OUT}" | tail -5 >&2; cutover_hard "vzdump did not report 'Backup job finished successfully'" ;;
-    esac
-    # Имя архива: формулировка PBS менялась (урок 1.16.1-1.18.1), поэтому запасной
-    # разбор по форме id ct/<ctid>/<время>Z.
-    VZ_ARCHIVE="$(printf '%s\n' "${VZ_OUT}" | grep -oE "creating (vzdump archive|Proxmox Backup Server archive) '[^']+'" | sed "s/.*'\(.*\)'/\1/" | tail -1 || true)"
-    [ -n "${VZ_ARCHIVE}" ] || VZ_ARCHIVE="$(printf '%s\n' "${VZ_OUT}" | grep -oE "ct/${HUB_CTID}/[0-9T:.-]+Z" | tail -1 || true)"
-    log "vzdump done: archive ${VZ_ARCHIVE:-unparsed (see the vzdump output)}, notes pre-${SHA}-${RUN_TS}"
+    REGATE_LABEL="after vzdump"
+    log "fresh vzdump of CT ${HUB_CTID} while hub and worker run (notes pre-${SHA}-${RUN_TS})"
+    PHASE="backing-up"
+    VZDUMP_STARTED=1
+    VZ_OUT="$(run_write "vzdump" ssh_pmx "vzdump ${HUB_CTID} --mode snapshot --storage ${PBS_STORAGE} --notes-template 'pre-${SHA}-${RUN_TS}' 2>&1")" \
+        || { printf '%s\n' "${VZ_OUT}" | tail -5 >&2; cutover_hard "vzdump failed"; }
+    if is_rehearse; then
+        log "rehearse: vzdump not run"
+    else
+        case "${VZ_OUT}" in
+            *"Backup job finished successfully"*) ;;
+            *) printf '%s\n' "${VZ_OUT}" | tail -5 >&2; cutover_hard "vzdump did not report 'Backup job finished successfully'" ;;
+        esac
+        # Имя архива: формулировка PBS менялась (урок 1.16.1-1.18.1), поэтому запасной
+        # разбор по форме id ct/<ctid>/<время>Z.
+        VZ_ARCHIVE="$(printf '%s\n' "${VZ_OUT}" | grep -oE "creating (vzdump archive|Proxmox Backup Server archive) '[^']+'" | sed "s/.*'\(.*\)'/\1/" | tail -1 || true)"
+        [ -n "${VZ_ARCHIVE}" ] || VZ_ARCHIVE="$(printf '%s\n' "${VZ_OUT}" | grep -oE "ct/${HUB_CTID}/[0-9T:.-]+Z" | tail -1 || true)"
+        log "vzdump done: archive ${VZ_ARCHIVE:-unparsed (see the vzdump output)}, notes pre-${SHA}-${RUN_TS}"
+    fi
+    VZDUMP_DONE=1
 fi
-VZDUMP_DONE=1
 
 # 2. vzdump идёт до минуты: ворота чтения и инвентарь сессий заново, прямо перед стопом.
 PHASE="regating"
-log "re-checking read gates and the session inventory after vzdump"
+log "re-checking read gates and the session inventory ${REGATE_LABEL}"
 fail_mark
-read_gates || cutover_hard_after "read gates failed after vzdump"
-[ "$(ssh_hub "readlink '${HUB_CURRENT}'" | sed 's|.*/||')" = "${PREV_HUB_SHA}" ] || cutover_hard "hub current moved unexpectedly"
+read_gates || cutover_hard_after "read gates failed ${REGATE_LABEL}"
+baseline_recheck
 fail_mark
-inventory_recheck "after vzdump" || cutover_hard_after "the session inventory changed after vzdump: refusing before the worker stop"
+inventory_recheck "${REGATE_LABEL}" || cutover_hard_after "the session inventory changed ${REGATE_LABEL}: refusing before the worker stop"
 control_worker_exact "before the worker stop" || cutover_hard "control-worker scan before the worker stop"
 
 # 3. Стоп воркера: писатели базы затихают для pg_dump.
@@ -1158,8 +1385,19 @@ WORKER_STOPPED=1
 
 # 4. Дамп при остановленном воркере и его полная проверка до flip хаба.
 PHASE="dumping"
-run_write "pg_dump" ssh_hub "install -d -m 0700 -o postgres '${HUB_BACKUP_DIR}' && runuser -u postgres -- pg_dump -Fc -Z zstd:3 -f '${HUB_BACKUP_DIR}/${RUN_DUMP}' '${HUB_PG_DB}'" \
+# Идентичность кластера и базы записывается рядом с дампом и печатается в команде отката.
+DB_SYSID=""
+DB_OID=""
+if DB_IDENTITY="$(pg_identity)"; then
+    DB_SYSID="${DB_IDENTITY% *}"
+    DB_OID="${DB_IDENTITY#* }"
+else
+    cutover_hard "cannot read the cluster identity before the dump"
+fi
+run_write "pg_dump" ssh_hub "install -d -m 0700 -o postgres '${HUB_BACKUP_DIR}' && runuser -u postgres -- pg_dump -Fc -Z zstd:3 -f '${HUB_BACKUP_DIR}/${RUN_DUMP}' -h '${HUB_PG_SOCKET}' '${HUB_PG_DB}'" \
     || cutover_hard "pg_dump failed"
+run_write "dump identity" ssh_hub "printf 'system_identifier=%s\ndatabase_oid=%s\ndatabase=%s\nsocket=%s\n' '${DB_SYSID}' '${DB_OID}' '${HUB_PG_DB}' '${HUB_PG_SOCKET}' >'${HUB_BACKUP_DIR}/${RUN_DUMP}.identity'" \
+    || cutover_hard "cannot record the cluster identity next to the dump"
 # Проверка дампа ДО flip хаба: TOC читается и каждый блок данных распаковывается.
 # Без проверенного дампа дальше только рестарт воркера (см. on_end, фазы до flip).
 # Сам восстановитель живёт в lib.sh: в этом файле не должно быть исполняемых
@@ -1188,7 +1426,11 @@ else
 fi
 PHASE="backed-up"
 DUMP_VERIFIED=1
-log "restore points: vzdump notes pre-${SHA}-${RUN_TS} (taken before the worker stop), pg_dump ${RUN_DUMP} (quiesced, verified)"
+if [ "${SKIP_VZDUMP}" = "1" ]; then
+    log "restore points: pg_dump ${RUN_DUMP} (quiesced, verified); no vzdump (skipped: ${VZDUMP_SKIP_REASON})"
+else
+    log "restore points: vzdump notes pre-${SHA}-${RUN_TS} (taken before the worker stop), pg_dump ${RUN_DUMP} (quiesced, verified)"
+fi
 
 # 5. Хаб.
 # Хаб: flip с абсолютным cd (урок: flip в /root), проверка ссылки, один рестарт.
@@ -1197,7 +1439,7 @@ RESTART_TS="$(ssh_hub "date -u '+%Y-%m-%d %H:%M:%S'")"
 [[ "${RESTART_TS}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}:[0-9]{2}$ ]] || cutover_hard "unexpected hub timestamp: '${RESTART_TS}'"
 PHASE="hub-flipping"
 HUB_FLIP_STARTED=1
-HUB_LINK_AFTER="$(run_write "hub flip" hub_locked "${HUB_FLIP_SCRIPT}" "${HUB_BASE}" "${SHA}" "${HUB_CURRENT}")"
+HUB_LINK_AFTER="$(run_write "hub flip" hub_locked "${HUB_FLIP_FWD_SCRIPT}" "${HUB_BASE}" "${SHA}" "${HUB_CURRENT}" "${PREV_HUB_SHA}")"
 # Отдельное чтение ссылки после flip: ровно releases/<sha> и абсолютная сверка.
 HUB_LINK_NOW="$(ssh_hub "readlink '${HUB_CURRENT}'")" || cutover_hard "cannot read hub current after the flip"
 [ "${HUB_LINK_NOW}" = "releases/${HUB_EXPECT}" ] || cutover_hard "hub current did not move to ${HUB_EXPECT} (now ${HUB_LINK_NOW}, flip printed ${HUB_LINK_AFTER:-nothing})"
@@ -1267,8 +1509,8 @@ worker_start_gates() {
 }
 worker_start_gates
 PHASE="worker-flipping"
-run_write "worker flip" worker_locked 'cd "$1" && ln -s "releases/$2" current.new && mv -T current.new current' \
-    "${WORKER_BASE}" "${SHA}" || cutover_hard "worker current did not move"
+run_write "worker flip" worker_locked "${WORKER_FLIP_FWD_SCRIPT}" \
+    "${WORKER_BASE}" "${SHA}" "${PREV_WORKER_SHA}" || cutover_hard "worker current did not move"
 link_points_to "${WORKER_CURRENT}" "${WORKER_BASE}" "releases/${WORKER_EXPECT}" \
     || cutover_hard "worker current did not move"
 PHASE="worker-starting"
@@ -1360,18 +1602,29 @@ if [ -z "${PWA_FAIL}" ]; then
         fi
     fi
 fi
+WEB_FOREIGN=0
+ENV_SWAPPED=0
+WEB_FLIPPED_BY_US=0
 if [ -z "${PWA_FAIL}" ]; then
-    run_write "swap canterlot.env" ssh_web "cp '${WEB_ENV}.${SHA}' '${WEB_ENV}'" || PWA_FAIL="canterlot.env swap failed"
+    # Ожидаемый прежний релиз веба проверяется ДО замены живого env: чужое состояние не трогаем.
+    WEB_NOW="$(ssh_web "readlink '${WEB_BUILD_LINK}'" 2>/dev/null)" || WEB_NOW=""
+    if [ "${WEB_NOW}" != "releases/${PREV_WEB_SHA}" ]; then
+        WEB_FOREIGN=1
+        PWA_FAIL="web link changed after approval (expected releases/${PREV_WEB_SHA}, found ${WEB_NOW:-unreadable}): nothing of the web was changed"
+    fi
+fi
+if [ -z "${PWA_FAIL}" ]; then
+    run_write "swap canterlot.env" ssh_web "cp '${WEB_ENV}.${SHA}' '${WEB_ENV}'" && ENV_SWAPPED=1 || PWA_FAIL="canterlot.env swap failed"
 fi
 if [ -z "${PWA_FAIL}" ]; then
     ssh_web "test -d '${WEB_RELEASES}/${SHA}'" || PWA_FAIL="web staged dir missing before build flip"
 fi
 CADDY_ID_BEFORE="$(ssh_web "docker inspect -f '{{.Id}}' $(shq "${WEB_CONTAINER}")" 2>/dev/null)" || CADDY_ID_BEFORE=""
 if [ -z "${PWA_FAIL}" ]; then
-    run_write "web build flip" web_locked 'cd "$1" && ln -s "releases/$2" build.new && mv -T build.new build && readlink "$3"' \
-        "${WEB_SITES_BASE}" "${SHA}" "${WEB_BUILD_LINK}" >/dev/null || true
+    run_write "web build flip" web_locked "${WEB_FLIP_FWD_SCRIPT}" \
+        "${WEB_SITES_BASE}" "${SHA}" "${WEB_BUILD_LINK}" "${PREV_WEB_SHA}" >/dev/null || true
     WEB_LINK_AFTER="$(ssh_web "readlink '${WEB_BUILD_LINK}'" 2>/dev/null)" || WEB_LINK_AFTER=""
-    [ "${WEB_LINK_AFTER}" = "releases/${WEB_EXPECT}" ] || PWA_FAIL="web build flip failed"
+    if [ "${WEB_LINK_AFTER}" = "releases/${WEB_EXPECT}" ]; then WEB_FLIPPED_BY_US=1; else PWA_FAIL="web build flip failed"; fi
 fi
 if [ -z "${PWA_FAIL}" ]; then
     run_write "caddy recreate" web_locked 'cd "$1" && docker compose up -d "$2"' "${WEB_COMPOSE_DIR}" "${WEB_CONTAINER}" \
@@ -1397,20 +1650,29 @@ if [ -z "${PWA_FAIL}" ]; then
     fi
 fi
 if [ -n "${PWA_FAIL}" ]; then
-    soft "PWA failure (soft, hub is not rolled back): ${PWA_FAIL}; restoring previous build ${PREV_WEB_SHA}"
-    WEB_SHA_EFF="${PREV_WEB_SHA}"
-    if run_write "web build flip back" web_locked 'cd "$1" && ln -s "releases/$2" build.new && mv -T build.new build' "${WEB_SITES_BASE}" "${PREV_WEB_SHA}"; then
-        log "PWA build flipped back to ${PREV_WEB_SHA}"
+    soft "PWA failure (soft, hub is not rolled back): ${PWA_FAIL}; restoring previous build ${PREV_WEB_SHA} (only what this run changed)"
+    if [ "${WEB_FOREIGN}" = "1" ]; then
+        WEB_SHA_EFF="$(deployed_sha web 2>/dev/null)" || WEB_SHA_EFF="${PREV_WEB_SHA}"
+        log "the web state belongs to someone else: no flip back, no env restore, no recreate"
     else
-        soft "PWA flip-back failed"
-    fi
-    if ssh_web "test -f '${WEB_ENV}.${PREV_WEB_SHA}'"; then
-        run_write "restore env + caddy recreate" web_locked 'cp "$1" "$2" && cd "$3" && docker compose up -d "$4"' \
-            "${WEB_ENV}.${PREV_WEB_SHA}" "${WEB_ENV}" "${WEB_COMPOSE_DIR}" "${WEB_CONTAINER}" \
-            || soft "PWA env restore failed"
-    else
-        run_write "caddy recreate after flip-back" web_locked 'cd "$1" && docker compose up -d "$2"' "${WEB_COMPOSE_DIR}" "${WEB_CONTAINER}" \
-            || soft "PWA recreate after flip-back failed"
+        WEB_SHA_EFF="${PREV_WEB_SHA}"
+        if [ "${WEB_FLIPPED_BY_US}" = "1" ]; then
+            if run_write "web build flip back" web_locked 'cd "$1" && ln -s "releases/$2" build.new && mv -T build.new build' "${WEB_SITES_BASE}" "${PREV_WEB_SHA}"; then
+                log "PWA build flipped back to ${PREV_WEB_SHA}"
+            else
+                soft "PWA flip-back failed"
+            fi
+        else
+            log "the web build was not flipped by this run: no flip back"
+        fi
+        if [ "${ENV_SWAPPED}" = "1" ] && ssh_web "test -f '${WEB_ENV}.${PREV_WEB_SHA}'"; then
+            run_write "restore env + caddy recreate" web_locked 'cp "$1" "$2" && cd "$3" && docker compose up -d "$4"' \
+                "${WEB_ENV}.${PREV_WEB_SHA}" "${WEB_ENV}" "${WEB_COMPOSE_DIR}" "${WEB_CONTAINER}" \
+                || soft "PWA env restore failed"
+        elif [ "${WEB_FLIPPED_BY_US}" = "1" ]; then
+            run_write "caddy recreate after flip-back" web_locked 'cd "$1" && docker compose up -d "$2"' "${WEB_COMPOSE_DIR}" "${WEB_CONTAINER}" \
+                || soft "PWA recreate after flip-back failed"
+        fi
     fi
 else
     log "PWA on ${WEB_EXPECT}: build flipped, one Caddy recreate, version.json and CSP ok"
@@ -1520,7 +1782,7 @@ finish_run() {
 if is_rehearse; then
     WRITES_PRINTED="$(wc -l <"${REHEARSE_COUNT_FILE}" 2>/dev/null || echo '?')"
     rm -f "${REHEARSE_COUNT_FILE}"  # lint: local-temp
-    plan_text "${SHA}" "${DIST}" "${BASE_HUB}" "${BASE_WEB}" "${BASE_WORKER}" | sed 's/^/   | /'
+    plan_text "${SHA}" "${DIST}" "${BASE_HUB}" "${BASE_WEB}" "${BASE_WORKER}" "${PLAN_VZ}" | sed 's/^/   | /'
     log "rehearse: speech: ${SPEECH_SUMMARY}; speech soft issues ${SPEECH_ISSUES} (never block the token)"
     SOFT_NOW="$(soft_total)"
     if [ "${HARD_FAILURES}" != "0" ] || [ "${SOFT_NOW}" != "0" ]; then
@@ -1536,6 +1798,13 @@ fi
 SOFT_NOW="$(soft_total)"
 log "cutover done: hub=${SHA}, worker=${SHA}, web=${WEB_SHA_EFF}, down ${WORKER_DOWNTIME}s (worker stop -> live), hub interruption ${HUB_INTERRUPTION}s, soft failures ${SOFT_NOW}, speech: ${SPEECH_SUMMARY} (speech soft issues ${SPEECH_ISSUES})"
 owner_checklist
+if [ "${SKIP_VZDUMP}" = "1" ]; then
+    FINAL_VZ_NOTE=". No vzdump was taken (skipped: ${VZDUMP_SKIP_REASON})."
+    FINAL_VZ_STEP="no vzdump (skipped) ->"
+else
+    FINAL_VZ_NOTE=", vzdump ${VZ_ARCHIVE:-archive} notes pre-${SHA}-${RUN_TS} (earlier, taken while the worker ran)."
+    FINAL_VZ_STEP="vzdump ${VZ_ARCHIVE:-<archive>} ->"
+fi
 cat <<EOF
 update note: the worker has connected to the new hub: forward-only. Its journals may already be past this run's
 dump, and an older hub stops on VersionMissing.
@@ -1546,7 +1815,7 @@ hub flip back, DB restore or worker downgrade: reviewed recovery, causes state_d
   below the dictation release needs [dictation] out of hub.toml, then ${SPEECH_UNIT} restarted, or stopped and
   disabled when that release has no bin/canterlot-speech (rollback-db.sh does it); a worker below this release
   needs [execution].delegate_mcp_servers out of worker.toml and never goes below a live supervisor release.
-restore points (reviewed recovery only): ${RUN_DUMP} in ${HUB_BACKUP_DIR} (quiesced, verified), vzdump ${VZ_ARCHIVE:-archive} notes pre-${SHA}-${RUN_TS} (earlier, taken while the worker ran).
+restore points (reviewed recovery only): ${RUN_DUMP} in ${HUB_BACKUP_DIR} (quiesced, verified)${FINAL_VZ_NOTE}
 
 === section template (paste into .superpowers/deploy/pilot-deploy-log.md; the script does not commit) ===
 ## Update to X.Y.Z (\`${SHA}\`), <N> live executions, DD.MM, HH:MM-HH:MM UTC
@@ -1557,7 +1826,7 @@ Release: \`${SHA}\` (\`<full sha>\`, tag \`vX.Y.Z\`), built by \`scripts/build-r
 ### Steps
 1. Dist: \`sha256sum -c\` OK; \`RELEASE source=\`; EXPECT; versions; glibc; openapi.
 2. Rehearsal and/or dry-run: plan ${PLAN_HASH}, token issued <time>, logs <paths>.
-3. Cutover: vzdump ${VZ_ARCHIVE:-<archive>} -> gates + inventory again -> stop -> pg_dump ${RUN_DUMP} + full read -> hub flip/restart (${HUB_INTERRUPTION} s) -> worker flip/start/live (down ${WORKER_DOWNTIME} s) -> PWA flip + one recreate.
+3. Cutover: ${FINAL_VZ_STEP} gates + inventory again -> stop -> pg_dump ${RUN_DUMP} + full read -> hub flip/restart (${HUB_INTERRUPTION} s) -> worker flip/start/live (down ${WORKER_DOWNTIME} s) -> PWA flip + one recreate.
 4. Chunk merge, maintenance, verification (two reads), retention: <paste the log lines>.
 ### Deviations
 - <none or describe>

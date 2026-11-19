@@ -7,10 +7,16 @@
 #       scripts/check-version.sh, коммит «Выпустить версию X.Y.Z». Запись X.Y.Z в
 #       CHANGES.rst пишется заранее руками; из грязного дерева допускается только
 #       изменённый CHANGES.rst, он входит в коммит. Ничего не пушит.
-#   scripts/release.sh ship X.Y.Z [--continue]
+#   scripts/release.sh ship X.Y.Z [--continue] [--full]
 #       тег, push main + тег одной атомарной операцией, сборка, проверка dist, stage,
 #       репетиция, боевой прогон по её токену, check-proxy без входа, публикация,
-#       раздел журнала выката. Можно запускать отсоединённо: ход — в
+#       раздел журнала выката. Путь выбирается автоматически (scripts/deploy/fastpath.sh,
+#       по git diff между развёрнутым и целевым релизом): без новых миграций и без правок
+#       обвязки выката репетиции нет (боевой прогон cutover.sh --fast сам пересчитывает
+#       условия), без новых миграций нет и vzdump (pg_dump с проверкой чтения остаётся);
+#       любая неясность — полный путь. --full — всегда полный путь. Путь и причины — одной
+#       строкой в логе, в файле итога (path, path_reasons, rehearsal_skipped, vzdump_skipped)
+#       и в разделе журнала. Можно запускать отсоединённо: ход — в
 #       .superpowers/deploy/release-X.Y.Z.log, фазы — в release-X.Y.Z.state, итог
 #       каждой попытки — в release-X.Y.Z.attempt-N.result, release-X.Y.Z.result —
 #       ссылка на последнюю (формат — pilot.md §11.7). Повторный запуск без
@@ -38,7 +44,7 @@ usage() {
     cat >&2 <<'EOF'
 Использование:
   scripts/release.sh prepare X.Y.Z
-  scripts/release.sh ship X.Y.Z [--continue]
+  scripts/release.sh ship X.Y.Z [--continue] [--full]
 EOF
     exit 2
 }
@@ -156,6 +162,12 @@ REHEARSAL_LOG=""
 REHEARSAL_RETRIED=no
 REHEARSAL_CODES=""
 TOKEN=""
+FORCE_FULL=0
+ROUTE_PATH=""
+ROUTE_REHEARSAL=""
+ROUTE_VZDUMP=""
+ROUTE_REASONS=""
+ROUTE_DECIDED=0
 CUTOVER_RESULT=""
 CUTOVER_LOG=""
 CUTOVER_RC=""
@@ -173,6 +185,23 @@ state_set() {
     else
         { [[ -f $STATE ]] && cat "$STATE"; printf '%s=%s\n' "$key" "$value"; } >"$tmp" || return 1
     fi
+    mv -f "$tmp" "$STATE" || return 1
+}
+# Несколько ключей одной атомарной записью (один временный файл, один mv): состояние либо
+# прежнее, либо целиком новое. Аргументы — пары ключ значение.
+state_set_many() {
+    local tmp="$STATE.tmp.$$" args=("$@") i
+    local -a pairs=()
+    for ((i = 0; i + 1 < ${#args[@]}; i += 2)); do pairs+=("${args[i]}=$(one_line "${args[i + 1]}")"); done
+    {
+        if [[ -f $STATE ]]; then
+            awk -v list="$(printf '%s\n' "${pairs[@]}")" 'BEGIN { n = split(list, p, "\n"); for (i = 1; i <= n; i++) { k = p[i]; sub(/=.*/, "", k); new[k] = p[i] } }
+                { key = $0; sub(/=.*/, "", key); if (key in new) { if (!(key in done)) { print new[key]; done[key] = 1 } next } print }
+                END { for (i = 1; i <= n; i++) { k = p[i]; sub(/=.*/, "", k); if (!(k in done)) { print p[i]; done[k] = 1 } } }' "$STATE"
+        else
+            printf '%s\n' "${pairs[@]}"
+        fi
+    } >"$tmp" || return 1
     mv -f "$tmp" "$STATE" || return 1
 }
 phase_status() { state_get "phase_$1" | awk '{print $1}'; }
@@ -229,6 +258,10 @@ write_result() {
             continued "$([[ $CONTINUE == 1 ]] && echo yes || echo no)" \
             started_at "$STARTED_AT" \
             finished_at "$(ts)" \
+            path "$ROUTE_PATH" \
+            path_reasons "$(one_line "$ROUTE_REASONS")" \
+            rehearsal_skipped "$([[ $ROUTE_REHEARSAL == skip ]] && echo yes || echo no)" \
+            vzdump_skipped "$([[ $ROUTE_VZDUMP == skip ]] && echo yes || echo no)" \
             rehearsal_retried "$REHEARSAL_RETRIED" \
             rehearsal_fail_codes "$REHEARSAL_CODES" \
             cutover_status "$([[ -n $cr ]] && kv "$cr" status)" \
@@ -297,6 +330,11 @@ append_journal() {
             "$VER" "$SHA12" "$status" "$(date -u '+%d.%m, %H:%M')"
         printf 'Release: `%s` (`%s`, tag `%s`); dist `%s`. Driver: `scripts/release.sh ship %s%s`, started %s.\n\n' \
             "$SHA12" "$SHA" "$TAG" "$DIST_ROOT/$SHA12" "$VER" "$([[ $CONTINUE == 1 ]] && echo ' --continue')" "$STARTED_AT"
+        if [[ -n $ROUTE_PATH ]]; then
+            printf 'Path: `%s` (rehearsal %s, vzdump %s): %s.\n\n' "$ROUTE_PATH" \
+                "$([[ $ROUTE_REHEARSAL == skip ]] && echo skipped || echo run)" "$([[ $ROUTE_VZDUMP == skip ]] && echo skipped || echo run)" \
+                "$(one_line "$ROUTE_REASONS")"
+        fi
         printf '**Result: %s: %s.**\n\n### Phases\n' "$status" "$reason"
         for p in "${PHASES[@]}"; do
             st=$(state_get "phase_$p")
@@ -307,8 +345,14 @@ append_journal() {
             printf -- '- result `%s`: status %s, soft failures %s (%s), speech soft failures %s, worker down %s s, hub interruption %s s\n' \
                 "$cr" "$(kv "$cr" status)" "$(kv "$cr" soft_failures)" "$(kv "$cr" soft_by_kind)" \
                 "$(kv "$cr" speech_soft_failures)" "$(kv "$cr" worker_downtime_s)" "$(kv "$cr" hub_interruption_s)"
-            [[ -z $(kv "$cr" dump) ]] || printf -- '- restore points: dump `%s`, vzdump `%s` notes `%s`\n' \
-                "$(kv "$cr" dump)" "$(kv "$cr" vzdump_archive)" "$(kv "$cr" vzdump_notes)"
+            # Точки восстановления — из записанных фактов, без пустых полей несуществующего vzdump.
+            if [[ -n $(kv "$cr" dump) || $(kv "$cr" vzdump_done) == yes || $(kv "$cr" vzdump_skipped) == yes ]]; then
+                printf -- '- restore points: %s; %s\n' \
+                    "$([[ -n $(kv "$cr" dump) ]] && printf 'dump `%s` (verified)' "$(kv "$cr" dump)" || printf 'no verified dump')" \
+                    "$(if [[ $(kv "$cr" vzdump_skipped) == yes ]]; then printf 'vzdump skipped (%s)' "$(kv "$cr" vzdump_skip_reason)"
+                       elif [[ $(kv "$cr" vzdump_done) == yes ]]; then printf 'vzdump `%s` notes `%s`' "$(kv "$cr" vzdump_archive)" "$(kv "$cr" vzdump_notes)"
+                       else printf 'no vzdump taken'; fi)"
+            fi
             if [[ -n $(kv "$cr" stop_block) && $(kv "$cr" status) == stop_and_report ]]; then
                 printf -- '- STOP block: `%s` (paste it here, call the owner)\n' "$(kv "$cr" stop_block)"
             elif [[ -n $(kv "$cr" stop_block) ]]; then
@@ -330,6 +374,11 @@ append_journal() {
             printf -- '- cutover #%s: `%s`, result `%s`\n' "$n" "$STATE_DIR/cutover-$VER-$n.log" "$STATE_DIR/cutover-$VER-$n.result"
         done
         printf '\n### Deviations\n'
+        if [[ $ROUTE_REHEARSAL == skip ]]; then
+            printf -- '- the rehearsal was skipped (fast path): %s\n' "$(one_line "$ROUTE_REASONS")"
+        elif [[ $ROUTE_VZDUMP == skip ]]; then
+            printf -- '- the vzdump was skipped (no new migration); the quiesced pg_dump is the restore point\n'
+        fi
         if [[ $REHEARSAL_RETRIED == yes ]]; then
             printf -- '- the rehearsal was repeated once after transient failure codes `%s`\n' "$(state_get retried_codes)"
         fi
@@ -414,6 +463,7 @@ finish_record() {
 on_exit() {
     local rc=$?
     set +e
+    warm_cancel
     if [[ $FINISHED == 0 && $RUN_STARTED == 1 ]]; then
         finish_record error 1 "release.sh stopped unexpectedly (exit $rc) in phase $CURRENT_PHASE; see $LOG"
         rc=$FINISH_CODE
@@ -552,16 +602,70 @@ dist_ok() {
     grep -qx 'format=1' "$d/EXPECT"
 }
 
+# Сборка тестового бинаря spec_compat (его потом запускает preflight.sh при каждом cutover) идёт
+# параллельно сборке релиза: та же команда и тот же каталог target, что в preflight.sh, но
+# только компиляция (--no-run). Сама проверка не пропускается и не подменяется: preflight
+# по-прежнему запускает её, просто артефакты уже собраны. Сбой прогрева выпуск не останавливает.
+WARM_PID=""
+# Прогрев запускается отдельным сеансом (setsid): так отмена убирает и cargo, и его дочерние rustc.
+warm_spec_compat() {
+    # shellcheck disable=SC2016 # скрипт раскрывает свои позиционные аргументы
+    setsid bash -c 'cd "$1" || exit 1
+        command -v cargo >/dev/null 2>&1 || source ~/.cargo/env
+        TMPDIR=/tmp exec cargo test --locked -p canterlot-worker --all-features --test it --no-run' _ "$repo" >"$1" 2>&1 &
+    WARM_PID=$!
+}
+# Остановить прогрев (если жив) и убрать его: группа процессов сеанса получает TERM, затем KILL.
+warm_cancel() {
+    local pid=$WARM_PID n
+    [[ -n $pid ]] || return 0
+    WARM_PID=""
+    if kill -0 "$pid" 2>/dev/null; then
+        kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+        for ((n = 0; n < 50; n++)); do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.1
+        done
+        kill -KILL -- "-$pid" 2>/dev/null || true
+    fi
+    wait "$pid" 2>/dev/null || true
+}
+# Ждать прогрев; сигнал, пришедший пока ждём (wait им прерывается), отменяет прогрев.
+warm_wait() {
+    local wlog=$1 pid=$WARM_PID rc=0
+    [[ -n $pid ]] || return 0
+    while :; do
+        if [[ -n $SIGNALED ]]; then
+            warm_cancel
+            log "warm-up of the spec_compat build cancelled by SIG$SIGNALED"
+            return 0
+        fi
+        if wait "$pid"; then rc=0; break; else rc=$?; fi
+        kill -0 "$pid" 2>/dev/null || break
+    done
+    WARM_PID=""
+    if ((rc == 0)); then
+        log "warm-up of the spec_compat build done (the preflight still runs the check itself)"
+    else
+        log "warm-up of the spec_compat build failed (see $wlog): the preflight compiles it itself"
+    fi
+}
+
 phase_build() {
-    local blog="$STATE_DIR/build-$VER.log"
+    local blog="$STATE_DIR/build-$VER.log" wlog="$STATE_DIR/warm-$VER.log"
     if [[ -e $DIST_ROOT/$SHA12 ]]; then
         dist_ok || finish failed_before_cutover 1 "$DIST_ROOT/$SHA12 exists but is not a complete build of $SHA12: remove that directory by hand, then --continue"
         log "dist $DIST_ROOT/$SHA12 already built from $SHA12"
     else
         state_set log_build "$blog"
-        log "build: scripts/build-release.sh $TAG --local (log $blog)"
-        CANTERLOT_DIST_ROOT="$DIST_ROOT" scripts/build-release.sh "$TAG" --local >"$blog" 2>&1 \
-            || finish failed_before_cutover 1 "scripts/build-release.sh failed, see $blog"
+        log "build: scripts/build-release.sh $TAG --local (log $blog); warm-up of the spec_compat build in parallel (log $wlog)"
+        warm_spec_compat "$wlog"
+        if ! CANTERLOT_DIST_ROOT="$DIST_ROOT" scripts/build-release.sh "$TAG" --local >"$blog" 2>&1; then
+            warm_cancel
+            log "warm-up of the spec_compat build cancelled: the build failed"
+            finish failed_before_cutover 1 "scripts/build-release.sh failed, see $blog"
+        fi
+        warm_wait "$wlog"
     fi
     phase_set build "done"
 }
@@ -594,8 +698,61 @@ rehearsal_transient() {
     done
 }
 
+# --- ship: выбор пути (быстрый / с репетицией без vzdump / полный) --------------------
+
+set_route() {
+    ROUTE_PATH=$1
+    ROUTE_REHEARSAL=$2
+    ROUTE_VZDUMP=$3
+    ROUTE_REASONS=$(one_line "$4")
+    # Решение и всё, что его сопровождает (route_fallback, refused_fast), пишутся одной записью.
+    state_set_many route_path "$ROUTE_PATH" route_rehearsal "$ROUTE_REHEARSAL" route_vzdump "$ROUTE_VZDUMP" \
+        route_reasons "$ROUTE_REASONS" "${@:5}"
+    log "release path: $ROUTE_PATH (rehearsal $ROUTE_REHEARSAL, vzdump $ROUTE_VZDUMP): $ROUTE_REASONS"
+}
+load_route() {
+    ROUTE_PATH=$(state_get route_path)
+    ROUTE_REHEARSAL=$(state_get route_rehearsal)
+    ROUTE_VZDUMP=$(state_get route_vzdump)
+    ROUTE_REASONS=$(state_get route_reasons)
+}
+# Путь решается по развёрнутому релизу, который читает fastpath.sh, и по git diff.
+# Любая неясность (скрипт упал, вывод не разобран, пути и флаги не согласуются) — полный
+# путь. Решение принимается один раз за запуск; до начала боевого прогона каждый
+# запуск (и --continue) решает заново: развёрнутый релиз мог смениться.
+decide_route() {
+    local out="" path reh vz reasons
+    [[ $ROUTE_DECIDED == 0 ]] || return 0
+    ROUTE_DECIDED=1
+    if [[ $(state_get route_fallback) == yes ]]; then
+        load_route
+        log "release path: $ROUTE_PATH (kept from the saved fallback to the full path): $ROUTE_REASONS"
+        return 0
+    fi
+    if [[ $FORCE_FULL == 1 ]]; then
+        set_route full run run "--full: the full path was asked for (rehearsal and vzdump)"
+        return 0
+    fi
+    if ! out=$(scripts/deploy/fastpath.sh "$SHA12" --source "$repo" --dist "$DIST_ROOT"); then
+        set_route full run run "fastpath.sh failed, the live release is unknown: full path"
+        return 0
+    fi
+    path=$(printf '%s\n' "$out" | sed -n 's/^path=//p' | sed -n 1p)
+    reh=$(printf '%s\n' "$out" | sed -n 's/^rehearsal=//p' | sed -n 1p)
+    vz=$(printf '%s\n' "$out" | sed -n 's/^vzdump=//p' | sed -n 1p)
+    reasons=$(printf '%s\n' "$out" | sed -n 's/^reasons=//p' | sed -n 1p)
+    case "$path/$reh/$vz" in
+        fast/skip/skip | rehearsed/run/skip | full/run/run) ;;
+        *)
+            set_route full run run "fastpath.sh output was not understood (path '$path', rehearsal '$reh', vzdump '$vz'): full path"
+            return 0 ;;
+    esac
+    [[ -n $reasons ]] || reasons="fastpath.sh gave no reasons"
+    set_route "$path" "$reh" "$vz" "$reasons"
+}
+
 run_rehearsal() {
-    local n
+    local n skip=()
     n=$(next_seq rehearsals)
     REHEARSAL_RESULT="$STATE_DIR/rehearsal-$VER-$n.result"
     REHEARSAL_LOG="$STATE_DIR/rehearsal-$VER-$n.log"
@@ -603,7 +760,8 @@ run_rehearsal() {
     state_set log_rehearsal "$REHEARSAL_LOG"
     log "rehearsal #$n: scripts/deploy/cutover.sh $SHA12 --rehearse (log $REHEARSAL_LOG)"
     REHEARSAL_RC=0
-    scripts/deploy/cutover.sh "$SHA12" --rehearse --source "$repo" --dist "$DIST_ROOT" \
+    [[ $ROUTE_VZDUMP != skip ]] || skip=(--skip-ct-backup)
+    scripts/deploy/cutover.sh "$SHA12" --rehearse "${skip[@]}" --source "$repo" --dist "$DIST_ROOT" \
         --result "$REHEARSAL_RESULT" >"$REHEARSAL_LOG" 2>&1 || REHEARSAL_RC=$?
     state_set rehearsal_exit "$REHEARSAL_RC"
 }
@@ -617,9 +775,21 @@ rehearsal_passed() {
 
 phase_rehearsal() {
     local retried=0
+    decide_route
+    if [[ $ROUTE_REHEARSAL == skip ]]; then
+        phase_set rehearsal skipped
+        return 0
+    fi
     phase_set rehearsal started
     run_rehearsal
     stop_if_signaled
+    # cutover.sh сам пересчитал условия и не согласился пропустить vzdump: полный путь.
+    if ! rehearsal_passed && [[ $ROUTE_VZDUMP == skip ]] && [[ $(kv "$REHEARSAL_RESULT" fail_codes) == fast_path_refused ]]; then
+        set_route full run run "cutover.sh refused to skip the vzdump (fast_path_refused): the live release or the migrations differ from the decision; full path" \
+            route_fallback yes
+        run_rehearsal
+        stop_if_signaled
+    fi
     if ! rehearsal_passed; then
         REHEARSAL_CODES=$(kv "$REHEARSAL_RESULT" fail_codes)
         if rehearsal_transient "$REHEARSAL_RESULT"; then
@@ -663,8 +833,30 @@ token_rejected_before_writes() {
     done
 }
 
+# Фаза execute записана как started, но результат её cutover — проверенный отказ быстрого пути до
+# любой записи: переход в refused_fast (с решением о полном пути) допишется сейчас.
+recover_proven_refusal() {
+    local r
+    [[ $(phase_status execute) == started ]] || return 0
+    r=$(state_get cutover_result)
+    [[ -n $r ]] || return 0
+    fast_rejected_before_writes "$r" || return 0
+    log "the saved execute attempt is a proven pre-write refusal of the fast path ($r): recovered as refused_fast, full path"
+    state_set_many route_path full route_rehearsal run route_vzdump run \
+        route_reasons "recovered: cutover.sh refused the fast path before any write (see $r); full path" \
+        route_fallback yes phase_execute "refused_fast $(ts)"
+}
+# Отказ быстрого пути до любой записи: cutover.sh сам пересчитал условия и не согласился.
+fast_rejected_before_writes() {
+    local r=$1
+    cutover_result_complete "$r" || return 1
+    [[ $(kv "$r" status) == refused && $(kv "$r" phase) == eligibility && -z $(kv "$r" signal) ]] || return 1
+    [[ $(kv "$r" vzdump_done) == no && $(kv "$r" worker_stopped) == no ]] || return 1
+    [[ $(kv "$r" fail_codes) == fast_path_refused ]]
+}
+
 run_execute() {
-    local n rc=0
+    local n rc=0 args=()
     n=$(next_seq executes)
     CUTOVER_RESULT="$STATE_DIR/cutover-$VER-$n.result"
     CUTOVER_LOG="$STATE_DIR/cutover-$VER-$n.log"
@@ -672,8 +864,15 @@ run_execute() {
     state_set log_cutover "$CUTOVER_LOG"
     # Фаза отмечается начатой ДО запуска: после этого --continue её не повторит.
     phase_set execute started
-    log "real cutover: scripts/deploy/cutover.sh --execute $SHA12 --confirm <rehearsal token> (log $CUTOVER_LOG)"
-    scripts/deploy/cutover.sh --execute "$SHA12" --confirm "$TOKEN" --source "$repo" --dist "$DIST_ROOT" \
+    if [[ $ROUTE_PATH == fast ]]; then
+        args=(--fast)
+        log "real cutover (fast path, no token): scripts/deploy/cutover.sh --execute $SHA12 --fast (log $CUTOVER_LOG)"
+    else
+        args=(--confirm "$TOKEN")
+        [[ $ROUTE_VZDUMP != skip ]] || args+=(--skip-ct-backup)
+        log "real cutover: scripts/deploy/cutover.sh --execute $SHA12 --confirm <rehearsal token>${ROUTE_VZDUMP:+ (vzdump $ROUTE_VZDUMP)} (log $CUTOVER_LOG)"
+    fi
+    scripts/deploy/cutover.sh --execute "$SHA12" "${args[@]}" --source "$repo" --dist "$DIST_ROOT" \
         --result "$CUTOVER_RESULT" >"$CUTOVER_LOG" 2>&1 || rc=$?
     CUTOVER_RC=$rc
     state_set execute_exit "$rc"
@@ -691,10 +890,22 @@ cutover_inconsistency() {
 }
 
 phase_execute() {
-    local r status token_retry=0
+    local r status token_retry=0 fast_retry=0
     while :; do
         run_execute
         r=$CUTOVER_RESULT
+        if ((fast_retry == 0)) && fast_rejected_before_writes "$r"; then
+            fast_retry=1
+            log "cutover.sh refused the $ROUTE_PATH path before any write: one fresh full rehearsal, then the real run"
+            # Доказанный отказ до записи и решение «полный путь» сохраняются ОДНОЙ записью: --continue
+            # после прерванного возврата начинает со свежей полной репетиции, не с боевого прогона.
+            set_route full run run "cutover.sh refused the $ROUTE_PATH path before any write (was: $ROUTE_REASONS); full path" \
+                route_fallback yes phase_execute "refused_fast $(ts)"
+            log "phase execute: refused_fast"
+            phase_rehearsal
+            check_pin
+            continue
+        fi
         if ((token_retry == 0)) && token_rejected_before_writes "$r"; then
             token_retry=1
             log "the token was rejected before any write ($(kv "$r" fail_codes)): one fresh rehearsal, then the real run"
@@ -775,6 +986,7 @@ resume_after_execute() {
     CUTOVER_LOG=$(state_get log_cutover)
     REHEARSAL_RESULT=$(state_get rehearsal_result)
     REHEARSAL_LOG=$(state_get log_rehearsal)
+    load_route
     if ! cutover_result_complete "$r" || [[ $(kv "$r" status) != "done" ]] \
         || [[ -n $(cutover_inconsistency "$r" "$(state_get execute_exit)") ]]; then
         log "the real cutover already ran (phase execute: $(state_get phase_execute)); it is never re-run"
@@ -843,6 +1055,7 @@ ship() {
         record_attempt refused 2 "no saved state $STATE: nothing to continue"
         exit "$FINISH_CODE"
     fi
+    [[ ! -f $STATE ]] || [[ $(state_get route_forced) != yes ]] || FORCE_FULL=1
     preconditions
     RUN_STARTED=1
     trap 'SIGNALED=INT' INT
@@ -858,9 +1071,16 @@ ship() {
         log "pinned $SHA in $STATE"
     fi
     SHA12=${SHA:0:12}
-    if [[ -n $(phase_status execute) ]]; then
-        resume_after_execute
-    fi
+    if [[ $FORCE_FULL == 1 ]]; then state_set route_forced yes; fi
+    load_route
+    # Остаток краха старой схемы (execute=started при сохранённом проверенном отказе): восстановить.
+    recover_proven_refusal
+    # Отказ до записи (refused_fast, refused_token) боевым прогоном не считается: дальше идёт
+    # свежая репетиция. Всё остальное, начавшее боевой прогон, не повторяется никогда.
+    case "$(phase_status execute)" in
+        '' | refused_fast | refused_token) ;;
+        *) resume_after_execute ;;
+    esac
     if [[ $(phase_status proxy) == "done" ]]; then PROXY_CHECK=pass; fi
     if [[ $(phase_status publish) == "done" ]]; then PUBLISHED=yes; fi
     for p in "${PHASES[@]}"; do
@@ -889,12 +1109,17 @@ case "${1:-}" in
         [[ $# == 2 ]] || usage
         prepare "$2" ;;
     ship)
-        [[ $# == 2 || $# == 3 ]] || usage
+        [[ $# -ge 2 && $# -le 4 ]] || usage
         [[ ${2:-} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || usage
-        if [[ $# == 3 ]]; then
-            [[ $3 == --continue ]] || usage
-            CONTINUE=1
-        fi
-        ship "$2" ;;
+        ship_ver=$2
+        shift 2
+        for ship_arg in "$@"; do
+            case "$ship_arg" in
+                --continue) CONTINUE=1 ;;
+                --full) FORCE_FULL=1 ;;
+                *) usage ;;
+            esac
+        done
+        ship "$ship_ver" ;;
     *) usage ;;
 esac

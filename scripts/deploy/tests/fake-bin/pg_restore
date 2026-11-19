@@ -25,6 +25,15 @@ if [ -n "${target}" ]; then
     cat "${file}" >/dev/null
     exit 0
 fi
+# Кластер задаёт только явный -h: без него (кластер по умолчанию) или с чужим сокетом — отказ.
+if [ -n "${FAKE_PG_SOCKET:-}" ]; then
+    got=""; prev=""
+    for arg in "$@"; do [ "${prev}" = "-h" ] && got="${arg}"; prev="${arg}"; done
+    if [ "${got}" != "${FAKE_PG_SOCKET}" ]; then
+        echo "fake-pg: wrong cluster (-h '${got}', want '${FAKE_PG_SOCKET}')" >&2
+        exit 1
+    fi
+fi
 if [ "${FAKE_FAIL_PG_RESTORE:-0}" = "1" ]; then
     echo "fake-pg_restore: injected restore failure" >&2
     exit 1

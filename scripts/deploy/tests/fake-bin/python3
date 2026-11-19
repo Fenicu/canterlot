@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Подмена python3 для стенда: обычный python3, но вызов fastpath-classify.py можно заменить
+# программой state/classifier-stub (сбои классификатора вносит стенд, не окружение рабочих скриптов).
+for arg in "$@"; do
+    case "${arg}" in
+        *fastpath-classify.py)
+            if [ -n "${FAKE_ROOT:-}" ] && [ -x "${FAKE_ROOT}/state/classifier-stub" ]; then exec "${FAKE_ROOT}/state/classifier-stub" "$@"; fi ;;
+    esac
+done
+exec /usr/bin/python3 "$@"

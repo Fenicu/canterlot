@@ -2,7 +2,12 @@
 # Общий стенд cutover: живые сессии, развёрнутый prev, залитый new, dist цели.
 # Подключается тестами cutover/rehearse после lib-harness.sh (файл не исполняемый).
 # shellcheck disable=SC2034,SC2015
-cargo() { echo "cargo $*" >>"${FAKE_ROOT}/state/calls.log"; return 0; }
+cargo() {
+    echo "cargo $*" >>"${FAKE_ROOT}/state/calls.log"
+    # Сценарий может вклинить действие во время предпроверки (там идёт spec_compat).
+    if [ -n "${FAKE_CARGO_HOOK:-}" ]; then bash "${FAKE_CARGO_HOOK}" >&2 || true; fi
+    return 0
+}
 export -f cargo
 sleep() { case "${1:-}" in 1|2|3|5|60) command sleep 0.1;; *) command sleep "$@";; esac; }
 export -f sleep
@@ -48,7 +53,7 @@ make_cutover_dist() {
     for ext in br zst gz; do
         printf 'precompressed\n' >"${DIST_DIR}/web/_app/immutable/chunks/probe.js.${ext}"
     done
-    printf 'sha=%s\ndate=x\nmigrations_last=0041_fake_harness.sql\nsource=%s%028d\n' "${SHA_NEW}" "${SHA_NEW}" 0 >"${DIST_DIR}/RELEASE"
+    printf 'sha=%s\ndate=x\nmigrations_last=0041_fake_harness.sql\nsource=%s\n' "${SHA_NEW}" "${SHA_NEW_FULL:-${SHA_NEW}$(printf '%028d' 0)}" >"${DIST_DIR}/RELEASE"
     printf "default-src 'self'; script-src '%s'; connect-src wss://hub.example.com" \
         'sha256-hUmDl3yY/7GaaX+Zuy8aEy8IzxgpBs7xccqYHs2/7kQ=' >"${DIST_DIR}/csp.txt"
     dist_resync
@@ -207,3 +212,7 @@ wait_for_log() {
     return 1
 }
 
+
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=fast-source-fixture.sh
+source "$(dirname "${BASH_SOURCE[0]}")/fast-source-fixture.sh"

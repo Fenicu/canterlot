@@ -16,9 +16,10 @@ fi
 # а без bin/canterlot-speech в релизе — стоп и выключение юнита.
 # Дамп — проверенный pg_dump прогона (canterlot-pre-<sha>-<ts>.dump): его снимают
 # после стопа воркера, при затихших писателях, и это несущая точка восстановления.
-# vzdump того же прогона (notes pre-<sha>-<ts>) снят раньше, пока воркер работал:
-# это отдельная точка восстановления всего CT, и её восстановление теряет записи
-# между vzdump и стопом воркера.
+# vzdump того же прогона (notes pre-<sha>-<ts>), если он был, снят раньше, пока воркер
+# работал: это отдельная точка восстановления всего CT, и её восстановление теряет записи
+# между vzdump и стопом воркера. Выпуск без миграций (cutover.sh --fast, --skip-ct-backup)
+# vzdump не снимает: тогда проверенный дамп — единственная точка восстановления прогона.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,15 +29,21 @@ source "${SCRIPT_DIR}/lib.sh"
 
 DUMP=""
 TO_RELEASE=""
+EXPECT_SYS=""
+EXPECT_OID=""
 while (($#)); do
     case "$1" in
         --to) TO_RELEASE="$(short_sha "$2")"; shift 2 ;;
+        --expect-system-id) EXPECT_SYS="$2"; shift 2 ;;
+        --expect-db-oid) EXPECT_OID="$2"; shift 2 ;;
         -*) die "unknown flag: $1" ;;
         *) DUMP="$1"; shift ;;
     esac
 done
 [ -n "${DUMP}" ] || die "usage: rollback-db.sh <dump> [--to <release>]"
 [ -z "${TO_RELEASE}" ] || require_release_id "${TO_RELEASE}"
+# Тот же замок, что у cutover: откат не идёт параллельно выкату и не разбирает его состояние на лету.
+take_deploy_lock "this rollback"
 XDG_RUNTIME_DIR="/run/user/$(id -u)"
 export XDG_RUNTIME_DIR
 # Правило отката (ADR-0005): хаб без собственного входа (1.29 и раньше) верит
@@ -131,12 +138,29 @@ assert_worker_stopped() {
     log "worker is provably stopped (${active_state}/${sub_state}, no MainPID, no worker process; ${phase})"
 }
 
+# Кластер и база те же, что у дампа: сверка ДО остановки хаба и любого dropdb. Ожидаемые значения
+# печатает cutover в команде отката; без них — запись рядом с дампом (.identity); нет и её — громкое
+# предупреждение (дамп старого прогона).
+if [ -z "${EXPECT_SYS}${EXPECT_OID}" ]; then
+    ID_FILE="$(ssh_hub "cat '${DUMP}.identity'" 2>/dev/null)" || ID_FILE=""
+    EXPECT_SYS="$(printf '%s\n' "${ID_FILE}" | sed -n 's/^system_identifier=//p' | sed -n 1p)"
+    EXPECT_OID="$(printf '%s\n' "${ID_FILE}" | sed -n 's/^database_oid=//p' | sed -n 1p)"
+fi
+if [ -z "${EXPECT_SYS}" ] || [ -z "${EXPECT_OID}" ]; then
+    log "WARNING: no recorded cluster identity for ${DUMP} (no --expect-system-id/--expect-db-oid, no ${DUMP}.identity): the cluster is NOT verified; read the target before going on"
+else
+    CUR_ID="$(pg_identity)" || die "cannot read the cluster identity of ${HUB_PG_DB} on ${HUB_PG_SOCKET}: refusing to touch the database"
+    [ "${CUR_ID% *}" = "${EXPECT_SYS}" ] || die "the cluster at ${HUB_PG_SOCKET} has system identifier ${CUR_ID% *}, the dump was taken from ${EXPECT_SYS}: refusing before the hub stops (wrong cluster)"
+    [ "${CUR_ID#* }" = "${EXPECT_OID}" ] || die "the database ${HUB_PG_DB} has database oid ${CUR_ID#* }, the dump was taken from oid ${EXPECT_OID}: refusing before the hub stops"
+    log "cluster identity verified: system identifier ${EXPECT_SYS}, database oid ${EXPECT_OID}"
+fi
+
 log "rollback-db: refusing unless the worker is provably stopped"
 assert_worker_stopped "before any change"
 
 # Все предпосылки проверяются ДО остановки хаба: иначе битый дамп или
 # несуществующий релиз оставляли бы хаб остановленным без плана восстановления.
-log "restoring the run's quiesced pg_dump (taken after the worker stop); the run's vzdump is an earlier whole-CT point taken while the worker ran"
+log "restoring the run's quiesced pg_dump (taken after the worker stop); a vzdump of the run, if it took one (none on a run without migrations), is an earlier whole-CT point taken while the worker ran"
 ssh_hub "test -s '${DUMP}'" || die "dump not found or empty: ${DUMP}"
 verify_dump "${DUMP}" || die "dump verification failed before stopping the hub: ${DUMP}"
 # Без --to хаб поднимется на том релизе, на который сейчас указывает current:
@@ -197,7 +221,7 @@ log "restoring ${DUMP} (dropdb + createdb + full pg_restore --exit-on-error)"
 # Последняя сверка ровно перед dropdb: между ранней проверкой и этой точкой
 # воркер мог появиться (auto-restart, ручной запуск, осиротевший процесс).
 assert_worker_stopped "immediately before dropdb"
-if ssh_hub "runuser -u postgres -- dropdb '${HUB_PG_DB}' && runuser -u postgres -- createdb -O '${HUB_PG_USER}' '${HUB_PG_DB}' && runuser -u postgres -- pg_restore --exit-on-error -d '${HUB_PG_DB}' '${DUMP}'"; then
+if ssh_hub "runuser -u postgres -- dropdb -h '${HUB_PG_SOCKET}' '${HUB_PG_DB}' && runuser -u postgres -- createdb -h '${HUB_PG_SOCKET}' -O '${HUB_PG_USER}' '${HUB_PG_DB}' && runuser -u postgres -- pg_restore --exit-on-error -h '${HUB_PG_SOCKET}' -d '${HUB_PG_DB}' '${DUMP}'"; then
     log "pg_restore done"
 else
     log "pg_restore FAILED: refusing to start anything on a partial database. Needs the owner loudly"

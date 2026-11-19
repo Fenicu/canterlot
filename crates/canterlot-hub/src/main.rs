@@ -45,6 +45,21 @@ enum Command {
     },
     /// Печатает документ OpenAPI (содержимое docs/api/openapi.json) без конфига и базы.
     Openapi,
+    /// Миграции, вшитые в этот бинарь (без конфига и базы).
+    Migrations {
+        #[command(subcommand)]
+        command: MigrationsCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum MigrationsCommand {
+    /// Печатает JSON со всеми вшитыми миграциями: версия, описание, контрольная сумма.
+    Manifest {
+        /// Формат вывода один, флаг оставлен для явности вызова из выката.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -141,6 +156,16 @@ async fn run(args: Args) -> Result<(), String> {
             return write!(std::io::stdout().lock(), "{}", http::openapi::render())
                 .map_err(|_| "output_error".to_owned());
         }
+        Command::Migrations {
+            command: MigrationsCommand::Manifest { .. },
+        } => {
+            return writeln!(
+                std::io::stdout().lock(),
+                "{}",
+                db::migration_manifest_json()
+            )
+            .map_err(|_| "output_error".to_owned());
+        }
         Command::Init(config) | Command::Serve(config) => config,
         Command::Machine { command } => match command {
             MachineCommand::Add { config, .. }
@@ -234,7 +259,9 @@ async fn run(args: Args) -> Result<(), String> {
                 .map_err(|_| "presets_seed_error".to_owned())?;
             serve(pool.clone(), config, installation).await?;
         }
-        Command::Openapi => unreachable!("handled before the config is loaded"),
+        Command::Openapi | Command::Migrations { .. } => {
+            unreachable!("handled before the config is loaded")
+        }
         Command::Geoip { .. } => unreachable!("handled before the database is opened"),
         Command::Auth { command } => {
             use canterlot_hub::owner_auth::cli;
@@ -530,4 +557,55 @@ async fn serve(
         .map_err(|failed| failed.0.to_owned())?;
     http_result?;
     grpc_result
+}
+
+#[cfg(test)]
+mod tests {
+    /// Всё, что хаб делает с базой в `serve` до начала обслуживания, должно быть либо
+    /// миграциями из `MIGRATOR` (их видит манифест выката), либо перечислено здесь, а
+    /// файлы этих вызовов — в `MIGRATION_CODE` у `scripts/deploy/fastpath-classify.py`.
+    /// Новый вызов с записью в базу до `serve(` без правки списка и классификатора
+    /// ломает этот тест: выкат без vzdump и без репетиции его бы не заметил.
+    #[test]
+    fn serve_startup_calls_are_pinned() {
+        let source = include_str!("main.rs");
+        let start = source
+            .find("        Command::Serve(_) => {")
+            .expect("the Serve arm");
+        let rest = &source[start..];
+        let end = rest[10..]
+            .find("\n        Command::")
+            .map_or(rest.len(), |at| at + 10);
+        let arm = &rest[..end];
+        let mut calls = Vec::new();
+        for (at, _) in arm.match_indices('(') {
+            let token: String = arm[..at]
+                .chars()
+                .rev()
+                .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == ':')
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            if token.contains("::") {
+                calls.push(token);
+            }
+        }
+        let expected = [
+            "Command::Serve",
+            "tracing_subscriber::registry",
+            "tracing_subscriber::fmt::layer",
+            "tracing_subscriber::filter::filter_fn",
+            "installation::check_manifest",
+            "db::migration_error_code",
+            "sqlx::query_scalar",
+            "installation::check",
+            "presets::seed_all_missing",
+        ];
+        assert_eq!(
+            calls, expected,
+            "a startup call changed in the Serve arm: if it writes to the database, add its source \
+             files to MIGRATION_CODE in scripts/deploy/fastpath-classify.py, then update this list"
+        );
+    }
 }

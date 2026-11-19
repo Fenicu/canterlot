@@ -63,11 +63,21 @@ if [ "${host}" = "fakeproxmox" ] && [ "${cmd}" = "ps -eo pid=,args=" ]; then
 fi
 rc=0
 bash -c "${cmd}" || rc=$?
+# Обрыв транспорта ПОСЛЕ того, как команда напечатала ответ: клиент видит вывод и код 255.
+if [ -n "${FAKE_SSH_TRANSPORT_FAIL_MATCH:-}" ] && [[ "${cmd}" == *"${FAKE_SSH_TRANSPORT_FAIL_MATCH}"* ]]; then
+    echo "fake-ssh: connection lost after the reply" >&2
+    exit 255
+fi
 # Крючок «после успешной команды»: детерминированно вклинить конкурентное
 # действие (например, flip current между проверкой и удалением) в старую схему.
 if [ -n "${FAKE_SSH_AFTER_HOOK:-}" ] && [ -n "${FAKE_SSH_AFTER_CMD:-}" ] && [ "${rc}" = "0" ] \
     && [[ "${cmd}" == *"${FAKE_SSH_AFTER_CMD}"* ]] \
     && { [ -z "${FAKE_SSH_AFTER_UNLESS:-}" ] || [[ "${cmd}" != *"${FAKE_SSH_AFTER_UNLESS}"* ]]; }; then
-    FAKE_SSH_LAST_CMD="${cmd}" bash "${FAKE_SSH_AFTER_HOOK}" >&2 || true
+    # FAKE_SSH_AFTER_NTH=N: крючок только на N-м совпадении (счётчик в state/after-hook-count).
+    hits=$(( $(cat "${FAKE_ROOT}/state/after-hook-count" 2>/dev/null || echo 0) + 1 ))
+    printf '%s\n' "${hits}" >"${FAKE_ROOT}/state/after-hook-count"
+    if [ -z "${FAKE_SSH_AFTER_NTH:-}" ] || [ "${hits}" = "${FAKE_SSH_AFTER_NTH}" ]; then
+        FAKE_SSH_LAST_CMD="${cmd}" bash "${FAKE_SSH_AFTER_HOOK}" >&2 || true
+    fi
 fi
 exit "${rc}"
