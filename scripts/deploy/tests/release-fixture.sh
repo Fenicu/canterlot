@@ -81,6 +81,10 @@ EOF
     cat >"${FAKE_ROOT}/fake-bin/cargo" <<EOF
 #!/usr/bin/env bash
 echo "cargo \$*" >>"${FAKE_ROOT}/state/calls.log"
+# Прогрев можно заблокировать (state/warm-block): процесс cargo живёт, пока его не убьют; pid — в state/warm.pid.
+if [[ "\$*" == *"--no-run"* && -e "${FAKE_ROOT}/state/warm-block" ]]; then echo "\$\$" >"${FAKE_ROOT}/state/warm.pid"; exec sleep 600; fi
+# Настоящая проверка spec_compat (без --no-run) можно уронить: state/spec-compat-fail.
+if [[ "\$*" == *"spec_compat"* && "\$*" != *"--no-run"* && -e "${FAKE_ROOT}/state/spec-compat-fail" ]]; then echo "spec_compat FAILED (fixture)" >&2; exit 1; fi
 # Прогрев сборки spec_compat (cargo test … --no-run) можно уронить: выпуск идёт дальше.
 if [[ "\$*" == *"--no-run"* && -e "${FAKE_ROOT}/state/warm-fail" ]]; then exit 1; fi
 # Как настоящий cargo update -w: версия членов workspace в Cargo.lock меняется.
@@ -95,6 +99,10 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 echo "build-release $*" >>"${FAKE_ROOT}/state/calls.log"
 [ "${2:-}" = --local ] || exit 2
+# Заблокированный прогрев: сборка ждёт, пока cargo прогрева действительно запустится.
+if [ -e "${FAKE_ROOT}/state/warm-block" ]; then
+    for _ in $(seq 1 100); do [ -f "${FAKE_ROOT}/state/warm.pid" ] && break; sleep 0.1; done
+fi
 if [ -e "${FAKE_ROOT}/state/build-fail" ]; then echo "build failed (fixture)"; exit 1; fi
 sha="$(git rev-parse "$1^{commit}")"
 d="${CANTERLOT_DIST_ROOT}/${sha:0:12}"

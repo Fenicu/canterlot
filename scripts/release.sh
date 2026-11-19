@@ -440,6 +440,7 @@ finish_record() {
 on_exit() {
     local rc=$?
     set +e
+    warm_cancel
     if [[ $FINISHED == 0 && $RUN_STARTED == 1 ]]; then
         finish_record error 1 "release.sh stopped unexpectedly (exit $rc) in phase $CURRENT_PHASE; see $LOG"
         rc=$FINISH_CODE
@@ -582,18 +583,45 @@ dist_ok() {
 # параллельно сборке релиза: та же команда и тот же каталог target, что в preflight.sh, но
 # только компиляция (--no-run). Сама проверка не пропускается и не подменяется: preflight
 # по-прежнему запускает её, просто артефакты уже собраны. Сбой прогрева выпуск не останавливает.
+WARM_PID=""
+# Прогрев запускается отдельным сеансом (setsid): так отмена убирает и cargo, и его дочерние rustc.
 warm_spec_compat() {
-    (
-        cd "$repo"
-        # shellcheck source=/dev/null # окружение cargo из домашнего каталога
+    # shellcheck disable=SC2016 # скрипт раскрывает свои позиционные аргументы
+    setsid bash -c 'cd "$1" || exit 1
         command -v cargo >/dev/null 2>&1 || source ~/.cargo/env
-        TMPDIR=/tmp cargo test --locked -p canterlot-worker --all-features --test it --no-run
-    ) >"$1" 2>&1
+        TMPDIR=/tmp exec cargo test --locked -p canterlot-worker --all-features --test it --no-run' _ "$repo" >"$1" 2>&1 &
+    WARM_PID=$!
 }
+# Остановить прогрев (если жив) и убрать его: группа процессов сеанса получает TERM, затем KILL.
+warm_cancel() {
+    local pid=$WARM_PID n
+    [[ -n $pid ]] || return 0
+    WARM_PID=""
+    if kill -0 "$pid" 2>/dev/null; then
+        kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+        for ((n = 0; n < 50; n++)); do
+            kill -0 "$pid" 2>/dev/null || break
+            sleep 0.1
+        done
+        kill -KILL -- "-$pid" 2>/dev/null || true
+    fi
+    wait "$pid" 2>/dev/null || true
+}
+# Ждать прогрев; сигнал, пришедший пока ждём (wait им прерывается), отменяет прогрев.
 warm_wait() {
-    local pid=$1 wlog=$2
-    [[ -z $pid ]] && return 0
-    if wait "$pid"; then
+    local wlog=$1 pid=$WARM_PID rc=0
+    [[ -n $pid ]] || return 0
+    while :; do
+        if [[ -n $SIGNALED ]]; then
+            warm_cancel
+            log "warm-up of the spec_compat build cancelled by SIG$SIGNALED"
+            return 0
+        fi
+        if wait "$pid"; then rc=0; break; else rc=$?; fi
+        kill -0 "$pid" 2>/dev/null || break
+    done
+    WARM_PID=""
+    if ((rc == 0)); then
         log "warm-up of the spec_compat build done (the preflight still runs the check itself)"
     else
         log "warm-up of the spec_compat build failed (see $wlog): the preflight compiles it itself"
@@ -601,20 +629,20 @@ warm_wait() {
 }
 
 phase_build() {
-    local blog="$STATE_DIR/build-$VER.log" wlog="$STATE_DIR/warm-$VER.log" warm_pid=""
+    local blog="$STATE_DIR/build-$VER.log" wlog="$STATE_DIR/warm-$VER.log"
     if [[ -e $DIST_ROOT/$SHA12 ]]; then
         dist_ok || finish failed_before_cutover 1 "$DIST_ROOT/$SHA12 exists but is not a complete build of $SHA12: remove that directory by hand, then --continue"
         log "dist $DIST_ROOT/$SHA12 already built from $SHA12"
     else
         state_set log_build "$blog"
         log "build: scripts/build-release.sh $TAG --local (log $blog); warm-up of the spec_compat build in parallel (log $wlog)"
-        warm_spec_compat "$wlog" &
-        warm_pid=$!
+        warm_spec_compat "$wlog"
         if ! CANTERLOT_DIST_ROOT="$DIST_ROOT" scripts/build-release.sh "$TAG" --local >"$blog" 2>&1; then
-            warm_wait "$warm_pid" "$wlog"
+            warm_cancel
+            log "warm-up of the spec_compat build cancelled: the build failed"
             finish failed_before_cutover 1 "scripts/build-release.sh failed, see $blog"
         fi
-        warm_wait "$warm_pid" "$wlog"
+        warm_wait "$wlog"
     fi
     phase_set build "done"
 }
@@ -674,6 +702,11 @@ decide_route() {
     local out="" path reh vz reasons
     [[ $ROUTE_DECIDED == 0 ]] || return 0
     ROUTE_DECIDED=1
+    if [[ $(state_get route_fallback) == yes ]]; then
+        load_route
+        log "release path: $ROUTE_PATH (kept from the saved fallback to the full path): $ROUTE_REASONS"
+        return 0
+    fi
     if [[ $FORCE_FULL == 1 ]]; then
         set_route full run run "--full: the full path was asked for (rehearsal and vzdump)"
         return 0
@@ -731,6 +764,7 @@ phase_rehearsal() {
     # cutover.sh сам пересчитал условия и не согласился пропустить vzdump: полный путь.
     if ! rehearsal_passed && [[ $ROUTE_VZDUMP == skip ]] && [[ $(kv "$REHEARSAL_RESULT" fail_codes) == fast_path_refused ]]; then
         set_route full run run "cutover.sh refused to skip the vzdump (fast_path_refused): the live release or the migrations differ from the decision; full path"
+        state_set route_fallback yes
         run_rehearsal
         stop_if_signaled
     fi
@@ -781,7 +815,7 @@ token_rejected_before_writes() {
 fast_rejected_before_writes() {
     local r=$1
     cutover_result_complete "$r" || return 1
-    [[ $(kv "$r" status) == refused && $(kv "$r" phase) == token && -z $(kv "$r" signal) ]] || return 1
+    [[ $(kv "$r" status) == refused && $(kv "$r" phase) == eligibility && -z $(kv "$r" signal) ]] || return 1
     [[ $(kv "$r" vzdump_done) == no && $(kv "$r" worker_stopped) == no ]] || return 1
     [[ $(kv "$r" fail_codes) == fast_path_refused ]]
 }
@@ -829,6 +863,9 @@ phase_execute() {
             fast_retry=1
             log "cutover.sh refused the $ROUTE_PATH path before any write: one fresh full rehearsal, then the real run"
             set_route full run run "cutover.sh refused the $ROUTE_PATH path before any write (was: $ROUTE_REASONS); full path"
+            # Доказанный отказ до записи и решение «полный путь» сохраняются вместе: --continue
+            # после прерванного возврата начинает со свежей полной репетиции, не с боевого прогона.
+            state_set route_fallback yes
             phase_set execute "refused_fast"
             phase_rehearsal
             check_pin
@@ -1001,9 +1038,12 @@ ship() {
     SHA12=${SHA:0:12}
     if [[ $FORCE_FULL == 1 ]]; then state_set route_forced yes; fi
     load_route
-    if [[ -n $(phase_status execute) ]]; then
-        resume_after_execute
-    fi
+    # Отказ до записи (refused_fast, refused_token) боевым прогоном не считается: дальше идёт
+    # свежая репетиция. Всё остальное, начавшее боевой прогон, не повторяется никогда.
+    case "$(phase_status execute)" in
+        '' | refused_fast | refused_token) ;;
+        *) resume_after_execute ;;
+    esac
     if [[ $(phase_status proxy) == "done" ]]; then PROXY_CHECK=pass; fi
     if [[ $(phase_status publish) == "done" ]]; then PUBLISHED=yes; fi
     for p in "${PHASES[@]}"; do

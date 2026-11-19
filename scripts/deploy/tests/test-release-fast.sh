@@ -142,7 +142,7 @@ case_end
 case_begin "cutover refuses the fast path before any write: one fresh full rehearsal, then the token run"
 setup_release fastrefused
 route_is fast "would be fast"
-cutover_plan "execute refused phase=token fail_codes=fast_path_refused" "rehearse pass" "execute done"
+cutover_plan "execute refused phase=eligibility fail_codes=fast_path_refused" "rehearse pass" "execute done"
 run_release ship "${RVER}"
 C="${FAKE_ROOT}/state/calls.log"
 assert_eq "${RREL_RC}" "0" "exit 0"
@@ -256,6 +256,148 @@ run_release ship "${RVER}"
 assert_eq "${RREL_RC}" "0" "a failing warm-up: exit 0"
 assert_contains "${RDIR}/release-${RVER}.log" "warm-up of the spec_compat build failed" "the failure is logged"
 teardown_case
+case_end
+
+
+# --continue после прерванного возврата на полный путь: доказанный отказ до записи сохранён
+# вместе с решением «полный путь», новый запуск начинает со свежей полной репетиции.
+case_begin "--continue after an interrupted fallback starts a fresh full rehearsal and never re-runs the fast attempt"
+setup_release fallback-continue
+route_is fast "would be fast"
+cutover_plan "execute refused phase=eligibility fail_codes=fast_path_refused" "rehearse fail fail_codes=unknown"
+run_release ship "${RVER}"
+assert_eq "$(rres status)/$(rres phase)" "failed_before_cutover/execute" "the fallback rehearsal failed: stopped"
+assert_eq "$(rstate phase_execute)" "refused_fast" "state: the proven pre-write refusal is saved"
+assert_eq "$(rstate route_fallback)" "yes" "state: the full-route decision is saved with it"
+route_is fast "the live release is fast again"
+cutover_plan "rehearse pass" "execute done"
+: >"${FAKE_ROOT}/state/calls.log"
+run_release ship "${RVER}" --continue
+assert_eq "${RREL_RC}" "0" "continue: exit 0"
+assert_eq "$(cutover_calls | grep -c -- '--fast')" "0" "continue: the fast attempt is not repeated"
+assert_eq "$(cutover_calls | grep -c -- '--rehearse')" "1" "continue: one fresh full rehearsal"
+cutover_calls | sed -n 2p | grep -q -- '--confirm ' && case_ok "continue: the real run takes the token" || case_fail "continue: no token run"
+assert_eq "$(calls_count 'fastpath ')" "0" "continue: the saved full-route decision is not asked again"
+assert_eq "$(rres path)/$(rres published)" "full/yes" "result: path=full, published"
+teardown_case
+case_end
+
+# --- прогрев spec_compat: отслеживается, отменяется и убирается
+warm_alive() { [ -f "${FAKE_ROOT}/state/warm.pid" ] && kill -0 "$(cat "${FAKE_ROOT}/state/warm.pid")" 2>/dev/null; }
+warm_kill() { if warm_alive; then kill -KILL "$(cat "${FAKE_ROOT}/state/warm.pid")" 2>/dev/null || true; fi; }
+case_begin "a TERM delivered during a blocked warm-up cancels and reaps it, and the lock is released"
+setup_release warm-term
+cutover_plan "${FULL_PLAN[@]}"
+: >"${FAKE_ROOT}/state/warm-block"
+( cd "${RREPO}" && bash scripts/release.sh ship "${RVER}" ) >"${FAKE_ROOT}/release.out" 2>&1 &
+RPID=$!
+for _ in $(seq 1 100); do [ -f "${FAKE_ROOT}/state/warm.pid" ] && break; command sleep 0.1; done
+[ -f "${FAKE_ROOT}/state/warm.pid" ] && case_ok "the warm-up cargo is running" || case_fail "the warm-up never started"
+warm_alive && case_ok "the warm-up process is alive before the TERM" || case_fail "no live warm-up"
+kill -TERM "${RPID}"
+RC=0
+wait "${RPID}" || RC=$?
+assert_eq "${RC}" "1" "the driver exits 1 (interrupted)"
+warm_alive && case_fail "the warm-up cargo survived the TERM" || case_ok "the warm-up cargo is gone"
+warm_kill
+assert_eq "$(rres status)" "interrupted" "result: interrupted"
+RC=0
+(cd "${RREPO}" && flock -n "${RDIR}/release.lock" true) || RC=$?
+assert_eq "${RC}" "0" "the release lock is free again"
+teardown_case
+case_end
+
+case_begin "a build failure while the warm-up cargo is active cancels it"
+setup_release warm-buildfail
+cutover_plan "${FULL_PLAN[@]}"
+: >"${FAKE_ROOT}/state/warm-block"
+: >"${FAKE_ROOT}/state/build-fail"
+run_release ship "${RVER}"
+assert_eq "$(rres status)/$(rres phase)" "failed_before_cutover/build" "stopped at the build"
+warm_alive && case_fail "the warm-up cargo survived the failed build" || case_ok "the warm-up cargo was cancelled"
+warm_kill
+teardown_case
+case_end
+
+
+# --- настоящий fastpath.sh и cutover.sh за обёртками стенда
+# Обёртки подставляют стендовые источник (FAST_SRC), dist и релиз цели, но флаги --fast и
+# --skip-ct-backup передают как есть.
+wire_real_fast() {
+    local saved
+    saved="$(declare -p SITE_ORIGIN WSS_ORIGIN SITE_CODES HUB_IP | sed 's/^declare -x /export /;s/^declare -- /export /')"
+    printf '%s\n' "${saved}" >"${FAKE_ROOT}/state/fixture.env"
+    make_release_repo
+    cat >"${RREPO}/scripts/deploy/fastpath.sh" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+source "${FAKE_ROOT}/state/fixture.env"
+echo "fastpath \$*" >>"${FAKE_ROOT}/state/calls.log"
+exec bash "${DEPLOY_DIR}/fastpath.sh" "${SHA_NEW}" --source "${FAST_SRC}" --dist "${FAKE_ROOT}/dist"
+EOF
+    cat >"${RREPO}/scripts/deploy/cutover.sh" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+source "${FAKE_ROOT}/state/fixture.env"
+echo "cutover \$*" >>"${FAKE_ROOT}/state/calls.log"
+args=()
+while ((\$#)); do
+    case "\$1" in
+        --source) args+=(--source "${FAST_SRC}"); shift 2 ;;
+        --dist) args+=(--dist "${FAKE_ROOT}/dist"); shift 2 ;;
+        --execute) args+=(--execute "${SHA_NEW}"); shift 2 ;;
+        --rehearse) args+=(--rehearse --state "${FAKE_ROOT}/rehearse.state"); shift ;;
+        --confirm | --result) args+=("\$1" "\$2"); shift 2 ;;
+        --fast | --skip-ct-backup) args+=("\$1"); shift ;;
+        *) args+=("${SHA_NEW}"); shift ;;
+    esac
+done
+exec bash "${DEPLOY_DIR}/cutover.sh" "\${args[@]}"
+EOF
+    chmod +x "${RREPO}/scripts/deploy/cutover.sh" "${RREPO}/scripts/deploy/fastpath.sh"
+    git -C "${RREPO}" commit -qam "Обёртки стенда"
+    attest_head
+}
+setup_real_fast() {
+    hash -r
+    make_fast_source other
+    setup_cutover "$1"
+    printf 'source=%s\n' "${FAST_LIVE_FULL}" >>"${HUB_RELEASES}/${SHA_PREV}/RELEASE"
+    printf 'source=%s\n' "${FAST_LIVE_FULL}" >>"${WORKER_RELEASES}/${SHA_PREV}/RELEASE"
+    wire_real_fast
+}
+finish_real_fast() { drop_fast_source; teardown_case; }
+
+case_begin "a real driver-to-cutover DB refusal: zero writes, then the full route to done"
+setup_real_fast real-db-refusal
+# База на 40, бинарь цели вшивает 41: быстрый путь отказывает до записи, дальше полный путь.
+run_release ship "${RVER}"
+assert_eq "${RREL_RC}" "0" "exit 0"
+[ "${RREL_RC}" = "0" ] || tail -15 "${FAKE_ROOT}/release.out"
+assert_eq "$(sed -n 's/^status=//p' "${RDIR}/cutover-${RVER}-1.result")/$(sed -n 's/^phase=//p' "${RDIR}/cutover-${RVER}-1.result")/$(sed -n 's/^fail_codes=//p' "${RDIR}/cutover-${RVER}-1.result")" \
+    "refused/eligibility/fast_path_refused" "the first real run: refused at the eligibility, before any write"
+assert_not_contains "${RDIR}/cutover-${RVER}-1.log" "previous releases:" "the refused run never reached the reservations"
+assert_not_contains "${RDIR}/cutover-${RVER}-1.log" "stopping worker" "the refused run never stopped the worker"
+assert_eq "$(sed -n 's/^status=//p' "${RDIR}/cutover-${RVER}-2.result")" "done" "the second real run (full route) is done"
+assert_eq "$(sed -n 's/^vzdump_done=//p' "${RDIR}/cutover-${RVER}-2.result")" "yes" "the full route took its vzdump"
+assert_eq "$(rres path)/$(rres published)" "full/yes" "result: path=full, published"
+hub_is "${SHA_NEW}" && worker_is "${SHA_NEW}" && web_is "${SHA_NEW}" && case_ok "everything on the target" || case_fail "not on the target"
+finish_real_fast
+case_end
+
+case_begin "a successful warm-up does not replace the real spec_compat: a failing check stops the real run"
+setup_real_fast real-spec-compat
+printf 'MIGR_MAX=41\nFAILED=0\npayload-predump\n' >"${FAKE_ROOT}/state/db.txt"
+sed -i 's/^migrations_last=.*/migrations_last=0041_fake_harness.sql/' "${HUB_RELEASES}/${SHA_PREV}/RELEASE" "${WORKER_RELEASES}/${SHA_PREV}/RELEASE"
+: >"${FAKE_ROOT}/state/spec-compat-fail"
+run_release ship "${RVER}"
+assert_contains "${RDIR}/release-${RVER}.log" "warm-up of the spec_compat build done" "the warm-up succeeded"
+assert_eq "$(rres path)" "fast" "the fast path was chosen"
+assert_eq "${RREL_RC}" "1" "the release stops"
+assert_eq "$(rres status)" "failed_before_cutover" "stopped before the cutover"
+assert_contains "${RDIR}/cutover-${RVER}-1.log" "spec_compat failed against" "the real preflight spec_compat failed"
+worker_stopped_ever && case_fail "the worker was stopped" || case_ok "the worker was never stopped"
+finish_real_fast
 case_end
 
 printf '\nrelease-fast: %s passed, %s failed\n' "${PASS_COUNT}" "${FAIL_COUNT}"

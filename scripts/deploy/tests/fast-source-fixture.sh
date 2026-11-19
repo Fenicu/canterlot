@@ -20,6 +20,7 @@
 #   pkg-dep        зависимость в web/package.json
 make_fast_source() {
     local what path g
+    hash -r # PATH стенда прошлого кейса мог указывать на уже удалённый git
     FAST_SRC="$(mktemp -d /tmp/canterlot-deploy-src.XXXXXX)"
     g=(git -C "${FAST_SRC}" -c user.name=Fixture -c user.email=fixture@canterlot.invalid -c commit.gpgsign=false)
     for path in docs/api/openapi.json crates/canterlot-proto/proto crates/canterlot-worker/src/supervisor/mod.rs \
