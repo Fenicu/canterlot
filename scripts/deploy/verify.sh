@@ -99,6 +99,15 @@ ACKS_1=""
 # нет, исход crashed, запрос не удался) — жёстко.
 gone_is_normal_end() {
     local exec_id="$1" row state outcome
+    # Засыпание хаба 1.40 (hibernate_requested=true) — ожидаемый уход при любом исходе.
+    if exec_hibernated_by_hub "${exec_id}"; then
+        case "${HIBERNATED_SEEN}" in
+            *" ${exec_id} "*) ;;
+            *) HIBERNATED_SEEN+="${exec_id} "
+               log "exec ${exec_id}: hibernated by the hub during the run (expected)" ;;
+        esac
+        return 0
+    fi
     row="$(hub_psql "select state || ':' || coalesce(outcome, 'null') from executions where id = '${exec_id}'" 2>/dev/null || echo UNKNOWN)"
     [ "${row}" != "UNKNOWN" ] || return 1
     state="${row%%:*}"; outcome="${row##*:}"
@@ -107,8 +116,10 @@ gone_is_normal_end() {
 }
 # Одна пометка на сессию, сколько бы ролей и курсоров ни пропало.
 ENDED_SEEN=" "
+HIBERNATED_SEEN=" "
 note_session_ended() {
     local exec_id="$1" label="$2"
+    case "${HIBERNATED_SEEN}" in *" ${exec_id} "*) return 0 ;; esac
     case "${ENDED_SEEN}" in *" ${exec_id} "*) return 0 ;; esac
     ENDED_SEEN+="${exec_id} "
     log "session ended between reads: ${exec_id} (${label}); execution row is terminal, not a failure of the rollout"

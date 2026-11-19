@@ -418,24 +418,47 @@ wait_worker_exe() {
     return 1
 }
 
+# Сессию могла усыпить сама версия 1.40 хаба (hibernate.rs): её CLI и mcp-relay
+# уходят по замыслу, строка исполнения получает hibernate_requested=true. Такой
+# уход ожидаем, а не провал выката. Читается строка хаба только на чтение через
+# hub_psql вызывающего скрипта; любой сбой чтения, отсутствие строки или флага —
+# «не усыплена» (то есть прежний жёсткий отказ). Хаб до 1.40 без колонки отвечает
+# ошибкой запроса — тоже «не усыплена».
+exec_hibernated_by_hub() {
+    local id="$1" out
+    [[ "${id}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || return 1
+    declare -F hub_psql >/dev/null || return 1
+    out="$( (hub_psql "select hibernate_requested from executions where id = '${id}'") 2>/dev/null)" || return 1
+    [ "${out}" = "t" ]
+}
+
 # Инвариант живой сессии: каждый ЗАПИСАННЫЙ процесс (sup/cli/relay) обязан быть
 # жив и иметь тот же стартовый тик. Множество НЕ обязано совпадать: новые
 # короткоживущие дети (вызовы инструментов, второй CLI-процесс на миг) допустимы
 # и только печатаются. Строка worker=... в снимке — отдельное множество и здесь
 # не проверяется (урок 1.17.0: равенство 15 строк падало на транзиентном ребёнке).
 snapshot_drift() {
-    local file="$1" label="$2" bad=0 line exec_id role old old_pid old_tick new_tick new_cli new_pid
+    local file="$1" label="$2" bad=0 line exec_id role old old_pid old_tick new_tick new_cli new_pid hib
     [ -f "${file}" ] || { printf 'snapshot file missing: %s\n' "${file}" >&2; return 1; }
     while IFS= read -r line; do
         case "${line}" in
             worker\ * | "") continue ;;
         esac
         exec_id="${line%% *}"
+        hib=""
         for role in sup cli relay; do
             for old in $(snapshot_role_values "${line}" "${role}"); do
                 old_pid="${old%%:*}"
                 old_tick="${old##*:}"
                 if ! proc_is_live "${old_pid}"; then
+                    if [ -z "${hib}" ]; then
+                        hib=no
+                        if exec_hibernated_by_hub "${exec_id}"; then
+                            hib=yes
+                            printf 'exec %s: hibernated by the hub during the run (expected) (%s)\n' "${exec_id}" "${label}" >&2
+                        fi
+                    fi
+                    if [ "${hib}" = "yes" ]; then continue; fi
                     printf 'recorded session process gone (%s): %s %s %s\n' "${label}" "${exec_id}" "${role}" "${old_pid}" >&2
                     bad=1
                     continue

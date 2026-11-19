@@ -234,6 +234,35 @@ assert_contains "${FAKE_ROOT}/verify.log" "session ended between reads" "owner s
 teardown_case
 case_end
 
+# V13h: сессию между чтениями усыпил хаб 1.40 (hibernate_requested=true): ожидаемый уход, не провал;
+# тот же уход без флага — жёсткий verify_ticks.
+for flagged in yes no; do
+    case_begin "verify hibernated session (hub hibernate flag: ${flagged})"
+    setup_verify "hibernated-${flagged}"
+    export VERIFY_GAP_RELEASE="${FAKE_ROOT}/state/gap-release"
+    bash "${DEPLOY_DIR}/verify.sh" "${SHA_PREV}" --dist "${FAKE_ROOT}/dist" >"${FAKE_ROOT}/verify.log" 2>&1 &
+    VPID=$!
+    for _ in $(seq 1 600); do
+        grep -q "waiting 60s between reads" "${FAKE_ROOT}/verify.log" 2>/dev/null && break
+        sleep 0.1
+    done
+    grep -v "^${EXEC2}$" "${FAKE_ROOT}/state/live-ids" >"${FAKE_ROOT}/state/live-ids.new" || true
+    mv "${FAKE_ROOT}/state/live-ids.new" "${FAKE_ROOT}/state/live-ids"
+    [ "${flagged}" = "yes" ] && printf '%s\n' "${EXEC2}" >"${FAKE_ROOT}/state/hibernated-ids"
+    SUP2_PID="$(sup_pid_of "${EXEC2}")"
+    [ -n "${SUP2_PID}" ] && kill "${SUP2_PID}" 2>/dev/null || true
+    touch "${VERIFY_GAP_RELEASE}"; rc=0; wait "${VPID}" || rc=$?; unset VERIFY_GAP_RELEASE
+    if [ "${flagged}" = "yes" ]; then
+        [ "${rc}" = "0" ] && case_ok "exit 0" || case_fail "exit ${rc}"
+        assert_contains "${FAKE_ROOT}/verify.log" "exec ${EXEC2}: hibernated by the hub during the run (expected)" "hibernation reported as expected"
+    else
+        [ "${rc}" != "0" ] && case_ok "exit nonzero" || case_fail "exit 0 although a session vanished without the flag"
+        assert_contains "${FAKE_ROOT}/verify.log" "session process gone" "plain disappearance stays a failure"
+    fi
+    teardown_case
+    case_end
+done
+
 # V14: миграции не догнали ожидаемый максимум из RELEASE — жёстко.
 case_begin "verify expected migration max"
 setup_verify expectedmigr

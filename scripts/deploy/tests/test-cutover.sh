@@ -654,6 +654,39 @@ assert_proc_alive "${SUP2}" "session 2 alive"
 teardown_case
 case_end
 
+# --- O2h. запись пропала после старта воркера: засыпание хаба — ожидаемый уход, иначе жёстко ---
+for flagged in yes no; do
+    case_begin "a recorded session gone after the worker start (hub hibernate flag: ${flagged})"
+    setup_cutover "hibernate-after-start-${flagged}"
+    CLI1="$(cli_pid_of "${EXEC1}" "${SUP1}")"
+    cat >"${FAKE_ROOT}/hibernate-hook.sh" <<HOOK
+#!/usr/bin/env bash
+# Как настоящее засыпание: CLI, mcp-relay и супервизор уходят, строка хаба перестаёт быть running.
+grep -vx "${EXEC1}" "${FAKE_ROOT}/state/live-ids" >"${FAKE_ROOT}/state/live-ids.new" || true
+mv "${FAKE_ROOT}/state/live-ids.new" "${FAKE_ROOT}/state/live-ids"
+pkill -P ${SUP1} 2>/dev/null || true
+kill ${SUP1} 2>/dev/null || true
+for _ in \$(seq 1 50); do kill -0 ${SUP1} 2>/dev/null || kill -0 ${CLI1} 2>/dev/null || exit 0; command sleep 0.05; done
+HOOK
+    [ "${flagged}" = "yes" ] && printf '%s\n' "${EXEC1}" >"${FAKE_ROOT}/state/hibernated-ids"
+    export FAKE_WORKER_START_HOOK="${FAKE_ROOT}/hibernate-hook.sh"
+    if run_cutover; then
+        [ "${flagged}" = "yes" ] && case_ok "exit 0" || case_fail "exit 0 although a session vanished without the flag"
+    else
+        [ "${flagged}" = "yes" ] && { case_fail "exit nonzero for a hibernated session"; tail -5 "${FAKE_ROOT}/cutover.log"; } || case_ok "exit nonzero"
+    fi
+    unset FAKE_WORKER_START_HOOK
+    if [ "${flagged}" = "yes" ]; then
+        assert_contains "${FAKE_ROOT}/cutover.log" "exec ${EXEC1}: hibernated by the hub during the run (expected)" "the departure is logged as expected"
+        assert_not_contains "${FAKE_ROOT}/cutover.log" "HARD-FAIL" "no hard failure"
+        assert_eq "$(result_of "${FAKE_ROOT}/cutover.result" hard_failures)" "0" "result file: hard_failures=0"
+    else
+        assert_contains "${FAKE_ROOT}/cutover.log" "HARD-FAIL: a recorded session process disappeared or changed its start tick after the worker start" "hard failure as before"
+    fi
+    teardown_case
+    case_end
+done
+
 # --- O3. новая сессия стартует во время vzdump (строка starting): отказ до стопа ---
 case_begin "a session starting during vzdump aborts before any destructive step"
 setup_cutover vzdump-session-starting

@@ -72,6 +72,10 @@ case "${sql}" in
     *"from machines where id ="*)
         # "<availability>:<возраст reported_at в секундах>" как отдаёт настоящий запрос.
         printf '%s' "${FAKE_MACHINE_ROW:-available:1}" ;;
+    *"select hibernate_requested from executions where id ="*)
+        # Исполнения, погашенные засыпанием хаба: state/hibernated-ids, по id в строке.
+        id="$(printf '%s' "${sql}" | grep -o "'[0-9a-f-]*'" | tr -d "'" | tail -1)"
+        if grep -qx "${id}" "${FAKE_ROOT}/state/hibernated-ids" 2>/dev/null; then printf 't'; else printf 'f'; fi ;;
     *"from executions where id ="*)
         id="$(printf '%s' "${sql}" | grep -o "'[0-9a-f-]*'" | tr -d "'" | tail -1)"
         if grep -qx "${id}" "${FAKE_ROOT}/state/live-ids" 2>/dev/null; then

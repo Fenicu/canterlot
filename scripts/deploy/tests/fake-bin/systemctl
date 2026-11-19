@@ -217,6 +217,10 @@ case "${op}" in
         fi
         date -u '+%a %Y-%m-%d %H:%M:%S UTC' >"${stfile}.since"
         echo 1 >"${active_file}"
+        # Крючок сценария «после старта воркера» (например, хаб усыпил сессию).
+        if [ "${unit}" = "canterlot-worker" ] && [ -n "${FAKE_WORKER_START_HOOK:-}" ]; then
+            bash "${FAKE_WORKER_START_HOOK}" >&2 || true
+        fi
         ;;
     restart)
         "$0" stop "${unit}"
