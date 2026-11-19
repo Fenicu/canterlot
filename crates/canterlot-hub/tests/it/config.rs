@@ -137,6 +137,7 @@ fn pilot_sections_parse_with_defaults() {
     );
     assert_eq!(http.ws.delta_window, D::from_millis(25));
     assert_eq!(http.ws.poll_interval, D::from_secs(2));
+    assert_eq!(http.ws.replay_limit, 300);
     assert_eq!(http.ws.stall_timeout, D::from_secs(15));
     let limits = config.limits;
     assert_eq!(limits.weekly_reserve_pct, 95);
@@ -177,6 +178,25 @@ fn pilot_sections_parse_with_defaults() {
     assert_eq!(limits.verify_backoff, [D::from_secs(1), D::from_secs(120)]);
     assert_eq!(limits.poll_floor["claude"], D::from_secs(2700));
     assert_eq!(limits.poll_floor["codex"], D::from_secs(420));
+}
+
+#[test]
+fn ws_replay_limit_is_configurable_and_rejects_zero() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hub.toml");
+    fs::write(
+        &path,
+        format!("{PILOT_BASE}{HTTP_BASE}[http.ws]\nreplay_limit = 50\n"),
+    )
+    .unwrap();
+    let http = HubConfig::load(&path).unwrap().http.unwrap();
+    assert_eq!(http.ws.replay_limit, 50);
+    fs::write(
+        &path,
+        format!("{PILOT_BASE}{HTTP_BASE}[http.ws]\nreplay_limit = 0\n"),
+    )
+    .unwrap();
+    assert!(HubConfig::load(&path).is_err());
 }
 
 #[test]

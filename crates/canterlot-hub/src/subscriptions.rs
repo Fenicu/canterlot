@@ -438,6 +438,12 @@ impl Pump {
                     {
                         return self.queue.control(json!({"op":"resync_required","id":id,"reason":if range.cursor_ahead {"cursor_ahead"} else {"cursor_too_old"},"oldest_available_seq":oldest_available_seq.to_string()})).await;
                     }
+                    let limit = i64::try_from(self.state.http.ws.replay_limit).unwrap_or(i64::MAX);
+                    if range.head.saturating_sub(after) > limit {
+                        // Вернувшийся клиент берёт один снимок вместо долгого повтора хвоста.
+                        let oldest = range.head - limit + 1;
+                        return self.queue.control(json!({"op":"resync_required","id":id,"reason":"cursor_too_old","oldest_available_seq":oldest.to_string()})).await;
+                    }
                     range.head
                 };
                 self.queue.control(json!({"op":"subscribed","id":id,"scope":events::wire_scope(&scope),"head":head.to_string()})).await?;

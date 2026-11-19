@@ -289,6 +289,34 @@ async fn subscribe_from_cursor_replays_missed_events_in_order(pool: PgPool) {
     h.stop().await;
 }
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn backlog_over_replay_limit_gets_resync_instead_of_replay(pool: PgPool) {
+    let h = Hub::new(pool, |c| c.ws.replay_limit = 3).await;
+    for _ in 0..8 {
+        h.f.emit("run_finished", json!({})).await;
+    }
+    let mut w = h.socket().await;
+    // Хвост 4 события (5..=8) больше лимита 3: один снимок вместо повтора.
+    let v = h.subscribe(&mut w, "old", Some(4)).await;
+    assert_eq!(
+        v,
+        json!({"op":"resync_required","id":"old","reason":"cursor_too_old","oldest_available_seq":"6"})
+    );
+    // Подписка не заведена: ни событий, ни новых кадров для этого id.
+    h.f.emit("run_finished", json!({})).await;
+    assert!(w.next(Duration::from_millis(200)).await.is_none());
+    // Голова теперь 9; ровно лимит (7..=9) повторяется как раньше.
+    assert_eq!(h.subscribe(&mut w, "edge", Some(6)).await["head"], "9");
+    let mut cursor = 6;
+    for _ in 7..=9 {
+        accept(&w.next(WAIT).await.unwrap(), &mut cursor);
+    }
+    assert_eq!(cursor, 9);
+    // Подписка без after стартует с головы, лимит её не касается.
+    assert_eq!(h.subscribe(&mut w, "head", None).await["op"], "subscribed");
+    w.close().await;
+    h.stop().await;
+}
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn subscription_to_foreign_scope_is_forbidden_and_indistinguishable_from_missing(
     pool: PgPool,
 ) {
@@ -607,7 +635,11 @@ async fn catch_up_over_a_slow_link_completes_without_lagged(pool: PgPool) {
     const EVENTS: i64 = 600;
     // Читатель медленнее хаба на каждом кадре, а срок зависания короткий: учёт ожидания медленного
     // читателя как зависания оборвал бы догон за секунды, а не за 15 с.
-    let h = Hub::new(pool, |c| c.ws.stall_timeout = Duration::from_secs(2)).await;
+    let h = Hub::new(pool, |c| {
+        c.ws.stall_timeout = Duration::from_secs(2);
+        c.ws.replay_limit = 1000;
+    })
+    .await;
     backlog(&h, EVENTS).await;
     let mut w = h.socket().await;
     h.subscribe(&mut w, "s", Some(0)).await;
@@ -1055,11 +1087,13 @@ fn websocket_resource_config_is_bounded() {
         ("queue_bytes", 1048577),
         ("max_subscriptions", 0),
         ("max_subscriptions", 17),
+        ("replay_limit", 0),
     ] {
         let mut c = valid.clone();
         match field {
             "queue_messages" => c.ws.queue_messages = value,
             "queue_bytes" => c.ws.queue_bytes = value,
+            "replay_limit" => c.ws.replay_limit = value,
             _ => c.ws.max_subscriptions = value,
         }
         assert!(c.validate().is_err(), "{field}={value}");
