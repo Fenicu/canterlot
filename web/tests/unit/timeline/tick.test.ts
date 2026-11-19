@@ -5,6 +5,7 @@ import Timeline from "#lib/timeline/Timeline.svelte";
 import { TimelineModel } from "#lib/stores/timeline.js";
 import type { ChatStore } from "#lib/stores/chat.svelte.js";
 import { ticking } from "./ticking.svelte";
+import { RoutineReportsModel } from "#lib/routines/reports.js";
 
 const rows = vi.hoisted(() => ({ calls: 0 }));
 
@@ -45,6 +46,7 @@ test("clock_ticks_do_not_rebuild_rows_until_the_day_changes", () => {
   const chat = {
     id: "c",
     timeline: new TimelineModel(),
+    routineReports: new RoutineReportsModel(),
     blocks: new SvelteMap(),
     deltaMarks: [],
     deltaSerial: 0,

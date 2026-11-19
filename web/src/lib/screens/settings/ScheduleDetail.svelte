@@ -92,7 +92,8 @@
   <div class="facts">
     <span>Расписание</span><span>{cronHuman(schedule.cron)}</span>
     <span>Цель</span>
-    <span data-role="schedule-target">{target.kind}{#if target.session && schedule.target.kind !== 'new_session'} · <a href={resolve('/c/[id]', { id: schedule.target.conversation_id })}>{target.session}</a>{/if}</span>
+    <span class="target" data-role="schedule-target"><span>{target.kind}</span>
+      {#if target.session && schedule.target.kind !== 'new_session'}<span aria-hidden="true">·</span><a href={resolve('/c/[id]', { id: schedule.target.conversation_id })}>{target.session}</a>{/if}</span>
     <span>Пояс</span><span>{schedule.timezone}</span>
     <span>Следующий запуск</span><span>{fireTime(schedule.next_fire_at, schedule.timezone)} (пояс {schedule.timezone})</span>
     <span>Состояние</span><span data-tone={schedule.enabled ? 'ok' : 'warn'}>{schedule.enabled ? 'Включено' : 'На паузе'}</span>
@@ -183,6 +184,7 @@
   .run-body { display: grid; gap: var(--s2); color: var(--secondary); font-size: var(--fs-sm); }
   .toggle { justify-self: start; }
   .run-report { min-width: 0; padding: var(--s4) var(--s5); border-radius: var(--radius-sm); background: var(--raised); color: var(--text); font-size: var(--fs-body); overflow-wrap: anywhere; }
+  .target { display: flex; flex-wrap: wrap; gap: var(--s2) var(--s3); min-width: 0; overflow-wrap: anywhere; }
   .facts a { color: var(--accent-link); }
   .tail { font-family: var(--font-mono); overflow-wrap: anywhere; }
   .run-body a { min-height: var(--target); display: inline-flex; align-items: center; color: var(--accent-link); }
