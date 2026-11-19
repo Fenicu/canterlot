@@ -342,6 +342,15 @@ sudo -u canterlot canterlot-hub auth recovery-link --config /etc/canterlot/hub.t
 sudo -u canterlot canterlot-hub geoip update --config /etc/canterlot/hub.toml   # в [auth.geoip].path, прежний файл остаётся при ошибке
 ```
 
+**Общая память: разовый импорт файлов памяти Claude** (выпуск 1.43). Порядок целиком в [docs/deploy/pilot.md](docs/deploy/pilot.md), §13:
+
+```bash
+canterlot-worker memory import-plan --root ~/.claude/projects --out manifest.toml   # 1. план; владелец просматривает manifest.toml (2)
+canterlot-worker memory import-bundle --manifest manifest.toml --out bundle.json    # 3. пакет; отказ при расхождении хэша
+sudo -u canterlot canterlot-hub memory import --config /etc/canterlot/hub.toml --bundle bundle.json --dry-run   # 4. сухой прогон
+sudo -u canterlot canterlot-hub memory import --config /etc/canterlot/hub.toml --bundle bundle.json             # 5. применение
+```
+
 **3. PWA и Caddy.** Разверните статику и подставьте свой адрес PWA в CSP:
 
 ```bash

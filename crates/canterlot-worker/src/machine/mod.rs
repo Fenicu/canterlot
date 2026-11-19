@@ -24,7 +24,7 @@ pub mod hotspots;
 pub mod leaks;
 pub mod limits;
 pub mod metrics;
-mod nofollow;
+pub(crate) mod nofollow;
 pub mod owner_instructions;
 pub mod precheck;
 pub mod probe;

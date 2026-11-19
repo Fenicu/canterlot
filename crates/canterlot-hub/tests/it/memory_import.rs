@@ -67,7 +67,12 @@ async fn apply_dry_run_writes_nothing(pool: PgPool) {
 async fn apply_is_idempotent(pool: PgPool) {
     testkit::seed(&pool).await;
     let config = MemoryConfig::default();
-    let bundle = bundle(vec![entry("Первая", "тело", "-h-work-thing/memory/a.md", "aa")]);
+    let bundle = bundle(vec![entry(
+        "Первая",
+        "тело",
+        "-h-work-thing/memory/a.md",
+        "aa",
+    )]);
 
     let first = apply(&pool, &bundle, false, &config).await.unwrap();
     let second = apply(&pool, &bundle, false, &config).await.unwrap();
@@ -112,7 +117,8 @@ async fn apply_renames_subject_collision_with_suffix_2(pool: PgPool) {
             .fetch_all(&pool)
             .await
             .unwrap();
-    for wanted in ["Один и тот же", "один и тот же (2)", "Один и тот же (3)"] {
+    for wanted in ["Один и тот же", "один и тот же (2)", "Один и тот же (3)"]
+    {
         assert!(
             subjects.iter().any(|subject| subject == wanted),
             "{wanted} в {subjects:?}"
@@ -132,7 +138,12 @@ async fn apply_refuses_secret_entry_even_if_bundle_has_it(pool: PgPool) {
             "-h-work-thing/memory/notes.md",
             "n1",
         ),
-        entry("Чистая", "ничего секретного", "-h-work-thing/memory/ok.md", "o1"),
+        entry(
+            "Чистая",
+            "ничего секретного",
+            "-h-work-thing/memory/ok.md",
+            "o1",
+        ),
     ]);
 
     let report = apply(&pool, &bundle, false, &config).await.unwrap();
@@ -143,7 +154,10 @@ async fn apply_refuses_secret_entry_even_if_bundle_has_it(pool: PgPool) {
         .fetch_all(&pool)
         .await
         .unwrap();
-    assert!(bodies.iter().all(|body| !body.contains("ghp_")), "{bodies:?}");
+    assert!(
+        bodies.iter().all(|body| !body.contains("ghp_")),
+        "{bodies:?}"
+    );
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -177,12 +191,19 @@ async fn frontmatter_description_to_subject_type_to_kind_modified_to_updated_at(
     let (subject, kind, updated, source) = &rows[0];
     assert_eq!(subject, "Строка две строки", "одна строка");
     assert_eq!(kind, "reference");
-    assert_eq!(*updated, at(2), "время изменения файла становится updated_at");
+    assert_eq!(
+        *updated,
+        at(2),
+        "время изменения файла становится updated_at"
+    );
     assert_eq!(source["path"], "-h-work-thing/memory/odd.md");
     assert_eq!(source["sha256"], "o1");
     let (subject, kind, updated, _) = &rows[1];
     assert!(subject.chars().count() <= 160);
-    assert!(subject.ends_with("слово"), "обрезка по границе слова: {subject}");
+    assert!(
+        subject.ends_with("слово"),
+        "обрезка по границе слова: {subject}"
+    );
     assert_eq!(kind, "decision");
     assert_eq!(*updated, at(3));
 }

@@ -98,6 +98,7 @@ mod instructions;
 mod lease;
 mod lease_scripts;
 mod machine;
+mod memory_import;
 #[cfg(feature = "synthetic-adapter")]
 mod opencode_adapter;
 mod opencode_config;
