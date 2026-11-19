@@ -70,7 +70,7 @@ test('existing_session_schedule_saves_a_session_target', async ({ page }) => {
   const editor = page.locator('[data-schedule-editor]');
 
   await editor.getByRole('textbox', { name: 'Название' }).fill('Проверка сессии');
-  await editor.getByRole('radiogroup', { name: 'Цель запуска' }).getByRole('radio', { name: 'Существующая сессия' }).click();
+  await editor.getByRole('radiogroup', { name: 'Цель запуска' }).getByRole('radio', { name: 'Сообщение в сессию' }).click();
   await editor.getByRole('combobox', { name: 'Сессия' }).selectOption(ids.pinned);
   await editor.getByRole('textbox', { name: 'Подсказка' }).fill('Собери итоги');
   await editor.getByRole('button', { name: 'Сохранить' }).click();
@@ -159,4 +159,114 @@ test('stale_revision_shows_the_standard_conflict_and_can_refresh', async ({ page
   await editor.getByRole('button', { name: 'Обновить' }).click();
   await expect(editor.getByRole('alert')).toHaveCount(0);
   await expect(editor.getByRole('textbox', { name: 'Название' })).toHaveValue(schedule.name);
+});
+
+test('session_report_schedule_saves_a_report_target_with_a_hint', async ({ page }) => {
+  const { api, ids } = await open(page);
+  await openNew(page);
+  const editor = page.locator('[data-schedule-editor]');
+
+  await editor.getByRole('textbox', { name: 'Название' }).fill('Стендап');
+  const target = editor.getByRole('radiogroup', { name: 'Цель запуска' });
+  await expect(target.locator('label')).toHaveText(['Новая сессия', 'Сообщение в сессию', 'Отчёт из сессии']);
+  await target.getByRole('radio', { name: 'Отчёт из сессии' }).click();
+  await expect(editor.getByRole('combobox', { name: 'Машина' })).toHaveCount(0);
+  await editor.getByRole('combobox', { name: 'Сессия' }).selectOption(ids.pinned);
+  await editor.getByRole('textbox', { name: 'Подсказка' }).fill('Вчера сделано / Сегодня в планах / Блокеры');
+  await expect(editor).toContainText('Копия сессии только читает её историю и отвечает на этот промпт; ответ придёт карточкой в ленту сессии.');
+  await expect(editor.getByRole('textbox', { name: 'Заголовок нового сеанса' })).toHaveCount(0);
+  await editor.getByRole('textbox', { name: 'Заголовок карточки' }).fill('{name}');
+  await editor.getByRole('button', { name: 'Сохранить' }).click();
+
+  const detail = page.locator('[data-schedule-detail]');
+  await expect(detail).toBeVisible();
+  const saved = [...api.schedules.values()][0]!;
+  expect(saved.target).toEqual({ kind: 'session_report', conversation_id: ids.pinned });
+  expect(saved.title_template).toBe('{name}');
+  await expect(detail).toContainText('Отчёт из сессии');
+});
+
+test('session_report_picker_leaves_out_side_copies', async ({ page }) => {
+  const { api, ids } = await open(page, (hub) => {
+    const row = [...hub.list.values()][0]!;
+    hub.list.set('00000000-0000-4000-8000-0000000000f1', { ...row, id: '00000000-0000-4000-8000-0000000000f1', title: 'Копия-читатель', side_of: row.id } as typeof row);
+  });
+  await openNew(page);
+  const editor = page.locator('[data-schedule-editor]');
+  await editor.getByRole('radiogroup', { name: 'Цель запуска' }).getByRole('radio', { name: 'Отчёт из сессии' }).click();
+  await expect(editor.getByRole('combobox', { name: 'Сессия' }).locator('option', { hasText: 'Копия-читатель' })).toHaveCount(0);
+  await expect(editor.getByRole('combobox', { name: 'Сессия' }).locator(`option[value="${ids.pinned}"]`)).toHaveCount(1);
+  expect(api.schedules.size).toBe(0);
+});
+
+test('session_report_target_error_from_the_hub_shows_at_the_target_field', async ({ page }) => {
+  const { api, ids } = await open(page, (hub) => { hub.scheduleTargetError = 'Машина сессии не умеет читать историю копией'; });
+  await openNew(page);
+  const editor = page.locator('[data-schedule-editor]');
+  await editor.getByRole('textbox', { name: 'Название' }).fill('Стендап');
+  await editor.getByRole('radiogroup', { name: 'Цель запуска' }).getByRole('radio', { name: 'Отчёт из сессии' }).click();
+  await editor.getByRole('combobox', { name: 'Сессия' }).selectOption(ids.pinned);
+  await editor.getByRole('textbox', { name: 'Подсказка' }).fill('Итоги');
+  await editor.getByRole('button', { name: 'Сохранить' }).click();
+
+  const select = editor.getByRole('combobox', { name: 'Сессия' });
+  await expect(select).toHaveAttribute('aria-invalid', 'true');
+  await expect(select).toHaveAccessibleDescription('Машина сессии не умеет читать историю копией');
+  await expect(editor).toBeVisible();
+  expect(api.schedules.size).toBe(0);
+  // Ошибка стоит у поля цели, а не в общей строке над формой.
+  await expect(editor.locator('> .error')).toHaveCount(0);
+  await select.selectOption('');
+  await expect(select).not.toHaveAttribute('aria-invalid', 'true');
+});
+
+test('list_and_detail_show_the_target_kind_and_session_name', async ({ page }) => {
+  const { api, ids } = await open(page);
+  const report = seedSchedule(api, { name: 'Стендап', target: { kind: 'session_report', conversation_id: ids.pinned } });
+  const message = seedSchedule(api, { name: 'Пинг', target: { kind: 'existing_session', conversation_id: ids.pinned } });
+  const created = seedSchedule(api, { name: 'Разбор' });
+  await page.reload();
+  const sessionTitle = api.list.get(ids.pinned)!.title;
+  await expect(page.locator(`[data-schedule-row="${report.id}"]`)).toContainText(`Отчёт из сессии · ${sessionTitle}`);
+  await expect(page.locator(`[data-schedule-row="${message.id}"]`)).toContainText(`Сообщение в сессию · ${sessionTitle}`);
+  await expect(page.locator(`[data-schedule-row="${created.id}"]`)).toContainText('Новая сессия');
+  await page.locator(`[data-schedule-row="${report.id}"]`).getByRole('link', { name: 'Открыть' }).click();
+  await expect(page.locator('[data-schedule-detail]')).toContainText('Отчёт из сессии');
+  await expect(page.locator('[data-schedule-detail]')).toContainText(sessionTitle);
+});
+
+test('history_of_a_report_run_shows_the_kept_text_collapsed_until_expanded', async ({ page }) => {
+  const { api, ids } = await open(page);
+  const schedule = seedSchedule(api, { name: 'Стендап', target: { kind: 'session_report', conversation_id: ids.pinned } });
+  seedScheduleRun(api, schedule.id, { detail: { report: { state: 'ready', text: '## Вчера сделано\n- Тесты рутин' } } });
+  seedScheduleRun(api, schedule.id, { state: 'started', detail: { report: { state: 'failed' } } });
+  await page.reload();
+  await page.locator(LIST).getByRole('link', { name: 'Открыть' }).first().click();
+  const history = page.locator('[data-schedule-history]');
+  await expect(history.locator('[data-run-row]')).toHaveCount(2);
+  const toggles = history.getByRole('button', { name: 'Показать отчёт' });
+  await expect(toggles).toHaveCount(1);
+  await expect(history.locator('[data-role="run-report"]')).toHaveCount(0);
+  await toggles.click();
+  await expect(history.locator('[data-role="run-report"]').getByRole('heading', { name: 'Вчера сделано' })).toBeVisible();
+  await expect(history.getByRole('button', { name: 'Скрыть отчёт' })).toBeVisible();
+  await history.getByRole('button', { name: 'Скрыть отчёт' }).click();
+  await expect(history.locator('[data-role="run-report"]')).toHaveCount(0);
+});
+
+test('session_report_editor_fits_a_phone', async ({ page }) => {
+  await page.setViewportSize({ width: 360, height: 740 });
+  await open(page);
+  await openNew(page);
+  const editor = page.locator('[data-schedule-editor]');
+  await editor.getByRole('radiogroup', { name: 'Цель запуска' }).getByRole('radio', { name: 'Отчёт из сессии' }).click();
+  await expect(editor.getByRole('combobox', { name: 'Сессия' })).toBeVisible();
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  expect(overflow).toBeLessThanOrEqual(0);
+  const radios = await editor.getByRole('radiogroup', { name: 'Цель запуска' }).evaluate((group) => {
+    const box = group.getBoundingClientRect();
+    return { right: box.right, inside: [...group.querySelectorAll('label, [role="radio"]')].every((item) => item.getBoundingClientRect().right <= box.right + 1) };
+  });
+  expect(radios.inside).toBe(true);
+  expect(radios.right).toBeLessThanOrEqual(360);
 });

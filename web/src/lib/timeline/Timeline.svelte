@@ -16,6 +16,8 @@
   import { INTERRUPT_FAILED, INTERRUPT_FAILED_OUTCOME, INTERRUPT_IDLE, type InterruptControl } from '#lib/composer/interrupt.svelte.js';
   import CompactionRow from '#lib/timeline/CompactionRow.svelte';
   import EventEntry from '#lib/timeline/EventEntry.svelte';
+  import RoutineReportCard from '#lib/timeline/RoutineReportCard.svelte';
+  import { placeReports } from '#lib/routines/reports.js';
   import SessionMessageBubble from '#lib/timeline/SessionMessageBubble.svelte';
   import LiveLine from '#lib/timeline/LiveLine.svelte';
   import UserBubble from '#lib/timeline/UserBubble.svelte';
@@ -47,7 +49,8 @@
     interrupt = null,
     onOpenPlan,
     bookmarks = null,
-    markable = true
+    markable = true,
+    focusReport = null
   }: {
     chat: ChatStore;
     /** Прерывание идущего хода: кнопка в живой строке хода. Только у ленты разговора. */
@@ -63,6 +66,8 @@
     bookmarks?: ConversationBookmarks | null;
     /** `false` — лента без закладок: копия в стороне не попадает в избранное, кнопки нет совсем. */
     markable?: boolean;
+    /** Карточка рутины, к которой привела ссылка `?routine_report=`: лента прокручивается к ней и подсвечивает её. */
+    focusReport?: string | null;
   } = $props();
   let host = $state<HTMLDivElement | null>(null);
   let controller = $state<ScrollController | null>(null);
@@ -88,6 +93,7 @@
   const folds = new FeedFolds(keepInPlace);
   const PIN_PX = 48;
   const OLDER_PAGE = 100;
+  type JumpRequest = { inputId: string; seq: string; nonce: number; blockId?: string; reportId?: string };
   let highlightKey = $state<string | null>(null);
   let jumpSerial = 0;
   // Прыжок в пути: окно вот-вот заменится окном вокруг цели. Страница истории для прежнего
@@ -108,7 +114,12 @@
     rowsCache.build(entries, { now: today, laneRoot, background: chat.backgroundFacts, harness })
   );
   const links = $derived(view.links);
-  const rows = $derived(view.rows);
+  // Карточки рутин живут только в ленте разговора: у ветки субагента и чужого окна их нет.
+  const rows = $derived(
+    feed || laneRoot
+      ? view.rows
+      : placeReports(view.rows, chat.routineReports.list, { hasOlder, tailDetached: chat.timeline.tailDetached })
+  );
   const windowRows = $derived(rows.slice(range.start, range.end));
   const lastInput = $derived(rows.findLast((row) => row.kind === 'input')?.key);
   // Своё сообщение возвращает ленту к хвосту: плашка «К новым сообщениям» нужна только для чужих.
@@ -469,7 +480,7 @@
    * Прыжок к своему сообщению: старые блоки не монтируются, пока летим, —
    * лента заменяется окном вокруг цели, а высоты строк доводят её до верха.
    */
-  async function jumpTo(request: { inputId: string; seq: string; nonce: number; blockId?: string }): Promise<void> {
+  async function jumpTo(request: JumpRequest): Promise<void> {
     const serial = ++jumpSerial;
     jumping += 1;
     try {
@@ -484,20 +495,23 @@
   }
 
   /** Окно вокруг цели прыжка и доводка цели до верха; края окна в это время не листаются. */
-  async function placeJump(request: { inputId: string; seq: string; nonce: number; blockId?: string }, serial: number): Promise<void> {
+  async function placeJump(request: JumpRequest, serial: number): Promise<void> {
     overscan = 0.1;
     held = null;
     controller?.release();
     const blockId = request.blockId;
+    const reportId = request.reportId;
     // Вложенный блок не стоит строкой ленты: его место — строка верхнего предка с тем же seq.
     const blockIndex = (id: string): number => {
       const exact = rows.findIndex((row) => row.entries.some((entry) => entry.kind === 'block' && entry.block.id === id));
       if (exact >= 0 || !request.seq) return exact;
       return rows.findIndex((row) => row.entries.some((entry) => entry.seq === request.seq));
     };
-    const targetIndex = (): number => (blockId ? blockIndex(blockId) : rowIndexOfInput(rows, request.inputId));
+    const targetIndex = (): number => (reportId ? rows.findIndex((row) => row.key === `routine:${reportId}`) : blockId ? blockIndex(blockId) : rowIndexOfInput(rows, request.inputId));
     try {
-      if (blockId && request.seq) await chat.focusAt(blockId, request.seq);
+      if (reportId) {
+        // Карточка уже в окне ленты по времени создания: окно вокруг неё не заменяется.
+      } else if (blockId && request.seq) await chat.focusAt(blockId, request.seq);
       else if (blockId) await chat.focusBlock(blockId);
       else await chat.focusMessage(request.inputId, request.seq);
     } catch {
@@ -570,6 +584,19 @@
     if (!request) return;
     untrack(() => {
       void jumpTo(request);
+    });
+  });
+
+  // Ссылка `?routine_report=` ведёт к карточке один раз за показ; закрытая или чужая карточка ничего не меняет.
+  let reportedTo: string | null = null;
+  $effect(() => {
+    const id = focusReport;
+    if (!id || reportedTo === id || !controller || !chat.detail) return;
+    const present = rows.some((row) => row.key === `routine:${id}`);
+    reportedTo = id;
+    if (!present) return;
+    untrack(() => {
+      void jumpTo({ inputId: '', seq: '', nonce: 0, reportId: id });
     });
   });
 
@@ -662,7 +689,9 @@
       }
       // Сверху пришла старшая страница или окно обрезано при подгрузке вниз: читаемая строка стоит на месте.
       const headMoved = previous.length > 0 && contentKey(keys) !== contentKey(previous);
-      const tail = tailKey(list);
+      // Карточка рутины в конце тоже растит хвост: лента у низа идёт за ней.
+      const last = list.at(-1);
+      const tail = tailKey(list) + (last?.kind === 'report' ? `|${last.key}` : '');
       const grew = previous.length > 0 && tail !== previousTail;
       const captured = headMoved && held ? captureAnchor(ix, previous, el.scrollTop) : null;
       const anchor = captured && keys.includes(captured.key) ? captured : null;
@@ -747,7 +776,7 @@
     <div class="pad" style:height={`${range.padTop}px`} use:spacer></div>
     {#each windowRows as row (row.key)}
       {@const first = row.entries[0]}
-      <div class="row" data-row data-kind={row.kind} data-key={row.key} data-jump={(row.kind === 'answer' || row.kind === 'event') && row.key === highlightKey ? '' : undefined} use:measure>
+      <div class="row" data-row data-kind={row.kind} data-key={row.key} data-jump={(row.kind === 'answer' || row.kind === 'event' || row.kind === 'report') && row.key === highlightKey ? '' : undefined} use:measure>
         {#if row.kind === 'day'}
           <p class="day">{row.label}</p>
         {:else if row.kind === 'input' && row.entries[0]?.kind === 'input'}
@@ -780,6 +809,8 @@
           <RequestCard request={first.request} onDecision={async () => undefined} {harnessId} {permissionMode} {now} open={folds.isOpen(row.key)} onToggle={() => folds.toggle(row.key)} />
         {:else if row.kind === 'answer'}
           <AnswerCard cardKey={row.key} {laneRoot} entries={row.entries} {folds} {links} {harness} {activeRun} conversationId={chat.id} {now} {onInfo} load={loadBlock} interrupt={feed || laneRoot ? null : interrupt} {leaseWait} {bookmarks} {markable} />
+        {:else if row.kind === 'report' && row.report}
+          <RoutineReportCard report={row.report} onDismissed={(id) => chat.routineReports.dismiss(id)} />
         {:else if row.kind === 'compaction' && row.entries[0]?.kind === 'compaction'}
           <CompactionRow compaction={row.entries[0].compaction} />
         {/if}

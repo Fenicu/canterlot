@@ -1,4 +1,5 @@
 import { utf8Length, utf8Slice, type BlockPage } from '../../src/lib/stores/blocks';
+import type { RoutineReport } from '../../src/lib/routines/reports';
 import type { AlarmView, HistoryBlock, HistoryInput, HistoryItem, HistoryPage, LanePage, SnapshotData } from '../../src/lib/stores/chat.svelte';
 import type { DelegationNode } from '../../src/lib/stores/delegation';
 import type { Counts, ListRow, ListSnapshot } from '../../src/lib/stores/list.svelte';
@@ -275,6 +276,12 @@ export class FakeHubApi {
 	/** Расписания владельца и история их запусков. */
 	readonly schedules = new Map<string, Schedule>();
 	readonly scheduleRuns = new Map<string, ScheduleRun[]>();
+	/** Карточки рутин по разговорам: открытые, как их отдаёт снимок. */
+	readonly routineReports = new Map<string, Map<string, RoutineReport>>();
+	/** Закрытия карточек владельцем: разговор, карточка. */
+	readonly routineDismissals: { conversation: string; report: string }[] = [];
+	/** Ответ хаба на создание расписания: `details.field = target` вместе с текстом, как при отказе цели. */
+	scheduleTargetError: string | null = null;
 	/** Пояс владельца из настроек пушей: умолчание редактора расписаний. */
 	scheduleOwnerTimezone = 'Europe/Moscow';
 	readonly scheduleKeys: string[] = [];
@@ -433,6 +440,48 @@ export class FakeHubApi {
 		this.scheduleRuns.set(schedule.id, []);
 		this.emitSchedule(schedule);
 		return schedule;
+	}
+
+	routineReportMap(conversationId: string): Map<string, RoutineReport> {
+		let map = this.routineReports.get(conversationId);
+		if (!map) { map = new Map(); this.routineReports.set(conversationId, map); }
+		return map;
+	}
+
+	/** Создать или сменить карточку рутины и опубликовать `routine_report_changed`. */
+	putRoutineReport(conversationId: string, patch: Partial<RoutineReport> & { id?: string } = {}): RoutineReport {
+		const id = patch.id ?? this.id();
+		const known = this.routineReportMap(conversationId).get(id);
+		const report: RoutineReport = {
+			id,
+			conversation_id: conversationId,
+			schedule_id: patch.schedule_id ?? known?.schedule_id ?? this.id(),
+			run_id: patch.run_id ?? known?.run_id ?? null,
+			title: patch.title ?? known?.title ?? 'Утренний стендап',
+			state: patch.state ?? known?.state ?? 'pending',
+			body: patch.body ?? known?.body ?? null,
+			error: patch.error === undefined ? (known?.error ?? null) : patch.error,
+			created_at: patch.created_at ?? known?.created_at ?? new Date().toISOString(),
+			completed_at: patch.completed_at === undefined ? (known?.completed_at ?? null) : patch.completed_at
+		};
+		this.routineReportMap(conversationId).set(id, report);
+		this.hub.append(`conversation:${conversationId}`, { kind: 'routine_report_changed', conversation_id: conversationId, payload: report });
+		this.hub.flush();
+		return report;
+	}
+
+	/** Закрыть карточку: событие уходит один раз, повтор безвреден. */
+	dismissRoutineReport(conversationId: string, reportId: string, reason: 'owner' | 'replaced' = 'owner'): boolean {
+		const found = this.routineReportMap(conversationId).get(reportId);
+		if (!found) return false;
+		this.routineReportMap(conversationId).delete(reportId);
+		this.hub.append(`conversation:${conversationId}`, {
+			kind: 'routine_report_dismissed',
+			conversation_id: conversationId,
+			payload: { report_id: reportId, conversation_id: conversationId, schedule_id: found.schedule_id, reason }
+		});
+		this.hub.flush();
+		return true;
 	}
 
 	getSchedule(id: string): Schedule {
@@ -1083,6 +1132,7 @@ export class FakeHubApi {
 			open_requests,
 			todos: [...todos.values()].sort((a, b) => Number(a.lane_block_id !== null) - Number(b.lane_block_id !== null)),
 			background: [...background.values()],
+			routine_reports: [...(this.routineReports.get(id)?.values() ?? [])],
 			context
 		};
 	}
