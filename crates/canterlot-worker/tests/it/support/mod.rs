@@ -48,6 +48,9 @@ pub struct Behavior {
     pub range_ack_delay: Duration,
     pub pause_after_first_batch: Duration,
     pub ack_override: Option<u64>,
+    /// Потолок подтверждений только на первом подключении: итог выше него хаб «не принял»
+    /// и после переподключения ждёт его повторно.
+    pub ack_cap_first_connection: Option<u64>,
     pub status: Option<(tonic::Code, &'static str)>,
     pub fetch_failures: Arc<Mutex<std::collections::VecDeque<tonic::Code>>>,
     pub attachment: Vec<u8>,
@@ -68,6 +71,7 @@ impl Default for Behavior {
             range_ack_delay: Duration::ZERO,
             pause_after_first_batch: Duration::ZERO,
             ack_override: None,
+            ack_cap_first_connection: None,
             status: None,
             fetch_failures: Arc::default(),
             attachment: Vec::new(),
@@ -88,6 +92,7 @@ struct Service {
     downstream: Downstream,
     committed: Arc<Mutex<std::collections::HashMap<String, u64>>>,
     data_downstream: DataDownstream,
+    connections: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Service {
@@ -158,6 +163,10 @@ impl WorkerControl for Service {
         if let Some((code, message)) = self.behavior.status {
             return Err(Status::new(code, message));
         }
+        let first_connection = self
+            .connections
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            == 0;
         *self.downstream.lock().unwrap() = Some(tx.clone());
         if self.behavior.hello_reply {
             tx.send(Ok(ControlDown {
@@ -213,7 +222,14 @@ impl WorkerControl for Service {
                             up_to_seq: service
                                 .behavior
                                 .ack_override
-                                .unwrap_or(batch.records.last().unwrap().seq),
+                                .unwrap_or(batch.records.last().unwrap().seq)
+                                .min(
+                                    service
+                                        .behavior
+                                        .ack_cap_first_connection
+                                        .filter(|_| first_connection)
+                                        .unwrap_or(u64::MAX),
+                                ),
                         };
                         if acks.send(ack).await.is_err() {
                             break;
@@ -423,6 +439,7 @@ impl ProtocolHub {
             downstream: downstream.clone(),
             committed: Arc::default(),
             data_downstream: data_downstream.clone(),
+            connections: Arc::default(),
         };
         let task = tokio::spawn(async move {
             Server::builder()

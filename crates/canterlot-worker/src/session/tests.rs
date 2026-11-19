@@ -830,11 +830,17 @@ async fn a_hung_metrics_sample_is_not_started_again_after_reconnects() {
 
 #[tokio::test]
 async fn handled_command_is_not_routed_twice_after_reconnect() {
+    // На первом подключении хаб подтверждает только квитанцию команды (seq 1), итог (seq 2) остаётся без подтверждения.
+    // С подтверждением всего подряд итог мог попасть в «принятое хабом» до обрыва (под нагрузкой
+    // задача подтверждения успевала раньше обрыва), и повторять было нечего. Срок ожидания
+    // подтверждения длинный, чтобы пакет не ушёл повторно по таймеру внутри первого подключения.
     let (mut hub, store) = support::ProtocolHub::start(support::Behavior {
         capabilities: vec!["exec_v1".to_owned()],
+        ack_cap_first_connection: Some(1),
         ..Default::default()
     })
     .await;
+    hub.config.timers.range_ack = Duration::from_secs(30);
     let worker = Worker::new(hub.config.clone(), store);
     let mut state = worker.state();
     let (stop, shutdown) = watch::channel(false);

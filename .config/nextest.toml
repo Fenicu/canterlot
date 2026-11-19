@@ -66,9 +66,3 @@ retries = 2
 filter = 'package(canterlot-worker) & binary(it) & test(=exec_e2e::killed_supervisor_with_nothing_left_fails_and_the_session_resumes)'
 retries = 2
 
-# QUARANTINE: 18.11 после замены паузы ожиданием по событию снова упал в проверке слияния 1.40
-# при load 14: «command outcome must be redelivered after reconnect: Elapsed» (8 с); отдельно
-# 40/40 при 8 потоках. Повтор разрешён до разбора повторной отправки CancelWon после переподключения.
-[[profile.default.overrides]]
-filter = 'package(canterlot-worker) & kind(lib) & test(=session::tests::handled_command_is_not_routed_twice_after_reconnect)'
-retries = 2
