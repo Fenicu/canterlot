@@ -4709,7 +4709,8 @@
             "reason": {
               "enum": [
                 "owner",
-                "replaced"
+                "replaced",
+                "schedule_deleted"
               ]
             }
           },

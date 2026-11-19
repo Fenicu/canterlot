@@ -58,3 +58,7 @@ alter table owner_pushes add constraint owner_pushes_kind_check check (
                'credential_expiry', 'credential_auth', 'schedule_failed')
       and conversation_id is null)
 );
+
+-- Чем кончился ход по версии адаптера. Прерванный и упавший ход тоже присылают `run_finished`,
+-- поэтому завершённая строка хода успеха не доказывает; пусто у старого воркера.
+alter table runs add column outcome text check (outcome in ('completed', 'failed', 'interrupted'));

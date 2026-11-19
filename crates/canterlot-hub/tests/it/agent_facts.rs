@@ -462,7 +462,44 @@ async fn run_is_created_on_accept_and_finished_with_usage_per_model(pool: PgPool
     assert_eq!(row, (1000, 123, 200000, 1000));
     let u:(i64,i64,i64,i64)=sqlx::query_as("select input_tokens,output_tokens,cache_read_tokens,cache_write_tokens from run_model_usage where model='synthetic-small'").fetch_one(&pool).await?;
     assert_eq!(u, (10, 20, 3, 4));
+    let outcome: Option<String> = sqlx::query_scalar("select outcome from runs")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(outcome.as_deref(), Some("completed"));
     Ok(())
+}
+
+/// Конец хода хранится как есть: упавший и прерванный ход тоже присылают `RunFinished`, а у
+/// старого воркера исхода нет вовсе.
+async fn stored_end(pool: &PgPool, end: i32) -> Option<String> {
+    let mut r = Run::new(pool).await;
+    let i = r.input(pool).await;
+    let ms = Utc::now().timestamp_millis();
+    r.send(vec![accepted(i.command_id, ms)]).await;
+    let Body::RunFinished(mut f) = finished(&r, i.command_id, ms + 1000) else {
+        unreachable!()
+    };
+    f.end = end;
+    r.send(vec![Body::RunFinished(f)]).await;
+    sqlx::query_scalar("select outcome from runs")
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn run_end_failed_is_stored_as_failed(pool: PgPool) {
+    assert_eq!(stored_end(&pool, 2).await.as_deref(), Some("failed"));
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn run_end_interrupted_is_stored_as_interrupted(pool: PgPool) {
+    assert_eq!(stored_end(&pool, 3).await.as_deref(), Some("interrupted"));
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn run_end_from_an_old_worker_is_stored_as_unknown(pool: PgPool) {
+    assert_eq!(stored_end(&pool, 0).await, None);
 }
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn replayed_run_finished_does_not_duplicate_usage(pool: PgPool) -> TestResult {

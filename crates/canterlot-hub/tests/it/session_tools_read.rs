@@ -297,6 +297,79 @@ async fn hidden_side_copies_are_unreachable_by_uuid_but_work_as_callers(pool: Pg
     assert!(f.visible(chat, chat).await);
 }
 
+/// Скрытая копия по UUID отвечает ровно так же, как несуществующая сессия, и ничего не пишет:
+/// ни доски плана, ни подписки, ни блокировки очереди копии.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn hidden_copies_answer_like_a_missing_session_and_leave_no_rows(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let mut hidden = Vec::new();
+    for kind in ["report", "chat"] {
+        let id = f.conversation(kind, None, 0).await;
+        sqlx::query("update conversations set side_of=$2, side_kind=$3 where id=$1")
+            .bind(id)
+            .bind(f.root)
+            .bind(kind)
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        hidden.push(id);
+    }
+    // Очередь копии занята чужой транзакцией: отказ не должен её ждать.
+    let mut locker = pool_tx(&f).await;
+    for id in &hidden {
+        sqlx::query("select 1 from queue_state where conversation_id=$1 for update")
+            .bind(id)
+            .execute(&mut *locker)
+            .await
+            .unwrap();
+    }
+    let calls = |target: Uuid| {
+        vec![
+            ("plan.adopt", json!({"from_session_id": target})),
+            ("sessions.subscribe", json!({"session_id": target})),
+            (
+                "nudge.set",
+                json!({"session_id": target, "report_file": "notes.md"}),
+            ),
+        ]
+    };
+    for target in &hidden {
+        for ((tool, hidden_args), (_, missing_args)) in
+            calls(*target).into_iter().zip(calls(Uuid::now_v7()))
+        {
+            let answer =
+                tokio::time::timeout(Duration::from_secs(5), f.call(f.root, tool, hidden_args))
+                    .await
+                    .unwrap_or_else(|_| panic!("{tool} waited on the hidden copy"))
+                    .unwrap_err();
+            let missing = f.call(f.root, tool, missing_args).await.unwrap_err();
+            assert_eq!(
+                answer, missing,
+                "{tool} told a hidden copy from a missing one"
+            );
+        }
+    }
+    locker.rollback().await.unwrap();
+    let boards: i64 = sqlx::query_scalar(
+        "select count(*) from plan_boards where orchestrator_conversation_id=any($1)",
+    )
+    .bind(&hidden)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    let subscriptions: i64 =
+        sqlx::query_scalar("select count(*) from session_subscriptions where target_id=any($1)")
+            .bind(&hidden)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!((boards, subscriptions), (0, 0));
+}
+
+async fn pool_tx(f: &Fx) -> sqlx::Transaction<'static, sqlx::Postgres> {
+    canterlot_hub::db::begin(&f.pool).await.unwrap()
+}
+
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn a_delegate_stays_narrow_after_its_parent_is_deleted(pool: PgPool) {
     let f = Fx::new(pool).await;

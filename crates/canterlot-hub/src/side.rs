@@ -555,9 +555,17 @@ fn compact(value: &Value) -> String {
 /// Уборка боковых чатов: отпускает удержанные вводы после простоя родителя, гасит
 /// копию без хода и убирает строки, чей родитель уже удалён.
 pub async fn sweep(pool: &PgPool, now: DateTime<Utc>) -> Result<(), sqlx::Error> {
-    release_waiting(pool).await?;
-    stop_idle(pool, now).await?;
-    purge_orphans(pool).await?;
+    // Сбой одной фазы не отменяет остальные: тик доходит до отчётов и заданий.
+    let phases = [
+        ("release_waiting", release_waiting(pool).await),
+        ("stop_idle", stop_idle(pool, now).await),
+        ("purge_orphans", purge_orphans(pool).await),
+    ];
+    for (phase, result) in phases {
+        if let Err(error) = result {
+            tracing::warn!(kind = "side_sweep_failed", phase, error = %crate::dberr::describe(&error), "side chat sweep phase failed");
+        }
+    }
     Ok(())
 }
 
@@ -576,22 +584,26 @@ async fn release_waiting(pool: &PgPool) -> Result<(), sqlx::Error> {
     .await?;
     let had_rows = !rows.is_empty();
     for (id, owner_id, _parent) in rows {
-        let mut tx = crate::db::begin(pool).await?;
-        clear_hold(&mut tx, id).await?;
-        let result = executions::start_in_tx(&mut tx, owner_id, id, Uuid::now_v7()).await;
-        match result {
-            Ok(_) | Err(executions::ExecutionError::AlreadyLive { .. }) => tx.commit().await?,
-            Err(executions::ExecutionError::Db(error)) => {
-                let _ = tx.rollback().await;
-                return Err(error);
-            }
-            Err(_) => tx.commit().await?,
+        if let Err(error) = release_one(pool, id, owner_id).await {
+            tracing::warn!(kind = "side_release_failed", conversation_id = %id, error = %crate::dberr::describe(&error), "side input release failed");
         }
     }
     if had_rows {
         crate::scheduler::notify_pool(pool);
     }
     Ok(())
+}
+
+async fn release_one(pool: &PgPool, id: Uuid, owner_id: Uuid) -> Result<(), sqlx::Error> {
+    let mut tx = crate::db::begin(pool).await?;
+    clear_hold(&mut tx, id).await?;
+    match executions::start_in_tx(&mut tx, owner_id, id, Uuid::now_v7()).await {
+        Err(executions::ExecutionError::Db(error)) => {
+            let _ = tx.rollback().await;
+            Err(error)
+        }
+        _ => tx.commit().await,
+    }
 }
 
 async fn stop_idle(pool: &PgPool, now: DateTime<Utc>) -> Result<(), sqlx::Error> {
@@ -644,21 +656,24 @@ async fn purge_orphans(pool: &PgPool) -> Result<(), sqlx::Error> {
     .fetch_all(pool)
     .await?;
     for (id, owner_id) in rows {
-        let mut tx = crate::db::begin(pool).await?;
-        match crate::deletion::delete_side_in_tx(&mut tx, owner_id, id, Uuid::now_v7()).await {
-            Ok(()) => tx.commit().await?,
-            Err(crate::deletion::DeleteError::Live)
-            | Err(crate::deletion::DeleteError::NotFound) => {
-                let _ = tx.rollback().await;
-            }
-            Err(crate::deletion::DeleteError::Db(error)) => {
-                let _ = tx.rollback().await;
-                return Err(error);
-            }
-            Err(_) => {
-                let _ = tx.rollback().await;
-            }
+        if let Err(error) = purge_one(pool, id, owner_id).await {
+            tracing::warn!(kind = "side_orphan_purge_failed", conversation_id = %id, error = %crate::dberr::describe(&error), "orphan side chat purge failed");
         }
     }
     Ok(())
+}
+
+async fn purge_one(pool: &PgPool, id: Uuid, owner_id: Uuid) -> Result<(), sqlx::Error> {
+    let mut tx = crate::db::begin(pool).await?;
+    match crate::deletion::delete_side_in_tx(&mut tx, owner_id, id, Uuid::now_v7()).await {
+        Ok(()) => tx.commit().await,
+        Err(crate::deletion::DeleteError::Db(error)) => {
+            let _ = tx.rollback().await;
+            Err(error)
+        }
+        Err(_) => {
+            let _ = tx.rollback().await;
+            Ok(())
+        }
+    }
 }

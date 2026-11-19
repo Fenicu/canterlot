@@ -210,6 +210,12 @@ fn decode(value: Value, blocks: &mut HashMap<Uuid, Uuid>) -> Result<Frame, Adapt
                 context_window_tokens: value["context_window_tokens"]
                     .as_u64()
                     .ok_or(AdapterError::Protocol)?,
+                end: value
+                    .get("end")
+                    .map(|end| serde_json::from_value(end.clone()))
+                    .transpose()
+                    .map_err(|_| AdapterError::Protocol)?
+                    .unwrap_or_default(),
             }
         }
         "agent_call" => AdapterEvent::AgentCall {

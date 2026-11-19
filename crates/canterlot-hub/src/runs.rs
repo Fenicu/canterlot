@@ -189,6 +189,17 @@ pub async fn start_in_tx(
     Ok(())
 }
 
+/// Исход хода для столбца `runs.outcome`; `None` у старого воркера без поля.
+fn outcome_of(end: i32) -> Option<&'static str> {
+    use canterlot_proto::worker::v1::RunEnd;
+    match RunEnd::try_from(end).ok()? {
+        RunEnd::Completed => Some("completed"),
+        RunEnd::Failed => Some("failed"),
+        RunEnd::Interrupted => Some("interrupted"),
+        RunEnd::Unspecified => None,
+    }
+}
+
 pub async fn finish_in_tx(
     conn: &mut PgConnection,
     fact: &RunFinished,
@@ -216,8 +227,8 @@ pub async fn finish_in_tx(
     if let Some(provider) = provider {
         lock_provider_runs(conn, provider, started).await?;
     }
-    let changed=sqlx::query("update runs set finished_at=started_at+($2::bigint * interval '1 millisecond'),duration_ms=$2,context_tokens=$3,context_window_tokens=$4,weekly_after_permille=(select weekly_used_permille from provider_limits where provider=runs.provider),exact=exact and $5,git=coalesce($6,git),forced_close=false,working_ms=null where input_command_id=$1 and (finished_at is null or forced_close)")
-        .bind(command).bind(duration).bind(number(fact.context_tokens)?).bind(number(fact.context_window_tokens)?).bind(now - at <= EXACT_WINDOW).bind(git_json(fact)?).execute(&mut *conn).await?.rows_affected();
+    let changed=sqlx::query("update runs set finished_at=started_at+($2::bigint * interval '1 millisecond'),duration_ms=$2,outcome=$7,context_tokens=$3,context_window_tokens=$4,weekly_after_permille=(select weekly_used_permille from provider_limits where provider=runs.provider),exact=exact and $5,git=coalesce($6,git),forced_close=false,working_ms=null where input_command_id=$1 and (finished_at is null or forced_close)")
+        .bind(command).bind(duration).bind(number(fact.context_tokens)?).bind(number(fact.context_window_tokens)?).bind(now - at <= EXACT_WINDOW).bind(git_json(fact)?).bind(outcome_of(fact.end)).execute(&mut *conn).await?.rows_affected();
     if changed == 0 {
         if fact.adopted {
             add_adopted(conn, command, fact).await?;

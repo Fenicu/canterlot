@@ -538,6 +538,17 @@ message RunFinished {
   bool adopted = 8;
   // Только при согласованной возможности session_tools_v1.
   GitFacts git = 9;
+  // Чем кончился ход. Пусто (RUN_END_UNSPECIFIED) у старого воркера: успехом это не считается.
+  RunEnd end = 10;
+}
+
+// Исход хода по версии адаптера. Прерванный и упавший ход тоже присылают RunFinished,
+// поэтому сам по себе RunFinished успеха не доказывает.
+enum RunEnd {
+  RUN_END_UNSPECIFIED = 0;
+  RUN_END_COMPLETED = 1;
+  RUN_END_FAILED = 2;
+  RUN_END_INTERRUPTED = 3;
 }
 
 message GitCommit {

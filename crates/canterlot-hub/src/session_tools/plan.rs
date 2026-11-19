@@ -913,10 +913,12 @@ async fn adopt_once(context: &ToolContext, caller: &Caller, from: Uuid) -> Resul
     pair.sort();
     let found: Vec<(Uuid, i32)> = sqlx::query_as(
         "select id,spawn_depth from conversations where id=any($1) and owner_id=$2
+           and (side_of is null or id=$3)
          order by id for key share",
     )
     .bind(&pair[..])
     .bind(caller.owner_id)
+    .bind(caller.conversation_id)
     .fetch_all(&mut *tx)
     .await?;
     let me = access::caller_in_tx(&mut tx, caller.owner_id, caller.conversation_id).await?;

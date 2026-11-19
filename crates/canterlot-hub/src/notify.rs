@@ -45,6 +45,8 @@ pub const SIGN_IN_PATH: &str = "/settings/sign-in";
 pub const KIND_SCHEDULE_FAILED: &str = "schedule_failed";
 /// Отчёт рутины готов: один пуш на карточку, привязан к родителю.
 pub const KIND_ROUTINE_REPORT: &str = "routine_report";
+/// Сколько отметка отправки считается живой: дольше строка брошена погибшим хабом.
+const SENDING_GRACE_SECS: f64 = 180.0;
 /// Катящееся окно троттлинга пушей о несработавших расписаниях.
 const SCHEDULE_FAILURE_WINDOW: TimeDelta = TimeDelta::hours(1);
 /// Сводный пуш о неудачах шлётся, когда их за час набралось столько.
@@ -1223,6 +1225,8 @@ struct PushRow {
     /// Версия строки, которую видел отправитель: условие сброса устаревшего.
     updated_at: DateTime<Utc>,
     stale: bool,
+    /// Попытка отмечена в строке, а итога нет дольше грейса: хаб погиб посреди отправки.
+    stranded: bool,
 }
 
 /// Отправитель пушей. Ключ живёт только здесь и уходит лишь в заголовке `X-Gotify-Key`.
@@ -1347,17 +1351,29 @@ impl Sender {
     ) -> Result<DeliveryReport, sqlx::Error> {
         let rows: Vec<PushRow> = sqlx::query_as(
             "select id,conversation_id,kind,payload,attempts,visible_defers,created_at,updated_at,
-                    clock_timestamp()-created_at > $1 * interval '1 second' as stale
+                    clock_timestamp()-created_at > $1 * interval '1 second' as stale,
+                    coalesce(last_status='sending'
+                             and clock_timestamp()-updated_at > $3 * interval '1 second',
+                             false) as stranded
              from owner_pushes
              where state='pending' and run_at<=clock_timestamp()
              order by run_at,id limit $2",
         )
         .bind(STALE.num_seconds() as f64)
         .bind(BATCH)
+        .bind(SENDING_GRACE_SECS)
         .fetch_all(pool)
         .await?;
         let mut report = DeliveryReport::default();
         for row in rows {
+            // Пуш «отчёт готов» не повторяется после гибели хаба посреди отправки: Gotify мог
+            // принять запрос. Попытка отмечена в строке до POST (`begin_attempt`).
+            if row.stranded && row.kind == KIND_ROUTINE_REPORT {
+                finish(pool, row.id, "dropped", Some("ambiguous_restart")).await?;
+                warn_dropped(&row, None, "ambiguous_restart");
+                report.dropped += 1;
+                continue;
+            }
             if row.stale {
                 // Условно по версии: слияние свежего исхода после чтения строки
                 // меняет `updated_at`, и такая строка уже не устарела.
@@ -1591,12 +1607,14 @@ async fn begin_attempt(
     sqlx::query(
         "update owner_pushes set attempts=$2,
            run_at=clock_timestamp()+$3*interval '1 second',
+           last_status=case when $4 then 'sending' else last_status end,
            updated_at=clock_timestamp()
          where id=$1 and state='pending'",
     )
     .bind(row.id)
     .bind(attempts)
     .bind(pause.as_secs_f64())
+    .bind(row.kind == KIND_ROUTINE_REPORT)
     .execute(&mut *tx)
     .await?;
     let stamped = match (schedule_id, previous) {
@@ -2125,6 +2143,7 @@ mod tests {
             created_at,
             updated_at,
             stale: false,
+            stranded: false,
         };
         // Расписание держит «постановка» (она запрашивает его первым).
         let mut enqueue = crate::db::begin(&pool).await.unwrap();

@@ -493,6 +493,16 @@ impl fmt::Debug for BackgroundTask {
             .finish_non_exhaustive()
     }
 }
+/// Чем кончился ход: успехом доказывается только `Completed`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunEnd {
+    #[default]
+    Completed,
+    Failed,
+    Interrupted,
+}
+
 #[derive(Clone)]
 pub enum AdapterEvent {
     RequestOpened {
@@ -549,6 +559,7 @@ pub enum AdapterEvent {
         usage: Vec<ModelUsage>,
         context_tokens: u64,
         context_window_tokens: u64,
+        end: RunEnd,
     },
     Limit(LimitFact),
     ContextExhausted,

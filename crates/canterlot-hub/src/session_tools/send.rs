@@ -343,7 +343,7 @@ pub async fn subscribe(
     }
     let visible: bool = sqlx::query_scalar(
         "select exists(select 1 from conversations
-                       where id=$1 and owner_id=$2 and trashed_at is null)",
+                       where id=$1 and owner_id=$2 and trashed_at is null and side_of is null)",
     )
     .bind(args.session_id)
     .bind(caller.owner_id)

@@ -22,6 +22,7 @@ use self::{
     rpc::{Incoming, RpcClient, RpcError, RpcId},
     thread::{Effective, OwnerDefaults, PermissionMode},
 };
+use crate::adapter::RunEnd;
 use crate::{
     adapter::{
         Adapter, AdapterError, AdapterEvent, AgentCallResult, BlockKind, Capabilities, CloseMode,
@@ -758,7 +759,11 @@ impl CodexAdapter {
         self.pending_writes.extend(self.requests.refuse_subagents());
         let mut finish = Vec::new();
         if let Some(translator) = self.translator.as_mut() {
-            finish.push(translator.finish_turn());
+            finish.push(translator.finish_turn(match status {
+                TurnStatus::Completed if error.is_none() => RunEnd::Completed,
+                TurnStatus::Interrupted => RunEnd::Interrupted,
+                _ => RunEnd::Failed,
+            }));
         }
         finish.push(AdapterEvent::Phase {
             phase: Phase::AwaitingInput,
@@ -1688,6 +1693,7 @@ impl CodexAdapter {
             usage: Vec::new(),
             context_tokens: 0,
             context_window_tokens: 0,
+            end: RunEnd::Failed,
         });
         self.events.push_back(AdapterEvent::Phase {
             phase: Phase::AwaitingInput,

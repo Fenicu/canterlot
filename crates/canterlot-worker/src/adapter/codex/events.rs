@@ -5,6 +5,7 @@ use super::super::frame_names::object_field_names;
 use super::super::labels::{command_label, cut_end};
 use super::super::{AdapterEvent, BlockKind, MediaSource, ModelUsage, Phase, TodoItem, TodoStatus};
 use super::rpc::RpcId;
+use crate::adapter::RunEnd;
 use canterlot_proto::goals::{GoalState, GoalStatus};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -366,7 +367,7 @@ impl Translator {
     }
 
     // RunFinished с расходом и контекстом; зовут на TurnCompleted главного хода.
-    pub fn finish_turn(&mut self) -> AdapterEvent {
+    pub fn finish_turn(&mut self, end: RunEnd) -> AdapterEvent {
         let command_id = self
             .active_turn
             .take()
@@ -391,6 +392,7 @@ impl Translator {
             usage,
             context_tokens: self.last_context_tokens,
             context_window_tokens: self.last_context_window,
+            end,
         }
     }
 

@@ -190,3 +190,58 @@ async fn nudge_http_is_limited_to_the_owners_sessions(pool: PgPool) {
         .await;
     assert_eq!(response.status.as_u16(), 404);
 }
+
+/// Правило боковой копии: GET владельца его показывает, значит PUT и DELETE владельца тоже
+/// его принимают. Скрыта копия только от инструментов агентов.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn owner_can_edit_and_clear_the_rule_of_a_side_chat_that_get_shows(pool: PgPool) {
+    let f = Fx::new(pool.clone()).await;
+    let path = format!("/api/v1/conversations/{}/nudge", f.session);
+    let created = f
+        .send(
+            Method::PUT,
+            &path,
+            Some("side_put_1"),
+            Some(json!({"idle_minutes": 5, "max_nudges": 2})),
+        )
+        .await;
+    assert_eq!(created.status.as_u16(), 200);
+    let parent = testkit::seed_conversation(
+        &pool,
+        f.owner,
+        sqlx::query_scalar("select machine_id from conversations where id=$1")
+            .bind(f.session)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+    )
+    .await;
+    sqlx::query("update conversations set side_of=$2, side_kind='chat' where id=$1")
+        .bind(f.session)
+        .bind(parent)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let read: Value = f.send(Method::GET, &path, None, None).await.json();
+    assert_eq!(read["rule"]["state"], "watching");
+    let paused = f
+        .send(
+            Method::PUT,
+            &path,
+            Some("side_put_2"),
+            Some(json!({"paused": true})),
+        )
+        .await;
+    assert_eq!(
+        paused.status.as_u16(),
+        200,
+        "PUT must accept what GET shows"
+    );
+    assert_eq!(paused.json::<Value>()["state"], "paused");
+    let cleared = f
+        .send(Method::DELETE, &path, Some("side_delete"), None)
+        .await;
+    assert_eq!(cleared.status.as_u16(), 204);
+    let read: Value = f.send(Method::GET, &path, None, None).await.json();
+    assert!(read["rule"].is_null());
+}

@@ -376,9 +376,9 @@ async fn record_copy_run(pool: &PgPool, copy: Uuid, finished: bool, forced: bool
     .unwrap();
     sqlx::query(
         "insert into runs(input_command_id,execution_id,conversation_id,provider,finished_at,
-                          duration_ms,forced_close)
+                          duration_ms,forced_close,outcome)
          select i.command_id,$2,$1,'claude',case when $3 then clock_timestamp() end,
-                case when $3 then 1000 end,$4
+                case when $3 then 1000 end,$4,case when $3 and not $4 then 'completed' end
            from inputs i where i.conversation_id=$1 and i.command_id is not null
          on conflict do nothing",
     )
@@ -1162,7 +1162,7 @@ async fn a_turn_that_is_just_starting_is_not_an_empty_report(pool: PgPool) {
     // Ход закончился с ответом: отчёт собран.
     finish_copy_turn(&pool, copy, "Всё спокойно.").await;
     sqlx::query(
-        "update runs set finished_at=clock_timestamp(),duration_ms=1 where conversation_id=$1",
+        "update runs set finished_at=clock_timestamp(),duration_ms=1,outcome='completed' where conversation_id=$1",
     )
     .bind(copy)
     .execute(&pool)
@@ -1450,6 +1450,19 @@ async fn card_events_fit_the_published_schema(pool: PgPool) {
         .await;
     assert_eq!(r.status.as_u16(), 204);
     assert_ne!(card, open);
+    // Удаление расписания снимает ещё одну карточку с причиной `schedule_deleted`.
+    let third = run_now(&f, schedule).await;
+    wait_run(&pool, third, "started").await;
+    assert_eq!(delete_schedule(&f, schedule).await, 200);
+    let reasons: Vec<String> = card_events(&pool, parent, "routine_report_dismissed")
+        .await
+        .iter()
+        .map(|payload| payload["reason"].as_str().unwrap().to_owned())
+        .collect();
+    assert!(
+        reasons.contains(&"schedule_deleted".to_owned()),
+        "{reasons:?}"
+    );
 
     let mut document: Value =
         serde_json::from_str(include_str!("../../../../docs/api/events.schema.json")).unwrap();
@@ -1942,4 +1955,399 @@ async fn a_lost_gotify_response_does_not_resend_the_report_push(pool: PgPool) {
     .await
     .unwrap();
     assert_eq!(pending, 0, "the row is settled");
+}
+
+async fn assert_not_published(outcome: Option<&str>, pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let _session = session(&f);
+    with_native(&f).await;
+    let schedule = make_schedule(&f, "Стендап").await;
+    let run = fire(&f, schedule).await;
+    let copy = copies(&pool, f.seed.conversation_id).await.remove(0).0;
+    finish_copy_turn(&pool, copy, "Промежуточная реплика, не итог").await;
+    sqlx::query("update runs set outcome=$2 where conversation_id=$1")
+        .bind(copy)
+        .bind(outcome)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sweep(&f).await;
+    failed_run_and_card(&f, schedule, run, "copy_failed").await;
+    assert!(routine_pushes(&pool).await.is_empty());
+    assert!(
+        run_state(&pool, run).await.1["report"]
+            .get("text")
+            .is_none()
+    );
+}
+
+/// Codex прерывает ход, OpenCode роняет его: `run_finished` приходит без принудительного
+/// закрытия, а блок с текстом уже `final`. Отчётом он быть не должен.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn an_interrupted_finish_never_publishes_the_earlier_text(pool: PgPool) {
+    assert_not_published(Some("interrupted"), pool).await;
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_failed_finish_never_publishes_the_earlier_text(pool: PgPool) {
+    assert_not_published(Some("failed"), pool).await;
+}
+
+/// Старый воркер исхода не присылает: успех не доказан, отчёт не публикуется.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_finish_without_a_recorded_outcome_never_publishes(pool: PgPool) {
+    assert_not_published(None, pool).await;
+}
+
+async fn retry_with(f: &Fixture, schedule: Uuid, key: &str, conversation: Uuid) -> (u16, Value) {
+    let r = f
+        .client
+        .send(
+            Method::POST,
+            &format!("/api/v1/schedules/{schedule}/run"),
+            Some(key),
+            Some(json!({"run_anyway": false, "report_conversation_id": conversation})),
+        )
+        .await;
+    (r.status.as_u16(), r.json())
+}
+
+async fn retarget_to_live_session(f: &Fixture, schedule: Uuid, conversation: Uuid) {
+    let revision: i64 = sqlx::query_scalar("select revision from schedules where id=$1")
+        .bind(schedule)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    let r = f
+        .client
+        .send(
+            Method::PATCH,
+            &format!("/api/v1/schedules/{schedule}"),
+            Some(&format!("retarget-{}", Uuid::now_v7())),
+            Some(json!({
+                "base_revision": revision,
+                "target": {"kind": "existing_session", "conversation_id": conversation},
+            })),
+        )
+        .await;
+    assert_eq!(
+        r.status.as_u16(),
+        200,
+        "{}",
+        String::from_utf8_lossy(&r.body)
+    );
+}
+
+/// Принятый повтор после правки расписания отвечает тем же ответом: повтор по ключу ищется
+/// раньше проверки цели.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn an_accepted_retry_replays_after_a_later_edit_of_the_schedule(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let _session = session(&f);
+    with_native(&f).await;
+    let parent = f.seed.conversation_id;
+    let schedule = make_schedule(&f, "Стендап").await;
+    let (status, first) = retry_with(&f, schedule, "retry-replay-key", parent).await;
+    assert_eq!(status, 200, "{first}");
+    retarget_to_live_session(&f, schedule, parent).await;
+    let (status, again) = retry_with(&f, schedule, "retry-replay-key", parent).await;
+    assert_eq!(status, 200, "{again}");
+    assert_eq!(again["id"], first["id"]);
+}
+
+/// Разговор карточки входит в личность запроса: тот же ключ с другим разговором не получает
+/// чужой ответ.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn the_retry_conversation_is_part_of_the_idempotency_identity(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let _session = session(&f);
+    with_native(&f).await;
+    let schedule = make_schedule(&f, "Стендап").await;
+    let (status, first) = retry_with(&f, schedule, "identity-key", f.seed.conversation_id).await;
+    assert_eq!(status, 200, "{first}");
+    let (status, other) = retry_with(&f, schedule, "identity-key", Uuid::now_v7()).await;
+    assert_eq!(status, 409, "{other}");
+}
+
+/// Правка расписания между заявкой повтора и приёмкой: заявка записала версию, которую
+/// проверила, поэтому приёмка по новой версии не проходит и промпт отчёта в живую сессию не
+/// уходит.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn an_edit_between_the_retry_reservation_and_admission_never_reaches_the_live_session(
+    pool: PgPool,
+) {
+    use canterlot_hub::schedules::admission::{Reservation, reserve_manual_for};
+    let f = Fixture::new(pool.clone()).await;
+    let _session = session(&f);
+    with_native(&f).await;
+    let parent = f.seed.conversation_id;
+    let schedule = make_schedule(&f, "Стендап").await;
+    let Reservation::Fresh { run, .. } = reserve_manual_for(
+        &pool,
+        f.seed.owner_id,
+        schedule,
+        "race-retry",
+        false,
+        Some(parent),
+    )
+    .await
+    .unwrap() else {
+        panic!("fresh");
+    };
+    retarget_to_live_session(&f, schedule, parent).await;
+    sqlx::query("update schedule_runs set lease_at=now()-interval '2 hours',updated_at=now()-interval '2 hours' where id=$1")
+        .bind(run.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sweep(&f).await;
+    for _ in 0..20_000 {
+        if run_state(&pool, run.id).await.0 != "claimed" {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_ne!(run_state(&pool, run.id).await.0, "started");
+    let sent: i64 = sqlx::query_scalar("select count(*) from inputs where content->0->>'text'=$1")
+        .bind(PROMPT)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(sent, 0, "the report prompt went into the live session");
+}
+
+/// Ждёт, пока в базе этого теста кто-то встанет на advisory-замок.
+async fn wait_for_advisory_waiter(pool: &PgPool) -> bool {
+    for _ in 0..20_000 {
+        let waiting: bool = sqlx::query_scalar(
+            "select exists(select 1 from pg_locks where locktype='advisory' and not granted
+               and database=(select oid from pg_database where datname=current_database()))",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        if waiting {
+            return true;
+        }
+        tokio::task::yield_now().await;
+    }
+    false
+}
+
+/// Приёмка берёт строку расписания, затем замок владельца. Удаление расписания идёт тем же
+/// порядком: обратный порядок давал взаимную блокировку при удалении во время срабатывания.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn deleting_a_schedule_takes_the_schedule_row_before_the_owner_lock(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let schedule = make_schedule_without_session(&f, "Стендап").await;
+    let mut holder = canterlot_hub::db::begin(&pool).await.unwrap();
+    sqlx::query(
+        "select pg_advisory_xact_lock(hashtextextended('canterlot:attributes:'||$1::text,0))",
+    )
+    .bind(f.seed.owner_id)
+    .execute(&mut *holder)
+    .await
+    .unwrap();
+    let deleter = {
+        let client = f.client.clone();
+        let revision: i64 = sqlx::query_scalar("select revision from schedules where id=$1")
+            .bind(schedule)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        tokio::spawn(async move {
+            client
+                .send(
+                    Method::DELETE,
+                    &format!("/api/v1/schedules/{schedule}"),
+                    Some("delete-order"),
+                    Some(json!({"base_revision": revision})),
+                )
+                .await
+                .status
+                .as_u16()
+        })
+    };
+    assert!(
+        wait_for_advisory_waiter(&pool).await,
+        "delete never reached the owner lock"
+    );
+    let held_by_delete = sqlx::query("select id from schedules where id=$1 for update nowait")
+        .bind(schedule)
+        .execute(&mut *holder)
+        .await
+        .is_err();
+    assert!(
+        held_by_delete,
+        "delete waits on the owner lock without holding the schedule row"
+    );
+    holder.rollback().await.unwrap();
+    assert_eq!(deleter.await.unwrap(), 200);
+}
+
+/// Очередь копии берётся раньше строки разговора, как в удалении и в `release_waiting`:
+/// обратный порядок замыкал уборку на отпускание ввода при простое родителя.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn cleanup_takes_the_copy_queue_before_the_copy_row(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let schedule = make_schedule_without_session(&f, "Стендап").await;
+    let (_card, copy) = stray_copy(&f, schedule, None).await;
+    let mut holder = canterlot_hub::db::begin(&pool).await.unwrap();
+    sqlx::query("select 1 from queue_state where conversation_id=$1 for update")
+        .bind(copy)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    let sweeper = {
+        let pool = pool.clone();
+        tokio::spawn(async move { canterlot_hub::routines::sweep(&pool, Utc::now()).await })
+    };
+    // Уборка встала на очереди копии: ждём, пока в базе появится ожидающий замок строки.
+    let mut waiting = false;
+    for _ in 0..20_000 {
+        waiting = sqlx::query_scalar(
+            "select exists(select 1 from pg_locks l join pg_stat_activity a on a.pid=l.pid
+                            where not l.granted and l.locktype in ('transactionid','tuple')
+                              and a.datname=current_database())",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        if waiting {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(waiting, "cleanup never waited on the copy queue");
+    let row_taken_first = sqlx::query("select id from conversations where id=$1 for update nowait")
+        .bind(copy)
+        .execute(&mut *holder)
+        .await
+        .is_err();
+    assert!(
+        !row_taken_first,
+        "cleanup took the copy row before its queue"
+    );
+    holder.rollback().await.unwrap();
+    sweeper.await.unwrap().unwrap();
+}
+
+/// Сбой уборки одного осиротевшего бокового чата не роняет `side::sweep`, поэтому тик доходит
+/// до отчётов и остальных копий.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_failing_orphan_side_chat_does_not_stop_the_tick(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let schedule = make_schedule_without_session(&f, "Стендап").await;
+    let (good_card, _good) = stray_copy(&f, schedule, None).await;
+    let other_parent = testkit::seed_conversation(&pool, f.seed.owner_id, f.seed.machine_id).await;
+    sqlx::query("update conversations set trashed_at=now() where id=$1")
+        .bind(other_parent)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let orphan = testkit::seed_conversation(&pool, f.seed.owner_id, f.seed.machine_id).await;
+    sqlx::query("update conversations set side_of=$2, side_kind='chat' where id=$1")
+        .bind(orphan)
+        .bind(other_parent)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "create function fail_orphan_delete() returns trigger language plpgsql as $$
+         begin
+           if old.id = '{orphan}' then raise exception 'boom'; end if;
+           return old;
+         end $$"
+    )))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "create trigger fail_orphan_delete before delete on conversations
+         for each row execute function fail_orphan_delete()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    scheduler(&f).tick(Utc::now()).await.unwrap();
+    assert!(card_copy(&pool, good_card).await.is_none());
+}
+
+/// Gotify, который в момент POST записывает, что видно в строке пуша: попытка должна быть
+/// отмечена в базе до запроса, иначе гибель хаба после приёма оставит строку без следа.
+async fn marker_probing_gotify(
+    pool: PgPool,
+) -> (
+    std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>>,
+    String,
+) {
+    use axum::{Router, extract::State, routing::post};
+    type Seen = std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>>;
+    #[derive(Clone)]
+    struct Shared {
+        pool: PgPool,
+        seen: Seen,
+    }
+    let seen: Seen = Default::default();
+    let app = Router::new()
+        .route(
+            "/gotify/message",
+            post(|State(shared): State<Shared>| async move {
+                let marker: Option<String> = sqlx::query_scalar(
+                    "select last_status from owner_pushes where kind='routine_report'",
+                )
+                .fetch_one(&shared.pool)
+                .await
+                .unwrap();
+                shared.seen.lock().unwrap().push(marker);
+                axum::http::StatusCode::OK
+            }),
+        )
+        .with_state(Shared {
+            pool,
+            seen: seen.clone(),
+        });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (seen, format!("http://{addr}/gotify"))
+}
+
+/// Хаб погиб после того, как Gotify принял пуш, но до записи итога: перезапуск не шлёт его
+/// второй раз. Попытка отмечается в строке до запроса, а брошенная отметка снимает строку.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_report_push_stranded_mid_send_is_not_resent_after_a_restart(pool: PgPool) {
+    use std::sync::atomic::Ordering;
+    crate::auth_pushes::enable(&pool).await;
+    let f = Fixture::new(pool.clone()).await;
+    let _session = session(&f);
+    with_native(&f).await;
+    let schedule = make_schedule(&f, "Стендап").await;
+    ready_card(&f, schedule, "Отчёт").await;
+    // Попытка отмечена до POST.
+    let (seen, url) = marker_probing_gotify(pool.clone()).await;
+    let (_dir, sender) = crate::auth_pushes::sender(&url);
+    sender.deliver_due(&pool).await.unwrap();
+    assert_eq!(*seen.lock().unwrap(), vec![Some("sending".to_owned())]);
+    // Гибель хаба: строка осталась `pending` с отметкой попытки, прошло больше грейса.
+    sqlx::query(
+        "update owner_pushes set state='pending',last_status='sending',attempts=1,
+           updated_at=clock_timestamp()-interval '10 minutes',run_at=clock_timestamp()
+         where kind='routine_report'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (hits, url) = crate::schedule_failure_push::dropping_gotify().await;
+    let (_dir2, restarted) = crate::auth_pushes::sender(&url);
+    restarted.deliver_due(&pool).await.unwrap();
+    assert_eq!(hits.load(Ordering::SeqCst), 0, "a stranded push was resent");
+    let state: String =
+        sqlx::query_scalar("select state from owner_pushes where kind='routine_report'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(state, "dropped");
 }

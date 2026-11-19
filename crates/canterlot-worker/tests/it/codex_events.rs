@@ -484,7 +484,7 @@ fn usage_is_sum_of_last_per_turn_and_matches_total() {
     let mut translator = Translator::new("01a171c0-fdcd-7db1-91ca-9804eb1229dd", "gpt-6-luna");
     translator.begin_turn("01a171c0-fdf7-7b12-a07f-38fb50befd0d", command_id());
     feed_frames(&mut translator, &frames);
-    match translator.finish_turn() {
+    match translator.finish_turn(canterlot_worker::adapter::RunEnd::Completed) {
         AdapterEvent::RunFinished {
             usage,
             context_tokens,
@@ -519,7 +519,7 @@ fn usage_replayed_after_resume_is_not_counted() {
     assert!(out52.iter().all(|t| matches!(t, Translated::Ignored)));
     // :105 — обновление нового хода: считается.
     feed_line(&mut translator, "resume", 105, "thread/tokenUsage/updated");
-    match translator.finish_turn() {
+    match translator.finish_turn(canterlot_worker::adapter::RunEnd::Completed) {
         AdapterEvent::RunFinished {
             usage,
             context_tokens,
@@ -544,7 +544,7 @@ fn context_tokens_and_window_from_last_update() {
     let mut translator = Translator::new("01a171c0-fdcd-7db1-91ca-9804eb1229dd", "gpt-6-luna");
     translator.begin_turn("01a171c0-fdf7-7b12-a07f-38fb50befd0d", command_id());
     feed_frames(&mut translator, &frames);
-    match translator.finish_turn() {
+    match translator.finish_turn(canterlot_worker::adapter::RunEnd::Completed) {
         AdapterEvent::RunFinished {
             context_tokens,
             context_window_tokens,
@@ -809,7 +809,7 @@ fn subagent_items_carry_agent_model_and_spawn_parent() {
         e,
         AdapterEvent::Phase { summary: Some(s), .. } if s == "Субагент helper: working"
     )));
-    match translator.finish_turn() {
+    match translator.finish_turn(canterlot_worker::adapter::RunEnd::Completed) {
         AdapterEvent::RunFinished { usage, .. } => {
             assert_eq!(usage.len(), 2);
             let helper = usage
@@ -1937,7 +1937,7 @@ fn subagent_from_activity_item_gets_a_call_a_lane_and_a_result() {
         Some(("listed".to_owned(), None, "orchestrator".to_owned()))
     );
     assert_eq!(diagnostics(&events), []);
-    match translator.finish_turn() {
+    match translator.finish_turn(canterlot_worker::adapter::RunEnd::Completed) {
         AdapterEvent::RunFinished { usage, .. } => {
             let child = usage
                 .iter()
@@ -2024,7 +2024,7 @@ fn subagent_outliving_the_turn_stays_attributed_and_leaves_the_phase_alone() {
             before.extend(out);
         }
         if finished {
-            translator.finish_turn();
+            translator.finish_turn(canterlot_worker::adapter::RunEnd::Completed);
             ended = true;
         }
     }

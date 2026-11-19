@@ -121,6 +121,15 @@ test('a_replaced_card_disappears_and_the_new_one_takes_its_place', async ({ page
   await expect(card(page)).not.toContainText('Старый отчёт');
 });
 
+test('a_card_of_a_deleted_schedule_leaves_an_open_feed_through_the_event', async ({ page }) => {
+  const { api, id } = await boot(page, {
+    seed: (hub, conversation) => { hub.putRoutineReport(conversation, { id: REPORT, schedule_id: SCHEDULE, state: 'pending', created_at: AFTER_ALL }); }
+  });
+  await expect(card(page)).toHaveAttribute('data-state', 'pending');
+  api.dismissRoutineReport(id, REPORT, 'schedule_deleted');
+  await expect(card(page)).toHaveCount(0);
+});
+
 test('copy_puts_the_report_text_on_the_clipboard_with_the_usual_feedback', async ({ page }) => {
   await boot(page, {
     seed: (api, id) => { api.putRoutineReport(id, { id: REPORT, schedule_id: SCHEDULE, state: 'ready', body: BODY, created_at: AFTER_ALL }); }
