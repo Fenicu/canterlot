@@ -311,6 +311,15 @@ pub struct ConversationDetail {
     pub turn_recorded: bool,
     /// Решение маршрута, выбравшее исполнителя; `None` — запуск без маршрута.
     pub routing: Option<Value>,
+    /// Домен общей памяти сессии (`work` или `personal`); `None` — у сессии нет памяти.
+    #[serde(default)]
+    pub memory_domain: Option<String>,
+    /// Проект памяти: канонический рабочий каталог запуска.
+    #[serde(default)]
+    pub memory_project: Option<String>,
+    /// Лексический и канонический домены разошлись: память сессии выключена.
+    #[serde(default)]
+    pub memory_conflict: bool,
 }
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct GroupCount {
@@ -839,6 +848,11 @@ pub async fn detail(
         holds,
         turn_recorded,
         routing: row.try_get("routing").ok().flatten(),
+        memory_domain: row.try_get("memory_domain")?,
+        memory_project: row.try_get("memory_project")?,
+        memory_conflict: row
+            .try_get::<Option<DateTime<Utc>>, _>("memory_domain_conflict_at")?
+            .is_some(),
     }))
 }
 pub async fn recent_workdirs(

@@ -460,7 +460,7 @@ async fn serve(
             .with_blob_store(blobs.clone())
             .with_media_quota(attachments.max_media_bytes_per_machine)
             .with_session_tools(session_tools.clone())
-            .with_memory(memory)
+            .with_memory(memory.clone())
             .with_limits(limits.clone())
             .with_orchestrator(&orchestrator)
             .with_activity(&activity)
@@ -536,6 +536,7 @@ async fn serve(
             routing_stale: orchestrator.routing.stale_limits,
             guards: orchestrator.guards.clone(),
             session_tools: session_tools.clone(),
+            memory,
             spawn_queue: orchestrator.spawn_queue.clone(),
             routing_queue_horizon: orchestrator.routing.queue_horizon,
             machines,

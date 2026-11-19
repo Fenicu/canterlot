@@ -170,6 +170,11 @@ error_codes! {
     TermEmpty => "term_empty", 422, Browser, Never, "Шаблон и замена не могут быть пустыми";
     TermTooLong => "term_too_long", 422, Browser, Never, "Шаблон или замена длиннее 100 символов";
     DuplicateTerm => "duplicate_term", 422, Browser, Never, "Шаблоны совпадают после нормализации";
+    VersionConflict => "version_conflict", 409, Browser, AfterCondition, "Запись уже изменена, обновите её";
+    LooksLikeSecret => "looks_like_secret", 422, Browser, Never, "Текст похож на секрет";
+    SubjectExists => "subject_exists", 409, Browser, Never, "Запись с такой темой уже есть";
+    DomainFull => "domain_full", 409, Browser, AfterCondition, "В домене слишком много записей памяти";
+    BadLevel => "bad_level", 422, Browser, Never, "Уровень проекта требует проект";
 }
 
 /// Причины отказа в `details.reason` и код, с которым каждая уходит владельцу:
@@ -394,6 +399,26 @@ pub struct ErrorDetails {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub retry_after_seconds: Option<u64>,
+    /// Текущая версия записи памяти (`version_conflict`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub current_version: Option<i32>,
+    /// Класс находки детектора секретов (`looks_like_secret`); значение не возвращается.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub class: Option<String>,
+    /// Запись, которая уже держит тему (`subject_exists`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub existing_id: Option<Uuid>,
+    /// Версия записи, которая уже держит тему (`subject_exists`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub existing_version: Option<i32>,
+    /// Предел записей домена (`domain_full`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub limit: Option<u32>,
 }
 
 impl ErrorDetails {
@@ -747,6 +772,46 @@ impl From<crate::message_snippets::MessageSnippetError> for ApiError {
             }
             E::IdempotencyConflict => Self::new(ErrorCode::IdempotencyConflict),
             E::Db(e) => e.into(),
+        }
+    }
+}
+
+impl From<crate::memory::store::MemoryError> for ApiError {
+    fn from(error: crate::memory::store::MemoryError) -> Self {
+        use crate::memory::store::MemoryError as E;
+        match error {
+            E::LooksLikeSecret { class } => {
+                Self::new(ErrorCode::LooksLikeSecret).with_details(ErrorDetails {
+                    class: Some(class.as_str().to_owned()),
+                    ..Default::default()
+                })
+            }
+            E::TooLarge { .. } => Self::new(ErrorCode::ResourceLimit),
+            E::SubjectExists { id, version } => {
+                Self::new(ErrorCode::SubjectExists).with_details(ErrorDetails {
+                    existing_id: Some(id),
+                    existing_version: Some(version),
+                    ..Default::default()
+                })
+            }
+            E::VersionConflict { current_version } => {
+                Self::new(ErrorCode::VersionConflict).with_details(ErrorDetails {
+                    current_version: Some(current_version),
+                    ..Default::default()
+                })
+            }
+            E::NotFound | E::MemoryUnavailable => Self::new(ErrorCode::NotFound),
+            // Лимит записей считают для агента; владельца он не касается.
+            E::RateLimited { .. } => Self::new(ErrorCode::TooManyRequests),
+            E::DomainFull { limit } => {
+                Self::new(ErrorCode::DomainFull).with_details(ErrorDetails {
+                    limit: Some(limit),
+                    ..Default::default()
+                })
+            }
+            E::BadLevel => Self::new(ErrorCode::BadLevel),
+            E::Invalid { field } => invalid_field(field),
+            E::Db(error) => error.into(),
         }
     }
 }

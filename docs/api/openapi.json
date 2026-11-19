@@ -10000,6 +10000,578 @@
         }
       }
     },
+    "/api/v1/memory": {
+      "get": {
+        "tags": [
+          "memory"
+        ],
+        "operationId": "get__api_v1_memory",
+        "parameters": [
+          {
+            "name": "domain",
+            "in": "query",
+            "description": "Обязателен: `work` или `personal`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "query",
+            "description": "Только записи этого проекта (канонический каталог).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Поиск по теме и тексту.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "`active` (по умолчанию) или `archived`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "До 100, по умолчанию 50.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Записи одного домена",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryListPage"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "memory"
+        ],
+        "operationId": "post__api_v1_memory",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateMemoryBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Запись создана",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryEntryView"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/memory/{id}": {
+      "get": {
+        "tags": [
+          "memory"
+        ],
+        "operationId": "get__api_v1_memory__id_",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "domain",
+            "in": "query",
+            "description": "Обязателен: `work` или `personal`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Запись",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryEntryView"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "memory"
+        ],
+        "operationId": "put__api_v1_memory__id_",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateMemoryBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Запись изменена; версия выросла",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryEntryView"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "memory"
+        ],
+        "operationId": "delete__api_v1_memory__id_",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "domain",
+            "in": "query",
+            "description": "Обязателен: `work` или `personal`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Запись и её прошлые версии удалены навсегда",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/memory/{id}/archive": {
+      "post": {
+        "tags": [
+          "memory"
+        ],
+        "operationId": "post__api_v1_memory__id__archive",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ArchiveMemoryBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Запись в архиве",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryEntryView"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/memory/{id}/restore": {
+      "post": {
+        "tags": [
+          "memory"
+        ],
+        "operationId": "post__api_v1_memory__id__restore",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RestoreMemoryBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Запись снова активна",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryEntryView"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/memory/{id}/revisions": {
+      "get": {
+        "tags": [
+          "memory"
+        ],
+        "operationId": "get__api_v1_memory__id__revisions",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "domain",
+            "in": "query",
+            "description": "Обязателен: `work` или `personal`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Прошлые версии записи, новые первыми",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/MemoryRevisionView"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/message-snippets": {
       "get": {
         "tags": [
@@ -13642,6 +14214,26 @@
           }
         }
       },
+      "ArchiveMemoryBody": {
+        "type": "object",
+        "properties": {
+          "domain": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Обязателен: `work` или `personal`."
+          },
+          "expected_version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          }
+        },
+        "additionalProperties": false
+      },
       "ArchiveReason": {
         "type": "string",
         "enum": [
@@ -14855,6 +15447,24 @@
                   "null"
                 ]
               },
+              "memory_conflict": {
+                "type": "boolean",
+                "description": "Лексический и канонический домены разошлись: память сессии выключена."
+              },
+              "memory_domain": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Домен общей памяти сессии (`work` или `personal`); `None` — у сессии нет памяти."
+              },
+              "memory_project": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Проект памяти: канонический рабочий каталог запуска."
+              },
               "model": {
                 "type": "string"
               },
@@ -15140,6 +15750,58 @@
           },
           "workdir": {
             "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "CreateMemoryBody": {
+        "type": "object",
+        "required": [
+          "level",
+          "kind",
+          "subject",
+          "body"
+        ],
+        "properties": {
+          "body": {
+            "type": "string"
+          },
+          "domain": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Обязателен: `work` или `personal`."
+          },
+          "force_secret_warning": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Сохранить, даже если текст похож на секрет."
+          },
+          "kind": {
+            "type": "string"
+          },
+          "level": {
+            "type": "string",
+            "description": "`domain` или `project`; для `project` нужен `project`."
+          },
+          "project": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Канонический каталог проекта для записи уровня проекта."
+          },
+          "subject": {
+            "type": "string"
+          },
+          "valid_until": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "additionalProperties": false
@@ -15852,7 +16514,12 @@
           "too_many_terms",
           "term_empty",
           "term_too_long",
-          "duplicate_term"
+          "duplicate_term",
+          "version_conflict",
+          "looks_like_secret",
+          "subject_exists",
+          "domain_full",
+          "bad_level"
         ]
       },
       "ErrorDetails": {
@@ -15866,6 +16533,10 @@
             },
             "description": "Разбор кандидатов маршрута (`no_executor_available`): не текст в `reason`."
           },
+          "class": {
+            "type": "string",
+            "description": "Класс находки детектора секретов (`looks_like_secret`); значение не возвращается."
+          },
           "current_revision": {
             "type": "integer",
             "format": "int64",
@@ -15875,13 +16546,34 @@
             "type": "string",
             "pattern": "^(open|decision_saved|decision_transmitting|decision_applied|decision_unconfirmed|decision_not_applied|closed_without_decision)$"
           },
+          "current_version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Текущая версия записи памяти (`version_conflict`)."
+          },
           "draft": {
             "$ref": "#/components/schemas/DraftView",
             "description": "Актуальный общий черновик (`draft_revision_conflict`)."
           },
+          "existing_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Запись, которая уже держит тему (`subject_exists`)."
+          },
+          "existing_version": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Версия записи, которая уже держит тему (`subject_exists`)."
+          },
           "field": {
             "type": "string",
             "description": "Поле запроса, которое не прошло проверку (`preset_invalid`)."
+          },
+          "limit": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Предел записей домена (`domain_full`).",
+            "minimum": 0
           },
           "nearest_reset": {
             "type": "string",
@@ -18805,6 +19497,176 @@
           }
         }
       },
+      "MemoryEntryView": {
+        "type": "object",
+        "description": "Запись памяти для экрана владельца.",
+        "required": [
+          "id",
+          "domain",
+          "level",
+          "kind",
+          "subject",
+          "body",
+          "status",
+          "expired",
+          "version",
+          "created_by",
+          "created_at",
+          "updated_by",
+          "updated_at"
+        ],
+        "properties": {
+          "body": {
+            "type": "string"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "created_by": {
+            "type": "object"
+          },
+          "domain": {
+            "type": "string",
+            "description": "`work` или `personal`."
+          },
+          "expired": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "level": {
+            "type": "string",
+            "description": "`domain`: для всего домена; `project`: для одного проекта."
+          },
+          "project": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Канонический рабочий каталог проекта; `None` у записи домена."
+          },
+          "project_label": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "description": "`active` или `archived`."
+          },
+          "subject": {
+            "type": "string"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updated_by": {
+            "type": "object"
+          },
+          "valid_until": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "MemoryListPage": {
+        "type": "object",
+        "description": "Страница списка: новые записи первыми.",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MemoryEntryView"
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Передайте в `cursor`, чтобы получить следующую страницу; `None` на последней."
+          }
+        }
+      },
+      "MemoryRevisionView": {
+        "type": "object",
+        "description": "Прошлое состояние записи.",
+        "required": [
+          "id",
+          "version",
+          "action",
+          "kind",
+          "subject",
+          "body",
+          "status",
+          "actor",
+          "at"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "`update`, `archive` или `restore`: действие, которое сохранило это состояние."
+          },
+          "actor": {
+            "type": "object"
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "body": {
+            "type": "string"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "project": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "valid_until": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "version": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
       "MessageSnippet": {
         "type": "object",
         "required": [
@@ -21721,6 +22583,19 @@
           }
         ]
       },
+      "RestoreMemoryBody": {
+        "type": "object",
+        "properties": {
+          "domain": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Обязателен: `work` или `personal`."
+          }
+        },
+        "additionalProperties": false
+      },
       "ResumeAtResetOutcome": {
         "type": "string",
         "description": "Итог одноразового «Продолжить при сбросе».",
@@ -24106,6 +24981,71 @@
           "allow",
           "skip"
         ]
+      },
+      "UpdateMemoryBody": {
+        "type": "object",
+        "properties": {
+          "body": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "domain": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Обязателен: `work` или `personal`."
+          },
+          "expected_version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Версия, с которой правят; при расхождении `409 version_conflict`."
+          },
+          "force_secret_warning": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "kind": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "level": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "project": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Проект для перевода записи на уровень проекта."
+          },
+          "subject": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "valid_until": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Срок действия; `null` снимает срок, отсутствие поля оставляет как было."
+          }
+        },
+        "additionalProperties": false
       },
       "UpdatePage": {
         "type": "object",
