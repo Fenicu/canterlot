@@ -354,6 +354,25 @@ run 0 "${web_real_env[@]}" bash "$g8/scripts/gate.sh" --rerun-failed --no-attest
 grep -qF 'npx phone ui/x.spec.ts:42' "$GATE_FAKE_CALLS" || fail 'web_rerun не перезапустил тест телефона'
 grep -qF 'npx desktop ui/w.spec.ts:5' "$GATE_FAKE_CALLS" || fail 'web_rerun не перезапустил тест десктопа'
 
+# Упал UI, а сквозные сценарии не запускались (отчёта стека нет): перезапуск одних
+# упавших UI-тестов дал бы аттестацию без стека, поэтому повторяется весь веб.
+g9="$tmp/g9"
+new_gate_repo "$g9"
+mkdir -p "$g9/web"
+: >"$g9/web/package-lock.json"
+cp scripts/gate/fake-check-web.sh "$g9/scripts/check-web.sh"
+git -C "$g9" add web/package-lock.json scripts/check-web.sh
+git -C "$g9" commit -qm web
+: >"$GATE_FAKE_CALLS"
+run 1 env FAKE_NO_STACK=1 "${web_real_env[@]}" bash "$g9/scripts/gate.sh" --no-attest
+state9="$g9/.superpowers/gate/$(git -C "$g9" rev-parse --short=8 HEAD)/state.tsv"
+grep -qF $'web_failed\tother' "$state9" || fail 'падение UI без отчёта стека отнесено к тестам'
+grep -q 'сквозные сценарии не запускались' "$out" || fail 'нет предупреждения о незапущенном стеке'
+: >"$GATE_FAKE_CALLS"
+run 1 env FAKE_NO_STACK=1 "${web_real_env[@]}" bash "$g9/scripts/gate.sh" --rerun-failed --no-attest
+grep -qF 'check-web --stack' "$GATE_FAKE_CALLS" || fail 'перезапуск без отчёта стека не повторил весь веб'
+if grep -q '^npx ' "$GATE_FAKE_CALLS"; then fail 'перезапуск без отчёта стека перезапустил одни UI-тесты'; fi
+
 # Битый индекс: git status падает, и проверка чистоты обязана провалиться, а не
 # пропустить аттестацию из-за пустого вывода.
 printf 'garbage' >"$scratch/.git/index"

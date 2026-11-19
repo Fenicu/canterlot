@@ -19,6 +19,7 @@ original_args=("$@")
 
 fast=0
 stack=0
+ui_status=0
 built=0
 base=main
 while (($#)); do
@@ -205,10 +206,14 @@ if ((fast)); then
     fi
 else
     printf '\n==> Playwright e2e/ui и e2e/parity\n'
-    npx --no-install playwright test e2e/ui e2e/parity
+    # С --stack сквозные сценарии идут и после падения UI: гейт перезапускает упавшие
+    # тесты по отчётам и без отчёта стека не узнал бы его результат.
+    npx --no-install playwright test e2e/ui e2e/parity || ui_status=$?
+    ((stack)) || ((ui_status == 0)) || exit "$ui_status"
 fi
 if ((stack)); then
     printf '\n==> сквозные сценарии на настоящем хабе\n'
     npm run stack:build && npm run test:stack
 fi
+((ui_status == 0)) || exit "$ui_status"
 printf 'web готов за %ds\n' $((SECONDS - started))

@@ -345,6 +345,15 @@ for suite in root.iter('testsuite'):
 PY
 }
 
+report_present() {
+    local prefix=$1 slot
+    [[ -f "$prefix.json" ]] && return 0
+    for slot in 1 2 3 4 5 6 7 8; do
+        [[ -f "$prefix-$slot.json" ]] && return 0
+    done
+    return 1
+}
+
 pw_failures() {
     local prefix=$1 kind=${2:-pw} f files=() slot
     [[ -f "$prefix.json" ]] && files+=("$prefix.json")
@@ -527,6 +536,7 @@ else
 fi
 
 # --- вся веб-половина и сквозные сценарии: один прогон ---
+web_stack_missing=0
 if [[ "$web_action" != skip ]]; then
     printf '\n==> scripts/check-web.sh --stack (%s)\n' "$web_action"
     s=$SECONDS
@@ -540,6 +550,12 @@ if [[ "$web_action" != skip ]]; then
     printf '    check-web.sh --stack: %ds, код %s\n' "$web_s" "$web_status"
     mapfile -t pw_ids < <(pw_failures "$CANTERLOT_PW_JSON_REPORT")
     mapfile -t stack_ids < <(pw_failures "$CANTERLOT_STACK_JSON_REPORT" stack)
+    # Без отчёта стека перезапуск одних упавших UI-тестов дал бы аттестацию без сквозных
+    # сценариев: такое падение не «тесты», и перезапуск повторит весь веб.
+    if [[ "$web_action" == full && "$web_status" != 0 ]] && ! report_present "$CANTERLOT_STACK_JSON_REPORT"; then
+        web_stack_missing=1
+        printf 'гейт: сквозные сценарии не запускались, перезапуск повторит весь веб\n' >&2
+    fi
     if [[ "$web_action" == tests ]]; then
         mapfile -t pw_missing < <(missing_rerun_ids pw "$CANTERLOT_PW_JSON_REPORT" "$log_dir/pw-expected.txt")
         mapfile -t stack_missing < <(missing_rerun_ids stack "$CANTERLOT_STACK_JSON_REPORT" "$log_dir/stack-expected.txt")
@@ -584,7 +600,9 @@ state_add deploy_failed "$(step_failure_kind "$deploy_exit" "${deploy_ids[@]}")"
 for id in "${deploy_ids[@]}"; do state_add deploy_fail "$id"; done
 state_add web_exit "$web_status"
 state_add web_duration_s "$web_s"
-state_add web_failed "$(step_failure_kind "$web_status" "${pw_ids[@]}" "${stack_ids[@]}")"
+web_kind=$(step_failure_kind "$web_status" "${pw_ids[@]}" "${stack_ids[@]}")
+((web_stack_missing)) && [[ "$web_kind" == tests ]] && web_kind=other
+state_add web_failed "$web_kind"
 for id in "${pw_ids[@]}"; do state_add pw_fail "$id"; done
 for id in "${stack_ids[@]}"; do state_add stack_fail "$id"; done
 for id in "${done_ids[@]}" "${to_rerun[@]}"; do state_add rerun_done "$id"; done
