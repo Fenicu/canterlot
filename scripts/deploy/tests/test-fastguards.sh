@@ -27,6 +27,7 @@ setup_fast() {
     # Развёрнутый релиз хранит полный хэш исходника, как настоящая сборка.
     printf 'source=%s\n' "${FAST_LIVE_FULL}" >>"${HUB_RELEASES}/${SHA_PREV}/RELEASE"
     printf 'source=%s\n' "${FAST_LIVE_FULL}" >>"${WORKER_RELEASES}/${SHA_PREV}/RELEASE"
+    seed_identity_sidecar
     : >"${FAKE_ROOT}/state/calls.log"
 }
 finish_fast() { drop_fast_source; teardown_case; }
@@ -135,6 +136,97 @@ RC=0
 unset FAKE_PG_DBOID
 [ "${RC}" != "0" ] && case_ok "a different database oid is refused too" || case_fail "the restore ran against another database oid"
 assert_contains "${FAKE_ROOT}/rollback.log" "database oid" "refused on the database oid"
+finish_fast
+case_end
+
+# ------------------------------------------------------------ быстрый путь без источника идентичности
+case_begin "skip eligibility refuses the fast path when there is no identity source (pin or sidecar)"
+setup_fast noid other
+rm -f "${HUB_BACKUP_DIR}/canterlot-pre-seed-20261101T000000Z.dump.identity"  # lint: local-temp
+if fcut --execute "${SHA_NEW}" --fast --result "${FAKE_ROOT}/x.result"; then case_fail "the fast path ran without an identity source"; else case_ok "exit nonzero"; fi
+assert_eq "$(result_of "${FAKE_ROOT}/x.result" status)/$(result_of "${FAKE_ROOT}/x.result" phase)/$(result_of "${FAKE_ROOT}/x.result" fail_codes)" "refused/eligibility/fast_path_refused" "refused before any write with the fallback code"
+assert_contains "${FAKE_ROOT}/cutover.log" "no identity source" "reason: no pin and no readable sidecar"
+assert_not_contains "${FAKE_ROOT}/cutover.log" "connection(s) of the running hub" "the same-role connection count is not a substitute"
+no_writes_yet "no identity source"
+if fcut "${SHA_NEW}" --rehearse --skip-ct-backup --result "${FAKE_ROOT}/reh.result"; then case_fail "the skip rehearsal passed without an identity source"; else case_ok "the skip rehearsal refuses too"; fi
+export HUB_PG_SYSTEM_ID=7000000000000000001
+fcut --execute "${SHA_NEW}" --fast --result "${FAKE_ROOT}/exe.result" && case_ok "a pinned HUB_PG_SYSTEM_ID is an identity source" || case_fail "the pinned run failed"
+unset HUB_PG_SYSTEM_ID
+finish_fast
+case_end
+
+case_begin "the full path keeps working without an identity source"
+setup_fast noidfull migration
+rm -f "${HUB_BACKUP_DIR}/canterlot-pre-seed-20261101T000000Z.dump.identity"  # lint: local-temp
+printf 'MIGR_MAX=40\nFAILED=0\npayload-predump\n' >"${FAKE_ROOT}/state/db.txt"
+sed -i 's/^migrations_last=.*/migrations_last=0040_monthly_limits.sql/' "${HUB_RELEASES}/${SHA_PREV}/RELEASE" "${WORKER_RELEASES}/${SHA_PREV}/RELEASE"
+fcut "${SHA_NEW}" --rehearse --result "${FAKE_ROOT}/reh.result" || true
+TOK="$(result_of "${FAKE_ROOT}/reh.result" token)"
+fcut --execute "${SHA_NEW}" --confirm "${TOK}" --result "${FAKE_ROOT}/exe.result" || true
+assert_eq "$(result_of "${FAKE_ROOT}/exe.result" status)" "done" "the full run is done"
+[ -f "$(result_of "${FAKE_ROOT}/exe.result" dump).identity" ] && case_ok "it records the identity for the next run" || case_fail "no identity recorded"
+finish_fast
+case_end
+
+# ------------------------------------------------------------ откат переживает частичное восстановление
+# Печатаемая команда отката после быстрого прогона со СТОПом: общий подготовительный шаг.
+printed_rollback() {
+    export FAKE_READYZ_NEW=0
+    fcut --execute "${SHA_NEW}" --fast --result "${FAKE_ROOT}/exe.result" || true
+    unset FAKE_READYZ_NEW
+    RECOVERY_CMD="$(grep -m1 'scripts/deploy/rollback-db.sh' "${FAKE_ROOT}/cutover.log" | sed 's/^[[:space:]]*//')"
+    PHASE_FILE="$(result_of "${FAKE_ROOT}/exe.result" dump).restore-phase"
+    printf 'MIGR_MAX=41\nFAILED=0\nchanged-after-the-dump\n' >"${FAKE_ROOT}/state/db.txt"
+}
+run_printed() { RC=0; ( cd "${REPO_ROOT}" && eval "${RECOVERY_CMD}" ) >"${FAKE_ROOT}/rollback.log" 2>&1 || RC=$?; }
+
+case_begin "pg_restore fails after createdb: the same printed command is rerun and restores"
+setup_fast rbcreated other
+printed_rollback
+export FAKE_FAIL_PG_RESTORE=1
+run_printed
+unset FAKE_FAIL_PG_RESTORE
+[ "${RC}" != "0" ] && case_ok "the first run fails" || case_fail "the first run did not fail"
+assert_eq "$(cut -d' ' -f1-2 "${PHASE_FILE}" 2>/dev/null)" "created 16500" "the phase file records the replacement oid"
+run_printed
+assert_eq "${RC}" "0" "the rerun of the same printed command succeeds"
+[ "${RC}" = "0" ] || tail -5 "${FAKE_ROOT}/rollback.log"
+grep -q 'payload-predump' "${FAKE_ROOT}/state/db.txt" && case_ok "the data is restored from the dump" || case_fail "the data was not restored"
+FAKE_HOST=fakehub "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-hub && case_ok "the hub is started" || case_fail "the hub is not running"
+assert_contains "${FAKE_ROOT}/rollback.log" "replacement database oid 16500" "the recorded replacement oid was accepted"
+assert_eq "$(cut -d' ' -f1 "${PHASE_FILE}")" "restored" "the phase ends as restored"
+finish_fast
+case_end
+
+case_begin "a failure between dropdb and createdb: the rerun continues from dropped"
+setup_fast rbdropped other
+printed_rollback
+export FAKE_FAIL_CREATEDB=1
+run_printed
+unset FAKE_FAIL_CREATEDB
+[ "${RC}" != "0" ] && case_ok "the first run fails" || case_fail "the first run did not fail"
+assert_eq "$(cut -d' ' -f1 "${PHASE_FILE}" 2>/dev/null)" "dropped" "the phase file says dropped"
+[ ! -f "${FAKE_ROOT}/state/db.txt" ] && case_ok "the database is really missing" || case_fail "the database exists"
+run_printed
+assert_eq "${RC}" "0" "the rerun succeeds with the database missing"
+[ "${RC}" = "0" ] || tail -5 "${FAKE_ROOT}/rollback.log"
+grep -q 'payload-predump' "${FAKE_ROOT}/state/db.txt" && case_ok "the data is restored from the dump" || case_fail "the data was not restored"
+finish_fast
+case_end
+
+case_begin "an unrecorded foreign oid is still refused, with or without a phase record"
+setup_fast rbforeign other
+printed_rollback
+export FAKE_PG_DBOID=77777
+: >"${FAKE_ROOT}/state/calls.log"
+run_printed
+[ "${RC}" != "0" ] && case_ok "no phase record: refused" || case_fail "the foreign oid was accepted"
+assert_contains "${FAKE_ROOT}/rollback.log" "database oid" "refused on the oid"
+printf 'created 16500\n' >"${PHASE_FILE}"
+run_printed
+[ "${RC}" != "0" ] && case_ok "a phase record for another oid does not excuse 77777" || case_fail "the foreign oid was accepted under a phase record"
+unset FAKE_PG_DBOID
+grep -qE '^(dropdb|createdb) ' "${FAKE_ROOT}/state/calls.log" && case_fail "dropdb or createdb ran" || case_ok "the database was never touched"
 finish_fast
 case_end
 

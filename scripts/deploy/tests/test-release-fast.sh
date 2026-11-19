@@ -414,6 +414,7 @@ setup_real_fast() {
     setup_cutover "$1"
     printf 'source=%s\n' "${FAST_LIVE_FULL}" >>"${HUB_RELEASES}/${SHA_PREV}/RELEASE"
     printf 'source=%s\n' "${FAST_LIVE_FULL}" >>"${WORKER_RELEASES}/${SHA_PREV}/RELEASE"
+    seed_identity_sidecar
     wire_real_fast
 }
 finish_real_fast() { drop_fast_source; teardown_case; }

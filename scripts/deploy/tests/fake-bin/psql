@@ -10,6 +10,13 @@ if [ -n "${FAKE_PSQL_FAIL_MATCH:-}" ] && [[ "${sql}" == *"${FAKE_PSQL_FAIL_MATCH
     echo "fake-psql: injected failure for query" >&2
     exit 1
 fi
+# -d <база>: у снесённой базы (нет db.txt) соединиться можно только с обслуживающей postgres.
+dbname=""; prevarg=""
+for arg in "$@"; do [ "${prevarg}" = "-d" ] && dbname="${arg}"; prevarg="${arg}"; done
+if [ -n "${dbname}" ] && [ "${dbname}" != "postgres" ] && [ ! -f "${FAKE_ROOT}/state/db.txt" ]; then
+    echo "psql: error: connection to server failed: FATAL:  database \"${dbname}\" does not exist" >&2
+    exit 2
+fi
 db="${FAKE_ROOT}/state/db.txt"
 migr_max=0
 failed=0
@@ -59,8 +66,15 @@ case "${sql}" in
         printf '%s' "${FAKE_HAS_COMPACTIONS:-1}" ;;
     *"from compactions where finished_at is null"*)
         printf '%s' "${FAKE_OPEN_COMP:-0}" ;;
+    *"select 1 from pg_database"*)
+        # Есть ли база: 1, если db.txt на месте.
+        if [ -f "${FAKE_ROOT}/state/db.txt" ]; then printf '1'; fi ;;
     *"pg_control_system"*)
-        printf '%s %s' "${FAKE_PG_SYSID:-7000000000000000001}" "${FAKE_PG_DBOID:-16384}" ;;
+        if [[ "${sql}" == *"pg_database"* ]]; then
+            printf '%s %s' "${FAKE_PG_SYSID:-7000000000000000001}" "${FAKE_PG_DBOID:-$(cat "${FAKE_ROOT}/state/db-oid" 2>/dev/null || echo 16384)}"
+        else
+            printf '%s' "${FAKE_PG_SYSID:-7000000000000000001}"
+        fi ;;
     *"from _sqlx_migrations order by version"*)
         if [ -f "${FAKE_ROOT}/state/db-migrations.txt" ]; then
             cat "${FAKE_ROOT}/state/db-migrations.txt"
