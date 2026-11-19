@@ -242,9 +242,24 @@ struct Tally {
     output: u64,
     cache_read: u64,
     cache_write: u64,
+    /// Микродолларов от сервера; `None`, пока ни один шаг не назвал цену.
+    cost_micro_usd: Option<u64>,
 }
 
 impl Tally {
+    // `cost` шага сервер считает сам, в долларах; бесплатная модель даёт 0, а не пропуск.
+    fn add_cost(&mut self, data: &Value) {
+        let Some(usd) = data
+            .get("cost")
+            .and_then(Value::as_f64)
+            .filter(|usd| usd.is_finite() && *usd >= 0.0)
+        else {
+            return;
+        };
+        let micro = (usd * 1_000_000.0).round() as u64;
+        self.cost_micro_usd = Some(self.cost_micro_usd.unwrap_or(0).saturating_add(micro));
+    }
+
     // `input` уже без кэша, `output` без рассуждений: так их записывает сервер.
     fn add(&mut self, tokens: &Value) {
         let count = |pointer: &str| tokens.pointer(pointer).and_then(Value::as_u64).unwrap_or(0);
@@ -730,7 +745,7 @@ impl Translator {
                 output_tokens: tally.output,
                 cache_read_tokens: tally.cache_read,
                 cache_write_tokens: tally.cache_write,
-                cost_micro_usd: None,
+                cost_micro_usd: tally.cost_micro_usd,
             })
             .collect();
         AdapterEvent::RunFinished {
@@ -1034,7 +1049,9 @@ impl Translator {
             return Vec::new();
         }
         let (_, agent) = self.lane_of(data);
-        self.usage.entry((model, agent)).or_default().add(tokens);
+        let tally = self.usage.entry((model, agent)).or_default();
+        tally.add(tokens);
+        tally.add_cost(data);
         // У потомка своё окно: контекст разговора считает только основной агент.
         if !child {
             let count =

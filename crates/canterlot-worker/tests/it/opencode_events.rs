@@ -201,7 +201,7 @@ fn usage_keeps_the_recorded_token_split() {
             output_tokens: 20,
             cache_read_tokens: 30,
             cache_write_tokens: 0,
-            cost_micro_usd: None,
+            cost_micro_usd: Some(0),
         }]
     );
     assert_eq!(context_tokens, 100);
@@ -1030,7 +1030,7 @@ fn child_tokens_are_counted_under_its_agent_and_never_touch_the_context() {
             output_tokens: 40,
             cache_read_tokens: 60,
             cache_write_tokens: 0,
-            cost_micro_usd: None,
+            cost_micro_usd: Some(0),
         }
     );
     assert_eq!(line("orchestrator").input_tokens, 140, "two parent steps");
@@ -1863,4 +1863,51 @@ fn current_tool_turn_gives_reasoning_call_result_text_and_matching_usage() {
     assert_eq!(usage[0].model, model);
     assert_eq!(usage[0].agent, "orchestrator");
     assert!(usage[0].output_tokens > 0);
+}
+
+fn run_steps(costs: &[Option<f64>]) -> Vec<ModelUsage> {
+    let session = "ses_cost";
+    let mut translator = Translator::new(session, HashMap::new());
+    let command = Uuid::now_v7();
+    translator.begin_run(Some(command));
+    for (index, cost) in costs.iter().enumerate() {
+        let message = format!("msg_{index}");
+        let frame = |kind: &str, extra: Value| {
+            let mut data = json!({"sessionID": session, "assistantMessageID": message,
+                "agent": "build", "model": {"id": "m", "providerID": "p"}});
+            if let (Some(map), Some(extra)) = (data.as_object_mut(), extra.as_object()) {
+                map.extend(extra.clone());
+            }
+            json!({"type": kind, "data": data})
+        };
+        translator.feed(&frame("session.step.started", json!({})));
+        let mut ended =
+            json!({"tokens": {"input": 10, "output": 5, "cache": {"read": 0, "write": 0}}});
+        if let Some(cost) = cost {
+            ended["cost"] = json!(cost);
+        }
+        translator.feed(&frame("session.step.ended", ended));
+    }
+    let AdapterEvent::RunFinished { usage, .. } = translator.finish_run(command) else {
+        panic!("not a run end");
+    };
+    usage
+}
+
+#[test]
+fn step_costs_add_up_per_turn() {
+    let usage = run_steps(&[Some(0.012), Some(0.0305)]);
+    assert_eq!(usage[0].cost_micro_usd, Some(42_500));
+}
+
+#[test]
+fn free_model_reports_zero_cost_not_unknown() {
+    let usage = run_steps(&[Some(0.0), Some(0.0)]);
+    assert_eq!(usage[0].cost_micro_usd, Some(0));
+}
+
+#[test]
+fn steps_without_cost_leave_the_cost_unknown() {
+    let usage = run_steps(&[None]);
+    assert_eq!(usage[0].cost_micro_usd, None);
 }
