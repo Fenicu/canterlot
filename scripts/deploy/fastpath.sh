@@ -63,7 +63,7 @@ if [[ "${LIVE_HUB}" =~ ^[0-9a-f]{12}$ ]] && [ "${LIVE_HUB}" = "${LIVE_WEB}" ] &&
     fi
 fi
 if [ -f "${DIST}/RELEASE" ]; then
-    TARGET_FULL="$(grep -E '^source=[0-9a-f]{40}$' "${DIST}/RELEASE" | head -1 | cut -d= -f2)" || TARGET_FULL=""
+    TARGET_FULL="$(sed -n 's/^source=\([0-9a-f]\{40\}\)$/\1/p' "${DIST}/RELEASE" | sed -n 1p)" || TARGET_FULL=""
 fi
 if [ -n "${LIVE_FULL}" ] && { [ -z "${TARGET_FULL}" ] || [ "${TARGET_FULL:0:12}" != "${SHA}" ]; }; then
     print_full "the target dist RELEASE has no full source= commit id matching ${SHA}"

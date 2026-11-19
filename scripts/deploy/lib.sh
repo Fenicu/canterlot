@@ -306,7 +306,7 @@ _plan_file_hash() {
 # hub web worker; $6 skip-ct-backup — план без vzdump (другой хэш: токен привязан к флагу).
 plan_text() {
     local sha="$1" dist_dir="$2" b_hub="$3" b_web="$4" b_worker="$5" skip_vz="${6:-}" f toolkit step2 step3
-    toolkit="$(for f in cutover.sh lib.sh verify.sh retain.sh preflight.sh target-check.sh deploy.conf; do
+    toolkit="$(for f in cutover.sh lib.sh verify.sh retain.sh preflight.sh target-check.sh deploy.conf fastpath-classify.py migration-compare.py toolkit-bound.py; do
         printf '%s %s\n' "$(_plan_file_hash "${DEPLOY_DIR}/${f}")" "${f}"
     done | sha256sum | cut -c1-12)"
     step2="  2 fresh vzdump of CT ${HUB_CTID} while hub and worker run (notes pre-${sha}-<ts>); the control worker is exactly the unit MainPID"
@@ -546,7 +546,7 @@ deployed_source_full() {
     local rel="$1" raw line
     [[ "${rel}" =~ ^[0-9a-f]{12}$ ]] || return 1
     raw="$(ssh_hub "cat '${HUB_RELEASES}/${rel}/RELEASE'" </dev/null)" || return 1
-    line="$(printf '%s\n' "${raw}" | grep -E '^source=[0-9a-f]{40}$' | head -2)" || return 1
+    line="$(printf '%s\n' "${raw}" | grep -E '^source=[0-9a-f]{40}$' | sed -n 1,2p)" || return 1
     [ "$(printf '%s\n' "${line}" | wc -l)" = "1" ] || return 1
     line="${line#source=}"
     [ "${line:0:12}" = "${rel}" ] || return 1
@@ -598,7 +598,7 @@ baseline_verify() {
 # $4..$6 имена развёрнутых hub web worker (12 hex).
 fastpath_eval() {
     local src="$1" target="$2" live="$3" b_hub="$4" b_web="$5" b_worker="$6"
-    local rehearsal=skip backup=skip reasons="" full_reason="" cls="" classifier="" c
+    local rehearsal=skip backup=skip reasons="" full_reason="" cls="" c
     local ancestor="" mig="" other="" changed="" key n
     fastpath_full() { full_reason="${full_reason:+${full_reason}; }$1"; }
     for c in "${b_hub}" "${b_web}" "${b_worker}"; do

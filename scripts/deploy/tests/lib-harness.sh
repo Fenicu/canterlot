@@ -34,7 +34,7 @@ export -f date
 fake_worker_build() {
     local cache uid
     uid="$(id -u)"
-    cache="${HARNESS_CACHE_DIR:-/tmp}/canterlot-fake-worker-v3.${uid}"
+    cache="${HARNESS_CACHE_DIR:-/tmp}/canterlot-fake-worker-v4.${uid}"
     if [ ! -x "${cache}" ]; then
         cat >"${cache}.c" <<'EOF'
 #include <stdio.h>
@@ -56,6 +56,22 @@ int main(int argc, char **argv) {
         if (!f) return 1;
         int c; while ((c = fgetc(f)) != EOF) putchar(c);
         fclose(f);
+        return 0;
+    }
+    if (argc > 2 && strcmp(argv[1], "migrations") == 0 && strcmp(argv[2], "manifest") == 0) {
+        const char *root = getenv("FAKE_ROOT");
+        char path[4096];
+        if (!root) return 1;
+        snprintf(path, sizeof path, "%s/state/hub-manifest.json", root);
+        FILE *f = fopen(path, "r");
+        if (f) { int c; while ((c = fgetc(f)) != EOF) putchar(c); fclose(f); return 0; }
+        int max = 41;
+        snprintf(path, sizeof path, "%s/state/manifest-max", root);
+        f = fopen(path, "r");
+        if (f) { if (fscanf(f, "%d", &max) != 1) max = 41; fclose(f); }
+        printf("{\"migrations\":[");
+        for (int v = 1; v <= max; v++) printf("%s{\"checksum\":\"c%d\",\"description\":\"m\",\"version\":%d}", v > 1 ? "," : "", v, v);
+        printf("]}\n");
         return 0;
     }
     if (argc > 1 && strcmp(argv[1], "capabilities") == 0) {

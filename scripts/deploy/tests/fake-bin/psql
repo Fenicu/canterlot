@@ -59,6 +59,14 @@ case "${sql}" in
         printf '%s' "${FAKE_HAS_COMPACTIONS:-1}" ;;
     *"from compactions where finished_at is null"*)
         printf '%s' "${FAKE_OPEN_COMP:-0}" ;;
+    *"from _sqlx_migrations order by version"*)
+        if [ -f "${FAKE_ROOT}/state/db-migrations.txt" ]; then
+            cat "${FAKE_ROOT}/state/db-migrations.txt"
+        else
+            for ((v = 1; v <= migr_max; v++)); do printf '%s c%s 1\n' "${v}" "${v}"; done
+        fi ;;
+    *"from pg_stat_activity"*)
+        printf '%s' "${FAKE_HUB_CONNS:-3}" ;;
     *"coalesce(max(version),0) from _sqlx_migrations"*)
         printf '%s' "${migr_max}" ;;
     *"from _sqlx_migrations where not success"*)

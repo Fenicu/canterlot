@@ -198,7 +198,7 @@ log "restoring ${DUMP} (dropdb + createdb + full pg_restore --exit-on-error)"
 # Последняя сверка ровно перед dropdb: между ранней проверкой и этой точкой
 # воркер мог появиться (auto-restart, ручной запуск, осиротевший процесс).
 assert_worker_stopped "immediately before dropdb"
-if ssh_hub "runuser -u postgres -- dropdb '${HUB_PG_DB}' && runuser -u postgres -- createdb -O '${HUB_PG_USER}' '${HUB_PG_DB}' && runuser -u postgres -- pg_restore --exit-on-error -d '${HUB_PG_DB}' '${DUMP}'"; then
+if ssh_hub "runuser -u postgres -- dropdb -h '${HUB_PG_SOCKET}' '${HUB_PG_DB}' && runuser -u postgres -- createdb -h '${HUB_PG_SOCKET}' -O '${HUB_PG_USER}' '${HUB_PG_DB}' && runuser -u postgres -- pg_restore --exit-on-error -h '${HUB_PG_SOCKET}' -d '${HUB_PG_DB}' '${DUMP}'"; then
     log "pg_restore done"
 else
     log "pg_restore FAILED: refusing to start anything on a partial database. Needs the owner loudly"

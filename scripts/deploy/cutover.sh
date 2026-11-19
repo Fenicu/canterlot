@@ -312,35 +312,13 @@ fi
 BASE_HUB="$(deployed_sha hub)"
 BASE_WEB="$(deployed_sha web)"
 BASE_WORKER="$(deployed_sha worker)"
-# --fast и --skip-ct-backup: условия пересчитываются здесь из --source, а не берутся на
-# веру у вызывающего. Отказ — до любой записи (phase=token), код fast_path_refused.
+# --fast и --skip-ct-backup: условия пересчитывает skip_eligibility ниже (после предпроверки
+# цели, до первой записи); здесь флаги только входят в хэш плана.
 [ "${FAST}" = "0" ] || SKIP_VZDUMP=1
-if [ "${FAST}" = "1" ] || [ "${SKIP_VZDUMP}" = "1" ]; then
-    PHASE="token"
-    FP_LIVE_FULL="$(deployed_source_full "${BASE_HUB}")" || FP_LIVE_FULL=""
-    FP_TARGET_FULL="$(grep -E '^source=[0-9a-f]{40}$' "${DIST}/RELEASE" 2>/dev/null | head -1 | cut -d= -f2)" || FP_TARGET_FULL=""
-    FP_OUT="$(fastpath_eval "${SOURCE_DIR}" "${FP_TARGET_FULL}" "${FP_LIVE_FULL}" "${BASE_HUB}" "${BASE_WEB}" "${BASE_WORKER}")"
-    FP_REHEARSAL="$(printf '%s\n' "${FP_OUT}" | sed -n 's/^rehearsal=//p')"
-    FP_VZDUMP="$(printf '%s\n' "${FP_OUT}" | sed -n 's/^vzdump=//p')"
-    FASTPATH_REASONS="$(printf '%s\n' "${FP_OUT}" | sed -n 's/^reasons=//p')"
-    if [ "${FP_VZDUMP}" != "skip" ]; then
-        fail_mark
-        fail_code fast_path_refused
-        die_after "refusing to skip the vzdump: ${FASTPATH_REASONS}"
-    fi
-    if [ "${FAST}" = "1" ] && [ "${FP_REHEARSAL}" != "skip" ]; then
-        fail_mark
-        fail_code fast_path_refused
-        die_after "refusing the fast path (a rehearsal and a token are needed): ${FASTPATH_REASONS}"
-    fi
-    VZDUMP_SKIP_REASON="$(printf '%s\n' "${FP_OUT}" | sed -n 's/^vzdump_reason=//p')"
-fi
 PLAN_VZ=""
 [ "${SKIP_VZDUMP}" = "0" ] || PLAN_VZ="skip-ct-backup"
 PLAN_HASH="$(plan_hash "${SHA}" "${DIST}" "${BASE_HUB}" "${BASE_WEB}" "${BASE_WORKER}" "${PLAN_VZ}")"
-if [ "${FAST}" = "1" ]; then
-    log "fast path: no confirm token, no rehearsal, no vzdump; recomputed from ${SOURCE_DIR}: ${FASTPATH_REASONS}; every gate and preflight check of the real run still runs; plan ${PLAN_HASH}"
-elif [ "${DRY_RUN}" = "0" ] && [ "${REHEARSE}" = "0" ]; then
+if [ "${FAST}" = "0" ] && [ "${DRY_RUN}" = "0" ] && [ "${REHEARSE}" = "0" ]; then
     # Проверка токена — до любой записи: phase=token в результате это доказывает.
     PHASE="token"
     if ! TOKEN_PROBLEM="$(confirm_token_check "${CONFIRM}" "${SHA}" "${PLAN_HASH}")"; then
@@ -393,14 +371,86 @@ print_token() {
     RESULT_TOKEN="${token}"
     RESULT_TOKEN_UNTIL="$(date -u -d "@$((now + CONFIRM_TTL))" +%Y-%m-%dT%H:%M:%SZ)"
     printf '  CONFIRM=%s   # plan %s, valid until %s\n' "${token}" "${PLAN_HASH}" "${until}"
-    printf '  real run:  scripts/deploy/cutover.sh --execute %s --confirm %s --source %s --dist %s\n' \
-        "${SHA}" "${token}" "${SOURCE_DIR}" "${DIST_BASE:-${REPO_ROOT}/dist}"
+    printf '  real run:  scripts/deploy/cutover.sh --execute %s --confirm %s%s --source %s --dist %s\n' \
+        "${SHA}" "${token}" "$([ "${SKIP_VZDUMP}" = "1" ] && printf ' --skip-ct-backup')" "${SOURCE_DIR}" "${DIST_BASE:-${REPO_ROOT}/dist}"
 }
 
 # Провал осмотра БД — громкая смерть, а не пустой результат.
 hub_psql() { ssh_hub "runuser -u canterlot -- psql -h '${HUB_PG_SOCKET}' -d '${HUB_PG_DB}' -tAc \"$1\"" || die "hub DB query failed"; }
 # Вариант без die: для отчёта, где провал запроса — тоже данные.
 hub_psql_soft() { ssh_hub "runuser -u canterlot -- psql -h '${HUB_PG_SOCKET}' -d '${HUB_PG_DB}' -tAc \"$1\"" 2>/dev/null || echo UNKNOWN; }
+
+# --- пропуск репетиции и vzdump (--fast, --skip-ct-backup): проверки до первой записи ---
+# Условия пересчитываются здесь из --source и живой системы, а не берутся у вызывающего.
+# Отказ быстрому пути (fast_path_refused, phase=eligibility) — это «иди полным путём», он
+# случается до резервов, остановок и дампов. Расхождение базы с бинарём (migration_mismatch)
+# и чужая база (db_identity) — обычный жёсткий отказ без перехода на полный путь.
+ELIG_WHAT=""
+fast_refuse() {
+    PHASE="eligibility"
+    fail_mark
+    fail_code fast_path_refused
+    die_after "refusing ${ELIG_WHAT}: $1"
+}
+# База, которую смотрят проверка, дамп и восстановление, — та, к которой подключён работающий
+# хаб: в ней есть клиентские соединения пользователя хаба. Иначе при нескольких кластерах дамп
+# и проверка могли бы взять одну базу, а хаб работать с другой.
+db_identity_check() {
+    local n
+    n="$(hub_psql "select count(*) from pg_stat_activity where datname = current_database() and usename = '${HUB_PG_USER}' and backend_type = 'client backend' and pid <> pg_backend_pid()")"
+    case "${n}" in
+        '' | *[!0-9]* | 0)
+            PHASE="eligibility"
+            fail_mark
+            fail_code db_identity
+            die_after "no connection of the running hub (user ${HUB_PG_USER}) in database ${HUB_PG_DB} on socket ${HUB_PG_SOCKET}: this may not be the database the hub runs on" ;;
+    esac
+    log "database identity: ${HUB_PG_DB} on ${HUB_PG_SOCKET} has ${n} connection(s) of the running hub (user ${HUB_PG_USER}); dump and restore use the same socket and database"
+}
+skip_eligibility() {
+    local live_full target_full fp reh vz tb manifest rows cmp n saved_phase="${PHASE}"
+    [ "${FAST}" = "1" ] || [ "${SKIP_VZDUMP}" = "1" ] || return 0
+    if [ "${FAST}" = "1" ]; then ELIG_WHAT="the fast path"; else ELIG_WHAT="to skip the vzdump"; fi
+    PHASE="eligibility"
+    if ! BASELINE_WHY="$(baseline_verify "${BASE_HUB}" "${BASE_WEB}" "${BASE_WORKER}" 2>&1)"; then
+        fast_refuse "the live baseline is inconsistent: ${BASELINE_WHY}"
+    fi
+    live_full="$(deployed_source_full "${BASE_HUB}")" || live_full=""
+    target_full="$(sed -n 's/^source=\([0-9a-f]\{40\}\)$/\1/p' "${DIST}/RELEASE" 2>/dev/null | sed -n 1p)" || target_full=""
+    fp="$(fastpath_eval "${SOURCE_DIR}" "${target_full}" "${live_full}" "${BASE_HUB}" "${BASE_WEB}" "${BASE_WORKER}")"
+    reh="$(printf '%s\n' "${fp}" | sed -n 's/^rehearsal=//p')"
+    vz="$(printf '%s\n' "${fp}" | sed -n 's/^vzdump=//p')"
+    FASTPATH_REASONS="$(printf '%s\n' "${fp}" | sed -n 's/^reasons=//p')"
+    [ "${vz}" = "skip" ] || fast_refuse "${FASTPATH_REASONS}"
+    if [ "${FAST}" = "1" ]; then
+        [ "${reh}" = "skip" ] || fast_refuse "a rehearsal and a token are needed: ${FASTPATH_REASONS}"
+        tb="$(python3 -I "${SCRIPT_DIR}/toolkit-bound.py" "${SOURCE_DIR}" "${target_full}" "${SCRIPT_DIR}" 2>&1)" \
+            || fast_refuse "the checkout and the executing toolkit are not bound to the target: ${tb}"
+    fi
+    db_identity_check
+    manifest="$(ssh_hub "'${HUB_RELEASES}/${SHA}/bin/canterlot-hub' migrations manifest --json")" \
+        || fast_refuse "the target hub binary cannot print its migrations manifest"
+    rows="$(hub_psql "select version::text || ' ' || encode(checksum, 'hex') || ' ' || success::int::text from _sqlx_migrations order by version")"
+    cmp="$(python3 -I "${SCRIPT_DIR}/migration-compare.py" "${manifest}" "${rows}" 2>&1)" \
+        || fast_refuse "the migrations manifest could not be compared with the database: ${cmp}"
+    case "${cmp}" in
+        equal) ;;
+        pending*) fast_refuse "the target hub binary embeds migrations the database has not applied (versions ${cmp#pending }): the full path (rehearsal and vzdump) is needed" ;;
+        *)
+            PHASE="eligibility"
+            fail_mark
+            fail_code migration_mismatch
+            die_after "the live database and the target hub binary disagree on migrations (${cmp#mismatch }): manual review, not a release" ;;
+    esac
+    n="$(printf '%s\n' "${manifest}" | grep -o '"version"' | wc -l | tr -d ' ')"
+    VZDUMP_SKIP_REASON="the target hub manifest (${n} migrations) equals the live database's applied migrations (same versions and checksums, all successful, none pending)"
+    if [ "${FAST}" = "1" ]; then
+        log "fast path: no confirm token, no rehearsal, no vzdump; recomputed from ${SOURCE_DIR}: ${FASTPATH_REASONS}; ${VZDUMP_SKIP_REASON}; the checkout and the executing toolkit are bound to ${target_full:0:12}; every gate and preflight check of the real run still runs; plan ${PLAN_HASH}"
+    else
+        log "vzdump skip allowed: ${VZDUMP_SKIP_REASON}"
+    fi
+    PHASE="${saved_phase}"
+}
 
 # --- сугубо читаемые проверки, общие для dry-run и боевого прогона ---
 read_gates() {
@@ -545,6 +595,7 @@ if [ "${DRY_RUN}" = "1" ]; then
         hard "target-check failed for ${SHA}"
         NOT_RUN=1
     fi
+    skip_eligibility
     read_gates || log "dry-run: a read gate above reported a problem (see SOFT-FAIL)"
     pwa_read_gates || log "dry-run: a pwa gate above reported a problem (see SOFT-FAIL)"
     log "dry-run: baseline checks below run against the DEPLOYED release (hub=${DRY_BASE_HUB}); the target was checked above"
@@ -649,6 +700,7 @@ run_child "${SCRIPT_DIR}/preflight.sh" "${SHA}" --source "${SOURCE_DIR}" --dist 
 fail_mark
 run_child "${SCRIPT_DIR}/target-check.sh" "${SHA}" --source "${SOURCE_DIR}" --dist "${DIST_BASE:-${REPO_ROOT}/dist}" \
     || die_after "target check failed for ${SHA}: refusing before any write"
+skip_eligibility
 
 # CSP, который уйдёт в canterlot.env.<sha>, обязан быть выведен из финального PWA-билда
 # этого же dist: проверка до любого изменения (урок 1.5.0).
@@ -711,13 +763,6 @@ read_gates || die_after "read gates failed before any write"
 PREV_MIGR_MAX="$(hub_psql "select coalesce(max(version),0) from _sqlx_migrations where success")"
 PREV_MIGR_FAILED="$(hub_psql "select count(*) from _sqlx_migrations where not success")"
 log "previous releases: hub=${PREV_HUB_SHA} web=${PREV_WEB_SHA} worker=${PREV_WORKER_SHA}; migrations max=${PREV_MIGR_MAX} failed=${PREV_MIGR_FAILED}"
-# Без vzdump база не должна ждать новых миграций: сверка git diff с самой базой (второй,
-# независимый от git признак «миграций нет»). Отказ — до первой записи.
-if [ "${SKIP_VZDUMP}" = "1" ] && { [ "${PREV_MIGR_MAX}" != "${EXPECTED_MIGR}" ] || [ "${PREV_MIGR_FAILED}" != "0" ]; }; then
-    fail_mark
-    fail_code fast_path_refused
-    die_after "the vzdump is skipped, but the database migrations max ${PREV_MIGR_MAX} differs from the release's ${EXPECTED_MIGR} (or failed ${PREV_MIGR_FAILED} is not 0): new migrations need the full path"
-fi
 if is_rehearse; then MIGR_EXPECT="${PREV_MIGR_MAX}"; else MIGR_EXPECT="${EXPECTED_MIGR}"; fi
 
 # Единственная ловушка на весь прогон: ставится один раз, снимается только после
@@ -1243,7 +1288,7 @@ WORKER_STOPPED=1
 
 # 4. Дамп при остановленном воркере и его полная проверка до flip хаба.
 PHASE="dumping"
-run_write "pg_dump" ssh_hub "install -d -m 0700 -o postgres '${HUB_BACKUP_DIR}' && runuser -u postgres -- pg_dump -Fc -Z zstd:3 -f '${HUB_BACKUP_DIR}/${RUN_DUMP}' '${HUB_PG_DB}'" \
+run_write "pg_dump" ssh_hub "install -d -m 0700 -o postgres '${HUB_BACKUP_DIR}' && runuser -u postgres -- pg_dump -Fc -Z zstd:3 -f '${HUB_BACKUP_DIR}/${RUN_DUMP}' -h '${HUB_PG_SOCKET}' '${HUB_PG_DB}'" \
     || cutover_hard "pg_dump failed"
 # Проверка дампа ДО flip хаба: TOC читается и каждый блок данных распаковывается.
 # Без проверенного дампа дальше только рестарт воркера (см. on_end, фазы до flip).
