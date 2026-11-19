@@ -90,7 +90,12 @@ make_fast_source() {
     SHA_NEW_FULL="${FAST_TARGET_FULL}"
     export SHA_PREV SHA_NEW SHA_NEW_FULL FAST_SRC FAST_LIVE_FULL FAST_TARGET_FULL
 }
+# Убирает временный репозиторий и проверяет, что его больше нет (вызывать ДО teardown_case:
+# после него подменный rm уже удалён вместе со стендом).
 drop_fast_source() {
-    if [ -n "${FAST_SRC:-}" ] && [ -d "${FAST_SRC}" ]; then rm -rf "${FAST_SRC}"; fi  # lint: local-temp
+    local gone="${FAST_SRC:-}"
+    [ -n "${gone}" ] || return 0
+    if [ -d "${gone}" ]; then rm -rf "${gone}"; fi  # lint: local-temp
+    if [ -e "${gone}" ]; then case_fail "the scratch source ${gone} was not removed"; else case_ok "the scratch source repository is gone"; fi
     FAST_SRC=""
 }

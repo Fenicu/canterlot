@@ -375,5 +375,66 @@ assert_eq "$(readlink "${FLIPDIR}/build")" "releases/other" "web link untouched"
 finish_fast
 case_end
 
+# ------------------------------------------------------------ восстановление по записанным фактам
+case_begin "a skip-mode dump read-back failure before the flip: the planned dump is not a restore point"
+setup_fast recdumpfail other
+export FAKE_DUMP_CORRUPT=1
+fcut --execute "${SHA_NEW}" --fast --result "${FAKE_ROOT}/exe.result" || true
+unset FAKE_DUMP_CORRUPT
+assert_eq "$(result_of "${FAKE_ROOT}/exe.result" status)" "failed_before_flip" "result: failed_before_flip"
+assert_eq "$(result_of "${FAKE_ROOT}/exe.result" dump_verified)/$(result_of "${FAKE_ROOT}/exe.result" dump)" "no/" "result: no verified dump named"
+STOP_BLOCK="$(result_of "${FAKE_ROOT}/exe.result" stop_block)"
+[ -f "${STOP_BLOCK}" ] && case_ok "the recovery report exists" || case_fail "no recovery report"
+assert_contains "${STOP_BLOCK}" "this run's dump   = none usable" "the dump line says there is no usable dump"
+assert_contains "${STOP_BLOCK}" "this run's vzdump = none (skipped:" "the vzdump line says skipped"
+assert_not_contains "${STOP_BLOCK}" "verified readable before the hub flip)" "no claim of a verified dump"
+hub_is "${SHA_PREV}" && case_ok "hub untouched" || case_fail "hub moved"
+FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-worker && case_ok "the worker is back on its previous release" || case_fail "the worker is not running"
+finish_fast
+case_end
+
+case_begin "a wrong cluster fails the dump before the flip and the manual restore refuses it"
+setup_fast recwrongcluster other
+export FAKE_PG_SOCKET=/run/another-cluster
+fcut --execute "${SHA_NEW}" --fast --result "${FAKE_ROOT}/exe.result" || true
+assert_eq "$(result_of "${FAKE_ROOT}/exe.result" status)" "failed_before_flip" "the dump on another cluster stops the run before the flip"
+hub_is "${SHA_PREV}" && case_ok "hub untouched" || case_fail "hub moved"
+cp "${FAKE_ROOT}/state/db.txt" "${FAKE_ROOT}/db-before-restore.txt"
+printf 'TOC-LINE-02 _sqlx_migrations table\n' >"${HUB_BACKUP_DIR}/canterlot-pre-manual.dump"
+if bash "${DEPLOY_DIR}/rollback-db.sh" "${HUB_BACKUP_DIR}/canterlot-pre-manual.dump" --to "${SHA_PREV}" >"${FAKE_ROOT}/rollback.log" 2>&1; then case_fail "the restore ran on the wrong cluster"; else case_ok "rollback-db.sh refuses the wrong cluster"; fi
+cmp -s "${FAKE_ROOT}/state/db.txt" "${FAKE_ROOT}/db-before-restore.txt" && case_ok "the database was not touched" || case_fail "the database changed"
+unset FAKE_PG_SOCKET
+finish_fast
+case_end
+
+case_begin "forward-only recovery after the worker is live (skip mode) names no vzdump"
+setup_fast recforward other
+export FAKE_SITE_FAIL=meeting.example.com
+fcut --execute "${SHA_NEW}" --fast --result "${FAKE_ROOT}/exe.result" || true
+unset FAKE_SITE_FAIL
+assert_eq "$(result_of "${FAKE_ROOT}/exe.result" status)" "stop_and_report" "result: stop_and_report after the worker is live"
+STOP_BLOCK="$(result_of "${FAKE_ROOT}/exe.result" stop_block)"
+assert_contains "${STOP_BLOCK}" "recovery is forward-only" "forward-only recovery"
+assert_contains "${STOP_BLOCK}" "this run's vzdump = none (skipped:" "no vzdump named"
+assert_not_contains "${STOP_BLOCK}" "notes pre-${SHA_NEW}-" "no vzdump notes"
+assert_not_contains "${STOP_BLOCK}" "The vzdump above" "no vzdump fallback text"
+hub_is "${SHA_NEW}" && worker_is "${SHA_NEW}" && case_ok "hub and worker stay new" || case_fail "not on new"
+finish_fast
+case_end
+
+case_begin "the printed rollback of a fast run runs verbatim and restores the data"
+setup_fast recrollback other
+export FAKE_READYZ_NEW=0
+fcut --execute "${SHA_NEW}" --fast --result "${FAKE_ROOT}/exe.result" || true
+unset FAKE_READYZ_NEW
+assert_eq "$(result_of "${FAKE_ROOT}/exe.result" status)" "stop_and_report" "result: stop_and_report"
+printf 'MIGR_MAX=41\nFAILED=0\nchanged-after-the-dump\n' >"${FAKE_ROOT}/state/db.txt"
+RECOVERY_CMD="$(grep -m1 'scripts/deploy/rollback-db.sh' "${FAKE_ROOT}/cutover.log" | sed 's/^[[:space:]]*//')"
+if [ -n "${RECOVERY_CMD}" ] && ( cd "${REPO_ROOT}" && eval "${RECOVERY_CMD}" ) >"${FAKE_ROOT}/recovery.log" 2>&1; then case_ok "the printed recovery command runs verbatim"; else case_fail "the printed recovery command failed"; tail -3 "${FAKE_ROOT}/recovery.log" 2>/dev/null; fi
+grep -q 'payload-predump' "${FAKE_ROOT}/state/db.txt" && case_ok "the restored data is the dump's" || case_fail "the data was not restored from the dump"
+hub_is "${SHA_PREV}" && case_ok "recovery flipped the hub back" || case_fail "the hub was not flipped back"
+finish_fast
+case_end
+
 printf '\nfastcutover: %s passed, %s failed\n' "${PASS_COUNT}" "${FAIL_COUNT}"
 [ "${FAIL_COUNT}" = "0" ]

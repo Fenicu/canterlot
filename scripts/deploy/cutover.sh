@@ -931,10 +931,18 @@ report_block() {
         worker-live) printf 'STOP-AND-REPORT (phase %s): automation halted; the new worker is live on %s, so recovery is forward-only.\n' "${PHASE}" "${SHA}" ;;
         *) printf 'STOP-AND-REPORT (phase %s): automation halted, nothing else will be touched.\n' "${PHASE}" ;;
     esac
-    local vzdump_state_line vzdump_fallback
+    local vzdump_state_line vzdump_fallback dump_state_line
+    if [ "${DUMP_VERIFIED}" = "1" ]; then
+        dump_state_line="${HUB_BACKUP_DIR}/${RUN_DUMP} (quiesced after the worker stop, verified readable before the hub flip)"
+    else
+        dump_state_line="none usable: this run did not finish a verified dump before this stop (a file named ${HUB_BACKUP_DIR}/${RUN_DUMP} may exist: do not trust it without review)"
+    fi
     if [ "${SKIP_VZDUMP}" = "1" ]; then
-        vzdump_state_line="none (skipped: ${VZDUMP_SKIP_REASON}); the quiesced dump above is this run's restore point"
+        vzdump_state_line="none (skipped: ${VZDUMP_SKIP_REASON}); the verified dump above is this run's only restore point"
         vzdump_fallback="       There is no vzdump from this run (skipped: no migration changed), so the quiesced dump is the only restore point of this run."
+    elif [ "${VZDUMP_DONE}" != "1" ]; then
+        vzdump_state_line="none: the vzdump had not completed before this stop"
+        vzdump_fallback="       This run has no completed vzdump, so the verified dump is its only restore point."
     else
         vzdump_state_line="notes pre-${SHA}-${RUN_TS}${VZ_ARCHIVE:+, archive ${VZ_ARCHIVE}} (whole CT, taken earlier, while the worker still ran)"
         vzdump_fallback="       The vzdump above is a separate, earlier whole-CT restore point: restoring it loses what the worker
@@ -950,7 +958,7 @@ report_block() {
     web build          = ${web_link} (was releases/${PREV_WEB_SHA})
     live executions    = ${live_n} (sessions keep running in their supervisors and buffer journals)
     speech unit        = ${SPEECH_UNIT}: ${speech_now} (dictation only, never blocks recovery)
-    this run's dump   = ${HUB_BACKUP_DIR}/${RUN_DUMP} (quiesced after the worker stop, verified readable before the hub flip: $(yn "${DUMP_VERIFIED}"))
+    this run's dump   = ${dump_state_line}
     this run's vzdump = ${vzdump_state_line}
 EOF
     case "${stage}" in

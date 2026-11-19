@@ -53,6 +53,9 @@ assert_contains "${RDIR}/release-${RVER}.log" "release path: fast (rehearsal ski
 assert_contains "$(journal)" "Path: \`fast\` (rehearsal skipped, vzdump skipped): no migration and no deploy tooling change" "journal: the path and the reasons"
 assert_contains "$(journal)" "- rehearsal: skipped" "journal: the rehearsal phase says skipped"
 assert_not_contains "$(journal)" "rehearsal #" "journal: no rehearsal entries"
+assert_contains "$(journal)" "restore points: dump" "journal: the verified dump is a restore point"
+assert_contains "$(journal)" "vzdump skipped (" "journal: the skipped vzdump says so"
+assert_not_contains "$(journal)" 'vzdump `` notes' "journal: no empty vzdump fields"
 teardown_case
 case_end
 

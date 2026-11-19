@@ -328,8 +328,14 @@ append_journal() {
             printf -- '- result `%s`: status %s, soft failures %s (%s), speech soft failures %s, worker down %s s, hub interruption %s s\n' \
                 "$cr" "$(kv "$cr" status)" "$(kv "$cr" soft_failures)" "$(kv "$cr" soft_by_kind)" \
                 "$(kv "$cr" speech_soft_failures)" "$(kv "$cr" worker_downtime_s)" "$(kv "$cr" hub_interruption_s)"
-            [[ -z $(kv "$cr" dump) ]] || printf -- '- restore points: dump `%s`, vzdump `%s` notes `%s`\n' \
-                "$(kv "$cr" dump)" "$(kv "$cr" vzdump_archive)" "$(kv "$cr" vzdump_notes)"
+            # Точки восстановления — из записанных фактов, без пустых полей несуществующего vzdump.
+            if [[ -n $(kv "$cr" dump) || $(kv "$cr" vzdump_done) == yes || $(kv "$cr" vzdump_skipped) == yes ]]; then
+                printf -- '- restore points: %s; %s\n' \
+                    "$([[ -n $(kv "$cr" dump) ]] && printf 'dump `%s` (verified)' "$(kv "$cr" dump)" || printf 'no verified dump')" \
+                    "$(if [[ $(kv "$cr" vzdump_skipped) == yes ]]; then printf 'vzdump skipped (%s)' "$(kv "$cr" vzdump_skip_reason)"
+                       elif [[ $(kv "$cr" vzdump_done) == yes ]]; then printf 'vzdump `%s` notes `%s`' "$(kv "$cr" vzdump_archive)" "$(kv "$cr" vzdump_notes)"
+                       else printf 'no vzdump taken'; fi)"
+            fi
             if [[ -n $(kv "$cr" stop_block) && $(kv "$cr" status) == stop_and_report ]]; then
                 printf -- '- STOP block: `%s` (paste it here, call the owner)\n' "$(kv "$cr" stop_block)"
             elif [[ -n $(kv "$cr" stop_block) ]]; then

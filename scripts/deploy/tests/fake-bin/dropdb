@@ -4,6 +4,15 @@ set -euo pipefail
 [ -n "${FAKE_ROOT:-}" ] || { echo "fake-db: FAKE_ROOT unset" >&2; exit 99; }
 name="$(basename "$0")"
 echo "${name} $*" >>"${FAKE_ROOT}/state/calls.log"
+# Кластер задаёт только явный -h: без него (кластер по умолчанию) или с чужим сокетом — отказ.
+if [ -n "${FAKE_PG_SOCKET:-}" ]; then
+    got=""; prev=""
+    for arg in "$@"; do [ "${prev}" = "-h" ] && got="${arg}"; prev="${arg}"; done
+    if [ "${got}" != "${FAKE_PG_SOCKET}" ]; then
+        echo "fake-pg: wrong cluster (-h '${got}', want '${FAKE_PG_SOCKET}')" >&2
+        exit 1
+    fi
+fi
 if [ "${name}" = "dropdb" ] && [ -n "${FAKE_DROPDB_HOOK:-}" ]; then bash "${FAKE_DROPDB_HOOK}" || true; fi
 case "${name}" in
     dropdb) rm -f "${FAKE_ROOT}/state/db.txt" ;;

@@ -10,6 +10,15 @@ for arg in "$@"; do
     prev="${arg}"
 done
 [ -n "${file}" ] || { echo "fake-pg_dump: no -f" >&2; exit 99; }
+# Кластер задаёт только явный -h: без него (кластер по умолчанию) или с чужим сокетом — отказ.
+if [ -n "${FAKE_PG_SOCKET:-}" ]; then
+    got=""; prev=""
+    for arg in "$@"; do [ "${prev}" = "-h" ] && got="${arg}"; prev="${arg}"; done
+    if [ "${got}" != "${FAKE_PG_SOCKET}" ]; then
+        echo "fake-pg: wrong cluster (-h '${got}', want '${FAKE_PG_SOCKET}')" >&2
+        exit 1
+    fi
+fi
 if [ "${FAKE_FAIL_PG_DUMP:-0}" = "1" ]; then
     echo "fake-pg_dump: injected failure" >&2
     exit 1
