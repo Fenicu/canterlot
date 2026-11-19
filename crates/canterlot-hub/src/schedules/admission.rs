@@ -1334,24 +1334,23 @@ async fn start_report_copy(
         return Err(Skip::new(RunState::Failed, "report_capability_missing"));
     }
     // Форкать нечего: сессия ещё не сделала ни одного хода.
-    if crate::side::current_native(&mut **tx, parent_id)
+    if crate::side::current_native(tx, parent_id)
         .await
         .map_err(db)?
         .is_none()
     {
         return Err(Skip::new(RunState::Failed, "no_native_session"));
     }
-    let copy =
-        crate::side::insert_copy_in_tx(&mut **tx, schedule.owner_id, parent_id, &parent, "report")
-            .await
-            .map_err(|error| {
-                Skip::with(
-                    RunState::Failed,
-                    json!({"reason": "create_failed", "detail": format!("{error:?}")}),
-                )
-            })?;
+    let copy = crate::side::insert_copy_in_tx(tx, schedule.owner_id, parent_id, &parent, "report")
+        .await
+        .map_err(|error| {
+            Skip::with(
+                RunState::Failed,
+                json!({"reason": "create_failed", "detail": format!("{error:?}")}),
+            )
+        })?;
     let submitted = submit_message_in_tx(
-        &mut **tx,
+        tx,
         &SubmitMessage {
             owner_id: schedule.owner_id,
             conversation_id: copy,
@@ -1371,7 +1370,7 @@ async fn start_report_copy(
         )
     })?;
     // Копия сама поднимает исполнение; OpenCode при занятом родителе держит ввод.
-    crate::side::start_for_input_in_tx(&mut **tx, schedule.owner_id, copy, Uuid::now_v7())
+    crate::side::start_for_input_in_tx(tx, schedule.owner_id, copy, Uuid::now_v7())
         .await
         .map_err(|error| {
             Skip::with(
@@ -1381,7 +1380,7 @@ async fn start_report_copy(
         })?;
     let title = render_title(&schedule.title_template, &schedule.name, run.scheduled_at);
     let card = crate::routines::open_in_tx(
-        &mut **tx,
+        tx,
         crate::routines::NewCard {
             owner_id: schedule.owner_id,
             conversation_id: parent_id,

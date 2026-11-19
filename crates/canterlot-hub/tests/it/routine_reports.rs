@@ -334,6 +334,7 @@ async fn copies(pool: &PgPool, parent: Uuid) -> Vec<(Uuid, String)> {
         .unwrap()
 }
 
+#[derive(sqlx::FromRow)]
 struct Card {
     id: Uuid,
     state: String,
@@ -345,35 +346,14 @@ struct Card {
 }
 
 async fn cards(pool: &PgPool, schedule: Uuid) -> Vec<Card> {
-    let rows: Vec<(
-        Uuid,
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<Uuid>,
-    )> = sqlx::query_as(
+    sqlx::query_as(
         "select id,state,title,body,error,dismiss_reason,copy_id
-               from routine_reports where schedule_id=$1 order by created_at,id",
+           from routine_reports where schedule_id=$1 order by created_at,id",
     )
     .bind(schedule)
     .fetch_all(pool)
     .await
-    .unwrap();
-    rows.into_iter()
-        .map(
-            |(id, state, title, body, error, dismiss_reason, copy_id)| Card {
-                id,
-                state,
-                title,
-                body,
-                error,
-                dismiss_reason,
-                copy_id,
-            },
-        )
-        .collect()
+    .unwrap()
 }
 
 async fn open_cards(pool: &PgPool, schedule: Uuid) -> Vec<Card> {
