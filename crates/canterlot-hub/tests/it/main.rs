@@ -81,6 +81,7 @@ mod machine_outage;
 mod machine_updates;
 mod machines;
 mod media;
+mod memory_import;
 mod memory_scope;
 mod memory_settings;
 mod memory_tools;

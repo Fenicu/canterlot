@@ -50,6 +50,26 @@ enum Command {
         #[command(subcommand)]
         command: MigrationsCommand,
     },
+    /// Общая память агентов.
+    Memory {
+        #[command(subcommand)]
+        command: MemoryCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum MemoryCommand {
+    /// Применить пакет импорта памяти Claude одной транзакцией.
+    Import {
+        #[command(flatten)]
+        config: ConfigArgs,
+        /// Пакет, собранный `canterlot-worker memory import-bundle`.
+        #[arg(long)]
+        bundle: PathBuf,
+        /// Выполнить всё и откатить: отчёт тот же, записей нет.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -181,6 +201,9 @@ async fn run(args: Args) -> Result<(), String> {
         Command::Geoip {
             command: GeoipCommand::Update { config } | GeoipCommand::Path { config },
         } => config,
+        Command::Memory {
+            command: MemoryCommand::Import { config, .. },
+        } => config,
     };
     let config = HubConfig::load(&config.config).map_err(|error| error.to_string())?;
     if let Command::Geoip {
@@ -263,6 +286,26 @@ async fn run(args: Args) -> Result<(), String> {
             unreachable!("handled before the config is loaded")
         }
         Command::Geoip { .. } => unreachable!("handled before the database is opened"),
+        Command::Memory {
+            command: MemoryCommand::Import {
+                bundle, dry_run, ..
+            },
+        } => {
+            use canterlot_hub::memory::import;
+            let text = fs::read_to_string(&bundle).map_err(|_| "bundle_read_error".to_owned())?;
+            let bundle: import::Bundle =
+                serde_json::from_str(&text).map_err(|_| "bundle_invalid".to_owned())?;
+            let report = import::apply(&pool, &bundle, dry_run, &config.memory)
+                .await
+                .map_err(|error| error.to_string())?;
+            let report = serde_json::to_string(&report).map_err(|_| "output_error".to_owned())?;
+            writeln!(
+                std::io::stdout().lock(),
+                "{}{report}",
+                if dry_run { "dry-run " } else { "" }
+            )
+            .map_err(|_| "output_error".to_owned())?;
+        }
         Command::Auth { command } => {
             use canterlot_hub::owner_auth::cli;
             let installation = installation::check(&pool, &config.manifest)

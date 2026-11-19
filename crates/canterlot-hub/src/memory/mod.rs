@@ -5,6 +5,7 @@
 //! если настоящий путь рабочего каталога ему противоречит.
 
 pub mod auto_memory;
+pub mod import;
 pub mod secrets;
 pub mod store;
 
