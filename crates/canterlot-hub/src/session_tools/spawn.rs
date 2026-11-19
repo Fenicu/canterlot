@@ -1680,7 +1680,7 @@ pub(crate) async fn run_job(
     let Some((RequestState::DecisionSaved, payload, decision)) = row else {
         return Ok(JobOutcome::Done(json!({"skipped": true})));
     };
-    let Some(parent) = access::session_in_tx(conn, job.owner_id, parent_id).await? else {
+    let Some(parent) = access::session_any_in_tx(conn, job.owner_id, parent_id).await? else {
         return Ok(JobOutcome::Done(json!({"skipped": true})));
     };
     let machine: Uuid = sqlx::query_scalar("select machine_id from conversations where id=$1")

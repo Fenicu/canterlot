@@ -970,7 +970,7 @@ pub async fn run_job_in_tx(
     conversation_ids.dedup();
     let mut sessions = Vec::new();
     for id in &conversation_ids {
-        if let Some(session) = access::session_in_tx(conn, head.owner_id, *id).await? {
+        if let Some(session) = access::session_any_in_tx(conn, head.owner_id, *id).await? {
             sessions.push(session);
         }
     }
@@ -982,7 +982,7 @@ pub async fn run_job_in_tx(
     // Режимы перечитываются после очередей: кэш, снятый до них, мог остаться прежним.
     sessions.clear();
     for id in &conversation_ids {
-        if let Some(session) = access::session_in_tx(conn, head.owner_id, *id).await? {
+        if let Some(session) = access::session_any_in_tx(conn, head.owner_id, *id).await? {
             sessions.push(session);
         }
     }
@@ -1185,7 +1185,7 @@ pub async fn rescue_nudge_in_tx(
         return Ok(RescueNudge::NotEligible);
     }
     let mut sessions = Vec::new();
-    if let Some(session) = access::session_in_tx(conn, rule.owner_id, target).await? {
+    if let Some(session) = access::session_any_in_tx(conn, rule.owner_id, target).await? {
         sessions.push(session);
     }
     if rule.set_by == "agent"
@@ -1211,7 +1211,8 @@ pub async fn rescue_nudge_in_tx(
             if exists {
                 return Ok(RescueNudge::Busy);
             }
-        } else if let Some(session) = access::session_in_tx(conn, rule.owner_id, author).await? {
+        } else if let Some(session) = access::session_any_in_tx(conn, rule.owner_id, author).await?
+        {
             sessions.push(session);
         }
     }
@@ -2207,7 +2208,7 @@ pub async fn set(
     let mut tx = crate::db::begin(&context.pool).await?;
     send::lock_sender(&mut tx, caller.conversation_id).await?;
     let author = access::caller_in_tx(&mut tx, caller.owner_id, caller.conversation_id).await?;
-    let target = access::session_in_tx(&mut tx, caller.owner_id, args.session_id)
+    let target = access::target_or_self_in_tx(&mut tx, caller.owner_id, author.id, args.session_id)
         .await?
         .ok_or_else(|| ToolError::new(ToolErrorCode::SessionNotFound))?;
     check_descendant_in_tx(&mut tx, caller.owner_id, author.id, target.id).await?;
@@ -2252,7 +2253,7 @@ pub async fn clear(
     let mut tx = crate::db::begin(&context.pool).await?;
     send::lock_sender(&mut tx, caller.conversation_id).await?;
     let author = access::caller_in_tx(&mut tx, caller.owner_id, caller.conversation_id).await?;
-    let target = access::session_in_tx(&mut tx, caller.owner_id, args.session_id)
+    let target = access::target_or_self_in_tx(&mut tx, caller.owner_id, author.id, args.session_id)
         .await?
         .ok_or_else(|| ToolError::new(ToolErrorCode::SessionNotFound))?;
     check_descendant_in_tx(&mut tx, caller.owner_id, author.id, target.id).await?;

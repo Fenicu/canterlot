@@ -258,6 +258,45 @@ async fn delegated_cannot_inspect_stranger(pool: PgPool) {
     assert_eq!(send, unknown);
 }
 
+/// Боковые копии (отчёт рутины и личный чат «В стороне») скрыты: по известному UUID их не
+/// достать ни одним инструментом, а сама копия по-прежнему работает от своего имени.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn hidden_side_copies_are_unreachable_by_uuid_but_work_as_callers(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let report = f.conversation("копия отчёта", None, 0).await;
+    let chat = f.conversation("чат в стороне", None, 0).await;
+    for (id, kind) in [(report, "report"), (chat, "chat")] {
+        sqlx::query("update conversations set side_of=$2, side_kind=$3 where id=$1")
+            .bind(id)
+            .bind(f.root)
+            .bind(kind)
+            .execute(&f.pool)
+            .await
+            .unwrap();
+    }
+    for target in [report, chat] {
+        for (tool, args) in [
+            ("sessions.inspect", json!({"session_id": target})),
+            ("sessions.send", json!({"session_id": target, "text": "эй"})),
+            ("sessions.stop", json!({"session_id": target})),
+            ("sessions.interrupt", json!({"session_id": target})),
+            ("sessions.subscribe", json!({"session_id": target})),
+            ("sessions.wait", json!({"session_id": target})),
+        ] {
+            let error = f.call(f.root, tool, args).await.unwrap_err();
+            assert_eq!(error.code, Code::SessionNotFound, "{tool} reached {target}");
+        }
+        assert!(!f.listed(f.root, json!({})).await.contains(&target));
+    }
+    // Копия вызывает инструменты от своего имени и видит саму себя.
+    let me = f
+        .call(report, "sessions.inspect", json!({"session_id": report}))
+        .await
+        .unwrap();
+    assert_eq!(me["session"]["id"], json!(report), "{me}");
+    assert!(f.visible(chat, chat).await);
+}
+
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn a_delegate_stays_narrow_after_its_parent_is_deleted(pool: PgPool) {
     let f = Fx::new(pool).await;
