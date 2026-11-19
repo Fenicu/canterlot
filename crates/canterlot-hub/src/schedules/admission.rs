@@ -276,8 +276,11 @@ async fn earlier_blocking(
                 or (r.state = 'started'
                     and case when r.detail ? 'report'
                          -- Отчёт блокирует следующий, пока копия собирает его: занятость
-                         -- родителя и состояние ввода копии здесь ни при чём.
-                         then r.detail #>> '{report,state}' = 'pending'
+                         -- родителя и состояние ввода копии здесь ни при чём. Смотрим на
+                         -- живую карточку, а не на запись в журнале запуска: карточка
+                         -- могла уйти каскадом вместе с родителем.
+                         then exists(select 1 from routine_reports rr
+                                      where rr.run_id = r.id and rr.state = 'pending')
                          else (i.state in ('queued','dispatched','on_machine','transmitting','acceptance_unconfirmed')
                                or d.activity_state in ('working','waiting_for_user','stalled'))
                          end))",

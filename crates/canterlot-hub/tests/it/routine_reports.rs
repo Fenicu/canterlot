@@ -1626,3 +1626,72 @@ async fn lost_copies_are_recovered_and_cannot_fill_the_cleanup_batch(pool: PgPoo
     .unwrap();
     assert_eq!(resolves, 55, "every lost copy gets a recovery request");
 }
+
+// ---------------------------------------------------------------------------
+// Удаление родителя и пересечение запусков.
+// ---------------------------------------------------------------------------
+
+/// Окончательное удаление родителя с недособранным отчётом: карточка уходит каскадом, а
+/// запуск не остаётся «собирается» навсегда.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn purging_the_parent_finalizes_its_pending_runs(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let _session = session(&f);
+    with_native(&f).await;
+    let parent = f.seed.conversation_id;
+    let schedule = make_schedule(&f, "Стендап").await;
+    let run = fire(&f, schedule).await;
+    let r = f
+        .client
+        .send(
+            Method::DELETE,
+            &format!("/api/v1/conversations/{parent}"),
+            Some("trash-before-purge"),
+            None,
+        )
+        .await;
+    assert!(r.status.as_u16() == 204 || r.status.as_u16() == 409);
+    worker_stops_copies(&pool).await;
+    // Окончательное удаление раньше прохода сборщика.
+    let r = f
+        .client
+        .send(
+            Method::DELETE,
+            &format!("/api/v1/conversations/{parent}/trash"),
+            Some("purge-before-sweep"),
+            None,
+        )
+        .await;
+    assert_eq!(
+        r.status.as_u16(),
+        204,
+        "{}",
+        String::from_utf8_lossy(&r.body)
+    );
+    let (state, detail) = run_state(&pool, run).await;
+    assert_eq!(state, "failed", "{detail}");
+    assert_eq!(detail["reason"], "conversation_not_found", "{detail}");
+    assert_eq!(detail["report"]["state"], "failed", "{detail}");
+}
+
+/// Пересечение считается по живому состоянию отчёта: запуск, чья карточка исчезла
+/// (каскад), следующий не блокирует, даже если в его журнале записано «собирается».
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn overlap_follows_the_live_report_not_the_run_journal(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let _session = session(&f);
+    with_native(&f).await;
+    let schedule = make_schedule(&f, "Стендап").await;
+    let first = fire(&f, schedule).await;
+    assert_eq!(
+        run_state(&pool, first).await.1["report"]["state"],
+        "pending"
+    );
+    sqlx::query("delete from routine_reports where schedule_id=$1")
+        .bind(schedule)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let second = fire(&f, schedule).await;
+    assert_ne!(first, second);
+}

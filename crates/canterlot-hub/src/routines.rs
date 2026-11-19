@@ -858,6 +858,46 @@ async fn remove_one(
     Ok(Removal::Gone)
 }
 
+/// Окончательное удаление родителя: карточки уходят каскадом, а запуски, чей отчёт ещё
+/// собирался, закрываются ошибкой, а не остаются «собирается» навсегда. Замки как у
+/// сборщика: расписание, затем карточка; занятое расписание (`skip locked`) — отказ `false`,
+/// удаление повторится.
+pub(crate) async fn finalize_pending_for_parent_in_tx(
+    conn: &mut PgConnection,
+    parent_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let schedules: Vec<Uuid> = sqlx::query_scalar(
+        "select distinct schedule_id from routine_reports
+          where conversation_id=$1 and state='pending' order by 1",
+    )
+    .bind(parent_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    if schedules.is_empty() {
+        return Ok(true);
+    }
+    let locked: Vec<Uuid> = sqlx::query_scalar(
+        "select id from schedules where id=any($1) order by id for update skip locked",
+    )
+    .bind(&schedules)
+    .fetch_all(&mut *conn)
+    .await?;
+    if locked.len() < schedules.len() {
+        return Ok(false);
+    }
+    let cards: Vec<CardRow> = sqlx::query_as(
+        "select * from routine_reports
+          where conversation_id=$1 and state='pending' order by id for update",
+    )
+    .bind(parent_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    for card in cards {
+        finish_failed(conn, &card, "conversation_not_found").await?;
+    }
+    Ok(true)
+}
+
 /// Уборка: через 30 дней текст отчёта уходит из истории запусков (сами запуски живут по
 /// общему правилу уборки), а закрытые карточки удаляются.
 pub async fn prune(conn: &mut PgConnection) -> Result<u64, sqlx::Error> {
