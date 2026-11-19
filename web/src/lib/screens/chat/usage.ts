@@ -1,5 +1,6 @@
 import { fmt } from "#lib/format/ru.js";
 import type { components } from "#lib/api/generated/openapi.js";
+import { sessionCostLine } from "#lib/format/cost.js";
 
 type SessionUsage = components["schemas"]["SessionUsageView"];
 type UsageTotals = components["schemas"]["UsageTotalsView"];
@@ -36,6 +37,8 @@ export interface SessionUsageSummary {
   session: UsageSection;
   delegates: UsageSection;
   hasDelegates: boolean;
+  /** «≈ $X за сессию с делегатами» и, если есть, «N ходов без цены». */
+  cost: { money: string; unknown: string | null };
 }
 
 function value(n: number): UsageValue {
@@ -90,5 +93,6 @@ export function summarizeUsage(usage: SessionUsage): SessionUsageSummary {
     session: section(usage.session),
     delegates,
     hasDelegates: !delegates.empty,
+    cost: sessionCostLine(usage.session, usage.delegates),
   };
 }

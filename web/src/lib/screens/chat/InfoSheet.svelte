@@ -150,6 +150,18 @@
 				</div>
 			{/if}
 
+			{#if summary.costs.length > 0}
+				<div class="section-heading">Цена</div>
+				<div class="key-value-list" data-role="run-costs">
+					{#each summary.costs as cost, index (index)}
+						<div class="key-value">
+							<span>{cost.model}{#if cost.source}<span class="sub">{cost.source}</span>{/if}</span>
+							<strong>{cost.money}</strong>
+						</div>
+					{/each}
+				</div>
+			{/if}
+
 			<div class="rule"></div>
 
 			{#if summary.duration}

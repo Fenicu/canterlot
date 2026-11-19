@@ -202,4 +202,28 @@ describe("summarizeRun", () => {
     expect(summarizeRun(two).speed).toEqual(["Opus 5.5: генерация 80 ток/с", "Haiku 4.5: первый токен 0,6 с"]);
     expect(summarizeRun({ ...base } as RunInfo).speed).toEqual([]);
   });
+
+  test("run_info_names_the_price_per_model_and_its_source", () => {
+    const base = { input_tokens: 10, output_tokens: 5, cache_read_tokens: 0, cache_write_tokens: 0 };
+    const info: RunInfo = {
+      run_id: "r",
+      input_id: "i",
+      started_at: "2026-10-26T22:12:00.000Z",
+      finished_at: "2026-10-26T22:14:18.000Z",
+      duration_ms: 1000,
+      parts: [],
+      usage: [
+        { ...base, model: "claude-opus-5-5", agent: "orchestrator", cost_micro_usd: 620_000, cost_source: "cli" },
+        { ...base, model: "gpt-6-luna", agent: "Plan", cost_micro_usd: 4_000, cost_source: "prices" },
+        { ...base, model: "mystery", agent: "Plan", cost_micro_usd: null, cost_source: null },
+        { ...base, model: "opencode-go/beam-free", agent: "Plan", cost_micro_usd: 0, cost_source: "cli" },
+      ],
+    };
+    expect(summarizeRun(info).costs).toEqual([
+      { model: "Opus 5.5", money: "≈ $0,62", source: "по данным CLI" },
+      { model: "GPT-6 Luna", money: "< $0,01", source: "по таблице цен" },
+      { model: "Mystery", money: "≈ $ —", source: null },
+      { model: "beam-free", money: "бесплатно", source: "по данным CLI" },
+    ]);
+  });
 });

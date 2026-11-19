@@ -2012,6 +2012,8 @@ export class FakeHubApi {
 	async sessionUsage(id: string): Promise<components['schemas']['SessionUsageView']> {
 		const empty = {
 			turns: 0,
+			unknown_cost_turns: 0,
+			cost_micro_usd: 0,
 			input_tokens: 0,
 			output_tokens: 0,
 			cache_read_tokens: 0,

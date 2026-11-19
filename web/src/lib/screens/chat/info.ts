@@ -1,4 +1,5 @@
 import { harnessLabel, modelLabel, resolvedModelLabel } from "#lib/format/labels.js";
+import { costMoney } from "#lib/format/cost.js";
 import { fmt } from "#lib/format/ru.js";
 import type { RunInfo } from "#lib/stores/run.js";
 import { isMainAgent } from "#lib/timeline/present.js";
@@ -6,6 +7,8 @@ import { isMainAgent } from "#lib/timeline/present.js";
 export interface InfoModel {
   parts: { title: string; sub: string; model: string }[];
   tokens: { label: string; main: number; sub: number | null }[];
+  /** Деньги по моделям хода; источник — «по данным CLI» или «по таблице цен». */
+  costs: { model: string; money: string; source: string | null }[];
   duration: string | null;
   context: { used: number; window: number } | null;
   limit: { text: string; note: string | null } | null;
@@ -162,9 +165,17 @@ export function summarizeRun(
     return measured.length > 1 ? `${modelLabel(s.model)}: ${line}` : line;
   });
 
+  const costs: InfoModel["costs"] = [];
+  for (const u of usageList) {
+    if (!u.model || (u.input_tokens ?? 0) + (u.output_tokens ?? 0) + (u.cache_read_tokens ?? 0) + (u.cache_write_tokens ?? 0) === 0) continue;
+    const source = u.cost_source === "cli" ? "по данным CLI" : u.cost_source === "prices" ? "по таблице цен" : null;
+    costs.push({ model: modelLabel(u.model), money: costMoney(u.cost_micro_usd), source });
+  }
+
   return {
     parts,
     tokens,
+    costs,
     ["duration"]: duration,
     context,
     limit,
