@@ -224,7 +224,7 @@
 	}
 	:global(.capsule):has(:global(.tray)):has([data-details]) {
 		grid-template-areas:
-			'tray tray tray tray tray tray'
+			'tray tray tray tray tray tray tray'
 			'input input input input input input input'
 			'attach mic context goal clock steer send'
 			'details details details details details details details';
