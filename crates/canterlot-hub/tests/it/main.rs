@@ -83,6 +83,7 @@ mod machines;
 mod media;
 mod memory_scope;
 mod memory_settings;
+mod memory_tools;
 mod message_snippets;
 mod model_resolution;
 mod nudge;

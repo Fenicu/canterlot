@@ -361,6 +361,7 @@ async fn serve(
         machines,
         attachments,
         session_tools,
+        memory,
         sessions,
         orchestrator,
         notify,
@@ -459,6 +460,7 @@ async fn serve(
             .with_blob_store(blobs.clone())
             .with_media_quota(attachments.max_media_bytes_per_machine)
             .with_session_tools(session_tools.clone())
+            .with_memory(memory)
             .with_limits(limits.clone())
             .with_orchestrator(&orchestrator)
             .with_activity(&activity)

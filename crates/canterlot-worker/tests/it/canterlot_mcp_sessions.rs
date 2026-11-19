@@ -93,10 +93,12 @@ fn session_tools_listed_for_all_three_providers() {
         }
         // Два инструмента чтения настроек и три предложения их изменить.
         let settings_tools = 5;
+        // memory_search, memory_get, memory_write, memory_update, memory_delete.
+        let memory_tools = 5;
         let expected = if tool_set == ToolSet::ApproveAndLimits {
-            2 + 3 + SESSION_TOOLS.len() + 1 + settings_tools
+            2 + 3 + SESSION_TOOLS.len() + 1 + settings_tools + memory_tools
         } else {
-            1 + 3 + SESSION_TOOLS.len() + 1 + settings_tools
+            1 + 3 + SESSION_TOOLS.len() + 1 + settings_tools + memory_tools
         };
         assert_eq!(tools.len(), expected, "{provider}");
         for required in [
@@ -578,12 +580,13 @@ fn no_agent_tool_applies_a_setting_itself() {
                 || hub_name.starts_with("spawn_queue.")
                 || hub_name.starts_with("plan.")
                 || hub_name.starts_with("history.")
+                || hub_name.starts_with("memory.")
                 || hub_name.starts_with("secrets.")
                 || hub_name.starts_with("settings."),
             "{hub_name}"
         );
     }
-    assert_eq!(mcp::AGENT_TOOLS.len(), 32);
+    assert_eq!(mcp::AGENT_TOOLS.len(), 37);
 }
 
 #[tokio::test]

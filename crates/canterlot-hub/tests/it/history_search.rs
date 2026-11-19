@@ -46,6 +46,7 @@ impl Fx {
         let state = AppState::new(deps);
         let client = TestClient::in_process(http::router(state)).as_owner();
         let context = ToolContext {
+            memory: Default::default(),
             pool: pool.clone(),
             config: Arc::new(SessionToolsConfig::default()),
             limits: Default::default(),

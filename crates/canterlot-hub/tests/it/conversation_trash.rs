@@ -87,6 +87,7 @@ async fn age_trash(pool: &PgPool, id: Uuid, hours: i64) {
 
 fn tool_context(pool: &PgPool) -> ToolContext {
     ToolContext {
+        memory: Default::default(),
         pool: pool.clone(),
         config: Arc::new(SessionToolsConfig::default()),
         limits: Default::default(),

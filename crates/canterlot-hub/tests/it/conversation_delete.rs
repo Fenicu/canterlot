@@ -686,6 +686,7 @@ async fn delete_leaves_no_row_in_any_table_that_references_the_conversation(pool
 /// Вводы, которые разговор оставил в других сессиях: сообщение, бриф и событие подписки.
 async fn sent_to_others(f: &Fixture, sender: Uuid, receiver: Uuid, title: &str, answer: &str) {
     let context = ToolContext {
+        memory: Default::default(),
         pool: f.pool.clone(),
         config: Default::default(),
         limits: Default::default(),

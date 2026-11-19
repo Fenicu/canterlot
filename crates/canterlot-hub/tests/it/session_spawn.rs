@@ -137,6 +137,7 @@ impl Fx {
         let (dispatcher, _) = Dispatcher::channel();
         Self {
             context: ToolContext {
+                memory: Default::default(),
                 pool: pool.clone(),
                 config: Arc::new(config),
                 limits: Default::default(),

@@ -36,6 +36,8 @@ pub struct HubConfig {
     #[serde(default)]
     pub session_tools: SessionToolsConfig,
     #[serde(default)]
+    pub memory: MemoryConfig,
+    #[serde(default)]
     pub sessions: SessionsConfig,
     #[serde(default)]
     pub orchestrator: OrchestratorConfig,
@@ -967,6 +969,28 @@ impl Default for SessionToolsConfig {
             spawn_stagger: Duration::from_secs(20),
             accepted_retention: Duration::from_secs(3 * 86400),
             machine_unavailable_after: Duration::from_secs(3 * 60),
+        }
+    }
+}
+
+/// `[memory]` в `hub.toml`: пределы общей памяти агентов.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MemoryConfig {
+    /// Активных записей на домен.
+    pub max_active_per_domain: u32,
+    /// Записей, правок и архивирований агента в час на разговор.
+    pub writes_per_hour: u32,
+    /// Строк в ответе `memory_search`.
+    pub search_limit: u32,
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            max_active_per_domain: 2000,
+            writes_per_hour: 60,
+            search_limit: 20,
         }
     }
 }

@@ -24,6 +24,7 @@ async fn sender_with_forwarded_attachment_can_be_deleted(pool: PgPool) {
         .await
         .unwrap();
     let context = ToolContext {
+        memory: Default::default(),
         pool: pool.clone(),
         config: Arc::new(SessionToolsConfig::default()),
         limits: Default::default(),
@@ -142,6 +143,7 @@ async fn empty_attachment_is_forwarded_by_sessions_send(pool: PgPool) {
         .await
         .unwrap();
     let context = ToolContext {
+        memory: Default::default(),
         pool: pool.clone(),
         config: Arc::new(SessionToolsConfig::default()),
         limits: Default::default(),

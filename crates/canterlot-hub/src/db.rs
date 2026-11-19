@@ -372,6 +372,45 @@ mod tests {
         );
     }
 
+    /// Таблицы общей памяти трогает только `crate::memory`: область (домен и проект)
+    /// входит в каждый запрос оттуда, и никакой другой SQL не должен её обходить.
+    #[test]
+    fn memory_tables_only_in_crate_memory() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let allowed = root.join("memory");
+        let own_file = root.join("db.rs");
+        let mut pending = vec![root];
+        let mut offenders = Vec::new();
+        while let Some(path) = pending.pop() {
+            if path.is_dir() {
+                if path == allowed {
+                    continue;
+                }
+                for entry in std::fs::read_dir(&path).unwrap() {
+                    pending.push(entry.unwrap().path());
+                }
+                continue;
+            }
+            if path == own_file || path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).unwrap();
+            for (index, line) in source.lines().enumerate() {
+                if ["memory_entries", "memory_revisions", "memory_events"]
+                    .iter()
+                    .any(|table| line.contains(table))
+                {
+                    offenders.push(format!("{}:{}: {}", path.display(), index + 1, line.trim()));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "таблицы памяти трогает только crate::memory (src/memory/):\n{}",
+            offenders.join("\n")
+        );
+    }
+
     #[sqlx::test(migrations = false)]
     async fn listeners_do_not_take_query_slots(pool: PgPool) {
         let mut listeners = Vec::new();

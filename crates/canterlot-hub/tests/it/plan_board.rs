@@ -41,6 +41,7 @@ struct Fx {
 
 fn context(pool: &PgPool) -> ToolContext {
     ToolContext {
+        memory: Default::default(),
         pool: pool.clone(),
         config: Arc::new(SessionToolsConfig::default()),
         limits: Default::default(),

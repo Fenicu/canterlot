@@ -1769,6 +1769,7 @@ async fn the_session_tool_returns_a_request_id_and_holds_the_limit(pool: PgPool)
     use std::sync::Arc;
     let fx = Fx::new(pool.clone()).await;
     let context = ToolContext {
+        memory: Default::default(),
         pool: fx.pool.clone(),
         config: Arc::new(SessionToolsConfig::default()),
         limits: Default::default(),

@@ -53,6 +53,7 @@ impl Fx {
             .unwrap();
         Self {
             context: ToolContext {
+                memory: Default::default(),
                 pool: pool.clone(),
                 config: Arc::new(SessionToolsConfig::default()),
                 limits: Default::default(),
@@ -337,6 +338,7 @@ async fn wait_holds_no_database_connection(pool: PgPool) {
         .await
         .unwrap();
     let context = ToolContext {
+        memory: Default::default(),
         pool: single.clone(),
         ..f.context.clone()
     };

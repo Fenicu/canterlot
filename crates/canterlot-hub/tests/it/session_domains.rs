@@ -29,6 +29,7 @@ impl Fx {
     async fn new(pool: PgPool) -> Self {
         let seed = testkit::seed(&pool).await;
         let context = ToolContext {
+            memory: Default::default(),
             pool: pool.clone(),
             config: Arc::new(SessionToolsConfig::default()),
             limits: Default::default(),

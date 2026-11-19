@@ -54,6 +54,7 @@ impl Fx {
         .unwrap();
         Self {
             context: ToolContext {
+                memory: Default::default(),
                 pool: pool.clone(),
                 config: Arc::new(config),
                 limits: Default::default(),
@@ -978,6 +979,7 @@ async fn parallel_sends_cannot_outrun_the_limit_or_the_dedup(pool: PgPool) {
         .unwrap();
     let wide = Fx {
         context: ToolContext {
+            memory: Default::default(),
             config: Arc::new(SessionToolsConfig {
                 sender_sends: 3,
                 ..Default::default()
