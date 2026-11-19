@@ -1040,6 +1040,17 @@ message ModelUsage {
   uint64 output_tokens = 4;
   uint64 cache_read_tokens = 5;
   uint64 cache_write_tokens = 6;
+  // Цена хода в миллионных долях доллара. Нет поля — цена неизвестна, а не ноль:
+  // ноль с источником CLI — бесплатная модель.
+  optional uint64 cost_micro_usd = 7;
+  CostSource cost_source = 8;
+}
+
+// Откуда цена: CLI назвал её сам или хаб взял таблицу цен.
+enum CostSource {
+  COST_SOURCE_UNSPECIFIED = 0;
+  COST_SOURCE_CLI = 1;
+  COST_SOURCE_PRICES = 2;
 }
 
 message SettingsOverride {
