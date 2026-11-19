@@ -58,7 +58,7 @@ test('reset_credits_are_named_on_the_limits_strip_with_the_nearest_expiry', asyn
   await boot(page, credits(2, [{ title: 'Full reset (Weekly + 5 hr)', expires_at: new Date(far).toISOString() }]));
   const strip = await openStrip(page);
   const line = strip.locator('.credit[data-provider="codex"]');
-  await expect(line).toHaveText(`Сбросы лимитов: 2, ближайший сгорит ${dayLabel(far)}`);
+  await expect(line).toHaveText(`Codex: сбросы лимитов 2, ближайший сгорит ${dayLabel(far)}`);
   await expect(line).toHaveAttribute('data-tone', 'normal');
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   expect(overflow).toBeLessThanOrEqual(0);
@@ -69,7 +69,7 @@ test('a_reset_burning_within_a_week_warns_on_the_strip', async ({ page }) => {
   await boot(page, credits(1, [{ title: 'Full reset (Weekly + 5 hr)', expires_at: new Date(soon).toISOString() }]));
   const strip = await openStrip(page);
   const line = strip.locator('.credit[data-provider="codex"]');
-  await expect(line).toHaveText(`Сбросы лимитов: 1, ближайший сгорит ${dayLabel(soon)}`);
+  await expect(line).toHaveText(`Codex: сбросы лимитов 1, ближайший сгорит ${dayLabel(soon)}`);
   await expect(line).toHaveAttribute('data-tone', 'warning');
   expect(await line.evaluate((node) => getComputedStyle(node).color)).toBe(await tokenColor(page, strip, '--warning'));
 });
@@ -78,8 +78,24 @@ test('known_resets_without_any_expiry_show_only_the_count', async ({ page }) => 
   await boot(page, credits(2, [{ title: 'Full reset (Weekly + 5 hr)', expires_at: null }]));
   const strip = await openStrip(page);
   const line = strip.locator('.credit[data-provider="codex"]');
-  await expect(line).toHaveText('Сбросы лимитов: 2');
+  await expect(line).toHaveText('Codex: сбросы лимитов 2');
   await expect(line).toHaveAttribute('data-tone', 'normal');
+});
+
+test('every_credentials_and_credits_line_on_the_strip_names_its_provider', async ({ page }) => {
+  const far = Date.now() + 60 * DAY;
+  const { api } = await boot(page, credits(2, [{ title: null, expires_at: new Date(far).toISOString() }]));
+  api.limits.find((row) => row.provider === 'claude')!.credential_expires_at = new Date(far).toISOString();
+  const strip = await openStrip(page);
+  if (process.env.LIMITS_SHOTS) await strip.screenshot({ path: `${process.env.LIMITS_SHOTS}-${test.info().project.name}.png` });
+  const lines = strip.locator('.credentials > span');
+  await expect(lines).toHaveCount(2);
+  // Строка сбросов не должна читаться как строка Claude: перед счётом стоит имя провайдера.
+  for (const [provider, name] of [['claude', 'Claude'], ['codex', 'Codex']] as const) {
+    await expect(strip.locator(`.credentials [data-provider="${provider}"]`)).toContainText(name);
+  }
+  await expect(strip.locator('.credit[data-provider="codex"]')).toHaveText(/^Codex: /);
+  await expect(strip.locator('.credential[data-provider="claude"]')).toHaveText(/^Вход Claude /);
 });
 
 test('no_credits_or_zero_available_resets_leave_no_line', async ({ page }) => {
