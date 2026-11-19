@@ -142,7 +142,7 @@ refused_fast() {
 }
 case_begin "--fast is refused when deploy tooling changed"
 setup_fast fasttool tooling
-refused_fast "tooling" "scripts/deploy/lib.sh"
+refused_fast "tooling" "scripts/deploy/tests/note.txt"
 finish_fast
 case_end
 case_begin "--fast is refused when a migration is new"
@@ -372,6 +372,68 @@ flip_run WORKER_FLIP_FWD_SCRIPT "${FLIPDIR}" new old >/dev/null 2>&1 && case_ok 
 ln -sfn releases/other "${FLIPDIR}/build"
 flip_run WEB_FLIP_FWD_SCRIPT "${FLIPDIR}" new "${FLIPDIR}/build" old >/dev/null 2>&1 && case_fail "web flip ignored the expected-old" || case_ok "web flip refuses a link that is not the approved release"
 assert_eq "$(readlink "${FLIPDIR}/build")" "releases/other" "web link untouched"
+finish_fast
+case_end
+
+# ------------------------------------------------------------ артефакт и манифест согласованы до записи
+case_begin "a manifest that contradicts RELEASE migrations_last stops before any write"
+setup_fast manifestrel other
+sed -i 's/^migrations_last=.*/migrations_last=0042_contradiction.sql/' "${DIST_DIR}/RELEASE"
+dist_resync
+stage_cutover_dist
+for mode in "--execute ${SHA_NEW} --fast" "${SHA_NEW} --rehearse --skip-ct-backup" "${SHA_NEW} --dry-run --skip-ct-backup"; do
+    # shellcheck disable=SC2086 # режим — несколько слов
+    if fcut ${mode} --result "${FAKE_ROOT}/x.result"; then case_fail "${mode}: exit 0"; else case_ok "${mode}: refused"; fi
+    assert_eq "$(result_of "${FAKE_ROOT}/x.result" fail_codes)" "manifest_release_mismatch" "${mode}: invalid artifact code (no fallback to the full path)"
+    assert_contains "${FAKE_ROOT}/cutover.log" "42" "${mode}: the RELEASE value is named"
+done
+assert_eq "$(result_of "${FAKE_ROOT}/x.result" token)" "" "the dry-run gives no token"
+no_writes_yet "contradictory migrations_last"
+finish_fast
+case_end
+
+case_begin "the staged manifest runs as the hub service account under a timeout; a hanging binary refuses"
+setup_fast manifestuser other
+export FAKE_SSH_LOG_CMDS=1
+fcut --execute "${SHA_NEW}" --fast --result "${FAKE_ROOT}/exe.result" || true
+unset FAKE_SSH_LOG_CMDS
+grep -E 'migrations manifest --json' "${FAKE_ROOT}/state/ssh-cmds.log" | grep -q "runuser -u ${HUB_SERVICE_USER:-canterlot} -- timeout 30 " && case_ok "runuser -u <service account> -- timeout 30 <staged binary> migrations manifest --json" || case_fail "the manifest is not run as the service account under timeout 30"
+finish_fast
+case_end
+case_begin "a staged binary that hangs on the manifest is refused at the timeout"
+setup_fast manifesthang other
+: >"${FAKE_ROOT}/state/manifest-hang"
+export MANIFEST_TIMEOUT=1
+if fcut --execute "${SHA_NEW}" --fast --result "${FAKE_ROOT}/x.result"; then case_fail "exit 0 with a hanging manifest"; else case_ok "exit nonzero"; fi
+unset MANIFEST_TIMEOUT
+assert_eq "$(result_of "${FAKE_ROOT}/x.result" status)/$(result_of "${FAKE_ROOT}/x.result" fail_codes)" "refused/fast_path_refused" "refused before any write, fallback code"
+no_writes_yet "hanging manifest"
+finish_fast
+case_end
+
+# ------------------------------------------------------------ одно и то же состояние git в обоих режимах пропуска
+case_begin "--skip-ct-backup binds the checkout, the toolkit and the token plan to the target"
+setup_fast skipgit tooling
+if fcut "${SHA_NEW}" --rehearse --skip-ct-backup --result "${FAKE_ROOT}/reh.result"; then case_ok "the rehearsal passes on the target checkout"; else case_fail "rehearsal failed"; tail -5 "${FAKE_ROOT}/cutover.log"; fi
+SKIP_TOKEN="$(result_of "${FAKE_ROOT}/reh.result" token)"
+OTHER_SRC="${FAKE_ROOT}/other-checkout"
+git clone -q "${FAST_SRC}" "${OTHER_SRC}"
+git -C "${OTHER_SRC}" checkout -q "${FAST_LIVE_FULL}"
+if bash "${DEPLOY_DIR}/cutover.sh" --execute "${SHA_NEW}" --confirm "${SKIP_TOKEN}" --skip-ct-backup --source "${OTHER_SRC}" \
+        --dist "${FAKE_ROOT}/dist" --state "${FAKE_ROOT}/snap.state" --result "${FAKE_ROOT}/x.result" >"${FAKE_ROOT}/cutover.log" 2>&1; then
+    case_fail "a token run with another --source was accepted"
+else
+    case_ok "a token run with another --source is refused"
+fi
+assert_eq "$(result_of "${FAKE_ROOT}/x.result" status)/$(result_of "${FAKE_ROOT}/x.result" fail_codes)" "refused/token_plan_changed" "the checkout identity is part of the plan"
+no_writes_yet "another --source"
+if bash "${DEPLOY_DIR}/cutover.sh" "${SHA_NEW}" --rehearse --skip-ct-backup --source "${OTHER_SRC}" --dist "${FAKE_ROOT}/dist" \
+        --state "${FAKE_ROOT}/snap.state" --result "${FAKE_ROOT}/y.result" >"${FAKE_ROOT}/cutover.log" 2>&1; then
+    case_fail "a skip rehearsal on a checkout that is not at the target passed"
+else
+    case_ok "a skip rehearsal on a checkout that is not at the target fails"
+fi
+assert_contains "${FAKE_ROOT}/cutover.log" "not at the target" "reason: the checkout is not at the target"
 finish_fast
 case_end
 

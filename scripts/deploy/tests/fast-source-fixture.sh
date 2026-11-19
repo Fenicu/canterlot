@@ -14,7 +14,7 @@
 #   rename-in      файл из docs/ переименован в каталог миграций; rename-out — обратно
 #   dbrs, mainrs   crates/canterlot-hub/src/db.rs, main.rs (загрузка и запуск миграций)
 #   installation, presets, presets-dir   то, что хаб исполняет при запуске вне манифеста
-#   tooling        scripts/deploy/lib.sh;  release-sh, build-sh, publish-sh — скрипты выпуска
+#   tooling        новый файл scripts/deploy/tests/note.txt;  release-sh, build-sh, publish-sh — скрипты выпуска
 #   script         посторонний скрипт scripts/extra.sh
 #   docker, toolchain, buildrs   Dockerfile сборки, rust-toolchain.toml, build.rs хаба
 #   lock-dep       версия внешней зависимости в Cargo.lock;  toml-dep — зависимость в Cargo.toml
@@ -75,7 +75,9 @@ make_fast_source() {
             installation) printf '// change\n' >>"${FAST_SRC}/crates/canterlot-hub/src/installation.rs" ;;
             presets) printf '// change\n' >>"${FAST_SRC}/crates/canterlot-hub/src/presets.rs" ;;
             presets-dir) mkdir -p "${FAST_SRC}/crates/canterlot-hub/src/presets" && printf 'pub fn x() {}\n' >"${FAST_SRC}/crates/canterlot-hub/src/presets/seed.rs" ;;
-            tooling) printf '# change\n' >>"${FAST_SRC}/scripts/deploy/lib.sh" ;;
+            # Файл под scripts/deploy, но вне исполняемой обвязки (tests/): классификатор видит правку
+            # обвязки, а исполняемая обвязка стенда остаётся равной коммиту цели.
+            tooling) mkdir -p "${FAST_SRC}/scripts/deploy/tests" && printf '# change\n' >"${FAST_SRC}/scripts/deploy/tests/note.txt" ;;
             release-sh) printf '# change\n' >>"${FAST_SRC}/scripts/release.sh" ;;
             build-sh) printf '# change\n' >>"${FAST_SRC}/scripts/build-release.sh" ;;
             publish-sh) printf '# change\n' >>"${FAST_SRC}/scripts/publish-release.sh" ;;

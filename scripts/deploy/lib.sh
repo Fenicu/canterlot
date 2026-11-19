@@ -312,9 +312,10 @@ _plan_file_hash() {
 # Канонический текст плана выката, общий у dry-run, репетиции и боевого прогона:
 # зависит только от цели, развёрнутой базы, содержимого dist, конфигурации выката
 # и текста самого toolkit. $1 цель, $2 каталог dist/<цель>, $3..$5 развёрнутые
-# hub web worker; $6 skip-ct-backup — план без vzdump (другой хэш: токен привязан к флагу).
+# hub web worker; $6 skip-ct-backup — план без vzdump (другой хэш: токен привязан к флагу); $7 — полный
+# хэш HEAD проверяемого чекаута (только в режимах без vzdump).
 plan_text() {
-    local sha="$1" dist_dir="$2" b_hub="$3" b_web="$4" b_worker="$5" skip_vz="${6:-}" f toolkit step2 step3
+    local sha="$1" dist_dir="$2" b_hub="$3" b_web="$4" b_worker="$5" skip_vz="${6:-}" checkout="${7:-}" f toolkit step2 step3
     toolkit="$(for f in cutover.sh lib.sh verify.sh retain.sh preflight.sh target-check.sh deploy.conf fastpath-classify.py migration-compare.py toolkit-bound.py; do
         printf '%s %s\n' "$(_plan_file_hash "${DEPLOY_DIR}/${f}")" "${f}"
     done | sha256sum | cut -c1-12)"
@@ -345,6 +346,8 @@ plan_text() {
         " 11 maintenance check (sockets, exec dirs, leftovers, env record); verify.sh twice incl. loopback Caddy probe and harness catalog" \
         " 12 geoip: canterlot-hub geoip update on the hub when [auth.geoip].path (canterlot-hub geoip path) is missing or older than ${GEOIP_MAX_AGE_DAYS} days (soft)" \
         " 13 retention: keep ${RETAIN_COUNT} per component + every live release; literal paths re-checked right before deletion"
+    # Режимы без vzdump: проверяемый чекаут входит в план (токен репетиции с другим --source не годится).
+    [ -z "${checkout}" ] || printf 'checkout=%s\n' "${checkout}"
 }
 plan_hash() { plan_text "$@" | sha256sum | cut -c1-12; }
 

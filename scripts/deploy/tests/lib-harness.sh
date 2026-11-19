@@ -34,7 +34,7 @@ export -f date
 fake_worker_build() {
     local cache uid
     uid="$(id -u)"
-    cache="${HARNESS_CACHE_DIR:-/tmp}/canterlot-fake-worker-v4.${uid}"
+    cache="${HARNESS_CACHE_DIR:-/tmp}/canterlot-fake-worker-v5.${uid}"
     if [ ! -x "${cache}" ]; then
         cat >"${cache}.c" <<'EOF'
 #include <stdio.h>
@@ -69,6 +69,9 @@ int main(int argc, char **argv) {
         snprintf(path, sizeof path, "%s/state/manifest-max", root);
         f = fopen(path, "r");
         if (f) { if (fscanf(f, "%d", &max) != 1) max = 41; fclose(f); }
+        snprintf(path, sizeof path, "%s/state/manifest-hang", root);
+        f = fopen(path, "r");
+        if (f) { fclose(f); sleep(100); return 1; }
         printf("{\"migrations\":[");
         for (int v = 1; v <= max; v++) printf("%s{\"checksum\":\"c%d\",\"description\":\"m\",\"version\":%d}", v > 1 ? "," : "", v, v);
         printf("]}\n");

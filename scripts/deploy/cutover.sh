@@ -316,8 +316,15 @@ BASE_WORKER="$(deployed_sha worker)"
 # цели, до первой записи); здесь флаги только входят в хэш плана.
 [ "${FAST}" = "0" ] || SKIP_VZDUMP=1
 PLAN_VZ=""
-[ "${SKIP_VZDUMP}" = "0" ] || PLAN_VZ="skip-ct-backup"
-PLAN_HASH="$(plan_hash "${SHA}" "${DIST}" "${BASE_HUB}" "${BASE_WEB}" "${BASE_WORKER}" "${PLAN_VZ}")"
+CHECKOUT_HEAD=""
+if [ "${SKIP_VZDUMP}" = "1" ]; then
+    PLAN_VZ="skip-ct-backup"
+    # Проверяемый чекаут входит в план обоих режимов пропуска: предпроверка читает структуры
+    # конфигов из него, и токен репетиции по одному коммиту не должен открывать прогон по другому.
+    CHECKOUT_HEAD="$(git -C "${SOURCE_DIR}" rev-parse HEAD 2>/dev/null)" || die "cannot read the checkout identity (git rev-parse HEAD) of ${SOURCE_DIR}"
+    [[ "${CHECKOUT_HEAD}" =~ ^[0-9a-f]{40}$ ]] || die "the checkout identity of ${SOURCE_DIR} is not a full commit id"
+fi
+PLAN_HASH="$(plan_hash "${SHA}" "${DIST}" "${BASE_HUB}" "${BASE_WEB}" "${BASE_WORKER}" "${PLAN_VZ}" "${CHECKOUT_HEAD}")"
 if [ "${FAST}" = "0" ] && [ "${DRY_RUN}" = "0" ] && [ "${REHEARSE}" = "0" ]; then
     # Проверка токена — до любой записи: phase=token в результате это доказывает.
     PHASE="token"
@@ -408,7 +415,7 @@ db_identity_check() {
     log "database identity: ${HUB_PG_DB} on ${HUB_PG_SOCKET} has ${n} connection(s) of the running hub (user ${HUB_PG_USER}); dump and restore use the same socket and database"
 }
 skip_eligibility() {
-    local live_full target_full fp reh vz tb manifest rows cmp n saved_phase="${PHASE}"
+    local live_full target_full fp reh vz tb manifest rows cmp n rel_last man_max saved_phase="${PHASE}"
     [ "${FAST}" = "1" ] || [ "${SKIP_VZDUMP}" = "1" ] || return 0
     if [ "${FAST}" = "1" ]; then ELIG_WHAT="the fast path"; else ELIG_WHAT="to skip the vzdump"; fi
     PHASE="eligibility"
@@ -428,14 +435,25 @@ skip_eligibility() {
     vz="$(printf '%s\n' "${fp}" | sed -n 's/^vzdump=//p')"
     FASTPATH_REASONS="$(printf '%s\n' "${fp}" | sed -n 's/^reasons=//p')"
     [ "${vz}" = "skip" ] || fast_refuse "${FASTPATH_REASONS}"
-    if [ "${FAST}" = "1" ]; then
-        [ "${reh}" = "skip" ] || fast_refuse "a rehearsal and a token are needed: ${FASTPATH_REASONS}"
-        tb="$(python3 -I "${SCRIPT_DIR}/toolkit-bound.py" "${SOURCE_DIR}" "${target_full}" "${SCRIPT_DIR}" 2>&1)" \
-            || fast_refuse "the checkout and the executing toolkit are not bound to the target: ${tb}"
-    fi
+    [ "${FAST}" = "0" ] || [ "${reh}" = "skip" ] || fast_refuse "a rehearsal and a token are needed: ${FASTPATH_REASONS}"
+    # Чекаут и исполняемая обвязка — это цель, в обоих режимах пропуска (в быстром вместе с классификацией).
+    tb="$(python3 -I "${SCRIPT_DIR}/toolkit-bound.py" "${SOURCE_DIR}" "${target_full}" "${SCRIPT_DIR}" 2>&1)" \
+        || fast_refuse "the checkout and the executing toolkit are not bound to the target: ${tb}"
     db_identity_check
-    manifest="$(ssh_hub "'${HUB_RELEASES}/${SHA}/bin/canterlot-hub' migrations manifest --json")" \
-        || fast_refuse "the target hub binary cannot print its migrations manifest"
+    # Бинарь цели — чужой для этого прогона код: запускается от учётной записи службы под пределом
+    # времени, не от root (проверка байтов залитого дерева сделана target-check до этого).
+    manifest="$(ssh_hub "runuser -u '${HUB_SERVICE_USER}' -- timeout ${MANIFEST_TIMEOUT} '${HUB_RELEASES}/${SHA}/bin/canterlot-hub' migrations manifest --json")" \
+        || fast_refuse "the target hub binary cannot print its migrations manifest (as ${HUB_SERVICE_USER}, within ${MANIFEST_TIMEOUT} s)"
+    # Манифест обязан сходиться с RELEASE артефакта ДО любой записи: расхождение — негодный артефакт.
+    rel_last="$(sed -n 's/^migrations_last=\([0-9]*\).*/\1/p' "${DIST}/RELEASE" 2>/dev/null | sed -n 1p | sed 's/^0*//')" || rel_last=""
+    man_max="$(python3 -I -c 'import json,sys; print(max(int(m["version"]) for m in json.loads(sys.argv[1])["migrations"]))' "${manifest}" 2>/dev/null)" \
+        || fast_refuse "the migrations manifest of the target hub binary is not understood"
+    if [ -z "${rel_last}" ] || [ "${man_max}" != "${rel_last}" ]; then
+        PHASE="eligibility"
+        fail_mark
+        fail_code manifest_release_mismatch
+        die_after "invalid artifact: the target hub binary embeds migrations up to ${man_max}, but RELEASE says migrations_last ${rel_last:-unreadable}: stopping before any write"
+    fi
     rows="$(hub_psql "select version::text || ' ' || encode(checksum, 'hex') || ' ' || success::int::text from _sqlx_migrations order by version")"
     cmp="$(python3 -I "${SCRIPT_DIR}/migration-compare.py" "${manifest}" "${rows}" 2>&1)" \
         || fast_refuse "the migrations manifest could not be compared with the database: ${cmp}"
