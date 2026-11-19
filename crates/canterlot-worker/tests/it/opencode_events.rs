@@ -187,7 +187,8 @@ fn usage_keeps_the_recorded_token_split() {
         usage,
         context_tokens,
         context_window_tokens,
-    } = translator.finish_run(command)
+        ..
+    } = translator.finish_run(command, canterlot_worker::adapter::RunEnd::Completed)
     else {
         panic!("not a run end");
     };
@@ -216,7 +217,7 @@ fn usage_of_several_steps_adds_up_and_context_is_the_last_step() {
         usage,
         context_tokens,
         ..
-    } = translator.finish_run(command)
+    } = translator.finish_run(command, canterlot_worker::adapter::RunEnd::Completed)
     else {
         panic!("not a run end");
     };
@@ -245,7 +246,7 @@ fn failed_step_tokens_count_and_usage_resets_between_runs() {
         context_tokens,
         context_window_tokens,
         ..
-    } = translator.finish_run(first)
+    } = translator.finish_run(first, canterlot_worker::adapter::RunEnd::Completed)
     else {
         panic!("not a run end");
     };
@@ -255,7 +256,9 @@ fn failed_step_tokens_count_and_usage_resets_between_runs() {
     assert_eq!(context_window_tokens, 0);
     let second = Uuid::now_v7();
     translator.begin_run(Some(second));
-    let AdapterEvent::RunFinished { usage, .. } = translator.finish_run(second) else {
+    let AdapterEvent::RunFinished { usage, .. } =
+        translator.finish_run(second, canterlot_worker::adapter::RunEnd::Completed)
+    else {
         panic!("not a run end");
     };
     assert!(usage.is_empty());
@@ -865,7 +868,9 @@ fn steps_seen_at_resume_are_not_counted_by_the_next_gap() {
     let command = Uuid::now_v7();
     translator.begin_run(Some(command));
     translator.replay(&[old, step("msg_new")], false, true);
-    let AdapterEvent::RunFinished { usage, .. } = translator.finish_run(command) else {
+    let AdapterEvent::RunFinished { usage, .. } =
+        translator.finish_run(command, canterlot_worker::adapter::RunEnd::Completed)
+    else {
         panic!("finish");
     };
     assert_eq!(usage.len(), 1, "{usage:?}");
@@ -1009,7 +1014,7 @@ fn child_tokens_are_counted_under_its_agent_and_never_touch_the_context() {
         usage,
         context_tokens,
         ..
-    } = translator.finish_run(command)
+    } = translator.finish_run(command, canterlot_worker::adapter::RunEnd::Completed)
     else {
         panic!("run must finish");
     };
@@ -1127,7 +1132,7 @@ fn background_child_keeps_its_open_blocks_over_the_end_of_the_run() {
     translator.feed(&json!({"type": "session.tool.called", "data": {
         "sessionID": "ses_a", "assistantMessageID": "msg_2", "id": "call_1",
         "input": {"command": "sleep 5"}}}));
-    let _ = translator.finish_run(command);
+    let _ = translator.finish_run(command, canterlot_worker::adapter::RunEnd::Completed);
     let out = flat_events(
         translator.feed(&json!({"type": "session.tool.success", "data": {
         "sessionID": "ses_a", "assistantMessageID": "msg_2", "id": "call_1",
@@ -1187,7 +1192,7 @@ fn child_working_after_the_parent_turn_reports_background_work() {
         outcomes(&translator.feed(&execution("succeeded", ROOT))).len(),
         1
     );
-    let _ = translator.finish_run(command);
+    let _ = translator.finish_run(command, canterlot_worker::adapter::RunEnd::Completed);
     let (wake, tasks) = only_work(translator.background_events());
     assert!(!wake);
     assert_eq!(tasks.len(), 1);
@@ -1205,7 +1210,7 @@ fn last_child_end_turns_background_work_off() {
     child(&mut translator, ROOT, "ses_a", "general");
     translator.feed(&execution("started", "ses_a"));
     translator.feed(&execution("succeeded", ROOT));
-    let _ = translator.finish_run(command);
+    let _ = translator.finish_run(command, canterlot_worker::adapter::RunEnd::Completed);
     assert_eq!(
         only_work(translator.background_events()).1[0].state,
         BackgroundState::Running
@@ -1229,7 +1234,7 @@ fn failed_child_ends_background_work_as_failed() {
     child(&mut translator, ROOT, "ses_a", "general");
     translator.feed(&execution("started", "ses_a"));
     translator.feed(&execution("succeeded", ROOT));
-    let _ = translator.finish_run(command);
+    let _ = translator.finish_run(command, canterlot_worker::adapter::RunEnd::Completed);
     let _ = translator.background_events();
     let (_, tasks) = only_work(translator.feed(&execution("failed", "ses_a")));
     assert_eq!(tasks[0].state, BackgroundState::Failed);
@@ -1251,7 +1256,7 @@ fn child_activity_during_a_parent_turn_reports_no_background_work() {
     );
     assert!(background(translator.feed(&execution("succeeded", "ses_a"))).is_empty());
     translator.feed(&execution("succeeded", ROOT));
-    let _ = translator.finish_run(command);
+    let _ = translator.finish_run(command, canterlot_worker::adapter::RunEnd::Completed);
     assert!(
         background(translator.background_events()).is_empty(),
         "no child runs after the turn"
@@ -1266,7 +1271,7 @@ fn a_new_parent_turn_hides_background_work_until_it_ends() {
     child(&mut translator, ROOT, "ses_a", "general");
     translator.feed(&execution("started", "ses_a"));
     translator.feed(&execution("succeeded", ROOT));
-    let _ = translator.finish_run(first);
+    let _ = translator.finish_run(first, canterlot_worker::adapter::RunEnd::Completed);
     assert_eq!(only_work(translator.background_events()).1.len(), 1);
     let second = Uuid::now_v7();
     let (wake, tasks) = only_work(translator.begin_run(Some(second)));
@@ -1281,7 +1286,7 @@ fn a_new_parent_turn_hides_background_work_until_it_ends() {
         "no repeated signal during the turn"
     );
     translator.feed(&execution("succeeded", ROOT));
-    let _ = translator.finish_run(second);
+    let _ = translator.finish_run(second, canterlot_worker::adapter::RunEnd::Completed);
     let (_, tasks) = only_work(translator.background_events());
     assert_eq!(tasks.len(), 1);
     assert_eq!(tasks[0].state, BackgroundState::Running);
@@ -1579,7 +1584,9 @@ fn compaction_is_context_maintenance_and_its_tokens_are_counted() {
         })
         .collect();
     assert_eq!(phases, ["ContextMaintenance", "Generating"]);
-    let AdapterEvent::RunFinished { usage, .. } = translator.finish_run(command) else {
+    let AdapterEvent::RunFinished { usage, .. } =
+        translator.finish_run(command, canterlot_worker::adapter::RunEnd::Completed)
+    else {
         panic!("run must finish");
     };
     assert_eq!(usage[0].input_tokens, 70);
@@ -1772,7 +1779,7 @@ fn translated_fixture(
             if let Translated::RunEnded(RunOutcome::Succeeded) = &item
                 && let AdapterEvent::RunFinished {
                     usage: finished, ..
-                } = translator.finish_run(command)
+                } = translator.finish_run(command, canterlot_worker::adapter::RunEnd::Completed)
             {
                 usage = finished;
             }
