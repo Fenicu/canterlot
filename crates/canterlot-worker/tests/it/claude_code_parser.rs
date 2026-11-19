@@ -2311,3 +2311,44 @@ fn an_empty_thinking_delta_reports_liveness_without_a_blank_block_delta() {
     );
     assert!(deltas(&parsed).is_empty(), "no empty delta is shipped");
 }
+
+/// Размышление с одними пустыми приращениями и подписью (CLI без показа мыслей) всё равно
+/// закрывается пустым итогом: иначе блок висит `streaming` весь ход, и карточка ответа
+/// показывает давно закончившееся «Рассуждает».
+#[test]
+fn an_empty_thinking_block_is_finalized_with_empty_text() {
+    let mut parser = Parser::new();
+    parser.set_input_command(command_id());
+    let frame = |event: Value| {
+        json!({"type":"stream_event","session_id":"s","parent_tool_use_id":null,"event":event})
+            .to_string()
+    };
+    let mut parsed = Vec::new();
+    for event in [
+        json!({"type":"content_block_start","index":0,
+               "content_block":{"type":"thinking","thinking":""}}),
+        json!({"type":"content_block_delta","index":0,
+               "delta":{"type":"thinking_delta","thinking":""}}),
+        json!({"type":"content_block_delta","index":0,
+               "delta":{"type":"signature_delta","signature":"abc"}}),
+        json!({"type":"content_block_stop","index":0}),
+    ] {
+        parsed.extend(parser.feed(&frame(event)));
+    }
+    let started = parsed.iter().any(|p| {
+        matches!(
+            p,
+            Parsed::Event(AdapterEvent::BlockStarted {
+                kind: BlockKind::Reasoning,
+                ..
+            })
+        )
+    });
+    assert!(started, "{parsed:?}");
+    let finals = finals(&parsed);
+    assert_eq!(finals.len(), 1, "{parsed:?}");
+    assert!(
+        matches!(finals[0], AdapterEvent::BlockFinal { text, .. } if text.is_empty()),
+        "{finals:?}"
+    );
+}

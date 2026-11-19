@@ -1308,21 +1308,14 @@ impl Parser {
                     return;
                 };
                 match block.kind {
-                    BlockKind::Text => {
+                    // Без показа мыслей CLI шлёт одни пустые приращения и подпись: пустой итог
+                    // всё равно закрывает блок, иначе он висит `streaming` до конца хода.
+                    BlockKind::Text | BlockKind::Reasoning => {
                         out.push(Parsed::Event(AdapterEvent::BlockFinal {
                             block_id: block.block_id,
                             text: block.text,
                             summary: None,
                         }));
-                    }
-                    BlockKind::Reasoning => {
-                        if !block.text.is_empty() {
-                            out.push(Parsed::Event(AdapterEvent::BlockFinal {
-                                block_id: block.block_id,
-                                text: block.text,
-                                summary: None,
-                            }));
-                        }
                     }
                     BlockKind::ToolCall => {
                         let tool_use_id = block.tool_use_id.unwrap_or_default();

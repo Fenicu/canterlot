@@ -1031,3 +1031,25 @@ async fn megabyte_text_block_finalizes_and_is_indexed(pool: PgPool) -> TestResul
     assert!(found);
     Ok(())
 }
+
+/// Размышление без видимого текста закрывается пустым итогом: блок становится `final`,
+/// а не висит `streaming` до конца хода.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn an_empty_reasoning_final_closes_the_block(pool: PgPool) -> TestResult {
+    let mut run = Run::new(&pool).await;
+    let id = Uuid::now_v7();
+    run.send(vec![
+        Body::BlockStarted(BlockStarted {
+            block_id: id.to_string(),
+            rev: 0,
+            kind: "reasoning".into(),
+            ..Default::default()
+        }),
+        final_fact(id, 1, ""),
+    ])
+    .await;
+    let (text, rev, state, reason) = block(&pool, id).await;
+    assert_eq!((text.as_str(), rev, state.as_str(), reason), ("", 1, "final", None));
+    assert!(kinds(&events(&pool, id).await).contains(&"block_final"));
+    Ok(())
+}
