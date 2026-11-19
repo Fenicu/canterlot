@@ -88,6 +88,8 @@ for (const theme of ['dark', 'light'] as const) {
 		await expect(ctx).not.toHaveAttribute('data-compacting', 'true');
 		await expect(ctx).toContainText('Контекст: ост. 36%');
 		await expect(ctx).toHaveAttribute('data-tone', 'accent');
+		// Шкала уходит, когда в строке не хватает места; в окне настольного браузера рядом ещё «Отправить позже».
+		await page.setViewportSize({ width: 560, height: 800 });
 		await expect(ctx.getByRole('meter')).toHaveAttribute('aria-valuenow', '36');
 		api.pushContext(id, 750_000, 1_000_000);
 		hub.flush();
@@ -221,5 +223,6 @@ test('token_only_context_keeps_the_label_and_draws_no_empty_track', async ({ pag
 	api.pushContext(id, 817_000, 1_000_000);
 	hub.flush();
 	await expect(ctx).toContainText('Контекст: ост. 19%');
+	await page.setViewportSize({ width: 560, height: 800 });
 	await expect(ctx.getByRole('meter')).toHaveCount(1);
 });

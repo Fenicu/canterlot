@@ -820,7 +820,7 @@
   .mic { grid-area: mic; display: inline-flex; }
   .file { position: absolute; width: var(--s1); height: var(--s1); overflow: hidden; clip-path: inset(50%); }
   .goal { grid-area: goal; width: var(--target); height: var(--target); border-radius: var(--radius-round); background: var(--transparent); color: var(--secondary); }
-  .goal.off { color: var(--muted); }
+  .goal.off { background: var(--transparent); color: var(--muted); }
   .clock, .send {
     width: var(--target);
     height: var(--target);

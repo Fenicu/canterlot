@@ -32,6 +32,11 @@
 	const gaugeTone = $derived(tone === 'accent' ? 'normal' : tone);
 	const badge = $derived(snapshot ? contextBadge(snapshot.tokens, snapshot.window) : '');
 	const label = $derived(compacting ? compactionRunningLine() : badge);
+	// Подпись режется по ширине ячейки: «Контекст: ост. 50%» → «ост. 50%» → «50%». Полный текст остаётся в aria-label.
+	const parts = $derived.by(() => {
+		const match = /^(Контекст: )?(ост\. )?(.*)$/.exec(label);
+		return { head: match?.[1] ?? '', mid: match?.[2] ?? '', tail: match?.[3] ?? label };
+	});
 	const details = $derived(snapshot ? contextDetails(snapshot.tokens, snapshot.window) : '');
 	const model = $derived(
 		modelLabel((chat.detail as { model?: string } | null)?.model ?? '')
@@ -93,6 +98,7 @@
 </script>
 
 {#if snapshot}
+	<span class="cell">
 	<button
 		type="button"
 		class="ctx"
@@ -105,8 +111,9 @@
 		{#if remaining !== null}
 			<span class="track"><Gauge value={remaining} tone={gaugeTone} quiet label={badge} /></span>
 		{/if}
-		<span class="label">{label}</span>
+		<span class="label">{#if parts.head}<span class="head">{parts.head}</span>{/if}{#if parts.mid}<span class="mid">{parts.mid}</span>{/if}{parts.tail}</span>
 	</button>
+	</span>
 	{#if open}
 		<div class="ctx-details" data-details bind:this={detailsNode}>
 			<p class="tokens">{details}</p>
@@ -122,14 +129,22 @@
 {/if}
 
 <style>
-	.ctx {
+	/* Ячейка отдаёт кнопке ровно ту ширину, что осталась в строке после кнопок: по ней подпись выбирает вид. */
+	.cell {
 		grid-area: context;
+		container-type: inline-size;
+		min-width: 0;
+		font-size: var(--fs-sm);
+	}
+	.ctx {
+		max-width: 100%;
 		display: inline-flex;
 		align-items: center;
 		gap: var(--s2);
 		min-width: 0;
 		min-height: var(--target);
 		padding-inline: var(--s2);
+		overflow: hidden;
 		border: var(--s0);
 		border-radius: var(--radius-pill);
 		background: var(--transparent);
@@ -144,19 +159,25 @@
 	.ctx[data-tone='danger'] {
 		color: var(--danger);
 	}
-	/* В узкой строке уступает шкала, а не подпись: «Контекст: ост. 37%» и «Сжимает контекст» видны целиком. */
+	/* В узкой строке уступает шкала, а не подпись: «Контекст: ост. 37%» и «Сжимает контекст» видны целиком.
+	   Не хватило и на подпись: сначала уходит «Контекст:», потом «ост.», а на самой малой ширине остаётся
+	   число с процентом. Последний предел — многоточие, наложения кнопок не бывает. */
 	.track {
-		display: flex;
-		flex: 0 1 var(--gauge-width);
+		display: none;
+		flex: 1 1 0;
+		max-width: var(--gauge-width);
 		min-width: var(--s13);
 	}
-	/* На очень узком экране шкала уступает место подписи и кнопке заготовок. */
-	@media (max-width: 360px) {
-		.track { display: none; }
-	}
 	.label {
-		flex: none;
+		flex: 0 1 auto;
+		min-width: 0;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
+	.head, .mid { display: none; }
+	@container (min-width: 6.5em) { .mid { display: inline; } }
+	@container (min-width: 10em) { .head { display: inline; } }
+	@container (min-width: 14.5em) { .track { display: flex; } }
 	/* Пока идёт сжатие, заполнение шкалы сжимается к началу и возвращается в такт строке ленты. */
 	.ctx[data-compacting='true'] .track :global([role='meter'] > span) {
 		transform-origin: left center;
@@ -197,15 +218,15 @@
 	}
 	:global(.capsule):has([data-details]) {
 		grid-template-areas:
-			'input input input input input input'
-			'attach mic context clock steer send'
-			'details details details details details details';
+			'input input input input input input input'
+			'attach mic context goal clock steer send'
+			'details details details details details details details';
 	}
 	:global(.capsule):has(:global(.tray)):has([data-details]) {
 		grid-template-areas:
 			'tray tray tray tray tray tray'
-			'input input input input input input'
-			'attach mic context clock steer send'
-			'details details details details details details';
+			'input input input input input input input'
+			'attach mic context goal clock steer send'
+			'details details details details details details details';
 	}
 </style>
