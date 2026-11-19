@@ -426,3 +426,46 @@ for (const width of [320, 412] as const) {
     expect(await noOverflow(page), 'collapsed').toBe(true);
   });
 }
+
+test('one_run_split_by_a_compaction_keeps_the_live_line_and_interrupt_on_the_last_card_only', async ({ page }) => {
+  const { hub, api, id } = await boot(page);
+  // Первая карточка: готовый текст и пустое размышление, которое так и осталось открытым.
+  const { blockId, run } = startReasoning(hub, api, id, new Date(Date.now() - 460_000).toISOString());
+  // Ход идёт: у ленты есть активный ход, как у настоящей сессии под CLI.
+  hub.append(scope(id), {
+    kind: 'derived_changed',
+    conversation_id: id,
+    payload: {
+      conversation_id: id,
+      activity: { state: 'working', evidence: { phase: 'generating' }, since: new Date(Date.now() - 460_000).toISOString() },
+      unread_count: 0,
+      queue: { queued: 0, pause_reasons: [], hold_reasons: [] },
+      last_activity_at: null,
+      settings: { model: 'opus-5.5', effort: 'medium', permission_mode: 'owner' },
+      crunch: { enabled: false }
+    }
+  });
+  const text = api.id();
+  hub.append(scope(id), { kind: 'block_started', conversation_id: id, payload: { ...base(api), input_command_id: run, block_id: text, rev: 0, kind: 'text' } });
+  await finalize(hub, id, text, 1, 'Читаю файлы');
+  expect(blockId).not.toBe(text);
+  api.pushCompaction(id, { ok: true });
+  hub.flush();
+  await expect(page.getByText('Контекст сжат автоматически')).toBeVisible();
+  // Вторая карточка того же хода: живое размышление.
+  const next = api.id();
+  hub.append(scope(id), { kind: 'block_started', conversation_id: id, payload: { ...base(api), input_command_id: run, block_id: next, rev: 0, kind: 'reasoning' } });
+  delta(hub, id, next, 1, 'Думаю дальше');
+  hub.flush();
+
+  const cards = page.locator('.card');
+  await expect(cards).toHaveCount(2);
+  await expect(page.locator('[data-working]')).toHaveCount(1);
+  await expect(page.getByRole('button', { name: 'Прервать' })).toHaveCount(1);
+  await expect(cards.nth(1).locator('[data-working]')).toHaveCount(1);
+  await expect(cards.nth(1).getByRole('button', { name: 'Прервать' })).toBeVisible();
+  await expect(cards.nth(0).locator('[data-working]')).toHaveCount(0);
+  await expect(cards.nth(0).getByRole('button', { name: 'Прервать' })).toHaveCount(0);
+  await expect(cards.nth(0)).not.toContainText(/Рассуждает|Генерирует/);
+  await expect(cards.nth(0)).not.toContainText(/\d+ мин|\d+ с\b/);
+});

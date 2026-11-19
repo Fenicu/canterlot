@@ -35,6 +35,7 @@
     links,
     harness,
     activeRun = null,
+    settled = false,
     conversationId,
     now,
     onInfo,
@@ -53,6 +54,8 @@
     harness?: { title?: string; provider?: string } | null;
     /** Ход, который идёт сейчас: вызов без результата в нём ещё работает. */
     activeRun?: string | null;
+    /** Ход идёт дальше в более поздней карточке (его разрезало сжатие): здесь живой строки нет. */
+    settled?: boolean;
     conversationId: string;
     now: number;
     onInfo?: (runId: string) => void;
@@ -79,12 +82,12 @@
   const head = $derived(all[0]);
   // Сведения хаб отдаёт по ходу; у карточки без хода (носитель файла прежних версий) их нет.
   const run = $derived(all.find((block) => block.inputCommandId)?.inputCommandId ?? null);
-  const streaming = $derived(all.some((block) => block.state === 'streaming'));
+  const streaming = $derived(!settled && all.some((block) => block.state === 'streaming'));
   const active = $derived(all.findLast((block) => block.state === 'streaming'));
   const started = $derived(all.find((block) => block.state === 'streaming')?.startedAt ?? head?.createdAt ?? now);
   const phase = $derived(active?.kind === 'tool_call' || active?.kind === 'tool_result' ? 'tool' : active?.kind === 'reasoning' ? 'thinking' : 'working');
   const agent = $derived(agentTitle(head?.agent ?? '', harness));
-  const working = $derived(activeRun !== null && head?.inputCommandId === activeRun);
+  const working = $derived(!settled && activeRun !== null && head?.inputCommandId === activeRun);
   const live = $derived(working || streaming);
   const cost = $derived(run && !live ? costs?.get(run) : undefined);
   const costText = $derived(cost ? costLine(cost.usage, cost.limit) : '');

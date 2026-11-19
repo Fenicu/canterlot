@@ -836,6 +836,23 @@ export class RowsCache {
   }
 }
 
+/**
+ * Карточки хода, который идёт сейчас, но не последние: живая строка и «Прервать» только у
+ * последней, а прежние (ход разрезан сжатием контекста) остаются завершёнными, даже если
+ * в них висит блок в `streaming`.
+ */
+export function settledRunCards(rows: Row[], activeRun: string | null): Set<string> {
+  const settled = new Set<string>();
+  if (activeRun === null) return settled;
+  const own = rows.filter(
+    (row) =>
+      row.kind === "answer" &&
+      row.entries.some((entry) => entry.kind === "block" && entry.block.inputCommandId === activeRun),
+  );
+  for (const row of own.slice(0, -1)) settled.add(row.key);
+  return settled;
+}
+
 /** Последняя запись ленты: новое сообщение меняет её, а старшая страница и пересборка карточки нет. */
 export function tailKey(rows: Row[]): string {
   return rows.findLast((row) => row.entries.length > 0)?.entries.at(-1)?.key ?? "";
