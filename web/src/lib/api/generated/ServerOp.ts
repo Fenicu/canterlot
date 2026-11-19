@@ -391,6 +391,10 @@ export interface RunCostUpdated {
       weekly_delta_permille: number;
       exact: boolean;
     } | null;
+    cache_hint: {
+      kind: "expired" | "model_changed" | "compaction" | "rebuilt";
+      idle_minutes: number | null;
+    } | null;
   };
 }
 export interface InterruptStateChanged {

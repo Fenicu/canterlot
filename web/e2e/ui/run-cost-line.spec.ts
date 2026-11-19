@@ -63,7 +63,8 @@ test('feed_line_updates_when_the_cost_of_a_finished_turn_arrives_late', async ({
     payload: {
       run_id: runId,
       usage: [{ model: 'mystery-model', agent: 'orchestrator', input_tokens: 10, output_tokens: 5, cache_read_tokens: 0, cache_write_tokens: 0, cost_micro_usd: null, cost_source: null }],
-      limit: null
+      limit: null,
+      cache_hint: null
     }
   });
   hub.flush();
@@ -75,7 +76,8 @@ test('feed_line_updates_when_the_cost_of_a_finished_turn_arrives_late', async ({
     payload: {
       run_id: runId,
       usage: [{ model: 'opencode-go/beam-free', agent: 'orchestrator', input_tokens: 10, output_tokens: 5, cache_read_tokens: 0, cache_write_tokens: 0, cost_micro_usd: 0, cost_source: 'cli' }],
-      limit: null
+      limit: null,
+      cache_hint: null
     }
   });
   hub.flush();
@@ -98,4 +100,48 @@ test('session_sheet_shows_the_session_total_with_delegates_and_turns_without_a_p
   await expect(total).toContainText('2 хода без цены');
   await total.scrollIntoViewIfNeeded();
   await page.screenshot({ path: `${SHOTS}/session-sheet-${test.info().project.name}.png` });
+});
+
+test('feed_line_shows_the_cache_hint_without_overflow_or_a_broken_line', async ({ page }) => {
+  const { hub, api, id, runId } = boot();
+  Object.assign(api.runs.get(runId)!, { cache_hint: { kind: 'expired', idle_minutes: 125 } });
+  await installChatRoutes(page, hub, api);
+  await page.goto(`/c/${id}`);
+  await expect(page.locator('.screen[data-ready]')).toBeVisible();
+
+  const line = page.locator('[data-role="run-cost"]').first();
+  const hint = line.locator('[data-role="cache-hint"]');
+  await expect(hint).toHaveText('кеш, вероятно, истёк · простой 2 ч 5 мин');
+  await expect(line).toContainText('Opus 5.5 · 48 тыс. токенов (кеш 96%)');
+  const viewport = page.viewportSize()!;
+  const box = await line.boundingBox();
+  expect(box!.x + box!.width).toBeLessThanOrEqual(viewport.width + 0.5);
+  const hintBox = await hint.boundingBox();
+  expect(hintBox!.x + hintBox!.width).toBeLessThanOrEqual(viewport.width + 0.5);
+  // Подсказка на одной строке: многоточие вместо переноса.
+  const lineHeight = await hint.evaluate((node) => parseFloat(getComputedStyle(node).lineHeight) || node.getBoundingClientRect().height);
+  expect(hintBox!.height).toBeLessThanOrEqual(lineHeight + 1);
+  await line.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: `${SHOTS}/feed-line-cache-hint-${test.info().project.name}.png` });
+
+  hub.append(`conversation:${id}`, {
+    kind: 'run_cost_updated',
+    conversation_id: id,
+    payload: {
+      run_id: runId,
+      usage: [{ model: 'claude-opus-5-5', agent: 'orchestrator', input_tokens: 10, output_tokens: 5, cache_read_tokens: 0, cache_write_tokens: 9000, cost_micro_usd: 5000, cost_source: 'cli' }],
+      limit: null,
+      cache_hint: { kind: 'model_changed', idle_minutes: null }
+    }
+  });
+  hub.flush();
+  await expect(page.locator('[data-role="cache-hint"]').first()).toHaveText('смена модели — кеш заново');
+});
+
+test('feed_line_has_no_hint_when_the_hub_names_none', async ({ page }) => {
+  const { hub, api, id } = boot();
+  await installChatRoutes(page, hub, api);
+  await page.goto(`/c/${id}`);
+  await expect(page.locator('[data-role="run-cost"]').first()).toBeVisible();
+  await expect(page.locator('[data-role="cache-hint"]')).toHaveCount(0);
 });

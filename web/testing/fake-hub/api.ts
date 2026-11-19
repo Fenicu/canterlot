@@ -1887,7 +1887,8 @@ export class FakeHubApi {
 						cost_micro_usd: line.cost_micro_usd ?? null,
 						cost_source: line.cost_source ?? null
 					})),
-					limit: info.limit ? { weekly_delta_permille: info.limit.weekly_delta_permille } : null
+					limit: info.limit ? { weekly_delta_permille: info.limit.weekly_delta_permille } : null,
+					cache_hint: info.cache_hint ?? null
 				}
 			];
 		});

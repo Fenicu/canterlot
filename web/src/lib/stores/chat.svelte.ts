@@ -1,6 +1,6 @@
 import { untrack } from "svelte";
 import { SvelteMap, SvelteSet } from "svelte/reactivity";
-import type { CostUsage } from "#lib/format/cost.js";
+import type { CacheHint, CostUsage } from "#lib/format/cost.js";
 import type { OpJournal } from "#lib/ops/journal.js";
 import { intents } from "#lib/ops/intent.js";
 import type { DraftStore } from "#lib/drafts/store.js";
@@ -138,6 +138,7 @@ export interface RunCost {
   run_id: string;
   usage: CostUsage[];
   limit?: { weekly_delta_permille: number } | null;
+  cache_hint?: CacheHint | null;
 }
 
 export interface HistoryPage {

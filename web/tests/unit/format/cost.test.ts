@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { cacheShare, costLine, costMoney, sessionCostLine, weekShare } from '#lib/format/cost.js';
+import { cacheHintText, cacheShare, idleText, costLine, costMoney, sessionCostLine, weekShare } from '#lib/format/cost.js';
 
 const line = (over: Record<string, unknown> = {}) => ({
 	model: 'claude-opus-5-5',
@@ -95,5 +95,28 @@ describe('sessionCostLine', () => {
 		expect(sessionCostLine({ cost_micro_usd: 0, unknown_cost_turns: 1 }, { cost_micro_usd: 0, unknown_cost_turns: 1 }).unknown).toBe('2 хода без цены');
 		expect(sessionCostLine({ cost_micro_usd: 0, unknown_cost_turns: 1 }, { cost_micro_usd: 0, unknown_cost_turns: 0 }).unknown).toBe('1 ход без цены');
 		expect(sessionCostLine({ cost_micro_usd: 0, unknown_cost_turns: 5 }, { cost_micro_usd: 0, unknown_cost_turns: 0 }).unknown).toBe('5 ходов без цены');
+	});
+});
+
+describe('cacheHintText', () => {
+	it('names the likely expiry with the idle time', () => {
+		expect(cacheHintText({ kind: 'expired', idle_minutes: 12 })).toBe('кеш, вероятно, истёк · простой 12 мин');
+		expect(cacheHintText({ kind: 'expired', idle_minutes: 60 })).toBe('кеш, вероятно, истёк · простой 1 ч');
+		expect(cacheHintText({ kind: 'expired', idle_minutes: 125 })).toBe('кеш, вероятно, истёк · простой 2 ч 5 мин');
+		expect(cacheHintText({ kind: 'expired' })).toBe('кеш, вероятно, истёк');
+	});
+	it('names a model change, a compaction and a plain rebuild', () => {
+		expect(cacheHintText({ kind: 'model_changed' })).toBe('смена модели — кеш заново');
+		expect(cacheHintText({ kind: 'compaction' })).toBe('после сжатия контекста');
+		expect(cacheHintText({ kind: 'rebuilt' })).toBe('кеш пересобран');
+	});
+	it('has no hint without data', () => {
+		expect(cacheHintText(null)).toBeNull();
+		expect(cacheHintText(undefined)).toBeNull();
+	});
+	it('formats idle time', () => {
+		expect(idleText(5)).toBe('5 мин');
+		expect(idleText(59)).toBe('59 мин');
+		expect(idleText(61)).toBe('1 ч 1 мин');
 	});
 });

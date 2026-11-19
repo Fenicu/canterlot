@@ -19,6 +19,8 @@ export interface RunInfo {
 		cost_source?: string | null;
 		kind?: string;
 	}[];
+	/** Подсказка о пересборке кеша, если хаб её нашёл. */
+	cache_hint?: { kind: 'expired' | 'model_changed' | 'compaction' | 'rebuilt'; idle_minutes?: number | null } | null;
 	speed?: {
 		model: string;
 		output_tokens: number;

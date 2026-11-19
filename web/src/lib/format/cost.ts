@@ -97,6 +97,35 @@ export function costLine(usage: CostUsage[], limit: { weekly_delta_permille: num
 	return [modelLabel(main.model), tokens, money, weekShare(limit?.weekly_delta_permille)].filter((part): part is string => !!part).join(' · ');
 }
 
+/** Вероятная причина пересборки кеша, как её называет хаб. */
+export interface CacheHint {
+	kind: 'expired' | 'model_changed' | 'compaction' | 'rebuilt';
+	idle_minutes?: number | null;
+}
+
+/** Простой для подсказки: «12 мин», «1 ч», «2 ч 5 мин». */
+export function idleText(minutes: number): string {
+	if (minutes < 60) return `${minutes} мин`;
+	const hours = Math.floor(minutes / 60);
+	const rest = minutes % 60;
+	return rest === 0 ? `${hours} ч` : `${hours} ч ${rest} мин`;
+}
+
+/** Короткая подсказка под строкой расхода; хаб не видит самого кеша, поэтому всегда «вероятно». */
+export function cacheHintText(hint: CacheHint | null | undefined): string | null {
+	if (!hint) return null;
+	switch (hint.kind) {
+		case 'expired':
+			return hint.idle_minutes != null ? `кеш, вероятно, истёк · простой ${idleText(hint.idle_minutes)}` : 'кеш, вероятно, истёк';
+		case 'model_changed':
+			return 'смена модели — кеш заново';
+		case 'compaction':
+			return 'после сжатия контекста';
+		default:
+			return 'кеш пересобран';
+	}
+}
+
 interface CostTotals {
 	cost_micro_usd: number;
 	unknown_cost_turns: number;

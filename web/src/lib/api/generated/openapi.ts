@@ -2487,6 +2487,16 @@ export interface components {
             target_id: string;
             target_kind: components["schemas"]["TargetKind"];
         };
+        CacheHint: {
+            /**
+             * Format: int64
+             * @description Простой между ходами в минутах; только у `expired`.
+             */
+            idle_minutes?: number | null;
+            kind: components["schemas"]["CacheHintKind"];
+        };
+        /** @enum {string} */
+        CacheHintKind: "expired" | "model_changed" | "compaction" | "rebuilt";
         CancelOutcome: "cancelled" | {
             cancel_requested: {
                 /** Format: uuid */
@@ -4711,6 +4721,7 @@ export interface components {
         };
         /** @description Расход одного хода для строки цены под ответом. */
         RunCostView: {
+            cache_hint?: components["schemas"]["CacheHint"] | null;
             limit?: components["schemas"]["RunLimit"] | null;
             /** Format: uuid */
             run_id: string;
