@@ -1323,6 +1323,48 @@ async fn make_schedule_without_session(f: &Fixture, name: &str) -> Uuid {
 // Уборка: текст отчёта живёт в истории запусков 30 дней.
 // ---------------------------------------------------------------------------
 
+/// Отчёт завершился `days` дней назад (срок текста считается от завершения, не от запуска).
+async fn age_report(pool: &PgPool, run: Uuid, days: i64) {
+    sqlx::query(
+        "update schedule_runs
+            set detail=jsonb_set(detail,'{report,completed_at}',
+                to_jsonb(to_char((clock_timestamp()-make_interval(days=>$2)) at time zone 'UTC',
+                                 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')))
+          where id=$1",
+    )
+    .bind(run)
+    .bind(days as i32)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// Двести пять завершённых запусков-заполнителей новее заданного.
+async fn newer_runs(f: &Fixture, schedule: Uuid, count: i32) {
+    for n in 0..count {
+        sqlx::query(
+            "insert into schedule_runs(id,schedule_id,owner_id,scheduled_at,claimed_revision,state,manual,idempotency_key)
+             values($1,$2,$3,now()+make_interval(secs=>$4),1,'skipped_overlap',false,$5)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(schedule)
+        .bind(f.seed.owner_id)
+        .bind(f64::from(n + 10))
+        .bind(format!("filler-{n}"))
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    }
+}
+
+async fn run_exists(pool: &PgPool, run: Uuid) -> bool {
+    sqlx::query_scalar("select exists(select 1 from schedule_runs where id=$1)")
+        .bind(run)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn report_text_is_pruned_from_history_after_thirty_days(pool: PgPool) {
     let f = Fixture::new(pool.clone()).await;
@@ -1334,19 +1376,11 @@ async fn report_text_is_pruned_from_history_after_thirty_days(pool: PgPool) {
     // Свежий отчёт уборка не трогает; запуск 29 дней назад — тоже.
     canterlot_hub::routines::prune(&mut conn).await.unwrap();
     assert_eq!(run_state(&pool, run).await.1["report"]["text"], "Отчёт");
-    sqlx::query("update schedule_runs set created_at=now()-interval '29 days' where id=$1")
-        .bind(run)
-        .execute(&pool)
-        .await
-        .unwrap();
+    age_report(&pool, run, 29).await;
     canterlot_hub::routines::prune(&mut conn).await.unwrap();
     assert_eq!(run_state(&pool, run).await.1["report"]["text"], "Отчёт");
-    // На 31 день текст уходит, запуск и его метаданные остаются.
-    sqlx::query("update schedule_runs set created_at=now()-interval '31 days' where id=$1")
-        .bind(run)
-        .execute(&pool)
-        .await
-        .unwrap();
+    // На 31 день после завершения текст уходит, запуск и его метаданные остаются.
+    age_report(&pool, run, 31).await;
     canterlot_hub::routines::prune(&mut conn).await.unwrap();
     let (state, detail) = run_state(&pool, run).await;
     assert_eq!(state, "started");
@@ -1812,4 +1846,50 @@ async fn a_stale_retry_is_refused_when_the_schedule_no_longer_reports_this_sessi
         .await
         .unwrap();
     assert_eq!(runs, 0, "a refused retry must not start a run");
+}
+
+/// Предел в 200 запусков не стирает отчёты: собирающийся запуск живёт до финала, а готовый
+/// отчёт — 30 дней от завершения, как бы часто ни шли запуски.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn the_history_cap_keeps_pending_reports_and_fresh_report_text(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let _session = session(&f);
+    with_native(&f).await;
+    let schedule = make_schedule(&f, "Стендап").await;
+    let (ready_run, _) = ready_card(&f, schedule, "Отчёт").await;
+    worker_stops_copies(&pool).await;
+    sweep(&f).await;
+    let pending_run = run_now(&f, schedule).await;
+    wait_run(&pool, pending_run, "started").await;
+    // Оба запуска старше всех заполнителей, то есть первыми попадают под предел.
+    sqlx::query("update schedule_runs set scheduled_at=now()-interval '2 days' where id=any($1)")
+        .bind(vec![ready_run, pending_run])
+        .execute(&pool)
+        .await
+        .unwrap();
+    newer_runs(&f, schedule, 205).await;
+    let mut conn = pool.acquire().await.unwrap();
+    canterlot_hub::schedules::prune_runs(&mut conn)
+        .await
+        .unwrap();
+    assert!(
+        run_exists(&pool, pending_run).await,
+        "a pending report run was purged"
+    );
+    assert!(
+        run_exists(&pool, ready_run).await,
+        "fresh report text was purged by the cap"
+    );
+    assert_eq!(
+        run_state(&pool, ready_run).await.1["report"]["text"],
+        "Отчёт"
+    );
+    // Через 30 дней после завершения текст уходит, и запуск снова подчиняется пределу.
+    age_report(&pool, ready_run, 31).await;
+    canterlot_hub::routines::prune(&mut conn).await.unwrap();
+    canterlot_hub::schedules::prune_runs(&mut conn)
+        .await
+        .unwrap();
+    assert!(!run_exists(&pool, ready_run).await);
+    assert!(run_exists(&pool, pending_run).await);
 }

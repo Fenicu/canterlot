@@ -967,13 +967,14 @@ pub(crate) async fn finalize_pending_for_parent_in_tx(
     Ok(true)
 }
 
-/// Уборка: через 30 дней текст отчёта уходит из истории запусков (сами запуски живут по
+/// Уборка: через 30 дней после завершения текст отчёта уходит из истории запусков (сами запуски живут по
 /// общему правилу уборки), а закрытые карточки удаляются.
 pub async fn prune(conn: &mut PgConnection) -> Result<u64, sqlx::Error> {
     let texts = sqlx::query(
         "update schedule_runs set detail=detail #- '{report,text}'
           where detail #> '{report,text}' is not null
-            and created_at < clock_timestamp() - $1 * interval '1 day'",
+            and (detail #>> '{report,completed_at}')::timestamptz
+                < clock_timestamp() - $1 * interval '1 day'",
     )
     .bind(TEXT_RETENTION_DAYS as f64)
     .execute(&mut *conn)
