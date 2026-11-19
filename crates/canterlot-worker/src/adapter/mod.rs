@@ -52,6 +52,8 @@ pub struct StartSpec {
     pub isolate_mcp: bool,
     /// Подсказки следующего сообщения: только Claude Code, только если хаб их включил.
     pub prompt_suggestions: bool,
+    /// Владелец выключил встроенную автопамять Claude Code (действует в режиме «как у владельца»).
+    pub disable_claude_auto_memory: bool,
     /// Боковой чат: стартовать форком из нативной сессии родителя, а не resume/созданием.
     /// `None` — обычный запуск; неизвестное или отсутствующее поле у старого хаба — то же самое.
     pub fork: Option<ForkSpec>,

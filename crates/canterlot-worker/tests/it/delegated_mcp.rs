@@ -42,6 +42,7 @@ fn claude_args(td: &TempDir, isolate_mcp: bool, mode: InstructionMode) -> Vec<St
         instructions: &instructions,
         isolate_mcp,
         prompt_suggestions: false,
+        disable_auto_memory: false,
     };
     build_args(&spec, &ClaudeCodeConfig::default())
         .unwrap()
@@ -102,6 +103,7 @@ fn claude_mcp_config_names_only_canterlot() {
         instructions: &instructions,
         isolate_mcp: true,
         prompt_suggestions: false,
+        disable_auto_memory: false,
     };
     write_exec_files(
         &spec,
@@ -282,6 +284,7 @@ fn claude_mcp_json(
         instructions: &instructions,
         isolate_mcp: true,
         prompt_suggestions: false,
+        disable_auto_memory: false,
     };
     write_exec_files_with(
         &spec,
@@ -351,6 +354,7 @@ fn claude_mcp_config_with_no_allowed_server_is_exactly_as_before() {
         instructions: &instructions,
         isolate_mcp: true,
         prompt_suggestions: false,
+        disable_auto_memory: false,
     };
     write_exec_files(
         &spec,
@@ -533,6 +537,7 @@ for line in sys.stdin:
                 instructions: instructions(mode),
                 isolate_mcp,
                 prompt_suggestions: false,
+                disable_claude_auto_memory: false,
                 fork: None,
             }
         }

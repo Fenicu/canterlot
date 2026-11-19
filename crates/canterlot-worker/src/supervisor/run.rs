@@ -1887,6 +1887,7 @@ impl Supervisor {
             instructions,
             isolate_mcp: start.isolate_mcp,
             prompt_suggestions: self.prompt_suggestions,
+            disable_claude_auto_memory: start.disable_claude_auto_memory,
             fork: (!start.fork_from_native.is_empty()).then(|| crate::adapter::ForkSpec {
                 parent_native_id: start.fork_from_native.clone(),
                 side_mcp: start.canterlot_mcp == "side",

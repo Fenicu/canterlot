@@ -153,13 +153,22 @@ pub fn mode_free_tools_allowed() -> Vec<String> {
 }
 
 /// JSON для `--settings` по режиму инструкций.
-pub fn settings_json(mode: InstructionMode, excludes: &[String]) -> serde_json::Value {
+///
+/// Чистый режим и пресет всегда выключают встроенную автопамять Claude; в режиме владельца
+/// её выключает только `disable_auto_memory` (настройка владельца «Встроенная память Claude»).
+pub fn settings_json(
+    mode: InstructionMode,
+    excludes: &[String],
+    disable_auto_memory: bool,
+) -> serde_json::Value {
     let mut settings = serde_json::json!({
         "crossSessionInbound": "refuse",
         "permissions": {"allow": mode_free_tools_allowed()},
     });
     if mode != InstructionMode::Owner {
         settings["claudeMdExcludes"] = serde_json::json!(excludes);
+        settings["autoMemoryEnabled"] = serde_json::json!(false);
+    } else if disable_auto_memory {
         settings["autoMemoryEnabled"] = serde_json::json!(false);
     }
     settings
@@ -260,6 +269,8 @@ pub struct LaunchSpec<'a> {
     pub isolate_mcp: bool,
     /// `--prompt-suggestions`: хаб включил подсказки, сессия не делегат, CLI их знает.
     pub prompt_suggestions: bool,
+    /// Настройка владельца «Встроенная память Claude: выключена»: действует только в режиме владельца.
+    pub disable_auto_memory: bool,
 }
 
 pub fn map_permission_mode(m: &str) -> Result<Option<&'static str>, LaunchError> {
@@ -307,7 +318,7 @@ pub fn build_args(
     // Домашний каталог — из окружения воркера; файлы не читаются, только пути.
     let home = std::env::var("HOME").unwrap_or_default();
     let excludes = owner_instruction_excludes(spec.workdir, Path::new(&home));
-    let settings = settings_json(spec.instructions.mode, &excludes);
+    let settings = settings_json(spec.instructions.mode, &excludes, spec.disable_auto_memory);
     args.push("--settings".into());
     args.push(settings.to_string().into());
     args.push("--system-prompt-snapshot".into());
@@ -366,6 +377,23 @@ pub fn build_env(parent: impl Iterator<Item = (OsString, OsString)>) -> Vec<(OsS
     out.push(("CLAUDE_CODE_ENABLE_TODO_TOOLS".into(), "true".into()));
     out.push(("CLAUDE_CODE_ENABLE_TASKS".into(), "false".into()));
     out
+}
+
+/// Окружение запуска CLI: общий для запуска, перезапуска, возобновления и отката путь
+/// (все идут через [`CliProcess::spawn`]). `build_env` отбрасывает унаследованные
+/// `CLAUDE_CODE_*`, поэтому переменная выключения автопамяти ставится здесь явно, после него.
+pub fn launch_env(
+    spec: &LaunchSpec<'_>,
+    parent: impl Iterator<Item = (OsString, OsString)>,
+) -> Vec<(OsString, OsString)> {
+    let mut envs = build_env(parent);
+    if spec.isolate_mcp {
+        apply_mcp_isolation(&mut envs);
+    }
+    if spec.disable_auto_memory && spec.instructions.mode == InstructionMode::Owner {
+        envs.push(("CLAUDE_CODE_DISABLE_AUTO_MEMORY".into(), "1".into()));
+    }
+    envs
 }
 
 /// Коннекторы аккаунта claude.ai тоже MCP-серверы владельца: переменная их выключает.
@@ -509,10 +537,7 @@ impl CliProcess {
         group: &dyn Containment,
     ) -> Result<Self, LaunchError> {
         let args = build_args(spec, cfg)?;
-        let mut envs = build_env(std::env::vars_os());
-        if spec.isolate_mcp {
-            apply_mcp_isolation(&mut envs);
-        }
+        let envs = launch_env(spec, std::env::vars_os());
         // Команда собирается заново на каждую попытку: повтор нужен только
         // для ETXTBSY при запуске свежезаписанного двойника в тестах.
         let mut child = spawn_with_retry_io(|| {

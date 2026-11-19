@@ -30,6 +30,7 @@ pub mod alarms;
 pub mod attachments;
 pub mod auth;
 pub mod bookmarks;
+pub mod claude_auto_memory;
 mod connection;
 pub mod conversations;
 pub mod crunch;
@@ -260,6 +261,7 @@ pub fn api_routes() -> OpenApiRouter<AppState> {
         .merge(spawn_queue::routes())
         .merge(limit_settings::routes())
         .merge(prompt_suggestions::routes())
+        .merge(claude_auto_memory::routes())
         .merge(hibernate::routes())
         .merge(dictation::routes())
         .merge(machines::routes())

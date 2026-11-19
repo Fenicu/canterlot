@@ -2667,6 +2667,120 @@
         }
       }
     },
+    "/api/v1/claude-auto-memory-settings": {
+      "get": {
+        "tags": [
+          "conversations"
+        ],
+        "operationId": "get__api_v1_claude_auto_memory_settings",
+        "responses": {
+          "200": {
+            "description": "Встроенная память Claude: on или off",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClaudeAutoMemorySettings"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "conversations"
+        ],
+        "operationId": "put__api_v1_claude_auto_memory_settings",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ClaudeAutoMemorySettings"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Настройка сохранена; действует на сессии после их перезапуска",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ClaudeAutoMemorySettings"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/config": {
       "get": {
         "tags": [
@@ -14312,6 +14426,26 @@
             "description": "Имя без ведущего слеша: вставляется как `/<name> `."
           }
         }
+      },
+      "ClaudeAutoMemory": {
+        "type": "string",
+        "enum": [
+          "on",
+          "off"
+        ]
+      },
+      "ClaudeAutoMemorySettings": {
+        "type": "object",
+        "required": [
+          "claude_auto_memory"
+        ],
+        "properties": {
+          "claude_auto_memory": {
+            "$ref": "#/components/schemas/ClaudeAutoMemory",
+            "description": "Встроенная автопамять Claude Code в сессиях режима «как у владельца»."
+          }
+        },
+        "additionalProperties": false
       },
       "ClaudeHistoryList": {
         "type": "object",

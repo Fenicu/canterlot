@@ -1180,6 +1180,7 @@ fn n_minus_one_decoders_skip_new_fields() {
         prompt_suggestions: true,
         fork_from_native: String::new(),
         canterlot_mcp: String::new(),
+        disable_claude_auto_memory: true,
     };
     assert_eq!(
         OldStartExecution::decode(new.encode_to_vec().as_slice()).unwrap(),
@@ -1380,6 +1381,7 @@ fn start_execution_capabilities_machine_report_os_and_limits_snapshot_roundtrip(
         prompt_suggestions: true,
         fork_from_native: String::new(),
         canterlot_mcp: String::new(),
+        disable_claude_auto_memory: true,
     });
     assert_roundtrip(ipc::CompactRequest {
         command_id: "command".into(),
@@ -2060,6 +2062,20 @@ fn isolate_mcp_is_additive_on_both_hops() {
         [0x78, 1],
         "StartCli.send_now_v1 is field 15"
     );
+}
+
+#[test]
+fn disable_claude_auto_memory_is_field_16_and_19() {
+    let start = StartExecution {
+        disable_claude_auto_memory: true,
+        ..Default::default()
+    };
+    assert_eq!(start.encode_to_vec(), vec![0x80, 0x01, 1]);
+    let cli = canterlot_proto::worker::ipc::StartCli {
+        disable_claude_auto_memory: true,
+        ..Default::default()
+    };
+    assert_eq!(cli.encode_to_vec(), vec![0x98, 0x01, 1]);
 }
 
 #[test]

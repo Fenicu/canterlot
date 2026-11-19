@@ -8,8 +8,9 @@ use canterlot_worker::{
         Adapter, AdapterContext, AdapterEvent, BlockKind, InstructionMode, InstructionSpec,
         SettingsChange, StartSpec, Transmission, TransmitOutcome,
         claude_code::process::{
-            LaunchSpec, SessionArg, build_args, needs_restart, owner_instruction_excludes,
-            owner_instruction_excludes_in, repository_root, settings_json, write_instructions_file,
+            LaunchSpec, SessionArg, build_args, launch_env, needs_restart,
+            owner_instruction_excludes, owner_instruction_excludes_in, repository_root,
+            settings_json, write_instructions_file,
         },
     },
     config::ClaudeCodeConfig,
@@ -263,6 +264,7 @@ fn clean_preset_args_exclude_owner_files_and_auto_memory() {
         instructions: &instructions,
         isolate_mcp: false,
         prompt_suggestions: false,
+        disable_auto_memory: false,
     };
     let args = build_args(&spec, &ClaudeCodeConfig::default()).unwrap();
     let s: Vec<String> = args
@@ -274,6 +276,7 @@ fn clean_preset_args_exclude_owner_files_and_auto_memory() {
     let expected = settings_json(
         InstructionMode::Clean,
         &owner_instruction_excludes(&workdir, &home_env),
+        false,
     );
     let mut full = expected.clone();
     full["crossSessionInbound"] = json!("refuse");
@@ -307,7 +310,7 @@ fn needs_restart_detects_instruction_changes() {
 fn settings_json_modes_match_the_plan() {
     let excludes = vec!["/x/CLAUDE.md".to_string()];
     assert_eq!(
-        settings_json(InstructionMode::Owner, &excludes),
+        settings_json(InstructionMode::Owner, &excludes, false),
         json!({
             "crossSessionInbound": "refuse",
             "permissions": {"allow": [
@@ -332,18 +335,18 @@ fn settings_json_modes_match_the_plan() {
             ]},
         })
     );
-    let clean = settings_json(InstructionMode::Clean, &excludes);
+    let clean = settings_json(InstructionMode::Clean, &excludes, false);
     assert_eq!(clean["autoMemoryEnabled"], json!(false));
     assert_eq!(clean["claudeMdExcludes"], json!(["/x/CLAUDE.md"]));
     assert_eq!(
-        settings_json(InstructionMode::Preset, &excludes),
-        settings_json(InstructionMode::Clean, &excludes)
+        settings_json(InstructionMode::Preset, &excludes, false),
+        settings_json(InstructionMode::Clean, &excludes, false)
     );
 }
 
 #[test]
 fn settings_json_leaves_tools_acting_on_others_to_the_mode() {
-    let settings = settings_json(InstructionMode::Clean, &[]);
+    let settings = settings_json(InstructionMode::Clean, &[], false);
     let allow = settings["permissions"]["allow"].as_array().unwrap();
     for tool in [
         "session_spawn",
@@ -507,6 +510,7 @@ impl RestartHarness {
             instructions: owner_spec(),
             isolate_mcp: false,
             prompt_suggestions: false,
+            disable_claude_auto_memory: false,
             fork: None,
         };
         let started = tokio::time::timeout(WAIT, adapter.start(&spec, &group))
@@ -1247,6 +1251,7 @@ for line in sys.stdin:
         instructions: owner_spec(),
         isolate_mcp: false,
         prompt_suggestions: false,
+        disable_claude_auto_memory: false,
         fork: None,
     };
     let started = tokio::time::timeout(WAIT, adapter.start(&spec, &group))
@@ -1336,6 +1341,7 @@ sys.stdout.flush()
         instructions: owner_spec(),
         isolate_mcp: false,
         prompt_suggestions: false,
+        disable_claude_auto_memory: false,
         fork: None,
     };
     tokio::time::timeout(WAIT, adapter.start(&spec, &group))
@@ -1407,6 +1413,7 @@ for line in sys.stdin:
         instructions: owner_spec(),
         isolate_mcp: false,
         prompt_suggestions: false,
+        disable_claude_auto_memory: false,
         fork: None,
     };
     tokio::time::timeout(WAIT, adapter.start(&spec, &group))
@@ -1526,4 +1533,121 @@ async fn deferred_restart_keeps_the_effort_changed_later_on_the_fly() {
         "high",
         "the latest effort must survive the restart"
     );
+}
+
+const AUTO_MEMORY_ENV: &str = "CLAUDE_CODE_DISABLE_AUTO_MEMORY";
+
+fn env_value(envs: &[(std::ffi::OsString, std::ffi::OsString)], key: &str) -> Option<String> {
+    envs.iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, v)| v.to_string_lossy().into_owned())
+}
+
+fn auto_memory_launch<'a>(
+    instructions: &'a InstructionSpec,
+    session: SessionArg,
+    exec_dir: &'a Path,
+    disable_auto_memory: bool,
+) -> LaunchSpec<'a> {
+    LaunchSpec {
+        executable: Path::new("/usr/bin/claude"),
+        exec_dir,
+        workdir: Path::new("/tmp"),
+        session,
+        model: "m",
+        effort: "e",
+        permission_mode: "owner",
+        instructions,
+        isolate_mcp: false,
+        prompt_suggestions: false,
+        disable_auto_memory,
+    }
+}
+
+fn settings_of(spec: &LaunchSpec<'_>) -> Value {
+    let args = build_args(spec, &ClaudeCodeConfig::default()).unwrap();
+    let s: Vec<String> = args
+        .iter()
+        .map(|o| o.to_string_lossy().to_string())
+        .collect();
+    let idx = s.iter().position(|x| x == "--settings").unwrap();
+    serde_json::from_str(&s[idx + 1]).unwrap()
+}
+
+#[test]
+fn owner_mode_with_flag_sets_auto_memory_false_and_env() {
+    let excludes: Vec<String> = Vec::new();
+    let settings = settings_json(InstructionMode::Owner, &excludes, true);
+    assert_eq!(settings["autoMemoryEnabled"], json!(false));
+    assert!(settings.get("claudeMdExcludes").is_none());
+    let owner = owner_spec();
+    let dir = Path::new("/e");
+    let spec = auto_memory_launch(&owner, SessionArg::New(Uuid::nil()), dir, true);
+    assert_eq!(settings_of(&spec)["autoMemoryEnabled"], json!(false));
+    // CLAUDE_CODE_* родителя отбрасывается, переменная ставится воркером после build_env.
+    let parent = vec![(AUTO_MEMORY_ENV.into(), "0".into())];
+    let envs = launch_env(&spec, parent.into_iter());
+    assert_eq!(env_value(&envs, AUTO_MEMORY_ENV).as_deref(), Some("1"));
+    assert_eq!(
+        envs.iter().filter(|(k, _)| k == AUTO_MEMORY_ENV).count(),
+        1,
+        "{envs:?}"
+    );
+}
+
+#[test]
+fn owner_mode_without_flag_unchanged() {
+    let excludes: Vec<String> = Vec::new();
+    assert!(
+        settings_json(InstructionMode::Owner, &excludes, false)
+            .get("autoMemoryEnabled")
+            .is_none()
+    );
+    let owner = owner_spec();
+    let dir = Path::new("/e");
+    let spec = auto_memory_launch(&owner, SessionArg::New(Uuid::nil()), dir, false);
+    assert!(settings_of(&spec).get("autoMemoryEnabled").is_none());
+    let parent = vec![(AUTO_MEMORY_ENV.into(), "1".into())];
+    let envs = launch_env(&spec, parent.into_iter());
+    assert_eq!(env_value(&envs, AUTO_MEMORY_ENV), None, "{envs:?}");
+}
+
+#[test]
+fn clean_and_preset_unchanged() {
+    let excludes = vec!["/x/CLAUDE.md".to_string()];
+    for mode in [InstructionMode::Clean, InstructionMode::Preset] {
+        // Автопамять в этих режимах выключена всегда, флаг ничего не меняет.
+        assert_eq!(
+            settings_json(mode, &excludes, true),
+            settings_json(mode, &excludes, false)
+        );
+        assert_eq!(
+            settings_json(mode, &excludes, false)["autoMemoryEnabled"],
+            json!(false)
+        );
+    }
+    let clean = clean_spec();
+    let dir = Path::new("/e");
+    let spec = auto_memory_launch(&clean, SessionArg::New(Uuid::nil()), dir, true);
+    let envs = launch_env(&spec, std::iter::empty());
+    assert_eq!(env_value(&envs, AUTO_MEMORY_ENV), None, "{envs:?}");
+}
+
+#[test]
+fn env_var_present_on_restart_and_resume_paths() {
+    let owner = owner_spec();
+    let dir = Path::new("/e");
+    for session in [
+        SessionArg::New(Uuid::nil()),
+        SessionArg::Resume("native".to_string()),
+        SessionArg::Fork {
+            parent: "native".to_string(),
+            new_id: Some(Uuid::nil()),
+        },
+    ] {
+        let spec = auto_memory_launch(&owner, session, dir, true);
+        let envs = launch_env(&spec, std::iter::empty());
+        assert_eq!(env_value(&envs, AUTO_MEMORY_ENV).as_deref(), Some("1"));
+        assert_eq!(settings_of(&spec)["autoMemoryEnabled"], json!(false));
+    }
 }

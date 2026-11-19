@@ -119,6 +119,7 @@ impl Fake {
             },
             isolate_mcp: false,
             prompt_suggestions: false,
+            disable_claude_auto_memory: false,
             fork: None,
         };
         Self {
@@ -1588,6 +1589,7 @@ while True:
             },
             isolate_mcp: false,
             prompt_suggestions: false,
+            disable_claude_auto_memory: false,
             fork: None,
         };
         let _permit = CLI_GATE.lock().await;
@@ -2334,6 +2336,7 @@ async fn live_smoke() {
         },
         isolate_mcp: false,
         prompt_suggestions: false,
+        disable_claude_auto_memory: false,
         fork: None,
     };
     tokio::time::timeout(WAIT, preset_adapter.start(&preset_spec, &preset_group))
@@ -3320,6 +3323,7 @@ sys.stdin.read()
             },
             isolate_mcp: isolate,
             prompt_suggestions: enabled,
+            disable_claude_auto_memory: false,
             fork: None,
         };
         let _permit = CLI_GATE.lock().await;

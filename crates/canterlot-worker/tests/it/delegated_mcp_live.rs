@@ -149,6 +149,7 @@ async fn claude_delegated_session_starts_no_owner_user_project_or_plugin_server(
             instructions: &instructions,
             isolate_mcp,
             prompt_suggestions: false,
+            disable_auto_memory: false,
         };
         let cfg = ClaudeCodeConfig::default();
         canterlot_worker::adapter::claude_code::process::write_exec_files(

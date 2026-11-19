@@ -272,6 +272,7 @@ impl Fake {
             },
             isolate_mcp: false,
             prompt_suggestions: false,
+            disable_claude_auto_memory: false,
             fork: None,
         };
         Self {
@@ -2110,6 +2111,7 @@ async fn start_refused_when_cli_missing_or_old_or_broken() {
             },
             isolate_mcp: false,
             prompt_suggestions: false,
+            disable_claude_auto_memory: false,
             fork: None,
         };
         spec.workdir = dir.path().into();
@@ -2165,6 +2167,7 @@ async fn start_fails_when_app_server_exits_at_once() {
         },
         isolate_mcp: false,
         prompt_suggestions: false,
+        disable_claude_auto_memory: false,
         fork: None,
     };
     let group = TreeContainment::new().unwrap();
@@ -2999,6 +3002,7 @@ async fn live_probe() {
         },
         isolate_mcp: false,
         prompt_suggestions: false,
+        disable_claude_auto_memory: false,
         fork: None,
     };
     let started = tokio::time::timeout(Duration::from_secs(90), adapter.start(&spec, &group))
@@ -3224,6 +3228,7 @@ async fn live_smoke() {
         },
         isolate_mcp: false,
         prompt_suggestions: false,
+        disable_claude_auto_memory: false,
         fork: None,
     };
     let started = tokio::time::timeout(Duration::from_secs(90), adapter.start(&spec, &group))
@@ -3451,6 +3456,7 @@ async fn live_smoke() {
         },
         isolate_mcp: false,
         prompt_suggestions: false,
+        disable_claude_auto_memory: false,
         fork: None,
     };
     let resumed = tokio::time::timeout(Duration::from_secs(90), adapter.start(&spec, &group))
@@ -3529,6 +3535,7 @@ async fn live_smoke() {
         instructions: clean_instructions(),
         isolate_mcp: false,
         prompt_suggestions: false,
+        disable_claude_auto_memory: false,
         fork: None,
     };
     tokio::time::timeout(

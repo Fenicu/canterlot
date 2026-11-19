@@ -84,6 +84,8 @@ pub struct ClaudeCodeAdapter {
     isolate_mcp: bool,
     /// Флаг подсказок для этого и всех перезапусков CLI исполнения.
     prompt_suggestions: bool,
+    /// Выключение встроенной автопамяти для этого и всех перезапусков CLI исполнения.
+    disable_auto_memory: bool,
     /// `[execution].delegate_mcp_servers`: серверы владельца, разрешённые делегату.
     delegate_mcp: Vec<String>,
     /// Разрешённые серверы, которые попали в `mcp.json` этого исполнения.
@@ -145,6 +147,7 @@ impl ClaudeCodeAdapter {
             start_attempted: false,
             isolate_mcp: false,
             prompt_suggestions: false,
+            disable_auto_memory: false,
             delegate_mcp: Vec::new(),
             delegate_mcp_written: Vec::new(),
             isolation_broken: false,
@@ -854,6 +857,7 @@ impl ClaudeCodeAdapter {
             instructions: &next,
             isolate_mcp: self.isolate_mcp,
             prompt_suggestions: self.prompt_suggestions,
+            disable_auto_memory: self.disable_auto_memory,
         };
         let spawned = self.spawn_for_restart(&launch, group).await;
         let Some(cli) = spawned else {
@@ -924,6 +928,7 @@ impl ClaudeCodeAdapter {
             instructions: &previous,
             isolate_mcp: self.isolate_mcp,
             prompt_suggestions: self.prompt_suggestions,
+            disable_auto_memory: self.disable_auto_memory,
         };
         match self.spawn_for_restart(&launch, group).await {
             Some(cli) => {
@@ -1551,8 +1556,10 @@ impl Adapter for ClaudeCodeAdapter {
             instructions: &spec.instructions,
             isolate_mcp: spec.isolate_mcp,
             prompt_suggestions: self.prompt_suggestions,
+            disable_auto_memory: spec.disable_claude_auto_memory,
         };
         self.isolate_mcp = spec.isolate_mcp;
+        self.disable_auto_memory = spec.disable_claude_auto_memory;
         self.workdir = spec.workdir.clone();
         self.instructions = spec.instructions.clone();
         // The exec manager stages a named Task-1 profile before starting the supervisor.

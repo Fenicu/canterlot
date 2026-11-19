@@ -196,6 +196,7 @@ async fn adapter_child() {
         },
         isolate_mcp: false,
         prompt_suggestions: false,
+        disable_claude_auto_memory: false,
         fork: None,
     };
     let make = |profile: &str| {

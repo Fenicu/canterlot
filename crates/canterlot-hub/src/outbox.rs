@@ -272,6 +272,8 @@ fn to_proto_with_capability(
         .collect();
         // Старый воркер не знает записи PromptSuggested: флаг уходит только вместе с возможностью.
         start.prompt_suggestions &= has(crate::session::CAPABILITY_PROMPT_SUGGESTIONS_V1);
+        // Старый воркер поле не знает и пропустил бы его: флаг уходит только вместе с возможностью.
+        start.disable_claude_auto_memory &= has(crate::memory::CAPABILITY_MEMORY_SCOPE_V1);
     }
     if command.encoded_len() > MAX_MESSAGE_BYTES {
         return Err(OutboxError::ResourceLimit);
@@ -383,6 +385,11 @@ pub fn to_proto(row: &CommandRow) -> Result<Command, OutboxError> {
             prompt_suggestions: row
                 .payload
                 .get("prompt_suggestions")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            disable_claude_auto_memory: row
+                .payload
+                .get("disable_claude_auto_memory")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
             worktree: row

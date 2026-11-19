@@ -222,6 +222,7 @@ impl PresetHarness {
             instructions,
             isolate_mcp: false,
             prompt_suggestions: false,
+            disable_claude_auto_memory: false,
             fork: None,
         };
         let started = tokio::time::timeout(WAIT, adapter.start(&spec, &group))
@@ -441,6 +442,7 @@ async fn resume_of_a_missing_rollout_fails_once_without_a_path() {
         instructions: clean_spec(),
         isolate_mcp: false,
         prompt_suggestions: false,
+        disable_claude_auto_memory: false,
         fork: None,
     };
     let error = adapter.start(&spec, &group).await.expect_err("no rollout");

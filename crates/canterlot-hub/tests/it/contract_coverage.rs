@@ -809,6 +809,13 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
         ),
         case(
             Method::PUT,
+            "/api/v1/claude-auto-memory-settings",
+            "/api/v1/claude-auto-memory-settings".into(),
+            Some(json!({"claude_auto_memory":"off"})),
+            Some(json!({"claude_auto_memory":"on"})),
+        ),
+        case(
+            Method::PUT,
             "/api/v1/hibernate-settings",
             "/api/v1/hibernate-settings".into(),
             Some(json!({"idle_minutes":30})),
