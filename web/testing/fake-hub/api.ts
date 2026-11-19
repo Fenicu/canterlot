@@ -471,7 +471,7 @@ export class FakeHubApi {
 	}
 
 	/** Закрыть карточку: событие уходит один раз, повтор безвреден. */
-	dismissRoutineReport(conversationId: string, reportId: string, reason: 'owner' | 'replaced' = 'owner'): boolean {
+	dismissRoutineReport(conversationId: string, reportId: string, reason: 'owner' | 'replaced' | 'schedule_deleted' = 'owner'): boolean {
 		const found = this.routineReportMap(conversationId).get(reportId);
 		if (!found) return false;
 		this.routineReportMap(conversationId).delete(reportId);

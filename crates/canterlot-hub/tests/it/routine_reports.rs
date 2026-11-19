@@ -1450,6 +1450,19 @@ async fn card_events_fit_the_published_schema(pool: PgPool) {
         .await;
     assert_eq!(r.status.as_u16(), 204);
     assert_ne!(card, open);
+    // Удаление расписания снимает ещё одну карточку с причиной `schedule_deleted`.
+    let third = run_now(&f, schedule).await;
+    wait_run(&pool, third, "started").await;
+    assert_eq!(delete_schedule(&f, schedule).await, 200);
+    let reasons: Vec<String> = card_events(&pool, parent, "routine_report_dismissed")
+        .await
+        .iter()
+        .map(|payload| payload["reason"].as_str().unwrap().to_owned())
+        .collect();
+    assert!(
+        reasons.contains(&"schedule_deleted".to_owned()),
+        "{reasons:?}"
+    );
 
     let mut document: Value =
         serde_json::from_str(include_str!("../../../../docs/api/events.schema.json")).unwrap();

@@ -1096,7 +1096,7 @@ export interface RoutineReportDismissed {
     report_id: Uuid;
     conversation_id: Uuid;
     schedule_id: Uuid;
-    reason: "owner" | "replaced";
+    reason: "owner" | "replaced" | "schedule_deleted";
   };
 }
 export interface NudgeChanged {
