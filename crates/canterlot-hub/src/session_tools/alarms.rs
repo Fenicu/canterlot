@@ -2004,7 +2004,7 @@ pub async fn set(
     conversation_ids.sort_unstable();
     conversation_ids.dedup();
     for id in conversation_ids {
-        access::session_in_tx(&mut tx, caller.owner_id, id).await?;
+        access::target_or_self_in_tx(&mut tx, caller.owner_id, caller.conversation_id, id).await?;
     }
     let waiter = access::caller_in_tx(&mut tx, caller.owner_id, caller.conversation_id).await?;
 

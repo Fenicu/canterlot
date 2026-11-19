@@ -861,7 +861,7 @@ pub async fn start_now_in_tx(
     now: DateTime<Utc>,
 ) -> Result<StartNowOutcome, ToolError> {
     conversations::lock_owner(&mut *conn, owner_id).await?;
-    let Some(parent_session) = access::session_in_tx(conn, owner_id, parent).await? else {
+    let Some(parent_session) = access::session_any_in_tx(conn, owner_id, parent).await? else {
         return Err(ToolError::new(ToolErrorCode::SessionNotFound));
     };
     // Очередь раньше строки разговора (README, шаги 6–7): продолжение остановленного
@@ -1372,7 +1372,7 @@ pub(crate) async fn run_job_in_tx(
 ) -> Result<JobOutcome, SubmitError> {
     conversations::lock_owner(&mut *conn, job.owner_id).await?;
     crate::session_tools::send::lock_queue(conn, parent).await?;
-    let Some(parent_session) = access::session_in_tx(conn, job.owner_id, parent).await? else {
+    let Some(parent_session) = access::session_any_in_tx(conn, job.owner_id, parent).await? else {
         return Ok(JobOutcome::Done(json!({"skipped": "parent_missing"})));
     };
     if parent_stopped_in_tx(&mut *conn, parent).await? {

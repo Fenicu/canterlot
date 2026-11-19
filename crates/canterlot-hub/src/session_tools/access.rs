@@ -47,25 +47,62 @@ impl Session {
     }
 }
 
-/// Строка держится `for key share`: удаление разговора ждёт конца транзакции,
-/// поэтому ввод с его названием не появится после чистки в `deletion.rs`.
+const SESSION_COLUMNS: &str = "id,title,harness,model,permission_mode,
+                pending_settings->>'permission_mode' pending_mode,spawn_depth,
+                archived_at is not null archived";
+
+/// Цель инструмента по UUID. Строка держится `for key share`: удаление разговора ждёт конца
+/// транзакции, поэтому ввод с его названием не появится после чистки в `deletion.rs`.
 /// Строки разговоров берутся по возрастанию ID до очереди и подписок:
 /// docs/design/delivery.md, «Порядок блокировок инструментов сессии».
+///
+/// Скрытые боковые копии (`side_of`: копия отчёта рутины и личный чат «В стороне») для
+/// агентов не существуют: по UUID их не достать. Сама копия работает от своего имени через
+/// `caller_in_tx` и `session_any_in_tx`.
 pub async fn session_in_tx(
     conn: &mut PgConnection,
     owner_id: Uuid,
     id: Uuid,
 ) -> Result<Option<Session>, sqlx::Error> {
-    sqlx::query_as(
-        "select id,title,harness,model,permission_mode,
-                pending_settings->>'permission_mode' pending_mode,spawn_depth,
-                archived_at is not null archived
-         from conversations where id=$1 and owner_id=$2 and trashed_at is null for key share",
-    )
+    sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "select {SESSION_COLUMNS} from conversations
+         where id=$1 and owner_id=$2 and trashed_at is null and side_of is null for key share"
+    )))
     .bind(id)
     .bind(owner_id)
     .fetch_optional(conn)
     .await
+}
+
+/// Та же строка без отсечения боковых копий: для вызывающего и для ссылок, которые хаб
+/// выставил сам (родитель задания, участники правила), а не взял из аргументов агента.
+pub async fn session_any_in_tx(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    id: Uuid,
+) -> Result<Option<Session>, sqlx::Error> {
+    sqlx::query_as(sqlx::AssertSqlSafe(format!(
+        "select {SESSION_COLUMNS} from conversations
+         where id=$1 and owner_id=$2 and trashed_at is null for key share"
+    )))
+    .bind(id)
+    .bind(owner_id)
+    .fetch_optional(conn)
+    .await
+}
+
+/// Цель из аргументов агента: боковые копии скрыты, но себя копия видит.
+pub async fn target_or_self_in_tx(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    caller_id: Uuid,
+    id: Uuid,
+) -> Result<Option<Session>, sqlx::Error> {
+    if id == caller_id {
+        session_any_in_tx(conn, owner_id, id).await
+    } else {
+        session_in_tx(conn, owner_id, id).await
+    }
 }
 
 /// Вызывающий проверен живым исполнением; пропасть он может только гонкой с удалением.
@@ -74,7 +111,7 @@ pub async fn caller_in_tx(
     owner_id: Uuid,
     id: Uuid,
 ) -> Result<Session, ToolError> {
-    session_in_tx(conn, owner_id, id)
+    session_any_in_tx(conn, owner_id, id)
         .await?
         .ok_or_else(|| ToolError::new(ToolErrorCode::SessionNotFound))
 }
@@ -128,7 +165,7 @@ pub async fn target_in_tx(
     {
         return Err(missing());
     }
-    session_in_tx(conn, owner_id, target)
+    target_or_self_in_tx(conn, owner_id, caller.id, target)
         .await?
         .ok_or_else(missing)
 }

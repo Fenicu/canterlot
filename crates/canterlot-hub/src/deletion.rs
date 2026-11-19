@@ -627,6 +627,9 @@ async fn delete_in_tx(
     if crate::session_tools::plan::touches_in_tx(conn, id).await? {
         crate::events::lock_scope(conn, &Scope::Conversations { owner_id }).await?;
     }
+    if !crate::routines::finalize_pending_for_parent_in_tx(conn, id).await? {
+        return Err(DeleteError::Busy);
+    }
     purge_rows(conn, id, &execution_ids).await?;
     purge_events(conn, owner_id, id, &execution_ids).await?;
     // После чистки событий: прежние события задач с ID исполнителя скрыты.

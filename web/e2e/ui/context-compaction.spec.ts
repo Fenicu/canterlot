@@ -226,3 +226,25 @@ test('token_only_context_keeps_the_label_and_draws_no_empty_track', async ({ pag
 	await page.setViewportSize({ width: 560, height: 800 });
 	await expect(ctx.getByRole('meter')).toHaveCount(1);
 });
+
+test('context_details_keep_their_full_width_row_with_an_attachment_present', async ({ page }) => {
+	const { id } = await boot(page, (seed, conversation) => {
+		seed.pushContext(conversation, 640_000, 1_000_000);
+		liveExecution(seed, conversation);
+	});
+	void id;
+	await page.setInputFiles('input[type=file]', { name: 'a.txt', mimeType: 'text/plain', buffer: Buffer.from('abc') });
+	const tray = page.locator('[data-composer] .tray');
+	await expect(tray).toBeVisible({ timeout: 30_000 });
+	await (await indicator(page)).click();
+	const details = page.locator('[data-details]');
+	await expect(details).toBeVisible();
+	// Подробности занимают всю строку капсулы, как и без вложения: шаблон не должен отбрасываться.
+	const capsule = page.locator('[data-composer] .capsule').first();
+	const [detailsBox, capsuleBox, trayBox] = await Promise.all([details.boundingBox(), capsule.boundingBox(), tray.boundingBox()]);
+	expect(detailsBox && capsuleBox && trayBox).toBeTruthy();
+	expect(Math.abs(detailsBox!.width - trayBox!.width)).toBeLessThanOrEqual(1);
+	expect(detailsBox!.width).toBeGreaterThan(capsuleBox!.width * 0.85);
+	// Строки идут друг под другом: вложения, ввод, подробности.
+	expect(trayBox!.y).toBeLessThan(detailsBox!.y);
+});

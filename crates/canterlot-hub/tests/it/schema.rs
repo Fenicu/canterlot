@@ -971,3 +971,25 @@ async fn steer_expiry_query_uses_the_partial_index(pool: PgPool) -> Result<(), s
     assert!(!plan.contains("Seq Scan on commands"), "{plan}");
     Ok(())
 }
+
+/// Уникальность `side_of` держит только чат, а поиск копий родителя и проверка внешнего ключа
+/// идут по `side_of` без вида: им нужен индекс на всех непустых значениях.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn side_of_lookups_by_parent_alone_use_an_index(pool: PgPool) -> Result<(), sqlx::Error> {
+    let mut tx = canterlot_hub::db::begin(&pool).await?;
+    sqlx::query("set local enable_seqscan = off")
+        .execute(&mut *tx)
+        .await?;
+    let plan: String = sqlx::query_scalar(
+        "explain (format text) select id from conversations where side_of = '00000000-0000-4000-8000-000000000001'",
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .map(|lines: Vec<String>| lines.join("\n"))?;
+    assert!(
+        !plan.contains("Seq Scan"),
+        "side_of lookup scans the table:\n{plan}"
+    );
+    tx.rollback().await?;
+    Ok(())
+}

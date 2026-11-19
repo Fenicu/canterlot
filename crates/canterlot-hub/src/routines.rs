@@ -91,7 +91,7 @@ struct CardRow {
     id: Uuid,
     owner_id: Uuid,
     conversation_id: Uuid,
-    schedule_id: Uuid,
+    schedule_id: Option<Uuid>,
     run_id: Option<Uuid>,
     copy_id: Option<Uuid>,
     title: String,
@@ -108,7 +108,7 @@ impl CardRow {
         Ok(RoutineReportView {
             id: self.id,
             conversation_id: self.conversation_id,
-            schedule_id: self.schedule_id,
+            schedule_id: self.schedule_id.unwrap_or_default(),
             run_id: self.run_id,
             title: self.title.clone(),
             state: ReportState::parse(&self.state)?,
@@ -397,7 +397,7 @@ pub async fn dismiss(
             &mut tx,
             conversation_id,
             card.id,
-            card.schedule_id,
+            card.schedule_id.unwrap_or_default(),
             "owner",
             correlation_id,
         )
@@ -438,19 +438,33 @@ pub async fn sweep(pool: &PgPool, now: DateTime<Utc>) -> Result<(), sqlx::Error>
 }
 
 async fn collect_one(pool: &PgPool, id: Uuid, now: DateTime<Utc>) -> Result<(), sqlx::Error> {
-    let schedule_id: Option<Uuid> =
-        sqlx::query_scalar("select schedule_id from routine_reports where id=$1")
+    let seen: Option<CardRow> =
+        sqlx::query_as("select * from routine_reports where id=$1 and state='pending'")
             .bind(id)
             .fetch_optional(pool)
             .await?;
-    let Some(schedule_id) = schedule_id else {
+    let Some(seen) = seen else {
         return Ok(());
     };
+    // Всё, что нужно для суждения, читается одним снимком: слот, ввод, запись хода и
+    // исполнения копии меняются разными транзакциями, и сочетание чтений из разных
+    // моментов выдавало бы начинающийся ход за пустой.
+    let facts = {
+        let mut snapshot =
+            crate::db::begin_with(pool, "begin isolation level repeatable read read only").await?;
+        let facts = observe(&mut snapshot, &seen).await;
+        snapshot.rollback().await?;
+        facts?
+    };
+    let verdict = decide(&seen, &facts, now);
+    if matches!(verdict, Verdict::Wait) {
+        return Ok(());
+    }
     let mut tx = crate::db::begin(pool).await?;
     // Порядок замков как у приёма запуска: расписание, затем карточка и запуск.
     let schedule: Option<(Uuid,)> =
         sqlx::query_as("select owner_id from schedules where id=$1 for update skip locked")
-            .bind(schedule_id)
+            .bind(seen.schedule_id)
             .fetch_optional(&mut *tx)
             .await?;
     if schedule.is_none() {
@@ -466,16 +480,18 @@ async fn collect_one(pool: &PgPool, id: Uuid, now: DateTime<Utc>) -> Result<(), 
         tx.rollback().await?;
         return Ok(());
     };
-    match judge(&mut tx, &card, now).await? {
+    match verdict {
         Verdict::Wait => {
             tx.rollback().await?;
         }
         Verdict::Started => {
-            sqlx::query("update routine_reports set turn_started_at=$2 where id=$1")
-                .bind(card.id)
-                .bind(now)
-                .execute(&mut *tx)
-                .await?;
+            sqlx::query(
+                "update routine_reports set turn_started_at=$2 where id=$1 and turn_started_at is null",
+            )
+            .bind(card.id)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
             tx.commit().await?;
         }
         Verdict::Ready(text) => {
@@ -490,16 +506,36 @@ async fn collect_one(pool: &PgPool, id: Uuid, now: DateTime<Utc>) -> Result<(), 
     Ok(())
 }
 
-async fn judge(
-    conn: &mut PgConnection,
-    card: &CardRow,
-    now: DateTime<Utc>,
-) -> Result<Verdict, sqlx::Error> {
-    let Some(copy_id) = card.copy_id else {
-        return Ok(Verdict::Failed("copy_lost"));
+/// Что видно у копии в один момент.
+struct Facts {
+    /// Копии нет, она в корзине или у неё нет очереди.
+    lost: bool,
+    input_state: Option<String>,
+    parent_busy: bool,
+    /// Запись хода входного ввода закрыта штатным `run_finished`. Слот и состояние ввода
+    /// этого не доказывают: свободный слот бывает и до начала хода, и после обрыва.
+    run_completed: bool,
+    live: bool,
+    ever_started: bool,
+    /// Последний ответ копии после ввода отчёта; читается только у завершённого хода.
+    text: Option<String>,
+}
+
+async fn observe(conn: &mut PgConnection, card: &CardRow) -> Result<Facts, sqlx::Error> {
+    let mut facts = Facts {
+        lost: true,
+        input_state: None,
+        parent_busy: false,
+        run_completed: false,
+        live: false,
+        ever_started: false,
+        text: None,
     };
-    let copy: Option<(Option<DateTime<Utc>>, String, bool)> = sqlx::query_as(
-        "select c.trashed_at, q.run_slot,
+    let Some(copy_id) = card.copy_id else {
+        return Ok(facts);
+    };
+    let copy: Option<(Option<DateTime<Utc>>, bool)> = sqlx::query_as(
+        "select c.trashed_at,
                 q.hold_reasons @> '[{\"reason\":\"side_parent_busy\"}]'::jsonb
            from conversations c join queue_state q on q.conversation_id=c.id
           where c.id=$1",
@@ -507,71 +543,88 @@ async fn judge(
     .bind(copy_id)
     .fetch_optional(&mut *conn)
     .await?;
-    let Some((trashed_at, run_slot, parent_busy)) = copy else {
-        return Ok(Verdict::Failed("copy_lost"));
+    let Some((trashed_at, parent_busy)) = copy else {
+        return Ok(facts);
     };
     if trashed_at.is_some() {
-        return Ok(Verdict::Failed("copy_lost"));
+        return Ok(facts);
     }
-    let input: Option<(Uuid, String, i64)> = sqlx::query_as(
-        "select id,state,created_seq from inputs where conversation_id=$1
-          order by created_seq limit 1",
+    let input: Option<(String, i64, bool)> = sqlx::query_as(
+        "select i.state, i.created_seq,
+                exists(select 1 from runs r
+                        where r.input_command_id=i.command_id
+                          and r.finished_at is not null and not r.forced_close)
+           from inputs i where i.conversation_id=$1 order by i.created_seq limit 1",
     )
     .bind(copy_id)
     .fetch_optional(&mut *conn)
     .await?;
-    let Some((_, input_state, input_seq)) = input else {
-        return Ok(Verdict::Failed("copy_lost"));
+    let Some((input_state, input_seq, run_completed)) = input else {
+        return Ok(facts);
     };
-    match input_state.as_str() {
-        "rejected" | "cancelled" => return Ok(Verdict::Failed("input_rejected")),
-        // Ход принят и слот свободен: ход кончился, ответ в блоках копии.
-        "accepted" if run_slot == "free" => {
-            let query = format!(
-                "select content from blocks
-                  where conversation_id=$1 and kind='text' and parent_block_id is null
-                    and state='final' and btrim(content)<>'' and created_seq>=$2 and {}
-                  order by created_seq desc, created_at desc limit 1",
-                crate::agents::main_agent_filter("agent")
-            );
-            let text: Option<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(query))
-                .bind(copy_id)
-                .bind(input_seq)
-                .fetch_optional(&mut *conn)
-                .await?;
-            return Ok(match text {
-                Some(text) => Verdict::Ready(clip(text.trim())),
-                None => Verdict::Failed("empty_report"),
-            });
-        }
-        _ => {}
-    }
-    let live = crate::executions::live(&mut *conn, copy_id)
+    facts.lost = false;
+    facts.parent_busy = parent_busy;
+    facts.run_completed = run_completed;
+    facts.input_state = Some(input_state);
+    facts.live = crate::executions::live(&mut *conn, copy_id)
         .await?
         .is_some();
-    let ever_started: bool =
+    facts.ever_started =
         sqlx::query_scalar("select exists(select 1 from executions where conversation_id=$1)")
             .bind(copy_id)
             .fetch_one(&mut *conn)
             .await?;
-    if !live && ever_started {
-        return Ok(Verdict::Failed("copy_failed"));
+    if run_completed {
+        let query = format!(
+            "select content from blocks
+              where conversation_id=$1 and kind='text' and parent_block_id is null
+                and state='final' and btrim(content)<>'' and created_seq>=$2 and {}
+              order by created_seq desc, created_at desc limit 1",
+            crate::agents::main_agent_filter("agent")
+        );
+        facts.text = sqlx::query_scalar(sqlx::AssertSqlSafe(query))
+            .bind(copy_id)
+            .bind(input_seq)
+            .fetch_optional(&mut *conn)
+            .await?;
+    }
+    Ok(facts)
+}
+
+fn decide(card: &CardRow, facts: &Facts, now: DateTime<Utc>) -> Verdict {
+    if facts.lost {
+        return Verdict::Failed("copy_lost");
+    }
+    let input_state = facts.input_state.as_deref().unwrap_or_default();
+    if matches!(input_state, "rejected" | "cancelled") {
+        return Verdict::Failed("input_rejected");
+    }
+    // Отчёт публикуется только у хода, о конце которого есть запись: без неё ответ мог
+    // быть промежуточной репликой оборванного хода, а пустой слот — просто не начавшимся ходом.
+    if facts.run_completed {
+        return match &facts.text {
+            Some(text) => Verdict::Ready(clip(text.trim())),
+            None => Verdict::Failed("empty_report"),
+        };
+    }
+    if !facts.live && facts.ever_started {
+        return Verdict::Failed("copy_failed");
     }
     if input_state == "queued" {
         // Ход не начался: OpenCode ждёт простоя родителя, остальное — очередь копии.
         if now - card.created_at > START_LIMIT {
-            return Ok(Verdict::Failed(if parent_busy {
+            return Verdict::Failed(if facts.parent_busy {
                 "parent_busy_timeout"
             } else {
                 "copy_not_started"
-            }));
+            });
         }
-        return Ok(Verdict::Wait);
+        return Verdict::Wait;
     }
     match card.turn_started_at {
-        None => Ok(Verdict::Started),
-        Some(started) if now - started > TURN_LIMIT => Ok(Verdict::Failed("turn_timeout")),
-        Some(_) => Ok(Verdict::Wait),
+        None => Verdict::Started,
+        Some(started) if now - started > TURN_LIMIT => Verdict::Failed("turn_timeout"),
+        Some(_) => Verdict::Wait,
     }
 }
 
@@ -677,13 +730,16 @@ async fn finish_failed(
     failed.detail = detail;
     schedules::run_changed(&mut *conn, &failed, correlation_id).await?;
     schedules::finalize_manual_key(&mut *conn, card.owner_id, &failed).await?;
+    let Some(schedule_id) = card.schedule_id else {
+        return Ok(());
+    };
     let name: Option<String> = sqlx::query_scalar("select name from schedules where id=$1")
-        .bind(card.schedule_id)
+        .bind(schedule_id)
         .fetch_optional(&mut *conn)
         .await?;
     crate::notify::enqueue_schedule_failure_in_tx(
         conn,
-        card.schedule_id,
+        schedule_id,
         name.as_deref().unwrap_or_default(),
         reason,
     )
@@ -691,61 +747,234 @@ async fn finish_failed(
     Ok(())
 }
 
+/// Пауза перед новой попыткой убрать копию, чьё исполнение потеряно или чья уборка упала.
+const CLEANUP_BACKOFF_SECONDS: f64 = 300.0;
+
+enum Removal {
+    /// Строки копии убраны.
+    Gone,
+    /// Копия ещё отвечает или потеряна: остановку или разрешение заказали, вернёмся позже.
+    Pending { backoff: bool },
+}
+
 /// Копии готовых и неудавшихся карточек: остановить и удалить обычным путём бокового чата.
 /// Копия, которая ещё отвечает, получает команду остановки, строки уберёт следующий проход.
+/// Сбой одной копии не мешает остальным и не роняет тик: пачка идёт по очереди попыток,
+/// поэтому потерянные копии в конец очереди, а не в начало каждой пачки.
 async fn remove_copies(pool: &PgPool) -> Result<(), sqlx::Error> {
     let rows: Vec<(Uuid, Uuid, Uuid)> = sqlx::query_as(
         "select id, owner_id, copy_id from routine_reports
           where copy_id is not null and state<>'pending'
-          order by updated_at,id limit $1",
+            and (cleanup_at is null or cleanup_at <= clock_timestamp())
+          order by cleanup_at nulls first, updated_at, id limit $1",
     )
     .bind(BATCH)
     .fetch_all(pool)
     .await?;
     for (card_id, owner_id, copy_id) in rows {
-        let mut tx = crate::db::begin(pool).await?;
-        let exists: bool =
-            sqlx::query_scalar("select exists(select 1 from conversations where id=$1 for update)")
-                .bind(copy_id)
-                .fetch_one(&mut *tx)
-                .await?;
-        let gone = if exists {
-            match crate::side::stop_and_delete_in_tx(&mut tx, owner_id, copy_id, Uuid::now_v7())
-                .await
-            {
-                Ok(done) => done,
-                Err(crate::deletion::DeleteError::NotFound) => true,
-                Err(crate::deletion::DeleteError::Db(error)) => {
-                    let _ = tx.rollback().await;
-                    return Err(error);
-                }
-                Err(error) => {
-                    tracing::warn!(kind = "routine_copy_delete_failed", copy_id = %copy_id, error = ?error, "report copy was not deleted");
-                    let _ = tx.rollback().await;
-                    continue;
-                }
+        let backoff = match remove_one(pool, card_id, owner_id, copy_id).await {
+            Ok(Removal::Gone) => continue,
+            Ok(Removal::Pending { backoff }) => backoff,
+            Err(error) => {
+                tracing::warn!(
+                    kind = "routine_copy_cleanup_failed",
+                    copy_id = %copy_id,
+                    error = %crate::dberr::describe(&error),
+                    "report copy cleanup failed; retried later"
+                );
+                true
             }
-        } else {
-            true
         };
-        if gone {
-            sqlx::query("update routine_reports set copy_id=null where id=$1")
-                .bind(card_id)
-                .execute(&mut *tx)
-                .await?;
+        let rotated = sqlx::query(
+            "update routine_reports
+                set cleanup_at=clock_timestamp()+$2*interval '1 second'
+              where id=$1",
+        )
+        .bind(card_id)
+        .bind(if backoff {
+            CLEANUP_BACKOFF_SECONDS
+        } else {
+            0.0
+        })
+        .execute(pool)
+        .await;
+        if let Err(error) = rotated {
+            tracing::warn!(
+                kind = "routine_copy_cleanup_rotate_failed",
+                error = %crate::dberr::describe(&error),
+                "report copy cleanup position was not saved"
+            );
         }
-        tx.commit().await?;
     }
     Ok(())
 }
 
-/// Уборка: через 30 дней текст отчёта уходит из истории запусков (сами запуски живут по
+async fn remove_one(
+    pool: &PgPool,
+    card_id: Uuid,
+    owner_id: Uuid,
+    copy_id: Uuid,
+) -> Result<Removal, sqlx::Error> {
+    let mut tx = crate::db::begin(pool).await?;
+    // Порядок удаления разговора: владелец, затем строки разговоров. Перенос родителя в
+    // корзину идёт так же, а копия, взятая раньше владельца, замыкала бы оба пути.
+    crate::conversations::lock_owner(&mut tx, owner_id).await?;
+    match remove_in_tx(&mut tx, card_id, owner_id, copy_id).await {
+        Ok(removal) => {
+            tx.commit().await?;
+            Ok(removal)
+        }
+        Err(error) => {
+            let _ = tx.rollback().await;
+            Err(error)
+        }
+    }
+}
+
+/// Остановить и удалить копию карточки в транзакции, где владелец уже взят. Ошибка базы
+/// уходит наружу; прочие отказы удаления оставляют копию на следующий проход.
+async fn remove_in_tx(
+    conn: &mut PgConnection,
+    card_id: Uuid,
+    owner_id: Uuid,
+    copy_id: Uuid,
+) -> Result<Removal, sqlx::Error> {
+    let exists: bool =
+        sqlx::query_scalar("select exists(select 1 from conversations where id=$1 for update)")
+            .bind(copy_id)
+            .fetch_one(&mut *conn)
+            .await?;
+    let mut gone = true;
+    if exists {
+        // Потерянное исполнение не остановить командой: просим воркер разрешить его.
+        if let Some((execution_id, generation, crate::model::ExecutionState::OwnerLost)) =
+            crate::executions::live(&mut *conn, copy_id).await?
+        {
+            crate::delivery::control::enqueue_resolve(
+                &mut *conn,
+                copy_id,
+                execution_id,
+                generation,
+            )
+            .await?;
+            return Ok(Removal::Pending { backoff: true });
+        }
+        match crate::side::stop_and_delete_in_tx(&mut *conn, owner_id, copy_id, Uuid::now_v7())
+            .await
+        {
+            Ok(done) => gone = done,
+            Err(crate::deletion::DeleteError::NotFound) => {}
+            Err(crate::deletion::DeleteError::Db(error)) => return Err(error),
+            Err(error) => {
+                tracing::warn!(kind = "routine_copy_delete_failed", copy_id = %copy_id, error = ?error, "report copy was not deleted");
+                return Ok(Removal::Pending { backoff: false });
+            }
+        }
+    }
+    if !gone {
+        return Ok(Removal::Pending { backoff: false });
+    }
+    sqlx::query("update routine_reports set copy_id=null where id=$1")
+        .bind(card_id)
+        .execute(&mut *conn)
+        .await?;
+    Ok(Removal::Gone)
+}
+
+/// Удаление расписания: карточки снимаются из открытых лент в той же транзакции, собирающиеся
+/// закрываются, копиям заказывается остановка. Строка карточки переживает каскад и остаётся
+/// записью об уборке: без неё остановившуюся копию никто не нашёл бы.
+pub(crate) async fn on_schedule_deleted_in_tx(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    schedule_id: Uuid,
+    correlation_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    let cards: Vec<CardRow> =
+        sqlx::query_as("select * from routine_reports where schedule_id=$1 order by id for update")
+            .bind(schedule_id)
+            .fetch_all(&mut *conn)
+            .await?;
+    for card in cards {
+        sqlx::query(
+            "update routine_reports
+                set state=case when state='pending' then 'failed' else state end,
+                    error=case when state='pending' then 'schedule_deleted' else error end,
+                    completed_at=coalesce(completed_at,clock_timestamp()),
+                    dismissed_at=coalesce(dismissed_at,clock_timestamp()),
+                    dismiss_reason=coalesce(dismiss_reason,'schedule_deleted'),
+                    updated_at=clock_timestamp()
+              where id=$1",
+        )
+        .bind(card.id)
+        .execute(&mut *conn)
+        .await?;
+        if card.dismissed_at.is_none() {
+            emit_dismissed(
+                conn,
+                card.conversation_id,
+                card.id,
+                schedule_id,
+                "schedule_deleted",
+                correlation_id,
+            )
+            .await?;
+        }
+        if let Some(copy_id) = card.copy_id {
+            remove_in_tx(conn, card.id, owner_id, copy_id).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Окончательное удаление родителя: карточки уходят каскадом, а запуски, чей отчёт ещё
+/// собирался, закрываются ошибкой, а не остаются «собирается» навсегда. Замки как у
+/// сборщика: расписание, затем карточка; занятое расписание (`skip locked`) — отказ `false`,
+/// удаление повторится.
+pub(crate) async fn finalize_pending_for_parent_in_tx(
+    conn: &mut PgConnection,
+    parent_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let schedules: Vec<Uuid> = sqlx::query_scalar(
+        "select distinct schedule_id from routine_reports
+          where conversation_id=$1 and state='pending' order by 1",
+    )
+    .bind(parent_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    if schedules.is_empty() {
+        return Ok(true);
+    }
+    let locked: Vec<Uuid> = sqlx::query_scalar(
+        "select id from schedules where id=any($1) order by id for update skip locked",
+    )
+    .bind(&schedules)
+    .fetch_all(&mut *conn)
+    .await?;
+    if locked.len() < schedules.len() {
+        return Ok(false);
+    }
+    let cards: Vec<CardRow> = sqlx::query_as(
+        "select * from routine_reports
+          where conversation_id=$1 and state='pending' order by id for update",
+    )
+    .bind(parent_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    for card in cards {
+        finish_failed(conn, &card, "conversation_not_found").await?;
+    }
+    Ok(true)
+}
+
+/// Уборка: через 30 дней после завершения текст отчёта уходит из истории запусков (сами запуски живут по
 /// общему правилу уборки), а закрытые карточки удаляются.
 pub async fn prune(conn: &mut PgConnection) -> Result<u64, sqlx::Error> {
     let texts = sqlx::query(
         "update schedule_runs set detail=detail #- '{report,text}'
           where detail #> '{report,text}' is not null
-            and created_at < clock_timestamp() - $1 * interval '1 day'",
+            and (detail #>> '{report,completed_at}')::timestamptz
+                < clock_timestamp() - $1 * interval '1 day'",
     )
     .bind(TEXT_RETENTION_DAYS as f64)
     .execute(&mut *conn)

@@ -7,6 +7,9 @@ alter table conversations
 drop index conversations_side_of;
 create unique index conversations_side_of on conversations(side_of)
   where side_of is not null and side_kind = 'chat';
+-- Поиск копий родителя и проверка внешнего ключа идут по `side_of` без вида: им нужен
+-- индекс на всех непустых значениях, а не только на чатах.
+create index conversations_side_of_all on conversations(side_of) where side_of is not null;
 
 -- Карточка отчёта в ленте родителя. Это не ввод и не блок ленты: у неё нет места в
 -- журнале, очереди и счётчиках, поэтому агент никогда её не получает, а родитель
@@ -15,12 +18,17 @@ create table routine_reports (
   id uuid primary key,
   owner_id uuid not null references owners(id),
   conversation_id uuid not null references conversations(id) on delete cascade,
-  schedule_id uuid not null references schedules(id) on delete cascade,
+  -- Удаление расписания карточку не уносит: она хранит запись об уборке копии. Приложение
+  -- снимает карточку и заказывает остановку копии в той же транзакции удаления.
+  schedule_id uuid references schedules(id) on delete set null,
   -- Строка запуска может уйти уборкой журнала раньше карточки: карточка не зависит от неё.
   run_id uuid references schedule_runs(id) on delete set null,
   -- Копия-читатель. Пока она не удалена, поле заполнено; ссылки нет: строку копии
   -- удаляет приложение, а не каскад.
   copy_id uuid,
+  -- Очередь уборки копий: после неудачной попытки карточка уходит в конец, а потерянная
+  -- копия ещё и ждёт паузу, чтобы пачка не застревала на одних и тех же копиях.
+  cleanup_at timestamptz,
   title text not null,
   state text not null check (state in ('pending', 'ready', 'failed')),
   body text,
@@ -31,7 +39,7 @@ create table routine_reports (
   updated_at timestamptz not null default clock_timestamp(),
   completed_at timestamptz,
   dismissed_at timestamptz,
-  dismiss_reason text check (dismiss_reason in ('owner', 'replaced')),
+  dismiss_reason text check (dismiss_reason in ('owner', 'replaced', 'schedule_deleted')),
   check ((dismissed_at is null) = (dismiss_reason is null))
 );
 -- Не больше одной открытой карточки расписания на родителя.

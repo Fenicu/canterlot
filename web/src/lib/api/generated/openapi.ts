@@ -4699,6 +4699,12 @@ export interface components {
             machine: components["schemas"]["MachineHeadroom"];
         };
         RunBody: {
+            /**
+             * Format: uuid
+             * @description Повтор карточки отчёта: разговор карточки. Хаб запускает расписание, только если оно
+             *     по-прежнему собирает отчёт по этой сессии, иначе отказ `schedule_invalid` по полю `target`.
+             */
+            report_conversation_id?: string | null;
             /** @description «Запустить в любом случае»: обходит проверки расписания. */
             run_anyway?: boolean;
         };

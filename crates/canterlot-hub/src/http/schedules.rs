@@ -31,7 +31,9 @@ fn map(error: schedules::ScheduleError) -> ApiError {
         }
         // Отказ по цели «Отчёт из сессии» называет поле: редактору есть что подсветить.
         schedules::ScheduleError::Invalid(
-            reason @ ("invalid_report_target" | "report_capability_missing"),
+            reason @ ("invalid_report_target"
+            | "report_capability_missing"
+            | "report_target_changed"),
         ) => {
             tracing::debug!(reason, "schedule target refused");
             ApiError::new(ErrorCode::ScheduleInvalid).with_details(super::error::ErrorDetails {
@@ -69,6 +71,10 @@ pub struct RunBody {
     /// «Запустить в любом случае»: обходит проверки расписания.
     #[serde(default)]
     pub run_anyway: bool,
+    /// Повтор карточки отчёта: разговор карточки. Хаб запускает расписание, только если оно
+    /// по-прежнему собирает отчёт по этой сессии, иначе отказ `schedule_invalid` по полю `target`.
+    #[serde(default)]
+    pub report_conversation_id: Option<Uuid>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -313,6 +319,7 @@ async fn run(
             id,
             &key,
             body.run_anyway,
+            body.report_conversation_id,
             correlation,
         )
         .await

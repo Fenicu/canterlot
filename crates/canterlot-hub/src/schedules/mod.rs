@@ -815,6 +815,8 @@ pub async fn delete(
         None,
         move |conn| {
             Box::pin(async move {
+                // Порядок удаления разговора: владелец раньше строк расписания и копий.
+                crate::conversations::lock_owner(&mut *conn, owner_id).await?;
                 let row: Option<ScheduleRow> = sqlx::query_as(
                     "select * from schedules where id=$1 and owner_id=$2 for update",
                 )
@@ -826,6 +828,13 @@ pub async fn delete(
                 if schedule.revision != base_revision {
                     return Err(ScheduleError::StaleRevision);
                 }
+                crate::routines::on_schedule_deleted_in_tx(
+                    &mut *conn,
+                    owner_id,
+                    id,
+                    correlation_id,
+                )
+                .await?;
                 sqlx::query("delete from schedules where id=$1")
                     .bind(id)
                     .execute(&mut *conn)
@@ -1156,7 +1165,7 @@ pub async fn claim_due(
 }
 
 /// Уборка: не больше 200 последних запусков на расписание, и только
-/// завершённых. Заявленный или идущий запуск (`claimed`, `prechecking`) за
+/// завершённых (кроме запусков с собирающимся отчётом и свежим текстом отчёта). Заявленный или идущий запуск (`claimed`, `prechecking`) за
 /// пределом окна остаётся: иначе приёмка теряет владение строкой, а повтор
 /// ручного запуска идёт по ответу, которому не на что опереться.
 pub async fn prune_runs(conn: &mut PgConnection) -> Result<u64, sqlx::Error> {
@@ -1166,7 +1175,14 @@ pub async fn prune_runs(conn: &mut PgConnection) -> Result<u64, sqlx::Error> {
              select id,state,row_number() over (partition by schedule_id order by scheduled_at desc,id desc) as n
              from schedule_runs
            ) ranked where n > 200 and state not in ('claimed','prechecking')
-         )",
+         )
+           -- Отчёт рутины не стирается пределом: собирающийся запуск живёт до финала,
+           -- готовый текст — 30 дней от завершения (его убирает `routines::prune`).
+           and not exists (select 1 from routine_reports rr
+                            where rr.run_id = schedule_runs.id and rr.state = 'pending')
+           and not (detail #> '{report,text}' is not null
+                    and (detail #>> '{report,completed_at}')::timestamptz
+                        > clock_timestamp() - interval '30 days')",
     )
     .execute(conn)
     .await?;

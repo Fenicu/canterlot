@@ -276,8 +276,11 @@ async fn earlier_blocking(
                 or (r.state = 'started'
                     and case when r.detail ? 'report'
                          -- Отчёт блокирует следующий, пока копия собирает его: занятость
-                         -- родителя и состояние ввода копии здесь ни при чём.
-                         then r.detail #>> '{report,state}' = 'pending'
+                         -- родителя и состояние ввода копии здесь ни при чём. Смотрим на
+                         -- живую карточку, а не на запись в журнале запуска: карточка
+                         -- могла уйти каскадом вместе с родителем.
+                         then exists(select 1 from routine_reports rr
+                                      where rr.run_id = r.id and rr.state = 'pending')
                          else (i.state in ('queued','dispatched','on_machine','transmitting','acceptance_unconfirmed')
                                or d.activity_state in ('working','waiting_for_user','stalled'))
                          end))",
@@ -1611,8 +1614,22 @@ pub async fn run_now(
     schedule_id: Uuid,
     key: &str,
     run_anyway: bool,
+    report_conversation_id: Option<Uuid>,
     correlation_id: Uuid,
 ) -> Result<ScheduleRun, ScheduleError> {
+    if let Some(conversation_id) = report_conversation_id {
+        // Повтор карточки отчёта не должен отправить сообщение в живую сессию, если
+        // расписание успели перенацелить.
+        let mut conn = state.pool.acquire().await?;
+        let schedule = super::get(&mut conn, owner_id, schedule_id)
+            .await?
+            .ok_or(ScheduleError::NotFound)?;
+        if !matches!(&schedule.target,
+            ScheduleTarget::SessionReport { conversation_id: target } if *target == conversation_id)
+        {
+            return Err(ScheduleError::Invalid("report_target_changed"));
+        }
+    }
     let (schedule, run) =
         match reserve_manual(&state.pool, owner_id, schedule_id, key, run_anyway).await? {
             Reservation::Fresh { schedule, run } => (*schedule, run),

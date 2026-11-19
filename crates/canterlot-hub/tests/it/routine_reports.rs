@@ -364,6 +364,33 @@ async fn open_cards(pool: &PgPool, schedule: Uuid) -> Vec<Card> {
         .collect()
 }
 
+/// Запись хода копии в `runs`: `finished` — ход закончился штатно (`run_finished`),
+/// `forced` — исполнение умерло посреди хода, и строку закрыл переход исполнения.
+async fn record_copy_run(pool: &PgPool, copy: Uuid, finished: bool, forced: bool) {
+    let execution: Uuid = sqlx::query_scalar(
+        "select id from executions where conversation_id=$1 order by generation desc limit 1",
+    )
+    .bind(copy)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "insert into runs(input_command_id,execution_id,conversation_id,provider,finished_at,
+                          duration_ms,forced_close)
+         select i.command_id,$2,$1,'claude',case when $3 then clock_timestamp() end,
+                case when $3 then 1000 end,$4
+           from inputs i where i.conversation_id=$1 and i.command_id is not null
+         on conflict do nothing",
+    )
+    .bind(copy)
+    .bind(execution)
+    .bind(finished)
+    .bind(forced)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
 /// Копия отчёта в тесте: ход «закончился» ответом `answer` (как после `run_finished`).
 async fn finish_copy_turn(pool: &PgPool, copy: Uuid, answer: &str) {
     let execution: Uuid = match sqlx::query_scalar(
@@ -414,6 +441,7 @@ async fn finish_copy_turn(pool: &PgPool, copy: Uuid, answer: &str) {
         .await
         .unwrap();
     }
+    record_copy_run(pool, copy, true, false).await;
 }
 
 async fn sweep(f: &Fixture) {
@@ -1100,8 +1128,77 @@ async fn a_finished_turn_without_text_fails_the_run(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
+    record_copy_run(&pool, copy, true, false).await;
     sweep(&f).await;
     failed_run_and_card(&f, schedule, run, "empty_report").await;
+}
+
+/// Гонка сборщика: слот ещё свободен, ввод уже принят, а ход только начинается. Раньше
+/// отсутствие текста объявлялось `empty_report`, и здоровую копию останавливали.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_turn_that_is_just_starting_is_not_an_empty_report(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let _session = session(&f);
+    with_native(&f).await;
+    let schedule = make_schedule(&f, "Стендап").await;
+    let run = fire(&f, schedule).await;
+    let copy = copies(&pool, f.seed.conversation_id).await.remove(0).0;
+    sqlx::query("update inputs set state='accepted' where conversation_id=$1")
+        .bind(copy)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("update queue_state set run_slot='free',run_slot_input_id=null,run_slot_attempt=null where conversation_id=$1")
+        .bind(copy)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Запись хода открыта (`run_started`), конца ещё нет.
+    record_copy_run(&pool, copy, false, false).await;
+    sweep(&f).await;
+    assert_eq!(run_state(&pool, run).await.0, "started");
+    let open = open_cards(&pool, schedule).await;
+    assert_eq!(open[0].state, "pending", "{:?}", open[0].error);
+    // Ход закончился с ответом: отчёт собран.
+    finish_copy_turn(&pool, copy, "Всё спокойно.").await;
+    sqlx::query(
+        "update runs set finished_at=clock_timestamp(),duration_ms=1 where conversation_id=$1",
+    )
+    .bind(copy)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sweep(&f).await;
+    assert_eq!(open_cards(&pool, schedule).await[0].state, "ready");
+}
+
+/// Копия упала после приёма ввода: слот освободил переход исполнения, а раньше сказанная
+/// реплика не итог хода. Отчётом она не становится.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn an_aborted_turn_does_not_publish_an_earlier_text_block(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let _session = session(&f);
+    with_native(&f).await;
+    let schedule = make_schedule(&f, "Стендап").await;
+    let run = fire(&f, schedule).await;
+    let copy = copies(&pool, f.seed.conversation_id).await.remove(0).0;
+    finish_copy_turn(&pool, copy, "Полуготовый отчёт").await;
+    // Ход оборван: запись хода закрыта принудительно, исполнение упало.
+    sqlx::query("update runs set finished_at=clock_timestamp(),duration_ms=1,forced_close=true where conversation_id=$1")
+        .bind(copy)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("update executions set state='failed' where conversation_id=$1")
+        .bind(copy)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sweep(&f).await;
+    failed_run_and_card(&f, schedule, run, "copy_failed").await;
+    assert!(routine_pushes(&pool).await.is_empty());
+    let (_, detail) = run_state(&pool, run).await;
+    assert!(detail["report"].get("text").is_none(), "{detail}");
 }
 
 // ---------------------------------------------------------------------------
@@ -1226,6 +1323,48 @@ async fn make_schedule_without_session(f: &Fixture, name: &str) -> Uuid {
 // Уборка: текст отчёта живёт в истории запусков 30 дней.
 // ---------------------------------------------------------------------------
 
+/// Отчёт завершился `days` дней назад (срок текста считается от завершения, не от запуска).
+async fn age_report(pool: &PgPool, run: Uuid, days: i64) {
+    sqlx::query(
+        "update schedule_runs
+            set detail=jsonb_set(detail,'{report,completed_at}',
+                to_jsonb(to_char((clock_timestamp()-make_interval(days=>$2)) at time zone 'UTC',
+                                 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"')))
+          where id=$1",
+    )
+    .bind(run)
+    .bind(days as i32)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+/// Двести пять завершённых запусков-заполнителей новее заданного.
+async fn newer_runs(f: &Fixture, schedule: Uuid, count: i32) {
+    for n in 0..count {
+        sqlx::query(
+            "insert into schedule_runs(id,schedule_id,owner_id,scheduled_at,claimed_revision,state,manual,idempotency_key)
+             values($1,$2,$3,now()+make_interval(secs=>$4),1,'skipped_overlap',false,$5)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(schedule)
+        .bind(f.seed.owner_id)
+        .bind(f64::from(n + 10))
+        .bind(format!("filler-{n}"))
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    }
+}
+
+async fn run_exists(pool: &PgPool, run: Uuid) -> bool {
+    sqlx::query_scalar("select exists(select 1 from schedule_runs where id=$1)")
+        .bind(run)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn report_text_is_pruned_from_history_after_thirty_days(pool: PgPool) {
     let f = Fixture::new(pool.clone()).await;
@@ -1237,19 +1376,11 @@ async fn report_text_is_pruned_from_history_after_thirty_days(pool: PgPool) {
     // Свежий отчёт уборка не трогает; запуск 29 дней назад — тоже.
     canterlot_hub::routines::prune(&mut conn).await.unwrap();
     assert_eq!(run_state(&pool, run).await.1["report"]["text"], "Отчёт");
-    sqlx::query("update schedule_runs set created_at=now()-interval '29 days' where id=$1")
-        .bind(run)
-        .execute(&pool)
-        .await
-        .unwrap();
+    age_report(&pool, run, 29).await;
     canterlot_hub::routines::prune(&mut conn).await.unwrap();
     assert_eq!(run_state(&pool, run).await.1["report"]["text"], "Отчёт");
-    // На 31 день текст уходит, запуск и его метаданные остаются.
-    sqlx::query("update schedule_runs set created_at=now()-interval '31 days' where id=$1")
-        .bind(run)
-        .execute(&pool)
-        .await
-        .unwrap();
+    // На 31 день после завершения текст уходит, запуск и его метаданные остаются.
+    age_report(&pool, run, 31).await;
     canterlot_hub::routines::prune(&mut conn).await.unwrap();
     let (state, detail) = run_state(&pool, run).await;
     assert_eq!(state, "started");
@@ -1386,4 +1517,428 @@ async fn trashing_the_parent_removes_report_copies_and_keeps_the_interactive_rul
     .await
     .unwrap();
     assert_eq!(left, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Уборка копий: порядок замков, отказ по одной копии, потерянные исполнения.
+// ---------------------------------------------------------------------------
+
+/// Карточка с копией, которую пора убрать: копия — скрытая боковая копия отчёта.
+async fn stray_copy(f: &Fixture, schedule: Uuid, exec_state: Option<&str>) -> (Uuid, Uuid) {
+    let copy = testkit::seed_conversation(&f.pool, f.seed.owner_id, f.seed.machine_id).await;
+    sqlx::query("update conversations set side_of=$2, side_kind='report' where id=$1")
+        .bind(copy)
+        .bind(f.seed.conversation_id)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    if let Some(state) = exec_state {
+        sqlx::query(
+            "insert into executions(id,conversation_id,generation,state) values($1,$2,1,$3)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(copy)
+        .bind(state)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    }
+    let card = Uuid::now_v7();
+    sqlx::query(
+        "insert into routine_reports(id,owner_id,conversation_id,schedule_id,copy_id,title,state,
+            body,completed_at,dismissed_at,dismiss_reason)
+         values($1,$2,$3,$4,$5,'t','ready','x',clock_timestamp(),clock_timestamp(),'replaced')",
+    )
+    .bind(card)
+    .bind(f.seed.owner_id)
+    .bind(f.seed.conversation_id)
+    .bind(schedule)
+    .bind(copy)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    (card, copy)
+}
+
+async fn card_copy(pool: &PgPool, card: Uuid) -> Option<Uuid> {
+    sqlx::query_scalar("select copy_id from routine_reports where id=$1")
+        .bind(card)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// Порядок замков удаления: владелец, затем строки копий. Уборка, берущая копию раньше
+/// владельца, замыкалась в цикл с переносом родителя в корзину.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn cleanup_takes_the_owner_lock_before_the_copy_row(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let schedule = make_schedule_without_session(&f, "Стендап").await;
+    let (_card, copy) = stray_copy(&f, schedule, None).await;
+    let mut holder = canterlot_hub::db::begin(&pool).await.unwrap();
+    sqlx::query(
+        "select pg_advisory_xact_lock(hashtextextended('canterlot:attributes:'||$1::text,0))",
+    )
+    .bind(f.seed.owner_id)
+    .execute(&mut *holder)
+    .await
+    .unwrap();
+    let sweeper = {
+        let pool = pool.clone();
+        tokio::spawn(async move { canterlot_hub::routines::sweep(&pool, Utc::now()).await })
+    };
+    // Уборка дошла до замка владельца и стоит на нём.
+    let mut waiting = false;
+    for _ in 0..20_000 {
+        waiting = sqlx::query_scalar(
+            "select exists(select 1 from pg_locks where locktype='advisory' and not granted)",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        if waiting {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(waiting, "cleanup never reached the owner lock");
+    let locked_by_cleanup =
+        sqlx::query("select id from conversations where id=$1 for update nowait")
+            .bind(copy)
+            .execute(&mut *holder)
+            .await
+            .is_err();
+    assert!(
+        !locked_by_cleanup,
+        "cleanup locked the copy row before the owner lock"
+    );
+    holder.rollback().await.unwrap();
+    sweeper.await.unwrap().unwrap();
+}
+
+/// Сбой уборки одной копии не роняет ни проход, ни тик планировщика, ни уборку других копий.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_cleanup_failure_is_per_copy_and_never_aborts_the_tick(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let schedule = make_schedule_without_session(&f, "Стендап").await;
+    let (broken_card, broken) = stray_copy(&f, schedule, None).await;
+    let (good_card, _good) = stray_copy(&f, schedule, None).await;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "create function fail_copy_delete() returns trigger language plpgsql as $$
+         begin
+           if old.id = '{broken}' then raise exception 'boom'; end if;
+           return old;
+         end $$"
+    )))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "create trigger fail_copy_delete before delete on conversations
+         for each row execute function fail_copy_delete()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    scheduler(&f).tick(Utc::now()).await.unwrap();
+    assert!(card_copy(&pool, good_card).await.is_none());
+    assert_eq!(card_copy(&pool, broken_card).await, Some(broken));
+}
+
+/// Потерянные исполнения копий получают запрос разрешения и уходят в конец очереди уборки:
+/// пятьдесят таких не вытесняют из пачки обычную копию.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn lost_copies_are_recovered_and_cannot_fill_the_cleanup_batch(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let schedule = make_schedule_without_session(&f, "Стендап").await;
+    let mut lost = Vec::new();
+    for _ in 0..55 {
+        lost.push(stray_copy(&f, schedule, Some("owner_lost")).await);
+    }
+    let (normal_card, _) = stray_copy(&f, schedule, None).await;
+    canterlot_hub::routines::sweep(&pool, Utc::now())
+        .await
+        .unwrap();
+    canterlot_hub::routines::sweep(&pool, Utc::now())
+        .await
+        .unwrap();
+    assert!(
+        card_copy(&pool, normal_card).await.is_none(),
+        "lost copies starved the cleanup batch"
+    );
+    let resolves: i64 = sqlx::query_scalar(
+        "select count(distinct conversation_id) from commands where kind='resolve_owner_lost'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(resolves, 55, "every lost copy gets a recovery request");
+}
+
+// ---------------------------------------------------------------------------
+// Удаление родителя и пересечение запусков.
+// ---------------------------------------------------------------------------
+
+/// Окончательное удаление родителя с недособранным отчётом: карточка уходит каскадом, а
+/// запуск не остаётся «собирается» навсегда.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn purging_the_parent_finalizes_its_pending_runs(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let _session = session(&f);
+    with_native(&f).await;
+    let parent = f.seed.conversation_id;
+    let schedule = make_schedule(&f, "Стендап").await;
+    let run = fire(&f, schedule).await;
+    let r = f
+        .client
+        .send(
+            Method::DELETE,
+            &format!("/api/v1/conversations/{parent}"),
+            Some("trash-before-purge"),
+            None,
+        )
+        .await;
+    assert!(r.status.as_u16() == 204 || r.status.as_u16() == 409);
+    worker_stops_copies(&pool).await;
+    // Окончательное удаление раньше прохода сборщика.
+    let r = f
+        .client
+        .send(
+            Method::DELETE,
+            &format!("/api/v1/conversations/{parent}/trash"),
+            Some("purge-before-sweep"),
+            None,
+        )
+        .await;
+    assert_eq!(
+        r.status.as_u16(),
+        204,
+        "{}",
+        String::from_utf8_lossy(&r.body)
+    );
+    let (state, detail) = run_state(&pool, run).await;
+    assert_eq!(state, "failed", "{detail}");
+    assert_eq!(detail["reason"], "conversation_not_found", "{detail}");
+    assert_eq!(detail["report"]["state"], "failed", "{detail}");
+}
+
+/// Пересечение считается по живому состоянию отчёта: запуск, чья карточка исчезла
+/// (каскад), следующий не блокирует, даже если в его журнале записано «собирается».
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn overlap_follows_the_live_report_not_the_run_journal(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let _session = session(&f);
+    with_native(&f).await;
+    let schedule = make_schedule(&f, "Стендап").await;
+    let first = fire(&f, schedule).await;
+    assert_eq!(
+        run_state(&pool, first).await.1["report"]["state"],
+        "pending"
+    );
+    sqlx::query("delete from routine_reports where schedule_id=$1")
+        .bind(schedule)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let second = fire(&f, schedule).await;
+    assert_ne!(first, second);
+}
+
+async fn delete_schedule(f: &Fixture, schedule: Uuid) -> u16 {
+    let revision: i64 = sqlx::query_scalar("select revision from schedules where id=$1")
+        .bind(schedule)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    f.client
+        .send(
+            Method::DELETE,
+            &format!("/api/v1/schedules/{schedule}"),
+            Some(&format!("routine-delete-{}", Uuid::now_v7())),
+            Some(json!({"base_revision": revision})),
+        )
+        .await
+        .status
+        .as_u16()
+}
+
+/// Удаление расписания с собирающимся отчётом: каскад не уносит запись об уборке, копии
+/// заказана остановка, открытая лента получает снятие карточки в той же транзакции.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn deleting_a_schedule_stops_its_copy_and_dismisses_the_open_card(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let _session = session(&f);
+    with_native(&f).await;
+    let parent = f.seed.conversation_id;
+    let schedule = make_schedule(&f, "Стендап").await;
+    fire(&f, schedule).await;
+    let copy = copies(&pool, parent).await.remove(0).0;
+    let card: Uuid = sqlx::query_scalar("select id from routine_reports where schedule_id=$1")
+        .bind(schedule)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(delete_schedule(&f, schedule).await, 200);
+
+    // Лента узнаёт о снятии сразу, не дожидаясь прохода.
+    let dismissed = card_events(&pool, parent, "routine_report_dismissed").await;
+    assert_eq!(dismissed.len(), 1, "{dismissed:?}");
+    assert_eq!(dismissed[0]["report_id"], card.to_string());
+    // Строка уборки пережила каскад, копии заказана остановка.
+    assert_eq!(card_copy(&pool, card).await, Some(copy));
+    let stops: i64 = sqlx::query_scalar(
+        "select count(*) from commands where conversation_id=$1 and kind='stop_execution'",
+    )
+    .bind(copy)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        stops >= 1,
+        "the copy keeps running after its schedule is gone"
+    );
+    // Остановка подтверждена: копия и запись об уборке уходят, ничего не публикуется.
+    worker_stops_copies(&pool).await;
+    sweep(&f).await;
+    assert!(copies(&pool, parent).await.is_empty());
+    assert!(card_copy(&pool, card).await.is_none());
+    assert!(routine_pushes(&pool).await.is_empty());
+}
+
+/// Карточка со старой ошибкой после смены цели расписания: «Повторить» не может отправить
+/// сообщение в настоящую сессию. Хаб сверяет цель с разговором карточки сам.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_stale_retry_is_refused_when_the_schedule_no_longer_reports_this_session(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let _session = session(&f);
+    let parent = f.seed.conversation_id;
+    let schedule = make_schedule(&f, "Стендап").await;
+    let revision: i64 = sqlx::query_scalar("select revision from schedules where id=$1")
+        .bind(schedule)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let r = f
+        .client
+        .send(
+            Method::PATCH,
+            &format!("/api/v1/schedules/{schedule}"),
+            Some(&format!("retarget-{}", Uuid::now_v7())),
+            Some(json!({
+                "base_revision": revision,
+                "target": {"kind": "existing_session", "conversation_id": parent},
+            })),
+        )
+        .await;
+    assert_eq!(
+        r.status.as_u16(),
+        200,
+        "{}",
+        String::from_utf8_lossy(&r.body)
+    );
+    let refused = f
+        .client
+        .send(
+            Method::POST,
+            &format!("/api/v1/schedules/{schedule}/run"),
+            Some(&format!("stale-retry-{}", Uuid::now_v7())),
+            Some(json!({"run_anyway": false, "report_conversation_id": parent})),
+        )
+        .await;
+    assert_eq!(
+        refused.status.as_u16(),
+        422,
+        "{}",
+        String::from_utf8_lossy(&refused.body)
+    );
+    let body = refused.json::<Value>();
+    assert_eq!(body["error"]["code"], "schedule_invalid", "{body}");
+    assert_eq!(body["error"]["details"]["field"], "target", "{body}");
+    let runs: i64 = sqlx::query_scalar("select count(*) from schedule_runs where schedule_id=$1")
+        .bind(schedule)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(runs, 0, "a refused retry must not start a run");
+}
+
+/// Предел в 200 запусков не стирает отчёты: собирающийся запуск живёт до финала, а готовый
+/// отчёт — 30 дней от завершения, как бы часто ни шли запуски.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn the_history_cap_keeps_pending_reports_and_fresh_report_text(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let _session = session(&f);
+    with_native(&f).await;
+    let schedule = make_schedule(&f, "Стендап").await;
+    let (ready_run, _) = ready_card(&f, schedule, "Отчёт").await;
+    worker_stops_copies(&pool).await;
+    sweep(&f).await;
+    let pending_run = run_now(&f, schedule).await;
+    wait_run(&pool, pending_run, "started").await;
+    // Оба запуска старше всех заполнителей, то есть первыми попадают под предел.
+    sqlx::query("update schedule_runs set scheduled_at=now()-interval '2 days' where id=any($1)")
+        .bind(vec![ready_run, pending_run])
+        .execute(&pool)
+        .await
+        .unwrap();
+    newer_runs(&f, schedule, 205).await;
+    let mut conn = pool.acquire().await.unwrap();
+    canterlot_hub::schedules::prune_runs(&mut conn)
+        .await
+        .unwrap();
+    assert!(
+        run_exists(&pool, pending_run).await,
+        "a pending report run was purged"
+    );
+    assert!(
+        run_exists(&pool, ready_run).await,
+        "fresh report text was purged by the cap"
+    );
+    assert_eq!(
+        run_state(&pool, ready_run).await.1["report"]["text"],
+        "Отчёт"
+    );
+    // Через 30 дней после завершения текст уходит, и запуск снова подчиняется пределу.
+    age_report(&pool, ready_run, 31).await;
+    canterlot_hub::routines::prune(&mut conn).await.unwrap();
+    canterlot_hub::schedules::prune_runs(&mut conn)
+        .await
+        .unwrap();
+    assert!(!run_exists(&pool, ready_run).await);
+    assert!(run_exists(&pool, pending_run).await);
+}
+
+/// Потерянный ответ Gotify не повод слать пуш «отчёт готов» второй раз: неоднозначная
+/// доставка не повторяется, как и у пуша о сбое расписания.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_lost_gotify_response_does_not_resend_the_report_push(pool: PgPool) {
+    use std::sync::atomic::Ordering;
+    crate::auth_pushes::enable(&pool).await;
+    let f = Fixture::new(pool.clone()).await;
+    let _session = session(&f);
+    with_native(&f).await;
+    let schedule = make_schedule(&f, "Стендап").await;
+    ready_card(&f, schedule, "Отчёт").await;
+    assert_eq!(routine_pushes(&pool).await.len(), 1);
+    let (hits, url) = crate::schedule_failure_push::dropping_gotify().await;
+    let (_dir, sender) = crate::auth_pushes::sender(&url);
+    for _ in 0..4 {
+        sender.deliver_due(&pool).await.unwrap();
+        sqlx::query("update owner_pushes set run_at=clock_timestamp() where state='pending'")
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        1,
+        "ambiguous delivery was retried"
+    );
+    let pending: i64 = sqlx::query_scalar(
+        "select count(*) from owner_pushes where kind='routine_report' and state='pending'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(pending, 0, "the row is settled");
 }

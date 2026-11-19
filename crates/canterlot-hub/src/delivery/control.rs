@@ -838,7 +838,7 @@ pub async fn request_resolve_owner_lost(
     .await
 }
 
-async fn enqueue_resolve(
+pub(crate) async fn enqueue_resolve(
     conn: &mut PgConnection,
     conversation_id: Uuid,
     execution_id: Uuid,

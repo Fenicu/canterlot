@@ -1446,10 +1446,10 @@ impl Sender {
             // оставят строку, которая обойдёт охлаждение при повторе.
             let stamp = begin_attempt(pool, &row, attempts, pause, scheduled).await?;
             let result = self.post(&message).await;
-            if scheduled {
-                // Пуш расписания: неоднозначная доставка (обрыв, таймаут, 408, 5xx
-                // шлюза после приёма апстримом) не повторяется, метка остаётся.
-                // Только определённый отказ возвращает ПРЕЖНЮЮ метку.
+            // Пуш расписания и пуш «отчёт готов»: неоднозначная доставка (обрыв, таймаут,
+            // 408, 5xx шлюза после приёма апстримом) не повторяется, метка остаётся.
+            // Только определённый отказ возвращает ПРЕЖНЮЮ метку (она есть у пуша расписания).
+            if scheduled || row.kind == KIND_ROUTINE_REPORT {
                 let ambiguous =
                     matches!(&result, Err(Failure::Retry(None | Some(408 | 500..=599))));
                 if ambiguous {
@@ -1474,6 +1474,7 @@ impl Sender {
                     continue;
                 }
                 if result.is_err()
+                    && scheduled
                     && let Some(stamp) = stamp
                 {
                     restore_schedule_push(pool, &row, &stamp).await?;
