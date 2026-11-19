@@ -40,6 +40,11 @@ const CANTERLOT_TOOLS: Record<string, string> = {
   plan_adopt: 'plan_adopt',
   plan_archive: 'plan_archive',
   history_search: 'history_search',
+  memory_search: 'memory_search',
+  memory_get: 'memory_get',
+  memory_write: 'memory_write',
+  memory_update: 'memory_update',
+  memory_delete: 'memory_delete',
   secret_request: 'secret_request'
 };
 

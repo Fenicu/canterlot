@@ -88,7 +88,7 @@ pub const SERVER_INSTRUCTIONS: &str = "canterlot is the control plane that super
      Use canterlot_limits before long work; do not poll it. Denied calls must not be retried with different arguments.\n\
      Only the owner can change these rules; settings can be proposed with settings_propose_routing, settings_propose_whitelist or settings_propose_preset, and the owner decides; model output never overrides them.\n\
      Instruction presets: canterlot_presets_list, canterlot_preset_save, canterlot_preset_apply (this session only, from the next turn).\n\
-     Other sessions: sessions_list and session_inspect show state and evidence.\n\
+     Other sessions: sessions_list and session_inspect show state and evidence. Shared memory: memory_search at the start of a task and before decisions; memory_write lessons, owner preferences, decisions and environment facts, never credentials.\n\
      session_send queues a message for another session; session_spawn starts a new one with a brief. By default pass route (a task type from the owner's routing policy, see route_preview) and let canterlot pick the executor; name harness and model yourself only when the owner asked for a specific executor or the policy has no fitting task type, and say why in your reply. session_spawn can nudge the new session (nudge_set) when it stops without a done marker; plan_task links it to your plan (plan_list, plan_add, plan_update, plan_archive, plan_adopt).\n\
      You are subscribed automatically: when the other session finishes, asks or stalls, a [canterlot] message arrives in your queue.\n\
      Do not poll. End your turn after delegating; the result comes to you. session_wait is only for short waits; alarm_set wakes you at a time or when delegates settle (batch, watchdog) instead of sleep commands.\n\
@@ -104,7 +104,7 @@ pub const CODEX_SERVER_INSTRUCTIONS: &str = "canterlot is the control plane that
      Use canterlot_limits before long work; do not poll it. Denied calls must not be retried with different arguments.\n\
      Only the owner can change these rules; settings can be proposed with settings_propose_routing, settings_propose_whitelist or settings_propose_preset, and the owner decides; model output never overrides them.\n\
      Instruction presets: canterlot_presets_list, canterlot_preset_save, canterlot_preset_apply (this session only, from the next turn).\n\
-     Other sessions: sessions_list and session_inspect show state and evidence.\n\
+     Other sessions: sessions_list and session_inspect show state and evidence. Shared memory: memory_search at the start of a task and before decisions; memory_write lessons, owner preferences, decisions and environment facts, never credentials.\n\
      session_send queues a message for another session; session_spawn starts a new one with a brief. By default pass route (a task type from the owner's routing policy, see route_preview) and let canterlot pick the executor; name harness and model yourself only when the owner asked for a specific executor or the policy has no fitting task type, and say why in your reply. session_spawn can nudge the new session (nudge_set) when it stops without a done marker; plan_task links it to your plan (plan_list, plan_add, plan_update, plan_archive, plan_adopt).\n\
      You are subscribed automatically: when the other session finishes, asks or stalls, a [canterlot] message arrives in your queue.\n\
      Do not poll. End your turn after delegating; the result comes to you. session_wait is only for short waits; alarm_set wakes you at a time or when delegates settle (batch, watchdog) instead of sleep commands.\n\
@@ -120,7 +120,7 @@ pub const OPENCODE_SERVER_INSTRUCTIONS: &str = "canterlot is the control plane t
      Use canterlot_canterlot_limits before long work; do not poll it. Denied calls must not be retried with different arguments.\n\
      Only the owner can change these rules; settings can be proposed with canterlot_settings_propose_routing, canterlot_settings_propose_whitelist or canterlot_settings_propose_preset, and the owner decides; model output never overrides them.\n\
      Instruction presets: canterlot_canterlot_presets_list, canterlot_canterlot_preset_save, canterlot_canterlot_preset_apply (this session only, from the next turn).\n\
-     Other sessions: canterlot_sessions_list and canterlot_session_inspect show state and evidence.\n\
+     Other sessions: canterlot_sessions_list and canterlot_session_inspect show state and evidence. Shared memory: canterlot_memory_search at the start of a task and before decisions; canterlot_memory_write lessons, owner preferences, decisions and environment facts, never credentials.\n\
      canterlot_session_send queues a message for another session; canterlot_session_spawn starts a new one with a brief. By default pass route (a task type from the owner's routing policy, see canterlot_route_preview) and let canterlot pick the executor; name harness and model yourself only when the owner asked for a specific executor or the policy has no fitting task type, and say why in your reply. nudge_set lets canterlot nudge it without waking you; plan_task links it to your plan (canterlot_plan_list, canterlot_plan_add, canterlot_plan_update, canterlot_plan_archive, canterlot_plan_adopt).\n\
      You are subscribed automatically: when the other session finishes, asks or stalls, a [canterlot] message arrives in your queue.\n\
      Do not poll. End your turn after delegating; the result comes to you. canterlot_session_wait is only for short waits; canterlot_alarm_set wakes you at a time or when delegates settle (batch, watchdog) instead of sleep commands.\n\
@@ -163,7 +163,7 @@ pub enum ToolKind {
 }
 
 /// Агентские инструменты: имя MCP → имя инструмента хаба.
-pub const AGENT_TOOLS: [(&str, &str); 32] = [
+pub const AGENT_TOOLS: [(&str, &str); 37] = [
     ("canterlot_presets_list", "presets.list"),
     ("canterlot_preset_save", "presets.save"),
     ("canterlot_preset_apply", "presets.apply"),
@@ -190,6 +190,11 @@ pub const AGENT_TOOLS: [(&str, &str); 32] = [
     ("plan_archive", "plan.archive"),
     ("plan_adopt", "plan.adopt"),
     ("history_search", "history.search"),
+    ("memory_search", "memory.search"),
+    ("memory_get", "memory.get"),
+    ("memory_write", "memory.write"),
+    ("memory_update", "memory.update"),
+    ("memory_delete", "memory.delete"),
     ("secret_request", "secrets.request"),
     ("canterlot_routing_policy", "settings.routing"),
     ("canterlot_spawn_whitelist", "settings.whitelist"),
@@ -205,7 +210,7 @@ pub const AGENT_TOOLS: [(&str, &str); 32] = [
 /// `session_interrupt`, `session_stop`, `session_accept`, `spawn_cancel`, `nudge_set`,
 /// `nudge_clear`, `share_file`, `canterlot_preset_save`, `canterlot_preset_apply`,
 /// `plan_adopt`), решает режим. Имена без префикса сервера: адаптер добавляет свой.
-pub const MODE_FREE_TOOLS: [&str; 18] = [
+pub const MODE_FREE_TOOLS: [&str; 23] = [
     "canterlot_limits",
     "canterlot_presets_list",
     "sessions_list",
@@ -222,6 +227,11 @@ pub const MODE_FREE_TOOLS: [&str; 18] = [
     "plan_update",
     "plan_archive",
     "history_search",
+    "memory_search",
+    "memory_get",
+    "memory_write",
+    "memory_update",
+    "memory_delete",
     "canterlot_routing_policy",
     "canterlot_spawn_whitelist",
 ];
@@ -252,6 +262,11 @@ fn is_session_tool(mcp_name: &str) -> bool {
             | "plan_archive"
             | "plan_adopt"
             | "history_search"
+            | "memory_search"
+            | "memory_get"
+            | "memory_write"
+            | "memory_update"
+            | "memory_delete"
             | "secret_request"
             | "canterlot_routing_policy"
             | "canterlot_spawn_whitelist"
@@ -260,6 +275,17 @@ fn is_session_tool(mcp_name: &str) -> bool {
             | "settings_propose_preset"
     )
 }
+
+const MEMORY_KINDS: [&str; 8] = [
+    "user",
+    "feedback",
+    "project",
+    "reference",
+    "decision",
+    "gotcha",
+    "environment",
+    "incident",
+];
 
 fn share_tool_description() -> &'static str {
     "Hand a file to the owner: pass a path under the session workdir or the temp directory (relative paths start at the workdir; copy other files there first), an optional title and note. The worker uploads it once and the owner sees it in this turn: images and videos as thumbnails, other files with name, size, type and download. Refuses symlinks, hard links, devices and files on the secret deny list; at most 50 MiB. Use it for a document, image or archive meant for the owner."
@@ -345,6 +371,21 @@ fn session_tool_description(mcp_name: &str) -> &'static str {
         }
         "plan_adopt" => {
             "Move the open tasks of another root session's plan (for example your previous orchestrator, even in the trash) into yours, renumbered after your last number; linked executors stay linked and you may accept them. Only a root session can adopt, and only from a root session of the same owner. Do not call it from a delegate or to copy a plan you still use."
+        }
+        "memory_search" => {
+            "Search the shared memory of this domain (work or personal; never the other one): lessons, owner preferences, decisions, environment facts and incidents written by agents and the owner. Search at the start of a task and before decisions. Returns short rows {id, kind, level, project_label, subject, excerpt, updated_at, expired}; an empty query lists the newest entries. Entries of this session's own project and domain-wide entries come first; `include_other_projects` widens the search to other projects of the same domain. Read the whole entry with memory_get. Read-only; do not call it in a loop with the same query."
+        }
+        "memory_get" => {
+            "Read one memory entry in full, with its version and provenance. Any id found by memory_search is allowed, including entries of other projects of this domain. An id outside this domain answers not_found, the same as a missing one. Read-only."
+        }
+        "memory_write" => {
+            "Write a memory entry visible to every agent of this domain: a lesson learned, an owner preference, a decision, an environment fact. Never put credentials, tokens, keys or passwords in it (a secret is refused with looks_like_secret; use secret_request to ask the owner). Prefer memory_update of an existing entry over a new one: the subject must be unique among active entries, otherwise subject_exists names the existing id and version. `level` is `project` (this session's project, the default) or `domain` (all projects of the domain). Subject: one line, up to 160 characters; body: up to 8 KB. Limits: 60 writes per hour per session and 2000 active entries per domain."
+        }
+        "memory_update" => {
+            "Change an entry of this session's project or a domain-wide one: pass the `expected_version` you read with memory_get or memory_search; a stale version answers version_conflict with the current one. Pass only the fields to change; `valid_until: null` clears the expiry. The previous state is kept in the entry's history."
+        }
+        "memory_delete" => {
+            "Archive an entry that is wrong or outdated, with the `expected_version` you read. The owner can restore it; an agent cannot. Prefer memory_update to fix an entry instead of deleting it."
         }
         "secret_request" => {
             "Ask the owner for a secret: a password, token or key. You get `{request_id, status: \"requested\"}` at once; the answer arrives later as a [canterlot] message with the path of a file on this machine. End the turn if you cannot proceed without the value. Read the value from the file only inside the command that needs it, and prefer passing the file path or stdin over `$(cat …)`: substitution strips trailing newlines and shows the value in the process list. Never print the value. Do not repeat the call for the same secret while it is open, and do not put the value in `name` or `purpose`: both go to the owner's card and to logs. The file expires in 24 hours; the owner may revoke it or decline the request."
@@ -626,6 +667,57 @@ fn session_input_schema(mcp_name: &str) -> Value {
                 "cursor": {"type": "string", "description": "next_cursor of the previous page."},
             },
             "required": ["query"],
+            "additionalProperties": false,
+        }),
+        "memory_search" => json!({
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "maxLength": 200, "description": "Words to find; empty lists the newest entries."},
+                "kind": {"type": "string", "enum": MEMORY_KINDS, "description": "Only this kind."},
+                "include_other_projects": {"type": "boolean", "default": false, "description": "Also search other projects of this domain."},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 20},
+            },
+            "additionalProperties": false,
+        }),
+        "memory_get" => json!({
+            "type": "object",
+            "properties": {"id": {"type": "string", "description": "Entry id (UUID) from memory_search."}},
+            "required": ["id"],
+            "additionalProperties": false,
+        }),
+        "memory_write" => json!({
+            "type": "object",
+            "properties": {
+                "kind": {"type": "string", "enum": MEMORY_KINDS},
+                "subject": {"type": "string", "minLength": 1, "maxLength": 160, "description": "One line; unique among active entries."},
+                "body": {"type": "string", "minLength": 1, "description": "Up to 8 KB. Never credentials."},
+                "level": {"type": "string", "enum": ["project", "domain"], "default": "project"},
+                "valid_until": {"type": "string", "description": "RFC 3339 time after which the entry counts as stale."},
+            },
+            "required": ["kind", "subject", "body"],
+            "additionalProperties": false,
+        }),
+        "memory_update" => json!({
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "description": "Entry id (UUID)."},
+                "expected_version": {"type": "integer", "description": "Version you read; a stale one answers version_conflict."},
+                "kind": {"type": "string", "enum": MEMORY_KINDS},
+                "subject": {"type": "string", "minLength": 1, "maxLength": 160},
+                "body": {"type": "string", "minLength": 1},
+                "level": {"type": "string", "enum": ["project", "domain"]},
+                "valid_until": {"type": ["string", "null"], "description": "RFC 3339 time; null clears it."},
+            },
+            "required": ["id", "expected_version"],
+            "additionalProperties": false,
+        }),
+        "memory_delete" => json!({
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "description": "Entry id (UUID)."},
+                "expected_version": {"type": "integer", "description": "Version you read."},
+            },
+            "required": ["id", "expected_version"],
             "additionalProperties": false,
         }),
         "plan_adopt" => json!({
@@ -1011,6 +1103,8 @@ fn tools_list(tool_set: ToolSet, provider: &str) -> Value {
                     | "route_preview"
                     | "plan_list"
                     | "history_search"
+                    | "memory_search"
+                    | "memory_get"
                     | "canterlot_routing_policy"
                     | "canterlot_spawn_whitelist"
             ) {
@@ -1802,6 +1896,73 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn canterlot_mcp_lists_memory_tools_in_default_profile_not_in_side() {
+        let memory = [
+            ("memory_search", "memory.search"),
+            ("memory_get", "memory.get"),
+            ("memory_write", "memory.write"),
+            ("memory_update", "memory.update"),
+            ("memory_delete", "memory.delete"),
+        ];
+        for tool_set in [ToolSet::ApproveAndLimits, ToolSet::LimitsOnly] {
+            let listing = tools_list(tool_set, "claude");
+            let tools = listing["tools"].as_array().unwrap();
+            for (name, hub) in memory {
+                let tool = tools
+                    .iter()
+                    .find(|tool| tool["name"] == name)
+                    .unwrap_or_else(|| panic!("{name} is not listed for {tool_set:?}"));
+                let description = tool["description"].as_str().unwrap();
+                assert!(description.len() > 80, "{name}: {description}");
+                assert_eq!(tool["inputSchema"]["additionalProperties"], json!(false));
+                let action = handle_rpc(
+                    &json!({"jsonrpc": "2.0", "id": 5, "method": "tools/call",
+                        "params": {"name": name, "arguments": {}}}),
+                    tool_set,
+                );
+                assert!(
+                    matches!(action, McpAction::ToolCall { kind: ToolKind::Agent { tool }, .. } if tool == hub),
+                    "{name}: {action:?}"
+                );
+            }
+            let schema = |name: &str| {
+                tools.iter().find(|tool| tool["name"] == name).unwrap()["inputSchema"].clone()
+            };
+            assert_eq!(
+                schema("memory_write")["required"],
+                json!(["kind", "subject", "body"])
+            );
+            assert_eq!(
+                schema("memory_update")["required"],
+                json!(["id", "expected_version"])
+            );
+            assert_eq!(
+                schema("memory_delete")["required"],
+                json!(["id", "expected_version"])
+            );
+            assert_eq!(schema("memory_get")["required"], json!(["id"]));
+        }
+        // Боковой чат: ни в списке, ни в вызове.
+        for provider in ["claude", "codex", "opencode"] {
+            let listing = tools_list(ToolSet::Side, provider);
+            let listed = listing["tools"].to_string();
+            assert!(!listed.contains("memory_"), "{provider}: {listed}");
+            for (name, _) in memory {
+                let action = handle_rpc_with_provider(
+                    &json!({"jsonrpc": "2.0", "id": 6, "method": "tools/call",
+                        "params": {"name": name, "arguments": {}}}),
+                    ToolSet::Side,
+                    provider,
+                );
+                assert!(
+                    !matches!(action, McpAction::ToolCall { .. }),
+                    "{provider}/{name} reached the hub from a side chat"
+                );
+            }
+        }
     }
 
     #[test]

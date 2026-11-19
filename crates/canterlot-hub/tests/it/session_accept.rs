@@ -60,6 +60,7 @@ fn scheduler(pool: &PgPool, registry: &Registry) -> Scheduler {
 
 fn context(pool: &PgPool, registry: &Registry) -> ToolContext {
     ToolContext {
+        memory: Default::default(),
         pool: pool.clone(),
         config: Arc::new(SessionToolsConfig {
             spawn_stagger: std::time::Duration::ZERO,

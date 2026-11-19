@@ -269,6 +269,7 @@ async fn rule_row(pool: &PgPool, id: Uuid) -> (String, i32, i32) {
 
 fn context(pool: &PgPool) -> ToolContext {
     ToolContext {
+        memory: Default::default(),
         pool: pool.clone(),
         config: Arc::new(SessionToolsConfig::default()),
         limits: Default::default(),

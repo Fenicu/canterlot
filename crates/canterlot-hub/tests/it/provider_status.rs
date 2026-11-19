@@ -327,6 +327,7 @@ async fn status_survives_a_restart_and_reaches_the_limits_api(pool: PgPool) {
 
 fn context(pool: &PgPool) -> ToolContext {
     ToolContext {
+        memory: Default::default(),
         pool: pool.clone(),
         config: Arc::new(SessionToolsConfig::default()),
         limits: Default::default(),

@@ -128,6 +128,7 @@ pub struct HubGrpc {
     pub timers: HubTimers,
     pub ingest: Arc<dyn Ingest>,
     pub session_tools: Arc<crate::config::SessionToolsConfig>,
+    pub memory: Arc<crate::config::MemoryConfig>,
     pub limits: Arc<crate::config::LimitsConfig>,
     pub alarms_enabled: bool,
     pub nudge_enabled: bool,
@@ -361,6 +362,7 @@ impl HubGrpc {
             timers,
             ingest,
             session_tools: Default::default(),
+            memory: Default::default(),
             limits: Default::default(),
             alarms_enabled: true,
             nudge_enabled: true,
@@ -385,6 +387,11 @@ impl HubGrpc {
 
     pub fn with_session_tools(mut self, config: crate::config::SessionToolsConfig) -> Self {
         self.session_tools = Arc::new(config);
+        self
+    }
+
+    pub fn with_memory(mut self, config: crate::config::MemoryConfig) -> Self {
+        self.memory = Arc::new(config);
         self
     }
 

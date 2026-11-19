@@ -257,6 +257,7 @@ impl Fx {
 
     fn context(&self) -> ToolContext {
         ToolContext {
+            memory: Default::default(),
             pool: self.pool.clone(),
             config: Arc::new(SessionToolsConfig::default()),
             limits: Default::default(),
