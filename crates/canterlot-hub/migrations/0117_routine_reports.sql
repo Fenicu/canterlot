@@ -65,3 +65,6 @@ alter table runs add column outcome text check (outcome in ('completed', 'failed
 -- Граница текстов хода: последняя последовательность блоков на момент `run_finished`.
 -- Продолжение под тем же идентификатором команды дописывает блоки позже и в отчёт не входит.
 alter table runs add column last_block_seq bigint;
+-- Разговор карточки, чей «Повторить» заявил ручной запуск: часть личности запроса, которая
+-- переживает срок ключа идемпотентности и перезапись `detail` итогом запуска.
+alter table schedule_runs add column report_conversation_id uuid;

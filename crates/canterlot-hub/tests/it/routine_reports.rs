@@ -2419,3 +2419,45 @@ async fn a_continuation_after_the_completed_turn_does_not_replace_the_report(poo
     let (_, detail) = run_state(&pool, run).await;
     assert_eq!(detail["report"]["text"], "Итог отчётного хода", "{detail}");
 }
+
+async fn expire_key_records(pool: &PgPool, key: &str) {
+    sqlx::query("delete from idempotency_keys where key=$1")
+        .bind(key)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+/// Запись общего ключа ушла по сроку, а строка запуска осталась: тот же повтор карточки
+/// получает её обратно даже после правки расписания, а запрос без разговора карточки под тем
+/// же ключом — конфликт.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn the_retained_run_replay_keeps_the_report_conversation_in_its_identity(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let _session = session(&f);
+    with_native(&f).await;
+    let parent = f.seed.conversation_id;
+    let schedule = make_schedule(&f, "Стендап").await;
+    let (status, first) = retry_with(&f, schedule, "retained-key", parent).await;
+    assert_eq!(status, 200, "{first}");
+    retarget_to_live_session(&f, schedule, parent).await;
+    expire_key_records(&pool, "retained-key").await;
+    let (status, again) = retry_with(&f, schedule, "retained-key", parent).await;
+    assert_eq!(status, 200, "{again}");
+    assert_eq!(again["id"], first["id"]);
+    let ordinary = f
+        .client
+        .send(
+            Method::POST,
+            &format!("/api/v1/schedules/{schedule}/run"),
+            Some("retained-key"),
+            Some(json!({"run_anyway": false})),
+        )
+        .await;
+    assert_eq!(
+        ordinary.status.as_u16(),
+        409,
+        "{}",
+        String::from_utf8_lossy(&ordinary.body)
+    );
+}
