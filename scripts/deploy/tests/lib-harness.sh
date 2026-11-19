@@ -332,7 +332,11 @@ cli_pid_of() {
 
 sup_pid_of() {
     local exec_id="$1"
-    ps -eo pid=,args= | awk -v id="${exec_id}" '$0 ~ "supervise --exec-dir" && $0 ~ id {print $1; exit}'
+    # Точный argv, как в harness_wait_supervisor: подстрока по всей строке цепляла ещё не
+    # успевшие сделать exec подоболочки (cli, mcp-relay) с командной строкой обёртки bash -c.
+    # Из-за переполнения счётчика pid у них бывал меньший номер, чем у супервизора, и
+    # проверка «сессия жива» следила за короткоживущим процессом.
+    ps -eo pid=,args= | awk -v id="${exec_id}" '$3 == "supervise" && $4 == "--exec-dir" && index($5, id) {print $1; exit}'
 }
 
 kill_session() {
