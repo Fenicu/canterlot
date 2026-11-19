@@ -412,7 +412,17 @@ fast_refuse() {
 # хаб: в ней есть клиентские соединения пользователя хаба. Иначе при нескольких кластерах дамп
 # и проверка могли бы взять одну базу, а хаб работать с другой.
 db_identity_check() {
-    local n
+    local n id sys expected="${HUB_PG_SYSTEM_ID:-}" last
+    # Источник ожидаемого идентификатора кластера: закреплённый HUB_PG_SYSTEM_ID или запись, которую
+    # оставил последний дамп. Нет ни того, ни другого — быстрому пути нечем доказать кластер (число
+    # соединений того же пользователя ничего не доказывает): отказ, дальше полный путь, он запишет её.
+    if [ -z "${expected}" ]; then
+        last="$(ssh_hub "ls -1t '${HUB_BACKUP_DIR}'/*.identity 2>/dev/null" | sed -n 1p)" || last=""
+        if [ -n "${last}" ]; then
+            expected="$(ssh_hub "cat '${last}'" 2>/dev/null | sed -n 's/^system_identifier=\([0-9][0-9]*\)$/\1/p' | sed -n 1p)" || expected=""
+        fi
+    fi
+    [ -n "${expected}" ] || fast_refuse "no identity source for the cluster (neither a pinned HUB_PG_SYSTEM_ID nor a readable .identity file next to an earlier dump in ${HUB_BACKUP_DIR}): the full path takes a dump and records one"
     n="$(hub_psql "select count(*) from pg_stat_activity where datname = current_database() and usename = '${HUB_PG_USER}' and backend_type = 'client backend' and pid <> pg_backend_pid()")"
     case "${n}" in
         '' | *[!0-9]* | 0)
@@ -421,24 +431,15 @@ db_identity_check() {
             fail_code db_identity
             die_after "no connection of the running hub (user ${HUB_PG_USER}) in database ${HUB_PG_DB} on socket ${HUB_PG_SOCKET}: this may not be the database the hub runs on" ;;
     esac
-    # Тот же пользователь и имя базы бывают и в чужом кластере: сверяем идентификатор кластера с
-    # закреплённым (HUB_PG_SYSTEM_ID) или с записанным у последнего дампа.
-    local id sys expected="${HUB_PG_SYSTEM_ID:-}" last
     id="$(pg_identity)" || { PHASE="eligibility"; fail_mark; fail_code db_identity; die_after "cannot read the cluster identity of ${HUB_PG_DB} on ${HUB_PG_SOCKET}"; }
     sys="${id% *}"
-    if [ -z "${expected}" ]; then
-        last="$(ssh_hub "ls -1t '${HUB_BACKUP_DIR}'/*.identity 2>/dev/null" | sed -n 1p)" || last=""
-        if [ -n "${last}" ]; then
-            expected="$(ssh_hub "cat '${last}'" 2>/dev/null | sed -n 's/^system_identifier=//p' | sed -n 1p)" || expected=""
-        fi
-    fi
-    if [ -n "${expected}" ] && [ "${sys}" != "${expected}" ]; then
+    if [ "${sys}" != "${expected}" ]; then
         PHASE="eligibility"
         fail_mark
         fail_code db_identity
         die_after "the cluster at ${HUB_PG_SOCKET} has system identifier ${sys}, but ${expected} is expected (pinned or recorded with the last dump): this is not the cluster of the running hub"
     fi
-    log "database identity: ${HUB_PG_DB} on ${HUB_PG_SOCKET} has ${n} connection(s) of the running hub (user ${HUB_PG_USER}); dump and restore use the same socket and database"
+    log "database identity: ${HUB_PG_DB} on ${HUB_PG_SOCKET} has system identifier ${sys} as expected and ${n} connection(s) of the running hub (user ${HUB_PG_USER}); dump and restore use the same socket and database"
 }
 skip_eligibility() {
     local live_full target_full fp reh vz tb manifest rows cmp n rel_last man_max saved_phase="${PHASE}"

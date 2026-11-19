@@ -29,6 +29,7 @@ setup_fast() {
     # Развёрнутый релиз хранит полный хэш исходника, как настоящая сборка.
     printf 'source=%s\n' "${FAST_LIVE_FULL}" >>"${HUB_RELEASES}/${SHA_PREV}/RELEASE"
     printf 'source=%s\n' "${FAST_LIVE_FULL}" >>"${WORKER_RELEASES}/${SHA_PREV}/RELEASE"
+    seed_identity_sidecar
     : >"${FAKE_ROOT}/state/calls.log"
 }
 finish_fast() { drop_fast_source; teardown_case; }

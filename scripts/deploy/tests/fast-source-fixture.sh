@@ -107,3 +107,10 @@ drop_fast_source() {
     if [ -e "${gone}" ]; then case_fail "the scratch source ${gone} was not removed"; else case_ok "the scratch source repository is gone"; fi
     FAST_SRC=""
 }
+
+# Запись идентичности кластера у «прежнего дампа»: источник ожидаемого system_identifier для быстрого
+# пути (как после настоящего полного прогона, который её пишет).
+seed_identity_sidecar() {
+    printf 'system_identifier=7000000000000000001\ndatabase_oid=16384\ndatabase=canterlot\nsocket=/var/run/postgresql\n' \
+        >"${HUB_BACKUP_DIR}/canterlot-pre-seed-20261101T000000Z.dump.identity"
+}
