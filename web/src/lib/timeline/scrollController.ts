@@ -3,6 +3,8 @@ import { cell } from "#lib/stores/cell.svelte.js";
 const PIN_PX = 48;
 /** Сколько после колеса, касания или клавиши прокрутка ещё считается рукой владельца: инерция и плавная прокрутка идут дольше самого жеста. */
 const INTENT_MS = 400;
+/** Жест владельца живёт ещё и это число кадров: под нагрузкой кадр дольше всего срока в миллисекундах, и решение о прижатии успевало забыть про жест. */
+const INTENT_FRAMES = 3;
 /** Прижатие на промежуточной раскладке доходит событием прокрутки не позже следующего кадра после правки ленты. */
 const CHANGE_FRAMES = 2;
 
@@ -30,6 +32,9 @@ export class ScrollController {
   #touching = false;
   #dragging = false;
   #intentUntil = 0;
+  /** Сколько кадров ещё считать жест владельца свежим, как бы долго они ни длились. */
+  #intentFrames = 0;
+  #intentFrame = 0;
   #observer: ResizeObserver | null = null;
   #mutations: MutationObserver | null = null;
   #off: (() => void)[] = [];
@@ -120,6 +125,7 @@ export class ScrollController {
     this.#observer?.disconnect();
     this.#mutations?.disconnect();
     if (this.#frame) cancelAnimationFrame(this.#frame);
+    if (this.#intentFrame) cancelAnimationFrame(this.#intentFrame);
   }
 
   #listen(target: EventTarget, type: string, fn: (event: Event) => void): void {
@@ -144,10 +150,18 @@ export class ScrollController {
 
   #intent(): void {
     this.#intentUntil = this.#now() + INTENT_MS;
+    if (typeof requestAnimationFrame === "undefined") return;
+    this.#intentFrames = INTENT_FRAMES;
+    if (this.#intentFrame) return;
+    const step = () => {
+      this.#intentFrames -= 1;
+      this.#intentFrame = this.#intentFrames > 0 ? requestAnimationFrame(step) : 0;
+    };
+    this.#intentFrame = requestAnimationFrame(step);
   }
 
   #owner(): boolean {
-    if (this.#touching || this.#dragging || this.#now() < this.#intentUntil) {
+    if (this.#touching || this.#dragging || this.#now() < this.#intentUntil || this.#intentFrames > 0) {
       // Пока лента едет под жестом, инерция продлевает его.
       this.#intent();
       return true;

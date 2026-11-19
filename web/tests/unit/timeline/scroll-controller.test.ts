@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ScrollController } from "#lib/timeline/scrollController.js";
 
 /** Прокручиваемый узел с настраиваемой геометрией: браузер сам прижимает scrollTop к пределу. */
@@ -59,6 +59,8 @@ function scroller(content: number, view: number, top = 0) {
 }
 
 describe("timeline/ScrollController", () => {
+  afterEach(() => vi.useRealTimers());
+
   it("a_scroll_clamped_by_a_taller_window_is_not_the_owner_leaving_the_bottom", () => {
     const view = scroller(1000, 500, 500);
     const controller = new ScrollController(view.el);
@@ -195,6 +197,22 @@ describe("timeline/ScrollController", () => {
     const controller = new ScrollController(view.el);
     (view.el as unknown as { scrollHeight: number }).scrollHeight = 18_200;
     view.wheel(9_000);
+    expect(controller.pinned).toBe(false);
+  });
+
+  it("a_slow_frame_does_not_turn_the_owners_move_into_a_stale_pin", () => {
+    // Часы идут, кадры нет: с жеста не прошло ни одного кадра.
+    vi.useFakeTimers({ toFake: ["performance"] });
+    const view = scroller(1000, 500, 500);
+    const controller = new ScrollController(view.el);
+    // Владелец ушёл вверх колесом, но кадр с ростом хвоста приходит позже срока жеста:
+    // под замедлением процессора и нагрузкой кадр длится дольше 400 мс.
+    view.emit("wheel");
+    view.el.scrollTop = 200;
+    vi.advanceTimersByTime(900);
+    (view.el as unknown as { scrollHeight: number }).scrollHeight = 1200;
+    controller.onContentChange("tail-growth");
+    expect(view.el.scrollTop).toBe(200);
     expect(controller.pinned).toBe(false);
   });
 });
