@@ -144,10 +144,88 @@ export function compactionLabel(value: Value): string | undefined {
   return lookup(COMPACTION, value);
 }
 
-/** Сводка фазы при повторе запроса: `retry <попытка>` от адаптера, повторяет сам агент. */
-export function retryLabel(summary: Value): string | null {
-  const attempt = typeof summary === "string" ? /^retry (\d+)$/.exec(summary) : null;
-  return attempt ? `Повторяет запрос к модели, попытка ${attempt[1]}` : null;
+/** Причина повтора запроса к модели из `Evidence::Working.retry` хаба. */
+export interface RetryFacts {
+  attempt: number;
+  max_retries?: number | null;
+  delay_ms: number;
+  http_status?: number | null;
+  category: string;
+  no_response_waited_ms?: number | null;
+}
+
+const RETRY_CATEGORY: Record<string, string> = {
+  overloaded: "перегрузка",
+  rate_limit: "лимит",
+  server_error: "ошибка сервера",
+  authentication_failed: "ошибка доступа",
+  oauth_org_not_allowed: "ошибка доступа",
+  account_on_hold: "ошибка доступа",
+  billing_error: "ошибка доступа",
+  cloud_credential_error: "ошибка доступа",
+  invalid_request: "ошибка запроса",
+  model_not_found: "ошибка запроса",
+  max_output_tokens: "ошибка запроса",
+};
+
+/** «3 мин 05 с», «45 с»: секунды при минутах с ведущим нулём, чтобы ширина не прыгала. */
+function minutesSeconds(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  return minutes > 0
+    ? `${minutes} мин ${String(seconds).padStart(2, "0")} с`
+    : `${seconds} с`;
+}
+
+function isRetryFacts(value: unknown): value is RetryFacts {
+  const retry = value as Partial<RetryFacts> | null | undefined;
+  return (
+    !!retry &&
+    typeof retry === "object" &&
+    Number.isFinite(retry.attempt) &&
+    Number.isFinite(retry.delay_ms) &&
+    typeof retry.category === "string"
+  );
+}
+
+/**
+ * Подпись фазы при повторе запроса к модели или `null`, когда фаза не повтор.
+ * Типизированная причина от хаба важнее строки: `summary` читают только старые хабы
+ * (`retry <попытка>` от OpenCode, `retry <попытка>/<потолок>` от Claude Code).
+ * Отсчёт «через N с» считается от `since` (начало фазы на хабе) и исчезает на нуле.
+ */
+export function retryText(input: {
+  retry: unknown;
+  summary: Value;
+  since: number | null;
+  now: number;
+}): string | null {
+  if (isRetryFacts(input.retry)) {
+    const retry = input.retry;
+    const attempt = retry.max_retries
+      ? `попытка ${retry.attempt} из ${retry.max_retries}`
+      : `попытка ${retry.attempt}`;
+    const left =
+      input.since === null ? 0 : retry.delay_ms - Math.max(0, input.now - input.since);
+    const countdown = left > 0 ? `через ${minutesSeconds(Math.ceil(left / 1000) * 1000)}` : "";
+    if (retry.no_response_waited_ms) {
+      return [`Нет ответа ${minutesSeconds(retry.no_response_waited_ms)}`, attempt, countdown]
+        .filter(Boolean)
+        .join(" · ");
+    }
+    const reason = lookup(RETRY_CATEGORY, retry.category) ?? "ошибка";
+    const status = retry.http_status ? ` (${retry.http_status})` : "";
+    return [`Повторяет запрос к модели: ${attempt}`, `${reason}${status}`, countdown]
+      .filter(Boolean)
+      .join(" · ");
+  }
+  const legacy =
+    typeof input.summary === "string" ? /^retry (\d+)(?:\/(\d+))?$/.exec(input.summary) : null;
+  if (!legacy) return null;
+  return legacy[2]
+    ? `Повторяет запрос к модели, попытка ${legacy[1]} из ${legacy[2]}`
+    : `Повторяет запрос к модели, попытка ${legacy[1]}`;
 }
 
 const OUTCOMES: Record<string, string> = {

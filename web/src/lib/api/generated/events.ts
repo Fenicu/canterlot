@@ -1640,6 +1640,26 @@ export interface PhaseChanged {
       | "unknown";
     tool_name: string | null;
     summary: string | null;
+    retry?: {
+      attempt: number;
+      max_retries: number | null;
+      delay_ms: number;
+      http_status: number | null;
+      category:
+        | "authentication_failed"
+        | "oauth_org_not_allowed"
+        | "account_on_hold"
+        | "billing_error"
+        | "rate_limit"
+        | "overloaded"
+        | "invalid_request"
+        | "model_not_found"
+        | "server_error"
+        | "max_output_tokens"
+        | "cloud_credential_error"
+        | "unknown";
+      no_response_waited_ms: number | null;
+    };
   };
 }
 /**

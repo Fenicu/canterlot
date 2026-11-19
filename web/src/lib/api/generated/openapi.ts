@@ -2938,6 +2938,7 @@ export interface components {
             phase: string;
             /** Format: date-time */
             phase_since?: string | null;
+            retry?: components["schemas"]["RetryEvidence"] | null;
             summary?: string | null;
             tool_name?: string | null;
         } | {
@@ -4631,6 +4632,30 @@ export interface components {
         };
         /** @enum {string} */
         Retry: "safe_same_key" | "explicit_new_operation" | "after_condition" | "never";
+        /**
+         * @description Повтор запроса к модели, который сейчас идёт в фазе генерации. Нулевые значения
+         *     воркера («нет» для статуса, потолка и ожидания) здесь пустые.
+         */
+        RetryEvidence: {
+            /** Format: int32 */
+            attempt: number;
+            /** @description Одна из `canterlot_proto::RETRY_CATEGORIES`. */
+            category: string;
+            /**
+             * Format: int64
+             * @description Через сколько после начала фазы начнётся следующая попытка.
+             */
+            delay_ms: number;
+            /** Format: int32 */
+            http_status?: number | null;
+            /** Format: int32 */
+            max_retries?: number | null;
+            /**
+             * Format: int64
+             * @description Сколько попытка ждала ответа, когда заголовков не было вовсе.
+             */
+            no_response_waited_ms?: number | null;
+        };
         RevisionBody: {
             /**
              * Format: int64
