@@ -134,7 +134,7 @@
 			{#if summary.pending && summary.tokens.every((t) => t.main === 0 && (t.sub === null || t.sub === 0))}
 				<p class="meta">Токены появятся после завершения хода.</p>
 			{:else}
-				<div class="key-value-list">
+				<div class="key-value-list" data-role="tokens">
 					{#each summary.tokens as token (token.label)}
 						<div class="key-value">
 							<span>{token.label}</span>
