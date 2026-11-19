@@ -120,6 +120,16 @@ echo "publish-release $*" >>"${FAKE_ROOT}/state/calls.log"
 if [ -e "${FAKE_ROOT}/state/publish-fail" ]; then echo "GitHub upload failed (fixture)"; exit 1; fi
 echo "published $1"
 EOF
+    # fastpath.sh: решение берётся из state/fastpath-out (по умолчанию — полный путь, как раньше);
+    # state/fastpath-fail — скрипт падает; state/fastpath-garbage — печатает не то.
+    cat >"${r}/scripts/deploy/fastpath.sh" <<'EOF'
+#!/usr/bin/env bash
+echo "fastpath $*" >>"${FAKE_ROOT}/state/calls.log"
+if [ -e "${FAKE_ROOT}/state/fastpath-fail" ]; then echo "fastpath: cannot read the live release (fixture)" >&2; exit 1; fi
+if [ -e "${FAKE_ROOT}/state/fastpath-garbage" ]; then echo "hello"; exit 0; fi
+if [ -f "${FAKE_ROOT}/state/fastpath-out" ]; then cat "${FAKE_ROOT}/state/fastpath-out"; exit 0; fi
+printf 'path=full\nrehearsal=run\nvzdump=run\nreasons=fixture default\nvzdump_reason=\n'
+EOF
     # cutover.sh по сценарию: строка state/cutover-plan на вызов, «режим статус [ключ=значение…]».
     # Особые статусы: none — нет файла результата; truncated — обрезанный файл.
     cat >"${r}/scripts/deploy/cutover.sh" <<'EOF'
@@ -130,6 +140,7 @@ mode=""; result=""; sha=""
 while (($#)); do
     case "$1" in
         --rehearse) mode=rehearse; shift ;;
+        --fast | --skip-ct-backup) shift ;;
         --execute) mode=execute; sha="$2"; shift 2 ;;
         --result | --confirm | --source | --dist) [ "$1" != --result ] || result="$2"; shift 2 ;;
         *) sha="$1"; shift ;;
@@ -143,7 +154,7 @@ read -r want status rest <<<"${line}"
 echo "fake cutover ${mode} -> ${status}"
 [ "${status}" != none ] || exit 1
 declare -A kv=([format]=1 [mode]="${mode}" [status]="${status}" [exit_code]=1 [signal]="" [release]="${sha}"
-    [plan]=0123456789ab [token]="" [token_valid_until]="" [phase]=end [vzdump_done]=no [worker_stopped]=no
+    [plan]=0123456789ab [token]="" [token_valid_until]="" [phase]=end [vzdump_done]=no [vzdump_skipped]=no [worker_stopped]=no
     [dump_verified]=no [hub_flipped]=no [worker_live]=no [recovery]="" [hard_failures]=0 [soft_failures]=0
     [soft_by_kind]="" [fail_codes]="" [speech_soft_failures]=0 [speech_summary]="speech ok" [web_release]=""
     [worker_downtime_s]="" [hub_interruption_s]="" [worker_stop_at]="" [vzdump_notes]="" [vzdump_archive]=""
@@ -157,7 +168,7 @@ case "${status}" in
           printf '=== STOP-AND-REPORT (fixture) ===\n' >"${kv[stop_block]}" ;;
 esac
 for pair in ${rest}; do kv[${pair%%=*}]="${pair#*=}"; done
-keys="format mode status exit_code signal release plan token token_valid_until started_at finished_at phase vzdump_done worker_stopped dump_verified hub_flipped worker_live recovery hard_failures soft_failures soft_by_kind fail_codes speech_soft_failures speech_summary web_release worker_downtime_s hub_interruption_s worker_stop_at vzdump_notes vzdump_archive dump stop_block log"
+keys="format mode status exit_code signal release plan token token_valid_until started_at finished_at phase vzdump_done vzdump_skipped worker_stopped dump_verified hub_flipped worker_live recovery hard_failures soft_failures soft_by_kind fail_codes speech_soft_failures speech_summary web_release worker_downtime_s hub_interruption_s worker_stop_at vzdump_notes vzdump_archive dump stop_block log"
 {
     for k in ${keys}; do
         [ "${status}" != truncated ] || [ "${k}" != log ] || break
@@ -171,6 +182,15 @@ fi
 exit "${kv[proc_exit]:-${kv[exit_code]}}"
 EOF
     chmod +x "${FAKE_ROOT}/gitbin/git" "${FAKE_ROOT}/fake-bin/cargo" "${r}"/scripts/*.sh "${r}"/scripts/deploy/*.sh
+}
+
+# Решение fastpath.sh стенда: route_is fast|rehearsed|full "причины".
+route_is() {
+    case "$1" in
+        fast) printf 'path=fast\nrehearsal=skip\nvzdump=skip\nreasons=%s\nvzdump_reason=no migration (fixture)\n' "$2" ;;
+        rehearsed) printf 'path=rehearsed\nrehearsal=run\nvzdump=skip\nreasons=%s\nvzdump_reason=no migration (fixture)\n' "$2" ;;
+        *) printf 'path=full\nrehearsal=run\nvzdump=run\nreasons=%s\nvzdump_reason=\n' "$2" ;;
+    esac >"${FAKE_ROOT}/state/fastpath-out"
 }
 
 # Новый «основной чекаут» в FAKE_ROOT/repo на версии RVER, origin запушен,
