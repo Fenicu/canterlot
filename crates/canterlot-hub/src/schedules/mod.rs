@@ -815,6 +815,8 @@ pub async fn delete(
         None,
         move |conn| {
             Box::pin(async move {
+                // Порядок удаления разговора: владелец раньше строк расписания и копий.
+                crate::conversations::lock_owner(&mut *conn, owner_id).await?;
                 let row: Option<ScheduleRow> = sqlx::query_as(
                     "select * from schedules where id=$1 and owner_id=$2 for update",
                 )
@@ -826,6 +828,13 @@ pub async fn delete(
                 if schedule.revision != base_revision {
                     return Err(ScheduleError::StaleRevision);
                 }
+                crate::routines::on_schedule_deleted_in_tx(
+                    &mut *conn,
+                    owner_id,
+                    id,
+                    correlation_id,
+                )
+                .await?;
                 sqlx::query("delete from schedules where id=$1")
                     .bind(id)
                     .execute(&mut *conn)

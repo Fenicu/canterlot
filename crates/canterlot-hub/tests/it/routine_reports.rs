@@ -1695,3 +1695,64 @@ async fn overlap_follows_the_live_report_not_the_run_journal(pool: PgPool) {
     let second = fire(&f, schedule).await;
     assert_ne!(first, second);
 }
+
+async fn delete_schedule(f: &Fixture, schedule: Uuid) -> u16 {
+    let revision: i64 = sqlx::query_scalar("select revision from schedules where id=$1")
+        .bind(schedule)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    f.client
+        .send(
+            Method::DELETE,
+            &format!("/api/v1/schedules/{schedule}"),
+            Some(&format!("routine-delete-{}", Uuid::now_v7())),
+            Some(json!({"base_revision": revision})),
+        )
+        .await
+        .status
+        .as_u16()
+}
+
+/// Удаление расписания с собирающимся отчётом: каскад не уносит запись об уборке, копии
+/// заказана остановка, открытая лента получает снятие карточки в той же транзакции.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn deleting_a_schedule_stops_its_copy_and_dismisses_the_open_card(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let _session = session(&f);
+    with_native(&f).await;
+    let parent = f.seed.conversation_id;
+    let schedule = make_schedule(&f, "Стендап").await;
+    fire(&f, schedule).await;
+    let copy = copies(&pool, parent).await.remove(0).0;
+    let card: Uuid = sqlx::query_scalar("select id from routine_reports where schedule_id=$1")
+        .bind(schedule)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(delete_schedule(&f, schedule).await, 200);
+
+    // Лента узнаёт о снятии сразу, не дожидаясь прохода.
+    let dismissed = card_events(&pool, parent, "routine_report_dismissed").await;
+    assert_eq!(dismissed.len(), 1, "{dismissed:?}");
+    assert_eq!(dismissed[0]["report_id"], card.to_string());
+    // Строка уборки пережила каскад, копии заказана остановка.
+    assert_eq!(card_copy(&pool, card).await, Some(copy));
+    let stops: i64 = sqlx::query_scalar(
+        "select count(*) from commands where conversation_id=$1 and kind='stop_execution'",
+    )
+    .bind(copy)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(
+        stops >= 1,
+        "the copy keeps running after its schedule is gone"
+    );
+    // Остановка подтверждена: копия и запись об уборке уходят, ничего не публикуется.
+    worker_stops_copies(&pool).await;
+    sweep(&f).await;
+    assert!(copies(&pool, parent).await.is_empty());
+    assert!(card_copy(&pool, card).await.is_none());
+    assert!(routine_pushes(&pool).await.is_empty());
+}

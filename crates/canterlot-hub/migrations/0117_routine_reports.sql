@@ -15,7 +15,9 @@ create table routine_reports (
   id uuid primary key,
   owner_id uuid not null references owners(id),
   conversation_id uuid not null references conversations(id) on delete cascade,
-  schedule_id uuid not null references schedules(id) on delete cascade,
+  -- Удаление расписания карточку не уносит: она хранит запись об уборке копии. Приложение
+  -- снимает карточку и заказывает остановку копии в той же транзакции удаления.
+  schedule_id uuid references schedules(id) on delete set null,
   -- Строка запуска может уйти уборкой журнала раньше карточки: карточка не зависит от неё.
   run_id uuid references schedule_runs(id) on delete set null,
   -- Копия-читатель. Пока она не удалена, поле заполнено; ссылки нет: строку копии
@@ -34,7 +36,7 @@ create table routine_reports (
   updated_at timestamptz not null default clock_timestamp(),
   completed_at timestamptz,
   dismissed_at timestamptz,
-  dismiss_reason text check (dismiss_reason in ('owner', 'replaced')),
+  dismiss_reason text check (dismiss_reason in ('owner', 'replaced', 'schedule_deleted')),
   check ((dismissed_at is null) = (dismiss_reason is null))
 );
 -- Не больше одной открытой карточки расписания на родителя.

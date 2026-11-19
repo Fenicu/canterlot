@@ -91,7 +91,7 @@ struct CardRow {
     id: Uuid,
     owner_id: Uuid,
     conversation_id: Uuid,
-    schedule_id: Uuid,
+    schedule_id: Option<Uuid>,
     run_id: Option<Uuid>,
     copy_id: Option<Uuid>,
     title: String,
@@ -108,7 +108,7 @@ impl CardRow {
         Ok(RoutineReportView {
             id: self.id,
             conversation_id: self.conversation_id,
-            schedule_id: self.schedule_id,
+            schedule_id: self.schedule_id.unwrap_or_default(),
             run_id: self.run_id,
             title: self.title.clone(),
             state: ReportState::parse(&self.state)?,
@@ -397,7 +397,7 @@ pub async fn dismiss(
             &mut tx,
             conversation_id,
             card.id,
-            card.schedule_id,
+            card.schedule_id.unwrap_or_default(),
             "owner",
             correlation_id,
         )
@@ -730,13 +730,16 @@ async fn finish_failed(
     failed.detail = detail;
     schedules::run_changed(&mut *conn, &failed, correlation_id).await?;
     schedules::finalize_manual_key(&mut *conn, card.owner_id, &failed).await?;
+    let Some(schedule_id) = card.schedule_id else {
+        return Ok(());
+    };
     let name: Option<String> = sqlx::query_scalar("select name from schedules where id=$1")
-        .bind(card.schedule_id)
+        .bind(schedule_id)
         .fetch_optional(&mut *conn)
         .await?;
     crate::notify::enqueue_schedule_failure_in_tx(
         conn,
-        card.schedule_id,
+        schedule_id,
         name.as_deref().unwrap_or_default(),
         reason,
     )
@@ -816,46 +819,112 @@ async fn remove_one(
     // Порядок удаления разговора: владелец, затем строки разговоров. Перенос родителя в
     // корзину идёт так же, а копия, взятая раньше владельца, замыкала бы оба пути.
     crate::conversations::lock_owner(&mut tx, owner_id).await?;
+    match remove_in_tx(&mut tx, card_id, owner_id, copy_id).await {
+        Ok(removal) => {
+            tx.commit().await?;
+            Ok(removal)
+        }
+        Err(error) => {
+            let _ = tx.rollback().await;
+            Err(error)
+        }
+    }
+}
+
+/// Остановить и удалить копию карточки в транзакции, где владелец уже взят. Ошибка базы
+/// уходит наружу; прочие отказы удаления оставляют копию на следующий проход.
+async fn remove_in_tx(
+    conn: &mut PgConnection,
+    card_id: Uuid,
+    owner_id: Uuid,
+    copy_id: Uuid,
+) -> Result<Removal, sqlx::Error> {
     let exists: bool =
         sqlx::query_scalar("select exists(select 1 from conversations where id=$1 for update)")
             .bind(copy_id)
-            .fetch_one(&mut *tx)
+            .fetch_one(&mut *conn)
             .await?;
     let mut gone = true;
     if exists {
         // Потерянное исполнение не остановить командой: просим воркер разрешить его.
         if let Some((execution_id, generation, crate::model::ExecutionState::OwnerLost)) =
-            crate::executions::live(&mut tx, copy_id).await?
+            crate::executions::live(&mut *conn, copy_id).await?
         {
-            crate::delivery::control::enqueue_resolve(&mut tx, copy_id, execution_id, generation)
-                .await?;
-            tx.commit().await?;
+            crate::delivery::control::enqueue_resolve(
+                &mut *conn,
+                copy_id,
+                execution_id,
+                generation,
+            )
+            .await?;
             return Ok(Removal::Pending { backoff: true });
         }
-        match crate::side::stop_and_delete_in_tx(&mut tx, owner_id, copy_id, Uuid::now_v7()).await {
+        match crate::side::stop_and_delete_in_tx(&mut *conn, owner_id, copy_id, Uuid::now_v7())
+            .await
+        {
             Ok(done) => gone = done,
             Err(crate::deletion::DeleteError::NotFound) => {}
-            Err(crate::deletion::DeleteError::Db(error)) => {
-                let _ = tx.rollback().await;
-                return Err(error);
-            }
+            Err(crate::deletion::DeleteError::Db(error)) => return Err(error),
             Err(error) => {
                 tracing::warn!(kind = "routine_copy_delete_failed", copy_id = %copy_id, error = ?error, "report copy was not deleted");
-                let _ = tx.rollback().await;
                 return Ok(Removal::Pending { backoff: false });
             }
         }
     }
     if !gone {
-        tx.commit().await?;
         return Ok(Removal::Pending { backoff: false });
     }
     sqlx::query("update routine_reports set copy_id=null where id=$1")
         .bind(card_id)
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await?;
-    tx.commit().await?;
     Ok(Removal::Gone)
+}
+
+/// Удаление расписания: карточки снимаются из открытых лент в той же транзакции, собирающиеся
+/// закрываются, копиям заказывается остановка. Строка карточки переживает каскад и остаётся
+/// записью об уборке: без неё остановившуюся копию никто не нашёл бы.
+pub(crate) async fn on_schedule_deleted_in_tx(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    schedule_id: Uuid,
+    correlation_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    let cards: Vec<CardRow> =
+        sqlx::query_as("select * from routine_reports where schedule_id=$1 order by id for update")
+            .bind(schedule_id)
+            .fetch_all(&mut *conn)
+            .await?;
+    for card in cards {
+        sqlx::query(
+            "update routine_reports
+                set state=case when state='pending' then 'failed' else state end,
+                    error=case when state='pending' then 'schedule_deleted' else error end,
+                    completed_at=coalesce(completed_at,clock_timestamp()),
+                    dismissed_at=coalesce(dismissed_at,clock_timestamp()),
+                    dismiss_reason=coalesce(dismiss_reason,'schedule_deleted'),
+                    updated_at=clock_timestamp()
+              where id=$1",
+        )
+        .bind(card.id)
+        .execute(&mut *conn)
+        .await?;
+        if card.dismissed_at.is_none() {
+            emit_dismissed(
+                conn,
+                card.conversation_id,
+                card.id,
+                schedule_id,
+                "schedule_deleted",
+                correlation_id,
+            )
+            .await?;
+        }
+        if let Some(copy_id) = card.copy_id {
+            remove_in_tx(conn, card.id, owner_id, copy_id).await?;
+        }
+    }
+    Ok(())
 }
 
 /// Окончательное удаление родителя: карточки уходят каскадом, а запуски, чей отчёт ещё
