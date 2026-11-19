@@ -270,6 +270,7 @@ export class FakeHubApi {
 	/** `null`: пороги лимитов по умолчанию, как у хаба. */
 	limitSettings: components['schemas']['LimitSettings'] | null = null;
 	promptSuggestionsEnabled = true;
+	claudeAutoMemory: 'on' | 'off' = 'on';
 	hibernateIdleMinutes: number | null = 60;
 	readonly promptSuggestions = new Map<string, components['schemas']['PromptSuggestionView']>();
 	readonly limitSettingsKeys: string[] = [];

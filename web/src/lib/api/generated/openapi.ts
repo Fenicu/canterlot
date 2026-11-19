@@ -511,6 +511,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/claude-auto-memory-settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get__api_v1_claude_auto_memory_settings"];
+        put: operations["put__api_v1_claude_auto_memory_settings"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/config": {
         parameters: {
             query?: never;
@@ -2533,6 +2549,12 @@ export interface components {
             kind: string;
             /** @description Имя без ведущего слеша: вставляется как `/<name> `. */
             name: string;
+        };
+        /** @enum {string} */
+        ClaudeAutoMemory: "on" | "off";
+        ClaudeAutoMemorySettings: {
+            /** @description Встроенная автопамять Claude Code в сессиях режима «как у владельца». */
+            claude_auto_memory: components["schemas"]["ClaudeAutoMemory"];
         };
         ClaudeHistoryList: {
             histories: components["schemas"]["ClaudeHistoryView"][];
@@ -7084,6 +7106,78 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get__api_v1_claude_auto_memory_settings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Встроенная память Claude: on или off */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClaudeAutoMemorySettings"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    put__api_v1_claude_auto_memory_settings: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ClaudeAutoMemorySettings"];
+            };
+        };
+        responses: {
+            /** @description Настройка сохранена; действует на сессии после их перезапуска */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClaudeAutoMemorySettings"];
                 };
             };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */

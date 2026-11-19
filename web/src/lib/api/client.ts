@@ -203,6 +203,20 @@ export function putPromptSuggestionSettings(
   return http("PUT", "/api/v1/prompt-suggestion-settings", body, keyed(key, opts));
 }
 
+export function getClaudeAutoMemorySettings(
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["get__api_v1_claude_auto_memory_settings"]>>> {
+  return http("GET", "/api/v1/claude-auto-memory-settings", undefined, opts);
+}
+
+export function putClaudeAutoMemorySettings(
+  body: Body<operations["put__api_v1_claude_auto_memory_settings"]>,
+  key: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["put__api_v1_claude_auto_memory_settings"]>>> {
+  return http("PUT", "/api/v1/claude-auto-memory-settings", body, keyed(key, opts));
+}
+
 export function getHibernateSettings(
   opts?: RequestOptions,
 ): Promise<HttpResponse<Ok<operations["get__api_v1_hibernate_settings"]>>> {

@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   getAttachmentContent,
+  getClaudeAutoMemorySettings,
+  putClaudeAutoMemorySettings,
   getMedia,
   markRead,
   me,
@@ -14,6 +16,29 @@ import { uploadLimits, loadConfig } from "#lib/api/config.js";
 describe("api/client", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it("claude_auto_memory_settings_round_trip_over_get_and_keyed_put", async () => {
+    const calls: Array<[string, RequestInit]> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init: RequestInit) => {
+        calls.push([url, init]);
+        return new Response(JSON.stringify({ claude_auto_memory: "off" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }),
+    );
+    expect((await getClaudeAutoMemorySettings()).data.claude_auto_memory).toBe("off");
+    const saved = await putClaudeAutoMemorySettings({ claude_auto_memory: "off" }, "k-mem");
+    expect(saved.data.claude_auto_memory).toBe("off");
+    expect(calls.map(([url, init]) => [url, init.method])).toEqual([
+      ["/api/v1/claude-auto-memory-settings", "GET"],
+      ["/api/v1/claude-auto-memory-settings", "PUT"],
+    ]);
+    expect(new Headers(calls[1]?.[1].headers).get("Idempotency-Key")).toBe("k-mem");
+    expect(JSON.parse(String(calls[1]?.[1].body))).toEqual({ claude_auto_memory: "off" });
   });
 
   it("coverage_functions_call_the_generated_paths_with_the_client_header", async () => {

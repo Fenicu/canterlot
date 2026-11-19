@@ -31,6 +31,14 @@ test('settings_categories_hold_login_connection_theme_enter_install_and_signout'
   await page.goto('/settings?c=input');
   await expect(main.getByRole('radiogroup', { name: 'Enter на клавиатуре' })).toBeVisible();
   await expect(main.getByRole('radiogroup', { name: 'Подсказки следующего сообщения' })).toBeVisible();
+  const memory = main.getByRole('radiogroup', { name: 'Встроенная память Claude' });
+  await expect(memory).toBeVisible();
+  await expect(memory.getByRole('radio', { name: 'Включена' })).toBeChecked();
+  await expect(main.getByText('воркеры старше 1.43 настройку не применяют')).toBeVisible();
+  await memory.getByRole('radio', { name: 'Выключена' }).check();
+  await expect(memory.getByRole('radio', { name: 'Выключена' })).toBeChecked();
+  await page.reload();
+  await expect(main.getByRole('radiogroup', { name: 'Встроенная память Claude' }).getByRole('radio', { name: 'Выключена' })).toBeChecked();
   await expect(main.getByRole('radiogroup', { name: 'Рассуждения' })).toBeVisible();
 
   await page.goto('/settings?c=app');

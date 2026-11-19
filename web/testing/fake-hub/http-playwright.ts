@@ -1488,6 +1488,22 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     await route.fulfill({ headers: headers(), json: { enabled: api.promptSuggestionsEnabled } });
   });
 
+  await page.route('**/api/v1/claude-auto-memory-settings', async (route) => {
+    const method = route.request().method();
+    if (method === 'GET') {
+      await route.fulfill({ headers: headers(), json: { claude_auto_memory: api.claudeAutoMemory } });
+      return;
+    }
+    if (method !== 'PUT') return route.fallback();
+    if (!route.request().headers()['idempotency-key']) {
+      await route.fulfill({ status: 400, headers: headers(), json: errorBody('invalid_request', 'Нужен Idempotency-Key') });
+      return;
+    }
+    const body = route.request().postDataJSON() as { claude_auto_memory: 'on' | 'off' };
+    api.claudeAutoMemory = body.claude_auto_memory;
+    await route.fulfill({ headers: headers(), json: { claude_auto_memory: api.claudeAutoMemory } });
+  });
+
   await page.route('**/api/v1/hibernate-settings', async (route) => {
     const method = route.request().method();
     if (method === 'GET') {
