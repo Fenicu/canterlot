@@ -628,14 +628,10 @@ fastpath_eval() {
         fi
     fi
     if [ -z "${full_reason}" ]; then
-        if [ -n "${FASTPATH_CLASSIFIER:-}" ]; then
-            cls="$("${FASTPATH_CLASSIFIER}" "${src}" "${live}" "${target}" 2>/dev/null)" || cls=""
-        else
-            cls="$(python3 -I "${DEPLOY_DIR}/fastpath-classify.py" "${src}" "${live}" "${target}" 2>&1)" || {
-                fastpath_full "the git diff of ${live:0:12}..${target:0:12} could not be classified: $(printf '%s' "${cls}" | tr '\n' ' ' | cut -c1-200)"
-                cls=""
-            }
-        fi
+        cls="$(python3 -I "${DEPLOY_DIR}/fastpath-classify.py" "${src}" "${live}" "${target}" 2>&1)" || {
+            fastpath_full "the git diff of ${live:0:12}..${target:0:12} could not be classified: $(printf '%s' "${cls}" | tr '\n' ' ' | cut -c1-200)"
+            cls=""
+        }
         if [ -z "${cls}" ] && [ -z "${full_reason}" ]; then
             fastpath_full "the classifier of the git diff failed or printed nothing"
         fi

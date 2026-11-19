@@ -11,7 +11,7 @@
 Печатает ключ=значение, по одному разу каждый:
   ancestor=yes|no          развёрнутый релиз — предок цели
   migration_inputs=...     изменённые файлы, от которых зависит, какие миграции вшиты
-                           в бинарь и как они применяются (каталог миграций, db.rs, main.rs хаба)
+                           в бинарь и как они применяются (каталог миграций, db.rs, main.rs, installation*, presets* хаба)
   other=...                изменённые файлы вне списка прикладного кода (список ниже)
   changed=N                число изменённых путей
 
@@ -30,7 +30,11 @@ import tomllib
 
 FULL = re.compile(r"^[0-9a-f]{40}$")
 MIGRATION_PREFIX = "crates/canterlot-hub/migrations/"
-MIGRATION_CODE = {"crates/canterlot-hub/src/db.rs", "crates/canterlot-hub/src/main.rs"}
+# Загрузка миграций и всё, что хаб исполняет при запуске с записью в базу вне манифеста:
+# installation::check и presets::seed_all_missing (см. тест serve_startup_calls_are_pinned в main.rs).
+MIGRATION_CODE = re.compile(
+    r"^crates/canterlot-hub/src/(db\.rs|main\.rs|installation(\.rs|/.*)|presets(\.rs|/.*))$"
+)
 ALLOW = [
     re.compile(r"^crates/[^/]+/src/.+"),
     re.compile(r"^crates/[^/]+/tests/.+"),
@@ -127,7 +131,7 @@ def main():
         fail("a changed path is not valid UTF-8")
     migration, other = [], []
     for path in paths:
-        if path.startswith(MIGRATION_PREFIX) or path in MIGRATION_CODE:
+        if path.startswith(MIGRATION_PREFIX) or MIGRATION_CODE.match(path):
             migration.append(path)
         elif any(rule.match(path) for rule in ALLOW):
             continue

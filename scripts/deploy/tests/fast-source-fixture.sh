@@ -13,6 +13,7 @@
 #   migration      новый файл миграции;  unicode-migration — с не-ASCII именем
 #   rename-in      файл из docs/ переименован в каталог миграций; rename-out — обратно
 #   dbrs, mainrs   crates/canterlot-hub/src/db.rs, main.rs (загрузка и запуск миграций)
+#   installation, presets, presets-dir   то, что хаб исполняет при запуске вне манифеста
 #   tooling        scripts/deploy/lib.sh;  release-sh, build-sh, publish-sh — скрипты выпуска
 #   script         посторонний скрипт scripts/extra.sh
 #   docker, toolchain, buildrs   Dockerfile сборки, rust-toolchain.toml, build.rs хаба
@@ -41,6 +42,8 @@ make_fast_source() {
     printf '{\n  "name": "web",\n  "version": "1.0.0",\n  "dependencies": {"svelte": "5.0.0"}\n}\n' >"${FAST_SRC}/web/package.json"
     printf 'pub fn a() {}\n' >"${FAST_SRC}/crates/canterlot-hub/src/db.rs"
     printf 'fn main() {}\n' >"${FAST_SRC}/crates/canterlot-hub/src/main.rs"
+    printf 'pub fn check() {}\n' >"${FAST_SRC}/crates/canterlot-hub/src/installation.rs"
+    printf 'pub fn seed_all_missing() {}\n' >"${FAST_SRC}/crates/canterlot-hub/src/presets.rs"
     printf 'note\n' >"${FAST_SRC}/docs/note.md"
     printf 'moved.sql\n' >"${FAST_SRC}/docs/moved.sql"
     printf 'export const a = 1;\n' >"${FAST_SRC}/web/src/a.ts"
@@ -69,6 +72,9 @@ make_fast_source() {
             rename-out) git -C "${FAST_SRC}" mv "$(cd "${FAST_SRC}" && find crates/canterlot-hub/migrations -name '*.sql' | sort | head -1)" docs/out.sql ;;
             dbrs) printf '// change\n' >>"${FAST_SRC}/crates/canterlot-hub/src/db.rs" ;;
             mainrs) printf '// change\n' >>"${FAST_SRC}/crates/canterlot-hub/src/main.rs" ;;
+            installation) printf '// change\n' >>"${FAST_SRC}/crates/canterlot-hub/src/installation.rs" ;;
+            presets) printf '// change\n' >>"${FAST_SRC}/crates/canterlot-hub/src/presets.rs" ;;
+            presets-dir) mkdir -p "${FAST_SRC}/crates/canterlot-hub/src/presets" && printf 'pub fn x() {}\n' >"${FAST_SRC}/crates/canterlot-hub/src/presets/seed.rs" ;;
             tooling) printf '# change\n' >>"${FAST_SRC}/scripts/deploy/lib.sh" ;;
             release-sh) printf '# change\n' >>"${FAST_SRC}/scripts/release.sh" ;;
             build-sh) printf '# change\n' >>"${FAST_SRC}/scripts/build-release.sh" ;;

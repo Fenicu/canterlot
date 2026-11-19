@@ -60,6 +60,9 @@ check_route "a file renamed into the migration directory: full" full run run "mi
 check_route "a migration renamed out of the directory: full" full run run "migrations/00" rename-out
 check_route "the hub's db.rs (migrator) changed: full" full run run "crates/canterlot-hub/src/db.rs" dbrs
 check_route "the hub's main.rs (startup migration call) changed: full" full run run "crates/canterlot-hub/src/main.rs" mainrs
+check_route "the hub's installation.rs (startup check) changed: full" full run run "crates/canterlot-hub/src/installation.rs" installation
+check_route "the hub's presets.rs (startup seeding) changed: full" full run run "crates/canterlot-hub/src/presets.rs" presets
+check_route "a file inside a presets/ directory changed: full" full run run "crates/canterlot-hub/src/presets/seed.rs" presets-dir
 check_route "migration and tooling together: full" full run run "migrations" migration tooling
 
 case_begin "fastpath_eval: an existing migration edited or deleted is a migration change"
@@ -118,27 +121,50 @@ case "$(fp_get "${OUT}" reasons)" in *"replace"*) case_ok "reason names the repl
 drop_fast_source
 case_end
 
-case_begin "fastpath_eval: a git failure or a contradictory classifier is the full path"
+# Сбои классификатора вносит стенд: подменный python3 в fake-bin запускает state/classifier-stub
+# вместо fastpath-classify.py. Рабочие скрипты ни переменных, ни подмен не читают.
+case_begin "fastpath_eval: a failing, contradictory or incomplete classifier is the full path"
+setup_case fp-stub
 make_fast_source other
-STUB="$(mktemp /tmp/canterlot-deploy-stub.XXXXXX)"
+STUB="${FAKE_ROOT}/state/classifier-stub"
 printf '#!/usr/bin/env bash\nexit 3\n' >"${STUB}"
 chmod +x "${STUB}"
-OUT="$(FASTPATH_CLASSIFIER="${STUB}" eval_std)"
-assert_eq "$(fp_get "${OUT}" path)" "full" "a failing classifier"
+assert_eq "$(fp_get "$(eval_std)" path)" "full" "a failing classifier"
 printf '#!/usr/bin/env bash\necho "ancestor=yes"\necho "ancestor=no"\n' >"${STUB}"
-OUT="$(FASTPATH_CLASSIFIER="${STUB}" eval_std)"
-assert_eq "$(fp_get "${OUT}" path)" "full" "a contradictory classifier (ancestor twice)"
+assert_eq "$(fp_get "$(eval_std)" path)" "full" "a contradictory classifier (ancestor twice)"
 printf '#!/usr/bin/env bash\necho "ancestor=yes"\n' >"${STUB}"
-OUT="$(FASTPATH_CLASSIFIER="${STUB}" eval_std)"
-assert_eq "$(fp_get "${OUT}" path)" "full" "an incomplete classifier"
+assert_eq "$(fp_get "$(eval_std)" path)" "full" "an incomplete classifier"
 printf '#!/usr/bin/env bash\necho "ancestor=yes"\necho "migration_inputs="\necho "other="\necho "changed=1"\n' >"${STUB}"
-OUT="$(FASTPATH_CLASSIFIER="${STUB}" eval_std)"
-assert_eq "$(fp_get "${OUT}" path)" "fast" "a complete classifier is trusted (control)"
+assert_eq "$(fp_get "$(eval_std)" path)" "fast" "a complete classifier is trusted (control: the stub is really consulted)"
 rm -f "${STUB}"  # lint: local-temp
-rm -rf "${FAST_SRC}/.git/objects/${FAST_TARGET_FULL:0:2}"  # lint: local-temp
-OUT="$(eval_std)"
-assert_eq "$(fp_get "${OUT}" path)" "full" "a missing object (git cannot diff) is the full path"
 drop_fast_source
+teardown_case
+case_end
+
+case_begin "the production classifier ignores FASTPATH_CLASSIFIER and every other override"
+setup_case fp-override
+make_fast_source migration
+ANSWER="${FAKE_ROOT}/answer.sh"
+printf '#!/usr/bin/env bash\necho "ancestor=yes"\necho "migration_inputs="\necho "other="\necho "changed=1"\n' >"${ANSWER}"
+chmod +x "${ANSWER}"
+OUT="$(FASTPATH_CLASSIFIER="${ANSWER}" FASTPATH_CLASSIFY="${ANSWER}" eval_std)"
+assert_eq "$(fp_get "${OUT}" path)" "full" "an override in the environment changes nothing (the migration is still full)"
+assert_eq "$(grep -c 'FASTPATH_CLASSIFIER' "${DEPLOY_DIR}/lib.sh" "${DEPLOY_DIR}/cutover.sh" "${DEPLOY_DIR}/fastpath.sh" | awk -F: '{s+=$2} END {print s+0}')" "0" "no production script mentions the override"
+drop_fast_source
+teardown_case
+case_end
+
+case_begin "fastpath_eval: git cannot produce the diff although the target commit exists"
+setup_case fp-corrupt
+make_fast_source other
+TREE="$(git -C "${FAST_SRC}" rev-parse "${FAST_TARGET_FULL}^{tree}")"
+rm -f "${FAST_SRC}/.git/objects/${TREE:0:2}/${TREE:2}"  # lint: local-temp
+git -C "${FAST_SRC}" cat-file -t "${FAST_TARGET_FULL}" >/dev/null 2>&1 && case_ok "the commit object is still there (only its tree is gone)" || case_fail "the commit object is gone"
+OUT="$(eval_std)"
+assert_eq "$(fp_get "${OUT}" path)" "full" "a diff failure is the full path"
+case "$(fp_get "${OUT}" reasons)" in *"could not be classified"*"git"*) case_ok "the reason names the git failure (not a revision lookup)" ;; *) case_fail "reason: $(fp_get "${OUT}" reasons)" ;; esac
+drop_fast_source
+teardown_case
 case_end
 
 # --- fastpath.sh: чтение развёрнутых релизов с хостов, точные хэши из RELEASE
