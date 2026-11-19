@@ -1474,20 +1474,16 @@ fn scheduled_retry_shows_the_attempt_and_ends_no_turn() {
     assert!(!retries.is_empty());
     let out = feed_all(&mut translator, &retries);
     assert!(outcomes(&out).is_empty());
-    let summaries: Vec<_> = adapter_events(out)
+    let infos: Vec<_> = adapter_events(out)
         .into_iter()
         .filter_map(|event| match event {
-            AdapterEvent::Phase {
-                phase: Phase::Generating,
-                summary,
-                ..
-            } => summary,
+            AdapterEvent::Retry { info } => Some(info),
             _ => None,
         })
         .collect();
-    assert_eq!(summaries.len(), retries.len());
-    assert_eq!(summaries[0], "retry 2");
-    assert!(summaries.iter().all(|text| !text.contains("slow down")));
+    assert_eq!(infos.len(), retries.len());
+    assert_eq!(infos[0].attempt, 2);
+    assert!(infos.iter().all(|info| !info.category.contains("slow down")));
 }
 
 #[test]

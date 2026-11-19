@@ -2524,12 +2524,24 @@ impl Supervisor {
                     phase: snake(&phase),
                     tool_name: tool_name.unwrap_or_default(),
                     summary: summary.unwrap_or_default(),
+                    retry: None,
                 };
                 self.last_phase = Some(changed.clone());
                 self.record(Body::PhaseChanged(changed))?;
                 if ready {
                     self.ready = true;
                 }
+            }
+            AdapterEvent::Retry { info } => {
+                let changed = PhaseChanged {
+                    execution_id: self.spec.execution_id.to_string(),
+                    phase: snake(&Phase::Generating),
+                    summary: crate::adapter::retry::summary(&info),
+                    retry: Some(info),
+                    ..Default::default()
+                };
+                self.last_phase = Some(changed.clone());
+                self.record(Body::PhaseChanged(changed))?;
             }
             AdapterEvent::Progress => {
                 // Сигнал жизни хода повторяет текущую фазу: хаб видит свежий прогресс, а
@@ -4781,6 +4793,29 @@ mod tests {
             state.lock().unwrap().transmit_calls,
             vec![first.0, second.0]
         );
+    }
+
+    #[tokio::test]
+    async fn retry_event_becomes_a_generating_phase_with_the_typed_payload() {
+        let (_dir, mut supervisor, _state) = test_supervisor();
+        queue_owner(&mut supervisor);
+        supervisor.try_transmit().await.unwrap();
+        let info = canterlot_proto::worker::v1::RetryInfo {
+            attempt: 2,
+            max_retries: 10,
+            delay_ms: 8000,
+            http_status: 529,
+            category: "overloaded".into(),
+            no_response_waited_ms: 0,
+        };
+        supervisor
+            .on_adapter_event(AdapterEvent::Retry { info: info.clone() })
+            .await
+            .unwrap();
+        let phase = supervisor.last_phase.clone().expect("phase recorded");
+        assert_eq!(phase.phase, "generating");
+        assert_eq!(phase.summary, "retry 2/10");
+        assert_eq!(phase.retry, Some(info));
     }
 
     #[tokio::test]

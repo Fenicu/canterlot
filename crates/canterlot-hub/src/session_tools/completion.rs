@@ -97,6 +97,7 @@ mod tests {
                 phase: "running_tool".into(),
                 tool_name: None,
                 summary: None,
+                retry: None,
                 phase_since: Some(now - chrono::TimeDelta::hours(1)),
                 lease_wait: None,
             },

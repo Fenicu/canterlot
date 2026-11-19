@@ -32,6 +32,7 @@ fn inputs() -> ActivityInputs {
             phase_at: Some(now),
             tool_name: None,
             summary: None,
+            retry: None,
         }),
         queue: QueueFacts {
             slot: RunSlot::Running {
@@ -123,6 +124,7 @@ fn state_table_matches_pilot_section_9() {
             phase: "generating".into(),
             tool_name: None,
             summary: None,
+            retry: None,
             phase_since: Some(base.now),
             lease_wait: None,
         },

@@ -122,6 +122,7 @@ async fn nul_in_any_text_of_a_record_never_refuses_the_record(pool: PgPool) -> T
                 phase: "pha\0se".into(),
                 tool_name: "to\0ol".into(),
                 summary: "sum\0mary".into(),
+                retry: None,
             }),
         ),
         (

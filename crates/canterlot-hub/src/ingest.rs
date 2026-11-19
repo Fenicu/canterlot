@@ -3009,7 +3009,9 @@ async fn apply_journal_body(
             if parse_id(&fact.execution_id)? != run.execution_id { return Err(IngestError::ForeignExecution); }
             sqlx::query("select conversation_id from queue_state where conversation_id = $1 for update")
                 .bind(run.conversation_id).execute(&mut *conn).await?;
-            let detail = json!({"phase":fact.phase,"tool_name":crate::blocks::non_empty(&fact.tool_name),"summary":crate::blocks::non_empty(&fact.summary)});
+            let mut detail = json!({"phase":fact.phase,"tool_name":crate::blocks::non_empty(&fact.tool_name),"summary":crate::blocks::non_empty(&fact.summary)});
+            let retry = fact.retry.as_ref().and_then(|r| serde_json::to_value(crate::activity::RetryEvidence::from_proto(r)).ok());
+            if let Some(retry) = &retry { detail["retry"] = retry.clone(); }
             // Повтор той же фазы — сигнал жизни хода от воркера: он обновляет только
             // `last_event_at` (в `touched`), а отметка начала фазы и поток событий не меняются.
             let repeated: bool = sqlx::query_scalar("select exists(select 1 from executions where id = $1 and state not in ('stopped', 'failed') and phase is not distinct from $2 and phase_detail is not distinct from $3)")
@@ -3018,7 +3020,7 @@ async fn apply_journal_body(
             let changed = sqlx::query("update executions set phase = $2, phase_at = clock_timestamp(), phase_detail=$3 where id = $1 and state not in ('stopped', 'failed')")
                 .bind(run.execution_id).bind(&fact.phase).bind(&detail).execute(&mut *conn).await?.rows_affected();
             if changed == 0 { return Ok(Some(true)); }
-            execution_event(conn, &run, "phase_changed", json!({"phase": fact.phase,"tool_name":crate::blocks::non_empty(&fact.tool_name),"summary":crate::blocks::non_empty(&fact.summary)}), correlation_id).await?;
+            execution_event(conn, &run, "phase_changed", detail, correlation_id).await?;
             return Ok(Some(false));
         }
         Body::JournalClosed(fact) => {

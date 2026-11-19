@@ -619,6 +619,24 @@ message PhaseChanged {
   string phase = 2;
   string tool_name = 3;
   string summary = 4;
+  // Повтор запроса к модели; пусто, когда фаза не повтор. Старые хабы поле пропускают.
+  RetryInfo retry = 5;
+}
+
+// Типизированная причина повтора запроса к модели: только числа и ограниченный список
+// категорий, текст ошибки CLI сюда не попадает.
+message RetryInfo {
+  uint32 attempt = 1;
+  uint32 max_retries = 2;
+  uint64 delay_ms = 3;
+  // HTTP-статус ответа; 0 — ответа не было.
+  uint32 http_status = 4;
+  // Одна из: authentication_failed, oauth_org_not_allowed, account_on_hold, billing_error,
+  // rate_limit, overloaded, invalid_request, model_not_found, server_error,
+  // max_output_tokens, cloud_credential_error, unknown.
+  string category = 5;
+  // Сколько попытка ждала заголовков ответа; 0 — это не «нет ответа».
+  uint64 no_response_waited_ms = 6;
 }
 
 message JournalOpened {

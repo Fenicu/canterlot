@@ -1188,6 +1188,7 @@ async fn project_working(f: &Fx, tx: &mut sqlx::PgConnection) -> Result<(), sqlx
             phase: "generating".into(),
             tool_name: None,
             summary: None,
+            retry: None,
             phase_since: Some(now),
             lease_wait: None,
         },

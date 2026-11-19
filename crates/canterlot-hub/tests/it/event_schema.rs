@@ -387,6 +387,7 @@ async fn emitted_event_payloads_match_published_schema(pool: PgPool) {
             phase: phase.into(),
             tool_name: "Agent".into(),
             summary: "task".into(),
+            retry: None,
         })])
         .await;
     }
