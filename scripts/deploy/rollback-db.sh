@@ -16,9 +16,10 @@ fi
 # а без bin/canterlot-speech в релизе — стоп и выключение юнита.
 # Дамп — проверенный pg_dump прогона (canterlot-pre-<sha>-<ts>.dump): его снимают
 # после стопа воркера, при затихших писателях, и это несущая точка восстановления.
-# vzdump того же прогона (notes pre-<sha>-<ts>) снят раньше, пока воркер работал:
-# это отдельная точка восстановления всего CT, и её восстановление теряет записи
-# между vzdump и стопом воркера.
+# vzdump того же прогона (notes pre-<sha>-<ts>), если он был, снят раньше, пока воркер
+# работал: это отдельная точка восстановления всего CT, и её восстановление теряет записи
+# между vzdump и стопом воркера. Выпуск без миграций (cutover.sh --fast, --skip-ct-backup)
+# vzdump не снимает: тогда проверенный дамп — единственная точка восстановления прогона.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -136,7 +137,7 @@ assert_worker_stopped "before any change"
 
 # Все предпосылки проверяются ДО остановки хаба: иначе битый дамп или
 # несуществующий релиз оставляли бы хаб остановленным без плана восстановления.
-log "restoring the run's quiesced pg_dump (taken after the worker stop); the run's vzdump is an earlier whole-CT point taken while the worker ran"
+log "restoring the run's quiesced pg_dump (taken after the worker stop); a vzdump of the run, if it took one (none on a run without migrations), is an earlier whole-CT point taken while the worker ran"
 ssh_hub "test -s '${DUMP}'" || die "dump not found or empty: ${DUMP}"
 verify_dump "${DUMP}" || die "dump verification failed before stopping the hub: ${DUMP}"
 # Без --to хаб поднимется на том релизе, на который сейчас указывает current:
