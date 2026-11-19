@@ -3383,7 +3383,10 @@ async fn goal_command_sends_slash_input_and_publishes_the_reply() {
         "local_command_run": {"command": "goal", "args": "Подготовить отчёт"},
         "local_command_source": "<local-command-stdout>Goal set: Подготовить отчёт</local-command-stdout>"
     });
-    let mut f = Fake::new(vec![answer_turn(), vec![reply]]);
+    // Без кадра начала команды приём `/goal` не доказан, и вызов ждал бы весь срок передачи,
+    // равный сроку теста: под нагрузкой они менялись местами.
+    let started = json!({"type":"command_lifecycle","command_uuid":"@input","state":"started"});
+    let mut f = Fake::new(vec![answer_turn(), vec![started, reply]]);
     f.start().await;
     let id = Uuid::now_v7();
     f.send(&tx(id)).await;
