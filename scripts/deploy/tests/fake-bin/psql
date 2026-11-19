@@ -59,6 +59,8 @@ case "${sql}" in
         printf '%s' "${FAKE_HAS_COMPACTIONS:-1}" ;;
     *"from compactions where finished_at is null"*)
         printf '%s' "${FAKE_OPEN_COMP:-0}" ;;
+    *"pg_control_system"*)
+        printf '%s %s' "${FAKE_PG_SYSID:-7000000000000000001}" "${FAKE_PG_DBOID:-16384}" ;;
     *"from _sqlx_migrations order by version"*)
         if [ -f "${FAKE_ROOT}/state/db-migrations.txt" ]; then
             cat "${FAKE_ROOT}/state/db-migrations.txt"

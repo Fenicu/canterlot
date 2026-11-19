@@ -85,7 +85,7 @@ fi
 rm -rf "${pgroot}"
 log "fake pg_restore contract OK"
 
-ALL_SUITES="changed lint token fastpath fastcutover guardrails invariants site-env preflight stage retain verify dryrun rehearse rollback-db cutover cutover-signals cutover-guarantees geoip speech check-proxy release release-fast"
+ALL_SUITES="changed lint token fastpath fastcutover fastbaseline fastguards guardrails invariants site-env preflight stage retain verify dryrun rehearse rollback-db cutover cutover-signals cutover-guarantees geoip speech check-proxy release release-fast"
 SUITES="${RUN_SUITES:-${ALL_SUITES}}"
 RUN_LOG_DIR="${RUN_LOG_DIR:-$(mktemp -d /tmp/canterlot-deploy-run.XXXXXX)}"
 mkdir -p "${RUN_LOG_DIR}"

@@ -219,6 +219,8 @@ write_result() {
             worker_stop_at "$([ "${restore}" = "1" ] && printf '%s' "${WORKER_STOP_ISO:-}")" \
             vzdump_notes "$([ "$((VZDUMP_DONE * restore))" = "1" ] && printf 'pre-%s-%s' "${SHA}" "${RUN_TS}")" \
             vzdump_archive "$([ "$((VZDUMP_DONE * restore))" = "1" ] && printf '%s' "${VZ_ARCHIVE:-}")" \
+            pg_system_identifier "$([ "${restore}" = "1" ] && printf '%s' "${DB_SYSID:-}")" \
+            pg_database_oid "$([ "${restore}" = "1" ] && printf '%s' "${DB_OID:-}")" \
             dump "$([ "$((DUMP_VERIFIED * restore))" = "1" ] && printf '%s/%s' "${HUB_BACKUP_DIR}" "${RUN_DUMP}")" \
             stop_block "${RESULT_STOP_BLOCK}" \
             log "${RESULT_LOG}"
@@ -308,6 +310,13 @@ else
     STATE_FILE="${STATE_FILE:-/tmp/canterlot-deploy-${SHA}.state}"
 fi
 
+# Боевой прогон держит замок от начала (до чтения базового состояния и предпроверки) до выхода:
+# второй cutover или rollback-db не может ни пройти те же проверки, ни принять чужой flip за свой.
+if [ "${DRY_RUN}" = "0" ] && [ "${REHEARSE}" = "0" ]; then
+    PHASE="lock"
+    take_deploy_lock "this cutover"
+    PHASE=""
+fi
 # План и его хэш считаются ДО любого действия, одинаково во всех режимах.
 BASE_HUB="$(deployed_sha hub)"
 BASE_WEB="$(deployed_sha web)"
@@ -412,6 +421,23 @@ db_identity_check() {
             fail_code db_identity
             die_after "no connection of the running hub (user ${HUB_PG_USER}) in database ${HUB_PG_DB} on socket ${HUB_PG_SOCKET}: this may not be the database the hub runs on" ;;
     esac
+    # Тот же пользователь и имя базы бывают и в чужом кластере: сверяем идентификатор кластера с
+    # закреплённым (HUB_PG_SYSTEM_ID) или с записанным у последнего дампа.
+    local id sys expected="${HUB_PG_SYSTEM_ID:-}" last
+    id="$(pg_identity)" || { PHASE="eligibility"; fail_mark; fail_code db_identity; die_after "cannot read the cluster identity of ${HUB_PG_DB} on ${HUB_PG_SOCKET}"; }
+    sys="${id% *}"
+    if [ -z "${expected}" ]; then
+        last="$(ssh_hub "ls -1t '${HUB_BACKUP_DIR}'/*.identity 2>/dev/null" | sed -n 1p)" || last=""
+        if [ -n "${last}" ]; then
+            expected="$(ssh_hub "cat '${last}'" 2>/dev/null | sed -n 's/^system_identifier=//p' | sed -n 1p)" || expected=""
+        fi
+    fi
+    if [ -n "${expected}" ] && [ "${sys}" != "${expected}" ]; then
+        PHASE="eligibility"
+        fail_mark
+        fail_code db_identity
+        die_after "the cluster at ${HUB_PG_SOCKET} has system identifier ${sys}, but ${expected} is expected (pinned or recorded with the last dump): this is not the cluster of the running hub"
+    fi
     log "database identity: ${HUB_PG_DB} on ${HUB_PG_SOCKET} has ${n} connection(s) of the running hub (user ${HUB_PG_USER}); dump and restore use the same socket and database"
 }
 skip_eligibility() {
@@ -956,11 +982,20 @@ report_block() {
         dump_state_line="none usable: this run did not finish a verified dump before this stop (a file named ${HUB_BACKUP_DIR}/${RUN_DUMP} may exist: do not trust it without review)"
     fi
     if [ "${SKIP_VZDUMP}" = "1" ]; then
-        vzdump_state_line="none (skipped: ${VZDUMP_SKIP_REASON}); the verified dump above is this run's only restore point"
-        vzdump_fallback="       There is no vzdump from this run (skipped: no migration changed), so the quiesced dump is the only restore point of this run."
+        if [ "${DUMP_VERIFIED}" = "1" ]; then
+            vzdump_state_line="none (skipped: ${VZDUMP_SKIP_REASON}); the verified dump above is this run's only restore point"
+            vzdump_fallback="       There is no vzdump from this run (skipped: no migration changed), so the quiesced dump is the only restore point of this run."
+        else
+            vzdump_state_line="none (skipped: ${VZDUMP_SKIP_REASON}); and this run has no verified dump either"
+            vzdump_fallback="       This run has no restore point at all (no vzdump, no verified dump): decide with the owner before any step below."
+        fi
     elif [ "${VZDUMP_DONE}" != "1" ]; then
         vzdump_state_line="none: the vzdump had not completed before this stop"
-        vzdump_fallback="       This run has no completed vzdump, so the verified dump is its only restore point."
+        if [ "${DUMP_VERIFIED}" = "1" ]; then
+            vzdump_fallback="       This run has no completed vzdump, so the verified dump is its only restore point."
+        else
+            vzdump_fallback="       This run has neither a completed vzdump nor a verified dump: decide with the owner before any step below."
+        fi
     else
         vzdump_state_line="notes pre-${SHA}-${RUN_TS}${VZ_ARCHIVE:+, archive ${VZ_ARCHIVE}} (whole CT, taken earlier, while the worker still ran)"
         vzdump_fallback="       The vzdump above is a separate, earlier whole-CT restore point: restoring it loses what the worker
@@ -1033,7 +1068,7 @@ EOF
     2. hub broken after a new migration (e.g. 0088_provider_status, 0091_dictation_terms): full DB restore
        from this run's verified quiesced dump (manual only; rollback-db.sh also brings ${SPEECH_UNIT} in line with the release).
 ${vzdump_fallback}
-         scripts/deploy/rollback-db.sh '${HUB_BACKUP_DIR}/${RUN_DUMP}' --to ${PREV_HUB_SHA}
+         scripts/deploy/rollback-db.sh '${HUB_BACKUP_DIR}/${RUN_DUMP}' --to ${PREV_HUB_SHA}${DB_SYSID:+ --expect-system-id ${DB_SYSID} --expect-db-oid ${DB_OID}}
          # it refuses while the worker is active, stops the hub, runs dropdb + createdb -O canterlot
          # + pg_restore --exit-on-error, starts the old hub and checks readyz loudly; on a failed
          # restore it starts nothing. Never start the worker on a restored DB by hand without review.
@@ -1350,8 +1385,19 @@ WORKER_STOPPED=1
 
 # 4. Дамп при остановленном воркере и его полная проверка до flip хаба.
 PHASE="dumping"
+# Идентичность кластера и базы записывается рядом с дампом и печатается в команде отката.
+DB_SYSID=""
+DB_OID=""
+if DB_IDENTITY="$(pg_identity)"; then
+    DB_SYSID="${DB_IDENTITY% *}"
+    DB_OID="${DB_IDENTITY#* }"
+else
+    cutover_hard "cannot read the cluster identity before the dump"
+fi
 run_write "pg_dump" ssh_hub "install -d -m 0700 -o postgres '${HUB_BACKUP_DIR}' && runuser -u postgres -- pg_dump -Fc -Z zstd:3 -f '${HUB_BACKUP_DIR}/${RUN_DUMP}' -h '${HUB_PG_SOCKET}' '${HUB_PG_DB}'" \
     || cutover_hard "pg_dump failed"
+run_write "dump identity" ssh_hub "printf 'system_identifier=%s\ndatabase_oid=%s\ndatabase=%s\nsocket=%s\n' '${DB_SYSID}' '${DB_OID}' '${HUB_PG_DB}' '${HUB_PG_SOCKET}' >'${HUB_BACKUP_DIR}/${RUN_DUMP}.identity'" \
+    || cutover_hard "cannot record the cluster identity next to the dump"
 # Проверка дампа ДО flip хаба: TOC читается и каждый блок данных распаковывается.
 # Без проверенного дампа дальше только рестарт воркера (см. on_end, фазы до flip).
 # Сам восстановитель живёт в lib.sh: в этом файле не должно быть исполняемых
@@ -1556,8 +1602,19 @@ if [ -z "${PWA_FAIL}" ]; then
         fi
     fi
 fi
+WEB_FOREIGN=0
+ENV_SWAPPED=0
+WEB_FLIPPED_BY_US=0
 if [ -z "${PWA_FAIL}" ]; then
-    run_write "swap canterlot.env" ssh_web "cp '${WEB_ENV}.${SHA}' '${WEB_ENV}'" || PWA_FAIL="canterlot.env swap failed"
+    # Ожидаемый прежний релиз веба проверяется ДО замены живого env: чужое состояние не трогаем.
+    WEB_NOW="$(ssh_web "readlink '${WEB_BUILD_LINK}'" 2>/dev/null)" || WEB_NOW=""
+    if [ "${WEB_NOW}" != "releases/${PREV_WEB_SHA}" ]; then
+        WEB_FOREIGN=1
+        PWA_FAIL="web link changed after approval (expected releases/${PREV_WEB_SHA}, found ${WEB_NOW:-unreadable}): nothing of the web was changed"
+    fi
+fi
+if [ -z "${PWA_FAIL}" ]; then
+    run_write "swap canterlot.env" ssh_web "cp '${WEB_ENV}.${SHA}' '${WEB_ENV}'" && ENV_SWAPPED=1 || PWA_FAIL="canterlot.env swap failed"
 fi
 if [ -z "${PWA_FAIL}" ]; then
     ssh_web "test -d '${WEB_RELEASES}/${SHA}'" || PWA_FAIL="web staged dir missing before build flip"
@@ -1567,7 +1624,7 @@ if [ -z "${PWA_FAIL}" ]; then
     run_write "web build flip" web_locked "${WEB_FLIP_FWD_SCRIPT}" \
         "${WEB_SITES_BASE}" "${SHA}" "${WEB_BUILD_LINK}" "${PREV_WEB_SHA}" >/dev/null || true
     WEB_LINK_AFTER="$(ssh_web "readlink '${WEB_BUILD_LINK}'" 2>/dev/null)" || WEB_LINK_AFTER=""
-    [ "${WEB_LINK_AFTER}" = "releases/${WEB_EXPECT}" ] || PWA_FAIL="web build flip failed"
+    if [ "${WEB_LINK_AFTER}" = "releases/${WEB_EXPECT}" ]; then WEB_FLIPPED_BY_US=1; else PWA_FAIL="web build flip failed"; fi
 fi
 if [ -z "${PWA_FAIL}" ]; then
     run_write "caddy recreate" web_locked 'cd "$1" && docker compose up -d "$2"' "${WEB_COMPOSE_DIR}" "${WEB_CONTAINER}" \
@@ -1593,20 +1650,29 @@ if [ -z "${PWA_FAIL}" ]; then
     fi
 fi
 if [ -n "${PWA_FAIL}" ]; then
-    soft "PWA failure (soft, hub is not rolled back): ${PWA_FAIL}; restoring previous build ${PREV_WEB_SHA}"
-    WEB_SHA_EFF="${PREV_WEB_SHA}"
-    if run_write "web build flip back" web_locked 'cd "$1" && ln -s "releases/$2" build.new && mv -T build.new build' "${WEB_SITES_BASE}" "${PREV_WEB_SHA}"; then
-        log "PWA build flipped back to ${PREV_WEB_SHA}"
+    soft "PWA failure (soft, hub is not rolled back): ${PWA_FAIL}; restoring previous build ${PREV_WEB_SHA} (only what this run changed)"
+    if [ "${WEB_FOREIGN}" = "1" ]; then
+        WEB_SHA_EFF="$(deployed_sha web 2>/dev/null)" || WEB_SHA_EFF="${PREV_WEB_SHA}"
+        log "the web state belongs to someone else: no flip back, no env restore, no recreate"
     else
-        soft "PWA flip-back failed"
-    fi
-    if ssh_web "test -f '${WEB_ENV}.${PREV_WEB_SHA}'"; then
-        run_write "restore env + caddy recreate" web_locked 'cp "$1" "$2" && cd "$3" && docker compose up -d "$4"' \
-            "${WEB_ENV}.${PREV_WEB_SHA}" "${WEB_ENV}" "${WEB_COMPOSE_DIR}" "${WEB_CONTAINER}" \
-            || soft "PWA env restore failed"
-    else
-        run_write "caddy recreate after flip-back" web_locked 'cd "$1" && docker compose up -d "$2"' "${WEB_COMPOSE_DIR}" "${WEB_CONTAINER}" \
-            || soft "PWA recreate after flip-back failed"
+        WEB_SHA_EFF="${PREV_WEB_SHA}"
+        if [ "${WEB_FLIPPED_BY_US}" = "1" ]; then
+            if run_write "web build flip back" web_locked 'cd "$1" && ln -s "releases/$2" build.new && mv -T build.new build' "${WEB_SITES_BASE}" "${PREV_WEB_SHA}"; then
+                log "PWA build flipped back to ${PREV_WEB_SHA}"
+            else
+                soft "PWA flip-back failed"
+            fi
+        else
+            log "the web build was not flipped by this run: no flip back"
+        fi
+        if [ "${ENV_SWAPPED}" = "1" ] && ssh_web "test -f '${WEB_ENV}.${PREV_WEB_SHA}'"; then
+            run_write "restore env + caddy recreate" web_locked 'cp "$1" "$2" && cd "$3" && docker compose up -d "$4"' \
+                "${WEB_ENV}.${PREV_WEB_SHA}" "${WEB_ENV}" "${WEB_COMPOSE_DIR}" "${WEB_CONTAINER}" \
+                || soft "PWA env restore failed"
+        elif [ "${WEB_FLIPPED_BY_US}" = "1" ]; then
+            run_write "caddy recreate after flip-back" web_locked 'cd "$1" && docker compose up -d "$2"' "${WEB_COMPOSE_DIR}" "${WEB_CONTAINER}" \
+                || soft "PWA recreate after flip-back failed"
+        fi
     fi
 else
     log "PWA on ${WEB_EXPECT}: build flipped, one Caddy recreate, version.json and CSP ok"

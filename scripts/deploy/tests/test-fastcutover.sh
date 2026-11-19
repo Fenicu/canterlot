@@ -32,8 +32,8 @@ setup_fast() {
 }
 finish_fast() { drop_fast_source; teardown_case; }
 fcut() {
-    # fcut РЕЖИМ... : cutover.sh с источником-репозиторием
-    bash "${DEPLOY_DIR}/cutover.sh" "$@" --source "${FAST_SRC}" --dist "${FAKE_ROOT}/dist" \
+    # fcut РЕЖИМ... : cutover.sh с источником-репозиторием; ssh-команды пишутся в state/ssh-cmds.log
+    FAKE_SSH_LOG_CMDS=1 bash "${DEPLOY_DIR}/cutover.sh" "$@" --source "${FAST_SRC}" --dist "${FAKE_ROOT}/dist" \
         --state "${FAKE_ROOT}/snap.state" >"${FAKE_ROOT}/cutover.log" 2>&1
 }
 rehearse_skip() { fcut "${SHA_NEW}" --rehearse --skip-ct-backup "$@"; }
@@ -170,10 +170,11 @@ no_writes_yet() {
     local why="$1"
     worker_stopped_ever && case_fail "${why}: worker stopped" || case_ok "${why}: worker untouched"
     grep -qE '^(vzdump|pg_dump) ' "${FAKE_ROOT}/state/calls.log" && case_fail "${why}: vzdump or pg_dump ran" || case_ok "${why}: no vzdump, no pg_dump"
-    if ls "${HUB_BASE}"/.reserved.* "${WEB_SITES_BASE}"/.reserved.* "${WORKER_BASE}"/.reserved.* >/dev/null 2>&1; then
-        case_fail "${why}: reservation markers were written"
+    # Маркеры резерва снимаются при выходе, поэтому по остатку их не видно: проверяем сами команды ssh.
+    if grep -q '\.reserved\.' "${FAKE_ROOT}/state/ssh-cmds.log" 2>/dev/null; then
+        case_fail "${why}: a reservation command was sent to a host"
     else
-        case_ok "${why}: zero reservation writes"
+        case_ok "${why}: zero reservation writes (no reserve command reached any host)"
     fi
 }
 # Манифест целевого хаба против базы: версия, которой в базе нет, — полный путь (отказ до записи).
@@ -302,199 +303,6 @@ stop_after_flip --confirm "${TOK}"
 assert_eq "$(result_of "${FAKE_ROOT}/exe.result" vzdump_done)/$(result_of "${FAKE_ROOT}/exe.result" vzdump_skipped)" "yes/no" "result: vzdump_done=yes, vzdump_skipped=no"
 assert_contains "${STOP_BLOCK}" "this run's vzdump = notes pre-${SHA_NEW}-" "live state: the vzdump is named"
 assert_contains "${STOP_BLOCK}" "The vzdump above is a separate" "recovery step 2 keeps the vzdump fallback"
-finish_fast
-case_end
-
-# ------------------------------------------------------------ базовое состояние закреплено
-# Крючок, который «вручную» переключает ссылку веба на другой релиз.
-make_drift_hook() {
-    mkdir -p "${WEB_RELEASES}/cccccccccccc/_app"
-    printf '#!/usr/bin/env bash\nln -sfn releases/cccccccccccc "%s"\n' "${WEB_BUILD_LINK}" >"${FAKE_ROOT}/drift-hook.sh"
-}
-case_begin "the baseline drifting during the preflight refuses the fast path before any write"
-setup_fast driftpre other
-make_drift_hook
-export FAKE_CARGO_HOOK="${FAKE_ROOT}/drift-hook.sh"
-if fcut --execute "${SHA_NEW}" --fast --result "${FAKE_ROOT}/x.result"; then case_fail "exit 0 after a drift"; else case_ok "exit nonzero"; fi
-unset FAKE_CARGO_HOOK
-assert_eq "$(result_of "${FAKE_ROOT}/x.result" status)/$(result_of "${FAKE_ROOT}/x.result" fail_codes)" "refused/fast_path_refused" "refused with the fallback code"
-assert_contains "${FAKE_ROOT}/cutover.log" "web link" "the drifted link is named"
-no_writes_yet "drift during the preflight"
-finish_fast
-case_end
-
-case_begin "the baseline drifting during the preflight stops a full run too (baseline_drift)"
-setup_fast driftfull migration
-printf 'MIGR_MAX=40\nFAILED=0\npayload-predump\n' >"${FAKE_ROOT}/state/db.txt"
-sed -i 's/^migrations_last=.*/migrations_last=0040_monthly_limits.sql/' "${HUB_RELEASES}/${SHA_PREV}/RELEASE" "${WORKER_RELEASES}/${SHA_PREV}/RELEASE"
-fcut "${SHA_NEW}" --rehearse --result "${FAKE_ROOT}/reh.result" || true
-TOK="$(result_of "${FAKE_ROOT}/reh.result" token)"
-make_drift_hook
-export FAKE_CARGO_HOOK="${FAKE_ROOT}/drift-hook.sh"
-if fcut --execute "${SHA_NEW}" --confirm "${TOK}" --result "${FAKE_ROOT}/x.result"; then case_fail "exit 0 after a drift"; else case_ok "exit nonzero"; fi
-unset FAKE_CARGO_HOOK
-assert_eq "$(result_of "${FAKE_ROOT}/x.result" fail_codes)" "baseline_drift" "fail code baseline_drift"
-no_writes_yet "full run drift"
-finish_fast
-case_end
-
-case_begin "the baseline drifting after the regate and before the stop leaves the worker running"
-setup_fast driftstop other
-make_drift_hook
-export FAKE_SSH_AFTER_HOOK="${FAKE_ROOT}/drift-hook.sh" FAKE_SSH_AFTER_CMD="select distinct conversation_id" FAKE_SSH_AFTER_NTH=2
-if fcut --execute "${SHA_NEW}" --fast --result "${FAKE_ROOT}/x.result"; then case_fail "exit 0 after a drift"; else case_ok "exit nonzero"; fi
-unset FAKE_SSH_AFTER_HOOK FAKE_SSH_AFTER_CMD FAKE_SSH_AFTER_NTH
-assert_eq "$(result_of "${FAKE_ROOT}/x.result" fail_codes)" "baseline_drift" "fail code baseline_drift"
-assert_contains "${FAKE_ROOT}/cutover.log" "changed after it was approved" "reason printed"
-worker_stopped_ever && case_fail "worker stopped" || case_ok "worker never stopped"
-grep -qE '^pg_dump ' "${FAKE_ROOT}/state/calls.log" && case_fail "pg_dump ran" || case_ok "no pg_dump"
-hub_is "${SHA_PREV}" && case_ok "hub untouched" || case_fail "hub moved"
-finish_fast
-case_end
-
-case_begin "the forward flip scripts refuse when the link is no longer the approved release"
-setup_fast flipold other
-FLIPDIR="${FAKE_ROOT}/flipdir"
-mkdir -p "${FLIPDIR}/releases/old/bin" "${FLIPDIR}/releases/new/bin" "${FLIPDIR}/releases/other"
-printf 'x' >"${FLIPDIR}/releases/new/RELEASE"; printf 'x' >"${FLIPDIR}/releases/new/SHA256SUMS"
-printf '#!/bin/sh\n' >"${FLIPDIR}/releases/new/bin/canterlot-hub"; chmod +x "${FLIPDIR}/releases/new/bin/canterlot-hub"
-mkdir -p "${FLIPDIR}/releases/new/_app"; printf '#!/bin/sh\n' >"${FLIPDIR}/releases/new/bin/canterlot-worker"
-flip_run() { bash -c "$(bash -c 'source "$1/lib.sh"; printf "%s" "${!2}"' _ "${DEPLOY_DIR}" "$1")" -- "${@:2}"; }
-ln -sfn releases/old "${FLIPDIR}/current"; ln -sfn releases/old "${FLIPDIR}/build"
-flip_run HUB_FLIP_FWD_SCRIPT "${FLIPDIR}" new "${FLIPDIR}/current" other >/dev/null 2>&1 && case_fail "hub flip ignored the expected-old" || case_ok "hub flip refuses a link that is not the approved release"
-assert_eq "$(readlink "${FLIPDIR}/current")" "releases/old" "hub link untouched"
-flip_run HUB_FLIP_FWD_SCRIPT "${FLIPDIR}" new "${FLIPDIR}/current" old >/dev/null 2>&1 && case_ok "hub flip proceeds from the approved release" || case_fail "hub flip refused the approved release"
-assert_eq "$(readlink "${FLIPDIR}/current")" "releases/new" "hub link moved"
-ln -sfn releases/other "${FLIPDIR}/current"
-flip_run WORKER_FLIP_FWD_SCRIPT "${FLIPDIR}" new old >/dev/null 2>&1 && case_fail "worker flip ignored the expected-old" || case_ok "worker flip refuses a link that is not the approved release"
-ln -sfn releases/old "${FLIPDIR}/current"
-flip_run WORKER_FLIP_FWD_SCRIPT "${FLIPDIR}" new old >/dev/null 2>&1 && case_ok "worker flip proceeds from the approved release" || case_fail "worker flip refused the approved release"
-ln -sfn releases/other "${FLIPDIR}/build"
-flip_run WEB_FLIP_FWD_SCRIPT "${FLIPDIR}" new "${FLIPDIR}/build" old >/dev/null 2>&1 && case_fail "web flip ignored the expected-old" || case_ok "web flip refuses a link that is not the approved release"
-assert_eq "$(readlink "${FLIPDIR}/build")" "releases/other" "web link untouched"
-finish_fast
-case_end
-
-# ------------------------------------------------------------ артефакт и манифест согласованы до записи
-case_begin "a manifest that contradicts RELEASE migrations_last stops before any write"
-setup_fast manifestrel other
-sed -i 's/^migrations_last=.*/migrations_last=0042_contradiction.sql/' "${DIST_DIR}/RELEASE"
-dist_resync
-stage_cutover_dist
-for mode in "--execute ${SHA_NEW} --fast" "${SHA_NEW} --rehearse --skip-ct-backup" "${SHA_NEW} --dry-run --skip-ct-backup"; do
-    # shellcheck disable=SC2086 # режим — несколько слов
-    if fcut ${mode} --result "${FAKE_ROOT}/x.result"; then case_fail "${mode}: exit 0"; else case_ok "${mode}: refused"; fi
-    assert_eq "$(result_of "${FAKE_ROOT}/x.result" fail_codes)" "manifest_release_mismatch" "${mode}: invalid artifact code (no fallback to the full path)"
-    assert_contains "${FAKE_ROOT}/cutover.log" "42" "${mode}: the RELEASE value is named"
-done
-assert_eq "$(result_of "${FAKE_ROOT}/x.result" token)" "" "the dry-run gives no token"
-no_writes_yet "contradictory migrations_last"
-finish_fast
-case_end
-
-case_begin "the staged manifest runs as the hub service account under a timeout; a hanging binary refuses"
-setup_fast manifestuser other
-export FAKE_SSH_LOG_CMDS=1
-fcut --execute "${SHA_NEW}" --fast --result "${FAKE_ROOT}/exe.result" || true
-unset FAKE_SSH_LOG_CMDS
-grep -E 'migrations manifest --json' "${FAKE_ROOT}/state/ssh-cmds.log" | grep -q "runuser -u ${HUB_SERVICE_USER:-canterlot} -- timeout 30 " && case_ok "runuser -u <service account> -- timeout 30 <staged binary> migrations manifest --json" || case_fail "the manifest is not run as the service account under timeout 30"
-finish_fast
-case_end
-case_begin "a staged binary that hangs on the manifest is refused at the timeout"
-setup_fast manifesthang other
-: >"${FAKE_ROOT}/state/manifest-hang"
-export MANIFEST_TIMEOUT=1
-if fcut --execute "${SHA_NEW}" --fast --result "${FAKE_ROOT}/x.result"; then case_fail "exit 0 with a hanging manifest"; else case_ok "exit nonzero"; fi
-unset MANIFEST_TIMEOUT
-assert_eq "$(result_of "${FAKE_ROOT}/x.result" status)/$(result_of "${FAKE_ROOT}/x.result" fail_codes)" "refused/fast_path_refused" "refused before any write, fallback code"
-no_writes_yet "hanging manifest"
-finish_fast
-case_end
-
-# ------------------------------------------------------------ одно и то же состояние git в обоих режимах пропуска
-case_begin "--skip-ct-backup binds the checkout, the toolkit and the token plan to the target"
-setup_fast skipgit tooling
-if fcut "${SHA_NEW}" --rehearse --skip-ct-backup --result "${FAKE_ROOT}/reh.result"; then case_ok "the rehearsal passes on the target checkout"; else case_fail "rehearsal failed"; tail -5 "${FAKE_ROOT}/cutover.log"; fi
-SKIP_TOKEN="$(result_of "${FAKE_ROOT}/reh.result" token)"
-OTHER_SRC="${FAKE_ROOT}/other-checkout"
-git clone -q "${FAST_SRC}" "${OTHER_SRC}"
-git -C "${OTHER_SRC}" checkout -q "${FAST_LIVE_FULL}"
-if bash "${DEPLOY_DIR}/cutover.sh" --execute "${SHA_NEW}" --confirm "${SKIP_TOKEN}" --skip-ct-backup --source "${OTHER_SRC}" \
-        --dist "${FAKE_ROOT}/dist" --state "${FAKE_ROOT}/snap.state" --result "${FAKE_ROOT}/x.result" >"${FAKE_ROOT}/cutover.log" 2>&1; then
-    case_fail "a token run with another --source was accepted"
-else
-    case_ok "a token run with another --source is refused"
-fi
-assert_eq "$(result_of "${FAKE_ROOT}/x.result" status)/$(result_of "${FAKE_ROOT}/x.result" fail_codes)" "refused/token_plan_changed" "the checkout identity is part of the plan"
-no_writes_yet "another --source"
-if bash "${DEPLOY_DIR}/cutover.sh" "${SHA_NEW}" --rehearse --skip-ct-backup --source "${OTHER_SRC}" --dist "${FAKE_ROOT}/dist" \
-        --state "${FAKE_ROOT}/snap.state" --result "${FAKE_ROOT}/y.result" >"${FAKE_ROOT}/cutover.log" 2>&1; then
-    case_fail "a skip rehearsal on a checkout that is not at the target passed"
-else
-    case_ok "a skip rehearsal on a checkout that is not at the target fails"
-fi
-assert_contains "${FAKE_ROOT}/cutover.log" "not at the target" "reason: the checkout is not at the target"
-finish_fast
-case_end
-
-# ------------------------------------------------------------ восстановление по записанным фактам
-case_begin "a skip-mode dump read-back failure before the flip: the planned dump is not a restore point"
-setup_fast recdumpfail other
-export FAKE_DUMP_CORRUPT=1
-fcut --execute "${SHA_NEW}" --fast --result "${FAKE_ROOT}/exe.result" || true
-unset FAKE_DUMP_CORRUPT
-assert_eq "$(result_of "${FAKE_ROOT}/exe.result" status)" "failed_before_flip" "result: failed_before_flip"
-assert_eq "$(result_of "${FAKE_ROOT}/exe.result" dump_verified)/$(result_of "${FAKE_ROOT}/exe.result" dump)" "no/" "result: no verified dump named"
-STOP_BLOCK="$(result_of "${FAKE_ROOT}/exe.result" stop_block)"
-[ -f "${STOP_BLOCK}" ] && case_ok "the recovery report exists" || case_fail "no recovery report"
-assert_contains "${STOP_BLOCK}" "this run's dump   = none usable" "the dump line says there is no usable dump"
-assert_contains "${STOP_BLOCK}" "this run's vzdump = none (skipped:" "the vzdump line says skipped"
-assert_not_contains "${STOP_BLOCK}" "verified readable before the hub flip)" "no claim of a verified dump"
-hub_is "${SHA_PREV}" && case_ok "hub untouched" || case_fail "hub moved"
-FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-worker && case_ok "the worker is back on its previous release" || case_fail "the worker is not running"
-finish_fast
-case_end
-
-case_begin "a wrong cluster fails the dump before the flip and the manual restore refuses it"
-setup_fast recwrongcluster other
-export FAKE_PG_SOCKET=/run/another-cluster
-fcut --execute "${SHA_NEW}" --fast --result "${FAKE_ROOT}/exe.result" || true
-assert_eq "$(result_of "${FAKE_ROOT}/exe.result" status)" "failed_before_flip" "the dump on another cluster stops the run before the flip"
-hub_is "${SHA_PREV}" && case_ok "hub untouched" || case_fail "hub moved"
-cp "${FAKE_ROOT}/state/db.txt" "${FAKE_ROOT}/db-before-restore.txt"
-printf 'TOC-LINE-02 _sqlx_migrations table\n' >"${HUB_BACKUP_DIR}/canterlot-pre-manual.dump"
-if bash "${DEPLOY_DIR}/rollback-db.sh" "${HUB_BACKUP_DIR}/canterlot-pre-manual.dump" --to "${SHA_PREV}" >"${FAKE_ROOT}/rollback.log" 2>&1; then case_fail "the restore ran on the wrong cluster"; else case_ok "rollback-db.sh refuses the wrong cluster"; fi
-cmp -s "${FAKE_ROOT}/state/db.txt" "${FAKE_ROOT}/db-before-restore.txt" && case_ok "the database was not touched" || case_fail "the database changed"
-unset FAKE_PG_SOCKET
-finish_fast
-case_end
-
-case_begin "forward-only recovery after the worker is live (skip mode) names no vzdump"
-setup_fast recforward other
-export FAKE_SITE_FAIL=meeting.example.com
-fcut --execute "${SHA_NEW}" --fast --result "${FAKE_ROOT}/exe.result" || true
-unset FAKE_SITE_FAIL
-assert_eq "$(result_of "${FAKE_ROOT}/exe.result" status)" "stop_and_report" "result: stop_and_report after the worker is live"
-STOP_BLOCK="$(result_of "${FAKE_ROOT}/exe.result" stop_block)"
-assert_contains "${STOP_BLOCK}" "recovery is forward-only" "forward-only recovery"
-assert_contains "${STOP_BLOCK}" "this run's vzdump = none (skipped:" "no vzdump named"
-assert_not_contains "${STOP_BLOCK}" "notes pre-${SHA_NEW}-" "no vzdump notes"
-assert_not_contains "${STOP_BLOCK}" "The vzdump above" "no vzdump fallback text"
-hub_is "${SHA_NEW}" && worker_is "${SHA_NEW}" && case_ok "hub and worker stay new" || case_fail "not on new"
-finish_fast
-case_end
-
-case_begin "the printed rollback of a fast run runs verbatim and restores the data"
-setup_fast recrollback other
-export FAKE_READYZ_NEW=0
-fcut --execute "${SHA_NEW}" --fast --result "${FAKE_ROOT}/exe.result" || true
-unset FAKE_READYZ_NEW
-assert_eq "$(result_of "${FAKE_ROOT}/exe.result" status)" "stop_and_report" "result: stop_and_report"
-printf 'MIGR_MAX=41\nFAILED=0\nchanged-after-the-dump\n' >"${FAKE_ROOT}/state/db.txt"
-RECOVERY_CMD="$(grep -m1 'scripts/deploy/rollback-db.sh' "${FAKE_ROOT}/cutover.log" | sed 's/^[[:space:]]*//')"
-if [ -n "${RECOVERY_CMD}" ] && ( cd "${REPO_ROOT}" && eval "${RECOVERY_CMD}" ) >"${FAKE_ROOT}/recovery.log" 2>&1; then case_ok "the printed recovery command runs verbatim"; else case_fail "the printed recovery command failed"; tail -3 "${FAKE_ROOT}/recovery.log" 2>/dev/null; fi
-grep -q 'payload-predump' "${FAKE_ROOT}/state/db.txt" && case_ok "the restored data is the dump's" || case_fail "the data was not restored from the dump"
-hub_is "${SHA_PREV}" && case_ok "recovery flipped the hub back" || case_fail "the hub was not flipped back"
 finish_fast
 case_end
 

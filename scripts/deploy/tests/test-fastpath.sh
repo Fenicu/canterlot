@@ -45,7 +45,7 @@ check_route "a version-only bump of Cargo.toml, Cargo.lock and package.json: fas
 check_route "release.sh changed" rehearsed run skip "scripts/release.sh" release-sh
 check_route "build-release.sh changed" rehearsed run skip "scripts/build-release.sh" build-sh
 check_route "publish-release.sh changed" rehearsed run skip "scripts/publish-release.sh" publish-sh
-check_route "scripts/deploy changed" rehearsed run skip "scripts/deploy/lib.sh" tooling
+check_route "scripts/deploy changed" rehearsed run skip "scripts/deploy/tests/note.txt" tooling
 check_route "any other script changed" rehearsed run skip "scripts/extra.sh" script
 check_route "the release-build Dockerfile changed" rehearsed run skip "docker/release-build/Dockerfile" docker
 check_route "rust-toolchain.toml changed" rehearsed run skip "rust-toolchain.toml" toolchain
@@ -228,10 +228,14 @@ printf '{"version":"%s"}' "cccccccccccc" >"${FAKE_ROOT}/container/version.json"
 assert_eq "$(fp_get "$(fastpath_cli)" path)" "full" "the served PWA is not the web link's release"
 printf '{"version":"%s"}' "${SHA_PREV}" >"${FAKE_ROOT}/container/version.json"
 assert_eq "$(fp_get "$(fastpath_cli)" path)" "fast" "control: restored"
-ln -sfn "releases/cccccccccccc" "${HUB_CURRENT}"
-mkdir -p "${HUB_RELEASES}/cccccccccccc/bin"
-cp "${FAKE_WORKER_BIN}" "${HUB_RELEASES}/cccccccccccc/bin/canterlot-hub"
-assert_eq "$(fp_get "$(fastpath_cli)" path)" "full" "the running hub executable is not from the link's release"
+# Все три ссылки согласованы, каталоги целы; расходится только работающий процесс: хаб запущен из
+# каталога, который переименовали (его exe теперь указывает на старый путь).
+mv "${HUB_RELEASES}/${SHA_PREV}" "${HUB_RELEASES}/${SHA_PREV}.running"
+cp -r "${HUB_RELEASES}/${SHA_PREV}.running" "${HUB_RELEASES}/${SHA_PREV}"
+assert_eq "$(readlink "${HUB_CURRENT}" | sed 's|.*/||')/$(readlink "${WORKER_CURRENT}" | sed 's|.*/||')" "${SHA_PREV}/${SHA_PREV}" "the links of hub and worker still agree"
+OUT="$(fastpath_cli)"
+assert_eq "$(fp_get "${OUT}" path)" "full" "the running hub executable is not from the linked release"
+case "$(fp_get "${OUT}" reasons)" in *"running hub executable"*) case_ok "the reason is the running process, not mixed link ids" ;; *) case_fail "reason: $(fp_get "${OUT}" reasons)" ;; esac
 drop_fast_source
 teardown_case
 case_end

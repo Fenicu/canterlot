@@ -592,6 +592,28 @@ baseline_verify() {
     return 0
 }
 
+# Замок прогона: fd 8 держит flock на DEPLOY_LOCK_FILE до выхода процесса (дочерние скрипты наследуют
+# дескриптор, поэтому замок живёт и пока работает любой из них). Занят — отказ с кодом deploy_locked.
+take_deploy_lock() {
+    local what="$1"
+    mkdir -p "$(dirname "${DEPLOY_LOCK_FILE}")" 2>/dev/null || true  # lint: local-temp
+    exec 8>>"${DEPLOY_LOCK_FILE}" || { fail_mark; fail_code deploy_locked; die_after "cannot open the deploy lock ${DEPLOY_LOCK_FILE}"; }
+    if ! flock -n 8; then
+        fail_mark
+        fail_code deploy_locked
+        die_after "deploy_locked: another cutover or rollback holds ${DEPLOY_LOCK_FILE}: ${what} does not start (wait for it to finish, or read its log)"
+    fi
+}
+
+# Идентичность кластера и базы, как её видит суперпользователь по явному сокету: "<system_identifier> <oid базы>".
+# Печатается тем же сокетом и той же базой, что берут проверка, дамп и восстановление.
+pg_identity() {
+    local out
+    out="$(ssh_hub "runuser -u postgres -- psql -h '${HUB_PG_SOCKET}' -d '${HUB_PG_DB}' -tAc \"select (select system_identifier::text from pg_control_system()) || ' ' || (select oid::text from pg_database where datname = current_database())\"")" || return 1
+    [[ "${out}" =~ ^[0-9]+\ [0-9]+$ ]] || return 1
+    printf '%s' "${out}"
+}
+
 # Быстрый путь выпуска. Решает по точным хэшам коммитов и git diff между развёрнутым
 # релизом и целью, какие шаги можно не делать, и печатает ключ=значение:
 #   path=fast|rehearsed|full   fast — без репетиции и без vzdump; rehearsed — репетиция

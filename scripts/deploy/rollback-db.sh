@@ -29,15 +29,21 @@ source "${SCRIPT_DIR}/lib.sh"
 
 DUMP=""
 TO_RELEASE=""
+EXPECT_SYS=""
+EXPECT_OID=""
 while (($#)); do
     case "$1" in
         --to) TO_RELEASE="$(short_sha "$2")"; shift 2 ;;
+        --expect-system-id) EXPECT_SYS="$2"; shift 2 ;;
+        --expect-db-oid) EXPECT_OID="$2"; shift 2 ;;
         -*) die "unknown flag: $1" ;;
         *) DUMP="$1"; shift ;;
     esac
 done
 [ -n "${DUMP}" ] || die "usage: rollback-db.sh <dump> [--to <release>]"
 [ -z "${TO_RELEASE}" ] || require_release_id "${TO_RELEASE}"
+# Тот же замок, что у cutover: откат не идёт параллельно выкату и не разбирает его состояние на лету.
+take_deploy_lock "this rollback"
 XDG_RUNTIME_DIR="/run/user/$(id -u)"
 export XDG_RUNTIME_DIR
 # Правило отката (ADR-0005): хаб без собственного входа (1.29 и раньше) верит
@@ -131,6 +137,23 @@ assert_worker_stopped() {
     fi
     log "worker is provably stopped (${active_state}/${sub_state}, no MainPID, no worker process; ${phase})"
 }
+
+# Кластер и база те же, что у дампа: сверка ДО остановки хаба и любого dropdb. Ожидаемые значения
+# печатает cutover в команде отката; без них — запись рядом с дампом (.identity); нет и её — громкое
+# предупреждение (дамп старого прогона).
+if [ -z "${EXPECT_SYS}${EXPECT_OID}" ]; then
+    ID_FILE="$(ssh_hub "cat '${DUMP}.identity'" 2>/dev/null)" || ID_FILE=""
+    EXPECT_SYS="$(printf '%s\n' "${ID_FILE}" | sed -n 's/^system_identifier=//p' | sed -n 1p)"
+    EXPECT_OID="$(printf '%s\n' "${ID_FILE}" | sed -n 's/^database_oid=//p' | sed -n 1p)"
+fi
+if [ -z "${EXPECT_SYS}" ] || [ -z "${EXPECT_OID}" ]; then
+    log "WARNING: no recorded cluster identity for ${DUMP} (no --expect-system-id/--expect-db-oid, no ${DUMP}.identity): the cluster is NOT verified; read the target before going on"
+else
+    CUR_ID="$(pg_identity)" || die "cannot read the cluster identity of ${HUB_PG_DB} on ${HUB_PG_SOCKET}: refusing to touch the database"
+    [ "${CUR_ID% *}" = "${EXPECT_SYS}" ] || die "the cluster at ${HUB_PG_SOCKET} has system identifier ${CUR_ID% *}, the dump was taken from ${EXPECT_SYS}: refusing before the hub stops (wrong cluster)"
+    [ "${CUR_ID#* }" = "${EXPECT_OID}" ] || die "the database ${HUB_PG_DB} has database oid ${CUR_ID#* }, the dump was taken from oid ${EXPECT_OID}: refusing before the hub stops"
+    log "cluster identity verified: system identifier ${EXPECT_SYS}, database oid ${EXPECT_OID}"
+fi
 
 log "rollback-db: refusing unless the worker is provably stopped"
 assert_worker_stopped "before any change"
