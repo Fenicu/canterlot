@@ -310,6 +310,7 @@
 	<Timeline
 		{chat}
 		{interrupt}
+		focusReport={page.url.searchParams.get('routine_report')}
 		onInfo={(runId) => {
 			infoRunId = runId;
 			onInfo?.(runId);

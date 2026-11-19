@@ -20,6 +20,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(create, list))
         .routes(routes!(get, update, remove))
         .routes(routes!(create_side, remove_side))
+        .routes(routes!(dismiss_routine_report))
         .routes(routes!(restore))
         .routes(routes!(purge_trash))
         .routes(routes!(set_groups))
@@ -1142,6 +1143,32 @@ async fn remove_side(
     Correlation(c): Correlation,
 ) -> Result<StatusCode, ApiError> {
     crate::side::remove(&s.pool, o.owner_id, id, c).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// «Завершить» на карточке рутины: карточка уходит из ленты у всех клиентов
+/// (`routine_report_dismissed`). Повтор безвреден и второго события не даёт; текст отчёта
+/// остаётся в истории запусков расписания.
+#[utoipa::path(
+    post, path="/api/v1/conversations/{id}/routine-reports/{report_id}/dismiss", tag="conversations",
+    params(("id"=Uuid,Path),("report_id"=Uuid,Path)),
+    responses(
+        (status=204,description="Карточка закрыта; повтор безвреден"),
+        (status=404,description="not_found: нет такого разговора или карточки",body=super::error::ErrorEnvelope)
+    )
+)]
+async fn dismiss_routine_report(
+    State(s): State<AppState>,
+    o: Owner,
+    ApiPath((id, report_id)): ApiPath<(Uuid, Uuid)>,
+    Correlation(c): Correlation,
+) -> Result<StatusCode, ApiError> {
+    crate::routines::dismiss(&s.pool, o.owner_id, id, report_id, c)
+        .await
+        .map_err(|error| match error {
+            crate::routines::DismissError::NotFound => ApiError::new(ErrorCode::NotFound),
+            crate::routines::DismissError::Db(error) => error.into(),
+        })?;
     Ok(StatusCode::NO_CONTENT)
 }
 

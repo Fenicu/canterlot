@@ -1096,6 +1096,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/conversations/{id}/routine-reports/{report_id}/dismiss": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * «Завершить» на карточке рутины: карточка уходит из ленты у всех клиентов
+         *     (`routine_report_dismissed`). Повтор безвреден и второго события не даёт; текст отчёта
+         *     остаётся в истории запусков расписания.
+         */
+        post: operations["post__api_v1_conversations__id__routine_reports__report_id__dismiss"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/conversations/{id}/runs/{run_id}": {
         parameters: {
             query?: never;
@@ -2650,6 +2671,8 @@ export interface components {
             open_requests: components["schemas"]["RequestView"][];
             prompt_suggestion?: components["schemas"]["PromptSuggestionView"] | null;
             queue: components["schemas"]["SnapshotQueueView"];
+            /** @description Открытые карточки рутин: отчёт собирается, готов или не собран. Не ввод и не блок ленты. */
+            routine_reports: components["schemas"]["RoutineReportView"][];
             scheduled: components["schemas"]["ScheduledMessage"][];
             /** @description Очередь запусков этого разговора: ожидающие и недавно завершённые. */
             spawn_queue: components["schemas"]["QueueItemView"][];
@@ -4523,6 +4546,14 @@ export interface components {
             project_key?: string;
             scope: string;
         };
+        ReportError: {
+            /** @description Готовая строка для карточки. */
+            message: string;
+            /** @description Код причины: `no_native_session`, `copy_failed`, `turn_timeout` и т. п. */
+            reason: string;
+        };
+        /** @enum {string} */
+        ReportState: "pending" | "ready" | "failed";
         /**
          * @description Вопрос или разрешение на том месте ленты, где агент его задал: открытый запрос
          *     стоит у поля ввода, решённый остаётся здесь и после перезагрузки.
@@ -4614,6 +4645,33 @@ export interface components {
         RouteTarget: {
             level?: string | null;
             task_type: string;
+        };
+        /** @description Карточка отчёта в ленте родителя. */
+        RoutineReportView: {
+            /** @description Текст отчёта в Markdown: ответ копии на промпт расписания. */
+            body?: string | null;
+            /** Format: date-time */
+            completed_at?: string | null;
+            /**
+             * Format: uuid
+             * @description Разговор, в ленте которого лежит карточка.
+             */
+            conversation_id: string;
+            /** Format: date-time */
+            created_at: string;
+            error?: components["schemas"]["ReportError"] | null;
+            /** Format: uuid */
+            id: string;
+            /**
+             * Format: uuid
+             * @description Запуск расписания; пустой, если журнал запусков его уже убрал.
+             */
+            run_id?: string | null;
+            /** Format: uuid */
+            schedule_id: string;
+            state: components["schemas"]["ReportState"];
+            /** @description Заголовок из шаблона расписания; клиент показывает его как «Рутина · …». */
+            title: string;
         };
         RoutingPolicyBody: {
             policy: components["schemas"]["Policy"] | null;
@@ -4756,7 +4814,7 @@ export interface components {
             items: components["schemas"]["ScheduleRun"][];
             next_cursor?: string | null;
         };
-        /** @description Цель запуска: новая сессия на машине или существующий разговор. */
+        /** @description Цель запуска: новая сессия на машине, существующий разговор или отчёт из контекста сессии. */
         ScheduleTarget: {
             executor?: components["schemas"]["ExplicitExecutor"] | null;
             /** Format: uuid */
@@ -4774,6 +4832,11 @@ export interface components {
             conversation_id: string;
             /** @enum {string} */
             kind: "existing_session";
+        } | {
+            /** Format: uuid */
+            conversation_id: string;
+            /** @enum {string} */
+            kind: "session_report";
         };
         ScheduledMessage: {
             attachment_ids: string[];
@@ -4966,6 +5029,8 @@ export interface components {
                 open_requests: components["schemas"]["RequestView"][];
                 prompt_suggestion?: components["schemas"]["PromptSuggestionView"] | null;
                 queue: components["schemas"]["SnapshotQueueView"];
+                /** @description Открытые карточки рутин: отчёт собирается, готов или не собран. Не ввод и не блок ленты. */
+                routine_reports: components["schemas"]["RoutineReportView"][];
                 scheduled: components["schemas"]["ScheduledMessage"][];
                 /** @description Очередь запусков этого разговора: ожидающие и недавно завершённые. */
                 spawn_queue: components["schemas"]["QueueItemView"][];
@@ -9081,6 +9146,51 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["StartedExecution"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    post__api_v1_conversations__id__routine_reports__report_id__dismiss: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                report_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Карточка закрыта; повтор безвреден */
+            204: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description not_found: нет такого разговора или карточки */
+            404: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */

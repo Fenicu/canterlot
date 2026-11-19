@@ -297,6 +297,22 @@ async fn seed_everything(f: &Fixture, conversation: Uuid, machine: Uuid, group: 
         &[conversation, execution, Uuid::now_v7()],
     )
     .await;
+    // Карточка рутины в ленте разговора уходит вместе с ним; расписание остаётся.
+    let schedule = Uuid::now_v7();
+    exec(
+        pool,
+        "insert into schedules(id,owner_id,name,cron,timezone,target,prompt,next_fire_at)
+         values($1,$2,'Рутина','0 9 * * *','UTC','{\"kind\":\"session_report\"}','подсказка',now())",
+        &[schedule, owner],
+    )
+    .await;
+    exec(
+        pool,
+        "insert into routine_reports(id,owner_id,conversation_id,schedule_id,title,state)
+         values($1,$2,$3,$4,'Рутина · 01.01','pending')",
+        &[Uuid::now_v7(), owner, conversation, schedule],
+    )
+    .await;
     // Потомок и подписки в обе стороны: после удаления остаются потомок без родителя и ничего больше.
     let delegate = f.conversation().await;
     exec(

@@ -56,6 +56,8 @@ export interface ListRow {
   groups: string[];
   group_pins: GroupPin[];
   parent_id: string | null;
+  /** Родитель боковой копии: сама копия скрытый читатель, её не выбирают целью расписания. */
+  side_of?: string | null;
   spawn_depth: number;
   machine: { id: string; name: string };
   harness: { id: string; title: string; provider: string };

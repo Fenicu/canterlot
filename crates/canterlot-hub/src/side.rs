@@ -181,16 +181,15 @@ pub async fn create(
             .fetch_optional(&mut *conn)
             .await?
             .ok_or(SideError::NotFound)?;
-            let harness: String = parent.try_get("harness")?;
             if parent.try_get::<Option<Uuid>, _>("side_of")?.is_some() {
                 return Err(SideError::ParentIsSide);
             }
-            let machine_id: Uuid = parent.try_get("machine_id")?;
             if !capability {
                 return Err(SideError::CapabilityMissing);
             }
             if let Some(existing) = sqlx::query_scalar::<_, Uuid>(
-                "select id from conversations where side_of=$1 and trashed_at is null",
+                "select id from conversations
+                  where side_of=$1 and side_kind='chat' and trashed_at is null",
             )
             .bind(parent_id)
             .fetch_optional(&mut *conn)
@@ -207,35 +206,7 @@ pub async fn create(
             if parent_busy(&mut *conn, parent_id).await? {
                 return Err(SideError::ParentBusy);
             }
-            let id = Uuid::now_v7();
-            sqlx::query(
-                "insert into conversations
-                   (id,owner_id,machine_id,harness,workdir,title,title_source,model,effort,
-                    permission_mode,instruction_profile,instruction_preset_revision,
-                    crunch_enabled,parent_conversation_id,spawn_depth,side_of)
-                 values($1,$2,$3,$4,$5,$6,'auto',$7,$8,'read_only','clean',null,
-                        false,null,0,$9)",
-            )
-            .bind(id)
-            .bind(owner_id)
-            .bind(machine_id)
-            .bind(&harness)
-            .bind(parent.try_get::<String, _>("workdir")?)
-            .bind(parent.try_get::<String, _>("title")?)
-            .bind(parent.try_get::<String, _>("model")?)
-            .bind(parent.try_get::<String, _>("effort")?)
-            .bind(parent_id)
-            .execute(&mut *conn)
-            .await?;
-            sqlx::query("insert into queue_state(conversation_id,hold_reasons) values($1,$2)")
-                .bind(id)
-                .bind(sqlx::types::Json(vec![HoldReason::NoLiveExecution]))
-                .execute(&mut *conn)
-                .await?;
-            sqlx::query("insert into conversation_derived(conversation_id,effective_model,effective_effort,effective_permission_mode,crunch_enabled,hold_reasons,activity_evidence) select id,model,effort,permission_mode,crunch_enabled,q.hold_reasons,'{\"kind\":\"idle\",\"last_turn_at\":null,\"background_work\":null}' from conversations c join queue_state q on q.conversation_id=c.id where c.id=$1")
-                .bind(id)
-                .execute(&mut *conn)
-                .await?;
+            let id = insert_copy_in_tx(&mut *conn, owner_id, parent_id, &parent, "chat").await?;
             let _ = correlation_id;
             Ok(SideView {
                 conversation_id: id,
@@ -244,6 +215,50 @@ pub async fn create(
         })
     })
     .await
+}
+
+/// Строка скрытой копии родителя: read-only, без очереди и родителя в дереве делегатов.
+/// Родитель уже заблокирован вызывающим. Вид копии (`chat` или `report`) ложится в метку.
+pub(crate) async fn insert_copy_in_tx(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    parent_id: Uuid,
+    parent: &sqlx::postgres::PgRow,
+    kind: &str,
+) -> Result<Uuid, sqlx::Error> {
+    let harness: String = parent.try_get("harness")?;
+    let machine_id: Uuid = parent.try_get("machine_id")?;
+    let id = Uuid::now_v7();
+    sqlx::query(
+        "insert into conversations
+           (id,owner_id,machine_id,harness,workdir,title,title_source,model,effort,
+            permission_mode,instruction_profile,instruction_preset_revision,
+            crunch_enabled,parent_conversation_id,spawn_depth,side_of,side_kind)
+         values($1,$2,$3,$4,$5,$6,'auto',$7,$8,'read_only','clean',null,
+                false,null,0,$9,$10)",
+    )
+    .bind(id)
+    .bind(owner_id)
+    .bind(machine_id)
+    .bind(&harness)
+    .bind(parent.try_get::<String, _>("workdir")?)
+    .bind(parent.try_get::<String, _>("title")?)
+    .bind(parent.try_get::<String, _>("model")?)
+    .bind(parent.try_get::<String, _>("effort")?)
+    .bind(parent_id)
+    .bind(kind)
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query("insert into queue_state(conversation_id,hold_reasons) values($1,$2)")
+        .bind(id)
+        .bind(sqlx::types::Json(vec![HoldReason::NoLiveExecution]))
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query("insert into conversation_derived(conversation_id,effective_model,effective_effort,effective_permission_mode,crunch_enabled,hold_reasons,activity_evidence) select id,model,effort,permission_mode,crunch_enabled,q.hold_reasons,'{\"kind\":\"idle\",\"last_turn_at\":null,\"background_work\":null}' from conversations c join queue_state q on q.conversation_id=c.id where c.id=$1")
+        .bind(id)
+        .execute(&mut *conn)
+        .await?;
+    Ok(id)
 }
 
 /// Удаление копии: сначала остановка, затем обычный путь удаления. Ответ `false` —
@@ -264,20 +279,24 @@ pub(crate) async fn stop_and_delete_in_tx(
     Ok(true)
 }
 
-/// Остановка и удаление копии родителя. Возвращает `false`, если копия ещё остановится.
+/// Остановка и удаление всех копий родителя: чата владельца и копий отчётов.
+/// Возвращает `false`, если какая-то копия ещё остановится.
 pub(crate) async fn stop_and_delete_for_parent_in_tx(
     conn: &mut PgConnection,
     owner_id: Uuid,
     parent_id: Uuid,
     correlation_id: Uuid,
 ) -> Result<bool, crate::deletion::DeleteError> {
-    let side: Option<Uuid> =
-        sqlx::query_scalar("select id from conversations where side_of=$1 for update")
+    let sides: Vec<Uuid> =
+        sqlx::query_scalar("select id from conversations where side_of=$1 order by id for update")
             .bind(parent_id)
-            .fetch_optional(&mut *conn)
+            .fetch_all(&mut *conn)
             .await?;
-    let Some(side) = side else { return Ok(true) };
-    stop_and_delete_in_tx(&mut *conn, owner_id, side, correlation_id).await
+    let mut all_gone = true;
+    for side in sides {
+        all_gone &= stop_and_delete_in_tx(&mut *conn, owner_id, side, correlation_id).await?;
+    }
+    Ok(all_gone)
 }
 
 pub async fn remove(
@@ -298,11 +317,12 @@ pub async fn remove(
             if parent.is_none() {
                 return Err(SideError::NotFound);
             }
-            let side: Option<Uuid> =
-                sqlx::query_scalar("select id from conversations where side_of=$1 for update")
-                    .bind(parent_id)
-                    .fetch_optional(&mut *conn)
-                    .await?;
+            let side: Option<Uuid> = sqlx::query_scalar(
+                "select id from conversations where side_of=$1 and side_kind='chat' for update",
+            )
+            .bind(parent_id)
+            .fetch_optional(&mut *conn)
+            .await?;
             let Some(side) = side else { return Ok(false) };
             stop_and_delete_in_tx(&mut *conn, owner_id, side, correlation_id)
                 .await

@@ -108,7 +108,7 @@
     "reason": "Кружок значка свёрнутого блока: декоративный элемент без текста."
   },
   {
-    "path": "lib/timeline/LiveLine.svelte",
+    "path": "lib/ui/WorkMotif.svelte",
     "rule": "pill_radius_needs_one_line",
     "value": ".write i { border-radius: var(--radius-pill) }",
     "reason": "Кружок значка живой строки хода: декоративный элемент без текста."

@@ -794,6 +794,25 @@ export function hungInterrupt(
   );
 }
 
+/** «Завершить» на карточке рутины: ответ 204, повтор безвреден. */
+export function dismissRoutineReport(
+  conversationId: string,
+  reportId: string,
+  key: string,
+  opts?: RequestOptions,
+): Promise<
+  HttpResponse<
+    Ok<operations["post__api_v1_conversations__id__routine_reports__report_id__dismiss"]>
+  >
+> {
+  return http(
+    "POST",
+    `/api/v1/conversations/${id(conversationId)}/routine-reports/${id(reportId)}/dismiss`,
+    undefined,
+    keyed(key, opts),
+  );
+}
+
 export function hungSteer(
   conversationId: string,
   episodeId: string,

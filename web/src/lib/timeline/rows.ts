@@ -10,6 +10,7 @@ import { providerApiError, providerOf, type ProviderId } from "./apiError";
 import { isMainAgent } from "./present";
 import { isEventOrigin } from "./hubEvent";
 import { toolId } from "./cards/toolId";
+import type { RoutineReport } from "#lib/routines/reports.js";
 import type { RowKind } from "./virtual";
 
 export type { RowKind };
@@ -18,6 +19,8 @@ export type Row = {
   kind: RowKind;
   entries: TimelineEntry[];
   label?: string;
+  /** Карточка рутины: у строки нет записей ленты, место ей даёт время создания. */
+  report?: RoutineReport;
 };
 
 /** Начало местных суток: подписи дней меняются раз в сутки, а не с каждым тиком часов. */
@@ -242,7 +245,7 @@ function requestLike(entry: TimelineEntry): boolean {
   return entry.kind === "request" || entry.kind === "secret_request";
 }
 
-function stampOf(entry: TimelineEntry): number {
+export function stampOf(entry: TimelineEntry): number {
   if (entry.kind === "block") return entry.block.createdAt;
   if (entry.kind === "compaction") return entry.compaction.createdAt;
   if (entry.kind === "secret_request") return Date.parse(entry.view.created_at) || 0;

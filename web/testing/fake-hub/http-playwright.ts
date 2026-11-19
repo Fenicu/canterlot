@@ -330,6 +330,16 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     });
   });
 
+  await page.route(/\/api\/v1\/conversations\/[^/]+\/routine-reports\/[^/]+\/dismiss$/, async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback();
+    const parts = new URL(route.request().url()).pathname.split('/');
+    const conversation = parts[4] ?? '';
+    const report = parts[6] ?? '';
+    api.routineDismissals.push({ conversation, report });
+    api.dismissRoutineReport(conversation, report);
+    await route.fulfill({ status: 204, headers: headers(), body: '' });
+  });
+
   await page.route(/\/api\/v1\/conversations\/[^/]+\/alarms\/[^/]+$/, async (route) => {
     if (route.request().method() !== 'DELETE') return route.fallback();
     const parts = new URL(route.request().url()).pathname.split('/');
@@ -1569,6 +1579,10 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
       return;
     }
     const body = route.request().postDataJSON() as Parameters<typeof api.createSchedule>[0];
+    if (body?.target?.kind === 'session_report' && api.scheduleTargetError) {
+      await route.fulfill({ status: 422, headers: headers(), json: errorBody('schedule_invalid', api.scheduleTargetError, { field: 'target' }) });
+      return;
+    }
     if (!body?.name || !body.cron || !body.prompt || !body.target) {
       await route.fulfill({ status: 422, headers: headers(), json: errorBody('schedule_invalid', 'Некорректное расписание') });
       return;

@@ -29,6 +29,16 @@ fn map(error: schedules::ScheduleError) -> ApiError {
         schedules::ScheduleError::StaleRevision => {
             ApiError::new(ErrorCode::ScheduleRevisionConflict)
         }
+        // Отказ по цели «Отчёт из сессии» называет поле: редактору есть что подсветить.
+        schedules::ScheduleError::Invalid(
+            reason @ ("invalid_report_target" | "report_capability_missing"),
+        ) => {
+            tracing::debug!(reason, "schedule target refused");
+            ApiError::new(ErrorCode::ScheduleInvalid).with_details(super::error::ErrorDetails {
+                field: Some("target".into()),
+                ..Default::default()
+            })
+        }
         schedules::ScheduleError::Invalid(_) => ApiError::new(ErrorCode::ScheduleInvalid),
         schedules::ScheduleError::Conflict(_) => ApiError::new(ErrorCode::IdempotencyConflict),
         // Ручная финализация после каскадного удаления: строка запуска ушла
@@ -113,6 +123,14 @@ async fn create(
     Correlation(correlation): Correlation,
     ApiJson(req): ApiJson<NewSchedule>,
 ) -> Result<Json<Schedule>, ApiError> {
+    schedules::check_target(
+        &mut *state.pool.acquire().await?,
+        &state.registry,
+        owner.owner_id,
+        &req.target,
+    )
+    .await
+    .map_err(map)?;
     Ok(Json(
         schedules::create(
             &state.pool,
@@ -176,6 +194,16 @@ async fn update(
     Correlation(correlation): Correlation,
     ApiJson(patch): ApiJson<PatchSchedule>,
 ) -> Result<Json<Schedule>, ApiError> {
+    if let Some(target) = &patch.target {
+        schedules::check_target(
+            &mut *state.pool.acquire().await?,
+            &state.registry,
+            owner.owner_id,
+            target,
+        )
+        .await
+        .map_err(map)?;
+    }
     Ok(Json(
         schedules::update(
             &state.pool,

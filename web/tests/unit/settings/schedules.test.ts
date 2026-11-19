@@ -6,7 +6,8 @@ import {
   fireTime,
   outcomeWord,
   parseCron,
-  runDetails
+  runDetails,
+  targetLabel
 } from "#lib/screens/settings/schedules.js";
 
 describe("cron presets and human text", () => {
@@ -60,9 +61,9 @@ describe("run detail and times", () => {
       run_anyway: true,
       something_new: 1
     })).toEqual({
-      code: 7, tail: "нет изменений", window: "five_hour", missedBefore: 3, runAnyway: true, reason: ""
+      code: 7, tail: "нет изменений", window: "five_hour", missedBefore: 3, runAnyway: true, reason: "", reportText: ""
     });
-    expect(runDetails(null)).toEqual({ code: null, tail: "", window: "", missedBefore: 0, runAnyway: false, reason: "" });
+    expect(runDetails(null)).toEqual({ code: null, tail: "", window: "", missedBefore: 0, runAnyway: false, reason: "", reportText: "" });
     expect(runDetails({ exit_code: 0, missed_before: -2, reason: "не готово" }).reason).toBe("не готово");
   });
 
@@ -86,5 +87,25 @@ describe("defaultTimezone", () => {
   it("skips zones the runtime cannot resolve", () => {
     expect(defaultTimezone("Not/AZone", "Europe/Berlin")).toBe("Europe/Berlin");
     expect(defaultTimezone("Not/AZone", "Also/Bad")).toBe("Europe/Moscow");
+  });
+});
+
+describe("session_report target", () => {
+  const sessions = new Map([["s1", { title: "Работа" }]]);
+
+  it("names the target kind and the session", () => {
+    expect(targetLabel({ kind: "session_report", conversation_id: "s1" }, sessions)).toEqual({ kind: "Отчёт из сессии", session: "Работа" });
+    expect(targetLabel({ kind: "existing_session", conversation_id: "s1" }, sessions)).toEqual({ kind: "Сообщение в сессию", session: "Работа" });
+    expect(targetLabel({ kind: "new_session", machine_id: "m", workdir: "/w" }, sessions)).toEqual({ kind: "Новая сессия", session: null });
+  });
+
+  it("falls back to a neutral name when the session is not in the list", () => {
+    expect(targetLabel({ kind: "session_report", conversation_id: "gone" }, sessions).session).toBe("Сессия недоступна");
+  });
+
+  it("reads the stored report text from a run detail", () => {
+    expect(runDetails({ report: { state: "ready", text: "## Итоги" } }).reportText).toBe("## Итоги");
+    expect(runDetails({ report: { state: "failed" } }).reportText).toBe("");
+    expect(runDetails({}).reportText).toBe("");
   });
 });

@@ -60,6 +60,7 @@ pub mod provider_status;
 pub mod rendition;
 pub mod requests;
 pub mod rescue;
+pub mod routines;
 pub mod runs;
 pub mod scheduler;
 pub mod schedules;

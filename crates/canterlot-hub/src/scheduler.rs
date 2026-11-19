@@ -772,6 +772,8 @@ impl Scheduler {
     pub async fn tick(&self, now: DateTime<Utc>) -> Result<TickReport, sqlx::Error> {
         crunch::expire_pending(&self.pool, now).await?;
         crate::side::sweep(&self.pool, now).await?;
+        // Отчёты рутин: собрать ответы закончивших копий, оборвать зависшие, убрать копии.
+        crate::routines::sweep(&self.pool, now).await?;
         // Заявление расписаний — короткая транзакция; работа с воркерами идёт вне тика.
         let claimed = {
             let mut tx = crate::db::begin(&self.pool).await?;
@@ -1559,6 +1561,11 @@ impl Scheduler {
             async {
                 let mut conn = self.pool.acquire().await?;
                 crate::schedules::prune_runs(&mut conn).await.map(|_| ())
+            }
+            .await,
+            async {
+                let mut conn = self.pool.acquire().await?;
+                crate::routines::prune(&mut conn).await.map(|_| ())
             }
             .await,
             sqlx::query("delete from alarms where updated_at < clock_timestamp() - interval '30 days' and (state in ('cancelled','expired','failed') or (state='fired' and delivered_input_id is not null))").execute(&self.pool).await.map(|_| ()),

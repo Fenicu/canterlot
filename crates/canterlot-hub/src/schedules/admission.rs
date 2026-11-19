@@ -198,6 +198,19 @@ async fn write_outcome(
             .get("reason")
             .and_then(Value::as_str)
             .unwrap_or("failed");
+        // Рутина, не дошедшая до копии, оставляет в ленте карточку с ошибкой:
+        // «Повторить» на ней — «Запустить сейчас» расписания.
+        if let ScheduleTarget::SessionReport { conversation_id } = &schedule.target {
+            crate::routines::record_failure_in_tx(
+                &mut tx,
+                schedule,
+                *conversation_id,
+                &updated,
+                reason,
+                correlation_id,
+            )
+            .await?;
+        }
         crate::notify::enqueue_schedule_failure_in_tx(&mut tx, schedule.id, &schedule.name, reason)
             .await?;
     }
@@ -259,8 +272,13 @@ async fn earlier_blocking(
            and r.scheduled_at < (select scheduled_at from schedule_runs where id = $2)
            and (r.state in ('claimed','prechecking')
                 or (r.state = 'started'
-                    and (i.state in ('queued','dispatched','on_machine','transmitting','acceptance_unconfirmed')
-                         or d.activity_state in ('working','waiting_for_user','stalled'))))",
+                    and case when r.detail ? 'report'
+                         -- Отчёт блокирует следующий, пока копия собирает его: занятость
+                         -- родителя и состояние ввода копии здесь ни при чём.
+                         then r.detail #>> '{report,state}' = 'pending'
+                         else (i.state in ('queued','dispatched','on_machine','transmitting','acceptance_unconfirmed')
+                               or d.activity_state in ('working','waiting_for_user','stalled'))
+                         end))",
     )
     .bind(schedule_id)
     .bind(run_id)
@@ -329,7 +347,8 @@ async fn admit_inner(
 
     let (machine_id, existing_conversation, existing_workdir) = match &schedule.target {
         ScheduleTarget::NewSession { machine_id, .. } => (*machine_id, None, None),
-        ScheduleTarget::ExistingSession { conversation_id } => {
+        ScheduleTarget::ExistingSession { conversation_id }
+        | ScheduleTarget::SessionReport { conversation_id } => {
             let mut conn = scheduler
                 .pool()
                 .acquire()
@@ -338,10 +357,15 @@ async fn admit_inner(
             let row: Option<(Uuid, Uuid, String)> = sqlx::query_as(
                 "select c.machine_id,q.conversation_id,c.workdir from conversations c
                  join queue_state q on q.conversation_id=c.id
-                 where c.id=$1 and c.owner_id=$2 and c.trashed_at is null",
+                 where c.id=$1 and c.owner_id=$2 and c.trashed_at is null
+                   and (c.side_of is null or $3)",
             )
             .bind(conversation_id)
             .bind(schedule.owner_id)
+            .bind(!matches!(
+                &schedule.target,
+                ScheduleTarget::SessionReport { .. }
+            ))
             .fetch_optional(&mut *conn)
             .await
             .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))?;
@@ -483,7 +507,9 @@ async fn resolve_route(
                 permission_mode.clone(),
             )
         }
-        ScheduleTarget::ExistingSession { .. } => unreachable!("existing sessions are not routed"),
+        ScheduleTarget::ExistingSession { .. } | ScheduleTarget::SessionReport { .. } => {
+            unreachable!("existing sessions are not routed")
+        }
     };
     let (policy, revision) = routing::load_policy(conn, schedule.owner_id)
         .await
@@ -595,7 +621,9 @@ async fn resolve_route(
         } => schedule_preset
             .clone()
             .unwrap_or_else(|| "clean".to_owned()),
-        ScheduleTarget::ExistingSession { .. } => "clean".to_owned(),
+        ScheduleTarget::ExistingSession { .. } | ScheduleTarget::SessionReport { .. } => {
+            "clean".to_owned()
+        }
     };
     Ok(ResolvedExecutor {
         harness: decision.harness,
@@ -761,7 +789,7 @@ async fn precheck(
         ScheduleTarget::NewSession { workdir, .. } => {
             (workdir.clone(), schedule.precheck_timeout_seconds)
         }
-        ScheduleTarget::ExistingSession { .. } => {
+        ScheduleTarget::ExistingSession { .. } | ScheduleTarget::SessionReport { .. } => {
             let Some(workdir) = existing_workdir else {
                 return Err(fail(Skip::new(RunState::Failed, "conversation_not_found")));
             };
@@ -1014,7 +1042,7 @@ async fn dispatch(
     // Действующая модель существующей сессии перечитывается под замками (8):
     // сначала разделяемая строка провайдера, затем очередь, и только потом
     // чтение. До предпроверки модель могла смениться, окно — вместе с ней.
-    if let ScheduleTarget::ExistingSession { conversation_id } = &schedule.target {
+    if let Some(conversation_id) = schedule.target.conversation_id() {
         if !provider.is_empty() {
             limits::share_provider(&mut tx, &provider)
                 .await
@@ -1052,10 +1080,7 @@ async fn dispatch(
     // окна и удержания могли покраснеть. Та же проверка, что и до предпроверки.
     let mut limits_probe = limits_probe;
     if !run_anyway && !provider.is_empty() {
-        let existing = match &schedule.target {
-            ScheduleTarget::ExistingSession { conversation_id } => Some(*conversation_id),
-            ScheduleTarget::NewSession { .. } => None,
-        };
+        let existing = schedule.target.conversation_id();
         let (skip, probe) = limits_skip(
             &mut tx,
             schedule.owner_id,
@@ -1077,7 +1102,9 @@ async fn dispatch(
     let content = vec![ContentBlock::Text {
         text: schedule.prompt.clone(),
     }];
-    let (session_id, input_id) = match &schedule.target {
+    // `report` — карточка отчёта для журнала запуска; `wake` — чьей выдаче дать толчок.
+    let mut report: Option<Value> = None;
+    let (session_id, input_id, wake) = match &schedule.target {
         ScheduleTarget::NewSession {
             machine_id,
             workdir,
@@ -1139,7 +1166,16 @@ async fn dispatch(
                 )
             })
             .map_err(fail)?;
-            (created, submitted.input_id)
+            (created, submitted.input_id, created)
+        }
+        ScheduleTarget::SessionReport { conversation_id } => {
+            let started =
+                start_report_copy(scheduler, &mut tx, schedule, run, *conversation_id, content)
+                    .await
+                    .map_err(fail)?;
+            report = Some(started.report);
+            // Родитель не трогается: толчок выдачи получает только копия.
+            (*conversation_id, started.input_id, started.copy_id)
         }
         ScheduleTarget::ExistingSession { conversation_id } => {
             let submitted = submit_message_in_tx(
@@ -1163,7 +1199,7 @@ async fn dispatch(
                 )
             })
             .map_err(fail)?;
-            (*conversation_id, submitted.input_id)
+            (*conversation_id, submitted.input_id, *conversation_id)
         }
     };
     let delay = delay_ms(run.scheduled_at, now);
@@ -1176,6 +1212,9 @@ async fn dispatch(
         merge(&mut base, limits_probe);
         base
     };
+    if let Some(report) = report.take() {
+        final_detail["report"] = report;
+    }
     if run_anyway
         && let Ok(holds) = sqlx::query_scalar::<_, Value>(
             "select to_jsonb(hold_reasons) from queue_state where conversation_id=$1",
@@ -1252,8 +1291,115 @@ async fn dispatch(
         .await
         .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))
         .map_err(fail)?;
-    scheduler.dispatcher().trigger(session_id);
+    scheduler.dispatcher().trigger(wake);
     Ok(AdmitOk)
+}
+
+struct StartedReport {
+    copy_id: Uuid,
+    input_id: Uuid,
+    report: Value,
+}
+
+/// Копия-читатель для запуска «Отчёт из сессии»: тот же путь, что у бокового чата
+/// (read-only, форк от нативной записи родителя, боковой MCP, сводка о родителе при выдаче),
+/// но копия своего вида, так что чат владельца не затрагивается. Родитель только читается:
+/// ни ввода, ни изменения очереди, ни пробуждения. Всё в транзакции dispatch.
+async fn start_report_copy(
+    scheduler: &Scheduler,
+    tx: &mut sqlx::Transaction<'static, sqlx::Postgres>,
+    schedule: &Schedule,
+    run: &ScheduleRun,
+    parent_id: Uuid,
+    content: Vec<ContentBlock>,
+) -> Result<StartedReport, Skip> {
+    let db = |_| Skip::new(RunState::Failed, "database_unavailable");
+    let parent = sqlx::query(
+        "select machine_id,harness,workdir,model,effort,title from conversations
+          where id=$1 and owner_id=$2 and trashed_at is null and side_of is null
+          for update",
+    )
+    .bind(parent_id)
+    .bind(schedule.owner_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(db)?
+    .ok_or_else(|| Skip::new(RunState::Failed, "conversation_not_found"))?;
+    use sqlx::Row;
+    let machine_id: Uuid = parent.try_get("machine_id").map_err(db)?;
+    let capable = scheduler
+        .registry()
+        .is_some_and(|r| r.has_capability(machine_id, crate::session::CAPABILITY_SIDE_CHAT_V1));
+    if !capable {
+        return Err(Skip::new(RunState::Failed, "report_capability_missing"));
+    }
+    // Форкать нечего: сессия ещё не сделала ни одного хода.
+    if crate::side::current_native(tx, parent_id)
+        .await
+        .map_err(db)?
+        .is_none()
+    {
+        return Err(Skip::new(RunState::Failed, "no_native_session"));
+    }
+    let copy = crate::side::insert_copy_in_tx(tx, schedule.owner_id, parent_id, &parent, "report")
+        .await
+        .map_err(|error| {
+            Skip::with(
+                RunState::Failed,
+                json!({"reason": "create_failed", "detail": format!("{error:?}")}),
+            )
+        })?;
+    let submitted = submit_message_in_tx(
+        tx,
+        &SubmitMessage {
+            owner_id: schedule.owner_id,
+            conversation_id: copy,
+            key: format!("scheduled-input:{}", run.id),
+            content,
+            attachment_ids: Vec::new(),
+            retry_of: None,
+            received_at: run.scheduled_at,
+        },
+        Uuid::now_v7(),
+    )
+    .await
+    .map_err(|error| {
+        Skip::with(
+            RunState::Failed,
+            json!({"reason": "submit_failed", "detail": format!("{error:?}")}),
+        )
+    })?;
+    // Копия сама поднимает исполнение; OpenCode при занятом родителе держит ввод.
+    crate::side::start_for_input_in_tx(tx, schedule.owner_id, copy, Uuid::now_v7())
+        .await
+        .map_err(|error| {
+            Skip::with(
+                RunState::Failed,
+                json!({"reason": "create_failed", "detail": error.to_string()}),
+            )
+        })?;
+    let title = render_title(&schedule.title_template, &schedule.name, run.scheduled_at);
+    let card = crate::routines::open_in_tx(
+        tx,
+        crate::routines::NewCard {
+            owner_id: schedule.owner_id,
+            conversation_id: parent_id,
+            schedule_id: schedule.id,
+            run_id: run.id,
+            copy_id: Some(copy),
+            title: &title,
+            state: crate::routines::ReportState::Pending,
+            error: None,
+        },
+        Uuid::now_v7(),
+    )
+    .await
+    .map_err(db)?;
+    Ok(StartedReport {
+        copy_id: copy,
+        input_id: submitted.input_id,
+        report: json!({"state": "pending", "report_id": card, "title": title}),
+    })
 }
 
 /// Тот же advisory-замок, что `idempotency::run_in_tx`: ключ первым,

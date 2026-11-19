@@ -20,7 +20,7 @@ use crate::{
 
 pub use cron::{CronError, CronSchedule};
 
-mod time_opt {
+pub(crate) mod time_opt {
     use chrono::{DateTime, Utc};
     use serde::{Deserialize, Deserializer, Serializer};
 
@@ -51,7 +51,7 @@ const MAX_NAME_BYTES: usize = 200;
 const MAX_PRECHECK_BYTES: usize = 4096;
 const DEFAULT_TITLE_TEMPLATE: &str = "{name} · {date}";
 
-/// Цель запуска: новая сессия на машине или существующий разговор.
+/// Цель запуска: новая сессия на машине, существующий разговор или отчёт из контекста сессии.
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 #[allow(clippy::large_enum_variant)]
@@ -74,6 +74,23 @@ pub enum ScheduleTarget {
     ExistingSession {
         conversation_id: Uuid,
     },
+    /// «Отчёт из сессии»: скрытая боковая копия читает контекст разговора, не трогая его,
+    /// а её ответ ложится карточкой в ленту этого разговора.
+    SessionReport {
+        conversation_id: Uuid,
+    },
+}
+
+impl ScheduleTarget {
+    /// Разговор, на котором запуск держит очередь и лимиты: у существующей сессии и у отчёта.
+    pub fn conversation_id(&self) -> Option<Uuid> {
+        match self {
+            Self::ExistingSession { conversation_id } | Self::SessionReport { conversation_id } => {
+                Some(*conversation_id)
+            }
+            Self::NewSession { .. } => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
@@ -447,8 +464,40 @@ fn validate_target(target: &ScheduleTarget) -> Result<(), ScheduleError> {
                 _ => Err(ScheduleError::Invalid("invalid_executor")),
             }
         }
-        ScheduleTarget::ExistingSession { .. } => Ok(()),
+        ScheduleTarget::ExistingSession { .. } | ScheduleTarget::SessionReport { .. } => Ok(()),
     }
+}
+
+/// Проверка цели «Отчёт из сессии» при создании и правке: разговор есть, принадлежит
+/// владельцу, не в корзине и сам не боковая копия, а машина умеет боковой чат.
+/// Остальные цели проверяются без обращения к базе в `validate_target`.
+pub async fn check_target(
+    conn: &mut PgConnection,
+    registry: &crate::session::Registry,
+    owner_id: Uuid,
+    target: &ScheduleTarget,
+) -> Result<(), ScheduleError> {
+    let ScheduleTarget::SessionReport { conversation_id } = target else {
+        return Ok(());
+    };
+    let row: Option<(Uuid, bool)> = sqlx::query_as(
+        "select machine_id, side_of is not null from conversations
+          where id=$1 and owner_id=$2 and trashed_at is null",
+    )
+    .bind(conversation_id)
+    .bind(owner_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some((machine_id, is_side)) = row else {
+        return Err(ScheduleError::Invalid("invalid_report_target"));
+    };
+    if is_side {
+        return Err(ScheduleError::Invalid("invalid_report_target"));
+    }
+    if !registry.has_capability(machine_id, crate::session::CAPABILITY_SIDE_CHAT_V1) {
+        return Err(ScheduleError::Invalid("report_capability_missing"));
+    }
+    Ok(())
 }
 
 async fn changed(
@@ -967,7 +1016,7 @@ pub struct ClaimedRun {
     pub schedule: Schedule,
 }
 
-async fn run_changed(
+pub(crate) async fn run_changed(
     conn: &mut PgConnection,
     run: &ScheduleRun,
     correlation_id: Uuid,

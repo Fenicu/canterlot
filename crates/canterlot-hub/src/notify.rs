@@ -43,6 +43,8 @@ pub const SIGN_IN_PATH: &str = "/settings/sign-in";
 /// Запуск расписания провалился: один пуш на расписание в катящийся час.
 /// Сессии обычно нет (ошибка до dispatch), поэтому разговор не привязывается.
 pub const KIND_SCHEDULE_FAILED: &str = "schedule_failed";
+/// Отчёт рутины готов: один пуш на карточку, привязан к родителю.
+pub const KIND_ROUTINE_REPORT: &str = "routine_report";
 /// Катящееся окно троттлинга пушей о несработавших расписаниях.
 const SCHEDULE_FAILURE_WINDOW: TimeDelta = TimeDelta::hours(1);
 /// Сводный пуш о неудачах шлётся, когда их за час набралось столько.
@@ -188,6 +190,7 @@ async fn enqueue_in_tx(
            and ($3 <> 'turn_finished' or c.snoozed_until is null or c.snoozed_until <= clock_timestamp())
            and case $3 when 'waiting' then s.waiting
                        when 'turn_finished' then s.turn_finished
+                       when 'routine_report' then s.turn_finished
                        else s.failures end
          {conflict}"
     );
@@ -230,6 +233,26 @@ pub async fn on_request_opened_in_tx(
         &payload,
         false,
         true,
+    )
+    .await
+}
+
+/// Отчёт рутины собран: «{имя} готов». Ключ — карточка, повтор не шлёт второй пуш.
+/// Выключатель тот же, что у пуша о конце хода: отдельной настройки у рутин нет.
+pub async fn on_routine_report_in_tx(
+    conn: &mut PgConnection,
+    conversation_id: Uuid,
+    report_id: Uuid,
+    schedule_name: &str,
+) -> Result<(), sqlx::Error> {
+    enqueue_in_tx(
+        conn,
+        conversation_id,
+        KIND_ROUTINE_REPORT,
+        &format!("{KIND_ROUTINE_REPORT}:{report_id}"),
+        &json!({"report_id": report_id, "schedule_name": schedule_name}),
+        false,
+        false,
     )
     .await
 }
@@ -828,6 +851,13 @@ fn schedule_failure_text(reason: &str) -> String {
         "live_counts_unavailable" => "не посчиталась занятость",
         "preset_unavailable" => "не разрешился пресет",
         "queue_unavailable" => "не прочиталась очередь",
+        "no_native_session" => "у сессии ещё нет записи для отчёта",
+        "report_capability_missing" => "воркер машины не умеет боковой чат",
+        "copy_failed" | "copy_lost" => "копия сессии не дожила до конца отчёта",
+        "turn_timeout" => "копия не закончила отчёт за 60 минут",
+        "parent_busy_timeout" | "copy_not_started" => "копия не начала работу за два часа",
+        "empty_report" => "копия закончила без текста ответа",
+        "input_rejected" => "копия отклонила запрос отчёта",
         other => return format!("внутренняя ошибка ({other})"),
     }
     .to_owned()
@@ -1683,6 +1713,34 @@ async fn compose(
     };
     if trashed {
         return Ok(None);
+    }
+    if row.kind == KIND_ROUTINE_REPORT {
+        // Карточку успели закрыть или заменить: пуш потерял смысл.
+        let Some(report_id) = row.payload["report_id"]
+            .as_str()
+            .and_then(|id| id.parse::<Uuid>().ok())
+        else {
+            return Ok(None);
+        };
+        let open: Option<bool> = sqlx::query_scalar(
+            "select state='ready' from routine_reports
+              where id=$1 and conversation_id=$2 and dismissed_at is null",
+        )
+        .bind(report_id)
+        .bind(conversation_id)
+        .fetch_optional(pool)
+        .await?;
+        if open != Some(true) {
+            return Ok(None);
+        }
+        let name = row.payload["schedule_name"].as_str().unwrap_or_default();
+        return Ok(Some(Message {
+            title: format!("{} готов", clip(name, TITLE_CHARS)),
+            body: clean_title(&title),
+            priority: PRIORITY_TURN_FINISHED,
+            // Ссылка ведёт в родителя; карточку клиент находит по идентификатору в запросе.
+            click_url: format!("{app_url}/c/{conversation_id}?routine_report={report_id}"),
+        }));
     }
     let (body, priority) = match row.kind.as_str() {
         KIND_WAITING if row.payload.get("secret_request_id").is_some() => {

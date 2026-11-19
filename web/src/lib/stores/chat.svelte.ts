@@ -48,6 +48,7 @@ import {
 import { BackgroundModel, type BackgroundTask } from "./background.svelte";
 import { TodosModel, type TodoList } from "./todos.svelte";
 import type { components } from "#lib/api/generated/openapi.js";
+import { RoutineReportsModel, type RoutineReport } from "#lib/routines/reports.js";
 
 export interface HistoryBlock {
   kind: "block";
@@ -225,6 +226,7 @@ export interface SnapshotData {
   open_requests?: unknown[];
   todos?: TodoList[];
   background?: BackgroundTask[];
+  routine_reports?: RoutineReport[];
 }
 
 export type RunSlot =
@@ -327,6 +329,8 @@ export class ChatStore {
   readonly secretRequests: SecretRequestsModel;
   readonly todos = new TodosModel();
   readonly background = new BackgroundModel();
+  /** Открытые карточки рутин: отдельные записи, не ввод и не блоки ленты. */
+  readonly routineReports = new RoutineReportsModel();
   readonly diagnostics: unknown[] = [];
   readonly queue = $state({
     pause_reasons: [] as unknown[],
@@ -566,6 +570,7 @@ export class ChatStore {
     this.secretRequests.clear();
     this.todos.clear();
     this.background.clear();
+    this.routineReports.clear();
     this.diagnostics.length = 0;
     this.#held = [];
     this.#laneLive.set([]);
@@ -1166,6 +1171,12 @@ export class ChatStore {
           if (!sameAlarms(this.alarms, next)) this.alarms = next;
         }
         return;
+      case "routine_report_changed":
+        if (event.kind === "routine_report_changed") this.routineReports.apply(event.payload);
+        return;
+      case "routine_report_dismissed":
+        if (event.kind === "routine_report_dismissed") this.routineReports.dismiss(event.payload.report_id);
+        return;
       case "spawn_queue_changed":
         if (event.kind === "spawn_queue_changed") {
           const item = event.payload as unknown as SpawnQueueItemView;
@@ -1661,6 +1672,7 @@ export class ChatStore {
     void this.loadSecretRequests().catch(() => undefined);
     if (data.todos) this.todos.ingestSnapshot(data.todos);
     if (data.background) this.background.ingestSnapshot(data.background);
+    if (data.routine_reports) this.routineReports.ingestSnapshot(data.routine_reports);
     if (data.context !== undefined)
       this.context = data.context
         ? { tokens: data.context.tokens, window: data.context.window_tokens ?? null }

@@ -78,6 +78,7 @@
       "name": "лента и таймлайн",
       "sources": [
         "src/lib/timeline/**",
+        "src/lib/routines/**",
         "src/lib/render/**",
         "src/lib/ops/**",
         "src/routes/c/**",
@@ -126,6 +127,7 @@
         "e2e/ui/feed-jitter.spec.ts",
         "e2e/ui/hub-events.spec.ts",
         "e2e/ui/hung-turn.spec.ts",
+        "e2e/ui/routine-reports.spec.ts",
         "e2e/ui/lane.spec.ts",
         "e2e/ui/linked-title-rows.spec.ts",
         "e2e/ui/live-turn.spec.ts",
