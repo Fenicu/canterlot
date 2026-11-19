@@ -5,6 +5,7 @@
 //! если настоящий путь рабочего каталога ему противоречит.
 
 pub mod secrets;
+pub mod store;
 
 use std::path::{Component, Path, PathBuf};
 
