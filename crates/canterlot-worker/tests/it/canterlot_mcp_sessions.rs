@@ -578,12 +578,13 @@ fn no_agent_tool_applies_a_setting_itself() {
                 || hub_name.starts_with("spawn_queue.")
                 || hub_name.starts_with("plan.")
                 || hub_name.starts_with("history.")
+                || hub_name.starts_with("memory.")
                 || hub_name.starts_with("secrets.")
                 || hub_name.starts_with("settings."),
             "{hub_name}"
         );
     }
-    assert_eq!(mcp::AGENT_TOOLS.len(), 32);
+    assert_eq!(mcp::AGENT_TOOLS.len(), 37);
 }
 
 #[tokio::test]
