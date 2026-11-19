@@ -2272,3 +2272,82 @@ async fn a_failing_orphan_side_chat_does_not_stop_the_tick(pool: PgPool) {
     scheduler(&f).tick(Utc::now()).await.unwrap();
     assert!(card_copy(&pool, good_card).await.is_none());
 }
+
+/// Gotify, который в момент POST записывает, что видно в строке пуша: попытка должна быть
+/// отмечена в базе до запроса, иначе гибель хаба после приёма оставит строку без следа.
+async fn marker_probing_gotify(
+    pool: PgPool,
+) -> (
+    std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>>,
+    String,
+) {
+    use axum::{Router, extract::State, routing::post};
+    type Seen = std::sync::Arc<std::sync::Mutex<Vec<Option<String>>>>;
+    #[derive(Clone)]
+    struct Shared {
+        pool: PgPool,
+        seen: Seen,
+    }
+    let seen: Seen = Default::default();
+    let app = Router::new()
+        .route(
+            "/gotify/message",
+            post(|State(shared): State<Shared>| async move {
+                let marker: Option<String> = sqlx::query_scalar(
+                    "select last_status from owner_pushes where kind='routine_report'",
+                )
+                .fetch_one(&shared.pool)
+                .await
+                .unwrap();
+                shared.seen.lock().unwrap().push(marker);
+                axum::http::StatusCode::OK
+            }),
+        )
+        .with_state(Shared {
+            pool,
+            seen: seen.clone(),
+        });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (seen, format!("http://{addr}/gotify"))
+}
+
+/// Хаб погиб после того, как Gotify принял пуш, но до записи итога: перезапуск не шлёт его
+/// второй раз. Попытка отмечается в строке до запроса, а брошенная отметка снимает строку.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_report_push_stranded_mid_send_is_not_resent_after_a_restart(pool: PgPool) {
+    use std::sync::atomic::Ordering;
+    crate::auth_pushes::enable(&pool).await;
+    let f = Fixture::new(pool.clone()).await;
+    let _session = session(&f);
+    with_native(&f).await;
+    let schedule = make_schedule(&f, "Стендап").await;
+    ready_card(&f, schedule, "Отчёт").await;
+    // Попытка отмечена до POST.
+    let (seen, url) = marker_probing_gotify(pool.clone()).await;
+    let (_dir, sender) = crate::auth_pushes::sender(&url);
+    sender.deliver_due(&pool).await.unwrap();
+    assert_eq!(*seen.lock().unwrap(), vec![Some("sending".to_owned())]);
+    // Гибель хаба: строка осталась `pending` с отметкой попытки, прошло больше грейса.
+    sqlx::query(
+        "update owner_pushes set state='pending',last_status='sending',attempts=1,
+           updated_at=clock_timestamp()-interval '10 minutes',run_at=clock_timestamp()
+         where kind='routine_report'",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let (hits, url) = crate::schedule_failure_push::dropping_gotify().await;
+    let (_dir2, restarted) = crate::auth_pushes::sender(&url);
+    restarted.deliver_due(&pool).await.unwrap();
+    assert_eq!(hits.load(Ordering::SeqCst), 0, "a stranded push was resent");
+    let state: String =
+        sqlx::query_scalar("select state from owner_pushes where kind='routine_report'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(state, "dropped");
+}
