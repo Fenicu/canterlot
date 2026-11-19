@@ -18,6 +18,7 @@ fn caps() -> Vec<&'static str> {
         "session_tools_v1",
         "schedule_precheck_v1",
         CAPABILITY_SIDE_CHAT_V1,
+        "run_outcome_v1",
     ]
 }
 
@@ -2460,4 +2461,38 @@ async fn the_retained_run_replay_keeps_the_report_conversation_in_its_identity(p
         "{}",
         String::from_utf8_lossy(&ordinary.body)
     );
+}
+
+/// Старый воркер (v1.40.1) объявляет `side_chat_v1`, но не присылает исход хода: отчёт он
+/// выполнил бы, а собрать его хаб не смог бы. Рутину ему не отдают.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_worker_without_run_outcome_never_gets_a_report(pool: PgPool) {
+    const OLD: [&str; 5] = [
+        "pilot_v1",
+        "instructions_v1",
+        "session_tools_v1",
+        "schedule_precheck_v1",
+        CAPABILITY_SIDE_CHAT_V1,
+    ];
+    let f = Fixture::new(pool.clone()).await;
+    with_native(&f).await;
+    {
+        let _old = testkit::fake_session(&f.state.registry, f.seed.machine_id, &OLD, true);
+        let (status, body) = post_schedule(&f, report_target(f.seed.conversation_id)).await;
+        assert_eq!(status, 422, "{body}");
+        assert_eq!(body["error"]["details"]["field"], "target", "{body}");
+    }
+    // Расписание, созданное до обновления воркера, при срабатывании тоже не доходит до копии.
+    let schedule = {
+        let _full = session(&f);
+        make_schedule(&f, "Стендап").await
+    };
+    let _old = testkit::fake_session(&f.state.registry, f.seed.machine_id, &OLD, true);
+    let now = Utc::now();
+    make_due(&pool, schedule, now - TimeDelta::seconds(30)).await;
+    scheduler(&f).tick(now).await.unwrap();
+    let run = latest_run(&pool, schedule).await;
+    let detail = wait_run(&pool, run, "failed").await;
+    assert_eq!(detail["reason"], "report_capability_missing", "{detail}");
+    assert!(copies(&pool, f.seed.conversation_id).await.is_empty());
 }

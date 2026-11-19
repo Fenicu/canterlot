@@ -1332,9 +1332,10 @@ async fn start_report_copy(
     .ok_or_else(|| Skip::new(RunState::Failed, "conversation_not_found"))?;
     use sqlx::Row;
     let machine_id: Uuid = parent.try_get("machine_id").map_err(db)?;
-    let capable = scheduler
-        .registry()
-        .is_some_and(|r| r.has_capability(machine_id, crate::session::CAPABILITY_SIDE_CHAT_V1));
+    let capable = scheduler.registry().is_some_and(|r| {
+        r.has_capability(machine_id, crate::session::CAPABILITY_SIDE_CHAT_V1)
+            && r.has_capability(machine_id, crate::session::CAPABILITY_RUN_OUTCOME_V1)
+    });
     if !capable {
         return Err(Skip::new(RunState::Failed, "report_capability_missing"));
     }

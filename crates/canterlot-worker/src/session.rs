@@ -50,6 +50,8 @@ const WATCH_FIRST_DELAY: Duration = Duration::from_secs(90);
 pub const CAPABILITY_LIMITS_FABLE_V1: &str = "limits_fable_v1";
 pub const CAPABILITY_PROMPT_SUGGESTIONS_V1: &str = "prompt_suggestions_v1";
 pub const CAPABILITY_SIDE_CHAT_V1: &str = "side_chat_v1";
+/// `RunFinished` несёт конец хода (`end`): без неё хаб не отличит успех от прерванного хода.
+pub const CAPABILITY_RUN_OUTCOME_V1: &str = "run_outcome_v1";
 pub const CAPABILITY_SECRET_REQUESTS_V2: &str = "secret_requests_v2";
 /// Хаб хранит конец входа провайдера из кадра `result`; без неё старая запись не уходит.
 pub const CAPABILITY_CREDENTIAL_EXPIRY_V1: &str = "credential_expiry_v1";
@@ -85,6 +87,7 @@ pub const OPTIONAL_CAPABILITIES: &[&str] = &[
     "watchdog_v1",
     CAPABILITY_PROMPT_SUGGESTIONS_V1,
     CAPABILITY_SIDE_CHAT_V1,
+    CAPABILITY_RUN_OUTCOME_V1,
     CAPABILITY_SECRET_REQUESTS_V2,
     CAPABILITY_CREDENTIAL_EXPIRY_V1,
     CAPABILITY_PROVIDER_CREDITS_V1,
