@@ -8,7 +8,7 @@ use canterlot_hub::{
         submit::{ContentBlock, SubmitInput, submit_input},
     },
     executions::{self, StartedExecution},
-    hibernate::{self, HibernateSettings},
+    hibernate::{self, HibernateSettings, StartupGrace},
     http,
     ingest::{Ingest, JournalKind},
     model::ExecutionState,
@@ -326,6 +326,42 @@ async fn unproven_idle_does_not_hibernate(pool: PgPool) -> TestResult {
         .await?;
     assert_eq!(hibernate::sweep(&pool, &Presence::default()).await?, 0);
     assert!(stop_command(&pool, seed.conversation_id).await.is_none());
+    Ok(())
+}
+
+#[test]
+fn startup_grace_is_over_exactly_at_the_window_end() {
+    let started = testkit::clock_now();
+    let grace = StartupGrace::new(started, Duration::from_secs(600));
+    assert!(!grace.is_over(started));
+    assert!(!grace.is_over(started + Duration::from_secs(599)));
+    assert!(grace.is_over(started + Duration::from_secs(600)));
+    assert!(StartupGrace::new(started, Duration::ZERO).is_over(started));
+}
+
+/// Первые десять минут после старта хаба обход ничего не усыпляет: сессия, простоявшая
+/// больше часа, не должна уснуть сразу под выкатом новой версии. Часы синтетические,
+/// моменты сдвигаются арифметикой, без ожиданий.
+#[sqlx::test(migrations = "./migrations")]
+async fn startup_grace_window_blocks_hibernation(pool: PgPool) -> TestResult {
+    let (seed, _run) = setup(&pool).await;
+    let started = testkit::clock_now();
+    let grace = StartupGrace::new(started, Duration::from_secs(600));
+    let presence = Presence::default();
+    for elapsed in [0, 1, 599] {
+        let now = started + Duration::from_secs(elapsed);
+        assert_eq!(hibernate::sweep_at(&pool, &presence, &grace, now).await?, 0);
+        assert!(stop_command(&pool, seed.conversation_id).await.is_none());
+    }
+    let after = started + Duration::from_secs(600);
+    assert_eq!(
+        hibernate::sweep_at(&pool, &presence, &grace, after).await?,
+        1
+    );
+    assert_eq!(
+        stop_command(&pool, seed.conversation_id).await,
+        Some(json!({"force": false, "reason": "hibernated"}))
+    );
     Ok(())
 }
 

@@ -86,6 +86,7 @@ impl Background {
                     pool.clone(),
                     presence,
                     hibernate.sweep,
+                    hibernate.startup_grace,
                     stopped.clone(),
                 )),
             ),

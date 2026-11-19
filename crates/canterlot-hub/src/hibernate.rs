@@ -30,13 +30,40 @@ pub const DEFAULT_IDLE_MINUTES: i32 = 60;
 pub struct HibernateConfig {
     #[serde(with = "humantime_serde")]
     pub sweep: Duration,
+    /// Сколько после старта процесса хаба обход ничего не усыпляет. Сессия, давно
+    /// простаивавшая до выката, иначе засыпает сразу после запуска нового хаба.
+    #[serde(with = "humantime_serde")]
+    pub startup_grace: Duration,
 }
 
 impl Default for HibernateConfig {
     fn default() -> Self {
         Self {
             sweep: Duration::from_secs(60),
+            startup_grace: DEFAULT_STARTUP_GRACE,
         }
+    }
+}
+
+/// Окно после старта хаба, в которое усыпление не работает, пока владелец не выбрал своё.
+pub const DEFAULT_STARTUP_GRACE: Duration = Duration::from_secs(600);
+
+/// Окно тишины после старта процесса: считается по монотонным часам, чтобы тест двигал
+/// момент арифметикой, а не ожиданием.
+#[derive(Debug, Clone, Copy)]
+pub struct StartupGrace {
+    until: Instant,
+}
+
+impl StartupGrace {
+    pub fn new(started: Instant, window: Duration) -> Self {
+        Self {
+            until: started + window,
+        }
+    }
+
+    pub fn is_over(&self, now: Instant) -> bool {
+        now >= self.until
     }
 }
 
@@ -157,10 +184,30 @@ async fn candidates(pool: &PgPool) -> Result<Vec<Candidate>, sqlx::Error> {
     .await
 }
 
-/// Один обход. Возвращает число усыплённых сессий.
+/// Один обход без окна после старта. Возвращает число усыплённых сессий.
 pub async fn sweep(pool: &PgPool, presence: &Presence) -> Result<usize, sqlx::Error> {
+    sweep_from(pool, presence, Instant::now()).await
+}
+
+/// Обход в момент `now`: пока окно после старта хаба не кончилось, не усыпляет ничего.
+pub async fn sweep_at(
+    pool: &PgPool,
+    presence: &Presence,
+    grace: &StartupGrace,
+    now: Instant,
+) -> Result<usize, sqlx::Error> {
+    if !grace.is_over(now) {
+        return Ok(0);
+    }
+    sweep_from(pool, presence, now).await
+}
+
+async fn sweep_from(
+    pool: &PgPool,
+    presence: &Presence,
+    now: Instant,
+) -> Result<usize, sqlx::Error> {
     let mut count = 0;
-    let now = Instant::now();
     for candidate in candidates(pool).await? {
         if presence.is_visible(candidate.id, now) {
             continue;
@@ -364,19 +411,22 @@ pub async fn wake_in_tx(
     Ok(true)
 }
 
-/// Фоновая служба: обходит кандидатов раз в `sweep`, не чаще одного обхода за interval.
+/// Фоновая служба: обходит кандидатов раз в `sweep`, не чаще одного обхода за interval;
+/// первые `startup_grace` после своего старта ничего не усыпляет.
 pub async fn run(
     pool: PgPool,
     presence: Presence,
     interval: Duration,
+    startup_grace: Duration,
     mut stopped: tokio::sync::watch::Receiver<bool>,
 ) {
+    let grace = StartupGrace::new(Instant::now(), startup_grace);
     let mut ticker = tokio::time::interval(interval.max(Duration::from_millis(10)));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                if let Err(error) = sweep(&pool, &presence).await {
+                if let Err(error) = sweep_at(&pool, &presence, &grace, Instant::now()).await {
                     tracing::warn!(error = %crate::dberr::describe(&error), "hibernate sweep failed");
                 }
             }
@@ -398,5 +448,16 @@ mod tests {
                 .idle_minutes,
             None
         );
+    }
+
+    #[test]
+    fn startup_grace_defaults_to_ten_minutes_and_parses() {
+        assert_eq!(
+            HibernateConfig::default().startup_grace,
+            Duration::from_secs(600)
+        );
+        let parsed: HibernateConfig = toml::from_str("startup_grace = \"3m\"").unwrap();
+        assert_eq!(parsed.startup_grace, Duration::from_secs(180));
+        assert_eq!(parsed.sweep, Duration::from_secs(60));
     }
 }
