@@ -625,6 +625,8 @@ pub struct RunCostView {
     pub run_id: Uuid,
     pub usage: Vec<ModelUsageView>,
     pub limit: Option<RunLimit>,
+    /// Вероятная причина пересборки кеша; пусто, если кеш в порядке или данных мало.
+    pub cache_hint: Option<crate::cache_hint::CacheHint>,
 }
 const USAGE_SQL: &str = "select model,agent,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,cost_micro_usd,cost_source from run_model_usage where input_command_id=$1 order by model,agent";
 fn run_limit(r: &sqlx::postgres::PgRow) -> Result<Option<RunLimit>, sqlx::Error> {
@@ -664,10 +666,19 @@ pub async fn run_costs(
         if usage.is_empty() {
             continue;
         }
+        let cache_hint = crate::cache_hint::for_run(
+            conn,
+            conversation_id,
+            run_id,
+            r.try_get("started_at")?,
+            r.try_get("finished_at")?,
+        )
+        .await?;
         out.push(RunCostView {
             run_id,
             usage,
             limit: run_limit(&r)?,
+            cache_hint,
         });
     }
     Ok(out)

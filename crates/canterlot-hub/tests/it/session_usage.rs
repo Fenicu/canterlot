@@ -61,6 +61,37 @@ impl Fixture {
         self.run_costed(conversation, model, tokens, None).await;
     }
 
+    /// Ход с заданными началом, концом и расходом кеша для подсказки о пересборке.
+    async fn run_cached(
+        &self,
+        model: &str,
+        tokens: (i64, i64, i64, i64),
+        started_minutes_ago: i64,
+        finished_minutes_ago: i64,
+    ) -> Uuid {
+        let command = self
+            .run_costed(self.conversation, model, tokens, Some(1))
+            .await;
+        sqlx::query(
+            "update runs set started_at=now()-make_interval(mins=>$2::int),finished_at=now()-make_interval(mins=>$3::int) where input_command_id=$1",
+        )
+        .bind(command)
+        .bind(i32::try_from(started_minutes_ago).unwrap())
+        .bind(i32::try_from(finished_minutes_ago).unwrap())
+        .execute(&self.pool)
+        .await
+        .unwrap();
+        command
+    }
+
+    async fn hint(&self, run: Uuid) -> Value {
+        let mut conn = self.pool.acquire().await.unwrap();
+        let views = canterlot_hub::history::run_costs(&mut conn, self.conversation, &[run])
+            .await
+            .unwrap();
+        serde_json::to_value(&views[0]).unwrap()["cache_hint"].clone()
+    }
+
     /// Ход с ценой в микродолларах; `None` — цена хода неизвестна.
     async fn run_costed(
         &self,
@@ -68,7 +99,7 @@ impl Fixture {
         model: &str,
         tokens: (i64, i64, i64, i64),
         cost: Option<i64>,
-    ) {
+    ) -> Uuid {
         sqlx::query(
             "insert into executions(id,conversation_id,generation,state,outcome)
              values($1,$2,1,'stopped','user_stop')
@@ -122,6 +153,7 @@ impl Fixture {
         .execute(&self.pool)
         .await
         .unwrap();
+        command
     }
 
     async fn usage(&self, id: Uuid) -> Value {
@@ -401,4 +433,69 @@ async fn deletion_fold_keeps_cost_and_unknown_turns(pool: PgPool) {
         model(&after, "delegates", "opus")["cost_micro_usd"],
         300_007
     );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn cache_hint_follows_the_previous_finished_turn(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let first = f.run_cached("opus", (1_000, 50, 40_000, 0), 60, 59).await;
+    // Простой 20 минут, чтение кеша обвалилось, запись крупная.
+    let second = f.run_cached("opus", (500, 50, 2_000, 38_000), 39, 38).await;
+    // Без простоя тот же обвал: кеш пересобран.
+    let third = f.run_cached("opus", (500, 50, 1_000, 30_000), 37, 36).await;
+    // Здоровое чтение: подсказки нет.
+    let fourth = f.run_cached("opus", (500, 50, 30_000, 500), 35, 34).await;
+
+    assert_eq!(f.hint(first).await, Value::Null, "first turn");
+    assert_eq!(
+        f.hint(second).await,
+        serde_json::json!({"kind": "expired", "idle_minutes": 20})
+    );
+    assert_eq!(
+        f.hint(third).await,
+        serde_json::json!({"kind": "rebuilt", "idle_minutes": null})
+    );
+    assert_eq!(f.hint(fourth).await, Value::Null);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn cache_hint_names_a_model_change_and_a_compaction(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    f.run_cached("opus", (1_000, 50, 40_000, 0), 60, 59).await;
+    let switched = f.run_cached("sonnet", (500, 50, 0, 38_000), 58, 57).await;
+    assert_eq!(
+        f.hint(switched).await,
+        serde_json::json!({"kind": "model_changed", "idle_minutes": null})
+    );
+    let after = f.run_cached("sonnet", (500, 50, 0, 38_000), 56, 55).await;
+    let execution: Uuid =
+        sqlx::query_scalar("select id from executions where conversation_id=$1 limit 1")
+            .bind(f.conversation)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    sqlx::query(
+        "insert into compactions(id,conversation_id,execution_id,trigger,ok,created_at)
+         values($1,$2,$3,'auto',true,now()-interval '56 minutes')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(f.conversation)
+    .bind(execution)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    // Первый ход без compactions: «пересобран», с записью о сжатии между концами: «после сжатия».
+    assert_eq!(
+        f.hint(after).await,
+        serde_json::json!({"kind": "compaction", "idle_minutes": null})
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn cache_hint_is_absent_when_the_previous_turn_has_no_usage(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let first = f.run_cached("opus", (0, 0, 0, 0), 60, 59).await;
+    let second = f.run_cached("opus", (500, 50, 0, 38_000), 58, 57).await;
+    let _ = first;
+    assert_eq!(f.hint(second).await, Value::Null);
 }

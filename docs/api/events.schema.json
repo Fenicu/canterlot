@@ -1407,12 +1407,48 @@
                   "type": "null"
                 }
               ]
+            },
+            "cache_hint": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "enum": [
+                        "expired",
+                        "model_changed",
+                        "compaction",
+                        "rebuilt"
+                      ]
+                    },
+                    "idle_minutes": {
+                      "oneOf": [
+                        {
+                          "type": "integer"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "idle_minutes"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
             "run_id",
             "usage",
-            "limit"
+            "limit",
+            "cache_hint"
           ],
           "additionalProperties": false
         }

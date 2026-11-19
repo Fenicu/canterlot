@@ -14149,6 +14149,34 @@
           }
         }
       },
+      "CacheHint": {
+        "type": "object",
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "idle_minutes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Простой между ходами в минутах; только у `expired`."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/CacheHintKind"
+          }
+        }
+      },
+      "CacheHintKind": {
+        "type": "string",
+        "enum": [
+          "expired",
+          "model_changed",
+          "compaction",
+          "rebuilt"
+        ]
+      },
       "CancelOutcome": {
         "oneOf": [
           {
@@ -21835,6 +21863,17 @@
           "usage"
         ],
         "properties": {
+          "cache_hint": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CacheHint",
+                "description": "Вероятная причина пересборки кеша; пусто, если кеш в порядке или данных мало."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "limit": {
             "oneOf": [
               {
