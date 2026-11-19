@@ -2452,6 +2452,58 @@ fn missing_cost_usd_stays_unknown_not_zero() {
     assert_eq!(usage[0].cost_micro_usd, None);
 }
 
+/// Цена модели за ход по последовательности накопительных замеров `costUSD`:
+/// `None` — замера в кадре нет.
+fn costs_over_turns(parser: &mut Parser, samples: &[Option<f64>]) -> Vec<Option<u64>> {
+    samples
+        .iter()
+        .map(|sample| {
+            let command = Uuid::now_v7();
+            parser.set_input_command(command);
+            let mut model = json!({"inputTokens":1,"outputTokens":1});
+            if let Some(usd) = sample {
+                model["costUSD"] = json!(usd);
+            }
+            let usage =
+                turn_usage_of(&parser.feed(&cost_turn(command, json!({"claude-opus-5-5": model}))));
+            usage[0].cost_micro_usd
+        })
+        .collect()
+}
+
+#[test]
+fn a_missing_cost_sample_does_not_reset_the_cumulative_baseline() {
+    let mut parser = Parser::new();
+    let costs = costs_over_turns(&mut parser, &[Some(0.20), None, Some(0.30)]);
+    assert_eq!(costs, [Some(200_000), None, Some(100_000)]);
+    let known: u64 = costs.iter().flatten().sum();
+    assert!(known <= 300_000, "the sum never exceeds the CLI counter");
+}
+
+#[test]
+fn an_invalid_cost_sample_is_treated_like_a_missing_one() {
+    let mut parser = Parser::new();
+    let costs = costs_over_turns(&mut parser, &[Some(0.20), Some(-1.0), Some(0.30)]);
+    assert_eq!(costs, [Some(200_000), None, Some(100_000)]);
+}
+
+#[test]
+fn a_lower_cost_sample_starts_a_new_baseline_without_going_negative() {
+    let mut parser = Parser::new();
+    let costs = costs_over_turns(&mut parser, &[Some(0.50), Some(0.10), Some(0.25)]);
+    assert_eq!(costs, [Some(500_000), Some(100_000), Some(150_000)]);
+}
+
+#[test]
+fn a_resumed_cli_process_starts_the_cost_counter_over() {
+    let mut parser = Parser::new();
+    let before = costs_over_turns(&mut parser, &[Some(0.40)]);
+    parser.reset_process();
+    let after = costs_over_turns(&mut parser, &[Some(0.15), Some(0.20)]);
+    assert_eq!(before, [Some(400_000)]);
+    assert_eq!(after, [Some(150_000), Some(50_000)]);
+}
+
 /// Размышление с одними пустыми приращениями и подписью (CLI без показа мыслей) всё равно
 /// закрывается пустым итогом: иначе блок висит `streaming` весь ход, и карточка ответа
 /// показывает давно закончившееся «Рассуждает».

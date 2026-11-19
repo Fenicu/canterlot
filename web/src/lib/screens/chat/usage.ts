@@ -38,7 +38,7 @@ export interface SessionUsageSummary {
   delegates: UsageSection;
   hasDelegates: boolean;
   /** «≈ $X за сессию с делегатами» и, если есть, «N ходов без цены». */
-  cost: { money: string; unknown: string | null };
+  cost: { money: string | null; unknown: string | null };
 }
 
 function value(n: number): UsageValue {

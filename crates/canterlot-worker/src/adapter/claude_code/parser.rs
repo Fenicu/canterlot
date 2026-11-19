@@ -449,6 +449,9 @@ pub struct Parser {
     session_model: Option<String>,
     current_model: String,
     prev_usage: HashMap<String, ModelUsage>,
+    /// Последний верный накопительный замер `costUSD` по модели, микродоллары. Живёт отдельно
+    /// от `prev_usage`: кадр без замера не должен сбрасывать базу.
+    cost_base: HashMap<String, u64>,
     model_agent: HashMap<String, String>,
     blocks: HashMap<u64, OpenBlock>,
     tool_blocks: HashMap<String, Uuid>,
@@ -504,6 +507,7 @@ impl Parser {
             session_model: None,
             current_model: String::new(),
             prev_usage: HashMap::new(),
+            cost_base: HashMap::new(),
             model_agent: HashMap::new(),
             blocks: HashMap::new(),
             tool_blocks: HashMap::new(),
@@ -751,6 +755,7 @@ impl Parser {
         self.background_sent = (Vec::new(), false);
         self.assistant_error_reported = false;
         self.prev_usage.clear();
+        self.cost_base.clear();
         self.tool_blocks.clear();
         self.tool_agents.clear();
         self.running_tools.clear();
@@ -1929,6 +1934,7 @@ impl Parser {
                 cache_read_tokens: get("cacheReadInputTokens"),
                 cache_write_tokens: get("cacheCreationInputTokens"),
                 cost_micro_usd: cost_micro(model),
+                cost_partial: false,
             };
             let prev = self.prev_usage.insert(name.clone(), seen.clone());
             let delta = |now: u64, was: u64| now.saturating_sub(was);
@@ -1940,6 +1946,18 @@ impl Parser {
                 cache_read_tokens: 0,
                 cache_write_tokens: 0,
                 cost_micro_usd: None,
+                cost_partial: false,
+            });
+            // Цена накопительная: за ход берём прирост к последнему верному замеру модели. Нет
+            // замера — цена хода неизвестна, а база остаётся; расход за пропуск целиком уходит в
+            // прирост следующего замера, так что сумма ходов не превышает счётчик CLI. Замер ниже
+            // базы (CLI перезапущен) — новая база, ход получает сам замер.
+            let cost_micro_usd = seen.cost_micro_usd.map(|now| {
+                let base = self.cost_base.insert(name.clone(), now);
+                match base {
+                    Some(base) if now >= base => now - base,
+                    _ => now,
+                }
             });
             let agent = if *name == main {
                 "orchestrator".to_owned()
@@ -1956,10 +1974,8 @@ impl Parser {
                 output_tokens: delta(seen.output_tokens, was.output_tokens),
                 cache_read_tokens: delta(seen.cache_read_tokens, was.cache_read_tokens),
                 cache_write_tokens: delta(seen.cache_write_tokens, was.cache_write_tokens),
-                // Цена, как и токены, накопительная: за ход берём прирост.
-                cost_micro_usd: seen
-                    .cost_micro_usd
-                    .map(|now| now.saturating_sub(was.cost_micro_usd.unwrap_or(0))),
+                cost_micro_usd,
+                cost_partial: false,
             });
         }
         usage

@@ -12,19 +12,24 @@ export interface CostUsage {
 	/** Микродолларов; пусто — цена неизвестна, а не ноль. */
 	cost_micro_usd?: number | null;
 	cost_source?: string | null;
+	/** Ложь — известна лишь часть цены: сумма ниже нижняя граница. Нет поля — цена полная. */
+	cost_complete?: boolean;
 }
 
 const UNKNOWN = '≈ $ —';
 
-/** Сумма в микродолларах по-русски: «≈ $0,62», «< $0,01», «бесплатно», неизвестная — «≈ $ —». */
-export function costMoney(micro: number | null | undefined): string {
-	if (micro == null) return UNKNOWN;
-	if (micro === 0) return 'бесплатно';
-	if (micro < 10_000) return '< $0,01';
+/**
+ * Сумма в микродолларах по-русски: «≈ $0,62», «< $0,01», «бесплатно», неизвестная — «≈ $ —».
+ * Неполная сумма — нижняя граница: «≥ $0,41». Ноль «бесплатно» только при полной известной цене.
+ */
+export function costMoney(micro: number | null | undefined, complete = true): string {
+	if (micro == null || !Number.isFinite(micro)) return UNKNOWN;
+	if (micro === 0) return complete ? 'бесплатно' : UNKNOWN;
+	if (micro < 10_000) return complete ? '< $0,01' : '> $0';
 	const cents = Math.round(micro / 10_000);
 	const dollars = Math.floor(cents / 100);
 	const rest = String(cents % 100).padStart(2, '0');
-	return `≈ $${fmt.number(dollars)},${rest}`;
+	return `${complete ? '≈' : '≥'} $${fmt.number(dollars)},${rest}`;
 }
 
 /** Доля кеша во входе, целые проценты; без входа её нет. */
@@ -46,6 +51,7 @@ const MAIN_AGENTS = new Set(['orchestrator', 'main']);
 interface Merged extends CostUsage {
 	main: boolean;
 	cost_micro_usd: number | null;
+	complete: boolean;
 }
 
 /** Одна модель — одна строка, даже если её звали несколько агентов; одна неизвестная цена делает неизвестной сумму. */
@@ -55,14 +61,15 @@ function mergeByModel(usage: CostUsage[]): Merged[] {
 		const known = byModel.get(line.model);
 		const cost = line.cost_micro_usd ?? null;
 		if (!known) {
-			byModel.set(line.model, { ...line, main: MAIN_AGENTS.has(line.agent ?? ''), cost_micro_usd: cost });
+			byModel.set(line.model, { ...line, main: MAIN_AGENTS.has(line.agent ?? ''), cost_micro_usd: cost, complete: cost != null && line.cost_complete !== false });
 			continue;
 		}
 		known.input_tokens += line.input_tokens;
 		known.output_tokens += line.output_tokens;
 		known.cache_read_tokens += line.cache_read_tokens;
 		known.cache_write_tokens += line.cache_write_tokens;
-		known.cost_micro_usd = known.cost_micro_usd == null || cost == null ? null : known.cost_micro_usd + cost;
+		known.cost_micro_usd = known.cost_micro_usd == null && cost == null ? null : (known.cost_micro_usd ?? 0) + (cost ?? 0);
+		known.complete &&= cost != null && line.cost_complete !== false;
 		known.main ||= MAIN_AGENTS.has(line.agent ?? '');
 	}
 	return [...byModel.values()];
@@ -86,13 +93,13 @@ export function costLine(usage: CostUsage[], limit: { weekly_delta_permille: num
 	if (!main) return '';
 	const cache = cacheShare(main);
 	const tokens = cache == null ? tokensText(total(main)) : `${tokensText(total(main))} (кэш ${cache}%)`;
-	let money = costMoney(main.cost_micro_usd);
+	let money = costMoney(main.cost_micro_usd, main.complete);
 	if (extra.length === 1 && extra[0]) {
-		money += ` + ${modelLabel(extra[0].model)} ${costMoney(extra[0].cost_micro_usd)}`;
+		money += ` + ${modelLabel(extra[0].model)} ${costMoney(extra[0].cost_micro_usd, extra[0].complete)}`;
 	} else if (extra.length > 1) {
-		const unknown = extra.some((line) => line.cost_micro_usd == null);
+		const complete = extra.every((line) => line.complete);
 		const sum = extra.reduce((acc, line) => acc + (line.cost_micro_usd ?? 0), 0);
-		money += ` + ${extra.length} ${fmt.plural(extra.length, ['модель', 'модели', 'моделей'])} ${unknown ? UNKNOWN : costMoney(sum)}`;
+		money += ` + ${extra.length} ${fmt.plural(extra.length, ['модель', 'модели', 'моделей'])} ${costMoney(sum, complete)}`;
 	}
 	return [modelLabel(main.model), tokens, money, weekShare(limit?.weekly_delta_permille)].filter((part): part is string => !!part).join(' · ');
 }
@@ -131,12 +138,20 @@ interface CostTotals {
 	unknown_cost_turns: number;
 }
 
-/** Итог панели сведений: деньги за сессию с делегатами и число ходов, которым цену назвать нечем. */
-export function sessionCostLine(session: CostTotals, delegates: CostTotals): { money: string; unknown: string | null } {
+const counted = (n: unknown): n is number => typeof n === 'number' && Number.isFinite(n);
+
+/**
+ * Итог панели сведений: деньги за сессию с делегатами и число ходов, которым цену назвать нечем.
+ * Хаб 1.41 этих полей не отдаёт: тогда цены нет, и денег в строке нет (`money` — null).
+ */
+export function sessionCostLine(session: CostTotals, delegates: CostTotals): { money: string | null; unknown: string | null } {
+	if (![session.cost_micro_usd, delegates.cost_micro_usd, session.unknown_cost_turns, delegates.unknown_cost_turns].every(counted)) {
+		return { money: null, unknown: null };
+	}
 	const micro = session.cost_micro_usd + delegates.cost_micro_usd;
 	const unknown = session.unknown_cost_turns + delegates.unknown_cost_turns;
 	return {
-		money: `${costMoney(micro)} за сессию с делегатами`,
+		money: `${costMoney(micro, unknown === 0)} за сессию с делегатами`,
 		unknown: unknown > 0 ? `${unknown} ${fmt.plural(unknown, ['ход', 'хода', 'ходов'])} без цены` : null
 	};
 }

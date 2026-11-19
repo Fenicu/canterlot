@@ -245,6 +245,8 @@ struct Tally {
     cache_write: u64,
     /// Микродолларов от сервера; `None`, пока ни один шаг не назвал цену.
     cost_micro_usd: Option<u64>,
+    /// Шаги без цены: при цене у других шагов сумма выше — лишь известная часть.
+    unpriced_steps: u32,
 }
 
 impl Tally {
@@ -255,6 +257,7 @@ impl Tally {
             .and_then(Value::as_f64)
             .filter(|usd| usd.is_finite() && *usd >= 0.0)
         else {
+            self.unpriced_steps = self.unpriced_steps.saturating_add(1);
             return;
         };
         let micro = (usd * 1_000_000.0).round() as u64;
@@ -747,6 +750,7 @@ impl Translator {
                 cache_read_tokens: tally.cache_read,
                 cache_write_tokens: tally.cache_write,
                 cost_micro_usd: tally.cost_micro_usd,
+                cost_partial: tally.cost_micro_usd.is_some() && tally.unpriced_steps > 0,
             })
             .collect();
         AdapterEvent::RunFinished {

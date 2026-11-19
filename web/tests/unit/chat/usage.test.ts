@@ -226,7 +226,7 @@ describe("summarizeUsage", () => {
       delegates: totals({ turns: 2, cost_micro_usd: 250_000, unknown_cost_turns: 1 }),
     };
     expect(summarizeUsage(usage).cost).toEqual({
-      money: "≈ $1,25 за сессию с делегатами",
+      money: "≥ $1,25 за сессию с делегатами",
       unknown: "2 хода без цены",
     });
   });

@@ -617,12 +617,13 @@ export class ChatStore {
 
   async loadOlder(): Promise<void> {
     const version = this.timeline.windowVersion;
+    const costClock = this.#costClock;
     const page = await this.deps.api.history(this.id, {
       before: this.timeline.oldestSeq() ?? undefined,
     });
     // Прежнее окно заменили, пока страница была в пути: её место уже не здесь.
     if (version !== this.timeline.windowVersion) return;
-    this.#takeRunCosts(page.runs);
+    this.#takeRunCosts(page.runs, costClock);
     this.#ingest(page.items, "older");
     this.timeline.hasOlder = Boolean(page.next_before);
   }
@@ -678,9 +679,10 @@ export class ChatStore {
     const epoch = this.#epoch;
     this.#holds += 1;
     try {
+      const costClock = this.#costClock;
       const page = await this.deps.api.history(this.id, { around: seq, limit: 80 });
       if (epoch !== this.#epoch) return;
-      this.#takeRunCosts(page.runs);
+      this.#takeRunCosts(page.runs, costClock);
       this.timeline.replaceWindow(
         this.#entriesFrom(page.items, false),
         Boolean(page.next_before),
@@ -757,11 +759,12 @@ export class ChatStore {
     const version = this.timeline.windowVersion;
     this.#holds += 1;
     try {
+      const costClock = this.#costClock;
       const page = await this.deps.api.history(this.id, {
         after: this.timeline.newestSeq() ?? undefined,
       });
       if (epoch !== this.#epoch || version !== this.timeline.windowVersion) return;
-      this.#takeRunCosts(page.runs);
+      this.#takeRunCosts(page.runs, costClock);
       this.#ingest(page.items, "newer");
       if (page.next_after) return;
       this.timeline.tailDetached = false;
@@ -776,6 +779,7 @@ export class ChatStore {
     const epoch = this.#epoch;
     this.#holds += 1;
     try {
+      const costClock = this.#costClock;
       const page = await this.deps.api.history(this.id, {});
       if (epoch !== this.#epoch) return;
       if (this.timeline.tailDetached) {
@@ -784,7 +788,7 @@ export class ChatStore {
         this.timeline.applyHistoryPage([], "tail");
         this.timeline.hasOlder = Boolean(page.next_before);
       }
-      this.#takeRunCosts(page.runs);
+      this.#takeRunCosts(page.runs, costClock);
       this.#ingest(page.items, "tail");
       this.#placeSecretRequests();
     } finally {
@@ -1056,8 +1060,10 @@ export class ChatStore {
           };
         return;
       case "run_cost_updated":
-        if (event.kind === "run_cost_updated")
+        if (event.kind === "run_cost_updated") {
+          this.#costStamp.set(event.payload.run_id, ++this.#costClock);
           this.runCosts.set(event.payload.run_id, event.payload);
+        }
         return;
       case "phase_changed":
         if (event.kind === "phase_changed") this.phase = { ...event.payload };
@@ -1748,9 +1754,20 @@ export class ChatStore {
     }
   }
 
-  #takeRunCosts(runs: RunCost[] | undefined): void {
-    for (const run of runs ?? []) this.runCosts.set(run.run_id, run);
+  /**
+   * Страница истории не затирает цену, которую событие принесло после начала её запроса:
+   * `since` — значение часов событий цены в момент запроса.
+   */
+  #takeRunCosts(runs: RunCost[] | undefined, since?: number): void {
+    for (const run of runs ?? []) {
+      if (since !== undefined && (this.#costStamp.get(run.run_id) ?? 0) > since) continue;
+      this.runCosts.set(run.run_id, run);
+    }
   }
+
+  #costClock = 0;
+  /** Часы события цены по ходу: больше, чем у запроса истории, — событие новее страницы. */
+  #costStamp = new SvelteMap<string, number>();
 
   #ingest(items: HistoryItem[], dir: "older" | "newer" | "tail"): void {
     this.timeline.applyHistoryPage(this.#entriesFrom(items, dir === "tail"), dir);
