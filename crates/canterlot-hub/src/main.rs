@@ -556,3 +556,54 @@ async fn serve(
     http_result?;
     grpc_result
 }
+
+#[cfg(test)]
+mod tests {
+    /// Всё, что хаб делает с базой в `serve` до начала обслуживания, должно быть либо
+    /// миграциями из `MIGRATOR` (их видит манифест выката), либо перечислено здесь, а
+    /// файлы этих вызовов — в `MIGRATION_CODE` у `scripts/deploy/fastpath-classify.py`.
+    /// Новый вызов с записью в базу до `serve(` без правки списка и классификатора
+    /// ломает этот тест: выкат без vzdump и без репетиции его бы не заметил.
+    #[test]
+    fn serve_startup_calls_are_pinned() {
+        let source = include_str!("main.rs");
+        let start = source
+            .find("        Command::Serve(_) => {")
+            .expect("the Serve arm");
+        let rest = &source[start..];
+        let end = rest[10..]
+            .find("\n        Command::")
+            .map_or(rest.len(), |at| at + 10);
+        let arm = &rest[..end];
+        let mut calls = Vec::new();
+        for (at, _) in arm.match_indices('(') {
+            let token: String = arm[..at]
+                .chars()
+                .rev()
+                .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == ':')
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            if token.contains("::") {
+                calls.push(token);
+            }
+        }
+        let expected = [
+            "Command::Serve",
+            "tracing_subscriber::registry",
+            "tracing_subscriber::fmt::layer",
+            "tracing_subscriber::filter::filter_fn",
+            "installation::check_manifest",
+            "db::migration_error_code",
+            "sqlx::query_scalar",
+            "installation::check",
+            "presets::seed_all_missing",
+        ];
+        assert_eq!(
+            calls, expected,
+            "a startup call changed in the Serve arm: if it writes to the database, add its source \
+             files to MIGRATION_CODE in scripts/deploy/fastpath-classify.py, then update this list"
+        );
+    }
+}
