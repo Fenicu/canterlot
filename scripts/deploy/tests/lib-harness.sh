@@ -406,6 +406,8 @@ harness_cleanup() {
             rm -rf "${FAKE_ROOT}"
         fi
     fi
+    # Подмены из fake-bin (python3, git…) уже удалены: кэш путей bash не должен на них указывать.
+    hash -r
     FAKE_ROOT=""
 }
 trap harness_cleanup EXIT
