@@ -393,7 +393,7 @@ MCP-серверы владельца и делегированные сесси
 
 ### Ошибки инструментов
 
-Модель получает код и короткое английское сообщение в `isError`. Коды: `session_not_found`, `read_only_session`, `rate_limited`, `chain_depth_exceeded`, `spawn_depth_exceeded`, `harness_unknown`, `model_unknown`, `effort_not_allowed`, `workdir_not_allowed`, `permission_mode_too_wide`, `profile_unknown`, `machine_unavailable`, `capability_missing`, `queue_full`, `conversation_closed`, `not_parent`, `not_delegated`, `attachment_not_available`, `text_too_large`, `already_decided`, `invalid_arguments`, `internal_error`, `unknown_tool`. Тексты сообщений, итоги и пути в логи, `Debug` и метрики не попадают; ошибка базы наружу идёт одним кодом `internal_error`.
+Модель получает код и короткое английское сообщение в `isError`. Коды: `session_not_found`, `read_only_session`, `rate_limited`, `chain_depth_exceeded`, `spawn_depth_exceeded`, `harness_unknown`, `model_unknown`, `effort_not_allowed`, `workdir_not_allowed`, `permission_mode_too_wide`, `profile_unknown`, `machine_unavailable`, `capability_missing`, `queue_full`, `conversation_closed`, `not_parent`, `not_delegated`, `attachment_not_available`, `text_too_large`, `already_decided`, `invalid_arguments`, `internal_error`, `unknown_tool`, `domain_mismatch`. Тексты сообщений, итоги и пути в логи, `Debug` и метрики не попадают; ошибка базы наружу идёт одним кодом `internal_error`.
 
 ### 12.1. Инструменты оркестратора (после пилота, по решениям владельца 27.10 и 29.10)
 
