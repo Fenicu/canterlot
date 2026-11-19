@@ -51,6 +51,38 @@ impl ActivityState {
     }
 }
 
+/// Повтор запроса к модели, который сейчас идёт в фазе генерации. Нулевые значения
+/// воркера («нет» для статуса, потолка и ожидания) здесь пустые.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+pub struct RetryEvidence {
+    pub attempt: u32,
+    #[serde(default)]
+    pub max_retries: Option<u32>,
+    /// Через сколько после начала фазы начнётся следующая попытка.
+    pub delay_ms: u64,
+    #[serde(default)]
+    pub http_status: Option<u32>,
+    /// Одна из `canterlot_proto::RETRY_CATEGORIES`.
+    pub category: String,
+    /// Сколько попытка ждала ответа, когда заголовков не было вовсе.
+    #[serde(default)]
+    pub no_response_waited_ms: Option<u64>,
+}
+
+impl RetryEvidence {
+    pub fn from_proto(info: &canterlot_proto::worker::v1::RetryInfo) -> Self {
+        Self {
+            attempt: info.attempt,
+            max_retries: (info.max_retries > 0).then_some(info.max_retries),
+            delay_ms: info.delay_ms,
+            http_status: (info.http_status > 0).then_some(info.http_status),
+            category: canterlot_proto::retry_category(&info.category).to_owned(),
+            no_response_waited_ms: (info.no_response_waited_ms > 0)
+                .then_some(info.no_response_waited_ms),
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Evidence {
@@ -68,6 +100,9 @@ pub enum Evidence {
         phase: String,
         tool_name: Option<String>,
         summary: Option<String>,
+        /// Идёт повтор запроса к модели; старые клиенты берут `summary`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry: Option<RetryEvidence>,
         #[serde(with = "optional_time")]
         phase_since: Option<DateTime<Utc>>,
         /// Процесс исполнения ждёт очереди тяжёлых задач машины.
@@ -165,6 +200,7 @@ pub struct ExecutionFacts {
     pub phase_at: Option<DateTime<Utc>>,
     pub tool_name: Option<String>,
     pub summary: Option<String>,
+    pub retry: Option<RetryEvidence>,
 }
 /// Причина `failed`, из которой воркер ещё может вернуть исполнение.
 pub const OWNER_LOST: &str = "owner_lost";
@@ -479,6 +515,7 @@ pub fn compute(i: &ActivityInputs, t: &Thresholds) -> Activity {
             phase: phase.into(),
             tool_name: e.tool_name.clone(),
             summary: e.summary.clone(),
+            retry: e.retry.clone(),
             phase_since: phase_since(i),
             lease_wait: i.lease_wait.clone(),
         },
@@ -750,6 +787,9 @@ pub async fn load_inputs(
                 .as_ref()
                 .and_then(|d| d["summary"].as_str())
                 .map(str::to_owned),
+            retry: detail
+                .as_ref()
+                .and_then(|d| serde_json::from_value(d["retry"].clone()).ok()),
         })
     } else {
         None

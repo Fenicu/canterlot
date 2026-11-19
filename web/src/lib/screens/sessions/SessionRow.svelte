@@ -146,7 +146,7 @@
   time { flex: none; color: var(--time); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
   .activity { flex: 1; min-width: 0; overflow: hidden; color: var(--muted); font-size: var(--fs-meta); white-space: nowrap; display: flex; align-items: baseline; gap: var(--s1); }
   /* Состояние занимает ровно свою ширину: короткий статус не добивается отступом до хвоста. */
-  .text { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .text { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
   /* Хвост «модель · машина» забирает остаток и сжимается первым. */
   .who { flex: 1 1 0; min-width: 0; overflow: hidden; color: var(--secondary); text-overflow: ellipsis; }
   .activity[data-tone='accent'] .text { color: var(--accent-link); }

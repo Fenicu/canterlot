@@ -863,11 +863,12 @@ impl Translator {
 
     // Запрос к модели повторяет сам сервер, ввод не отправляется заново. Подпись строит PWA.
     fn on_retry(data: &Value) -> Vec<Translated> {
-        let attempt = data.get("attempt").and_then(Value::as_u64).unwrap_or(1);
-        vec![Self::phase(
-            Phase::Generating,
-            Some(format!("{RETRY_SUMMARY} {attempt}")),
-        )]
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_millis() as u64);
+        vec![Translated::Event(AdapterEvent::Retry {
+            info: crate::adapter::retry::from_opencode(data, now_ms),
+        })]
     }
 
     // Сжатие тратит токены отдельно от шагов. Форма кадров: `live/compaction.jsonl`.

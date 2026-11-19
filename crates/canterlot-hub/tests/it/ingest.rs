@@ -1970,6 +1970,111 @@ async fn phase_changed_updates_execution_phase(pool: PgPool) -> TestResult {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn phase_retry_reaches_the_event_the_phase_detail_and_the_activity_evidence(
+    pool: PgPool,
+) -> TestResult {
+    use canterlot_hub::activity::{self, Evidence, Thresholds};
+    let (seed, execution, _) = setup(&pool).await;
+    let journal = Uuid::now_v7();
+    Ingest::new(pool.clone())
+        .apply_batch(
+            seed.machine_id,
+            &seed.credential_digest(),
+            JournalKind::Sj,
+            &batch(
+                journal,
+                vec![
+                    opened(&execution),
+                    record_body::Body::PhaseChanged(PhaseChanged {
+                        execution_id: execution.execution_id.to_string(),
+                        phase: "generating".into(),
+                        summary: "retry 2/10".into(),
+                        retry: Some(RetryInfo {
+                            attempt: 2,
+                            max_retries: 10,
+                            delay_ms: 8000,
+                            http_status: 529,
+                            // Хаб не доверяет воркеру: неизвестная категория становится unknown.
+                            category: "Rate limit: sk-secret".into(),
+                            no_response_waited_ms: 185_000,
+                        }),
+                        ..Default::default()
+                    }),
+                ],
+            ),
+        )
+        .await?;
+    let expected = json!({"attempt":2,"max_retries":10,"delay_ms":8000,"http_status":529,
+        "category":"unknown","no_response_waited_ms":185000});
+    let payload: Value = sqlx::query_scalar(
+        "select payload from events where execution_id = $1 and kind = 'phase_changed'",
+    )
+    .bind(execution.execution_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(payload["summary"], "retry 2/10");
+    assert_eq!(payload["retry"], expected);
+    let detail: Value = sqlx::query_scalar("select phase_detail from executions where id = $1")
+        .bind(execution.execution_id)
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(detail["retry"], expected);
+
+    let mut conn = pool.acquire().await?;
+    let inputs = activity::load_inputs(
+        &mut conn,
+        seed.conversation_id,
+        Utc::now(),
+        std::time::Duration::from_secs(60),
+    )
+    .await?;
+    let t = Thresholds {
+        stalled_generating: std::time::Duration::from_secs(1800),
+        stalled_tool: std::time::Duration::from_secs(1800),
+        hung_generating: std::time::Duration::from_secs(600),
+        hung_rescue: canterlot_hub::config::HungRescue::Auto,
+        idle_quiet: std::time::Duration::from_secs(5),
+        idle_background_max: std::time::Duration::from_secs(15 * 60),
+    };
+    let Evidence::Working { retry, .. } = activity::compute(&inputs, &t).evidence else {
+        panic!("working evidence");
+    };
+    assert_eq!(serde_json::to_value(retry.unwrap())?, expected);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn phase_without_retry_has_no_retry_key(pool: PgPool) -> TestResult {
+    let (seed, execution, _) = setup(&pool).await;
+    Ingest::new(pool.clone())
+        .apply_batch(
+            seed.machine_id,
+            &seed.credential_digest(),
+            JournalKind::Sj,
+            &batch(
+                Uuid::now_v7(),
+                vec![
+                    opened(&execution),
+                    record_body::Body::PhaseChanged(PhaseChanged {
+                        execution_id: execution.execution_id.to_string(),
+                        phase: "generating".into(),
+                        ..Default::default()
+                    }),
+                ],
+            ),
+        )
+        .await?;
+    let payload: Value = sqlx::query_scalar(
+        "select payload from events where execution_id = $1 and kind = 'phase_changed'",
+    )
+    .bind(execution.execution_id)
+    .fetch_one(&pool)
+    .await?;
+    assert!(payload.get("retry").is_none(), "{payload}");
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn execution_running_completes_start_command_and_records_native_id(
     pool: PgPool,
 ) -> TestResult {

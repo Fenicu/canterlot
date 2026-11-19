@@ -8406,6 +8406,65 @@
                 "null"
               ],
               "maxLength": 1024
+            },
+            "retry": {
+              "type": "object",
+              "properties": {
+                "attempt": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "max_retries": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 1
+                },
+                "delay_ms": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "http_status": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 1
+                },
+                "category": {
+                  "enum": [
+                    "authentication_failed",
+                    "oauth_org_not_allowed",
+                    "account_on_hold",
+                    "billing_error",
+                    "rate_limit",
+                    "overloaded",
+                    "invalid_request",
+                    "model_not_found",
+                    "server_error",
+                    "max_output_tokens",
+                    "cloud_credential_error",
+                    "unknown"
+                  ]
+                },
+                "no_response_waited_ms": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 1
+                }
+              },
+              "required": [
+                "attempt",
+                "max_retries",
+                "delay_ms",
+                "http_status",
+                "category",
+                "no_response_waited_ms"
+              ],
+              "additionalProperties": false
             }
           },
           "required": [

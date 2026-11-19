@@ -15,6 +15,7 @@ pub mod jsonrpc;
 pub mod labels;
 pub mod limit_note;
 pub mod opencode;
+pub mod retry;
 #[cfg(feature = "synthetic-adapter")]
 pub mod synthetic;
 #[cfg(feature = "synthetic-adapter")]
@@ -519,6 +520,10 @@ pub enum AdapterEvent {
         tool_name: Option<String>,
         summary: Option<String>,
     },
+    /// Повтор запроса к модели: фаза генерации с причиной и числами повтора.
+    Retry {
+        info: canterlot_proto::worker::v1::RetryInfo,
+    },
     /// Ход жив, хотя видимого вывода нет: размышление без текста, повтор запроса,
     /// начало рассуждения. Сопровождение редко пишет его в журнал как прогресс, чтобы хаб
     /// не принял думающий ход за зависший.
@@ -676,6 +681,11 @@ impl fmt::Debug for AdapterEvent {
             Self::Phase { phase, .. } => f
                 .debug_struct("Phase")
                 .field("phase", phase)
+                .finish_non_exhaustive(),
+            Self::Retry { info } => f
+                .debug_struct("Retry")
+                .field("attempt", &info.attempt)
+                .field("category", &info.category)
                 .finish_non_exhaustive(),
             Self::Progress => f.write_str("Progress"),
             Self::BlockStarted {

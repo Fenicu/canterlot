@@ -295,14 +295,8 @@ impl ClaudeCodeAdapter {
                         }
                     }
                     if value["type"] == "system" && value["subtype"] == "api_retry" {
-                        self.events.push_back(AdapterEvent::Phase {
-                            phase: Phase::Generating,
-                            tool_name: None,
-                            summary: Some(format!(
-                                "retry {}/{}",
-                                value["attempt"].as_u64().unwrap_or(0),
-                                value["max_retries"].as_u64().unwrap_or(0)
-                            )),
+                        self.events.push_back(AdapterEvent::Retry {
+                            info: crate::adapter::retry::from_claude(&value),
                         });
                     }
                 }

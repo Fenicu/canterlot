@@ -1,4 +1,4 @@
-import { failureLabel, providerLabel, retryLabel } from "#lib/format/labels.js";
+import { failureLabel, providerLabel, retryText, type RetryFacts } from "#lib/format/labels.js";
 import { fmt } from "#lib/format/ru.js";
 import { leaseWaitText } from "#lib/format/lease.js";
 import { waitStatusText, type WaitFacts } from "#lib/requests/waitCopy.js";
@@ -12,6 +12,8 @@ export interface ActivityEvidence {
   phase?: string;
   phase_since?: string | null;
   summary?: string | null;
+  /** Повтор запроса к модели: причина и числа, пока он идёт. */
+  retry?: RetryFacts | null;
   tool_name?: string | null;
   question?: string | null;
   last_event_at?: string;
@@ -152,7 +154,15 @@ function working(
     return { text: "Нет связи с машиной", tone: "warning", live: false };
   if (phase === "generating")
     return {
-      text: retryLabel(evidence.summary) ?? "Генерирует",
+      text:
+        retryText({
+          retry: evidence.retry,
+          summary: evidence.summary,
+          since: Number.isFinite(Date.parse(evidence.phase_since ?? ""))
+            ? Date.parse(evidence.phase_since ?? "")
+            : null,
+          now,
+        }) ?? "Генерирует",
       tone: "accent",
       live: false,
     };

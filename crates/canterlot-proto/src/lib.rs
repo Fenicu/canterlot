@@ -13,6 +13,32 @@ pub mod worker {
 /// `outcome` факта CJ: управляющая служба заново подтвердила то же живое сопровождение.
 pub const OWNER_RECLAIMED: &str = "owner_reclaimed";
 
+/// Категории причины повтора запроса к модели (`RetryInfo.category`). Всё, чего в списке нет,
+/// называется `unknown`: текст ошибки CLI дальше воркера не идёт.
+pub const RETRY_CATEGORIES: [&str; 12] = [
+    "authentication_failed",
+    "oauth_org_not_allowed",
+    "account_on_hold",
+    "billing_error",
+    "rate_limit",
+    "overloaded",
+    "invalid_request",
+    "model_not_found",
+    "server_error",
+    "max_output_tokens",
+    "cloud_credential_error",
+    "unknown",
+];
+
+/// Приводит категорию к закрытому списку.
+pub fn retry_category(raw: &str) -> &'static str {
+    RETRY_CATEGORIES
+        .iter()
+        .find(|known| **known == raw)
+        .copied()
+        .unwrap_or("unknown")
+}
+
 pub mod goals;
 pub mod harness;
 pub mod limits;

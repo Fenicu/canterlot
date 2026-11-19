@@ -6158,7 +6158,7 @@ async fn retry_of_the_server_sends_no_second_prompt() {
     let events = bench.until_finished(input.command_id).await;
     assert!(events.iter().any(|event| matches!(
         event,
-        AdapterEvent::Phase { summary: Some(summary), .. } if summary == "retry 2"
+        AdapterEvent::Retry { info } if info.attempt == 2 && info.category == "rate_limit" && info.http_status == 429
     )));
     assert!(text_of(&events, "Error").is_empty());
     let prompts = bench

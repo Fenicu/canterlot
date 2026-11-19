@@ -99,6 +99,7 @@ async fn review_fix_agent_metadata_is_truncated_at_char_boundaries(pool: PgPool)
             phase: "running_tool".into(),
             tool_name: text.clone(),
             summary: text.clone(),
+            retry: None,
         }),
     ])
     .await;
@@ -409,6 +410,7 @@ async fn phase_detail_is_stored_with_tool_name(pool: PgPool) -> TestResult {
         phase: "running_tool".into(),
         tool_name: "Read".into(),
         summary: "task".into(),
+        retry: None,
     })])
     .await;
     let detail: Value = sqlx::query_scalar("select phase_detail from executions where id=$1")

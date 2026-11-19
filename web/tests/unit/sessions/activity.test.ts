@@ -56,6 +56,30 @@ describe("sessions/activity", () => {
     expect(
       line({
         state: "working",
+        evidence: { phase: "generating", summary: "retry 2/10" },
+      }).text,
+    ).toBe("Повторяет запрос к модели, попытка 2 из 10");
+    expect(
+      line({
+        state: "working",
+        evidence: {
+          phase: "generating",
+          summary: "retry 2/10",
+          phase_since: new Date(now).toISOString(),
+          retry: {
+            attempt: 2,
+            max_retries: 10,
+            delay_ms: 8000,
+            http_status: 529,
+            category: "overloaded",
+            no_response_waited_ms: null,
+          },
+        },
+      }).text,
+    ).toBe("Повторяет запрос к модели: попытка 2 из 10 · перегрузка (529) · через 8 с");
+    expect(
+      line({
+        state: "working",
         evidence: { phase: "generating", summary: "Субагент general: done" },
       }).text,
     ).toBe("Генерирует");

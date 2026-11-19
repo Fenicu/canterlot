@@ -1386,6 +1386,21 @@ fn start_execution_capabilities_machine_report_os_and_limits_snapshot_roundtrip(
         phase: "executing_tool".into(),
         tool_name: "shell".into(),
         summary: "Проверка".into(),
+        retry: None,
+    });
+    assert_roundtrip(PhaseChanged {
+        execution_id: "execution".into(),
+        phase: "generating".into(),
+        summary: "retry 2/10".into(),
+        retry: Some(RetryInfo {
+            attempt: 2,
+            max_retries: 10,
+            delay_ms: 8000,
+            http_status: 529,
+            category: "overloaded".into(),
+            no_response_waited_ms: 185_000,
+        }),
+        ..Default::default()
     });
     assert_roundtrip(BlockFinal {
         summary: "Готово".into(),
@@ -2400,4 +2415,29 @@ fn secret_messages_keep_their_wire_shape_and_hide_the_value() {
     };
     assert_eq!(body.encode_to_vec()[..2], [0xF2, 0x02], "field 46");
     assert!(!format!("{remove_failed:?}").contains(VALUE));
+}
+
+#[test]
+fn phase_changed_without_retry_decodes_from_the_old_wire_form() {
+    use canterlot_proto::worker::v1::{PhaseChanged, RetryInfo};
+    // Старый воркер не знает поля 5: его кадр читается новым хабом с пустым `retry`.
+    let old = [
+        0x0a, 0x01, b'e', // execution_id
+        0x12, 0x0a, b'g', b'e', b'n', b'e', b'r', b'a', b't', b'i', b'n', b'g', // phase
+    ];
+    let decoded = PhaseChanged::decode(old.as_slice()).unwrap();
+    assert_eq!(decoded.phase, "generating");
+    assert!(decoded.retry.is_none());
+    // Новый кадр читается старым хабом: поле 5 — неизвестное и пропускается.
+    let new = PhaseChanged {
+        execution_id: "e".into(),
+        phase: "generating".into(),
+        retry: Some(RetryInfo {
+            attempt: 1,
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+    .encode_to_vec();
+    assert!(new.starts_with(&old));
 }

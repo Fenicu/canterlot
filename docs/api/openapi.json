@@ -15891,6 +15891,17 @@
                 ],
                 "format": "date-time"
               },
+              "retry": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/RetryEvidence",
+                    "description": "Идёт повтор запроса к модели; старые клиенты берут `summary`."
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "summary": {
                 "type": [
                   "string",
@@ -21582,6 +21593,57 @@
           "after_condition",
           "never"
         ]
+      },
+      "RetryEvidence": {
+        "type": "object",
+        "description": "Повтор запроса к модели, который сейчас идёт в фазе генерации. Нулевые значения\nворкера («нет» для статуса, потолка и ожидания) здесь пустые.",
+        "required": [
+          "attempt",
+          "delay_ms",
+          "category"
+        ],
+        "properties": {
+          "attempt": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "category": {
+            "type": "string",
+            "description": "Одна из `canterlot_proto::RETRY_CATEGORIES`."
+          },
+          "delay_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Через сколько после начала фазы начнётся следующая попытка.",
+            "minimum": 0
+          },
+          "http_status": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "max_retries": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "no_response_waited_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Сколько попытка ждала ответа, когда заголовков не было вовсе.",
+            "minimum": 0
+          }
+        }
       },
       "RevisionBody": {
         "type": "object",

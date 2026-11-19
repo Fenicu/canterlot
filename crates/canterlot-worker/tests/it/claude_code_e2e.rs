@@ -761,7 +761,9 @@ async fn transient_api_retry_only_reports_generating_phase() {
         .find(|v| v["subtype"] == "api_retry")
         .unwrap();
     let events = error_turn(vec![retry, json!({"type":"result","is_error":false})]).await;
-    assert!(events.iter().any(|e| matches!(e, AdapterEvent::Phase { phase: adapter::Phase::Generating, summary: Some(s), .. } if s == "retry 1/1")));
+    assert!(events.iter().any(
+        |e| matches!(e, AdapterEvent::Retry { info } if info.attempt == 1 && info.max_retries == 1)
+    ));
     assert!(!events.iter().any(|e| matches!(
         e,
         AdapterEvent::BlockStarted {
@@ -769,6 +771,43 @@ async fn transient_api_retry_only_reports_generating_phase() {
             ..
         }
     )));
+}
+
+#[tokio::test]
+async fn api_retry_reports_a_typed_reason_without_forwarding_free_text() {
+    let frame = |extra: Value| {
+        let mut base = json!({"type":"system","subtype":"api_retry","attempt":2,"max_retries":10,
+            "retry_delay_ms":8000,"error_status":null,"error":"overloaded: key sk-secret","session_id":"s"});
+        for (key, value) in extra.as_object().unwrap() {
+            base[key] = value.clone();
+        }
+        base
+    };
+    let events = error_turn(vec![
+        frame(json!({})),
+        frame(json!({"error_status":529,"error":"overloaded"})),
+        frame(json!({"no_response":{"waited_ms":185000,"retry_wait_ms":8000},"error":"unknown"})),
+        json!({"type":"result","is_error":false}),
+    ])
+    .await;
+    let infos: Vec<_> = events
+        .iter()
+        .filter_map(|e| match e {
+            AdapterEvent::Retry { info } => Some(info.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(infos.len(), 3, "{events:?}");
+    assert_eq!(
+        (infos[0].http_status, infos[0].category.as_str()),
+        (0, "unknown")
+    );
+    assert_eq!(
+        (infos[1].http_status, infos[1].category.as_str()),
+        (529, "overloaded")
+    );
+    assert_eq!(infos[1].delay_ms, 8000);
+    assert_eq!(infos[2].no_response_waited_ms, 185_000);
 }
 
 #[tokio::test]
