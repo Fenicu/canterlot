@@ -530,6 +530,68 @@ deployed_sha() {
     printf '%s' "${out}"
 }
 
+# Быстрый путь выпуска без миграций. Решает по git diff между развёрнутым релизом и
+# целью, какие шаги можно не делать, и печатает ключ=значение:
+#   path=fast|rehearsed|full   fast — без репетиции и без vzdump; rehearsed — репетиция
+#                              есть, vzdump нет; full — как раньше (репетиция и vzdump)
+#   rehearsal=skip|run  vzdump=skip|run  reasons=<все причины через "; ">
+# Репетиция пропускается, только если не менялись миграции (crates/canterlot-hub/migrations/)
+# и обвязка выката (scripts/deploy/, release.sh, build-release.sh, publish-release.sh);
+# vzdump — только если не менялись миграции. Любая неясность (релиз не определён, компоненты на
+# разных релизах, нет репозитория или ревизии, развёрнутый не предок цели, diff не
+# считается) даёт full. Только читает; код возврата всегда 0.
+# $1 каталог git-репозитория, $2 цель, $3..$5 развёрнутые hub web worker.
+FASTPATH_MIGRATIONS_DIR="crates/canterlot-hub/migrations"
+fastpath_tooling_path() {
+    case "$1" in
+        scripts/deploy/* | scripts/release.sh | scripts/build-release.sh | scripts/publish-release.sh) return 0 ;;
+    esac
+    return 1
+}
+fastpath_eval() {
+    local src="$1" target="$2" b_hub="$3" b_web="$4" b_worker="$5"
+    local rehearsal=skip backup=skip reasons="" b names path mig="" tool="" full_reason=""
+    fastpath_full() { full_reason="${full_reason:+${full_reason}; }$1"; }
+    local c
+    for c in "${b_hub}" "${b_web}" "${b_worker}"; do
+        if ! is_release_id "${c}"; then fastpath_full "the live release cannot be determined (hub '${b_hub}', web '${b_web}', worker '${b_worker}')"; break; fi
+    done
+    if [ -z "${full_reason}" ]; then
+        if ! sha_match "${b_hub}" "${b_web}" || ! sha_match "${b_hub}" "${b_worker}"; then
+            fastpath_full "hub, web and worker are on different releases (${b_hub}, ${b_web}, ${b_worker})"
+        fi
+    fi
+    if [ -z "${full_reason}" ]; then
+        b="${b_hub}"
+        if ! is_release_id "${target}" || ! git -C "${src}" rev-parse --verify -q "${target}^{commit}" >/dev/null 2>&1; then
+            fastpath_full "the target ${target} is not a commit of ${src}"
+        elif ! git -C "${src}" rev-parse --verify -q "${b}^{commit}" >/dev/null 2>&1; then
+            fastpath_full "the live release ${b} is not a commit of ${src}"
+        elif sha_match "${b}" "${target}"; then
+            fastpath_full "the target equals the live release ${b}"
+        elif ! git -C "${src}" merge-base --is-ancestor "${b}" "${target}" >/dev/null 2>&1; then
+            fastpath_full "the live release ${b} is not an ancestor of the target ${target}"
+        elif ! names="$(git -C "${src}" diff --name-only --no-renames "${b}" "${target}" -- 2>/dev/null)"; then
+            fastpath_full "git diff ${b}..${target} cannot be computed"
+        else
+            while IFS= read -r path; do
+                [ -n "${path}" ] || continue
+                case "${path}" in
+                    "${FASTPATH_MIGRATIONS_DIR}"/*) mig="${mig:+${mig}, }${path}" ;;
+                esac
+                if fastpath_tooling_path "${path}"; then tool="${tool:+${tool}, }${path}"; fi
+            done <<<"${names}"
+            [ -z "${mig}" ] || { rehearsal=run; backup=run; reasons="migrations changed since ${b}: ${mig}"; }
+            [ -z "${tool}" ] || { rehearsal=run; reasons="${reasons:+${reasons}; }deploy tooling changed since ${b}: ${tool}"; }
+            [ -n "${reasons}" ] || reasons="no migration and no deploy tooling change between the live ${b} and ${target}"
+        fi
+    fi
+    if [ -n "${full_reason}" ]; then rehearsal=run; backup=run; reasons="${full_reason}"; fi
+    local path_name=full
+    if [ "${rehearsal}" = skip ]; then path_name=fast; elif [ "${backup}" = skip ]; then path_name=rehearsed; fi
+    printf 'path=%s\nrehearsal=%s\nvzdump=%s\nreasons=%s\n' "${path_name}" "${rehearsal}" "${backup}" "$(printf '%s' "${reasons}" | tr '\n\r=' '  :')"
+}
+
 # Ни один управляющий процесс прод-воркера не должен жить. Кандидат — процесс, у
 # которого basename exe ИЛИ argv[0] равен canterlot-worker (бинарь мог быть удалён
 # из релиза после запуска: тогда /proc/pid/exe кончается на " (deleted)", а argv[0]
