@@ -3834,7 +3834,7 @@ export interface components {
             cache_write_tokens: number;
             /**
              * Format: int64
-             * @description Сумма известных цен в микродолларах; ходы без цены в неё не входят.
+             * @description Сумма известных цен в микродолларах; у неполных ходов в неё входит известная часть.
              */
             cost_micro_usd?: number;
             /** Format: int64 */
@@ -5395,7 +5395,8 @@ export interface components {
             turns: number;
             /**
              * Format: int64
-             * @description Ходы, у которых хотя бы по одной модели нет цены: в сумму ниже они не входят.
+             * @description Ходы, у которых хотя бы по одной модели цена неизвестна или известна лишь частично:
+             *     известная часть в сумму ниже входит, поэтому при таких ходах сумма — нижняя граница.
              */
             unknown_cost_turns: number;
         };

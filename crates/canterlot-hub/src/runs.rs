@@ -240,9 +240,9 @@ pub async fn finish_in_tx(
     store_working(conn, command).await?;
     crate::test_summary::store_in_tx(conn, command).await?;
     for usage in &fact.usage {
-        let (cost, source) = usage_cost(usage, prices);
-        sqlx::query("insert into run_model_usage(input_command_id,model,agent,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,cost_micro_usd,cost_source) values($1,$2,$3,$4,$5,$6,$7,$8,$9) on conflict(input_command_id,model,agent) do update set input_tokens=excluded.input_tokens,output_tokens=excluded.output_tokens,cache_read_tokens=excluded.cache_read_tokens,cache_write_tokens=excluded.cache_write_tokens,cost_micro_usd=excluded.cost_micro_usd,cost_source=excluded.cost_source")
-            .bind(command).bind(&usage.model).bind(if usage.agent.is_empty(){"main"}else{&usage.agent}).bind(number(usage.input_tokens)?).bind(number(usage.output_tokens)?).bind(number(usage.cache_read_tokens)?).bind(number(usage.cache_write_tokens)?).bind(cost).bind(source).execute(&mut *conn).await?;
+        let (cost, source, complete) = usage_cost(usage, prices);
+        sqlx::query("insert into run_model_usage(input_command_id,model,agent,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,cost_micro_usd,cost_source,cost_complete) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) on conflict(input_command_id,model,agent) do update set input_tokens=excluded.input_tokens,output_tokens=excluded.output_tokens,cache_read_tokens=excluded.cache_read_tokens,cache_write_tokens=excluded.cache_write_tokens,cost_micro_usd=excluded.cost_micro_usd,cost_source=excluded.cost_source,cost_complete=excluded.cost_complete")
+            .bind(command).bind(&usage.model).bind(if usage.agent.is_empty(){"main"}else{&usage.agent}).bind(number(usage.input_tokens)?).bind(number(usage.output_tokens)?).bind(number(usage.cache_read_tokens)?).bind(number(usage.cache_write_tokens)?).bind(cost).bind(source).bind(complete).execute(&mut *conn).await?;
     }
     if let Some(provider) = provider {
         refresh_overlap(conn, provider, started).await?;
@@ -341,23 +341,27 @@ async fn add_adopted(
     merge_git(conn, command, fact).await?;
     crate::test_summary::store_in_tx(conn, command).await?;
     for usage in &fact.usage {
-        let (cost, source) = usage_cost(usage, prices);
-        // Цена складывается, только если известна у обеих частей: иначе ход остаётся без цены.
-        sqlx::query("insert into run_model_usage(input_command_id,model,agent,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,cost_micro_usd,cost_source) values($1,$2,$3,$4,$5,$6,$7,$8,$9) on conflict(input_command_id,model,agent) do update set input_tokens=run_model_usage.input_tokens+excluded.input_tokens,output_tokens=run_model_usage.output_tokens+excluded.output_tokens,cache_read_tokens=run_model_usage.cache_read_tokens+excluded.cache_read_tokens,cache_write_tokens=run_model_usage.cache_write_tokens+excluded.cache_write_tokens,cost_micro_usd=run_model_usage.cost_micro_usd+excluded.cost_micro_usd,cost_source=case when run_model_usage.cost_micro_usd is null or excluded.cost_micro_usd is null then null else run_model_usage.cost_source end")
-            .bind(command).bind(&usage.model).bind(if usage.agent.is_empty(){"main"}else{&usage.agent}).bind(number(usage.input_tokens)?).bind(number(usage.output_tokens)?).bind(number(usage.cache_read_tokens)?).bind(number(usage.cache_write_tokens)?).bind(cost).bind(source).execute(&mut *conn).await?;
+        let (cost, source, complete) = usage_cost(usage, prices);
+        // Известные суммы складываются; часть без цены не стирает известную, а делает ход неполным.
+        sqlx::query("insert into run_model_usage(input_command_id,model,agent,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,cost_micro_usd,cost_source,cost_complete) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) on conflict(input_command_id,model,agent) do update set input_tokens=run_model_usage.input_tokens+excluded.input_tokens,output_tokens=run_model_usage.output_tokens+excluded.output_tokens,cache_read_tokens=run_model_usage.cache_read_tokens+excluded.cache_read_tokens,cache_write_tokens=run_model_usage.cache_write_tokens+excluded.cache_write_tokens,cost_micro_usd=case when run_model_usage.cost_micro_usd is null and excluded.cost_micro_usd is null then null else coalesce(run_model_usage.cost_micro_usd,0)+coalesce(excluded.cost_micro_usd,0) end,cost_source=coalesce(run_model_usage.cost_source,excluded.cost_source),cost_complete=case when run_model_usage.cost_micro_usd is null and excluded.cost_micro_usd is null then true else run_model_usage.cost_complete and excluded.cost_complete and run_model_usage.cost_micro_usd is not null and excluded.cost_micro_usd is not null end")
+            .bind(command).bind(&usage.model).bind(if usage.agent.is_empty(){"main"}else{&usage.agent}).bind(number(usage.input_tokens)?).bind(number(usage.output_tokens)?).bind(number(usage.cache_read_tokens)?).bind(number(usage.cache_write_tokens)?).bind(cost).bind(source).bind(complete).execute(&mut *conn).await?;
     }
     Ok(())
 }
 
-/// Цена и её источник: названная CLI, иначе по таблице хаба, иначе неизвестна.
+/// Цена, её источник и полнота: названная CLI, иначе по таблице хаба, иначе неизвестна.
+/// Сумма от CLI, названная лишь за часть шагов (`CliPartial`), — известная нижняя граница:
+/// неполная, пока хаб не умеет оценить остаток. Неизвестная цена полнотой не помечается.
 /// Свои токены Codex отдаёт уже без повторов: кеш вычтен из входа, рассуждения лежат в выходе.
 fn usage_cost(
     usage: &canterlot_proto::worker::v1::ModelUsage,
     prices: &crate::pricing::PriceBook,
-) -> (Option<i64>, Option<&'static str>) {
+) -> (Option<i64>, Option<&'static str>, bool) {
     let known = |micro: u64| i64::try_from(micro).unwrap_or(i64::MAX);
     if let Some(micro) = usage.cost_micro_usd {
-        return (Some(known(micro)), Some("cli"));
+        let partial = usage.cost_source
+            == canterlot_proto::worker::v1::CostSource::CliPartial as i32;
+        return (Some(known(micro)), Some("cli"), !partial);
     }
     let tokens = crate::pricing::Tokens {
         input: usage.input_tokens,
@@ -366,8 +370,8 @@ fn usage_cost(
         cache_write: usage.cache_write_tokens,
     };
     match prices.cost_micro_usd(&usage.model, tokens) {
-        Some(micro) => (Some(known(micro)), Some("prices")),
-        None => (None, None),
+        Some(micro) => (Some(known(micro)), Some("prices"), true),
+        None => (None, None, true),
     }
 }
 

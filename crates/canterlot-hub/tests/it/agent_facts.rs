@@ -107,11 +107,85 @@ async fn adopted_run_adds_cost_and_unknown_stays_unknown(pool: PgPool) -> TestRe
         sqlx::query_as("select model,cost_micro_usd from run_model_usage order by model")
             .fetch_all(&pool)
             .await?;
+    // Неизвестная часть не стирает известную сумму: она остаётся, а ход помечается неполным.
     assert_eq!(
         rows,
         vec![
             ("claude-opus-5-5".into(), Some(150)),
-            ("mystery-model".into(), None)
+            ("mystery-model".into(), Some(9))
+        ]
+    );
+    let complete: Vec<(String, bool)> =
+        sqlx::query_as("select model,cost_complete from run_model_usage order by model")
+            .fetch_all(&pool)
+            .await?;
+    assert_eq!(
+        complete,
+        vec![
+            ("claude-opus-5-5".into(), true),
+            ("mystery-model".into(), false)
+        ]
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn unpriced_adopted_segment_keeps_the_known_cost_as_incomplete(pool: PgPool) -> TestResult {
+    let mut r = Run::new(&pool).await;
+    let i = r.input(&pool).await;
+    let ms = Utc::now().timestamp_millis();
+    r.send(vec![accepted(i.command_id, ms)]).await;
+    let Body::RunFinished(mut first) = finished(&r, i.command_id, ms + 1000) else {
+        unreachable!()
+    };
+    first.usage = vec![priced("claude-opus-5-5", 1, Some(100))];
+    r.send(vec![Body::RunFinished(first.clone())]).await;
+    let mut adopted = first.clone();
+    adopted.adopted = true;
+    adopted.usage = vec![priced("claude-opus-5-5", 1, None)];
+    r.send(vec![Body::RunFinished(adopted)]).await;
+    let row: (Option<i64>, Option<String>, bool) = sqlx::query_as(
+        "select cost_micro_usd,cost_source,cost_complete from run_model_usage",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(row, (Some(100), Some("cli".into()), false));
+    // Дальнейшая полная часть неполноту не снимает.
+    let mut more = first.clone();
+    more.adopted = true;
+    more.usage = vec![priced("claude-opus-5-5", 1, Some(25))];
+    r.send(vec![Body::RunFinished(more)]).await;
+    let row: (Option<i64>, bool) =
+        sqlx::query_as("select cost_micro_usd,cost_complete from run_model_usage")
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(row, (Some(125), false));
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn partial_cli_cost_is_stored_as_known_and_incomplete(pool: PgPool) -> TestResult {
+    let mut r = Run::new(&pool).await;
+    let i = r.input(&pool).await;
+    let ms = Utc::now().timestamp_millis();
+    r.send(vec![accepted(i.command_id, ms)]).await;
+    let Body::RunFinished(mut fact) = finished(&r, i.command_id, ms + 1000) else {
+        unreachable!()
+    };
+    let mut partial = priced("opencode-model", 10, Some(410_000));
+    partial.cost_source = CostSource::CliPartial as i32;
+    fact.usage = vec![partial, priced("opencode-full", 10, Some(7))];
+    r.send(vec![Body::RunFinished(fact)]).await;
+    let rows: Vec<(String, Option<i64>, Option<String>, bool)> = sqlx::query_as(
+        "select model,cost_micro_usd,cost_source,cost_complete from run_model_usage order by model",
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        rows,
+        vec![
+            ("opencode-full".into(), Some(7), Some("cli".into()), true),
+            ("opencode-model".into(), Some(410_000), Some("cli".into()), false),
         ]
     );
     Ok(())
