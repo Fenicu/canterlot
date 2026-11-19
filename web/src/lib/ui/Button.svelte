@@ -12,7 +12,7 @@
   .primary, .primary:hover { background: var(--accent); color: var(--accent-ink); }
   .text-button { background: var(--transparent); color: var(--secondary); }
   .full { width: 100%; }
-  button:disabled { color: var(--muted); cursor: default; background: var(--button-bg, var(--raised)); }
+  button:disabled { color: var(--muted); opacity: var(--opacity-dim); cursor: default; background: var(--button-bg, var(--raised)); }
   .primary:disabled, .primary:disabled:hover { color: var(--muted); background: var(--accent-soft); }
   .text-button:disabled { background: var(--transparent); }
   .reason { color: var(--muted); font-size: var(--fs-sm); margin-top: var(--s2); }
