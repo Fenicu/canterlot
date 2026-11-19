@@ -312,6 +312,8 @@ pub const CLIENT_KINDS: &[&str] = &[
     "scheduled_changed",
     "draft_changed",
     "alarm_changed",
+    "routine_report_changed",
+    "routine_report_dismissed",
     "nudge_changed",
     "routing_policy_changed",
     "spawn_whitelist_changed",

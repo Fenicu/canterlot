@@ -59,6 +59,8 @@ pub struct ConversationSnapshot {
     /// Правило автопинка этой сессии и последние события толчков.
     pub nudge: Option<crate::session_tools::nudge::NudgeRuleView>,
     pub nudge_events: Vec<crate::session_tools::nudge::NudgeEventView>,
+    /// Открытые карточки рутин: отчёт собирается, готов или не собран. Не ввод и не блок ленты.
+    pub routine_reports: Vec<crate::routines::RoutineReportView>,
 }
 
 pub type ConversationSnapshotView = ConversationSnapshot;
@@ -246,6 +248,7 @@ pub async fn conversation_with_registry(
     let nudge = crate::session_tools::nudge::snapshot_rule(&mut *conn, id).await?;
     let nudge_events = crate::session_tools::nudge::snapshot_events(&mut *conn, id, 5).await?;
     let spawn_queue = crate::session_tools::spawn_queue::snapshot_views(&mut *conn, id).await?;
+    let routine_reports = crate::routines::open_for_conversation(&mut *conn, id).await?;
     let data = ConversationSnapshot {
         detail,
         queue: QueueView {
@@ -267,6 +270,7 @@ pub async fn conversation_with_registry(
         spawn_queue,
         nudge,
         nudge_events,
+        routine_reports,
     };
     Ok(Some(Snapshot {
         scope: events::wire_scope(&scope),
