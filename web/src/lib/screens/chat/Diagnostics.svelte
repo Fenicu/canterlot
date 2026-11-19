@@ -173,10 +173,12 @@
 				<p class="note">{usageError}</p>
 			{:else if usageSummary}
 				<div class="usage">
-					<p class="cost-total" data-role="session-cost">
-						<strong>{usageSummary.cost.money}</strong>
-						{#if usageSummary.cost.unknown}<span class="note">{usageSummary.cost.unknown}</span>{/if}
-					</p>
+					{#if usageSummary.cost.money}
+						<p class="cost-total" data-role="session-cost">
+							<strong>{usageSummary.cost.money}</strong>
+							{#if usageSummary.cost.unknown}<span class="note">{usageSummary.cost.unknown}</span>{/if}
+						</p>
+					{/if}
 					<div class="usage-group" data-role="usage-session">
 						<div class="rows">
 							{#each usageSummary.session.rows as row (row.label)}

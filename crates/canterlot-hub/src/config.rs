@@ -563,6 +563,7 @@ impl HttpConfig {
             || self.ws.max_connection_age.is_zero()
             || self.ws.poll_interval.is_zero()
             || self.ws.stall_timeout.is_zero()
+            || self.ws.replay_limit == 0
             || self.ws.delta_window.is_zero()
             || self.ws.delta_window > Duration::from_millis(25)
             || self.ws.session_check_interval.is_zero()
@@ -727,6 +728,8 @@ pub struct WsConfig {
     pub delta_window: Duration,
     #[serde(with = "humantime_serde")]
     pub poll_interval: Duration,
+    /// Сколько событий хвоста повторяется при подписке со старым курсором; больше — `resync_required`.
+    pub replay_limit: usize,
     #[serde(with = "humantime_serde")]
     pub stall_timeout: Duration,
     /// Как часто открытый WebSocket перепроверяет свой сеанс в базе, даже без уведомлений.
@@ -743,6 +746,7 @@ impl Default for WsConfig {
             queue_bytes: 1048576,
             delta_window: Duration::from_millis(25),
             poll_interval: Duration::from_secs(2),
+            replay_limit: 300,
             stall_timeout: Duration::from_secs(15),
             session_check_interval: Duration::from_secs(60),
         }

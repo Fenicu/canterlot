@@ -286,13 +286,14 @@ run_gate_step() {
 # заголовок теги», соединённой пробелами, поэтому точный заголовок вроде «A › B» не
 # совпадёт. Выбираем тесты по расположению из JSON-отчёта (file:line) — на том же
 # коммите номера строк стабильны — и группируем все локации одного проекта в один
-# вызов. После прогона missing_rerun_ids проверяет, что каждая идентичность реально
-# выполнилась и прошла: пропущенная или пропущенная как skipped — провал.
+# вызов. У каждого вызова свой отчёт <база>-N.json, его читают pw_failures и
+# missing_rerun_ids. После прогона missing_rerun_ids проверяет, что каждая идентичность
+# реально выполнилась и прошла: пропущенная или пропущенная как skipped — провал.
 web_rerun() {
     local selection=$1 id kind f1 f2 _ status=0 project
     local -A pw_loc=()
     local stack_sel=""
-    [[ -f package-lock.json ]] || die 'нет web/package-lock.json'
+    [[ -f web/package-lock.json ]] || die 'нет web/package-lock.json'
     export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-${XDG_CACHE_HOME:-$HOME/.cache}/canterlot-playwright}"
     export TOKIO_WORKER_THREADS="${TOKIO_WORKER_THREADS:-4}" RAYON_NUM_THREADS="${RAYON_NUM_THREADS:-4}"
     export MOZ_TASKCONTROLLER_THREADCOUNT="${MOZ_TASKCONTROLLER_THREADCOUNT:-4}" GSETTINGS_BACKEND="${GSETTINGS_BACKEND:-memory}"
@@ -307,10 +308,13 @@ web_rerun() {
         esac
     done <<<"$selection"
     local -a locations=()
+    local slot=0
     cd web
     for project in "${!pw_loc[@]}"; do
+        slot=$((slot + 1))
         read -r -a locations <<<"${pw_loc[$project]}"
-        npx --no-install playwright test "${locations[@]}" "--project=$project" || status=1
+        CANTERLOT_PW_JSON_REPORT="$CANTERLOT_PW_JSON_REPORT-$slot" \
+            npx --no-install playwright test "${locations[@]}" "--project=$project" || status=1
     done
     if [[ -n "$stack_sel" ]]; then
         read -r -a locations <<<"$stack_sel"
@@ -339,6 +343,15 @@ for suite in root.iter('testsuite'):
         if any(child.tag in ('failure', 'error') for child in case):
             print(f"rust|{binary}|{case.get('name', '')}")
 PY
+}
+
+report_present() {
+    local prefix=$1 slot
+    [[ -f "$prefix.json" ]] && return 0
+    for slot in 1 2 3 4 5 6 7 8; do
+        [[ -f "$prefix-$slot.json" ]] && return 0
+    done
+    return 1
 }
 
 pw_failures() {
@@ -523,6 +536,7 @@ else
 fi
 
 # --- вся веб-половина и сквозные сценарии: один прогон ---
+web_stack_missing=0
 if [[ "$web_action" != skip ]]; then
     printf '\n==> scripts/check-web.sh --stack (%s)\n' "$web_action"
     s=$SECONDS
@@ -536,6 +550,12 @@ if [[ "$web_action" != skip ]]; then
     printf '    check-web.sh --stack: %ds, код %s\n' "$web_s" "$web_status"
     mapfile -t pw_ids < <(pw_failures "$CANTERLOT_PW_JSON_REPORT")
     mapfile -t stack_ids < <(pw_failures "$CANTERLOT_STACK_JSON_REPORT" stack)
+    # Без отчёта стека перезапуск одних упавших UI-тестов дал бы аттестацию без сквозных
+    # сценариев: такое падение не «тесты», и перезапуск повторит весь веб.
+    if [[ "$web_action" == full && "$web_status" != 0 ]] && ! report_present "$CANTERLOT_STACK_JSON_REPORT"; then
+        web_stack_missing=1
+        printf 'гейт: сквозные сценарии не запускались, перезапуск повторит весь веб\n' >&2
+    fi
     if [[ "$web_action" == tests ]]; then
         mapfile -t pw_missing < <(missing_rerun_ids pw "$CANTERLOT_PW_JSON_REPORT" "$log_dir/pw-expected.txt")
         mapfile -t stack_missing < <(missing_rerun_ids stack "$CANTERLOT_STACK_JSON_REPORT" "$log_dir/stack-expected.txt")
@@ -580,7 +600,9 @@ state_add deploy_failed "$(step_failure_kind "$deploy_exit" "${deploy_ids[@]}")"
 for id in "${deploy_ids[@]}"; do state_add deploy_fail "$id"; done
 state_add web_exit "$web_status"
 state_add web_duration_s "$web_s"
-state_add web_failed "$(step_failure_kind "$web_status" "${pw_ids[@]}" "${stack_ids[@]}")"
+web_kind=$(step_failure_kind "$web_status" "${pw_ids[@]}" "${stack_ids[@]}")
+((web_stack_missing)) && [[ "$web_kind" == tests ]] && web_kind=other
+state_add web_failed "$web_kind"
 for id in "${pw_ids[@]}"; do state_add pw_fail "$id"; done
 for id in "${stack_ids[@]}"; do state_add stack_fail "$id"; done
 for id in "${done_ids[@]}" "${to_rerun[@]}"; do state_add rerun_done "$id"; done

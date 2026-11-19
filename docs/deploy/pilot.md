@@ -233,6 +233,7 @@ queue_messages = 64                                 # уменьшено про�
 queue_bytes = 65536                                 # уменьшено против умолчания 1048576; диапазон 4096..=1048576
 delta_window = "25ms"                               # не более 25ms
 poll_interval = "2s"
+replay_limit = 300                                  # длиннее хвост со старым курсором заменяется снимком
 stall_timeout = "15s"
 
 [auth]

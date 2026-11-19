@@ -338,6 +338,7 @@ async fn real_turn_gives_blocks_usage_and_one_provider_request() {
             cache_read_tokens: 30,
             cache_write_tokens: 0,
             cost_micro_usd: Some(0),
+            cost_partial: false,
         }]
     );
     assert_eq!(*context_tokens, 100);

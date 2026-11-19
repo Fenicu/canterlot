@@ -73,6 +73,7 @@ queue_messages = 256
 queue_bytes = 1048576
 delta_window = "25ms"
 poll_interval = "2s"
+replay_limit = 300 # длиннее хвост со старым курсором не повторяется: клиент берёт снимок
 stall_timeout = "15s" # без прогресса записи при заполненной очереди
 session_check_interval = "60s" # сокет перепроверяет свой сеанс и без уведомлений
 

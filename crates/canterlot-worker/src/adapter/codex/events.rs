@@ -385,6 +385,7 @@ impl Translator {
                 cache_write_tokens: acc.cache_write,
                 // Цену Codex не называет: хаб считает её по таблице цен.
                 cost_micro_usd: None,
+                cost_partial: false,
             })
             .collect();
         usage.sort_by(|a, b| (&a.agent, &a.model).cmp(&(&b.agent, &b.model)));

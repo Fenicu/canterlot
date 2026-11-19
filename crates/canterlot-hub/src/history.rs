@@ -612,6 +612,8 @@ pub struct ModelUsageView {
     pub cost_micro_usd: Option<i64>,
     /// `cli` — назвал CLI, `prices` — по таблице цен хаба.
     pub cost_source: Option<String>,
+    /// Ложь — цена известна лишь для части токенов: `cost_micro_usd` — нижняя граница.
+    pub cost_complete: bool,
 }
 #[derive(Serialize, ToSchema)]
 pub struct RunLimit {
@@ -628,7 +630,7 @@ pub struct RunCostView {
     /// Вероятная причина пересборки кеша; пусто, если кеш в порядке или данных мало.
     pub cache_hint: Option<crate::cache_hint::CacheHint>,
 }
-const USAGE_SQL: &str = "select model,agent,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,cost_micro_usd,cost_source from run_model_usage where input_command_id=$1 order by model,agent";
+const USAGE_SQL: &str = "select model,agent,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,cost_micro_usd,cost_source,cost_complete from run_model_usage where input_command_id=$1 order by model,agent";
 fn run_limit(r: &sqlx::postgres::PgRow) -> Result<Option<RunLimit>, sqlx::Error> {
     let before: Option<i32> = r.try_get("weekly_before_permille")?;
     let after: Option<i32> = r.try_get("weekly_after_permille")?;

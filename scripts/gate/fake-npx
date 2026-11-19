@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Подмена npx для scripts/gate/test.sh: «прогоняет» переданные локации одного проекта
+# Playwright и пишет JSON-отчёт туда же, куда его пишет web/playwright.config.ts.
+set -euo pipefail
+project=""
+locs=()
+for a in "$@"; do
+    case "$a" in
+        --project=*) project=${a#--project=} ;;
+        --no-install | playwright | test) ;;
+        *) locs+=("$a") ;;
+    esac
+done
+echo "npx $project ${locs[*]}" >>"$GATE_FAKE_CALLS"
+PROJECT="$project" REPORT="${CANTERLOT_PW_JSON_REPORT}.json" python3 - "${locs[@]}" <<'PY'
+import json
+import os
+import sys
+
+specs = []
+for loc in sys.argv[1:]:
+    file, _, line = loc.rpartition(":")
+    specs.append({"file": file, "line": int(line), "title": "spec", "tests": [
+        {"projectName": os.environ["PROJECT"], "title": "title", "status": "expected",
+         "results": [{"status": "passed"}]}]})
+with open(os.environ["REPORT"], "w") as handle:
+    json.dump({"suites": [{"specs": specs}]}, handle)
+PY

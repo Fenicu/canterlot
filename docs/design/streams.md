@@ -258,7 +258,7 @@ stateDiagram-v2
 | нет | `subscribe_requested` | | HTTP: snapshot и граница `B` | `loading_snapshot` |
 | `loading_snapshot` | `snapshot_loaded` | | применить snapshot, курсор = `B`; локальные операции `saving` из `LS` остаются | `subscribing` |
 | `subscribing` | `subscribed_from_cursor` | сервер авторизовал область и курсор не старше срока журнала | события с курсор + 1 | `live` |
-| `subscribing`, `gap_recovery` | `resync_required` | курсор старше журнала (исходно 7 суток, §14.1) | явный ответ и новый snapshot, без цикла reconnect (AT-B-05) | `loading_snapshot` |
+| `subscribing`, `gap_recovery` | `resync_required` | курсор старше журнала (исходно 7 суток, §14.1) или хвост при подписке длиннее `[http.ws] replay_limit` (300): вернувшийся клиент берёт один снимок вместо долгого повтора | явный ответ и новый snapshot, без цикла reconnect (AT-B-05) | `loading_snapshot` |
 | `live` | `event_applied` | `scope_seq` = курсор + 1 | применить, курсор + 1; `scope_seq` ≤ курсора игнорируется | `live` |
 | `live` | `gap_detected` | `scope_seq` > курсор + 1 | буферизовать; HTTP-запрос недостающего диапазона | `gap_recovery` |
 | `gap_recovery` | `range_recovered` | | применить по порядку | `live` |

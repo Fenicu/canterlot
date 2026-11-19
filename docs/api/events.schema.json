@@ -1366,6 +1366,9 @@
                         "type": "null"
                       }
                     ]
+                  },
+                  "cost_complete": {
+                    "type": "boolean"
                   }
                 },
                 "required": [
@@ -1376,7 +1379,8 @@
                   "cache_read_tokens",
                   "cache_write_tokens",
                   "cost_micro_usd",
-                  "cost_source"
+                  "cost_source",
+                  "cost_complete"
                 ],
                 "additionalProperties": false
               }

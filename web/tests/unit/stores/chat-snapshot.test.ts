@@ -131,6 +131,47 @@ describe("снимок тёплого чата", () => {
   });
 });
 
+describe("цена хода: событие новее ответа истории", () => {
+  const RUN = "00000000-0000-4000-8000-0000000000b1";
+  const usage = (cost: number) => [
+    { model: "m", agent: "main", input_tokens: 1, output_tokens: 1, cache_read_tokens: 0, cache_write_tokens: 0, cost_micro_usd: cost, cost_source: "cli" },
+  ];
+  const costOf = (chat: ChatStore) => chat.runCosts.get(RUN)?.usage[0]?.cost_micro_usd;
+
+  it("run_cost_updated во время запроса истории не затирается её старым значением", async () => {
+    let release: ((page: { items: HistoryItem[]; runs?: unknown[] }) => void) | undefined;
+    const chat = chatOf({
+      history: () => new Promise((resolve) => { release = resolve as typeof release; }),
+    });
+    const pending = chat.reloadTail();
+    apply(chat, ev("run_cost_updated", { run_id: RUN, usage: usage(900), limit: null, cache_hint: null }, "7"));
+    release?.({ items: [], runs: [{ run_id: RUN, usage: usage(100), limit: null }] });
+    await pending;
+    expect(costOf(chat)).toBe(900);
+  });
+
+  it("запрос, начатый после события, его значение заменяет", async () => {
+    const chat = chatOf({
+      history: async () => ({ items: [], runs: [{ run_id: RUN, usage: usage(1200), limit: null }] }),
+    });
+    apply(chat, ev("run_cost_updated", { run_id: RUN, usage: usage(900), limit: null, cache_hint: null }, "7"));
+    await chat.reloadTail();
+    expect(costOf(chat)).toBe(1200);
+  });
+
+  it("старая страница не затирает событие и при подгрузке старых", async () => {
+    let release: ((page: { items: HistoryItem[]; runs?: unknown[] }) => void) | undefined;
+    const chat = chatOf({
+      history: () => new Promise((resolve) => { release = resolve as typeof release; }),
+    });
+    const pending = chat.loadOlder();
+    apply(chat, ev("run_cost_updated", { run_id: RUN, usage: usage(900), limit: null, cache_hint: null }, "7"));
+    release?.({ items: [], runs: [{ run_id: RUN, usage: usage(100), limit: null }] });
+    await pending;
+    expect(costOf(chat)).toBe(900);
+  });
+});
+
 function blockItem(seq: number): HistoryItem {
   return {
     kind: "block",

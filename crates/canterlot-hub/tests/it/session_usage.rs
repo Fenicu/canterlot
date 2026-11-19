@@ -156,6 +156,25 @@ impl Fixture {
         command
     }
 
+    /// Ход с известной частью цены: сумма есть, но она нижняя граница.
+    async fn run_partial(
+        &self,
+        conversation: Uuid,
+        model: &str,
+        tokens: (i64, i64, i64, i64),
+        cost: i64,
+    ) -> Uuid {
+        let command = self
+            .run_costed(conversation, model, tokens, Some(cost))
+            .await;
+        sqlx::query("update run_model_usage set cost_complete=false where input_command_id=$1")
+            .bind(command)
+            .execute(&self.pool)
+            .await
+            .unwrap();
+        command
+    }
+
     async fn usage(&self, id: Uuid) -> Value {
         let response = self
             .client
@@ -404,6 +423,45 @@ async fn cost_sums_known_turns_and_counts_unknown_ones(pool: PgPool) {
     assert_eq!(model(&usage, "session", "mystery")["cost_micro_usd"], 0);
     assert_eq!(usage["delegates"]["cost_micro_usd"], 5);
     assert_eq!(usage["delegates"]["unknown_cost_turns"], 1);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_partly_priced_turn_keeps_its_known_sum_and_counts_as_incomplete(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let child = f.child(f.conversation).await;
+    f.run_costed(f.conversation, "opus", (100, 10, 0, 0), Some(620_000))
+        .await;
+    f.run_partial(f.conversation, "opencode", (50, 5, 0, 0), 410_000)
+        .await;
+    f.run_partial(child, "opencode", (1, 1, 0, 0), 9).await;
+
+    let usage = f.usage(f.conversation).await;
+    assert_eq!(usage["session"]["cost_micro_usd"], 1_030_000);
+    assert_eq!(usage["session"]["unknown_cost_turns"], 1);
+    assert_eq!(
+        model(&usage, "session", "opencode")["cost_micro_usd"],
+        410_000
+    );
+    assert_eq!(usage["delegates"]["cost_micro_usd"], 9);
+    assert_eq!(usage["delegates"]["unknown_cost_turns"], 1);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn deletion_fold_keeps_partial_cost_as_known_and_incomplete(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let child = f.child(f.conversation).await;
+    f.run_partial(child, "opencode", (10, 1, 0, 0), 410_000)
+        .await;
+    f.run_costed(child, "opus", (5, 5, 0, 0), Some(7)).await;
+
+    deletion::delete_retained(&f.pool, None, f.owner, child, Uuid::now_v7())
+        .await
+        .unwrap();
+
+    let after = f.usage(f.conversation).await;
+    assert_eq!(after["delegates"]["cost_micro_usd"], 410_007);
+    assert_eq!(after["delegates"]["unknown_cost_turns"], 1);
+    assert_eq!(after["delegates"]["turns"], 2);
 }
 
 #[sqlx::test(migrations = "./migrations")]

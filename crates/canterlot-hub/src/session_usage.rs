@@ -17,7 +17,7 @@ pub struct ModelUsageView {
     pub output_tokens: i64,
     pub cache_read_tokens: i64,
     pub cache_write_tokens: i64,
-    /// Сумма известных цен в микродолларах; ходы без цены в неё не входят.
+    /// Сумма известных цен в микродолларах; у неполных ходов в неё входит известная часть.
     #[serde(default)]
     pub cost_micro_usd: i64,
 }
@@ -25,7 +25,8 @@ pub struct ModelUsageView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct UsageTotalsView {
     pub turns: i64,
-    /// Ходы, у которых хотя бы по одной модели нет цены: в сумму ниже они не входят.
+    /// Ходы, у которых хотя бы по одной модели цена неизвестна или известна лишь частично:
+    /// известная часть в сумму ниже входит, поэтому при таких ходах сумма — нижняя граница.
     pub unknown_cost_turns: i64,
     pub cost_micro_usd: i64,
     pub input_tokens: i64,
@@ -165,7 +166,7 @@ async fn own(conn: &mut PgConnection, id: Uuid) -> Result<Part, sqlx::Error> {
     let unknown: i64 = sqlx::query_scalar(
         "select count(distinct r.input_command_id)::bigint
            from runs r join run_model_usage u using(input_command_id)
-          where r.conversation_id=$1 and u.cost_micro_usd is null",
+          where r.conversation_id=$1 and (u.cost_micro_usd is null or not u.cost_complete)",
     )
     .bind(id)
     .fetch_one(&mut *conn)
@@ -229,7 +230,7 @@ async fn live_descendants(conn: &mut PgConnection, id: Uuid) -> Result<Part, sql
            from runs r
            join run_model_usage u using(input_command_id)
            join tree t on t.id=r.conversation_id
-          where t.id<>$1 and u.cost_micro_usd is null",
+          where t.id<>$1 and (u.cost_micro_usd is null or not u.cost_complete)",
     )
     .bind(id)
     .fetch_one(&mut *conn)

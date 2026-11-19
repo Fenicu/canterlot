@@ -246,6 +246,9 @@ pub struct ModelUsage {
     /// Цена хода в микродолларах, которую назвал сам CLI. `None` — CLI цену не назвал.
     #[serde(default)]
     pub cost_micro_usd: Option<u64>,
+    /// Цену назвали не все шаги: `cost_micro_usd` — известная часть, нижняя граница.
+    #[serde(default)]
+    pub cost_partial: bool,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]

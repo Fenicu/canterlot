@@ -346,6 +346,7 @@ export interface RunCostUpdated {
       cache_write_tokens: number;
       cost_micro_usd: number | null;
       cost_source: ("cli" | "prices") | null;
+      cost_complete: boolean;
     }[];
     limit: {
       provider: string;
