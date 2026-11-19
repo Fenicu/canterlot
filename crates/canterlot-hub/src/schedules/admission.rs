@@ -1332,9 +1332,10 @@ async fn start_report_copy(
     .ok_or_else(|| Skip::new(RunState::Failed, "conversation_not_found"))?;
     use sqlx::Row;
     let machine_id: Uuid = parent.try_get("machine_id").map_err(db)?;
-    let capable = scheduler
-        .registry()
-        .is_some_and(|r| r.has_capability(machine_id, crate::session::CAPABILITY_SIDE_CHAT_V1));
+    let capable = scheduler.registry().is_some_and(|r| {
+        r.has_capability(machine_id, crate::session::CAPABILITY_SIDE_CHAT_V1)
+            && r.has_capability(machine_id, crate::session::CAPABILITY_RUN_OUTCOME_V1)
+    });
     if !capable {
         return Err(Skip::new(RunState::Failed, "report_capability_missing"));
     }
@@ -1538,6 +1539,25 @@ pub async fn reserve_manual_for(
     Err(ScheduleError::Conflict("idempotency_conflict"))
 }
 
+/// Сохранённая ручная строка отвечает на тот же запрос: расписание, `run_anyway` и разговор
+/// карточки отчёта (его нет у обычного запуска).
+async fn same_manual_request(
+    conn: &mut PgConnection,
+    run: &ScheduleRun,
+    schedule_id: Uuid,
+    run_anyway: bool,
+    report_conversation_id: Option<Uuid>,
+) -> Result<bool, sqlx::Error> {
+    let stored: Option<Uuid> =
+        sqlx::query_scalar("select report_conversation_id from schedule_runs where id=$1")
+            .bind(run.id)
+            .fetch_one(&mut *conn)
+            .await?;
+    Ok(run.schedule_id == schedule_id
+        && run.run_anyway == run_anyway
+        && stored == report_conversation_id)
+}
+
 async fn reserve_manual_once(
     pool: &PgPool,
     owner_id: Uuid,
@@ -1566,6 +1586,33 @@ async fn reserve_manual_once(
         }
         crate::idempotency::Begin::New => {}
     }
+    // Запись общего ключа могла уйти по сроку, а ручная строка истории остаться: тот же
+    // запрос (расписание, `run_anyway`, разговор карточки) получает её обратно до любой
+    // проверки цели, чужой запрос под этим ключом — конфликт.
+    let retained: Option<super::RunRow> = sqlx::query_as(
+        "select * from schedule_runs where owner_id=$1 and idempotency_key=$2 and manual",
+    )
+    .bind(owner_id)
+    .bind(key)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(retained) = retained {
+        let run = retained.into_run()?;
+        let same = same_manual_request(
+            &mut tx,
+            &run,
+            schedule_id,
+            run_anyway,
+            report_conversation_id,
+        )
+        .await?;
+        let _ = tx.rollback().await;
+        return if same {
+            Ok(Some(Reservation::Existing(run)))
+        } else {
+            Err(ScheduleError::Conflict("idempotency_conflict"))
+        };
+    }
     let schedule = super::get(&mut tx, owner_id, schedule_id)
         .await?
         .ok_or(ScheduleError::NotFound)?;
@@ -1588,6 +1635,13 @@ async fn reserve_manual_once(
         json!({"manual": true, "run_anyway": run_anyway}),
     )
     .await?;
+    if let (Some(run), Some(conversation_id)) = (&reserved, report_conversation_id) {
+        sqlx::query("update schedule_runs set report_conversation_id=$2 where id=$1")
+            .bind(run.id)
+            .bind(conversation_id)
+            .execute(&mut *tx)
+            .await?;
+    }
     let Some(run) = reserved else {
         // Запись общего ключа уже убрана по сроку, а ручная строка истории
         // осталась: тот же запрос (расписание и `run_anyway`) получает её
@@ -1599,12 +1653,23 @@ async fn reserve_manual_once(
         .bind(key)
         .fetch_optional(&mut *tx)
         .await?;
-        let _ = tx.rollback().await;
         let retained = retained.map(super::RunRow::into_run).transpose()?;
-        return match retained {
-            Some(run) if run.schedule_id == schedule_id && run.run_anyway == run_anyway => {
-                Ok(Some(Reservation::Existing(run)))
+        let same = match &retained {
+            Some(run) => {
+                same_manual_request(
+                    &mut tx,
+                    run,
+                    schedule_id,
+                    run_anyway,
+                    report_conversation_id,
+                )
+                .await?
             }
+            None => false,
+        };
+        let _ = tx.rollback().await;
+        return match retained {
+            Some(run) if same => Ok(Some(Reservation::Existing(run))),
             _ => Err(ScheduleError::Conflict("idempotency_conflict")),
         };
     };

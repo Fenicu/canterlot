@@ -1227,6 +1227,8 @@ struct PushRow {
     stale: bool,
     /// Попытка отмечена в строке, а итога нет дольше грейса: хаб погиб посреди отправки.
     stranded: bool,
+    /// Отметка отправки жива: первая попытка могла дойти, повторять POST нельзя.
+    sending: bool,
 }
 
 /// Отправитель пушей. Ключ живёт только здесь и уходит лишь в заголовке `X-Gotify-Key`.
@@ -1354,7 +1356,8 @@ impl Sender {
                     clock_timestamp()-created_at > $1 * interval '1 second' as stale,
                     coalesce(last_status='sending'
                              and clock_timestamp()-updated_at > $3 * interval '1 second',
-                             false) as stranded
+                             false) as stranded,
+                    coalesce(last_status='sending', false) as sending
              from owner_pushes
              where state='pending' and run_at<=clock_timestamp()
              order by run_at,id limit $2",
@@ -1368,6 +1371,9 @@ impl Sender {
         for row in rows {
             // Пуш «отчёт готов» не повторяется после гибели хаба посреди отправки: Gotify мог
             // принять запрос. Попытка отмечена в строке до POST (`begin_attempt`).
+            if row.sending && !row.stranded && row.kind == KIND_ROUTINE_REPORT {
+                continue;
+            }
             if row.stranded && row.kind == KIND_ROUTINE_REPORT {
                 finish(pool, row.id, "dropped", Some("ambiguous_restart")).await?;
                 warn_dropped(&row, None, "ambiguous_restart");
@@ -2144,6 +2150,7 @@ mod tests {
             updated_at,
             stale: false,
             stranded: false,
+            sending: false,
         };
         // Расписание держит «постановка» (она запрашивает его первым).
         let mut enqueue = crate::db::begin(&pool).await.unwrap();

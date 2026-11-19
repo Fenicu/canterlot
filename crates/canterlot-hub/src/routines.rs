@@ -552,7 +552,7 @@ async fn observe(conn: &mut PgConnection, card: &CardRow) -> Result<Facts, sqlx:
     if trashed_at.is_some() {
         return Ok(facts);
     }
-    let input: Option<(String, i64, bool, bool)> = sqlx::query_as(
+    let input: Option<(String, i64, bool, bool, Option<i64>)> = sqlx::query_as(
         "select i.state, i.created_seq,
                 exists(select 1 from runs r
                         where r.input_command_id=i.command_id
@@ -561,13 +561,15 @@ async fn observe(conn: &mut PgConnection, card: &CardRow) -> Result<Facts, sqlx:
                 exists(select 1 from runs r
                         where r.input_command_id=i.command_id
                           and r.finished_at is not null and not r.forced_close
-                          and r.outcome is distinct from 'completed')
+                          and r.outcome is distinct from 'completed'),
+                (select r.last_block_seq from runs r where r.input_command_id=i.command_id)
            from inputs i where i.conversation_id=$1 order by i.created_seq limit 1",
     )
     .bind(copy_id)
     .fetch_optional(&mut *conn)
     .await?;
-    let Some((input_state, input_seq, run_completed, run_unsuccessful)) = input else {
+    let Some((input_state, input_seq, run_completed, run_unsuccessful, turn_end_seq)) = input
+    else {
         return Ok(facts);
     };
     facts.lost = false;
@@ -587,13 +589,15 @@ async fn observe(conn: &mut PgConnection, card: &CardRow) -> Result<Facts, sqlx:
         let query = format!(
             "select content from blocks
               where conversation_id=$1 and kind='text' and parent_block_id is null
-                and state='final' and btrim(content)<>'' and created_seq>=$2 and {}
+                and state='final' and btrim(content)<>'' and created_seq>=$2
+                and created_seq<=$3 and {}
               order by created_seq desc, created_at desc limit 1",
             crate::agents::main_agent_filter("agent")
         );
         facts.text = sqlx::query_scalar(sqlx::AssertSqlSafe(query))
             .bind(copy_id)
             .bind(input_seq)
+            .bind(turn_end_seq.unwrap_or(0))
             .fetch_optional(&mut *conn)
             .await?;
     }
@@ -853,6 +857,26 @@ async fn remove_in_tx(
     owner_id: Uuid,
     copy_id: Uuid,
 ) -> Result<Removal, sqlx::Error> {
+    // Порядок приёма журнала: курсор раньше очереди. Исполнение копии уже остановилось, но
+    // `JournalClosed` мог ещё не прийти: хвост последней пачки приём держит под курсором и
+    // ждёт очередь, а жёсткое удаление, взяв очередь первой, замкнулось бы с ним. Открытый
+    // журнал откладывает удаление на следующий тик.
+    let open_journals: Vec<bool> = sqlx::query_scalar(
+        "select not jc.closed and not jc.discarded
+           from journal_cursors jc join executions e on e.id=jc.execution_id
+          where e.conversation_id=$1 order by jc.journal_id for update of jc",
+    )
+    .bind(copy_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    // Живое исполнение журнал держит открытым само: ему сначала нужна остановка ниже.
+    if open_journals.contains(&true)
+        && crate::executions::live(&mut *conn, copy_id)
+            .await?
+            .is_none()
+    {
+        return Ok(Removal::Pending { backoff: false });
+    }
     // Очередь копии раньше строки разговора, как в удалении и в отпускании ввода.
     let queued: Option<Uuid> = sqlx::query_scalar(
         "select conversation_id from queue_state where conversation_id=$1 for update",

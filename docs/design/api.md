@@ -248,7 +248,7 @@
 | `PATCH /api/v1/scheduled/{id}` | Изменить время или содержимое до отправки |
 | `DELETE /api/v1/scheduled/{id}` | Отменить до отправки |
 | `GET /api/v1/schedules` | Расписания владельца |
-| `POST /api/v1/schedules` | Создать расписание: cron, пояс, цель и подсказка. Цель `session_report {conversation_id}` («Отчёт из сессии») требует разговор владельца вне корзины, не боковую копию, на машине с `side_chat_v1`; иначе 422 `schedule_invalid` с `details.field = target` |
+| `POST /api/v1/schedules` | Создать расписание: cron, пояс, цель и подсказка. Цель `session_report {conversation_id}` («Отчёт из сессии») требует разговор владельца вне корзины, не боковую копию, на машине с `side_chat_v1` и `run_outcome_v1`; иначе 422 `schedule_invalid` с `details.field = target` |
 | `POST /api/v1/schedules/preview` | Следующие N срабатываний для редактора |
 | `GET /api/v1/schedules/defaults` | Умолчания редактора: `timezone` владельца из настроек пушей, без настройки `Europe/Moscow`; PWA берёт отсюда пояс нового расписания |
 | `GET /api/v1/schedules/{id}` | Расписание по идентификатору |

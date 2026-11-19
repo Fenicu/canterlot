@@ -487,6 +487,39 @@ async fn stored_end(pool: &PgPool, end: i32) -> Option<String> {
         .unwrap()
 }
 
+/// Граница текстов хода: последняя последовательность блоков на момент `run_finished`.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn run_finish_remembers_the_last_block_seq_of_its_turn(pool: PgPool) {
+    let mut r = Run::new(&pool).await;
+    let i = r.input(&pool).await;
+    let ms = Utc::now().timestamp_millis();
+    r.send(vec![accepted(i.command_id, ms)]).await;
+    let conversation: Uuid = sqlx::query_scalar("select conversation_id from runs")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let execution: Uuid = sqlx::query_scalar("select execution_id from runs")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "insert into blocks(block_id,execution_id,conversation_id,kind,state,rev,content,created_seq)
+         values($1,$2,$3,'text','final',1,'x',77)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(execution)
+    .bind(conversation)
+    .execute(&pool)
+    .await
+    .unwrap();
+    r.send(vec![finished(&r, i.command_id, ms + 1000)]).await;
+    let seq: Option<i64> = sqlx::query_scalar("select last_block_seq from runs")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(seq, Some(77));
+}
+
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn run_end_failed_is_stored_as_failed(pool: PgPool) {
     assert_eq!(stored_end(&pool, 2).await.as_deref(), Some("failed"));

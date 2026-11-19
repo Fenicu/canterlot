@@ -494,7 +494,9 @@ pub async fn check_target(
     if is_side {
         return Err(ScheduleError::Invalid("invalid_report_target"));
     }
-    if !registry.has_capability(machine_id, crate::session::CAPABILITY_SIDE_CHAT_V1) {
+    if !registry.has_capability(machine_id, crate::session::CAPABILITY_SIDE_CHAT_V1)
+        || !registry.has_capability(machine_id, crate::session::CAPABILITY_RUN_OUTCOME_V1)
+    {
         return Err(ScheduleError::Invalid("report_capability_missing"));
     }
     Ok(())

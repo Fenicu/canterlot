@@ -18,6 +18,7 @@ fn caps() -> Vec<&'static str> {
         "session_tools_v1",
         "schedule_precheck_v1",
         CAPABILITY_SIDE_CHAT_V1,
+        "run_outcome_v1",
     ]
 }
 
@@ -376,9 +377,11 @@ async fn record_copy_run(pool: &PgPool, copy: Uuid, finished: bool, forced: bool
     .unwrap();
     sqlx::query(
         "insert into runs(input_command_id,execution_id,conversation_id,provider,finished_at,
-                          duration_ms,forced_close,outcome)
+                          duration_ms,forced_close,outcome,last_block_seq)
          select i.command_id,$2,$1,'claude',case when $3 then clock_timestamp() end,
-                case when $3 then 1000 end,$4,case when $3 and not $4 then 'completed' end
+                case when $3 then 1000 end,$4,case when $3 and not $4 then 'completed' end,
+                case when $3 then coalesce((select max(created_seq) from blocks
+                                             where conversation_id=$1),0) end
            from inputs i where i.conversation_id=$1 and i.command_id is not null
          on conflict do nothing",
     )
@@ -1162,7 +1165,7 @@ async fn a_turn_that_is_just_starting_is_not_an_empty_report(pool: PgPool) {
     // Ход закончился с ответом: отчёт собран.
     finish_copy_turn(&pool, copy, "Всё спокойно.").await;
     sqlx::query(
-        "update runs set finished_at=clock_timestamp(),duration_ms=1,outcome='completed' where conversation_id=$1",
+        "update runs set finished_at=clock_timestamp(),duration_ms=1,outcome='completed',last_block_seq=(select max(created_seq) from blocks where conversation_id=$1) where conversation_id=$1",
     )
     .bind(copy)
     .execute(&pool)
@@ -2350,4 +2353,248 @@ async fn a_report_push_stranded_mid_send_is_not_resent_after_a_restart(pool: PgP
             .await
             .unwrap();
     assert_eq!(state, "dropped");
+}
+
+/// Строка с отметкой отправки, которой нет и трёх минут, ни при каком перезапуске не уходит
+/// в POST повторно: первая попытка могла дойти, а пауза повтора (60 с) короче грейса.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_fresh_sending_marker_keeps_the_push_out_of_the_send_path(pool: PgPool) {
+    use std::sync::atomic::Ordering;
+    crate::auth_pushes::enable(&pool).await;
+    let f = Fixture::new(pool.clone()).await;
+    let _session = session(&f);
+    with_native(&f).await;
+    let schedule = make_schedule(&f, "Стендап").await;
+    ready_card(&f, schedule, "Отчёт").await;
+    for age in [61, 120, 179] {
+        sqlx::query(
+            "update owner_pushes set state='pending',last_status='sending',attempts=1,
+               updated_at=clock_timestamp()-make_interval(secs=>$1),run_at=clock_timestamp()
+             where kind='routine_report'",
+        )
+        .bind(f64::from(age))
+        .execute(&pool)
+        .await
+        .unwrap();
+        let (hits, url) = crate::schedule_failure_push::dropping_gotify().await;
+        let (_dir, sender) = crate::auth_pushes::sender(&url);
+        sender.deliver_due(&pool).await.unwrap();
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "resent at {age} s");
+        let state: String =
+            sqlx::query_scalar("select state from owner_pushes where kind='routine_report'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(state, "pending", "dropped too early at {age} s");
+    }
+}
+
+/// Codex может принять продолжение под тем же идентификатором команды: после конца отчётного
+/// хода оно дописывает свой текст. Отчёт берётся из блоков самого хода, а не «последнего
+/// текста после ввода».
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_continuation_after_the_completed_turn_does_not_replace_the_report(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let _session = session(&f);
+    with_native(&f).await;
+    let schedule = make_schedule(&f, "Стендап").await;
+    let run = fire(&f, schedule).await;
+    let copy = copies(&pool, f.seed.conversation_id).await.remove(0).0;
+    finish_copy_turn(&pool, copy, "Итог отчётного хода").await;
+    let execution: Uuid = sqlx::query_scalar("select id from executions where conversation_id=$1")
+        .bind(copy)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "insert into blocks(block_id,execution_id,conversation_id,kind,state,rev,content,created_seq)
+         values($1,$2,$3,'text','final',1,'Недописанное продолжение',2000)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(execution)
+    .bind(copy)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sweep(&f).await;
+    let (_, detail) = run_state(&pool, run).await;
+    assert_eq!(detail["report"]["text"], "Итог отчётного хода", "{detail}");
+}
+
+async fn expire_key_records(pool: &PgPool, key: &str) {
+    sqlx::query("delete from idempotency_keys where key=$1")
+        .bind(key)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+/// Запись общего ключа ушла по сроку, а строка запуска осталась: тот же повтор карточки
+/// получает её обратно даже после правки расписания, а запрос без разговора карточки под тем
+/// же ключом — конфликт.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn the_retained_run_replay_keeps_the_report_conversation_in_its_identity(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let _session = session(&f);
+    with_native(&f).await;
+    let parent = f.seed.conversation_id;
+    let schedule = make_schedule(&f, "Стендап").await;
+    let (status, first) = retry_with(&f, schedule, "retained-key", parent).await;
+    assert_eq!(status, 200, "{first}");
+    retarget_to_live_session(&f, schedule, parent).await;
+    expire_key_records(&pool, "retained-key").await;
+    let (status, again) = retry_with(&f, schedule, "retained-key", parent).await;
+    assert_eq!(status, 200, "{again}");
+    assert_eq!(again["id"], first["id"]);
+    let ordinary = f
+        .client
+        .send(
+            Method::POST,
+            &format!("/api/v1/schedules/{schedule}/run"),
+            Some("retained-key"),
+            Some(json!({"run_anyway": false})),
+        )
+        .await;
+    assert_eq!(
+        ordinary.status.as_u16(),
+        409,
+        "{}",
+        String::from_utf8_lossy(&ordinary.body)
+    );
+}
+
+/// Старый воркер (v1.40.1) объявляет `side_chat_v1`, но не присылает исход хода: отчёт он
+/// выполнил бы, а собрать его хаб не смог бы. Рутину ему не отдают.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_worker_without_run_outcome_never_gets_a_report(pool: PgPool) {
+    const OLD: [&str; 5] = [
+        "pilot_v1",
+        "instructions_v1",
+        "session_tools_v1",
+        "schedule_precheck_v1",
+        CAPABILITY_SIDE_CHAT_V1,
+    ];
+    let f = Fixture::new(pool.clone()).await;
+    with_native(&f).await;
+    {
+        let _old = testkit::fake_session(&f.state.registry, f.seed.machine_id, &OLD, true);
+        let (status, body) = post_schedule(&f, report_target(f.seed.conversation_id)).await;
+        assert_eq!(status, 422, "{body}");
+        assert_eq!(body["error"]["details"]["field"], "target", "{body}");
+    }
+    // Расписание, созданное до обновления воркера, при срабатывании тоже не доходит до копии.
+    let schedule = {
+        let _full = session(&f);
+        make_schedule(&f, "Стендап").await
+    };
+    let _old = testkit::fake_session(&f.state.registry, f.seed.machine_id, &OLD, true);
+    let now = Utc::now();
+    make_due(&pool, schedule, now - TimeDelta::seconds(30)).await;
+    scheduler(&f).tick(now).await.unwrap();
+    let run = latest_run(&pool, schedule).await;
+    let detail = wait_run(&pool, run, "failed").await;
+    assert_eq!(detail["reason"], "report_capability_missing", "{detail}");
+    assert!(copies(&pool, f.seed.conversation_id).await.is_empty());
+}
+
+/// Курсор журнала остановившейся копии: хвост последней пачки ещё может приходить.
+async fn open_journal_of(f: &Fixture, copy: Uuid) -> Uuid {
+    let execution: Uuid = sqlx::query_scalar("select id from executions where conversation_id=$1")
+        .bind(copy)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    let journal = Uuid::now_v7();
+    sqlx::query(
+        "insert into journal_cursors(machine_id,journal_id,kind,committed_seq,execution_id,closed)
+         values($1,$2,'sj',5,$3,false)",
+    )
+    .bind(f.seed.machine_id)
+    .bind(journal)
+    .bind(execution)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    journal
+}
+
+/// Исполнение уже `stopped`, а `JournalClosed` ещё не пришёл: жёсткое удаление копии ждёт
+/// следующего тика, а не встаёт на курсор, который держит приём хвоста.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn cleanup_waits_for_the_journal_of_a_stopped_copy_to_close(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let schedule = make_schedule_without_session(&f, "Стендап").await;
+    let (card, copy) = stray_copy(&f, schedule, Some("stopped")).await;
+    let journal = open_journal_of(&f, copy).await;
+    canterlot_hub::routines::sweep(&pool, Utc::now())
+        .await
+        .unwrap();
+    assert_eq!(
+        card_copy(&pool, card).await,
+        Some(copy),
+        "deleted with an open journal"
+    );
+    sqlx::query("update journal_cursors set closed=true where journal_id=$1")
+        .bind(journal)
+        .execute(&pool)
+        .await
+        .unwrap();
+    canterlot_hub::routines::sweep(&pool, Utc::now())
+        .await
+        .unwrap();
+    assert!(card_copy(&pool, card).await.is_none());
+}
+
+/// Приём берёт курсор журнала раньше очереди; уборка идёт тем же порядком, иначе приём хвоста
+/// и жёсткое удаление замыкались друг на друге.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn cleanup_takes_the_journal_cursor_before_the_copy_queue(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let schedule = make_schedule_without_session(&f, "Стендап").await;
+    let (_card, copy) = stray_copy(&f, schedule, Some("stopped")).await;
+    let journal = open_journal_of(&f, copy).await;
+    sqlx::query("update journal_cursors set closed=true where journal_id=$1")
+        .bind(journal)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // «Приём хвоста»: курсор взят, очередь ещё нет.
+    let mut ingest = canterlot_hub::db::begin(&pool).await.unwrap();
+    sqlx::query("select 1 from journal_cursors where journal_id=$1 for update")
+        .bind(journal)
+        .execute(&mut *ingest)
+        .await
+        .unwrap();
+    let sweeper = {
+        let pool = pool.clone();
+        tokio::spawn(async move { canterlot_hub::routines::sweep(&pool, Utc::now()).await })
+    };
+    let mut waiting = false;
+    for _ in 0..20_000 {
+        waiting = sqlx::query_scalar(
+            "select exists(select 1 from pg_locks l join pg_stat_activity a on a.pid=l.pid
+                            where not l.granted and l.locktype in ('transactionid','tuple')
+                              and a.datname=current_database())",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        if waiting {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(waiting, "cleanup never waited on the journal cursor");
+    let queue_taken_first =
+        sqlx::query("select 1 from queue_state where conversation_id=$1 for update nowait")
+            .bind(copy)
+            .execute(&mut *ingest)
+            .await
+            .is_err();
+    assert!(
+        !queue_taken_first,
+        "cleanup took the queue before the journal cursor"
+    );
+    ingest.rollback().await.unwrap();
+    sweeper.await.unwrap().unwrap();
 }

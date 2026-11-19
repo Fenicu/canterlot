@@ -1174,10 +1174,21 @@ async fn retried_input_found_in_a_finished_turn_finishes_at_once_and_queue_moves
         let finished = tokio::time::timeout(Duration::from_secs(3), fake.finish(command))
             .await
             .unwrap_or_else(|_| panic!("{status}: no RunFinished for the retried input"));
-        assert!(matches!(
-            finished.last(),
-            Some(AdapterEvent::RunFinished { usage, .. }) if usage.is_empty()
-        ));
+        // Историей доказано только `completed`: прерванный и оставшийся от убитого процесса
+        // ход успехом не считается, иначе отчёт собрался бы из недописанного.
+        let expected = match status {
+            "completed" => canterlot_worker::adapter::RunEnd::Completed,
+            "interrupted" => canterlot_worker::adapter::RunEnd::Interrupted,
+            _ => canterlot_worker::adapter::RunEnd::Failed,
+        };
+        assert!(
+            matches!(
+                finished.last(),
+                Some(AdapterEvent::RunFinished { usage, end, .. })
+                    if usage.is_empty() && *end == expected
+            ),
+            "{status}: {finished:?}"
+        );
         assert!(matches!(
             fake.event().await,
             AdapterEvent::Phase {
