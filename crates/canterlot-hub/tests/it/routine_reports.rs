@@ -1316,3 +1316,57 @@ async fn the_card_never_reaches_the_agents_prompt(pool: PgPool) {
     assert!(!text.contains("СЕКРЕТНЫЙ-ТЕКСТ-ОТЧЁТА"), "{text}");
     assert!(!text.contains("Стендап · "), "{text}");
 }
+
+// ---------------------------------------------------------------------------
+// Контракт событий: настоящие события карточки укладываются в events.schema.json.
+// ---------------------------------------------------------------------------
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn card_events_fit_the_published_schema(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let _session = session(&f);
+    with_native(&f).await;
+    let parent = f.seed.conversation_id;
+    let schedule = make_schedule(&f, "Стендап").await;
+    let (_, card) = ready_card(&f, schedule, "Отчёт").await;
+    // Замена прежней карточки и закрытие владельцем дают оба вида событий.
+    let second = run_now(&f, schedule).await;
+    wait_run(&pool, second, "started").await;
+    let open = open_cards(&pool, schedule).await.remove(0).id;
+    let r = f
+        .client
+        .send(Method::POST, &dismiss_path(parent, open), None, None)
+        .await;
+    assert_eq!(r.status.as_u16(), 204);
+    assert_ne!(card, open);
+
+    let mut document: Value =
+        serde_json::from_str(include_str!("../../../../docs/api/events.schema.json")).unwrap();
+    document.as_object_mut().unwrap().remove("oneOf");
+    let rows: Vec<canterlot_hub::events::StoredEvent> =
+        sqlx::query_as("select * from events where scope=$1 order by scope_seq")
+            .bind(format!("conversation:{parent}"))
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    let mut seen = std::collections::BTreeSet::new();
+    for event in canterlot_hub::events::project_for_client(rows) {
+        if !event.kind.starts_with("routine_report_") {
+            continue;
+        }
+        let mut schema = document.clone();
+        schema["$ref"] = json!(format!("#/$defs/{}", event.kind));
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        let value = serde_json::to_value(&event).unwrap();
+        assert!(
+            validator.is_valid(&value),
+            "{} does not fit: {value}",
+            event.kind
+        );
+        seen.insert(event.kind.clone());
+    }
+    assert_eq!(
+        seen.into_iter().collect::<Vec<_>>(),
+        ["routine_report_changed", "routine_report_dismissed"]
+    );
+}

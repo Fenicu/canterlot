@@ -225,7 +225,7 @@ fn coverage_table_matches_openapi_and_event_schema() {
             kinds.insert(span.to_owned());
         }
     }
-    assert_eq!(rows, 38, "screen coverage rows");
+    assert_eq!(rows, 39, "screen coverage rows");
     let in_document = operations(&document);
     let missing: Vec<_> = in_document.difference(&routes).collect();
     let unknown: Vec<_> = routes.difference(&in_document).collect();
@@ -313,6 +313,11 @@ fn exempt(method: &str, path: &str) -> bool {
         || (method == "POST" && path.contains("/hung-episodes/"))
         || (method == "PUT" && path.ends_with("/draft"))
         || (matches!(method, "POST" | "DELETE") && path.ends_with("/side"))
+        // «Завершить» карточки рутины идемпотентно само: повтор ничего не меняет и событий
+        // не плодит (routine_reports.rs, `dismiss_is_idempotent_evented_and_keeps_the_text_in_history`).
+        || (method == "POST"
+            && path.contains("/routine-reports/")
+            && path.ends_with("/dismiss"))
         || (matches!(method, "PUT" | "DELETE") && path.contains("/bookmarks/"))
         // Ответ и отзыв секрета намеренно не проходят слой идемпотентности:
         // тело ответа не хешируется и не сохраняется, `Idempotency-Key` игнорируется.

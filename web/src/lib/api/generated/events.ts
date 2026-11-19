@@ -31,6 +31,8 @@ export type WireEvent =
   | DraftChanged
   | PromptSuggestionChanged
   | AlarmChanged
+  | RoutineReportChanged
+  | RoutineReportDismissed
   | NudgeChanged
   | LimitsChanged
   | LimitsProvidersChanged
@@ -1048,6 +1050,53 @@ export interface AlarmChanged {
     fresh?: boolean | null;
     read_head?: boolean | null;
     created_at: Time;
+  };
+}
+export interface RoutineReportChanged {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "routine_report_changed";
+  payload: {
+    id: Uuid;
+    conversation_id: Uuid;
+    schedule_id: Uuid;
+    run_id: Uuid | null;
+    title: string;
+    state: "pending" | "ready" | "failed";
+    body: string | null;
+    error: null | {
+      reason: string;
+      message: string;
+    };
+    created_at: Time;
+    completed_at: Time | null;
+  };
+}
+export interface RoutineReportDismissed {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "routine_report_dismissed";
+  payload: {
+    report_id: Uuid;
+    conversation_id: Uuid;
+    schedule_id: Uuid;
+    reason: "owner" | "replaced";
   };
 }
 export interface NudgeChanged {

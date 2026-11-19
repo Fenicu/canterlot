@@ -100,6 +100,12 @@
       "$ref": "#/$defs/alarm_changed"
     },
     {
+      "$ref": "#/$defs/routine_report_changed"
+    },
+    {
+      "$ref": "#/$defs/routine_report_dismissed"
+    },
+    {
       "$ref": "#/$defs/nudge_changed"
     },
     {
@@ -4477,6 +4483,260 @@
       ],
       "additionalProperties": false
     },
+    "routine_report_changed": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "scope_seq": {
+          "$ref": "#/$defs/Seq"
+        },
+        "scope_seq_from": {
+          "$ref": "#/$defs/Seq"
+        },
+        "committed_at": {
+          "$ref": "#/$defs/Time"
+        },
+        "committed_at_from": {
+          "$ref": "#/$defs/Time"
+        },
+        "conversation_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "execution_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "correlation_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "kind": {
+          "const": "routine_report_changed"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/Uuid"
+            },
+            "conversation_id": {
+              "$ref": "#/$defs/Uuid"
+            },
+            "schedule_id": {
+              "$ref": "#/$defs/Uuid"
+            },
+            "run_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Uuid"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "title": {
+              "type": "string"
+            },
+            "state": {
+              "enum": [
+                "pending",
+                "ready",
+                "failed"
+              ]
+            },
+            "body": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "error": {
+              "anyOf": [
+                {
+                  "type": "null"
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "reason": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "reason",
+                    "message"
+                  ]
+                }
+              ]
+            },
+            "created_at": {
+              "$ref": "#/$defs/Time"
+            },
+            "completed_at": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Time"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "id",
+            "conversation_id",
+            "schedule_id",
+            "run_id",
+            "title",
+            "state",
+            "body",
+            "error",
+            "created_at",
+            "completed_at"
+          ]
+        }
+      },
+      "required": [
+        "v",
+        "id",
+        "scope",
+        "scope_seq",
+        "scope_seq_from",
+        "committed_at",
+        "committed_at_from",
+        "conversation_id",
+        "execution_id",
+        "correlation_id",
+        "kind",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    "routine_report_dismissed": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "scope_seq": {
+          "$ref": "#/$defs/Seq"
+        },
+        "scope_seq_from": {
+          "$ref": "#/$defs/Seq"
+        },
+        "committed_at": {
+          "$ref": "#/$defs/Time"
+        },
+        "committed_at_from": {
+          "$ref": "#/$defs/Time"
+        },
+        "conversation_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "execution_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "correlation_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "kind": {
+          "const": "routine_report_dismissed"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "report_id": {
+              "$ref": "#/$defs/Uuid"
+            },
+            "conversation_id": {
+              "$ref": "#/$defs/Uuid"
+            },
+            "schedule_id": {
+              "$ref": "#/$defs/Uuid"
+            },
+            "reason": {
+              "enum": [
+                "owner",
+                "replaced"
+              ]
+            }
+          },
+          "required": [
+            "report_id",
+            "conversation_id",
+            "schedule_id",
+            "reason"
+          ]
+        }
+      },
+      "required": [
+        "v",
+        "id",
+        "scope",
+        "scope_seq",
+        "scope_seq_from",
+        "committed_at",
+        "committed_at_from",
+        "conversation_id",
+        "execution_id",
+        "correlation_id",
+        "kind",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
     "goal_changed": {
       "type": "object",
       "properties": {
@@ -7814,6 +8074,12 @@
                 },
                 {
                   "$ref": "#/$defs/alarm_changed"
+                },
+                {
+                  "$ref": "#/$defs/routine_report_changed"
+                },
+                {
+                  "$ref": "#/$defs/routine_report_dismissed"
                 },
                 {
                   "$ref": "#/$defs/nudge_changed"

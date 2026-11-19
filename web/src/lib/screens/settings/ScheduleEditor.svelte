@@ -42,7 +42,7 @@
       catchUp: schedule?.catch_up_minutes ?? 30,
       overlap: schedule?.overlap ?? 'skip',
       titleTemplate: schedule?.title_template ?? '{name} · {date}',
-      targetKind: (target?.kind ?? 'new_session') as 'new_session' | 'existing_session',
+      targetKind: (target?.kind ?? 'new_session') as 'new_session' | 'existing_session' | 'session_report',
       machineId: isNew && target?.kind === 'new_session' ? target.machine_id : '',
       path: isNew && target?.kind === 'new_session' ? target.workdir : '',
       executorMode: (isNew && target?.kind === 'new_session' && target.executor ? 'explicit' : 'route') as 'route' | 'explicit',
@@ -54,7 +54,7 @@
       presetId: isNew && target?.kind === 'new_session' ? (target.preset ?? 'clean') : 'clean',
       permission: isNew && target?.kind === 'new_session' ? (target.permission_mode ?? '') : '',
       groupId: isNew && target?.kind === 'new_session' ? (target.group_id ?? '') : '',
-      sessionId: target?.kind === 'existing_session' ? target.conversation_id : '',
+      sessionId: target?.kind === 'existing_session' || target?.kind === 'session_report' ? target.conversation_id : '',
       baseRevision: schedule?.revision ?? 0
     };
   });
@@ -192,6 +192,8 @@
   }
 
   function buildTarget(): ScheduleTarget {
+    // Рутина «Отчёт из сессии» пока правится только в части общих полей: цель сохраняется как есть.
+    if (targetKind === 'session_report') return { kind: 'session_report', conversation_id: sessionId };
     if (targetKind === 'existing_session') return { kind: 'existing_session', conversation_id: sessionId };
     return {
       kind: 'new_session',

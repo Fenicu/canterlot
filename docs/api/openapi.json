@@ -6593,6 +6593,87 @@
         }
       }
     },
+    "/api/v1/conversations/{id}/routine-reports/{report_id}/dismiss": {
+      "post": {
+        "tags": [
+          "conversations"
+        ],
+        "summary": "«Завершить» на карточке рутины: карточка уходит из ленты у всех клиентов\n(`routine_report_dismissed`). Повтор безвреден и второго события не даёт; текст отчёта\nостаётся в истории запусков расписания.",
+        "operationId": "post__api_v1_conversations__id__routine_reports__report_id__dismiss",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "report_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Карточка закрыта; повтор безвреден",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            }
+          },
+          "404": {
+            "description": "not_found: нет такого разговора или карточки",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/conversations/{id}/runs/{run_id}": {
       "get": {
         "tags": [
@@ -14671,7 +14752,8 @@
           "background",
           "alarms",
           "spawn_queue",
-          "nudge_events"
+          "nudge_events",
+          "routine_reports"
         ],
         "properties": {
           "alarms": {
@@ -14763,6 +14845,13 @@
           },
           "queue": {
             "$ref": "#/components/schemas/SnapshotQueueView"
+          },
+          "routine_reports": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RoutineReportView"
+            },
+            "description": "Открытые карточки рутин: отчёт собирается, готов или не собран. Не ввод и не блок ленты."
           },
           "scheduled": {
             "type": "array",
@@ -21231,6 +21320,31 @@
         },
         "additionalProperties": false
       },
+      "ReportError": {
+        "type": "object",
+        "required": [
+          "reason",
+          "message"
+        ],
+        "properties": {
+          "message": {
+            "type": "string",
+            "description": "Готовая строка для карточки."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Код причины: `no_native_session`, `copy_failed`, `turn_timeout` и т. п."
+          }
+        }
+      },
+      "ReportState": {
+        "type": "string",
+        "enum": [
+          "pending",
+          "ready",
+          "failed"
+        ]
+      },
       "RequestItemView": {
         "type": "object",
         "description": "Вопрос или разрешение на том месте ленты, где агент его задал: открытый запрос\nстоит у поля ввода, решённый остаётся здесь и после перезагрузки.",
@@ -21513,6 +21627,76 @@
           },
           "task_type": {
             "type": "string"
+          }
+        }
+      },
+      "RoutineReportView": {
+        "type": "object",
+        "description": "Карточка отчёта в ленте родителя.",
+        "required": [
+          "id",
+          "conversation_id",
+          "schedule_id",
+          "title",
+          "state",
+          "created_at"
+        ],
+        "properties": {
+          "body": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Текст отчёта в Markdown: ответ копии на промпт расписания."
+          },
+          "completed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "conversation_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Разговор, в ленте которого лежит карточка."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "error": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ReportError"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "run_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Запуск расписания; пустой, если журнал запусков его уже убрал."
+          },
+          "schedule_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "state": {
+            "$ref": "#/components/schemas/ReportState"
+          },
+          "title": {
+            "type": "string",
+            "description": "Заголовок из шаблона расписания; клиент показывает его как «Рутина · …»."
           }
         }
       },
@@ -22126,9 +22310,29 @@
                 ]
               }
             }
+          },
+          {
+            "type": "object",
+            "description": "«Отчёт из сессии»: скрытая боковая копия читает контекст разговора, не трогая его,\nа её ответ ложится карточкой в ленту этого разговора.",
+            "required": [
+              "conversation_id",
+              "kind"
+            ],
+            "properties": {
+              "conversation_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "session_report"
+                ]
+              }
+            }
           }
         ],
-        "description": "Цель запуска: новая сессия на машине или существующий разговор."
+        "description": "Цель запуска: новая сессия на машине, существующий разговор или отчёт из контекста сессии."
       },
       "ScheduledMessage": {
         "type": "object",
@@ -22706,7 +22910,8 @@
               "background",
               "alarms",
               "spawn_queue",
-              "nudge_events"
+              "nudge_events",
+              "routine_reports"
             ],
             "properties": {
               "alarms": {
@@ -22798,6 +23003,13 @@
               },
               "queue": {
                 "$ref": "#/components/schemas/SnapshotQueueView"
+              },
+              "routine_reports": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/RoutineReportView"
+                },
+                "description": "Открытые карточки рутин: отчёт собирается, готов или не собран. Не ввод и не блок ленты."
               },
               "scheduled": {
                 "type": "array",
