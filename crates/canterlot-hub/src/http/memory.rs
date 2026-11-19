@@ -57,10 +57,10 @@ pub struct MemoryEntryView {
     pub valid_until: Option<DateTime<Utc>>,
     pub expired: bool,
     pub version: i32,
-    #[schema(value_type = Object)]
+    /// Кто создал запись: `{kind: owner | agent | import, ...}`.
     pub created_by: Value,
     pub created_at: DateTime<Utc>,
-    #[schema(value_type = Object)]
+    /// Кто менял запись последним, в той же форме.
     pub updated_by: Value,
     pub updated_at: DateTime<Utc>,
 }
@@ -109,7 +109,7 @@ pub struct MemoryRevisionView {
     pub body: String,
     pub status: String,
     pub valid_until: Option<DateTime<Utc>>,
-    #[schema(value_type = Object)]
+    /// Кто сохранил это состояние, в форме `created_by`.
     pub actor: Value,
     pub at: DateTime<Utc>,
 }

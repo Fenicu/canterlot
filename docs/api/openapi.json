@@ -19524,7 +19524,7 @@
             "format": "date-time"
           },
           "created_by": {
-            "type": "object"
+            "description": "Кто создал запись: `{kind: owner | agent | import, ...}`."
           },
           "domain": {
             "type": "string",
@@ -19569,7 +19569,7 @@
             "format": "date-time"
           },
           "updated_by": {
-            "type": "object"
+            "description": "Кто менял запись последним, в той же форме."
           },
           "valid_until": {
             "type": [
@@ -19626,7 +19626,7 @@
             "description": "`update`, `archive` или `restore`: действие, которое сохранило это состояние."
           },
           "actor": {
-            "type": "object"
+            "description": "Кто сохранил это состояние, в форме `created_by`."
           },
           "at": {
             "type": "string",
