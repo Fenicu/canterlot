@@ -524,6 +524,9 @@ message ExecutionState {
   // Только при согласованной возможности side_chat_v1: запуск был свежим форком
   // (первый старт или перефорк при невозможном resume). Пусто у старого воркера.
   bool fresh_fork = 6;
+  // Только при согласованной возможности memory_scope_v1: realpath рабочего каталога
+  // запуска. Пусто у старого воркера или если каталог не разрешился.
+  string canonical_workdir = 7;
 }
 
 message RunFinished {
@@ -705,6 +708,9 @@ message MachineReport {
   string home_dir = 9;
   // Корень изолированных рабочих копий; пусто, если воркер их не поддерживает.
   string worktree_root = 10;
+  // Только при согласованной возможности memory_scope_v1: канонические (realpath)
+  // корни рабочих проектов из worker.toml [memory] work_roots.
+  repeated string memory_work_roots = 11;
 }
 
 message HarnessInfo {

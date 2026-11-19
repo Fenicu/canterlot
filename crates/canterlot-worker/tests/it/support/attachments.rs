@@ -147,6 +147,7 @@ impl Fixture {
         };
         let config = WorkerConfig {
             secrets: Default::default(),
+            memory: Default::default(),
             hub_url: format!("https://localhost:{}", hub.addr.port()),
             ca_cert,
             token_file,

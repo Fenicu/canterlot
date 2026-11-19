@@ -1855,3 +1855,42 @@ async fn approval_links_at_start_and_a_task_closed_meanwhile_stays_closed(pool: 
     assert_eq!((state.as_str(), attempts), ("in_progress", 1));
     assert!(executor.is_some_and(|id| id != child));
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn spawn_explicit_workdir_of_other_domain_is_domain_mismatch(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    sqlx::query(
+        "update machines set capabilities=array['pilot_v1','memory_scope_v1'],
+           memory_work_roots='[\"/tmp/work\"]',allowed_roots='[\"/tmp\"]' where id=$1",
+    )
+    .bind(f.machine)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "update conversations set memory_domain='work',memory_project='/tmp/work/p' where id=$1",
+    )
+    .bind(f.parent)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    let before = f.sessions().await;
+    let mut personal = inside();
+    personal["workdir"] = json!("/tmp/play");
+    assert_eq!(code(f.spawn(personal).await), Code::DomainMismatch);
+    assert_eq!(f.sessions().await, before, "отказ не создаёт сессию");
+
+    let mut same = inside();
+    same["workdir"] = json!("/tmp/work/q");
+    let (child, _) = f.started(same).await;
+    let scope: (Option<String>, Option<String>) =
+        sqlx::query_as("select memory_domain,memory_project from conversations where id=$1")
+            .bind(child)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        scope,
+        (Some("work".to_owned()), Some("/tmp/work/p".to_owned()))
+    );
+}
