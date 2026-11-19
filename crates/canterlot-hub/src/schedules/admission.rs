@@ -1506,11 +1506,31 @@ pub async fn reserve_manual(
     key: &str,
     run_anyway: bool,
 ) -> Result<Reservation, ScheduleError> {
+    reserve_manual_for(pool, owner_id, schedule_id, key, run_anyway, None).await
+}
+
+/// То же, но повтор карточки отчёта (`report_conversation_id`) входит в личность запроса, а
+/// цель сверяется на той версии расписания, которую заявка и записывает в запуск.
+pub async fn reserve_manual_for(
+    pool: &PgPool,
+    owner_id: Uuid,
+    schedule_id: Uuid,
+    key: &str,
+    run_anyway: bool,
+    report_conversation_id: Option<Uuid>,
+) -> Result<Reservation, ScheduleError> {
     // Проигранная гонка за общий ключ откатывает заявку целиком; победителя
     // разбирает следующий проход по ключу (повтор или конфликт).
     for _ in 0..3 {
-        if let Some(reservation) =
-            reserve_manual_once(pool, owner_id, schedule_id, key, run_anyway).await?
+        if let Some(reservation) = reserve_manual_once(
+            pool,
+            owner_id,
+            schedule_id,
+            key,
+            run_anyway,
+            report_conversation_id,
+        )
+        .await?
         {
             return Ok(reservation);
         }
@@ -1524,8 +1544,12 @@ async fn reserve_manual_once(
     schedule_id: Uuid,
     key: &str,
     run_anyway: bool,
+    report_conversation_id: Option<Uuid>,
 ) -> Result<Option<Reservation>, ScheduleError> {
-    let body = json!({"schedule_id": schedule_id, "run_anyway": run_anyway});
+    let mut body = json!({"schedule_id": schedule_id, "run_anyway": run_anyway});
+    if let Some(conversation_id) = report_conversation_id {
+        body["report_conversation_id"] = json!(conversation_id);
+    }
     let hash = crate::idempotency::request_hash("run_now", &body);
     let mut tx = crate::db::begin(pool).await?;
     lock_idempotency_key(&mut tx, owner_id, key).await?;
@@ -1545,6 +1569,13 @@ async fn reserve_manual_once(
     let schedule = super::get(&mut tx, owner_id, schedule_id)
         .await?
         .ok_or(ScheduleError::NotFound)?;
+    if let Some(conversation_id) = report_conversation_id
+        && !matches!(&schedule.target,
+            ScheduleTarget::SessionReport { conversation_id: target } if *target == conversation_id)
+    {
+        let _ = tx.rollback().await;
+        return Err(ScheduleError::Invalid("report_target_changed"));
+    }
     let reserved = super::reserve_run(
         &mut tx,
         Uuid::now_v7(),
@@ -1617,26 +1648,21 @@ pub async fn run_now(
     report_conversation_id: Option<Uuid>,
     correlation_id: Uuid,
 ) -> Result<ScheduleRun, ScheduleError> {
-    if let Some(conversation_id) = report_conversation_id {
-        // Повтор карточки отчёта не должен отправить сообщение в живую сессию, если
-        // расписание успели перенацелить.
-        let mut conn = state.pool.acquire().await?;
-        let schedule = super::get(&mut conn, owner_id, schedule_id)
-            .await?
-            .ok_or(ScheduleError::NotFound)?;
-        if !matches!(&schedule.target,
-            ScheduleTarget::SessionReport { conversation_id: target } if *target == conversation_id)
-        {
-            return Err(ScheduleError::Invalid("report_target_changed"));
+    let (schedule, run) = match reserve_manual_for(
+        &state.pool,
+        owner_id,
+        schedule_id,
+        key,
+        run_anyway,
+        report_conversation_id,
+    )
+    .await?
+    {
+        Reservation::Fresh { schedule, run } => (*schedule, run),
+        Reservation::Existing(stored) => {
+            return settle_existing(&state.pool, owner_id, stored).await;
         }
-    }
-    let (schedule, run) =
-        match reserve_manual(&state.pool, owner_id, schedule_id, key, run_anyway).await? {
-            Reservation::Fresh { schedule, run } => (*schedule, run),
-            Reservation::Existing(stored) => {
-                return settle_existing(&state.pool, owner_id, stored).await;
-            }
-        };
+    };
     let scheduler = state.scheduler.clone();
     let _guard = super::AdmittingGuard::insert(run.id);
     let result = admit_inner(&scheduler, &schedule, &run, run.run_anyway, run.manual).await;

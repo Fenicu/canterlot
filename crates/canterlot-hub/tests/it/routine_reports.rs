@@ -1985,3 +1985,120 @@ async fn a_failed_finish_never_publishes_the_earlier_text(pool: PgPool) {
 async fn a_finish_without_a_recorded_outcome_never_publishes(pool: PgPool) {
     assert_not_published(None, pool).await;
 }
+
+async fn retry_with(f: &Fixture, schedule: Uuid, key: &str, conversation: Uuid) -> (u16, Value) {
+    let r = f
+        .client
+        .send(
+            Method::POST,
+            &format!("/api/v1/schedules/{schedule}/run"),
+            Some(key),
+            Some(json!({"run_anyway": false, "report_conversation_id": conversation})),
+        )
+        .await;
+    (r.status.as_u16(), r.json())
+}
+
+async fn retarget_to_live_session(f: &Fixture, schedule: Uuid, conversation: Uuid) {
+    let revision: i64 = sqlx::query_scalar("select revision from schedules where id=$1")
+        .bind(schedule)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    let r = f
+        .client
+        .send(
+            Method::PATCH,
+            &format!("/api/v1/schedules/{schedule}"),
+            Some(&format!("retarget-{}", Uuid::now_v7())),
+            Some(json!({
+                "base_revision": revision,
+                "target": {"kind": "existing_session", "conversation_id": conversation},
+            })),
+        )
+        .await;
+    assert_eq!(
+        r.status.as_u16(),
+        200,
+        "{}",
+        String::from_utf8_lossy(&r.body)
+    );
+}
+
+/// Принятый повтор после правки расписания отвечает тем же ответом: повтор по ключу ищется
+/// раньше проверки цели.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn an_accepted_retry_replays_after_a_later_edit_of_the_schedule(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let _session = session(&f);
+    with_native(&f).await;
+    let parent = f.seed.conversation_id;
+    let schedule = make_schedule(&f, "Стендап").await;
+    let (status, first) = retry_with(&f, schedule, "retry-replay-key", parent).await;
+    assert_eq!(status, 200, "{first}");
+    retarget_to_live_session(&f, schedule, parent).await;
+    let (status, again) = retry_with(&f, schedule, "retry-replay-key", parent).await;
+    assert_eq!(status, 200, "{again}");
+    assert_eq!(again["id"], first["id"]);
+}
+
+/// Разговор карточки входит в личность запроса: тот же ключ с другим разговором не получает
+/// чужой ответ.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn the_retry_conversation_is_part_of_the_idempotency_identity(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let _session = session(&f);
+    with_native(&f).await;
+    let schedule = make_schedule(&f, "Стендап").await;
+    let (status, first) = retry_with(&f, schedule, "identity-key", f.seed.conversation_id).await;
+    assert_eq!(status, 200, "{first}");
+    let (status, other) = retry_with(&f, schedule, "identity-key", Uuid::now_v7()).await;
+    assert_eq!(status, 409, "{other}");
+}
+
+/// Правка расписания между заявкой повтора и приёмкой: заявка записала версию, которую
+/// проверила, поэтому приёмка по новой версии не проходит и промпт отчёта в живую сессию не
+/// уходит.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn an_edit_between_the_retry_reservation_and_admission_never_reaches_the_live_session(
+    pool: PgPool,
+) {
+    use canterlot_hub::schedules::admission::{Reservation, reserve_manual_for};
+    let f = Fixture::new(pool.clone()).await;
+    let _session = session(&f);
+    with_native(&f).await;
+    let parent = f.seed.conversation_id;
+    let schedule = make_schedule(&f, "Стендап").await;
+    let Reservation::Fresh { run, .. } = reserve_manual_for(
+        &pool,
+        f.seed.owner_id,
+        schedule,
+        "race-retry",
+        false,
+        Some(parent),
+    )
+    .await
+    .unwrap() else {
+        panic!("fresh");
+    };
+    retarget_to_live_session(&f, schedule, parent).await;
+    sqlx::query("update schedule_runs set lease_at=now()-interval '2 hours',updated_at=now()-interval '2 hours' where id=$1")
+        .bind(run.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sweep(&f).await;
+    for _ in 0..20_000 {
+        if run_state(&pool, run.id).await.0 != "claimed" {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert_ne!(run_state(&pool, run.id).await.0, "started");
+    let sent: i64 = sqlx::query_scalar("select count(*) from inputs where content->0->>'text'=$1")
+        .bind(PROMPT)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(sent, 0, "the report prompt went into the live session");
+}
