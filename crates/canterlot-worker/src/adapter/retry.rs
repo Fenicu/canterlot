@@ -9,7 +9,9 @@ pub(crate) fn category(raw: Option<&str>) -> &'static str {
 }
 
 fn count(value: &Value) -> u32 {
-    value.as_u64().map_or(0, |n| n.min(u64::from(u32::MAX)) as u32)
+    value
+        .as_u64()
+        .map_or(0, |n| n.min(u64::from(u32::MAX)) as u32)
 }
 
 /// Кадр `system/api_retry` Claude Code.
@@ -42,9 +44,13 @@ pub(crate) fn from_opencode(data: &Value, now_ms: u64) -> RetryInfo {
         },
     };
     RetryInfo {
-        attempt: data["attempt"].as_u64().map_or(1, |n| n.min(u64::from(u32::MAX)) as u32),
+        attempt: data["attempt"]
+            .as_u64()
+            .map_or(1, |n| n.min(u64::from(u32::MAX)) as u32),
         max_retries: 0,
-        delay_ms: data["at"].as_u64().map_or(0, |at| at.saturating_sub(now_ms)),
+        delay_ms: data["at"]
+            .as_u64()
+            .map_or(0, |at| at.saturating_sub(now_ms)),
         http_status: status,
         category: category.into(),
         no_response_waited_ms: 0,
@@ -93,7 +99,12 @@ mod tests {
 
     #[test]
     fn claude_unknown_or_hostile_category_becomes_unknown() {
-        for raw in [json!("brand_new_kind"), json!("Rate limit: key sk-secret"), json!(7), Value::Null] {
+        for raw in [
+            json!("brand_new_kind"),
+            json!("Rate limit: key sk-secret"),
+            json!(7),
+            Value::Null,
+        ] {
             let info = from_claude(&json!({"attempt":1,"max_retries":5,"error":raw}));
             assert_eq!(info.category, "unknown", "{raw}");
         }
@@ -127,7 +138,10 @@ mod tests {
                 "error":{"type":"provider.rate-limit","message":"slow down","status":429}}),
             1_700_000_000_000,
         );
-        assert_eq!((info.attempt, info.delay_ms, info.http_status), (3, 8000, 429));
+        assert_eq!(
+            (info.attempt, info.delay_ms, info.http_status),
+            (3, 8000, 429)
+        );
         assert_eq!(info.category, "rate_limit");
         assert_eq!(summary(&info), "retry 3");
     }

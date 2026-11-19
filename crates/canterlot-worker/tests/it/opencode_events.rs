@@ -1483,7 +1483,11 @@ fn scheduled_retry_shows_the_attempt_and_ends_no_turn() {
         .collect();
     assert_eq!(infos.len(), retries.len());
     assert_eq!(infos[0].attempt, 2);
-    assert!(infos.iter().all(|info| !info.category.contains("slow down")));
+    assert!(
+        infos
+            .iter()
+            .all(|info| !info.category.contains("slow down"))
+    );
 }
 
 #[test]

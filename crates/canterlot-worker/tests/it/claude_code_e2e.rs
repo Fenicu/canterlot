@@ -761,7 +761,9 @@ async fn transient_api_retry_only_reports_generating_phase() {
         .find(|v| v["subtype"] == "api_retry")
         .unwrap();
     let events = error_turn(vec![retry, json!({"type":"result","is_error":false})]).await;
-    assert!(events.iter().any(|e| matches!(e, AdapterEvent::Retry { info } if info.attempt == 1 && info.max_retries == 1)));
+    assert!(events.iter().any(
+        |e| matches!(e, AdapterEvent::Retry { info } if info.attempt == 1 && info.max_retries == 1)
+    ));
     assert!(!events.iter().any(|e| matches!(
         e,
         AdapterEvent::BlockStarted {
@@ -796,8 +798,14 @@ async fn api_retry_reports_a_typed_reason_without_forwarding_free_text() {
         })
         .collect();
     assert_eq!(infos.len(), 3, "{events:?}");
-    assert_eq!((infos[0].http_status, infos[0].category.as_str()), (0, "unknown"));
-    assert_eq!((infos[1].http_status, infos[1].category.as_str()), (529, "overloaded"));
+    assert_eq!(
+        (infos[0].http_status, infos[0].category.as_str()),
+        (0, "unknown")
+    );
+    assert_eq!(
+        (infos[1].http_status, infos[1].category.as_str()),
+        (529, "overloaded")
+    );
     assert_eq!(infos[1].delay_ms, 8000);
     assert_eq!(infos[2].no_response_waited_ms, 185_000);
 }
