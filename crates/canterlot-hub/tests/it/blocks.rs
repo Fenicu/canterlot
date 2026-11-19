@@ -1049,7 +1049,10 @@ async fn an_empty_reasoning_final_closes_the_block(pool: PgPool) -> TestResult {
     ])
     .await;
     let (text, rev, state, reason) = block(&pool, id).await;
-    assert_eq!((text.as_str(), rev, state.as_str(), reason), ("", 1, "final", None));
+    assert_eq!(
+        (text.as_str(), rev, state.as_str(), reason),
+        ("", 1, "final", None)
+    );
     assert!(kinds(&events(&pool, id).await).contains(&"block_final"));
     Ok(())
 }
