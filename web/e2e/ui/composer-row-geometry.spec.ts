@@ -112,7 +112,7 @@ for (const width of WIDTHS) {
         if (mic) await expect(page.getByRole('button', { name: 'Диктовка' })).toBeVisible();
         if (running) await expect(page.locator('.capsule .send')).toHaveAttribute('aria-label', /очеред|Поставить/i);
         // Заливка кнопки цели меняется с переходом: ждём, пока он закончится.
-        await page.waitForTimeout(400);
+        await page.locator('.capsule').evaluate((el) => Promise.allSettled(el.getAnimations({ subtree: true }).map((item) => item.finished)));
         const { boxes, goalBg, siblingBg, ctxClipped } = await rowBoxes(page);
         if (SHOTS) {
           mkdirSync(SHOTS, { recursive: true });
