@@ -569,6 +569,7 @@ pub(super) async fn report_owner_lost(
                 outcome: String::new(),
                 native_conversation_id: String::new(),
                 fresh_fork: false,
+                canonical_workdir: String::new(),
             })],
             vec![],
         )
@@ -604,6 +605,7 @@ pub(super) async fn reclaim_owner(
                 outcome: canterlot_proto::OWNER_RECLAIMED.into(),
                 native_conversation_id: String::new(),
                 fresh_fork: false,
+                canonical_workdir: String::new(),
             }))?;
             let mut record = store
                 .ownership()
@@ -1135,6 +1137,7 @@ pub(super) async fn answer_without_execution(
                         outcome: "start_cancelled".into(),
                         native_conversation_id: String::new(),
                         fresh_fork: false,
+                        canonical_workdir: String::new(),
                     })],
                     terminal_self(command),
                 )
@@ -1747,6 +1750,7 @@ impl Actor {
                     outcome: "start_cancelled".into(),
                     native_conversation_id: String::new(),
                     fresh_fork: false,
+                    canonical_workdir: String::new(),
                 })],
                 terminal,
             )

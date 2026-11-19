@@ -464,6 +464,7 @@ impl ProtocolHub {
         });
         let config = WorkerConfig {
             secrets: Default::default(),
+            memory: Default::default(),
             machine: Default::default(),
             attachments: Default::default(),
             claude_code: None,

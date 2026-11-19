@@ -415,6 +415,7 @@ fn exec_records_roundtrip() {
         outcome: String::new(),
         native_conversation_id: "native".into(),
         fresh_fork: false,
+        canonical_workdir: "/h/work/p".into(),
     });
     assert_roundtrip(BlockStarted {
         block_id: "block".into(),
@@ -888,6 +889,7 @@ fn pilot_records_roundtrip() {
         os: "Debian 13 · 6.12".into(),
         home_dir: "/home/owner".into(),
         worktree_root: "/data/worktrees".into(),
+        memory_work_roots: vec!["/h/work".into()],
     };
     let metrics = MachineMetrics {
         machine_time_ms: 123456,
@@ -2120,6 +2122,35 @@ fn side_chat_fields_are_additive_on_both_hops() {
         "ExecutionState.fresh_fork is field 6"
     );
     assert_roundtrip(state);
+
+    // memory_scope_v1: старое поле остаётся на месте, новое добавляется хвостом.
+    let old_wire = ExecutionState {
+        fresh_fork: true,
+        ..Default::default()
+    }
+    .encode_to_vec();
+    let state = ExecutionState {
+        fresh_fork: true,
+        canonical_workdir: "/h/work".into(),
+        ..Default::default()
+    };
+    let wire = state.encode_to_vec();
+    assert_eq!(&wire[..old_wire.len()], old_wire.as_slice());
+    assert_eq!(
+        &wire[old_wire.len()..],
+        [&[0x3a, 7][..], b"/h/work"].concat(),
+        "ExecutionState.canonical_workdir is field 7"
+    );
+    assert_roundtrip(state);
+
+    let report = canterlot_proto::worker::v1::MachineReport {
+        memory_work_roots: vec!["/h/work".into(), "/h/job".into()],
+        ..Default::default()
+    };
+    let wire = report.encode_to_vec();
+    assert_eq!(wire[0], 0x5a, "MachineReport.memory_work_roots is field 11");
+    assert_eq!(wire.iter().filter(|b| **b == 0x5a).count(), 2);
+    assert_roundtrip(report);
 }
 
 #[test]

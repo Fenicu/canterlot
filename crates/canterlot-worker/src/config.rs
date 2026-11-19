@@ -38,6 +38,24 @@ pub struct WorkerConfig {
     pub legacy_ignored: Option<toml::Value>,
     #[serde(default)]
     pub secrets: SecretConfig,
+    #[serde(default)]
+    pub memory: MemoryConfig,
+}
+
+/// Общая память: какие корни считаются рабочими проектами (домен `work`).
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MemoryConfig {
+    /// Каталоги рабочих проектов; `~` раскрывается в домашний каталог воркера.
+    pub work_roots: Vec<String>,
+}
+
+impl Default for MemoryConfig {
+    fn default() -> Self {
+        Self {
+            work_roots: vec!["~/work".into()],
+        }
+    }
 }
 
 /// Файлы секретов: базовый каталог в tmpfs. Явный путь нужен тестам; боевой

@@ -412,6 +412,7 @@ fn execution_fact(run: &StartedExecution, state: &str, outcome: &str) -> Body {
         state: state.into(),
         outcome: outcome.into(),
         fresh_fork: false,
+        canonical_workdir: String::new(),
     })
 }
 

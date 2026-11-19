@@ -14,6 +14,7 @@ pub mod lease;
 pub mod machine;
 pub mod mcp_relay;
 pub mod media;
+pub mod memory_scope;
 pub mod ownership;
 pub mod secret;
 pub mod session;

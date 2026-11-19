@@ -662,6 +662,16 @@ impl Supervisor {
         native: &str,
         fresh_fork: bool,
     ) -> Result<(), SupervisorError> {
+        // Запуск подтверждён: хаб сверяет домен памяти с настоящим (realpath) каталогом.
+        let canonical_workdir = if state == "running" {
+            self.workdir
+                .as_deref()
+                .and_then(crate::memory_scope::canonical_workdir)
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
         self.record(Body::ExecutionState(
             canterlot_proto::worker::v1::ExecutionState {
                 execution_id: self.spec.execution_id.to_string(),
@@ -670,6 +680,7 @@ impl Supervisor {
                 outcome: outcome.into(),
                 native_conversation_id: native.into(),
                 fresh_fork,
+                canonical_workdir,
             },
         ))?;
         Ok(())
