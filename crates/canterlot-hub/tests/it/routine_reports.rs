@@ -1350,3 +1350,40 @@ async fn card_events_fit_the_published_schema(pool: PgPool) {
         ["routine_report_changed", "routine_report_dismissed"]
     );
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn trashing_the_parent_removes_report_copies_and_keeps_the_interactive_rules(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let _session = session(&f);
+    with_native(&f).await;
+    let parent = f.seed.conversation_id;
+    let schedule = make_schedule(&f, "Стендап").await;
+    fire(&f, schedule).await;
+    // Копия ещё собирает отчёт: удаление родителя заказывает остановку и ждёт её.
+    let r = f
+        .client
+        .send(
+            Method::DELETE,
+            &format!("/api/v1/conversations/{parent}"),
+            Some("trash-with-report"),
+            None,
+        )
+        .await;
+    assert!(
+        r.status.as_u16() == 204 || r.status.as_u16() == 409,
+        "{}",
+        String::from_utf8_lossy(&r.body)
+    );
+    worker_stops_copies(&pool).await;
+    sweep(&f).await;
+    sweep(&f).await;
+    // Копий нет, а сломанная карточка не мешает следующим запускам и не падает в тике.
+    let left: i64 = sqlx::query_scalar(
+        "select count(*) from conversations where side_of=$1 and trashed_at is null",
+    )
+    .bind(parent)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(left, 0);
+}
