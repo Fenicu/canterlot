@@ -911,8 +911,8 @@ async fn adopt_once(context: &ToolContext, caller: &Caller, from: Uuid) -> Resul
     // Строки обоих разговоров по возрастанию ID, как у остальных инструментов.
     let mut pair = [caller.conversation_id, args.from_session_id];
     pair.sort();
-    let found: Vec<(Uuid, i32)> = sqlx::query_as(
-        "select id,spawn_depth from conversations where id=any($1) and owner_id=$2
+    let found: Vec<(Uuid, i32, Option<String>)> = sqlx::query_as(
+        "select id,spawn_depth,memory_domain from conversations where id=any($1) and owner_id=$2
            and (side_of is null or id=$3)
          order by id for key share",
     )
@@ -927,7 +927,10 @@ async fn adopt_once(context: &ToolContext, caller: &Caller, from: Uuid) -> Resul
     }
     let source = found
         .iter()
-        .find(|(id, _)| *id == args.from_session_id)
+        .find(|(id, _, domain)| {
+            *id == args.from_session_id
+                && access::same_domain(me.memory_domain.as_deref(), domain.as_deref())
+        })
         .ok_or_else(|| ToolError::new(ToolErrorCode::SessionNotFound))?;
     if source.1 != 0 {
         return Err(invalid(

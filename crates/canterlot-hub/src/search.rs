@@ -182,6 +182,9 @@ pub struct SearchQuery {
     pub text: String,
     /// Семья делегированной сессии; `None` — все сессии владельца.
     pub family: Option<Vec<Uuid>>,
+    /// Домен памяти вызывающего агента: `Some(None)` видит только разговоры без домена,
+    /// `None` (владелец, PWA) не сужает.
+    pub domain: Option<Option<String>>,
     pub conversation_id: Option<Uuid>,
     pub since: Option<DateTime<Utc>>,
     pub until: Option<DateTime<Utc>>,
@@ -270,6 +273,7 @@ impl RawQuery {
             owner_id,
             text: text.to_owned(),
             family,
+            domain: None,
             conversation_id: self.conversation_id,
             since: self.since,
             until: self.until,
@@ -282,7 +286,7 @@ impl RawQuery {
 }
 
 /// Условия одной ветви без курсора. `$1` владелец, `$2` запрос, `$3` семья, `$4` сессия,
-/// `$5`/`$6` период, `$7` харнесс, `$8`/`$9` нужны ли ответы и сообщения.
+/// `$5`/`$6` период, `$7` харнесс, `$8`/`$9` нужны ли ответы и сообщения, `$10`/`$11` область памяти: флаг и домен.
 const BLOCK_WHERE: &str = "b.kind = 'text' and b.state <> 'streaming'
    and canterlot_block_doc(b.content) @@ websearch_to_tsquery('pg_catalog.russian', $2)
    and c.owner_id = $1 and c.trashed_at is null and c.side_of is null
@@ -291,6 +295,7 @@ const BLOCK_WHERE: &str = "b.kind = 'text' and b.state <> 'streaming'
    and ($5::timestamptz is null or b.created_at >= $5::timestamptz)
    and ($6::timestamptz is null or b.created_at < $6::timestamptz)
    and ($7::text is null or c.harness = $7::text)
+   and ($10::boolean is false or c.memory_domain is not distinct from $11::text)
    and $8::boolean";
 
 /// Сообщения ленты: владелец, другая сессия, бриф запуска и итог делегата, в том числе
@@ -308,12 +313,13 @@ const INPUT_WHERE: &str = "i.feed_seq is not null
    and ($5::timestamptz is null or i.created_at >= $5::timestamptz)
    and ($6::timestamptz is null or i.created_at < $6::timestamptz)
    and ($7::text is null or c.harness = $7::text)
+   and ($10::boolean is false or c.memory_domain is not distinct from $11::text)
    and $9::boolean";
 
 /// Текст ввода для фрагмента: та же выборка, что в `canterlot_input_doc`.
 const INPUT_TEXT: &str = "array_to_string(array(select jsonb_array_elements_text(jsonb_path_query_array(i.content, 'lax $[*] ? (@.type == \"text\").text'))), E'\\n')";
 
-/// Страница: `$10`–`$12` курсор, `$13` строк с запасом в одну.
+/// Страница: `$12`–`$14` курсор, `$15` строк с запасом в одну.
 pub static PAGE_SQL: LazyLock<String> = LazyLock::new(|| {
     format!(
         "with page as (
@@ -321,20 +327,20 @@ pub static PAGE_SQL: LazyLock<String> = LazyLock::new(|| {
              (select 'answer'::text kind, b.block_id id, b.conversation_id, b.created_at
               from blocks b join conversations c on c.id = b.conversation_id
               where {BLOCK_WHERE}
-                and ($10::timestamptz is null or b.created_at < $10::timestamptz
-                     or (b.created_at = $10::timestamptz
-                         and ('answer' > $11::text or ('answer' = $11::text and b.block_id > $12::uuid))))
-              order by b.created_at desc, b.block_id limit $13)
+                and ($12::timestamptz is null or b.created_at < $12::timestamptz
+                     or (b.created_at = $12::timestamptz
+                         and ('answer' > $13::text or ('answer' = $13::text and b.block_id > $14::uuid))))
+              order by b.created_at desc, b.block_id limit $15)
              union all
              (select 'message'::text kind, i.id, i.conversation_id, i.created_at
               from inputs i join conversations c on c.id = i.conversation_id
               where {INPUT_WHERE}
-                and ($10::timestamptz is null or i.created_at < $10::timestamptz
-                     or (i.created_at = $10::timestamptz
-                         and ('message' > $11::text or ('message' = $11::text and i.id > $12::uuid))))
-              order by i.created_at desc, i.id limit $13)
+                and ($12::timestamptz is null or i.created_at < $12::timestamptz
+                     or (i.created_at = $12::timestamptz
+                         and ('message' > $13::text or ('message' = $13::text and i.id > $14::uuid))))
+              order by i.created_at desc, i.id limit $15)
            ) found
-           order by created_at desc, kind, id limit $13)
+           order by created_at desc, kind, id limit $15)
          select p.kind, p.id, p.conversation_id, p.created_at,
                 c.title, c.harness, c.model, c.archived_at is not null archived,
                 coalesce(b.created_seq, i.feed_seq) seq, b.parent_block_id, i.origin,
@@ -351,15 +357,15 @@ pub static PAGE_SQL: LazyLock<String> = LazyLock::new(|| {
     )
 });
 
-/// Число совпадений до `$10` строк в каждой ветви.
+/// Число совпадений до `$12` строк в каждой ветви.
 pub static TOTAL_SQL: LazyLock<String> = LazyLock::new(|| {
     format!(
         "select count(*) from (
            (select 1 from blocks b join conversations c on c.id = b.conversation_id
-            where {BLOCK_WHERE} limit $10)
+            where {BLOCK_WHERE} limit $12)
            union all
            (select 1 from inputs i join conversations c on c.id = i.conversation_id
-            where {INPUT_WHERE} limit $10)
+            where {INPUT_WHERE} limit $12)
          ) found"
     )
 });
@@ -385,6 +391,8 @@ macro_rules! bind_filters {
             .bind($q.harness.as_deref())
             .bind($q.kind != Some(SearchKind::Messages))
             .bind($q.kind != Some(SearchKind::Answers))
+            .bind($q.domain.is_some())
+            .bind($q.domain.clone().flatten())
     };
 }
 

@@ -41,8 +41,9 @@ pub async fn search(
         access::target_in_tx(&mut tx, &context.config, &session, caller.owner_id, target).await?;
     }
     let family = access::family_in_tx(&mut tx, &context.config, &session, caller.owner_id).await?;
+    let domain = session.memory_domain.clone();
     tx.commit().await?;
-    let query = RawQuery {
+    let mut query = RawQuery {
         text: args.query,
         conversation_id: args.session_id,
         since: args.since,
@@ -54,6 +55,7 @@ pub async fn search(
     }
     .check(caller.owner_id, family)
     .map_err(tool_error)?;
+    query.domain = Some(domain);
     let mut page = search::search(&context.pool, &query)
         .await
         .map_err(tool_error)?;
