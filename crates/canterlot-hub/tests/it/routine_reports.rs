@@ -1893,3 +1893,38 @@ async fn the_history_cap_keeps_pending_reports_and_fresh_report_text(pool: PgPoo
     assert!(!run_exists(&pool, ready_run).await);
     assert!(run_exists(&pool, pending_run).await);
 }
+
+/// Потерянный ответ Gotify не повод слать пуш «отчёт готов» второй раз: неоднозначная
+/// доставка не повторяется, как и у пуша о сбое расписания.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_lost_gotify_response_does_not_resend_the_report_push(pool: PgPool) {
+    use std::sync::atomic::Ordering;
+    crate::auth_pushes::enable(&pool).await;
+    let f = Fixture::new(pool.clone()).await;
+    let _session = session(&f);
+    with_native(&f).await;
+    let schedule = make_schedule(&f, "Стендап").await;
+    ready_card(&f, schedule, "Отчёт").await;
+    assert_eq!(routine_pushes(&pool).await.len(), 1);
+    let (hits, url) = crate::schedule_failure_push::dropping_gotify().await;
+    let (_dir, sender) = crate::auth_pushes::sender(&url);
+    for _ in 0..4 {
+        sender.deliver_due(&pool).await.unwrap();
+        sqlx::query("update owner_pushes set run_at=clock_timestamp() where state='pending'")
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        1,
+        "ambiguous delivery was retried"
+    );
+    let pending: i64 = sqlx::query_scalar(
+        "select count(*) from owner_pushes where kind='routine_report' and state='pending'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(pending, 0, "the row is settled");
+}

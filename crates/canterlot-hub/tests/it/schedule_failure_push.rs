@@ -191,7 +191,7 @@ async fn dropped_first_push_does_not_suppress_the_next_failure(pool: PgPool) {
 }
 
 /// Сервер принимает запрос и обрывает соединение без ответа: доставка неоднозначна.
-async fn dropping_gotify() -> (Arc<std::sync::atomic::AtomicUsize>, String) {
+pub(crate) async fn dropping_gotify() -> (Arc<std::sync::atomic::AtomicUsize>, String) {
     use tokio::io::AsyncReadExt;
     let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
