@@ -35,6 +35,7 @@ const allSpecs = [
 
 const both = ['phone', 'desktop'];
 const phone = ['phone'];
+const layouts = ['layout-1024', 'layout-1440', 'layout-2560', 'layout-3840'];
 
 describe('matchesGlob', () => {
   it('matches_a_double_star_glob_across_directories', () => {
@@ -97,6 +98,27 @@ describe('selectSpecs', () => {
     expect(selectSpecs(['e2e/ui/dialog.spec.ts', 'src/lib/timeline/rows.ts'], areas, allSpecs)).toEqual([
       { path: 'e2e/ui/dialog.spec.ts', reasons: ['изменена спека', 'область «feed»'], projects: both },
       { path: 'e2e/ui/timeline.spec.ts', reasons: ['область «feed»'], projects: both }
+    ]);
+  });
+
+  it('runs_the_desktop_layout_spec_on_the_layout_projects_instead_of_phone_and_desktop', () => {
+    expect(selectSpecs(['e2e/ui/desktop-layout.spec.ts'], areas, allSpecs)).toEqual([
+      { path: 'e2e/ui/desktop-layout.spec.ts', reasons: ['изменена спека'], projects: layouts }
+    ]);
+  });
+
+  it('adds_the_layout_projects_when_a_global_path_selects_the_desktop_layout_spec', () => {
+    const withLayout = [...allSpecs, 'e2e/ui/desktop-layout.spec.ts'];
+    const selected = selectSpecs(['src/lib/styles/tokens.css'], areas, withLayout);
+    expect(selected.find(entry => entry.path === 'e2e/ui/desktop-layout.spec.ts')?.projects).toEqual(layouts);
+    expect(selected.find(entry => entry.path === 'e2e/ui/dialog.spec.ts')?.projects).toEqual(phone);
+  });
+
+  it('adds_the_layout_projects_when_an_area_lists_the_desktop_layout_spec', () => {
+    const area = { name: 'shell', sources: ['src/lib/shell/**'], specs: ['e2e/ui/desktop-layout.spec.ts', 'e2e/ui/dialog.spec.ts'] };
+    expect(selectSpecs(['src/lib/shell/nav.ts'], { ...areas, areas: [area] }, allSpecs)).toEqual([
+      { path: 'e2e/ui/desktop-layout.spec.ts', reasons: ['область «shell»'], projects: layouts },
+      { path: 'e2e/ui/dialog.spec.ts', reasons: ['область «shell»'], projects: both }
     ]);
   });
 

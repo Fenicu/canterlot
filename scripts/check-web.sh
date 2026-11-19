@@ -5,7 +5,8 @@
 #   scripts/check-web.sh --fast          то же без полного Playwright, vitest только по изменённым файлам;
 #                                        проверки собранных артефактов — только если была сборка;
 #                                        по diff выбираются изменённые спеки и спеки затронутых областей
-#                                        из e2e/areas.json (phone и desktop), глобальный путь — весь набор
+#                                        из e2e/areas.json (phone и desktop; спека desktop-layout — проекты
+#                                        layout-1024/1440/2560/3840), глобальный путь — весь набор
 #                                        только на phone; сгенерированные типы API — только проверка типов
 #   scripts/check-web.sh --fast --base REF  сравнивать с REF (по умолчанию main)
 #   scripts/check-web.sh --stack         полная плюс сквозные сценарии на настоящем хабе (перед выкаткой)
@@ -162,16 +163,20 @@ if ((fast)); then
         done
         # Глобальный путь дёргает весь набор, но только на phone: desktop — только для
         # изменённых спек и областей, чтобы быстрая проверка не распухала до гейта.
+        # Спеку раскладки (desktop-layout) весь набор layout-* берёт отдельным проходом.
         # Самопроверки обвязки (контактный лист, провод fake-hub) в обычный прогон не входят:
         # изменившуюся из них запускает PW_HARNESS=1, иначе она молча пропустилась бы.
-        plain_phone=() plain_both=() harness_phone=() harness_both=()
+        plain_phone=() plain_both=() harness_phone=() harness_both=() layout_specs=()
         for index in "${!specs[@]}"; do
             spec=${specs[$index]}
             harness=0
             case "$spec" in
                 *contact-sheet.spec.ts|*fake-hub-wire.spec.ts) harness=1 ;;
             esac
-            if [[ "${projects[$index]}" == "phone" ]]; then
+            # Раскладка рабочего стола живёт в проектах layout-*: phone и desktop эту спеку пропускают.
+            if [[ "${projects[$index]}" == layout-* ]]; then
+                layout_specs+=("$spec")
+            elif [[ "${projects[$index]}" == "phone" ]]; then
                 if ((harness)); then harness_phone+=("$spec"); else plain_phone+=("$spec"); fi
             else
                 if ((harness)); then harness_both+=("$spec"); else plain_both+=("$spec"); fi
@@ -184,6 +189,10 @@ if ((fast)); then
         if ((${#plain_both[@]})); then
             printf '\n-- изменённые спеки и области, phone и desktop: %d спек\n' "${#plain_both[@]}"
             npx --no-install playwright test --project=phone --project=desktop "${plain_both[@]}"
+        fi
+        if ((${#layout_specs[@]})); then
+            printf '\n-- раскладка рабочего стола, layout-1024/1440/2560/3840: %d спек\n' "${#layout_specs[@]}"
+            npx --no-install playwright test --project=layout-1024 --project=layout-1440 --project=layout-2560 --project=layout-3840 "${layout_specs[@]}"
         fi
         if ((${#harness_phone[@]})); then
             printf '\n-- обвязка, phone: %d спеки\n' "${#harness_phone[@]}"

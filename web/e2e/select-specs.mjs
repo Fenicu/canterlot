@@ -16,6 +16,10 @@ const PROJECTS = ['phone', 'desktop'];
 // Глобальный путь дёргает весь набор, но только на телефоне: desktop нужен только для точечных правок.
 const GLOBAL_PROJECTS = ['phone'];
 const AREA_PROJECTS = ['phone', 'desktop'];
+// Раскладку рабочего стола playwright.config.ts гоняет отдельными проектами по одной спеке
+// (LAYOUT_SPEC в конфиге), а phone и desktop её пропускают: выбранная спека идёт только на них.
+const LAYOUT_SPEC = /(?:^|\/)desktop-layout\.spec\.ts$/;
+const LAYOUT_PROJECTS = ['layout-1024', 'layout-1440', 'layout-2560', 'layout-3840'];
 
 const escape = value => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -87,7 +91,9 @@ export function selectSpecs(changed, areas, allSpecs) {
         .map(([path, entry]) => ({
             path,
             reasons: entry.reasons,
-            projects: PROJECTS.filter(project => entry.projects.has(project))
+            projects: LAYOUT_SPEC.test(path)
+                ? LAYOUT_PROJECTS
+                : PROJECTS.filter(project => entry.projects.has(project))
         }))
         .sort((a, b) => a.path.localeCompare(b.path));
 }
