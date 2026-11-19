@@ -578,16 +578,43 @@ dist_ok() {
     grep -qx 'format=1' "$d/EXPECT"
 }
 
+# Сборка тестового бинаря spec_compat (его потом запускает preflight.sh при каждом cutover) идёт
+# параллельно сборке релиза: та же команда и тот же каталог target, что в preflight.sh, но
+# только компиляция (--no-run). Сама проверка не пропускается и не подменяется: preflight
+# по-прежнему запускает её, просто артефакты уже собраны. Сбой прогрева выпуск не останавливает.
+warm_spec_compat() {
+    (
+        cd "$repo"
+        # shellcheck source=/dev/null # окружение cargo из домашнего каталога
+        command -v cargo >/dev/null 2>&1 || source ~/.cargo/env
+        TMPDIR=/tmp cargo test --locked -p canterlot-worker --all-features --test it --no-run
+    ) >"$1" 2>&1
+}
+warm_wait() {
+    local pid=$1 wlog=$2
+    [[ -z $pid ]] && return 0
+    if wait "$pid"; then
+        log "warm-up of the spec_compat build done (the preflight still runs the check itself)"
+    else
+        log "warm-up of the spec_compat build failed (see $wlog): the preflight compiles it itself"
+    fi
+}
+
 phase_build() {
-    local blog="$STATE_DIR/build-$VER.log"
+    local blog="$STATE_DIR/build-$VER.log" wlog="$STATE_DIR/warm-$VER.log" warm_pid=""
     if [[ -e $DIST_ROOT/$SHA12 ]]; then
         dist_ok || finish failed_before_cutover 1 "$DIST_ROOT/$SHA12 exists but is not a complete build of $SHA12: remove that directory by hand, then --continue"
         log "dist $DIST_ROOT/$SHA12 already built from $SHA12"
     else
         state_set log_build "$blog"
-        log "build: scripts/build-release.sh $TAG --local (log $blog)"
-        CANTERLOT_DIST_ROOT="$DIST_ROOT" scripts/build-release.sh "$TAG" --local >"$blog" 2>&1 \
-            || finish failed_before_cutover 1 "scripts/build-release.sh failed, see $blog"
+        log "build: scripts/build-release.sh $TAG --local (log $blog); warm-up of the spec_compat build in parallel (log $wlog)"
+        warm_spec_compat "$wlog" &
+        warm_pid=$!
+        if ! CANTERLOT_DIST_ROOT="$DIST_ROOT" scripts/build-release.sh "$TAG" --local >"$blog" 2>&1; then
+            warm_wait "$warm_pid" "$wlog"
+            finish failed_before_cutover 1 "scripts/build-release.sh failed, see $blog"
+        fi
+        warm_wait "$warm_pid" "$wlog"
     fi
     phase_set build "done"
 }

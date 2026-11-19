@@ -240,5 +240,23 @@ assert_eq "$(rres path)" "full" "path=full on the continued run"
 teardown_case
 case_end
 
+case_begin "the build phase warms the spec_compat test build, a failed warm-up never stops the release"
+setup_release warm
+cutover_plan "${FULL_PLAN[@]}"
+run_release ship "${RVER}"
+C="${FAKE_ROOT}/state/calls.log"
+assert_eq "${RREL_RC}" "0" "exit 0"
+assert_eq "$(grep -c '^cargo test --locked -p canterlot-worker --all-features --test it --no-run$' "${C}" || true)" "1" "one warm-up compile of the spec_compat test binary"
+assert_not_contains "${C}" "spec_compat" "the check itself is not run by the warm-up (the preflight runs it)"
+teardown_case
+setup_release warm-failed
+cutover_plan "${FULL_PLAN[@]}"
+: >"${FAKE_ROOT}/state/warm-fail"
+run_release ship "${RVER}"
+assert_eq "${RREL_RC}" "0" "a failing warm-up: exit 0"
+assert_contains "${RDIR}/release-${RVER}.log" "warm-up of the spec_compat build failed" "the failure is logged"
+teardown_case
+case_end
+
 printf '\nrelease-fast: %s passed, %s failed\n' "${PASS_COUNT}" "${FAIL_COUNT}"
 [ "${FAIL_COUNT}" = "0" ]

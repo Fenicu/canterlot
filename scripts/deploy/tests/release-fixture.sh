@@ -81,6 +81,8 @@ EOF
     cat >"${FAKE_ROOT}/fake-bin/cargo" <<EOF
 #!/usr/bin/env bash
 echo "cargo \$*" >>"${FAKE_ROOT}/state/calls.log"
+# Прогрев сборки spec_compat (cargo test … --no-run) можно уронить: выпуск идёт дальше.
+if [[ "\$*" == *"--no-run"* && -e "${FAKE_ROOT}/state/warm-fail" ]]; then exit 1; fi
 # Как настоящий cargo update -w: версия членов workspace в Cargo.lock меняется.
 # Только во временном чекауте стенда: остальные вызовы (spec_compat cutover) — запись в лог.
 if [ "\$*" = "update -w --offline" ] && [ "\${PWD}" = "${FAKE_ROOT}/repo" ]; then
