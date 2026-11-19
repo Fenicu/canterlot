@@ -1816,7 +1816,8 @@ async fn run_now_does_not_commit_a_claim_when_another_operation_wins_the_key(poo
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         loop {
             let waiting: i64 = sqlx::query_scalar(
-                "select count(*) from pg_locks where locktype='transactionid' and not granted",
+                "select count(*) from pg_locks l join pg_stat_activity a on a.pid=l.pid
+                  where l.locktype='transactionid' and not l.granted and a.datname=current_database()",
             )
             .fetch_one(&pool)
             .await

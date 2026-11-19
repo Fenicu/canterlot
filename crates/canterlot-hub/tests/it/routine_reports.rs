@@ -1591,7 +1591,8 @@ async fn cleanup_takes_the_owner_lock_before_the_copy_row(pool: PgPool) {
     let mut waiting = false;
     for _ in 0..20_000 {
         waiting = sqlx::query_scalar(
-            "select exists(select 1 from pg_locks where locktype='advisory' and not granted)",
+            "select exists(select 1 from pg_locks where locktype='advisory' and not granted
+               and database=(select oid from pg_database where datname=current_database()))",
         )
         .fetch_one(&pool)
         .await

@@ -261,7 +261,7 @@ async fn wait_for_lock_waiters(pool: &PgPool, count: i64) {
     for _ in 0..20_000 {
         let waiting: i64 = sqlx::query_scalar(
             "select count(*) from pg_stat_activity
-              where wait_event_type='Lock' and state='active'
+              where datname=current_database() and wait_event_type='Lock' and state='active'
                 and query not ilike '%pg_stat_activity%'",
         )
         .fetch_one(pool)
