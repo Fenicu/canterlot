@@ -529,7 +529,8 @@ async fn concurrent_updates_one_wins(pool: PgPool) {
             if waiting {
                 break;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            // Запрос к базе сам занимает время; пауза без нужды не нужна.
+            tokio::task::yield_now().await;
         }
     })
     .await
