@@ -928,7 +928,6 @@ async fn degraded_outbox_resends_past_older_unsent_row_without_spinning(pool: Pg
     sqlx::query("insert into commands (id, machine_id, conversation_id, execution_id, execution_generation, kind, payload, delivery_state, created_at) select $1, machine_id, conversation_id, execution_id, execution_generation, 'interrupt', '{}', 'pending', created_at - interval '1 hour' from commands where id = $2")
         .bind(older).bind(Uuid::parse_str(&command.command_id).unwrap()).execute(&pool).await.unwrap();
     let before = queries.load(Ordering::Relaxed);
-    let started = tokio::time::Instant::now();
     // Повтор приходит после срока квитанции: ждём его по событию, а окно подсчёта обращений
     // к базе измеряем тем же отрезком. Фиксированные 650 мс и 100 мс под нагрузкой
     // расходились с моментом повтора.
@@ -938,14 +937,10 @@ async fn degraded_outbox_resends_past_older_unsent_row_without_spinning(pool: Pg
         .unwrap()
         .unwrap();
     let calls = queries.load(Ordering::Relaxed) - before;
-    let elapsed_ms = started.elapsed().as_millis() as u64;
-    eprintln!("outbox_database_acquires={calls} in {elapsed_ms} ms");
-    // Без пробуксовки обращений порядка сотни в секунду (замер ~115/с); пробуксовка даёт тысячи.
-    let limit = 30 + elapsed_ms / 4;
-    assert!(
-        calls < limit,
-        "database acquire count: {calls} in {elapsed_ms} ms"
-    );
+    eprintln!("outbox_database_acquires={calls}");
+    // Замер без пробуксовки: ~75 обращений за 650 мс; цикл без паузы между обращениями их на порядок больше.
+    // Потолок с запасом на задержку повтора под нагрузкой: считаем до события, а не за окно.
+    assert!(calls < 1000, "database acquire count: {calls}");
     assert!(matches!(message.msg, Some(control_down::Msg::Command(value)) if value == command));
     assert!(
         timeout(Duration::from_secs(2), worker.down.message())

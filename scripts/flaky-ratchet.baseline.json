@@ -111,7 +111,7 @@
     },
     "crates/canterlot-hub/tests/it/outbox.rs": {
       "rust_clock": 1,
-      "rust_sleep": 8
+      "rust_sleep": 7
     },
     "crates/canterlot-hub/tests/it/owner_push.rs": {
       "rust_clock": 7,
