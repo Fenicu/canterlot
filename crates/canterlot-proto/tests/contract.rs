@@ -4,9 +4,9 @@ use canterlot_proto::limits::{
     check_record_batch,
 };
 use canterlot_proto::worker::v1::{
-    BlockDelta, Command, ContentBlock, DeliverInput, Hello, InputDispatchDeferred, JournalCursor,
-    JournalRecord, JournalRecords, RecordBody, StartExecution, StreamKind, TextBlock, command,
-    content_block, record_body,
+    BlockDelta, Command, ContentBlock, CostSource, DeliverInput, Hello, InputDispatchDeferred,
+    JournalCursor, JournalRecord, JournalRecords, ModelUsage, RecordBody, StartExecution,
+    StreamKind, TextBlock, command, content_block, record_body,
 };
 use prost::Message;
 
@@ -1118,6 +1118,8 @@ fn n_minus_one_decoders_skip_new_fields() {
             output_tokens: 30,
             cache_read_tokens: 10,
             cache_write_tokens: 5,
+            cost_micro_usd: Some(620_000),
+            cost_source: CostSource::Cli as i32,
         }],
         context_tokens: 1000,
         context_window_tokens: 200000,
@@ -2440,4 +2442,36 @@ fn phase_changed_without_retry_decodes_from_the_old_wire_form() {
     }
     .encode_to_vec();
     assert!(new.starts_with(&old));
+}
+
+#[test]
+fn model_usage_cost_is_optional_in_both_directions() {
+    #[derive(Clone, PartialEq, Message)]
+    struct OldModelUsage {
+        #[prost(string, tag = "1")]
+        model: String,
+        #[prost(string, tag = "2")]
+        agent: String,
+        #[prost(uint64, tag = "3")]
+        input_tokens: u64,
+    }
+    let old = OldModelUsage {
+        model: "m".into(),
+        agent: "main".into(),
+        input_tokens: 7,
+    };
+    let from_old = ModelUsage::decode(old.encode_to_vec().as_slice()).unwrap();
+    assert_eq!(from_old.cost_micro_usd, None);
+    assert_eq!(from_old.cost_source, CostSource::Unspecified as i32);
+    let free = ModelUsage {
+        cost_micro_usd: Some(0),
+        cost_source: CostSource::Cli as i32,
+        ..from_old
+    };
+    let decoded = ModelUsage::decode(free.encode_to_vec().as_slice()).unwrap();
+    assert_eq!(decoded.cost_micro_usd, Some(0));
+    assert_eq!(
+        OldModelUsage::decode(free.encode_to_vec().as_slice()).unwrap(),
+        old
+    );
 }

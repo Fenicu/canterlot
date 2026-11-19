@@ -47,6 +47,9 @@ pub struct HubConfig {
     pub provider_status: ProviderStatusConfig,
     #[serde(default)]
     pub dictation: DictationConfig,
+    /// Свои цены моделей: сильнее таблицы `pricing.rs`.
+    #[serde(default)]
+    pub pricing: BTreeMap<String, PriceConfig>,
     /// Что загрузка подменила в конфигурации. Подписчик журнала к этому моменту ещё не
     /// установлен, поэтому предупреждения выдаёт `log_startup_warnings` после него.
     #[serde(skip)]
@@ -58,6 +61,38 @@ pub struct HubConfig {
 pub enum StartupWarning {
     /// `[activity].hung_rescue = "auto"` принято как `alert`.
     HungRescueAutoUnavailable,
+}
+
+/// `[pricing."<id>"]` в `hub.toml`: доллары за 1 млн токенов.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct PriceConfig {
+    pub input: f64,
+    pub output: f64,
+    #[serde(default)]
+    pub cache_read: Option<f64>,
+    #[serde(default)]
+    pub cache_write: Option<f64>,
+}
+
+impl PriceConfig {
+    pub fn validate(&self) -> Result<(), String> {
+        let all = [
+            Some(self.input),
+            Some(self.output),
+            self.cache_read,
+            self.cache_write,
+        ];
+        if all
+            .iter()
+            .flatten()
+            .all(|v| v.is_finite() && *v >= 0.0 && *v <= 100_000.0)
+        {
+            Ok(())
+        } else {
+            Err("цены — конечные неотрицательные числа, доллары за 1 млн токенов".into())
+        }
+    }
 }
 
 /// `[dictation]`: живая диктовка в PWA через службу распознавания речи.
@@ -220,6 +255,17 @@ impl HubConfig {
                     error.path = path.to_owned();
                     error
                 })?;
+        }
+        if config
+            .pricing
+            .values()
+            .any(|price| price.validate().is_err())
+        {
+            return Err(ConfigError {
+                path: path.to_owned(),
+                category: "invalid [pricing] price",
+                location: None,
+            });
         }
         config.provider_status.validate().map_err(|mut error| {
             error.path = path.to_owned();

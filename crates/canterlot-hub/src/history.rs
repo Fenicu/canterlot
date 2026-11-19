@@ -129,6 +129,8 @@ pub enum TimelineItem {
 #[derive(Serialize, ToSchema)]
 pub struct HistoryPage {
     pub items: Vec<TimelineItem>,
+    /// Расход и цена ходов, чьи блоки лежат на странице: строка под ответом не просит их отдельно.
+    pub runs: Vec<RunCostView>,
     pub next_before: Option<String>,
     pub next_after: Option<String>,
 }
@@ -379,6 +381,13 @@ pub async fn page(
     } else {
         crate::compactions::compaction_views(conn, ids("compaction")).await?
     };
+    let mut run_ids: Vec<Uuid> = blocks
+        .values()
+        .filter_map(|block| block.input_command_id)
+        .collect();
+    run_ids.sort_unstable();
+    run_ids.dedup();
+    let runs = run_costs(conn, conversation_id, &run_ids).await?;
     let mut items = Vec::with_capacity(keys.len());
     for k in &keys {
         let id: Uuid = k.try_get("id")?;
@@ -401,6 +410,7 @@ pub async fn page(
     }
     Ok(Some(HistoryPage {
         items,
+        runs,
         next_before: if more && !after {
             first.map(|n| n.to_string())
         } else {
@@ -448,8 +458,15 @@ async fn around(
     };
     let mut items = before.items;
     items.extend(after.items);
+    let mut runs = before.runs;
+    for run in after.runs {
+        if !runs.iter().any(|known| known.run_id == run.run_id) {
+            runs.push(run);
+        }
+    }
     Ok(Some(HistoryPage {
         items,
+        runs,
         next_before: before.next_before,
         next_after: after.next_after,
     }))
@@ -591,12 +608,80 @@ pub struct ModelUsageView {
     pub output_tokens: i64,
     pub cache_read_tokens: i64,
     pub cache_write_tokens: i64,
+    /// Микродолларов; пусто — цена неизвестна (не ноль).
+    pub cost_micro_usd: Option<i64>,
+    /// `cli` — назвал CLI, `prices` — по таблице цен хаба.
+    pub cost_source: Option<String>,
 }
 #[derive(Serialize, ToSchema)]
 pub struct RunLimit {
     pub provider: String,
     pub weekly_delta_permille: i32,
     pub exact: bool,
+}
+/// Расход одного хода для строки цены под ответом.
+#[derive(Serialize, ToSchema)]
+pub struct RunCostView {
+    pub run_id: Uuid,
+    pub usage: Vec<ModelUsageView>,
+    pub limit: Option<RunLimit>,
+    /// Вероятная причина пересборки кеша; пусто, если кеш в порядке или данных мало.
+    pub cache_hint: Option<crate::cache_hint::CacheHint>,
+}
+const USAGE_SQL: &str = "select model,agent,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,cost_micro_usd,cost_source from run_model_usage where input_command_id=$1 order by model,agent";
+fn run_limit(r: &sqlx::postgres::PgRow) -> Result<Option<RunLimit>, sqlx::Error> {
+    let before: Option<i32> = r.try_get("weekly_before_permille")?;
+    let after: Option<i32> = r.try_get("weekly_after_permille")?;
+    let provider: Option<String> = r.try_get("provider")?;
+    Ok(provider
+        .zip(before.zip(after))
+        .filter(|(_, (b, a))| a >= b)
+        .map(|(provider, (b, a))| RunLimit {
+            provider,
+            weekly_delta_permille: a - b,
+            exact: r.get::<bool, _>("exact")
+                && !r.get::<bool, _>("overlapped")
+                && a > b
+                && (a % 10 != 0 || b % 10 != 0),
+        }))
+}
+/// Расход и доля недели ходов разговора; ход без строк расхода (ещё идёт) не попадает.
+pub async fn run_costs(
+    conn: &mut PgConnection,
+    conversation_id: Uuid,
+    run_ids: &[Uuid],
+) -> Result<Vec<RunCostView>, sqlx::Error> {
+    let mut out = Vec::new();
+    for r in sqlx::query("select * from runs where conversation_id=$1 and input_command_id=any($2) order by started_at,input_command_id")
+        .bind(conversation_id)
+        .bind(run_ids)
+        .fetch_all(&mut *conn)
+        .await?
+    {
+        let run_id: Uuid = r.try_get("input_command_id")?;
+        let usage: Vec<ModelUsageView> = sqlx::query_as(USAGE_SQL)
+            .bind(run_id)
+            .fetch_all(&mut *conn)
+            .await?;
+        if usage.is_empty() {
+            continue;
+        }
+        let cache_hint = crate::cache_hint::for_run(
+            conn,
+            conversation_id,
+            run_id,
+            r.try_get("started_at")?,
+            r.try_get("finished_at")?,
+        )
+        .await?;
+        out.push(RunCostView {
+            run_id,
+            usage,
+            limit: run_limit(&r)?,
+            cache_hint,
+        });
+    }
+    Ok(out)
 }
 #[derive(Serialize, ToSchema, sqlx::FromRow)]
 pub struct PartView {
@@ -630,21 +715,11 @@ pub async fn run_info(
 ) -> Result<Option<RunInfo>, sqlx::Error> {
     let r=sqlx::query("select r.*,i.id input_id from runs r join conversations c on c.id=r.conversation_id join inputs i on i.command_id=r.input_command_id and i.conversation_id=c.id where c.owner_id=$1 and c.id=$2 and r.input_command_id=$3").bind(owner_id).bind(conversation_id).bind(run_id).fetch_optional(&mut *conn).await?;
     let Some(r) = r else { return Ok(None) };
-    let before: Option<i32> = r.try_get("weekly_before_permille")?;
-    let after: Option<i32> = r.try_get("weekly_after_permille")?;
-    let provider: Option<String> = r.try_get("provider")?;
-    let limit = provider
-        .zip(before.zip(after))
-        .filter(|(_, (b, a))| a >= b)
-        .map(|(provider, (b, a))| RunLimit {
-            provider,
-            weekly_delta_permille: a - b,
-            exact: r.get::<bool, _>("exact")
-                && !r.get::<bool, _>("overlapped")
-                && a > b
-                && (a % 10 != 0 || b % 10 != 0),
-        });
-    let usage=sqlx::query_as("select model,agent,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens from run_model_usage where input_command_id=$1 order by model,agent").bind(run_id).fetch_all(&mut *conn).await?;
+    let limit = run_limit(&r)?;
+    let usage = sqlx::query_as(USAGE_SQL)
+        .bind(run_id)
+        .fetch_all(&mut *conn)
+        .await?;
     let parts=sqlx::query_as("select block_id,agent,model,kind from blocks where conversation_id=$1 and input_command_id=$2 order by created_seq,block_id").bind(conversation_id).bind(run_id).fetch_all(&mut *conn).await?;
     let speed = crate::speed::for_runs(conn, &[run_id])
         .await?

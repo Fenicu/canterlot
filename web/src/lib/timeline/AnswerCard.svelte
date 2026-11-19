@@ -1,6 +1,8 @@
 <script lang="ts">
   import { blockEndLabel } from '#lib/format/labels.js';
   import { fmt } from '#lib/format/ru.js';
+  import { cacheHintText, costLine } from '#lib/format/cost.js';
+  import type { RunCost } from '#lib/stores/chat.svelte.js';
   import type { BlockModel, BlockPage } from '#lib/stores/blocks.js';
   import RequestCard from '#lib/requests/RequestCard.svelte';
   import type { TimelineEntry } from '#lib/stores/timeline.js';
@@ -36,6 +38,7 @@
     conversationId,
     now,
     onInfo,
+    costs = null,
     load,
     interrupt = null,
     leaseWait = null,
@@ -53,6 +56,8 @@
     conversationId: string;
     now: number;
     onInfo?: (runId: string) => void;
+    /** Расход ходов разговора: строка цены под законченным ответом. */
+    costs?: ReadonlyMap<string, RunCost> | null;
     load: (blockId: string, offset: number) => Promise<BlockPage>;
     interrupt?: InterruptControl | null;
     /** Процесс текущего хода ждёт очереди тяжёлых задач машины. */
@@ -81,6 +86,9 @@
   const agent = $derived(agentTitle(head?.agent ?? '', harness));
   const working = $derived(activeRun !== null && head?.inputCommandId === activeRun);
   const live = $derived(working || streaming);
+  const cost = $derived(run && !live ? costs?.get(run) : undefined);
+  const costText = $derived(cost ? costLine(cost.usage, cost.limit) : '');
+  const hintText = $derived(cost ? cacheHintText(cost.cache_hint) : null);
   // Рассуждение само показывает «Рассуждает» с часами: строка хода не повторяет текст, но остаётся с «Прервать».
   const ownReasoning = $derived(active?.kind === 'reasoning' && shownInCard(active));
   const quietLiveLine = $derived(liveLineQuiet(phase, ownReasoning));
@@ -164,6 +172,9 @@
         {/if}
       </div>
     </footer>
+    {#if costText && run}
+      <button type="button" class="cost" data-role="run-cost" onclick={() => onInfo?.(run)}>{costText}{#if hintText}<span class="hint" data-role="cache-hint">{hintText}</span>{/if}</button>
+    {/if}
   {/if}
 </article>
 
@@ -185,6 +196,10 @@
   strong { font-weight: var(--weight-semibold); }
   time { color: var(--time); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
   .byline :global(button) { color: var(--secondary); }
+  /* Строка цены: тихая, под подписью; нажатие открывает сведения о ходе. */
+  .cost { align-self: flex-start; background: none; max-width: 100%; min-height: var(--target); padding: var(--s0); text-align: left; color: var(--time); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+  /* Подсказка о кеше: своя строка под цифрами, на узком экране обрезается многоточием, а не ломает строку. */
+  .hint { display: block; max-width: 100%; margin-top: var(--s0); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .footer-actions { display: flex; align-items: center; gap: var(--s1); }
   .entry { min-width: 0; }
   .entry:has(> :global(.text)) { margin-block: var(--s2); }

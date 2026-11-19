@@ -327,6 +327,7 @@ async fn serve(
         timers,
         http: http_config,
         limits,
+        pricing,
         activity,
         hibernate,
         scheduler: scheduler_config,
@@ -439,7 +440,8 @@ async fn serve(
         ingest::Ingest::new(pool.clone())
             .with_dispatcher(dispatcher.clone())
             .with_registry(registry.clone())
-            .with_limits(limits.clone()),
+            .with_limits(limits.clone())
+            .with_prices(canterlot_hub::pricing::PriceBook::with_overrides(&pricing)),
     );
     let background = Background::start(BackgroundDeps {
         pool: pool.clone(),

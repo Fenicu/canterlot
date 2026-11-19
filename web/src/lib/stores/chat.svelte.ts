@@ -1,5 +1,6 @@
 import { untrack } from "svelte";
 import { SvelteMap, SvelteSet } from "svelte/reactivity";
+import type { CacheHint, CostUsage } from "#lib/format/cost.js";
 import type { OpJournal } from "#lib/ops/journal.js";
 import { intents } from "#lib/ops/intent.js";
 import type { DraftStore } from "#lib/drafts/store.js";
@@ -132,8 +133,18 @@ export interface HistoryCompaction {
 
 export type HistoryItem = HistoryBlock | HistoryInput | HistoryRequest | HistoryCompaction;
 
+/** Расход и доля недели одного хода: строка цены под ответом приходит с историей, а не по запросу. */
+export interface RunCost {
+  run_id: string;
+  usage: CostUsage[];
+  limit?: { weekly_delta_permille: number } | null;
+  cache_hint?: CacheHint | null;
+}
+
 export interface HistoryPage {
   items: HistoryItem[];
+  /** Ходы, чьи блоки лежат на странице; у прежнего хаба поля нет. */
+  runs?: RunCost[];
   next_before?: string | null;
   next_after?: string | null;
 }
@@ -323,6 +334,8 @@ class InputMap extends SvelteMap<string, InputView> {
 
 export class ChatStore {
   readonly blocks = new SvelteMap<string, BlockModel>();
+  /** Цена ходов по номеру хода: страницы истории и событие `run_cost_updated` кладут сюда. */
+  readonly runCosts = new SvelteMap<string, RunCost>();
   readonly inputs = new InputMap();
   readonly timeline = new TimelineModel(() => this.#pruneBlocks());
   readonly requests: RequestsModel;
@@ -609,6 +622,7 @@ export class ChatStore {
     });
     // Прежнее окно заменили, пока страница была в пути: её место уже не здесь.
     if (version !== this.timeline.windowVersion) return;
+    this.#takeRunCosts(page.runs);
     this.#ingest(page.items, "older");
     this.timeline.hasOlder = Boolean(page.next_before);
   }
@@ -666,6 +680,7 @@ export class ChatStore {
     try {
       const page = await this.deps.api.history(this.id, { around: seq, limit: 80 });
       if (epoch !== this.#epoch) return;
+      this.#takeRunCosts(page.runs);
       this.timeline.replaceWindow(
         this.#entriesFrom(page.items, false),
         Boolean(page.next_before),
@@ -746,6 +761,7 @@ export class ChatStore {
         after: this.timeline.newestSeq() ?? undefined,
       });
       if (epoch !== this.#epoch || version !== this.timeline.windowVersion) return;
+      this.#takeRunCosts(page.runs);
       this.#ingest(page.items, "newer");
       if (page.next_after) return;
       this.timeline.tailDetached = false;
@@ -768,6 +784,7 @@ export class ChatStore {
         this.timeline.applyHistoryPage([], "tail");
         this.timeline.hasOlder = Boolean(page.next_before);
       }
+      this.#takeRunCosts(page.runs);
       this.#ingest(page.items, "tail");
       this.#placeSecretRequests();
     } finally {
@@ -1037,6 +1054,10 @@ export class ChatStore {
             ...(this.execution ?? {}),
             last_run: event.payload,
           };
+        return;
+      case "run_cost_updated":
+        if (event.kind === "run_cost_updated")
+          this.runCosts.set(event.payload.run_id, event.payload);
         return;
       case "phase_changed":
         if (event.kind === "phase_changed") this.phase = { ...event.payload };
@@ -1679,6 +1700,7 @@ export class ChatStore {
         : null;
     if (data.history)
       this.timeline.hasOlder = Boolean(data.history.next_before);
+    this.#takeRunCosts(data.history?.runs);
     const items = data.history?.items ?? [];
     const oldest = [...items].sort((a, b) => cmpSeq(seqOf(a), seqOf(b)))[0];
     const floor = oldest ? seqOf(oldest) : null;
@@ -1724,6 +1746,10 @@ export class ChatStore {
         this.timeline.remove(`input:${input.key}`);
       }
     }
+  }
+
+  #takeRunCosts(runs: RunCost[] | undefined): void {
+    for (const run of runs ?? []) this.runCosts.set(run.run_id, run);
   }
 
   #ingest(items: HistoryItem[], dir: "older" | "newer" | "tail"): void {

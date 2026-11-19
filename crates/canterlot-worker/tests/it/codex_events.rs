@@ -2529,3 +2529,30 @@ fn reasoning_start_reports_liveness_before_the_first_visible_delta() {
         "{out:?}"
     );
 }
+
+#[test]
+fn turn_usage_splits_cached_input_and_leaves_reasoning_inside_output() {
+    let mut translator = Translator::new("thread-main", "gpt-6-luna");
+    translator.begin_turn("turn-main", command_id());
+    // Форма Responses: кеш входит во вход, рассуждения входят в выход.
+    translator.feed(
+        "thread/tokenUsage/updated",
+        &json!({"threadId": "thread-main", "turnId": "turn-main",
+            "tokenUsage": {"last": {"inputTokens": 1000, "cachedInputTokens": 400,
+                "outputTokens": 200, "reasoningOutputTokens": 150, "totalTokens": 1200},
+            "modelContextWindow": 200000}}),
+    );
+    let AdapterEvent::RunFinished { usage, .. } =
+        translator.finish_turn(canterlot_worker::adapter::RunEnd::Completed)
+    else {
+        panic!("not a run end");
+    };
+    assert_eq!(usage.len(), 1);
+    assert_eq!(usage[0].input_tokens, 600);
+    assert_eq!(usage[0].cache_read_tokens, 400);
+    assert_eq!(usage[0].output_tokens, 200, "reasoning is not added again");
+    assert_eq!(
+        usage[0].cost_micro_usd, None,
+        "Codex names no price: the hub prices it"
+    );
+}

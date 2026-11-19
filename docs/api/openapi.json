@@ -14149,6 +14149,34 @@
           }
         }
       },
+      "CacheHint": {
+        "type": "object",
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "idle_minutes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Простой между ходами в минутах; только у `expired`."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/CacheHintKind"
+          }
+        }
+      },
+      "CacheHintKind": {
+        "type": "string",
+        "enum": [
+          "expired",
+          "model_changed",
+          "compaction",
+          "rebuilt"
+        ]
+      },
       "CancelOutcome": {
         "oneOf": [
           {
@@ -16638,7 +16666,8 @@
       "HistoryPage": {
         "type": "object",
         "required": [
-          "items"
+          "items",
+          "runs"
         ],
         "properties": {
           "items": {
@@ -16658,6 +16687,13 @@
               "string",
               "null"
             ]
+          },
+          "runs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RunCostView"
+            },
+            "description": "Расход и цена ходов, чьи блоки лежат на странице: строка под ответом не просит их отдельно."
           }
         }
       },
@@ -18847,6 +18883,11 @@
           "cache_write_tokens": {
             "type": "integer",
             "format": "int64"
+          },
+          "cost_micro_usd": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Сумма известных цен в микродолларах; ходы без цены в неё не входят."
           },
           "input_tokens": {
             "type": "integer",
@@ -21884,6 +21925,47 @@
         },
         "additionalProperties": false
       },
+      "RunCostView": {
+        "type": "object",
+        "description": "Расход одного хода для строки цены под ответом.",
+        "required": [
+          "run_id",
+          "usage"
+        ],
+        "properties": {
+          "cache_hint": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CacheHint",
+                "description": "Вероятная причина пересборки кеша; пусто, если кеш в порядке или данных мало."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "limit": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RunLimit"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "run_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "usage": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModelUsageView"
+            }
+          }
+        }
+      },
       "RunInfo": {
         "type": "object",
         "required": [
@@ -24068,6 +24150,8 @@
         "type": "object",
         "required": [
           "turns",
+          "unknown_cost_turns",
+          "cost_micro_usd",
           "input_tokens",
           "output_tokens",
           "cache_read_tokens",
@@ -24080,6 +24164,10 @@
             "format": "int64"
           },
           "cache_write_tokens": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "cost_micro_usd": {
             "type": "integer",
             "format": "int64"
           },
@@ -24100,6 +24188,11 @@
           "turns": {
             "type": "integer",
             "format": "int64"
+          },
+          "unknown_cost_turns": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Ходы, у которых хотя бы по одной модели нет цены: в сумму ниже они не входят."
           }
         }
       },

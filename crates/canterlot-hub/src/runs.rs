@@ -206,6 +206,7 @@ pub async fn finish_in_tx(
     run: &ExecutionRef,
     at: DateTime<Utc>,
     now: DateTime<Utc>,
+    prices: &crate::pricing::PriceBook,
 ) -> Result<(), sqlx::Error> {
     let command = Uuid::parse_str(&fact.input_command_id)
         .map_err(|_| sqlx::Error::InvalidArgument("invalid run command".into()))?;
@@ -231,19 +232,52 @@ pub async fn finish_in_tx(
         .bind(command).bind(duration).bind(number(fact.context_tokens)?).bind(number(fact.context_window_tokens)?).bind(now - at <= EXACT_WINDOW).bind(git_json(fact)?).bind(outcome_of(fact.end)).execute(&mut *conn).await?.rows_affected();
     if changed == 0 {
         if fact.adopted {
-            add_adopted(conn, command, fact).await?;
+            add_adopted(conn, command, fact, prices).await?;
+            announce_cost(conn, command, run).await?;
         }
         return Ok(());
     }
     store_working(conn, command).await?;
     crate::test_summary::store_in_tx(conn, command).await?;
     for usage in &fact.usage {
-        sqlx::query("insert into run_model_usage(input_command_id,model,agent,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens) values($1,$2,$3,$4,$5,$6,$7) on conflict(input_command_id,model,agent) do update set input_tokens=excluded.input_tokens,output_tokens=excluded.output_tokens,cache_read_tokens=excluded.cache_read_tokens,cache_write_tokens=excluded.cache_write_tokens")
-            .bind(command).bind(&usage.model).bind(if usage.agent.is_empty(){"main"}else{&usage.agent}).bind(number(usage.input_tokens)?).bind(number(usage.output_tokens)?).bind(number(usage.cache_read_tokens)?).bind(number(usage.cache_write_tokens)?).execute(&mut *conn).await?;
+        let (cost, source) = usage_cost(usage, prices);
+        sqlx::query("insert into run_model_usage(input_command_id,model,agent,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,cost_micro_usd,cost_source) values($1,$2,$3,$4,$5,$6,$7,$8,$9) on conflict(input_command_id,model,agent) do update set input_tokens=excluded.input_tokens,output_tokens=excluded.output_tokens,cache_read_tokens=excluded.cache_read_tokens,cache_write_tokens=excluded.cache_write_tokens,cost_micro_usd=excluded.cost_micro_usd,cost_source=excluded.cost_source")
+            .bind(command).bind(&usage.model).bind(if usage.agent.is_empty(){"main"}else{&usage.agent}).bind(number(usage.input_tokens)?).bind(number(usage.output_tokens)?).bind(number(usage.cache_read_tokens)?).bind(number(usage.cache_write_tokens)?).bind(cost).bind(source).execute(&mut *conn).await?;
     }
     if let Some(provider) = provider {
         refresh_overlap(conn, provider, started).await?;
     }
+    announce_cost(conn, command, run).await?;
+    Ok(())
+}
+
+/// Расход хода изменился: клиент обновляет строку цены под ответом без запроса.
+async fn announce_cost(
+    conn: &mut PgConnection,
+    command: Uuid,
+    run: &ExecutionRef,
+) -> Result<(), sqlx::Error> {
+    let Some(view) = crate::history::run_costs(conn, run.conversation_id, &[command])
+        .await?
+        .pop()
+    else {
+        return Ok(());
+    };
+    let payload = serde_json::to_value(&view).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
+    crate::events::append(
+        conn,
+        crate::events::NewEvent {
+            scope: crate::events::Scope::Conversation {
+                id: run.conversation_id,
+            },
+            kind: "run_cost_updated",
+            conversation_id: Some(run.conversation_id),
+            execution_id: Some(run.execution_id),
+            payload,
+            correlation_id: Uuid::now_v7(),
+        },
+    )
+    .await?;
     Ok(())
 }
 
@@ -292,6 +326,7 @@ async fn add_adopted(
     conn: &mut PgConnection,
     command: Uuid,
     fact: &RunFinished,
+    prices: &crate::pricing::PriceBook,
 ) -> Result<(), sqlx::Error> {
     if fact.context_tokens > 0 {
         sqlx::query(
@@ -306,10 +341,34 @@ async fn add_adopted(
     merge_git(conn, command, fact).await?;
     crate::test_summary::store_in_tx(conn, command).await?;
     for usage in &fact.usage {
-        sqlx::query("insert into run_model_usage(input_command_id,model,agent,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens) values($1,$2,$3,$4,$5,$6,$7) on conflict(input_command_id,model,agent) do update set input_tokens=run_model_usage.input_tokens+excluded.input_tokens,output_tokens=run_model_usage.output_tokens+excluded.output_tokens,cache_read_tokens=run_model_usage.cache_read_tokens+excluded.cache_read_tokens,cache_write_tokens=run_model_usage.cache_write_tokens+excluded.cache_write_tokens")
-            .bind(command).bind(&usage.model).bind(if usage.agent.is_empty(){"main"}else{&usage.agent}).bind(number(usage.input_tokens)?).bind(number(usage.output_tokens)?).bind(number(usage.cache_read_tokens)?).bind(number(usage.cache_write_tokens)?).execute(&mut *conn).await?;
+        let (cost, source) = usage_cost(usage, prices);
+        // Цена складывается, только если известна у обеих частей: иначе ход остаётся без цены.
+        sqlx::query("insert into run_model_usage(input_command_id,model,agent,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,cost_micro_usd,cost_source) values($1,$2,$3,$4,$5,$6,$7,$8,$9) on conflict(input_command_id,model,agent) do update set input_tokens=run_model_usage.input_tokens+excluded.input_tokens,output_tokens=run_model_usage.output_tokens+excluded.output_tokens,cache_read_tokens=run_model_usage.cache_read_tokens+excluded.cache_read_tokens,cache_write_tokens=run_model_usage.cache_write_tokens+excluded.cache_write_tokens,cost_micro_usd=run_model_usage.cost_micro_usd+excluded.cost_micro_usd,cost_source=case when run_model_usage.cost_micro_usd is null or excluded.cost_micro_usd is null then null else run_model_usage.cost_source end")
+            .bind(command).bind(&usage.model).bind(if usage.agent.is_empty(){"main"}else{&usage.agent}).bind(number(usage.input_tokens)?).bind(number(usage.output_tokens)?).bind(number(usage.cache_read_tokens)?).bind(number(usage.cache_write_tokens)?).bind(cost).bind(source).execute(&mut *conn).await?;
     }
     Ok(())
+}
+
+/// Цена и её источник: названная CLI, иначе по таблице хаба, иначе неизвестна.
+/// Свои токены Codex отдаёт уже без повторов: кеш вычтен из входа, рассуждения лежат в выходе.
+fn usage_cost(
+    usage: &canterlot_proto::worker::v1::ModelUsage,
+    prices: &crate::pricing::PriceBook,
+) -> (Option<i64>, Option<&'static str>) {
+    let known = |micro: u64| i64::try_from(micro).unwrap_or(i64::MAX);
+    if let Some(micro) = usage.cost_micro_usd {
+        return (Some(known(micro)), Some("cli"));
+    }
+    let tokens = crate::pricing::Tokens {
+        input: usage.input_tokens,
+        output: usage.output_tokens,
+        cache_read: usage.cache_read_tokens,
+        cache_write: usage.cache_write_tokens,
+    };
+    match prices.cost_micro_usd(&usage.model, tokens) {
+        Some(micro) => (Some(known(micro)), Some("prices")),
+        None => (None, None),
+    }
 }
 
 fn git_json(fact: &RunFinished) -> Result<Option<serde_json::Value>, sqlx::Error> {

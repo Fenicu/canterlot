@@ -8,6 +8,8 @@ type Totals = components["schemas"]["UsageTotalsView"];
 function totals(over: Partial<Totals> = {}): Totals {
   return {
     turns: 0,
+    unknown_cost_turns: 0,
+    cost_micro_usd: 0,
     input_tokens: 0,
     output_tokens: 0,
     cache_read_tokens: 0,
@@ -216,5 +218,16 @@ describe("summarizeUsage", () => {
     expect(summary.delegates.models[0]?.model).toBe("sonnet-5");
     expect(summary.delegates.models[0]?.input.compact).toBe("900 тыс.");
     expect(summary.session.models).toEqual([]);
+  });
+
+  test("shows the session total with delegates and the turns without a price", () => {
+    const usage: SessionUsage = {
+      session: totals({ turns: 3, cost_micro_usd: 1_000_000, unknown_cost_turns: 1 }),
+      delegates: totals({ turns: 2, cost_micro_usd: 250_000, unknown_cost_turns: 1 }),
+    };
+    expect(summarizeUsage(usage).cost).toEqual({
+      money: "≈ $1,25 за сессию с делегатами",
+      unknown: "2 хода без цены",
+    });
   });
 });

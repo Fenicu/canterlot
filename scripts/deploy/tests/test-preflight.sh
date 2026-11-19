@@ -431,6 +431,19 @@ if python3 "${DEPLOY_DIR}/config-check.py" "${FAKE_ROOT}/check/structs.rs" Root 
 else
     case_ok "unrenamed field rejected"
 fi
+# [pricing."<модель>"]: открытая карта структур HubConfig, неизвестный ключ цены — ошибка.
+printf 'database_url_file = "d"\ngrpc_listen = "127.0.0.1:1"\ntls_cert = "c"\ntls_key = "k"\nmanifest = "m"\n[pricing."gpt-6.1-sol"]\ninput = 2.0\noutput = 10.0\ncache_read = 0.1\n' >"${FAKE_ROOT}/check/pricing.toml"
+printf 'database_url_file = "d"\ngrpc_listen = "127.0.0.1:1"\ntls_cert = "c"\ntls_key = "k"\nmanifest = "m"\n[pricing."gpt-6.1-sol"]\ninput = 2.0\noutput = 10.0\ncashe_read = 0.1\n' >"${FAKE_ROOT}/check/pricing-bad.toml"
+if python3 "${DEPLOY_DIR}/config-check.py" "${REPO_ROOT}/crates/canterlot-hub/src/config.rs" HubConfig "${FAKE_ROOT}/check/pricing.toml" >/dev/null 2>&1; then
+    case_ok "hub.toml [pricing.\"model\"] accepted"
+else
+    case_fail "hub.toml [pricing] rejected"
+fi
+if python3 "${DEPLOY_DIR}/config-check.py" "${REPO_ROOT}/crates/canterlot-hub/src/config.rs" HubConfig "${FAKE_ROOT}/check/pricing-bad.toml" >/dev/null 2>&1; then
+    case_fail "unknown key in [pricing] accepted"
+else
+    case_ok "unknown key in [pricing] rejected"
+fi
 mkdir -p "${FAKE_ROOT}/own-neg/ownership"
 printf 'seq = -1\nrecords = []\n' >"${FAKE_ROOT}/own-neg/ownership/snapshot.toml"
 if python3 "${DEPLOY_DIR}/ownership-check.py" \

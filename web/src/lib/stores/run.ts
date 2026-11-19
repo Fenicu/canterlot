@@ -14,8 +14,13 @@ export interface RunInfo {
 		output_tokens?: number;
 		cache_read_tokens?: number;
 		cache_write_tokens?: number;
+		/** Микродолларов; пусто — цена неизвестна. */
+		cost_micro_usd?: number | null;
+		cost_source?: string | null;
 		kind?: string;
 	}[];
+	/** Подсказка о пересборке кеша, если хаб её нашёл. */
+	cache_hint?: { kind: 'expired' | 'model_changed' | 'compaction' | 'rebuilt'; idle_minutes?: number | null } | null;
 	speed?: {
 		model: string;
 		output_tokens: number;

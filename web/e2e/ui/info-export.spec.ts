@@ -81,10 +81,10 @@ test('info_sheet_matches_mockup_04_with_per_model_parts_and_the_limit_estimate',
 	const dialog = page.getByRole('dialog', { name: 'Об ответе' });
 	await expect(dialog.getByText('Основной ответ')).toBeVisible();
 	await expect(dialog.getByText('Claude Code')).toBeVisible();
-	await expect(dialog.getByText('opus-5.5')).toBeVisible();
+	await expect(dialog.getByRole('table').getByText('opus-5.5')).toBeVisible();
 	await expect(dialog.getByText('Поиск дедупликации')).toBeVisible();
 	await expect(dialog.getByText('Субагент · Explore')).toBeVisible();
-	await expect(dialog.getByText('haiku')).toBeVisible();
+	await expect(dialog.getByRole('table').getByText('haiku')).toBeVisible();
 
 	// Tokens
 	await expect(dialog.getByText('18 420 + 4 216')).toBeVisible();

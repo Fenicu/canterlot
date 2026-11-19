@@ -173,6 +173,10 @@
 				<p class="note">{usageError}</p>
 			{:else if usageSummary}
 				<div class="usage">
+					<p class="cost-total" data-role="session-cost">
+						<strong>{usageSummary.cost.money}</strong>
+						{#if usageSummary.cost.unknown}<span class="note">{usageSummary.cost.unknown}</span>{/if}
+					</p>
 					<div class="usage-group" data-role="usage-session">
 						<div class="rows">
 							{#each usageSummary.session.rows as row (row.label)}
@@ -274,6 +278,14 @@
 		font-size: var(--fs-meta);
 		font-weight: var(--weight-semibold);
 		color: var(--secondary);
+	}
+	.cost-total {
+		display: flex;
+		flex-wrap: wrap;
+		align-items: baseline;
+		gap: var(--s2) var(--s4);
+		margin: var(--s0);
+		font-variant-numeric: tabular-nums;
 	}
 	.usage {
 		display: flex;

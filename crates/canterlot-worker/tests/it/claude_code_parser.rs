@@ -2387,3 +2387,67 @@ fn one_result_closing_two_commands_gives_each_the_results_own_end() {
         [(first, RunEnd::Interrupted), (second, RunEnd::Interrupted)]
     );
 }
+
+fn cost_turn(command: Uuid, models: Value) -> String {
+    json!({"type":"result","subtype":"success","is_error":false,
+        "user_message_uuids":[command],"modelUsage":models})
+    .to_string()
+}
+
+fn turn_usage_of(parsed: &[Parsed]) -> Vec<canterlot_worker::adapter::ModelUsage> {
+    parsed
+        .iter()
+        .find_map(|p| match p {
+            Parsed::Event(AdapterEvent::RunFinished { usage, .. }) => Some(usage.clone()),
+            _ => None,
+        })
+        .expect("a finished turn")
+}
+
+#[test]
+fn cost_is_per_turn_although_cost_usd_is_cumulative() {
+    let mut parser = Parser::new();
+    let model = |input: u64, cost: f64| {
+        json!({"inputTokens":input,"outputTokens":10,"cacheReadInputTokens":0,
+            "cacheCreationInputTokens":0,"costUSD":cost,"contextWindow":200000})
+    };
+    let first = Uuid::now_v7();
+    parser.set_input_command(first);
+    let one = turn_usage_of(&parser.feed(&cost_turn(
+        first,
+        json!({"claude-opus-5-5": model(100, 0.5), "claude-haiku-5-5": model(10, 0.0123)}),
+    )));
+    let second = Uuid::now_v7();
+    parser.set_input_command(second);
+    let two = turn_usage_of(&parser.feed(&cost_turn(
+        second,
+        json!({"claude-opus-5-5": model(250, 0.8), "claude-haiku-5-5": model(10, 0.0123)}),
+    )));
+    let cost = |usage: &[canterlot_worker::adapter::ModelUsage], name: &str| {
+        usage
+            .iter()
+            .find(|u| u.model == name)
+            .unwrap()
+            .cost_micro_usd
+    };
+    assert_eq!(cost(&one, "claude-opus-5-5"), Some(500_000));
+    assert_eq!(cost(&one, "claude-haiku-5-5"), Some(12_300));
+    assert_eq!(cost(&two, "claude-opus-5-5"), Some(300_000));
+    assert_eq!(
+        cost(&two, "claude-haiku-5-5"),
+        Some(0),
+        "idle side model costs nothing this turn"
+    );
+}
+
+#[test]
+fn missing_cost_usd_stays_unknown_not_zero() {
+    let mut parser = Parser::new();
+    let command = Uuid::now_v7();
+    parser.set_input_command(command);
+    let usage = turn_usage_of(&parser.feed(&cost_turn(
+        command,
+        json!({"claude-opus-5-5": {"inputTokens":5,"outputTokens":1}}),
+    )));
+    assert_eq!(usage[0].cost_micro_usd, None);
+}
