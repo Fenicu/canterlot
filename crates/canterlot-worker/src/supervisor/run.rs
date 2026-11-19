@@ -2614,6 +2614,7 @@ impl Supervisor {
                 usage,
                 context_tokens,
                 context_window_tokens,
+                end,
             } => {
                 let adopted = self.adopted_turn == Some(input_command_id);
                 if adopted {
@@ -2654,6 +2655,17 @@ impl Supervisor {
                     context_window_tokens,
                     duration_ms,
                     machine_time_ms: now_ms(),
+                    end: match end {
+                        crate::adapter::RunEnd::Completed => {
+                            canterlot_proto::worker::v1::RunEnd::Completed
+                        }
+                        crate::adapter::RunEnd::Failed => {
+                            canterlot_proto::worker::v1::RunEnd::Failed
+                        }
+                        crate::adapter::RunEnd::Interrupted => {
+                            canterlot_proto::worker::v1::RunEnd::Interrupted
+                        }
+                    } as i32,
                 }))?;
                 if ours {
                     self.active_turn = None;
@@ -4179,6 +4191,7 @@ mod tests {
                 usage: Vec::new(),
                 context_tokens: 0,
                 context_window_tokens: 0,
+                end: crate::adapter::RunEnd::Completed,
             })
             .await
             .unwrap();
@@ -4375,6 +4388,7 @@ mod tests {
                 usage: Vec::new(),
                 context_tokens: 0,
                 context_window_tokens: 0,
+                end: crate::adapter::RunEnd::Completed,
             })
             .await
             .unwrap();
@@ -4754,6 +4768,7 @@ mod tests {
                 usage: Vec::new(),
                 context_tokens: 0,
                 context_window_tokens: 0,
+                end: crate::adapter::RunEnd::Completed,
             })
             .await
             .unwrap();
@@ -4997,6 +5012,7 @@ mod tests {
                 usage: Vec::new(),
                 context_tokens: 0,
                 context_window_tokens: 0,
+                end: crate::adapter::RunEnd::Completed,
             })
             .await
             .unwrap();

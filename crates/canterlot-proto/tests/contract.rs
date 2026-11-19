@@ -1124,6 +1124,7 @@ fn n_minus_one_decoders_skip_new_fields() {
         duration_ms: 1234,
         machine_time_ms: 123456,
         git: None,
+        end: canterlot_proto::worker::v1::RunEnd::Completed as i32,
     };
     assert_eq!(
         OldRunFinished::decode(new.encode_to_vec().as_slice()).unwrap(),

@@ -160,6 +160,7 @@ pub fn finished(r: &Run, command: Uuid, ms: i64) -> Body {
             cache_write_tokens: 4,
         }],
         git: None,
+        end: canterlot_proto::worker::v1::RunEnd::Completed as i32,
     })
 }
 pub fn observation(used: u32, ms: i64) -> LimitObservation {

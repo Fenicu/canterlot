@@ -132,6 +132,7 @@ fn run_finished(command_id: Uuid) -> Parsed {
         usage: Vec::new(),
         context_tokens: 0,
         context_window_tokens: 0,
+        end: canterlot_worker::adapter::RunEnd::Completed,
     })
 }
 

@@ -430,6 +430,7 @@ async fn autonomous_goal_turn_reaches_history_and_ends_the_run(pool: PgPool) {
                     context_window_tokens: 100,
                     usage: vec![],
                     git: None,
+                    end: canterlot_proto::worker::v1::RunEnd::Completed as i32,
                 })],
             ),
         )

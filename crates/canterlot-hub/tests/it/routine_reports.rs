@@ -376,9 +376,9 @@ async fn record_copy_run(pool: &PgPool, copy: Uuid, finished: bool, forced: bool
     .unwrap();
     sqlx::query(
         "insert into runs(input_command_id,execution_id,conversation_id,provider,finished_at,
-                          duration_ms,forced_close)
+                          duration_ms,forced_close,outcome)
          select i.command_id,$2,$1,'claude',case when $3 then clock_timestamp() end,
-                case when $3 then 1000 end,$4
+                case when $3 then 1000 end,$4,case when $3 and not $4 then 'completed' end
            from inputs i where i.conversation_id=$1 and i.command_id is not null
          on conflict do nothing",
     )
@@ -1162,7 +1162,7 @@ async fn a_turn_that_is_just_starting_is_not_an_empty_report(pool: PgPool) {
     // Ход закончился с ответом: отчёт собран.
     finish_copy_turn(&pool, copy, "Всё спокойно.").await;
     sqlx::query(
-        "update runs set finished_at=clock_timestamp(),duration_ms=1 where conversation_id=$1",
+        "update runs set finished_at=clock_timestamp(),duration_ms=1,outcome='completed' where conversation_id=$1",
     )
     .bind(copy)
     .execute(&pool)
@@ -1942,4 +1942,46 @@ async fn a_lost_gotify_response_does_not_resend_the_report_push(pool: PgPool) {
     .await
     .unwrap();
     assert_eq!(pending, 0, "the row is settled");
+}
+
+async fn assert_not_published(outcome: Option<&str>, pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let _session = session(&f);
+    with_native(&f).await;
+    let schedule = make_schedule(&f, "Стендап").await;
+    let run = fire(&f, schedule).await;
+    let copy = copies(&pool, f.seed.conversation_id).await.remove(0).0;
+    finish_copy_turn(&pool, copy, "Промежуточная реплика, не итог").await;
+    sqlx::query("update runs set outcome=$2 where conversation_id=$1")
+        .bind(copy)
+        .bind(outcome)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sweep(&f).await;
+    failed_run_and_card(&f, schedule, run, "copy_failed").await;
+    assert!(routine_pushes(&pool).await.is_empty());
+    assert!(
+        run_state(&pool, run).await.1["report"]
+            .get("text")
+            .is_none()
+    );
+}
+
+/// Codex прерывает ход, OpenCode роняет его: `run_finished` приходит без принудительного
+/// закрытия, а блок с текстом уже `final`. Отчётом он быть не должен.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn an_interrupted_finish_never_publishes_the_earlier_text(pool: PgPool) {
+    assert_not_published(Some("interrupted"), pool).await;
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_failed_finish_never_publishes_the_earlier_text(pool: PgPool) {
+    assert_not_published(Some("failed"), pool).await;
+}
+
+/// Старый воркер исхода не присылает: успех не доказан, отчёт не публикуется.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_finish_without_a_recorded_outcome_never_publishes(pool: PgPool) {
+    assert_not_published(None, pool).await;
 }

@@ -6,6 +6,7 @@
 //! diagnostic per name, lines that are not JSON become an `unparsed_line`
 //! diagnostic. Partial tool JSON stays buffered until `content_block_stop`.
 
+use crate::adapter::RunEnd;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
@@ -1841,6 +1842,7 @@ impl Parser {
                 usage: Vec::new(),
                 context_tokens: 0,
                 context_window_tokens: 0,
+                end: RunEnd::Completed,
             }));
         }
         if let Some(input_command_id) = finished {
@@ -1862,6 +1864,11 @@ impl Parser {
                     .and_then(|model| model.get("contextWindow"))
                     .and_then(serde_json::Value::as_u64)
                     .unwrap_or(0),
+                end: if is_error {
+                    RunEnd::Failed
+                } else {
+                    RunEnd::Completed
+                },
             }));
         }
         if value.get("is_error").and_then(serde_json::Value::as_bool) == Some(true) {

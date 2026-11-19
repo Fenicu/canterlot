@@ -29,6 +29,7 @@ use self::{
     requests::{Intake, Reply, Requests, Settled},
     sse::StreamItem,
 };
+use crate::adapter::RunEnd;
 use crate::{
     adapter::{
         Adapter, AdapterError, AdapterEvent, AgentCallResult, BlockKind, Capabilities, CloseMode,
@@ -1523,7 +1524,14 @@ impl OpenCodeAdapter {
         }
         let (finished, background) = match self.translator.as_mut() {
             Some(translator) => (
-                Some(translator.finish_run(command)),
+                Some(translator.finish_run(
+                    command,
+                    match &outcome {
+                        RunOutcome::Succeeded => RunEnd::Completed,
+                        RunOutcome::Failed(_) => RunEnd::Failed,
+                        RunOutcome::Interrupted => RunEnd::Interrupted,
+                    },
+                )),
                 translator.background_events(),
             ),
             None => (None, Vec::new()),
@@ -1615,7 +1623,7 @@ impl OpenCodeAdapter {
         }
         let (finished, background) = match self.translator.as_mut() {
             Some(translator) => (
-                Some(translator.finish_run(command)),
+                Some(translator.finish_run(command, RunEnd::Failed)),
                 translator.background_events(),
             ),
             None => (None, Vec::new()),
@@ -1668,6 +1676,7 @@ impl OpenCodeAdapter {
             usage: Vec::new(),
             context_tokens: 0,
             context_window_tokens: 0,
+            end: RunEnd::Failed,
         });
         self.awaiting_input();
     }

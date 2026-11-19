@@ -515,6 +515,8 @@ struct Facts {
     /// Запись хода входного ввода закрыта штатным `run_finished`. Слот и состояние ввода
     /// этого не доказывают: свободный слот бывает и до начала хода, и после обрыва.
     run_completed: bool,
+    /// Ход закончился записью `run_finished`, но не успехом: упал, прерван или исход неизвестен.
+    run_unsuccessful: bool,
     live: bool,
     ever_started: bool,
     /// Последний ответ копии после ввода отчёта; читается только у завершённого хода.
@@ -527,6 +529,7 @@ async fn observe(conn: &mut PgConnection, card: &CardRow) -> Result<Facts, sqlx:
         input_state: None,
         parent_busy: false,
         run_completed: false,
+        run_unsuccessful: false,
         live: false,
         ever_started: false,
         text: None,
@@ -549,22 +552,28 @@ async fn observe(conn: &mut PgConnection, card: &CardRow) -> Result<Facts, sqlx:
     if trashed_at.is_some() {
         return Ok(facts);
     }
-    let input: Option<(String, i64, bool)> = sqlx::query_as(
+    let input: Option<(String, i64, bool, bool)> = sqlx::query_as(
         "select i.state, i.created_seq,
                 exists(select 1 from runs r
                         where r.input_command_id=i.command_id
-                          and r.finished_at is not null and not r.forced_close)
+                          and r.finished_at is not null and not r.forced_close
+                          and r.outcome='completed'),
+                exists(select 1 from runs r
+                        where r.input_command_id=i.command_id
+                          and r.finished_at is not null and not r.forced_close
+                          and r.outcome is distinct from 'completed')
            from inputs i where i.conversation_id=$1 order by i.created_seq limit 1",
     )
     .bind(copy_id)
     .fetch_optional(&mut *conn)
     .await?;
-    let Some((input_state, input_seq, run_completed)) = input else {
+    let Some((input_state, input_seq, run_completed, run_unsuccessful)) = input else {
         return Ok(facts);
     };
     facts.lost = false;
     facts.parent_busy = parent_busy;
     facts.run_completed = run_completed;
+    facts.run_unsuccessful = run_unsuccessful;
     facts.input_state = Some(input_state);
     facts.live = crate::executions::live(&mut *conn, copy_id)
         .await?
@@ -598,6 +607,11 @@ fn decide(card: &CardRow, facts: &Facts, now: DateTime<Utc>) -> Verdict {
     let input_state = facts.input_state.as_deref().unwrap_or_default();
     if matches!(input_state, "rejected" | "cancelled") {
         return Verdict::Failed("input_rejected");
+    }
+    // Упавший или прерванный ход тоже присылает `run_finished`; его промежуточная реплика
+    // отчётом не становится.
+    if facts.run_unsuccessful {
+        return Verdict::Failed("copy_failed");
     }
     // Отчёт публикуется только у хода, о конце которого есть запись: без неё ответ мог
     // быть промежуточной репликой оборванного хода, а пустой слот — просто не начавшимся ходом.

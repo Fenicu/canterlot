@@ -9,6 +9,7 @@ use super::{
     failure,
     requests::GLOBAL_SESSION,
 };
+use crate::adapter::RunEnd;
 use crate::adapter::frame_names::object_field_names;
 use crate::adapter::labels::{command_label, cut_end, path_tail};
 use canterlot_proto::limits::BLOCK_FINAL_INLINE_MAX_BYTES;
@@ -712,7 +713,7 @@ impl Translator {
         self.report_background()
     }
 
-    pub fn finish_run(&mut self, command: Uuid) -> AdapterEvent {
+    pub fn finish_run(&mut self, command: Uuid, end: RunEnd) -> AdapterEvent {
         self.command = None;
         // Живой учёт следующего хода начинается заново: итог ушёл в `RunFinished`.
         self.progress_sent = 0;
@@ -737,6 +738,7 @@ impl Translator {
             usage,
             context_tokens: std::mem::take(&mut self.context_tokens),
             context_window_tokens: self.windows.get(&self.model).copied().unwrap_or_default(),
+            end,
         }
     }
 
