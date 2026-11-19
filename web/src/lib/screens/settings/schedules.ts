@@ -170,6 +170,8 @@ export interface RunDetails {
   missedBefore: number;
   runAnyway: boolean;
   reason: string;
+  /** Текст отчёта рутины: хаб хранит его в истории запусков 30 дней. */
+  reportText: string;
 }
 
 function text(value: unknown): string {
@@ -181,13 +183,15 @@ export function runDetails(raw: unknown): RunDetails {
   const value = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
   const code = value.precheck_exit_code ?? value.exit_code;
   const missed = value.missed_before;
+  const report = value.report && typeof value.report === "object" ? value.report as Record<string, unknown> : {};
   return {
     code: typeof code === "number" && Number.isInteger(code) ? code : null,
     tail: text(value.precheck_tail ?? value.output_tail ?? value.tail),
     window: text(value.limits_window ?? value.window),
     missedBefore: typeof missed === "number" && Number.isInteger(missed) && missed > 0 ? missed : 0,
     runAnyway: value.run_anyway === true,
-    reason: text(value.reason ?? value.error ?? value.detail ?? value.failure_reason)
+    reason: text(value.reason ?? value.error ?? value.detail ?? value.failure_reason),
+    reportText: text(report.text)
   };
 }
 
@@ -224,4 +228,20 @@ export function fireTime(iso: string, timeZone?: string): string {
       day: "numeric", month: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23"
     }).format(date);
   }
+}
+
+const TARGET_KINDS: Record<ScheduleTarget["kind"], string> = {
+  new_session: "Новая сессия",
+  existing_session: "Сообщение в сессию",
+  session_report: "Отчёт из сессии"
+};
+
+/** Вид цели и имя сессии для списка и карточки расписания. */
+export function targetLabel(
+  target: ScheduleTarget,
+  sessions: ReadonlyMap<string, { title: string }>
+): { kind: string; session: string | null } {
+  const kind = TARGET_KINDS[target.kind];
+  if (target.kind === "new_session") return { kind, session: null };
+  return { kind, session: sessions.get(target.conversation_id)?.title ?? "Сессия недоступна" };
 }
