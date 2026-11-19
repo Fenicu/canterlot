@@ -285,9 +285,53 @@ assert_eq "$(rres path)/$(rres published)" "full/yes" "result: path=full, publis
 teardown_case
 case_end
 
+# Старая схема писала route_fallback и refused_fast двумя записями; крах между ними оставлял
+# execute=started. Состояние теперь пишется одной записью, а такой остаток восстанавливается по
+# проверенному результату отказа (статус, фаза, коды, факты «ничего не записано»).
+case_begin "a crash between the old two fallback writes is recovered from the verified refusal result"
+setup_release crash-fallback
+route_is fast "would be fast"
+cutover_plan "execute refused phase=eligibility fail_codes=fast_path_refused" "rehearse fail fail_codes=unknown"
+run_release ship "${RVER}"
+assert_eq "$(rstate phase_execute)" "refused_fast" "the transition is saved"
+# Остаток краха: execute=started и нет решения о полном пути.
+python3 -I -c 'import sys
+p=sys.argv[1]
+rows=[l for l in open(p).read().split("\n") if l and not l.startswith("route_fallback=")]
+rows=[("phase_execute=started 2026-11-19T00:00:00Z" if l.startswith("phase_execute=") else l) for l in rows]
+open(p,"w").write("\n".join(rows)+"\n")' "${RDIR}/release-${RVER}.state"
+assert_eq "$(rstate phase_execute)" "started" "(the crash leftover is in place)"
+route_is fast "fast again"
+cutover_plan "rehearse pass" "execute done"
+: >"${FAKE_ROOT}/state/calls.log"
+run_release ship "${RVER}" --continue
+assert_eq "${RREL_RC}" "0" "continue: exit 0"
+assert_eq "$(cutover_calls | grep -c -- '--fast')" "0" "continue: no repeat of the fast attempt"
+assert_eq "$(cutover_calls | grep -c -- '--rehearse')" "1" "continue: a fresh full rehearsal"
+assert_eq "$(rres path)/$(rres published)" "full/yes" "result: full, published"
+teardown_case
+case_end
+
 # --- прогрев spec_compat: отслеживается, отменяется и убирается
-warm_alive() { [ -f "${FAKE_ROOT}/state/warm.pid" ] && kill -0 "$(cat "${FAKE_ROOT}/state/warm.pid")" 2>/dev/null; }
-warm_kill() { if warm_alive; then kill -KILL "$(cat "${FAKE_ROOT}/state/warm.pid")" 2>/dev/null || true; fi; }
+# Живой процесс: есть и не зомби (kill -0 успешен и для зомби, а он уже не работает).
+proc_running() {
+    local st
+    st="$(ps -o stat= -p "$1" 2>/dev/null | tr -d ' ')" || return 1
+    [ -n "${st}" ] && [ "${st:0:1}" != "Z" ]
+}
+warm_alive() { [ -f "${FAKE_ROOT}/state/warm.pid" ] && proc_running "$(cat "${FAKE_ROOT}/state/warm.pid")"; }
+# Потомок прогрева (sleep от «rustc») тоже должен исчезнуть, а не только сам cargo.
+warm_child_alive() { [ -f "${FAKE_ROOT}/state/warm.child" ] && proc_running "$(cat "${FAKE_ROOT}/state/warm.child")"; }
+warm_kill() {
+    if warm_alive; then kill -KILL "$(cat "${FAKE_ROOT}/state/warm.pid")" 2>/dev/null || true; fi
+    if warm_child_alive; then kill -KILL "$(cat "${FAKE_ROOT}/state/warm.child")" 2>/dev/null || true; fi
+}
+# Ждать завершения процесса не дольше N секунд (иначе тест не зависает навсегда).
+wait_gone() {
+    local pid="$1" deadline="$2" i
+    for ((i = 0; i < deadline * 10; i++)); do kill -0 "${pid}" 2>/dev/null || return 0; command sleep 0.1; done
+    return 1
+}
 case_begin "a TERM delivered during a blocked warm-up cancels and reaps it, and the lock is released"
 setup_release warm-term
 cutover_plan "${FULL_PLAN[@]}"
@@ -299,9 +343,11 @@ for _ in $(seq 1 100); do [ -f "${FAKE_ROOT}/state/warm.pid" ] && break; command
 warm_alive && case_ok "the warm-up process is alive before the TERM" || case_fail "no live warm-up"
 kill -TERM "${RPID}"
 RC=0
+if wait_gone "${RPID}" 30; then case_ok "the driver exits within the deadline"; else case_fail "the driver did not exit within 30 s"; kill -KILL "${RPID}" 2>/dev/null || true; fi
 wait "${RPID}" || RC=$?
 assert_eq "${RC}" "1" "the driver exits 1 (interrupted)"
 warm_alive && case_fail "the warm-up cargo survived the TERM" || case_ok "the warm-up cargo is gone"
+warm_child_alive && case_fail "a descendant of the warm-up survived the TERM" || case_ok "no descendant of the warm-up is left"
 warm_kill
 assert_eq "$(rres status)" "interrupted" "result: interrupted"
 RC=0
@@ -318,6 +364,7 @@ cutover_plan "${FULL_PLAN[@]}"
 run_release ship "${RVER}"
 assert_eq "$(rres status)/$(rres phase)" "failed_before_cutover/build" "stopped at the build"
 warm_alive && case_fail "the warm-up cargo survived the failed build" || case_ok "the warm-up cargo was cancelled"
+warm_child_alive && case_fail "a descendant of the warm-up survived the failed build" || case_ok "no descendant of the warm-up is left"
 warm_kill
 teardown_case
 case_end

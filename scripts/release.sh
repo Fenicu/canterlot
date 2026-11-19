@@ -187,6 +187,23 @@ state_set() {
     fi
     mv -f "$tmp" "$STATE" || return 1
 }
+# Несколько ключей одной атомарной записью (один временный файл, один mv): состояние либо
+# прежнее, либо целиком новое. Аргументы — пары ключ значение.
+state_set_many() {
+    local tmp="$STATE.tmp.$$" args=("$@") i
+    local -a pairs=()
+    for ((i = 0; i + 1 < ${#args[@]}; i += 2)); do pairs+=("${args[i]}=$(one_line "${args[i + 1]}")"); done
+    {
+        if [[ -f $STATE ]]; then
+            awk -v list="$(printf '%s\n' "${pairs[@]}")" 'BEGIN { n = split(list, p, "\n"); for (i = 1; i <= n; i++) { k = p[i]; sub(/=.*/, "", k); new[k] = p[i] } }
+                { key = $0; sub(/=.*/, "", key); if (key in new) { if (!(key in done)) { print new[key]; done[key] = 1 } next } print }
+                END { for (i = 1; i <= n; i++) { k = p[i]; sub(/=.*/, "", k); if (!(k in done)) { print p[i]; done[k] = 1 } } }' "$STATE"
+        else
+            printf '%s\n' "${pairs[@]}"
+        fi
+    } >"$tmp" || return 1
+    mv -f "$tmp" "$STATE" || return 1
+}
 phase_status() { state_get "phase_$1" | awk '{print $1}'; }
 phase_set() {
     state_set "phase_$1" "$2 $(ts)" || return 1
@@ -688,10 +705,9 @@ set_route() {
     ROUTE_REHEARSAL=$2
     ROUTE_VZDUMP=$3
     ROUTE_REASONS=$(one_line "$4")
-    state_set route_path "$ROUTE_PATH"
-    state_set route_rehearsal "$ROUTE_REHEARSAL"
-    state_set route_vzdump "$ROUTE_VZDUMP"
-    state_set route_reasons "$ROUTE_REASONS"
+    # Решение и всё, что его сопровождает (route_fallback, refused_fast), пишутся одной записью.
+    state_set_many route_path "$ROUTE_PATH" route_rehearsal "$ROUTE_REHEARSAL" route_vzdump "$ROUTE_VZDUMP" \
+        route_reasons "$ROUTE_REASONS" "${@:5}"
     log "release path: $ROUTE_PATH (rehearsal $ROUTE_REHEARSAL, vzdump $ROUTE_VZDUMP): $ROUTE_REASONS"
 }
 load_route() {
@@ -769,8 +785,8 @@ phase_rehearsal() {
     stop_if_signaled
     # cutover.sh сам пересчитал условия и не согласился пропустить vzdump: полный путь.
     if ! rehearsal_passed && [[ $ROUTE_VZDUMP == skip ]] && [[ $(kv "$REHEARSAL_RESULT" fail_codes) == fast_path_refused ]]; then
-        set_route full run run "cutover.sh refused to skip the vzdump (fast_path_refused): the live release or the migrations differ from the decision; full path"
-        state_set route_fallback yes
+        set_route full run run "cutover.sh refused to skip the vzdump (fast_path_refused): the live release or the migrations differ from the decision; full path" \
+            route_fallback yes
         run_rehearsal
         stop_if_signaled
     fi
@@ -817,6 +833,19 @@ token_rejected_before_writes() {
     done
 }
 
+# Фаза execute записана как started, но результат её cutover — проверенный отказ быстрого пути до
+# любой записи: переход в refused_fast (с решением о полном пути) допишется сейчас.
+recover_proven_refusal() {
+    local r
+    [[ $(phase_status execute) == started ]] || return 0
+    r=$(state_get cutover_result)
+    [[ -n $r ]] || return 0
+    fast_rejected_before_writes "$r" || return 0
+    log "the saved execute attempt is a proven pre-write refusal of the fast path ($r): recovered as refused_fast, full path"
+    state_set_many route_path full route_rehearsal run route_vzdump run \
+        route_reasons "recovered: cutover.sh refused the fast path before any write (see $r); full path" \
+        route_fallback yes phase_execute "refused_fast $(ts)"
+}
 # Отказ быстрого пути до любой записи: cutover.sh сам пересчитал условия и не согласился.
 fast_rejected_before_writes() {
     local r=$1
@@ -868,11 +897,11 @@ phase_execute() {
         if ((fast_retry == 0)) && fast_rejected_before_writes "$r"; then
             fast_retry=1
             log "cutover.sh refused the $ROUTE_PATH path before any write: one fresh full rehearsal, then the real run"
-            set_route full run run "cutover.sh refused the $ROUTE_PATH path before any write (was: $ROUTE_REASONS); full path"
-            # Доказанный отказ до записи и решение «полный путь» сохраняются вместе: --continue
+            # Доказанный отказ до записи и решение «полный путь» сохраняются ОДНОЙ записью: --continue
             # после прерванного возврата начинает со свежей полной репетиции, не с боевого прогона.
-            state_set route_fallback yes
-            phase_set execute "refused_fast"
+            set_route full run run "cutover.sh refused the $ROUTE_PATH path before any write (was: $ROUTE_REASONS); full path" \
+                route_fallback yes phase_execute "refused_fast $(ts)"
+            log "phase execute: refused_fast"
             phase_rehearsal
             check_pin
             continue
@@ -1044,6 +1073,8 @@ ship() {
     SHA12=${SHA:0:12}
     if [[ $FORCE_FULL == 1 ]]; then state_set route_forced yes; fi
     load_route
+    # Остаток краха старой схемы (execute=started при сохранённом проверенном отказе): восстановить.
+    recover_proven_refusal
     # Отказ до записи (refused_fast, refused_token) боевым прогоном не считается: дальше идёт
     # свежая репетиция. Всё остальное, начавшее боевой прогон, не повторяется никогда.
     case "$(phase_status execute)" in

@@ -82,7 +82,14 @@ EOF
 #!/usr/bin/env bash
 echo "cargo \$*" >>"${FAKE_ROOT}/state/calls.log"
 # Прогрев можно заблокировать (state/warm-block): процесс cargo живёт, пока его не убьют; pid — в state/warm.pid.
-if [[ "\$*" == *"--no-run"* && -e "${FAKE_ROOT}/state/warm-block" ]]; then echo "\$\$" >"${FAKE_ROOT}/state/warm.pid"; exec sleep 600; fi
+if [[ "\$*" == *"--no-run"* && -e "${FAKE_ROOT}/state/warm-block" ]]; then
+    echo "\$\$" >"${FAKE_ROOT}/state/warm.pid"
+    # Потомок, как rustc у настоящего cargo: отмена обязана убрать и его.
+    sleep 600 &
+    echo "\$!" >"${FAKE_ROOT}/state/warm.child"
+    wait
+    exit 1
+fi
 # Настоящая проверка spec_compat (без --no-run) можно уронить: state/spec-compat-fail.
 if [[ "\$*" == *"spec_compat"* && "\$*" != *"--no-run"* && -e "${FAKE_ROOT}/state/spec-compat-fail" ]]; then echo "spec_compat FAILED (fixture)" >&2; exit 1; fi
 # Прогрев сборки spec_compat (cargo test … --no-run) можно уронить: выпуск идёт дальше.
