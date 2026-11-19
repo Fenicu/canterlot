@@ -106,7 +106,7 @@ export interface CreditsLine {
 }
 
 /**
- * «Сбросы лимитов: 2, ближайший сгорит 02.12»: счёт берётся у провайдера, а срок — самый
+ * «Codex: сбросы лимитов 2, ближайший сгорит 02.12»: счёт берётся у провайдера, а срок — самый
  * ранний из названных. Ближе недели до сгорания — предупреждение. Сбросы есть только у Codex.
  */
 export function creditsLine(
@@ -118,10 +118,11 @@ export function creditsLine(
   const count = credits.reset_count ?? 0;
   if (count <= 0) return null;
   const nearest = nearestCredit(credits);
-  if (nearest === null) return { text: `Сбросы лимитов: ${count}`, tone: "normal" };
+  const label = providerLabel(provider);
+  if (nearest === null) return { text: `${label}: сбросы лимитов ${count}`, tone: "normal" };
   const burning = nearest - now <= CREDITS_WARN_MS;
   return {
-    text: `Сбросы лимитов: ${count}, ближайший сгорит ${fmt.shortDate(nearest)}`,
+    text: `${label}: сбросы лимитов ${count}, ближайший сгорит ${fmt.shortDate(nearest)}`,
     tone: burning ? "warning" : "normal",
   };
 }

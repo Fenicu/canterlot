@@ -236,7 +236,7 @@ describe("sessions/limits credits", () => {
       NOW,
     );
     // Ближайший срок — самый ранний из названных, а не первый в списке.
-    expect(line).toMatchObject({ text: "Сбросы лимитов: 2, ближайший сгорит 20.10" });
+    expect(line).toMatchObject({ text: "Codex: сбросы лимитов 2, ближайший сгорит 20.10" });
   });
 
   it("a_reset_burning_within_a_week_warns", () => {
@@ -249,11 +249,11 @@ describe("sessions/limits credits", () => {
 
   it("without_any_expiry_the_count_stands_alone_and_zero_hides_the_line", () => {
     expect(creditsLine("codex", credits(2, []), NOW)).toEqual({
-      text: "Сбросы лимитов: 2",
+      text: "Codex: сбросы лимитов 2",
       tone: "normal",
     });
     expect(creditsLine("codex", credits(2, [null]), NOW)).toEqual({
-      text: "Сбросы лимитов: 2",
+      text: "Codex: сбросы лимитов 2",
       tone: "normal",
     });
     expect(creditsLine("codex", credits(0, []), NOW)).toBeNull();
@@ -280,7 +280,7 @@ describe("sessions/limits credits", () => {
       NOW,
       cfg,
     );
-    expect(strip.rows[0]?.credits?.text).toBe("Сбросы лимитов: 2, ближайший сгорит 31.10");
+    expect(strip.rows[0]?.credits?.text).toBe("Codex: сбросы лимитов 2, ближайший сгорит 31.10");
     expect(strip.rows[0]?.creditList).toHaveLength(1);
     expect(limitStrip([provider("claude", 100, 200)], NOW, cfg).rows[0]?.credits).toBeNull();
   });

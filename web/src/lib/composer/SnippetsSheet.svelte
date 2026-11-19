@@ -112,7 +112,9 @@
 </Sheet>
 
 <style>
-  .actions, .editor-actions { display: flex; gap: var(--s2); flex-wrap: wrap; }
+  /* Кнопки по своей ширине, причина выключения встаёт под своей кнопкой: так же, как в настройках. */
+  .actions, .editor-actions { display: grid; justify-items: start; gap: var(--s4); }
+  .actions :global(.reason), .editor-actions :global(.reason) { margin-block: var(--s0); }
   .editor { display: grid; gap: var(--s2); }
   .editor label { display: grid; gap: var(--s1); color: var(--secondary); font-size: var(--fs-sm); }
   .editor input, .editor select {
