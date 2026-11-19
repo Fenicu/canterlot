@@ -21,6 +21,9 @@ create table routine_reports (
   -- Копия-читатель. Пока она не удалена, поле заполнено; ссылки нет: строку копии
   -- удаляет приложение, а не каскад.
   copy_id uuid,
+  -- Очередь уборки копий: после неудачной попытки карточка уходит в конец, а потерянная
+  -- копия ещё и ждёт паузу, чтобы пачка не застревала на одних и тех же копиях.
+  cleanup_at timestamptz,
   title text not null,
   state text not null check (state in ('pending', 'ready', 'failed')),
   body text,

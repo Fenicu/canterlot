@@ -1484,3 +1484,145 @@ async fn trashing_the_parent_removes_report_copies_and_keeps_the_interactive_rul
     .unwrap();
     assert_eq!(left, 0);
 }
+
+// ---------------------------------------------------------------------------
+// Уборка копий: порядок замков, отказ по одной копии, потерянные исполнения.
+// ---------------------------------------------------------------------------
+
+/// Карточка с копией, которую пора убрать: копия — скрытая боковая копия отчёта.
+async fn stray_copy(f: &Fixture, schedule: Uuid, exec_state: Option<&str>) -> (Uuid, Uuid) {
+    let copy = testkit::seed_conversation(&f.pool, f.seed.owner_id, f.seed.machine_id).await;
+    sqlx::query("update conversations set side_of=$2, side_kind='report' where id=$1")
+        .bind(copy)
+        .bind(f.seed.conversation_id)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    if let Some(state) = exec_state {
+        sqlx::query(
+            "insert into executions(id,conversation_id,generation,state) values($1,$2,1,$3)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(copy)
+        .bind(state)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    }
+    let card = Uuid::now_v7();
+    sqlx::query(
+        "insert into routine_reports(id,owner_id,conversation_id,schedule_id,copy_id,title,state,
+            body,completed_at,dismissed_at,dismiss_reason)
+         values($1,$2,$3,$4,$5,'t','ready','x',clock_timestamp(),clock_timestamp(),'replaced')",
+    )
+    .bind(card)
+    .bind(f.seed.owner_id)
+    .bind(f.seed.conversation_id)
+    .bind(schedule)
+    .bind(copy)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    (card, copy)
+}
+
+async fn card_copy(pool: &PgPool, card: Uuid) -> Option<Uuid> {
+    sqlx::query_scalar("select copy_id from routine_reports where id=$1")
+        .bind(card)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// Порядок замков удаления: владелец, затем строки копий. Уборка, берущая копию раньше
+/// владельца, замыкалась в цикл с переносом родителя в корзину.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn cleanup_takes_the_owner_lock_before_the_copy_row(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let schedule = make_schedule_without_session(&f, "Стендап").await;
+    let (_card, copy) = stray_copy(&f, schedule, None).await;
+    let mut holder = canterlot_hub::db::begin(&pool).await.unwrap();
+    sqlx::query(
+        "select pg_advisory_xact_lock(hashtextextended('canterlot:attributes:'||$1::text,0))",
+    )
+    .bind(f.seed.owner_id)
+    .execute(&mut *holder)
+    .await
+    .unwrap();
+    let sweeper = {
+        let pool = pool.clone();
+        tokio::spawn(async move { canterlot_hub::routines::sweep(&pool, Utc::now()).await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+    let locked_by_cleanup =
+        sqlx::query("select id from conversations where id=$1 for update nowait")
+            .bind(copy)
+            .execute(&mut *holder)
+            .await
+            .is_err();
+    assert!(
+        !locked_by_cleanup,
+        "cleanup locked the copy row before the owner lock"
+    );
+    holder.rollback().await.unwrap();
+    sweeper.await.unwrap().unwrap();
+}
+
+/// Сбой уборки одной копии не роняет ни проход, ни тик планировщика, ни уборку других копий.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_cleanup_failure_is_per_copy_and_never_aborts_the_tick(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let schedule = make_schedule_without_session(&f, "Стендап").await;
+    let (broken_card, broken) = stray_copy(&f, schedule, None).await;
+    let (good_card, _good) = stray_copy(&f, schedule, None).await;
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "create function fail_copy_delete() returns trigger language plpgsql as $$
+         begin
+           if old.id = '{broken}' then raise exception 'boom'; end if;
+           return old;
+         end $$"
+    )))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "create trigger fail_copy_delete before delete on conversations
+         for each row execute function fail_copy_delete()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    scheduler(&f).tick(Utc::now()).await.unwrap();
+    assert!(card_copy(&pool, good_card).await.is_none());
+    assert_eq!(card_copy(&pool, broken_card).await, Some(broken));
+}
+
+/// Потерянные исполнения копий получают запрос разрешения и уходят в конец очереди уборки:
+/// пятьдесят таких не вытесняют из пачки обычную копию.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn lost_copies_are_recovered_and_cannot_fill_the_cleanup_batch(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let schedule = make_schedule_without_session(&f, "Стендап").await;
+    let mut lost = Vec::new();
+    for _ in 0..55 {
+        lost.push(stray_copy(&f, schedule, Some("owner_lost")).await);
+    }
+    let (normal_card, _) = stray_copy(&f, schedule, None).await;
+    canterlot_hub::routines::sweep(&pool, Utc::now())
+        .await
+        .unwrap();
+    canterlot_hub::routines::sweep(&pool, Utc::now())
+        .await
+        .unwrap();
+    assert!(
+        card_copy(&pool, normal_card).await.is_none(),
+        "lost copies starved the cleanup batch"
+    );
+    let resolves: i64 = sqlx::query_scalar(
+        "select count(distinct conversation_id) from commands where kind='resolve_owner_lost'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(resolves, 55, "every lost copy gets a recovery request");
+}

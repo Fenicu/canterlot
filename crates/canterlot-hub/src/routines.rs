@@ -744,52 +744,118 @@ async fn finish_failed(
     Ok(())
 }
 
+/// Пауза перед новой попыткой убрать копию, чьё исполнение потеряно или чья уборка упала.
+const CLEANUP_BACKOFF_SECONDS: f64 = 300.0;
+
+enum Removal {
+    /// Строки копии убраны.
+    Gone,
+    /// Копия ещё отвечает или потеряна: остановку или разрешение заказали, вернёмся позже.
+    Pending { backoff: bool },
+}
+
 /// Копии готовых и неудавшихся карточек: остановить и удалить обычным путём бокового чата.
 /// Копия, которая ещё отвечает, получает команду остановки, строки уберёт следующий проход.
+/// Сбой одной копии не мешает остальным и не роняет тик: пачка идёт по очереди попыток,
+/// поэтому потерянные копии в конец очереди, а не в начало каждой пачки.
 async fn remove_copies(pool: &PgPool) -> Result<(), sqlx::Error> {
     let rows: Vec<(Uuid, Uuid, Uuid)> = sqlx::query_as(
         "select id, owner_id, copy_id from routine_reports
           where copy_id is not null and state<>'pending'
-          order by updated_at,id limit $1",
+            and (cleanup_at is null or cleanup_at <= clock_timestamp())
+          order by cleanup_at nulls first, updated_at, id limit $1",
     )
     .bind(BATCH)
     .fetch_all(pool)
     .await?;
     for (card_id, owner_id, copy_id) in rows {
-        let mut tx = crate::db::begin(pool).await?;
-        let exists: bool =
-            sqlx::query_scalar("select exists(select 1 from conversations where id=$1 for update)")
-                .bind(copy_id)
-                .fetch_one(&mut *tx)
-                .await?;
-        let gone = if exists {
-            match crate::side::stop_and_delete_in_tx(&mut tx, owner_id, copy_id, Uuid::now_v7())
-                .await
-            {
-                Ok(done) => done,
-                Err(crate::deletion::DeleteError::NotFound) => true,
-                Err(crate::deletion::DeleteError::Db(error)) => {
-                    let _ = tx.rollback().await;
-                    return Err(error);
-                }
-                Err(error) => {
-                    tracing::warn!(kind = "routine_copy_delete_failed", copy_id = %copy_id, error = ?error, "report copy was not deleted");
-                    let _ = tx.rollback().await;
-                    continue;
-                }
+        let backoff = match remove_one(pool, card_id, owner_id, copy_id).await {
+            Ok(Removal::Gone) => continue,
+            Ok(Removal::Pending { backoff }) => backoff,
+            Err(error) => {
+                tracing::warn!(
+                    kind = "routine_copy_cleanup_failed",
+                    copy_id = %copy_id,
+                    error = %crate::dberr::describe(&error),
+                    "report copy cleanup failed; retried later"
+                );
+                true
             }
-        } else {
-            true
         };
-        if gone {
-            sqlx::query("update routine_reports set copy_id=null where id=$1")
-                .bind(card_id)
-                .execute(&mut *tx)
-                .await?;
+        let rotated = sqlx::query(
+            "update routine_reports
+                set cleanup_at=clock_timestamp()+$2*interval '1 second'
+              where id=$1",
+        )
+        .bind(card_id)
+        .bind(if backoff {
+            CLEANUP_BACKOFF_SECONDS
+        } else {
+            0.0
+        })
+        .execute(pool)
+        .await;
+        if let Err(error) = rotated {
+            tracing::warn!(
+                kind = "routine_copy_cleanup_rotate_failed",
+                error = %crate::dberr::describe(&error),
+                "report copy cleanup position was not saved"
+            );
         }
-        tx.commit().await?;
     }
     Ok(())
+}
+
+async fn remove_one(
+    pool: &PgPool,
+    card_id: Uuid,
+    owner_id: Uuid,
+    copy_id: Uuid,
+) -> Result<Removal, sqlx::Error> {
+    let mut tx = crate::db::begin(pool).await?;
+    // Порядок удаления разговора: владелец, затем строки разговоров. Перенос родителя в
+    // корзину идёт так же, а копия, взятая раньше владельца, замыкала бы оба пути.
+    crate::conversations::lock_owner(&mut tx, owner_id).await?;
+    let exists: bool =
+        sqlx::query_scalar("select exists(select 1 from conversations where id=$1 for update)")
+            .bind(copy_id)
+            .fetch_one(&mut *tx)
+            .await?;
+    let mut gone = true;
+    if exists {
+        // Потерянное исполнение не остановить командой: просим воркер разрешить его.
+        if let Some((execution_id, generation, crate::model::ExecutionState::OwnerLost)) =
+            crate::executions::live(&mut tx, copy_id).await?
+        {
+            crate::delivery::control::enqueue_resolve(&mut tx, copy_id, execution_id, generation)
+                .await?;
+            tx.commit().await?;
+            return Ok(Removal::Pending { backoff: true });
+        }
+        match crate::side::stop_and_delete_in_tx(&mut tx, owner_id, copy_id, Uuid::now_v7()).await {
+            Ok(done) => gone = done,
+            Err(crate::deletion::DeleteError::NotFound) => {}
+            Err(crate::deletion::DeleteError::Db(error)) => {
+                let _ = tx.rollback().await;
+                return Err(error);
+            }
+            Err(error) => {
+                tracing::warn!(kind = "routine_copy_delete_failed", copy_id = %copy_id, error = ?error, "report copy was not deleted");
+                let _ = tx.rollback().await;
+                return Ok(Removal::Pending { backoff: false });
+            }
+        }
+    }
+    if !gone {
+        tx.commit().await?;
+        return Ok(Removal::Pending { backoff: false });
+    }
+    sqlx::query("update routine_reports set copy_id=null where id=$1")
+        .bind(card_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(Removal::Gone)
 }
 
 /// Уборка: через 30 дней текст отчёта уходит из истории запусков (сами запуски живут по

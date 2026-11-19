@@ -773,7 +773,14 @@ impl Scheduler {
         crunch::expire_pending(&self.pool, now).await?;
         crate::side::sweep(&self.pool, now).await?;
         // Отчёты рутин: собрать ответы закончивших копий, оборвать зависшие, убрать копии.
-        crate::routines::sweep(&self.pool, now).await?;
+        // Сбой отчётов не должен лишать тик заявления расписаний и обычных заданий.
+        if let Err(error) = crate::routines::sweep(&self.pool, now).await {
+            tracing::warn!(
+                kind = "routine_sweep_failed",
+                error = %crate::dberr::describe(&error),
+                "routine sweep failed; the tick goes on"
+            );
+        }
         // Заявление расписаний — короткая транзакция; работа с воркерами идёт вне тика.
         let claimed = {
             let mut tx = crate::db::begin(&self.pool).await?;
