@@ -25,9 +25,12 @@ setup_fast() {
     # Развёрнутый релиз уже на 0041: так выглядит выпуск без новых миграций.
     sed -i 's/^migrations_last=.*/migrations_last=0041_fake_harness.sql/' \
         "${HUB_RELEASES}/${SHA_PREV}/RELEASE" "${WORKER_RELEASES}/${SHA_PREV}/RELEASE"
+    # Развёрнутый релиз хранит полный хэш исходника, как настоящая сборка.
+    printf 'source=%s\n' "${FAST_LIVE_FULL}" >>"${HUB_RELEASES}/${SHA_PREV}/RELEASE"
+    printf 'source=%s\n' "${FAST_LIVE_FULL}" >>"${WORKER_RELEASES}/${SHA_PREV}/RELEASE"
     : >"${FAKE_ROOT}/state/calls.log"
 }
-finish_fast() { teardown_case; drop_fast_source; }
+finish_fast() { drop_fast_source; teardown_case; }
 fcut() {
     # fcut РЕЖИМ... : cutover.sh с источником-репозиторием
     bash "${DEPLOY_DIR}/cutover.sh" "$@" --source "${FAST_SRC}" --dist "${FAKE_ROOT}/dist" \
@@ -97,7 +100,7 @@ if fcut --execute "${SHA_NEW}" --fast --result "${FAKE_ROOT}/exe.result"; then c
 L="${FAKE_ROOT}/cutover.log"
 C="${FAKE_ROOT}/state/calls.log"
 assert_contains "${L}" "fast path: no confirm token" "the fast path is logged"
-assert_contains "${L}" "no migration and no deploy tooling change" "the recomputed conditions are logged"
+assert_contains "${L}" "allowlisted application code" "the recomputed conditions are logged"
 assert_not_contains "${L}" "confirm token accepted" "no token was involved"
 grep -q '^vzdump ' "${C}" && case_fail "vzdump ran" || case_ok "vzdump never ran"
 assert_contains "${L}" "common preflight: preflight.sh and target-check.sh for ${SHA_NEW}" "the common preflight ran"
@@ -158,7 +161,7 @@ EMPTY="${FAKE_ROOT}/empty-repo"
 git init -q "${EMPTY}"
 FAST_SRC_REAL="${FAST_SRC}"
 FAST_SRC="${EMPTY}"
-refused_fast "unknown revision" "is not a commit of"
+refused_fast "unknown revision" "could not be classified"
 FAST_SRC="${FAST_SRC_REAL}"
 finish_fast
 case_end

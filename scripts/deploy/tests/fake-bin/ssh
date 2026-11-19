@@ -63,6 +63,11 @@ if [ "${host}" = "fakeproxmox" ] && [ "${cmd}" = "ps -eo pid=,args=" ]; then
 fi
 rc=0
 bash -c "${cmd}" || rc=$?
+# Обрыв транспорта ПОСЛЕ того, как команда напечатала ответ: клиент видит вывод и код 255.
+if [ -n "${FAKE_SSH_TRANSPORT_FAIL_MATCH:-}" ] && [[ "${cmd}" == *"${FAKE_SSH_TRANSPORT_FAIL_MATCH}"* ]]; then
+    echo "fake-ssh: connection lost after the reply" >&2
+    exit 255
+fi
 # Крючок «после успешной команды»: детерминированно вклинить конкурентное
 # действие (например, flip current между проверкой и удалением) в старую схему.
 if [ -n "${FAKE_SSH_AFTER_HOOK:-}" ] && [ -n "${FAKE_SSH_AFTER_CMD:-}" ] && [ "${rc}" = "0" ] \

@@ -317,7 +317,9 @@ BASE_WORKER="$(deployed_sha worker)"
 [ "${FAST}" = "0" ] || SKIP_VZDUMP=1
 if [ "${FAST}" = "1" ] || [ "${SKIP_VZDUMP}" = "1" ]; then
     PHASE="token"
-    FP_OUT="$(fastpath_eval "${SOURCE_DIR}" "${SHA}" "${BASE_HUB}" "${BASE_WEB}" "${BASE_WORKER}")"
+    FP_LIVE_FULL="$(deployed_source_full "${BASE_HUB}")" || FP_LIVE_FULL=""
+    FP_TARGET_FULL="$(grep -E '^source=[0-9a-f]{40}$' "${DIST}/RELEASE" 2>/dev/null | head -1 | cut -d= -f2)" || FP_TARGET_FULL=""
+    FP_OUT="$(fastpath_eval "${SOURCE_DIR}" "${FP_TARGET_FULL}" "${FP_LIVE_FULL}" "${BASE_HUB}" "${BASE_WEB}" "${BASE_WORKER}")"
     FP_REHEARSAL="$(printf '%s\n' "${FP_OUT}" | sed -n 's/^rehearsal=//p')"
     FP_VZDUMP="$(printf '%s\n' "${FP_OUT}" | sed -n 's/^vzdump=//p')"
     FASTPATH_REASONS="$(printf '%s\n' "${FP_OUT}" | sed -n 's/^reasons=//p')"

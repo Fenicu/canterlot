@@ -522,13 +522,16 @@ migration_lock_risks() {
 # Пустой ответ (обрыв ssh, битая ссылка) — громкая смерть, а не пустая строка,
 # которую вызывающий прочитал бы как «всё хорошо».
 deployed_sha() {
-    local out
+    local raw out
+    # Статус каждого чтения проверяется явно: вызывающие часто стоят под `||`, где errexit
+    # выключен, а конвейер `ssh | sed` отдавал статус sed и пропускал обрыв транспорта.
     case "$1" in
-        hub) out="$(ssh_hub "readlink '${HUB_CURRENT}'" </dev/null | sed 's|.*/||')" ;;
-        web) out="$(ssh_web "readlink '${WEB_BUILD_LINK}'" </dev/null | sed 's|.*/||')" ;;
-        worker) out="$(readlink "${WORKER_CURRENT}" | sed 's|.*/||')" ;;
+        hub) raw="$(ssh_hub "readlink '${HUB_CURRENT}'" </dev/null)" || die "cannot read the hub current link (ssh failed)" ;;
+        web) raw="$(ssh_web "readlink '${WEB_BUILD_LINK}'" </dev/null)" || die "cannot read the web build link (ssh failed)" ;;
+        worker) raw="$(readlink "${WORKER_CURRENT}")" || die "cannot read the worker current link" ;;
         *) die "unknown component: $1" ;;
     esac
+    out="${raw##*/}"
     [ -n "${out}" ] || die "cannot read current release for $1"
     # Имя пришло с хоста (или из файловой системы): до shell-текста оно доходит
     # только после проверки формата.
@@ -536,66 +539,131 @@ deployed_sha() {
     printf '%s' "${out}"
 }
 
-# Быстрый путь выпуска без миграций. Решает по git diff между развёрнутым релизом и
-# целью, какие шаги можно не делать, и печатает ключ=значение:
+# Полный хэш исходника развёрнутого релиза: строка source= из RELEASE каталога релиза хаба
+# (его пишет сборка). Пустой вывод и код 1 — нет файла, нет строки, не 40 hex, не совпадает
+# с именем релиза или оборвался ssh.
+deployed_source_full() {
+    local rel="$1" raw line
+    [[ "${rel}" =~ ^[0-9a-f]{12}$ ]] || return 1
+    raw="$(ssh_hub "cat '${HUB_RELEASES}/${rel}/RELEASE'" </dev/null)" || return 1
+    line="$(printf '%s\n' "${raw}" | grep -E '^source=[0-9a-f]{40}$' | head -2)" || return 1
+    [ "$(printf '%s\n' "${line}" | wc -l)" = "1" ] || return 1
+    line="${line#source=}"
+    [ "${line:0:12}" = "${rel}" ] || return 1
+    printf '%s' "${line}"
+}
+
+# Базовое состояние до выката согласовано: ссылки каждого компонента ведут в существующие
+# релизы, работающий хаб и воркер запущены из них, а раздаваемый PWA — именно тот
+# релиз веба, на который указывает ссылка. $1..$3 — имена релизов hub web worker.
+# При расхождении печатает причину в stderr и возвращает 1; сбой любого чтения — тоже 1.
+baseline_verify() {
+    local hub="$1" web="$2" worker="$3" pid exe served
+    ssh_hub "test -x '${HUB_RELEASES}/${hub}/bin/canterlot-hub' && test -f '${HUB_RELEASES}/${hub}/RELEASE'" </dev/null \
+        || { echo "the hub link points at ${hub}, which has no complete release directory" >&2; return 1; }
+    pid="$(ssh_hub "systemctl show '${HUB_UNIT}' -p MainPID --value" </dev/null)" || { echo "cannot read the hub MainPID" >&2; return 1; }
+    case "${pid}" in '' | 0 | *[!0-9]*) echo "the hub has no running process (MainPID '${pid}')" >&2; return 1 ;; esac
+    exe="$(ssh_hub "readlink '/proc/${pid}/exe'" </dev/null)" || { echo "cannot read the hub process executable" >&2; return 1; }
+    [ "${exe}" = "${HUB_RELEASES}/${hub}/bin/canterlot-hub" ] \
+        || { echo "the running hub executable ${exe} is not from the linked release ${hub}" >&2; return 1; }
+    [ -x "${WORKER_RELEASES}/${worker}/bin/canterlot-worker" ] \
+        || { echo "the worker link points at ${worker}, which has no binary" >&2; return 1; }
+    pid="$(unit_main_pid)"
+    case "${pid}" in '' | 0) echo "the worker has no running process" >&2; return 1 ;; esac
+    exe="$(proc_exe "${pid}")"
+    [ "${exe}" = "${WORKER_RELEASES}/${worker}/bin/canterlot-worker" ] \
+        || { echo "the running worker executable '${exe}' is not from the linked release ${worker}" >&2; return 1; }
+    ssh_web "test -d '${WEB_RELEASES}/${web}/_app'" </dev/null \
+        || { echo "the web link points at ${web}, which has no build" >&2; return 1; }
+    served="$(container_pwa_sha)" || { echo "cannot read the served PWA version" >&2; return 1; }
+    sha_match "${served}" "${web}" || { echo "the served PWA is ${served:-unknown}, not the linked web release ${web}" >&2; return 1; }
+    return 0
+}
+
+# Быстрый путь выпуска. Решает по точным хэшам коммитов и git diff между развёрнутым
+# релизом и целью, какие шаги можно не делать, и печатает ключ=значение:
 #   path=fast|rehearsed|full   fast — без репетиции и без vzdump; rehearsed — репетиция
 #                              есть, vzdump нет; full — как раньше (репетиция и vzdump)
 #   rehearsal=skip|run  vzdump=skip|run  reasons=<все причины через "; ">
 #   vzdump_reason=<почему vzdump пропущен; пусто, если не пропущен>
-# Репетиция пропускается, только если не менялись миграции (crates/canterlot-hub/migrations/)
-# и обвязка выката (scripts/deploy/, release.sh, build-release.sh, publish-release.sh);
-# vzdump — только если не менялись миграции. Любая неясность (релиз не определён, компоненты на
-# разных релизах, нет репозитория или ревизии, развёрнутый не предок цели, diff не
-# считается) даёт full. Только читает; код возврата всегда 0.
-# $1 каталог git-репозитория, $2 цель, $3..$5 развёрнутые hub web worker.
-FASTPATH_MIGRATIONS_DIR="crates/canterlot-hub/migrations"
-fastpath_tooling_path() {
-    case "$1" in
-        scripts/deploy/* | scripts/release.sh | scripts/build-release.sh | scripts/publish-release.sh) return 0 ;;
-    esac
-    return 1
-}
+# Классификация файлов — fastpath-classify.py (NUL-разделённый diff со статусом, без
+# переименований, без объектов-замен): быстрый путь только если каждый изменённый
+# файл в списке прикладного кода; изменились миграции или их загрузка — full. Это
+# предварительное решение по git: что реально вшито в бинарь, сверяет с живой базой
+# сам cutover.sh (манифест миграций хаба), и только он разрешает пропустить vzdump.
+# Любая неясность (релиз не определён, компоненты на разных релизах, хэши не
+# полные или не совпадают с именами релизов, классификатор упал или ответил
+# противоречиво, развёрнутый не предок цели) даёт full. Только читает; код возврата 0.
+# $1 каталог git-репозитория, $2 полный хэш цели, $3 полный хэш развёрнутого,
+# $4..$6 имена развёрнутых hub web worker (12 hex).
 fastpath_eval() {
-    local src="$1" target="$2" b_hub="$3" b_web="$4" b_worker="$5"
-    local rehearsal=skip backup=skip reasons="" b names path mig="" tool="" full_reason=""
+    local src="$1" target="$2" live="$3" b_hub="$4" b_web="$5" b_worker="$6"
+    local rehearsal=skip backup=skip reasons="" full_reason="" cls="" classifier="" c
+    local ancestor="" mig="" other="" changed="" key n
     fastpath_full() { full_reason="${full_reason:+${full_reason}; }$1"; }
-    local c
     for c in "${b_hub}" "${b_web}" "${b_worker}"; do
-        if ! is_release_id "${c}"; then fastpath_full "the live release cannot be determined (hub '${b_hub}', web '${b_web}', worker '${b_worker}')"; break; fi
+        if ! [[ "${c}" =~ ^[0-9a-f]{12}$ ]]; then
+            fastpath_full "the live release cannot be determined (hub '${b_hub}', web '${b_web}', worker '${b_worker}')"
+            break
+        fi
     done
     if [ -z "${full_reason}" ]; then
-        if ! sha_match "${b_hub}" "${b_web}" || ! sha_match "${b_hub}" "${b_worker}"; then
+        if [ "${b_hub}" != "${b_web}" ] || [ "${b_hub}" != "${b_worker}" ]; then
             fastpath_full "hub, web and worker are on different releases (${b_hub}, ${b_web}, ${b_worker})"
+        elif ! [[ "${live}" =~ ^[0-9a-f]{40}$ && "${target}" =~ ^[0-9a-f]{40}$ ]]; then
+            fastpath_full "the live or the target commit id is not a full 40-hex id (live '${live}', target '${target}')"
+        elif [ "${live:0:12}" != "${b_hub}" ]; then
+            fastpath_full "the live source id ${live:0:12} does not match the live release name ${b_hub}"
+        elif [ "${live}" = "${target}" ]; then
+            fastpath_full "the target equals the live release ${b_hub}"
         fi
     fi
     if [ -z "${full_reason}" ]; then
-        b="${b_hub}"
-        if ! is_release_id "${target}" || ! git -C "${src}" rev-parse --verify -q "${target}^{commit}" >/dev/null 2>&1; then
-            fastpath_full "the target ${target} is not a commit of ${src}"
-        elif ! git -C "${src}" rev-parse --verify -q "${b}^{commit}" >/dev/null 2>&1; then
-            fastpath_full "the live release ${b} is not a commit of ${src}"
-        elif sha_match "${b}" "${target}"; then
-            fastpath_full "the target equals the live release ${b}"
-        elif ! git -C "${src}" merge-base --is-ancestor "${b}" "${target}" >/dev/null 2>&1; then
-            fastpath_full "the live release ${b} is not an ancestor of the target ${target}"
-        elif ! names="$(git -C "${src}" diff --name-only --no-renames "${b}" "${target}" -- 2>/dev/null)"; then
-            fastpath_full "git diff ${b}..${target} cannot be computed"
+        if [ -n "${FASTPATH_CLASSIFIER:-}" ]; then
+            cls="$("${FASTPATH_CLASSIFIER}" "${src}" "${live}" "${target}" 2>/dev/null)" || cls=""
         else
-            while IFS= read -r path; do
-                [ -n "${path}" ] || continue
-                case "${path}" in
-                    "${FASTPATH_MIGRATIONS_DIR}"/*) mig="${mig:+${mig}, }${path}" ;;
-                esac
-                if fastpath_tooling_path "${path}"; then tool="${tool:+${tool}, }${path}"; fi
-            done <<<"${names}"
-            [ -z "${mig}" ] || { rehearsal=run; backup=run; reasons="migrations changed since ${b}: ${mig}"; }
-            [ -z "${tool}" ] || { rehearsal=run; reasons="${reasons:+${reasons}; }deploy tooling changed since ${b}: ${tool}"; }
-            [ -n "${reasons}" ] || reasons="no migration and no deploy tooling change between the live ${b} and ${target}"
+            cls="$(python3 -I "${DEPLOY_DIR}/fastpath-classify.py" "${src}" "${live}" "${target}" 2>&1)" || {
+                fastpath_full "the git diff of ${live:0:12}..${target:0:12} could not be classified: $(printf '%s' "${cls}" | tr '\n' ' ' | cut -c1-200)"
+                cls=""
+            }
         fi
+        if [ -z "${cls}" ] && [ -z "${full_reason}" ]; then
+            fastpath_full "the classifier of the git diff failed or printed nothing"
+        fi
+    fi
+    if [ -z "${full_reason}" ]; then
+        # Ровно по одной строке каждого ключа: неполный или противоречивый ответ — отказ.
+        for key in ancestor migration_inputs other changed; do
+            n="$(printf '%s\n' "${cls}" | grep -c "^${key}=" || true)"
+            if [ "${n}" != "1" ]; then fastpath_full "the classifier answer is incomplete or contradictory (key ${key} seen ${n} times)"; fi
+        done
+    fi
+    if [ -z "${full_reason}" ]; then
+        ancestor="$(printf '%s\n' "${cls}" | sed -n 's/^ancestor=//p')"
+        mig="$(printf '%s\n' "${cls}" | sed -n 's/^migration_inputs=//p')"
+        other="$(printf '%s\n' "${cls}" | sed -n 's/^other=//p')"
+        changed="$(printf '%s\n' "${cls}" | sed -n 's/^changed=//p')"
+        case "${ancestor}" in
+            yes) ;;
+            no) fastpath_full "the live release ${live:0:12} is not an ancestor of the target ${target:0:12}" ;;
+            *) fastpath_full "the classifier answer is not understood (ancestor '${ancestor}')" ;;
+        esac
+        [[ "${changed}" =~ ^[0-9]+$ ]] || fastpath_full "the classifier answer is not understood (changed '${changed}')"
+    fi
+    if [ -z "${full_reason}" ]; then
+        if [ -n "${mig}" ]; then
+            rehearsal=run; backup=run
+            reasons="migration inputs changed since ${live:0:12}: ${mig}"
+        fi
+        if [ -n "${other}" ]; then
+            rehearsal=run
+            reasons="${reasons:+${reasons}; }changed outside the application-code allowlist since ${live:0:12}: ${other}"
+        fi
+        [ -n "${reasons}" ] || reasons="all ${changed} changed files are allowlisted application code (no migration input, no deploy tooling) between the live ${live:0:12} and ${target:0:12}"
     fi
     if [ -n "${full_reason}" ]; then rehearsal=run; backup=run; reasons="${full_reason}"; fi
     local backup_reason=""
-    [ "${backup}" != skip ] || backup_reason="no migration added or changed between the live ${b_hub} and ${target}"
+    [ "${backup}" != skip ] || backup_reason="no migration input changed between the live ${live:0:12} and ${target:0:12} (git); the cutover compares the hub manifest with the database"
     local path_name=full
     if [ "${rehearsal}" = skip ]; then path_name=fast; elif [ "${backup}" = skip ]; then path_name=rehearsed; fi
     printf 'path=%s\nrehearsal=%s\nvzdump=%s\nreasons=%s\nvzdump_reason=%s\n' "${path_name}" "${rehearsal}" "${backup}" \
@@ -712,8 +780,9 @@ find_control_worker() {
 # Версия PWA внутри контейнера Caddy: голый sha без JSON-обёртки.
 # Пустой ответ (контейнер молчит, файла нет) — пустая строка, не UNKNOWN-ловушка.
 container_pwa_sha() {
-    ssh_web "docker exec caddy cat '${WEB_CONTAINER_VERSION_JSON}'" 2>/dev/null \
-        | sed -n 's/.*"version"[ ]*:[ ]*"\([0-9a-zA-Z]\+\)".*/\1/p'
+    local raw
+    raw="$(ssh_web "docker exec caddy cat '${WEB_CONTAINER_VERSION_JSON}'" 2>/dev/null)" || return 1
+    printf '%s\n' "${raw}" | sed -n 's/.*"version"[ ]*:[ ]*"\([0-9a-zA-Z]\+\)".*/\1/p'
 }
 
 # Зомби — не живой процесс: сопровождение-зомби нельзя считать ни живым,

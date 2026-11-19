@@ -678,7 +678,7 @@ decide_route() {
         set_route full run run "--full: the full path was asked for (rehearsal and vzdump)"
         return 0
     fi
-    if ! out=$(scripts/deploy/fastpath.sh "$SHA12" --source "$repo"); then
+    if ! out=$(scripts/deploy/fastpath.sh "$SHA12" --source "$repo" --dist "$DIST_ROOT"); then
         set_route full run run "fastpath.sh failed, the live release is unknown: full path"
         return 0
     fi

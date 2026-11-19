@@ -48,7 +48,7 @@ make_cutover_dist() {
     for ext in br zst gz; do
         printf 'precompressed\n' >"${DIST_DIR}/web/_app/immutable/chunks/probe.js.${ext}"
     done
-    printf 'sha=%s\ndate=x\nmigrations_last=0041_fake_harness.sql\nsource=%s%028d\n' "${SHA_NEW}" "${SHA_NEW}" 0 >"${DIST_DIR}/RELEASE"
+    printf 'sha=%s\ndate=x\nmigrations_last=0041_fake_harness.sql\nsource=%s\n' "${SHA_NEW}" "${SHA_NEW_FULL:-${SHA_NEW}$(printf '%028d' 0)}" >"${DIST_DIR}/RELEASE"
     printf "default-src 'self'; script-src '%s'; connect-src wss://hub.example.com" \
         'sha256-hUmDl3yY/7GaaX+Zuy8aEy8IzxgpBs7xccqYHs2/7kQ=' >"${DIST_DIR}/csp.txt"
     dist_resync
@@ -114,54 +114,6 @@ fi
 exec "${real}" "\$@"
 EOF
     chmod +x "${FAKE_ROOT}/fake-bin/readlink"
-}
-
-# Исходный git-репозиторий для --source с двумя ревизиями: развёрнутой (SHA_PREV) и
-# целью (SHA_NEW). Имена релизов стенда становятся настоящими короткими хэшами
-# коммитов, поэтому вызывать ДО setup_cutover. Аргументы — что меняет цель
-# относительно развёрнутой: migration (новый файл миграции), tooling (файл под
-# scripts/deploy), release-sh, build-sh, publish-sh (одноимённые скрипты), other
-# (посторонний файл). Без аргументов цель отличается только посторонним файлом.
-# Копируется то, что читает предпроверка: исходники конфигов, спеки, openapi, миграции.
-make_fast_source() {
-    local what path g
-    FAST_SRC="$(mktemp -d /tmp/canterlot-deploy-src.XXXXXX)"
-    g=(git -C "${FAST_SRC}" -c user.name=Fixture -c user.email=fixture@canterlot.invalid -c commit.gpgsign=false)
-    for path in docs/api/openapi.json crates/canterlot-proto/proto crates/canterlot-worker/src/supervisor/mod.rs \
-        crates/canterlot-worker/src/config.rs crates/canterlot-worker/tests/it/fixtures/spec \
-        crates/canterlot-hub/src/config.rs crates/canterlot-speech/src/config.rs crates/canterlot-hub/migrations; do
-        mkdir -p "${FAST_SRC}/$(dirname "${path}")"
-        cp -r "${REPO_ROOT}/${path}" "${FAST_SRC}/${path}"
-    done
-    mkdir -p "${FAST_SRC}/scripts/deploy"
-    printf 'live\n' >"${FAST_SRC}/scripts/deploy/lib.sh"
-    printf 'live\n' >"${FAST_SRC}/scripts/release.sh"
-    printf 'live\n' >"${FAST_SRC}/scripts/build-release.sh"
-    printf 'live\n' >"${FAST_SRC}/scripts/publish-release.sh"
-    "${g[@]}" init -q
-    "${g[@]}" add -A
-    "${g[@]}" commit -q -m live
-    SHA_PREV="$("${g[@]}" rev-parse --short=12 HEAD)"
-    for what in "$@"; do
-        case "${what}" in
-            migration) printf -- '-- fixture\nselect 1;\n' >"${FAST_SRC}/crates/canterlot-hub/migrations/9999_fixture.sql" ;;
-            tooling) printf 'changed\n' >"${FAST_SRC}/scripts/deploy/lib.sh" ;;
-            release-sh) printf 'changed\n' >"${FAST_SRC}/scripts/release.sh" ;;
-            build-sh) printf 'changed\n' >"${FAST_SRC}/scripts/build-release.sh" ;;
-            publish-sh) printf 'changed\n' >"${FAST_SRC}/scripts/publish-release.sh" ;;
-            other) ;;
-            *) echo "make_fast_source: unknown change ${what}" >&2; return 1 ;;
-        esac
-    done
-    printf 'target\n' >"${FAST_SRC}/CHANGES.txt"
-    "${g[@]}" add -A
-    "${g[@]}" commit -q -m target
-    SHA_NEW="$("${g[@]}" rev-parse --short=12 HEAD)"
-    export SHA_PREV SHA_NEW FAST_SRC
-}
-drop_fast_source() {
-    if [ -n "${FAST_SRC:-}" ] && [ -d "${FAST_SRC}" ]; then rm -rf "${FAST_SRC}"; fi  # lint: local-temp
-    FAST_SRC=""
 }
 
 setup_cutover() {
@@ -255,3 +207,7 @@ wait_for_log() {
     return 1
 }
 
+
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=fast-source-fixture.sh
+source "$(dirname "${BASH_SOURCE[0]}")/fast-source-fixture.sh"
