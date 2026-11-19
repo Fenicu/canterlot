@@ -305,5 +305,75 @@ assert_contains "${STOP_BLOCK}" "The vzdump above is a separate" "recovery step 
 finish_fast
 case_end
 
+# ------------------------------------------------------------ базовое состояние закреплено
+# Крючок, который «вручную» переключает ссылку веба на другой релиз.
+make_drift_hook() {
+    mkdir -p "${WEB_RELEASES}/cccccccccccc/_app"
+    printf '#!/usr/bin/env bash\nln -sfn releases/cccccccccccc "%s"\n' "${WEB_BUILD_LINK}" >"${FAKE_ROOT}/drift-hook.sh"
+}
+case_begin "the baseline drifting during the preflight refuses the fast path before any write"
+setup_fast driftpre other
+make_drift_hook
+export FAKE_CARGO_HOOK="${FAKE_ROOT}/drift-hook.sh"
+if fcut --execute "${SHA_NEW}" --fast --result "${FAKE_ROOT}/x.result"; then case_fail "exit 0 after a drift"; else case_ok "exit nonzero"; fi
+unset FAKE_CARGO_HOOK
+assert_eq "$(result_of "${FAKE_ROOT}/x.result" status)/$(result_of "${FAKE_ROOT}/x.result" fail_codes)" "refused/fast_path_refused" "refused with the fallback code"
+assert_contains "${FAKE_ROOT}/cutover.log" "web link" "the drifted link is named"
+no_writes_yet "drift during the preflight"
+finish_fast
+case_end
+
+case_begin "the baseline drifting during the preflight stops a full run too (baseline_drift)"
+setup_fast driftfull migration
+printf 'MIGR_MAX=40\nFAILED=0\npayload-predump\n' >"${FAKE_ROOT}/state/db.txt"
+sed -i 's/^migrations_last=.*/migrations_last=0040_monthly_limits.sql/' "${HUB_RELEASES}/${SHA_PREV}/RELEASE" "${WORKER_RELEASES}/${SHA_PREV}/RELEASE"
+fcut "${SHA_NEW}" --rehearse --result "${FAKE_ROOT}/reh.result" || true
+TOK="$(result_of "${FAKE_ROOT}/reh.result" token)"
+make_drift_hook
+export FAKE_CARGO_HOOK="${FAKE_ROOT}/drift-hook.sh"
+if fcut --execute "${SHA_NEW}" --confirm "${TOK}" --result "${FAKE_ROOT}/x.result"; then case_fail "exit 0 after a drift"; else case_ok "exit nonzero"; fi
+unset FAKE_CARGO_HOOK
+assert_eq "$(result_of "${FAKE_ROOT}/x.result" fail_codes)" "baseline_drift" "fail code baseline_drift"
+no_writes_yet "full run drift"
+finish_fast
+case_end
+
+case_begin "the baseline drifting after the regate and before the stop leaves the worker running"
+setup_fast driftstop other
+make_drift_hook
+export FAKE_SSH_AFTER_HOOK="${FAKE_ROOT}/drift-hook.sh" FAKE_SSH_AFTER_CMD="select distinct conversation_id" FAKE_SSH_AFTER_NTH=2
+if fcut --execute "${SHA_NEW}" --fast --result "${FAKE_ROOT}/x.result"; then case_fail "exit 0 after a drift"; else case_ok "exit nonzero"; fi
+unset FAKE_SSH_AFTER_HOOK FAKE_SSH_AFTER_CMD FAKE_SSH_AFTER_NTH
+assert_eq "$(result_of "${FAKE_ROOT}/x.result" fail_codes)" "baseline_drift" "fail code baseline_drift"
+assert_contains "${FAKE_ROOT}/cutover.log" "changed after it was approved" "reason printed"
+worker_stopped_ever && case_fail "worker stopped" || case_ok "worker never stopped"
+grep -qE '^pg_dump ' "${FAKE_ROOT}/state/calls.log" && case_fail "pg_dump ran" || case_ok "no pg_dump"
+hub_is "${SHA_PREV}" && case_ok "hub untouched" || case_fail "hub moved"
+finish_fast
+case_end
+
+case_begin "the forward flip scripts refuse when the link is no longer the approved release"
+setup_fast flipold other
+FLIPDIR="${FAKE_ROOT}/flipdir"
+mkdir -p "${FLIPDIR}/releases/old/bin" "${FLIPDIR}/releases/new/bin" "${FLIPDIR}/releases/other"
+printf 'x' >"${FLIPDIR}/releases/new/RELEASE"; printf 'x' >"${FLIPDIR}/releases/new/SHA256SUMS"
+printf '#!/bin/sh\n' >"${FLIPDIR}/releases/new/bin/canterlot-hub"; chmod +x "${FLIPDIR}/releases/new/bin/canterlot-hub"
+mkdir -p "${FLIPDIR}/releases/new/_app"; printf '#!/bin/sh\n' >"${FLIPDIR}/releases/new/bin/canterlot-worker"
+flip_run() { bash -c "$(bash -c 'source "$1/lib.sh"; printf "%s" "${!2}"' _ "${DEPLOY_DIR}" "$1")" -- "${@:2}"; }
+ln -sfn releases/old "${FLIPDIR}/current"; ln -sfn releases/old "${FLIPDIR}/build"
+flip_run HUB_FLIP_FWD_SCRIPT "${FLIPDIR}" new "${FLIPDIR}/current" other >/dev/null 2>&1 && case_fail "hub flip ignored the expected-old" || case_ok "hub flip refuses a link that is not the approved release"
+assert_eq "$(readlink "${FLIPDIR}/current")" "releases/old" "hub link untouched"
+flip_run HUB_FLIP_FWD_SCRIPT "${FLIPDIR}" new "${FLIPDIR}/current" old >/dev/null 2>&1 && case_ok "hub flip proceeds from the approved release" || case_fail "hub flip refused the approved release"
+assert_eq "$(readlink "${FLIPDIR}/current")" "releases/new" "hub link moved"
+ln -sfn releases/other "${FLIPDIR}/current"
+flip_run WORKER_FLIP_FWD_SCRIPT "${FLIPDIR}" new old >/dev/null 2>&1 && case_fail "worker flip ignored the expected-old" || case_ok "worker flip refuses a link that is not the approved release"
+ln -sfn releases/old "${FLIPDIR}/current"
+flip_run WORKER_FLIP_FWD_SCRIPT "${FLIPDIR}" new old >/dev/null 2>&1 && case_ok "worker flip proceeds from the approved release" || case_fail "worker flip refused the approved release"
+ln -sfn releases/other "${FLIPDIR}/build"
+flip_run WEB_FLIP_FWD_SCRIPT "${FLIPDIR}" new "${FLIPDIR}/build" old >/dev/null 2>&1 && case_fail "web flip ignored the expected-old" || case_ok "web flip refuses a link that is not the approved release"
+assert_eq "$(readlink "${FLIPDIR}/build")" "releases/other" "web link untouched"
+finish_fast
+case_end
+
 printf '\nfastcutover: %s passed, %s failed\n' "${PASS_COUNT}" "${FAIL_COUNT}"
 [ "${FAIL_COUNT}" = "0" ]

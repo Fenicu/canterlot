@@ -73,6 +73,11 @@ fi
 if [ -n "${FAKE_SSH_AFTER_HOOK:-}" ] && [ -n "${FAKE_SSH_AFTER_CMD:-}" ] && [ "${rc}" = "0" ] \
     && [[ "${cmd}" == *"${FAKE_SSH_AFTER_CMD}"* ]] \
     && { [ -z "${FAKE_SSH_AFTER_UNLESS:-}" ] || [[ "${cmd}" != *"${FAKE_SSH_AFTER_UNLESS}"* ]]; }; then
-    FAKE_SSH_LAST_CMD="${cmd}" bash "${FAKE_SSH_AFTER_HOOK}" >&2 || true
+    # FAKE_SSH_AFTER_NTH=N: крючок только на N-м совпадении (счётчик в state/after-hook-count).
+    hits=$(( $(cat "${FAKE_ROOT}/state/after-hook-count" 2>/dev/null || echo 0) + 1 ))
+    printf '%s\n' "${hits}" >"${FAKE_ROOT}/state/after-hook-count"
+    if [ -z "${FAKE_SSH_AFTER_NTH:-}" ] || [ "${hits}" = "${FAKE_SSH_AFTER_NTH}" ]; then
+        FAKE_SSH_LAST_CMD="${cmd}" bash "${FAKE_SSH_AFTER_HOOK}" >&2 || true
+    fi
 fi
 exit "${rc}"

@@ -412,6 +412,12 @@ skip_eligibility() {
     [ "${FAST}" = "1" ] || [ "${SKIP_VZDUMP}" = "1" ] || return 0
     if [ "${FAST}" = "1" ]; then ELIG_WHAT="the fast path"; else ELIG_WHAT="to skip the vzdump"; fi
     PHASE="eligibility"
+    local comp now base
+    for comp in hub web worker; do
+        now="$(deployed_sha "${comp}")"
+        eval "base=\${BASE_$(printf '%s' "${comp}" | tr 'a-z' 'A-Z')}"
+        [ "${now}" = "${base}" ] || fast_refuse "the ${comp} link changed during the preflight (was ${base}, now ${now})"
+    done
     if ! BASELINE_WHY="$(baseline_verify "${BASE_HUB}" "${BASE_WEB}" "${BASE_WORKER}" 2>&1)"; then
         fast_refuse "the live baseline is inconsistent: ${BASELINE_WHY}"
     fi
@@ -714,6 +720,13 @@ fi
 PREV_HUB_SHA="$(deployed_sha hub)"
 PREV_WEB_SHA="$(deployed_sha web)"
 PREV_WORKER_SHA="$(deployed_sha worker)"
+# Базовое состояние одобрено в начале прогона (и в токене репетиции): ссылки не должны уйти за
+# время предпроверки (ручной частичный выкат), иначе дальше пошли бы по устаревшим данным.
+if [ "${PREV_HUB_SHA}" != "${BASE_HUB}" ] || [ "${PREV_WEB_SHA}" != "${BASE_WEB}" ] || [ "${PREV_WORKER_SHA}" != "${BASE_WORKER}" ]; then
+    fail_mark
+    fail_code baseline_drift
+    die_after "the deployed releases changed after they were approved (hub ${BASE_HUB} -> ${PREV_HUB_SHA}, web ${BASE_WEB} -> ${PREV_WEB_SHA}, worker ${BASE_WORKER} -> ${PREV_WORKER_SHA}): run again"
+fi
 if is_rehearse; then
     HUB_EXPECT="${PREV_HUB_SHA}"
     WEB_EXPECT="${PREV_WEB_SHA}"
@@ -791,6 +804,29 @@ facts_line() {
     printf 'vzdump done=%s%s, worker stopped (verified)=%s, dump verified=%s, hub flip started=%s, hub link read back=%s, new worker live=%s' \
         "$(yn "${VZDUMP_DONE}")" "$([ "${SKIP_VZDUMP}" = "1" ] && printf ' (skipped: %s)' "${VZDUMP_SKIP_REASON}")" "$(yn "${WORKER_STOPPED}")" "$(yn "${DUMP_VERIFIED}")" \
         "$(yn "${HUB_FLIP_STARTED}")" "$(yn "${HUB_FLIPPED}")" "$(yn "${WORKER_PROVEN}")"
+}
+
+# Одобренная база перед стопом: те же релизы по ссылкам, а при пропуске vzdump (--fast,
+# --skip-ct-backup) ещё и согласие процессов и раздаваемого PWA с ссылками. Расхождение — отказ
+# до остановки воркера (flip вперёд дополнительно сверяют ожидаемый прежний релиз под lock).
+baseline_recheck() {
+    local comp now base why
+    for comp in hub web worker; do
+        now="$(deployed_sha "${comp}")"
+        case "${comp}" in hub) base="${PREV_HUB_SHA}" ;; web) base="${PREV_WEB_SHA}" ;; *) base="${PREV_WORKER_SHA}" ;; esac
+        if [ "${now}" != "${base}" ]; then
+            fail_mark
+            fail_code baseline_drift
+            cutover_hard_after "the ${comp} link changed after it was approved (was ${base}, now ${now}): refusing before the worker stop"
+        fi
+    done
+    if [ "${SKIP_VZDUMP}" = "1" ] && ! is_rehearse; then
+        if ! why="$(baseline_verify "${PREV_HUB_SHA}" "${PREV_WEB_SHA}" "${PREV_WORKER_SHA}" 2>&1)"; then
+            fail_mark
+            fail_code baseline_drift
+            cutover_hard_after "the live baseline changed after it was approved: ${why}"
+        fi
+    fi
 }
 
 # Управляющий воркер до стопа: ровно процесс MainPID юнита и ничего больше
@@ -1229,7 +1265,7 @@ PHASE="regating"
 log "re-checking read gates and the session inventory ${REGATE_LABEL}"
 fail_mark
 read_gates || cutover_hard_after "read gates failed ${REGATE_LABEL}"
-[ "$(ssh_hub "readlink '${HUB_CURRENT}'" | sed 's|.*/||')" = "${PREV_HUB_SHA}" ] || cutover_hard "hub current moved unexpectedly"
+baseline_recheck
 fail_mark
 inventory_recheck "${REGATE_LABEL}" || cutover_hard_after "the session inventory changed ${REGATE_LABEL}: refusing before the worker stop"
 control_worker_exact "before the worker stop" || cutover_hard "control-worker scan before the worker stop"
@@ -1331,7 +1367,7 @@ RESTART_TS="$(ssh_hub "date -u '+%Y-%m-%d %H:%M:%S'")"
 [[ "${RESTART_TS}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}:[0-9]{2}$ ]] || cutover_hard "unexpected hub timestamp: '${RESTART_TS}'"
 PHASE="hub-flipping"
 HUB_FLIP_STARTED=1
-HUB_LINK_AFTER="$(run_write "hub flip" hub_locked "${HUB_FLIP_SCRIPT}" "${HUB_BASE}" "${SHA}" "${HUB_CURRENT}")"
+HUB_LINK_AFTER="$(run_write "hub flip" hub_locked "${HUB_FLIP_FWD_SCRIPT}" "${HUB_BASE}" "${SHA}" "${HUB_CURRENT}" "${PREV_HUB_SHA}")"
 # Отдельное чтение ссылки после flip: ровно releases/<sha> и абсолютная сверка.
 HUB_LINK_NOW="$(ssh_hub "readlink '${HUB_CURRENT}'")" || cutover_hard "cannot read hub current after the flip"
 [ "${HUB_LINK_NOW}" = "releases/${HUB_EXPECT}" ] || cutover_hard "hub current did not move to ${HUB_EXPECT} (now ${HUB_LINK_NOW}, flip printed ${HUB_LINK_AFTER:-nothing})"
@@ -1401,8 +1437,8 @@ worker_start_gates() {
 }
 worker_start_gates
 PHASE="worker-flipping"
-run_write "worker flip" worker_locked 'cd "$1" && ln -s "releases/$2" current.new && mv -T current.new current' \
-    "${WORKER_BASE}" "${SHA}" || cutover_hard "worker current did not move"
+run_write "worker flip" worker_locked "${WORKER_FLIP_FWD_SCRIPT}" \
+    "${WORKER_BASE}" "${SHA}" "${PREV_WORKER_SHA}" || cutover_hard "worker current did not move"
 link_points_to "${WORKER_CURRENT}" "${WORKER_BASE}" "releases/${WORKER_EXPECT}" \
     || cutover_hard "worker current did not move"
 PHASE="worker-starting"
@@ -1502,8 +1538,8 @@ if [ -z "${PWA_FAIL}" ]; then
 fi
 CADDY_ID_BEFORE="$(ssh_web "docker inspect -f '{{.Id}}' $(shq "${WEB_CONTAINER}")" 2>/dev/null)" || CADDY_ID_BEFORE=""
 if [ -z "${PWA_FAIL}" ]; then
-    run_write "web build flip" web_locked 'cd "$1" && ln -s "releases/$2" build.new && mv -T build.new build && readlink "$3"' \
-        "${WEB_SITES_BASE}" "${SHA}" "${WEB_BUILD_LINK}" >/dev/null || true
+    run_write "web build flip" web_locked "${WEB_FLIP_FWD_SCRIPT}" \
+        "${WEB_SITES_BASE}" "${SHA}" "${WEB_BUILD_LINK}" "${PREV_WEB_SHA}" >/dev/null || true
     WEB_LINK_AFTER="$(ssh_web "readlink '${WEB_BUILD_LINK}'" 2>/dev/null)" || WEB_LINK_AFTER=""
     [ "${WEB_LINK_AFTER}" = "releases/${WEB_EXPECT}" ] || PWA_FAIL="web build flip failed"
 fi

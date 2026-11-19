@@ -137,6 +137,15 @@ worker_locked() {
 # $3 путь current. Печатает целевую ссылку после flip.
 # shellcheck disable=SC2016,SC2034 # удалённый скрипт раскрывает свои позиционные аргументы; константа используется в cutover/rollback-db
 HUB_FLIP_SCRIPT='cd "$1" && test -x "releases/$2/bin/canterlot-hub" && test -f "releases/$2/RELEASE" && test -f "releases/$2/SHA256SUMS" && ln -s "releases/$2" current.new && mv -T current.new current && readlink "$3"'
+# Те же flip вперёд, но только из одобренного состояния: внутри lock ссылка обязана вести на
+# ожидаемый прежний релиз (последний аргумент), иначе ничего не меняется. Ручной частичный выкат
+# между проверкой и flip не затирается молча.
+# shellcheck disable=SC2016,SC2034 # удалённый скрипт раскрывает свои позиционные аргументы
+HUB_FLIP_FWD_SCRIPT='test "$(readlink "$3")" = "releases/$4" && '"${HUB_FLIP_SCRIPT}"
+# shellcheck disable=SC2016,SC2034 # удалённый скрипт; $1 корень, $2 новый релиз, $3 ожидаемый прежний
+WORKER_FLIP_FWD_SCRIPT='cd "$1" && test "$(readlink current)" = "releases/$3" && ln -s "releases/$2" current.new && mv -T current.new current'
+# shellcheck disable=SC2016,SC2034 # удалённый скрипт; $1 корень, $2 новый, $3 путь build, $4 ожидаемый прежний
+WEB_FLIP_FWD_SCRIPT='cd "$1" && test "$(readlink build)" = "releases/$4" && ln -s "releases/$2" build.new && mv -T build.new build && readlink "$3"'
 # Печатаемый ручной текст ssh-команды: host + одна цитированная удалённая команда.
 ssh_cmd_text() { printf 'ssh %s %s' "$1" "$(shq "$2")"; }
 
