@@ -795,7 +795,7 @@ impl Ingest {
                 {
                     Some(ignored) => Ok((ignored, None, false)),
                     None => {
-                        Self::apply_pilot_body(&mut *conn, &registry, &limits_cfg, &prices, machine_id, journal_id, body, correlation_id)
+                        Self::apply_pilot_body(&mut *conn, &registry, PilotConfig { limits: &limits_cfg, prices: &prices }, machine_id, journal_id, body, correlation_id)
                             .await
                     }
                 }
@@ -930,18 +930,25 @@ fn touches_activity(body: &Body) -> bool {
     canterlot_proto::is_stream_progress(body)
 }
 
+/// Настройки хаба, нужные при разборе записей журнала.
+#[derive(Clone, Copy)]
+struct PilotConfig<'a> {
+    limits: &'a crate::config::LimitsConfig,
+    prices: &'a crate::pricing::PriceBook,
+}
+
 impl Ingest {
     async fn apply_pilot_body(
         conn: &mut PgConnection,
         registry: &Option<crate::session::Registry>,
-        limits: &crate::config::LimitsConfig,
-        prices: &crate::pricing::PriceBook,
+        config: PilotConfig<'_>,
         machine: Uuid,
         journal: Uuid,
         body: &Body,
         correlation: Uuid,
     ) -> Result<(bool, Option<(String, crate::limits::Window)>, bool), IngestError> {
         use crate::limits::{self, DataConfidence, Observation, ObservationSource, Window};
+        let PilotConfig { limits, prices } = config;
         let now = chrono::Utc::now();
         // Конец входа провайдера: дата без окна, проверяется тем же владением исполнением,
         // что и показания лимитов, — иначе чужой журнал мог бы её подменить.

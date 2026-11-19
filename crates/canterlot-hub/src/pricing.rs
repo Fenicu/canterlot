@@ -91,7 +91,8 @@ impl PriceBook {
 }
 
 /// (модель, вход, выход, чтение кеша, запись кеша).
-const TABLE: &[(&str, u64, u64, Option<u64>, Option<u64>)] = &[
+type Row = (&'static str, u64, u64, Option<u64>, Option<u64>);
+const TABLE: &[Row] = &[
     ("gpt-3.5-turbo", 500000, 1500000, Some(0), None),
     ("gpt-4", 30000000, 60000000, None, None),
     ("gpt-4-turbo", 10000000, 30000000, None, None),
