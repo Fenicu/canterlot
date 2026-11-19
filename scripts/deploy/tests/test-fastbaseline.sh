@@ -40,7 +40,6 @@ fcut() {
 rehearse_skip() { fcut "${SHA_NEW}" --rehearse --skip-ct-backup "$@"; }
 # Токен репетиции из её файла результата.
 token_of() { result_of "${FAKE_ROOT}/cutover.result" token; }
-L="${FAKE_ROOT:-}"
 
 
 # Отказ быстрого пути до первой записи: ни маркеров резерва, ни остановок, ни дампов.
