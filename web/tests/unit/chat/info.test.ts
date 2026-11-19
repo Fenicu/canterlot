@@ -220,9 +220,9 @@ describe("summarizeRun", () => {
       ],
     };
     expect(summarizeRun(info).costs).toEqual([
-      { model: "Opus 5.5", money: "≈ $0,62", source: "по данным CLI" },
-      { model: "GPT-6 Luna", money: "< $0,01", source: "по таблице цен" },
-      { model: "Mystery", money: "≈ $ —", source: null },
+      { model: "Opus 5.5", money: "≈ $0,62", source: "по данным CLI" },
+      { model: "GPT-6 Luna", money: "< $0,01", source: "по таблице цен" },
+      { model: "Mystery", money: "≈ $ —", source: null },
       { model: "beam-free", money: "бесплатно", source: "по данным CLI" },
     ]);
   });

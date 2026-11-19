@@ -196,7 +196,7 @@
   time { color: var(--time); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
   .byline :global(button) { color: var(--secondary); }
   /* Строка цены: тихая, под подписью; нажатие открывает сведения о ходе. */
-  .cost { align-self: flex-start; max-width: 100%; min-height: var(--target); padding: var(--s0); text-align: left; color: var(--time); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+  .cost { align-self: flex-start; background: none; max-width: 100%; min-height: var(--target); padding: var(--s0); text-align: left; color: var(--time); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
   .footer-actions { display: flex; align-items: center; gap: var(--s1); }
   .entry { min-width: 0; }
   .entry:has(> :global(.text)) { margin-block: var(--s2); }

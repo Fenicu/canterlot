@@ -1867,7 +1867,34 @@ export class FakeHubApi {
 		};
 	}
 
+	/** Как хаб: цены ходов страницы едут с историей. Ход без цен в сидах (нет `cost_micro_usd`) строки не получает. */
 	page(id: string, query: { before?: string; after?: string; around?: string; limit?: number }): HistoryPage {
+		const raw = this.pageItems(id, query);
+		const runIds = new Set(raw.items.flatMap((item) => (item.kind === 'block' && item.input_command_id ? [String(item.input_command_id)] : [])));
+		const runs = [...runIds].flatMap((runId) => {
+			const info = this.runs.get(runId);
+			if (!info || !info.usage.some((line) => line.cost_micro_usd !== undefined)) return [];
+			return [
+				{
+					run_id: runId,
+					usage: info.usage.map((line) => ({
+						model: line.model ?? '',
+						agent: line.agent ?? '',
+						input_tokens: line.input_tokens ?? 0,
+						output_tokens: line.output_tokens ?? 0,
+						cache_read_tokens: line.cache_read_tokens ?? 0,
+						cache_write_tokens: line.cache_write_tokens ?? 0,
+						cost_micro_usd: line.cost_micro_usd ?? null,
+						cost_source: line.cost_source ?? null
+					})),
+					limit: info.limit ? { weekly_delta_permille: info.limit.weekly_delta_permille } : null
+				}
+			];
+		});
+		return { ...raw, runs };
+	}
+
+	private pageItems(id: string, query: { before?: string; after?: string; around?: string; limit?: number }): HistoryPage {
 		const placed = [...this.requestRows(id).values()].flatMap((row): HistoryItem[] =>
 			row.created_seq
 				? [

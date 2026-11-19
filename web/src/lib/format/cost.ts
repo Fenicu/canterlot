@@ -14,17 +14,17 @@ export interface CostUsage {
 	cost_source?: string | null;
 }
 
-const UNKNOWN = '≈ $ —';
+const UNKNOWN = '≈ $ —';
 
 /** Сумма в микродолларах по-русски: «≈ $0,62», «< $0,01», «бесплатно», неизвестная — «≈ $ —». */
 export function costMoney(micro: number | null | undefined): string {
 	if (micro == null) return UNKNOWN;
 	if (micro === 0) return 'бесплатно';
-	if (micro < 10_000) return '< $0,01';
+	if (micro < 10_000) return '< $0,01';
 	const cents = Math.round(micro / 10_000);
 	const dollars = Math.floor(cents / 100);
 	const rest = String(cents % 100).padStart(2, '0');
-	return `≈ $${fmt.number(dollars)},${rest}`;
+	return `≈ $${fmt.number(dollars)},${rest}`;
 }
 
 /** Доля кеша во входе, целые проценты; без входа её нет. */
