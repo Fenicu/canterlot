@@ -24,7 +24,7 @@
   import { activityLiveLine } from '#lib/timeline/present.js';
   import { leaseWaitOf } from '#lib/format/lease.js';
   import { FeedFolds } from '#lib/timeline/folds.js';
-  import { dayStart, shownInCard, tailKey, RowsCache, type Row } from '#lib/timeline/rows.js';
+  import { dayStart, settledRunCards, shownInCard, tailKey, RowsCache, type Row } from '#lib/timeline/rows.js';
   import { rowIndexOfInput } from '#lib/timeline/ownerMessages.js';
   import { turnIsLive } from '#lib/composer/sendRules.js';
   import { ScrollController } from '#lib/timeline/scrollController.js';
@@ -227,6 +227,7 @@
     );
     return own?.kind === 'block' ? own.block.inputCommandId : null;
   });
+  const settledCards = $derived(feed || laneRoot ? new Set<string>() : settledRunCards(rows, activeRun));
   // Живой строкой хода владеет карточка ответа, как только у текущего хода есть блок.
   const liveAnswer = $derived.by(() => {
     if (feed || laneRoot) return false;
@@ -808,7 +809,7 @@
         {:else if row.kind === 'request' && first?.kind === 'request'}
           <RequestCard request={first.request} onDecision={async () => undefined} {harnessId} {permissionMode} {now} open={folds.isOpen(row.key)} onToggle={() => folds.toggle(row.key)} />
         {:else if row.kind === 'answer'}
-          <AnswerCard cardKey={row.key} {laneRoot} entries={row.entries} {folds} {links} {harness} {activeRun} conversationId={chat.id} {now} {onInfo} load={loadBlock} interrupt={feed || laneRoot ? null : interrupt} {leaseWait} {bookmarks} {markable} />
+          <AnswerCard cardKey={row.key} {laneRoot} entries={row.entries} {folds} {links} {harness} {activeRun} settled={settledCards.has(row.key)} conversationId={chat.id} {now} {onInfo} load={loadBlock} interrupt={feed || laneRoot ? null : interrupt} {leaseWait} {bookmarks} {markable} />
         {:else if row.kind === 'report' && row.report}
           <RoutineReportCard report={row.report} onDismissed={(id) => chat.routineReports.dismiss(id)} />
         {:else if row.kind === 'compaction' && row.entries[0]?.kind === 'compaction'}
