@@ -2102,3 +2102,72 @@ async fn an_edit_between_the_retry_reservation_and_admission_never_reaches_the_l
         .unwrap();
     assert_eq!(sent, 0, "the report prompt went into the live session");
 }
+
+/// Ждёт, пока в базе этого теста кто-то встанет на advisory-замок.
+async fn wait_for_advisory_waiter(pool: &PgPool) -> bool {
+    for _ in 0..20_000 {
+        let waiting: bool = sqlx::query_scalar(
+            "select exists(select 1 from pg_locks where locktype='advisory' and not granted
+               and database=(select oid from pg_database where datname=current_database()))",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        if waiting {
+            return true;
+        }
+        tokio::task::yield_now().await;
+    }
+    false
+}
+
+/// Приёмка берёт строку расписания, затем замок владельца. Удаление расписания идёт тем же
+/// порядком: обратный порядок давал взаимную блокировку при удалении во время срабатывания.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn deleting_a_schedule_takes_the_schedule_row_before_the_owner_lock(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let schedule = make_schedule_without_session(&f, "Стендап").await;
+    let mut holder = canterlot_hub::db::begin(&pool).await.unwrap();
+    sqlx::query(
+        "select pg_advisory_xact_lock(hashtextextended('canterlot:attributes:'||$1::text,0))",
+    )
+    .bind(f.seed.owner_id)
+    .execute(&mut *holder)
+    .await
+    .unwrap();
+    let deleter = {
+        let client = f.client.clone();
+        let revision: i64 = sqlx::query_scalar("select revision from schedules where id=$1")
+            .bind(schedule)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        tokio::spawn(async move {
+            client
+                .send(
+                    Method::DELETE,
+                    &format!("/api/v1/schedules/{schedule}"),
+                    Some("delete-order"),
+                    Some(json!({"base_revision": revision})),
+                )
+                .await
+                .status
+                .as_u16()
+        })
+    };
+    assert!(
+        wait_for_advisory_waiter(&pool).await,
+        "delete never reached the owner lock"
+    );
+    let held_by_delete = sqlx::query("select id from schedules where id=$1 for update nowait")
+        .bind(schedule)
+        .execute(&mut *holder)
+        .await
+        .is_err();
+    assert!(
+        held_by_delete,
+        "delete waits on the owner lock without holding the schedule row"
+    );
+    holder.rollback().await.unwrap();
+    assert_eq!(deleter.await.unwrap(), 200);
+}
