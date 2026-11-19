@@ -1637,3 +1637,100 @@ export function scheduleRuns(
     opts,
   );
 }
+
+/**
+ * Общая память. Хаб не требует `Idempotency-Key` (повтор отсекают версия записи и тема),
+ * но общий слой запросов требует ключ у любого изменения, поэтому ключ уходит как есть.
+ */
+export function listMemory(
+  query: Query,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["get__api_v1_memory"]>>> {
+  return http("GET", withQuery("/api/v1/memory", query), undefined, opts);
+}
+
+export function getMemory(
+  entryId: string,
+  domain: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["get__api_v1_memory__id_"]>>> {
+  return http(
+    "GET",
+    withQuery(`/api/v1/memory/${id(entryId)}`, { domain }),
+    undefined,
+    opts,
+  );
+}
+
+export function createMemory(
+  body: Body<operations["post__api_v1_memory"]>,
+  key: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["post__api_v1_memory"]>>> {
+  return http("POST", "/api/v1/memory", body, keyed(key, opts));
+}
+
+export function updateMemory(
+  entryId: string,
+  body: Body<operations["put__api_v1_memory__id_"]>,
+  key: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["put__api_v1_memory__id_"]>>> {
+  return http("PUT", `/api/v1/memory/${id(entryId)}`, body, keyed(key, opts));
+}
+
+export function archiveMemory(
+  entryId: string,
+  body: Body<operations["post__api_v1_memory__id__archive"]>,
+  key: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["post__api_v1_memory__id__archive"]>>> {
+  return http(
+    "POST",
+    `/api/v1/memory/${id(entryId)}/archive`,
+    body,
+    keyed(key, opts),
+  );
+}
+
+export function restoreMemory(
+  entryId: string,
+  body: Body<operations["post__api_v1_memory__id__restore"]>,
+  key: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["post__api_v1_memory__id__restore"]>>> {
+  return http(
+    "POST",
+    `/api/v1/memory/${id(entryId)}/restore`,
+    body,
+    keyed(key, opts),
+  );
+}
+
+/** Удаление навсегда: записи и её прошлых версий больше нет. */
+export function deleteMemory(
+  entryId: string,
+  domain: string,
+  key: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["delete__api_v1_memory__id_"]>>> {
+  return http(
+    "DELETE",
+    withQuery(`/api/v1/memory/${id(entryId)}`, { domain }),
+    undefined,
+    keyed(key, opts),
+  );
+}
+
+export function memoryRevisions(
+  entryId: string,
+  domain: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["get__api_v1_memory__id__revisions"]>>> {
+  return http(
+    "GET",
+    withQuery(`/api/v1/memory/${id(entryId)}/revisions`, { domain }),
+    undefined,
+    opts,
+  );
+}

@@ -28,7 +28,7 @@
   import SpawnWhitelist from './SpawnWhitelist.svelte';
   import LimitSettings from './LimitSettings.svelte';
   import PromptSuggestionSetting from './PromptSuggestionSetting.svelte';
-  import ClaudeAutoMemorySetting from './ClaudeAutoMemorySetting.svelte';
+  import MemoryScreen from './MemoryScreen.svelte';
   import HibernateSetting from './HibernateSetting.svelte';
   import DictationSettings from './DictationSettings.svelte';
   import SnippetsSettings from './SnippetsSettings.svelte';
@@ -148,7 +148,6 @@
           <div class="group">
             <section class="setting"><h3>Enter на клавиатуре</h3><p class="note">Авто: на телефоне новая строка, на компьютере отправка. Shift+Enter добавляет строку</p><Segmented name="enter" label="Enter на клавиатуре" options={[{ value: 'auto', label: 'Авто' }, { value: 'send', label: 'Отправка' }, { value: 'newline', label: 'Новая строка' }]} bind:value={enter} /></section>
             <div class="setting embedded"><PromptSuggestionSetting /></div>
-            <div class="setting embedded"><ClaudeAutoMemorySetting /></div>
           </div>
           <DictationSettings />
           <SnippetsSettings />
@@ -165,6 +164,8 @@
           <div class="embed"><RoutingScreen embedded /></div>
         {:else if category === 'schedules'}
           <SchedulesScreen />
+        {:else if category === 'memory'}
+          <MemoryScreen />
         {:else if category === 'security'}
           <h3 class="group-title">Подключение</h3>
           <div class="group">

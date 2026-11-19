@@ -660,6 +660,58 @@ struct SearchRaw {
     expired: bool,
 }
 
+/// Отбор списка владельца. Курсор: время и идентификатор последней записи прошлой страницы.
+#[derive(Debug, Clone, Default)]
+pub struct OwnerList {
+    pub archived: bool,
+    pub kind: Option<Kind>,
+    pub project: Option<String>,
+    pub query: String,
+    pub after: Option<(DateTime<Utc>, Uuid)>,
+    pub limit: u32,
+}
+
+/// Страница записей домена для экрана владельца, новые первыми. Только владелец: область
+/// агента не листает, а чужой домен в выборку не попадает.
+pub async fn list(
+    conn: &mut PgConnection,
+    scope: &MemoryScope,
+    filter: &OwnerList,
+) -> Result<Vec<Entry>, MemoryError> {
+    if !scope.is_owner {
+        return Err(MemoryError::NotFound);
+    }
+    let query: String = filter.query.trim().chars().take(200).collect();
+    let rows = sqlx::query_as(
+        "with q as (
+           select pg_catalog.websearch_to_tsquery('pg_catalog.russian'::pg_catalog.regconfig, $5) as ru,
+                  pg_catalog.websearch_to_tsquery('pg_catalog.simple'::pg_catalog.regconfig, $5) as si
+         )
+         select e.id, e.domain, e.project, e.kind, e.subject, e.body, e.status, e.valid_until,
+                e.version, e.created_by, e.created_at, e.updated_by, e.updated_at, e.import_source,
+                (e.valid_until is not null and e.valid_until < now()) as expired
+         from memory_entries e, q
+         where e.domain = $1 and e.status = $2
+           and ($3::text is null or e.kind = $3)
+           and ($4::text is null or e.project = $4)
+           and ($5 = '' or e.tsv @@ q.ru or e.tsv @@ q.si)
+           and ($6::timestamptz is null or (e.updated_at, e.id) < ($6, $7))
+         order by e.updated_at desc, e.id desc
+         limit $8",
+    )
+    .bind(scope.domain.as_str())
+    .bind(if filter.archived { "archived" } else { "active" })
+    .bind(filter.kind.map(Kind::as_str))
+    .bind(filter.project.as_deref())
+    .bind(&query)
+    .bind(filter.after.map(|(at, _)| at))
+    .bind(filter.after.map_or_else(Uuid::nil, |(_, id)| id))
+    .bind(i64::from(filter.limit.max(1)))
+    .fetch_all(&mut *conn)
+    .await?;
+    Ok(rows)
+}
+
 /// Запись по идентификатору. Агент видит только активные записи своего домена; с `widen`
 /// это и чужие проекты домена. Чужой домен и несуществующий идентификатор неотличимы.
 pub async fn get(

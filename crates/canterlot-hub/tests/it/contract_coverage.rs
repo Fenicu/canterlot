@@ -225,7 +225,7 @@ fn coverage_table_matches_openapi_and_event_schema() {
             kinds.insert(span.to_owned());
         }
     }
-    assert_eq!(rows, 39, "screen coverage rows");
+    assert_eq!(rows, 40, "screen coverage rows");
     let in_document = operations(&document);
     let missing: Vec<_> = in_document.difference(&routes).collect();
     let unknown: Vec<_> = routes.difference(&in_document).collect();
@@ -319,6 +319,10 @@ fn exempt(method: &str, path: &str) -> bool {
             && path.contains("/routine-reports/")
             && path.ends_with("/dismiss"))
         || (matches!(method, "PUT" | "DELETE") && path.contains("/bookmarks/"))
+        // Память без ключа: повтор правки и архива отсекает `expected_version`, повтор создания
+        // даёт `subject_exists`, повтор удаления навсегда даёт `not_found` (memory_http.rs).
+        || path == "/api/v1/memory"
+        || path.starts_with("/api/v1/memory/")
         // Ответ и отзыв секрета намеренно не проходят слой идемпотентности:
         // тело ответа не хешируется и не сохраняется, `Idempotency-Key` игнорируется.
         || (method == "POST"

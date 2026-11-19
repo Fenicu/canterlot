@@ -103,6 +103,11 @@ const ALL_ERROR_CODES: ErrorCode[] = [
   "term_empty",
   "term_too_long",
   "duplicate_term",
+  "version_conflict",
+  "looks_like_secret",
+  "subject_exists",
+  "domain_full",
+  "bad_level",
 ];
 
 const VALID_ACTIONS: ErrorAction[] = [
@@ -142,7 +147,7 @@ describe("api/errors", () => {
   });
 
   it("error_actions_cover_every_code_in_the_api_error_table", () => {
-    expect(ALL_ERROR_CODES.length).toBe(89);
+    expect(ALL_ERROR_CODES.length).toBe(94);
 
     for (const code of ALL_ERROR_CODES) {
       const err = new ApiError(

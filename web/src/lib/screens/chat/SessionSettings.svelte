@@ -25,6 +25,7 @@
 	import { SettingsFormSync, type SettingsFormValues } from './settingsForm';
 	import { listPresets } from '#lib/api/client.js';
 	import { untrack } from 'svelte';
+	import { sessionMemoryLabel } from '../settings/memory.js';
 	import type { components } from '#lib/api/generated/openapi.js';
 	import { ApiError } from '#lib/api/http.js';
 	import { shouldShowApplyNewVersion } from '../presets/presetsModel.js';
@@ -341,6 +342,7 @@
 					<br /><code>{chat.detail.workdir}</code>
 				{/if}
 			</p>
+			<p class="note" data-role="session-memory">Память: <strong data-tone={chat.detail?.memory_domain ? 'ok' : 'warn'}>{sessionMemoryLabel(chat.detail ?? {})}</strong></p>
 		</div>
 
 		<div class="pair">
@@ -519,6 +521,9 @@
 	}
 	.note strong {
 		color: var(--text);
+	}
+	.note strong[data-tone='warn'] {
+		color: var(--warning);
 	}
 	.pair {
 		display: grid;

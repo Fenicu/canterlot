@@ -392,6 +392,26 @@ const ERROR_TABLE: Record<ErrorCode, ErrorDescriptor> = {
     action: "none",
     message: "Шаблоны совпадают после нормализации",
   },
+  version_conflict: {
+    action: "reload",
+    message: "Запись уже изменена, обновите её",
+  },
+  looks_like_secret: {
+    action: "none",
+    message: "Текст похож на секрет",
+  },
+  subject_exists: {
+    action: "none",
+    message: "Запись с такой темой уже есть",
+  },
+  domain_full: {
+    action: "none",
+    message: "В домене слишком много записей памяти",
+  },
+  bad_level: {
+    action: "none",
+    message: "Уровень проекта требует проект",
+  },
 };
 
 export interface DescribedError {
