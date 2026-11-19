@@ -2166,10 +2166,12 @@ pub async fn set(
     let report_file = match args.report_file.as_deref() {
         Some(raw) => {
             let row: Option<(String, Option<Uuid>)> = sqlx::query_as(
-                "select workdir,machine_id from conversations where id=$1 and owner_id=$2",
+                "select workdir,machine_id from conversations
+                  where id=$1 and owner_id=$2 and (side_of is null or id=$3)",
             )
             .bind(args.session_id)
             .bind(caller.owner_id)
+            .bind(caller.conversation_id)
             .fetch_optional(&context.pool)
             .await?;
             let Some((workdir, machine)) = row else {
