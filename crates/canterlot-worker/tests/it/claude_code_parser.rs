@@ -2311,3 +2311,79 @@ fn an_empty_thinking_delta_reports_liveness_without_a_blank_block_delta() {
     );
     assert!(deltas(&parsed).is_empty(), "no empty delta is shipped");
 }
+
+fn finish_ends(parsed: &[Parsed]) -> Vec<(Uuid, canterlot_worker::adapter::RunEnd)> {
+    parsed
+        .iter()
+        .filter_map(|p| match p {
+            Parsed::Event(AdapterEvent::RunFinished {
+                input_command_id,
+                end,
+                ..
+            }) => Some((*input_command_id, *end)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn result_frame(uuid: Uuid, is_error: bool, reason: Option<&str>) -> String {
+    let mut frame = json!({
+        "type": "result",
+        "subtype": if is_error { "error_during_execution" } else { "success" },
+        "is_error": is_error,
+        "user_message_uuids": [uuid],
+        "origin": {"kind": "task-notification", "producer": "session-task", "runId": "r"},
+        "modelUsage": {},
+    });
+    if let Some(reason) = reason {
+        frame["terminal_reason"] = json!(reason);
+    }
+    frame.to_string()
+}
+
+#[test]
+fn aborted_results_end_the_run_as_interrupted_not_failed() {
+    use canterlot_worker::adapter::RunEnd;
+    for reason in ["aborted_tools", "aborted_streaming"] {
+        let mut parser = Parser::new();
+        parser.set_input_command(command_id());
+        let parsed = parser.feed(&result_frame(command_id(), true, Some(reason)));
+        assert_eq!(
+            finish_ends(&parsed),
+            [(command_id(), RunEnd::Interrupted)],
+            "{reason}"
+        );
+    }
+    let mut parser = Parser::new();
+    parser.set_input_command(command_id());
+    let parsed = parser.feed(&result_frame(command_id(), true, None));
+    assert_eq!(finish_ends(&parsed), [(command_id(), RunEnd::Failed)]);
+    let mut parser = Parser::new();
+    parser.set_input_command(command_id());
+    let parsed = parser.feed(&result_frame(command_id(), false, None));
+    assert_eq!(finish_ends(&parsed), [(command_id(), RunEnd::Completed)]);
+}
+
+/// Один итог закрывает две команды: каждая получает конец этого итога, а не `Completed`.
+#[test]
+fn one_result_closing_two_commands_gives_each_the_results_own_end() {
+    use canterlot_worker::adapter::RunEnd;
+    let rows = fixtures::replay_fixture_rows("background_wake_2_1_326");
+    let mut parser = Parser::new();
+    let mut before = replay_rows(&mut parser, &rows[..rows.len() - 2]);
+    before.extend(
+        parser.feed(
+            &json!({"type":"stream_event","parent_tool_use_id":null,
+            "event":{"type":"message_start","message":{"id":"w","model":"m","usage":{}}}})
+            .to_string(),
+        ),
+    );
+    let first = *adopted(&before).last().expect("the wake turn is adopted");
+    let second = Uuid::now_v7();
+    parser.set_input_command(second);
+    let parsed = parser.feed(&result_frame(second, true, Some("aborted_tools")));
+    assert_eq!(
+        finish_ends(&parsed),
+        [(first, RunEnd::Interrupted), (second, RunEnd::Interrupted)]
+    );
+}

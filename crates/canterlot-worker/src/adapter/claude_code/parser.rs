@@ -1826,6 +1826,17 @@ impl Parser {
         if let Some(answer) = Self::answer_frame(value) {
             out.push(answer);
         }
+        let end = if value
+            .get("terminal_reason")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(super::input::is_interrupt_reason)
+        {
+            RunEnd::Interrupted
+        } else if is_error {
+            RunEnd::Failed
+        } else {
+            RunEnd::Completed
+        };
         let ended = self.result_command(value, out);
         let finished = ended.command;
         if !self.command_open {
@@ -1842,7 +1853,7 @@ impl Parser {
                 usage: Vec::new(),
                 context_tokens: 0,
                 context_window_tokens: 0,
-                end: RunEnd::Completed,
+                end,
             }));
         }
         if let Some(input_command_id) = finished {
@@ -1864,11 +1875,7 @@ impl Parser {
                     .and_then(|model| model.get("contextWindow"))
                     .and_then(serde_json::Value::as_u64)
                     .unwrap_or(0),
-                end: if is_error {
-                    RunEnd::Failed
-                } else {
-                    RunEnd::Completed
-                },
+                end,
             }));
         }
         if value.get("is_error").and_then(serde_json::Value::as_bool) == Some(true) {

@@ -326,16 +326,17 @@ impl ClaudeCodeAdapter {
                     self.diagnostic("unknown_required_frame", true);
                 }
                 // Finish is emitted after the error/limit facts from the same result frame.
-                let mut finished = None;
+                // Один итог может закрыть две команды: пересылаются все концы, по порядку.
+                let mut finished = Vec::new();
                 for parsed in self.parser.feed(&line) {
                     if let Parsed::Event(AdapterEvent::RunFinished { .. }) = &parsed {
-                        finished = Some(parsed);
+                        finished.push(parsed);
                         continue;
                     }
                     self.on_parsed(parsed);
                 }
-                if let Some(finished) = finished {
-                    self.on_parsed(finished);
+                for finish in finished {
+                    self.on_parsed(finish);
                 }
             }
         }
