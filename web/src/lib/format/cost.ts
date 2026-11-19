@@ -75,7 +75,7 @@ function tokensText(n: number): string {
 }
 
 /**
- * Строка под ответом: «Opus 5.5 · 48 тыс. токенов (кеш 96%) · ≈ $0,62 · ≈ 1,4% недели».
+ * Строка под ответом: «Opus 5.5 · 48 тыс. токенов (кэш 96%) · ≈ $0,62 · ≈ 1,4% недели».
  * Главная модель идёт первой своими числами, остальные — «+ Haiku 5.5 ≈ $0,01» или счётом.
  */
 export function costLine(usage: CostUsage[], limit: { weekly_delta_permille: number } | null | undefined): string {
@@ -85,7 +85,7 @@ export function costLine(usage: CostUsage[], limit: { weekly_delta_permille: num
 	const [main, ...extra] = models;
 	if (!main) return '';
 	const cache = cacheShare(main);
-	const tokens = cache == null ? tokensText(total(main)) : `${tokensText(total(main))} (кеш ${cache}%)`;
+	const tokens = cache == null ? tokensText(total(main)) : `${tokensText(total(main))} (кэш ${cache}%)`;
 	let money = costMoney(main.cost_micro_usd);
 	if (extra.length === 1 && extra[0]) {
 		money += ` + ${modelLabel(extra[0].model)} ${costMoney(extra[0].cost_micro_usd)}`;
@@ -116,13 +116,13 @@ export function cacheHintText(hint: CacheHint | null | undefined): string | null
 	if (!hint) return null;
 	switch (hint.kind) {
 		case 'expired':
-			return hint.idle_minutes != null ? `кеш, вероятно, истёк · простой ${idleText(hint.idle_minutes)}` : 'кеш, вероятно, истёк';
+			return hint.idle_minutes != null ? `кэш, вероятно, истёк · простой ${idleText(hint.idle_minutes)}` : 'кэш, вероятно, истёк';
 		case 'model_changed':
-			return 'смена модели — кеш заново';
+			return 'смена модели — кэш заново';
 		case 'compaction':
 			return 'после сжатия контекста';
 		default:
-			return 'кеш пересобран';
+			return 'кэш пересобран';
 	}
 }
 

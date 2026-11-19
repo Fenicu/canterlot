@@ -53,7 +53,7 @@ describe('weekShare', () => {
 describe('costLine', () => {
 	it('puts the model, tokens, cache, money and week in one line', () => {
 		expect(costLine([line()], { weekly_delta_permille: 14 })).toBe(
-			'Opus 5.5 · 48 тыс. токенов (кеш 96%) · ≈ $0,62 · ≈ 1,4% недели'
+			'Opus 5.5 · 48 тыс. токенов (кэш 96%) · ≈ $0,62 · ≈ 1,4% недели'
 		);
 	});
 	it('drops cache and week when they are unknown', () => {
@@ -62,7 +62,7 @@ describe('costLine', () => {
 	});
 	it('lists the main model first and the side model after it', () => {
 		const side = line({ model: 'claude-haiku-5-5', agent: 'Explore', input_tokens: 100, cache_read_tokens: 0, output_tokens: 50, cost_micro_usd: 10_000 });
-		expect(costLine([side, line()], null)).toBe('Opus 5.5 · 48 тыс. токенов (кеш 96%) · ≈ $0,62 + Haiku 5.5 ≈ $0,01');
+		expect(costLine([side, line()], null)).toBe('Opus 5.5 · 48 тыс. токенов (кэш 96%) · ≈ $0,62 + Haiku 5.5 ≈ $0,01');
 	});
 	it('counts several side models', () => {
 		const a = line({ model: 'claude-haiku-5-5', agent: 'Explore', cost_micro_usd: 10_000, input_tokens: 1, cache_read_tokens: 0, output_tokens: 1 });
@@ -77,7 +77,7 @@ describe('costLine', () => {
 	});
 	it('merges the same model run by several agents', () => {
 		const text = costLine([line(), line({ agent: 'Explore', input_tokens: 0, cache_read_tokens: 0, output_tokens: 2000, cost_micro_usd: 380_000 })], null);
-		expect(text).toBe('Opus 5.5 · 50 тыс. токенов (кеш 96%) · ≈ $1,00');
+		expect(text).toBe('Opus 5.5 · 50 тыс. токенов (кэш 96%) · ≈ $1,00');
 	});
 	it('is empty without usage', () => {
 		expect(costLine([], null)).toBe('');
@@ -100,15 +100,15 @@ describe('sessionCostLine', () => {
 
 describe('cacheHintText', () => {
 	it('names the likely expiry with the idle time', () => {
-		expect(cacheHintText({ kind: 'expired', idle_minutes: 12 })).toBe('кеш, вероятно, истёк · простой 12 мин');
-		expect(cacheHintText({ kind: 'expired', idle_minutes: 60 })).toBe('кеш, вероятно, истёк · простой 1 ч');
-		expect(cacheHintText({ kind: 'expired', idle_minutes: 125 })).toBe('кеш, вероятно, истёк · простой 2 ч 5 мин');
-		expect(cacheHintText({ kind: 'expired' })).toBe('кеш, вероятно, истёк');
+		expect(cacheHintText({ kind: 'expired', idle_minutes: 12 })).toBe('кэш, вероятно, истёк · простой 12 мин');
+		expect(cacheHintText({ kind: 'expired', idle_minutes: 60 })).toBe('кэш, вероятно, истёк · простой 1 ч');
+		expect(cacheHintText({ kind: 'expired', idle_minutes: 125 })).toBe('кэш, вероятно, истёк · простой 2 ч 5 мин');
+		expect(cacheHintText({ kind: 'expired' })).toBe('кэш, вероятно, истёк');
 	});
 	it('names a model change, a compaction and a plain rebuild', () => {
-		expect(cacheHintText({ kind: 'model_changed' })).toBe('смена модели — кеш заново');
+		expect(cacheHintText({ kind: 'model_changed' })).toBe('смена модели — кэш заново');
 		expect(cacheHintText({ kind: 'compaction' })).toBe('после сжатия контекста');
-		expect(cacheHintText({ kind: 'rebuilt' })).toBe('кеш пересобран');
+		expect(cacheHintText({ kind: 'rebuilt' })).toBe('кэш пересобран');
 	});
 	it('has no hint without data', () => {
 		expect(cacheHintText(null)).toBeNull();

@@ -31,7 +31,7 @@ test('feed_line_under_a_finished_turn_shows_model_tokens_cache_money_and_week_an
   await expect(page.locator('.screen[data-ready]')).toBeVisible();
 
   const line = page.locator('[data-role="run-cost"]').first();
-  await expect(line).toHaveText('Opus 5.5 · 48 тыс. токенов (кеш 96%) · ≈ $0,62 + Haiku 5.5 ≈ $0,01 · ≈ 1,4% недели');
+  await expect(line).toHaveText('Opus 5.5 · 48 тыс. токенов (кэш 96%) · ≈ $0,62 + Haiku 5.5 ≈ $0,01 · ≈ 1,4% недели');
   const box = await line.boundingBox();
   const viewport = page.viewportSize()!;
   expect(box!.x + box!.width).toBeLessThanOrEqual(viewport.width + 0.5);
@@ -68,7 +68,7 @@ test('feed_line_updates_when_the_cost_of_a_finished_turn_arrives_late', async ({
     }
   });
   hub.flush();
-  await expect(page.locator('[data-role="run-cost"]').first()).toHaveText('mystery-model · 15 токенов (кеш 0%) · ≈ $ —');
+  await expect(page.locator('[data-role="run-cost"]').first()).toHaveText('mystery-model · 15 токенов (кэш 0%) · ≈ $ —');
 
   hub.append(`conversation:${id}`, {
     kind: 'run_cost_updated',
@@ -81,7 +81,7 @@ test('feed_line_updates_when_the_cost_of_a_finished_turn_arrives_late', async ({
     }
   });
   hub.flush();
-  await expect(page.locator('[data-role="run-cost"]').first()).toHaveText('beam-free · 15 токенов (кеш 0%) · бесплатно');
+  await expect(page.locator('[data-role="run-cost"]').first()).toHaveText('beam-free · 15 токенов (кэш 0%) · бесплатно');
 });
 
 test('session_sheet_shows_the_session_total_with_delegates_and_turns_without_a_price', async ({ page }) => {
@@ -111,8 +111,8 @@ test('feed_line_shows_the_cache_hint_without_overflow_or_a_broken_line', async (
 
   const line = page.locator('[data-role="run-cost"]').first();
   const hint = line.locator('[data-role="cache-hint"]');
-  await expect(hint).toHaveText('кеш, вероятно, истёк · простой 2 ч 5 мин');
-  await expect(line).toContainText('Opus 5.5 · 48 тыс. токенов (кеш 96%)');
+  await expect(hint).toHaveText('кэш, вероятно, истёк · простой 2 ч 5 мин');
+  await expect(line).toContainText('Opus 5.5 · 48 тыс. токенов (кэш 96%)');
   const viewport = page.viewportSize()!;
   const box = await line.boundingBox();
   expect(box!.x + box!.width).toBeLessThanOrEqual(viewport.width + 0.5);
@@ -135,7 +135,7 @@ test('feed_line_shows_the_cache_hint_without_overflow_or_a_broken_line', async (
     }
   });
   hub.flush();
-  await expect(page.locator('[data-role="cache-hint"]').first()).toHaveText('смена модели — кеш заново');
+  await expect(page.locator('[data-role="cache-hint"]').first()).toHaveText('смена модели — кэш заново');
 });
 
 test('feed_line_has_no_hint_when_the_hub_names_none', async ({ page }) => {
