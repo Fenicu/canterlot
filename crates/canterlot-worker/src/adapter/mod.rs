@@ -240,6 +240,9 @@ pub struct ModelUsage {
     pub output_tokens: u64,
     pub cache_read_tokens: u64,
     pub cache_write_tokens: u64,
+    /// Цена хода в микродолларах, которую назвал сам CLI. `None` — CLI цену не назвал.
+    #[serde(default)]
+    pub cost_micro_usd: Option<u64>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]

@@ -579,6 +579,7 @@ fn run_steps<'a>(
                         output_tokens: 0,
                         cache_read_tokens: 0,
                         cache_write_tokens: 0,
+                        cost_micro_usd: None,
                     });
                 row.input_tokens = row
                     .input_tokens
@@ -823,6 +824,7 @@ async fn run_turn(
                 output_tokens: turn.output_chars / 4,
                 cache_read_tokens: 0,
                 cache_write_tokens: 0,
+                cost_micro_usd: None,
             },
         );
     }

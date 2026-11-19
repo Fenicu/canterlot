@@ -1886,6 +1886,14 @@ impl Parser {
     }
 
     fn turn_usage(&mut self, value: &serde_json::Value) -> Vec<ModelUsage> {
+        // `costUSD` модели в `modelUsage` — доллары числом с дробью; хранится целое в микродолларах.
+        let cost_micro = |model: &serde_json::Value| {
+            model
+                .get("costUSD")
+                .and_then(serde_json::Value::as_f64)
+                .filter(|usd| usd.is_finite() && *usd >= 0.0)
+                .map(|usd| (usd * 1_000_000.0).round() as u64)
+        };
         let mut usage = Vec::new();
         let Some(models) = value
             .get("modelUsage")
@@ -1913,6 +1921,7 @@ impl Parser {
                 output_tokens: get("outputTokens"),
                 cache_read_tokens: get("cacheReadInputTokens"),
                 cache_write_tokens: get("cacheCreationInputTokens"),
+                cost_micro_usd: cost_micro(model),
             };
             let prev = self.prev_usage.insert(name.clone(), seen.clone());
             let delta = |now: u64, was: u64| now.saturating_sub(was);
@@ -1923,6 +1932,7 @@ impl Parser {
                 output_tokens: 0,
                 cache_read_tokens: 0,
                 cache_write_tokens: 0,
+                cost_micro_usd: None,
             });
             let agent = if *name == main {
                 "orchestrator".to_owned()
@@ -1939,6 +1949,10 @@ impl Parser {
                 output_tokens: delta(seen.output_tokens, was.output_tokens),
                 cache_read_tokens: delta(seen.cache_read_tokens, was.cache_read_tokens),
                 cache_write_tokens: delta(seen.cache_write_tokens, was.cache_write_tokens),
+                // Цена, как и токены, накопительная: за ход берём прирост.
+                cost_micro_usd: seen
+                    .cost_micro_usd
+                    .map(|now| now.saturating_sub(was.cost_micro_usd.unwrap_or(0))),
             });
         }
         usage

@@ -201,6 +201,7 @@ fn usage_keeps_the_recorded_token_split() {
             output_tokens: 20,
             cache_read_tokens: 30,
             cache_write_tokens: 0,
+            cost_micro_usd: None,
         }]
     );
     assert_eq!(context_tokens, 100);
@@ -1029,6 +1030,7 @@ fn child_tokens_are_counted_under_its_agent_and_never_touch_the_context() {
             output_tokens: 40,
             cache_read_tokens: 60,
             cache_write_tokens: 0,
+            cost_micro_usd: None,
         }
     );
     assert_eq!(line("orchestrator").input_tokens, 140, "two parent steps");

@@ -730,6 +730,7 @@ impl Translator {
                 output_tokens: tally.output,
                 cache_read_tokens: tally.cache_read,
                 cache_write_tokens: tally.cache_write,
+                cost_micro_usd: None,
             })
             .collect();
         AdapterEvent::RunFinished {

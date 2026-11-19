@@ -2647,6 +2647,12 @@ impl Supervisor {
                             output_tokens: u.output_tokens,
                             cache_read_tokens: u.cache_read_tokens,
                             cache_write_tokens: u.cache_write_tokens,
+                            cost_micro_usd: u.cost_micro_usd,
+                            cost_source: if u.cost_micro_usd.is_some() {
+                                canterlot_proto::worker::v1::CostSource::Cli as i32
+                            } else {
+                                canterlot_proto::worker::v1::CostSource::Unspecified as i32
+                            },
                         })
                         .collect(),
                     git,
