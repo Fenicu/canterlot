@@ -31,6 +31,11 @@ test('settings_categories_hold_login_connection_theme_enter_install_and_signout'
   await page.goto('/settings?c=input');
   await expect(main.getByRole('radiogroup', { name: 'Enter на клавиатуре' })).toBeVisible();
   await expect(main.getByRole('radiogroup', { name: 'Подсказки следующего сообщения' })).toBeVisible();
+  await expect(main.getByRole('radiogroup', { name: 'Встроенная память Claude' })).toHaveCount(0);
+  await expect(main.getByRole('radiogroup', { name: 'Рассуждения' })).toBeVisible();
+
+  // Встроенная память Claude живёт на экране «Память», рядом с общей памятью.
+  await page.goto('/settings?c=memory');
   const memory = main.getByRole('radiogroup', { name: 'Встроенная память Claude' });
   await expect(memory).toBeVisible();
   await expect(memory.getByRole('radio', { name: 'Включена' })).toBeChecked();
@@ -39,7 +44,6 @@ test('settings_categories_hold_login_connection_theme_enter_install_and_signout'
   await expect(memory.getByRole('radio', { name: 'Выключена' })).toBeChecked();
   await page.reload();
   await expect(main.getByRole('radiogroup', { name: 'Встроенная память Claude' }).getByRole('radio', { name: 'Выключена' })).toBeChecked();
-  await expect(main.getByRole('radiogroup', { name: 'Рассуждения' })).toBeVisible();
 
   await page.goto('/settings?c=app');
   await expect(main.getByText(/^установлена текущая версия|^доступна новая версия/)).toBeVisible();
@@ -56,7 +60,7 @@ test('settings_list_drills_into_a_category_and_back_on_the_phone', async ({ page
   await bootSecondary(page, '/settings');
   const main = page.locator('main');
   const nav = main.getByRole('navigation', { name: 'Разделы настроек' });
-  await expect(nav.getByRole('link')).toHaveText([/^Внешний вид/, /^Ввод и чтение/, /^Лимиты и делегирование/, /^Маршрутизация/, /^Расписание/, /^Вход и безопасность/, /^Приложение/, /^Обновления и модели/]);
+  await expect(nav.getByRole('link')).toHaveText([/^Внешний вид/, /^Ввод и чтение/, /^Лимиты и делегирование/, /^Маршрутизация/, /^Расписание/, /^Память/, /^Вход и безопасность/, /^Приложение/, /^Обновления и модели/]);
   await expect(main.locator('[data-settings-pane]')).toHaveCount(0);
   await nav.getByRole('link', { name: /^Ввод и чтение/ }).click();
   await expect(page).toHaveURL(/\/settings\?c=input$/);

@@ -35,6 +35,16 @@ type Schedule = components['schemas']['Schedule'];
 type ScheduleRun = components['schemas']['ScheduleRun'];
 type NewSchedule = components['schemas']['NewSchedule'];
 type PatchSchedule = components['schemas']['PatchSchedule'];
+type MemoryEntryView = components['schemas']['MemoryEntryView'];
+type MemoryRevisionView = components['schemas']['MemoryRevisionView'];
+
+/** Отказ памяти в форме ответа хаба: статус, код и детали. */
+export class FakeMemoryError extends Error {
+	constructor(readonly status: number, readonly code: string, message: string, readonly details?: Record<string, unknown>) {
+		super(message);
+		this.name = 'FakeMemoryError';
+	}
+}
 
 /** Запись ленты обновлений CLI и моделей, как её отдаёт `GET /api/v1/updates`. */
 export interface FakeUpdate {
@@ -271,6 +281,11 @@ export class FakeHubApi {
 	limitSettings: components['schemas']['LimitSettings'] | null = null;
 	promptSuggestionsEnabled = true;
 	claudeAutoMemory: 'on' | 'off' = 'on';
+	/** Общая память владельца: записи обоих доменов, домен хранится в самой записи, как у хаба. */
+	readonly memoryEntries = new Map<string, MemoryEntryView>();
+	readonly memoryRevisionLog = new Map<string, MemoryRevisionView[]>();
+	/** Обращения экрана к памяти по порядку: так тест видит, что домены не смешиваются. */
+	readonly memoryCalls: { method: string; domain: string | null; id: string | null }[] = [];
 	hibernateIdleMinutes: number | null = 60;
 	readonly promptSuggestions = new Map<string, components['schemas']['PromptSuggestionView']>();
 	readonly limitSettingsKeys: string[] = [];
@@ -483,6 +498,102 @@ export class FakeHubApi {
 		});
 		this.hub.flush();
 		return true;
+	}
+
+	/** Запись памяти с разумными умолчаниями; время растёт на секунду, чтобы порядок был устойчив. */
+	seedMemory(entry: Partial<MemoryEntryView> & { domain: 'work' | 'personal'; subject: string }): MemoryEntryView {
+		const at = new Date(Date.UTC(2026, 10, 1, 9, 0, this.memoryEntries.size)).toISOString();
+		const row: MemoryEntryView = {
+			id: `00000000-0000-4000-8000-${String(this.memoryEntries.size + 1).padStart(12, '0')}`,
+			level: 'domain', project: null, project_label: null, kind: 'reference', body: `Текст записи «${entry.subject}»`,
+			status: 'active', valid_until: null, expired: false, version: 1,
+			created_by: { kind: 'owner' }, created_at: at, updated_by: { kind: 'owner' }, updated_at: at,
+			...entry
+		};
+		this.memoryEntries.set(row.id, row);
+		return row;
+	}
+
+	private memoryRow(id: string, domain: string | null): MemoryEntryView {
+		const row = this.memoryEntries.get(id);
+		if (!domain || !row || row.domain !== domain) throw new FakeMemoryError(404, 'not_found', 'Не найдено');
+		return row;
+	}
+
+	listMemory(query: URLSearchParams): { items: MemoryEntryView[]; next_cursor: string | null } {
+		const domain = query.get('domain');
+		this.memoryCalls.push({ method: 'GET', domain, id: null });
+		if (domain !== 'work' && domain !== 'personal') throw new FakeMemoryError(400, 'invalid_request', 'Некорректный запрос', { field: 'domain' });
+		const status = query.get('status') ?? 'active';
+		const text = (query.get('q') ?? '').toLowerCase();
+		const items = [...this.memoryEntries.values()]
+			.filter((row) => row.domain === domain && row.status === status && (!text || `${row.subject} ${row.body}`.toLowerCase().includes(text)))
+			.sort((a, b) => b.updated_at.localeCompare(a.updated_at) || b.id.localeCompare(a.id));
+		return { items, next_cursor: null };
+	}
+
+	private touchMemory(row: MemoryEntryView, action: string, patch: Partial<MemoryEntryView>): MemoryEntryView {
+		const log = this.memoryRevisionLog.get(row.id) ?? [];
+		log.unshift({ id: log.length + 1, version: row.version, action, project: row.project, kind: row.kind, subject: row.subject, body: row.body, status: row.status, valid_until: row.valid_until, actor: { kind: 'owner' }, at: new Date().toISOString() });
+		this.memoryRevisionLog.set(row.id, log);
+		const next = { ...row, ...patch, version: row.version + 1, updated_at: new Date().toISOString() };
+		this.memoryEntries.set(row.id, next);
+		return next;
+	}
+
+	private screenMemory(texts: (string | undefined)[], force: boolean | undefined): void {
+		if (force) return;
+		if (texts.some((text) => text && /\bsk-[A-Za-z0-9]{16,}/.test(text))) throw new FakeMemoryError(422, 'looks_like_secret', 'Текст похож на секрет', { class: 'token_prefix' });
+	}
+
+	createMemory(body: { domain: string; level: string; project?: string | null; kind: string; subject: string; body: string; valid_until?: string | null; force_secret_warning?: boolean | null }): MemoryEntryView {
+		this.memoryCalls.push({ method: 'POST', domain: body.domain, id: null });
+		if (body.domain !== 'work' && body.domain !== 'personal') throw new FakeMemoryError(400, 'invalid_request', 'Некорректный запрос', { field: 'domain' });
+		this.screenMemory([body.subject, body.body], body.force_secret_warning ?? undefined);
+		const same = [...this.memoryEntries.values()].find((row) => row.domain === body.domain && row.status === 'active' && row.subject.toLowerCase() === body.subject.toLowerCase());
+		if (same) throw new FakeMemoryError(409, 'subject_exists', 'Запись с такой темой уже есть', { existing_id: same.id, existing_version: same.version });
+		return this.seedMemory({ domain: body.domain, subject: body.subject, body: body.body, kind: body.kind, level: body.level, project: body.level === 'project' ? (body.project ?? null) : null, project_label: body.level === 'project' ? (body.project ?? '').split('/').at(-1) ?? null : null, valid_until: body.valid_until ?? null });
+	}
+
+	updateMemory(id: string, body: { domain: string; expected_version?: number | null; kind?: string | null; subject?: string | null; body?: string | null; valid_until?: string | null; force_secret_warning?: boolean | null }): MemoryEntryView {
+		this.memoryCalls.push({ method: 'PUT', domain: body.domain, id });
+		const row = this.memoryRow(id, body.domain);
+		if (body.expected_version == null) throw new FakeMemoryError(400, 'invalid_request', 'Некорректный запрос', { field: 'expected_version' });
+		if (body.expected_version !== row.version) throw new FakeMemoryError(409, 'version_conflict', 'Запись уже изменена, обновите её', { current_version: row.version });
+		this.screenMemory([body.subject ?? undefined, body.body ?? undefined], body.force_secret_warning ?? undefined);
+		return this.touchMemory(row, 'update', {
+			...(body.kind ? { kind: body.kind } : {}), ...(body.subject ? { subject: body.subject } : {}), ...(body.body ? { body: body.body } : {}),
+			valid_until: body.valid_until ?? null
+		});
+	}
+
+	archiveMemory(id: string, body: { domain: string; expected_version?: number | null }): MemoryEntryView {
+		this.memoryCalls.push({ method: 'POST', domain: body.domain, id });
+		const row = this.memoryRow(id, body.domain);
+		if (body.expected_version !== row.version) throw new FakeMemoryError(409, 'version_conflict', 'Запись уже изменена, обновите её', { current_version: row.version });
+		return this.touchMemory(row, 'archive', { status: 'archived' });
+	}
+
+	restoreMemory(id: string, body: { domain: string }): MemoryEntryView {
+		this.memoryCalls.push({ method: 'POST', domain: body.domain, id });
+		return this.touchMemory(this.memoryRow(id, body.domain), 'restore', { status: 'active' });
+	}
+
+	deleteMemory(id: string, domain: string | null): void {
+		this.memoryCalls.push({ method: 'DELETE', domain, id });
+		this.memoryRow(id, domain);
+		this.memoryEntries.delete(id);
+		this.memoryRevisionLog.delete(id);
+	}
+
+	getMemory(id: string, domain: string | null): MemoryEntryView {
+		this.memoryCalls.push({ method: 'GET', domain, id });
+		return this.memoryRow(id, domain);
+	}
+
+	memoryRevisions(id: string, domain: string | null): MemoryRevisionView[] {
+		this.memoryRow(id, domain);
+		return this.memoryRevisionLog.get(id) ?? [];
 	}
 
 	getSchedule(id: string): Schedule {
