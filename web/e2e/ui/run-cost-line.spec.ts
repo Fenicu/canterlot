@@ -96,7 +96,7 @@ test('session_sheet_shows_the_session_total_with_delegates_and_turns_without_a_p
   await page.getByRole('button', { name: 'Меню сессии' }).click();
   await page.getByRole('menuitem', { name: 'Диагностика' }).click();
   const total = page.getByRole('dialog', { name: 'Диагностика' }).locator('[data-role="session-cost"]');
-  await expect(total).toContainText('≈ $1,25 за сессию с делегатами');
+  await expect(total).toContainText('≥ $1,25 за сессию с делегатами');
   await expect(total).toContainText('2 хода без цены');
   await total.scrollIntoViewIfNeeded();
   await page.screenshot({ path: `${SHOTS}/session-sheet-${test.info().project.name}.png` });

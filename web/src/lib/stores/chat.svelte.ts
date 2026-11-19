@@ -1767,7 +1767,7 @@ export class ChatStore {
 
   #costClock = 0;
   /** Часы события цены по ходу: больше, чем у запроса истории, — событие новее страницы. */
-  #costStamp = new Map<string, number>();
+  #costStamp = new SvelteMap<string, number>();
 
   #ingest(items: HistoryItem[], dir: "older" | "newer" | "tail"): void {
     this.timeline.applyHistoryPage(this.#entriesFrom(items, dir === "tail"), dir);

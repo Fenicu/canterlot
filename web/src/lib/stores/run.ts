@@ -17,6 +17,7 @@ export interface RunInfo {
 		/** Микродолларов; пусто — цена неизвестна. */
 		cost_micro_usd?: number | null;
 		cost_source?: string | null;
+		cost_complete?: boolean;
 		kind?: string;
 	}[];
 	/** Подсказка о пересборке кеша, если хаб её нашёл. */
