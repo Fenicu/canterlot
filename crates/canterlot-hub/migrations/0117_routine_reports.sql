@@ -7,6 +7,9 @@ alter table conversations
 drop index conversations_side_of;
 create unique index conversations_side_of on conversations(side_of)
   where side_of is not null and side_kind = 'chat';
+-- Поиск копий родителя и проверка внешнего ключа идут по `side_of` без вида: им нужен
+-- индекс на всех непустых значениях, а не только на чатах.
+create index conversations_side_of_all on conversations(side_of) where side_of is not null;
 
 -- Карточка отчёта в ленте родителя. Это не ввод и не блок ленты: у неё нет места в
 -- журнале, очереди и счётчиках, поэтому агент никогда её не получает, а родитель
