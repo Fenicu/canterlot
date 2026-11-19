@@ -169,6 +169,7 @@ pub enum SpawnRefusalCode {
     ModelUnknown,
     EffortNotAllowed,
     WorkdirNotAllowed,
+    DomainMismatch,
     ProfileUnknown,
     ConversationClosed,
     QueueFull,
@@ -196,6 +197,7 @@ impl SpawnRefusalCode {
             Self::ModelUnknown => "model_unknown",
             Self::EffortNotAllowed => "effort_not_allowed",
             Self::WorkdirNotAllowed => "workdir_not_allowed",
+            Self::DomainMismatch => "domain_mismatch",
             Self::ProfileUnknown => "profile_unknown",
             Self::ConversationClosed => "conversation_closed",
             Self::QueueFull => "queue_full",
@@ -223,6 +225,7 @@ impl SpawnRefusalCode {
             Self::ModelUnknown,
             Self::EffortNotAllowed,
             Self::WorkdirNotAllowed,
+            Self::DomainMismatch,
             Self::ProfileUnknown,
             Self::ConversationClosed,
             Self::QueueFull,
@@ -252,6 +255,7 @@ impl SpawnRefusalCode {
             Self::ModelUnknown => "Unknown model",
             Self::EffortNotAllowed => "This effort is not available for the model",
             Self::WorkdirNotAllowed => "This working directory is not allowed",
+            Self::DomainMismatch => "The working directory belongs to another memory domain",
             Self::ProfileUnknown => "Unknown instruction preset",
             Self::ConversationClosed => "The session is closed",
             Self::QueueFull => "Too many spawns are already queued for this session",
@@ -1695,4 +1699,16 @@ pub async fn waiting_summary(conn: &mut PgConnection, parent: Uuid) -> Result<Va
     .fetch_one(conn)
     .await?;
     Ok(json!({"count": count, "nearest": next}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SpawnRefusalCode;
+
+    #[test]
+    fn domain_mismatch_survives_the_queue_round_trip() {
+        let code = SpawnRefusalCode::parse("domain_mismatch");
+        assert_eq!(code, Some(SpawnRefusalCode::DomainMismatch));
+        assert_eq!(SpawnRefusalCode::DomainMismatch.as_str(), "domain_mismatch");
+    }
 }

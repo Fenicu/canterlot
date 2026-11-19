@@ -5162,7 +5162,7 @@ export interface components {
          *     и состояниями элемента очереди.
          * @enum {string}
          */
-        SpawnRefusalCode: "not_in_whitelist" | "permission_mode_too_wide" | "machine_unavailable" | "capability_missing" | "no_executor_available" | "invalid_arguments" | "harness_unknown" | "model_unknown" | "effort_not_allowed" | "workdir_not_allowed" | "profile_unknown" | "conversation_closed" | "queue_full" | "rate_limited" | "machine_busy" | "parent_stopped" | "parent_archived" | "cancelled" | "expired" | "job_failed" | "internal_error" | "unknown";
+        SpawnRefusalCode: "not_in_whitelist" | "permission_mode_too_wide" | "machine_unavailable" | "capability_missing" | "no_executor_available" | "invalid_arguments" | "harness_unknown" | "model_unknown" | "effort_not_allowed" | "workdir_not_allowed" | "domain_mismatch" | "profile_unknown" | "conversation_closed" | "queue_full" | "rate_limited" | "machine_busy" | "parent_stopped" | "parent_archived" | "cancelled" | "expired" | "job_failed" | "internal_error" | "unknown";
         SpeedStats: {
             /**
              * Format: int64

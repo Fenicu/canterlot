@@ -174,6 +174,7 @@ const REFUSAL_TEXT: Record<string, string> = {
   model_unknown: 'модель отсутствует в каталоге агента',
   effort_not_allowed: 'усилие недоступно для модели',
   workdir_not_allowed: 'рабочий каталог вне разрешённых',
+  domain_mismatch: 'каталог относится к другому домену памяти',
   profile_unknown: 'инструкции не найдены',
   conversation_closed: 'разговор закрыт',
   queue_full: 'очередь запусков заполнена',
