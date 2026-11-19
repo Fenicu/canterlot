@@ -2171,3 +2171,91 @@ async fn deleting_a_schedule_takes_the_schedule_row_before_the_owner_lock(pool: 
     holder.rollback().await.unwrap();
     assert_eq!(deleter.await.unwrap(), 200);
 }
+
+/// Очередь копии берётся раньше строки разговора, как в удалении и в `release_waiting`:
+/// обратный порядок замыкал уборку на отпускание ввода при простое родителя.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn cleanup_takes_the_copy_queue_before_the_copy_row(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let schedule = make_schedule_without_session(&f, "Стендап").await;
+    let (_card, copy) = stray_copy(&f, schedule, None).await;
+    let mut holder = canterlot_hub::db::begin(&pool).await.unwrap();
+    sqlx::query("select 1 from queue_state where conversation_id=$1 for update")
+        .bind(copy)
+        .execute(&mut *holder)
+        .await
+        .unwrap();
+    let sweeper = {
+        let pool = pool.clone();
+        tokio::spawn(async move { canterlot_hub::routines::sweep(&pool, Utc::now()).await })
+    };
+    // Уборка встала на очереди копии: ждём, пока в базе появится ожидающий замок строки.
+    let mut waiting = false;
+    for _ in 0..20_000 {
+        waiting = sqlx::query_scalar(
+            "select exists(select 1 from pg_locks l join pg_stat_activity a on a.pid=l.pid
+                            where not l.granted and l.locktype in ('transactionid','tuple')
+                              and a.datname=current_database())",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        if waiting {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(waiting, "cleanup never waited on the copy queue");
+    let row_taken_first = sqlx::query("select id from conversations where id=$1 for update nowait")
+        .bind(copy)
+        .execute(&mut *holder)
+        .await
+        .is_err();
+    assert!(
+        !row_taken_first,
+        "cleanup took the copy row before its queue"
+    );
+    holder.rollback().await.unwrap();
+    sweeper.await.unwrap().unwrap();
+}
+
+/// Сбой уборки одного осиротевшего бокового чата не роняет `side::sweep`, поэтому тик доходит
+/// до отчётов и остальных копий.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_failing_orphan_side_chat_does_not_stop_the_tick(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let schedule = make_schedule_without_session(&f, "Стендап").await;
+    let (good_card, _good) = stray_copy(&f, schedule, None).await;
+    let other_parent = testkit::seed_conversation(&pool, f.seed.owner_id, f.seed.machine_id).await;
+    sqlx::query("update conversations set trashed_at=now() where id=$1")
+        .bind(other_parent)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let orphan = testkit::seed_conversation(&pool, f.seed.owner_id, f.seed.machine_id).await;
+    sqlx::query("update conversations set side_of=$2, side_kind='chat' where id=$1")
+        .bind(orphan)
+        .bind(other_parent)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!(
+        "create function fail_orphan_delete() returns trigger language plpgsql as $$
+         begin
+           if old.id = '{orphan}' then raise exception 'boom'; end if;
+           return old;
+         end $$"
+    )))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "create trigger fail_orphan_delete before delete on conversations
+         for each row execute function fail_orphan_delete()",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    scheduler(&f).tick(Utc::now()).await.unwrap();
+    assert!(card_copy(&pool, good_card).await.is_none());
+}

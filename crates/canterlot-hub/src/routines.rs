@@ -853,8 +853,15 @@ async fn remove_in_tx(
     owner_id: Uuid,
     copy_id: Uuid,
 ) -> Result<Removal, sqlx::Error> {
-    let exists: bool =
-        sqlx::query_scalar("select exists(select 1 from conversations where id=$1 for update)")
+    // Очередь копии раньше строки разговора, как в удалении и в отпускании ввода.
+    let queued: Option<Uuid> = sqlx::query_scalar(
+        "select conversation_id from queue_state where conversation_id=$1 for update",
+    )
+    .bind(copy_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let exists: bool = queued.is_some()
+        && sqlx::query_scalar("select exists(select 1 from conversations where id=$1 for update)")
             .bind(copy_id)
             .fetch_one(&mut *conn)
             .await?;
