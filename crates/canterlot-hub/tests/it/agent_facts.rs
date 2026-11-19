@@ -33,6 +33,90 @@ fn spent(input: i64, output: i64) -> ModelUsage {
     }
 }
 
+fn priced(model: &str, input: u64, cost: Option<u64>) -> ModelUsage {
+    ModelUsage {
+        model: model.into(),
+        agent: "main".into(),
+        input_tokens: input,
+        cost_micro_usd: cost,
+        cost_source: if cost.is_some() {
+            CostSource::Cli as i32
+        } else {
+            CostSource::Unspecified as i32
+        },
+        ..Default::default()
+    }
+}
+
+// Цену хода называет CLI, иначе её берёт таблица хаба, иначе она неизвестна, а не ноль.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn run_finish_stores_cost_with_its_source(pool: PgPool) -> TestResult {
+    let mut r = Run::new(&pool).await;
+    let i = r.input(&pool).await;
+    let ms = Utc::now().timestamp_millis();
+    r.send(vec![accepted(i.command_id, ms)]).await;
+    let Body::RunFinished(mut fact) = finished(&r, i.command_id, ms + 1000) else {
+        unreachable!()
+    };
+    fact.usage = vec![
+        priced("claude-opus-5-5", 1, Some(620_000)),
+        priced("opencode-free-model", 1, Some(0)),
+        priced("gpt-6.1-sol", 1_000_000, None),
+        priced("mystery-model", 5, None),
+    ];
+    r.send(vec![Body::RunFinished(fact)]).await;
+    let rows: Vec<(String, Option<i64>, Option<String>)> = sqlx::query_as(
+        "select model,cost_micro_usd,cost_source from run_model_usage order by model",
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        rows,
+        vec![
+            ("claude-opus-5-5".into(), Some(620_000), Some("cli".into())),
+            ("gpt-6.1-sol".into(), Some(2_000_000), Some("prices".into())),
+            ("mystery-model".into(), None, None),
+            ("opencode-free-model".into(), Some(0), Some("cli".into())),
+        ]
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn adopted_run_adds_cost_and_unknown_stays_unknown(pool: PgPool) -> TestResult {
+    let mut r = Run::new(&pool).await;
+    let i = r.input(&pool).await;
+    let ms = Utc::now().timestamp_millis();
+    r.send(vec![accepted(i.command_id, ms)]).await;
+    let Body::RunFinished(mut first) = finished(&r, i.command_id, ms + 1000) else {
+        unreachable!()
+    };
+    first.usage = vec![
+        priced("claude-opus-5-5", 1, Some(100)),
+        priced("mystery-model", 1, None),
+    ];
+    r.send(vec![Body::RunFinished(first.clone())]).await;
+    let mut adopted = first.clone();
+    adopted.adopted = true;
+    adopted.usage = vec![
+        priced("claude-opus-5-5", 1, Some(50)),
+        priced("mystery-model", 1, Some(9)),
+    ];
+    r.send(vec![Body::RunFinished(adopted)]).await;
+    let rows: Vec<(String, Option<i64>)> =
+        sqlx::query_as("select model,cost_micro_usd from run_model_usage order by model")
+            .fetch_all(&pool)
+            .await?;
+    assert_eq!(
+        rows,
+        vec![
+            ("claude-opus-5-5".into(), Some(150)),
+            ("mystery-model".into(), None)
+        ]
+    );
+    Ok(())
+}
+
 // Запуск без ввода приписан законченной команде: его расход и контекст добавляются к ней,
 // а обычный повтор конца хода ничего не меняет.
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
@@ -503,6 +587,7 @@ async fn stored_run(pool: &PgPool, r: &Run, ms: i64, duration: u64, late: bool) 
         &r.reference(),
         at + Duration::milliseconds(duration as i64),
         now + Duration::milliseconds(duration as i64),
+        &canterlot_hub::pricing::PriceBook::default(),
     )
     .await?;
     tx.commit().await?;
@@ -1366,9 +1451,16 @@ async fn end_run(pool: &PgPool, r: &Run, i: &SubmittedInput, ms: i64, duration: 
     fact.duration_ms = duration;
     let at = DateTime::from_timestamp_millis(ms + duration as i64).unwrap();
     let mut tx = pool.begin().await.unwrap();
-    runs::finish_in_tx(&mut tx, &fact, &r.reference(), at, at)
-        .await
-        .unwrap();
+    runs::finish_in_tx(
+        &mut tx,
+        &fact,
+        &r.reference(),
+        at,
+        at,
+        &canterlot_hub::pricing::PriceBook::default(),
+    )
+    .await
+    .unwrap();
     tx.commit().await.unwrap();
 }
 async fn overlapped(pool: &PgPool, i: &SubmittedInput) -> bool {

@@ -115,6 +115,7 @@ pub struct Ingest {
     dispatcher: Option<crate::dispatcher::Dispatcher>,
     registry: Option<crate::session::Registry>,
     limits: crate::config::LimitsConfig,
+    prices: crate::pricing::PriceBook,
     ignored: Arc<AtomicU64>,
     #[cfg(feature = "fault-injection")]
     pub faults: crate::fault_injection::Faults,
@@ -143,6 +144,7 @@ impl Ingest {
             dispatcher: None,
             registry: None,
             limits: Default::default(),
+            prices: Default::default(),
             ignored: Arc::new(AtomicU64::new(0)),
             #[cfg(feature = "fault-injection")]
             faults: Default::default(),
@@ -151,6 +153,10 @@ impl Ingest {
 
     pub fn with_limits(mut self, config: crate::config::LimitsConfig) -> Self {
         self.limits = config;
+        self
+    }
+    pub fn with_prices(mut self, prices: crate::pricing::PriceBook) -> Self {
+        self.prices = prices;
         self
     }
     pub fn with_registry(mut self, registry: crate::session::Registry) -> Self {
@@ -664,6 +670,7 @@ impl Ingest {
         let pool = self.pool.clone();
         let registry = self.registry.clone();
         let limits_cfg = self.limits.clone();
+        let prices = self.prices.clone();
         let credential = credential.to_owned();
         let pending: Vec<(canterlot_proto::worker::v1::JournalRecord, Option<Vec<u8>>)> = batch
             .records
@@ -788,7 +795,7 @@ impl Ingest {
                 {
                     Some(ignored) => Ok((ignored, None, false)),
                     None => {
-                        Self::apply_pilot_body(&mut *conn, &registry, &limits_cfg, machine_id, journal_id, body, correlation_id)
+                        Self::apply_pilot_body(&mut *conn, &registry, &limits_cfg, &prices, machine_id, journal_id, body, correlation_id)
                             .await
                     }
                 }
@@ -928,6 +935,7 @@ impl Ingest {
         conn: &mut PgConnection,
         registry: &Option<crate::session::Registry>,
         limits: &crate::config::LimitsConfig,
+        prices: &crate::pricing::PriceBook,
         machine: Uuid,
         journal: Uuid,
         body: &Body,
@@ -1100,6 +1108,7 @@ impl Ingest {
                             &run,
                             Self::hub_time_for(registry, machine, f.machine_time_ms, now),
                             now,
+                            prices,
                         )
                         .await
                         .map_err(pilot_error)?;
