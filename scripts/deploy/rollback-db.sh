@@ -260,14 +260,14 @@ restore_fail() {
 if [ "${RESTORE_PHASE}" != "dropped" ]; then
     DB_EXISTS="$(ssh_hub "runuser -u postgres -- psql -h '${HUB_PG_SOCKET}' -d postgres -tAc \"select 1 from pg_database where datname = '${HUB_PG_DB}'\"")" || restore_fail "cannot ask the cluster whether ${HUB_PG_DB} exists"
     if [ "${DB_EXISTS}" = "1" ]; then
-        ssh_hub "runuser -u postgres -- dropdb -h '${HUB_PG_SOCKET}' '${HUB_PG_DB}'" || restore_fail "dropdb FAILED"
+        run_write "dropdb" ssh_hub "runuser -u postgres -- dropdb -h '${HUB_PG_SOCKET}' '${HUB_PG_DB}'" || restore_fail "dropdb FAILED"
     fi
     write_phase "dropped"
 fi
-ssh_hub "runuser -u postgres -- createdb -h '${HUB_PG_SOCKET}' -O '${HUB_PG_USER}' '${HUB_PG_DB}'" || restore_fail "createdb FAILED"
+run_write "createdb" ssh_hub "runuser -u postgres -- createdb -h '${HUB_PG_SOCKET}' -O '${HUB_PG_USER}' '${HUB_PG_DB}'" || restore_fail "createdb FAILED"
 NEW_ID="$(pg_identity)" || restore_fail "cannot read the identity of the recreated database"
 write_phase "created ${NEW_ID#* }"
-ssh_hub "runuser -u postgres -- pg_restore --exit-on-error -h '${HUB_PG_SOCKET}' -d '${HUB_PG_DB}' '${DUMP}'" || restore_fail "pg_restore FAILED"
+run_write "pg_restore" ssh_hub "runuser -u postgres -- pg_restore --exit-on-error -h '${HUB_PG_SOCKET}' -d '${HUB_PG_DB}' '${DUMP}'" || restore_fail "pg_restore FAILED"
 write_phase "restored ${NEW_ID#* }"
 log "pg_restore done"
 
