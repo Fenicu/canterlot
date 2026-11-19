@@ -77,8 +77,11 @@ fn subjects(page: &Value) -> Vec<String> {
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn owner_list_requires_domain_and_never_mixes(pool: PgPool) {
     let fx = Fx::new(pool).await;
-    let work = fx.create("work", "Сборка воркера", "cargo build -p worker").await;
-    fx.create("personal", "Рецепт борща", "свёкла, капуста").await;
+    let work = fx
+        .create("work", "Сборка воркера", "cargo build -p worker")
+        .await;
+    fx.create("personal", "Рецепт борща", "свёкла, капуста")
+        .await;
 
     for path in [
         "/api/v1/memory",
@@ -108,7 +111,11 @@ async fn owner_list_requires_domain_and_never_mixes(pool: PgPool) {
 
     let id = work["id"].as_str().unwrap();
     let own = fx
-        .call(Method::GET, &format!("/api/v1/memory/{id}?domain=work"), None)
+        .call(
+            Method::GET,
+            &format!("/api/v1/memory/{id}?domain=work"),
+            None,
+        )
         .await;
     assert_eq!(own.status.as_u16(), 200);
     assert_eq!(own.json::<Value>()["body"], "cargo build -p worker");
@@ -119,7 +126,11 @@ async fn owner_list_requires_domain_and_never_mixes(pool: PgPool) {
             None,
         )
         .await;
-    assert_eq!(foreign.status.as_u16(), 404, "чужой домен неотличим от пропавшей записи");
+    assert_eq!(
+        foreign.status.as_u16(),
+        404,
+        "чужой домен неотличим от пропавшей записи"
+    );
     assert_eq!(code(&foreign), "not_found");
     let no_domain = fx
         .call(Method::GET, &format!("/api/v1/memory/{id}"), None)
@@ -141,7 +152,11 @@ async fn owner_list_requires_domain_and_never_mixes(pool: PgPool) {
         .json::<Value>();
     assert!(subjects(&active).is_empty());
     let in_archive = fx
-        .call(Method::GET, "/api/v1/memory?domain=work&status=archived", None)
+        .call(
+            Method::GET,
+            "/api/v1/memory?domain=work&status=archived",
+            None,
+        )
         .await
         .json::<Value>();
     assert_eq!(subjects(&in_archive), ["Сборка воркера"]);
@@ -274,7 +289,10 @@ async fn owner_secret_warning_needs_force(pool: PgPool) {
         assert_eq!(refused.status.as_u16(), 422);
         assert_eq!(code(&refused), "looks_like_secret");
         let text = String::from_utf8_lossy(&refused.body).into_owned();
-        assert!(!text.contains("sk-abcdefghijklmnop1234"), "значение не эхом: {text}");
+        assert!(
+            !text.contains("sk-abcdefghijklmnop1234"),
+            "значение не эхом: {text}"
+        );
         assert!(
             refused.json::<Value>()["error"]["details"]["class"].is_string(),
             "класс находки назван: {text}"
@@ -302,11 +320,19 @@ async fn owner_secret_warning_needs_force(pool: PgPool) {
         })
     };
     let refused = fx
-        .call(Method::PUT, &format!("/api/v1/memory/{id}"), Some(edit(false)))
+        .call(
+            Method::PUT,
+            &format!("/api/v1/memory/{id}"),
+            Some(edit(false)),
+        )
         .await;
     assert_eq!(code(&refused), "looks_like_secret");
     let allowed = fx
-        .call(Method::PUT, &format!("/api/v1/memory/{id}"), Some(edit(true)))
+        .call(
+            Method::PUT,
+            &format!("/api/v1/memory/{id}"),
+            Some(edit(true)),
+        )
         .await;
     assert_eq!(allowed.status.as_u16(), 200);
 }
@@ -340,7 +366,10 @@ async fn hard_delete_404_after(pool: PgPool) {
     assert_eq!(deleted.status.as_u16(), 204);
     for (method, path) in [
         (Method::GET, format!("/api/v1/memory/{id}?domain=personal")),
-        (Method::DELETE, format!("/api/v1/memory/{id}?domain=personal")),
+        (
+            Method::DELETE,
+            format!("/api/v1/memory/{id}?domain=personal"),
+        ),
         (
             Method::GET,
             format!("/api/v1/memory/{id}/revisions?domain=personal"),
@@ -388,11 +417,13 @@ async fn conversation_info_carries_memory_domain_and_conflict(pool: PgPool) {
     assert!(bare["memory_project"].is_null());
     assert_eq!(bare["memory_conflict"], false);
 
-    sqlx::query("update conversations set memory_domain='work', memory_project='/h/work/alpha' where id=$1")
-        .bind(seed.conversation_id)
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "update conversations set memory_domain='work', memory_project='/h/work/alpha' where id=$1",
+    )
+    .bind(seed.conversation_id)
+    .execute(&pool)
+    .await
+    .unwrap();
     let work = info(seed.conversation_id).await;
     assert_eq!(work["memory_domain"], "work");
     assert_eq!(work["memory_project"], "/h/work/alpha");

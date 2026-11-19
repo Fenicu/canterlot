@@ -152,10 +152,12 @@ fn screen(force: Option<bool>, texts: &[&str]) -> Result<(), ApiError> {
     }
     for text in texts {
         if let Some(class) = secrets::scan(text) {
-            return Err(ApiError::new(ErrorCode::LooksLikeSecret).with_details(ErrorDetails {
-                class: Some(class.as_str().to_owned()),
-                ..Default::default()
-            }));
+            return Err(
+                ApiError::new(ErrorCode::LooksLikeSecret).with_details(ErrorDetails {
+                    class: Some(class.as_str().to_owned()),
+                    ..Default::default()
+                }),
+            );
         }
     }
     Ok(())
@@ -348,7 +350,9 @@ async fn update(
     ApiJson(b): ApiJson<UpdateMemoryBody>,
 ) -> Result<Json<MemoryEntryView>, ApiError> {
     let domain = domain_of(b.domain.as_deref())?;
-    let expected = b.expected_version.ok_or_else(|| invalid("expected_version"))?;
+    let expected = b
+        .expected_version
+        .ok_or_else(|| invalid("expected_version"))?;
     let id = parse_id(&id)?;
     let mut texts: Vec<&str> = Vec::new();
     texts.extend(b.subject.as_deref());
@@ -367,7 +371,16 @@ async fn update(
     };
     let scope = MemoryScope::owner(domain, b.project.filter(|project| !project.is_empty()));
     let mut tx = db::begin(&s.pool).await?;
-    store::update(&mut tx, &scope, Actor::Owner, id, expected, patch, &s.memory).await?;
+    store::update(
+        &mut tx,
+        &scope,
+        Actor::Owner,
+        id,
+        expected,
+        patch,
+        &s.memory,
+    )
+    .await?;
     let entry = store::get(&mut tx, &scope, id, true)
         .await?
         .ok_or_else(|| ApiError::new(ErrorCode::NotFound))?;
@@ -391,7 +404,9 @@ async fn archive(
     ApiJson(b): ApiJson<ArchiveMemoryBody>,
 ) -> Result<Json<MemoryEntryView>, ApiError> {
     let domain = domain_of(b.domain.as_deref())?;
-    let expected = b.expected_version.ok_or_else(|| invalid("expected_version"))?;
+    let expected = b
+        .expected_version
+        .ok_or_else(|| invalid("expected_version"))?;
     let id = parse_id(&id)?;
     let scope = MemoryScope::owner(domain, None);
     let mut tx = db::begin(&s.pool).await?;

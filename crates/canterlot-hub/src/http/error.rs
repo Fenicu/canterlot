@@ -794,12 +794,11 @@ impl From<crate::memory::store::MemoryError> for ApiError {
                     ..Default::default()
                 })
             }
-            E::VersionConflict { current_version } => {
-                Self::new(ErrorCode::VersionConflict).with_details(ErrorDetails {
+            E::VersionConflict { current_version } => Self::new(ErrorCode::VersionConflict)
+                .with_details(ErrorDetails {
                     current_version: Some(current_version),
                     ..Default::default()
-                })
-            }
+                }),
             E::NotFound | E::MemoryUnavailable => Self::new(ErrorCode::NotFound),
             // Лимит записей считают для агента; владельца он не касается.
             E::RateLimited { .. } => Self::new(ErrorCode::TooManyRequests),
