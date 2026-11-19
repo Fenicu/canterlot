@@ -3,13 +3,15 @@
   import { deleteSchedule, pauseSchedule, resumeSchedule, runSchedule, scheduleRuns } from '#lib/api/client.js';
   import { fmt } from '#lib/format/ru.js';
   import type { SchedulesStore } from '#lib/stores/schedules.svelte.js';
+  import TextBlock from '#lib/timeline/TextBlock.svelte';
   import Button from '#lib/ui/Button.svelte';
   import {
-    cronHuman, fireTime, outcomeWord, runDetails, type Schedule, type ScheduleRun
+    cronHuman, fireTime, outcomeWord, runDetails, targetLabel, type Schedule, type ScheduleRun
   } from './schedules.js';
 
-  let { schedule, store, back, edit, removed }: {
+  let { schedule, store, sessions, back, edit, removed }: {
     schedule: Schedule;
+    sessions: ReadonlyMap<string, { title: string }>;
     store: SchedulesStore;
     back: () => void;
     edit: () => void;
@@ -76,6 +78,9 @@
   }
 
   const last = $derived(runs[0]);
+  const target = $derived(targetLabel(schedule.target, sessions));
+  // Текст отчёта свёрнут, пока владелец не раскроет: он может быть длинным.
+  let openReports = $state<Record<string, boolean>>({});
 </script>
 
 <section data-schedule-detail class="detail" aria-label="Расписание: {schedule.name}">
@@ -86,6 +91,8 @@
   </div>
   <div class="facts">
     <span>Расписание</span><span>{cronHuman(schedule.cron)}</span>
+    <span>Цель</span>
+    <span data-role="schedule-target">{target.kind}{#if target.session && schedule.target.kind !== 'new_session'} · <a href={resolve('/c/[id]', { id: schedule.target.conversation_id })}>{target.session}</a>{/if}</span>
     <span>Пояс</span><span>{schedule.timezone}</span>
     <span>Следующий запуск</span><span>{fireTime(schedule.next_fire_at, schedule.timezone)} (пояс {schedule.timezone})</span>
     <span>Состояние</span><span data-tone={schedule.enabled ? 'ok' : 'warn'}>{schedule.enabled ? 'Включено' : 'На паузе'}</span>
@@ -128,6 +135,12 @@
           {#if run.session_id}
             <a href={resolve('/c/[id]', { id: run.session_id })}>Открыть сессию</a>
           {/if}
+          {#if detail.reportText}
+            <span class="toggle"><Button variant="text" onclick={() => (openReports[run.id] = !openReports[run.id])}>{openReports[run.id] ? 'Скрыть отчёт' : 'Показать отчёт'}</Button></span>
+            {#if openReports[run.id]}
+              <div class="run-report" data-role="run-report"><TextBlock block={{ id: `run-report-${run.id}`, text: detail.reportText, state: 'final' }} /></div>
+            {/if}
+          {/if}
         </div>
       </div>
     {/each}
@@ -154,7 +167,7 @@
   h2 { margin: var(--s0); font-size: var(--fs-title); font-weight: var(--weight-semibold); }
   h3 { margin: var(--s4) var(--s0) var(--s0); font-size: var(--fs-body); }
   .facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: var(--s3) var(--s5); padding: var(--s5); border-radius: var(--radius-card); background: var(--surface); }
-  .facts span:nth-child(odd) { color: var(--muted); font-size: var(--fs-sm); }
+  .facts > span:nth-child(odd) { color: var(--muted); font-size: var(--fs-sm); }
   [data-tone='ok'] { color: var(--success); }
   [data-tone='warn'] { color: var(--warning); }
   [data-tone='danger'] { color: var(--danger); }
@@ -168,6 +181,9 @@
   .when, .delay { color: var(--secondary); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
   .tag { color: var(--muted); font-size: var(--fs-sm); }
   .run-body { display: grid; gap: var(--s2); color: var(--secondary); font-size: var(--fs-sm); }
+  .toggle { justify-self: start; }
+  .run-report { min-width: 0; padding: var(--s4) var(--s5); border-radius: var(--radius-sm); background: var(--raised); color: var(--text); font-size: var(--fs-body); overflow-wrap: anywhere; }
+  .facts a { color: var(--accent-link); }
   .tail { font-family: var(--font-mono); overflow-wrap: anywhere; }
   .run-body a { min-height: var(--target); display: inline-flex; align-items: center; color: var(--accent-link); }
   .delete { display: grid; gap: var(--s3); margin-top: var(--s6); }

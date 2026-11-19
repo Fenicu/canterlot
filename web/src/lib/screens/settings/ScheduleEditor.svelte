@@ -80,6 +80,8 @@
   let permission = $state(initial.permission);
   let groupId = $state(initial.groupId);
   let sessionId = $state(initial.sessionId);
+  // Отказ хаба по цели (`details.field = target`) стоит у поля сессии и гаснет, когда цель меняется.
+  let targetError = $state('');
 
   let preview = $state<string[]>([]);
   let previewError = $state('');
@@ -103,7 +105,8 @@
   const models = $derived(selectedHarness?.models ?? []);
   const efforts = $derived(models.find((item) => item.id === modelId)?.efforts ?? []);
   const permissions = $derived(selectedHarness?.permission_modes ?? []);
-  const sessions = $derived([...runtime.list.items.values()].filter((item) => !item.archived).sort((a, b) => Date.parse(b.last_activity_at ?? b.created_at) - Date.parse(a.last_activity_at ?? a.created_at)));
+  // Боковая копия — скрытый читатель родителя: ни отчёт, ни ввод ей не адресуют.
+  const sessions = $derived([...runtime.list.items.values()].filter((item) => !item.archived && !item.side_of).sort((a, b) => Date.parse(b.last_activity_at ?? b.created_at) - Date.parse(a.last_activity_at ?? a.created_at)));
   const groups = $derived(runtime.list.groups);
   const presets = $derived(runtime.list.presets.length > 0 ? sortPresets([...runtime.list.presets]) : BUILTIN_PRESETS);
 
@@ -151,6 +154,7 @@
       .finally(() => { void refreshPreview(); });
   });
 
+  $effect(() => { void sessionId; void targetKind; targetError = ''; });
   $effect(() => { void machineId; harness = keptHarness(harnesses, harness); });
   $effect(() => { void harness; if (modelId && !models.some((item) => item.id === modelId)) modelId = models[0]?.id ?? ''; });
   $effect(() => {
@@ -192,7 +196,6 @@
   }
 
   function buildTarget(): ScheduleTarget {
-    // Рутина «Отчёт из сессии» пока правится только в части общих полей: цель сохраняется как есть.
     if (targetKind === 'session_report') return { kind: 'session_report', conversation_id: sessionId };
     if (targetKind === 'existing_session') return { kind: 'existing_session', conversation_id: sessionId };
     return {
@@ -257,6 +260,8 @@
     } catch (err) {
       if (err instanceof ApiError && err.code === 'schedule_revision_conflict') {
         conflict = true;
+      } else if (err instanceof ApiError && err.code === 'schedule_invalid' && err.details?.field === 'target') {
+        targetError = err.message.trim() || 'Эту сессию нельзя выбрать целью';
       } else {
         error = errorText(err, 'Не удалось сохранить расписание. Повторите при восстановлении связи');
       }
@@ -304,7 +309,7 @@
 
     <h3>Цель запуска</h3>
     <Segmented name="schedule-target" label="Цель запуска"
-      options={[{ value: 'new_session', label: 'Новая сессия' }, { value: 'existing_session', label: 'Существующая сессия' }]}
+      options={[{ value: 'new_session', label: 'Новая сессия' }, { value: 'existing_session', label: 'Сообщение в сессию' }, { value: 'session_report', label: 'Отчёт из сессии' }]}
       bind:value={targetKind} />
 
     {#if targetKind === 'new_session'}
@@ -331,10 +336,12 @@
       {/if}
       <Select label="Группа" options={groupOptions} bind:value={groupId} />
     {:else}
-      <Select label="Сессия" options={sessionOptions} bind:value={sessionId} hint="Подсказка придёт в очередь выбранной сессии как обычный ввод" />
+      <Select label="Сессия" options={sessionOptions} bind:value={sessionId} error={targetError || undefined}
+        hint={targetKind === 'existing_session' ? 'Подсказка придёт в очередь выбранной сессии как обычный ввод' : undefined} />
     {/if}
 
-    <Textarea label="Подсказка" bind:value={prompt} rows={4} />
+    <Textarea label="Подсказка" bind:value={prompt} rows={4}
+      hint={targetKind === 'session_report' ? 'Копия сессии только читает её историю и отвечает на этот промпт; ответ придёт карточкой в ленту сессии.' : undefined} />
     <Textarea label="Предпроверка" bind:value={precheck} rows={2} hint="Необязательная команда: ненулевой код отменяет запуск" mono />
     <div class="pair">
       <Field label="Таймаут предпроверки, с">
@@ -345,7 +352,7 @@
       </Field>
     </div>
     <Segmented name="schedule-overlap" label="Пересечения" options={[...OVERLAP_OPTIONS].map((item) => ({ value: item.value, label: item.label }))} bind:value={overlap} />
-    <Field label="Заголовок нового сеанса" hint="В шаблоне подставятся название и дата запуска">
+    <Field label={targetKind === 'session_report' ? 'Заголовок карточки' : 'Заголовок нового сеанса'} hint={targetKind === 'session_report' ? 'Карточка в ленте покажет его как «Рутина · …»; подставятся название и дата запуска' : 'В шаблоне подставятся название и дата запуска'}>
       {#snippet children({ id })}<input {id} bind:value={titleTemplate} />{/snippet}
     </Field>
 

@@ -9,7 +9,7 @@
   import { SchedulesStore } from '#lib/stores/schedules.svelte.js';
   import ScheduleEditor from './ScheduleEditor.svelte';
   import ScheduleDetail from './ScheduleDetail.svelte';
-  import { cronHuman, fireTime, outcomeWord, type ScheduleRun, type Schedule } from './schedules.js';
+  import { cronHuman, fireTime, outcomeWord, targetLabel, type ScheduleRun, type Schedule } from './schedules.js';
 
   const store = new SchedulesStore();
   let runtime = $state<Runtime | null>(null);
@@ -18,6 +18,8 @@
   let busy = $state('');
   let confirming = $state('');
 
+  // Имена сессий для строки цели; пока список не пришёл, подпись не выдумывает название.
+  const sessions = $derived(new Map([...(runtime?.list.items.values() ?? [])].map((item) => [item.id, { title: item.title }])));
   const edit = $derived(page.url.searchParams.get('edit'));
   const view = $derived(page.url.searchParams.get('view'));
   const href = (suffix = '') => `${resolve('/settings')}?c=schedules${suffix}`;
@@ -87,7 +89,7 @@
     {:else}<p>Открываю форму…</p>{/if}
   {:else if view && selected}
     {#if runtime}
-      <ScheduleDetail schedule={selected} {store} back={() => location.assign(href())} edit={() => location.assign(href(`&edit=${encodeURIComponent(selected.id)}`))} removed={() => { void store.load(); location.assign(href()); }} />
+      <ScheduleDetail schedule={selected} {store} {sessions} back={() => location.assign(href())} edit={() => location.assign(href(`&edit=${encodeURIComponent(selected.id)}`))} removed={() => { void store.load(); location.assign(href()); }} />
     {:else}<p>Открываю расписание…</p>{/if}
   {:else}
     <div class="head">
@@ -95,7 +97,7 @@
       <!-- eslint-disable-next-line svelte/no-navigation-without-resolve -->
       <a class="add" href={href('&edit=new')}><Button variant="primary">Новое расписание</Button></a>
     </div>
-    <p class="note">Повторяющиеся запуски: новый сеанс по маршруту или ввод в существующую сессию. Пропуск при красных лимитах и пересечении</p>
+    <p class="note">Повторяющиеся запуски: новый сеанс по маршруту, сообщение в существующую сессию или отчёт из сессии карточкой в её ленту. Пропуск при красных лимитах и пересечении</p>
     {#if notice}<p class="error" role="alert">{notice}</p>{/if}
     {#if store.error}<p class="error" role="alert">{store.error}<Button onclick={() => store.load()}>Повторить</Button></p>{/if}
     {#if store.items.length === 0 && !store.error}
@@ -104,11 +106,13 @@
     <div class="list" data-schedules-list>
       {#each store.items as item (item.id)}
         {@const run = last[item.id]}
+        {@const target = targetLabel(item.target, sessions)}
         {@const outcome = run ? outcomeWord(run.state) : null}
         <div class="row" data-schedule-row={item.id}>
           <div class="row-main">
             <strong>{item.name}</strong>
             <span class="meta">{cronHuman(item.cron)}</span>
+            <span class="meta" data-role="schedule-target">{target.kind}{target.session ? ` · ${target.session}` : ''}</span>
             <span class="meta">Далее: {fireTime(item.next_fire_at, item.timezone)} (пояс {item.timezone})</span>
             {#if outcome}
               <span class="outcome" data-tone={outcome.tone}>{outcome.word}</span>
