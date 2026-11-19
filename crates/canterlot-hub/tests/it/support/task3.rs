@@ -158,6 +158,7 @@ pub fn finished(r: &Run, command: Uuid, ms: i64) -> Body {
             output_tokens: 20,
             cache_read_tokens: 3,
             cache_write_tokens: 4,
+            ..Default::default()
         }],
         git: None,
     })

@@ -29,6 +29,7 @@ fn spent(input: i64, output: i64) -> ModelUsage {
         output_tokens: output as u64,
         cache_read_tokens: 1,
         cache_write_tokens: 2,
+        ..Default::default()
     }
 }
 
@@ -447,6 +448,7 @@ async fn run_is_created_on_accept_and_finished_with_usage_per_model(pool: PgPool
         output_tokens: 40,
         cache_read_tokens: 5,
         cache_write_tokens: 6,
+        ..Default::default()
     });
     r.send(vec![Body::RunFinished(f)]).await;
     let readings: (i32, i32) =

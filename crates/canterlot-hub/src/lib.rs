@@ -55,6 +55,7 @@ pub mod owner_auth;
 pub mod presence;
 pub mod presets;
 pub mod preview;
+pub mod pricing;
 pub mod prompt_suggestions;
 pub mod provider_status;
 pub mod rendition;

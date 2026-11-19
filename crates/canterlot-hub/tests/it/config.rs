@@ -658,3 +658,37 @@ fn hung_rescue_auto_is_reported_as_a_startup_warning_and_maps_to_alert() {
     fs::write(&path, base).unwrap();
     assert!(HubConfig::load(&path).unwrap().startup_warnings.is_empty());
 }
+
+#[test]
+fn pricing_section_is_optional_and_overrides_the_price_table() {
+    use canterlot_hub::pricing::{PriceBook, Tokens};
+    let base = "database_url_file = 'db'\ngrpc_listen = '127.0.0.1:7443'\ntls_cert = 'cert'\ntls_key = 'key'\nmanifest = 'manifest'\n";
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hub.toml");
+    fs::write(&path, base).unwrap();
+    assert!(HubConfig::load(&path).unwrap().pricing.is_empty());
+    fs::write(
+        &path,
+        format!("{base}[pricing.\"my-model\"]\ninput = 3.0\noutput = 4.0\n"),
+    )
+    .unwrap();
+    let config = HubConfig::load(&path).unwrap();
+    let tokens = Tokens {
+        input: 1_000_000,
+        output: 1_000_000,
+        cache_read: 0,
+        cache_write: 0,
+    };
+    assert_eq!(
+        PriceBook::with_overrides(&config.pricing).cost_micro_usd("my-model", tokens),
+        Some(7_000_000)
+    );
+    for bad in [
+        "[pricing.\"m\"]\ninput = -1.0\noutput = 1.0\n",
+        "[pricing.\"m\"]\ninput = 1.0\n",
+        "[pricing.\"m\"]\ninput = 1.0\noutput = 1.0\nfree = true\n",
+    ] {
+        fs::write(&path, format!("{base}{bad}")).unwrap();
+        assert!(HubConfig::load(&path).is_err(), "{bad}");
+    }
+}
