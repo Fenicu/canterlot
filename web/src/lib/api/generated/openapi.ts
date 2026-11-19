@@ -3146,6 +3146,8 @@ export interface components {
             items: components["schemas"]["TimelineItem"][];
             next_after?: string | null;
             next_before?: string | null;
+            /** @description Расход и цена ходов, чьи блоки лежат на странице: строка под ответом не просит их отдельно. */
+            runs: components["schemas"]["RunCostView"][];
         };
         /**
          * @description Найденный ответ или сообщение. `seq` — место в ленте (`created_seq` блока, `feed_seq`
@@ -3819,6 +3821,11 @@ export interface components {
             cache_read_tokens: number;
             /** Format: int64 */
             cache_write_tokens: number;
+            /**
+             * Format: int64
+             * @description Сумма известных цен в микродолларах; ходы без цены в неё не входят.
+             */
+            cost_micro_usd?: number;
             /** Format: int64 */
             input_tokens: number;
             model: string;
@@ -4702,6 +4709,13 @@ export interface components {
             /** @description «Запустить в любом случае»: обходит проверки расписания. */
             run_anyway?: boolean;
         };
+        /** @description Расход одного хода для строки цены под ответом. */
+        RunCostView: {
+            limit?: components["schemas"]["RunLimit"] | null;
+            /** Format: uuid */
+            run_id: string;
+            usage: components["schemas"]["ModelUsageView"][];
+        };
         RunInfo: {
             /** Format: int32 */
             compactions?: number | null;
@@ -5329,12 +5343,19 @@ export interface components {
             /** Format: int64 */
             cache_write_tokens: number;
             /** Format: int64 */
+            cost_micro_usd: number;
+            /** Format: int64 */
             input_tokens: number;
             models: components["schemas"]["ModelUsageView"][];
             /** Format: int64 */
             output_tokens: number;
             /** Format: int64 */
             turns: number;
+            /**
+             * Format: int64
+             * @description Ходы, у которых хотя бы по одной модели нет цены: в сумму ниже они не входят.
+             */
+            unknown_cost_turns: number;
         };
         WatchView: {
             hotspots: components["schemas"]["HotspotView"][];

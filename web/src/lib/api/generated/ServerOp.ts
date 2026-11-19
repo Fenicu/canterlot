@@ -15,6 +15,7 @@ export type ServerOp =
         | QueuePaused
         | ExecutionStateChanged
         | RunFinished
+        | RunCostUpdated
         | InterruptStateChanged
         | BlockStarted
         | BlockDelta
@@ -359,6 +360,37 @@ export interface RunFinished {
   payload: {
     input_id: Uuid;
     input_command_id: Uuid;
+  };
+}
+export interface RunCostUpdated {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "run_cost_updated";
+  payload: {
+    run_id: Uuid;
+    usage: {
+      model: string;
+      agent: string;
+      input_tokens: number;
+      output_tokens: number;
+      cache_read_tokens: number;
+      cache_write_tokens: number;
+      cost_micro_usd: number | null;
+      cost_source: ("cli" | "prices") | null;
+    }[];
+    limit: {
+      provider: string;
+      weekly_delta_permille: number;
+      exact: boolean;
+    } | null;
   };
 }
 export interface InterruptStateChanged {
