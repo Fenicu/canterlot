@@ -190,6 +190,8 @@ def check_dict(node, struct_name, structs, path, errors, warnings):
             (errors if deny else warnings).append(
                 f"{'unknown key' if deny else 'unchecked key (no deny_unknown_fields)'} '{here}'")
             continue
+        if strip_option(fields[key]) == "Value" and "Value" not in structs:
+            continue  # произвольное значение TOML: внутрь не смотрим
         kind = classify(fields[key], structs)
         if isinstance(value, dict):
             if kind[0] == "struct":

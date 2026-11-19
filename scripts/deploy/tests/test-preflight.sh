@@ -538,6 +538,29 @@ else
     case_ok "serde(skip) worker key codex.owner_home rejected"
 fi
 assert_contains "${FAKE_ROOT}/check/ownerhome.log" "unknown key 'codex.owner_home'" "[codex] owner_home reported unknown"
+
+# Поле toml::Value (worker.legacy_ignored, ключ antigravity) принимает любую
+# таблицу без проверки внутри; неизвестная таблица в другом месте по-прежнему отказ.
+cp "${WORKER_CONFIG}" "${FAKE_ROOT}/check/worker-antigravity.toml"
+printf '\n[antigravity]\nenabled = true\n[antigravity.nested]\nkey = "v"\n' >>"${FAKE_ROOT}/check/worker-antigravity.toml"
+if python3 "${DEPLOY_DIR}/config-check.py" \
+        "${REPO_ROOT}/crates/canterlot-worker/src/config.rs" WorkerConfig \
+        "${FAKE_ROOT}/check/worker-antigravity.toml" >"${FAKE_ROOT}/check/antigravity.log" 2>&1; then
+    case_ok "real WorkerConfig accepts the legacy [antigravity] table"
+else
+    cat "${FAKE_ROOT}/check/antigravity.log"
+    case_fail "real WorkerConfig rejected the legacy [antigravity] table"
+fi
+cp "${WORKER_CONFIG}" "${FAKE_ROOT}/check/worker-unknown-table.toml"
+printf '\n[nonsense]\nkey = 1\n' >>"${FAKE_ROOT}/check/worker-unknown-table.toml"
+if python3 "${DEPLOY_DIR}/config-check.py" \
+        "${REPO_ROOT}/crates/canterlot-worker/src/config.rs" WorkerConfig \
+        "${FAKE_ROOT}/check/worker-unknown-table.toml" >"${FAKE_ROOT}/check/unknown-table.log" 2>&1; then
+    case_fail "unknown worker table [nonsense] accepted"
+else
+    case_ok "unknown worker table [nonsense] rejected"
+fi
+assert_contains "${FAKE_ROOT}/check/unknown-table.log" "unknown key 'nonsense'" "unknown table reported"
 teardown_case
 case_end
 
