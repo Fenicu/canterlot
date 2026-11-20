@@ -530,6 +530,10 @@ message ExecutionState {
   // Только при согласованной возможности memory_scope_v1: realpath рабочего каталога
   // запуска. Пусто у старого воркера или если каталог не разрешился.
   string canonical_workdir = 7;
+  // Только у изолированного запуска: realpath исходного репозитория, из которого
+  // собрана рабочая копия. Хаб классифицирует его, а не нейтральную копию. Пусто у
+  // старого воркера и у неизолированного запуска.
+  string canonical_source = 8;
 }
 
 message RunFinished {
@@ -975,6 +979,8 @@ message PathProbeExists {
   string head = 3;
   // Пусто, `binary` (не текст) или `not_requested`.
   string head_omitted = 4;
+  // Realpath файла: хаб классифицирует его по корням работы. Пусто у старого воркера.
+  string canonical_path = 5;
 }
 
 message PathProbeMissing {}

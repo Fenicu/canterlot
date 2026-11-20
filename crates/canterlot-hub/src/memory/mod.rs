@@ -195,6 +195,35 @@ pub async fn child_scope(
     Ok((Some(domain), project))
 }
 
+/// Файл под рабочим корнем машины нельзя отдавать вызывающему не из рабочего домена:
+/// ни существование, ни метаданные, ни начало текста. Работа с файлами вне корней
+/// (`/tmp/*.done`) рабочему вызывающему остаётся. Классифицируется настоящий путь от
+/// воркера, а без него (старый воркер, файла нет) — путь как он записан. Корни неизвестны —
+/// поведение прежнее.
+pub async fn file_denied_for(
+    conn: &mut PgConnection,
+    conversation_id: Uuid,
+    lexical_path: &str,
+    canonical_path: Option<&str>,
+) -> Result<bool, sqlx::Error> {
+    let row: Option<(Uuid, Option<String>)> =
+        sqlx::query_as("select machine_id, memory_domain from conversations where id=$1")
+            .bind(conversation_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    let Some((machine_id, domain)) = row else {
+        return Ok(false);
+    };
+    if domain.as_deref().and_then(MemoryDomain::parse) == Some(MemoryDomain::Work) {
+        return Ok(false);
+    }
+    let Some(roots) = machine_roots(conn, machine_id).await? else {
+        return Ok(false);
+    };
+    let path = canonical_path.unwrap_or(lexical_path);
+    Ok(classify(path, &roots.work_roots, roots.worktree_root.as_deref()) == Classification::Work)
+}
+
 /// Проверка запуска: настоящий путь, который прислал воркер, противоречит сохранённому
 /// домену. Тогда память разговора выключается, событие остаётся владельцу, а запуск идёт
 /// дальше. Нейтральный настоящий путь домену не противоречит. Возвращает `true`, если
@@ -203,9 +232,17 @@ pub async fn recheck_launch(
     conn: &mut PgConnection,
     execution_id: Uuid,
     canonical_workdir: &str,
+    canonical_source: &str,
     correlation_id: Uuid,
 ) -> Result<bool, sqlx::Error> {
-    if canonical_workdir.is_empty() {
+    // Изолированная копия лежит в нейтральной базе, её домен определяет репозиторий-источник.
+    // Старый воркер и неизолированный запуск источник не шлют: проверяется сам каталог.
+    let checked = if canonical_source.is_empty() {
+        canonical_workdir
+    } else {
+        canonical_source
+    };
+    if checked.is_empty() {
         return Ok(false);
     }
     let row: Option<(Uuid, Uuid, Option<String>)> = sqlx::query_as(
@@ -225,11 +262,7 @@ pub async fn recheck_launch(
     let Some(roots) = machine_roots(conn, machine_id).await? else {
         return Ok(false);
     };
-    let actual = classify(
-        canonical_workdir,
-        &roots.work_roots,
-        roots.worktree_root.as_deref(),
-    );
+    let actual = classify(checked, &roots.work_roots, roots.worktree_root.as_deref());
     let contradicts = matches!(
         (actual, stored),
         (Classification::Work, MemoryDomain::Personal)

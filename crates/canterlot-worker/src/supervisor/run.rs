@@ -268,6 +268,8 @@ struct Supervisor {
     next_conn: u64,
     attach_deadline: Option<Instant>,
     workdir: Option<PathBuf>,
+    /// Репозиторий-источник изолированной копии, как его назвал хаб.
+    source_workdir: Option<PathBuf>,
     media: MediaQueue,
     media_jobs: mpsc::UnboundedSender<MediaJob>,
     shares: ShareQueue,
@@ -477,6 +479,7 @@ pub(super) async fn run(exec_dir: PathBuf) -> Result<ExitCode, SupervisorError> 
         unknown_ipc_logged: false,
         next_conn: 0,
         workdir: None,
+        source_workdir: None,
         media: MediaQueue::default(),
         media_jobs,
         shares: ShareQueue::default(),
@@ -672,6 +675,12 @@ impl Supervisor {
         } else {
             String::new()
         };
+        // Изолированная копия лежит в нейтральной базе: домен задаёт её репозиторий.
+        let canonical_source = if state == "running" {
+            crate::memory_scope::canonical_source(self.source_workdir.as_deref())
+        } else {
+            String::new()
+        };
         self.record(Body::ExecutionState(
             canterlot_proto::worker::v1::ExecutionState {
                 execution_id: self.spec.execution_id.to_string(),
@@ -681,6 +690,7 @@ impl Supervisor {
                 native_conversation_id: native.into(),
                 fresh_fork,
                 canonical_workdir,
+                canonical_source,
             },
         ))?;
         Ok(())
@@ -1855,6 +1865,8 @@ impl Supervisor {
         self.session_tools_v1 = start.session_tools_v1;
         self.prompt_suggestions = start.prompt_suggestions && !start.isolate_mcp;
         self.workdir = Some(PathBuf::from(&start.workdir));
+        self.source_workdir =
+            (!start.source_workdir.is_empty()).then(|| PathBuf::from(&start.source_workdir));
         if self.session_tools_v1 {
             self.git_head = git_facts::head(Path::new(&start.workdir)).await;
         }
@@ -3966,6 +3978,7 @@ mod tests {
             unknown_ipc_logged: false,
             next_conn: 0,
             workdir: None,
+            source_workdir: None,
             media: MediaQueue::default(),
             media_jobs,
             shares: ShareQueue::default(),

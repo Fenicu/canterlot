@@ -1510,6 +1510,7 @@ async fn apply_body(
                             conn,
                             execution_id,
                             &fact.canonical_workdir,
+                            &fact.canonical_source,
                             correlation_id,
                         )
                         .await?;
