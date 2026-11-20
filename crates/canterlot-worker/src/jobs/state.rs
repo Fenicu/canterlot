@@ -37,6 +37,12 @@ pub const EMITTED: &str = "emitted.json";
 pub const UPLOADED: &str = "uploaded";
 pub const LOG_GZ: &str = "log.gz";
 pub const SHIM_LOG: &str = "shim.log";
+/// Оболочка после выдачи аренды не признала рабочий каталог: команда не запускалась.
+pub const WORKDIR_REFUSED: &str = "workdir_refused";
+/// Замок запуска: под ним оболочка делает последнюю проверку отмены и создаёт процесс команды,
+/// а воркер сохраняет отмену. Так сохранённая отмена либо видна до запуска, либо приходит
+/// после того, как процесс уже есть и его группу можно убрать.
+pub const START_LOCK: &str = "start.lock";
 
 pub fn jobs_root(data_dir: &Path) -> PathBuf {
     data_dir.join("jobs")
@@ -73,6 +79,10 @@ pub struct Spec {
     pub command_id: String,
     pub dispatch_attempt: u32,
     pub workdir: String,
+    /// Корни, внутри которых должен лежать рабочий каталог; оболочка проверяет его заново
+    /// после выдачи аренды. Пустой список (описание без поля) отказывает любому каталогу.
+    #[serde(default)]
+    pub allowed_roots: Vec<PathBuf>,
     pub shell: String,
     /// Полное окружение команды, уже собранное воркером: оболочка берёт только его.
     pub env: Vec<(String, String)>,
@@ -192,6 +202,33 @@ pub fn read_started(dir: &Path) -> Option<u64> {
         .trim()
         .parse()
         .ok()
+}
+
+/// Замок запуска попытки; снимается при закрытии файла.
+pub struct StartLock {
+    _file: File,
+}
+
+impl StartLock {
+    /// Ждёт замок: его держат только на время проверки и создания процесса.
+    pub fn acquire(dir: &Path) -> io::Result<Self> {
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(dir.join(START_LOCK))?;
+        rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive)
+            .map_err(io::Error::from)?;
+        Ok(Self { _file: file })
+    }
+}
+
+/// Сохраняет отмену под замком запуска: к моменту возврата оболочка либо уже создала процесс
+/// (группу убирает наблюдатель), либо увидит отмену в последней проверке и ничего не создаст.
+pub fn persist_cancel(attempt: &Path) -> io::Result<()> {
+    let _lock = StartLock::acquire(attempt)?;
+    touch(&attempt.join(CANCEL))
 }
 
 pub fn cancel_requested(data_dir: &Path, job_id: &str, attempt: u32) -> bool {
