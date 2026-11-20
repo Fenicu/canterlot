@@ -355,6 +355,17 @@ pub async fn run(
     if !capable {
         return Err(ToolError::new(ToolErrorCode::CapabilityMissing));
     }
+    // Удалённая задача запоминает поколение допуска машины: выключение до диспетчеризации
+    // закроет её, даже если выключатель потом включат снова. Строка машины уже прочитана
+    // `for share` в `admit`.
+    let admission_generation: Option<i64> = if remote {
+        sqlx::query_scalar("select remote_admission_generation from machines where id=$1")
+            .bind(machine_id)
+            .fetch_optional(&mut *tx)
+            .await?
+    } else {
+        None
+    };
     let id = Uuid::now_v7();
     // Страж встаёт до фиксации: вызов, оборванный внутри `commit`, не оставит задачу без
     // доставки. Если заявка не зафиксирована, строки нет и страж ничего не делает.
@@ -372,10 +383,11 @@ pub async fn run(
     let inserted = sqlx::query(
         "insert into jobs (id, owner_id, conversation_id, domain, machine_id, remote, workdir,
                            shell, env, title, timeout_seconds, lease, call_id, idempotency_key,
-                           delivery, waiter_instance, waiter_deadline)
+                           delivery, waiter_instance, waiter_deadline, admission_generation)
          values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
                  case when $16::uuid is null then null
-                      else clock_timestamp() + make_interval(secs => $17) end)
+                      else clock_timestamp() + make_interval(secs => $17) end,
+                 $18)
          on conflict do nothing",
     )
     .bind(id)
@@ -399,6 +411,7 @@ pub async fn run(
     // Ждущий вызов живёт в этом экземпляре хаба до срока; срок уточняется после фиксации.
     .bind((wait > 0).then(jobs::hub_instance))
     .bind((wait + jobs::WAITER_SLACK_SECONDS) as f64)
+    .bind(admission_generation)
     .execute(&mut *tx)
     .await?
     .rows_affected();

@@ -879,6 +879,56 @@ async fn a_queued_remote_spawn_is_refused_when_the_switch_goes_off_before_the_st
     );
 }
 
+/// Выключатель, выключенный и включённый обратно до старта, не оживляет ожидавший запуск:
+/// он запомнил прежнее поколение допуска.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_queued_remote_spawn_does_not_revive_after_off_and_on(pool: PgPool) {
+    let f = Fx::with(pool, false).await;
+    f.switch(true).await;
+    f.spawn(remote_args()).await.unwrap();
+    f.switch(false).await;
+    f.switch(true).await;
+    sqlx::query("update spawn_queue set not_before=now()-interval '1 second'")
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let registry = Registry::new(Default::default());
+    let _a = testkit::fake_session(&registry, f.a, &CAPABILITIES, true);
+    let _b = testkit::fake_session(&registry, f.b, &REMOTE, true);
+    f.dequeue_with(&registry).await;
+    let (state, result): (String, Option<Value>) =
+        sqlx::query_as("select state,result from spawn_queue where parent_id=$1")
+            .bind(f.parent)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(state, "failed", "{result:?}");
+    assert_eq!(result.unwrap()["code"], "remote_work_disabled");
+    assert!(f.children().await.is_empty());
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn an_approved_remote_spawn_does_not_revive_after_off_and_on(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    f.switch(true).await;
+    let mut outside = remote_args();
+    outside["model"] = json!(OUTSIDE);
+    let answer = f.spawn(outside).await.unwrap();
+    let request: Uuid = serde_json::from_value(answer["request_id"].clone()).unwrap();
+    f.switch(false).await;
+    f.switch(true).await;
+    f.decide(request, PermissionBehavior::Allow).await;
+    f.tick().await;
+    assert!(f.children().await.is_empty(), "the old card must not start");
+    assert!(
+        f.notes().await.iter().any(|note| note.contains("remote_work_disabled")),
+        "{:?}",
+        f.notes().await
+    );
+    // Новая заявка после повторного включения проходит.
+    f.started(remote_args()).await;
+}
+
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn an_offline_queued_remote_spawn_expires_with_a_note_to_the_parent(pool: PgPool) {
     let f = Fx::with(pool, false).await;

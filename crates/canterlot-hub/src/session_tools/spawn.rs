@@ -134,6 +134,10 @@ pub(crate) struct SpawnArgs {
     /// а не имя. Модель её не передаёт.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) machine_id: Option<Uuid>,
+    /// Поколение допуска удалённой работы целевой машины на момент заявки; ставит хаб, а то,
+    /// что пришло от модели, перезаписывается. Запуск отказывает, если поколение выросло.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) admission_generation: Option<i64>,
     #[serde(default)]
     pub(crate) isolated: Option<bool>,
     pub(crate) base: Option<String>,
@@ -194,6 +198,10 @@ pub struct SpawnSpec {
     /// только её; пусто — машина родителя (так выглядят все прежние карточки).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) machine_id: Option<Uuid>,
+    /// Поколение допуска удалённой работы машины запуска на момент заявки (см. `SpawnArgs`);
+    /// пусто у карточек до миграции 0126, это поколение 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) admission_generation: Option<i64>,
 }
 
 impl SpawnSpec {
@@ -671,14 +679,20 @@ pub(crate) async fn resolve_machine(
 
 /// Допуск удалённой работы: единственная точка, общая для запуска и очереди. Строка машины
 /// читается `for share`, а выключатель меняют `for update`. Владелец уже заблокирован.
+///
+/// `recorded` — поколение допуска, которое запомнила заявка: запуск, ждавший в очереди или в
+/// карточке, отказывает, если машину с тех пор выключали (поколение выросло), даже когда
+/// выключатель включён снова. Свежая заявка передаёт `None`. Возвращает текущее поколение.
 pub(crate) async fn admit_remote_in_tx(
     conn: &mut PgConnection,
     owner: Uuid,
     machine: Uuid,
-) -> Result<(), ToolError> {
+    recorded: Option<i64>,
+) -> Result<i64, ToolError> {
     conversations::lock_owner(conn, owner).await?;
-    if crate::machines::accepts_remote_work_for_share(conn, machine).await? {
-        Ok(())
+    let (accepts, generation) = crate::machines::remote_admission_for_share(conn, machine).await?;
+    if accepts && recorded.is_none_or(|recorded| recorded >= generation) {
+        Ok(generation)
     } else {
         Err(ToolError::new(ToolErrorCode::RemoteWorkDisabled))
     }
@@ -815,6 +829,7 @@ pub(crate) async fn validate(
             wider_than_parent,
             plan_task_id: args.plan_task_id,
             machine_id: remote.then_some(machine),
+            admission_generation: remote.then_some(args.admission_generation).flatten(),
         },
         catalog,
     ))
@@ -1009,6 +1024,7 @@ pub(crate) async fn validate_routed(
             wider_than_parent,
             plan_task_id: args.plan_task_id,
             machine_id: remote.then_some(machine),
+            admission_generation: remote.then_some(args.admission_generation).flatten(),
         },
         first_model,
     ))
@@ -1063,7 +1079,13 @@ pub(crate) async fn start_child(
     // Единственная точка допуска удалённого запуска: после коммита запуска выключатель уже
     // не отзовёт стартовую команду, а до него — отказывает. Владелец заблокирован раньше.
     if spec.machine_id.is_some() {
-        admit_remote_in_tx(conn, owner, machine).await?;
+        admit_remote_in_tx(
+            conn,
+            owner,
+            machine,
+            Some(spec.admission_generation.unwrap_or(0)),
+        )
+        .await?;
     }
     let brief = vec![ContentBlock::Text {
         text: spec.brief.clone(),
@@ -1380,8 +1402,11 @@ pub async fn spawn(
     // Имя или id → машина; дальше очередь, карточка и повтор помнят только её id.
     let requested_machine = args.machine.take();
     args.machine_id = resolve_machine(&mut tx, caller, requested_machine.as_deref()).await?;
+    // Поколение допуска записывается при заявке; присланное моделью значение не доверяется.
+    args.admission_generation = None;
     if let Some(target) = args.machine_id {
-        admit_remote_in_tx(&mut tx, caller.owner_id, target).await?;
+        args.admission_generation =
+            Some(admit_remote_in_tx(&mut tx, caller.owner_id, target, None).await?);
     }
     if parent.spawn_depth >= context.config.max_spawn_depth as i32 {
         return Err(ToolError::new(ToolErrorCode::SpawnDepthExceeded));

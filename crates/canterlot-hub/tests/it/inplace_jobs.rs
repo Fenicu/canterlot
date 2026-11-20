@@ -947,6 +947,29 @@ async fn dispatch_waits_for_a_concurrent_mode_change_and_sees_it(pool: PgPool) {
     assert_eq!(fx.commands(fx.a, "start_inplace_job").await, 4);
 }
 
+/// Выключатель выключили и включили до диспетчеризации: удалённая задача, ждавшая в очереди
+/// в момент выключения, не стартует, а закрывается `remote_work_disabled`.
+#[sqlx::test(migrations = "./migrations")]
+async fn a_queued_remote_job_does_not_revive_after_off_and_on(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    fx.switch(true).await;
+    let first = job_id(&fx.run_on_b("one").await.unwrap());
+    let _second = job_id(&fx.run_on_b("two").await.unwrap());
+    let waiting = job_id(&fx.run_on_b("three").await.unwrap());
+    assert_eq!(fx.state(waiting).await, "queued");
+    fx.switch(false).await;
+    fx.switch(true).await;
+    fx.started(fx.b, first).await;
+    fx.finished(fx.b, first, JobOutcome::Succeeded, Some(0)).await;
+    let job = fx.job(waiting).await;
+    assert_eq!(job.state, "canceled");
+    assert_eq!(job.end_reason.as_deref(), Some("remote_work_disabled"));
+    assert_eq!(fx.commands(fx.b, "start_inplace_job").await, 2);
+    // Заявка после повторного включения проходит.
+    let fresh = job_id(&fx.run_on_b("four").await.unwrap());
+    assert_eq!(fx.state(fresh).await, "dispatched");
+}
+
 // ───────── Допуск ─────────
 
 #[sqlx::test(migrations = "./migrations")]

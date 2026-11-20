@@ -141,6 +141,7 @@ pub struct Job {
     pub late_report: Option<Value>,
     pub waiter_instance: Option<Uuid>,
     pub waiter_deadline: Option<DateTime<Utc>>,
+    pub admission_generation: Option<i64>,
     pub finish_report: Option<Value>,
     pub finish_reported_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
@@ -681,6 +682,22 @@ pub async fn dispatch_machine_in_tx(
         };
         if job.state() != State::Queued {
             continue;
+        }
+        // Удалённая задача, ждавшая в очереди, пока машину выключали, не оживает от повторного
+        // включения: поколение допуска выросло с её заявки.
+        if job.remote {
+            let (accepts, generation) =
+                crate::machines::remote_admission_for_share(conn, job.machine_id).await?;
+            if !accepts || job.admission_generation.unwrap_or(0) < generation {
+                finish_in_tx(
+                    conn,
+                    &job,
+                    Outcome::bare(State::Canceled, Some(Refusal::RemoteWorkDisabled.reason())),
+                    correlation_id,
+                )
+                .await?;
+                continue;
+            }
         }
         // Заказчик, чьё разрешение сменилось, больше не может ставить новую работу;
         // удалённый заказчик не мешает: заявка была допущена, задача принадлежит владельцу.
