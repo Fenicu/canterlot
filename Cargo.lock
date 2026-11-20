@@ -592,6 +592,7 @@ dependencies = [
  "canterlot-proto",
  "chrono",
  "clap",
+ "flate2",
  "humantime-serde",
  "jsonschema",
  "prost",

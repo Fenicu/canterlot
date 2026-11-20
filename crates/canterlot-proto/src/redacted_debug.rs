@@ -67,7 +67,54 @@ impl fmt::Debug for command::Kind {
                 .debug_struct("GoalCommand")
                 .field("action", &input.action)
                 .finish_non_exhaustive(),
+            Self::StartInPlaceJob(input) => f.debug_tuple("StartInPlaceJob").field(input).finish(),
+            Self::CancelInPlaceJob(input) => {
+                f.debug_tuple("CancelInPlaceJob").field(input).finish()
+            }
         }
+    }
+}
+
+// Команда и значения окружения задачи — данные владельца: в логи идут только размеры и имена.
+impl fmt::Debug for crate::worker::v1::StartInPlaceJob {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let names: Vec<&str> = self.env.iter().map(|var| var.name.as_str()).collect();
+        f.debug_struct("StartInPlaceJob")
+            .field("job_id", &self.job_id)
+            .field("attempt", &self.attempt)
+            .field("workdir", &self.workdir)
+            .field("shell_bytes", &self.shell.len())
+            .field("env_names", &names)
+            .field("timeout_seconds", &self.timeout_seconds)
+            .field("lease", &self.lease)
+            .finish()
+    }
+}
+
+// Вывод команды: в логи идут только размеры.
+impl fmt::Debug for crate::worker::v1::JobLogChunk {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("JobLogChunk")
+            .field("job_id", &self.job_id)
+            .field("attempt", &self.attempt)
+            .field("offset", &self.offset)
+            .field("data_bytes", &self.data.len())
+            .finish()
+    }
+}
+
+impl fmt::Debug for crate::worker::v1::JobFinished {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("JobFinished")
+            .field("job_id", &self.job_id)
+            .field("attempt", &self.attempt)
+            .field("outcome", &self.outcome)
+            .field("exit_code", &self.exit_code)
+            .field("duration_ms", &self.duration_ms)
+            .field("log_bytes", &self.log_bytes)
+            .field("tail_bytes", &self.tail.len())
+            .field("truncated", &self.truncated)
+            .finish()
     }
 }
 

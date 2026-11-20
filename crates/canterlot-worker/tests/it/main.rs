@@ -95,6 +95,7 @@ mod exec_e2e;
 mod exec_media;
 mod git_facts;
 mod instructions;
+mod jobs;
 mod lease;
 mod lease_scripts;
 mod machine;

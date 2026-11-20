@@ -81,10 +81,18 @@ impl Fixture {
     }
 
     fn wrapper(&self, kind: &str, args: &[&str]) -> Command {
+        self.wrapper_with(kind, false, args)
+    }
+
+    fn wrapper_with(&self, kind: &str, strict: bool, args: &[&str]) -> Command {
         let mut command = Command::new(WORKER);
         command
             .args(["lease", "run", "--kind", kind, "--label"])
-            .arg(format!("test {kind}"))
+            .arg(format!("test {kind}"));
+        if strict {
+            command.arg("--strict");
+        }
+        command
             .arg("--")
             .args(args)
             .current_dir(self.root.path())
@@ -100,6 +108,10 @@ impl Fixture {
 
     /// Задача, которая под арендой пишет свои ограничения в `<name>.held` и ждёт `<name>.go`.
     fn job(&self, kind: &str, name: &str) -> Job {
+        self.job_with(kind, name, false)
+    }
+
+    fn job_with(&self, kind: &str, name: &str, strict: bool) -> Job {
         let held = self.path(&format!("{name}.held"));
         let go = self.path(&format!("{name}.go"));
         let pid = self.path(&format!("{name}.pid"));
@@ -108,7 +120,7 @@ impl Fixture {
              echo \"$CANTERLOT_LEASE_HELD $CANTERLOT_TEST_THREADS $CARGO_BUILD_JOBS $PW_WORKERS $CANTERLOT_LEASE_BUDGET\" > {held:?}.tmp && mv {held:?}.tmp {held:?}; \
              while [ ! -e {go:?} ]; do sleep 0.05; done"
         );
-        let mut command = self.wrapper(kind, &["sh", "-c", &script]);
+        let mut command = self.wrapper_with(kind, strict, &["sh", "-c", &script]);
         std::os::unix::process::CommandExt::process_group(&mut command, 0);
         Job {
             child: command.spawn().unwrap(),
@@ -710,6 +722,114 @@ async fn status_lists_holders_and_waiters() {
     assert!(!parsed.holders[0].state.is_empty());
     drop(waiter);
     drop(holder);
+}
+
+// Строгий режим (задачи на месте): очередь без запуска вне аренды.
+
+/// Событие, после которого проверяется ожидание: сервер показал просителя в очереди или
+/// обёртка сама написала в stderr, что ждёт. Таймеров здесь нет.
+fn assert_still_waiting(job: &mut Job) {
+    assert!(!job.granted(), "the strict request must keep waiting");
+    assert!(
+        job.child.try_wait().unwrap().is_none(),
+        "the strict wrapper must not exit or run the command unleased"
+    );
+}
+
+async fn wait_note(job: &mut Job, needle: &str) {
+    let stderr = job.child.stderr.take().expect("stderr is piped");
+    let needle = needle.to_owned();
+    let seen = tokio::time::timeout(
+        WAIT,
+        tokio::task::spawn_blocking(move || {
+            use std::io::BufRead;
+            std::io::BufReader::new(stderr)
+                .lines()
+                .map_while(Result::ok)
+                .any(|line| line.contains(&needle))
+        }),
+    )
+    .await
+    .expect("timed out waiting for the wrapper note")
+    .unwrap();
+    assert!(seen, "the wrapper never said it keeps waiting");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn strict_request_waits_behind_a_held_gate_and_never_runs_unleased() {
+    let fixture = Fixture::new(2).await;
+    let gate = fixture.job_with("gate", "gate", true);
+    gate.wait_granted().await;
+    let mut behind = fixture.job_with("build", "behind", true);
+    fixture.waiters(1).await;
+    assert_still_waiting(&mut behind);
+    assert_eq!(fixture.snapshot().holders.len(), 1, "no second holder");
+
+    assert!(gate.finish().await.success());
+    let env = behind.wait_granted().await;
+    assert_eq!(fixture.snapshot().holders.len(), 1);
+    assert!(
+        !env[0].is_empty() && env[0] != lease::UNLEASED,
+        "a real lease id, got {env:?}"
+    );
+    assert!(behind.finish().await.success());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn strict_request_does_not_fall_back_while_the_worker_is_unreachable() {
+    let mut fixture = Fixture::new(1).await;
+    fixture.restart().await;
+    let mut job = fixture.job_with("build", "no-socket", true);
+    // Обычный клиент без сокета ушёл бы без аренды сразу; строгий пишет, что ждёт воркер.
+    wait_note(&mut job, "still waiting").await;
+    assert_still_waiting(&mut job);
+    fixture.start().await;
+    let env = job.wait_granted().await;
+    assert_ne!(env[0], lease::UNLEASED);
+    assert_eq!(fixture.snapshot().holders.len(), 1);
+    assert!(job.finish().await.success());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn strict_holder_survives_a_worker_restart_and_keeps_its_slot() {
+    let mut fixture = Fixture::new(1).await;
+    let holder = fixture.job_with("build", "survivor", true);
+    let env = holder.wait_granted().await;
+    let lease_id = env[0].clone();
+    fixture.restart().await;
+    fixture.start().await;
+    wait_for("reattached holder", || {
+        fixture
+            .snapshot()
+            .holders
+            .iter()
+            .any(|entry| entry.lease_id == lease_id)
+    })
+    .await;
+    // Слот остался за держателем: следующая просьба ждёт.
+    let mut next = fixture.job_with("build", "next", true);
+    fixture.waiters(1).await;
+    assert_still_waiting(&mut next);
+    assert!(holder.finish().await.success());
+    next.wait_granted().await;
+    assert!(next.finish().await.success());
+}
+
+#[test]
+fn strict_without_any_socket_refuses_with_75_instead_of_running() {
+    let mut command = Command::new(WORKER);
+    command
+        .args([
+            "lease", "run", "--kind", "build", "--strict", "--", "echo", "ran",
+        ])
+        .env_remove(LEASE_SOCKET_ENV)
+        .env_remove("XDG_RUNTIME_DIR")
+        .env_remove(lease::HELD_ENV)
+        .stdin(Stdio::null())
+        .stderr(Stdio::piped());
+    let (status, stdout, stderr) = output(command);
+    assert_eq!(status.code(), Some(75), "{stderr}");
+    assert!(!stdout.contains("ran"), "{stdout}");
 }
 
 /// Воркер ушёл и не вернулся: команда держателя работает дальше, а её выход не ждёт

@@ -373,7 +373,7 @@ sudo -u canterlot canterlot-hub machine add --config /etc/canterlot/hub.toml --n
 sudo tar -xzf canterlot-worker-$VER-x86_64-linux-gnu.tar.gz -C /usr/local/bin
 ```
 
-`~/.config/canterlot/worker.toml` заполните по §6.2 и [docs/configuration.md](docs/configuration.md): адрес хаба `https://<хаб>:7443`, три UUID, `allowed_workdir_roots` и таблицы нужных агентов (`[claude_code]`, `[codex]`, `[opencode]`). Таблица `[machine]` задаёт ёмкость очереди тяжёлых задач (`lease_slots`) и где сторож ищет кэши сборки (`hotspot_roots`). Таблица `[memory]` задаёт рабочие корни общей памяти (`work_roots`, по умолчанию `["~/work"]`). Пользовательская служба — из §6.4, в ней обязателен `KillMode=process`: с ним идущие сессии переживают перезапуск воркера.
+`~/.config/canterlot/worker.toml` заполните по §6.2 и [docs/configuration.md](docs/configuration.md): адрес хаба `https://<хаб>:7443`, три UUID, `allowed_workdir_roots` и таблицы нужных агентов (`[claude_code]`, `[codex]`, `[opencode]`). Таблица `[machine]` задаёт ёмкость очереди тяжёлых задач (`lease_slots`) и где сторож ищет кэши сборки (`hotspot_roots`). Таблица `[memory]` задаёт рабочие корни общей памяти (`work_roots`, по умолчанию `["~/work"]`). Таблица `[jobs]` настраивает задачи на месте, команды оболочки по просьбе хаба (`jobs_inplace_v1`): `max_running` (4), `log_max_mib` (16), `state_retention` (`"3d"`); подробности в [конфигурации](docs/configuration.md). Пользовательская служба — из §6.4, в ней обязателен `KillMode=process`: с ним идущие сессии переживают перезапуск воркера.
 
 ```bash
 loginctl enable-linger "$USER"

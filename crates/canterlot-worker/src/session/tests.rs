@@ -683,7 +683,7 @@ fn an_oversized_cj_record_is_replaced_instead_of_blocking_the_session() {
     let second = store
         .append_cj_fact(record_body::Body::CommandStored(CommandStored::default()))
         .unwrap();
-    let (message, last) = batch_for_session(&store, first, true)
+    let (message, last) = batch_for_session(&store, first, true, false)
         .unwrap()
         .expect("a batch is sent");
     let Some(control_up::Msg::CjRecords(batch)) = message.msg else {
@@ -699,7 +699,7 @@ fn an_oversized_cj_record_is_replaced_instead_of_blocking_the_session() {
     ));
     assert_eq!(last, first);
     // Следующая запись не заперта заменённой: она уходит следующим пакетом.
-    let (message, last) = batch_for_session(&store, first + 1, true)
+    let (message, last) = batch_for_session(&store, first + 1, true, false)
         .unwrap()
         .expect("the next batch is sent");
     let Some(control_up::Msg::CjRecords(batch)) = message.msg else {
@@ -708,6 +708,54 @@ fn an_oversized_cj_record_is_replaced_instead_of_blocking_the_session() {
     assert_eq!(batch.records.len(), 1);
     assert_eq!(batch.records[0].seq, second);
     assert_eq!(last, second);
+}
+
+// Факты задач на месте не уходят на соединение без `jobs_inplace_v1`: хаб без неё отказал бы
+// всей партии, а факты ушли бы потерянными. Запись держит журнал, остальные ждут за ней.
+#[test]
+fn job_facts_stay_in_the_journal_until_a_negotiated_connection() {
+    use canterlot_proto::worker::v1::{JobDispatched, JobFinished};
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut store = WorkerStore::open(root.path()).unwrap();
+    let before = store
+        .append_cj_fact(record_body::Body::CommandStored(CommandStored::default()))
+        .unwrap();
+    let dispatched = store
+        .append_cj_fact(record_body::Body::JobDispatched(JobDispatched {
+            job_id: Uuid::now_v7().to_string(),
+            attempt: 1,
+            ..Default::default()
+        }))
+        .unwrap();
+    let after = store
+        .append_cj_fact(record_body::Body::CommandStored(CommandStored::default()))
+        .unwrap();
+    store
+        .append_cj_fact(record_body::Body::JobFinished(JobFinished::default()))
+        .unwrap();
+
+    let seqs = |negotiated: bool| -> Vec<u64> {
+        let Some((message, _)) = batch_for_session(&store, before, true, negotiated).unwrap()
+        else {
+            return vec![];
+        };
+        let Some(control_up::Msg::CjRecords(batch)) = message.msg else {
+            panic!("expected CjRecords");
+        };
+        batch.records.iter().map(|record| record.seq).collect()
+    };
+    assert_eq!(
+        seqs(false),
+        [before],
+        "the batch stops at the first job fact"
+    );
+    assert_eq!(seqs(true), [before, dispatched, after, after + 1]);
+    // Журнал ничего не потерял: после согласования записи уходят по порядку.
+    assert!(crate::store::requires_jobs(&RecordBody {
+        body: Some(record_body::Body::JobStarted(Default::default()))
+    }));
 }
 
 // Подтверждение за пределами отправленного — ошибка протокола хаба,

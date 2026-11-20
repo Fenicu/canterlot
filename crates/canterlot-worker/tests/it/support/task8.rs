@@ -88,7 +88,8 @@ async fn worker_without_exec_capability_echo_rejects_start() {
             "slash_catalog_v1",
             "schedule_precheck_v1",
             "goals_v1",
-            "memory_scope_v1"
+            "memory_scope_v1",
+            "jobs_inplace_v1"
         ]
     );
     hub.send(ControlDown {

@@ -43,6 +43,7 @@ async fn fixture(pool: &PgPool, hub: &TestHub) -> (TempDir, WorkerConfig, Worker
     let config = WorkerConfig {
         secrets: Default::default(),
         memory: Default::default(),
+        jobs: Default::default(),
         machine: Default::default(),
         attachments: Default::default(),
         claude_code: None,
@@ -2365,5 +2366,158 @@ async fn precheck_backpressure_second_busy_first_intact() {
         precheck_result::Outcome::Error(error) => assert_eq!(error.reason, "busy"),
         other => panic!("second request refused while reply pending: {other:?}"),
     }
+    stop_worker(stop, join).await;
+}
+
+fn job_command(workdir: &str) -> Command {
+    use canterlot_proto::worker::v1::{JobLease, StartInPlaceJob};
+    Command {
+        command_id: Uuid::now_v7().to_string(),
+        dispatch_attempt: 1,
+        kind: Some(command::Kind::StartInPlaceJob(StartInPlaceJob {
+            job_id: Uuid::now_v7().to_string(),
+            attempt: 1,
+            workdir: workdir.into(),
+            shell: "true".into(),
+            env: vec![],
+            timeout_seconds: 60,
+            lease: JobLease::None as i32,
+        })),
+        ..Default::default()
+    }
+}
+
+fn filler_command() -> Command {
+    Command {
+        command_id: Uuid::now_v7().to_string(),
+        kind: Some(command::Kind::CancelInput(CancelInput::default())),
+        ..Default::default()
+    }
+}
+
+/// Всё, что воркер прислал за `window`: пакеты журнала управления и отчёты задач.
+async fn collect_control(hub: &mut ProtocolHub, window: Duration) -> Vec<Msg> {
+    let mut seen = Vec::new();
+    // Окно ограничивает сбор, а не отмеряет событие: пустой хаб просто молчит `window`.
+    let _ = timeout(window, async {
+        while let Some(event) = hub.events.recv().await {
+            if let Observed::Control(message) = event
+                && let Some(msg) = message.msg
+            {
+                seen.push(msg);
+            }
+        }
+    })
+    .await;
+    seen
+}
+
+fn job_facts(messages: &[Msg]) -> Vec<canterlot_proto::worker::v1::record_body::Body> {
+    messages
+        .iter()
+        .filter_map(|msg| match msg {
+            Msg::CjRecords(batch) => Some(batch),
+            _ => None,
+        })
+        .flat_map(|batch| batch.records.iter())
+        .filter_map(|record| record.body.as_ref()?.body.clone())
+        .filter(|body| {
+            use canterlot_proto::worker::v1::record_body::Body;
+            matches!(
+                body,
+                Body::JobDispatched(_)
+                    | Body::JobWaitingLease(_)
+                    | Body::JobStarted(_)
+                    | Body::JobFinished(_)
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn negotiated_connection_runs_job_commands_reports_jobs_and_ships_their_facts() {
+    use canterlot_proto::worker::v1::{JobOutcome, record_body::Body};
+    let (mut hub, mut store) = ProtocolHub::start(Behavior {
+        capabilities: vec![
+            "exec_v1".into(),
+            "pilot_v1".into(),
+            "jobs_inplace_v1".into(),
+        ],
+        // Относительный путь: воркер отказывает, ничего не запуская.
+        command_on_first_batch: Some(job_command("relative/dir")),
+        ..Default::default()
+    })
+    .await;
+    // Хаб шлёт команду в ответ на первый пакет журнала: он должен появиться.
+    store.accept_command(&filler_command()).unwrap();
+    let (stop, _state, join) = start(hub.config.clone(), store);
+    let messages = collect_control(&mut hub, Duration::from_secs(3)).await;
+    let facts = job_facts(&messages);
+    assert!(
+        matches!(facts.first(), Some(Body::JobDispatched(_))),
+        "{facts:?}"
+    );
+    assert!(
+        facts.iter().any(|fact| matches!(
+            fact,
+            Body::JobFinished(done) if done.outcome == JobOutcome::WorkdirRefused as i32
+        )),
+        "{facts:?}"
+    );
+    // Отчёт о задачах идёт на согласованном соединении, после доигрывания журнала.
+    assert!(
+        messages.iter().any(|msg| matches!(msg, Msg::JobsReport(_))),
+        "a JobsReport is sent after the journal replay"
+    );
+    // Ёмкость задач видна хабу в отчёте машины.
+    assert!(messages.iter().any(|msg| matches!(
+        msg,
+        Msg::MachineReport(report) if report.jobs_max_running == 4
+    )));
+    stop_worker(stop, join).await;
+}
+
+#[tokio::test]
+async fn connection_without_the_capability_rejects_job_commands_and_sends_no_job_messages() {
+    use canterlot_proto::worker::v1::record_body::Body;
+    let (mut hub, mut store) = ProtocolHub::start(Behavior {
+        capabilities: vec!["exec_v1".into(), "pilot_v1".into()],
+        command_on_first_batch: Some(job_command("relative/dir")),
+        ..Default::default()
+    })
+    .await;
+    store.accept_command(&filler_command()).unwrap();
+    let (stop, _state, join) = start(hub.config.clone(), store);
+    let messages = collect_control(&mut hub, Duration::from_secs(2)).await;
+    assert!(
+        job_facts(&messages).is_empty(),
+        "no job facts: {messages:?}"
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|msg| matches!(msg, Msg::JobsReport(_) | Msg::JobLogChunk(_))),
+        "no job reports without the capability"
+    );
+    // Команда не пропала молча: отказ записан в журнал словом.
+    let rejected = messages
+        .iter()
+        .filter_map(|msg| match msg {
+            Msg::CjRecords(batch) => Some(batch),
+            _ => None,
+        })
+        .flat_map(|batch| batch.records.iter())
+        .any(|record| {
+            matches!(
+                record.body.as_ref().and_then(|body| body.body.as_ref()),
+                Some(Body::CommandRejected(rejected)) if rejected.reason == "capability_missing"
+            )
+        });
+    assert!(rejected, "{messages:?}");
+    // Ёмкость задач хабу без возможности не сообщается.
+    assert!(messages.iter().all(|msg| !matches!(
+        msg,
+        Msg::MachineReport(report) if report.jobs_max_running != 0
+    )));
     stop_worker(stop, join).await;
 }

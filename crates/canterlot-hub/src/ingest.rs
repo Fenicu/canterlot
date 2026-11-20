@@ -1760,6 +1760,12 @@ async fn apply_body(
             )
             .await?);
         }
+        // Факты задач на месте (`jobs_inplace_v1`): хаб пока их только принимает, таблицу
+        // задач и переходы состояний ведёт следующий этап.
+        Body::JobDispatched(_)
+        | Body::JobWaitingLease(_)
+        | Body::JobStarted(_)
+        | Body::JobFinished(_) => {}
     }
     Ok(false)
 }

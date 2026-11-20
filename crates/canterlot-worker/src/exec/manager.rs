@@ -2482,9 +2482,12 @@ impl Actor {
                     self.shared.cj(vec![], self_terminal).await
                 }
             }
-            Some(Kind::RemoveWorktree(_) | Kind::RevokeSecret(_)) => {
-                reject_invalid(&self.shared, &command).await
-            }
+            Some(
+                Kind::RemoveWorktree(_)
+                | Kind::RevokeSecret(_)
+                | Kind::StartInPlaceJob(_)
+                | Kind::CancelInPlaceJob(_),
+            ) => reject_invalid(&self.shared, &command).await,
             // Хаб считает исполнение потерянным, а связь с ним цела: это и есть доказательство.
             Some(Kind::ResolveOwnerLost(_)) => {
                 if live && command.execution_generation == self.generation {
@@ -2817,6 +2820,8 @@ impl Actor {
             share: true,
             width: request.width,
             height: request.height,
+            job_id: String::new(),
+            job_attempt: 0,
         };
         let task = tokio::spawn(async move {
             let path = media::media_path(&exec_dir, share_id);

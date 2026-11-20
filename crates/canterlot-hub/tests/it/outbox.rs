@@ -637,6 +637,9 @@ fn to_proto_maps_all_command_variants_and_rejects_unknown_kinds() {
             command::Kind::RemoveWorktree(_) => panic!("unexpected worktree command"),
             command::Kind::RevokeSecret(_) => panic!("unexpected secret command"),
             command::Kind::GoalCommand(_) => assert_eq!(kind, "goal_command"),
+            command::Kind::StartInPlaceJob(_) | command::Kind::CancelInPlaceJob(_) => {
+                panic!("unexpected in-place job command")
+            }
         }
     }
     assert!(matches!(
