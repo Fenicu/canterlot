@@ -175,6 +175,7 @@ const REFUSAL_TEXT: Record<string, string> = {
   effort_not_allowed: 'усилие недоступно для модели',
   workdir_not_allowed: 'рабочий каталог вне разрешённых',
   domain_mismatch: 'каталог относится к другому домену памяти',
+  remote_work_disabled: 'машина не принимает работу других машин',
   profile_unknown: 'инструкции не найдены',
   conversation_closed: 'разговор закрыт',
   queue_full: 'очередь запусков заполнена',
@@ -198,11 +199,12 @@ const QUEUE_REASONS: Record<string, string> = {
   concurrency: 'исполнители заняты',
   limits: 'лимиты провайдера',
   resources: 'машина занята',
+  machine_offline: 'машина запуска не в сети',
   children: 'Ждёт',
   stagger: 'Ждёт'
 };
 
-/** Причина постановки в очередь: `rate`, `concurrency`, `limits`, `resources`, `children`, `stagger`. */
+/** Причина постановки в очередь: `rate`, `concurrency`, `limits`, `resources`, `machine_offline`, `children`, `stagger`. */
 export function queueReasonLabel(reason: string): string {
   return QUEUE_REASONS[reason] ?? reason;
 }

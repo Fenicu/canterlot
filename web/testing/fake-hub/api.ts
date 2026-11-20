@@ -291,6 +291,10 @@ export class FakeHubApi {
 	hibernateIdleMinutes: number | null = 60;
 	readonly promptSuggestions = new Map<string, components['schemas']['PromptSuggestionView']>();
 	readonly limitSettingsKeys: string[] = [];
+	/** Запросы выключателя удалённой работы: машина, значение и ключ идемпотентности. */
+	readonly remoteWorkCalls: { machine: string; accepts: boolean; key: string }[] = [];
+	/** Код отказа выключателя; `null` — запрос проходит. */
+	remoteWorkFailStatus: number | null = null;
 	/** Расписания владельца и история их запусков. */
 	readonly schedules = new Map<string, Schedule>();
 	readonly scheduleRuns = new Map<string, ScheduleRun[]>();

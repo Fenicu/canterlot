@@ -1345,6 +1345,29 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     await route.fulfill({ headers: headers(), json: [...api.machines.values()] });
   });
 
+  await page.route(/\/api\/v1\/machines\/[^/]+\/remote-work$/, async (route) => {
+    if (route.request().method() !== 'PUT') return route.fallback();
+    const key = route.request().headers()['idempotency-key'];
+    if (!key) {
+      await route.fulfill({ status: 400, headers: headers(), json: errorBody('invalid_request', 'Нужен Idempotency-Key') });
+      return;
+    }
+    const machineId = new URL(route.request().url()).pathname.split('/')[4]!;
+    const machine = api.machines.get(machineId);
+    if (!machine) {
+      await route.fulfill({ status: 404, headers: headers(), json: errorBody('machine_not_found', 'Машина не найдена') });
+      return;
+    }
+    const body = route.request().postDataJSON() as { accepts_remote_work: boolean };
+    api.remoteWorkCalls.push({ machine: machineId, accepts: body.accepts_remote_work, key });
+    if (api.remoteWorkFailStatus !== null) {
+      await route.fulfill({ status: api.remoteWorkFailStatus, headers: headers(), json: errorBody('internal_error', 'Сбой') });
+      return;
+    }
+    machine.accepts_remote_work = body.accepts_remote_work;
+    await route.fulfill({ headers: headers(), json: { accepts_remote_work: body.accepts_remote_work } });
+  });
+
   await page.route(/\/api\/v1\/updates(?:\?|$)/, async (route) => {
     if (route.request().method() !== 'GET') return route.fallback();
     const url = new URL(route.request().url());

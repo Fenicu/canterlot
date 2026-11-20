@@ -189,6 +189,21 @@ export function putLimitSettings(
   return http("PUT", "/api/v1/limit-settings", body, keyed(key, opts));
 }
 
+// Выключатель удалённой работы машины: принимает ли она делегатов и команды других машин.
+export function putMachineRemoteWork(
+  machineId: string,
+  body: Body<operations["put__api_v1_machines__id__remote_work"]>,
+  key: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["put__api_v1_machines__id__remote_work"]>>> {
+  return http(
+    "PUT",
+    `/api/v1/machines/${id(machineId)}/remote-work`,
+    body,
+    keyed(key, opts),
+  );
+}
+
 export function getPromptSuggestionSettings(
   opts?: RequestOptions,
 ): Promise<HttpResponse<Ok<operations["get__api_v1_prompt_suggestion_settings"]>>> {
