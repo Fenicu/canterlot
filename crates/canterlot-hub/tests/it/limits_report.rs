@@ -555,7 +555,7 @@ async fn credentials_and_credits_are_listed_per_machine_and_never_mixed_across_a
     let late = now + TimeDelta::days(9);
     for (machine, expires) in [(seed.machine_id, late), (b, early)] {
         canterlot_hub::limits::record_credential_in_tx(
-            &mut *pool.acquire().await.unwrap(),
+            &mut pool.acquire().await.unwrap(),
             machine,
             "opencode",
             expires,
@@ -567,7 +567,7 @@ async fn credentials_and_credits_are_listed_per_machine_and_never_mixed_across_a
     }
     for (machine, count) in [(seed.machine_id, 4), (b, 1)] {
         canterlot_hub::limits::record_credits_in_tx(
-            &mut *pool.acquire().await.unwrap(),
+            &mut pool.acquire().await.unwrap(),
             machine,
             "opencode",
             &ProviderCredits {

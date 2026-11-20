@@ -1005,6 +1005,7 @@ async fn cancel_jobs_in_tx(
 }
 
 /// Задание опроса лимитов: просит провайдера снять свежее показание к сроку сброса.
+#[allow(clippy::too_many_arguments)]
 async fn insert_probe_job_in_tx(
     conn: &mut PgConnection,
     owner_id: Uuid,

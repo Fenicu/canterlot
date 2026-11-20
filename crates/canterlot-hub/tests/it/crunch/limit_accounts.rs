@@ -226,7 +226,7 @@ async fn an_unstamped_fact_from_a_machine_with_another_account_is_dropped(pool: 
         let pool = pool.clone();
         async move {
             limits::fact_account(
-                &mut *pool.acquire().await.unwrap(),
+                &mut pool.acquire().await.unwrap(),
                 machine,
                 provider,
                 stamped,

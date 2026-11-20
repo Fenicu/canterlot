@@ -129,8 +129,10 @@ fn machine_report_names_the_account_per_harness() {
 fn session_limit_facts_of_the_supervisor_carry_the_account_of_the_spec() {
     let timers = config::SupervisorTimers::default();
     let spec_text = |account: &str| {
-        let mut opencode = config::OpenCodeConfig::default();
-        opencode.account = account.into();
+        let opencode = config::OpenCodeConfig {
+            account: account.into(),
+            ..Default::default()
+        };
         supervisor_spec_toml(&SupervisorSpecParams {
             data_dir: Path::new("/tmp/data"),
             execution_id: Uuid::nil(),
@@ -159,8 +161,10 @@ fn session_limit_facts_of_the_supervisor_carry_the_account_of_the_spec() {
 fn spec_for_the_supervisor_is_unchanged_for_owner_and_carries_other_accounts() {
     let timers = config::SupervisorTimers::default();
     let spec = |account: &str| {
-        let mut opencode = config::OpenCodeConfig::default();
-        opencode.account = account.into();
+        let opencode = config::OpenCodeConfig {
+            account: account.into(),
+            ..Default::default()
+        };
         supervisor_spec_toml(&SupervisorSpecParams {
             data_dir: Path::new("/tmp/data"),
             execution_id: Uuid::nil(),
