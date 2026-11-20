@@ -540,7 +540,11 @@ async fn a_replay_never_changes_the_delivery_of_a_running_job(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(job_id(&replay), id);
-    assert_eq!(fx.job(id).await.delivery, None, "a replay reads, never rewrites");
+    assert_eq!(
+        fx.job(id).await.delivery,
+        None,
+        "a replay reads, never rewrites"
+    );
     fx.started(fx.a, id).await;
     fx.finished(fx.a, id, JobOutcome::Succeeded, Some(0)).await;
     let reply = call.await.unwrap().unwrap();
@@ -668,7 +672,9 @@ async fn the_sweep_gives_an_orphaned_job_a_message(pool: PgPool) {
     fx.finished(fx.a, orphan, JobOutcome::Succeeded, Some(0))
         .await;
     assert_eq!(fx.messages(orphan).await, 0);
-    let swept = sweep::undelivered_sweep(&fx.pool, Utc::now()).await.unwrap();
+    let swept = sweep::undelivered_sweep(&fx.pool, Utc::now())
+        .await
+        .unwrap();
     assert_eq!(swept, 1, "a fresh job may still have a live waiter");
     assert_eq!(fx.job(orphan).await.delivery.as_deref(), Some("message"));
     assert_eq!(fx.messages(orphan).await, 1, "terminal: queued at once");
@@ -755,14 +761,16 @@ async fn replay_by_call_id_and_by_idempotency_key_returns_the_stored_job(pool: P
 async fn a_replay_never_returns_another_conversations_job(pool: PgPool) {
     let fx = Fx::new(pool).await;
     let caller = fx.caller();
-    let args = json!({"workdir": "/tmp/w", "shell": "make", "wait_seconds": 0, "idempotency_key": "k"});
+    let args =
+        json!({"workdir": "/tmp/w", "shell": "make", "wait_seconds": 0, "idempotency_key": "k"});
     let mine = job_id(
         &session_tools::call(&fx.context, &caller, "job.run", args.clone())
             .await
             .unwrap(),
     );
     fx.started(fx.a, mine).await;
-    fx.finished(fx.a, mine, JobOutcome::Succeeded, Some(0)).await;
+    fx.finished(fx.a, mine, JobOutcome::Succeeded, Some(0))
+        .await;
     let (other, other_execution) = fx.other_conversation().await;
     let mut stranger = fx.caller_of(other, other_execution);
     stranger.call_id = caller.call_id;
@@ -770,7 +778,10 @@ async fn a_replay_never_returns_another_conversations_job(pool: PgPool) {
         .await
         .unwrap();
     assert_ne!(job_id(&reply), mine, "{reply}");
-    assert!(reply.get("output_tail").is_none(), "no foreign output: {reply}");
+    assert!(
+        reply.get("output_tail").is_none(),
+        "no foreign output: {reply}"
+    );
     let theirs = job_id(&reply);
     let owner: Option<Uuid> = sqlx::query_scalar("select conversation_id from jobs where id=$1")
         .bind(theirs)
@@ -784,7 +795,8 @@ async fn a_replay_never_returns_another_conversations_job(pool: PgPool) {
 async fn a_replay_after_a_domain_change_returns_nothing_stored(pool: PgPool) {
     let fx = Fx::new(pool).await;
     let caller = fx.caller();
-    let args = json!({"workdir": "/tmp/w", "shell": "make", "wait_seconds": 0, "idempotency_key": "k"});
+    let args =
+        json!({"workdir": "/tmp/w", "shell": "make", "wait_seconds": 0, "idempotency_key": "k"});
     let id = job_id(
         &session_tools::call(&fx.context, &caller, "job.run", args.clone())
             .await
@@ -799,9 +811,15 @@ async fn a_replay_after_a_domain_change_returns_nothing_stored(pool: PgPool) {
         .unwrap();
     // Тот же ключ и тот же вызов транспорта: старый итог не отдаётся ни по одному из них.
     let by_key = fx.call("job.run", args.clone()).await;
-    assert!(by_key.is_err(), "the stored output must not leak: {by_key:?}");
+    assert!(
+        by_key.is_err(),
+        "the stored output must not leak: {by_key:?}"
+    );
     let by_call = session_tools::call(&fx.context, &caller, "job.run", args).await;
-    assert!(by_call.is_err(), "the stored output must not leak: {by_call:?}");
+    assert!(
+        by_call.is_err(),
+        "the stored output must not leak: {by_call:?}"
+    );
 }
 
 /// Ждущий вызов тоже не берёт итог, если домен разговора сменился после заявки.
@@ -843,7 +861,9 @@ async fn submission_and_completion_take_the_jobs_lock_before_the_event_counter(p
     let machine = fx.a;
     // «Итог»: замок машины уже у него, событие ещё впереди.
     let mut completion = canterlot_hub::db::begin(&fx.pool).await.unwrap();
-    inplace_jobs::lock_machine(&mut completion, machine).await.unwrap();
+    inplace_jobs::lock_machine(&mut completion, machine)
+        .await
+        .unwrap();
     let context = fx.context.clone();
     let caller = fx.caller();
     let submit = tokio::spawn(async move {
@@ -871,7 +891,10 @@ async fn submission_and_completion_take_the_jobs_lock_before_the_event_counter(p
         .expect("the completion publishes without a deadlock");
     completion.commit().await.expect("the completion commits");
     let reply = submit.await.unwrap();
-    assert!(reply.is_ok(), "the submission must not be aborted: {reply:?}");
+    assert!(
+        reply.is_ok(),
+        "the submission must not be aborted: {reply:?}"
+    );
 }
 
 /// Допуск заказчика держится до фиксации диспетчеризации: владелец сужает режим тем же путём,
@@ -921,9 +944,7 @@ async fn dispatch_waits_for_a_concurrent_mode_change_and_sees_it(pool: PgPool) {
             truncated: false,
         };
         canterlot_hub::db::in_tx(&pool, move |conn| {
-            Box::pin(
-                async move { facts::apply_finished(conn, a, &fact, Uuid::now_v7()).await },
-            )
+            Box::pin(async move { facts::apply_finished(conn, a, &fact, Uuid::now_v7()).await })
         })
         .await
     });
@@ -942,7 +963,10 @@ async fn dispatch_waits_for_a_concurrent_mode_change_and_sees_it(pool: PgPool) {
     settings.commit().await.unwrap();
     finisher.await.unwrap().unwrap();
     let job = fx.job(queued).await;
-    assert_eq!(job.state, "canceled", "the narrowed mode is seen at dispatch");
+    assert_eq!(
+        job.state, "canceled",
+        "the narrowed mode is seen at dispatch"
+    );
     assert_eq!(job.end_reason.as_deref(), Some("mode_too_narrow"));
     assert_eq!(fx.commands(fx.a, "start_inplace_job").await, 4);
 }
@@ -960,7 +984,8 @@ async fn a_queued_remote_job_does_not_revive_after_off_and_on(pool: PgPool) {
     fx.switch(false).await;
     fx.switch(true).await;
     fx.started(fx.b, first).await;
-    fx.finished(fx.b, first, JobOutcome::Succeeded, Some(0)).await;
+    fx.finished(fx.b, first, JobOutcome::Succeeded, Some(0))
+        .await;
     let job = fx.job(waiting).await;
     assert_eq!(job.state, "canceled");
     assert_eq!(job.end_reason.as_deref(), Some("remote_work_disabled"));
@@ -1292,7 +1317,8 @@ async fn a_report_on_connect_applies_forward(pool: PgPool) {
     assert_eq!(fx.state(running).await, "running");
     // Снимок «закончена» с выводом ждёт факт с хвостом, а не закрывает задачу пустой.
     assert_eq!(fx.state(finished).await, "dispatched");
-    fx.finished(fx.a, finished, JobOutcome::Succeeded, Some(0)).await;
+    fx.finished(fx.a, finished, JobOutcome::Succeeded, Some(0))
+        .await;
     assert_eq!(fx.state(finished).await, "succeeded");
     assert_eq!(fx.job(finished).await.exit_code, Some(0));
 }
@@ -1342,7 +1368,10 @@ async fn a_report_arriving_before_the_finished_fact_keeps_the_output_tail(pool: 
     })
     .await;
     assert_eq!(fx.messages(id).await, 1);
-    assert_eq!(fx.job(id).await.tail.as_deref(), Some(&b"hello\nworld\n"[..]));
+    assert_eq!(
+        fx.job(id).await.tail.as_deref(),
+        Some(&b"hello\nworld\n"[..])
+    );
 }
 
 /// Снимок без вывода закрывает задачу сразу: терять нечего. А если факт с хвостом так и не
@@ -1657,7 +1686,10 @@ async fn binary_output_is_escaped_in_the_message_and_kept_in_the_log(pool: PgPoo
     assert_eq!(texts.len(), 1, "{texts:?}");
     let text = &texts[0];
     assert!(!text.contains('\0') && !text.contains('\u{1b}'), "{text:?}");
-    assert!(text.contains("ok\\x00bad\\x1b[31mred\\x07\nline two\ttab"), "{text:?}");
+    assert!(
+        text.contains("ok\\x00bad\\x1b[31mred\\x07\nline two\ttab"),
+        "{text:?}"
+    );
     assert_eq!(fx.job(id).await.tail.as_deref(), Some(raw.as_slice()));
 }
 
@@ -1672,9 +1704,13 @@ async fn a_tail_that_fails_validation_degrades_to_a_short_message(pool: PgPool) 
     let job = fx.job(id).await;
     let full = inplace_jobs::message_for_delivery(&job, "machine-b", |_| true);
     assert!(full.contains("hello\nworld"), "{full}");
-    let short = inplace_jobs::message_for_delivery(&job, "machine-b", |text| !text.contains("hello"));
+    let short =
+        inplace_jobs::message_for_delivery(&job, "machine-b", |text| !text.contains("hello"));
     assert!(!short.contains("hello"), "{short}");
-    assert!(short.contains("failed") && short.contains("exit code 2"), "{short}");
+    assert!(
+        short.contains("failed") && short.contains("exit code 2"),
+        "{short}"
+    );
     assert!(short.contains("job_log"), "{short}");
 }
 

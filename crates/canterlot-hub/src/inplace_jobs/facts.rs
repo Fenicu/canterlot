@@ -331,15 +331,16 @@ pub async fn finish_from_report(
     let Some(job) = lock_row(conn, id).await? else {
         return Ok(false);
     };
-    let report: Option<Value> =
-        sqlx::query_scalar("select finish_report from jobs where id=$1")
-            .bind(id)
-            .fetch_one(&mut *conn)
-            .await?;
+    let report: Option<Value> = sqlx::query_scalar("select finish_report from jobs where id=$1")
+        .bind(id)
+        .fetch_one(&mut *conn)
+        .await?;
     let Some(report) = report.filter(|_| !job.is_terminal()) else {
         return Ok(false);
     };
-    let outcome = report["outcome"].as_i64().and_then(|v| i32::try_from(v).ok());
+    let outcome = report["outcome"]
+        .as_i64()
+        .and_then(|v| i32::try_from(v).ok());
     let (state, reason) = finished_state(outcome.unwrap_or_default());
     let reason = reason.unwrap_or("tail_unavailable");
     finish_in_tx(
@@ -348,7 +349,9 @@ pub async fn finish_from_report(
         Outcome {
             state,
             reason: Some(reason.to_owned()),
-            exit_code: report["exit_code"].as_i64().and_then(|v| i32::try_from(v).ok()),
+            exit_code: report["exit_code"]
+                .as_i64()
+                .and_then(|v| i32::try_from(v).ok()),
             duration_ms: report["duration_ms"].as_i64(),
             output_bytes: report["log_bytes"].as_i64(),
             tail: None,

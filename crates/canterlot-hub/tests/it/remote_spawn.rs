@@ -921,7 +921,10 @@ async fn an_approved_remote_spawn_does_not_revive_after_off_and_on(pool: PgPool)
     f.tick().await;
     assert!(f.children().await.is_empty(), "the old card must not start");
     assert!(
-        f.notes().await.iter().any(|note| note.contains("remote_work_disabled")),
+        f.notes()
+            .await
+            .iter()
+            .any(|note| note.contains("remote_work_disabled")),
         "{:?}",
         f.notes().await
     );

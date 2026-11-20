@@ -424,7 +424,7 @@ pub async fn run(
             args.idempotency_key.as_deref(),
         )
         .await?
-            .ok_or_else(|| ToolError::new(ToolErrorCode::Internal))?;
+        .ok_or_else(|| ToolError::new(ToolErrorCode::Internal))?;
         let value = answer(context, &mut tx, &job).await?;
         tx.commit().await?;
         return Ok(value);
