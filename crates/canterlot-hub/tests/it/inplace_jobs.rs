@@ -6,15 +6,16 @@
 
 use std::{sync::Arc, time::Duration};
 
+use axum::http::Method;
 use canterlot_hub::{
     config::{LimitsConfig, SessionToolsConfig},
-    executions,
+    executions, http,
     inplace_jobs::{self, State, facts, logs, sweep},
     session::Registry,
     session_tools::{
         self, Caller, ToolContext, ToolError, ToolErrorCode as Code, settle::SettleConfig,
     },
-    testkit::{self, FakeSession},
+    testkit::{self, FakeSession, TestClient},
 };
 use canterlot_proto::worker::v1::{
     JobFinished, JobOutcome, JobPhase, JobSnapshot, JobStarted, JobWaitingLease, JobsReport,
@@ -1357,4 +1358,303 @@ async fn status_and_listing_report_machine_offline_and_state(pool: PgPool) {
         Code::InvalidArguments
     );
     let _ = State::Queued;
+}
+
+// ───────── HTTP владельца ─────────
+
+struct Api {
+    client: TestClient,
+    anonymous: TestClient,
+    owner: Uuid,
+    machine: Uuid,
+    pool: PgPool,
+    _dir: tempfile::TempDir,
+}
+
+impl Api {
+    async fn new(pool: PgPool) -> Self {
+        let (deps, dir) =
+            testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
+        let owner = deps.installation.owner_id;
+        let router = http::router(http::AppState::new(deps));
+        let machine = Uuid::now_v7();
+        sqlx::query("insert into machines(id,owner_id,name) values($1,$2,'machine-b')")
+            .bind(machine)
+            .bind(owner)
+            .execute(&pool)
+            .await
+            .unwrap();
+        Self {
+            client: TestClient::in_process(router.clone()).as_owner(),
+            anonymous: TestClient::in_process(router),
+            owner,
+            machine,
+            pool,
+            _dir: dir,
+        }
+    }
+
+    /// Задача владельца в нужном состоянии, без заказчика.
+    async fn insert(&self, state: &str, shell: &str) -> Uuid {
+        self.insert_for(self.owner, self.machine, None, state, shell)
+            .await
+    }
+
+    async fn insert_for(
+        &self,
+        owner: Uuid,
+        machine: Uuid,
+        conversation: Option<Uuid>,
+        state: &str,
+        shell: &str,
+    ) -> Uuid {
+        let id = Uuid::now_v7();
+        sqlx::query(
+            "insert into jobs(id,owner_id,conversation_id,domain,machine_id,workdir,shell,
+                              timeout_seconds,state)
+             values($1,$2,$3,'personal',$4,'/tmp/w',$5,1800,$6)",
+        )
+        .bind(id)
+        .bind(owner)
+        .bind(conversation)
+        .bind(machine)
+        .bind(shell)
+        .bind(state)
+        .execute(&self.pool)
+        .await
+        .unwrap();
+        id
+    }
+
+    async fn get(&self, path: &str) -> testkit::TestResponse {
+        self.client.send(Method::GET, path, None, None).await
+    }
+
+    async fn cancel(&self, id: Uuid, key: &str) -> testkit::TestResponse {
+        self.client
+            .send(
+                Method::POST,
+                &format!("/api/v1/jobs/{id}/cancel"),
+                Some(key),
+                None,
+            )
+            .await
+    }
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn the_owner_lists_filters_and_reads_jobs(pool: PgPool) {
+    let api = Api::new(pool.clone()).await;
+    let other_machine = Uuid::now_v7();
+    sqlx::query("insert into machines(id,owner_id,name) values($1,$2,'machine-c')")
+        .bind(other_machine)
+        .bind(api.owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let conversation = testkit::seed_conversation(&pool, api.owner, api.machine).await;
+    let first = api.insert("running", "make").await;
+    let second = api
+        .insert_for(
+            api.owner,
+            api.machine,
+            Some(conversation),
+            "succeeded",
+            "test",
+        )
+        .await;
+    let third = api
+        .insert_for(api.owner, other_machine, None, "queued", "deploy")
+        .await;
+    // Чужая задача владельцу не видна.
+    let stranger = testkit::seed(&pool).await;
+    let foreign = api
+        .insert_for(
+            stranger.owner_id,
+            stranger.machine_id,
+            None,
+            "running",
+            "secret",
+        )
+        .await;
+    let all = api.get("/api/v1/jobs").await.json::<Value>();
+    let ids: Vec<String> = all["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        ids,
+        [third.to_string(), second.to_string(), first.to_string()]
+    );
+    let by_machine = api
+        .get(&format!("/api/v1/jobs?machine={other_machine}"))
+        .await
+        .json::<Value>();
+    assert_eq!(by_machine["items"].as_array().unwrap().len(), 1);
+    assert_eq!(by_machine["items"][0]["machine_name"], "machine-c");
+    let by_state = api
+        .get("/api/v1/jobs?state=succeeded")
+        .await
+        .json::<Value>();
+    assert_eq!(by_state["items"][0]["id"], second.to_string());
+    let by_conversation = api
+        .get(&format!("/api/v1/jobs?conversation={conversation}"))
+        .await
+        .json::<Value>();
+    assert_eq!(by_conversation["items"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        api.get("/api/v1/jobs?state=nope").await.status.as_u16(),
+        400
+    );
+    assert_eq!(api.get("/api/v1/jobs?limit=0").await.status.as_u16(), 400);
+    assert_eq!(
+        api.get("/api/v1/jobs?limit=1").await.json::<Value>()["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let detail = api.get(&format!("/api/v1/jobs/{first}")).await;
+    assert_eq!(detail.status.as_u16(), 200);
+    let detail = detail.json::<Value>();
+    assert_eq!(detail["job"]["shell"], "make");
+    assert_eq!(detail["job"]["state"], "running");
+    assert_eq!(detail["job"]["timeout_minutes"], 30);
+    assert_eq!(
+        api.get(&format!("/api/v1/jobs/{foreign}"))
+            .await
+            .status
+            .as_u16(),
+        404
+    );
+    assert_eq!(
+        api.get(&format!("/api/v1/jobs/{}", Uuid::now_v7()))
+            .await
+            .status
+            .as_u16(),
+        404
+    );
+    assert!(matches!(
+        api.anonymous
+            .send(Method::GET, "/api/v1/jobs", None, None)
+            .await
+            .status
+            .as_u16(),
+        401 | 403
+    ));
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn the_log_endpoint_reads_the_hub_tail_with_offset_and_limit(pool: PgPool) {
+    let api = Api::new(pool.clone()).await;
+    let id = api.insert("running", "make").await;
+    sqlx::query("update jobs set live_tail=$2, live_offset=17 where id=$1")
+        .bind(id)
+        .bind(b"alpha\nbeta\ngamma\n".to_vec())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let whole = api
+        .get(&format!("/api/v1/jobs/{id}/log"))
+        .await
+        .json::<Value>();
+    assert_eq!(whole["source"], "tail");
+    assert_eq!(whole["text"], "alpha\nbeta\ngamma\n");
+    let slice = api
+        .get(&format!("/api/v1/jobs/{id}/log?offset=6&limit=4"))
+        .await
+        .json::<Value>();
+    assert_eq!(slice["text"], "beta");
+    assert_eq!(slice["offset"], 6);
+    assert_eq!(slice["next_offset"], 10);
+    assert_eq!(slice["eof"], false);
+    assert_eq!(
+        api.get(&format!("/api/v1/jobs/{id}/log?limit=70000"))
+            .await
+            .status
+            .as_u16(),
+        400
+    );
+    assert_eq!(
+        api.get(&format!("/api/v1/jobs/{}/log", Uuid::now_v7()))
+            .await
+            .status
+            .as_u16(),
+        404
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn the_owner_cancels_queued_running_and_lost_jobs_idempotently(pool: PgPool) {
+    let api = Api::new(pool.clone()).await;
+    let queued = api.insert("queued", "a").await;
+    let running = api.insert("running", "b").await;
+    let lost = api.insert("lost", "c").await;
+    let done = api.insert("succeeded", "d").await;
+    let reply = api.cancel(queued, "k-queued").await;
+    assert_eq!(reply.status.as_u16(), 200);
+    assert_eq!(reply.json::<Value>()["state"], "canceled");
+    let commands: i64 =
+        sqlx::query_scalar("select count(*) from commands where kind='cancel_inplace_job'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(commands, 0, "a queued job never reached the machine");
+    let reply = api.cancel(running, "k-running").await.json::<Value>();
+    assert_eq!(reply["state"], "running");
+    assert_eq!(reply["cancel_requested"], true);
+    // Повтор с тем же ключом отвечает тем же и не плодит команд.
+    api.cancel(running, "k-running").await;
+    api.cancel(running, "k-second-key").await;
+    let reply = api.cancel(lost, "k-lost").await.json::<Value>();
+    assert_eq!(
+        reply["state"], "lost",
+        "a lost job is cancelled when the machine is back"
+    );
+    assert_eq!(reply["cancel_requested"], true);
+    let commands: i64 =
+        sqlx::query_scalar("select count(*) from commands where kind='cancel_inplace_job'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(commands, 2, "one cancel command per live attempt");
+    let reply = api.cancel(done, "k-done").await.json::<Value>();
+    assert_eq!(reply["state"], "succeeded");
+    assert_eq!(
+        api.cancel(Uuid::now_v7(), "k-none").await.status.as_u16(),
+        404
+    );
+    // Каждый переход — событие `job_changed` в потоке машин владельца.
+    let kinds: Vec<(String, Value)> = sqlx::query_as(
+        "select kind, payload from events where scope=$1 and kind='job_changed' order by scope_seq",
+    )
+    .bind(format!("owner:{}:machines", api.owner))
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(
+        kinds
+            .iter()
+            .any(|(_, payload)| payload["job"]["id"] == queued.to_string()
+                && payload["job"]["state"] == "canceled"),
+        "{kinds:?}"
+    );
+    assert!(
+        kinds
+            .iter()
+            .any(|(_, payload)| payload["job"]["id"] == running.to_string()
+                && payload["job"]["cancel_requested"] == true)
+    );
+    let anonymous = api
+        .anonymous
+        .send(
+            Method::POST,
+            &format!("/api/v1/jobs/{running}/cancel"),
+            Some("k-anon"),
+            None,
+        )
+        .await;
+    assert!(matches!(anonymous.status.as_u16(), 401 | 403));
 }

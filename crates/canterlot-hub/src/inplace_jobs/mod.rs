@@ -145,7 +145,7 @@ impl Job {
 }
 
 /// Задача для клиентов: без вывода (его отдают отдельные чтения).
-#[derive(Serialize, ToSchema, Clone, Debug)]
+#[derive(Serialize, serde::Deserialize, ToSchema, Clone, Debug)]
 pub struct JobView {
     pub id: Uuid,
     pub state: String,
@@ -165,6 +165,9 @@ pub struct JobView {
     pub end_reason: Option<String>,
     pub cancel_requested: bool,
     pub has_log: bool,
+    /// Машина не на связи, а задача не закончена; в событии всегда `false`: связь машины
+    /// приходит событиями машин.
+    pub machine_offline: bool,
     #[schema(value_type = Option<Object>)]
     pub late_report: Option<Value>,
     pub created_at: DateTime<Utc>,
@@ -319,6 +322,7 @@ pub fn view_with(job: &Job, machine_name: String, conversation_title: Option<Str
         end_reason: job.end_reason.clone(),
         cancel_requested: job.cancel_requested_at.is_some(),
         has_log: job.log_media_id.is_some(),
+        machine_offline: false,
         late_report: job.late_report.clone(),
         created_at: job.created_at,
         started_at: job.started_at,

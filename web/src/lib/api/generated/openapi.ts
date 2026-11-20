@@ -1488,6 +1488,70 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/jobs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get__api_v1_jobs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/jobs/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get__api_v1_jobs__id_"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/jobs/{id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["post__api_v1_jobs__id__cancel"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/jobs/{id}/log": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get__api_v1_jobs__id__log"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/limit-settings": {
         parameters: {
             query?: never;
@@ -3652,8 +3716,57 @@ export interface components {
             revision: number;
             state: string;
         };
+        /** @description Задача и последний хвост её вывода. */
+        JobDetail: {
+            job: components["schemas"]["JobView"];
+            /** @description Хвост на хабе: живой, пока идёт, и итоговый после конца (не больше 64 КиБ). */
+            output_tail: string;
+        };
+        JobList: {
+            items: components["schemas"]["JobView"][];
+        };
         /** @enum {string} */
         JobState: "pending" | "fired" | "cancelled" | "failed";
+        /** @description Задача для клиентов: без вывода (его отдают отдельные чтения). */
+        JobView: {
+            cancel_requested: boolean;
+            /** Format: uuid */
+            conversation_id?: string | null;
+            conversation_title?: string | null;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: int64 */
+            duration_ms?: number | null;
+            end_reason?: string | null;
+            /** Format: int32 */
+            exit_code?: number | null;
+            /** Format: date-time */
+            finished_at?: string | null;
+            has_log: boolean;
+            /** Format: uuid */
+            id: string;
+            late_report?: Record<string, never> | null;
+            lease: string;
+            /** Format: uuid */
+            machine_id: string;
+            machine_name: string;
+            /**
+             * @description Машина не на связи, а задача не закончена; в событии всегда `false`: связь машины
+             *     приходит событиями машин.
+             */
+            machine_offline: boolean;
+            /** Format: int64 */
+            output_bytes: number;
+            shell: string;
+            /** Format: date-time */
+            started_at?: string | null;
+            state: string;
+            /** Format: int32 */
+            timeout_minutes: number;
+            title?: string | null;
+            truncated: boolean;
+            workdir: string;
+        };
         /** @description Страница ленты одного субагента: корень (вызов) и его потомки по любой глубине. */
         LanePage: {
             /** @description Потомки корня по возрастанию `created_seq`; сам корень сюда не входит. */
@@ -3844,6 +3957,22 @@ export interface components {
             native_conversation_id?: string | null;
             outcome?: string | null;
             state: string;
+        };
+        /** @description Кусок журнала для инструмента и HTTP. */
+        LogSlice: {
+            eof: boolean;
+            /** Format: int64 */
+            next_offset: number;
+            /** Format: int64 */
+            offset: number;
+            /** @description `tail` — живой или итоговый хвост на хабе, `log` — полный журнал после конца. */
+            source: string;
+            text: string;
+            /**
+             * Format: int64
+             * @description Размер журнала, когда он известен.
+             */
+            total_bytes?: number | null;
         };
         /**
          * @description Запас машины для предпросмотра: минимум свободного диска, нагрузка на ядро,
@@ -10820,6 +10949,211 @@ export interface operations {
             };
             /** @description Конфликт состояния, причина в details.reason */
             409: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get__api_v1_jobs: {
+        parameters: {
+            query?: {
+                /** @description Машина (id). */
+                machine?: string;
+                /**
+                 * @description Состояние: `queued`, `dispatched`, `waiting_lease`, `running`, `succeeded`, `failed`,
+                 *     `timed_out`, `canceled` или `lost`.
+                 */
+                state?: string;
+                /** @description Разговор-заказчик. */
+                conversation?: string;
+                /** @description Не больше 200, по умолчанию 50; новые первыми. */
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Задачи на месте, новые первыми */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JobList"];
+                };
+            };
+            /** @description Неизвестное состояние или предел */
+            400: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get__api_v1_jobs__id_: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Задача */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Задача и хвост вывода */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JobDetail"];
+                };
+            };
+            /** @description Задачи нет у владельца */
+            404: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    post__api_v1_jobs__id__cancel: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Ключ операции */
+                "Idempotency-Key": string;
+            };
+            path: {
+                /** @description Задача */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Отмена принята: очередь закрыта сразу, идущую задачу воркер подтвердит; потерянной команда уйдёт, когда машина вернётся */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JobView"];
+                };
+            };
+            /** @description Задачи нет у владельца */
+            404: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get__api_v1_jobs__id__log: {
+        parameters: {
+            query?: {
+                /** @description Позиция в выводе; без неё — последние `limit` байт хвоста. */
+                offset?: number;
+                /** @description Не больше 65536, по умолчанию 16384. */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Задача */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Кусок журнала: хвост хаба, пока задача идёт, и полный журнал после конца */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LogSlice"];
+                };
+            };
+            /** @description Задачи нет у владельца */
+            404: {
                 headers: {
                     /** @description Часы хаба: целые миллисекунды Unix */
                     "X-Server-Time-Ms"?: number;

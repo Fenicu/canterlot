@@ -53,6 +53,7 @@ export type WireEvent =
   | MachineJournalStopsChanged
   | MachineWatchChanged
   | MachineLeaseChanged
+  | JobChanged
   | MachineUpdate
   | Hidden
   | PhaseChanged
@@ -1618,6 +1619,51 @@ export interface LeaseEntry {
   requested_at: Time | null;
   position: number | null;
   dir: string;
+}
+export interface JobChanged {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "job_changed";
+  payload: {
+    job: JobView;
+  };
+}
+/**
+ * Задача на месте целиком, без вывода; состояние ведёт только вперёд
+ */
+export interface JobView {
+  id: Uuid;
+  state:
+    "queued" | "dispatched" | "waiting_lease" | "running" | "succeeded" | "failed" | "timed_out" | "canceled" | "lost";
+  machine_id: Uuid;
+  machine_name: string;
+  conversation_id: Uuid | null;
+  conversation_title: string | null;
+  title: string | null;
+  workdir: string;
+  shell: string;
+  lease: "none" | "build" | "gate";
+  timeout_minutes: number;
+  exit_code: number | null;
+  duration_ms: number | null;
+  output_bytes: number;
+  truncated: boolean;
+  end_reason: string | null;
+  cancel_requested: boolean;
+  has_log: boolean;
+  machine_offline: boolean;
+  late_report: {} | null;
+  created_at: Time;
+  started_at: Time | null;
+  finished_at: Time | null;
 }
 export interface MachineUpdate {
   v: 1;
