@@ -133,6 +133,67 @@ async fn machine_roots(
     }))
 }
 
+/// Правило по умолчанию для машины, которая корней ещё не сообщала; то же, что в
+/// миграции 0119: `/home/<user>/work` и всё под ним.
+fn under_default_work_root(path: &Path) -> bool {
+    let mut parts = path.components();
+    matches!(parts.next(), Some(Component::RootDir))
+        && matches!(parts.next(), Some(Component::Normal(h)) if h == "home")
+        && matches!(parts.next(), Some(Component::Normal(_)))
+        && matches!(parts.next(), Some(Component::Normal(w)) if w == "work")
+}
+
+/// Домен настоящего пути на машине. Под рабочим корнем — `work`; внутри базы рабочих копий
+/// машины — домен разговора, которому принадлежит копия (самый длинный совпавший путь), а
+/// без такого разговора `None`, «неизвестно»; иначе `personal`. Пока машина не сообщила
+/// рабочие корни, работает правило по умолчанию.
+pub async fn path_domain(
+    conn: &mut PgConnection,
+    machine_id: Uuid,
+    path: &str,
+) -> Result<Option<MemoryDomain>, sqlx::Error> {
+    let roots = machine_roots(conn, machine_id).await?;
+    let reported = roots.is_some();
+    let (work_roots, worktree_root) = match roots {
+        Some(roots) => (roots.work_roots, roots.worktree_root),
+        None => (
+            Vec::new(),
+            sqlx::query_scalar("select worktree_root from machines where id=$1")
+                .bind(machine_id)
+                .fetch_optional(&mut *conn)
+                .await?
+                .flatten(),
+        ),
+    };
+    let normalized = normalize(path);
+    match classify(path, &work_roots, worktree_root.as_deref()) {
+        Classification::Work => Ok(Some(MemoryDomain::Work)),
+        Classification::Neutral => {
+            let owner: Option<Option<String>> = sqlx::query_scalar(
+                "select memory_domain from conversations
+                  where machine_id=$1 and worktree ->> 'path' is not null
+                    and ($2 = worktree ->> 'path' or starts_with($2, (worktree ->> 'path') || '/'))
+                  order by length(worktree ->> 'path') desc limit 1",
+            )
+            .bind(machine_id)
+            .bind(normalized.to_string_lossy().as_ref())
+            .fetch_optional(&mut *conn)
+            .await?;
+            Ok(owner.flatten().as_deref().and_then(MemoryDomain::parse))
+        }
+        Classification::Personal => Ok(Some(
+            if !reported
+                && !normalized.components().any(|c| c == Component::ParentDir)
+                && under_default_work_root(&normalized)
+            {
+                MemoryDomain::Work
+            } else {
+                MemoryDomain::Personal
+            },
+        )),
+    }
+}
+
 pub type Scoped = (Option<MemoryDomain>, Option<String>);
 
 fn project_of(workdir: &str) -> String {
@@ -178,19 +239,9 @@ pub async fn child_scope(
     let Some(domain) = MemoryDomain::parse(&domain) else {
         return Ok((None, None));
     };
-    // Корни неизвестны: проверить каталог нечем, потомок остаётся без памяти.
-    let Some(roots) = machine_roots(conn, machine_id).await? else {
-        return Ok((None, None));
-    };
-    match classify(
-        child_workdir,
-        &roots.work_roots,
-        roots.worktree_root.as_deref(),
-    ) {
-        Classification::Neutral => {}
-        Classification::Work if domain == MemoryDomain::Work => {}
-        Classification::Personal if domain == MemoryDomain::Personal => {}
-        _ => return Err(ScopeError::DomainMismatch),
+    // Каталог в базе рабочих копий без хозяина-разговора даёт `None` и тоже отказ.
+    if path_domain(conn, machine_id, child_workdir).await? != Some(domain) {
+        return Err(ScopeError::DomainMismatch);
     }
     Ok((Some(domain), project))
 }
@@ -198,8 +249,8 @@ pub async fn child_scope(
 /// Файл под рабочим корнем машины нельзя отдавать вызывающему не из рабочего домена:
 /// ни существование, ни метаданные, ни начало текста. Работа с файлами вне корней
 /// (`/tmp/*.done`) рабочему вызывающему остаётся. Классифицируется настоящий путь от
-/// воркера, а без него (старый воркер, файла нет) — путь как он записан. Корни неизвестны —
-/// поведение прежнее.
+/// воркера, а без него (старый воркер, файла нет) — путь как он записан. Домен пути даёт
+/// `path_domain`: отказ и для рабочего пути, и для неизвестного (копия без хозяина).
 pub async fn file_denied_for(
     conn: &mut PgConnection,
     conversation_id: Uuid,
@@ -217,11 +268,8 @@ pub async fn file_denied_for(
     if domain.as_deref().and_then(MemoryDomain::parse) == Some(MemoryDomain::Work) {
         return Ok(false);
     }
-    let Some(roots) = machine_roots(conn, machine_id).await? else {
-        return Ok(false);
-    };
     let path = canonical_path.unwrap_or(lexical_path);
-    Ok(classify(path, &roots.work_roots, roots.worktree_root.as_deref()) == Classification::Work)
+    Ok(path_domain(conn, machine_id, path).await? != Some(MemoryDomain::Personal))
 }
 
 /// Проверка запуска: настоящий путь, который прислал воркер, противоречит сохранённому

@@ -159,8 +159,8 @@ async fn spawn_side_fork_routine_copy_inherit_parent_scope(pool: PgPool) {
     let parent = create(&pool, &registry, request(&seed, "/h/work/p", None))
         .await
         .unwrap();
-    // Делегат без своего каталога, с рабочим каталогом того же домена и в базе копий.
-    for workdir in ["/h/work/p", "/h/work/q", "/h/data/worktrees/x"] {
+    // Делегат без своего каталога и с рабочим каталогом того же домена.
+    for workdir in ["/h/work/p", "/h/work/q"] {
         let child = create(&pool, &registry, request(&seed, workdir, Some(parent)))
             .await
             .unwrap();
@@ -196,6 +196,51 @@ async fn spawn_side_fork_routine_copy_inherit_parent_scope(pool: PgPool) {
         scope(&pool, side.conversation_id).await,
         some("work", "/h/work/p")
     );
+}
+
+/// Рабочая копия в базе машины, принадлежащая разговору `owner`.
+async fn own_worktree(pool: &PgPool, owner: Uuid, path: &str) {
+    sqlx::query("update conversations set workdir=$2, worktree=$3 where id=$1")
+        .bind(owner)
+        .bind(path)
+        .bind(serde_json::json!({"path": path, "branch": "b", "source_workdir": "/h/x", "base": "main"}))
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn spawn_into_a_worktree_is_classified_by_the_conversation_that_owns_it(pool: PgPool) {
+    let (seed, registry) = fixture(&pool, &["pilot_v1", "memory_scope_v1"]).await;
+    let work = create(&pool, &registry, request(&seed, "/h/work/p", None))
+        .await
+        .unwrap();
+    own_worktree(&pool, work, "/h/data/worktrees/w1").await;
+    let personal = create(&pool, &registry, request(&seed, "/h/play", None))
+        .await
+        .unwrap();
+    // Личный родитель не попадает в рабочую копию рабочего делегата, ни в корень, ни глубже.
+    for path in ["/h/data/worktrees/w1", "/h/data/worktrees/w1/src"] {
+        let refused = create(&pool, &registry, request(&seed, path, Some(personal))).await;
+        assert!(matches!(refused, Err(CreateError::DomainMismatch)), "{path}");
+    }
+    // Каталог в базе без хозяина неизвестен: тоже отказ.
+    let refused = create(
+        &pool,
+        &registry,
+        request(&seed, "/h/data/worktrees/nobody", Some(personal)),
+    )
+    .await;
+    assert!(matches!(refused, Err(CreateError::DomainMismatch)));
+    // Рабочий родитель в свою рабочую копию и в копию с тем же доменом попадает.
+    let child = create(
+        &pool,
+        &registry,
+        request(&seed, "/h/data/worktrees/w1/src", Some(work)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(scope(&pool, child).await, some("work", "/h/work/p"));
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
