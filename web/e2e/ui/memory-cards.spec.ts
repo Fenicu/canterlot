@@ -38,6 +38,13 @@ async function reveal(page: Page, target: Locator): Promise<Locator> {
         // Строку сняли с окна, пока до неё крутили: ищем дальше.
       }
     }
+    // Чтение и поиск памяти уходят в свёрнутые шаги хода: раскрываем встреченную группу.
+    const folded = feed(page).locator('button.head[aria-expanded="false"]', { hasText: /\d+ шаг/ });
+    if ((await folded.count()) > 0) {
+      await folded.first().click();
+      await settle();
+      continue;
+    }
     await feed(page).evaluate((node) => {
       node.scrollTop += node.clientHeight * 0.6;
     });
@@ -48,6 +55,8 @@ async function reveal(page: Page, target: Locator): Promise<Locator> {
 }
 
 const line = (found: Locator) => found.locator('.head .hit');
+/** Раскрывает карточку за шеврон: на узком экране середина строки занята ссылкой на запись. */
+const toggle = (found: Locator) => line(found).click({ position: { x: 8, y: 8 } });
 
 test('every_memory_card_reads_its_line_and_word', async ({ page }) => {
   test.setTimeout(90_000);
@@ -82,7 +91,7 @@ test('every_memory_card_reads_its_line_and_word', async ({ page }) => {
 test('a_search_card_opens_and_lists_the_rows_with_kind_level_and_stale_mark', async ({ page }) => {
   const { seed } = await boot(page);
   const found = await reveal(page, card(page, seed.blocks.search!));
-  await line(found).click();
+  await toggle(found);
   const rows = found.locator('[data-role="memory-rows"] li');
   await expect(rows).toHaveCount(3);
   await expect(rows.nth(0)).toContainText('грабли Порт тестовой базы');
@@ -97,7 +106,7 @@ test('a_search_card_opens_and_lists_the_rows_with_kind_level_and_stale_mark', as
 test('a_search_row_opens_that_entry_on_the_memory_screen', async ({ page }) => {
   const { seed } = await boot(page);
   const found = await reveal(page, card(page, seed.blocks.search!));
-  await line(found).click();
+  await toggle(found);
   await found.locator(`[data-memory-row="${seed.entries.port.id}"]`).click();
   await expect(page).toHaveURL(new RegExp(`/settings\\?c=memory&entry=${seed.entries.port.id}`));
   const sheet = page.getByRole('dialog', { name: 'Запись' });
@@ -125,7 +134,7 @@ test('a_link_to_an_unknown_entry_shows_the_list_with_a_notice', async ({ page })
 test('a_get_card_shows_the_body_as_markdown_with_kind_level_version_and_expiry', async ({ page }) => {
   const { seed } = await boot(page);
   const found = await reveal(page, card(page, seed.blocks.get!));
-  await line(found).click();
+  await toggle(found);
   await expect(found.locator('[data-role="memory-meta"]')).toHaveText('грабли · canterlot · версия 2 · до 01.12');
   await expect(found.locator('[data-role="memory-body"] strong')).toHaveText('Порт');
   await expect(found.locator('[data-role="memory-body"] code')).toHaveText('55883');
@@ -135,7 +144,7 @@ test('a_write_card_names_kind_and_level_and_opens_the_body', async ({ page }) =>
   const { seed } = await boot(page);
   const found = await reveal(page, card(page, seed.blocks.write!));
   await expect(found.locator('[data-role="memory-meta"]')).toHaveText('урок · весь домен');
-  await line(found).click();
+  await toggle(found);
   await expect(found.locator('[data-role="memory-body"] li')).toHaveCount(2);
 });
 
@@ -149,7 +158,7 @@ test('an_update_card_lists_the_changed_fields_and_the_new_text', async ({ page }
   const { seed } = await boot(page);
   const found = await reveal(page, card(page, seed.blocks.update!));
   await expect(found.locator('[data-role="memory-changes"]')).toHaveText('Изменено: срок, текст');
-  await line(found).click();
+  await toggle(found);
   await expect(found.locator('[data-role="memory-details"]')).toHaveText('Срок снят');
   await expect(found.locator('[data-role="memory-body"] code')).toHaveText('55884');
 });
@@ -158,7 +167,7 @@ test('a_long_subject_and_a_long_row_stay_inside_the_bubble', async ({ page }) =>
   const { seed } = await boot(page);
   for (const name of ['writeLong', 'search']) {
     const found = await reveal(page, card(page, seed.blocks[name]!));
-    if (name === 'search') await line(found).click();
+    if (name === 'search') await toggle(found);
     const box = await found.boundingBox();
     const viewport = page.viewportSize()!;
     expect(box!.x + box!.width, name).toBeLessThanOrEqual(viewport.width);

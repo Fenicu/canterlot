@@ -20,7 +20,8 @@
             <a class="row" href={resolve(memoryHref(row.id) as '/')} data-memory-row={row.id}>
               <span class="subject"><span class="kind">{kindWord(row.kind)}</span> {row.subject}</span>
               <span class="meta">
-                {levelWord(row.level, row.projectLabel)}{#if row.updatedAt !== null} · {fmt.shortDate(row.updatedAt)}{/if}{#if row.expired} · <span class="stale" data-role="memory-stale">устарела</span>{/if}
+                <span>{[levelWord(row.level, row.projectLabel), row.updatedAt !== null ? fmt.shortDate(row.updatedAt) : ''].filter(Boolean).join(' · ')}</span>
+                {#if row.expired}<span class="stale" data-role="memory-stale">устарела</span>{/if}
               </span>
             </a>
           </li>
@@ -37,7 +38,7 @@
   .row { display: flex; flex-direction: column; justify-content: center; gap: var(--s1); min-height: var(--target); min-width: 0; padding-block: var(--s2); color: inherit; text-decoration: none; }
   .subject { min-width: 0; color: var(--text); overflow-wrap: anywhere; }
   .kind { color: var(--secondary); }
-  .meta { color: var(--muted); font-size: var(--fs-sm); overflow-wrap: anywhere; }
+  .meta { display: flex; flex-wrap: wrap; gap: var(--s0) var(--s3); color: var(--muted); font-size: var(--fs-sm); overflow-wrap: anywhere; }
   .stale { color: var(--warning); }
   li[data-expired] .subject, li[data-expired] .kind { color: var(--muted); }
   .row:hover .subject, .row:focus-visible .subject { text-decoration: underline; text-underline-offset: var(--s1); }

@@ -226,6 +226,7 @@ export interface MemoryWriteData {
 }
 
 export const memoryWrite: CardLogic<MemoryWriteData> = {
+  stays: true,
   label: 'Память',
   parse(call) {
     const subject = str(call.input.subject).trim();
@@ -286,6 +287,7 @@ export interface MemoryUpdateData {
 }
 
 export const memoryUpdate: CardLogic<MemoryUpdateData> = {
+  stays: true,
   label: 'Память',
   parse(call) {
     const id = str(call.input.id);
@@ -337,6 +339,7 @@ export interface MemoryDeleteData {
 }
 
 export const memoryDelete: CardLogic<MemoryDeleteData> = {
+  stays: true,
   label: 'Память',
   parse(call) {
     const id = str(call.input.id);

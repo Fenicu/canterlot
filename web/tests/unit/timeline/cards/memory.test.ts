@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'vitest';
+import type { BlockModel } from '../../../../src/lib/stores/blocks';
+import type { TimelineEntry } from '../../../../src/lib/stores/timeline';
 import { cardCall } from '../../../../src/lib/timeline/cards/call';
+import { memorySubject } from '../../../../src/lib/timeline/cards/context';
 import type { MemoryDeleteData, MemoryGetData, MemorySearchData, MemoryUpdateData, MemoryWriteData } from '../../../../src/lib/timeline/cards/defs/memory';
 import { kindWord, memoryHref } from '../../../../src/lib/timeline/cards/defs/memory';
 import { resolveCard } from '../../../../src/lib/timeline/cards/registry';
@@ -19,6 +22,38 @@ function failed(tool: string, input: unknown, output: string, root = true) {
 }
 
 const row = (patch: Record<string, unknown> = {}) => ({ id: ID, kind: 'gotcha', level: 'project', project_label: 'canterlot', subject: 'Миграции в тестовой базе', excerpt: 'Порт 55883', updated_at: '2026-11-18T09:00:00Z', expired: false, ...patch });
+
+describe('memorySubject (the feed lookup behind memory_update and memory_delete)', () => {
+  const entry = (block: BlockModel) => ({ kind: 'block', block }) as unknown as TimelineEntry;
+  function pair(tool: string, input: unknown, output: string): BlockModel[] {
+    const call = callBlock(tool, input);
+    return [call, resultBlock(output, { parentId: call.id } as Partial<BlockModel>)];
+  }
+  const found = (blocks: BlockModel[], target: BlockModel) => memorySubject(blocks.map(entry), target, ID);
+
+  it('takes_the_subject_from_the_nearest_earlier_get_search_write_or_update', () => {
+    const target = callBlock('mcp__canterlot__memory_delete', { id: ID, expected_version: 2 });
+    const search = pair('mcp__canterlot__memory_search', { query: 'x' }, hub({ count: 1, results: [row()] }));
+    expect(found([...search, target], target)).toBe('Миграции в тестовой базе');
+    const get = pair('mcp__canterlot__memory_get', { id: ID }, hub({ id: ID, subject: 'Из чтения', body: 'b' }));
+    expect(found([...search, ...get, target], target)).toBe('Из чтения');
+    const written = pair('mcp__canterlot__memory_write', { kind: 'gotcha', subject: 'Из записи', body: 'b' }, hub({ id: ID, domain: 'work', level: 'domain', project_label: null, version: 1 }));
+    expect(found([...search, ...written, target], target)).toBe('Из записи');
+    const renamed = pair('mcp__canterlot__memory_update', { id: ID, expected_version: 1, subject: 'Новая тема' }, hub({ id: ID, domain: 'work', level: 'domain', project_label: null, version: 2 }));
+    expect(found([...search, ...written, ...renamed, target], target)).toBe('Новая тема');
+  });
+
+  it('ignores_later_calls_other_entries_and_a_refused_rename', () => {
+    const target = callBlock('mcp__canterlot__memory_delete', { id: ID, expected_version: 2 });
+    const get = pair('mcp__canterlot__memory_get', { id: ID }, hub({ id: ID, subject: 'Из чтения', body: 'b' }));
+    const refused = pair('mcp__canterlot__memory_update', { id: ID, expected_version: 1, subject: 'Отказанная тема' }, 'version_conflict: The entry changed since you read it {"current_version":2}');
+    const other = pair('mcp__canterlot__memory_get', { id: OTHER }, hub({ id: OTHER, subject: 'Чужая', body: 'b' }));
+    expect(found([...get, ...refused, ...other, target], target)).toBe('Из чтения');
+    const later = pair('mcp__canterlot__memory_get', { id: ID }, hub({ id: ID, subject: 'Позже', body: 'b' }));
+    expect(found([target, ...later], target)).toBeNull();
+    expect(found([target], target)).toBeNull();
+  });
+});
 
 describe('kind labels and links', () => {
   it('names_every_kind_in_short_russian', () => {

@@ -127,11 +127,10 @@ export function memorySubject(entries: readonly TimelineEntry[], block: BlockMod
     } else if (tool === 'canterlot.memory_get') {
       if (answer && str(answer.id) === id && str(answer.subject).trim()) return str(answer.subject).trim();
     } else {
-      // Запись и правка называют тему во входе; id записи дают вход правки или ответ записи.
-      const input = jsonObjectIn(other.text);
-      const named = str(input?.subject).trim();
-      const target = tool === 'canterlot.memory_write' ? str(answer?.id) : str(input?.id);
-      if (named && target === id) return named;
+      // Запись и правка называют тему во входе. Отказанный вызов тему не меняет: у удачного ответа
+      // есть `id` записи (у отказа о конфликте версий его нет).
+      const named = str(jsonObjectIn(other.text)?.subject).trim();
+      if (named && str(answer?.id) === id) return named;
     }
   }
   return null;
