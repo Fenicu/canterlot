@@ -153,7 +153,12 @@ pub struct LogSlice {
     pub total_bytes: Option<u64>,
     pub eof: bool,
     pub text: String,
+    /// `full log expired`: полный журнал убран по сроку хранения, остался хвост.
+    pub note: Option<String>,
 }
+
+/// Сообщение, когда полный журнал убран по сроку хранения.
+pub const EXPIRED_NOTE: &str = "full log expired";
 
 fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
@@ -191,6 +196,7 @@ fn tail_slice(job: &Job, offset: Option<u64>, limit: usize) -> LogSlice {
         total_bytes: terminal.then_some(end),
         eof: terminal && upto >= end,
         text: text(slice),
+        note: (terminal && job.log_expired_at.is_some()).then(|| EXPIRED_NOTE.to_owned()),
     }
 }
 
@@ -239,5 +245,6 @@ pub async fn read(
         total_bytes: eof.then_some(next),
         eof,
         text: text(&data),
+        note: None,
     })
 }

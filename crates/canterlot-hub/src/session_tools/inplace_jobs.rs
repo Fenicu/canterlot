@@ -458,6 +458,7 @@ pub async fn log(
         "total_bytes": slice.total_bytes,
         "eof": slice.eof,
         "text": slice.text,
+        "note": slice.note,
     }))
 }
 

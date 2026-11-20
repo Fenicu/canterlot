@@ -157,7 +157,7 @@ impl Background {
                 tokio::spawn(crate::inplace_jobs::sweep::run(
                     pool.clone(),
                     registry.clone(),
-                    jobs.lost_grace,
+                    jobs,
                     stopped.clone(),
                 )),
             ),

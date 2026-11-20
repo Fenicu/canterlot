@@ -19861,6 +19861,13 @@
             "format": "int64",
             "minimum": 0
           },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`full log expired`: полный журнал убран по сроку хранения, остался хвост."
+          },
           "offset": {
             "type": "integer",
             "format": "int64",

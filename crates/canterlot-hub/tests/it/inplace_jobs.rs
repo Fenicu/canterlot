@@ -447,6 +447,90 @@ async fn hub_restart_during_the_wait_turns_every_undelivered_job_into_a_message(
     assert_eq!(sweep::on_start(&fx.pool).await.unwrap(), 0);
 }
 
+/// Срок хранения журнала: вложение отпускается, строка хранит хвост, чтение отвечает хвостом
+/// с пометкой; свежая и идущая задачи не трогаются, нулевой срок не убирает ничего.
+#[sqlx::test(migrations = "./migrations")]
+async fn an_expired_log_is_released_and_reads_answer_with_the_tail_and_a_note(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let old = job_id(&fx.run("old").await);
+    let fresh = job_id(&fx.run("fresh").await);
+    let running = job_id(&fx.run("running").await);
+    for id in [old, fresh] {
+        fx.started(fx.a, id).await;
+        fx.finished(fx.a, id, JobOutcome::Succeeded, Some(0)).await;
+    }
+    fx.started(fx.a, running).await;
+    for id in [old, fresh, running] {
+        sqlx::query("update jobs set log_media_id=$2, log_size=10 where id=$1")
+            .bind(id)
+            .bind(Uuid::now_v7())
+            .execute(&fx.pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query("update jobs set finished_at=now()-interval '15 days' where id=$1")
+        .bind(old)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    let day = Duration::from_secs(86400);
+    assert_eq!(
+        sweep::expire_logs(&fx.pool, Duration::ZERO, Utc::now())
+            .await
+            .unwrap(),
+        0,
+        "zero keeps the logs for ever"
+    );
+    assert_eq!(
+        sweep::expire_logs(&fx.pool, 14 * day, Utc::now())
+            .await
+            .unwrap(),
+        1
+    );
+    let expired = fx.job(old).await;
+    assert!(expired.log_media_id.is_none() && expired.log_expired_at.is_some());
+    assert_eq!(
+        expired.tail.as_deref(),
+        Some(&b"hello\nworld\n"[..]),
+        "the tail stays"
+    );
+    assert!(fx.job(fresh).await.log_media_id.is_some());
+    assert!(fx.job(running).await.log_media_id.is_some());
+    let reply = fx.call("job.log", json!({"job_id": old})).await.unwrap();
+    assert_eq!(reply["source"], "tail");
+    assert_eq!(reply["note"], "full log expired");
+    assert_eq!(reply["text"], "hello\nworld\n");
+    assert!(fx.call("job.log", json!({"job_id": fresh})).await.unwrap()["note"].is_null());
+    // Второй проход ничего не меняет.
+    assert_eq!(
+        sweep::expire_logs(&fx.pool, 14 * day, Utc::now())
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn the_http_log_of_an_expired_job_answers_with_the_tail_and_a_note(pool: PgPool) {
+    let api = Api::new(pool.clone()).await;
+    let id = api.insert("succeeded", "make").await;
+    sqlx::query(
+        "update jobs set tail=$2, output_bytes=6, log_expired_at=now(), finished_at=now() where id=$1",
+    )
+    .bind(id)
+    .bind(b"tail\n\n".to_vec())
+    .execute(&pool)
+    .await
+    .unwrap();
+    let slice = api
+        .get(&format!("/api/v1/jobs/{id}/log"))
+        .await
+        .json::<Value>();
+    assert_eq!(slice["source"], "tail");
+    assert_eq!(slice["note"], "full log expired");
+    assert_eq!(slice["text"], "tail\n\n");
+}
+
 /// Вызов, оборванный там, где страж не успел встать, не оставляет задачу без доставки навсегда:
 /// таймер переводит давние задачи без выбранной доставки на сообщение.
 #[sqlx::test(migrations = "./migrations")]

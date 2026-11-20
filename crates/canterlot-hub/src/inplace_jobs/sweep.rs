@@ -60,6 +60,54 @@ pub async fn undelivered_sweep(
     Ok(count)
 }
 
+/// Срок хранения полного журнала вышел: вложение отпускается (сборщик блобов уберёт файл),
+/// строка хранит метаданные и хвост, а чтение отвечает хвостом с пометкой. `retention = 0`
+/// не убирает ничего.
+pub async fn expire_logs(
+    pool: &PgPool,
+    retention: Duration,
+    now: DateTime<Utc>,
+) -> Result<usize, sqlx::Error> {
+    if retention.is_zero() {
+        return Ok(0);
+    }
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        "select id from jobs
+         where log_media_id is not null
+           and state in ('succeeded','failed','timed_out','canceled','lost')
+           and finished_at < $1 - make_interval(secs => $2)
+         order by id limit 500",
+    )
+    .bind(now)
+    .bind(retention.as_secs_f64())
+    .fetch_all(pool)
+    .await?;
+    let mut done = 0;
+    for id in ids {
+        let released = crate::db::in_tx(pool, move |conn| {
+            Box::pin(async move {
+                let released = sqlx::query(
+                    "update jobs set log_media_id=null, log_expired_at=$2, updated_at=clock_timestamp()
+                     where id=$1 and log_media_id is not null",
+                )
+                .bind(id)
+                .bind(now)
+                .execute(&mut *conn)
+                .await?
+                .rows_affected()
+                    > 0;
+                if released && let Some(job) = super::load(conn, id).await? {
+                    super::emit_changed(conn, &job, Uuid::now_v7()).await?;
+                }
+                Ok::<_, sqlx::Error>(released)
+            })
+        })
+        .await?;
+        done += usize::from(released);
+    }
+    Ok(done)
+}
+
 /// Дольше самого долгого ожидания вызова (60 с) с запасом на сеть и разбор.
 const UNDELIVERED_AFTER: Duration = Duration::from_secs(3 * 60);
 
@@ -136,9 +184,10 @@ pub async fn dispatch_machine(pool: &PgPool, machine_id: Uuid) -> Result<(), sql
 pub async fn run(
     pool: PgPool,
     registry: Registry,
-    grace: Duration,
+    config: crate::config::JobsConfig,
     shutdown: watch::Receiver<bool>,
 ) {
+    let (grace, retention) = (config.lost_grace, config.log_retention);
     let supervisor = pool.clone();
     crate::singleton::supervise(&supervisor, "inplace_jobs", shutdown, move || {
         let pool = pool.clone();
@@ -160,7 +209,7 @@ pub async fn run(
                         Ok((machine, Availability::Available)) => dispatch_machine(&pool, machine).await,
                         _ => Ok(()),
                     },
-                    _ = tick.tick() => sweep_once(&pool, &registry, grace).await,
+                    _ = tick.tick() => sweep_once(&pool, &registry, grace, retention).await,
                 };
                 if let Err(error) = result {
                     tracing::warn!(
@@ -179,9 +228,11 @@ async fn sweep_once(
     pool: &PgPool,
     registry: &Registry,
     grace: Duration,
+    retention: Duration,
 ) -> Result<(), sqlx::Error> {
     lost_sweep(pool, registry, grace, Utc::now()).await?;
     undelivered_sweep(pool, UNDELIVERED_AFTER, Utc::now()).await?;
+    expire_logs(pool, retention, Utc::now()).await?;
     for machine in queued_machines(pool).await? {
         if registry.availability(machine) == Availability::Available {
             dispatch_machine(pool, machine).await?;

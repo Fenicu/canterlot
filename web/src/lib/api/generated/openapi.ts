@@ -3971,6 +3971,8 @@ export interface components {
             eof: boolean;
             /** Format: int64 */
             next_offset: number;
+            /** @description `full log expired`: полный журнал убран по сроку хранения, остался хвост. */
+            note?: string | null;
             /** Format: int64 */
             offset: number;
             /** @description `tail` — живой или итоговый хвост на хабе, `log` — полный журнал после конца. */

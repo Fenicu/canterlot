@@ -126,6 +126,7 @@ pub struct Job {
     pub proc_start_time: Option<i64>,
     pub log_media_id: Option<Uuid>,
     pub log_size: Option<i64>,
+    pub log_expired_at: Option<DateTime<Utc>>,
     pub late_report: Option<Value>,
     pub created_at: DateTime<Utc>,
     pub dispatched_at: Option<DateTime<Utc>>,

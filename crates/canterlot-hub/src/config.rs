@@ -982,12 +982,17 @@ pub struct JobsConfig {
     /// Запас после срока команды: машина, молчащая дольше `timeout + lost_grace`, теряет задачу.
     #[serde(with = "humantime_serde")]
     pub lost_grace: Duration,
+    /// Сколько хранится полный журнал законченной задачи; потом вложение отпускается, а строка
+    /// оставляет метаданные и хвост. `0` хранит журналы без срока.
+    #[serde(with = "humantime_serde")]
+    pub log_retention: Duration,
 }
 
 impl Default for JobsConfig {
     fn default() -> Self {
         Self {
             lost_grace: Duration::from_secs(10 * 60),
+            log_retention: Duration::from_secs(14 * 86400),
         }
     }
 }
