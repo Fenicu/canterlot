@@ -144,7 +144,8 @@
   .filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--gauge-width)), 1fr)); gap: var(--s4); }
   .search input { display: block; white-space: nowrap; width: 100%; min-height: var(--target); padding: var(--s5) var(--s8); border: 0; border-radius: var(--radius-pill); background: var(--raised); font-size: var(--fs-input); color: inherit; }
   .list { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--s3); margin: var(--s0); padding: var(--s0); list-style: none; }
-  .row { display: flex; flex-direction: column; gap: var(--s2); width: 100%; padding: var(--s6); border: 0; border-radius: var(--radius-card); background: var(--surface); color: inherit; text-align: left; }
+  /* white-space: normal снимает nowrap, который `.secondary-content button` задаёт кнопкам-таблеткам: он наследуется и тексту строки, и переносы не работают. */
+  .row { white-space: normal; display: flex; flex-direction: column; gap: var(--s2); width: 100%; padding: var(--s6); border: 0; border-radius: var(--radius-card); background: var(--surface); color: inherit; text-align: left; }
   .row strong { overflow-wrap: anywhere; }
   .meta { color: var(--secondary); font-size: var(--fs-sm); }
   .excerpt { color: var(--muted); font-size: var(--fs-sm); overflow-wrap: anywhere; }
