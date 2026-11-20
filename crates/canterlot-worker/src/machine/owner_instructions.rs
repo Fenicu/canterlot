@@ -65,6 +65,9 @@ pub struct OwnerRoots {
     pub claude_config_dir: PathBuf,
     pub codex_home: PathBuf,
     pub opencode_config_dir: PathBuf,
+    /// Воркер без таблицы `[claude_code]` Claude Code игнорирует: его файлы не показываются
+    /// в обзоре и не читаются.
+    pub claude_enabled: bool,
 }
 
 impl OwnerRoots {
@@ -80,7 +83,21 @@ impl OwnerRoots {
             claude_config_dir,
             codex_home,
             opencode_config_dir,
+            claude_enabled: true,
         }
+    }
+
+    /// Выключает все пути Claude Code.
+    pub fn without_claude(mut self) -> Self {
+        self.claude_enabled = false;
+        self
+    }
+
+    fn is_claude_kind(kind: &str) -> bool {
+        matches!(
+            kind,
+            KIND_CLAUDE_USER | KIND_CLAUDE_HOME | KIND_MEMORY_INDEX | KIND_MEMORY_FILE
+        )
     }
 
     pub fn from_env(
@@ -95,8 +112,7 @@ impl OwnerRoots {
                 .find(|(name, _)| name.to_string_lossy() == key)
                 .map(|(_, value)| PathBuf::from(value))
         };
-        let claude_config_dir = std::env::var_os("CLAUDE_CONFIG_DIR")
-            .map(PathBuf::from)
+        let claude_config_dir = get("CLAUDE_CONFIG_DIR")
             .filter(|dir| dir.is_absolute())
             .unwrap_or_else(|| home.join(".claude"));
         let codex_home = codex_owner_home
@@ -115,6 +131,7 @@ impl OwnerRoots {
             claude_config_dir,
             codex_home,
             opencode_config_dir,
+            claude_enabled: true,
         }
     }
 }
@@ -357,12 +374,17 @@ pub fn overview(roots: &OwnerRoots) -> OwnerInstructionsOverview {
         KIND_OPENCODE_GLOBAL,
     ]
     .into_iter()
+    .filter(|kind| roots.claude_enabled || !OwnerRoots::is_claude_kind(kind))
     .map(|kind| meta_for(kind, roots))
     .collect();
     OwnerInstructionsOverview {
         request_id: String::new(),
         files,
-        projects: memory_projects(roots),
+        projects: if roots.claude_enabled {
+            memory_projects(roots)
+        } else {
+            Vec::new()
+        },
     }
 }
 
@@ -478,6 +500,14 @@ pub fn read_one(
             ReadOutcome::Symlink => REASON_SYMLINK,
             _ => "",
         }
+    }
+    // Claude Code выключен таблицей: его пути не читаются и не называются.
+    if !roots.claude_enabled && OwnerRoots::is_claude_kind(kind) {
+        return OwnerInstructionsFile {
+            request_id: request_id.into(),
+            kind: kind.into(),
+            ..Default::default()
+        };
     }
     if let Some(expected) = expected_path(kind, roots) {
         // Лишние project/name у глобального файла запрос портят.

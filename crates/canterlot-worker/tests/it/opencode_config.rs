@@ -196,6 +196,7 @@ fn table_survives_the_supervisor_spec() {
         provider_models: Default::default(),
         owner_config: Some(PathBuf::from("/home/user/.config/opencode")),
         default_model: None,
+        account: "owner".into(),
     };
     let mut spec: toml::Value = toml::from_str(&format!(
         "execution_id = \"{id}\"\ngeneration = 1\nconversation_id = \"{id}\"\nprotocol_version = 1\n",

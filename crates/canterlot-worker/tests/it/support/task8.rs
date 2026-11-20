@@ -70,7 +70,7 @@ async fn worker_without_exec_capability_echo_rejects_start() {
             "session_tools_v1",
             "owner_exit_v1",
             "owner_instructions_v1",
-            "claude_histories_v1",
+            // Без `[claude_code]` в конфигурации Claude Code игнорируется: историй нет.
             "send_now_v1",
             "guarded_interrupt_v1",
             "alarms_v1",

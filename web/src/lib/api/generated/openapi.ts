@@ -2414,6 +2414,8 @@ export interface components {
         };
         /** @description То, что видят PWA и HTTP: без заметки и без внутренних отметок. */
         AlarmView: {
+            /** @description Учётная запись провайдера, закреплённая при взводе; только у `limit_reset`. */
+            account?: string | null;
             /** Format: uuid */
             alarm_id: string;
             batch: boolean;
@@ -3354,6 +3356,8 @@ export interface components {
             title: string;
         };
         HarnessView: {
+            /** @description Учётная запись лимитов харнесса (`account` в worker.toml); `owner` по умолчанию. */
+            account: string;
             /** @description Команды и навыки, которые CLI может выполнить; пусто без `slash_catalog_v1`. */
             catalog: components["schemas"]["CatalogView"][];
             /** @description Поддерживает ли харнесс цели. */
@@ -3452,6 +3456,8 @@ export interface components {
             /** @enum {string} */
             reason: "attachments_pending";
         } | {
+            /** @description Учётная запись провайдера; для `owner` ключа в JSON нет. */
+            account?: string;
             provider: string;
             /** @enum {string} */
             reason: "quota_exhausted";
@@ -3459,6 +3465,8 @@ export interface components {
             wake_at: string;
             window: string;
         } | {
+            /** @description Учётная запись провайдера; для `owner` ключа в JSON нет. */
+            account?: string;
             provider: string;
             /** @enum {string} */
             reason: "weekly_reserve";
@@ -3973,6 +3981,20 @@ export interface components {
              * @description Размер журнала, когда он известен.
              */
             total_bytes?: number | null;
+        };
+        /** @description Вход провайдера на одной машине учётной записи. */
+        MachineCredentialView: {
+            /** @description `null` — дата неизвестна (API-ключ, старый CLI). */
+            expires_at?: string | null;
+            /** Format: uuid */
+            machine_id: string;
+            machine_name: string;
+        };
+        /** @description Сбросы лимитов, о которых сообщила одна машина учётной записи. */
+        MachineCreditsView: components["schemas"]["CreditsView"] & {
+            /** Format: uuid */
+            machine_id: string;
+            machine_name: string;
         };
         /**
          * @description Запас машины для предпросмотра: минимум свободного диска, нагрузка на ядро,
@@ -4493,6 +4515,8 @@ export interface components {
             /** @enum {string} */
             reason: "process_exited";
         } | {
+            /** @description Учётная запись провайдера; для `owner` ключа в JSON нет. */
+            account?: string;
             provider?: string | null;
             /** @enum {string} */
             reason: "limit_reached";
@@ -4708,6 +4732,7 @@ export interface components {
             url?: string | null;
         };
         ProviderSeries: {
+            account: string;
             five_hour: components["schemas"]["Point"][];
             provider: string;
             weekly: components["schemas"]["Point"][];
@@ -4763,8 +4788,14 @@ export interface components {
         };
         ProviderView: {
             /**
-             * @description Самый ранний конец входа провайдера на машинах владельца; `null` — дата неизвестна
-             *     (API-ключ, старый CLI) или у провайдера такого входа нет.
+             * @description Учётная запись провайдера (`account` харнесса в worker.toml); `owner` по умолчанию.
+             *     У провайдера на нескольких подписках строк по одной на каждую.
+             */
+            account: string;
+            /**
+             * @description Самый ранний конец входа провайдера на машинах этой учётной записи; `null` — дата
+             *     неизвестна (API-ключ, старый CLI) или у провайдера такого входа нет. Сводное поле для
+             *     клиентов, которые ещё не читают `machine_credentials`.
              */
             credential_expires_at?: string | null;
             credits?: components["schemas"]["CreditsView"] | null;
@@ -4773,6 +4804,10 @@ export interface components {
             five_hour?: components["schemas"]["WindowView"] | null;
             /** @description У провайдера нет пятичасового окна (например, план без этого лимита): счётчик скрывается. */
             five_hour_absent: boolean;
+            /** @description Вход по машинам: у каждой машины он свой и в одну дату не сливается. */
+            machine_credentials: components["schemas"]["MachineCredentialView"][];
+            /** @description Сбросы лимитов по машинам. */
+            machine_credits: components["schemas"]["MachineCreditsView"][];
             monthly?: components["schemas"]["WindowView"] | null;
             provider: string;
             status?: components["schemas"]["ProviderStatusView"] | null;
@@ -4906,6 +4941,8 @@ export interface components {
         RefreshView: {
             /** @description Провайдеры, чьим машинам отправлена просьба об опросе. */
             requested: string[];
+            /** @description Те же просьбы по учётным записям: у провайдера их может быть несколько. */
+            requested_accounts: components["schemas"]["RequestedAccount"][];
             /** Format: int64 */
             retry_after_secs: number;
         };
@@ -4966,6 +5003,10 @@ export interface components {
             updated_at: string;
             /** Format: uuid */
             winner_decision_id?: string | null;
+        };
+        RequestedAccount: {
+            account: string;
+            provider: string;
         };
         /** @description Сброс лимитов, подаренный провайдером (сбросы Codex): когда сгорит. */
         ResetView: {
@@ -5741,6 +5782,8 @@ export interface components {
             upload_chunk_bytes: number;
         };
         UsageDay: {
+            /** @description Учётная запись провайдера, на которой шли ходы. */
+            account: string;
             agent: string;
             /** Format: int64 */
             cache_read_tokens: number;
@@ -11285,6 +11328,8 @@ export interface operations {
         parameters: {
             query?: {
                 provider?: string;
+                /** @description Только эта учётная запись провайдера; без параметра — все. */
+                account?: string;
                 from?: string;
                 to?: string;
                 tz?: string;

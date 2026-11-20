@@ -1299,6 +1299,11 @@ impl Scheduler {
             .as_str()
             .unwrap_or_default()
             .to_owned();
+        // Нагрузка `owner` и задания, поставленные до учётных записей, ключа не несут.
+        let account = job.payload["account"]
+            .as_str()
+            .unwrap_or(canterlot_proto::limits::OWNER_ACCOUNT)
+            .to_owned();
         let correlation = Uuid::now_v7();
         let mut left = Vec::new();
         let mut reserve_left = false;
@@ -1322,6 +1327,7 @@ impl Scheduler {
                 &mut tx,
                 job.owner_id,
                 &provider,
+                &account,
                 &self.limits,
                 now,
                 correlation,
@@ -1400,9 +1406,10 @@ impl Scheduler {
                             self.dispatcher.trigger(id);
                         }
                         if let Some(registry) = &self.registry
-                            && let Err(e) =
-                                crate::limits::push_limits_snapshot(&self.pool, registry, &provider)
-                                    .await
+                            && let Err(e) = crate::limits::push_limits_snapshot(
+                                &self.pool, registry, &provider, &account,
+                            )
+                            .await
                         {
                             log_error(&e);
                         }
@@ -1453,8 +1460,10 @@ impl Scheduler {
                 report.retried += 1;
                 if poll && let Some(registry) = &self.registry {
                     let interval = crunch::poll_interval(&self.limits, &provider, job.attempts);
-                    if let Err(e) =
-                        crunch::request_poll(&self.pool, registry, &provider, interval, now).await
+                    if let Err(e) = crunch::request_poll(
+                        &self.pool, registry, &provider, &account, interval, now,
+                    )
+                    .await
                     {
                         log_error(&e);
                     }

@@ -70,6 +70,7 @@ async fn plain_stop(
             window: proto_window(window),
             resets_at_ms: resets_at.map_or(0, |at| at.timestamp_millis() as u64),
             input_command_id: String::new(),
+            account: String::new(),
         },
         &LimitsConfig::default(),
         at,
@@ -146,6 +147,7 @@ async fn observe(
         f.seed.owner_id,
         &Observation {
             provider: provider.into(),
+            account: "owner".into(),
             window,
             used_permille: used,
             resets_at,
@@ -209,7 +211,7 @@ async fn arming_keeps_crunch_off_and_builds_the_same_hold_and_wake_job(pool: PgP
     let holds = hold_reasons(&pool, id).await;
     assert!(matches!(
         holds.as_slice(),
-        [HoldReason::QuotaExhausted { provider, window, wake_at }]
+        [HoldReason::QuotaExhausted { provider, window, wake_at, .. }]
             if provider == "claude" && window == "five_hour" && *wake_at == reset
     ));
     let jobs = wake_jobs(&pool, id).await;
@@ -311,7 +313,7 @@ async fn cancel_restores_the_plain_pause_and_cancels_the_wake(pool: PgPool) {
     assert!(!crunch_enabled(&pool, id).await);
     assert!(matches!(
         pause_reasons(&pool, id).await.as_slice(),
-        [PauseReason::LimitReached { provider: Some(provider), window: Some(window), resets_at: Some(at) }]
+        [PauseReason::LimitReached { provider: Some(provider), window: Some(window), resets_at: Some(at), .. }]
             if provider == "claude" && window == "five_hour" && *at == reset
     ));
     let jobs = wake_jobs(&pool, id).await;

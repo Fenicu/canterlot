@@ -420,10 +420,12 @@ async fn admit_inner(
     // Зонд лимитов (`known`/`unknown`) едет в журнал запуска дальше.
     let mut limits_probe = json!({"limits": "unknown"});
     if !run_anyway && !provider.is_empty() {
+        let account = schedule_account(&mut conn, machine_id, &executor.harness).await?;
         let (skip, probe) = limits_skip(
             &mut conn,
             schedule.owner_id,
             provider,
+            &account,
             &executor.model,
             existing_conversation,
             scheduler.limits_config(),
@@ -534,13 +536,13 @@ async fn resolve_route(
         .await
         .map_err(|_| Skip::new(RunState::Failed, "whitelist_unavailable"))?
         .entries;
-    let limits = routing::limits_view(conn)
+    let limits = routing::limits_view(conn, machine_id)
         .await
         .map_err(|_| Skip::new(RunState::Failed, "limits_unavailable"))?;
     // Занятость считаем с корнями (F): запланированные сессии — корни, как
     // интерактивные. Занятая пара отбрасывает кандидата в маршрутизации,
     // и выбор падает на свободный запасной, а не в отказ на dispatch.
-    let mut live = routing::live_counts_with_roots(conn, schedule.owner_id)
+    let mut live = routing::live_counts_with_roots(conn, schedule.owner_id, machine_id)
         .await
         .map_err(|_| Skip::new(RunState::Failed, "live_counts_unavailable"))?;
     // Пара, ставшая занятой после маршрутизации (dispatch под замками), не
@@ -640,21 +642,35 @@ async fn resolve_route(
     })
 }
 
+/// Учётная запись лимитов запуска: метка харнесса исполнителя на машине расписания.
+/// Подписка у каждой записи своя, поэтому окна и удержания читаются по ней.
+async fn schedule_account(
+    conn: &mut PgConnection,
+    machine_id: Uuid,
+    harness: &str,
+) -> Result<String, Skip> {
+    limits::harness_account(conn, machine_id, harness)
+        .await
+        .map_err(|_| Skip::new(RunState::Failed, "limits_unavailable"))
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn limits_skip(
     conn: &mut PgConnection,
     owner_id: Uuid,
     provider: &str,
+    account: &str,
     model: &str,
     existing_conversation: Option<Uuid>,
     config: &LimitsConfig,
     now: DateTime<Utc>,
 ) -> Result<(Option<Value>, Value), Skip> {
-    // Замки раньше чтений (8): сначала разделяемая строка провайдера, затем
-    // очередь существующей сессии — как у обычной отправки. В транзакции
+    // Замки раньше чтений (8): сначала разделяемая строка пары (провайдер, учётная запись),
+    // затем очередь существующей сессии — как у обычной отправки. В транзакции
     // dispatch замки держатся до commit, поэтому окно не краснеет и
     // удержание не встаёт между чтением и замком.
     if !provider.is_empty() {
-        limits::share_provider(conn, provider)
+        limits::share_provider(conn, provider, account)
             .await
             .map_err(|_| Skip::new(RunState::Failed, "limits_unavailable"))?;
     }
@@ -668,13 +684,13 @@ async fn limits_skip(
     let settings = limit_settings::effective(conn, owner_id, config)
         .await
         .map_err(|_| Skip::new(RunState::Failed, "limit_settings_unavailable"))?;
-    let all = limits::current(conn)
+    let all = limits::current_for(conn, Some((provider, account)))
         .await
         .map_err(|_| Skip::new(RunState::Failed, "limits_unavailable"))?;
     // Предикат окон один с маршрутизацией (`schedule_window_verdict`):
     // строгое сравнение остатка, как PWA, только свежие показания.
     let mut probe = json!({"limits": "unknown"});
-    if let Some(entry) = all.iter().find(|entry| entry.provider == provider) {
+    if let Some(entry) = all.first() {
         // Окно Fable — только для Claude-моделей Fable, как в маршрутизации.
         let fable = provider == "claude" && model.to_ascii_lowercase().contains("fable");
         let reading = |window: Option<&limits::WindowState>| {
@@ -726,15 +742,15 @@ async fn limits_skip(
             && holds.0.iter().any(|hold| {
                 matches!(
                     hold,
-                    HoldReason::QuotaExhausted { provider: p, .. } | HoldReason::WeeklyReserve { provider: p, .. }
-                        if p == provider
+                    HoldReason::QuotaExhausted { provider: p, account: a, .. } | HoldReason::WeeklyReserve { provider: p, account: a, .. }
+                        if p == provider && a == account
                 )
             })
         {
             return Ok((Some(json!({"reason": "queue_hold", "provider": provider})), probe));
         }
     } else if !provider.is_empty() {
-        let holds = crunch_holds(conn, provider).await?;
+        let holds = crunch_holds(conn, provider, account).await?;
         if !holds.is_empty() {
             return Ok((
                 Some(json!({"reason": "initial_hold", "provider": provider})),
@@ -745,8 +761,12 @@ async fn limits_skip(
     Ok((None, probe))
 }
 
-async fn crunch_holds(conn: &mut PgConnection, provider: &str) -> Result<Vec<HoldReason>, Skip> {
-    crate::crunch::initial_holds_in_tx(conn, provider)
+async fn crunch_holds(
+    conn: &mut PgConnection,
+    provider: &str,
+    account: &str,
+) -> Result<Vec<HoldReason>, Skip> {
+    crate::crunch::initial_holds_in_tx(conn, provider, account)
         .await
         .map_err(|_| Skip::new(RunState::Failed, "limits_unavailable"))
 }
@@ -992,7 +1012,12 @@ async fn dispatch(
     // иначе проходят проверку одновременно. Занятая после маршрутизации пара
     // не отказывает сразу (F): маршрутизируемая цель выбирает следующего
     // кандидата под теми же замками.
-    if matches!(&schedule.target, ScheduleTarget::NewSession { .. }) {
+    if let ScheduleTarget::NewSession {
+        machine_id: busy_machine,
+        ..
+    } = &schedule.target
+    {
+        let busy_machine = *busy_machine;
         let routed = matches!(
             &schedule.target,
             ScheduleTarget::NewSession {
@@ -1013,13 +1038,14 @@ async fn dispatch(
             };
             // Тот же запрос занятости, что в маршрутизации (с корнями и
             // ожидающими толчками): иначе явный исполнитель и маршрут расходятся.
-            let busy: i64 = routing::live_counts_with_roots(&mut tx, schedule.owner_id)
-                .await
-                .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))
-                .map_err(fail)?
-                .get(&(executor.harness.clone(), executor.model.clone()))
-                .copied()
-                .unwrap_or(0);
+            let busy: i64 =
+                routing::live_counts_with_roots(&mut tx, schedule.owner_id, busy_machine)
+                    .await
+                    .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))
+                    .map_err(fail)?
+                    .get(&(executor.harness.clone(), executor.model.clone()))
+                    .copied()
+                    .unwrap_or(0);
             let injected = super::fault::hit(schedule.id, super::fault::Fault::BusyAfterRouting);
             if busy < *limit && !injected {
                 break;
@@ -1048,9 +1074,27 @@ async fn dispatch(
     // Действующая модель существующей сессии перечитывается под замками (8):
     // сначала разделяемая строка провайдера, затем очередь, и только потом
     // чтение. До предпроверки модель могла смениться, окно — вместе с ней.
+    // Учётная запись — метка харнесса исполнителя на машине расписания.
+    let schedule_machine: Uuid = match &schedule.target {
+        ScheduleTarget::NewSession { machine_id, .. } => *machine_id,
+        other => match other.conversation_id() {
+            Some(conversation_id) => {
+                sqlx::query_scalar("select machine_id from conversations where id=$1")
+                    .bind(conversation_id)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(|_| Skip::new(RunState::Failed, "database_unavailable"))
+                    .map_err(fail)?
+            }
+            None => Uuid::nil(),
+        },
+    };
+    let account = schedule_account(&mut tx, schedule_machine, &executor.harness)
+        .await
+        .map_err(fail)?;
     if let Some(conversation_id) = schedule.target.conversation_id() {
         if !provider.is_empty() {
-            limits::share_provider(&mut tx, &provider)
+            limits::share_provider(&mut tx, &provider, &account)
                 .await
                 .map_err(|_| Skip::new(RunState::Failed, "limits_unavailable"))
                 .map_err(fail)?;
@@ -1091,6 +1135,7 @@ async fn dispatch(
             &mut tx,
             schedule.owner_id,
             &provider,
+            &account,
             &executor.model,
             existing,
             scheduler.limits_config(),

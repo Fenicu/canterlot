@@ -65,12 +65,14 @@ fn proto_window(window: Window) -> i32 {
 fn weekly_hold(provider: &str, resets_at: Option<DateTime<Utc>>) -> HoldReason {
     HoldReason::WeeklyReserve {
         provider: provider.into(),
+        account: "owner".into(),
         resets_at,
     }
 }
 fn quota_hold(provider: &str, window: &str, wake_at: DateTime<Utc>) -> HoldReason {
     HoldReason::QuotaExhausted {
         provider: provider.into(),
+        account: "owner".into(),
         window: window.into(),
         wake_at,
     }
@@ -218,6 +220,19 @@ impl Env {
         resets_at: Option<DateTime<Utc>>,
         now: DateTime<Utc>,
     ) -> LimitReachedEffect {
+        self.limit_reached_as(conversation, provider, "", window, resets_at, now)
+            .await
+    }
+    /// Факт лимита с меткой учётной записи; пустая метка — старый воркер.
+    async fn limit_reached_as(
+        &self,
+        conversation: Uuid,
+        provider: &str,
+        account: &str,
+        window: Window,
+        resets_at: Option<DateTime<Utc>>,
+        now: DateTime<Utc>,
+    ) -> LimitReachedEffect {
         let (execution, machine): (Uuid, Uuid) = sqlx::query_as("select e.id,c.machine_id from executions e join conversations c on c.id=e.conversation_id where e.conversation_id=$1 order by e.generation desc limit 1")
             .bind(conversation).fetch_one(&self.pool).await.unwrap();
         let mut tx = self.pool.begin().await.unwrap();
@@ -235,6 +250,7 @@ impl Env {
                 window: proto_window(window),
                 resets_at_ms: resets_at.map_or(0, |at| at.timestamp_millis() as u64),
                 input_command_id: String::new(),
+                account: account.into(),
             },
             &self.config,
             now,
@@ -328,6 +344,7 @@ impl Env {
             self.owner,
             &Observation {
                 provider: provider.into(),
+                account: "owner".into(),
                 window,
                 used_permille: used,
                 resets_at,
@@ -521,6 +538,7 @@ async fn five_hour_limit_without_crunch_pauses_with_reset_time(pool: PgPool) {
         pauses,
         vec![PauseReason::LimitReached {
             provider: Some("claude".into()),
+            account: "owner".into(),
             window: Some("five_hour".into()),
             resets_at: Some(reset),
         }]
@@ -560,6 +578,7 @@ async fn five_hour_limit_with_crunch_holds_and_schedules_wake_at_reset_plus_grac
         window: LimitWindow::FiveHour as i32,
         resets_at_ms: reset.timestamp_millis() as u64,
         input_command_id: input.command_id.to_string(),
+        account: String::new(),
     })])
     .await;
     let (pauses, holds, slot) = queue(&pool, id).await;
@@ -809,6 +828,7 @@ async fn a_missing_five_hour_window_wakes_after_an_estimated_reading(pool: PgPoo
         &mut tx,
         env.owner,
         "claude",
+        "owner",
         Window::FiveHour,
         reset + secs(60),
         Uuid::now_v7(),
@@ -1160,6 +1180,7 @@ async fn a_five_hour_hold_wakes_when_the_provider_no_longer_has_that_window(pool
         &mut tx,
         env.owner,
         "claude",
+        "owner",
         Window::FiveHour,
         reset + secs(60),
         Uuid::now_v7(),
@@ -1665,6 +1686,7 @@ async fn rereview_sj_stop_marker_blocks_old_turn_but_allows_new_turn(pool: PgPoo
             window: LimitWindow::FiveHour as i32,
             resets_at_ms: reset.timestamp_millis() as u64,
             input_command_id: command.to_string(),
+            account: String::new(),
         })
     };
     let late = fact(first.command_id, reset);
@@ -1691,6 +1713,7 @@ async fn rereview_sj_stop_marker_blocks_old_turn_but_allows_new_turn(pool: PgPoo
         window: LimitWindow::FiveHour as i32,
         resets_at_ms: (reset + secs(7200)).timestamp_millis() as u64,
         input_command_id: second.command_id.to_string(),
+        account: String::new(),
     })])
     .await;
     assert!(
@@ -2817,7 +2840,7 @@ async fn poll_requests_are_rate_limited_per_provider_and_skip_unavailable_machin
     let five = Duration::from_secs(300);
     let now = start();
     assert!(
-        crunch::request_poll(&pool, &registry, "claude", five, now)
+        crunch::request_poll(&pool, &registry, "claude", "owner", five, now)
             .await
             .unwrap()
     );
@@ -2829,6 +2852,7 @@ async fn poll_requests_are_rate_limited_per_provider_and_skip_unavailable_machin
             &pool,
             &registry,
             "claude",
+            "owner",
             five,
             now + TimeDelta::minutes(1)
         )
@@ -2837,9 +2861,16 @@ async fn poll_requests_are_rate_limited_per_provider_and_skip_unavailable_machin
     );
     assert!(polls(&mut claude_s).is_empty());
     assert!(
-        crunch::request_poll(&pool, &registry, "codex", five, now + TimeDelta::minutes(1))
-            .await
-            .unwrap()
+        crunch::request_poll(
+            &pool,
+            &registry,
+            "codex",
+            "owner",
+            five,
+            now + TimeDelta::minutes(1),
+        )
+        .await
+        .unwrap()
     );
     assert_eq!(polls(&mut codex_s), vec!["codex"]);
     assert!(
@@ -2847,6 +2878,7 @@ async fn poll_requests_are_rate_limited_per_provider_and_skip_unavailable_machin
             &pool,
             &registry,
             "claude",
+            "owner",
             five,
             now + TimeDelta::minutes(5)
         )
@@ -2860,6 +2892,7 @@ async fn poll_requests_are_rate_limited_per_provider_and_skip_unavailable_machin
             &pool,
             &registry,
             "claude",
+            "owner",
             five,
             now + TimeDelta::minutes(20)
         )
@@ -2909,6 +2942,7 @@ async fn disabling_crunch_turns_quota_hold_into_limit_pause_and_cancels_wakes(po
         paused_now,
         vec![PauseReason::LimitReached {
             provider: Some("claude".into()),
+            account: "owner".into(),
             window: Some("five_hour".into()),
             resets_at: Some(reset),
         }]
@@ -3013,7 +3047,7 @@ async fn lock_order_has_no_deadlocks_across_ingest_dispatch_scheduler_and_http(p
     let stopper = env.conversation(false, true).await;
     let base = start();
     let far = base + TimeDelta::days(10);
-    sqlx::query("insert into provider_limits(provider,five_hour_used_permille,five_hour_resets_at,five_hour_observed_at) values('claude',10,$1,$2) on conflict(provider) do update set five_hour_used_permille=10,five_hour_resets_at=$1,five_hour_observed_at=$2")
+    sqlx::query("insert into provider_limits(provider,five_hour_used_permille,five_hour_resets_at,five_hour_observed_at) values('claude',10,$1,$2) on conflict(provider,account) do update set five_hour_used_permille=10,five_hour_resets_at=$1,five_hour_observed_at=$2")
         .bind(far).bind(base).execute(&pool).await.unwrap();
     let scheduler = env.new_scheduler();
     let thresholds = activity::Thresholds {
@@ -3304,6 +3338,7 @@ async fn final_wave_failed_poll_send_does_not_consume_provider_slot(pool: PgPool
             &pool,
             &env.registry,
             "claude",
+            "owner",
             Duration::from_secs(1800),
             now
         )
@@ -3321,6 +3356,7 @@ async fn final_wave_failed_poll_send_does_not_consume_provider_slot(pool: PgPool
             &pool,
             &env.registry,
             "claude",
+            "owner",
             Duration::from_secs(1800),
             now + secs(1)
         )
@@ -3503,3 +3539,6 @@ async fn wake_with_a_live_execution_still_sends_the_resume_text(pool: PgPool) {
     assert!(parent_note_texts(&pool, parent).await.is_empty());
     assert!(!resume_pending(&pool, child).await);
 }
+
+// Лимиты по учётным записям: у двух подписок одного провайдера свои удержания и пробуждения.
+mod limit_accounts;

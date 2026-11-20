@@ -269,6 +269,7 @@ fn model_enums_roundtrip() {
         (
             PauseReason::LimitReached {
                 provider: None,
+                account: "owner".into(),
                 window: None,
                 resets_at: None,
             },
@@ -525,6 +526,7 @@ fn quota_hold_and_limit_pause_json_roundtrip() {
     let at: DateTime<Utc> = "2026-10-27T12:00:00Z".parse().unwrap();
     let quota = HoldReason::QuotaExhausted {
         provider: "claude".into(),
+        account: "owner".into(),
         window: "five_hour".into(),
         wake_at: at,
     };
@@ -535,6 +537,7 @@ fn quota_hold_and_limit_pause_json_roundtrip() {
     );
     let reserve = HoldReason::WeeklyReserve {
         provider: "codex".into(),
+        account: "owner".into(),
         resets_at: Some(at),
     };
     assert_eq!(reserve.as_str(), "weekly_reserve");
@@ -545,12 +548,14 @@ fn quota_hold_and_limit_pause_json_roundtrip() {
     assert_json_roundtrip(
         HoldReason::WeeklyReserve {
             provider: "claude".into(),
+            account: "owner".into(),
             resets_at: None,
         },
         json!({"reason":"weekly_reserve", "provider":"claude", "resets_at":null}),
     );
     let pause = PauseReason::LimitReached {
         provider: Some("claude".into()),
+        account: "owner".into(),
         window: Some("weekly".into()),
         resets_at: Some(at),
     };
@@ -571,6 +576,7 @@ fn legacy_limit_reached_pause_json_still_parses() {
         pause,
         PauseReason::LimitReached {
             provider: None,
+            account: "owner".into(),
             window: None,
             resets_at: None
         }
@@ -622,11 +628,13 @@ fn derived_holds_serialise_in_the_view_but_never_parse_as_stored_holds() {
         HoldReason::AttachmentsPending { input_id },
         HoldReason::QuotaExhausted {
             provider: "claude".into(),
+            account: "owner".into(),
             window: "five_hour".into(),
             wake_at: "2026-10-27T12:00:00Z".parse().unwrap(),
         },
         HoldReason::WeeklyReserve {
             provider: "codex".into(),
+            account: "owner".into(),
             resets_at: None,
         },
     ] {

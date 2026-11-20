@@ -9500,6 +9500,15 @@
             }
           },
           {
+            "name": "account",
+            "in": "query",
+            "description": "Только эта учётная запись провайдера; без параметра — все.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
             "name": "from",
             "in": "query",
             "required": false,
@@ -14469,6 +14478,13 @@
           "created_at"
         ],
         "properties": {
+          "account": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Учётная запись провайдера, закреплённая при взводе; только у `limit_reset`."
+          },
           "alarm_id": {
             "type": "string",
             "format": "uuid"
@@ -17831,6 +17847,7 @@
           "id",
           "title",
           "provider",
+          "account",
           "images",
           "settings_midsession",
           "settings_midsession_effort",
@@ -17840,6 +17857,10 @@
           "catalog"
         ],
         "properties": {
+          "account": {
+            "type": "string",
+            "description": "Учётная запись лимитов харнесса (`account` в worker.toml); `owner` по умолчанию."
+          },
           "catalog": {
             "type": "array",
             "items": {
@@ -18216,6 +18237,10 @@
               "reason"
             ],
             "properties": {
+              "account": {
+                "type": "string",
+                "description": "Учётная запись провайдера; для `owner` ключа в JSON нет."
+              },
               "provider": {
                 "type": "string"
               },
@@ -18241,6 +18266,10 @@
               "reason"
             ],
             "properties": {
+              "account": {
+                "type": "string",
+                "description": "Учётная запись провайдера; для `owner` ключа в JSON нет."
+              },
               "provider": {
                 "type": "string"
               },
@@ -19854,6 +19883,54 @@
             "minimum": 0
           }
         }
+      },
+      "MachineCredentialView": {
+        "type": "object",
+        "description": "Вход провайдера на одной машине учётной записи.",
+        "required": [
+          "machine_id",
+          "machine_name"
+        ],
+        "properties": {
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`null` — дата неизвестна (API-ключ, старый CLI)."
+          },
+          "machine_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "machine_name": {
+            "type": "string"
+          }
+        }
+      },
+      "MachineCreditsView": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/CreditsView"
+          },
+          {
+            "type": "object",
+            "required": [
+              "machine_id",
+              "machine_name"
+            ],
+            "properties": {
+              "machine_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "machine_name": {
+                "type": "string"
+              }
+            }
+          }
+        ],
+        "description": "Сбросы лимитов, о которых сообщила одна машина учётной записи."
       },
       "MachineHeadroom": {
         "type": "object",
@@ -21626,6 +21703,10 @@
               "reason"
             ],
             "properties": {
+              "account": {
+                "type": "string",
+                "description": "Учётная запись провайдера; для `owner` ключа в JSON нет."
+              },
               "provider": {
                 "type": [
                   "string",
@@ -22337,11 +22418,15 @@
         "type": "object",
         "required": [
           "provider",
+          "account",
           "five_hour",
           "weekly",
           "weekly_fable"
         ],
         "properties": {
+          "account": {
+            "type": "string"
+          },
           "five_hour": {
             "type": "array",
             "items": {
@@ -22477,23 +22562,30 @@
         "type": "object",
         "required": [
           "provider",
+          "account",
           "weekly_reserve_active",
           "five_hour_absent",
-          "data_confidence"
+          "data_confidence",
+          "machine_credentials",
+          "machine_credits"
         ],
         "properties": {
+          "account": {
+            "type": "string",
+            "description": "Учётная запись провайдера (`account` харнесса в worker.toml); `owner` по умолчанию.\nУ провайдера на нескольких подписках строк по одной на каждую."
+          },
           "credential_expires_at": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Самый ранний конец входа провайдера на машинах владельца; `null` — дата неизвестна\n(API-ключ, старый CLI) или у провайдера такого входа нет."
+            "description": "Самый ранний конец входа провайдера на машинах этой учётной записи; `null` — дата\nнеизвестна (API-ключ, старый CLI) или у провайдера такого входа нет. Сводное поле для\nклиентов, которые ещё не читают `machine_credentials`."
           },
           "credits": {
             "oneOf": [
               {
                 "$ref": "#/components/schemas/CreditsView",
-                "description": "Сбросы лимитов Codex с самой свежей машины; `null` — провайдер о них молчит."
+                "description": "Сбросы лимитов Codex с самой свежей машины учётной записи; `null` — провайдер о них\nмолчит. Сводное поле для клиентов, которые ещё не читают `machine_credits`."
               },
               {
                 "type": "null"
@@ -22517,6 +22609,20 @@
           "five_hour_absent": {
             "type": "boolean",
             "description": "У провайдера нет пятичасового окна (например, план без этого лимита): счётчик скрывается."
+          },
+          "machine_credentials": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MachineCredentialView"
+            },
+            "description": "Вход по машинам: у каждой машины он свой и в одну дату не сливается."
+          },
+          "machine_credits": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MachineCreditsView"
+            },
+            "description": "Сбросы лимитов по машинам."
           },
           "monthly": {
             "oneOf": [
@@ -22974,6 +23080,7 @@
         "type": "object",
         "required": [
           "requested",
+          "requested_accounts",
           "retry_after_secs"
         ],
         "properties": {
@@ -22983,6 +23090,13 @@
               "type": "string"
             },
             "description": "Провайдеры, чьим машинам отправлена просьба об опросе."
+          },
+          "requested_accounts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RequestedAccount"
+            },
+            "description": "Те же просьбы по учётным записям: у провайдера их может быть несколько."
           },
           "retry_after_secs": {
             "type": "integer",
@@ -23164,6 +23278,21 @@
               "null"
             ],
             "format": "uuid"
+          }
+        }
+      },
+      "RequestedAccount": {
+        "type": "object",
+        "required": [
+          "provider",
+          "account"
+        ],
+        "properties": {
+          "account": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
           }
         }
       },
@@ -25848,6 +25977,7 @@
         "required": [
           "day",
           "provider",
+          "account",
           "conversation_id",
           "model",
           "agent",
@@ -25860,6 +25990,10 @@
           "overlapped_runs"
         ],
         "properties": {
+          "account": {
+            "type": "string",
+            "description": "Учётная запись провайдера, на которой шли ходы."
+          },
           "agent": {
             "type": "string"
           },

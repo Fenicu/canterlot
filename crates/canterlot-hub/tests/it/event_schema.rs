@@ -555,6 +555,7 @@ async fn emitted_event_payloads_match_published_schema(pool: PgPool) {
         f.seed.owner_id,
         &canterlot_hub::limits::Observation {
             provider: "claude".into(),
+            account: "owner".into(),
             window: canterlot_hub::limits::Window::Weekly,
             used_permille: 105,
             resets_at: None,

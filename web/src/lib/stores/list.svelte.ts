@@ -9,7 +9,7 @@ import type {
 import type { ConnectionManager } from "#lib/sync/connection.js";
 import type { HubEvent } from "#lib/sync/wire.js";
 import type { BookmarkChange } from "#lib/bookmarks/model.js";
-import type { LimitWindow, ProviderLimits, ProviderStatus, WindowForecast } from "./limits";
+import { limitKey, type LimitWindow, type ProviderLimits, type ProviderStatus, type WindowForecast } from "./limits";
 import { PlanModel, type PlanTask } from "./plan.svelte";
 
 /**
@@ -344,9 +344,16 @@ export class ListStore {
     if (kind === "limits_changed" && event.kind === "limits_changed") {
       const payload = event.payload;
       const next = this.limits.map((item) => ({ ...item }));
-      let provider = next.find((item) => item.provider === payload.provider);
+      // Строка лимитов — пара (провайдер, учётная запись); событие без записи касается `owner`.
+      const key = limitKey(payload.provider, payload.account);
+      let provider = next.find((item) => limitKey(item.provider, item.account) === key);
       if (!provider) {
-        provider = { provider: payload.provider, weekly_reserve_active: false, status: this.providerStatus[payload.provider] ?? null };
+        provider = {
+          provider: payload.provider,
+          ...(payload.account ? { account: payload.account } : {}),
+          weekly_reserve_active: false,
+          status: this.providerStatus[payload.provider] ?? null,
+        };
         next.push(provider);
       }
       const previous =
@@ -382,6 +389,9 @@ export class ListStore {
       if ('credential_expires_at' in payload) provider.credential_expires_at = payload.credential_expires_at as string | null;
       // Сбросы лимитов тоже меняются без смены окна.
       if ('credits' in payload) provider.credits = payload.credits as ProviderLimits['credits'];
+      // Вход и сбросы по машинам приходят со строкой своей учётной записи.
+      if (payload.machine_credentials) provider.machine_credentials = payload.machine_credentials;
+      if (payload.machine_credits) provider.machine_credits = payload.machine_credits as ProviderLimits['machine_credits'];
       this.limits = next;
       return;
     }
@@ -393,9 +403,13 @@ export class ListStore {
       return;
     }
     if (kind === "limits_providers_changed" && event.kind === "limits_providers_changed") {
-      // Харнесс провайдера ушёл из каталога машин: его лимиты больше не показываются.
-      const offered = event.payload.providers;
-      this.limits = this.limits.filter((item) => offered.includes(item.provider));
+      // Харнесс ушёл из каталога машин: лимиты его учётной записи больше не показываются.
+      // Старый хаб не присылает пары и называет только провайдеров.
+      const { providers, accounts } = event.payload;
+      const offered = accounts ? new SvelteSet(accounts.map((pair) => limitKey(pair.provider, pair.account))) : null;
+      this.limits = this.limits.filter((item) =>
+        offered ? offered.has(limitKey(item.provider, item.account)) : providers.includes(item.provider),
+      );
       return;
     }
     if (kind === "routing_policy_changed" && event.kind === "routing_policy_changed") {

@@ -459,6 +459,208 @@ async fn limits_report_includes_the_countdown_and_the_forecast(pool: PgPool) {
     );
 }
 
+/// Вторая машина владельца с тем же провайдером и другой учётной записью лимитов.
+async fn second_account_machine(pool: &PgPool, owner: Uuid, name: &str, account: &str) -> Uuid {
+    let id = Uuid::now_v7();
+    sqlx::query("insert into machines(id,owner_id,name) values($1,$2,$3)")
+        .bind(id)
+        .bind(owner)
+        .bind(name)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("insert into machine_harnesses(machine_id,harness,provider,title,account) values($1,'opencode','opencode','OpenCode',$2)")
+        .bind(id)
+        .bind(account)
+        .execute(pool)
+        .await
+        .unwrap();
+    id
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn limits_report_prints_a_line_per_account_and_names_it_only_when_there_are_several(
+    pool: PgPool,
+) {
+    let seed = testkit::seed(&pool).await;
+    testkit::offer_provider(&pool, seed.machine_id, "opencode").await;
+    let now = Utc::now();
+    let reset = now + TimeDelta::hours(2);
+    let insert = |account: &'static str, used: i32| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query(
+                "insert into provider_limits(provider,account,weekly_used_permille,weekly_resets_at,weekly_observed_at)
+                 values('opencode',$1,$2,$3,$4)",
+            )
+            .bind(account)
+            .bind(used)
+            .bind(reset)
+            .bind(now - TimeDelta::minutes(1))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+    };
+    insert("owner", 120).await;
+    let caller = Caller {
+        owner_id: seed.owner_id,
+        conversation_id: seed.conversation_id,
+        execution_id: Uuid::now_v7(),
+        machine_id: seed.machine_id,
+        call_id: Uuid::now_v7(),
+    };
+    let one = session_tools::call(&context(&pool), &caller, "limits.report", json!({}))
+        .await
+        .unwrap();
+    let text = one["text"].as_str().unwrap();
+    assert!(
+        text.starts_with("OpenCode API budget: weekly window 12% used"),
+        "one account keeps today's text: {text}"
+    );
+    // Вторая учётная запись того же провайдера на другой машине.
+    second_account_machine(&pool, seed.owner_id, "machine-b", "b-opencode").await;
+    insert("b-opencode", 700).await;
+    let two = session_tools::call(&context(&pool), &caller, "limits.report", json!({}))
+        .await
+        .unwrap();
+    let text = two["text"].as_str().unwrap();
+    assert!(
+        text.contains("OpenCode API budget (b-opencode): weekly window 70% used"),
+        "{text}"
+    );
+    assert!(
+        text.contains("OpenCode API budget (owner): weekly window 12% used"),
+        "{text}"
+    );
+    let rows = two["providers"].as_array().unwrap();
+    let accounts: Vec<&str> = rows
+        .iter()
+        .map(|row| row["account"].as_str().unwrap())
+        .collect();
+    assert_eq!(accounts, vec!["b-opencode", "owner"]);
+    assert!(text.contains("Observed: opencode b-opencode"), "{text}");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn credentials_and_credits_are_listed_per_machine_and_never_mixed_across_accounts(
+    pool: PgPool,
+) {
+    use canterlot_proto::worker::v1::{ProviderCredits, ResetCredit};
+    let seed = testkit::seed(&pool).await;
+    testkit::offer_provider(&pool, seed.machine_id, "opencode").await;
+    let b = second_account_machine(&pool, seed.owner_id, "machine-b", "b-opencode").await;
+    let now = Utc::now();
+    let early = now + TimeDelta::days(2);
+    let late = now + TimeDelta::days(9);
+    for (machine, expires) in [(seed.machine_id, late), (b, early)] {
+        canterlot_hub::limits::record_credential_in_tx(
+            &mut pool.acquire().await.unwrap(),
+            machine,
+            "opencode",
+            expires,
+            now,
+            now,
+        )
+        .await
+        .unwrap();
+    }
+    for (machine, count) in [(seed.machine_id, 4), (b, 1)] {
+        canterlot_hub::limits::record_credits_in_tx(
+            &mut pool.acquire().await.unwrap(),
+            machine,
+            "opencode",
+            &ProviderCredits {
+                provider: "opencode".into(),
+                resets_known: true,
+                reset_count: count,
+                resets: vec![ResetCredit::default()],
+                ..Default::default()
+            },
+            now,
+            now,
+        )
+        .await
+        .unwrap();
+    }
+    for account in ["owner", "b-opencode"] {
+        sqlx::query(
+            "insert into provider_limits(provider,account,weekly_used_permille,weekly_resets_at,weekly_observed_at)
+             values('opencode',$1,100,$2,$3)",
+        )
+        .bind(account)
+        .bind(now + TimeDelta::hours(2))
+        .bind(now)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let mut conn = pool.acquire().await.unwrap();
+    let rows = canterlot_hub::limits::shown(&mut conn, seed.owner_id)
+        .await
+        .unwrap();
+    let row = |account: &str| {
+        rows.iter()
+            .find(|row| row.provider == "opencode" && row.account == account)
+            .unwrap()
+    };
+    // B вошёл раньше, но его дата не попадает в строку владельца и наоборот.
+    let owner = row("owner");
+    assert_eq!(
+        owner.credential_expires_at.map(|t| t.timestamp()),
+        Some(late.timestamp())
+    );
+    assert_eq!(owner.machine_credentials.len(), 1);
+    assert_eq!(owner.machine_credentials[0].machine_id, seed.machine_id);
+    assert_eq!(owner.credits.as_ref().unwrap().reset_count, Some(4));
+    assert_eq!(owner.machine_credits.len(), 1);
+    let b_row = row("b-opencode");
+    assert_eq!(
+        b_row.credential_expires_at.map(|t| t.timestamp()),
+        Some(early.timestamp())
+    );
+    assert_eq!(b_row.machine_credentials.len(), 1);
+    assert_eq!(b_row.machine_credentials[0].machine_id, b);
+    assert_eq!(b_row.machine_credentials[0].machine_name, "machine-b");
+    assert_eq!(b_row.credits.as_ref().unwrap().reset_count, Some(1));
+    assert_eq!(b_row.machine_credits[0].machine_id, b);
+    // Событие лимитов несёт те же списки по машинам.
+    let mut tx = pool.begin().await.unwrap();
+    canterlot_hub::limits::record_observation_in_tx(
+        &mut tx,
+        seed.owner_id,
+        &canterlot_hub::limits::Observation {
+            provider: "opencode".into(),
+            account: "b-opencode".into(),
+            window: canterlot_hub::limits::Window::Weekly,
+            used_permille: 150,
+            resets_at: Some(now + TimeDelta::hours(2)),
+            observed_at: now + TimeDelta::seconds(5),
+            source: canterlot_hub::limits::ObservationSource::Poll,
+            data_confidence: canterlot_hub::limits::DataConfidence::Exact,
+            machine_id: b,
+            execution_id: None,
+        },
+        now + TimeDelta::seconds(5),
+        &Default::default(),
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let payload: serde_json::Value = sqlx::query_scalar(
+        "select payload from events where kind='limits_changed' and payload->>'account'='b-opencode' order by id desc limit 1",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        payload["machine_credentials"][0]["machine_id"],
+        b.to_string()
+    );
+    assert_eq!(payload["machine_credits"][0]["reset_count"], 1);
+}
+
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn limits_report_without_data_says_so(pool: PgPool) {
     let seed = testkit::seed(&pool).await;

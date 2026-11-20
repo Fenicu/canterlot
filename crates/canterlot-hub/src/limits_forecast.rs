@@ -206,6 +206,7 @@ fn recent_rate(
 pub async fn load(
     conn: &mut PgConnection,
     provider: &str,
+    account: &str,
     window: Window,
     current: Reading,
     now: DateTime<Utc>,
@@ -215,13 +216,14 @@ pub async fn load(
     };
     let rows = sqlx::query(
         "select used_permille,resets_at,observed_at from limit_snapshots
-          where provider=$1 and window_kind=$2 and resets_at between $3 and $4
+          where provider=$1 and account=$5 and window_kind=$2 and resets_at between $3 and $4
           order by observed_at,id",
     )
     .bind(provider)
     .bind(window.as_str())
     .bind(resets_at - RESET_TOLERANCE)
     .bind(resets_at + RESET_TOLERANCE)
+    .bind(account)
     .fetch_all(&mut *conn)
     .await?;
     let snapshots = rows

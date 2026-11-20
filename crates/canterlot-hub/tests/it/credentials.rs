@@ -48,6 +48,7 @@ async fn observe_window(pool: &PgPool, s: &testkit::Seed) {
         s.owner_id,
         &Observation {
             provider: "claude".into(),
+            account: "owner".into(),
             window: Window::Weekly,
             used_permille: 410,
             resets_at: Some(when + Duration::hours(3)),

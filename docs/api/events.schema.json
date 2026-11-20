@@ -5369,6 +5369,25 @@
               "items": {
                 "type": "string"
               }
+            },
+            "accounts": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "provider": {
+                    "type": "string"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "provider",
+                  "account"
+                ],
+                "additionalProperties": false
+              }
             }
           },
           "required": [
@@ -6112,6 +6131,77 @@
           "properties": {
             "provider": {
               "type": "string"
+            },
+            "account": {
+              "type": "string",
+              "pattern": "^[a-z0-9-]{1,40}$"
+            },
+            "machine_credentials": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "machine_id": {
+                    "$ref": "#/$defs/Uuid"
+                  },
+                  "machine_name": {
+                    "type": "string"
+                  },
+                  "expires_at": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/Time"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "machine_id",
+                  "machine_name",
+                  "expires_at"
+                ]
+              }
+            },
+            "machine_credits": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "machine_id": {
+                    "$ref": "#/$defs/Uuid"
+                  },
+                  "machine_name": {
+                    "type": "string"
+                  },
+                  "reset_count": {
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "resets": {
+                    "type": "array"
+                  },
+                  "observed_at": {
+                    "$ref": "#/$defs/Time"
+                  }
+                },
+                "required": [
+                  "machine_id",
+                  "machine_name",
+                  "reset_count",
+                  "resets",
+                  "observed_at"
+                ]
+              }
             },
             "window": {
               "enum": [

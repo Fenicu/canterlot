@@ -30,11 +30,12 @@
 
   const view = $derived(limitStrip(providers, now, thresholds, { prefer }));
   const shown = $derived(compact ? view.rows.slice(0, 1) : view.rows);
-  const troubled = $derived(view.rows.filter((row) => row.status));
+  /** Статус общий у провайдера: подробности один раз на провайдера, а не на каждую учётную запись. */
+  const troubled = $derived(view.rows.filter((row, index, all) => row.status && all.findIndex((other) => other.provider === row.provider) === index));
   /** Конец входа провайдера — строкой под полосой: дата одна на провайдера, окна её не заменяют. */
-  const credentials = $derived(view.rows.filter((row) => row.credential));
+  const credentials = $derived(view.rows.flatMap((row) => row.credentials.map((line, index) => ({ row, line, key: `${row.key}:${index}` }))));
   /** Сбросы лимитов — той же тихой строкой: их приносит только Codex. */
-  const credits = $derived(view.rows.filter((row) => row.credits));
+  const credits = $derived(view.rows.flatMap((row) => row.creditLines.map((line, index) => ({ row, line, key: `${row.key}:${index}` }))));
 
   const refresher = new LimitsRefresh();
   // Новое показание приходит событием хаба: оно и закрывает ожидание.
@@ -93,9 +94,9 @@
     <summary>
       {#if plaques && !open}
         <span class="plaques" data-limit-plaques>
-          {#each view.rows as row (row.provider)}
+          {#each view.rows as row (row.key)}
             {@const plaque = limitPlaque(row)}
-            <span class="plaque" data-provider={row.provider}>
+            <span class="plaque" data-provider={row.provider} data-account={row.named ? row.account : undefined}>
               <span class="plaque-text">
                 <span class="pname">{row.label}</span>
                 {#if row.status}{@render statusWord(row.status)}{/if}
@@ -120,8 +121,8 @@
         </span>
       {:else}
       <span class="rows">
-        {#each shown as row, index (row.provider)}
-          <span class="row">
+        {#each shown as row, index (row.key)}
+          <span class="row" data-account={row.named ? row.account : undefined}>
             <!-- Стрелка живёт в первой строке: в свёрнутой и раскрытой полосе она стоит на одном месте. -->
             {#if index === 0}<span class="chevron"><Icon name="down" /></span>{/if}
             {#if row.empty}
@@ -149,11 +150,11 @@
       {/if}
       {#if credentials.length || credits.length}
         <span class="credentials">
-          {#each credentials as row (row.provider)}
-            <span class="credential" data-provider={row.provider} data-tone={row.credential?.tone}>{row.credential?.text}</span>
+          {#each credentials as item (item.key)}
+            <span class="credential" data-provider={item.row.provider} data-account={item.row.named ? item.row.account : undefined} data-tone={item.line.tone}>{item.line.text}</span>
           {/each}
-          {#each credits as row (row.provider)}
-            <span class="credit" data-provider={row.provider} data-tone={row.credits?.tone}>{row.credits?.text}</span>
+          {#each credits as item (item.key)}
+            <span class="credit" data-provider={item.row.provider} data-account={item.row.named ? item.row.account : undefined} data-tone={item.line.tone}>{item.line.text}</span>
           {/each}
         </span>
       {/if}
@@ -166,6 +167,7 @@
       </div>
       <p class="note" role="status">{refresher.note}</p>
       {#each troubled as row (row.provider)}
+
         {#if row.status}
           <div class="status-detail" data-provider={row.provider}>
             {@render statusLink(row.status, true)}
@@ -207,7 +209,8 @@
     /* max-content, а не размер значка: отступ строки достаётся крайним колонкам как поле, и колонка стрелки растёт на него. */
     --chevron-column: max-content;
     display: grid;
-    grid-template-columns: minmax(0, max-content) minmax(calc(var(--s4) * 3), max-content) var(--gauge-width) max-content minmax(0, 1fr) var(--chevron-column);
+    /* Имя с учётной записью («OpenCode · b-opencode») не отнимает у отсчёта сброса больше трети полосы: остальное съедает многоточие. */
+    grid-template-columns: fit-content(35cqw) minmax(calc(var(--s4) * 3), max-content) var(--gauge-width) max-content minmax(0, 1fr) var(--chevron-column);
     column-gap: var(--s2);
     align-items: baseline;
     min-width: 0;

@@ -220,8 +220,8 @@ async fn preview(
     };
     let catalogs = routing::load_catalogs(&mut conn, machine).await?;
     let list = crate::session_tools::whitelist::view(&mut conn, o.owner_id).await?;
-    let limits = routing::limits_view(&mut conn).await?;
-    let live = routing::live_counts(&mut conn, o.owner_id).await?;
+    let limits = routing::limits_view(&mut conn, machine).await?;
+    let live = routing::live_counts(&mut conn, o.owner_id, machine).await?;
     let workdir = match b.workdir {
         Some(workdir) => workdir,
         None => sqlx::query_scalar(

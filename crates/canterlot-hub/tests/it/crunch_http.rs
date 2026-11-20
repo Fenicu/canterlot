@@ -33,6 +33,7 @@ async fn enter_reserve(f: &Fixture, weekly_reset: DateTime<Utc>, now: DateTime<U
         f.seed.owner_id,
         &Observation {
             provider: "claude".into(),
+            account: "owner".into(),
             window: Window::Weekly,
             used_permille: 960,
             resets_at: Some(weekly_reset),
@@ -198,6 +199,7 @@ async fn limits_endpoint_exposes_reserve_state_and_holds(pool: PgPool) {
             window: LimitWindow::FiveHour as i32,
             resets_at_ms: reset.timestamp_millis() as u64,
             input_command_id: String::new(),
+            account: String::new(),
         },
         &LimitsConfig::default(),
         now,

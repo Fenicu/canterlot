@@ -35,6 +35,21 @@ pub struct LimitsFetch {
     pub provider_credits: Vec<ProviderCredits>,
 }
 
+/// Проставляет каждому показанию и отчёту об отсутствии окна учётную запись харнесса
+/// провайдера из `worker.toml`. Хаб при приёме её не угадывает.
+pub fn stamp_report(
+    config: &crate::config::WorkerConfig,
+    observations: &mut [LimitObservation],
+    absent: &mut [LimitAbsence],
+) {
+    for observation in observations {
+        observation.account = config.account_for_provider(&observation.provider).into();
+    }
+    for absence in absent {
+        absence.account = config.account_for_provider(&absence.provider).into();
+    }
+}
+
 #[async_trait::async_trait]
 pub trait LimitsSource: Send + Sync {
     /// Запрос хаба (`PollLimits`, проверка пробуждения «кранча»).

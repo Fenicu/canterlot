@@ -1496,8 +1496,9 @@ pub(crate) async fn create_in_tx(
     // Строка провайдера `for share` раньше очереди: правило резерва видит новый разговор или наоборот.
     let mut holds = vec![HoldReason::NoLiveExecution];
     if let Some(provider) = canterlot_proto::harness::provider_of(&req.harness) {
-        crate::limits::share_provider(conn, provider).await?;
-        holds.extend(crate::crunch::initial_holds_in_tx(conn, provider).await?);
+        let account = crate::limits::harness_account(conn, req.machine_id, &req.harness).await?;
+        crate::limits::share_provider(conn, provider, &account).await?;
+        holds.extend(crate::crunch::initial_holds_in_tx(conn, provider, &account).await?);
     }
     let id = Uuid::now_v7();
     let isolated = req

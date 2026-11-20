@@ -114,6 +114,8 @@ pub struct HarnessView {
     pub id: String,
     pub title: String,
     pub provider: String,
+    /// Учётная запись лимитов харнесса (`account` в worker.toml); `owner` по умолчанию.
+    pub account: String,
     pub images: bool,
     pub settings_midsession: bool,
     pub settings_midsession_effort: bool,
@@ -255,6 +257,7 @@ pub(crate) async fn load_stored(
                     id: harness,
                     title: h.try_get("title")?,
                     provider: h.try_get("provider")?,
+                    account: h.try_get("account")?,
                     images: h.try_get("images")?,
                     settings_midsession: h.try_get("settings_midsession")?,
                     settings_midsession_effort: h.try_get("settings_midsession_effort")?,

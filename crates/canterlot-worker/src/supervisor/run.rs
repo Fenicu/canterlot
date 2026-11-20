@@ -2769,6 +2769,7 @@ impl Supervisor {
                             used_permille: u32::from(used_permille),
                             resets_at_ms: resets_at_ms.unwrap_or(0),
                             observed_machine_ms: now_ms(),
+                            account: self.spec.limit_account(&self.provider).into(),
                             ..Default::default()
                         }),
                         LimitFact::Reached {
@@ -2783,6 +2784,7 @@ impl Supervisor {
                                 .active_turn
                                 .map(|id| id.to_string())
                                 .unwrap_or_default(),
+                            account: self.spec.limit_account(&self.provider).into(),
                         }),
                         LimitFact::CredentialExpires { expires_at_ms } => Body::ProviderCredential(
                             canterlot_proto::worker::v1::ProviderCredential {

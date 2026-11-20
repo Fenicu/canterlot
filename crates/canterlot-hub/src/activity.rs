@@ -610,6 +610,7 @@ pub fn compute(i: &ActivityInputs, t: &Thresholds) -> Activity {
                 provider,
                 window,
                 wake_at,
+                ..
             } => Some((
                 "quota_exhausted",
                 Some(provider.clone()),
@@ -619,6 +620,7 @@ pub fn compute(i: &ActivityInputs, t: &Thresholds) -> Activity {
             HoldReason::WeeklyReserve {
                 provider,
                 resets_at,
+                ..
             } => Some((
                 "weekly_reserve",
                 Some(provider.clone()),
@@ -645,6 +647,7 @@ pub fn compute(i: &ActivityInputs, t: &Thresholds) -> Activity {
                 provider,
                 window,
                 resets_at,
+                ..
             } => {
                 return Activity {
                     state: S::QuotaPaused,

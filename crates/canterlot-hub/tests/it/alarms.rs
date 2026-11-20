@@ -128,12 +128,47 @@ impl Fx {
             self.owner,
             &Observation {
                 provider: provider.into(),
+                account: "owner".into(),
                 window,
                 used_permille: used,
                 resets_at,
                 observed_at,
                 source: ObservationSource::Poll,
                 data_confidence: confidence,
+                machine_id: self.machine,
+                execution_id: None,
+            },
+            observed_at,
+            &self.context.limits,
+            Uuid::now_v7(),
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+    }
+
+    /// Показание учётной записи `account` (метка воркера), снятое машиной сессии.
+    async fn observe_account(
+        &self,
+        account: &str,
+        window: Window,
+        used: u16,
+        resets_at: Option<DateTime<Utc>>,
+        observed_at: DateTime<Utc>,
+    ) {
+        let mut tx = self.pool.begin().await.unwrap();
+        limits::record_observation_in_tx(
+            &mut tx,
+            self.owner,
+            &Observation {
+                provider: "claude".into(),
+                account: account.into(),
+                window,
+                used_permille: used,
+                resets_at,
+                observed_at,
+                source: ObservationSource::Poll,
+                data_confidence: DataConfidence::Exact,
                 machine_id: self.machine,
                 execution_id: None,
             },
@@ -3113,6 +3148,116 @@ async fn limit_reset_fires_on_a_fresh_exact_reading(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn limit_reset_binds_the_account_of_the_callers_machine_harness_at_arming(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    testkit::offer_provider(&f.pool, f.machine, "claude").await;
+    sqlx::query(
+        "update machine_harnesses set account='b-acct' where machine_id=$1 and provider='claude'",
+    )
+    .bind(f.machine)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    let now = Utc::now();
+    let reset = now + TimeDelta::hours(1);
+    for account in ["owner", "b-acct"] {
+        f.observe_account(account, Window::Weekly, 600, Some(reset), now)
+            .await;
+    }
+    let armed = f
+        .arm_limit("window", "claude", "weekly", None)
+        .await
+        .unwrap();
+    let id = alarm_id(&armed);
+    let bound: Option<String> =
+        sqlx::query_scalar("select condition->>'account' from alarms where id=$1")
+            .bind(id)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(bound.as_deref(), Some("b-acct"));
+    assert!(
+        armed["condition"].as_str().unwrap().contains("b-acct"),
+        "{armed}"
+    );
+    // Сброс чужой учётной записи будильник не будит.
+    let after = now + TimeDelta::minutes(10);
+    f.observe_account(
+        "owner",
+        Window::Weekly,
+        100,
+        Some(reset + TimeDelta::hours(1)),
+        after,
+    )
+    .await;
+    assert_eq!(alarm_state(&f.pool, id).await.0, "armed");
+    // Сброс своей — будит.
+    f.observe_account(
+        "b-acct",
+        Window::Weekly,
+        100,
+        Some(reset + TimeDelta::hours(1)),
+        after,
+    )
+    .await;
+    let (state, reason, _) = alarm_state(&f.pool, id).await;
+    assert_eq!(state, "fired");
+    assert_eq!(reason.as_deref(), Some("condition"));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn limit_reset_takes_an_explicit_account_and_owner_stays_unmarked(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    testkit::offer_provider(&f.pool, f.machine, "claude").await;
+    sqlx::query(
+        "update machine_harnesses set account='b-acct' where machine_id=$1 and provider='claude'",
+    )
+    .bind(f.machine)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    let now = Utc::now();
+    let reset = now + TimeDelta::hours(1);
+    f.observe_account("owner", Window::Weekly, 600, Some(reset), now)
+        .await;
+    let armed = f
+        .call(
+            "alarms.set",
+            json!({"when": {"kind": "limit_reset", "provider": "claude", "account": "owner", "window": "weekly"}, "key": "explicit"}),
+        )
+        .await
+        .unwrap();
+    let id = alarm_id(&armed);
+    let condition: Value = sqlx::query_scalar("select condition from alarms where id=$1")
+        .bind(id)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert!(
+        condition.get("account").is_none(),
+        "the owner condition keeps its stored shape: {condition}"
+    );
+    // Негодная метка отклоняется.
+    let refused = f
+        .call(
+            "alarms.set",
+            json!({"when": {"kind": "limit_reset", "provider": "claude", "account": "Bad Label", "window": "weekly", "below_percent": 5}, "key": "bad"}),
+        )
+        .await;
+    assert!(refused.is_err());
+    // Сброс записи владельца будит именно его.
+    f.observe_account(
+        "owner",
+        Window::Weekly,
+        100,
+        Some(reset + TimeDelta::hours(1)),
+        now + TimeDelta::minutes(10),
+    )
+    .await;
+    assert_eq!(alarm_state(&f.pool, id).await.0, "fired");
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn limit_reset_reading_without_reset_does_not_fire(pool: PgPool) {
     let f = Fx::new(pool).await;
     let now = Utc::now();
@@ -3321,6 +3466,7 @@ async fn limit_reset_missing_window_fires_the_condition(pool: PgPool) {
         &mut tx,
         f.owner,
         "claude",
+        "owner",
         Window::FiveHour,
         now,
         Uuid::now_v7(),

@@ -49,8 +49,8 @@ async fn derived_reserve(
     conn: &mut sqlx::PgConnection,
     conversation_id: Uuid,
 ) -> Result<Option<HoldReason>, sqlx::Error> {
-    let (harness, overridden): (String, bool) = sqlx::query_as(
-        "select harness, coalesce(reserve_override_until > clock_timestamp(), false) from conversations where id = $1",
+    let (harness, machine_id, overridden): (String, Uuid, bool) = sqlx::query_as(
+        "select harness, machine_id, coalesce(reserve_override_until > clock_timestamp(), false) from conversations where id = $1",
     )
     .bind(conversation_id)
     .fetch_one(&mut *conn)
@@ -59,15 +59,20 @@ async fn derived_reserve(
     else {
         return Ok(None);
     };
+    // Резерв считается по учётной записи харнесса на машине разговора: чужая подписка
+    // этот разговор не держит.
+    let account = crate::limits::harness_account(&mut *conn, machine_id, &harness).await?;
     let reserve: Option<Option<chrono::DateTime<chrono::Utc>>> = sqlx::query_scalar(
         "select coalesce(weekly_reserve_resets_at, weekly_resets_at) from provider_limits
-         where provider = $1 and weekly_reserve_active",
+         where provider = $1 and account = $2 and weekly_reserve_active",
     )
     .bind(provider)
+    .bind(&account)
     .fetch_optional(conn)
     .await?;
     Ok(reserve.map(|resets_at| HoldReason::WeeklyReserve {
         provider: provider.into(),
+        account,
         resets_at,
     }))
 }
@@ -147,7 +152,7 @@ pub async fn dispatch_next(
         .cloned()
         .collect();
     if let Some(reserve) = derived_reserve(&mut *conn, conversation_id).await?
-        && !holds.iter().any(|h| matches!((h, &reserve), (HoldReason::WeeklyReserve { provider: a, .. }, HoldReason::WeeklyReserve { provider: b, .. }) if a == b))
+        && !holds.iter().any(|h| h.same_reserve(&reserve))
     {
         holds.push(reserve);
     }
