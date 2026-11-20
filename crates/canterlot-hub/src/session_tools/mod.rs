@@ -15,6 +15,7 @@ pub mod disk;
 pub mod guard;
 pub mod jobs;
 pub mod machine_text;
+pub mod memory;
 pub mod nudge;
 pub mod origin;
 pub mod outage;
@@ -76,6 +77,11 @@ pub const TOOLS: &[&str] = &[
     "plan.archive",
     "plan.adopt",
     "history.search",
+    "memory.search",
+    "memory.get",
+    "memory.write",
+    "memory.update",
+    "memory.delete",
     "secrets.request",
     "settings.routing",
     "settings.whitelist",
@@ -101,6 +107,7 @@ pub enum ToolErrorCode {
     ModelUnknown,
     EffortNotAllowed,
     WorkdirNotAllowed,
+    DomainMismatch,
     PermissionModeTooWide,
     ProfileUnknown,
     MachineUnavailable,
@@ -125,11 +132,20 @@ pub enum ToolErrorCode {
     AlreadyDecided,
     TooManySecrets,
     InvalidArguments,
+    /// Коды памяти: чужой домен и несуществующая запись отвечают одинаково.
+    NotFound,
+    LooksLikeSecret,
+    SubjectExists,
+    VersionConflict,
+    DomainFull,
+    BadLevel,
+    Invalid,
+    MemoryUnavailable,
     Internal,
 }
 
 impl ToolErrorCode {
-    pub const ALL: [Self; 35] = [
+    pub const ALL: [Self; 44] = [
         Self::UnknownTool,
         Self::SessionNotFound,
         Self::ReadOnlySession,
@@ -140,6 +156,7 @@ impl ToolErrorCode {
         Self::ModelUnknown,
         Self::EffortNotAllowed,
         Self::WorkdirNotAllowed,
+        Self::DomainMismatch,
         Self::PermissionModeTooWide,
         Self::ProfileUnknown,
         Self::MachineUnavailable,
@@ -164,6 +181,14 @@ impl ToolErrorCode {
         Self::AlreadyDecided,
         Self::TooManySecrets,
         Self::InvalidArguments,
+        Self::NotFound,
+        Self::LooksLikeSecret,
+        Self::SubjectExists,
+        Self::VersionConflict,
+        Self::DomainFull,
+        Self::BadLevel,
+        Self::Invalid,
+        Self::MemoryUnavailable,
         Self::Internal,
     ];
 
@@ -179,6 +204,7 @@ impl ToolErrorCode {
             Self::ModelUnknown => "model_unknown",
             Self::EffortNotAllowed => "effort_not_allowed",
             Self::WorkdirNotAllowed => "workdir_not_allowed",
+            Self::DomainMismatch => "domain_mismatch",
             Self::PermissionModeTooWide => "permission_mode_too_wide",
             Self::ProfileUnknown => "profile_unknown",
             Self::MachineUnavailable => "machine_unavailable",
@@ -203,6 +229,14 @@ impl ToolErrorCode {
             Self::AlreadyDecided => "already_decided",
             Self::TooManySecrets => "too_many_secrets",
             Self::InvalidArguments => "invalid_arguments",
+            Self::NotFound => "not_found",
+            Self::LooksLikeSecret => "looks_like_secret",
+            Self::SubjectExists => "subject_exists",
+            Self::VersionConflict => "version_conflict",
+            Self::DomainFull => "domain_full",
+            Self::BadLevel => "bad_level",
+            Self::Invalid => "invalid",
+            Self::MemoryUnavailable => "memory_unavailable",
             Self::Internal => "internal_error",
         }
     }
@@ -219,6 +253,7 @@ impl ToolErrorCode {
             Self::ModelUnknown => "Unknown model",
             Self::EffortNotAllowed => "This effort is not available for the model",
             Self::WorkdirNotAllowed => "This working directory is not allowed",
+            Self::DomainMismatch => "The working directory belongs to another memory domain",
             Self::PermissionModeTooWide => "The mode is wider than the parent session's",
             Self::ProfileUnknown => "Unknown instruction preset",
             Self::MachineUnavailable => "The machine is not available",
@@ -243,6 +278,14 @@ impl ToolErrorCode {
             Self::AlreadyDecided => "The owner has already answered this request",
             Self::TooManySecrets => "Too many secret requests are already waiting",
             Self::InvalidArguments => "Invalid arguments",
+            Self::NotFound => "No such memory entry",
+            Self::LooksLikeSecret => "The text looks like a secret",
+            Self::SubjectExists => "An active entry with this subject already exists",
+            Self::VersionConflict => "The entry changed since you read it",
+            Self::DomainFull => "The memory of this domain is full",
+            Self::BadLevel => "This session has no project, so project level is not possible",
+            Self::Invalid => "Invalid memory field",
+            Self::MemoryUnavailable => "This session has no memory",
             Self::Internal => "The hub could not complete the call, try later",
         }
     }
@@ -271,6 +314,9 @@ impl ToolErrorCode {
             Self::EffortNotAllowed => "Lower effort, or pass no effort for the model default.",
             Self::WorkdirNotAllowed => {
                 "Pass a workdir under the allowed roots, or omit it to use this session's."
+            }
+            Self::DomainMismatch => {
+                "Omit workdir, or pass one inside this session's own memory domain."
             }
             Self::PermissionModeTooWide => {
                 "Pass a mode no wider than this session's, or ask the owner to approve."
@@ -318,6 +364,20 @@ impl ToolErrorCode {
             Self::InvalidArguments => {
                 "Fix the argument and call again; tools/list shows the schema."
             }
+            Self::NotFound => "Call memory_search to find an entry id.",
+            Self::LooksLikeSecret => {
+                "Remove the secret from the text and ask the owner for it with secret_request."
+            }
+            Self::SubjectExists => {
+                "Update the existing entry with memory_update, or pick another subject."
+            }
+            Self::VersionConflict => {
+                "Read the entry again with memory_get, then repeat the call with its current version."
+            }
+            Self::DomainFull => "Archive entries you no longer need with memory_delete.",
+            Self::BadLevel => "Pass level domain, or write from a session that has a project.",
+            Self::Invalid => "Fix the named field and call again.",
+            Self::MemoryUnavailable => "Continue without memory; do not retry.",
             Self::Internal => "Try again; if it repeats, tell the owner.",
         }
     }
@@ -387,6 +447,7 @@ impl From<sqlx::Error> for ToolError {
 pub struct ToolContext {
     pub pool: PgPool,
     pub config: Arc<SessionToolsConfig>,
+    pub memory: Arc<crate::config::MemoryConfig>,
     pub limits: Arc<LimitsConfig>,
     pub settle: SettleConfig,
     pub alarms_enabled: bool,
@@ -446,6 +507,11 @@ pub async fn call(
         "plan.archive" => plan::archive(context, caller, arguments).await,
         "plan.adopt" => plan::adopt(context, caller, arguments).await,
         "history.search" => search::search(context, caller, arguments).await,
+        "memory.search" => memory::search(context, caller, arguments).await,
+        "memory.get" => memory::get(context, caller, arguments).await,
+        "memory.write" => memory::write(context, caller, arguments).await,
+        "memory.update" => memory::update(context, caller, arguments).await,
+        "memory.delete" => memory::delete(context, caller, arguments).await,
         "secrets.request" => secret::request(context, caller, arguments).await,
         "settings.routing" => settings_change::routing_policy(context, caller, arguments).await,
         "settings.whitelist" => settings_change::whitelist(context, caller, arguments).await,

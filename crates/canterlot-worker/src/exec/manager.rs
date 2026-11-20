@@ -569,6 +569,8 @@ pub(super) async fn report_owner_lost(
                 outcome: String::new(),
                 native_conversation_id: String::new(),
                 fresh_fork: false,
+                canonical_workdir: String::new(),
+                canonical_source: String::new(),
             })],
             vec![],
         )
@@ -604,6 +606,8 @@ pub(super) async fn reclaim_owner(
                 outcome: canterlot_proto::OWNER_RECLAIMED.into(),
                 native_conversation_id: String::new(),
                 fresh_fork: false,
+                canonical_workdir: String::new(),
+                canonical_source: String::new(),
             }))?;
             let mut record = store
                 .ownership()
@@ -862,6 +866,17 @@ pub(super) async fn revoke_secret(
         )),
     };
     shared.cj(vec![body], terminal_self(command)).await
+}
+
+/// Источник для `StartCli`: канонический путь, который менеджер проверил и из которого
+/// готовил копию. Без проверенного пути (команда пришла повторно после перезапуска актора)
+/// остаётся записанный в команде: пусто лишь у неизолированного запуска.
+pub(super) fn start_cli_source(start: &StartExecution, validated: Option<&Path>) -> String {
+    match (&start.worktree, validated) {
+        (None, _) => String::new(),
+        (Some(_), Some(source)) => source.to_string_lossy().into_owned(),
+        (Some(spec), None) => spec.source_workdir.clone(),
+    }
 }
 
 /// Уборка рабочей копии не привязана к исполнению: итог идёт в CJ, команда гасится вместе с ним.
@@ -1135,6 +1150,8 @@ pub(super) async fn answer_without_execution(
                         outcome: "start_cancelled".into(),
                         native_conversation_id: String::new(),
                         fresh_fork: false,
+                        canonical_workdir: String::new(),
+                        canonical_source: String::new(),
                     })],
                     terminal_self(command),
                 )
@@ -1208,6 +1225,9 @@ pub(super) struct Actor {
     start_command: Option<(String, u32)>,
     start: Option<StartExecution>,
     start_cli_sent: bool,
+    /// Канонический репозиторий-источник, прошедший проверку при запуске: из него собрана
+    /// копия, и его же supervisor сообщает хабу, без второго разбора исходной записи.
+    validated_source: Option<PathBuf>,
     cli_started: bool,
     handed: HashSet<(Uuid, u32)>,
     cancelled_local: HashSet<(Uuid, u32)>,
@@ -1251,6 +1271,7 @@ impl Actor {
             start_command: None,
             start: None,
             start_cli_sent: false,
+            validated_source: None,
             cli_started: false,
             handed: HashSet::new(),
             cancelled_local: HashSet::new(),
@@ -1427,6 +1448,7 @@ impl Actor {
         } = request;
         self.start_command = Some((command.command_id.clone(), command.dispatch_attempt));
         self.start = Some(start.clone());
+        self.validated_source = source.clone();
         #[cfg(feature = "fault-injection")]
         {
             let delay = *self.shared.spawn_delay.lock().expect("delay lock");
@@ -1657,6 +1679,8 @@ impl Actor {
                 prompt_suggestions: prompt_suggestions_enabled(start),
                 fork_from_native: start.fork_from_native.clone(),
                 canterlot_mcp: start.canterlot_mcp.clone(),
+                disable_claude_auto_memory: start.disable_claude_auto_memory,
+                source_workdir: start_cli_source(start, self.validated_source.as_deref()),
             }))
             .await;
         Ok(())
@@ -1747,6 +1771,8 @@ impl Actor {
                     outcome: "start_cancelled".into(),
                     native_conversation_id: String::new(),
                     fresh_fork: false,
+                    canonical_workdir: String::new(),
+                    canonical_source: String::new(),
                 })],
                 terminal,
             )
@@ -3000,6 +3026,40 @@ mod tests {
     use canterlot_proto::worker::v1::{
         AdapterDiagnostic, DeliverInput, InputCancelLost, JournalRecord, RecordBody,
     };
+
+    /// Рабочий каталог запуска — символическая ссылка: в `StartCli` уходит канонический
+    /// путь, из которого менеджер готовил копию, а не записанная в команде ссылка.
+    #[test]
+    fn start_cli_reports_the_validated_canonical_source_not_the_alias() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = fs::canonicalize(dir.path()).unwrap();
+        fs::create_dir_all(base.join("work/repo")).unwrap();
+        fs::create_dir_all(base.join("play")).unwrap();
+        std::os::unix::fs::symlink(base.join("work/repo"), base.join("play/alias")).unwrap();
+        let alias = base.join("play/alias");
+        let validated = under_roots(std::slice::from_ref(&base), &alias).unwrap();
+        assert_eq!(validated, base.join("work/repo"));
+        let start = StartExecution {
+            worktree: Some(canterlot_proto::worker::v1::WorktreeSpec {
+                source_workdir: alias.to_string_lossy().into_owned(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            start_cli_source(&start, Some(&validated)),
+            validated.to_string_lossy()
+        );
+        // Ссылку после проверки перенацелили: сообщается всё равно проверенный путь.
+        fs::remove_file(&alias).unwrap();
+        std::os::unix::fs::symlink(base.join("play"), &alias).unwrap();
+        assert_eq!(
+            start_cli_source(&start, Some(&validated)),
+            validated.to_string_lossy()
+        );
+        // Неизолированный запуск источника не шлёт.
+        assert_eq!(start_cli_source(&StartExecution::default(), None), "");
+    }
 
     #[test]
     fn prompt_suggestions_need_the_flag_the_capability_and_an_owner_session() {

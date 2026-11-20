@@ -96,7 +96,7 @@ impl Fx {
         .unwrap();
         sqlx::query(
             "update conversations set title='Родитель',harness='opencode',model='opencode-go/beam-free',
-               effort='medium',permission_mode='bypass',workdir='/tmp/w' where id=$1",
+               effort='medium',permission_mode='bypass',workdir='/tmp/w',memory_domain='personal' where id=$1",
         )
         .bind(seed.conversation_id)
         .execute(&pool)
@@ -123,6 +123,7 @@ impl Fx {
         let (_dispatcher, _) = Dispatcher::channel();
         Self {
             context: ToolContext {
+                memory: Default::default(),
                 pool: pool.clone(),
                 config: Arc::new(config),
                 limits: Default::default(),
@@ -334,8 +335,9 @@ impl Fx {
 async fn child_of(pool: &PgPool, parent: Uuid, harness: &str, model: &str, state: &str) -> Uuid {
     let id = Uuid::now_v7();
     sqlx::query(
-        "insert into conversations(id,owner_id,machine_id,harness,workdir,model,effort,parent_conversation_id,spawn_depth)
-         values($1,(select owner_id from conversations where id=$2),$3,$4,'/tmp/w',$5,'high',$2,1)",
+        "insert into conversations(id,owner_id,machine_id,harness,workdir,model,effort,parent_conversation_id,spawn_depth,memory_domain)
+         values($1,(select owner_id from conversations where id=$2),$3,$4,'/tmp/w',$5,'high',$2,1,
+                (select memory_domain from conversations where id=$2))",
     )
     .bind(id)
     .bind(parent)

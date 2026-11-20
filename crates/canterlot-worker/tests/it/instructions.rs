@@ -548,6 +548,7 @@ mod manager_tests {
                 fork_from_native: String::new(),
                 canterlot_mcp: String::new(),
                 prompt_suggestions: false,
+                disable_claude_auto_memory: false,
             }),
         )
     }

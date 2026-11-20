@@ -28,6 +28,7 @@
   import SpawnWhitelist from './SpawnWhitelist.svelte';
   import LimitSettings from './LimitSettings.svelte';
   import PromptSuggestionSetting from './PromptSuggestionSetting.svelte';
+  import MemoryScreen from './MemoryScreen.svelte';
   import HibernateSetting from './HibernateSetting.svelte';
   import DictationSettings from './DictationSettings.svelte';
   import SnippetsSettings from './SnippetsSettings.svelte';
@@ -163,6 +164,8 @@
           <div class="embed"><RoutingScreen embedded /></div>
         {:else if category === 'schedules'}
           <SchedulesScreen />
+        {:else if category === 'memory'}
+          <MemoryScreen />
         {:else if category === 'security'}
           <h3 class="group-title">Подключение</h3>
           <div class="group">

@@ -145,6 +145,7 @@ pub async fn test_app_deps(
         routing_stale: std::time::Duration::from_secs(1800),
         guards: Default::default(),
         session_tools: Default::default(),
+        memory: Default::default(),
         spawn_queue: Default::default(),
         routing_queue_horizon: std::time::Duration::from_secs(6 * 3600),
         machines: Default::default(),
@@ -406,6 +407,7 @@ pub async fn spawn_test_hub_with(pool: PgPool, options: TestHubOptions) -> TestH
                 routing_stale: std::time::Duration::from_secs(1800),
                 guards: orchestrator.guards.clone(),
                 session_tools: session_tools.clone(),
+                memory: Default::default(),
                 spawn_queue: orchestrator.spawn_queue.clone(),
                 routing_queue_horizon: orchestrator.routing.queue_horizon,
                 machines,
@@ -622,6 +624,23 @@ pub async fn seed_conversation(pool: &PgPool, owner_id: Uuid, machine_id: Uuid) 
         .execute(&mut *transaction)
         .await
         .expect("seed queue state");
+    // Разговоры без домена агентам друг другу не видны, поэтому посев даёт домен `work`, как
+    // у обычного рабочего разговора. Схемы до появления домена (тесты миграций) его не знают.
+    let has_domain: bool = sqlx::query_scalar(
+        "select exists(select 1 from information_schema.columns
+          where table_schema=current_schema() and table_name='conversations'
+            and column_name='memory_domain')",
+    )
+    .fetch_one(&mut *transaction)
+    .await
+    .expect("probe memory_domain column");
+    if has_domain {
+        sqlx::query("update conversations set memory_domain='work' where id=$1")
+            .bind(conversation_id)
+            .execute(&mut *transaction)
+            .await
+            .expect("seed memory domain");
+    }
     transaction
         .commit()
         .await
@@ -705,6 +724,7 @@ pub async fn seed_catalog(pool: &PgPool, machine_id: Uuid) {
         }],
         home_dir: String::new(),
         worktree_root: String::new(),
+        memory_work_roots: vec![],
     };
     crate::machine_info::apply_report(pool, owner, machine_id, &report, Uuid::now_v7())
         .await

@@ -41,6 +41,7 @@ sleep 60
         instructions: &owner,
         isolate_mcp: false,
         prompt_suggestions: false,
+        disable_auto_memory: false,
     };
     let proc = CliProcess::spawn(&spec, &ClaudeCodeConfig::default(), &group)
         .await

@@ -114,6 +114,7 @@ impl Live {
             },
             isolate_mcp: false,
             prompt_suggestions: false,
+            disable_claude_auto_memory: false,
             fork: None,
         }
     }

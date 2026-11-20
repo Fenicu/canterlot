@@ -268,6 +268,8 @@ struct Supervisor {
     next_conn: u64,
     attach_deadline: Option<Instant>,
     workdir: Option<PathBuf>,
+    /// Репозиторий-источник изолированной копии, как его назвал хаб.
+    source_workdir: Option<PathBuf>,
     media: MediaQueue,
     media_jobs: mpsc::UnboundedSender<MediaJob>,
     shares: ShareQueue,
@@ -477,6 +479,7 @@ pub(super) async fn run(exec_dir: PathBuf) -> Result<ExitCode, SupervisorError> 
         unknown_ipc_logged: false,
         next_conn: 0,
         workdir: None,
+        source_workdir: None,
         media: MediaQueue::default(),
         media_jobs,
         shares: ShareQueue::default(),
@@ -662,6 +665,27 @@ impl Supervisor {
         native: &str,
         fresh_fork: bool,
     ) -> Result<(), SupervisorError> {
+        // Запуск подтверждён: хаб сверяет домен памяти с настоящим (realpath) каталогом.
+        let canonical_workdir = if state == "running" {
+            self.workdir
+                .as_deref()
+                .and_then(crate::memory_scope::canonical_workdir)
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        // Изолированная копия лежит в нейтральной базе: домен задаёт её репозиторий.
+        // Путь пришёл от менеджера уже каноническим, тем самым, из которого готовилась копия:
+        // второго разбора записи нет.
+        let canonical_source = if state == "running" {
+            self.source_workdir
+                .as_deref()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
         self.record(Body::ExecutionState(
             canterlot_proto::worker::v1::ExecutionState {
                 execution_id: self.spec.execution_id.to_string(),
@@ -670,6 +694,8 @@ impl Supervisor {
                 outcome: outcome.into(),
                 native_conversation_id: native.into(),
                 fresh_fork,
+                canonical_workdir,
+                canonical_source,
             },
         ))?;
         Ok(())
@@ -1844,6 +1870,8 @@ impl Supervisor {
         self.session_tools_v1 = start.session_tools_v1;
         self.prompt_suggestions = start.prompt_suggestions && !start.isolate_mcp;
         self.workdir = Some(PathBuf::from(&start.workdir));
+        self.source_workdir =
+            (!start.source_workdir.is_empty()).then(|| PathBuf::from(&start.source_workdir));
         if self.session_tools_v1 {
             self.git_head = git_facts::head(Path::new(&start.workdir)).await;
         }
@@ -1876,6 +1904,7 @@ impl Supervisor {
             instructions,
             isolate_mcp: start.isolate_mcp,
             prompt_suggestions: self.prompt_suggestions,
+            disable_claude_auto_memory: start.disable_claude_auto_memory,
             fork: (!start.fork_from_native.is_empty()).then(|| crate::adapter::ForkSpec {
                 parent_native_id: start.fork_from_native.clone(),
                 side_mcp: start.canterlot_mcp == "side",
@@ -3954,6 +3983,7 @@ mod tests {
             unknown_ipc_logged: false,
             next_conn: 0,
             workdir: None,
+            source_workdir: None,
             media: MediaQueue::default(),
             media_jobs,
             shares: ShareQueue::default(),

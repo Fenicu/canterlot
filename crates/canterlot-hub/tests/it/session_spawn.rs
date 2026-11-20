@@ -115,7 +115,7 @@ impl Fx {
         }
         sqlx::query(
             "update conversations set title='Родитель \"главный\"',model='small',effort='low',
-               permission_mode='bypass',workdir='/tmp/w' where id=$1",
+               permission_mode='bypass',workdir='/tmp/w',memory_domain='personal' where id=$1",
         )
         .bind(seed.conversation_id)
         .execute(&pool)
@@ -137,6 +137,7 @@ impl Fx {
         let (dispatcher, _) = Dispatcher::channel();
         Self {
             context: ToolContext {
+                memory: Default::default(),
                 pool: pool.clone(),
                 config: Arc::new(config),
                 limits: Default::default(),
@@ -1245,7 +1246,7 @@ async fn spawn_brief_stops_a_deep_chain(pool: PgPool) {
     };
     let f = Fx::with(pool, config, &CAPABILITIES).await;
     let sender = testkit::seed_conversation(&f.pool, f.owner, f.machine).await;
-    sqlx::query("update conversations set model='small' where id=$1")
+    sqlx::query("update conversations set model='small',memory_domain='personal' where id=$1")
         .bind(sender)
         .execute(&f.pool)
         .await
@@ -1854,4 +1855,145 @@ async fn approval_links_at_start_and_a_task_closed_meanwhile_stays_closed(pool: 
     let (state, executor, attempts) = f.task(2).await;
     assert_eq!((state.as_str(), attempts), ("in_progress", 1));
     assert!(executor.is_some_and(|id| id != child));
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn spawn_explicit_workdir_of_other_domain_is_domain_mismatch(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    sqlx::query(
+        "update machines set capabilities=array['pilot_v1','memory_scope_v1'],
+           memory_work_roots='[\"/tmp/work\"]',allowed_roots='[\"/tmp\"]' where id=$1",
+    )
+    .bind(f.machine)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "update conversations set memory_domain='work',memory_project='/tmp/work/p' where id=$1",
+    )
+    .bind(f.parent)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    let before = f.sessions().await;
+    let mut personal = inside();
+    personal["workdir"] = json!("/tmp/play");
+    assert_eq!(code(f.spawn(personal).await), Code::DomainMismatch);
+    assert_eq!(f.sessions().await, before, "отказ не создаёт сессию");
+
+    let mut same = inside();
+    same["workdir"] = json!("/tmp/work/q");
+    let (child, _) = f.started(same).await;
+    let scope: (Option<String>, Option<String>) =
+        sqlx::query_as("select memory_domain,memory_project from conversations where id=$1")
+            .bind(child)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        scope,
+        (Some("work".to_owned()), Some("/tmp/work/p".to_owned()))
+    );
+}
+
+/// Отправка авторизовала цель, потом встала в очередь; за это время запуск обнулил домен цели
+/// и закоммитился. После очереди отправка проверяет домены заново и ничего не вставляет.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn send_rechecks_the_domain_after_waiting_for_the_queue(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let target = testkit::seed_conversation(&f.pool, f.owner, f.machine).await;
+    sqlx::query("update conversations set memory_domain='personal' where id=$1")
+        .bind(target)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    // Очередь цели держит другая транзакция.
+    let mut holder = f.pool.begin().await.unwrap();
+    sqlx::query("select conversation_id from queue_state where conversation_id=$1 for update")
+        .bind(target)
+        .fetch_one(&mut *holder)
+        .await
+        .unwrap();
+    let send = {
+        let context = f.context.clone();
+        let caller = f.caller();
+        tokio::spawn(async move {
+            session_tools::call(
+                &context,
+                &caller,
+                "sessions.send",
+                json!({"session_id": target, "text": "сообщение"}),
+            )
+            .await
+        })
+    };
+    // Отправка уже прошла авторизацию и стоит на очереди.
+    loop {
+        let waiting: bool = sqlx::query_scalar(
+            "select exists(select 1 from pg_stat_activity
+              where datname=current_database() and wait_event_type='Lock'
+                and query like 'select conversation_id from queue_state%')",
+        )
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        if waiting {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    // Запуск обнуляет домен цели: `no key update` не мешает `key share` отправки.
+    sqlx::query("update conversations set memory_domain=null where id=$1")
+        .bind(target)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    holder.commit().await.unwrap();
+    let error = send.await.unwrap().unwrap_err();
+    assert_eq!(error.code, Code::SessionNotFound);
+    let inputs: i64 = sqlx::query_scalar("select count(*) from inputs where conversation_id=$1")
+        .bind(target)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(inputs, 0);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_parent_without_a_domain_cannot_spawn_but_a_personal_one_can(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    sqlx::query("update conversations set memory_domain=null,memory_project=null where id=$1")
+        .bind(f.parent)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let before = f.sessions().await;
+    // Прямой путь: отказ с понятным текстом, без сессии и подписки.
+    let error = f.spawn(inside()).await.unwrap_err();
+    assert_eq!(error.code, Code::DomainMismatch);
+    assert!(
+        error
+            .message
+            .contains("сессия без домена памяти не может запускать делегатов"),
+        "{}",
+        error.message
+    );
+    assert_eq!(f.sessions().await, before);
+    let subscriptions: i64 = sqlx::query_scalar("select count(*) from session_subscriptions")
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(subscriptions, 0);
+    // Запрос, которому нужно одобрение владельца, до карточки не доходит.
+    assert_eq!(code(f.spawn(outside()).await), Code::DomainMismatch);
+    assert_eq!(f.sessions().await, before);
+
+    sqlx::query("update conversations set memory_domain='personal' where id=$1")
+        .bind(f.parent)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let (child, _) = f.started(inside()).await;
+    assert_eq!(f.sessions().await, before + 1);
+    assert!(f.child().await == Some(child));
 }

@@ -65,6 +65,9 @@ pub const CAPABILITY_SCHEDULE_PRECHECK_V1: &str = "schedule_precheck_v1";
 /// Воркер ведёт состояние цели и принимает команды управления ею.
 pub const CAPABILITY_GOALS_V1: &str = canterlot_proto::goals::CAPABILITY_GOALS_V1;
 
+/// Воркер сообщает канонические корни работы и канонический рабочий каталог запуска.
+pub const CAPABILITY_MEMORY_SCOPE_V1: &str = "memory_scope_v1";
+
 pub const OPTIONAL_CAPABILITIES: &[&str] = &[
     "exec_v1",
     "pilot_v1",
@@ -95,6 +98,7 @@ pub const OPTIONAL_CAPABILITIES: &[&str] = &[
     CAPABILITY_SLASH_CATALOG_V1,
     CAPABILITY_SCHEDULE_PRECHECK_V1,
     CAPABILITY_GOALS_V1,
+    CAPABILITY_MEMORY_SCOPE_V1,
 ];
 
 #[derive(Clone)]

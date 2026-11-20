@@ -300,6 +300,7 @@ async fn activity_row(pool: &PgPool, id: Uuid) -> (String, Value) {
 
 fn tool_context(pool: &PgPool) -> ToolContext {
     ToolContext {
+        memory: Default::default(),
         pool: pool.clone(),
         config: Arc::new(SessionToolsConfig::default()),
         limits: Default::default(),

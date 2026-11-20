@@ -78,6 +78,7 @@ fn owner_preset_args_keep_owner_configuration() {
         instructions: &owner,
         isolate_mcp: false,
         prompt_suggestions: false,
+        disable_auto_memory: false,
     };
     let args = build_args(&spec, &cfg()).unwrap();
     let s: Vec<String> = args
@@ -92,7 +93,7 @@ fn owner_preset_args_keep_owner_configuration() {
     let idx = s.iter().position(|x| x == "--settings").unwrap();
     assert_eq!(
         s[idx + 1],
-        "{\"crossSessionInbound\":\"refuse\",\"permissions\":{\"allow\":[\"mcp__canterlot__canterlot_limits\",\"mcp__canterlot__canterlot_presets_list\",\"mcp__canterlot__sessions_list\",\"mcp__canterlot__session_inspect\",\"mcp__canterlot__session_subscribe\",\"mcp__canterlot__session_unsubscribe\",\"mcp__canterlot__session_wait\",\"mcp__canterlot__alarm_set\",\"mcp__canterlot__alarm_cancel\",\"mcp__canterlot__alarm_list\",\"mcp__canterlot__route_preview\",\"mcp__canterlot__plan_list\",\"mcp__canterlot__plan_add\",\"mcp__canterlot__plan_update\",\"mcp__canterlot__plan_archive\",\"mcp__canterlot__history_search\",\"mcp__canterlot__canterlot_routing_policy\",\"mcp__canterlot__canterlot_spawn_whitelist\"]}}"
+        "{\"crossSessionInbound\":\"refuse\",\"permissions\":{\"allow\":[\"mcp__canterlot__canterlot_limits\",\"mcp__canterlot__canterlot_presets_list\",\"mcp__canterlot__sessions_list\",\"mcp__canterlot__session_inspect\",\"mcp__canterlot__session_subscribe\",\"mcp__canterlot__session_unsubscribe\",\"mcp__canterlot__session_wait\",\"mcp__canterlot__alarm_set\",\"mcp__canterlot__alarm_cancel\",\"mcp__canterlot__alarm_list\",\"mcp__canterlot__route_preview\",\"mcp__canterlot__plan_list\",\"mcp__canterlot__plan_add\",\"mcp__canterlot__plan_update\",\"mcp__canterlot__plan_archive\",\"mcp__canterlot__history_search\",\"mcp__canterlot__memory_search\",\"mcp__canterlot__memory_get\",\"mcp__canterlot__memory_write\",\"mcp__canterlot__memory_update\",\"mcp__canterlot__memory_delete\",\"mcp__canterlot__canterlot_routing_policy\",\"mcp__canterlot__canterlot_spawn_whitelist\"]}}"
     );
     assert_eq!(s[idx + 2], "--system-prompt-snapshot");
     assert_eq!(s[idx + 3], "off");
@@ -118,6 +119,7 @@ fn one_million_variant_reaches_the_cli_unchanged_on_resume() {
         instructions: &owner,
         isolate_mcp: false,
         prompt_suggestions: false,
+        disable_auto_memory: false,
     };
     let args = build_args(&spec, &cfg()).unwrap();
     let s: Vec<String> = args
@@ -158,6 +160,7 @@ fn no_preset_passes_bare_setting_sources_or_strict_mcp() {
             instructions,
             isolate_mcp: false,
             prompt_suggestions: false,
+            disable_auto_memory: false,
         };
         let args = build_args(&spec, &cfg()).unwrap();
         let s: Vec<String> = args
@@ -193,6 +196,7 @@ fn custom_preset_writes_instructions_file_0600_and_appends_it() {
         instructions: &preset,
         isolate_mcp: false,
         prompt_suggestions: false,
+        disable_auto_memory: false,
     };
     let args = build_args(&spec, &cfg()).unwrap();
     let s: Vec<String> = args
@@ -247,6 +251,7 @@ fn permission_modes_map_to_cli_values() {
             instructions: &owner,
             isolate_mcp: false,
             prompt_suggestions: false,
+            disable_auto_memory: false,
         };
         let args = build_args(&spec, &cfg()).unwrap();
         let s: Vec<String> = args
@@ -278,6 +283,7 @@ fn permission_modes_map_to_cli_values() {
         instructions: &owner,
         isolate_mcp: false,
         prompt_suggestions: false,
+        disable_auto_memory: false,
     };
     assert!(build_args(&spec, &cfg()).is_err());
 }
@@ -354,6 +360,7 @@ fn mcp_json_points_relay_at_exec_socket() {
         instructions: &owner,
         isolate_mcp: false,
         prompt_suggestions: false,
+        disable_auto_memory: false,
     };
     fs::create_dir_all(&exec_dir).unwrap();
     write_exec_files(
@@ -412,6 +419,7 @@ printf '%s\n' '{"type":"x"}'
         instructions: &owner,
         isolate_mcp: false,
         prompt_suggestions: false,
+        disable_auto_memory: false,
     };
     let mut proc = CliProcess::spawn(&spec, &ClaudeCodeConfig::default(), &group)
         .await
@@ -496,6 +504,7 @@ head -c 102400 /dev/zero | tr '\0' b 1>&2
         instructions: &owner,
         isolate_mcp: false,
         prompt_suggestions: false,
+        disable_auto_memory: false,
     };
     let mut proc = CliProcess::spawn(&spec, &ClaudeCodeConfig::default(), &group)
         .await
@@ -538,6 +547,7 @@ while :; do sleep 0.1; done
         instructions: &owner,
         isolate_mcp: false,
         prompt_suggestions: false,
+        disable_auto_memory: false,
     };
     let mut proc = CliProcess::spawn(&spec, &ClaudeCodeConfig::default(), &group)
         .await
@@ -595,6 +605,7 @@ sleep 1
         instructions: &owner,
         isolate_mcp: false,
         prompt_suggestions: false,
+        disable_auto_memory: false,
     };
     let proc = CliProcess::spawn(&spec, &ClaudeCodeConfig::default(), &group)
         .await
@@ -626,6 +637,7 @@ fn suggestion_args(prompt_suggestions: bool, isolate_mcp: bool) -> Vec<String> {
         instructions: &owner,
         isolate_mcp,
         prompt_suggestions,
+        disable_auto_memory: false,
     };
     build_args(&spec, &cfg())
         .unwrap()
@@ -692,6 +704,7 @@ fn fork_passes_resume_parent_fork_session_and_the_allocated_id() {
         instructions: &owner,
         isolate_mcp: false,
         prompt_suggestions: false,
+        disable_auto_memory: false,
     };
     let args = build_args(&spec, &cfg()).unwrap();
     let s: Vec<String> = args

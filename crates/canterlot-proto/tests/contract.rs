@@ -415,6 +415,8 @@ fn exec_records_roundtrip() {
         outcome: String::new(),
         native_conversation_id: "native".into(),
         fresh_fork: false,
+        canonical_workdir: "/h/work/p".into(),
+        canonical_source: "/h/work/src".into(),
     });
     assert_roundtrip(BlockStarted {
         block_id: "block".into(),
@@ -888,6 +890,7 @@ fn pilot_records_roundtrip() {
         os: "Debian 13 · 6.12".into(),
         home_dir: "/home/owner".into(),
         worktree_root: "/data/worktrees".into(),
+        memory_work_roots: vec!["/h/work".into()],
     };
     let metrics = MachineMetrics {
         machine_time_ms: 123456,
@@ -1178,6 +1181,7 @@ fn n_minus_one_decoders_skip_new_fields() {
         prompt_suggestions: true,
         fork_from_native: String::new(),
         canterlot_mcp: String::new(),
+        disable_claude_auto_memory: true,
     };
     assert_eq!(
         OldStartExecution::decode(new.encode_to_vec().as_slice()).unwrap(),
@@ -1378,6 +1382,8 @@ fn start_execution_capabilities_machine_report_os_and_limits_snapshot_roundtrip(
         prompt_suggestions: true,
         fork_from_native: String::new(),
         canterlot_mcp: String::new(),
+        disable_claude_auto_memory: true,
+        source_workdir: "/h/work/src".into(),
     });
     assert_roundtrip(ipc::CompactRequest {
         command_id: "command".into(),
@@ -2061,6 +2067,20 @@ fn isolate_mcp_is_additive_on_both_hops() {
 }
 
 #[test]
+fn disable_claude_auto_memory_is_field_16_and_19() {
+    let start = StartExecution {
+        disable_claude_auto_memory: true,
+        ..Default::default()
+    };
+    assert_eq!(start.encode_to_vec(), vec![0x80, 0x01, 1]);
+    let cli = canterlot_proto::worker::ipc::StartCli {
+        disable_claude_auto_memory: true,
+        ..Default::default()
+    };
+    assert_eq!(cli.encode_to_vec(), vec![0x98, 0x01, 1]);
+}
+
+#[test]
 fn side_chat_fields_are_additive_on_both_hops() {
     use canterlot_proto::worker::{ipc, v1::ExecutionState};
     // Неизвестное поле старый получатель пропускает, а его отсутствие значит обычный запуск.
@@ -2120,6 +2140,55 @@ fn side_chat_fields_are_additive_on_both_hops() {
         "ExecutionState.fresh_fork is field 6"
     );
     assert_roundtrip(state);
+
+    // memory_scope_v1: старое поле остаётся на месте, новое добавляется хвостом.
+    let old_wire = ExecutionState {
+        fresh_fork: true,
+        ..Default::default()
+    }
+    .encode_to_vec();
+    let state = ExecutionState {
+        fresh_fork: true,
+        canonical_workdir: "/h/work".into(),
+        ..Default::default()
+    };
+    let wire = state.encode_to_vec();
+    assert_eq!(&wire[..old_wire.len()], old_wire.as_slice());
+    assert_eq!(
+        &wire[old_wire.len()..],
+        [&[0x3a, 7][..], b"/h/work"].concat(),
+        "ExecutionState.canonical_workdir is field 7"
+    );
+    assert_roundtrip(state);
+
+    // Источник изолированной копии: поле 8, тоже хвостом.
+    let old_wire = ExecutionState {
+        canonical_workdir: "/h/wt".into(),
+        ..Default::default()
+    }
+    .encode_to_vec();
+    let state = ExecutionState {
+        canonical_workdir: "/h/wt".into(),
+        canonical_source: "/h/work".into(),
+        ..Default::default()
+    };
+    let wire = state.encode_to_vec();
+    assert_eq!(&wire[..old_wire.len()], old_wire.as_slice());
+    assert_eq!(
+        &wire[old_wire.len()..],
+        [&[0x42, 7][..], b"/h/work"].concat(),
+        "ExecutionState.canonical_source is field 8"
+    );
+    assert_roundtrip(state);
+
+    let report = canterlot_proto::worker::v1::MachineReport {
+        memory_work_roots: vec!["/h/work".into(), "/h/job".into()],
+        ..Default::default()
+    };
+    let wire = report.encode_to_vec();
+    assert_eq!(wire[0], 0x5a, "MachineReport.memory_work_roots is field 11");
+    assert_eq!(wire.iter().filter(|b| **b == 0x5a).count(), 2);
+    assert_roundtrip(report);
 }
 
 #[test]
@@ -2146,6 +2215,7 @@ fn path_probe_uses_new_control_fields_and_old_decoders_skip_them() {
             mtime_ms: 1_762_345_260_000,
             head: "0".into(),
             head_omitted: String::new(),
+            canonical_path: "/h/f".into(),
         })),
         now_ms: 1_762_345_300_000,
     };

@@ -50,6 +50,7 @@ impl Fx {
         .unwrap();
         let router = http::router(AppState::new(deps));
         let context = ToolContext {
+            memory: Default::default(),
             pool: pool.clone(),
             config: Arc::new(SessionToolsConfig::default()),
             limits: Arc::new(LimitsConfig::default()),
@@ -753,6 +754,7 @@ async fn approval_job_takes_the_queue_before_the_request_row(pool: PgPool) {
     let task = {
         let pool = f.pool.clone();
         let context = ToolContext {
+            memory: Default::default(),
             pool: pool.clone(),
             config: Arc::new(SessionToolsConfig::default()),
             limits: Arc::new(LimitsConfig::default()),

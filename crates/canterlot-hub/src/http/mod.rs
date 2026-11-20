@@ -30,6 +30,7 @@ pub mod alarms;
 pub mod attachments;
 pub mod auth;
 pub mod bookmarks;
+pub mod claude_auto_memory;
 mod connection;
 pub mod conversations;
 pub mod crunch;
@@ -46,6 +47,7 @@ pub mod limit_settings;
 pub mod limits;
 pub mod machines;
 pub mod media;
+pub mod memory;
 pub mod message_snippets;
 pub mod nudge;
 pub mod openapi;
@@ -110,6 +112,8 @@ pub struct AppDeps {
     pub guards: GuardsConfig,
     /// Пределы межсессионных инструментов: пуск из очереди владельцем.
     pub session_tools: SessionToolsConfig,
+    /// `[memory]`: пределы общей памяти для API владельца.
+    pub memory: crate::config::MemoryConfig,
     /// Очередь запусков: срок элемента и пауза повтора.
     pub spawn_queue: crate::config::SpawnQueueConfig,
     /// Горизонт ожидания лимита для маршрута.
@@ -145,6 +149,7 @@ pub struct AppState {
     pub routing_stale: std::time::Duration,
     pub guards: GuardsConfig,
     pub session_tools: SessionToolsConfig,
+    pub memory: Arc<crate::config::MemoryConfig>,
     pub spawn_queue: crate::config::SpawnQueueConfig,
     pub routing_queue_horizon: Duration,
     pub machines: Arc<MachinesConfig>,
@@ -192,6 +197,7 @@ impl AppState {
             routing_stale: deps.routing_stale,
             guards: deps.guards,
             session_tools: deps.session_tools,
+            memory: Arc::new(deps.memory),
             spawn_queue: deps.spawn_queue,
             routing_queue_horizon: deps.routing_queue_horizon,
             machines: Arc::new(deps.machines),
@@ -260,6 +266,8 @@ pub fn api_routes() -> OpenApiRouter<AppState> {
         .merge(spawn_queue::routes())
         .merge(limit_settings::routes())
         .merge(prompt_suggestions::routes())
+        .merge(claude_auto_memory::routes())
+        .merge(memory::routes())
         .merge(hibernate::routes())
         .merge(dictation::routes())
         .merge(machines::routes())

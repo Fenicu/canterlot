@@ -288,6 +288,15 @@ pub async fn start_in_tx_with_native(
     {
         payload["prompt_suggestions"] = json!(true);
     }
+    if crate::memory::auto_memory::disabled_for_start(
+        conn,
+        owner_id,
+        &row.try_get::<String, _>("harness")?,
+    )
+    .await?
+    {
+        payload["disable_claude_auto_memory"] = json!(true);
+    }
     if let Some(worktree) = worktree {
         payload["worktree"] = json!({
             "source_workdir": worktree["source_workdir"],

@@ -1,6 +1,6 @@
-import type { Page } from '@playwright/test';
+import type { Page, Route } from '@playwright/test';
 import type { FakeHub } from './hub';
-import { FakeDraftConflict, NUDGE_BUILTIN_TEXT, type FakeHubApi } from './api';
+import { FakeDraftConflict, FakeMemoryError, NUDGE_BUILTIN_TEXT, type FakeHubApi } from './api';
 import { APP_VERSION } from '../version';
 import { installAuthRoutes } from './auth';
 
@@ -1486,6 +1486,65 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     const body = route.request().postDataJSON() as { enabled: boolean };
     api.setPromptSuggestionsEnabled(body.enabled);
     await route.fulfill({ headers: headers(), json: { enabled: api.promptSuggestionsEnabled } });
+  });
+
+  await page.route('**/api/v1/claude-auto-memory-settings', async (route) => {
+    const method = route.request().method();
+    if (method === 'GET') {
+      await route.fulfill({ headers: headers(), json: { claude_auto_memory: api.claudeAutoMemory } });
+      return;
+    }
+    if (method !== 'PUT') return route.fallback();
+    if (!route.request().headers()['idempotency-key']) {
+      await route.fulfill({ status: 400, headers: headers(), json: errorBody('invalid_request', 'Нужен Idempotency-Key') });
+      return;
+    }
+    const body = route.request().postDataJSON() as { claude_auto_memory: 'on' | 'off' };
+    api.claudeAutoMemory = body.claude_auto_memory;
+    await route.fulfill({ headers: headers(), json: { claude_auto_memory: api.claudeAutoMemory } });
+  });
+
+  // Общая память: те же отказы и формы, что у хаба. Домен обязателен в каждом запросе.
+  const memoryFail = async (route: Route, error: unknown) => {
+    if (!(error instanceof FakeMemoryError)) throw error;
+    await route.fulfill({ status: error.status, headers: headers(), json: errorBody(error.code, error.message, error.details) });
+  };
+  await page.route(/\/api\/v1\/memory(?:\?.*)?$/, async (route) => {
+    const request = route.request();
+    try {
+      if (request.method() === 'GET') {
+        await route.fulfill({ headers: headers(), json: api.listMemory(new URL(request.url()).searchParams) });
+      } else if (request.method() === 'POST') {
+        await route.fulfill({ status: 201, headers: headers(), json: api.createMemory(request.postDataJSON()) });
+      } else return route.fallback();
+    } catch (error) { await memoryFail(route, error); }
+  });
+  await page.route(/\/api\/v1\/memory\/[^/?]+(?:\?.*)?$/, async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    const id = url.pathname.split('/').at(-1) ?? '';
+    try {
+      if (request.method() === 'GET') await route.fulfill({ headers: headers(), json: api.getMemory(id, url.searchParams.get('domain')) });
+      else if (request.method() === 'PUT') await route.fulfill({ headers: headers(), json: api.updateMemory(id, request.postDataJSON()) });
+      else if (request.method() === 'DELETE') { api.deleteMemory(id, url.searchParams.get('domain')); await route.fulfill({ status: 204, headers: headers() }); }
+      else return route.fallback();
+    } catch (error) { await memoryFail(route, error); }
+  });
+  await page.route(/\/api\/v1\/memory\/[^/?]+\/(?:archive|restore)$/, async (route) => {
+    const request = route.request();
+    const parts = new URL(request.url()).pathname.split('/');
+    const action = parts.at(-1);
+    const id = parts.at(-2) ?? '';
+    try {
+      const body = request.postDataJSON();
+      await route.fulfill({ headers: headers(), json: action === 'archive' ? api.archiveMemory(id, body) : api.restoreMemory(id, body) });
+    } catch (error) { await memoryFail(route, error); }
+  });
+  await page.route(/\/api\/v1\/memory\/[^/?]+\/revisions(?:\?.*)?$/, async (route) => {
+    const url = new URL(route.request().url());
+    const id = url.pathname.split('/').at(-2) ?? '';
+    try { await route.fulfill({ headers: headers(), json: api.memoryRevisions(id, url.searchParams.get('domain')) }); }
+    catch (error) { await memoryFail(route, error); }
   });
 
   await page.route('**/api/v1/hibernate-settings', async (route) => {

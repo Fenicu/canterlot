@@ -65,6 +65,32 @@ enum Command {
         #[command(subcommand)]
         command: LeaseCommand,
     },
+    /// Разовый импорт памяти Claude: план и пакет. Только чтение, без конфига и сети.
+    Memory {
+        #[command(subcommand)]
+        command: MemoryCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum MemoryCommand {
+    /// Составить манифест TOML по каталогу `~/.claude/projects` для просмотра владельцем.
+    ImportPlan {
+        #[arg(long)]
+        root: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+        /// Корень рабочих проектов (домен work); можно повторять. По умолчанию `~/work`.
+        #[arg(long)]
+        work_root: Vec<PathBuf>,
+    },
+    /// Собрать JSON-пакет по просмотренному манифесту; расхождение хэша отказывает.
+    ImportBundle {
+        #[arg(long)]
+        manifest: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -106,6 +132,9 @@ async fn main() -> ExitCode {
         return code;
     }
     if let Some(code) = lease().await {
+        return code;
+    }
+    if let Some(code) = memory() {
         return code;
     }
     if let Some(code) = codex_replay().await {
@@ -152,6 +181,66 @@ fn capabilities() -> Option<ExitCode> {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("capabilities: {error}");
+            ExitCode::FAILURE
+        }
+    })
+}
+
+fn memory() -> Option<ExitCode> {
+    use canterlot_worker::memory_import::{Manifest, PlanOptions, bundle, plan};
+    let Command::Memory { command } = Cli::try_parse().ok()?.command else {
+        return None;
+    };
+    let result = (|| -> Result<String, String> {
+        match command {
+            MemoryCommand::ImportPlan {
+                root,
+                out,
+                work_root,
+            } => {
+                let work_roots = if work_root.is_empty() {
+                    let home = std::env::var_os("HOME").ok_or("HOME is not set")?;
+                    vec![PathBuf::from(home).join("work")]
+                } else {
+                    work_root
+                };
+                let manifest =
+                    plan(&root, &PlanOptions { work_roots }).map_err(|e| e.to_string())?;
+                let text = manifest.to_toml().map_err(|e| e.to_string())?;
+                std::fs::write(&out, text).map_err(|e| format!("write {}: {e}", out.display()))?;
+                let files: usize = manifest.dir.iter().map(|d| d.file.len()).sum();
+                let skipped: usize = manifest
+                    .dir
+                    .iter()
+                    .flat_map(|d| &d.file)
+                    .filter(|f| !f.skip.is_empty())
+                    .count();
+                let ambiguous = manifest.dir.iter().filter(|d| d.ambiguous).count();
+                Ok(format!(
+                    "manifest: {} dirs, {files} files, {skipped} skipped, {ambiguous} ambiguous",
+                    manifest.dir.len()
+                ))
+            }
+            MemoryCommand::ImportBundle { manifest, out } => {
+                let text = std::fs::read_to_string(&manifest)
+                    .map_err(|e| format!("read {}: {e}", manifest.display()))?;
+                let manifest = Manifest::from_toml(&text).map_err(|e| e.to_string())?;
+                let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                let id = uuid::Uuid::now_v7().to_string();
+                let bundle = bundle(&manifest, &id, &now).map_err(|e| e.to_string())?;
+                let json = serde_json::to_string_pretty(&bundle).map_err(|e| e.to_string())?;
+                std::fs::write(&out, json).map_err(|e| format!("write {}: {e}", out.display()))?;
+                Ok(format!("bundle {id}: {} entries", bundle.entries.len()))
+            }
+        }
+    })();
+    Some(match result {
+        Ok(line) => {
+            println!("{line}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("memory: {error}");
             ExitCode::FAILURE
         }
     })
@@ -260,6 +349,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         Command::McpRelay { .. }
         | Command::Supervise { .. }
         | Command::Capabilities
+        | Command::Memory { .. }
         | Command::Lease { .. } => {
             return Ok(());
         }

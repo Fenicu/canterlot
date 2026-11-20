@@ -205,6 +205,7 @@ pub fn report() -> MachineReport {
         os: "linux".into(),
         home_dir: "/home/worker".into(),
         worktree_root: String::new(),
+        memory_work_roots: vec![],
     }
 }
 pub fn metrics(ms: u64) -> MachineMetrics {

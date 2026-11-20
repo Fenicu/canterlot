@@ -108,7 +108,7 @@ impl Fx {
         .unwrap();
         sqlx::query(
             "update conversations set title='Родитель',harness='opencode',model='opencode-go/muse-spark-1.3-contributor',
-               effort='high',permission_mode='bypass',workdir='/tmp/w' where id=$1",
+               effort='high',permission_mode='bypass',workdir='/tmp/w',memory_domain='personal' where id=$1",
         )
         .bind(conversation)
         .execute(&pool)
@@ -132,6 +132,7 @@ impl Fx {
         let (_dispatcher, _) = Dispatcher::channel();
         Self {
             context: ToolContext {
+                memory: Default::default(),
                 pool: pool.clone(),
                 config: Arc::new(SessionToolsConfig {
                     spawn_stagger: std::time::Duration::ZERO,

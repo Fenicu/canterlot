@@ -1,0 +1,403 @@
+//! Общая память агентов: область (домен и проект) каждого разговора.
+//!
+//! Здесь только часть про область. Домен ставится при создании строки и не
+//! пересчитывается; единственное исключение — проверка запуска, которая обнуляет домен,
+//! если настоящий путь рабочего каталога ему противоречит.
+
+pub mod auto_memory;
+pub mod import;
+pub mod import_rules;
+pub mod secrets;
+pub mod store;
+
+use std::path::{Component, Path, PathBuf};
+
+use serde_json::{Value, json};
+use sqlx::PgConnection;
+use uuid::Uuid;
+
+use crate::events::{self, NewEvent, Scope};
+
+/// Возможность воркера, без которой домен у разговора пуст.
+pub const CAPABILITY_MEMORY_SCOPE_V1: &str = "memory_scope_v1";
+
+/// Событие, которое видит владелец в сведениях о сессии.
+pub const EVENT_DOMAIN_CONFLICT: &str = "memory_domain_conflict";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Classification {
+    Work,
+    Personal,
+    Neutral,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemoryDomain {
+    Work,
+    Personal,
+}
+
+impl MemoryDomain {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Work => "work",
+            Self::Personal => "personal",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "work" => Some(Self::Work),
+            "personal" => Some(Self::Personal),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ScopeError {
+    /// Каталог потомка не нейтрален и не из домена родителя.
+    #[error("domain mismatch")]
+    DomainMismatch,
+    #[error("database error")]
+    Db(#[from] sqlx::Error),
+}
+
+/// Путь без хвостовых `/` и `.`; `..` остаётся как есть, и такой путь не считается вложенным.
+fn normalize(path: &str) -> PathBuf {
+    Path::new(path)
+        .components()
+        .filter(|c| *c != Component::CurDir)
+        .collect()
+}
+
+fn under(path: &Path, root: &str) -> bool {
+    let root = normalize(root);
+    root.is_absolute() && path.starts_with(&root)
+}
+
+/// Лексическая классификация: путь равен корню работы или лежит под ним — `Work`; под
+/// базой рабочих копий — `Neutral`; иначе `Personal`. Каталог с `..` вложенным не считается
+/// ни в какой корень: `Personal`.
+pub fn classify(
+    workdir: &str,
+    work_roots: &[String],
+    worktree_root: Option<&str>,
+) -> Classification {
+    let path = normalize(workdir);
+    if !path.is_absolute() || path.components().any(|c| c == Component::ParentDir) {
+        return Classification::Personal;
+    }
+    if worktree_root.is_some_and(|root| under(&path, root)) {
+        return Classification::Neutral;
+    }
+    if work_roots.iter().any(|root| under(&path, root)) {
+        return Classification::Work;
+    }
+    Classification::Personal
+}
+
+/// Корни и база рабочих копий машины; `None`, если воркер не умеет `memory_scope_v1`.
+/// Корни не присланы или список пуст (воркер отбрасывает несуществующий `~/work`) —
+/// значит «неизвестно», и тогда работает правило по умолчанию (`default_rule`).
+struct MachineRoots {
+    work_roots: Vec<String>,
+    worktree_root: Option<String>,
+    default_rule: bool,
+}
+
+impl MachineRoots {
+    /// Лексическая классификация с правилом по умолчанию, когда корни неизвестны.
+    fn classify(&self, path: &str) -> Classification {
+        let found = classify(path, &self.work_roots, self.worktree_root.as_deref());
+        if found == Classification::Personal && self.default_rule {
+            let normalized = normalize(path);
+            if normalized.is_absolute()
+                && !normalized.components().any(|c| c == Component::ParentDir)
+                && under_default_work_root(&normalized)
+            {
+                return Classification::Work;
+            }
+        }
+        found
+    }
+}
+
+async fn machine_roots(
+    conn: &mut PgConnection,
+    machine_id: Uuid,
+) -> Result<Option<MachineRoots>, sqlx::Error> {
+    let row: Option<(Vec<String>, Option<Value>, Option<String>)> = sqlx::query_as(
+        "select capabilities, memory_work_roots, worktree_root from machines where id=$1",
+    )
+    .bind(machine_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some((capabilities, roots, worktree_root)) = row else {
+        return Ok(None);
+    };
+    if !capabilities.iter().any(|c| c == CAPABILITY_MEMORY_SCOPE_V1) {
+        return Ok(None);
+    }
+    let work_roots: Vec<String> = roots
+        .as_ref()
+        .and_then(Value::as_array)
+        .map(|roots| {
+            roots
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(Some(MachineRoots {
+        default_rule: work_roots.is_empty(),
+        work_roots,
+        worktree_root,
+    }))
+}
+
+/// Правило по умолчанию для машины, которая корней ещё не сообщала; то же, что в
+/// миграции 0119: `/home/<user>/work` и всё под ним.
+fn under_default_work_root(path: &Path) -> bool {
+    let mut parts = path.components();
+    matches!(parts.next(), Some(Component::RootDir))
+        && matches!(parts.next(), Some(Component::Normal(h)) if h == "home")
+        && matches!(parts.next(), Some(Component::Normal(_)))
+        && matches!(parts.next(), Some(Component::Normal(w)) if w == "work")
+}
+
+/// Домен настоящего пути на машине. Под рабочим корнем — `work`; внутри базы рабочих копий
+/// машины — домен разговора, которому принадлежит копия (самый длинный совпавший путь), а
+/// без такого разговора `None`, «неизвестно»; иначе `personal`. Пока машина не сообщила
+/// рабочие корни, работает правило по умолчанию.
+pub async fn path_domain(
+    conn: &mut PgConnection,
+    machine_id: Uuid,
+    path: &str,
+) -> Result<Option<MemoryDomain>, sqlx::Error> {
+    let roots = match machine_roots(conn, machine_id).await? {
+        Some(roots) => roots,
+        None => MachineRoots {
+            work_roots: Vec::new(),
+            worktree_root: sqlx::query_scalar("select worktree_root from machines where id=$1")
+                .bind(machine_id)
+                .fetch_optional(&mut *conn)
+                .await?
+                .flatten(),
+            default_rule: true,
+        },
+    };
+    let normalized = normalize(path);
+    match roots.classify(path) {
+        Classification::Work => Ok(Some(MemoryDomain::Work)),
+        Classification::Neutral => {
+            let owner: Option<Option<String>> = sqlx::query_scalar(
+                "select memory_domain from conversations
+                  where machine_id=$1 and worktree ->> 'path' is not null
+                    and ($2 = worktree ->> 'path' or starts_with($2, (worktree ->> 'path') || '/'))
+                  order by length(worktree ->> 'path') desc limit 1",
+            )
+            .bind(machine_id)
+            .bind(normalized.to_string_lossy().as_ref())
+            .fetch_optional(&mut *conn)
+            .await?;
+            Ok(owner.flatten().as_deref().and_then(MemoryDomain::parse))
+        }
+        Classification::Personal => Ok(Some(MemoryDomain::Personal)),
+    }
+}
+
+pub type Scoped = (Option<MemoryDomain>, Option<String>);
+
+fn project_of(workdir: &str) -> String {
+    normalize(workdir).to_string_lossy().into_owned()
+}
+
+/// Область корневой сессии: новая, из расписания или продолжение истории. Пусто у старого
+/// воркера, у машины без корней и у нейтрального каталога.
+pub async fn root_scope(
+    conn: &mut PgConnection,
+    machine_id: Uuid,
+    workdir: &str,
+) -> Result<Scoped, sqlx::Error> {
+    let Some(roots) = machine_roots(conn, machine_id).await? else {
+        return Ok((None, None));
+    };
+    Ok(match roots.classify(workdir) {
+        Classification::Work => (Some(MemoryDomain::Work), Some(project_of(workdir))),
+        Classification::Personal => (Some(MemoryDomain::Personal), Some(project_of(workdir))),
+        Classification::Neutral => (None, None),
+    })
+}
+
+/// Область потомка (делегат, форк, копия): домен и проект родителя. Родитель без домена
+/// даёт потомка без домена. Явный каталог потомка должен быть нейтральным или из домена
+/// родителя, иначе `DomainMismatch`.
+pub async fn child_scope(
+    conn: &mut PgConnection,
+    parent_id: Uuid,
+    child_workdir: &str,
+    machine_id: Uuid,
+) -> Result<Scoped, ScopeError> {
+    let parent: Option<(Option<String>, Option<String>)> =
+        sqlx::query_as("select memory_domain, memory_project from conversations where id=$1")
+            .bind(parent_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    let Some((Some(domain), project)) = parent else {
+        return Ok((None, None));
+    };
+    let Some(domain) = MemoryDomain::parse(&domain) else {
+        return Ok((None, None));
+    };
+    // Каталог в базе рабочих копий без хозяина-разговора даёт `None` и тоже отказ.
+    if path_domain(conn, machine_id, child_workdir).await? != Some(domain) {
+        return Err(ScopeError::DomainMismatch);
+    }
+    Ok((Some(domain), project))
+}
+
+/// Файл под рабочим корнем машины нельзя отдавать вызывающему не из рабочего домена:
+/// ни существование, ни метаданные, ни начало текста. Работа с файлами вне корней
+/// (`/tmp/*.done`) рабочему вызывающему остаётся. Классифицируется настоящий путь от
+/// воркера, а без него (старый воркер, файла нет) — путь как он записан. Домен пути даёт
+/// `path_domain`: отказ и для рабочего пути, и для неизвестного (копия без хозяина).
+pub async fn file_denied_for(
+    conn: &mut PgConnection,
+    conversation_id: Uuid,
+    lexical_path: &str,
+    canonical_path: Option<&str>,
+) -> Result<bool, sqlx::Error> {
+    let row: Option<(Uuid, Option<String>)> =
+        sqlx::query_as("select machine_id, memory_domain from conversations where id=$1")
+            .bind(conversation_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    let Some((machine_id, domain)) = row else {
+        return Ok(false);
+    };
+    if domain.as_deref().and_then(MemoryDomain::parse) == Some(MemoryDomain::Work) {
+        return Ok(false);
+    }
+    let path = canonical_path.unwrap_or(lexical_path);
+    Ok(path_domain(conn, machine_id, path).await? != Some(MemoryDomain::Personal))
+}
+
+/// Проверка запуска: настоящий путь, который прислал воркер, противоречит сохранённому
+/// домену. Тогда память разговора выключается, событие остаётся владельцу, а запуск идёт
+/// дальше. Нейтральный настоящий путь домену не противоречит. Возвращает `true`, если
+/// домен обнулён.
+pub async fn recheck_launch(
+    conn: &mut PgConnection,
+    execution_id: Uuid,
+    canonical_workdir: &str,
+    canonical_source: &str,
+    correlation_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    // Изолированная копия лежит в нейтральной базе, её домен определяет репозиторий-источник.
+    // Старый воркер и неизолированный запуск источник не шлют: проверяется сам каталог.
+    let checked = if canonical_source.is_empty() {
+        canonical_workdir
+    } else {
+        canonical_source
+    };
+    if checked.is_empty() {
+        return Ok(false);
+    }
+    let row: Option<(Uuid, Uuid, Option<String>)> = sqlx::query_as(
+        "select c.id, c.machine_id, c.memory_domain
+           from executions e join conversations c on c.id=e.conversation_id
+          where e.id=$1",
+    )
+    .bind(execution_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some((conversation_id, machine_id, Some(stored))) = row else {
+        return Ok(false);
+    };
+    let Some(stored) = MemoryDomain::parse(&stored) else {
+        return Ok(false);
+    };
+    // Корни неизвестны: настоящий путь сверить не с чем, домен остаётся как есть.
+    let Some(roots) = machine_roots(conn, machine_id)
+        .await?
+        .filter(|roots| !roots.default_rule)
+    else {
+        return Ok(false);
+    };
+    let actual = classify(checked, &roots.work_roots, roots.worktree_root.as_deref());
+    let contradicts = matches!(
+        (actual, stored),
+        (Classification::Work, MemoryDomain::Personal)
+            | (Classification::Personal, MemoryDomain::Work)
+    );
+    if !contradicts {
+        return Ok(false);
+    }
+    // Строка блокируется только здесь, когда домен действительно меняется, и в режиме
+    // `for no key update`, который не конфликтует с `for key share` инструментов сессий.
+    // Раньше она брала `for update` на каждый запуск, и отправка, державшая `key share`
+    // и ждавшая очередь, замыкала цикл с приёмом журнала, державшим очередь.
+    let locked: Option<Option<String>> =
+        sqlx::query_scalar("select memory_domain from conversations where id=$1 for no key update")
+            .bind(conversation_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    if locked.flatten().as_deref() != Some(stored.as_str()) {
+        return Ok(false);
+    }
+    sqlx::query(
+        "update conversations
+            set memory_domain=null, memory_domain_conflict_at=clock_timestamp()
+          where id=$1",
+    )
+    .bind(conversation_id)
+    .execute(&mut *conn)
+    .await?;
+    // Путь и корни в событие не кладутся: хватает домена, который был.
+    events::append(
+        conn,
+        NewEvent {
+            scope: Scope::Conversation {
+                id: conversation_id,
+            },
+            kind: EVENT_DOMAIN_CONFLICT,
+            conversation_id: Some(conversation_id),
+            execution_id: Some(execution_id),
+            payload: json!({"was": stored.as_str(), "now": match actual {
+                Classification::Work => "work",
+                _ => "personal",
+            }}),
+            correlation_id,
+        },
+    )
+    .await?;
+    Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classify_lexical() {
+        let roots = vec!["/h/work".to_string()];
+        let base = Some("/h/data/worktrees");
+        assert_eq!(classify("/h/work", &roots, base), Classification::Work);
+        assert_eq!(classify("/h/work/x/", &roots, base), Classification::Work);
+        assert_eq!(
+            classify("/h/workshop", &roots, base),
+            Classification::Personal
+        );
+        assert_eq!(
+            classify("/h/work/../x", &roots, base),
+            Classification::Personal
+        );
+        assert_eq!(
+            classify("/h/data/worktrees/0190", &roots, base),
+            Classification::Neutral
+        );
+        assert_eq!(classify("relative", &roots, base), Classification::Personal);
+    }
+}

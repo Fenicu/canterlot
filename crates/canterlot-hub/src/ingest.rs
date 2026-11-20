@@ -1504,6 +1504,16 @@ async fn apply_body(
                     if to == ExecutionState::Running {
                         sqlx::query("update executions set native_conversation_id = coalesce(nullif($2, ''), native_conversation_id) where id = $1")
                             .bind(execution_id).bind(&fact.native_conversation_id).execute(&mut *conn).await?;
+                        // Настоящий путь запуска против домена памяти: при противоречии
+                        // память разговора выключается, а запуск идёт дальше.
+                        crate::memory::recheck_launch(
+                            conn,
+                            execution_id,
+                            &fact.canonical_workdir,
+                            &fact.canonical_source,
+                            correlation_id,
+                        )
+                        .await?;
                         // Свежий форк после первого старта: копия начнёт историю заново,
                         // и лента говорит об этом тихой строкой.
                         if fact.fresh_fork {

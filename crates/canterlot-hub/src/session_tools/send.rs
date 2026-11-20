@@ -279,6 +279,18 @@ async fn send_in_tx(
     }
     access::check_read_only(&sender, &target)?;
     lock_queue(conn, target_id).await?;
+    // Пока отправка ждала очередь, запуск мог обнулить домен цели (или отправителя) и
+    // закоммититься: `key share` ему не мешает. Домены читаются заново, уже под очередью.
+    let domains: Vec<Option<String>> = sqlx::query_scalar(
+        "select memory_domain from conversations where id=any($1) order by id=$2 desc",
+    )
+    .bind([sender.id, target_id])
+    .bind(sender.id)
+    .fetch_all(&mut *conn)
+    .await?;
+    if domains.len() != 2 || !access::same_domain(domains[0].as_deref(), domains[1].as_deref()) {
+        return Err(ToolError::new(ToolErrorCode::SessionNotFound));
+    }
     lift_interrupt_pause(conn, caller, sender.id, target_id).await?;
     let now = Utc::now();
     let depth = access::current_depth(conn, sender.id).await?;

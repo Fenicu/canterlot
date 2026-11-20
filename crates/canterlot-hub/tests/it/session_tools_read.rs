@@ -30,6 +30,7 @@ impl Fx {
         let seed = testkit::seed(&pool).await;
         Self {
             context: ToolContext {
+                memory: Default::default(),
                 pool: pool.clone(),
                 config: Arc::new(SessionToolsConfig::default()),
                 limits: Default::default(),

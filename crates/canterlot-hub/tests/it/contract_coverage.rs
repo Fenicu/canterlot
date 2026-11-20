@@ -225,7 +225,7 @@ fn coverage_table_matches_openapi_and_event_schema() {
             kinds.insert(span.to_owned());
         }
     }
-    assert_eq!(rows, 39, "screen coverage rows");
+    assert_eq!(rows, 40, "screen coverage rows");
     let in_document = operations(&document);
     let missing: Vec<_> = in_document.difference(&routes).collect();
     let unknown: Vec<_> = routes.difference(&in_document).collect();
@@ -319,6 +319,10 @@ fn exempt(method: &str, path: &str) -> bool {
             && path.contains("/routine-reports/")
             && path.ends_with("/dismiss"))
         || (matches!(method, "PUT" | "DELETE") && path.contains("/bookmarks/"))
+        // Память без ключа: повтор правки и архива отсекает `expected_version`, повтор создания
+        // даёт `subject_exists`, повтор удаления навсегда даёт `not_found` (memory_http.rs).
+        || path == "/api/v1/memory"
+        || path.starts_with("/api/v1/memory/")
         // Ответ и отзыв секрета намеренно не проходят слой идемпотентности:
         // тело ответа не хешируется и не сохраняется, `Idempotency-Key` игнорируется.
         || (method == "POST"
@@ -806,6 +810,13 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
             "/api/v1/prompt-suggestion-settings".into(),
             Some(json!({"enabled":false})),
             Some(json!({"enabled":true})),
+        ),
+        case(
+            Method::PUT,
+            "/api/v1/claude-auto-memory-settings",
+            "/api/v1/claude-auto-memory-settings".into(),
+            Some(json!({"claude_auto_memory":"off"})),
+            Some(json!({"claude_auto_memory":"on"})),
         ),
         case(
             Method::PUT,

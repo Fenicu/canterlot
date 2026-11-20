@@ -555,6 +555,8 @@ impl Watch {
                     outcome: exit.outcome.into(),
                     native_conversation_id: String::new(),
                     fresh_fork: false,
+                    canonical_workdir: String::new(),
+                    canonical_source: String::new(),
                 };
                 let seq = store.append_cj_fact(Body::ExecutionState(state.clone()))?;
                 let mut record = store

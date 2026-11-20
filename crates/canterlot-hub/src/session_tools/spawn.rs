@@ -382,6 +382,7 @@ fn create_error(error: CreateError) -> ToolError {
         CreateError::WorkdirNotAllowed | CreateError::ResumeHarnessUnsupported => {
             ToolErrorCode::WorkdirNotAllowed
         }
+        CreateError::DomainMismatch => ToolErrorCode::DomainMismatch,
         CreateError::PermissionModeUnknown
         | CreateError::GroupNotFound
         | CreateError::Invalid(_)
@@ -858,11 +859,24 @@ pub(crate) struct Launch<'a> {
     pub(crate) correlation_id: Uuid,
 }
 
+/// Родитель без домена памяти не видит собственных потомков (разговор без домена не равен
+/// даже другому такому же), поэтому делегатов он не запускает: ни сессии, ни подписки.
+pub(crate) fn check_parent_domain(parent: &access::Session) -> Result<(), ToolError> {
+    if parent.memory_domain.is_none() {
+        return Err(ToolError::with_message(
+            ToolErrorCode::DomainMismatch,
+            "сессия без домена памяти не может запускать делегатов",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) async fn start_child(
     conn: &mut PgConnection,
     launch: Launch<'_>,
     publish_attributes: bool,
 ) -> Result<Started, ToolError> {
+    check_parent_domain(launch.parent)?;
     let Launch {
         registry,
         owner,
@@ -1148,6 +1162,7 @@ pub async fn spawn(
         return Err(ToolError::new(ToolErrorCode::ConversationClosed));
     }
     let parent = access::caller_in_tx(&mut tx, caller.owner_id, caller.conversation_id).await?;
+    check_parent_domain(&parent)?;
     if parent.spawn_depth >= context.config.max_spawn_depth as i32 {
         return Err(ToolError::new(ToolErrorCode::SpawnDepthExceeded));
     }

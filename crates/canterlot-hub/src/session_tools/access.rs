@@ -21,6 +21,37 @@ pub struct Session {
     pub pending_mode: Option<String>,
     pub spawn_depth: i32,
     pub archived: bool,
+    pub memory_domain: Option<String>,
+}
+
+/// Домены памяти совпадают: оба заданы и равны. Отсутствие домена означает неизвестное
+/// происхождение (старый воркер, конфликт запуска) и не равно ничему, даже другому
+/// отсутствию: такой разговор виден агенту только сам себе, а это решает вызывающий по ID.
+/// Агентам чужой домен неотличим от несуществующего разговора.
+pub(crate) fn same_domain(caller: Option<&str>, target: Option<&str>) -> bool {
+    matches!((caller, target), (Some(caller), Some(target)) if caller == target)
+}
+
+/// Какие из существующих разговоров `ids` получатель `viewer` уже не вправе видеть: строки
+/// читаются на момент вызова, без блокировок. Нужна при доставке и ответе на ожидание: связь
+/// (подписка, будильник, ожидание) создана при совпавших доменах, а домен потом мог измениться.
+/// Удалённый разговор в ответ не попадает: у него нечего показывать.
+pub(crate) async fn hidden_from_in_tx(
+    conn: &mut PgConnection,
+    viewer: Uuid,
+    ids: &[Uuid],
+) -> Result<Vec<Uuid>, sqlx::Error> {
+    sqlx::query_scalar(
+        "select t.id from conversations t
+         where t.id=any($2) and t.id<>$1
+           and not exists(select 1 from conversations v
+                           where v.id=$1 and v.memory_domain is not null
+                             and v.memory_domain=t.memory_domain)",
+    )
+    .bind(viewer)
+    .bind(ids)
+    .fetch_all(conn)
+    .await
 }
 
 impl Session {
@@ -49,7 +80,7 @@ impl Session {
 
 const SESSION_COLUMNS: &str = "id,title,harness,model,permission_mode,
                 pending_settings->>'permission_mode' pending_mode,spawn_depth,
-                archived_at is not null archived";
+                archived_at is not null archived,memory_domain";
 
 /// Цель инструмента по UUID. Строка держится `for key share`: удаление разговора ждёт конца
 /// транзакции, поэтому ввод с его названием не появится после чистки в `deletion.rs`.
@@ -91,7 +122,9 @@ pub async fn session_any_in_tx(
     .await
 }
 
-/// Цель из аргументов агента: боковые копии скрыты, но себя копия видит.
+/// Цель из аргументов агента: боковые копии скрыты, но себя копия видит. Разговор другого
+/// домена памяти (и без домена при вызывающем с доменом, и наоборот) не существует.
+/// Домен вызывающего читается без блокировки: порядок блокировок строк не меняется.
 pub async fn target_or_self_in_tx(
     conn: &mut PgConnection,
     owner_id: Uuid,
@@ -99,10 +132,18 @@ pub async fn target_or_self_in_tx(
     id: Uuid,
 ) -> Result<Option<Session>, sqlx::Error> {
     if id == caller_id {
-        session_any_in_tx(conn, owner_id, id).await
-    } else {
-        session_in_tx(conn, owner_id, id).await
+        return session_any_in_tx(conn, owner_id, id).await;
     }
+    let caller_domain: Option<String> =
+        sqlx::query_scalar("select memory_domain from conversations where id=$1 and owner_id=$2")
+            .bind(caller_id)
+            .bind(owner_id)
+            .fetch_optional(&mut *conn)
+            .await?
+            .flatten();
+    Ok(session_in_tx(conn, owner_id, id)
+        .await?
+        .filter(|target| same_domain(caller_domain.as_deref(), target.memory_domain.as_deref())))
 }
 
 /// Вызывающий проверен живым исполнением; пропасть он может только гонкой с удалением.
@@ -346,4 +387,18 @@ pub async fn check_rate(
         return Err(ToolError::new(ToolErrorCode::RateLimited));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::same_domain;
+
+    #[test]
+    fn null_domain_equals_nothing() {
+        assert!(same_domain(Some("work"), Some("work")));
+        assert!(!same_domain(None, None));
+        assert!(!same_domain(Some("work"), Some("personal")));
+        assert!(!same_domain(Some("work"), None));
+        assert!(!same_domain(None, Some("personal")));
+    }
 }

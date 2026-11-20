@@ -121,6 +121,7 @@ impl Fixture {
         fs::write(&ca_cert, &hub.pki.ca_pem).unwrap();
         let config = WorkerConfig {
             secrets: Default::default(),
+            memory: Default::default(),
             machine: Default::default(),
             attachments: Default::default(),
             claude_code: None,

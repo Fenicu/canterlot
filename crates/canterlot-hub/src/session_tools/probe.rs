@@ -36,6 +36,8 @@ pub enum PathProbe {
         head: Option<String>,
         /// Почему `head` пуст: `binary`, `not_requested` или `unreadable`.
         head_omitted: Option<String>,
+        /// Realpath файла от воркера; `None` у старого воркера.
+        canonical: Option<String>,
     },
     Missing,
     NotAllowed(String),
@@ -54,6 +56,7 @@ impl std::fmt::Debug for PathProbe {
                 mtime,
                 head,
                 head_omitted,
+                ..
             } => f
                 .debug_struct("Exists")
                 .field("size", size)
@@ -100,6 +103,7 @@ impl From<v1::PathProbe> for PathProbe {
                     .and_then(DateTime::from_timestamp_millis),
                 head: (!exists.head.is_empty()).then_some(exists.head),
                 head_omitted: (!exists.head_omitted.is_empty()).then_some(exists.head_omitted),
+                canonical: (!exists.canonical_path.is_empty()).then_some(exists.canonical_path),
             },
             Some(path_probe::Outcome::Missing(_)) => Self::Missing,
             Some(path_probe::Outcome::NotAllowed(not_allowed)) => {
@@ -263,6 +267,7 @@ mod tests {
                 mtime_ms: 1_762_345_260_000,
                 head: head.unwrap_or_default().into(),
                 head_omitted: String::new(),
+                canonical_path: String::new(),
             })),
             now_ms: 1_762_345_300_000,
         }
@@ -284,6 +289,7 @@ mod tests {
             mtime: None,
             head: Some("secret-token".into()),
             head_omitted: None,
+            canonical: None,
         };
         let text = format!("{probe:?}");
         assert!(!text.contains("secret-token"), "{text}");

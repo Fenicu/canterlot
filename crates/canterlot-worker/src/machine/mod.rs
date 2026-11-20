@@ -24,7 +24,7 @@ pub mod hotspots;
 pub mod leaks;
 pub mod limits;
 pub mod metrics;
-mod nofollow;
+pub(crate) mod nofollow;
 pub mod owner_instructions;
 pub mod precheck;
 pub mod probe;
@@ -157,6 +157,13 @@ pub fn build_report_with_extras(
             .and_then(|home| home.to_str().map(str::to_owned))
             .unwrap_or_default(),
         worktree_root: worktree_root(&config.data_dir),
+        memory_work_roots: std::env::home_dir()
+            .filter(|home| home.is_absolute())
+            .map(|home| crate::memory_scope::canonical_roots(&config.memory.work_roots, &home))
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|root| root.to_str().map(str::to_owned))
+            .collect(),
     }
 }
 

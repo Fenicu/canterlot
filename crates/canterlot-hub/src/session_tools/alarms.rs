@@ -1179,6 +1179,15 @@ async fn apply_settled_in_tx(
     else {
         return Ok(Applied::Skipped);
     };
+    // Будильник взведён при совпавших доменах, но домен цели мог измениться: итог чужого
+    // домена не засчитывается.
+    if !access::hidden_from_in_tx(conn, row.conversation_id, &[target_id])
+        .await?
+        .is_empty()
+    {
+        tracing::debug!(alarm = %row.id, target = %target_id, "alarm target left the domain");
+        return Ok(Applied::Skipped);
+    }
     // Срок уже наступил: задание срока — единственный хозяин исхода. Устоявшаяся цель
     // после отсечки не отменяет сторож и не заменяет `timed_out` обычным срабатыванием.
     if row.deadline_at.is_some_and(|deadline| now >= deadline) {
@@ -1644,12 +1653,31 @@ async fn file_probe_in_tx(
         });
     };
     let mut fired = None;
+    // Взведённый будильник мог оказаться на рабочем файле для не рабочего вызывающего
+    // (домен или корни поменялись): ни размер, ни время, ни текст не сохраняются.
+    let canonical = match &probe {
+        PathProbe::Exists { canonical, .. } => canonical.clone(),
+        _ => None,
+    };
+    let probe = if crate::memory::file_denied_for(
+        conn,
+        row.conversation_id,
+        &condition.path,
+        canonical.as_deref(),
+    )
+    .await?
+    {
+        PathProbe::NotAllowed("domain_mismatch".into())
+    } else {
+        probe
+    };
     match probe {
         PathProbe::Exists {
             size,
             mtime,
             head,
             head_omitted,
+            ..
         } => {
             condition.observed_size = Some(size);
             condition.observed_mtime = mtime;
@@ -1955,6 +1983,24 @@ pub async fn set(
             };
             let (probe, worker_now) =
                 probe::ask_clock(&context.registry, machine, &resolved, read_head_bytes).await;
+            // Рабочие файлы не уходят в сообщения не рабочему агенту: ответ пробы при этом
+            // не показывается ни в каком виде.
+            let canonical = match &probe {
+                PathProbe::Exists { canonical, .. } => canonical.as_deref(),
+                _ => None,
+            };
+            let mut conn = context.pool.acquire().await?;
+            if crate::memory::file_denied_for(
+                &mut conn,
+                caller.conversation_id,
+                &resolved,
+                canonical,
+            )
+            .await?
+            {
+                return Err(ToolError::new(ToolErrorCode::DomainMismatch));
+            }
+            drop(conn);
             match &probe {
                 PathProbe::Missing | PathProbe::Exists { .. } => {}
                 PathProbe::NotAllowed(reason) => {
@@ -2381,6 +2427,7 @@ pub async fn set(
                             mtime,
                             head,
                             head_omitted,
+                            ..
                         } = probe
                     {
                         condition.observed_size = Some(size);
@@ -2970,6 +3017,20 @@ fn compact_condition(row: &AlarmRow) -> Value {
 }
 
 /// Цели условия `session_state` на момент срабатывания: имя и состояние из проекции.
+/// Сессии, которые называет условие `session_state`; у остальных будильников пусто.
+fn sessions_of(row: &AlarmRow) -> Vec<Uuid> {
+    let Some(condition) = row.condition.as_ref() else {
+        return Vec::new();
+    };
+    if condition.get("kind").and_then(Value::as_str) != Some("session_state") {
+        return Vec::new();
+    }
+    condition
+        .get("session_ids")
+        .and_then(|value| serde_json::from_value(value.clone()).ok())
+        .unwrap_or_default()
+}
+
 async fn alarm_sessions_in_tx(
     conn: &mut PgConnection,
     row: &AlarmRow,
@@ -3053,7 +3114,7 @@ pub async fn deliver_job_in_tx(
             }),
         };
     }
-    let mut rows: Vec<AlarmRow> = sqlx::query_as(
+    let rows: Vec<AlarmRow> = sqlx::query_as(
         "select * from alarms where conversation_id=$1 and (
              (state='fired' and delivered_input_id is null)
              or (state='armed' and kind='at' and fire_at <= $2)
@@ -3127,6 +3188,29 @@ pub async fn deliver_job_in_tx(
             poll: false,
         });
     }
+    // Будильник на сессии, чей домен с тех пор разошёлся с доменом получателя, не доставляется:
+    // ни названий, ни состояний чужого домена. Он закрывается без ввода.
+    let mut visible = Vec::with_capacity(rows.len());
+    for row in rows {
+        let targets = sessions_of(&row);
+        if !targets.is_empty()
+            && !access::hidden_from_in_tx(conn, conversation, &targets)
+                .await?
+                .is_empty()
+        {
+            tracing::debug!(alarm = %row.id, "alarm names a session outside the domain");
+            sqlx::query(
+                "update alarms set state='cancelled',failure_reason='domain_changed',
+                        updated_at=clock_timestamp() where id=$1",
+            )
+            .bind(row.id)
+            .execute(&mut *conn)
+            .await?;
+            continue;
+        }
+        visible.push(row);
+    }
+    let mut rows = visible;
     if rows.is_empty() {
         return Ok(crate::crunch::JobOutcome::Cancelled("alarm_settled"));
     }

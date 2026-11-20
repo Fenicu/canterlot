@@ -59,6 +59,7 @@ impl Fx {
             .unwrap();
         Self {
             context: ToolContext {
+                memory: Default::default(),
                 pool: pool.clone(),
                 config: Arc::new(SessionToolsConfig::default()),
                 limits: Default::default(),
@@ -3731,4 +3732,71 @@ async fn a_machine_alarm_and_a_time_alarm_still_coalesce_into_one_input(pool: Pg
     assert!(text.contains("2 alarms fired"), "{text}");
     assert!(text.contains("\"time\""), "{text}");
     assert!(text.contains("\"freed\""), "{text}");
+}
+
+/// Взвести будильник на `f.child`, когда оба конца в домене `personal`.
+async fn arm_in_personal(f: &Fx, extra: Value) -> Value {
+    sqlx::query("update conversations set memory_domain='personal' where id=any($1)")
+        .bind([f.orchestrator, f.child])
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let mut args = json!({
+        "when": {"kind": "session_state", "session_ids": [f.child]},
+        "deadline_seconds": 120,
+        "key": "watch"
+    });
+    args.as_object_mut()
+        .unwrap()
+        .extend(extra.as_object().unwrap().clone());
+    f.call("alarms.set", args).await.unwrap()
+}
+
+async fn alarm_dropped_at_deadline(pool: PgPool, domain: Option<&str>) {
+    let f = Fx::new(pool).await;
+    let armed = arm_in_personal(&f, json!({"only_on_timeout": true})).await;
+    sqlx::query("update conversations set memory_domain=$2 where id=$1")
+        .bind(f.child)
+        .bind(domain)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let now = Utc::now();
+    scheduler(&f.pool, Default::default())
+        .tick(now + TimeDelta::seconds(126))
+        .await
+        .unwrap();
+    assert!(
+        f.alarm_inputs().await.is_empty(),
+        "ничего не доставлено при домене {domain:?}"
+    );
+    let (state, _, _) = alarm_state(&f.pool, alarm_id(&armed)).await;
+    assert_eq!(state, "cancelled");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn alarm_is_dropped_when_the_target_moves_to_work(pool: PgPool) {
+    alarm_dropped_at_deadline(pool, Some("work")).await;
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn alarm_is_dropped_when_the_target_domain_becomes_null(pool: PgPool) {
+    alarm_dropped_at_deadline(pool, None).await;
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn alarm_ignores_a_settled_target_that_left_the_domain(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let now = Utc::now();
+    let armed = arm_in_personal(&f, json!({})).await;
+    sqlx::query("update conversations set memory_domain='work' where id=$1")
+        .bind(f.child)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    f.refresh_id(f.child, now - TimeDelta::hours(1)).await;
+    f.refresh_id(f.child, now + TimeDelta::seconds(1)).await;
+    let (state, _, _) = alarm_state(&f.pool, alarm_id(&armed)).await;
+    assert_eq!(state, "armed", "итог чужого домена не засчитан");
+    assert_eq!(f.event_jobs().await, 0);
 }

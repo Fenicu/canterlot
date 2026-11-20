@@ -313,6 +313,9 @@ message StartExecution {
   // Профиль MCP canterlot этого запуска: пусто — обычный набор адаптера,
   // "side" — только мост разрешений и вопросов (без сессий, пресетов, share_file и лимитов).
   string canterlot_mcp = 15;
+  // Только при согласованной возможности memory_scope_v1: владелец выключил встроенную
+  // автопамять Claude Code; действует в режиме инструкций «как у владельца».
+  bool disable_claude_auto_memory = 16;
 }
 
 // Изолированная рабочая копия git: путь воркер строит сам из корня рабочих копий.
@@ -524,6 +527,13 @@ message ExecutionState {
   // Только при согласованной возможности side_chat_v1: запуск был свежим форком
   // (первый старт или перефорк при невозможном resume). Пусто у старого воркера.
   bool fresh_fork = 6;
+  // Только при согласованной возможности memory_scope_v1: realpath рабочего каталога
+  // запуска. Пусто у старого воркера или если каталог не разрешился.
+  string canonical_workdir = 7;
+  // Только у изолированного запуска: realpath исходного репозитория, из которого
+  // собрана рабочая копия. Хаб классифицирует его, а не нейтральную копию. Пусто у
+  // старого воркера и у неизолированного запуска.
+  string canonical_source = 8;
 }
 
 message RunFinished {
@@ -705,6 +715,9 @@ message MachineReport {
   string home_dir = 9;
   // Корень изолированных рабочих копий; пусто, если воркер их не поддерживает.
   string worktree_root = 10;
+  // Только при согласованной возможности memory_scope_v1: канонические (realpath)
+  // корни рабочих проектов из worker.toml [memory] work_roots.
+  repeated string memory_work_roots = 11;
 }
 
 message HarnessInfo {
@@ -966,6 +979,8 @@ message PathProbeExists {
   string head = 3;
   // Пусто, `binary` (не текст) или `not_requested`.
   string head_omitted = 4;
+  // Realpath файла: хаб классифицирует его по корням работы. Пусто у старого воркера.
+  string canonical_path = 5;
 }
 
 message PathProbeMissing {}

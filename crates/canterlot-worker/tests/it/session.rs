@@ -42,6 +42,7 @@ async fn fixture(pool: &PgPool, hub: &TestHub) -> (TempDir, WorkerConfig, Worker
     let store = WorkerStore::open(&data_dir).unwrap();
     let config = WorkerConfig {
         secrets: Default::default(),
+        memory: Default::default(),
         machine: Default::default(),
         attachments: Default::default(),
         claude_code: None,
@@ -2231,6 +2232,11 @@ async fn hello_and_heartbeat_carry_the_machine_clock() {
     }
     assert_eq!(hellos, 2);
     stop_worker(stop, join).await;
+}
+
+#[test]
+fn memory_scope_capability_list_contains_memory_scope_v1() {
+    assert!(canterlot_worker::session::OPTIONAL_CAPABILITIES.contains(&"memory_scope_v1"));
 }
 
 #[tokio::test]

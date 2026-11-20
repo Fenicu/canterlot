@@ -53,6 +53,7 @@ impl Fx {
             .unwrap();
         Self {
             context: ToolContext {
+                memory: Default::default(),
                 pool: pool.clone(),
                 config: Arc::new(SessionToolsConfig::default()),
                 limits: Default::default(),
@@ -293,6 +294,46 @@ async fn event_still_arrives_when_evaluator_wins(pool: PgPool) {
     assert_eq!(f.event_jobs().await, 1, "the queued event is untouched");
 }
 
+/// Подписка и ожидание заведены при `personal` на обоих концах, домен цели потом сменился.
+async fn wait_after_target_domain_change(pool: PgPool, domain: Option<&str>) {
+    let f = Fx::new(pool).await;
+    sqlx::query("update conversations set memory_domain='personal' where id=any($1)")
+        .bind([f.waiter, f.target])
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    f.busy_target().await;
+    f.subscribe().await;
+    // Ход цели закончился, а домен успел измениться: итог не отдаётся.
+    sqlx::query("update conversations set memory_domain=$2 where id=$1")
+        .bind(f.target)
+        .bind(domain)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    sqlx::query("update inputs set state='accepted' where conversation_id=$1")
+        .bind(f.target)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    f.settle_target().await;
+    let error = f
+        .wait(json!({"session_id": f.target, "timeout_seconds": 5}))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, Code::SessionNotFound, "{domain:?}");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn wait_refuses_a_target_that_moved_to_work(pool: PgPool) {
+    wait_after_target_domain_change(pool, Some("work")).await;
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn wait_refuses_a_target_whose_domain_became_null(pool: PgPool) {
+    wait_after_target_domain_change(pool, None).await;
+}
+
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn wait_picks_up_a_state_reached_while_waiting(pool: PgPool) {
     let f = Fx::new(pool).await;
@@ -337,6 +378,7 @@ async fn wait_holds_no_database_connection(pool: PgPool) {
         .await
         .unwrap();
     let context = ToolContext {
+        memory: Default::default(),
         pool: single.clone(),
         ..f.context.clone()
     };

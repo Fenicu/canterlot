@@ -511,6 +511,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/claude-auto-memory-settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get__api_v1_claude_auto_memory_settings"];
+        put: operations["put__api_v1_claude_auto_memory_settings"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/config": {
         parameters: {
             query?: never;
@@ -1697,6 +1713,86 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/memory": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get__api_v1_memory"];
+        put?: never;
+        post: operations["post__api_v1_memory"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/memory/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get__api_v1_memory__id_"];
+        put: operations["put__api_v1_memory__id_"];
+        post?: never;
+        delete: operations["delete__api_v1_memory__id_"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/memory/{id}/archive": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["post__api_v1_memory__id__archive"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/memory/{id}/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["post__api_v1_memory__id__restore"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/memory/{id}/revisions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get__api_v1_memory__id__revisions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/message-snippets": {
         parameters: {
             query?: never;
@@ -2299,6 +2395,12 @@ export interface components {
             revision?: number | null;
             title: string;
         };
+        ArchiveMemoryBody: {
+            /** @description Обязателен: `work` или `personal`. */
+            domain?: string | null;
+            /** Format: int32 */
+            expected_version?: number | null;
+        };
         /** @enum {string} */
         ArchiveReason: "crunch" | "scheduled" | "live_execution";
         AttachmentRecord: {
@@ -2534,6 +2636,12 @@ export interface components {
             /** @description Имя без ведущего слеша: вставляется как `/<name> `. */
             name: string;
         };
+        /** @enum {string} */
+        ClaudeAutoMemory: "on" | "off";
+        ClaudeAutoMemorySettings: {
+            /** @description Встроенная автопамять Claude Code в сессиях режима «как у владельца». */
+            claude_auto_memory: components["schemas"]["ClaudeAutoMemory"];
+        };
         ClaudeHistoryList: {
             histories: components["schemas"]["ClaudeHistoryView"][];
         };
@@ -2647,6 +2755,12 @@ export interface components {
             execution?: components["schemas"]["LiveExecutionView"] | null;
             holds: components["schemas"]["HoldView"][];
             last_activity_at?: string | null;
+            /** @description Лексический и канонический домены разошлись: память сессии выключена. */
+            memory_conflict?: boolean;
+            /** @description Домен общей памяти сессии (`work` или `personal`); `None` — у сессии нет памяти. */
+            memory_domain?: string | null;
+            /** @description Проект памяти: канонический рабочий каталог запуска. */
+            memory_project?: string | null;
             model: string;
             /**
              * @description Конкретная модель за псевдонимом `model` (`fable[1m]` → `claude-fable-5-2`): из ходов
@@ -2716,6 +2830,20 @@ export interface components {
             start?: boolean;
             title?: string | null;
             workdir: string;
+        };
+        CreateMemoryBody: {
+            body: string;
+            /** @description Обязателен: `work` или `personal`. */
+            domain?: string | null;
+            /** @description Сохранить, даже если текст похож на секрет. */
+            force_secret_warning?: boolean | null;
+            kind: string;
+            /** @description `domain` или `project`; для `project` нужен `project`. */
+            level: string;
+            /** @description Канонический каталог проекта для записи уровня проекта. */
+            project?: string | null;
+            subject: string;
+            valid_until?: string | null;
         };
         CreateSnippetBody: {
             body: string;
@@ -2889,21 +3017,43 @@ export interface components {
             scope: components["schemas"]["ErrorScope"];
         };
         /** @enum {string} */
-        ErrorCode: "unauthenticated" | "invalid_credentials" | "too_many_attempts" | "session_revoked" | "session_expired" | "reauth_required" | "wrong_password" | "qr_expired" | "qr_approvals_exhausted" | "passkey_rejected" | "no_passkeys" | "passkeys_unavailable" | "origin_rejected" | "invalid_request" | "invalid_offset" | "not_found" | "method_not_allowed" | "idempotency_conflict" | "draft_revision_conflict" | "decision_conflict" | "request_not_open" | "decision_invalid" | "resource_limit" | "not_implemented" | "too_many_requests" | "db_unavailable" | "internal" | "queue_full" | "conversation_closed" | "execution_already_live" | "invalid_state" | "not_pending" | "schedule_time_out_of_range" | "too_many_scheduled" | "schedule_invalid" | "schedule_revision_conflict" | "machine_not_found" | "machine_unavailable" | "machine_offline" | "not_open" | "not_delivered" | "limit" | "capability_missing" | "limits_mismatch" | "harness_unknown" | "model_unknown" | "effort_not_allowed" | "permission_mode_unknown" | "settings_midsession_unsupported" | "profile_unknown" | "workdir_not_allowed" | "resume_harness_unsupported" | "group_not_found" | "group_name_taken" | "archive_active" | "conversation_deleted" | "conversation_live" | "attachment_not_ready" | "attachment_not_uploadable" | "attachment_unsupported" | "attachment_unavailable" | "offset_mismatch" | "upload_in_progress" | "checksum_mismatch" | "attachment_conflict" | "preset_not_found" | "preset_builtin" | "preset_revision_conflict" | "preset_title_taken" | "preset_limit_reached" | "preset_invalid" | "message_snippet_not_found" | "message_snippet_revision_conflict" | "message_snippet_title_taken" | "message_snippet_limit_reached" | "message_snippet_invalid" | "spawn_whitelist_invalid" | "limit_settings_invalid" | "routing_policy_invalid" | "routing_policy_conflict" | "task_type_unknown" | "no_executor_available" | "not_delegated" | "worktree_removed" | "worktree_not_removed" | "too_many_terms" | "term_empty" | "term_too_long" | "duplicate_term";
+        ErrorCode: "unauthenticated" | "invalid_credentials" | "too_many_attempts" | "session_revoked" | "session_expired" | "reauth_required" | "wrong_password" | "qr_expired" | "qr_approvals_exhausted" | "passkey_rejected" | "no_passkeys" | "passkeys_unavailable" | "origin_rejected" | "invalid_request" | "invalid_offset" | "not_found" | "method_not_allowed" | "idempotency_conflict" | "draft_revision_conflict" | "decision_conflict" | "request_not_open" | "decision_invalid" | "resource_limit" | "not_implemented" | "too_many_requests" | "db_unavailable" | "internal" | "queue_full" | "conversation_closed" | "execution_already_live" | "invalid_state" | "not_pending" | "schedule_time_out_of_range" | "too_many_scheduled" | "schedule_invalid" | "schedule_revision_conflict" | "machine_not_found" | "machine_unavailable" | "machine_offline" | "not_open" | "not_delivered" | "limit" | "capability_missing" | "limits_mismatch" | "harness_unknown" | "model_unknown" | "effort_not_allowed" | "permission_mode_unknown" | "settings_midsession_unsupported" | "profile_unknown" | "workdir_not_allowed" | "resume_harness_unsupported" | "group_not_found" | "group_name_taken" | "archive_active" | "conversation_deleted" | "conversation_live" | "attachment_not_ready" | "attachment_not_uploadable" | "attachment_unsupported" | "attachment_unavailable" | "offset_mismatch" | "upload_in_progress" | "checksum_mismatch" | "attachment_conflict" | "preset_not_found" | "preset_builtin" | "preset_revision_conflict" | "preset_title_taken" | "preset_limit_reached" | "preset_invalid" | "message_snippet_not_found" | "message_snippet_revision_conflict" | "message_snippet_title_taken" | "message_snippet_limit_reached" | "message_snippet_invalid" | "spawn_whitelist_invalid" | "limit_settings_invalid" | "routing_policy_invalid" | "routing_policy_conflict" | "task_type_unknown" | "no_executor_available" | "not_delegated" | "worktree_removed" | "worktree_not_removed" | "too_many_terms" | "term_empty" | "term_too_long" | "duplicate_term" | "version_conflict" | "looks_like_secret" | "subject_exists" | "domain_full" | "bad_level";
         /** @description Детали ответа владельцу; содержимое решения не должно попадать в журналы ошибок. */
         ErrorDetails: {
             /** @description Разбор кандидатов маршрута (`no_executor_available`): не текст в `reason`. */
             candidates?: components["schemas"]["Considered"][];
+            /** @description Класс находки детектора секретов (`looks_like_secret`); значение не возвращается. */
+            class?: string;
             /**
              * Format: int64
              * @description Текущая версия пресета (`preset_revision_conflict`).
              */
             current_revision?: number;
             current_state?: string;
+            /**
+             * Format: int32
+             * @description Текущая версия записи памяти (`version_conflict`).
+             */
+            current_version?: number;
             /** @description Актуальный общий черновик (`draft_revision_conflict`). */
             draft?: components["schemas"]["DraftView"];
+            /**
+             * Format: uuid
+             * @description Запись, которая уже держит тему (`subject_exists`).
+             */
+            existing_id?: string;
+            /**
+             * Format: int32
+             * @description Версия записи, которая уже держит тему (`subject_exists`).
+             */
+            existing_version?: number;
             /** @description Поле запроса, которое не прошло проверку (`preset_invalid`). */
             field?: string;
+            /**
+             * Format: int32
+             * @description Предел записей домена (`domain_full`).
+             */
+            limit?: number;
             /**
              * Format: date-time
              * @description Ближайший сброс лимита провайдера (`no_executor_available`).
@@ -3757,6 +3907,62 @@ export interface components {
             size: number;
             /** Format: int32 */
             width?: number | null;
+        };
+        /** @description Запись памяти для экрана владельца. */
+        MemoryEntryView: {
+            body: string;
+            /** Format: date-time */
+            created_at: string;
+            /** @description Кто создал запись: `{kind: owner | agent | import, ...}`. */
+            created_by: unknown;
+            /** @description `work` или `personal`. */
+            domain: string;
+            expired: boolean;
+            /** Format: uuid */
+            id: string;
+            kind: string;
+            /** @description `domain`: для всего домена; `project`: для одного проекта. */
+            level: string;
+            /** @description Канонический рабочий каталог проекта; `None` у записи домена. */
+            project?: string | null;
+            project_label?: string | null;
+            /** @description `active` или `archived`. */
+            status: string;
+            subject: string;
+            /** Format: date-time */
+            updated_at: string;
+            /** @description Кто менял запись последним, в той же форме. */
+            updated_by: unknown;
+            /** Format: date-time */
+            valid_until?: string | null;
+            /** Format: int32 */
+            version: number;
+        };
+        /** @description Страница списка: новые записи первыми. */
+        MemoryListPage: {
+            items: components["schemas"]["MemoryEntryView"][];
+            /** @description Передайте в `cursor`, чтобы получить следующую страницу; `None` на последней. */
+            next_cursor?: string | null;
+        };
+        /** @description Прошлое состояние записи. */
+        MemoryRevisionView: {
+            /** @description `update`, `archive` или `restore`: действие, которое сохранило это состояние. */
+            action: string;
+            /** @description Кто сохранил это состояние, в форме `created_by`. */
+            actor: unknown;
+            /** Format: date-time */
+            at: string;
+            body: string;
+            /** Format: int64 */
+            id: number;
+            kind: string;
+            project?: string | null;
+            status: string;
+            subject: string;
+            /** Format: date-time */
+            valid_until?: string | null;
+            /** Format: int32 */
+            version: number;
         };
         MessageSnippet: {
             body: string;
@@ -4633,6 +4839,10 @@ export interface components {
                 command_id: string;
             };
         } | "not_owner_lost";
+        RestoreMemoryBody: {
+            /** @description Обязателен: `work` или `personal`. */
+            domain?: string | null;
+        };
         /**
          * @description Итог одноразового «Продолжить при сбросе».
          * @enum {string}
@@ -5162,7 +5372,7 @@ export interface components {
          *     и состояниями элемента очереди.
          * @enum {string}
          */
-        SpawnRefusalCode: "not_in_whitelist" | "permission_mode_too_wide" | "machine_unavailable" | "capability_missing" | "no_executor_available" | "invalid_arguments" | "harness_unknown" | "model_unknown" | "effort_not_allowed" | "workdir_not_allowed" | "profile_unknown" | "conversation_closed" | "queue_full" | "rate_limited" | "machine_busy" | "parent_stopped" | "parent_archived" | "cancelled" | "expired" | "job_failed" | "internal_error" | "unknown";
+        SpawnRefusalCode: "not_in_whitelist" | "permission_mode_too_wide" | "machine_unavailable" | "capability_missing" | "no_executor_available" | "invalid_arguments" | "harness_unknown" | "model_unknown" | "effort_not_allowed" | "workdir_not_allowed" | "domain_mismatch" | "profile_unknown" | "conversation_closed" | "queue_full" | "rate_limited" | "machine_busy" | "parent_stopped" | "parent_archived" | "cancelled" | "expired" | "job_failed" | "internal_error" | "unknown";
         SpeedStats: {
             /**
              * Format: int64
@@ -5326,6 +5536,24 @@ export interface components {
         TodoStatus: "pending" | "in_progress" | "completed" | "cancelled";
         /** @enum {string} */
         UnknownLimits: "allow" | "skip";
+        UpdateMemoryBody: {
+            body?: string | null;
+            /** @description Обязателен: `work` или `personal`. */
+            domain?: string | null;
+            /**
+             * Format: int32
+             * @description Версия, с которой правят; при расхождении `409 version_conflict`.
+             */
+            expected_version?: number | null;
+            force_secret_warning?: boolean | null;
+            kind?: string | null;
+            level?: string | null;
+            /** @description Проект для перевода записи на уровень проекта. */
+            project?: string | null;
+            subject?: string | null;
+            /** @description Срок действия; `null` снимает срок, отсутствие поля оставляет как было. */
+            valid_until?: string | null;
+        };
         UpdatePage: {
             items: components["schemas"]["UpdateView"][];
             next_cursor: string | null;
@@ -7085,6 +7313,78 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get__api_v1_claude_auto_memory_settings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Встроенная память Claude: on или off */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClaudeAutoMemorySettings"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    put__api_v1_claude_auto_memory_settings: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ClaudeAutoMemorySettings"];
+            };
+        };
+        responses: {
+            /** @description Настройка сохранена; действует на сессии после их перезапуска */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClaudeAutoMemorySettings"];
                 };
             };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
@@ -11110,6 +11410,318 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get__api_v1_memory: {
+        parameters: {
+            query?: {
+                /** @description Обязателен: `work` или `personal`. */
+                domain?: string;
+                /** @description Только записи этого проекта (канонический каталог). */
+                project?: string;
+                kind?: string;
+                /** @description Поиск по теме и тексту. */
+                q?: string;
+                /** @description `active` (по умолчанию) или `archived`. */
+                status?: string;
+                cursor?: string;
+                /** @description До 100, по умолчанию 50. */
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Записи одного домена */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MemoryListPage"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    post__api_v1_memory: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateMemoryBody"];
+            };
+        };
+        responses: {
+            /** @description Запись создана */
+            201: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MemoryEntryView"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get__api_v1_memory__id_: {
+        parameters: {
+            query?: {
+                /** @description Обязателен: `work` или `personal`. */
+                domain?: string;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Запись */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MemoryEntryView"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    put__api_v1_memory__id_: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateMemoryBody"];
+            };
+        };
+        responses: {
+            /** @description Запись изменена; версия выросла */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MemoryEntryView"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    delete__api_v1_memory__id_: {
+        parameters: {
+            query?: {
+                /** @description Обязателен: `work` или `personal`. */
+                domain?: string;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Запись и её прошлые версии удалены навсегда */
+            204: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    post__api_v1_memory__id__archive: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ArchiveMemoryBody"];
+            };
+        };
+        responses: {
+            /** @description Запись в архиве */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MemoryEntryView"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    post__api_v1_memory__id__restore: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RestoreMemoryBody"];
+            };
+        };
+        responses: {
+            /** @description Запись снова активна */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MemoryEntryView"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get__api_v1_memory__id__revisions: {
+        parameters: {
+            query?: {
+                /** @description Обязателен: `work` или `personal`. */
+                domain?: string;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Прошлые версии записи, новые первыми */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MemoryRevisionView"][];
+                };
             };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
             default: {
