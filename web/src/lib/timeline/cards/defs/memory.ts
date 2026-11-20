@@ -1,24 +1,12 @@
 // Общая память агентов: поиск, чтение, запись, правка и архив. Ответы хаба: `session_tools/memory.rs`.
 import { fmt } from '#lib/format/ru.js';
+import { kindWord } from '#lib/screens/settings/memory.js';
 import { isObject, list, num, str, type JsonObject } from '../json';
 import { say } from '../copy';
 import type { CardCall, CardLogic, StateWord } from '../types';
 
-const KIND_WORDS: Record<string, string> = {
-  user: 'владелец',
-  feedback: 'урок',
-  project: 'проект',
-  reference: 'справка',
-  decision: 'решение',
-  gotcha: 'грабли',
-  environment: 'окружение',
-  incident: 'инцидент'
-};
-
-/** Вид записи коротким русским словом; незнакомый вид остаётся как есть. */
-export function kindWord(kind: string): string {
-  return KIND_WORDS[kind] ?? kind;
-}
+// Словарь видов один, на экране «Память»: карточки берут слова оттуда.
+export { kindWord };
 
 /** Уровень записи: проект называется по подписи, остальное — «весь домен». */
 export function levelWord(level: string, projectLabel: string): string {

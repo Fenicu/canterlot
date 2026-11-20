@@ -13,6 +13,8 @@ import {
   dateToValidUntil,
   entryStatus,
   kindLabel,
+  kindWord,
+  KINDS,
   levelLabel,
   secretClass,
   sessionMemoryLabel,
@@ -37,6 +39,15 @@ describe('memory domains and copy', () => {
       expect(kindLabel(kind)).toMatch(/^[А-Яа-яЁё ]+$/);
     }
     expect(kindLabel('unknown')).toBe('unknown');
+  });
+
+  it('keeps_one_kind_dictionary_for_the_screen_and_the_cards', () => {
+    const kinds = ['user', 'feedback', 'project', 'reference', 'decision', 'gotcha', 'environment', 'incident'];
+    expect(kinds.map(kindWord)).toEqual(['о владельце', 'урок', 'о проекте', 'справка', 'решение', 'грабли', 'окружение', 'инцидент']);
+    // Экран говорит теми же словами с заглавной буквы.
+    expect(kinds.map(kindLabel)).toEqual(['О владельце', 'Урок', 'О проекте', 'Справка', 'Решение', 'Грабли', 'Окружение', 'Инцидент']);
+    expect(KINDS.map((entry) => entry.label)).toEqual(kinds.map(kindLabel));
+    expect(kindWord('weird')).toBe('weird');
   });
 
   it('describes the level of an entry', () => {

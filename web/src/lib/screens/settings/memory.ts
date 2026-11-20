@@ -13,19 +13,29 @@ export const DOMAINS: { value: MemoryDomain; label: string }[] = [
   { value: "work", label: "Работа" }
 ];
 
-export const KINDS: { value: string; label: string }[] = [
-  { value: "user", label: "О владельце" },
-  { value: "feedback", label: "Замечание" },
-  { value: "project", label: "О проекте" },
-  { value: "reference", label: "Справка" },
-  { value: "decision", label: "Решение" },
-  { value: "gotcha", label: "Ловушка" },
-  { value: "environment", label: "Окружение" },
-  { value: "incident", label: "Инцидент" }
-];
+/** Единый словарь видов записей: экран пишет слова с заглавной буквы, карточки ленты — как есть. */
+const KIND_WORDS: Record<string, string> = {
+  user: "о владельце",
+  feedback: "урок",
+  project: "о проекте",
+  reference: "справка",
+  decision: "решение",
+  gotcha: "грабли",
+  environment: "окружение",
+  incident: "инцидент"
+};
+
+/** Вид записи словом со строчной буквы; незнакомый вид остаётся как есть. */
+export function kindWord(kind: string): string {
+  return KIND_WORDS[kind] ?? kind;
+}
+
+const capital = (word: string): string => word.charAt(0).toUpperCase() + word.slice(1);
+
+export const KINDS: { value: string; label: string }[] = Object.entries(KIND_WORDS).map(([value, word]) => ({ value, label: capital(word) }));
 
 export function kindLabel(kind: string): string {
-  return KINDS.find((entry) => entry.value === kind)?.label ?? kind;
+  return KIND_WORDS[kind] === undefined ? kind : capital(KIND_WORDS[kind]);
 }
 
 export function levelLabel(entry: { level: string; project_label?: string | null }): string {

@@ -57,7 +57,7 @@ describe('memorySubject (the feed lookup behind memory_update and memory_delete)
 
 describe('kind labels and links', () => {
   it('names_every_kind_in_short_russian', () => {
-    expect(['user', 'feedback', 'project', 'reference', 'decision', 'gotcha', 'environment', 'incident'].map(kindWord)).toEqual(['владелец', 'урок', 'проект', 'справка', 'решение', 'грабли', 'окружение', 'инцидент']);
+    expect(['user', 'feedback', 'project', 'reference', 'decision', 'gotcha', 'environment', 'incident'].map(kindWord)).toEqual(['о владельце', 'урок', 'о проекте', 'справка', 'решение', 'грабли', 'окружение', 'инцидент']);
     expect(kindWord('weird')).toBe('weird');
   });
 
