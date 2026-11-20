@@ -13,19 +13,29 @@ export const DOMAINS: { value: MemoryDomain; label: string }[] = [
   { value: "work", label: "Работа" }
 ];
 
-export const KINDS: { value: string; label: string }[] = [
-  { value: "user", label: "О владельце" },
-  { value: "feedback", label: "Замечание" },
-  { value: "project", label: "О проекте" },
-  { value: "reference", label: "Справка" },
-  { value: "decision", label: "Решение" },
-  { value: "gotcha", label: "Ловушка" },
-  { value: "environment", label: "Окружение" },
-  { value: "incident", label: "Инцидент" }
-];
+/** Единый словарь видов записей: экран пишет слова с заглавной буквы, карточки ленты — как есть. */
+const KIND_WORDS: Record<string, string> = {
+  user: "о владельце",
+  feedback: "урок",
+  project: "о проекте",
+  reference: "справка",
+  decision: "решение",
+  gotcha: "грабли",
+  environment: "окружение",
+  incident: "инцидент"
+};
+
+/** Вид записи словом со строчной буквы; незнакомый вид остаётся как есть. */
+export function kindWord(kind: string): string {
+  return KIND_WORDS[kind] ?? kind;
+}
+
+const capital = (word: string): string => word.charAt(0).toUpperCase() + word.slice(1);
+
+export const KINDS: { value: string; label: string }[] = Object.entries(KIND_WORDS).map(([value, word]) => ({ value, label: capital(word) }));
 
 export function kindLabel(kind: string): string {
-  return KINDS.find((entry) => entry.value === kind)?.label ?? kind;
+  return KIND_WORDS[kind] === undefined ? kind : capital(KIND_WORDS[kind]);
 }
 
 export function levelLabel(entry: { level: string; project_label?: string | null }): string {
@@ -105,6 +115,40 @@ export function conflictVersion(error: unknown): number | null {
 export function secretClass(error: unknown): string | null {
   if (!(error instanceof ApiError) || error.code !== "looks_like_secret") return null;
   return error.details?.class ?? null;
+}
+
+export const LINK_NOTICE = {
+  missing: "Записи нет в этом домене: она удалена или лежит в другом",
+  archived: "Запись в архиве: откройте её во вкладке «В архиве»",
+  failed: "Не удалось открыть запись по ссылке. Повторите при восстановлении связи"
+} as const;
+
+export type LinkedEntry =
+  | { kind: "open"; entry: MemoryEntry; domain: MemoryDomain }
+  | { kind: "notice"; notice: string; domain?: MemoryDomain };
+
+/**
+ * Запись по ссылке из карточки ленты. Домен в ссылке известен не всегда (поиск агента его не
+ * называет): без подсказки запись ищется в обоих доменах, с подсказкой — только в названном.
+ * Любая неудача — короткое пояснение над списком, а не страница ошибки.
+ */
+export async function resolveLinkedEntry(
+  get: (id: string, domain: MemoryDomain) => Promise<MemoryEntry>,
+  id: string,
+  hint: string | null
+): Promise<LinkedEntry> {
+  const domains: MemoryDomain[] = hint === "work" || hint === "personal" ? [hint] : ["work", "personal"];
+  for (const domain of domains) {
+    try {
+      const entry = await get(id, domain);
+      if (entry.status === "archived") return { kind: "notice", notice: LINK_NOTICE.archived, domain };
+      return { kind: "open", entry, domain };
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) continue;
+      return { kind: "notice", notice: LINK_NOTICE.failed };
+    }
+  }
+  return { kind: "notice", notice: LINK_NOTICE.missing };
 }
 
 /** Срок действия: поле даты в конце суток по UTC; пустое поле снимает срок. */

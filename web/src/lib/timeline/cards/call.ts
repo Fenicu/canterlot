@@ -18,6 +18,7 @@ export interface CallFacts {
   events?: (sessionId: string) => HubEvent[];
   previous?: () => BlockModel | null;
   planBefore?: (number: number) => PlanSnapshot | null;
+  memorySubject?: (id: string) => string | null;
   /** Носитель файла `share_file`: вложение хаб привязал к нему, а не к вызову. */
   carrier?: BlockModel | null;
 }
@@ -64,6 +65,7 @@ export function cardCall(block: BlockModel, result: BlockModel | null, facts: Ca
     events: facts.events ?? (() => []),
     previous: facts.previous ?? (() => null),
     planBefore: facts.planBefore ?? (() => null),
+    memorySubject: facts.memorySubject ?? (() => null),
     carrier: facts.carrier ?? null
   };
 }

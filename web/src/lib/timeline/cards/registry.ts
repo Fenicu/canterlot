@@ -23,6 +23,10 @@ import SpawnCard from './SpawnCard.svelte';
 import SubagentCard from './SubagentCard.svelte';
 import TaigaCard from './TaigaCard.svelte';
 import TodoCard from './TodoCard.svelte';
+import MemoryGetCard from './MemoryGetCard.svelte';
+import MemorySearchCard from './MemorySearchCard.svelte';
+import MemoryUpdateCard from './MemoryUpdateCard.svelte';
+import MemoryWriteCard from './MemoryWriteCard.svelte';
 import PlanAddCard from './plan/PlanAddCard.svelte';
 import PlanAdoptCard from './plan/PlanAdoptCard.svelte';
 import PlanListCard from './plan/PlanListCard.svelte';
@@ -31,6 +35,7 @@ import { planHref } from './plan/livePlan';
 import { alarmCancel, alarmList, alarmSet } from './defs/alarms';
 import { limits } from './defs/limits';
 import { meeting } from './defs/meeting';
+import * as memory from './defs/memory';
 import { planAdd, planAdopt, planList, planUpdate } from './defs/plan';
 import * as sessions from './defs/sessions';
 import { find, read } from './defs/explore';
@@ -111,7 +116,17 @@ function outcomed<D extends { outcome: Outcome }>(logic: CardLogic<D>): CardLogi
   return { ...logic, word: (call, data) => outcomeWord(data.outcome) ?? defaultWord(call) };
 }
 
+/** Готовый вызов памяти говорит своё слово; ошибка, ход и обрыв — слово состояния. */
+function remembered<D>(logic: CardLogic<D>, done: (data: D) => StateWord | null): CardLogic<D> {
+  return { ...logic, word: (call, data) => (call.state === 'done' ? done(data) : defaultWord(call)) };
+}
+
 const REGISTRY: Record<string, AnyCard> = {
+  'canterlot.memory_search': card(remembered(memory.memorySearch, (data) => (data.refusal ? null : memory.searchWord(data))), MemorySearchCard),
+  'canterlot.memory_get': card(memory.memoryGet, MemoryGetCard),
+  'canterlot.memory_write': card(memory.memoryWrite, MemoryWriteCard),
+  'canterlot.memory_update': card(remembered(memory.memoryUpdate, memory.updateWord), MemoryUpdateCard),
+  'canterlot.memory_delete': card(memory.memoryDelete),
   'canterlot.session_spawn': card<sessions.SpawnData>({ ...sessions.spawn, grows: true, link: (call, data) => sessionLink(call, data.sessionId, data.title) }, SpawnCard),
   'canterlot.session_accept': card(bySession(sessions.accept), AcceptCard),
   'canterlot.session_send': card(bySession(sessions.send), SendCard),

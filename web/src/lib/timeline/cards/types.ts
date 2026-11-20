@@ -51,6 +51,8 @@ export interface CardCall {
   previous: () => BlockModel | null;
   /** Задача плана с этим номером по прошлым вызовам плана в ленте: какой она была до этого вызова. */
   planBefore: (number: number) => PlanSnapshot | null;
+  /** Тема записи памяти по прошлым чтениям, поискам и записям в ленте; `null`, если запись в ленте не встречалась. */
+  memorySubject: (id: string) => string | null;
   /** Блок-носитель файла, который воркер записал для этого вызова `share_file`. */
   carrier: BlockModel | null;
 }

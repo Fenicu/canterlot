@@ -29,7 +29,7 @@
   import { turnIsLive } from '#lib/composer/sendRules.js';
   import { ScrollController } from '#lib/timeline/scrollController.js';
   import { setGallerySource } from '#lib/viewer/gallery-context.js';
-  import { feedEvents, listSession, planBefore, previousCall, setFeedCards } from '#lib/timeline/cards/context.js';
+  import { feedEvents, listSession, memorySubject, planBefore, previousCall, setFeedCards } from '#lib/timeline/cards/context.js';
   import {
     HeightIndex,
     captureAnchor,
@@ -165,6 +165,7 @@
     session: listSession,
     events: (sessionId) => feedEvents(entries, sessionId),
     planBefore: (block, number) => planBefore(entries, block, number),
+    memorySubject: (block, id) => memorySubject(entries, block, id),
     openPlan: (orchestratorId) => onOpenPlan?.(orchestratorId) ?? false
   });
   // Просмотрщик картинок листает всю сессию: страницы берёт у разговора, а «Показать в чате» прыгает

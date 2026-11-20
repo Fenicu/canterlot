@@ -22,6 +22,8 @@ export interface FeedCards {
   events(sessionId: string): HubEvent[];
   /** Задача плана с номером до этого вызова: по ответам прошлых вызовов плана в ленте. */
   planBefore?(block: BlockModel, number: number): PlanSnapshot | null;
+  /** Тема записи памяти по прошлым вызовам памяти в ленте. */
+  memorySubject?(block: BlockModel, id: string): string | null;
   /**
    * Открыть план оркестратора на месте: вкладка «План» в панели или листе делегирования.
    * `false` — открыть нечем, ссылка ведёт на страницу плана.
@@ -96,7 +98,47 @@ export function feedEvents(entries: readonly TimelineEntry[], sessionId: string)
   return out;
 }
 
-const PLAN_TOOLS = new Set(['canterlot.plan_add', 'canterlot.plan_update', 'canterlot.plan_list', 'canterlot.plan_adopt']);
+/**
+ * Тема записи памяти с этим id по вызовам памяти до `block`: чтение, поиск, запись и правка.
+ * Ближайший к вызову назад выигрывает; записи, которых лента не видела, остаются без темы.
+ */
+export function memorySubject(entries: readonly TimelineEntry[], block: BlockModel, id: string): string | null {
+  const results = new Map<string, BlockModel>();
+  for (const entry of entries) {
+    if (entry.kind === 'block' && entry.block.kind === 'tool_result' && entry.block.parentId) results.set(entry.block.parentId, entry.block);
+  }
+  let seen = false;
+  for (let index = entries.length - 1; index >= 0; index--) {
+    const entry = entries[index]!;
+    if (entry.kind !== 'block') continue;
+    const other = entry.block;
+    if (other.id === block.id) {
+      seen = true;
+      continue;
+    }
+    if (!seen || other.kind !== 'tool_call') continue;
+    const tool = toolId(other.toolName);
+    if (!MEMORY_TOOLS.has(tool)) continue;
+    const answer = jsonObjectIn(results.get(other.id)?.text);
+    if (tool === 'canterlot.memory_search') {
+      for (const row of list(answer?.results)) {
+        if (isObject(row) && str(row.id) === id && str(row.subject).trim()) return str(row.subject).trim();
+      }
+    } else if (tool === 'canterlot.memory_get') {
+      if (answer && str(answer.id) === id && str(answer.subject).trim()) return str(answer.subject).trim();
+    } else {
+      // Запись и правка называют тему во входе. Отказанный вызов тему не меняет: у удачного ответа
+      // есть `id` записи (у отказа о конфликте версий его нет).
+      const named = str(jsonObjectIn(other.text)?.subject).trim();
+      if (named && str(answer?.id) === id) return named;
+    }
+  }
+  return null;
+}
+
+const MEMORY_TOOLS = new Set(['canterlot.memory_search', 'canterlot.memory_get', 'canterlot.memory_write', 'canterlot.memory_update']);
+
+const PLAN_TOOLS =new Set(['canterlot.plan_add', 'canterlot.plan_update', 'canterlot.plan_list', 'canterlot.plan_adopt']);
 
 /**
  * Какой была задача плана с номером до вызова `block`: ищется назад по ответам вызовов плана
