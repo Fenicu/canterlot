@@ -1,10 +1,16 @@
 /**
  * Присутствие в чате: пока экран `/c/{id}` открыт и виден, хаб не шлёт пуши об этой
  * сессии. Отметка живёт 45 секунд, поэтому видимая страница повторяет её каждые
- * 20 секунд, а скрытая или уходящая гасит сразу.
+ * 20 секунд, а скрытая или уходящая гасит сразу. Страница без касаний, клавиш,
+ * прокрутки и движения указателя 15 минут один раз сообщает «не видно» и молчит
+ * до первого действия: забытая вкладка не держит сессию бодрствующей.
  */
 
 export const PRESENCE_HEARTBEAT_MS = 20_000;
+export const PRESENCE_IDLE_MS = 15 * 60_000;
+
+const ACTIVITY_EVENTS = ["pointerdown", "pointermove", "keydown", "wheel", "touchstart", "scroll"];
+const ACTIVITY_LISTENER = { capture: true, passive: true } as const;
 
 export type PresenceSend = (
   conversationId: string,
@@ -42,6 +48,7 @@ export interface ChatPresenceOptions {
   intervalMs?: number;
   doc?: Document;
   win?: Window;
+  now?: () => number;
 }
 
 /**
@@ -59,14 +66,34 @@ export function trackChatPresence(
   let timer: number | null = null;
   let stopped = false;
 
+  const now = options.now ?? Date.now;
+  let lastActivity = now();
+  let idle = false;
+
   const pageVisible = (): boolean => doc.visibilityState === "visible";
   const visible = (): void => {
     if (stopped) return;
+    lastActivity = now();
+    idle = false;
     send(conversationId, true, false);
     if (timer === null) {
       timer = win.setInterval(() => {
-        if (pageVisible()) send(conversationId, true, false);
+        if (!pageVisible()) return;
+        if (now() - lastActivity < PRESENCE_IDLE_MS) {
+          send(conversationId, true, false);
+        } else if (!idle) {
+          idle = true;
+          send(conversationId, false, false);
+        }
       }, intervalMs);
+    }
+  };
+  const onActivity = (): void => {
+    if (stopped) return;
+    lastActivity = now();
+    if (idle && pageVisible()) {
+      idle = false;
+      send(conversationId, true, false);
     }
   };
   const hidden = (keepalive: boolean): void => {
@@ -89,6 +116,7 @@ export function trackChatPresence(
   doc.addEventListener("visibilitychange", onVisibility);
   win.addEventListener("pagehide", onPageHide);
   win.addEventListener("pageshow", onPageShow);
+  for (const type of ACTIVITY_EVENTS) doc.addEventListener(type, onActivity, ACTIVITY_LISTENER);
   if (pageVisible()) visible();
 
   return () => {
@@ -101,6 +129,7 @@ export function trackChatPresence(
     doc.removeEventListener("visibilitychange", onVisibility);
     win.removeEventListener("pagehide", onPageHide);
     win.removeEventListener("pageshow", onPageShow);
+    for (const type of ACTIVITY_EVENTS) doc.removeEventListener(type, onActivity, ACTIVITY_LISTENER);
     send(conversationId, false, true);
   };
 }

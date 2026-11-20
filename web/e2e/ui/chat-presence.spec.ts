@@ -71,6 +71,22 @@ test('switching_to_the_sessions_list_reports_not_visible', async ({ page }) => {
   await expect.poll(() => last(hub, id)?.visible).toBe(false);
 });
 
+test('an_untouched_chat_reports_not_visible_after_15_minutes_and_a_touch_brings_it_back', async ({ page }) => {
+  await page.clock.install({ time: new Date() });
+  const { hub, id } = await bootChat(page);
+  await expect.poll(() => last(hub, id)?.visible).toBe(true);
+
+  await page.clock.fastForward(15 * 60_000 + 20_000);
+  await expect.poll(() => last(hub, id)?.visible).toBe(false);
+
+  const idleCount = reports(hub, id).length;
+  await page.clock.fastForward(60_000);
+  expect(reports(hub, id).length).toBe(idleCount);
+
+  await page.keyboard.press('Shift');
+  await expect.poll(() => last(hub, id)?.visible).toBe(true);
+});
+
 test('the_visible_chat_repeats_its_report_every_20_seconds', async ({ page }) => {
   await page.clock.install({ time: new Date() });
   const { hub, id } = await bootChat(page);
