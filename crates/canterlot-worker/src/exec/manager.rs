@@ -733,6 +733,18 @@ fn under_roots(roots: &[PathBuf], path: &Path) -> Option<PathBuf> {
         .then_some(path)
 }
 
+/// Присланные пути равны своему каноническому виду: каталог запуска и, у рабочей копии,
+/// источник. Сравнение строгое, по тексту, без нормализации.
+fn validated_matches_request(start: &StartExecution, validated: &Validated) -> bool {
+    let same = |given: &str, canonical: &Path| canonical.as_os_str() == std::ffi::OsStr::new(given);
+    same(&start.workdir, &validated.workdir)
+        && match (&start.worktree, &validated.source) {
+            (Some(spec), Some(source)) => same(&spec.source_workdir, source),
+            (None, None) => true,
+            _ => false,
+        }
+}
+
 pub(super) async fn validate(
     shared: &Shared,
     command: &Command,
@@ -797,6 +809,11 @@ pub(super) async fn validate(
     let Some(validated) = canonical else {
         return Ok(Err("workdir_not_allowed"));
     };
+    // Запуск по просьбе другой машины: хаб отнёс каталог к области памяти по тексту пути.
+    // Путь, который воркер разрешает иначе (ссылка, `..`), мог бы лежать в другой области.
+    if start.remote && !validated_matches_request(start, &validated) {
+        return Ok(Err("workdir_not_canonical"));
+    }
     let conversation = conversation_id.to_string();
     let stored = shared
         .store

@@ -549,6 +549,7 @@ mod manager_tests {
                 canterlot_mcp: String::new(),
                 prompt_suggestions: false,
                 disable_claude_auto_memory: false,
+                remote: false,
             }),
         )
     }
