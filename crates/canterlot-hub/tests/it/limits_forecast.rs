@@ -188,6 +188,7 @@ async fn a_new_observation_emits_the_recomputed_forecast(pool: PgPool) {
         f.seed.owner_id,
         &Observation {
             provider: "claude".into(),
+            account: "owner".into(),
             window: Window::Weekly,
             used_permille: 900,
             resets_at: Some(reset),

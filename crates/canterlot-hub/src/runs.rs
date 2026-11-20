@@ -163,10 +163,19 @@ async fn provider_of_input(
     conn: &mut PgConnection,
     input_command_id: Uuid,
     run: &ExecutionRef,
-) -> Result<Option<Option<&'static str>>, sqlx::Error> {
+) -> Result<Option<(Option<&'static str>, String)>, sqlx::Error> {
     let harness: Option<String> = sqlx::query_scalar("select c.harness from conversations c join commands cmd on cmd.conversation_id=c.id where cmd.id=$1 and cmd.kind='deliver_input' and cmd.execution_id=$2 and c.id=$3 and c.machine_id=$4")
         .bind(input_command_id).bind(run.execution_id).bind(run.conversation_id).bind(run.machine_id).fetch_optional(&mut *conn).await?;
-    Ok(harness.map(|harness| canterlot_proto::harness::provider_of(&harness)))
+    let Some(harness) = harness else {
+        return Ok(None);
+    };
+    // Учётная запись хода — метка харнесса на машине разговора: недельные снимки и
+    // пересечения считаются внутри неё.
+    let account = crate::limits::harness_account(conn, run.machine_id, &harness).await?;
+    Ok(Some((
+        canterlot_proto::harness::provider_of(&harness),
+        account,
+    )))
 }
 
 pub async fn start_in_tx(
@@ -176,15 +185,15 @@ pub async fn start_in_tx(
     at: DateTime<Utc>,
     now: DateTime<Utc>,
 ) -> Result<(), sqlx::Error> {
-    let Some(provider) = provider_of_input(conn, input_command_id, run).await? else {
+    let Some((provider, account)) = provider_of_input(conn, input_command_id, run).await? else {
         return Ok(());
     };
-    let inserted = sqlx::query("insert into runs(input_command_id,execution_id,conversation_id,provider,started_at,weekly_before_permille,exact) values($1,$2,$3,$4,$5,(select weekly_used_permille from provider_limits where provider=$4),$6) on conflict do nothing")
-        .bind(input_command_id).bind(run.execution_id).bind(run.conversation_id).bind(provider).bind(at).bind(now - at <= EXACT_WINDOW).execute(&mut *conn).await?.rows_affected();
+    let inserted = sqlx::query("insert into runs(input_command_id,execution_id,conversation_id,provider,started_at,weekly_before_permille,exact,account) values($1,$2,$3,$4,$5,(select weekly_used_permille from provider_limits where provider=$4 and account=$7),$6,$7) on conflict do nothing")
+        .bind(input_command_id).bind(run.execution_id).bind(run.conversation_id).bind(provider).bind(at).bind(now - at <= EXACT_WINDOW).bind(&account).execute(&mut *conn).await?.rows_affected();
     if inserted > 0
         && let Some(provider) = provider
     {
-        refresh_overlap(conn, provider, at).await?;
+        refresh_overlap(conn, provider, &account, at).await?;
     }
     Ok(())
 }
@@ -210,7 +219,7 @@ pub async fn finish_in_tx(
 ) -> Result<(), sqlx::Error> {
     let command = Uuid::parse_str(&fact.input_command_id)
         .map_err(|_| sqlx::Error::InvalidArgument("invalid run command".into()))?;
-    let Some(provider) = provider_of_input(conn, command, run).await? else {
+    let Some((provider, account)) = provider_of_input(conn, command, run).await? else {
         return Ok(());
     };
     let duration = number(fact.duration_ms)?;
@@ -218,17 +227,17 @@ pub async fn finish_in_tx(
         .and_then(|d| at.checked_sub_signed(d))
         .ok_or_else(|| sqlx::Error::InvalidArgument("invalid run duration".into()))?;
     // Ход без сохранённого начала восстанавливается по длительности и исключается из оценки.
-    sqlx::query("insert into runs(input_command_id,execution_id,conversation_id,provider,started_at,exact) values($1,$2,$3,$4,$5,false) on conflict do nothing")
-        .bind(command).bind(run.execution_id).bind(run.conversation_id).bind(provider).bind(restored).execute(&mut *conn).await?;
+    sqlx::query("insert into runs(input_command_id,execution_id,conversation_id,provider,started_at,exact,account) values($1,$2,$3,$4,$5,false,$6) on conflict do nothing")
+        .bind(command).bind(run.execution_id).bind(run.conversation_id).bind(provider).bind(restored).bind(&account).execute(&mut *conn).await?;
     let started: DateTime<Utc> =
         sqlx::query_scalar("select started_at from runs where input_command_id=$1")
             .bind(command)
             .fetch_one(&mut *conn)
             .await?;
     if let Some(provider) = provider {
-        lock_provider_runs(conn, provider, started).await?;
+        lock_provider_runs(conn, provider, &account, started).await?;
     }
-    let changed=sqlx::query("update runs set finished_at=started_at+($2::bigint * interval '1 millisecond'),duration_ms=$2,outcome=$7,last_block_seq=(select max(created_seq) from blocks where conversation_id=(select conversation_id from runs where input_command_id=$1)),context_tokens=$3,context_window_tokens=$4,weekly_after_permille=(select weekly_used_permille from provider_limits where provider=runs.provider),exact=exact and $5,git=coalesce($6,git),forced_close=false,working_ms=null where input_command_id=$1 and (finished_at is null or forced_close)")
+    let changed=sqlx::query("update runs set finished_at=started_at+($2::bigint * interval '1 millisecond'),duration_ms=$2,outcome=$7,last_block_seq=(select max(created_seq) from blocks where conversation_id=(select conversation_id from runs where input_command_id=$1)),context_tokens=$3,context_window_tokens=$4,weekly_after_permille=(select weekly_used_permille from provider_limits where provider=runs.provider and account=runs.account),exact=exact and $5,git=coalesce($6,git),forced_close=false,working_ms=null where input_command_id=$1 and (finished_at is null or forced_close)")
         .bind(command).bind(duration).bind(number(fact.context_tokens)?).bind(number(fact.context_window_tokens)?).bind(now - at <= EXACT_WINDOW).bind(git_json(fact)?).bind(outcome_of(fact.end)).execute(&mut *conn).await?.rows_affected();
     if changed == 0 {
         if fact.adopted {
@@ -245,7 +254,7 @@ pub async fn finish_in_tx(
             .bind(command).bind(&usage.model).bind(if usage.agent.is_empty(){"main"}else{&usage.agent}).bind(number(usage.input_tokens)?).bind(number(usage.output_tokens)?).bind(number(usage.cache_read_tokens)?).bind(number(usage.cache_write_tokens)?).bind(cost).bind(source).bind(complete).execute(&mut *conn).await?;
     }
     if let Some(provider) = provider {
-        refresh_overlap(conn, provider, started).await?;
+        refresh_overlap(conn, provider, &account, started).await?;
     }
     announce_cost(conn, command, run).await?;
     Ok(())
@@ -287,15 +296,16 @@ pub async fn close_open_in_tx(
     conn: &mut PgConnection,
     execution_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    let open: Vec<(String, DateTime<Utc>)> = sqlx::query_as(
-        "select provider, min(started_at) from runs
-         where execution_id=$1 and finished_at is null and provider is not null group by provider",
+    let open: Vec<(String, String, DateTime<Utc>)> = sqlx::query_as(
+        "select provider, account, min(started_at) from runs
+         where execution_id=$1 and finished_at is null and provider is not null
+         group by provider, account",
     )
     .bind(execution_id)
     .fetch_all(&mut *conn)
     .await?;
-    for (provider, since) in &open {
-        lock_provider_runs(conn, provider, *since).await?;
+    for (provider, account, since) in &open {
+        lock_provider_runs(conn, provider, account, *since).await?;
     }
     let closed: Vec<Uuid> = sqlx::query_scalar("update runs set finished_at=greatest(started_at,now()),duration_ms=(extract(epoch from (greatest(started_at,now())-started_at))*1000)::bigint,exact=false,forced_close=true where execution_id=$1 and finished_at is null returning input_command_id")
         .bind(execution_id)
@@ -305,8 +315,8 @@ pub async fn close_open_in_tx(
         store_working(conn, command).await?;
         crate::test_summary::store_in_tx(conn, command).await?;
     }
-    for (provider, since) in &open {
-        refresh_overlap(conn, provider, *since).await?;
+    for (provider, account, since) in &open {
+        refresh_overlap(conn, provider, account, *since).await?;
     }
     Ok(())
 }
@@ -414,22 +424,25 @@ async fn merge_git(
 async fn lock_provider_runs(
     conn: &mut PgConnection,
     provider: &str,
+    account: &str,
     since: DateTime<Utc>,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("select input_command_id from runs where provider=$1 and coalesce(finished_at,'infinity')>$2 order by input_command_id for update")
-        .bind(provider).bind(since).fetch_all(conn).await?;
+    sqlx::query("select input_command_id from runs where provider=$1 and account=$3 and coalesce(finished_at,'infinity')>$2 order by input_command_id for update")
+        .bind(provider).bind(since).bind(account).fetch_all(conn).await?;
     Ok(())
 }
 
 // Незавершённый ход считается открытым; затрагиваются только строки, кончающиеся позже `since`.
+// Ходы пересекаются только внутри одной учётной записи: прирост недели у каждой свой.
 async fn refresh_overlap(
     conn: &mut PgConnection,
     provider: &str,
+    account: &str,
     since: DateTime<Utc>,
 ) -> Result<(), sqlx::Error> {
-    lock_provider_runs(conn, provider, since).await?;
-    sqlx::query("with calc as (select a.input_command_id id, exists(select 1 from runs b where b.provider=a.provider and b.input_command_id<>a.input_command_id and a.started_at<coalesce(b.finished_at,'infinity') and b.started_at<coalesce(a.finished_at,'infinity')) o from runs a where a.provider=$1 and coalesce(a.finished_at,'infinity')>$2) update runs r set overlapped=calc.o from calc where r.input_command_id=calc.id and r.overlapped is distinct from calc.o")
-        .bind(provider).bind(since).execute(conn).await?;
+    lock_provider_runs(conn, provider, account, since).await?;
+    sqlx::query("with calc as (select a.input_command_id id, exists(select 1 from runs b where b.provider=a.provider and b.account=a.account and b.input_command_id<>a.input_command_id and a.started_at<coalesce(b.finished_at,'infinity') and b.started_at<coalesce(a.finished_at,'infinity')) o from runs a where a.provider=$1 and a.account=$3 and coalesce(a.finished_at,'infinity')>$2) update runs r set overlapped=calc.o from calc where r.input_command_id=calc.id and r.overlapped is distinct from calc.o")
+        .bind(provider).bind(since).bind(account).execute(conn).await?;
     Ok(())
 }
 

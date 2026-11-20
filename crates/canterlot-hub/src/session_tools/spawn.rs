@@ -876,13 +876,13 @@ pub(crate) async fn validate_routed(
             ),
         )
     })?;
-    // Кандидаты, каталоги и каталоги исключений — целевой машины; занятость по-прежнему общая.
+    // Кандидаты, каталоги, исключения, лимиты и занятость — по целевой машине и её учётным записям.
     let machine = args.machine_id.unwrap_or(caller.machine_id);
     let remote = machine != caller.machine_id;
     let catalogs = super::routing::load_catalogs(conn, machine).await?;
     let list = whitelist::view(conn, caller.owner_id).await?;
-    let limits = super::routing::limits_view(conn).await?;
-    let live = super::routing::live_counts(conn, caller.owner_id).await?;
+    let limits = super::routing::limits_view(conn, machine).await?;
+    let live = super::routing::live_counts(conn, caller.owner_id, machine).await?;
     let place = place_for(
         conn,
         parent.id,

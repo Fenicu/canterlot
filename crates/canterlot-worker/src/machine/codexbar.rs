@@ -156,6 +156,8 @@ fn observation_from_row(
             .unwrap_or(0),
         observed_machine_ms: seen_ms,
         data_confidence,
+        // Учётную запись ставит воркер при отправке отчёта (`limits::stamp_report`).
+        account: String::new(),
     })
 }
 
@@ -259,6 +261,7 @@ pub fn reading_from_output(
             provider: provider.to_owned(),
             window: LimitWindow::FiveHour as i32,
             observed_machine_ms: seen_ms,
+            account: String::new(),
         }]
     } else {
         Vec::new()

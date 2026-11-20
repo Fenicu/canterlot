@@ -851,6 +851,7 @@ async fn last_event_at_is_touched_once_per_batch(pool: PgPool) -> TestResult {
 fn obs(s: &testkit::Seed, used: u16, at: DateTime<Utc>) -> Observation {
     Observation {
         provider: "claude".into(),
+        account: "owner".into(),
         window: Window::Weekly,
         used_permille: used,
         resets_at: None,
@@ -1341,7 +1342,15 @@ async fn series_are_ordered_and_bounded_for_both_windows(pool: PgPool) -> TestRe
             o.window = window;
             record(&pool, &s, &o).await;
         }
-        let rows = limits::series(&pool, "claude", window, at, at + Duration::seconds(2)).await?;
+        let rows = limits::series(
+            &pool,
+            "claude",
+            "owner",
+            window,
+            at,
+            at + Duration::seconds(2),
+        )
+        .await?;
         assert_eq!(rows, vec![(at, 900), (at + Duration::seconds(1), 901)]);
     }
     Ok(())
@@ -1381,7 +1390,7 @@ async fn limits_snapshot_reaches_pilot_sessions_of_that_provider(pool: PgPool) -
     let mut cc = connect(&hub, &c, Uuid::now_v7(), false, 1000).await;
     record(&pool, &a, &obs(&a, 960, Utc::now())).await;
     assert_eq!(
-        limits::push_limits_snapshot(&pool, &hub.registry, "claude").await?,
+        limits::push_limits_snapshot(&pool, &hub.registry, "claude", "owner").await?,
         1
     );
     let down = tokio::time::timeout(WAIT, ca.stream.message())
@@ -1428,6 +1437,63 @@ async fn limits_snapshot_is_sent_on_session_start(pool: PgPool) -> TestResult {
     Ok(())
 }
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_limits_report_without_labels_from_a_machine_with_another_account_is_dropped(
+    pool: PgPool,
+) -> TestResult {
+    let s = wire_seed(&pool).await;
+    // Машина объявила для провайдера другую учётную запись: старый воркер на ней
+    // присылает показания без метки, и чьи они, хаб не знает.
+    sqlx::query(
+        "update machine_harnesses set account='b-acct' where machine_id=$1 and provider='claude'",
+    )
+    .bind(s.machine_id)
+    .execute(&pool)
+    .await?;
+    let hub = testkit::spawn_test_hub(pool.clone(), HubTimers::default()).await;
+    let now_ms = Utc::now().timestamp_millis() as u64;
+    let c = connect(&hub, &s, Uuid::now_v7(), true, now_ms).await;
+    let observation = |used: u32, account: &str| LimitObservation {
+        provider: "claude".into(),
+        window: LimitWindow::Weekly as i32,
+        used_permille: used,
+        observed_machine_ms: now_ms + 1000,
+        account: account.into(),
+        ..Default::default()
+    };
+    // Первым идёт показание без метки, вторым — с меткой: когда второе легло, первое уже разобрано.
+    c.tx.send(ControlUp {
+        msg: Some(control_up::Msg::LimitsReport(LimitsReport {
+            observations: vec![observation(111, "")],
+            ..Default::default()
+        })),
+    })
+    .await?;
+    c.tx.send(ControlUp {
+        msg: Some(control_up::Msg::LimitsReport(LimitsReport {
+            observations: vec![observation(222, "b-acct")],
+            ..Default::default()
+        })),
+    })
+    .await?;
+    wait_until(
+        &pool,
+        "select count(*) from provider_limits where account='b-acct' and weekly_used_permille=222",
+    )
+    .await;
+    assert_eq!(
+        count(
+            &pool,
+            "select count(*) from provider_limits where account='owner' or weekly_used_permille=111"
+        )
+        .await,
+        0,
+        "the unlabelled reading is dropped, not credited to owner"
+    );
+    hub.shutdown.send(()).unwrap();
+    hub.join.await??;
+    Ok(())
+}
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn reported_absence_of_the_five_hour_window_reaches_the_state_and_the_worker_snapshot(
     pool: PgPool,
 ) -> TestResult {
@@ -1447,6 +1513,7 @@ async fn reported_absence_of_the_five_hour_window_reaches_the_state_and_the_work
                 provider: "claude".into(),
                 window: LimitWindow::FiveHour as i32,
                 observed_machine_ms: now_ms + 1000,
+                account: String::new(),
             }],
             credentials: Vec::new(),
             provider_credits: Vec::new(),

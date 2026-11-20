@@ -527,6 +527,7 @@ impl ProtocolHub {
             msg: Some(control_down::Msg::PollLimits(PollLimits {
                 provider: provider.into(),
                 owner_refresh: false,
+                account: String::new(),
             })),
         })
         .await;

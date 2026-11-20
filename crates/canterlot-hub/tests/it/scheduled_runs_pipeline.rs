@@ -202,6 +202,7 @@ async fn red_limits_window_skips_the_run(pool: PgPool) {
         f.seed.owner_id,
         &Observation {
             provider: "claude".into(),
+            account: "owner".into(),
             window: Window::Weekly,
             used_permille: 990,
             resets_at: Some(now + TimeDelta::days(2)),
@@ -223,6 +224,86 @@ async fn red_limits_window_skips_the_run(pool: PgPool) {
     scheduler(&f).tick(now).await.unwrap();
     let rid = run_id(&pool, &id).await;
     // Приёмка идёт вне тика: ждать исхода ограниченным опросом, а не разовым чтением.
+    let detail = wait_state(&pool, rid, "skipped_limits").await;
+    assert_eq!(detail["window"], "weekly", "{detail}");
+}
+
+/// Допуск запуска смотрит окна той учётной записи, которую харнесс расписания держит на своей
+/// машине: красное окно чужой подписки того же провайдера запуск не пропускает.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn admission_reads_the_window_of_the_schedules_own_account(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
+    let updated = sqlx::query(
+        "update machine_harnesses set account='b-acct' where machine_id=$1 and provider='claude'",
+    )
+    .bind(f.seed.machine_id)
+    .execute(&pool)
+    .await
+    .unwrap()
+    .rows_affected();
+    assert!(updated > 0, "the fixture machine declares a claude harness");
+    let now = Utc::now();
+    let red = |account: &'static str| {
+        let pool = pool.clone();
+        let owner = f.seed.owner_id;
+        let machine = f.seed.machine_id;
+        async move {
+            let mut tx = pool.begin().await.unwrap();
+            record_observation_in_tx(
+                &mut tx,
+                owner,
+                &Observation {
+                    provider: "claude".into(),
+                    account: account.into(),
+                    window: Window::Weekly,
+                    used_permille: 990,
+                    resets_at: Some(now + TimeDelta::days(2)),
+                    observed_at: now,
+                    source: ObservationSource::Session,
+                    data_confidence: DataConfidence::Exact,
+                    machine_id: machine,
+                    execution_id: None,
+                },
+                now,
+                &Default::default(),
+                Uuid::now_v7(),
+            )
+            .await
+            .unwrap();
+            tx.commit().await.unwrap();
+        }
+    };
+    // Красна только запись владельца, а расписание идёт на b-acct: не пропускается.
+    red("owner").await;
+    let id = create(&f, existing(&f), "0 9 * * *").await;
+    due(&pool, &id, now - TimeDelta::seconds(30)).await;
+    scheduler(&f).tick(now).await.unwrap();
+    let rid = run_id(&pool, &id).await;
+    for _ in 0..20_000 {
+        let state: String = sqlx::query_scalar("select state from schedule_runs where id=$1")
+            .bind(rid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_ne!(
+            state, "skipped_limits",
+            "the other account's window is irrelevant"
+        );
+        if !matches!(state.as_str(), "claimed" | "prechecking") {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    // Красная запись самого расписания пропускает запуск.
+    red("b-acct").await;
+    let id = create(&f, existing(&f), "0 9 * * *").await;
+    due(&pool, &id, now - TimeDelta::seconds(30)).await;
+    scheduler(&f)
+        .tick(now + TimeDelta::seconds(1))
+        .await
+        .unwrap();
+    let rid = run_id(&pool, &id).await;
     let detail = wait_state(&pool, rid, "skipped_limits").await;
     assert_eq!(detail["window"], "weekly", "{detail}");
 }
@@ -601,6 +682,7 @@ async fn run_now_is_idempotent_and_run_anyway_bypasses_checks(pool: PgPool) {
         f.seed.owner_id,
         &Observation {
             provider: "claude".into(),
+            account: "owner".into(),
             window: Window::Weekly,
             used_permille: 990,
             resets_at: Some(now + TimeDelta::days(2)),
@@ -891,7 +973,7 @@ async fn weekly_reserve_hold_skips_new_session_run(pool: PgPool) {
     sqlx::query(
         "insert into provider_limits(provider, weekly_reserve_active)
          values('claude', true)
-         on conflict(provider) do update set weekly_reserve_active=true",
+         on conflict(provider,account) do update set weekly_reserve_active=true",
     )
     .execute(&pool)
     .await
@@ -1473,6 +1555,7 @@ async fn observe(pool: &PgPool, f: &Fixture, provider: &str, window: limits::Win
         f.seed.owner_id,
         &Observation {
             provider: provider.into(),
+            account: "owner".into(),
             window,
             used_permille: used,
             resets_at: Some(now + TimeDelta::hours(3)),
@@ -1619,6 +1702,7 @@ async fn observation_landing_during_existing_session_dispatch_turns_it_red(pool:
         f.seed.owner_id,
         &Observation {
             provider: "claude".into(),
+            account: "owner".into(),
             window: limits::Window::FiveHour,
             used_permille: 990,
             resets_at: Some(now + TimeDelta::hours(3)),
@@ -2513,6 +2597,7 @@ async fn scheduled_new_session_takes_the_machine_lock_before_the_provider_lock(p
             owner,
             &Observation {
                 provider: "claude".into(),
+                account: "owner".into(),
                 window: limits::Window::FiveHour,
                 used_permille: 100,
                 resets_at: Some(now + TimeDelta::hours(3)),

@@ -551,6 +551,7 @@ fn session_input_schema(mcp_name: &str) -> Value {
                         "states": {"type": "array", "items": {"enum": ["idle", "waiting_for_user", "stalled", "quota_paused", "failed", "stopped", "deleted"]}},
                         "all": {"type": "boolean", "description": "Wait until every listed session settles (default: any)."},
                         "provider": {"enum": ["claude", "codex", "opencode"]},
+                        "account": {"type": "string", "pattern": "^[a-z0-9-]{1,40}$", "description": "Account of the provider's limits (limit_reset only). Default: the account of your own harness on your machine, else owner."},
                         "window": {"enum": ["five_hour", "weekly", "monthly", "weekly_fable"]},
                         "below_percent": {"type": "number", "minimum": 0, "maximum": 100},
                         "path": {"type": "string", "description": "Absolute or relative to your workdir."},
@@ -1564,6 +1565,7 @@ mod tests {
             json!(["five_hour", "weekly", "monthly", "weekly_fable"])
         );
         assert!(when["below_percent"].is_object());
+        assert_eq!(when["account"]["type"], "string");
         assert!(when["free_disk_gb_above"].is_object());
         assert!(when["load_per_core_below"].is_object());
         assert!(when["mem_available_gb_above"].is_object());

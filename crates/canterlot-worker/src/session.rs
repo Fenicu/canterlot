@@ -122,6 +122,86 @@ pub const OPTIONAL_CAPABILITIES: &[&str] = &[
     CAPABILITY_REMOTE_SPAWN_V1,
 ];
 
+/// Возможности, которые воркер объявляет хабу. Без таблицы `[claude_code]` Claude Code
+/// игнорируется целиком, поэтому истории его бесед не объявляются.
+pub fn advertised_capabilities(config: &WorkerConfig) -> Vec<String> {
+    OPTIONAL_CAPABILITIES
+        .iter()
+        .filter(|cap| **cap != "claude_histories_v1" || config.claude_code.is_some())
+        .map(|cap| (*cap).to_owned())
+        .collect()
+}
+
+/// Провайдеры, чьи лимиты воркер опрашивает вне сессий: по одному на включённый харнесс.
+pub fn polled_providers(config: &WorkerConfig) -> Vec<&'static str> {
+    let mut providers = Vec::new();
+    if config.claude_code.is_some() {
+        providers.push("claude");
+    }
+    if config.codex.is_some() {
+        providers.push("codex");
+    }
+    if config.opencode.is_some() {
+        providers.push("opencode");
+    }
+    providers
+}
+
+/// Корни инструкций владельца для обзора и чтения: без `[claude_code]` пути Claude Code выключены.
+pub fn owner_roots(
+    config: &WorkerConfig,
+    home: &std::path::Path,
+    env: &[(std::ffi::OsString, std::ffi::OsString)],
+) -> crate::machine::owner_instructions::OwnerRoots {
+    let roots = crate::machine::owner_instructions::OwnerRoots::from_env(
+        home,
+        env,
+        config.codex.as_ref().and_then(|c| c.owner_home.as_deref()),
+        config
+            .opencode
+            .as_ref()
+            .and_then(|c| c.owner_config.as_deref()),
+    );
+    if config.claude_code.is_some() {
+        roots
+    } else {
+        roots.without_claude()
+    }
+}
+
+/// Ответ на список историй Claude Code. Выключенный харнесс отвечает пустым списком и
+/// каталога не читает, даже если хаб прислал запрос напрямую.
+pub fn claude_histories_reply(
+    enabled: bool,
+    request: ListClaudeHistories,
+    excluded: std::collections::HashSet<String>,
+    config_dir: std::path::PathBuf,
+) -> ClaudeHistories {
+    let items = if enabled {
+        crate::machine::claude_history::list_histories(&request.workdir, &config_dir, &excluded)
+    } else {
+        Vec::new()
+    };
+    ClaudeHistories {
+        request_id: request.request_id,
+        items: items
+            .into_iter()
+            .map(|item| ClaudeHistory {
+                id: item.id,
+                modified_at_ms: item.modified_at_ms,
+                size: item.size,
+                preview: item.preview,
+            })
+            .collect(),
+    }
+}
+
+/// Принадлежит ли сообщение хаба о лимитах учётной записи, которую эта машина держит для
+/// провайдера. Пустая метка — хаб старше учётных записей: сообщение считается своим.
+fn account_is_mine(config: &WorkerConfig, provider: &str, account: &str) -> bool {
+    account.is_empty() || account == config.account_for_provider(provider)
+}
+
 #[derive(Clone)]
 pub struct CachedLimits {
     pub observations: Vec<LimitObservation>,
@@ -590,12 +670,13 @@ impl Worker {
                 fallback,
             )) as Arc<dyn crate::machine::limits::LimitsSource>
         };
+        for provider in polled_providers(&config) {
+            idle_ticker.register(provider, limits_interval);
+        }
         if config.claude_code.is_some() {
-            idle_ticker.register("claude", limits_interval);
             routes.insert("claude".into(), codexbar(None));
         }
         if let Some(codex) = &config.codex {
-            idle_ticker.register("codex", limits_interval);
             let cache_for_hub = limits_cache.clone();
             let hub_age: crate::machine::limits::HubLimitsAge =
                 Arc::new(move |provider| cache_for_hub.get(provider).map(|c| c.received_at));
@@ -611,7 +692,6 @@ impl Worker {
             );
         }
         if config.opencode.is_some() {
-            idle_ticker.register("opencode", limits_interval);
             routes.insert("opencode".into(), codexbar(None));
         }
         let limits_source: Arc<dyn crate::machine::limits::LimitsSource> = if routes.is_empty() {
@@ -1220,10 +1300,7 @@ impl Worker {
             secrets_epoch: crate::secret::epoch(&self.config.secrets, boot_id),
             stream_kind: StreamKind::Control as i32,
             required_capabilities: vec![],
-            optional_capabilities: OPTIONAL_CAPABILITIES
-                .iter()
-                .map(|cap| (*cap).into())
-                .collect(),
+            optional_capabilities: advertised_capabilities(&self.config),
         };
         let mut control = WorkerControlClient::with_interceptor(control, auth.clone())
             .max_decoding_message_size(MAX_MESSAGE_BYTES)
@@ -1342,10 +1419,13 @@ impl Worker {
             .capabilities
             .iter()
             .any(|cap| cap == "owner_instructions_v1");
-        let histories_enabled = accepted
-            .capabilities
-            .iter()
-            .any(|cap| cap == "claude_histories_v1");
+        // Без таблицы `[claude_code]` прямой запрос истории не принимается, что бы ни
+        // согласовал хаб.
+        let histories_enabled = self.config.claude_code.is_some()
+            && accepted
+                .capabilities
+                .iter()
+                .any(|cap| cap == "claude_histories_v1");
         let probe_enabled = accepted
             .capabilities
             .iter()
@@ -1629,44 +1709,24 @@ impl Worker {
                     &home,
                     std::env::var_os("CLAUDE_CONFIG_DIR").as_deref(),
                 );
+                let enabled = histories_enabled;
                 histories_operation = Some(Box::pin(async move {
-                    let items = tokio::task::spawn_blocking(move || {
-                        crate::machine::claude_history::list_histories(
-                            &request.workdir,
-                            &config_dir,
-                            &excluded,
-                        )
+                    let request_id = request.request_id.clone();
+                    tokio::task::spawn_blocking(move || {
+                        claude_histories_reply(enabled, request, excluded, config_dir)
                     })
                     .await
-                    .unwrap_or_default();
-                    ClaudeHistories {
-                        request_id: request.request_id,
-                        items: items
-                            .into_iter()
-                            .map(|item| ClaudeHistory {
-                                id: item.id,
-                                modified_at_ms: item.modified_at_ms,
-                                size: item.size,
-                                preview: item.preview,
-                            })
-                            .collect(),
-                    }
+                    .unwrap_or(ClaudeHistories {
+                        request_id,
+                        items: Vec::new(),
+                    })
                 }));
             }
             if owner_operation.is_none()
                 && owner_outbound.is_none()
                 && let Some(request) = owner_next.take()
             {
-                let codex_owner = self
-                    .config
-                    .codex
-                    .as_ref()
-                    .and_then(|c| c.owner_home.clone());
-                let opencode_owner = self
-                    .config
-                    .opencode
-                    .as_ref()
-                    .and_then(|c| c.owner_config.clone());
+                let owner_config = self.config.clone();
                 owner_operation = Some(Box::pin(async move {
                     let request_id = request.request_id.clone();
                     tokio::task::spawn_blocking(move || {
@@ -1679,12 +1739,7 @@ impl Worker {
                                     std::env::var_os(key).map(|value| (key.into(), value))
                                 })
                                 .collect();
-                        let roots = crate::machine::owner_instructions::OwnerRoots::from_env(
-                            &home,
-                            &env,
-                            codex_owner.as_deref(),
-                            opencode_owner.as_deref(),
-                        );
+                        let roots = owner_roots(&owner_config, &home, &env);
                         if request.kind == crate::machine::owner_instructions::KIND_OVERVIEW {
                             let mut view = crate::machine::owner_instructions::overview(&roots);
                             view.request_id = request.request_id.clone();
@@ -1867,11 +1922,13 @@ impl Worker {
                 message = inbound.message(), if commands.len() < 32 && polls.len()<8 => {
                     let message = message.map_err(status_error)?.ok_or(WorkerError::Transport)?;
                     match message.msg {
-                        Some(control_down::Msg::PollLimits(request)) if pilot => {
+                        // Просьба или снимок чужой учётной записи этого провайдера не про нас:
+                        // у машины одна учётная запись на провайдера.
+                        Some(control_down::Msg::PollLimits(request)) if pilot && account_is_mine(&self.config, &request.provider, &request.account) => {
                             let kind = if request.owner_refresh { PollKind::OwnerRefresh } else { PollKind::Hub };
                             polls.push_back((request.provider, kind));
                         }
-                        Some(control_down::Msg::LimitsSnapshot(snapshot)) if pilot => {self.limits_cache.update(snapshot);}
+                        Some(control_down::Msg::LimitsSnapshot(snapshot)) if pilot && account_is_mine(&self.config, &snapshot.provider, &snapshot.account) => {self.limits_cache.update(snapshot);}
                         Some(control_down::Msg::SuggestWorkdirs(request)) if suggest_enabled => {suggest_next = Some(request);}
                         Some(control_down::Msg::ListClaudeHistories(request)) if histories_enabled => {histories_next = Some(request);}
                         Some(control_down::Msg::ReadOwner(request)) if owner_enabled => {owner_next = Some(request);}
@@ -2071,10 +2128,14 @@ impl Worker {
                     // Временный сбой не ждёт следующего тика: воркер сам назначает ранний повтор.
                     if let Some(delay)=limits_source.retry_in(&provider) { idle_ticker.reschedule(&provider, delay); }
                     // Хаб держит один необработанный отчёт: пустой вытеснил бы настоящий.
-                    let mut observations = fetched.observations;
+                    let mut fetched = fetched;
+                    let mut observations = std::mem::take(&mut fetched.observations);
                     if !limits_fable {
                         observations.retain(|o| o.window != LimitWindow::WeeklyFable as i32);
                     }
+                    // Каждое показание называет учётную запись харнесса, который его дал:
+                    // хаб не угадывает её по порядку отчётов.
+                    crate::machine::limits::stamp_report(&self.config, &mut observations, &mut fetched.absent);
                     let mut credits = fetched.provider_credits;
                     if !provider_credits {
                         credits.clear();

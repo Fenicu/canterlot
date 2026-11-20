@@ -127,11 +127,40 @@ fn millis(at: DateTime<Utc>) -> DateTime<Utc> {
 fn wire(at: DateTime<Utc>) -> String {
     at.to_rfc3339_opts(SecondsFormat::Millis, true)
 }
-fn quota_key(provider: &str, window: &str) -> String {
-    format!("quota:{provider}:{window}")
+/// Ключ удержания по окну. Для `owner` он прежний, байт в байт, поэтому ожидающие
+/// пробуждения и сохранённые удержания переживают обновление; другая учётная запись
+/// получает суффикс `@{account}` у провайдера.
+pub(crate) fn quota_key(provider: &str, account: &str, window: &str) -> String {
+    if account == canterlot_proto::limits::OWNER_ACCOUNT {
+        format!("quota:{provider}:{window}")
+    } else {
+        format!("quota:{provider}@{account}:{window}")
+    }
 }
-fn weekly_key(provider: &str) -> String {
-    format!("weekly:{provider}")
+pub(crate) fn weekly_key(provider: &str, account: &str) -> String {
+    if account == canterlot_proto::limits::OWNER_ACCOUNT {
+        format!("weekly:{provider}")
+    } else {
+        format!("weekly:{provider}@{account}")
+    }
+}
+/// Нагрузка заданий `limit_check` и `limit_rule`: у `owner` без ключа `account`, как раньше.
+fn provider_payload(provider: &str, account: &str) -> Value {
+    if account == canterlot_proto::limits::OWNER_ACCOUNT {
+        json!({"provider": provider})
+    } else {
+        json!({"provider": provider, "account": account})
+    }
+}
+/// Разговоры владельца провайдера с этой учётной записью: харнесс из списка и метка
+/// харнесса на машине разговора (нет строки каталога — `owner`).
+macro_rules! conversations_of_account {
+    ($tail:literal) => {
+        concat!(
+            "select c.id from conversations c join queue_state q on q.conversation_id=c.id left join machine_harnesses mh on mh.machine_id=c.machine_id and mh.harness=c.harness where c.owner_id=$1 and c.harness=any($2) and coalesce(mh.account,'owner')=$3 ",
+            $tail
+        )
+    };
 }
 fn window_from_wire(value: &str) -> Option<Window> {
     match value {
@@ -142,11 +171,11 @@ fn window_from_wire(value: &str) -> Option<Window> {
         _ => None,
     }
 }
-fn is_quota(hold: &HoldReason, provider: &str, window: &str) -> bool {
-    matches!(hold, HoldReason::QuotaExhausted { provider: p, window: w, .. } if p == provider && w == window)
+fn is_quota(hold: &HoldReason, provider: &str, account: &str, window: &str) -> bool {
+    matches!(hold, HoldReason::QuotaExhausted { provider: p, account: a, window: w, .. } if p == provider && a == account && w == window)
 }
-fn is_weekly(hold: &HoldReason, provider: &str) -> bool {
-    matches!(hold, HoldReason::WeeklyReserve { provider: p, .. } if p == provider)
+fn is_weekly(hold: &HoldReason, provider: &str, account: &str) -> bool {
+    matches!(hold, HoldReason::WeeklyReserve { provider: p, account: a, .. } if p == provider && a == account)
 }
 fn floor(config: &LimitsConfig, provider: &str) -> Duration {
     config
@@ -323,7 +352,8 @@ pub async fn hold_quota_in_tx(
 ) -> Result<LimitReachedEffect, sqlx::Error> {
     let window = Window::from_proto(fact.window)?;
     let provider = fact.provider.as_str();
-    limits::lock_provider(conn, provider).await?;
+    let account = canterlot_proto::limits::account_or_owner(&fact.account);
+    limits::lock_provider(conn, provider, account).await?;
     let mut queue: LockedQueue = sqlx::query_as("select q.* from queue_state q join conversations c on c.id=q.conversation_id join executions e on e.conversation_id=c.id where e.id=$1 and c.id=$2 and c.machine_id=$3 for update of q")
         .bind(run.execution_id).bind(run.conversation_id).bind(run.machine_id).fetch_one(&mut *conn).await?;
     let resets_at = limits::timestamp(fact.resets_at_ms)?;
@@ -344,6 +374,7 @@ pub async fn hold_quota_in_tx(
         run.conversation_id,
         &mut queue,
         provider,
+        account,
         window,
         resets_at,
         pending,
@@ -368,6 +399,7 @@ async fn hold_quota_core_in_tx(
     conversation_id: Uuid,
     queue: &mut LockedQueue,
     provider: &str,
+    account: &str,
     window: Window,
     resets_at: Option<DateTime<Utc>>,
     pending: bool,
@@ -381,7 +413,7 @@ async fn hold_quota_core_in_tx(
     let holds = &mut queue.hold_reasons.0;
     let (wake_at, moved) = match holds
         .iter()
-        .position(|h| is_quota(h, provider, window.as_str()))
+        .position(|h| is_quota(h, provider, account, window.as_str()))
     {
         Some(i) => match &holds[i] {
             HoldReason::QuotaExhausted { wake_at, .. } if *wake_at >= candidate => {
@@ -390,6 +422,7 @@ async fn hold_quota_core_in_tx(
             _ => {
                 holds[i] = HoldReason::QuotaExhausted {
                     provider: provider.into(),
+                    account: account.into(),
                     window: window.as_str().into(),
                     wake_at: candidate,
                 };
@@ -399,17 +432,20 @@ async fn hold_quota_core_in_tx(
         None => {
             holds.push(HoldReason::QuotaExhausted {
                 provider: provider.into(),
+                account: account.into(),
                 window: window.as_str().into(),
                 wake_at: candidate,
             });
             (candidate, true)
         }
     };
-    let weekly_reset: Option<DateTime<Utc>> =
-        sqlx::query_scalar("select weekly_resets_at from provider_limits where provider=$1")
-            .bind(provider)
-            .fetch_one(&mut *conn)
-            .await?;
+    let weekly_reset: Option<DateTime<Utc>> = sqlx::query_scalar(
+        "select weekly_resets_at from provider_limits where provider=$1 and account=$2",
+    )
+    .bind(provider)
+    .bind(account)
+    .fetch_one(&mut *conn)
+    .await?;
     let expires = weekly_reset
         .filter(|at| *at > now)
         .unwrap_or(now + TimeDelta::days(7))
@@ -423,8 +459,12 @@ async fn hold_quota_core_in_tx(
             .fetch_one(&mut *conn)
             .await?
     };
-    let hold_key = quota_key(provider, window.as_str());
+    let hold_key = quota_key(provider, account, window.as_str());
     let mut payload = json!({"provider":provider,"window":window,"hold_key":hold_key,"resets_at":resets_at.map(wire)});
+    // Нагрузка `owner` прежняя, без ключа `account`.
+    if account != canterlot_proto::limits::OWNER_ACCOUNT {
+        payload["account"] = json!(account);
+    }
     if one_shot {
         payload["one_shot"] = json!(true);
     }
@@ -458,26 +498,110 @@ async fn hold_quota_core_in_tx(
 pub async fn initial_holds_in_tx(
     conn: &mut PgConnection,
     provider: &str,
+    account: &str,
 ) -> Result<Vec<HoldReason>, sqlx::Error> {
-    let row: Option<(bool, Time, Time)> = sqlx::query_as("select weekly_reserve_active,weekly_reserve_resets_at,weekly_resets_at from provider_limits where provider=$1")
-        .bind(provider).fetch_optional(conn).await?;
+    let row: Option<(bool, Time, Time)> = sqlx::query_as("select weekly_reserve_active,weekly_reserve_resets_at,weekly_resets_at from provider_limits where provider=$1 and account=$2")
+        .bind(provider).bind(account).fetch_optional(conn).await?;
     Ok(match row {
         Some((true, reserve, weekly)) => vec![HoldReason::WeeklyReserve {
             provider: provider.into(),
+            account: account.into(),
             resets_at: reserve.or(weekly),
         }],
         _ => Vec::new(),
     })
 }
 
+/// Смена метки харнесса в отчёте машины: удержания её разговоров по прежней учётной записи
+/// снимаются в той же транзакции, ожидающие пробуждения отменяются, а резерв новой записи
+/// выводится заново из её состояния. Квоту новой записи ставит только свежий факт лимита.
+/// Возвращает разговоры, чью очередь стоит разбудить.
+#[allow(clippy::too_many_arguments)]
+pub async fn release_relabelled_in_tx(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    machine_id: Uuid,
+    harness: &str,
+    provider: &str,
+    old_account: &str,
+    new_account: &str,
+    now: DateTime<Utc>,
+    correlation_id: Uuid,
+) -> Result<Vec<Uuid>, sqlx::Error> {
+    if !limits::known_provider(provider) {
+        return Ok(Vec::new());
+    }
+    // Порядок блокировок как везде: строки пар по порядку, потом очереди.
+    let mut pairs = [old_account, new_account];
+    pairs.sort_unstable();
+    for account in pairs {
+        limits::lock_provider(conn, provider, account).await?;
+    }
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        "select c.id from conversations c join queue_state q on q.conversation_id=c.id
+          where c.owner_id=$1 and c.machine_id=$2 and c.harness=$3 order by c.id",
+    )
+    .bind(owner_id)
+    .bind(machine_id)
+    .bind(harness)
+    .fetch_all(&mut *conn)
+    .await?;
+    let queues = lock_queues(conn, &ids).await?;
+    let mut released = Vec::new();
+    for mut queue in queues {
+        let id = queue.conversation_id;
+        let before = queue.hold_reasons.0.len();
+        queue.hold_reasons.0.retain(|hold| match hold {
+            HoldReason::QuotaExhausted {
+                provider: p,
+                account: a,
+                ..
+            }
+            | HoldReason::WeeklyReserve {
+                provider: p,
+                account: a,
+                ..
+            } => !(p == provider && a == old_account),
+            _ => true,
+        });
+        let had = queue.hold_reasons.0.len() != before;
+        if !had {
+            continue;
+        }
+        // Ожидающие пробуждения прежней записи больше ничего не сторожат.
+        sqlx::query(
+            "update scheduled_jobs set state='cancelled',result='{\"reason\":\"account_changed\"}',updated_at=clock_timestamp()
+              where conversation_id=$1 and kind='wake' and state='pending'
+                and payload->>'provider'=$2 and coalesce(payload->>'account','owner')=$3",
+        )
+        .bind(id)
+        .bind(provider)
+        .bind(old_account)
+        .execute(&mut *conn)
+        .await?;
+        clear_resume_in_tx(conn, id, None, correlation_id).await?;
+        for hold in initial_holds_in_tx(conn, provider, new_account).await? {
+            if !queue.hold_reasons.0.iter().any(|h| h.same_reserve(&hold)) {
+                queue.hold_reasons.0.push(hold);
+            }
+        }
+        let slot = queue.slot()?;
+        queue.save(conn, &slot, None, correlation_id).await?;
+        release_held_notifications_in_tx(conn, id, now).await?;
+        released.push(id);
+    }
+    Ok(released)
+}
+
 async fn schedule_limit_check(
     conn: &mut PgConnection,
     owner_id: Uuid,
     provider: &str,
+    account: &str,
     run_at: DateTime<Utc>,
 ) -> Result<(), sqlx::Error> {
-    let pending: Option<(Uuid, DateTime<Utc>)> = sqlx::query_as("select id,run_at from scheduled_jobs where kind='limit_check' and state='pending' and payload->>'provider'=$1 for update skip locked")
-        .bind(provider).fetch_optional(&mut *conn).await?;
+    let pending: Option<(Uuid, DateTime<Utc>)> = sqlx::query_as("select id,run_at from scheduled_jobs where kind='limit_check' and state='pending' and payload->>'provider'=$1 and coalesce(payload->>'account','owner')=$2 for update skip locked")
+        .bind(provider).bind(account).fetch_optional(&mut *conn).await?;
     match pending {
         // Окно резерва сдвинулось: проверка раньше нового сброса бессмысленна.
         Some((id, at)) if at < run_at => {
@@ -486,8 +610,8 @@ async fn schedule_limit_check(
         }
         Some(_) => {}
         None => {
-            sqlx::query("insert into scheduled_jobs(id,kind,owner_id,conversation_id,run_at,payload) select $1,'limit_check',$2,null,$3,jsonb_build_object('provider',$4::text) where not exists(select 1 from scheduled_jobs where kind='limit_check' and state='pending' and payload->>'provider'=$4) on conflict do nothing")
-                .bind(Uuid::now_v7()).bind(owner_id).bind(run_at).bind(provider).execute(&mut *conn).await?;
+            sqlx::query("insert into scheduled_jobs(id,kind,owner_id,conversation_id,run_at,payload) select $1,'limit_check',$2,null,$3,$5::jsonb where not exists(select 1 from scheduled_jobs where kind='limit_check' and state='pending' and payload->>'provider'=$4 and coalesce(payload->>'account','owner')=$6) on conflict do nothing")
+                .bind(Uuid::now_v7()).bind(owner_id).bind(run_at).bind(provider).bind(provider_payload(provider, account)).bind(account).execute(&mut *conn).await?;
         }
     }
     Ok(())
@@ -506,6 +630,7 @@ pub async fn apply_weekly_rule_in_tx(
     conn: &mut PgConnection,
     owner_id: Uuid,
     provider: &str,
+    account: &str,
     config: &LimitsConfig,
     now: DateTime<Utc>,
     correlation_id: Uuid,
@@ -514,9 +639,9 @@ pub async fn apply_weekly_rule_in_tx(
     if !limits::known_provider(provider) {
         return Ok(effect);
     }
-    limits::lock_provider(conn, provider).await?;
-    let (active, used, current_resets, reserve_resets, low_count): (bool, Option<i32>, Time, Time, i16) = sqlx::query_as("select weekly_reserve_active,weekly_used_permille,weekly_resets_at,weekly_reserve_resets_at,weekly_low_count from provider_limits where provider=$1")
-        .bind(provider).fetch_one(&mut *conn).await?;
+    limits::lock_provider(conn, provider, account).await?;
+    let (active, used, current_resets, reserve_resets, low_count): (bool, Option<i32>, Time, Time, i16) = sqlx::query_as("select weekly_reserve_active,weekly_used_permille,weekly_resets_at,weekly_reserve_resets_at,weekly_low_count from provider_limits where provider=$1 and account=$2")
+        .bind(provider).bind(account).fetch_one(&mut *conn).await?;
     if !active {
         return Ok(effect);
     }
@@ -528,6 +653,7 @@ pub async fn apply_weekly_rule_in_tx(
             conn,
             owner_id,
             provider,
+            account,
             &harnesses,
             now,
             correlation_id,
@@ -542,6 +668,7 @@ pub async fn apply_weekly_rule_in_tx(
             conn,
             owner_id,
             provider,
+            account,
             &harnesses,
             now,
             correlation_id,
@@ -553,12 +680,17 @@ pub async fn apply_weekly_rule_in_tx(
     let mut resets_at = reserve_resets.or(current_resets);
     if new_window {
         // Новое окно всё ещё выше порога: резерв продолжается до его сброса.
-        sqlx::query("update provider_limits set weekly_reserve_resets_at=$2,weekly_low_count=0,weekly_low_at=null where provider=$1")
-            .bind(provider).bind(current_resets).execute(&mut *conn).await?;
+        sqlx::query("update provider_limits set weekly_reserve_resets_at=$2,weekly_low_count=0,weekly_low_at=null where provider=$1 and account=$3")
+            .bind(provider).bind(current_resets).bind(account).execute(&mut *conn).await?;
         resets_at = current_resets;
     }
-    let ids: Vec<Uuid> = sqlx::query_scalar("select c.id from conversations c join queue_state q on q.conversation_id=c.id where c.owner_id=$1 and c.harness=any($2) and not q.closed order by c.id")
-        .bind(owner_id).bind(&harnesses).fetch_all(&mut *conn).await?;
+    let ids: Vec<Uuid> =
+        sqlx::query_scalar(conversations_of_account!("and not q.closed order by c.id"))
+            .bind(owner_id)
+            .bind(&harnesses)
+            .bind(account)
+            .fetch_all(&mut *conn)
+            .await?;
     let queues = lock_queues(conn, &ids).await?;
     let overridden: Vec<Uuid> = sqlx::query_scalar(
         "select id from conversations where id=any($1) and reserve_override_until > $2 order by id",
@@ -569,6 +701,7 @@ pub async fn apply_weekly_rule_in_tx(
     .await?;
     let hold = HoldReason::WeeklyReserve {
         provider: provider.into(),
+        account: account.into(),
         resets_at,
     };
     for mut queue in queues {
@@ -577,7 +710,7 @@ pub async fn apply_weekly_rule_in_tx(
             continue;
         }
         let holds = &mut queue.hold_reasons.0;
-        let entered = match holds.iter().position(|h| is_weekly(h, provider)) {
+        let entered = match holds.iter().position(|h| is_weekly(h, provider, account)) {
             Some(i) if holds[i] == hold => continue,
             Some(i) => {
                 holds[i] = hold.clone();
@@ -621,9 +754,17 @@ pub async fn apply_weekly_rule_in_tx(
         Some(at) => at + delta(config.reset_grace)?,
         None => now + delta(verify_delay(config, 0))?,
     };
-    schedule_limit_check(conn, owner_id, provider, check_at).await?;
+    schedule_limit_check(conn, owner_id, provider, account, check_at).await?;
     if new_window {
-        limits::emit_changed(conn, owner_id, provider, Window::Weekly, correlation_id).await?;
+        limits::emit_changed(
+            conn,
+            owner_id,
+            provider,
+            account,
+            Window::Weekly,
+            correlation_id,
+        )
+        .await?;
     }
     Ok(effect)
 }
@@ -653,14 +794,14 @@ pub async fn reapply_reserve_in_tx(
     // Порядок блокировок как у приёма отчётов лимитов: сначала все строки провайдеров
     // в отсортированном порядке, потом события и очереди. Иначе смена порогов и отчёт
     // по разным провайдерам берут строки в разном порядке и ловят взаимоблокировку.
-    let advertised: Vec<String> = sqlx::query_scalar(
-        "select provider from machine_harnesses mh
+    let advertised: Vec<(String, String)> = sqlx::query_as(
+        "select mh.provider, mh.account from machine_harnesses mh
            join machines m on m.id=mh.machine_id
           where m.owner_id=$1 and mh.provider <> ''
          union
-         select provider from provider_limits where weekly_reserve_active
+         select provider, account from provider_limits where weekly_reserve_active
          union
-         select h->>'provider'
+         select h->>'provider', coalesce(h->>'account','owner')
            from conversations c
            join queue_state q on q.conversation_id=c.id
            cross join lateral jsonb_array_elements(q.hold_reasons) h
@@ -670,31 +811,31 @@ pub async fn reapply_reserve_in_tx(
     .bind(owner_id)
     .fetch_all(&mut *conn)
     .await?;
-    let mut providers: std::collections::BTreeSet<String> = advertised.into_iter().collect();
-    // Сессия в кранче без удержания тоже помнит провайдера через свой харнесс.
-    let waiting: Vec<String> = sqlx::query_scalar(
-        "select distinct c.harness from conversations c
+    let mut providers: std::collections::BTreeSet<(String, String)> =
+        advertised.into_iter().collect();
+    // Сессия в кранче без удержания тоже помнит провайдера и учётную запись через свой харнесс.
+    let waiting: Vec<(String, String)> = sqlx::query_as(
+        "select distinct c.harness, coalesce(mh.account,'owner') from conversations c
+           left join machine_harnesses mh on mh.machine_id=c.machine_id and mh.harness=c.harness
           where c.owner_id=$1 and (c.resume_pending or c.reserve_override_until is not null)",
     )
     .bind(owner_id)
     .fetch_all(&mut *conn)
     .await?;
-    providers.extend(
-        waiting
-            .iter()
-            .filter_map(|harness| harness::provider_of(harness))
-            .map(str::to_owned),
-    );
-    providers.retain(|provider| limits::known_provider(provider));
-    for provider in &providers {
-        limits::lock_provider(conn, provider).await?;
+    providers.extend(waiting.iter().filter_map(|(harness, account)| {
+        harness::provider_of(harness).map(|provider| (provider.to_owned(), account.clone()))
+    }));
+    providers.retain(|(provider, _)| limits::known_provider(provider));
+    for (provider, account) in &providers {
+        limits::lock_provider(conn, provider, account).await?;
     }
 
-    for provider in providers {
+    for (provider, account) in providers {
         let row: Option<ReserveState> = sqlx::query_as(
-            "select weekly_reserve_active,weekly_used_permille,weekly_resets_at,weekly_reserve_resets_at,weekly_low_count from provider_limits where provider=$1",
+            "select weekly_reserve_active,weekly_used_permille,weekly_resets_at,weekly_reserve_resets_at,weekly_low_count from provider_limits where provider=$1 and account=$2",
         )
         .bind(&provider)
+        .bind(&account)
         .fetch_optional(&mut *conn)
         .await?;
         let Some((active, used, weekly_resets, _reserve_resets, _low_count)) = row else {
@@ -709,6 +850,7 @@ pub async fn reapply_reserve_in_tx(
                     conn,
                     owner_id,
                     &provider,
+                    &account,
                     &harnesses,
                     now,
                     correlation_id,
@@ -728,6 +870,7 @@ pub async fn reapply_reserve_in_tx(
                     conn,
                     owner_id,
                     &provider,
+                    &account,
                     &harnesses,
                     now,
                     correlation_id,
@@ -737,44 +880,84 @@ pub async fn reapply_reserve_in_tx(
                 continue;
             }
             // Порог сменился: старые подтверждения выхода относятся к прежнему порогу.
-            sqlx::query("update provider_limits set weekly_low_count=0,weekly_low_at=null where provider=$1")
+            sqlx::query("update provider_limits set weekly_low_count=0,weekly_low_at=null where provider=$1 and account=$2")
                 .bind(&provider)
+                .bind(&account)
                 .execute(&mut *conn)
                 .await?;
             if used >= threshold {
-                apply_weekly_rule_in_tx(conn, owner_id, &provider, config, now, correlation_id)
-                    .await?;
+                apply_weekly_rule_in_tx(
+                    conn,
+                    owner_id,
+                    &provider,
+                    &account,
+                    config,
+                    now,
+                    correlation_id,
+                )
+                .await?;
             }
             continue;
         }
         if used >= threshold {
-            sqlx::query("update provider_limits set weekly_reserve_active=true,weekly_reserve_resets_at=$2,weekly_low_count=0,weekly_low_at=null,updated_at=$3 where provider=$1")
+            sqlx::query("update provider_limits set weekly_reserve_active=true,weekly_reserve_resets_at=$2,weekly_low_count=0,weekly_low_at=null,updated_at=$3 where provider=$1 and account=$4")
                 .bind(&provider)
                 .bind(weekly_resets)
                 .bind(now)
+                .bind(&account)
                 .execute(&mut *conn)
                 .await?;
-            apply_weekly_rule_in_tx(conn, owner_id, &provider, config, now, correlation_id).await?;
-            limits::emit_changed(conn, owner_id, &provider, Window::Weekly, correlation_id).await?;
+            apply_weekly_rule_in_tx(
+                conn,
+                owner_id,
+                &provider,
+                &account,
+                config,
+                now,
+                correlation_id,
+            )
+            .await?;
+            limits::emit_changed(
+                conn,
+                owner_id,
+                &provider,
+                &account,
+                Window::Weekly,
+                correlation_id,
+            )
+            .await?;
         }
     }
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn leave(
     conn: &mut PgConnection,
     owner_id: Uuid,
     provider: &str,
+    account: &str,
     harnesses: &[&str],
     now: DateTime<Utc>,
     correlation_id: Uuid,
     effect: &mut WeeklyEffect,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query("update provider_limits set weekly_reserve_active=false,weekly_reserve_resets_at=null,weekly_low_count=0,weekly_low_at=null,updated_at=$2 where provider=$1")
-        .bind(provider).bind(now).execute(&mut *conn).await?;
-    let marker = json!([{"reason":"weekly_reserve","provider":provider}]);
-    let ids: Vec<Uuid> = sqlx::query_scalar("select c.id from conversations c join queue_state q on q.conversation_id=c.id where c.owner_id=$1 and c.harness=any($2) and (q.hold_reasons @> $3 or c.reserve_override_until is not null) order by c.id")
-        .bind(owner_id).bind(harnesses).bind(&marker).fetch_all(&mut *conn).await?;
+    sqlx::query("update provider_limits set weekly_reserve_active=false,weekly_reserve_resets_at=null,weekly_low_count=0,weekly_low_at=null,updated_at=$2 where provider=$1 and account=$3")
+        .bind(provider).bind(now).bind(account).execute(&mut *conn).await?;
+    let marker = if account == canterlot_proto::limits::OWNER_ACCOUNT {
+        json!([{"reason":"weekly_reserve","provider":provider}])
+    } else {
+        json!([{"reason":"weekly_reserve","provider":provider,"account":account}])
+    };
+    let ids: Vec<Uuid> = sqlx::query_scalar(conversations_of_account!(
+        "and (q.hold_reasons @> $4 or c.reserve_override_until is not null) order by c.id"
+    ))
+    .bind(owner_id)
+    .bind(harnesses)
+    .bind(account)
+    .bind(&marker)
+    .fetch_all(&mut *conn)
+    .await?;
     let queues = lock_queues(conn, &ids).await?;
     #[derive(sqlx::FromRow)]
     struct Row {
@@ -786,14 +969,20 @@ async fn leave(
     }
     let rows: Vec<Row> = sqlx::query_as("select id,owner_id,crunch_enabled,resume_pending,reserve_override_until from conversations where id=any($1) order by id for no key update")
         .bind(&ids).fetch_all(&mut *conn).await?;
-    let hold_key = weekly_key(provider);
-    let payload =
+    let hold_key = weekly_key(provider, account);
+    let mut payload =
         json!({"provider":provider,"window":"weekly","hold_key":hold_key,"verified":true});
+    if account != canterlot_proto::limits::OWNER_ACCOUNT {
+        payload["account"] = json!(account);
+    }
     for (mut queue, row) in queues.into_iter().zip(rows) {
         let id = queue.conversation_id;
         debug_assert_eq!(id, row.id);
         let before = queue.hold_reasons.0.len();
-        queue.hold_reasons.0.retain(|h| !is_weekly(h, provider));
+        queue
+            .hold_reasons
+            .0
+            .retain(|h| !is_weekly(h, provider, account));
         let had = queue.hold_reasons.0.len() != before;
         if had {
             effect.left.push(id);
@@ -824,12 +1013,23 @@ async fn leave(
             effect.woken.push(id);
         }
     }
-    limits::emit_changed(conn, owner_id, provider, Window::Weekly, correlation_id).await
+    limits::emit_changed(
+        conn,
+        owner_id,
+        provider,
+        account,
+        Window::Weekly,
+        correlation_id,
+    )
+    .await
 }
 
 #[derive(Deserialize)]
 struct WakePayload {
     provider: String,
+    /// Нет в нагрузке `owner` и в заданиях, поставленных до учётных записей.
+    #[serde(default = "crate::model::owner_account")]
+    account: String,
     window: String,
     #[serde(default)]
     verified: bool,
@@ -853,27 +1053,30 @@ pub(crate) enum ResetCheck {
 pub(crate) async fn check_reset(
     conn: &mut PgConnection,
     provider: &str,
+    account: &str,
     window: Window,
     wake_at: DateTime<Utc>,
 ) -> Result<ResetCheck, sqlx::Error> {
     // Окна больше нет у провайдера: ограничивать им нечему, сброс подтверждён отчётом после срока.
     if window == Window::FiveHour {
-        let absent: Option<DateTime<Utc>> =
-            sqlx::query_scalar("select five_hour_absent_at from provider_limits where provider=$1")
-                .bind(provider)
-                .fetch_optional(&mut *conn)
-                .await?
-                .flatten();
+        let absent: Option<DateTime<Utc>> = sqlx::query_scalar(
+            "select five_hour_absent_at from provider_limits where provider=$1 and account=$2",
+        )
+        .bind(provider)
+        .bind(account)
+        .fetch_optional(&mut *conn)
+        .await?
+        .flatten();
         if absent.is_some_and(|at| at >= wake_at) {
             return Ok(ResetCheck::Verified);
         }
     }
     let row: Option<Reading> = sqlx::query_as(match window {
-        Window::Weekly => "select weekly_used_permille,weekly_resets_at,weekly_observed_at from provider_limits where provider=$1",
-        Window::FiveHour => "select five_hour_used_permille,five_hour_resets_at,five_hour_observed_at from provider_limits where provider=$1",
-        Window::Monthly => "select monthly_used_permille,monthly_resets_at,monthly_observed_at from provider_limits where provider=$1",
-        Window::WeeklyFable => "select weekly_fable_used_permille,weekly_fable_resets_at,weekly_fable_observed_at from provider_limits where provider=$1",
-    }).bind(provider).fetch_optional(conn).await?;
+        Window::Weekly => "select weekly_used_permille,weekly_resets_at,weekly_observed_at from provider_limits where provider=$1 and account=$2",
+        Window::FiveHour => "select five_hour_used_permille,five_hour_resets_at,five_hour_observed_at from provider_limits where provider=$1 and account=$2",
+        Window::Monthly => "select monthly_used_permille,monthly_resets_at,monthly_observed_at from provider_limits where provider=$1 and account=$2",
+        Window::WeeklyFable => "select weekly_fable_used_permille,weekly_fable_resets_at,weekly_fable_observed_at from provider_limits where provider=$1 and account=$2",
+    }).bind(provider).bind(account).fetch_optional(conn).await?;
     // Повтор доналимитного наблюдения не может подтвердить сброс: нужен более поздний сброс,
     // а без времени сброса - наблюдение не раньше ожидаемого.
     Ok(match row {
@@ -894,30 +1097,35 @@ pub(crate) async fn check_reset(
 async fn check_reset_confirmed(
     conn: &mut PgConnection,
     provider: &str,
+    account: &str,
     window: Window,
     wake_at: DateTime<Utc>,
 ) -> Result<ResetCheck, sqlx::Error> {
-    let check = check_reset(conn, provider, window, wake_at).await?;
+    let check = check_reset(conn, provider, account, window, wake_at).await?;
     if check != ResetCheck::Verified {
         return Ok(check);
     }
-    let confidence: Option<String> =
-        sqlx::query_scalar("select data_confidence from provider_limits where provider=$1")
-            .bind(provider)
-            .fetch_optional(&mut *conn)
-            .await?;
+    let confidence: Option<String> = sqlx::query_scalar(
+        "select data_confidence from provider_limits where provider=$1 and account=$2",
+    )
+    .bind(provider)
+    .bind(account)
+    .fetch_optional(&mut *conn)
+    .await?;
     let confidence = DataConfidence::from_stored(confidence.as_deref().unwrap_or("exact"));
     if confidence == DataConfidence::Exact {
         return Ok(ResetCheck::Verified);
     }
     // Исчезнувшее пятичасовое окно подтверждает отчёт об отсутствии, а не показание.
     if window == Window::FiveHour {
-        let absent: Option<DateTime<Utc>> =
-            sqlx::query_scalar("select five_hour_absent_at from provider_limits where provider=$1")
-                .bind(provider)
-                .fetch_optional(&mut *conn)
-                .await?
-                .flatten();
+        let absent: Option<DateTime<Utc>> = sqlx::query_scalar(
+            "select five_hour_absent_at from provider_limits where provider=$1 and account=$2",
+        )
+        .bind(provider)
+        .bind(account)
+        .fetch_optional(&mut *conn)
+        .await?
+        .flatten();
         if absent.is_some_and(|at| at >= wake_at) {
             return Ok(ResetCheck::Verified);
         }
@@ -926,13 +1134,14 @@ async fn check_reset_confirmed(
     // подтверждением не является, а ранний сдвиг `resets_at` стоит до срока.
     let readings: i64 = sqlx::query_scalar(
         "select count(distinct observed_at) from limit_snapshots
-         where provider=$1 and window_kind=$2 and observed_at >= $3
+         where provider=$1 and account=$4 and window_kind=$2 and observed_at >= $3
            and used_permille < 1000
            and (resets_at > $3 or resets_at is null)",
     )
     .bind(provider)
     .bind(window.as_str())
     .bind(wake_at)
+    .bind(account)
     .fetch_one(&mut *conn)
     .await?;
     if readings < 2 {
@@ -962,11 +1171,12 @@ pub async fn handle_wake_in_tx(
         None => return Ok(JobOutcome::Cancelled("invalid_payload")),
     };
     let provider = payload.provider.as_str();
-    if !limits::known_provider(provider) {
+    let account = payload.account.as_str();
+    if !limits::known_provider(provider) || !canterlot_proto::limits::valid_account(account) {
         return Ok(JobOutcome::Cancelled("invalid_payload"));
     }
-    // Порядок блокировок: задание, строка провайдера, очередь, разговор.
-    limits::share_provider(conn, provider).await?;
+    // Порядок блокировок: задание, строка пары, очередь, разговор.
+    limits::share_provider(conn, provider, account).await?;
     let mut by_clock = false;
     let mut episode_wake_at = None;
     if !payload.verified {
@@ -979,9 +1189,10 @@ pub async fn handle_wake_in_tx(
             h.0.into_iter().find_map(|h| match h {
                 HoldReason::QuotaExhausted {
                     provider: p,
+                    account: a,
                     window: w,
                     wake_at,
-                } if p == provider && w == window.as_str() => Some(wake_at),
+                } if p == provider && a == account && w == window.as_str() => Some(wake_at),
                 _ => None,
             })
         });
@@ -996,7 +1207,7 @@ pub async fn handle_wake_in_tx(
                 poll: false,
             });
         }
-        match check_reset_confirmed(conn, provider, window, wake_at).await? {
+        match check_reset_confirmed(conn, provider, account, window, wake_at).await? {
             ResetCheck::Verified => {}
             ResetCheck::NoReading if now >= wake_at + delta(config.unverified_wake_after)? => {
                 by_clock = true;
@@ -1049,7 +1260,7 @@ pub async fn handle_wake_in_tx(
             .hold_reasons
             .0
             .iter()
-            .position(|h| is_quota(h, provider, window.as_str()))
+            .position(|h| is_quota(h, provider, account, window.as_str()))
         else {
             return Ok(JobOutcome::Cancelled("hold_gone"));
         };
@@ -1066,9 +1277,10 @@ pub async fn handle_wake_in_tx(
     let (resume_queued, owner_queued): (bool, bool) = sqlx::query_as("select exists(select 1 from inputs where conversation_id=$1 and state in ('queued','dispatched','on_machine') and idempotency_key like 'wake:%'), exists(select 1 from inputs where conversation_id=$1 and state in ('queued','dispatched','on_machine') and idempotency_key not like 'wake:%')")
         .bind(id).fetch_one(&mut *conn).await?;
     let reserve: bool = sqlx::query_scalar(
-        "select coalesce((select weekly_reserve_active from provider_limits where provider=$1),false)",
+        "select coalesce((select weekly_reserve_active from provider_limits where provider=$1 and account=$2),false)",
     )
     .bind(provider)
+    .bind(account)
     .fetch_one(&mut *conn)
     .await?;
     let skipped = if queue.closed {
@@ -1296,11 +1508,21 @@ pub async fn handle_limit_check_in_tx(
     else {
         return Ok(JobOutcome::Cancelled("invalid_payload"));
     };
-    limits::lock_provider(conn, provider).await?;
+    // Нет ключа `account` — нагрузка `owner` или задание, поставленное до учётных записей.
+    let account = job
+        .payload
+        .get("account")
+        .and_then(Value::as_str)
+        .unwrap_or(canterlot_proto::limits::OWNER_ACCOUNT);
+    if !canterlot_proto::limits::valid_account(account) {
+        return Ok(JobOutcome::Cancelled("invalid_payload"));
+    }
+    limits::lock_provider(conn, provider, account).await?;
     let (active, entered, observed): (bool, Time, Time) = sqlx::query_as(
-        "select weekly_reserve_active,weekly_reserve_resets_at,weekly_observed_at from provider_limits where provider=$1",
+        "select weekly_reserve_active,weekly_reserve_resets_at,weekly_observed_at from provider_limits where provider=$1 and account=$2",
     )
     .bind(provider)
+    .bind(account)
     .fetch_one(&mut *conn)
     .await?;
     if !active {
@@ -1317,6 +1539,7 @@ pub async fn handle_limit_check_in_tx(
             conn,
             job.owner_id,
             provider,
+            account,
             &harnesses,
             now,
             correlation_id,
@@ -1359,6 +1582,7 @@ pub(crate) async fn disable_in_tx(
     for hold in holds {
         let HoldReason::QuotaExhausted {
             provider,
+            account,
             window,
             wake_at,
         } = hold
@@ -1367,7 +1591,7 @@ pub(crate) async fn disable_in_tx(
             continue;
         };
         let known: Option<Option<String>> = sqlx::query_scalar("select payload->>'resets_at' from scheduled_jobs where conversation_id=$1 and kind='wake' and payload->>'hold_key'=$2 order by created_at desc limit 1")
-            .bind(conversation_id).bind(quota_key(&provider, &window)).fetch_optional(&mut *conn).await?;
+            .bind(conversation_id).bind(quota_key(&provider, &account, &window)).fetch_optional(&mut *conn).await?;
         let resets_at = match known {
             Some(Some(at)) => DateTime::parse_from_rfc3339(&at)
                 .ok()
@@ -1377,6 +1601,7 @@ pub(crate) async fn disable_in_tx(
         };
         let pause = PauseReason::LimitReached {
             provider: Some(provider),
+            account,
             window: Some(window),
             resets_at,
         };
@@ -1410,16 +1635,19 @@ pub async fn spend_reserve(
     dispatcher: &Dispatcher,
     correlation_id: Uuid,
 ) -> Result<SpendOutcome, CrunchError> {
-    let harness: Option<String> =
-        sqlx::query_scalar("select harness from conversations where id=$1 and owner_id=$2")
+    let found: Option<(String, Uuid)> =
+        sqlx::query_as("select harness, machine_id from conversations where id=$1 and owner_id=$2")
             .bind(conversation_id)
             .bind(owner_id)
             .fetch_optional(pool)
             .await?;
-    let Some(harness) = harness else {
+    let Some((harness, machine_id)) = found else {
         return Err(CrunchError::NotFound);
     };
     let provider = harness::provider_of(&harness);
+    // Учётная запись берётся с машины разговора: резерв у каждой её свой.
+    let account =
+        limits::harness_account(&mut *pool.acquire().await?, machine_id, &harness).await?;
     let request = json!({"conversation_id": conversation_id});
     let outcome = idempotency::run_in_tx(
         pool,
@@ -1434,6 +1662,7 @@ pub async fn spend_reserve(
                 owner_id,
                 conversation_id,
                 provider,
+                account.clone(),
                 now,
                 correlation_id,
             ))
@@ -1451,11 +1680,12 @@ async fn spend_in_tx(
     owner_id: Uuid,
     id: Uuid,
     provider: Option<&'static str>,
+    account: String,
     now: DateTime<Utc>,
     correlation_id: Uuid,
 ) -> Result<SpendOutcome, CrunchError> {
     if let Some(provider) = provider {
-        limits::share_provider(conn, provider).await?;
+        limits::share_provider(conn, provider, &account).await?;
     }
     let mut queue: LockedQueue = sqlx::query_as("select q.* from queue_state q join conversations c on c.id=q.conversation_id where c.id=$1 and c.owner_id=$2 for update of q")
         .bind(id).bind(owner_id).fetch_optional(&mut *conn).await?.ok_or(CrunchError::NotFound)?;
@@ -1465,9 +1695,10 @@ async fn spend_in_tx(
         return Ok(SpendOutcome::NotHeld);
     };
     let (active, weekly_resets): (bool, Option<DateTime<Utc>>) = sqlx::query_as(
-        "select weekly_reserve_active,weekly_resets_at from provider_limits where provider=$1",
+        "select weekly_reserve_active,weekly_resets_at from provider_limits where provider=$1 and account=$2",
     )
     .bind(provider)
+    .bind(&account)
     .fetch_one(&mut *conn)
     .await?;
     let overridden = until.is_some_and(|until| until > now);
@@ -1475,7 +1706,7 @@ async fn spend_in_tx(
         .hold_reasons
         .0
         .iter()
-        .position(|h| is_weekly(h, provider));
+        .position(|h| is_weekly(h, provider, &account));
     if stored.is_none() && !(active && !overridden) {
         return Ok(if overridden {
             SpendOutcome::AlreadyContinued
@@ -1569,13 +1800,14 @@ async fn resume_at_reset_in_tx(
         p.0.into_iter().find_map(|reason| match reason {
             PauseReason::LimitReached {
                 provider: Some(provider),
+                account,
                 window: Some(window),
                 ..
-            } if window_from_wire(&window).is_some() => Some((provider, window)),
+            } if window_from_wire(&window).is_some() => Some((provider, account, window)),
             _ => None,
         })
     });
-    let Some((provider, window)) = pause else {
+    let Some((provider, account, window)) = pause else {
         // Повтор после уже взведённого одноразового продолжения не ошибка.
         let armed: bool = sqlx::query_scalar(
             "select exists(select 1 from scheduled_jobs where conversation_id=$1 and kind='wake'
@@ -1590,7 +1822,7 @@ async fn resume_at_reset_in_tx(
             return Err(CrunchError::InvalidState);
         });
     };
-    limits::lock_provider(conn, &provider).await?;
+    limits::lock_provider(conn, &provider, &account).await?;
     let mut queue: LockedQueue =
         sqlx::query_as("select * from queue_state where conversation_id=$1 for update")
             .bind(id)
@@ -1598,8 +1830,8 @@ async fn resume_at_reset_in_tx(
             .await?
             .ok_or(CrunchError::NotFound)?;
     let Some(position) = queue.pause_reasons.0.iter().position(|reason| {
-        matches!(reason, PauseReason::LimitReached { provider: Some(p), window: Some(w), .. }
-            if p == &provider && w == &window)
+        matches!(reason, PauseReason::LimitReached { provider: Some(p), account: a, window: Some(w), .. }
+            if p == &provider && a == &account && w == &window)
     }) else {
         return Err(CrunchError::InvalidState);
     };
@@ -1616,6 +1848,7 @@ async fn resume_at_reset_in_tx(
         id,
         &mut queue,
         &provider,
+        &account,
         window,
         resets_at,
         pending,
@@ -1692,10 +1925,12 @@ async fn cancel_resume_at_reset_in_tx(
     let Some(window) = window_from_wire(&payload.window) else {
         return Ok(CancelResumeOutcome::NotPending);
     };
-    if !limits::known_provider(&payload.provider) {
+    if !limits::known_provider(&payload.provider)
+        || !canterlot_proto::limits::valid_account(&payload.account)
+    {
         return Ok(CancelResumeOutcome::NotPending);
     }
-    limits::lock_provider(conn, &payload.provider).await?;
+    limits::lock_provider(conn, &payload.provider, &payload.account).await?;
     let mut queue: LockedQueue =
         sqlx::query_as("select * from queue_state where conversation_id=$1 for update")
             .bind(id)
@@ -1714,13 +1949,14 @@ async fn cancel_resume_at_reset_in_tx(
         .hold_reasons
         .0
         .iter()
-        .position(|hold| is_quota(hold, &payload.provider, window.as_str()))
+        .position(|hold| is_quota(hold, &payload.provider, &payload.account, window.as_str()))
     else {
         return Ok(CancelResumeOutcome::NotPending);
     };
     queue.hold_reasons.0.remove(position);
     let pause = PauseReason::LimitReached {
         provider: Some(payload.provider.clone()),
+        account: payload.account.clone(),
         window: Some(window.as_str().into()),
         resets_at: payload.resets_at,
     };
@@ -1764,27 +2000,32 @@ pub async fn request_poll(
     pool: &PgPool,
     registry: &Registry,
     provider: &str,
+    account: &str,
     min_interval: Duration,
     now: DateTime<Utc>,
 ) -> Result<bool, sqlx::Error> {
     Ok(
-        request_poll_outcome(pool, registry, provider, min_interval, false, now).await?
+        request_poll_outcome(pool, registry, provider, account, min_interval, false, now).await?
             == PollRequest::Sent,
     )
 }
 
+/// Опрос идёт только на подключённую машину, чей харнесс провайдера держит эту
+/// учётную запись: чужая подписка по ней не прочитается.
 pub async fn request_poll_outcome(
     pool: &PgPool,
     registry: &Registry,
     provider: &str,
+    account: &str,
     min_interval: Duration,
     owner_refresh: bool,
     now: DateTime<Utc>,
 ) -> Result<PollRequest, sqlx::Error> {
     let machines: Vec<Uuid> = sqlx::query_scalar(
-        "select distinct machine_id from machine_harnesses where provider=$1 order by machine_id",
+        "select distinct machine_id from machine_harnesses where provider=$1 and account=$2 order by machine_id",
     )
     .bind(provider)
+    .bind(account)
     .fetch_all(pool)
     .await?;
     let Some(sender) = machines
@@ -1800,8 +2041,8 @@ pub async fn request_poll_outcome(
     let Ok(permit) = sender.try_reserve() else {
         return Ok(PollRequest::NoMachine);
     };
-    let claimed: Option<String> = sqlx::query_scalar("insert into limit_polls(provider,last_requested_at) values($1,$2) on conflict(provider) do update set last_requested_at=excluded.last_requested_at where limit_polls.last_requested_at <= $3 returning provider")
-        .bind(provider).bind(now).bind(now - delta(min_interval)?).fetch_optional(pool).await?;
+    let claimed: Option<String> = sqlx::query_scalar("insert into limit_polls(provider,account,last_requested_at) values($1,$4,$2) on conflict(provider,account) do update set last_requested_at=excluded.last_requested_at where limit_polls.last_requested_at <= $3 returning provider")
+        .bind(provider).bind(now).bind(now - delta(min_interval)?).bind(account).fetch_optional(pool).await?;
     if claimed.is_none() {
         return Ok(PollRequest::Throttled);
     }
@@ -1809,6 +2050,7 @@ pub async fn request_poll_outcome(
         msg: Some(control_down::Msg::PollLimits(PollLimits {
             provider: provider.into(),
             owner_refresh,
+            account: account.into(),
         })),
     });
     Ok(PollRequest::Sent)

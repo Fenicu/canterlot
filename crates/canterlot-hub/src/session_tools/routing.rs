@@ -1374,11 +1374,32 @@ pub async fn status_view(
         .collect())
 }
 
-/// Снимок лимитов и статуса провайдеров для маршрута.
+/// Снимок лимитов и статуса провайдеров для маршрута с машины `machine_id`: по каждому
+/// провайдеру берётся учётная запись харнесса этой машины (нет харнесса — `owner`),
+/// так что подписка другой машины кандидата не краснит и не освобождает.
 pub async fn limits_view(
     conn: &mut PgConnection,
+    machine_id: Uuid,
 ) -> Result<HashMap<String, ProviderView>, sqlx::Error> {
-    let current = crate::limits::current(&mut *conn).await?;
+    let accounts: HashMap<String, String> = sqlx::query_as::<_, (String, String)>(
+        "select distinct on (provider) provider, account from machine_harnesses
+          where machine_id=$1 order by provider, account",
+    )
+    .bind(machine_id)
+    .fetch_all(&mut *conn)
+    .await?
+    .into_iter()
+    .collect();
+    let current: Vec<_> = crate::limits::current(&mut *conn)
+        .await?
+        .into_iter()
+        .filter(|row| {
+            row.account
+                == accounts
+                    .get(&row.provider)
+                    .map_or(canterlot_proto::limits::OWNER_ACCOUNT, String::as_str)
+        })
+        .collect();
     let mut out = status_view(conn).await?;
     for provider in current {
         let window = |state: Option<crate::limits::WindowState>| {
@@ -1407,11 +1428,14 @@ pub async fn limits_view(
 
 /// Отпечаток занятых пар: живые делегированные сессии владельца с той же
 /// разрешённой парой: `working`, `stalled`, `idle` с очередью, ожидающий толчок.
+/// Потолок `max_parallel` бережёт подписку, поэтому считаются только сессии той же
+/// учётной записи, что у харнесса машины `machine_id`, откуда идёт запуск.
 pub async fn live_counts(
     conn: &mut PgConnection,
     owner: Uuid,
+    machine_id: Uuid,
 ) -> Result<HashMap<(String, String), i64>, sqlx::Error> {
-    live_counts_filtered(conn, owner, true).await
+    live_counts_filtered(conn, owner, machine_id, true).await
 }
 
 /// Тот же отпечаток, но с корнями (F): запланированные сессии — корни, как
@@ -1420,19 +1444,24 @@ pub async fn live_counts(
 pub async fn live_counts_with_roots(
     conn: &mut PgConnection,
     owner: Uuid,
+    machine_id: Uuid,
 ) -> Result<HashMap<(String, String), i64>, sqlx::Error> {
-    live_counts_filtered(conn, owner, false).await
+    live_counts_filtered(conn, owner, machine_id, false).await
 }
 
 async fn live_counts_filtered(
     conn: &mut PgConnection,
     owner: Uuid,
+    machine_id: Uuid,
     children_only: bool,
 ) -> Result<HashMap<(String, String), i64>, sqlx::Error> {
     let rows: Vec<(String, String, i64)> = sqlx::query_as(
         "select c.harness,c.model,count(*) from conversations c
           join conversation_derived d on d.conversation_id=c.id
+          left join machine_harnesses own on own.machine_id=c.machine_id and own.harness=c.harness
+          left join machine_harnesses target on target.machine_id=$3 and target.harness=c.harness
           where c.owner_id=$1 and c.trashed_at is null
+            and coalesce(own.account,'owner')=coalesce(target.account,'owner')
             and (not $2 or c.parent_conversation_id is not null)
             and (d.activity_state in ('working','stalled')
               or (d.activity_state='idle' and d.queue_queued > 0)
@@ -1453,6 +1482,7 @@ async fn live_counts_filtered(
     )
     .bind(owner)
     .bind(children_only)
+    .bind(machine_id)
     .fetch_all(conn)
     .await?;
     Ok(rows
@@ -1605,8 +1635,8 @@ pub async fn preview(
     let machine = target.unwrap_or(caller.machine_id);
     let catalogs = load_catalogs(&mut tx, machine).await?;
     let list = whitelist::view(&mut tx, caller.owner_id).await?;
-    let limits = limits_view(&mut tx).await?;
-    let live = live_counts(&mut tx, caller.owner_id).await?;
+    let limits = limits_view(&mut tx, machine).await?;
+    let live = live_counts(&mut tx, caller.owner_id, machine).await?;
     let workdir = match target {
         Some(target) => {
             super::spawn::remote_workdir(&mut tx, target, args.workdir.as_deref()).await?

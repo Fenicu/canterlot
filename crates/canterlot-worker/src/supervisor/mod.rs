@@ -66,6 +66,20 @@ pub struct SupervisorSpec {
     pub delegate_mcp_servers: Vec<String>,
 }
 
+impl SupervisorSpec {
+    /// Учётная запись лимитов харнесса провайдера: её сопровождение ставит на каждый факт
+    /// лимита. Таблицы нет (старая спека) — `owner`.
+    pub fn limit_account(&self, provider: &str) -> &str {
+        let account = match provider {
+            "claude" => self.claude_code.as_ref().map(|c| c.account.as_str()),
+            "codex" => self.codex.as_ref().map(|c| c.account.as_str()),
+            "opencode" => self.opencode.as_ref().map(|c| c.account.as_str()),
+            _ => None,
+        };
+        account.unwrap_or(canterlot_proto::limits::OWNER_ACCOUNT)
+    }
+}
+
 /// Спека на диске глазами управляющей службы: она может быть записана другим релизом,
 /// поэтому читаются только поля проверки, а незнакомые ключи пропускаются. `SupervisorSpec`
 /// читает лишь сопровождение, запущенное тем же релизом, что её записал.
