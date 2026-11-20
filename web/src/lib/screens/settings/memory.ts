@@ -39,6 +39,37 @@ export function entryStatus(entry: { status: string; expired: boolean }): { word
   return { word: "Активна", tone: "ok" };
 }
 
+/** Кто менял запись: `{kind: owner | agent | import, ...}` из `updated_by`. */
+export function actorLabel(actor: unknown): string {
+  const value = (actor ?? {}) as { kind?: string; harness?: string };
+  if (value.kind === "owner") return "владельцем";
+  if (value.kind === "agent") return value.harness ? `агентом (${value.harness})` : "агентом";
+  if (value.kind === "import") return "импортом";
+  return "неизвестно кем";
+}
+
+/** «Изменено владельцем, 1 нояб., 09:05»: кто и когда менял запись, одной короткой строкой. */
+export function changedLine(entry: { updated_by: unknown; updated_at: string }): string {
+  const when = new Date(entry.updated_at).toLocaleString("ru-RU", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  return `Изменено ${actorLabel(entry.updated_by)}, ${when}`;
+}
+
+/** Запоминает проекты загруженных записей: список фильтра не сужается вместе с выборкой. */
+export function collectProjects(seen: Map<string, string>, entries: { project?: string | null; project_label?: string | null }[]): void {
+  for (const entry of entries) {
+    if (entry.project) seen.set(entry.project, entry.project_label ?? entry.project);
+  }
+}
+
+export function projectOptions(seen: Map<string, string>): { value: string; label: string }[] {
+  const rows = [...seen].map(([value, label]) => ({ value, label })).sort((a, b) => a.label.localeCompare(b.label, "ru") || a.value.localeCompare(b.value));
+  return [{ value: "", label: "Все проекты" }, ...rows];
+}
+
+export function kindOptions(): { value: string; label: string }[] {
+  return [{ value: "", label: "Все виды" }, ...KINDS];
+}
+
 /** Строка памяти в карточке сессии: домен, «нет памяти» или «конфликт домена». */
 export function sessionMemoryLabel(detail: { memory_domain?: string | null; memory_conflict?: boolean }): string {
   if (detail.memory_domain === "work") return "Работа";

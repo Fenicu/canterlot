@@ -175,6 +175,7 @@ test('session_info_shows_memory_domain_or_no_memory', async ({ page }) => {
 
   Object.assign(detail, { memory_domain: 'personal', memory_project: '/h/home/alpha', memory_conflict: false });
   await expect(await memoryRow()).toContainText('Память: Личное');
+  await expect(page.locator('[data-role="session-memory"] code')).toHaveText('/h/home/alpha');
 
   Object.assign(detail, { memory_domain: 'work' });
   await expect(await memoryRow()).toContainText('Память: Работа');
@@ -184,4 +185,113 @@ test('session_info_shows_memory_domain_or_no_memory', async ({ page }) => {
 
   Object.assign(detail, { memory_domain: null, memory_conflict: true });
   await expect(await memoryRow()).toContainText('Память: конфликт домена');
+  await expect(page.locator('[data-role="session-memory"] code')).toHaveCount(0);
+});
+
+const ALPHA = '/h/work/alpha';
+const BETA = '/h/work/beta';
+
+test('filters_by_project_and_kind', async ({ page }) => {
+  const { api } = await open(page, (hub) => {
+    hub.seedMemory({ domain: 'work', subject: 'Альфа: ловушка', kind: 'gotcha', level: 'project', project: ALPHA, project_label: 'alpha', updated_by: { kind: 'agent', harness: 'claude_code' } });
+    hub.seedMemory({ domain: 'work', subject: 'Бета: решение', kind: 'decision', level: 'project', project: BETA, project_label: 'beta' });
+    hub.seedMemory({ domain: 'work', subject: 'Общая ловушка', kind: 'gotcha' });
+  });
+  const project = page.getByRole('combobox', { name: 'Проект' });
+  const kind = page.getByRole('combobox', { name: 'Вид записей' });
+  await expect(project.locator('option')).toHaveText(['Все проекты', 'alpha', 'beta']);
+
+  await project.selectOption(ALPHA);
+  await expect(rowTitles(page)).toHaveText(['Альфа: ловушка']);
+  // Список проектов не сужается вместе с выборкой.
+  await expect(project.locator('option')).toHaveText(['Все проекты', 'alpha', 'beta']);
+  expect(api.memoryQueries.at(-1)).toMatchObject({ domain: 'work', project: ALPHA });
+
+  await project.selectOption('');
+  await kind.selectOption('gotcha');
+  await expect(rowTitles(page)).toHaveText(['Общая ловушка', 'Альфа: ловушка']);
+  await expect(page.getByText('Бета: решение')).toHaveCount(0);
+  expect(api.memoryQueries.at(-1)).toMatchObject({ kind: 'gotcha' });
+  expect(api.memoryQueries.at(-1)?.project).toBeUndefined();
+
+  await project.selectOption(BETA);
+  await expect(page.locator('[data-memory-row]')).toHaveCount(0);
+  await expect(page.locator('[data-role="memory-empty"]')).toBeVisible();
+
+  // Смена домена сбрасывает фильтры: личный список не прячется за чужим проектом.
+  await page.getByRole('radiogroup', { name: 'Домен памяти' }).getByRole('radio', { name: 'Личное' }).check();
+  await expect(rowTitles(page)).toHaveText(['Рецепт борща']);
+  await expect(project.locator('option')).toHaveText(['Все проекты']);
+
+  // Строка называет, кем и когда запись менялась.
+  await page.getByRole('radiogroup', { name: 'Домен памяти' }).getByRole('radio', { name: 'Работа' }).check();
+  await expect(page.locator('[data-memory-row]', { hasText: 'Альфа: ловушка' })).toContainText('Изменено агентом (claude_code)');
+  await expect(page.locator('[data-memory-row]', { hasText: 'Общая ловушка' })).toContainText('Изменено владельцем');
+});
+
+test('level_change_saves_with_version', async ({ page }) => {
+  const { api } = await open(page, (hub) => { hub.seedMemory({ domain: 'work', subject: 'Правило сборки', body: 'Собирать из корня' }); });
+  const row = () => [...api.memoryEntries.values()].find((entry) => entry.subject === 'Правило сборки')!;
+  await page.locator('[data-memory-row]', { hasText: 'Правило сборки' }).click();
+  const sheet = page.getByRole('dialog', { name: 'Запись' });
+  const level = sheet.getByRole('combobox', { name: 'Уровень' });
+  await expect(level).toHaveValue('domain');
+
+  await level.selectOption('project');
+  await expect(sheet.getByRole('button', { name: 'Сохранить', exact: true })).toBeDisabled();
+  await sheet.getByRole('textbox', { name: 'Каталог проекта' }).fill(ALPHA);
+  await sheet.getByRole('button', { name: 'Сохранить', exact: true }).click();
+  await expect(sheet.locator('[data-role="memory-version"]')).toHaveText('Версия 2');
+  expect(row()).toMatchObject({ level: 'project', project: ALPHA, version: 2 });
+  await expect(sheet.getByRole('textbox', { name: 'Каталог проекта' })).toHaveCount(0);
+  await expect(level).toHaveValue('project');
+
+  await level.selectOption('domain');
+  await sheet.getByRole('button', { name: 'Сохранить', exact: true }).click();
+  await expect(sheet.locator('[data-role="memory-version"]')).toHaveText('Версия 3');
+  expect(row()).toMatchObject({ level: 'domain', project: null, version: 3 });
+
+  // Устаревшая версия при смене уровня даёт тот же запрос перезагрузки.
+  api.updateMemory(row().id, { domain: 'work', expected_version: 3, body: 'Правка с другого устройства' });
+  await level.selectOption('project');
+  await sheet.getByRole('textbox', { name: 'Каталог проекта' }).fill(BETA);
+  await sheet.getByRole('button', { name: 'Сохранить', exact: true }).click();
+  await expect(sheet.locator('[data-role="memory-conflict"]')).toContainText('версия 4');
+  expect(row().level).toBe('domain');
+});
+
+test('revision_view_and_restore', async ({ page }) => {
+  const { api } = await open(page, (hub) => {
+    const seeded = hub.seedMemory({ domain: 'work', subject: 'Адрес стенда', body: 'Первый текст записи' });
+    hub.updateMemory(seeded.id, { domain: 'work', expected_version: 1, body: 'Второй текст записи' });
+    hub.updateMemory(seeded.id, { domain: 'work', expected_version: 2, body: 'Третий текст записи' });
+  });
+  const entry = () => [...api.memoryEntries.values()].find((row) => row.subject === 'Адрес стенда')!;
+
+  await page.locator('[data-memory-row]', { hasText: 'Адрес стенда' }).click();
+  const sheet = page.getByRole('dialog', { name: 'Запись' });
+  await expect(sheet.locator('[data-role="memory-version"]')).toHaveText('Версия 3');
+  await sheet.getByText('Прошлые версии').click();
+  const list = sheet.locator('[data-role="memory-revisions"]');
+  await expect(list.getByRole('button')).toHaveCount(2);
+
+  await list.getByRole('button', { name: /Версия 1/ }).click();
+  const view = sheet.locator('[data-role="memory-revision-body"]');
+  await expect(view).toHaveText('Первый текст записи');
+  await sheet.getByRole('button', { name: 'Вернуть эту версию' }).click();
+  await expect(sheet.locator('[data-role="memory-version"]')).toHaveText('Версия 4');
+  await expect(sheet.getByRole('textbox', { name: 'Текст' })).toHaveValue('Первый текст записи');
+  expect(entry()).toMatchObject({ version: 4, body: 'Первый текст записи' });
+  // Новая версия видна в списке прошлых, прежняя третья тоже.
+  await expect(list.getByRole('button')).toHaveCount(3);
+
+  // Версию открыли, пока запись менялась в другом месте: перезапись отклонена, текст не потерян.
+  await list.getByRole('button', { name: /Версия 2/ }).click();
+  api.updateMemory(entry().id, { domain: 'work', expected_version: 4, body: 'Правка с другого устройства' });
+  await sheet.getByRole('button', { name: 'Вернуть эту версию' }).click();
+  const prompt = sheet.locator('[data-role="memory-conflict"]');
+  await expect(prompt).toContainText('версия 5');
+  expect(entry().body).toBe('Правка с другого устройства');
+  await prompt.getByRole('button', { name: 'Загрузить актуальную версию' }).click();
+  await expect(sheet.getByRole('textbox', { name: 'Текст' })).toHaveValue('Правка с другого устройства');
 });

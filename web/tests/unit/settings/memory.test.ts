@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { ApiError } from '#lib/api/http.js';
 import {
+  actorLabel,
+  changedLine,
+  collectProjects,
+  kindOptions,
+  projectOptions,
   DOMAINS,
   conflictVersion,
   dateToValidUntil,
@@ -76,6 +81,41 @@ describe('expiry date field', () => {
     expect(validUntilToDate(stamp)).toBe('2027-03-05');
     expect(dateToValidUntil('')).toBeNull();
     expect(validUntilToDate(null)).toBe('');
+  });
+});
+
+describe('who changed an entry', () => {
+  it('names the actor in Russian', () => {
+    expect(actorLabel({ kind: 'owner' })).toBe('владельцем');
+    expect(actorLabel({ kind: 'agent', harness: 'claude_code' })).toBe('агентом (claude_code)');
+    expect(actorLabel({ kind: 'agent' })).toBe('агентом');
+    expect(actorLabel({ kind: 'import', bundle_id: 'b1' })).toBe('импортом');
+    expect(actorLabel(null)).toBe('неизвестно кем');
+  });
+
+  it('puts the actor and a time in one compact line', () => {
+    const line = changedLine({ updated_by: { kind: 'owner' }, updated_at: '2026-11-01T09:05:00Z' });
+    expect(line.startsWith('Изменено владельцем, ')).toBe(true);
+    expect(line.length).toBeLessThan(60);
+  });
+});
+
+describe('project filter options', () => {
+  it('keeps every project seen, once, labelled by its last segment', () => {
+    const seen = new Map<string, string>();
+    collectProjects(seen, [{ project: '/h/work/alpha', project_label: 'alpha' }, { project: null, project_label: null }]);
+    collectProjects(seen, [{ project: '/h/work/beta', project_label: 'beta' }, { project: '/h/work/alpha', project_label: 'alpha' }]);
+    expect(projectOptions(seen)).toEqual([
+      { value: '', label: 'Все проекты' },
+      { value: '/h/work/alpha', label: 'alpha' },
+      { value: '/h/work/beta', label: 'beta' }
+    ]);
+  });
+
+  it('offers every kind plus "all kinds"', () => {
+    const options = kindOptions();
+    expect(options[0]).toEqual({ value: '', label: 'Все виды' });
+    expect(options).toHaveLength(9);
   });
 });
 

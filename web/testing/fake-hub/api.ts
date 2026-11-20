@@ -286,6 +286,8 @@ export class FakeHubApi {
 	readonly memoryRevisionLog = new Map<string, MemoryRevisionView[]>();
 	/** Обращения экрана к памяти по порядку: так тест видит, что домены не смешиваются. */
 	readonly memoryCalls: { method: string; domain: string | null; id: string | null }[] = [];
+	/** Query-параметры запросов списка: фильтры проекта и вида доходят до хаба. */
+	readonly memoryQueries: Record<string, string>[] = [];
 	hibernateIdleMinutes: number | null = 60;
 	readonly promptSuggestions = new Map<string, components['schemas']['PromptSuggestionView']>();
 	readonly limitSettingsKeys: string[] = [];
@@ -526,8 +528,11 @@ export class FakeHubApi {
 		if (domain !== 'work' && domain !== 'personal') throw new FakeMemoryError(400, 'invalid_request', 'Некорректный запрос', { field: 'domain' });
 		const status = query.get('status') ?? 'active';
 		const text = (query.get('q') ?? '').toLowerCase();
+		const project = query.get('project');
+		const kind = query.get('kind');
+		this.memoryQueries.push(Object.fromEntries(query));
 		const items = [...this.memoryEntries.values()]
-			.filter((row) => row.domain === domain && row.status === status && (!text || `${row.subject} ${row.body}`.toLowerCase().includes(text)))
+			.filter((row) => row.domain === domain && row.status === status && (!project || row.project === project) && (!kind || row.kind === kind) && (!text || `${row.subject} ${row.body}`.toLowerCase().includes(text)))
 			.sort((a, b) => b.updated_at.localeCompare(a.updated_at) || b.id.localeCompare(a.id));
 		return { items, next_cursor: null };
 	}
@@ -555,13 +560,21 @@ export class FakeHubApi {
 		return this.seedMemory({ domain: body.domain, subject: body.subject, body: body.body, kind: body.kind, level: body.level, project: body.level === 'project' ? (body.project ?? null) : null, project_label: body.level === 'project' ? (body.project ?? '').split('/').at(-1) ?? null : null, valid_until: body.valid_until ?? null });
 	}
 
-	updateMemory(id: string, body: { domain: string; expected_version?: number | null; kind?: string | null; subject?: string | null; body?: string | null; valid_until?: string | null; force_secret_warning?: boolean | null }): MemoryEntryView {
+	updateMemory(id: string, body: { domain: string; expected_version?: number | null; kind?: string | null; subject?: string | null; body?: string | null; level?: string | null; project?: string | null; valid_until?: string | null; force_secret_warning?: boolean | null }): MemoryEntryView {
 		this.memoryCalls.push({ method: 'PUT', domain: body.domain, id });
 		const row = this.memoryRow(id, body.domain);
 		if (body.expected_version == null) throw new FakeMemoryError(400, 'invalid_request', 'Некорректный запрос', { field: 'expected_version' });
 		if (body.expected_version !== row.version) throw new FakeMemoryError(409, 'version_conflict', 'Запись уже изменена, обновите её', { current_version: row.version });
 		this.screenMemory([body.subject ?? undefined, body.body ?? undefined], body.force_secret_warning ?? undefined);
+		let place: Partial<MemoryEntryView> = {};
+		if (body.level === 'domain') place = { level: 'domain', project: null, project_label: null };
+		if (body.level === 'project') {
+			const project = row.project ?? body.project ?? null;
+			if (!project) throw new FakeMemoryError(422, 'bad_level', 'Уровень проекта требует проект');
+			place = { level: 'project', project, project_label: project.split('/').at(-1) ?? project };
+		}
 		return this.touchMemory(row, 'update', {
+			...place,
 			...(body.kind ? { kind: body.kind } : {}), ...(body.subject ? { subject: body.subject } : {}), ...(body.body ? { body: body.body } : {}),
 			valid_until: body.valid_until ?? null
 		});

@@ -33,7 +33,7 @@
   {#if error}<p class="error" role="alert">{error}</p>{#if mode === null}<button type="button" onclick={load}>Повторить</button>{/if}{/if}
   {#if mode !== null}
     <Segmented name="claude-auto-memory" label="Встроенная память Claude" options={[{ value: 'on', label: 'Включена' }, { value: 'off', label: 'Выключена' }]} bind:value={() => mode ?? 'on', (value) => void save(value === 'off' ? 'off' : 'on')} />
-    <p class="note">Действует на сессии в режиме «как у владельца» после их перезапуска; воркеры старше 1.43 настройку не применяют</p>
+    <p class="note">Изменение действует с ближайшего запуска сессии: уже работающие сессии остаются в прежнем режиме, пока их не запустят заново. Касается сессий в режиме «как у владельца»; воркеры старше 1.43 настройку не применяют</p>
   {:else if !error}
     <p>Загружаю настройку встроенной памяти…</p>
   {/if}

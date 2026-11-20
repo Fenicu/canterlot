@@ -8,7 +8,7 @@
   import Sheet from '#lib/ui/Sheet.svelte';
   import Textarea from '#lib/ui/Textarea.svelte';
   import {
-    KINDS, conflictVersion, dateToValidUntil, entryStatus, kindLabel, levelLabel, secretClass, validUntilToDate,
+    KINDS, actorLabel, conflictVersion, dateToValidUntil, entryStatus, kindLabel, levelLabel, secretClass, validUntilToDate,
     type MemoryDomain, type MemoryEntry, type MemoryRevision
   } from './memory.js';
 
@@ -27,8 +27,9 @@
   let subject = $state(untrack(() => entry?.subject ?? ''));
   let body = $state(untrack(() => entry?.body ?? ''));
   let until = $state(untrack(() => validUntilToDate(entry?.valid_until)));
-  let level = $state<'domain' | 'project'>('domain');
+  let level = $state<'domain' | 'project'>(untrack(() => (entry?.level === 'project' ? 'project' : 'domain')));
   let project = $state('');
+  let picked = $state<MemoryRevision | null>(null);
 
   let busy = $state(false);
   let error = $state('');
@@ -44,10 +45,13 @@
   const status = $derived(current ? entryStatus(current) : null);
   const archived = $derived(current?.status === 'archived');
   const title = $derived(current ? 'Запись' : 'Новая запись');
-  const canSave = $derived(!busy && subject.trim() !== '' && body.trim() !== '' && (current !== null || level === 'domain' || project.trim() !== ''));
+  /** Запись переводят из домена в проект: каталог проекта нужен, пока записи его не назвали. */
+  const needsProject = $derived(level === 'project' && (current === null || current.level !== 'project'));
+  const canSave = $derived(!busy && subject.trim() !== '' && body.trim() !== '' && (!needsProject || project.trim() !== ''));
 
   function fill(next: MemoryEntry) {
     current = next; kind = next.kind; subject = next.subject; body = next.body; until = validUntilToDate(next.valid_until);
+    level = next.level === 'project' ? 'project' : 'domain'; project = '';
   }
   function clearMessages() { error = ''; notice = ''; conflict = null; secret = ''; }
 
@@ -69,7 +73,8 @@
       const key = crypto.randomUUID();
       const text = { kind, subject: subject.trim(), body, valid_until: dateToValidUntil(until), force_secret_warning: force || undefined };
       if (current) {
-        const next = (await updateMemory(current.id, { domain, expected_version: current.version, ...text }, key)).data;
+        const place = level !== current.level ? { level, project: level === 'project' ? project.trim() : undefined } : {};
+        const next = (await updateMemory(current.id, { domain, expected_version: current.version, ...place, ...text }, key)).data;
         fill(next); notice = `Сохранено, версия ${next.version}`;
       } else {
         const created = (await createMemory({ domain, level, project: level === 'project' ? project.trim() : undefined, ...text }, key)).data;
@@ -104,6 +109,19 @@
     const target = current;
     if (!target) return;
     void run(async () => { await deleteMemory(target.id, domain, crypto.randomUUID()); onchanged(); onclose(); }, 'Не удалось удалить запись');
+  }
+
+  /** Тело выбранной версии пишется как новая версия записи: история не теряется. */
+  function restoreRevision() {
+    const target = current; const old = picked;
+    if (!target || !old) return;
+    void run(async () => {
+      const next = (await updateMemory(target.id, { domain, expected_version: target.version, body: old.body }, crypto.randomUUID())).data;
+      fill(next); picked = null; revisions = null;
+      notice = `Версия ${old.version} возвращена как версия ${next.version}`;
+      onchanged();
+      await loadRevisions();
+    }, 'Не удалось вернуть версию. Повторите при восстановлении связи');
   }
 
   async function loadRevisions() {
@@ -151,15 +169,13 @@
           <input {id} type="date" bind:value={until} disabled={archived} aria-describedby={describedby} aria-invalid={invalid} />
         {/snippet}
       </Field>
-      {#if !current}
-        <Select label="Уровень" options={[{ value: 'domain', label: 'Весь домен' }, { value: 'project', label: 'Один проект' }]} bind:value={level} />
-        {#if level === 'project'}
-          <Field label="Каталог проекта" hint="Канонический рабочий каталог проекта">
-            {#snippet children({ id, describedby, invalid })}
-              <input {id} type="text" bind:value={project} placeholder="/h/work/project" spellcheck="false" autocapitalize="off" aria-describedby={describedby} aria-invalid={invalid} />
-            {/snippet}
-          </Field>
-        {/if}
+      <Select label="Уровень" options={[{ value: 'domain', label: 'Весь домен' }, { value: 'project', label: 'Один проект' }]} bind:value={level} disabled={archived} />
+      {#if needsProject}
+        <Field label="Каталог проекта" hint="Канонический рабочий каталог проекта">
+          {#snippet children({ id, describedby, invalid })}
+            <input {id} type="text" bind:value={project} placeholder="/h/work/project" spellcheck="false" autocapitalize="off" aria-describedby={describedby} aria-invalid={invalid} />
+          {/snippet}
+        </Field>
       {/if}
       {#if !archived}
         <div class="actions">
@@ -195,9 +211,20 @@
         {#if revisions && revisions.length === 0}<p class="note">Прошлых версий нет</p>{/if}
         <ul data-role="memory-revisions">
           {#each revisions ?? [] as revision (revision.id)}
-            <li><strong>Версия {revision.version}</strong> <span class="note">{new Date(revision.at).toLocaleString('ru-RU')}</span><span class="old">{revision.subject}</span></li>
+            <li>
+              <button type="button" class="revision" aria-pressed={picked?.id === revision.id} onclick={() => picked = revision}>
+                <strong>Версия {revision.version}</strong> <span class="note">{new Date(revision.at).toLocaleString('ru-RU')} · {actorLabel(revision.actor)}</span><span class="old">{revision.subject}</span>
+              </button>
+            </li>
           {/each}
         </ul>
+        {#if picked}
+          <div class="picked" data-role="memory-revision">
+            <p class="note">Версия {picked.version}: {picked.subject}</p>
+            <pre data-role="memory-revision-body">{picked.body}</pre>
+            {#if !archived}<Button onclick={restoreRevision}>Вернуть эту версию</Button>{/if}
+          </div>
+        {/if}
       </details>
     {/if}
   </div>
@@ -222,7 +249,10 @@
   .confirm-actions { display: flex; flex-wrap: wrap; gap: var(--s3); }
   .revisions summary { min-height: var(--target); display: flex; align-items: center; color: var(--accent-link); cursor: pointer; }
   .revisions ul { display: grid; gap: var(--s3); margin: var(--s0); padding: var(--s0); list-style: none; }
-  .revisions li { display: flex; flex-wrap: wrap; gap: var(--s2) var(--s4); }
+  .revision { display: flex; flex-wrap: wrap; gap: var(--s2) var(--s4); width: 100%; min-height: var(--target); padding: var(--s3) var(--s4); border: 0; border-radius: var(--radius-sm); background: var(--transparent); color: inherit; text-align: left; }
+  .revision[aria-pressed='true'] { background: var(--selected); }
+  .picked { display: grid; gap: var(--s4); margin-top: var(--s4); padding: var(--s5) var(--s6); border-radius: var(--radius-card); background: var(--raised); }
+  .picked pre { margin: var(--s0); font: inherit; white-space: pre-wrap; overflow-wrap: anywhere; }
   .note { margin: var(--s0); color: var(--muted); font-size: var(--fs-sm); }
   .old { flex-basis: 100%; overflow-wrap: anywhere; color: var(--secondary); font-size: var(--fs-sm); }
 </style>

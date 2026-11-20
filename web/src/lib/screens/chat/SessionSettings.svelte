@@ -342,7 +342,7 @@
 					<br /><code>{chat.detail.workdir}</code>
 				{/if}
 			</p>
-			<p class="note" data-role="session-memory">Память: <strong data-tone={chat.detail?.memory_domain ? 'ok' : 'warn'}>{sessionMemoryLabel(chat.detail ?? {})}</strong></p>
+			<p class="note" data-role="session-memory">Память: <strong data-tone={chat.detail?.memory_domain ? 'ok' : 'warn'}>{sessionMemoryLabel(chat.detail ?? {})}</strong>{#if chat.detail?.memory_project}<br /><code>{chat.detail.memory_project}</code>{/if}</p>
 		</div>
 
 		<div class="pair">

@@ -40,6 +40,8 @@ test('settings_categories_hold_login_connection_theme_enter_install_and_signout'
   await expect(memory).toBeVisible();
   await expect(memory.getByRole('radio', { name: 'Включена' })).toBeChecked();
   await expect(main.getByText('воркеры старше 1.43 настройку не применяют')).toBeVisible();
+  await expect(main.getByText('Изменение действует с ближайшего запуска сессии')).toBeVisible();
+  await expect(main.getByText('уже работающие сессии остаются в прежнем режиме')).toBeVisible();
   await memory.getByRole('radio', { name: 'Выключена' }).check();
   await expect(memory.getByRole('radio', { name: 'Выключена' })).toBeChecked();
   await page.reload();
