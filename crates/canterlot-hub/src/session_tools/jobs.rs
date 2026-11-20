@@ -96,11 +96,12 @@ enum Action {
     SpawnAttributes,
     SettingsChange,
     SettingsExpire,
+    JobResult,
 }
 
 impl Action {
     #[cfg(test)]
-    const ALL: [Self; 13] = [
+    const ALL: [Self; 14] = [
         Self::Event,
         Self::MachineEvent,
         Self::Note,
@@ -114,6 +115,7 @@ impl Action {
         Self::SpawnAttributes,
         Self::SettingsChange,
         Self::SettingsExpire,
+        Self::JobResult,
     ];
 
     fn parse(value: &str) -> Option<Self> {
@@ -131,6 +133,7 @@ impl Action {
             "spawn_attributes" => Some(Self::SpawnAttributes),
             "settings_change" => Some(Self::SettingsChange),
             "settings_expire" => Some(Self::SettingsExpire),
+            "job_result" => Some(Self::JobResult),
             _ => None,
         }
     }
@@ -293,6 +296,74 @@ pub async fn run_in_tx(
                 note.text,
                 note.origin,
                 note.dedupe_key,
+                now,
+                correlation_id,
+            )
+            .await
+        }
+        Action::JobResult => {
+            let Some(job_id) = job
+                .payload
+                .get("job_id")
+                .and_then(Value::as_str)
+                .and_then(|value| Uuid::parse_str(value).ok())
+            else {
+                return Ok(JobOutcome::Cancelled("invalid_payload"));
+            };
+            let Some(task) = crate::inplace_jobs::load(conn, job_id).await? else {
+                return Ok(JobOutcome::Cancelled("job_missing"));
+            };
+            // Итог получает только тот разговор, что заказал задачу, пока он существует, не
+            // в архиве и в том же домене памяти: иначе ни сообщения, ни следа.
+            if task.conversation_id != Some(subscriber) {
+                return Ok(JobOutcome::Cancelled("not_the_caller"));
+            }
+            let Some(facts) = crate::inplace_jobs::caller_facts(conn, subscriber).await? else {
+                return Ok(JobOutcome::Cancelled("caller_deleted"));
+            };
+            if facts.archived {
+                return Ok(JobOutcome::Cancelled("caller_archived"));
+            }
+            if facts.memory_domain.as_deref() != Some(task.domain.as_str()) {
+                return Ok(JobOutcome::Cancelled("domain_mismatch"));
+            }
+            if let Some(at) = crate::crunch::notification_hold_in_tx(
+                conn,
+                subscriber,
+                now,
+                limits.reset_grace,
+                retry_delay,
+            )
+            .await?
+            {
+                return Ok(JobOutcome::Retry { at, poll: false });
+            }
+            let machine = crate::inplace_jobs::machine_name(conn, task.machine_id).await?;
+            let text = crate::inplace_jobs::message_text(&task, &machine);
+            let event = origin::HubEvent {
+                kind: "job_result".to_owned(),
+                state: Some(task.state.clone()),
+                machine_id: Some(task.machine_id),
+                machine_name: Some(origin::clean_title(&machine)),
+                details: Some(json!({
+                    "job_id": task.id,
+                    "title": task.title,
+                    "exit_code": task.exit_code,
+                    "duration_ms": task.duration_ms,
+                    "output_bytes": task.output_bytes,
+                    "truncated": task.truncated,
+                    "reason": task.end_reason,
+                })),
+                ..origin::HubEvent::default()
+            };
+            let origin = origin::with_event(origin::note_origin(0), event);
+            deliver(
+                conn,
+                job,
+                subscriber,
+                text,
+                Some(origin),
+                Some(format!("job:{}", task.id)),
                 now,
                 correlation_id,
             )
@@ -723,7 +794,8 @@ pub async fn abandon_in_tx(
         return Ok(false);
     };
     match action {
-        Action::Event | Action::Note | Action::MachineEvent => Ok(false),
+        // Итог задачи не держит ничего, что надо закрывать: задача остаётся у владельца.
+        Action::Event | Action::Note | Action::MachineEvent | Action::JobResult => Ok(false),
         Action::Spawn => {
             spawn::abandon_spawn_in_tx(conn, conversation, payload, now, correlation_id)
                 .await
@@ -797,6 +869,7 @@ mod tests {
                     "outage_id": Uuid::now_v7(),
                 }),
                 Action::Note => json!({"action": "note"}),
+                Action::JobResult => json!({"action": "job_result", "job_id": Uuid::now_v7()}),
                 Action::Spawn => json!({"action": "spawn", "request_id": Uuid::now_v7()}),
                 Action::SpawnClose => json!({
                     "action": "spawn_close",

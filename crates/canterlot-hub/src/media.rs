@@ -505,7 +505,7 @@ pub async fn put(
     .await
 }
 
-async fn receive(
+pub(crate) async fn receive(
     store: &dyn BlobStore,
     header: &Header,
     body: BoxStream<'static, Result<Bytes, io::Error>>,

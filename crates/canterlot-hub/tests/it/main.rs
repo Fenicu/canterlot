@@ -66,6 +66,7 @@ mod hung_rescue;
 mod images;
 mod in_tx;
 mod ingest;
+mod inplace_jobs;
 mod installation;
 mod limit_settings;
 mod limits_absent;

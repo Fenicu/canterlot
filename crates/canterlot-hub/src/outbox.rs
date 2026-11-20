@@ -232,6 +232,14 @@ fn to_proto_with_capability(
     if row.kind == "revoke_secret" && !has(crate::session::CAPABILITY_SECRET_REQUESTS_V2) {
         return Err(OutboxError::CapabilityMissing);
     }
+    // Команды задач на месте уходят и переигрываются только на соединении с возможностью.
+    if matches!(
+        row.kind.as_str(),
+        "start_inplace_job" | "cancel_inplace_job"
+    ) && !has(crate::session::CAPABILITY_JOBS_INPLACE_V1)
+    {
+        return Err(OutboxError::CapabilityMissing);
+    }
     if row.kind == "resolve_owner_lost" && !has(crate::session::CAPABILITY_OWNER_EXIT_V1) {
         return Err(OutboxError::CapabilityMissing);
     }
@@ -286,6 +294,14 @@ fn to_proto_with_capability(
         return Err(OutboxError::ResourceLimit);
     }
     Ok(command)
+}
+
+fn job_attempt(payload: &Value) -> Result<u32, OutboxError> {
+    payload
+        .get("attempt")
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or(OutboxError::InvalidCommand)
 }
 
 fn remote_flag(payload: &Value) -> bool {
@@ -545,6 +561,52 @@ pub fn to_proto(row: &CommandRow) -> Result<Command, OutboxError> {
                 .and_then(Value::as_u64)
                 .unwrap_or(0),
         }),
+        "start_inplace_job" => {
+            use canterlot_proto::worker::v1::{JobEnvVar, JobLease, StartInPlaceJob};
+            let env = row
+                .payload
+                .get("env")
+                .and_then(Value::as_array)
+                .map(|pairs| {
+                    pairs
+                        .iter()
+                        .map(|pair| {
+                            Ok(JobEnvVar {
+                                name: text(pair, "name")?,
+                                value: text(pair, "value")?,
+                            })
+                        })
+                        .collect::<Result<Vec<_>, OutboxError>>()
+                })
+                .transpose()?
+                .unwrap_or_default();
+            let lease = match text(&row.payload, "lease")?.as_str() {
+                "none" => JobLease::None,
+                "build" => JobLease::Build,
+                "gate" => JobLease::Gate,
+                _ => return Err(OutboxError::InvalidCommand),
+            };
+            command::Kind::StartInPlaceJob(StartInPlaceJob {
+                job_id: text(&row.payload, "job_id")?,
+                attempt: job_attempt(&row.payload)?,
+                workdir: text(&row.payload, "workdir")?,
+                shell: text(&row.payload, "shell")?,
+                env,
+                timeout_seconds: row
+                    .payload
+                    .get("timeout_seconds")
+                    .and_then(Value::as_u64)
+                    .and_then(|value| u32::try_from(value).ok())
+                    .ok_or(OutboxError::InvalidCommand)?,
+                lease: lease as i32,
+            })
+        }
+        "cancel_inplace_job" => {
+            command::Kind::CancelInPlaceJob(canterlot_proto::worker::v1::CancelInPlaceJob {
+                job_id: text(&row.payload, "job_id")?,
+                attempt: job_attempt(&row.payload)?,
+            })
+        }
         "stop_execution" => command::Kind::StopExecution(StopExecution {
             force: match row.payload.get("force") {
                 None => false,
@@ -553,8 +615,11 @@ pub fn to_proto(row: &CommandRow) -> Result<Command, OutboxError> {
         }),
         _ => return Err(OutboxError::InvalidCommand),
     };
-    // Отзыв секрета не привязан к исполнению: файл живёт дольше хода.
-    let (execution_id, execution_generation) = if row.kind == "revoke_secret" {
+    // Отзыв секрета и задачи на месте не привязаны к исполнению: уровень машины.
+    let (execution_id, execution_generation) = if matches!(
+        row.kind.as_str(),
+        "revoke_secret" | "start_inplace_job" | "cancel_inplace_job"
+    ) {
         (String::new(), 0)
     } else {
         (

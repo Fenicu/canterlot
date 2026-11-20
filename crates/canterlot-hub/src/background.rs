@@ -15,6 +15,8 @@ pub struct BackgroundDeps {
     pub presence: crate::presence::Presence,
     pub machines: crate::config::MachinesConfig,
     pub session_tools: crate::config::SessionToolsConfig,
+    /// `[jobs]`: запас перед потерей задачи на месте.
+    pub jobs: crate::config::JobsConfig,
     /// Выключатель `[orchestrator.nudge]`: шлюз автопинка в проекторе цели.
     pub nudge_enabled: bool,
     /// Порог `[orchestrator].lease_warn_hold_minutes`.
@@ -59,6 +61,7 @@ impl Background {
             presence,
             machines,
             session_tools,
+            jobs,
             nudge_enabled,
             lease_warn_hold,
             multi_process,
@@ -146,6 +149,15 @@ impl Background {
                     registry.clone(),
                     dispatch_rx,
                     timers,
+                    stopped.clone(),
+                )),
+            ),
+            (
+                "inplace_jobs_task_error",
+                tokio::spawn(crate::inplace_jobs::sweep::run(
+                    pool.clone(),
+                    registry.clone(),
+                    jobs.lost_grace,
                     stopped.clone(),
                 )),
             ),

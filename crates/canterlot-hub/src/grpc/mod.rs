@@ -57,6 +57,7 @@ pub const KNOWN_OPTIONAL_CAPABILITIES: &[&str] = &[
     CAPABILITY_BACKGROUND_V1,
     CAPABILITY_SESSION_TOOLS_V1,
     crate::session::CAPABILITY_REMOTE_SPAWN_V1,
+    crate::session::CAPABILITY_JOBS_INPLACE_V1,
     CAPABILITY_SEND_NOW_V1,
     CAPABILITY_GUARDED_INTERRUPT_V1,
     CAPABILITY_OWNER_EXIT_V1,
@@ -106,6 +107,14 @@ pub trait Ingest: Send + Sync {
         Ok(())
     }
     async fn lease_state(&self, _machine_id: Uuid, _state: LeaseState) -> Result<(), Status> {
+        Ok(())
+    }
+    /// Все задачи на месте, которые знает воркер (`jobs_inplace_v1`); применяется вперёд.
+    async fn jobs_report(&self, _machine_id: Uuid, _report: JobsReport) -> Result<(), Status> {
+        Ok(())
+    }
+    /// Живой кусок вывода задачи: непостоянный.
+    async fn job_log_chunk(&self, _machine_id: Uuid, _chunk: JobLogChunk) -> Result<(), Status> {
         Ok(())
     }
     async fn cj_records(
@@ -168,6 +177,8 @@ enum IngestJob {
     LimitsReport(LimitsReport),
     MachineWatch(MachineWatch),
     LeaseState(LeaseState),
+    JobsReport(JobsReport),
+    JobLogChunk(JobLogChunk),
 }
 
 /// Метрики и опрос лимитов теряются без остановки потока: следующий образец заменит их.
@@ -247,6 +258,16 @@ impl IngestLane {
                             volatile(ingest.lease_state(machine_id, state).await);
                             None
                         }
+                        // Отчёт задач идёт в очереди после журнала, который воркер доиграл раньше.
+                        // Он применяется вперёд, и потерянный отчёт воркер пришлёт заново.
+                        IngestJob::JobsReport(report) => {
+                            volatile(ingest.jobs_report(machine_id, report).await);
+                            None
+                        }
+                        IngestJob::JobLogChunk(chunk) => {
+                            volatile(ingest.job_log_chunk(machine_id, chunk).await);
+                            None
+                        }
                     }
                 };
                 let result = tokio::select! {
@@ -294,6 +315,15 @@ impl IngestLane {
     }
     fn submit_metrics(&self, metrics: MachineMetrics) {
         let _ = self.batches.try_send(IngestJob::MachineMetrics(metrics));
+    }
+    #[allow(clippy::result_large_err)]
+    fn submit_jobs_report(&self, report: JobsReport) -> Result<(), Status> {
+        self.batches
+            .try_send(IngestJob::JobsReport(report))
+            .map_err(|_| Status::resource_exhausted("ingest_backlog"))
+    }
+    fn submit_job_chunk(&self, chunk: JobLogChunk) {
+        let _ = self.batches.try_send(IngestJob::JobLogChunk(chunk));
     }
     fn submit_lease(&self, state: LeaseState) {
         self.leases.send_replace(Some(state));

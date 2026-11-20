@@ -170,6 +170,14 @@ impl WorkerControl for HubGrpc {
                                 if !state.registry.has_capability(machine_id,crate::session::CAPABILITY_RESOURCE_LEASE_V1){Err(session_log.error(Status::invalid_argument("capability_missing")))?;}
                                 lane.submit_lease(lease_state);
                             }
+                            Some(control_up::Msg::JobsReport(report)) => {
+                                if !state.registry.has_capability(machine_id,crate::session::CAPABILITY_JOBS_INPLACE_V1){Err(session_log.error(Status::invalid_argument("capability_missing")))?;}
+                                lane.submit_jobs_report(report).map_err(|error| session_log.error(error))?;
+                            }
+                            Some(control_up::Msg::JobLogChunk(chunk)) => {
+                                if !state.registry.has_capability(machine_id,crate::session::CAPABILITY_JOBS_INPLACE_V1){Err(session_log.error(Status::invalid_argument("capability_missing")))?;}
+                                lane.submit_job_chunk(chunk);
+                            }
                             Some(control_up::Msg::WorkdirSuggestions(reply)) => {
                                 if !state.registry.has_capability(machine_id,crate::session::CAPABILITY_WORKDIR_SUGGEST_V1){Err(session_log.error(Status::invalid_argument("capability_missing")))?;}
                                 state.registry.finish_suggest(machine_id, reply);

@@ -243,7 +243,8 @@ pub async fn run_once(
             continue;
         }
         let ids: Vec<_> = locked.keys().copied().collect();
-        let rows: Vec<(Uuid,Option<String>,bool)> = sqlx::query_as("select ids.id,a.state,m.id is not null from unnest($1::uuid[]) ids(id) left join attachments a on a.id=ids.id left join block_media m on m.id=ids.id")
+        // Журнал задачи на месте держит строка `jobs`, как медиа держит `block_media`.
+        let rows: Vec<(Uuid,Option<String>,bool)> = sqlx::query_as("select ids.id,a.state,(m.id is not null or exists(select 1 from jobs j where j.log_media_id=ids.id)) from unnest($1::uuid[]) ids(id) left join attachments a on a.id=ids.id left join block_media m on m.id=ids.id")
             .bind(&ids).fetch_all(pool).await?;
         let known: std::collections::HashMap<_, _> = rows
             .into_iter()

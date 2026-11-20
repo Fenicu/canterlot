@@ -404,6 +404,8 @@ pub enum CommandKind {
     RemoveWorktree,
     ResolveOwnerLost,
     RevokeSecret,
+    StartInPlaceJob,
+    CancelInPlaceJob,
 }
 
 impl CommandKind {
@@ -420,6 +422,8 @@ impl CommandKind {
             Self::RemoveWorktree => "remove_worktree",
             Self::ResolveOwnerLost => "resolve_owner_lost",
             Self::RevokeSecret => "revoke_secret",
+            Self::StartInPlaceJob => "start_inplace_job",
+            Self::CancelInPlaceJob => "cancel_inplace_job",
         }
     }
 }
@@ -440,6 +444,8 @@ impl FromStr for CommandKind {
             "remove_worktree" => Ok(Self::RemoveWorktree),
             "resolve_owner_lost" => Ok(Self::ResolveOwnerLost),
             "revoke_secret" => Ok(Self::RevokeSecret),
+            "start_inplace_job" => Ok(Self::StartInPlaceJob),
+            "cancel_inplace_job" => Ok(Self::CancelInPlaceJob),
             _ => Err(ModelError::UnknownValue {
                 kind: "command kind",
                 value: value.into(),
