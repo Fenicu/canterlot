@@ -2,7 +2,7 @@ import { modelLabel, providerLabel } from '#lib/format/labels.js';
 import { fmt } from '#lib/format/ru.js';
 import { resetPhrase } from '#lib/format/countdown.js';
 import type { components } from '#lib/api/generated/openapi.js';
-import { dayClock, remainingPct, remainingText, shortWeekday, type ForecastView, type LimitThresholds, type MeterTone, type MeterView, type ProviderLimits } from '#lib/stores/limits.js';
+import { accountLabel, accountRank, dayClock, limitKey, multiAccountProviders, remainingPct, remainingText, shortWeekday, type ForecastView, type LimitThresholds, type MeterTone, type MeterView, type ProviderLimits } from '#lib/stores/limits.js';
 import { limitStrip, providerRank } from '#lib/screens/sessions/limitsText.js';
 type Series = components['schemas']['ProviderSeries'];
 type Usage = components['schemas']['UsageDay'];
@@ -86,19 +86,19 @@ export function currentBlocks(providers: ProviderLimits[], now: number, cfg: Lim
     const lead = leadWindow(windows);
     const seenAt = Math.max(...meters.flatMap(([, meter]) => meter && Number.isFinite(meter.observedAt) ? [meter.observedAt] : []));
     return {
-      provider: row.provider, label: row.label, windows, empty: windows.length === 0, markers, reserve: row.reserve, lead,
+      provider: row.provider, account: row.account, key: row.key, named: row.named, label: row.label, windows, empty: windows.length === 0, markers, reserve: row.reserve, lead,
       /** Все окна устарели: крупного числа нет, вместо него время последнего показания. */
       stale: windows.length > 0 && !lead,
       seen: Number.isFinite(seenAt) ? `показание ${dayClock(seenAt, now)}` : '',
       status: lead ? TONE_WORD[lead.tone] : '',
       /** Статус провайдера словом, когда он не в порядке. */
       providerStatus: row.status,
-      /** Конец входа провайдера: дата, предупреждение или «закончился». */
-      credential: row.credential,
-      /** Сбросы лимитов: каждый поимённо, со сроком сгорания. */
+      /** Конец входа по машинам: дата, предупреждение или «закончился»; у нескольких машин — с именем машины. */
+      credentials: row.credentials,
+      /** Сбросы лимитов: каждый поимённо, со сроком сгорания; у нескольких машин — с именем машины. */
       credits: row.creditList.map((credit, index) => ({
         key: index,
-        title: credit.title,
+        title: credit.machine ? `${credit.title} (${credit.machine})` : credit.title,
         expires: credit.expiresAt === null ? '' : `сгорит ${fmt.numericDate(credit.expiresAt)}`
       }))
     };
@@ -106,11 +106,13 @@ export function currentBlocks(providers: ProviderLimits[], now: number, cfg: Lim
 }
 
 /** Недельный остаток по дням, отдельный маленький график на провайдера; 5ч в истории не показывается. */
-export function historyCharts(series: Series[], days: string[], zone: string) {
+export function historyCharts(series: Series[], days: string[], zone: string, accounts: ReadonlySet<string> = new Set()) {
   const seen = new Set<string>();
+  // Подпись записи нужна, когда их несколько у карточек «Сейчас» или у самих графиков.
+  const multi = new Set([...accounts, ...multiAccountProviders(series)]);
   return series
-    .filter(item => !seen.has(item.provider) && seen.add(item.provider))
-    .sort((a, b) => providerRank(a.provider) - providerRank(b.provider))
+    .filter(item => !seen.has(limitKey(item.provider, item.account)) && seen.add(limitKey(item.provider, item.account)))
+    .sort((a, b) => providerRank(a.provider) - providerRank(b.provider) || accountRank(a).localeCompare(accountRank(b)))
     .map(item => {
       // Снимок дня — последнее показание за этот день.
       const last = new Map<string, number>();
@@ -122,9 +124,9 @@ export function historyCharts(series: Series[], days: string[], zone: string) {
       const known = points.flatMap(p => p.value === null ? [] : [p.value]);
       const pct = (value: number) => `${Math.round(value).toLocaleString('ru-RU')}`;
       const today = points.at(-1)?.text ?? '';
-      const label = providerLabel(item.provider);
+      const label = accountLabel(item.provider, item.account, multi);
       return {
-        provider: item.provider, label, days: points, today, known: known.length > 0,
+        provider: item.provider, account: item.account, key: limitKey(item.provider, item.account), named: multi.has(item.provider), label, days: points, today, known: known.length > 0,
         summary: `${label}: от ${pct(Math.min(...known))} до ${pct(Math.max(...known))}%, сегодня ${today || 'нет данных'}`
       };
     })
@@ -133,18 +135,21 @@ export function historyCharts(series: Series[], days: string[], zone: string) {
 export { providerLabel as providerName } from '#lib/format/labels.js';
 
 type Chart = ReturnType<typeof historyCharts>[number];
-export type ChartSlot = Chart | { provider: string; label: string; known: false };
+export type ChartSlot = Chart | { provider: string; account?: string; key: string; named: boolean; label: string; known: false };
 
 /**
- * Графики в порядке карточек «Сейчас»: на широком экране неделя провайдера стоит под его карточкой.
- * Провайдеру без снимков достаётся пустое место, графики провайдеров без карточки идут следом.
+ * Графики в порядке карточек «Сейчас»: на широком экране неделя учётной записи стоит под её карточкой.
+ * Записи без снимков достаётся пустое место, графики записей без карточки идут следом.
  */
-export function alignCharts(charts: Chart[], providers: { provider: string; label: string }[]): ChartSlot[] {
+export function alignCharts(charts: Chart[], providers: { provider: string; account?: string; named?: boolean; label: string }[]): ChartSlot[] {
   if (!charts.length) return [];
-  const byProvider = new Map(charts.map(chart => [chart.provider, chart]));
-  const slots: ChartSlot[] = providers.map(({ provider, label }) => byProvider.get(provider) ?? { provider, label, known: false });
-  const placed = new Set(providers.map(item => item.provider));
-  return [...slots, ...charts.filter(chart => !placed.has(chart.provider))];
+  const byKey = new Map(charts.map(chart => [limitKey(chart.provider, chart.account), chart]));
+  const slots: ChartSlot[] = providers.map(({ provider, account, named, label }) => {
+    const key = limitKey(provider, account);
+    return byKey.get(key) ?? { provider, account, key, named: named ?? false, label, known: false };
+  });
+  const placed = new Set(providers.map(item => limitKey(item.provider, item.account)));
+  return [...slots, ...charts.filter(chart => !placed.has(limitKey(chart.provider, chart.account)))];
 }
 
 /** Подзаголовок страницы перечисляет ровно те провайдеры, чьи карточки видны. */
@@ -153,9 +158,9 @@ export function limitsSubtitle(providers: { provider: string }[]): string {
   if (names.length <= 1) return names[0] ?? '';
   return `${names.slice(0, -1).join(', ')} и ${names.at(-1)}`;
 }
-/** Провайдеры, у которых в текущем снимке есть недельное окно. */
+/** Учётные записи (ключи пар провайдер и запись), у которых в текущем снимке есть недельное окно. */
 export function providersWithWeekly(providers: ProviderLimits[]): ReadonlySet<string> {
-  return new Set(providers.filter(row => row.weekly).map(row => row.provider));
+  return new Set(providers.filter(row => row.weekly).map(row => limitKey(row.provider, row.account)));
 }
 
 export function usageRows(usage: Usage[], day: string, sessions: ReadonlyMap<string, { title: string }>, weekly: ReadonlySet<string>) {
@@ -164,16 +169,18 @@ export function usageRows(usage: Usage[], day: string, sessions: ReadonlyMap<str
     .map(row => {
       const input = row.input_tokens + row.cache_read_tokens + row.cache_write_tokens;
       return {
-        id: `${row.provider}:${row.conversation_id}:${row.agent}:${row.model}`,
+        id: `${limitKey(row.provider, row.account)}:${row.conversation_id}:${row.agent}:${row.model}`,
         conversationId: row.conversation_id,
         title: sessions.get(row.conversation_id)?.title ?? `Сессия ${row.conversation_id.slice(0, 8)}`,
         provider: row.provider,
+        account: row.account,
+        key: limitKey(row.provider, row.account),
         // Провайдер назван заголовком группы, в строке остаются модель и роль.
         detail: row.agent === 'main' ? modelLabel(row.model) : `Субагент · ${modelLabel(row.model)}`,
         input,
         output: row.output_tokens, delta: row.weekly_delta_permille,
         // Без недельного окна долю показать нечем: «≈ 0%» читалось бы как настоящее измерение.
-        weekly: weekly.has(row.provider),
+        weekly: weekly.has(limitKey(row.provider, row.account)),
         tokens: input + row.output_tokens,
         // Квота измеряется за время работы, а не по каждому отдельному токену.
         approximate: true,
@@ -190,24 +197,26 @@ export function usageRows(usage: Usage[], day: string, sessions: ReadonlyMap<str
 type UsageRow = ReturnType<typeof usageRows>[number];
 
 /**
- * Расход за сегодня по провайдерам: у каждой недели своя квота, поэтому доли разных провайдеров
- * не сравниваются в одном списке. Итог группы — сумма приблизительных долей её строк.
+ * Расход за сегодня по учётным записям провайдеров: у каждой недели своя квота, поэтому доли разных
+ * записей не сравниваются в одном списке. Итог группы — сумма приблизительных долей её строк.
  */
-export function usageGroups(rows: UsageRow[]) {
+export function usageGroups(rows: UsageRow[], accounts: ReadonlySet<string> = new Set()) {
   const groups = new Map<string, UsageRow[]>();
-  for (const row of rows) groups.set(row.provider, [...(groups.get(row.provider) ?? []), row]);
+  for (const row of rows) groups.set(row.key, [...(groups.get(row.key) ?? []), row]);
+  const multi = new Set([...accounts, ...multiAccountProviders(rows)]);
   return [...groups.entries()]
-    .map(([provider, items]) => {
+    .map(([key, items]) => {
+      const { provider, account } = items[0]!;
       const weekly = items[0]!.weekly;
       const total = items.reduce((sum, row) => sum + row.delta, 0);
       const top = Math.max(...items.map(row => row.delta));
       return {
-        provider, label: providerLabel(provider), weekly,
+        provider, account, key, named: multi.has(provider), label: accountLabel(provider, account, multi), weekly,
         total: weekly ? fmt.pctApprox(total) : '—',
         rows: items.map(row => ({ ...row, share: weekly && top > 0 ? row.delta / top : 0 }))
       };
     })
-    .sort((a, b) => (a.weekly === b.weekly ? 0 : a.weekly ? -1 : 1) || providerRank(a.provider) - providerRank(b.provider));
+    .sort((a, b) => (a.weekly === b.weekly ? 0 : a.weekly ? -1 : 1) || providerRank(a.provider) - providerRank(b.provider) || accountRank(a).localeCompare(accountRank(b)));
 }
 
 type Speed = components['schemas']['ModelSpeedSummary'];
