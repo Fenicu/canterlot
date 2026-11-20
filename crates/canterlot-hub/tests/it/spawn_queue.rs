@@ -335,8 +335,9 @@ impl Fx {
 async fn child_of(pool: &PgPool, parent: Uuid, harness: &str, model: &str, state: &str) -> Uuid {
     let id = Uuid::now_v7();
     sqlx::query(
-        "insert into conversations(id,owner_id,machine_id,harness,workdir,model,effort,parent_conversation_id,spawn_depth)
-         values($1,(select owner_id from conversations where id=$2),$3,$4,'/tmp/w',$5,'high',$2,1)",
+        "insert into conversations(id,owner_id,machine_id,harness,workdir,model,effort,parent_conversation_id,spawn_depth,memory_domain)
+         values($1,(select owner_id from conversations where id=$2),$3,$4,'/tmp/w',$5,'high',$2,1,
+                (select memory_domain from conversations where id=$2))",
     )
     .bind(id)
     .bind(parent)

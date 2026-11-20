@@ -90,6 +90,7 @@ pub async fn list(
             family,
             state: args.state,
             include_archived: args.include_archived,
+            caller: session.id,
             domain: session.memory_domain.clone(),
             limit,
         },

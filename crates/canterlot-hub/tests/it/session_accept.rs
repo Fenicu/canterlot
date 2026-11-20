@@ -194,6 +194,17 @@ impl Fx {
             .unwrap();
         assert_eq!(answer["status"], "started", "{answer}");
         let child: Uuid = serde_json::from_value(answer["session_id"].clone()).unwrap();
+        // Машина стенда не сообщает корней памяти, и ребёнок остался бы без домена,
+        // а такие разговоры родителю не видны: домен берётся у родителя вызова.
+        sqlx::query(
+            "update conversations set memory_domain=(select memory_domain from conversations where id=$2)
+             where id=$1",
+        )
+        .bind(child)
+        .bind(caller.conversation_id)
+        .execute(&self.pool)
+        .await
+        .unwrap();
         let execution = sqlx::query_scalar("select id from executions where conversation_id=$1")
             .bind(child)
             .fetch_one(&self.pool)

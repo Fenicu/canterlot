@@ -624,6 +624,23 @@ pub async fn seed_conversation(pool: &PgPool, owner_id: Uuid, machine_id: Uuid) 
         .execute(&mut *transaction)
         .await
         .expect("seed queue state");
+    // Разговоры без домена агентам друг другу не видны, поэтому посев даёт домен `work`, как
+    // у обычного рабочего разговора. Схемы до появления домена (тесты миграций) его не знают.
+    let has_domain: bool = sqlx::query_scalar(
+        "select exists(select 1 from information_schema.columns
+          where table_schema=current_schema() and table_name='conversations'
+            and column_name='memory_domain')",
+    )
+    .fetch_one(&mut *transaction)
+    .await
+    .expect("probe memory_domain column");
+    if has_domain {
+        sqlx::query("update conversations set memory_domain='work' where id=$1")
+            .bind(conversation_id)
+            .execute(&mut *transaction)
+            .await
+            .expect("seed memory domain");
+    }
     transaction
         .commit()
         .await

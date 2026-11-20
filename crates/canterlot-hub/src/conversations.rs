@@ -648,7 +648,9 @@ pub struct AgentListQuery {
     pub family: Option<Vec<Uuid>>,
     pub state: Option<activity::ActivityState>,
     pub include_archived: bool,
-    /// Домен памяти вызывающего; без домена видны одни разговоры без домена.
+    /// Вызывающий и его домен памяти: видны разговоры того же домена и сам вызывающий.
+    /// Разговоры без домена не видны никому, кроме себя.
+    pub caller: Uuid,
     pub domain: Option<String>,
     pub limit: i64,
 }
@@ -665,8 +667,11 @@ pub async fn agent_list(
             .push_bind(family.clone())
             .push(")");
     }
-    sql.push(" and c.memory_domain is not distinct from ")
-        .push_bind(q.domain.clone());
+    sql.push(" and (c.id=")
+        .push_bind(q.caller)
+        .push(" or c.memory_domain=")
+        .push_bind(q.domain.clone())
+        .push(")");
     if !q.include_archived {
         sql.push(" and c.archived_at is null");
     }
