@@ -1,5 +1,8 @@
 //! Задачи на месте на настоящих процессах: оболочка попытки (`canterlot-worker job-shim`),
 //! каталоги состояния во временных каталогах и временный HOME.
+//!
+//! Ожидания событийные: менеджер будит `progress` после каждого шага наблюдателя, сервер
+//! аренды публикует снимок очереди, живой вывод приходит кусками. Таймеров и часов в тестах нет.
 
 use std::{
     fs,
@@ -7,7 +10,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command as Process, Stdio},
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -21,7 +24,7 @@ use canterlot_worker::{
     jobs::{JobError, JobManager, JobSink, JobsRuntime},
     lease::server::{LeaseServer, ServerConfig},
 };
-use tokio::sync::watch;
+use tokio::sync::{Notify, watch};
 use uuid::Uuid;
 
 const WORKER: &str = env!("CARGO_BIN_EXE_canterlot-worker");
@@ -74,6 +77,27 @@ impl Recorder {
             })
             .collect()
     }
+
+    fn uploaded(&self) -> bool {
+        !self.uploads.lock().unwrap().is_empty()
+    }
+}
+
+/// Ждёт условие, перепроверяя его после каждого события; без события дольше `WAIT` — отказ.
+async fn until(progress: Arc<Notify>, what: &str, mut check: impl FnMut() -> bool) {
+    tokio::time::timeout(WAIT, async {
+        loop {
+            let notified = progress.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if check() {
+                return;
+            }
+            notified.await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
 }
 
 struct Harness {
@@ -151,6 +175,10 @@ impl Harness {
         }
     }
 
+    async fn wait(&self, what: &str, check: impl FnMut() -> bool) {
+        until(self.manager.progress(), what, check).await;
+    }
+
     fn work(&self) -> PathBuf {
         self.work.path().canonicalize().unwrap()
     }
@@ -158,7 +186,11 @@ impl Harness {
     /// Новый менеджер над теми же каталогами: так выглядит перезапуск воркера.
     async fn restart(&mut self) {
         let _ = self.stop.send(true);
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        let old = self.manager.clone();
+        until(old.progress(), "old watchers to stop", || {
+            old.watching() == 0
+        })
+        .await;
         let (stop, shutdown) = watch::channel(false);
         self.stop = stop;
         self.manager = JobManager::new(
@@ -226,8 +258,34 @@ impl Harness {
     }
 
     async fn finished(&self, job_id: &str) -> canterlot_proto::worker::v1::JobFinished {
-        wait_for("JobFinished", || self.sink.finished(job_id).is_some()).await;
+        self.wait("JobFinished", || self.sink.finished(job_id).is_some())
+            .await;
         self.sink.finished(job_id).unwrap()
+    }
+
+    /// Журнал загружен: после итога и после загрузки наблюдатель будит `progress`.
+    async fn uploaded(&self) {
+        self.wait("log upload", || self.sink.uploaded()).await;
+    }
+
+    /// Ждёт, пока команда напечатает `needle`: куски живого вывода идут по мере записи.
+    async fn output_has(
+        chunks: &mut tokio::sync::broadcast::Receiver<canterlot_proto::worker::v1::JobLogChunk>,
+        needle: &str,
+    ) {
+        tokio::time::timeout(WAIT, async {
+            let mut seen = String::new();
+            loop {
+                if let Ok(chunk) = chunks.recv().await {
+                    seen.push_str(&String::from_utf8_lossy(&chunk.data));
+                    if seen.contains(needle) {
+                        return;
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("the command never printed {needle}"));
     }
 }
 
@@ -252,29 +310,7 @@ impl Drop for Harness {
     }
 }
 
-fn kill_session(session: i32) {
-    for entry in fs::read_dir("/proc").into_iter().flatten().flatten() {
-        let Some(pid) = entry
-            .file_name()
-            .to_str()
-            .and_then(|name| name.parse::<i32>().ok())
-        else {
-            continue;
-        };
-        let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) else {
-            continue;
-        };
-        let Some(end) = stat.rfind(')') else { continue };
-        let fields: Vec<_> = stat[end + 1..].split_whitespace().collect();
-        if fields.get(3).and_then(|sid| sid.parse::<i32>().ok()) == Some(session)
-            && let Some(pid) = rustix::process::Pid::from_raw(pid)
-        {
-            let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
-        }
-    }
-}
-
-fn session_members(session: i32) -> Vec<i32> {
+fn session_ids(session: i32) -> Vec<i32> {
     let mut found = Vec::new();
     for entry in fs::read_dir("/proc").into_iter().flatten().flatten() {
         let Some(pid) = entry
@@ -297,11 +333,11 @@ fn session_members(session: i32) -> Vec<i32> {
     found
 }
 
-async fn wait_for(what: &str, mut check: impl FnMut() -> bool) {
-    let started = Instant::now();
-    while !check() {
-        assert!(started.elapsed() < WAIT, "timed out waiting for {what}");
-        tokio::time::sleep(Duration::from_millis(25)).await;
+fn kill_session(session: i32) {
+    for pid in session_ids(session) {
+        if let Some(pid) = rustix::process::Pid::from_raw(pid) {
+            let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+        }
     }
 }
 
@@ -340,10 +376,7 @@ async fn success_reports_dispatched_started_finished_with_the_output_tail() {
     let started = started.unwrap();
     assert!(started.pid > 0 && started.start_time > 0, "{started:?}");
     // Журнал уходит вложением через существующий путь загрузки, сжатый.
-    wait_for("log upload", || {
-        !harness.sink.uploads.lock().unwrap().is_empty()
-    })
-    .await;
+    harness.uploaded().await;
     let uploads = harness.sink.uploads.lock().unwrap();
     assert_eq!(uploads[0].0.job_id, id);
     assert_eq!(uploads[0].0.job_attempt, 1);
@@ -367,6 +400,7 @@ async fn failure_keeps_the_exit_code_and_timeout_wins_over_it() {
     harness.start(start).await;
     let finished = harness.finished(&slow).await;
     assert_eq!(finished.outcome, JobOutcome::TimedOut as i32);
+    // Секунда лимита, а не тридцать секунд команды: `timeout` оборвал её сам.
     assert!(
         finished.duration_ms >= 900 && finished.duration_ms < 15_000,
         "{finished:?}"
@@ -417,6 +451,23 @@ async fn command_runs_in_the_workdir_with_a_minimal_environment_plus_env() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn lease_variables_cannot_be_smuggled_through_env() {
+    let harness = Harness::new().await;
+    let id = Uuid::now_v7().to_string();
+    let mut start = harness.start_command(&id, "true");
+    start.env = vec![JobEnvVar {
+        name: "CANTERLOT_LEASE_HELD".into(),
+        value: "unleased".into(),
+    }];
+    let refused = harness
+        .manager
+        .start(&Harness::envelope(Kind::StartInPlaceJob(start)))
+        .await;
+    assert!(matches!(refused, Err(JobError::Invalid)));
+    assert!(!harness.data.path().join("jobs").join(&id).exists());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn cancel_before_start_prevents_the_command_from_ever_running() {
     let harness = Harness::new().await;
     let id = Uuid::now_v7().to_string();
@@ -428,7 +479,8 @@ async fn cancel_before_start_prevents_the_command_from_ever_running() {
     let finished = harness.finished(&id).await;
     assert_eq!(finished.outcome, JobOutcome::Canceled as i32);
     assert_eq!(finished.exit_code, None);
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    // Итог записан без запуска оболочки: ни `pid`, ни факта запуска.
+    assert!(!harness.attempt_dir(&id).join("pid").exists());
     assert!(!marker.exists(), "a cancelled job must not start");
     assert!(!harness.sink.kinds(&id).contains(&"started"));
 }
@@ -436,18 +488,16 @@ async fn cancel_before_start_prevents_the_command_from_ever_running() {
 #[tokio::test(flavor = "multi_thread")]
 async fn cancel_during_the_run_is_confirmed_only_after_the_group_is_gone() {
     let harness = Harness::new().await;
+    let mut chunks = harness.manager.subscribe_chunks();
     let pids = harness.work().join("pids");
-    // Внуки в своей группе и сессии процесса: confirm не должен опередить их смерть.
+    // Внуки в своей группе и в своей сессии: подтверждение не должно опередить их смерть.
     let id = harness
         .run(&format!(
-            "sleep 300 & echo $! >> {pids}; setsid sleep 300 & echo started; wait",
+            "sleep 300 & echo $! >> {pids}; setsid sleep 300 & echo $! >> {pids}; echo ready; wait",
             pids = pids.display()
         ))
         .await;
-    wait_for("started", || {
-        harness.sink.kinds(&id).contains(&"started") && pids.exists()
-    })
-    .await;
+    Harness::output_has(&mut chunks, "ready").await;
     let leader = fs::read_to_string(harness.attempt_dir(&id).join("pid"))
         .unwrap()
         .split_whitespace()
@@ -455,22 +505,29 @@ async fn cancel_during_the_run_is_confirmed_only_after_the_group_is_gone() {
         .unwrap()
         .parse::<i32>()
         .unwrap();
-    assert!(!session_members(leader).is_empty());
+    assert!(!session_ids(leader).is_empty());
+    let sleepers: Vec<i32> = fs::read_to_string(&pids)
+        .unwrap()
+        .lines()
+        .map(|line| line.trim().parse().unwrap())
+        .collect();
+    assert_eq!(sleepers.len(), 2);
     harness.cancel(&id).await;
     let finished = harness.finished(&id).await;
     assert_eq!(finished.outcome, JobOutcome::Canceled as i32);
-    // К моменту факта группа уже исчезла.
-    assert_eq!(session_members(leader), Vec::<i32>::new());
-    let sleeper = fs::read_to_string(&pids)
-        .unwrap()
-        .trim()
-        .parse::<i32>()
-        .unwrap();
-    assert!(
-        !Path::new(&format!("/proc/{sleeper}")).exists()
-            || fs::read_to_string(format!("/proc/{sleeper}/stat")).is_ok_and(|s| s.contains(") Z")),
-        "the background child is gone"
-    );
+    // К моменту факта сессия пуста: фоновый потомок убит.
+    assert_eq!(session_ids(leader), Vec::<i32>::new());
+    let alive = |pid: i32| {
+        fs::read_to_string(format!("/proc/{pid}/stat"))
+            .is_ok_and(|stat| !stat.contains(") Z") && !stat.contains(") X"))
+    };
+    assert!(!alive(sleepers[0]), "the background child is gone");
+    // Процесс, ушедший в свою сессию, остаётся: границей служит сессия попытки.
+    for pid in sleepers {
+        if let Some(pid) = rustix::process::Pid::from_raw(pid) {
+            let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+        }
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -484,7 +541,26 @@ async fn crash_between_claim_and_pid_becomes_launch_interrupted_and_never_runs()
     assert_eq!(finished.outcome, JobOutcome::LaunchInterrupted as i32);
     assert_eq!(finished.exit_code, None);
 
-    // Тот же исход, когда оболочка стартовала, но не дошла до `pid`.
+    // Описание записано, а оболочки нет: тот же исход, команда не запускалась.
+    let claimed = Harness::new().await;
+    let marker = claimed.work().join("ran");
+    let id = Uuid::now_v7().to_string();
+    let dir = claimed.attempt_dir(&id);
+    fs::create_dir_all(&dir).unwrap();
+    let spec = serde_json::json!({
+        "job_id": id, "attempt": 1, "command_id": "", "dispatch_attempt": 0,
+        "workdir": claimed.work().display().to_string(),
+        "shell": format!("touch {}", marker.display()),
+        "env": [], "timeout_seconds": 60, "lease": "none", "lease_socket": null,
+        "log_max_bytes": 1_048_576, "label": "job",
+    });
+    fs::write(dir.join("spec.json"), spec.to_string()).unwrap();
+    claimed.manager.recover().await;
+    let finished = claimed.finished(&id).await;
+    assert_eq!(finished.outcome, JobOutcome::LaunchInterrupted as i32);
+    assert!(!marker.exists());
+
+    // Оболочка стартовала, но не дошла до `pid`: тот же исход.
     let broken = Harness::with(JobsConfig::default(), None, "/bin/true").await;
     let marker = broken.work().join("ran");
     let id = broken.run(&format!("touch {}", marker.display())).await;
@@ -496,14 +572,20 @@ async fn crash_between_claim_and_pid_becomes_launch_interrupted_and_never_runs()
 #[tokio::test(flavor = "multi_thread")]
 async fn restart_after_pid_reattaches_without_relaunching() {
     let mut harness = Harness::new().await;
+    let mut chunks = harness.manager.subscribe_chunks();
     let counter = harness.work().join("launches");
     let id = harness
         .run(&format!(
-            "echo x >> {counter}; sleep 2; echo end",
+            "echo x >> {counter}; echo up; sleep 2; echo end",
             counter = counter.display()
         ))
         .await;
-    wait_for("started", || harness.sink.kinds(&id).contains(&"started")).await;
+    Harness::output_has(&mut chunks, "up").await;
+    harness
+        .wait("started fact", || {
+            harness.sink.kinds(&id).contains(&"started")
+        })
+        .await;
     let before = harness.sink.facts().len();
 
     harness.restart().await;
@@ -518,7 +600,7 @@ async fn restart_after_pid_reattaches_without_relaunching() {
         .unwrap();
     let finished = harness.finished(&id).await;
     assert_eq!(finished.outcome, JobOutcome::Succeeded as i32);
-    assert_eq!(finished.tail, b"end\n");
+    assert_eq!(finished.tail, b"up\nend\n");
     assert_eq!(
         fs::read_to_string(&counter).unwrap().lines().count(),
         1,
@@ -557,7 +639,7 @@ async fn workdir_must_canonicalize_to_itself_inside_the_allowed_roots() {
         // за корнем
         outside.path().display().to_string(),
         outside_link.display().to_string(),
-        // не абсолютный, не каталог, нет такого
+        // не абсолютный, нет такого, корень файловой системы
         "relative/dir".into(),
         harness.work().join("missing").display().to_string(),
         "/".into(),
@@ -573,6 +655,7 @@ async fn workdir_must_canonicalize_to_itself_inside_the_allowed_roots() {
             "{refused}"
         );
         assert_eq!(harness.sink.kinds(&id), ["dispatched", "finished"]);
+        assert!(!harness.attempt_dir(&id).join("pid").exists());
     }
     assert!(!marker.exists(), "no refused job may run");
 
@@ -613,10 +696,7 @@ async fn log_is_capped_on_disk_and_the_upload_has_head_marker_and_tail() {
         .map(|entry| entry.metadata().unwrap().len())
         .sum();
     assert!(on_disk <= 1024 * 1024, "{on_disk}");
-    wait_for("log upload", || {
-        !harness.sink.uploads.lock().unwrap().is_empty()
-    })
-    .await;
+    harness.uploaded().await;
     let text = gunzip(&harness.sink.uploads.lock().unwrap()[0].1);
     assert!(text.starts_with("HEAD-LINE\n"));
     assert!(text.contains("bytes omitted"));
@@ -624,24 +704,22 @@ async fn log_is_capped_on_disk_and_the_upload_has_head_marker_and_tail() {
     assert!(text.len() < 1024 * 1024 + 100);
 }
 
+/// Держатель аренды: настоящая обёртка `lease run --strict`, которая ждёт слот сколько нужно,
+/// поэтому сокет сервера может подняться позже неё.
 struct HeldLease {
     child: std::process::Child,
     go: PathBuf,
-    held: PathBuf,
 }
 
 impl HeldLease {
     fn take(kind: &str, socket: &Path, dir: &Path) -> Self {
         let go = dir.join("holder.go");
-        let held = dir.join("holder.held");
-        let script = format!(
-            "touch {held:?}; while [ ! -e {go:?} ]; do sleep 0.05; done",
-            held = held,
-            go = go
-        );
+        let script = format!("while [ ! -e {go:?} ]; do sleep 0.05; done", go = go);
         let mut command = Process::new(WORKER);
         command
-            .args(["lease", "run", "--kind", kind, "--", "sh", "-c", &script])
+            .args([
+                "lease", "run", "--kind", kind, "--strict", "--", "sh", "-c", &script,
+            ])
             .env(LEASE_SOCKET_ENV, socket)
             .env_remove("CANTERLOT_LEASE_HELD")
             .stdin(Stdio::null())
@@ -650,7 +728,6 @@ impl HeldLease {
         Self {
             child: command.spawn().unwrap(),
             go,
-            held,
         }
     }
 
@@ -668,6 +745,18 @@ impl Drop for HeldLease {
     }
 }
 
+async fn snapshot_until(
+    server: &LeaseServer,
+    what: &str,
+    mut check: impl FnMut(&canterlot_worker::lease::Snapshot) -> bool,
+) {
+    let mut snapshot = server.snapshot();
+    tokio::time::timeout(WAIT, snapshot.wait_for(|snapshot| check(snapshot)))
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {what}"))
+        .unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn strict_lease_waits_behind_a_held_gate_and_never_runs_unleased() {
     let root = tempfile::tempdir().unwrap();
@@ -681,14 +770,10 @@ async fn strict_lease_waits_behind_a_held_gate_and_never_runs_unleased() {
     );
     let socket = config.socket.clone();
     let server = LeaseServer::start(config, stop.subscribe());
-    wait_for("lease socket", || {
-        std::os::unix::net::UnixStream::connect(&socket).is_ok()
-    })
-    .await;
 
     let harness = Harness::with(JobsConfig::default(), Some(socket.clone()), WORKER).await;
     let mut gate = HeldLease::take("gate", &socket, root.path());
-    wait_for("gate held", || gate.held.exists()).await;
+    snapshot_until(&server, "the gate to be held", |s| s.holders.len() == 1).await;
 
     let marker = harness.work().join("ran");
     let id = Uuid::now_v7().to_string();
@@ -696,19 +781,27 @@ async fn strict_lease_waits_behind_a_held_gate_and_never_runs_unleased() {
     start.lease = JobLease::Build as i32;
     harness.start(start).await;
 
-    wait_for("waiting_lease fact", || {
-        harness.sink.kinds(&id).contains(&"waiting_lease")
+    // Попытка стоит в очереди сервера за гейтом: слот ей не выдан, команда не запущена,
+    // запуска вне аренды нет.
+    snapshot_until(&server, "the job to queue behind the gate", |s| {
+        s.waiters.len() == 1
     })
     .await;
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    harness
+        .wait("waiting_lease fact", || {
+            harness.sink.kinds(&id).contains(&"waiting_lease")
+        })
+        .await;
     assert!(!marker.exists(), "no unleased fallback behind a gate");
     assert!(!harness.sink.kinds(&id).contains(&"started"));
     assert!(harness.sink.finished(&id).is_none());
+    assert_eq!(server.snapshot().borrow().holders.len(), 1);
 
     gate.release();
     let finished = harness.finished(&id).await;
     assert_eq!(finished.outcome, JobOutcome::Succeeded as i32);
     assert_eq!(finished.tail, b"leased\n");
+    assert!(marker.exists());
     assert_eq!(
         harness.sink.kinds(&id),
         ["dispatched", "waiting_lease", "started", "finished"]
@@ -730,7 +823,13 @@ async fn strict_lease_without_a_worker_socket_keeps_waiting_instead_of_running()
     let mut start = harness.start_command(&id, &format!("touch {}", marker.display()));
     start.lease = JobLease::Gate as i32;
     harness.start(start).await;
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    // Оболочка сама сообщает, что воркера нет и она продолжает ждать.
+    let shim_log = harness.attempt_dir(&id).join("shim.log");
+    harness
+        .wait("the shim to report the missing socket", || {
+            fs::read_to_string(&shim_log).is_ok_and(|log| log.contains("still waiting"))
+        })
+        .await;
     assert!(!marker.exists());
     assert_eq!(harness.sink.kinds(&id), ["dispatched", "waiting_lease"]);
     // Отмена в ожидании снимает попытку, не запустив команду.
@@ -745,12 +844,14 @@ async fn sweep_removes_only_the_expired_attempt_directory() {
     let harness = Harness::new().await;
     let old = harness.run("echo old").await;
     harness.finished(&old).await;
-    wait_for("log upload", || {
-        !harness.sink.uploads.lock().unwrap().is_empty()
-    })
-    .await;
+    harness.uploaded().await;
     let fresh = harness.run("echo fresh").await;
     harness.finished(&fresh).await;
+    harness
+        .wait("both logs uploaded", || {
+            harness.sink.uploads.lock().unwrap().len() == 2
+        })
+        .await;
     // Соседняя незавершённая попытка той же задачи и посторонние файлы остаются.
     let sibling = harness.data.path().join("jobs").join(&old).join("2");
     fs::create_dir_all(&sibling).unwrap();
@@ -761,11 +862,12 @@ async fn sweep_removes_only_the_expired_attempt_directory() {
     fs::write(&workfile, "keep").unwrap();
 
     // Срок ещё не вышел: ничего не убрано.
-    assert_eq!(harness.manager.sweep(canterlot_worker_now()).await, 0);
+    let now = canterlot_worker::jobs::state::now_ms();
+    assert_eq!(harness.manager.sweep(now).await, 0);
     assert!(harness.attempt_dir(&old).exists());
 
     // Через три дня и час: убирается только каталог завершённой попытки каждой задачи.
-    let later = canterlot_worker_now() + (3 * 24 + 1) * 3600 * 1000;
+    let later = now + (3 * 24 + 1) * 3600 * 1000;
     assert_eq!(harness.manager.sweep(later).await, 2);
     assert!(!harness.attempt_dir(&old).exists());
     assert!(!harness.attempt_dir(&fresh).exists());
@@ -780,13 +882,6 @@ async fn sweep_removes_only_the_expired_attempt_directory() {
     );
     assert!(stranger.exists());
     assert!(workfile.exists());
-}
-
-fn canterlot_worker_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -808,11 +903,22 @@ async fn facts_are_written_only_while_the_capability_is_negotiated() {
     // Задача, начатая на согласованном соединении, доживает разрыв без записи фактов:
     // итог ждёт нового согласованного соединения и отчёта.
     harness.manager.set_enabled(true);
-    let live = harness.run("sleep 1; echo done").await;
-    wait_for("started", || harness.sink.kinds(&live).contains(&"started")).await;
+    let mut chunks = harness.manager.subscribe_chunks();
+    let live = harness.run("echo up; sleep 1; echo down").await;
+    Harness::output_has(&mut chunks, "up").await;
+    harness
+        .wait("started fact", || {
+            harness.sink.kinds(&live).contains(&"started")
+        })
+        .await;
     harness.manager.set_enabled(false);
     let seen = harness.sink.facts().len();
-    tokio::time::sleep(Duration::from_millis(2500)).await;
+    // Задача заканчивается сама, пока соединения нет: итог лежит на диске, а не в журнале.
+    harness
+        .wait("the job to finish on disk", || {
+            fs::read_to_string(harness.attempt_dir(&live).join("result.json")).is_ok()
+        })
+        .await;
     assert_eq!(
         harness.sink.facts().len(),
         seen,
@@ -831,10 +937,11 @@ async fn jobs_report_lists_every_known_job_with_its_last_state() {
     let failed = harness.run("exit 5").await;
     harness.finished(&failed).await;
     let running = harness.run("sleep 30").await;
-    wait_for("started", || {
-        harness.sink.kinds(&running).contains(&"started")
-    })
-    .await;
+    harness
+        .wait("started fact", || {
+            harness.sink.kinds(&running).contains(&"started")
+        })
+        .await;
     // Попытка, у которой воркер умер до запуска оболочки, в отчёте ещё «принята».
     let claimed = Uuid::now_v7().to_string();
     let dir = harness.data.path().join("jobs").join(&claimed).join("1");

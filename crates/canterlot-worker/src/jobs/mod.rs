@@ -148,6 +148,8 @@ pub struct JobManager {
     uploading: Mutex<HashSet<(String, u32)>>,
     chunks: broadcast::Sender<JobLogChunk>,
     shutdown: watch::Receiver<bool>,
+    /// Будится после каждого шага наблюдателей, конца наблюдения и загрузки журнала.
+    progress: Arc<tokio::sync::Notify>,
 }
 
 impl JobManager {
@@ -164,7 +166,14 @@ impl JobManager {
             uploading: Mutex::default(),
             chunks: broadcast::channel(64).0,
             shutdown,
+            progress: Arc::default(),
         })
+    }
+
+    /// Сигнал «что-то продвинулось»: ждущему не нужно опрашивать диск по таймеру, он
+    /// перепроверяет своё условие после каждого шага наблюдателя.
+    pub fn progress(&self) -> Arc<tokio::sync::Notify> {
+        self.progress.clone()
     }
 
     /// Возможность `jobs_inplace_v1` согласована на текущем соединении. Без неё команды не
@@ -358,9 +367,10 @@ impl JobManager {
                 if *shutdown.borrow() {
                     break;
                 }
-                match watcher.step().await {
-                    Step::Done => break,
-                    Step::Continue => {}
+                let step = watcher.step().await;
+                manager.progress.notify_waiters();
+                if matches!(step, Step::Done) {
+                    break;
                 }
                 tokio::select! {
                     _ = tokio::time::sleep(manager.rt.poll_interval) => {}
@@ -372,6 +382,7 @@ impl JobManager {
                 .lock()
                 .expect("tracked lock")
                 .remove(&(job_id, attempt));
+            manager.progress.notify_waiters();
         });
     }
 
@@ -922,6 +933,7 @@ impl Watcher {
                 .lock()
                 .expect("uploading lock")
                 .remove(&key);
+            manager.progress.notify_waiters();
         });
     }
 

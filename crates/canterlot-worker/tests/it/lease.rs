@@ -726,13 +726,33 @@ async fn status_lists_holders_and_waiters() {
 
 // Строгий режим (задачи на месте): очередь без запуска вне аренды.
 
-async fn stays_waiting(job: &mut Job, how_long: Duration) {
-    tokio::time::sleep(how_long).await;
+/// Событие, после которого проверяется ожидание: сервер показал просителя в очереди или
+/// обёртка сама написала в stderr, что ждёт. Таймеров здесь нет.
+fn assert_still_waiting(job: &mut Job) {
     assert!(!job.granted(), "the strict request must keep waiting");
     assert!(
         job.child.try_wait().unwrap().is_none(),
         "the strict wrapper must not exit or run the command unleased"
     );
+}
+
+async fn wait_note(job: &mut Job, needle: &str) {
+    let stderr = job.child.stderr.take().expect("stderr is piped");
+    let needle = needle.to_owned();
+    let seen = tokio::time::timeout(
+        WAIT,
+        tokio::task::spawn_blocking(move || {
+            use std::io::BufRead;
+            std::io::BufReader::new(stderr)
+                .lines()
+                .map_while(Result::ok)
+                .any(|line| line.contains(&needle))
+        }),
+    )
+    .await
+    .expect("timed out waiting for the wrapper note")
+    .unwrap();
+    assert!(seen, "the wrapper never said it keeps waiting");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -742,7 +762,7 @@ async fn strict_request_waits_behind_a_held_gate_and_never_runs_unleased() {
     gate.wait_granted().await;
     let mut behind = fixture.job_with("build", "behind", true);
     fixture.waiters(1).await;
-    stays_waiting(&mut behind, Duration::from_millis(1500)).await;
+    assert_still_waiting(&mut behind);
     assert_eq!(fixture.snapshot().holders.len(), 1, "no second holder");
 
     assert!(gate.finish().await.success());
@@ -760,8 +780,9 @@ async fn strict_request_does_not_fall_back_while_the_worker_is_unreachable() {
     let mut fixture = Fixture::new(1).await;
     fixture.restart().await;
     let mut job = fixture.job_with("build", "no-socket", true);
-    // Обычный клиент ушёл бы без аренды через десять секунд; строгий ждёт воркер.
-    stays_waiting(&mut job, Duration::from_millis(1500)).await;
+    // Обычный клиент без сокета ушёл бы без аренды сразу; строгий пишет, что ждёт воркер.
+    wait_note(&mut job, "still waiting").await;
+    assert_still_waiting(&mut job);
     fixture.start().await;
     let env = job.wait_granted().await;
     assert_ne!(env[0], lease::UNLEASED);
@@ -787,7 +808,8 @@ async fn strict_holder_survives_a_worker_restart_and_keeps_its_slot() {
     .await;
     // Слот остался за держателем: следующая просьба ждёт.
     let mut next = fixture.job_with("build", "next", true);
-    stays_waiting(&mut next, Duration::from_millis(1200)).await;
+    fixture.waiters(1).await;
+    assert_still_waiting(&mut next);
     assert!(holder.finish().await.success());
     next.wait_granted().await;
     assert!(next.finish().await.success());

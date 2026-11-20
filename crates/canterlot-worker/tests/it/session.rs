@@ -2398,14 +2398,17 @@ fn filler_command() -> Command {
 /// Всё, что воркер прислал за `window`: пакеты журнала управления и отчёты задач.
 async fn collect_control(hub: &mut ProtocolHub, window: Duration) -> Vec<Msg> {
     let mut seen = Vec::new();
-    let deadline = tokio::time::Instant::now() + window;
-    while let Ok(Some(event)) = tokio::time::timeout_at(deadline, hub.events.recv()).await {
-        if let Observed::Control(message) = event
-            && let Some(msg) = message.msg
-        {
-            seen.push(msg);
+    // Окно ограничивает сбор, а не отмеряет событие: пустой хаб просто молчит `window`.
+    let _ = timeout(window, async {
+        while let Some(event) = hub.events.recv().await {
+            if let Observed::Control(message) = event
+                && let Some(msg) = message.msg
+            {
+                seen.push(msg);
+            }
         }
-    }
+    })
+    .await;
     seen
 }
 
