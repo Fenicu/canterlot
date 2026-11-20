@@ -29,6 +29,8 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LimitReachedEffect {
     Paused,
+    /// Факт учётной записи, которой у харнесса разговора уже нет: очередь не тронута.
+    Stale,
     Held {
         wake_job: Uuid,
         wake_at: DateTime<Utc>,
@@ -512,8 +514,8 @@ pub async fn initial_holds_in_tx(
     })
 }
 
-/// Смена метки харнесса в отчёте машины: удержания её разговоров по прежней учётной записи
-/// снимаются в той же транзакции, ожидающие пробуждения отменяются, а резерв новой записи
+/// Смена метки харнесса в отчёте машины: удержания и обычные паузы лимита её разговоров по
+/// прежней учётной записи снимаются в той же транзакции, ожидающие пробуждения отменяются, а резерв новой записи
 /// выводится заново из её состояния. Квоту новой записи ставит только свежий факт лимита.
 /// Возвращает разговоры, чью очередь стоит разбудить.
 #[allow(clippy::too_many_arguments)]
@@ -564,12 +566,16 @@ pub async fn release_relabelled_in_tx(
             } => !(p == provider && a == old_account),
             _ => true,
         });
-        let had = queue.hold_reasons.0.len() != before;
-        if !had {
-            continue;
-        }
+        let had_hold = queue.hold_reasons.0.len() != before;
+        // Обычная пауза лимита без «кранча» тоже принадлежит прежней записи.
+        let pauses_before = queue.pause_reasons.0.len();
+        queue.pause_reasons.0.retain(|pause| {
+            !matches!(pause, PauseReason::LimitReached { provider: p, account: a, .. }
+                if a == old_account && p.as_deref().is_none_or(|p| p == provider))
+        });
+        let had_pause = queue.pause_reasons.0.len() != pauses_before;
         // Ожидающие пробуждения прежней записи больше ничего не сторожат.
-        sqlx::query(
+        let cancelled = sqlx::query(
             "update scheduled_jobs set state='cancelled',result='{\"reason\":\"account_changed\"}',updated_at=clock_timestamp()
               where conversation_id=$1 and kind='wake' and state='pending'
                 and payload->>'provider'=$2 and coalesce(payload->>'account','owner')=$3",
@@ -578,7 +584,11 @@ pub async fn release_relabelled_in_tx(
         .bind(provider)
         .bind(old_account)
         .execute(&mut *conn)
-        .await?;
+        .await?
+        .rows_affected();
+        if !(had_hold || had_pause || cancelled > 0) {
+            continue;
+        }
         clear_resume_in_tx(conn, id, None, correlation_id).await?;
         for hold in initial_holds_in_tx(conn, provider, new_account).await? {
             if !queue.hold_reasons.0.iter().any(|h| h.same_reserve(&hold)) {
