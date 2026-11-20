@@ -717,8 +717,8 @@ pub(crate) async fn validate_routed(
     })?;
     let catalogs = super::routing::load_catalogs(conn, caller.machine_id).await?;
     let list = whitelist::view(conn, caller.owner_id).await?;
-    let limits = super::routing::limits_view(conn).await?;
-    let live = super::routing::live_counts(conn, caller.owner_id).await?;
+    let limits = super::routing::limits_view(conn, caller.machine_id).await?;
+    let live = super::routing::live_counts(conn, caller.owner_id, caller.machine_id).await?;
     let place = parent_place(conn, parent.id, caller.machine_id).await?;
     let workdir = args
         .workdir

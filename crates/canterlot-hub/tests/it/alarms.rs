@@ -128,6 +128,7 @@ impl Fx {
             self.owner,
             &Observation {
                 provider: provider.into(),
+                account: "owner".into(),
                 window,
                 used_permille: used,
                 resets_at,
@@ -3321,6 +3322,7 @@ async fn limit_reset_missing_window_fires_the_condition(pool: PgPool) {
         &mut tx,
         f.owner,
         "claude",
+        "owner",
         Window::FiveHour,
         now,
         Uuid::now_v7(),

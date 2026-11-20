@@ -851,6 +851,7 @@ async fn last_event_at_is_touched_once_per_batch(pool: PgPool) -> TestResult {
 fn obs(s: &testkit::Seed, used: u16, at: DateTime<Utc>) -> Observation {
     Observation {
         provider: "claude".into(),
+        account: "owner".into(),
         window: Window::Weekly,
         used_permille: used,
         resets_at: None,
@@ -1341,7 +1342,15 @@ async fn series_are_ordered_and_bounded_for_both_windows(pool: PgPool) -> TestRe
             o.window = window;
             record(&pool, &s, &o).await;
         }
-        let rows = limits::series(&pool, "claude", window, at, at + Duration::seconds(2)).await?;
+        let rows = limits::series(
+            &pool,
+            "claude",
+            "owner",
+            window,
+            at,
+            at + Duration::seconds(2),
+        )
+        .await?;
         assert_eq!(rows, vec![(at, 900), (at + Duration::seconds(1), 901)]);
     }
     Ok(())
@@ -1381,7 +1390,7 @@ async fn limits_snapshot_reaches_pilot_sessions_of_that_provider(pool: PgPool) -
     let mut cc = connect(&hub, &c, Uuid::now_v7(), false, 1000).await;
     record(&pool, &a, &obs(&a, 960, Utc::now())).await;
     assert_eq!(
-        limits::push_limits_snapshot(&pool, &hub.registry, "claude").await?,
+        limits::push_limits_snapshot(&pool, &hub.registry, "claude", "owner").await?,
         1
     );
     let down = tokio::time::timeout(WAIT, ca.stream.message())

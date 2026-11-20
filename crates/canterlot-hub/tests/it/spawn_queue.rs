@@ -1291,7 +1291,7 @@ async fn a_blocked_head_does_not_hold_a_ready_later_item(pool: PgPool) {
         .unwrap();
     sqlx::query(
         "insert into provider_limits(provider,weekly_used_permille,weekly_observed_at,weekly_resets_at)
-         values('opencode',990,now(),now()+interval '4 hours') on conflict(provider) do update
+         values('opencode',990,now(),now()+interval '4 hours') on conflict(provider,account) do update
          set weekly_used_permille=990,weekly_observed_at=now(),weekly_resets_at=now()+interval '4 hours'",
     )
     .execute(&f.pool)
@@ -1353,7 +1353,7 @@ async fn past_reset_limits_fixture(f: &Fx, unknown: &str) -> Uuid {
     sqlx::query(
         "insert into provider_limits(provider,weekly_used_permille,weekly_observed_at,weekly_resets_at)
          values('opencode',960,now(),now()-interval '1 minute')
-         on conflict(provider) do update set weekly_used_permille=960,weekly_observed_at=now(),
+         on conflict(provider,account) do update set weekly_used_permille=960,weekly_observed_at=now(),
            weekly_resets_at=now()-interval '1 minute'",
     )
     .execute(&f.pool)

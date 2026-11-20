@@ -60,6 +60,7 @@ async fn observe(
         seed.owner_id,
         &Observation {
             provider: "claude".into(),
+            account: "owner".into(),
             window,
             used_permille: used,
             resets_at: Some(reset),

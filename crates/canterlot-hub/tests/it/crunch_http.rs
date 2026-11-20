@@ -33,6 +33,7 @@ async fn enter_reserve(f: &Fixture, weekly_reset: DateTime<Utc>, now: DateTime<U
         f.seed.owner_id,
         &Observation {
             provider: "claude".into(),
+            account: "owner".into(),
             window: Window::Weekly,
             used_permille: 960,
             resets_at: Some(weekly_reset),

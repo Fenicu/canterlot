@@ -737,6 +737,7 @@ async fn provider_quota_pauses_the_queue_with_the_reset_time(pool: PgPool) {
         provider,
         window,
         resets_at,
+        ..
     } = pause
     else {
         unreachable!();

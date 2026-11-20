@@ -119,8 +119,19 @@ fn rate_percent(permille_per_hour: f64) -> String {
     }
 }
 
+/// Название строки: у провайдера с одной учётной записью оно прежнее, у провайдера с
+/// несколькими за названием идёт метка учётной записи.
+fn row_label(row: &crate::limits::ProviderLimits, several_accounts: bool) -> String {
+    if several_accounts {
+        format!("{} ({})", label(&row.provider), row.account)
+    } else {
+        label(&row.provider).to_owned()
+    }
+}
+
 fn line(
     row: &crate::limits::ProviderLimits,
+    several_accounts: bool,
     now: chrono::DateTime<Utc>,
     stale_after: std::time::Duration,
 ) -> String {
@@ -184,10 +195,11 @@ fn line(
             ));
         }
     }
+    let name = row_label(row, several_accounts);
     if parts.is_empty() {
-        return format!("{}: no limit data yet.", label(&row.provider));
+        return format!("{name}: no limit data yet.");
     }
-    format!("{}: {}.", label(&row.provider), parts.join("; "))
+    format!("{name}: {}.", parts.join("; "))
 }
 
 /// Строка статуса провайдера, когда он не в порядке; при `ok` и `unknown` ничего.
@@ -236,15 +248,35 @@ pub async fn report(
     let stale_after = context.limits.stale_after;
     rows.sort_by(|a, b| {
         let first = args.provider.as_deref();
-        let rank = |provider: &str| (Some(provider) != first, provider.to_owned());
-        rank(&a.provider).cmp(&rank(&b.provider))
+        let rank = |row: &crate::limits::ProviderLimits| {
+            (
+                Some(row.provider.as_str()) != first,
+                row.provider.clone(),
+                row.account.clone(),
+            )
+        };
+        rank(a).cmp(&rank(b))
     });
+    // Строка на пару (провайдер, учётная запись); метка записи нужна, только когда у
+    // провайдера их несколько, иначе текст прежний.
+    let several: std::collections::HashSet<String> = {
+        let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for row in &rows {
+            *counts.entry(row.provider.as_str()).or_default() += 1;
+        }
+        counts
+            .into_iter()
+            .filter(|(_, count)| *count > 1)
+            .map(|(provider, _)| provider.to_owned())
+            .collect()
+    };
     let now = Utc::now();
     let providers: Vec<Value> = rows
         .iter()
         .map(|row| {
             json!({
                 "provider": row.provider,
+                "account": row.account,
                 "windows": [
                     window("five_hour", row.five_hour.as_ref(), now, stale_after),
                     window("weekly", row.weekly.as_ref(), now, stale_after),
@@ -265,16 +297,24 @@ pub async fn report(
     );
     let mut text = rows
         .first()
-        .map(|row| line(row, now, stale_after))
+        .map(|row| line(row, several.contains(&row.provider), now, stale_after))
         .unwrap_or_else(|| "no limit data yet in this session".to_owned());
     if let Some(status) = rows.first().and_then(status_line) {
         text.push('\n');
         text.push_str(&status);
     }
-    for row in rows.iter().skip(1) {
+    for (index, row) in rows.iter().enumerate().skip(1) {
         text.push('\n');
-        text.push_str(&line(row, now, stale_after));
-        if let Some(status) = status_line(row) {
+        text.push_str(&line(
+            row,
+            several.contains(&row.provider),
+            now,
+            stale_after,
+        ));
+        // Публичный статус общий на провайдера: строка статуса идёт один раз.
+        if rows[index - 1].provider != row.provider
+            && let Some(status) = status_line(row)
+        {
             text.push('\n');
             text.push_str(&status);
         }
@@ -290,7 +330,12 @@ pub async fn report(
                     .or(row.weekly_fable.as_ref())
                     .or(row.monthly.as_ref())?
                     .observed_at;
-                Some(format!("{} {}", row.provider, age(at, now)))
+                let name = if several.contains(&row.provider) {
+                    format!("{} {}", row.provider, row.account)
+                } else {
+                    row.provider.clone()
+                };
+                Some(format!("{name} {}", age(at, now)))
             })
             .collect::<Vec<_>>();
         if !fresh.is_empty() {

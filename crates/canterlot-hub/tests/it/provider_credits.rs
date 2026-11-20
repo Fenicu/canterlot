@@ -82,6 +82,7 @@ async fn observe_weekly(pool: &PgPool, seed: &testkit::Seed, provider: &str) {
         seed.owner_id,
         &Observation {
             provider: provider.into(),
+            account: "owner".into(),
             window: Window::Weekly,
             used_permille: 410,
             resets_at: Some(when + Duration::hours(3)),
@@ -144,7 +145,7 @@ async fn a_limits_report_reaches_the_stored_credits(pool: PgPool) -> TestResult 
         Some(expires.timestamp_millis() as u64)
     );
     let mut conn = pool.acquire().await?;
-    let credits = limits::credits(&mut conn, seed.owner_id, "codex")
+    let credits = limits::credits(&mut conn, seed.owner_id, "codex", "owner")
         .await?
         .unwrap();
     assert_eq!(credits.reset_count, Some(2));
@@ -215,7 +216,7 @@ async fn unknown_resets_keep_the_stored_values(pool: PgPool) -> TestResult {
         "a report that knows nothing changes nothing"
     );
     let mut conn = pool.acquire().await?;
-    let credits = limits::credits(&mut conn, seed.owner_id, "codex")
+    let credits = limits::credits(&mut conn, seed.owner_id, "codex", "owner")
         .await?
         .unwrap();
     assert_eq!(credits.reset_count, Some(2));
@@ -231,7 +232,7 @@ async fn unknown_resets_keep_the_stored_values(pool: PgPool) -> TestResult {
         )
         .await
     );
-    let credits = limits::credits(&mut conn, seed.owner_id, "codex")
+    let credits = limits::credits(&mut conn, seed.owner_id, "codex", "owner")
         .await?
         .unwrap();
     assert_eq!(credits.reset_count, Some(0));
@@ -263,7 +264,7 @@ async fn an_older_report_does_not_replace_the_credits(pool: PgPool) -> TestResul
         "a stale record is ignored"
     );
     let mut conn = pool.acquire().await?;
-    let credits = limits::credits(&mut conn, seed.owner_id, "codex")
+    let credits = limits::credits(&mut conn, seed.owner_id, "codex", "owner")
         .await?
         .unwrap();
     assert_eq!(credits.reset_count, Some(2));

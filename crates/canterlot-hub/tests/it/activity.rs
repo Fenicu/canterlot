@@ -158,6 +158,7 @@ fn state_table_matches_pilot_section_9() {
     i.queue.slot = RunSlot::Free;
     i.queue.hold_reasons.push(HoldReason::QuotaExhausted {
         provider: "claude".into(),
+        account: "owner".into(),
         window: "five_hour".into(),
         wake_at: base.now,
     });
@@ -203,6 +204,7 @@ fn running_turn_beats_quota_hold() {
     let mut i = inputs();
     i.queue.hold_reasons.push(HoldReason::WeeklyReserve {
         provider: "codex".into(),
+        account: "owner".into(),
         resets_at: None,
     });
     assert_eq!(activity::compute(&i, &thresholds()).state, S::Working);
@@ -213,6 +215,7 @@ fn running_turn_beats_quota_hold() {
     i.queue.hold_reasons.clear();
     i.queue.pause_reasons.push(PauseReason::LimitReached {
         provider: None,
+        account: "owner".into(),
         window: None,
         resets_at: None,
     });

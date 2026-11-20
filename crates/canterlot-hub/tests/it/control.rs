@@ -1031,6 +1031,7 @@ async fn continue_removes_only_releasable_reasons_and_preserves_holds(pool: PgPo
         PauseReason::ProcessExited,
         PauseReason::LimitReached {
             provider: None,
+            account: "owner".into(),
             window: None,
             resets_at: None,
         },

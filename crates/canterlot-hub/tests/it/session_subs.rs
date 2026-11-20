@@ -2166,6 +2166,7 @@ async fn a_stale_idle_background_warning_is_not_delivered(pool: PgPool) {
 fn quota_hold(provider: &str, window: &str, wake_at: DateTime<Utc>) -> HoldReason {
     HoldReason::QuotaExhausted {
         provider: provider.into(),
+        account: "owner".into(),
         window: window.into(),
         wake_at,
     }
@@ -2220,6 +2221,7 @@ async fn hold_subscriber_weekly(
         .bind(p.subscriber)
         .bind(json!([HoldReason::WeeklyReserve {
             provider: "claude".into(),
+            account: "owner".into(),
             resets_at: Some(wake_at),
         }]))
         .execute(pool)

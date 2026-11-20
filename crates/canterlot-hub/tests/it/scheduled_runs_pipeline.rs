@@ -202,6 +202,7 @@ async fn red_limits_window_skips_the_run(pool: PgPool) {
         f.seed.owner_id,
         &Observation {
             provider: "claude".into(),
+            account: "owner".into(),
             window: Window::Weekly,
             used_permille: 990,
             resets_at: Some(now + TimeDelta::days(2)),
@@ -601,6 +602,7 @@ async fn run_now_is_idempotent_and_run_anyway_bypasses_checks(pool: PgPool) {
         f.seed.owner_id,
         &Observation {
             provider: "claude".into(),
+            account: "owner".into(),
             window: Window::Weekly,
             used_permille: 990,
             resets_at: Some(now + TimeDelta::days(2)),
@@ -891,7 +893,7 @@ async fn weekly_reserve_hold_skips_new_session_run(pool: PgPool) {
     sqlx::query(
         "insert into provider_limits(provider, weekly_reserve_active)
          values('claude', true)
-         on conflict(provider) do update set weekly_reserve_active=true",
+         on conflict(provider,account) do update set weekly_reserve_active=true",
     )
     .execute(&pool)
     .await
@@ -1473,6 +1475,7 @@ async fn observe(pool: &PgPool, f: &Fixture, provider: &str, window: limits::Win
         f.seed.owner_id,
         &Observation {
             provider: provider.into(),
+            account: "owner".into(),
             window,
             used_permille: used,
             resets_at: Some(now + TimeDelta::hours(3)),
@@ -1619,6 +1622,7 @@ async fn observation_landing_during_existing_session_dispatch_turns_it_red(pool:
         f.seed.owner_id,
         &Observation {
             provider: "claude".into(),
+            account: "owner".into(),
             window: limits::Window::FiveHour,
             used_permille: 990,
             resets_at: Some(now + TimeDelta::hours(3)),
@@ -2513,6 +2517,7 @@ async fn scheduled_new_session_takes_the_machine_lock_before_the_provider_lock(p
             owner,
             &Observation {
                 provider: "claude".into(),
+                account: "owner".into(),
                 window: limits::Window::FiveHour,
                 used_permille: 100,
                 resets_at: Some(now + TimeDelta::hours(3)),

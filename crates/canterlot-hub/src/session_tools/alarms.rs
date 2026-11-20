@@ -66,8 +66,14 @@ const AUTOMATION: &str = "This is canterlot automation, not the owner.";
 
 /// Какое задание опроса ставит взвод: лимиты к сроку сброса или файл раз в 30 с.
 enum ProbeJob {
-    Limits { at: DateTime<Utc>, provider: String },
-    File { at: DateTime<Utc> },
+    Limits {
+        at: DateTime<Utc>,
+        provider: String,
+        account: String,
+    },
+    File {
+        at: DateTime<Utc>,
+    },
 }
 
 /// Состояние условия `session_state`: отметки целей снимаются при взводе.
@@ -88,6 +94,12 @@ struct SessionCondition {
 struct LimitCondition {
     kind: String,
     provider: String,
+    /// Учётная запись провайдера, закреплённая при взводе; без ключа — `owner`.
+    #[serde(
+        default = "crate::model::owner_account",
+        skip_serializing_if = "crate::model::is_owner_account"
+    )]
+    account: String,
     window: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     below_percent: Option<f64>,
@@ -373,6 +385,9 @@ struct WhenArgs {
     states: Option<Vec<String>>,
     all: Option<bool>,
     provider: Option<String>,
+    /// Учётная запись провайдера; по умолчанию — учётная запись харнесса вызывающей сессии
+    /// на её машине, иначе `owner`. Закрепляется при взводе.
+    account: Option<String>,
     window: Option<String>,
     below_percent: Option<f64>,
     path: Option<String>,
@@ -448,6 +463,9 @@ pub struct AlarmView {
     pub condition: String,
     /// Разобранное условие `limit_reset` для подписей PWA на русском.
     pub provider: Option<String>,
+    /// Учётная запись провайдера, закреплённая при взводе; только у `limit_reset`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
     pub window: Option<String>,
     pub below_percent: Option<f64>,
     /// Разобранное условие `machine` для подписей PWA на русском.
@@ -543,9 +561,14 @@ fn limit_condition_text(
         .map(|at| format!(" after {}", clock(at)))
         .unwrap_or_default();
     let watchdog = if only_on_timeout { "; watchdog" } else { "" };
+    // Текст `owner` прежний; другая учётная запись называется в скобках.
+    let provider = if condition.account == canterlot_proto::limits::OWNER_ACCOUNT {
+        condition.provider.clone()
+    } else {
+        format!("{} ({})", condition.provider, condition.account)
+    };
     format!(
-        "{} {} window resets{reset}{below}; deadline {}{watchdog}",
-        condition.provider,
+        "{provider} {} window resets{reset}{below}; deadline {}{watchdog}",
         condition.window,
         clock(deadline)
     )
@@ -603,6 +626,8 @@ enum ParsedWhen {
     Session(SessionCondition, Vec<String>),
     Limit {
         provider: String,
+        /// Названная вызывающим учётная запись; `None` — берётся с машины вызывающего при взводе.
+        account: Option<String>,
         window: Window,
         below_percent: Option<f64>,
     },
@@ -643,8 +668,10 @@ fn parse_when(when: &WhenArgs) -> Result<ParsedWhen, ToolError> {
         || when.load_per_core_below.is_some()
         || when.mem_available_gb_above.is_some();
     let session_fields = when.session_ids.is_some() || when.states.is_some() || when.all.is_some();
-    let limit_fields =
-        when.provider.is_some() || when.window.is_some() || when.below_percent.is_some();
+    let limit_fields = when.provider.is_some()
+        || when.account.is_some()
+        || when.window.is_some()
+        || when.below_percent.is_some();
     let file_fields = when.path.is_some()
         || when.min_bytes.is_some()
         || when.fresh.is_some()
@@ -703,8 +730,16 @@ fn parse_when(when: &WhenArgs) -> Result<ParsedWhen, ToolError> {
                 Some(_) => return Err(invalid()),
                 None => None,
             };
+            let account = match when.account.as_deref() {
+                Some(account) if canterlot_proto::limits::valid_account(account) => {
+                    Some(account.to_owned())
+                }
+                Some(_) => return Err(invalid()),
+                None => None,
+            };
             Ok(ParsedWhen::Limit {
                 provider,
+                account,
                 window,
                 below_percent,
             })
@@ -828,6 +863,7 @@ fn view(row: &AlarmRow) -> AlarmView {
         kind: row.kind.clone(),
         condition,
         provider: limit.as_ref().map(|condition| condition.provider.clone()),
+        account: limit.as_ref().map(|condition| condition.account.clone()),
         window: limit.as_ref().map(|condition| condition.window.clone()),
         below_percent: limit.as_ref().and_then(|condition| condition.below_percent),
         free_disk_gb_above: machine
@@ -976,9 +1012,20 @@ async fn insert_probe_job_in_tx(
     run_at: DateTime<Utc>,
     alarm_id: Uuid,
     provider: &str,
+    account: &str,
     probe_at: DateTime<Utc>,
 ) -> Result<Uuid, sqlx::Error> {
     let id = Uuid::now_v7();
+    let mut payload = json!({
+        "action": "alarm_probe",
+        "alarm_id": alarm_id,
+        "provider": provider,
+        "probe_at": time(probe_at),
+    });
+    // Нагрузка `owner` прежняя, без ключа `account`.
+    if account != canterlot_proto::limits::OWNER_ACCOUNT {
+        payload["account"] = json!(account);
+    }
     sqlx::query(
         "insert into scheduled_jobs(id,kind,owner_id,conversation_id,run_at,payload)
          values($1,'session_task',$2,$3,$4,$5)",
@@ -987,15 +1034,32 @@ async fn insert_probe_job_in_tx(
     .bind(owner_id)
     .bind(conversation_id)
     .bind(run_at)
-    .bind(json!({
-        "action": "alarm_probe",
-        "alarm_id": alarm_id,
-        "provider": provider,
-        "probe_at": time(probe_at),
-    }))
+    .bind(payload)
     .execute(conn)
     .await?;
     Ok(id)
+}
+
+/// Учётная запись провайдера для `limit_reset` без названной: метка харнесса вызывающей
+/// сессии, если он этого провайдера, иначе любого харнесса этого провайдера на её машине,
+/// иначе `owner`.
+async fn caller_limit_account(
+    conn: &mut PgConnection,
+    conversation_id: Uuid,
+    provider: &str,
+) -> Result<String, sqlx::Error> {
+    let account: Option<String> = sqlx::query_scalar(
+        "select h.account from conversations c
+           join machine_harnesses h on h.machine_id=c.machine_id and h.provider=$2
+          where c.id=$1
+          order by (h.harness=c.harness) desc, h.account
+          limit 1",
+    )
+    .bind(conversation_id)
+    .bind(provider)
+    .fetch_optional(conn)
+    .await?;
+    Ok(account.unwrap_or_else(crate::model::owner_account))
 }
 
 /// Задание опроса файла: путь и размер лежат в условии будильника, задание несёт
@@ -1304,12 +1368,13 @@ async fn limit_status_in_tx(
     let window = window_from_str(&condition.window)
         .ok_or_else(|| sqlx::Error::InvalidArgument("invalid window".into()))?;
     let row: Option<LimitReading> = sqlx::query_as(match window {
-            Window::Weekly => "select weekly_used_permille,weekly_resets_at,weekly_observed_at,data_confidence from provider_limits where provider=$1",
-            Window::FiveHour => "select five_hour_used_permille,five_hour_resets_at,five_hour_observed_at,data_confidence from provider_limits where provider=$1",
-            Window::Monthly => "select monthly_used_permille,monthly_resets_at,monthly_observed_at,data_confidence from provider_limits where provider=$1",
-            Window::WeeklyFable => "select weekly_fable_used_permille,weekly_fable_resets_at,weekly_fable_observed_at,data_confidence from provider_limits where provider=$1",
+            Window::Weekly => "select weekly_used_permille,weekly_resets_at,weekly_observed_at,data_confidence from provider_limits where provider=$1 and account=$2",
+            Window::FiveHour => "select five_hour_used_permille,five_hour_resets_at,five_hour_observed_at,data_confidence from provider_limits where provider=$1 and account=$2",
+            Window::Monthly => "select monthly_used_permille,monthly_resets_at,monthly_observed_at,data_confidence from provider_limits where provider=$1 and account=$2",
+            Window::WeeklyFable => "select weekly_fable_used_permille,weekly_fable_resets_at,weekly_fable_observed_at,data_confidence from provider_limits where provider=$1 and account=$2",
         })
         .bind(&condition.provider)
+        .bind(&condition.account)
         .fetch_optional(&mut *conn)
         .await?;
     let (used, _resets, observed, confidence) =
@@ -1330,12 +1395,14 @@ async fn limit_status_in_tx(
         return Ok(LimitStatus::NoReading);
     };
     if window == Window::FiveHour {
-        let absent: Option<DateTime<Utc>> =
-            sqlx::query_scalar("select five_hour_absent_at from provider_limits where provider=$1")
-                .bind(&condition.provider)
-                .fetch_optional(&mut *conn)
-                .await?
-                .flatten();
+        let absent: Option<DateTime<Utc>> = sqlx::query_scalar(
+            "select five_hour_absent_at from provider_limits where provider=$1 and account=$2",
+        )
+        .bind(&condition.provider)
+        .bind(&condition.account)
+        .fetch_optional(&mut *conn)
+        .await?
+        .flatten();
         if absent.is_some_and(|absent| absent >= wake_at) {
             return Ok(LimitStatus::Met {
                 trigger: "reset",
@@ -1343,7 +1410,15 @@ async fn limit_status_in_tx(
             });
         }
     }
-    match crate::crunch::check_reset(conn, &condition.provider, window, wake_at).await? {
+    match crate::crunch::check_reset(
+        conn,
+        &condition.provider,
+        &condition.account,
+        window,
+        wake_at,
+    )
+    .await?
+    {
         ResetCheck::Verified => {
             // Оценочный отсчёт подтверждает сброс только вместе со вторым отдельным
             // отсчётом, который сам показывает сброс после запомненного срока.
@@ -1354,13 +1429,14 @@ async fn limit_status_in_tx(
             if confidence == DataConfidence::Estimated {
                 let readings: i64 = sqlx::query_scalar(
                     "select count(distinct observed_at) from limit_snapshots
-                     where provider=$1 and window_kind=$2 and observed_at >= $3
+                     where provider=$1 and account=$4 and window_kind=$2 and observed_at >= $3
                        and used_permille < 1000
                        and (resets_at > $3 or resets_at is null)",
                 )
                 .bind(&condition.provider)
                 .bind(window.as_str())
                 .bind(wake_at)
+                .bind(&condition.account)
                 .fetch_one(&mut *conn)
                 .await?;
                 if readings < 2 {
@@ -1383,6 +1459,7 @@ async fn limit_status_in_tx(
 pub(crate) async fn evaluate_limit_in_tx(
     conn: &mut PgConnection,
     provider: &str,
+    account: &str,
     window: Window,
     now: DateTime<Utc>,
     correlation_id: Uuid,
@@ -1391,11 +1468,13 @@ pub(crate) async fn evaluate_limit_in_tx(
         "select * from alarms
          where state='armed' and condition->>'kind'='limit_reset'
            and condition->>'provider'=$1 and condition->>'window'=$2
+           and coalesce(condition->>'account','owner')=$3
          order by id
          for update skip locked",
     )
     .bind(provider)
     .bind(window.as_str())
+    .bind(account)
     .fetch_all(&mut *conn)
     .await?;
     let mut changed = false;
@@ -2290,18 +2369,28 @@ pub async fn set(
                 }
                 ParsedWhen::Limit {
                     provider,
+                    account,
                     window,
                     below_percent,
                 } => {
+                    // Учётная запись закрепляется при взводе: названная вызывающим, иначе
+                    // метка харнесса вызывающей сессии для провайдера на её машине, иначе `owner`.
+                    let account = match account {
+                        Some(account) => account,
+                        None => {
+                            caller_limit_account(&mut tx, caller.conversation_id, &provider).await?
+                        }
+                    };
                     let (resets_at, used): (Option<DateTime<Utc>>, Option<i32>) = sqlx::query_as(
                         match window {
-                            Window::Weekly => "select weekly_resets_at,weekly_used_permille from provider_limits where provider=$1",
-                            Window::FiveHour => "select five_hour_resets_at,five_hour_used_permille from provider_limits where provider=$1",
-                            Window::Monthly => "select monthly_resets_at,monthly_used_permille from provider_limits where provider=$1",
-                            Window::WeeklyFable => "select weekly_fable_resets_at,weekly_fable_used_permille from provider_limits where provider=$1",
+                            Window::Weekly => "select weekly_resets_at,weekly_used_permille from provider_limits where provider=$1 and account=$2",
+                            Window::FiveHour => "select five_hour_resets_at,five_hour_used_permille from provider_limits where provider=$1 and account=$2",
+                            Window::Monthly => "select monthly_resets_at,monthly_used_permille from provider_limits where provider=$1 and account=$2",
+                            Window::WeeklyFable => "select weekly_fable_resets_at,weekly_fable_used_permille from provider_limits where provider=$1 and account=$2",
                         },
                     )
                     .bind(&provider)
+                    .bind(&account)
                     .fetch_optional(&mut *tx)
                     .await?
                     .unwrap_or((None, None));
@@ -2314,6 +2403,7 @@ pub async fn set(
                     let condition = LimitCondition {
                         kind: "limit_reset".into(),
                         provider: provider.clone(),
+                        account: account.clone(),
                         window: window.as_str().into(),
                         below_percent,
                         armed_at: now,
@@ -2341,7 +2431,11 @@ pub async fn set(
                         response,
                         deadline + COALESCE,
                         true,
-                        probe_at.map(|at| ProbeJob::Limits { at, provider }),
+                        probe_at.map(|at| ProbeJob::Limits {
+                            at,
+                            provider,
+                            account,
+                        }),
                     )
                 }
                 ParsedWhen::Machine {
@@ -2529,7 +2623,11 @@ pub async fn set(
         .await?;
     }
     match probe {
-        Some(ProbeJob::Limits { at, provider }) => {
+        Some(ProbeJob::Limits {
+            at,
+            provider,
+            account,
+        }) => {
             insert_probe_job_in_tx(
                 &mut tx,
                 caller.owner_id,
@@ -2537,6 +2635,7 @@ pub async fn set(
                 at.max(now),
                 id,
                 &provider,
+                &account,
                 at,
             )
             .await?;
@@ -4015,6 +4114,7 @@ mod tests {
             states: None,
             all: Some(true),
             provider: None,
+            account: None,
             window: None,
             below_percent: None,
             path: None,
