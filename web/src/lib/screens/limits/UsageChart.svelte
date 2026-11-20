@@ -53,10 +53,10 @@
   const legend = $derived(lines.map(line => line.name).join(', '));
 </script>
 <div class="charts">
-  {#each charts as chart (chart.provider)}
+  {#each charts as chart (chart.key)}
     {#if chart.known}
       {@const todayTone = chart.days.at(-1)?.value == null ? 'normal' : meterTone(chart.days.at(-1)!.value!, thresholds)}
-      <figure class="chart" data-provider={chart.provider} role="img" aria-label="Недельный остаток по дням. {chart.summary}{legend ? `; ${legend}` : ''}">
+      <figure class="chart" data-provider={chart.provider} data-account={chart.named ? chart.account : undefined} role="img" aria-label="Недельный остаток по дням. {chart.summary}{legend ? `; ${legend}` : ''}">
         <figcaption aria-hidden="true"><span class="name">{chart.label}</span>{#if chart.today}<span class="today">сегодня <b data-tone={todayTone}>{chart.today}</b></span>{/if}</figcaption>
         <div class="plot" aria-hidden="true">
           <div class="axis">
@@ -82,19 +82,19 @@
         </div>
       </figure>
     {:else}
-      <div class="chart empty" data-provider={chart.provider}><span class="name">{chart.label}</span><p>Снимков за эти дни нет</p></div>
+      <div class="chart empty" data-provider={chart.provider} data-account={chart.named ? chart.account : undefined}><span class="name">{chart.label}</span><p>Снимков за эти дни нет</p></div>
     {/if}
   {/each}
 </div>
 <div class="sr-only"><table aria-label="Недельный остаток по дням"><thead><tr><th>День</th><th>Провайдер</th><th>Неделя, осталось</th></tr></thead><tbody>
-  {#each charts as chart (chart.provider)}{#if chart.known}{#each chart.days as day (day.day)}<tr><th>{day.day}</th><td>{chart.label}</td><td>{day.text || 'Нет данных'}</td></tr>{/each}{/if}{/each}
+  {#each charts as chart (chart.key)}{#if chart.known}{#each chart.days as day (day.day)}<tr><th>{day.day}</th><td>{chart.label}</td><td>{day.text || 'Нет данных'}</td></tr>{/each}{/if}{/each}
 </tbody></table></div>
 <style>
   /* Колонка не уже 224 px: в панели 636 px три графика по 206 px режут дни и наезжают подписями. */
   .charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, calc(var(--gauge-width) * 2)), 1fr)); align-items: stretch; gap: var(--s4); }
   .chart { min-width: 0; margin: var(--s0); padding: var(--s6) var(--s8) var(--s6); background: var(--surface); border-radius: var(--radius-card); }
   figcaption { display: flex; justify-content: space-between; align-items: baseline; gap: var(--s4); }
-  .name { font-size: var(--fs-body); font-weight: var(--weight-semibold); }
+  .name { min-width: 0; overflow-wrap: anywhere; font-size: var(--fs-body); font-weight: var(--weight-semibold); }
   .today { color: var(--muted); font-size: var(--fs-sm); white-space: nowrap; }
   .today b { color: var(--text); font-size: var(--fs-meta); font-variant-numeric: tabular-nums; }
   .today b[data-tone='warning'] { color: var(--warning); }

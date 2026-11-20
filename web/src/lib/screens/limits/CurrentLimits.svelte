@@ -5,8 +5,8 @@
   let { blocks }: { blocks: ReturnType<typeof currentBlocks> } = $props();
 </script>
 <div class="current">
-  {#each blocks as block (block.provider)}
-    <section class="provider" data-provider={block.provider} data-tone={block.lead?.tone} data-stale={block.stale || undefined} aria-label="{block.label}, текущие лимиты">
+  {#each blocks as block (block.key)}
+    <section class="provider" data-provider={block.provider} data-account={block.named ? block.account : undefined} data-tone={block.lead?.tone} data-stale={block.stale || undefined} aria-label="{block.label}, текущие лимиты">
       <header class="head">
         <h3>{block.label}</h3>
         <!-- Крупно — самое тесное свежее окно: сколько осталось там, где кончится раньше всего. -->
@@ -16,7 +16,7 @@
           <!-- eslint-disable-next-line svelte/no-navigation-without-resolve -- внешняя страница статуса провайдера -->
           <a class="pstatus" data-status-tone={block.providerStatus.tone} href={block.providerStatus.url} target="_blank" rel="noopener noreferrer" title={block.providerStatus.title} aria-label={block.providerStatus.title}>{block.providerStatus.company}: {block.providerStatus.text}</a>{/if}</p>{/if}
       </header>
-      {#if block.credential}<p class="credential" data-provider={block.provider} data-tone={block.credential.tone}>{block.credential.text}</p>{/if}
+      {#each block.credentials as line, index (index)}<p class="credential" data-provider={block.provider} data-tone={line.tone}>{line.text}</p>{/each}
       {#if block.credits.length}
         <ul class="credits" aria-label="Сбросы лимитов">
           {#each block.credits as credit (credit.key)}
@@ -45,7 +45,7 @@
   .current { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--limits-column)), 1fr)); gap: var(--s4); }
   .provider { min-width: 0; container-type: inline-size; padding: var(--s6) var(--s8) var(--s8); background: var(--surface); border-radius: var(--radius-card); }
   .head { display: grid; grid-template-columns: minmax(0, 1fr) max-content; grid-template-areas: 'name lead' 'status lead'; align-items: start; column-gap: var(--s4); margin-bottom: var(--s6); }
-  h3 { grid-area: name; margin: var(--s0); font-size: var(--fs-body); font-weight: var(--weight-semibold); line-height: var(--lh-tight); padding-top: var(--s2); }
+  h3 { grid-area: name; min-width: 0; overflow-wrap: anywhere; margin: var(--s0); font-size: var(--fs-body); font-weight: var(--weight-semibold); line-height: var(--lh-tight); padding-top: var(--s2); }
   .lead { grid-area: lead; display: flex; flex-direction: column; align-items: end; margin: var(--s0); text-align: end; }
   .lead b { font-size: var(--fs-heading); font-weight: var(--weight-semibold); line-height: var(--lh-tight); font-variant-numeric: tabular-nums; letter-spacing: var(--tracking-tight); }
   .lead span { color: var(--muted); font-size: var(--fs-xs); white-space: nowrap; }

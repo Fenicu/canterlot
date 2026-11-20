@@ -280,8 +280,8 @@ describe("sessions/limits credits", () => {
       NOW,
       cfg,
     );
-    expect(strip.rows[0]?.credits?.text).toBe("Codex: сбросы лимитов 2, ближайший сгорит 31.10");
+    expect(strip.rows[0]?.creditLines.map((line) => line.text)).toEqual(["Codex: сбросы лимитов 2, ближайший сгорит 31.10"]);
     expect(strip.rows[0]?.creditList).toHaveLength(1);
-    expect(limitStrip([provider("claude", 100, 200)], NOW, cfg).rows[0]?.credits).toBeNull();
+    expect(limitStrip([provider("claude", 100, 200)], NOW, cfg).rows[0]?.creditLines).toEqual([]);
   });
 });

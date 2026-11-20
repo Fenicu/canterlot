@@ -1,10 +1,14 @@
-import { providerLabel as label } from "#lib/format/labels.js";
 import {
-  creditEntries,
-  credentialLine,
-  creditsLine,
+  accountRank,
+  accountCreditEntries,
+  accountCreditLines,
+  accountCredentialLines,
+  accountLabel,
+  accountOf,
   dayClock,
+  limitKey,
   limitView,
+  multiAccountProviders,
   statusBadge,
   type CredentialLine,
   type CreditEntry,
@@ -17,6 +21,12 @@ import {
 
 export interface LimitRow {
   provider: string;
+  /** Учётная запись лимитов; `owner` по умолчанию. */
+  account: string;
+  /** Ключ строки: пара (провайдер, учётная запись), у `owner` — сам провайдер. */
+  key: string;
+  /** У провайдера несколько учётных записей: имя записи стоит в подписи и в `data-account`. */
+  named: boolean;
   label: string;
   five: MeterView;
   week: MeterView;
@@ -32,10 +42,10 @@ export interface LimitRow {
   estimated: boolean;
   /** Статус провайдера словом, когда он не в порядке; иначе `null`. */
   status: StatusBadge | null;
-  /** Конец входа провайдера; `null` — дата неизвестна (API-ключ, старый воркер). */
-  credential: CredentialLine | null;
-  /** Сбросы лимитов; `null` — у провайдера их нет или воркер о них молчит. */
-  credits: CreditsLine | null;
+  /** Конец входа по машинам: строка на машину с известной датой; у одной машины без её имени. */
+  credentials: CredentialLine[];
+  /** Сбросы лимитов по машинам; пусто — их нет или воркер о них молчит. */
+  creditLines: CreditsLine[];
   /** Каждый сброс со сроком: полный экран лимитов перечисляет их поимённо. */
   creditList: CreditEntry[];
 }
@@ -57,8 +67,12 @@ export function limitStrip(
   cfg: LimitThresholds,
   opts: { prefer?: string } = {},
 ): LimitStrip {
+  const multi = multiAccountProviders(providers);
+  // Записи одного провайдера идут подряд: сначала `owner`, затем остальные по имени.
   const ordered = [...providers].sort(
-    (a, b) => providerRank(a.provider, opts.prefer) - providerRank(b.provider, opts.prefer),
+    (a, b) =>
+      providerRank(a.provider, opts.prefer) - providerRank(b.provider, opts.prefer) ||
+      accountRank(a).localeCompare(accountRank(b)),
   );
   const views = ordered.map((provider) => ({
     provider,
@@ -73,24 +87,37 @@ export function limitStrip(
     .filter((stamp) => Number.isFinite(stamp));
   const latest = seen.length ? Math.max(...seen) : 0;
   return {
-    rows: views.map(({ provider, view }) => ({
-      provider: provider.provider,
-      label: label(provider.provider),
-      five: view.five,
-      week: view.week,
-      fable: view.fable,
-      month: view.month,
-      empty: !provider.five_hour && !provider.weekly && !provider.weekly_fable && !provider.monthly,
-      reserve: provider.weekly_reserve_active,
-      estimated: provider.data_confidence === "estimated",
-      status: statusBadge(provider.provider, provider.status),
-      credential: credentialLine(provider.provider, provider.credential_expires_at, now),
-      credits: creditsLine(provider.provider, provider.credits, now),
-      creditList: creditEntries(provider.credits),
-    })),
+    rows: views.map(({ provider, view }) => limitRow(provider, view, multi, now)),
     tone,
     updated: latest ? `обновлено ${dayClock(latest, now)}` : "",
     updatedAt: latest,
+  };
+}
+
+function limitRow(
+  provider: ProviderLimits,
+  view: ReturnType<typeof limitView>,
+  multi: ReadonlySet<string>,
+  now: number,
+): LimitRow {
+  const label = accountLabel(provider.provider, provider.account, multi);
+  return {
+    provider: provider.provider,
+    account: accountOf(provider),
+    key: limitKey(provider.provider, provider.account),
+    named: multi.has(provider.provider),
+    label,
+    five: view.five,
+    week: view.week,
+    fable: view.fable,
+    month: view.month,
+    empty: !provider.five_hour && !provider.weekly && !provider.weekly_fable && !provider.monthly,
+    reserve: provider.weekly_reserve_active,
+    estimated: provider.data_confidence === "estimated",
+    status: statusBadge(provider.provider, provider.status),
+    credentials: accountCredentialLines(provider, label, now),
+    creditLines: accountCreditLines(provider, label, now),
+    creditList: accountCreditEntries(provider),
   };
 }
 

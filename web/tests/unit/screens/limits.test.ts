@@ -154,7 +154,7 @@ describe("screens/limits history charts", () => {
 });
 
 describe("screens/limits layout helpers", () => {
-  const chart = (provider: string, label: string) => ({ provider, label, known: true as const, days: [], today: "", summary: "" });
+  const chart = (provider: string, label: string) => ({ provider, account: "owner", key: provider, named: false, label, known: true as const, days: [], today: "", summary: "" });
 
   it("charts_follow_the_card_order_with_a_slot_for_a_provider_without_snapshots", () => {
     const slots = alignCharts([chart("gemini", "Gemini"), chart("claude", "Claude")], [
