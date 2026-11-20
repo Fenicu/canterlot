@@ -335,6 +335,43 @@ async fn launch_canonical_path_contradicting_domain_sets_null_and_records_confli
     }
 }
 
+/// Отправка держит `for key share` на разговоре цели и потом ждёт её очередь; приём журнала
+/// держит очередь. Проверка запуска не должна ждать `key share`, иначе цикл: PostgreSQL
+/// оборвёт одну из транзакций. Здесь отправка держит строку, а запуск идёт мимо неё.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn launch_recheck_does_not_wait_for_key_share_held_by_send(pool: PgPool) {
+    let (seed, registry) = fixture(&pool, &["pilot_v1", "memory_scope_v1"]).await;
+    // Совпавший домен и домен, который придётся обнулить: оба хода не ждут `key share`.
+    for (workdir, canonical, expected) in [
+        ("/h/work/p", "/h/work/p", Some("work")),
+        ("/h/play/link", "/h/work/secret", None),
+    ] {
+        let target = create(&pool, &registry, request(&seed, workdir, None))
+            .await
+            .unwrap();
+        let mut send = pool.begin().await.unwrap();
+        sqlx::query("select id from conversations where id=$1 for key share")
+            .bind(target)
+            .fetch_one(&mut *send)
+            .await
+            .unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            launch(&pool, &seed, target, canonical),
+        )
+        .await
+        .expect("запуск ждёт строку, которую держит отправка");
+        // Отправка берёт очередь после строки: цикла нет, ошибки взаимной блокировки тоже.
+        sqlx::query("select conversation_id from queue_state where conversation_id=$1 for update")
+            .bind(target)
+            .fetch_optional(&mut *send)
+            .await
+            .unwrap();
+        send.commit().await.unwrap();
+        assert_eq!(scope(&pool, target).await.0.as_deref(), expected);
+    }
+}
+
 #[sqlx::test(migrations = false)]
 async fn backfill_roots_by_workdir_children_by_parent_broken_chain_null(pool: PgPool) {
     let old = sqlx::migrate::Migrator {
@@ -396,4 +433,99 @@ async fn backfill_roots_by_workdir_children_by_parent_broken_chain_null(pool: Pg
     for (id, want) in expected {
         assert_eq!(scope(&pool, id).await, want, "{id}");
     }
+}
+
+/// Миграция убирает открытые подписки и взведённые будильники, чьи концы после заполнения
+/// оказались в разных доменах или без домена; остальные остаются.
+#[sqlx::test(migrations = false)]
+async fn migration_removes_cross_domain_subscriptions_and_alarms(pool: PgPool) {
+    let old = sqlx::migrate::Migrator {
+        migrations: canterlot_hub::db::MIGRATOR
+            .iter()
+            .filter(|migration| migration.version < 119)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into(),
+        ..sqlx::migrate::Migrator::DEFAULT
+    };
+    old.run(&pool).await.unwrap();
+    let seed = testkit::seed(&pool).await;
+    sqlx::query("update machines set worktree_root=$2 where id=$1")
+        .bind(seed.machine_id)
+        .bind(BASE)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let add = |workdir: &'static str| {
+        let pool = pool.clone();
+        let (owner, machine) = (seed.owner_id, seed.machine_id);
+        async move {
+            let id = Uuid::now_v7();
+            sqlx::query("insert into conversations(id,owner_id,machine_id,harness,workdir) values($1,$2,$3,'synthetic',$4)")
+                .bind(id).bind(owner).bind(machine).bind(workdir)
+                .execute(&pool).await.unwrap();
+            id
+        }
+    };
+    let work = add("/home/u/work/app").await;
+    let work_other = add("/home/u/work/app").await;
+    let personal = add("/home/u/play").await;
+    let neutral = add("/h/data/worktrees/x").await;
+    let neutral_other = add("/h/data/worktrees/y").await;
+    let subscribe = |subscriber: Uuid, target: Uuid| {
+        let pool = pool.clone();
+        let owner = seed.owner_id;
+        async move {
+            sqlx::query("insert into session_subscriptions(id,owner_id,subscriber_id,target_id) values($1,$2,$3,$4)")
+                .bind(Uuid::now_v7()).bind(owner).bind(subscriber).bind(target)
+                .execute(&pool).await.unwrap();
+        }
+    };
+    subscribe(work, work_other).await;
+    subscribe(work, personal).await;
+    subscribe(personal, neutral).await;
+    subscribe(neutral, neutral_other).await;
+    let arm = |owner_of: Uuid, target: Uuid| {
+        let pool = pool.clone();
+        let owner = seed.owner_id;
+        async move {
+            let id = Uuid::now_v7();
+            sqlx::query(
+                "insert into alarms(id,owner_id,conversation_id,created_by,kind,condition,
+                                    deadline_at,call_id)
+                 values($1,$2,$3,'agent','condition',
+                        jsonb_build_object('kind','session_state','session_ids',
+                                           jsonb_build_array($4::text)),
+                        now()+interval '1 hour',$5)",
+            )
+            .bind(id)
+            .bind(owner)
+            .bind(owner_of)
+            .bind(target.to_string())
+            .bind(Uuid::now_v7())
+            .execute(&pool)
+            .await
+            .unwrap();
+            id
+        }
+    };
+    let alarm_same = arm(work, work_other).await;
+    let alarm_cross = arm(work, personal).await;
+    let alarm_null = arm(neutral, neutral_other).await;
+
+    canterlot_hub::db::MIGRATOR.run(&pool).await.unwrap();
+
+    let kept: Vec<(Uuid, Uuid)> = sqlx::query_as(
+        "select subscriber_id,target_id from session_subscriptions order by subscriber_id,target_id",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(kept, vec![(work, work_other)]);
+    let alarms: Vec<Uuid> = sqlx::query_scalar("select id from alarms where kind='condition'")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(alarms, vec![alarm_same]);
+    assert!(!alarms.contains(&alarm_cross) && !alarms.contains(&alarm_null));
 }
