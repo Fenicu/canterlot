@@ -266,7 +266,9 @@ mod tests {
     }
 
     fn stream(len: usize) -> Vec<u8> {
-        (0..len).map(|i| b'a' + u8::try_from(i % 26).unwrap()).collect()
+        (0..len)
+            .map(|i| b'a' + u8::try_from(i % 26).unwrap())
+            .collect()
     }
 
     #[test]

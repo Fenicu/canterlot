@@ -132,10 +132,7 @@ async fn execute(dir: &Path, spec: &Spec, lease: Option<&client::StrictLease>) -
         command.env("PATH", path);
     }
     let log = LogWriter::create(dir, spec.log_max_bytes);
-    let _ = write_atomic(
-        &dir.join(STARTED),
-        state::now_ms().to_string().as_bytes(),
-    );
+    let _ = write_atomic(&dir.join(STARTED), state::now_ms().to_string().as_bytes());
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(_) => return NOT_FOUND,

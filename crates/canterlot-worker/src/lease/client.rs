@@ -626,7 +626,9 @@ async fn run_strict(socket: PathBuf, args: RunArgs) -> ExitCode {
     match status {
         Ok(status) => match (status.code(), status.signal()) {
             (Some(code), _) => ExitCode::from(u8::try_from(code & 0xff).unwrap_or(1)),
-            (None, Some(number)) => ExitCode::from(u8::try_from((128 + number) & 0xff).unwrap_or(1)),
+            (None, Some(number)) => {
+                ExitCode::from(u8::try_from((128 + number) & 0xff).unwrap_or(1))
+            }
             (None, None) => ExitCode::FAILURE,
         },
         Err(_) => ExitCode::FAILURE,
@@ -676,7 +678,9 @@ pub async fn acquire_strict(
         match request(stream, kind, label, dir, requested_at_ms, &mut last_line).await {
             Wait::Granted(granted) => break granted,
             Wait::Lost(reason, _) => {
-                note(format!("connection to worker lost ({reason}), reconnecting"));
+                note(format!(
+                    "connection to worker lost ({reason}), reconnecting"
+                ));
                 tokio::time::sleep(RETRY_STEP).await;
             }
             Wait::Failed(reason) => {

@@ -299,7 +299,10 @@ impl JobManager {
         // подобрал при старте, и он увидит отметку на следующем шаге. Новый наблюдатель
         // без каталога или с каталогом, который занимает запуск, принял бы работу за брошенную.
         self.sink
-            .facts(vec![], vec![(command.command_id.clone(), command.dispatch_attempt)])
+            .facts(
+                vec![],
+                vec![(command.command_id.clone(), command.dispatch_attempt)],
+            )
             .await
             .map_err(|_| JobError::Sink)?;
         Ok(())
@@ -392,7 +395,8 @@ impl JobManager {
     /// рабочие каталоги и чужие файлы не трогаем. Возвращает число убранных попыток.
     pub async fn sweep(&self, now_ms: u64) -> usize {
         let data_dir = self.rt.data_dir.clone();
-        let retention = u64::try_from(self.rt.config.state_retention.as_millis()).unwrap_or(u64::MAX);
+        let retention =
+            u64::try_from(self.rt.config.state_retention.as_millis()).unwrap_or(u64::MAX);
         tokio::task::spawn_blocking(move || sweep_dirs(&data_dir, now_ms, retention))
             .await
             .unwrap_or(0)
@@ -739,8 +743,8 @@ impl Watcher {
     async fn finish_by_exit(&mut self, spec: &Spec, code: i32, finished_at: u64) {
         let started = read_started(&self.dir).unwrap_or(finished_at);
         let duration = finished_at.saturating_sub(started);
-        let timed_out = code == 124
-            || (code == 137 && duration >= u64::from(spec.timeout_seconds) * 1000);
+        let timed_out =
+            code == 124 || (code == 137 && duration >= u64::from(spec.timeout_seconds) * 1000);
         let outcome = if code == 0 {
             JobOutcome::Succeeded
         } else if timed_out {
@@ -768,7 +772,10 @@ impl Watcher {
             finished_at_ms: finished_at,
         };
         if write_json(&self.dir.join(state::RESULT), &result).is_err() {
-            tracing::warn!(kind = "job_result_write_failed", "job result was not stored");
+            tracing::warn!(
+                kind = "job_result_write_failed",
+                "job result was not stored"
+            );
         }
     }
 

@@ -699,12 +699,15 @@ data_dir = "/tmp/store"
         assert_eq!(tuned.jobs.log_max_bytes(), 1024 * 1024);
         assert_eq!(tuned.jobs.state_retention, Duration::from_secs(12 * 3600));
         // Ноль и огромные значения не ломают воркер: границы подтягиваются.
-        let wild: WorkerConfig =
-            toml::from_str(&format!("{base}\n[jobs]\nmax_running = 0\nlog_max_mib = 9999\n"))
-                .unwrap();
+        let wild: WorkerConfig = toml::from_str(&format!(
+            "{base}\n[jobs]\nmax_running = 0\nlog_max_mib = 9999\n"
+        ))
+        .unwrap();
         assert_eq!(wild.jobs.max_running(), 1);
         assert_eq!(wild.jobs.log_max_bytes(), 64 * 1024 * 1024);
-        assert!(toml::from_str::<WorkerConfig>(&format!("{base}\n[jobs]\nlost_grace = 1\n")).is_err());
+        assert!(
+            toml::from_str::<WorkerConfig>(&format!("{base}\n[jobs]\nlost_grace = 1\n")).is_err()
+        );
     }
 
     #[test]

@@ -2570,7 +2570,10 @@ fn in_place_job_messages_keep_their_wire_shape_and_hide_the_command() {
     };
     let debug = format!("{start:?}");
     assert!(!debug.contains(SECRET_LOOKING), "{debug}");
-    assert!(debug.contains("/h/u/proj") && debug.contains("MODE"), "{debug}");
+    assert!(
+        debug.contains("/h/u/proj") && debug.contains("MODE"),
+        "{debug}"
+    );
     let command = Command {
         command_id: "command".into(),
         kind: Some(command::Kind::StartInPlaceJob(start)),
@@ -2579,7 +2582,11 @@ fn in_place_job_messages_keep_their_wire_shape_and_hide_the_command() {
     assert!(!format!("{command:?}").contains(SECRET_LOOKING));
     let wire = command.encode_to_vec();
     let tag = wire.iter().position(|b| *b == 0xBA).expect("field 23");
-    assert_eq!(wire[tag + 1], 0x01, "Command.start_in_place_job is field 23");
+    assert_eq!(
+        wire[tag + 1],
+        0x01,
+        "Command.start_in_place_job is field 23"
+    );
     assert_roundtrip(command);
     let cancel = Command {
         command_id: "command".into(),
@@ -2591,7 +2598,11 @@ fn in_place_job_messages_keep_their_wire_shape_and_hide_the_command() {
     };
     let wire = cancel.encode_to_vec();
     let tag = wire.iter().position(|b| *b == 0xC2).expect("field 24");
-    assert_eq!(wire[tag + 1], 0x01, "Command.cancel_in_place_job is field 24");
+    assert_eq!(
+        wire[tag + 1],
+        0x01,
+        "Command.cancel_in_place_job is field 24"
+    );
     assert_roundtrip(cancel);
 
     for (body, prefix) in [
@@ -2668,7 +2679,11 @@ fn in_place_job_messages_keep_their_wire_shape_and_hide_the_command() {
             observed_at_ms: 3,
         })),
     };
-    assert_eq!(report.encode_to_vec()[..2], [0x82, 0x01], "ControlUp field 16");
+    assert_eq!(
+        report.encode_to_vec()[..2],
+        [0x82, 0x01],
+        "ControlUp field 16"
+    );
     assert_roundtrip(report);
     let chunk = ControlUp {
         msg: Some(control_up::Msg::JobLogChunk(JobLogChunk {
@@ -2678,7 +2693,11 @@ fn in_place_job_messages_keep_their_wire_shape_and_hide_the_command() {
             data: b"out".to_vec(),
         })),
     };
-    assert_eq!(chunk.encode_to_vec()[..2], [0x8A, 0x01], "ControlUp field 17");
+    assert_eq!(
+        chunk.encode_to_vec()[..2],
+        [0x8A, 0x01],
+        "ControlUp field 17"
+    );
     assert_roundtrip(chunk);
     assert_eq!(MachineReport::default().jobs_max_running, 0);
     let header = MediaHeader {

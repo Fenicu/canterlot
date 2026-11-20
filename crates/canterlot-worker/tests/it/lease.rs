@@ -797,7 +797,9 @@ async fn strict_holder_survives_a_worker_restart_and_keeps_its_slot() {
 fn strict_without_any_socket_refuses_with_75_instead_of_running() {
     let mut command = Command::new(WORKER);
     command
-        .args(["lease", "run", "--kind", "build", "--strict", "--", "echo", "ran"])
+        .args([
+            "lease", "run", "--kind", "build", "--strict", "--", "echo", "ran",
+        ])
         .env_remove(LEASE_SOCKET_ENV)
         .env_remove("XDG_RUNTIME_DIR")
         .env_remove(lease::HELD_ENV)

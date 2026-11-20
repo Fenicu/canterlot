@@ -72,6 +72,17 @@ pub const CAPABILITY_MEMORY_SCOPE_V1: &str = "memory_scope_v1";
 /// Команды принимаются и факты пишутся только на соединении, где возможность согласована.
 pub const CAPABILITY_JOBS_INPLACE_V1: &str = "jobs_inplace_v1";
 
+/// Снимает согласованность задач на месте при любом выходе из сеанса.
+struct JobsGate(Option<std::sync::Arc<crate::jobs::JobManager>>);
+
+impl Drop for JobsGate {
+    fn drop(&mut self) {
+        if let Some(jobs) = &self.0 {
+            jobs.set_enabled(false);
+        }
+    }
+}
+
 pub const OPTIONAL_CAPABILITIES: &[&str] = &[
     "exec_v1",
     "pilot_v1",
@@ -780,6 +791,10 @@ impl Worker {
             .runtime_dir
             .clone()
             .or_else(crate::exec::runtime_dir_from_env);
+        let lease_socket = Some(crate::lease::socket_path(
+            runtime_dir.as_deref(),
+            &self.config.data_dir,
+        ));
         // Тестовая сборка не поднимает сокет аренды в общем каталоге сокетов.
         if crate::exec::maintenance::ensure_test_runtime_allowed(runtime_dir.as_deref()).is_ok() {
             self.lease = Some(crate::lease::server::LeaseServer::start(
@@ -843,6 +858,18 @@ impl Worker {
             }
         }
         manager.set_secrets(self.config.secrets.clone());
+        // Задачи на месте: оболочкой попытки служит этот же исполняемый файл. Незавершённые
+        // попытки подбираются с диска до первого соединения, факты они пишут уже на согласованном.
+        manager.set_jobs(crate::jobs::JobsRuntime::new(
+            self.config.data_dir.clone(),
+            self.config.execution.allowed_workdir_roots.clone(),
+            self.config.jobs.clone(),
+            std::env::current_exe().unwrap_or_default(),
+            lease_socket,
+        ));
+        if let Some(jobs) = manager.jobs() {
+            jobs.recover().await;
+        }
         // Восстановление до приёма любых доставок: брошенные временные файлы,
         // значения без манифеста и неполные публикации убираются раньше, чем
         // хаб успеет прислать новое поколение.
@@ -1330,6 +1357,27 @@ impl Worker {
             .capabilities
             .iter()
             .any(|cap| cap == "resource_lease_v1");
+        // Задачи на месте включены ровно на время этого соединения: охрана выключает их
+        // при любом выходе из сеанса, и факты задач больше не пишутся.
+        let jobs_enabled = exec_enabled
+            && accepted
+                .capabilities
+                .iter()
+                .any(|cap| cap == CAPABILITY_JOBS_INPLACE_V1);
+        self.manager
+            .as_ref()
+            .unwrap()
+            .set_jobs_enabled(jobs_enabled);
+        let _jobs_gate = JobsGate(self.manager.as_ref().unwrap().jobs());
+        let mut chunk_updates = self
+            .manager
+            .as_ref()
+            .unwrap()
+            .jobs()
+            .filter(|_| jobs_enabled)
+            .map(|jobs| jobs.subscribe_chunks());
+        let mut jobs_outbound: Option<ControlUp> = None;
+        let mut chunk_outbound: VecDeque<ControlUp> = VecDeque::new();
         let watch_enabled = pilot && accepted.capabilities.iter().any(|cap| cap == "watchdog_v1");
         if watch_enabled {
             self.watchdog.ensure_started();
@@ -1697,6 +1745,17 @@ impl Worker {
             }
             if !report_created && acknowledged >= replay_end {
                 report_created = true;
+                // Отчёт о задачах идёт после доигрывания журнала и применяется хабом только вперёд.
+                if jobs_enabled && let Some(jobs) = manager.jobs() {
+                    let report = jobs.report().await;
+                    let message = ControlUp {
+                        msg: Some(control_up::Msg::JobsReport(report)),
+                    };
+                    if message.encoded_len() > MAX_MESSAGE_BYTES {
+                        return Err(WorkerError::Protocol);
+                    }
+                    jobs_outbound = Some(message);
+                }
                 if exec_enabled {
                     let report = ControlUp {
                         msg: Some(control_up::Msg::ReconcileReport(ReconcileReport {
@@ -1750,15 +1809,13 @@ impl Worker {
                     let from = next_seq;
                     operation = Some(Box::pin(self.store.call(move |slot| {
                         let store = store_mut(slot)?;
-                        let withheld = !pilot
-                            && store
-                                .cj_records_from(from, 0)?
-                                .first()
-                                .and_then(|r| r.body.as_ref())
-                                .is_some_and(crate::store::requires_pilot);
+                        let head = store.cj_records_from(from, 0)?.into_iter().next();
+                        let head = head.as_ref().and_then(|r| r.body.as_ref());
+                        let withheld = (!pilot && head.is_some_and(crate::store::requires_pilot))
+                            || (!jobs_enabled && head.is_some_and(crate::store::requires_jobs));
                         Ok(StoreReply::Batch(
                             from,
-                            batch_for_session(store, from, pilot)?.map(Box::new),
+                            batch_for_session(store, from, pilot, jobs_enabled)?.map(Box::new),
                             withheld,
                         ))
                     })));
@@ -1785,6 +1842,8 @@ impl Worker {
                 || !probe_outbound.is_empty()
                 || !precheck_outbound.is_empty()
                 || lease_outbound.is_some()
+                || jobs_outbound.is_some()
+                || !chunk_outbound.is_empty()
                 || watch_outbound.is_some()
                 || report_outbound.is_some()
                 || range_outbound.is_some()
@@ -1950,6 +2009,8 @@ impl Worker {
                     else if let Some(message)=probe_outbound.pop_front() {message}
                     else if let Some(message)=precheck_outbound.pop_front() {message}
                     else if let Some(message)=lease_outbound.take() {message}
+                    else if let Some(message)=jobs_outbound.take() {message}
+                    else if let Some(message)=chunk_outbound.pop_front() {message}
                     else if let Some(message)=watch_outbound.take() {message}
                     else if let Some(message) = report_outbound.take() {
                         manager.on_hub_session(data::session_committed(&hello, &accepted,self.manager.as_ref().unwrap())?);
@@ -2028,6 +2089,16 @@ impl Worker {
                     match changed {
                         Ok(()) => lease_outbound = lease_updates.as_mut().map(|updates| lease_state_message(&updates.borrow_and_update())),
                         Err(_) => lease_updates = None,
+                    }
+                }
+                chunk = async { chunk_updates.as_mut().unwrap().recv().await }, if chunk_updates.is_some() => {
+                    match chunk {
+                        // Живой вывод непостоянен: переполненная очередь теряет кусок, а не держит поток.
+                        Ok(chunk) => if chunk_outbound.len() < 8 {
+                            chunk_outbound.push_back(ControlUp{msg:Some(control_up::Msg::JobLogChunk(chunk))});
+                        },
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => chunk_updates = None,
                     }
                 }
                 _ = sleep_until(watch_at), if watch_enabled && watch_operation.is_none() => {
@@ -2216,6 +2287,7 @@ fn batch_for_session(
     store: &WorkerStore,
     from: u64,
     pilot: bool,
+    jobs: bool,
 ) -> Result<Option<(ControlUp, u64)>, WorkerError> {
     let mut batch = JournalRecords {
         journal_id: store.cj_journal_id()?.to_string(),
@@ -2226,11 +2298,16 @@ fn batch_for_session(
         .into_iter()
         .take(256)
     {
-        if !pilot
+        if (!pilot
             && record
                 .body
                 .as_ref()
-                .is_some_and(crate::store::requires_pilot)
+                .is_some_and(crate::store::requires_pilot))
+            || (!jobs
+                && record
+                    .body
+                    .as_ref()
+                    .is_some_and(crate::store::requires_jobs))
         {
             break;
         }

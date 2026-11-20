@@ -329,10 +329,14 @@ async fn success_reports_dispatched_started_finished_with_the_output_tail() {
     );
     // Команда запуска погашена вместе с фактом «принято», а не держится до конца задачи.
     assert_eq!(harness.sink.terminals.lock().unwrap().len(), 1);
-    let started = harness.sink.facts().into_iter().find_map(|body| match body {
-        Body::JobStarted(fact) => Some(fact),
-        _ => None,
-    });
+    let started = harness
+        .sink
+        .facts()
+        .into_iter()
+        .find_map(|body| match body {
+            Body::JobStarted(fact) => Some(fact),
+            _ => None,
+        });
     let started = started.unwrap();
     assert!(started.pid > 0 && started.start_time > 0, "{started:?}");
     // Журнал уходит вложением через существующий путь загрузки, сжатый.
@@ -394,8 +398,18 @@ async fn command_runs_in_the_workdir_with_a_minimal_environment_plus_env() {
         assert!(
             matches!(
                 name,
-                "PATH" | "HOME" | "USER" | "LANG" | "TERM" | "MODE" | "PWD" | "SHLVL" | "_"
-                    | "OLDPWD" | "LOGNAME" | "SHELL"
+                "PATH"
+                    | "HOME"
+                    | "USER"
+                    | "LANG"
+                    | "TERM"
+                    | "MODE"
+                    | "PWD"
+                    | "SHLVL"
+                    | "_"
+                    | "OLDPWD"
+                    | "LOGNAME"
+                    | "SHELL"
             ) || name.starts_with("XDG_"),
             "unexpected variable {name}"
         );
@@ -473,9 +487,7 @@ async fn crash_between_claim_and_pid_becomes_launch_interrupted_and_never_runs()
     // Тот же исход, когда оболочка стартовала, но не дошла до `pid`.
     let broken = Harness::with(JobsConfig::default(), None, "/bin/true").await;
     let marker = broken.work().join("ran");
-    let id = broken
-        .run(&format!("touch {}", marker.display()))
-        .await;
+    let id = broken.run(&format!("touch {}", marker.display())).await;
     let finished = broken.finished(&id).await;
     assert_eq!(finished.outcome, JobOutcome::LaunchInterrupted as i32);
     assert!(!marker.exists());

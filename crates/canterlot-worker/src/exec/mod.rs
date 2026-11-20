@@ -313,6 +313,8 @@ pub(crate) struct Shared {
     pub boot_id: OnceCell<String>,
     /// Файлы секретов: база и сроки. Ставит сеанс после создания менеджера.
     pub secrets: OnceCell<crate::config::SecretConfig>,
+    /// Задачи на месте; ставит сеанс вместе с настройками. Без него команды задач отклоняются.
+    pub jobs: OnceCell<Arc<crate::jobs::JobManager>>,
     #[cfg(feature = "fault-injection")]
     pub spawn_delay: Mutex<std::time::Duration>,
     #[cfg(feature = "fault-injection")]
@@ -606,6 +608,27 @@ impl ExecutionManager {
         let _ = self.shared.secrets.set(config);
     }
 
+    /// Включает задачи на месте: факты идут в журнал управления, журнал попытки — на хаб
+    /// через канал загрузки. Возможность на соединении включается отдельно.
+    pub fn set_jobs(&self, runtime: crate::jobs::JobsRuntime) {
+        let sink = Arc::new(JobsSink {
+            shared: Arc::downgrade(&self.shared),
+        });
+        let jobs = crate::jobs::JobManager::new(runtime, sink, self.shared.shutdown.clone());
+        let _ = self.shared.jobs.set(jobs);
+    }
+
+    pub fn jobs(&self) -> Option<Arc<crate::jobs::JobManager>> {
+        self.shared.jobs.get().cloned()
+    }
+
+    /// `jobs_inplace_v1` согласована на текущем соединении (или соединения больше нет).
+    pub fn set_jobs_enabled(&self, enabled: bool) {
+        if let Some(jobs) = self.shared.jobs.get() {
+            jobs.set_enabled(enabled);
+        }
+    }
+
     pub fn new(
         config: ExecutionConfig,
         store: StoreClient,
@@ -682,6 +705,7 @@ impl ExecutionManager {
                 data_dir: OnceCell::new(),
                 boot_id: OnceCell::new(),
                 secrets: OnceCell::new(),
+                jobs: OnceCell::new(),
                 #[cfg(feature = "fault-injection")]
                 spawn_delay: Mutex::new(std::time::Duration::ZERO),
                 #[cfg(feature = "fault-injection")]
@@ -1124,6 +1148,14 @@ impl ExecutionManager {
             .call(|store| Ok(open(store)?.stored_commands()?))
             .await?;
         for command in commands {
+            // Команды задач ждут согласованного соединения: без него `route` отклонил бы
+            // годную команду. Сеанс доиграет их при подключении.
+            if matches!(
+                command.kind,
+                Some(Kind::StartInPlaceJob(_) | Kind::CancelInPlaceJob(_))
+            ) {
+                continue;
+            }
             if matches!(
                 command.kind,
                 Some(Kind::RemoveWorktree(_) | Kind::RevokeSecret(_))
@@ -1192,6 +1224,9 @@ impl ExecutionManager {
             self.revoke_secret(command, request);
             return Ok(());
         }
+        if matches!(kind, Kind::StartInPlaceJob(_) | Kind::CancelInPlaceJob(_)) {
+            return self.in_place_job(command).await;
+        }
         let Ok(id) = Uuid::parse_str(&command.execution_id) else {
             return manager::reject_invalid(&self.shared, &command).await;
         };
@@ -1208,6 +1243,38 @@ impl ExecutionManager {
             return Ok(());
         }
         manager::answer_without_execution(&self.shared, &command).await
+    }
+
+    /// Команды задач на месте уровня машины: исполнения у них нет, ответ — факты задач.
+    /// Без согласованной возможности команда отклоняется, а не теряется молча.
+    async fn in_place_job(&self, command: Command) -> Result<(), ExecError> {
+        use crate::jobs::JobError;
+        let Some(jobs) = self.shared.jobs.get().cloned() else {
+            return manager::reject(&self.shared, &command, "capability_missing").await;
+        };
+        let result = match &command.kind {
+            Some(Kind::StartInPlaceJob(_)) => jobs.start(&command).await,
+            Some(Kind::CancelInPlaceJob(_)) => jobs.cancel(&command).await,
+            _ => Err(JobError::Invalid),
+        };
+        match result {
+            Ok(()) => Ok(()),
+            Err(JobError::NotNegotiated) => {
+                manager::reject(&self.shared, &command, "capability_missing").await
+            }
+            Err(JobError::Invalid) => {
+                manager::reject(&self.shared, &command, "unsupported_command").await
+            }
+            // Хранилище или диск не ответили: команда остаётся непогашенной и доиграется
+            // при следующем подключении; занятый каталог попытки второй запуск не допустит.
+            Err(JobError::Io | JobError::Sink) => {
+                tracing::warn!(
+                    kind = "job_command_failed",
+                    "in-place job command was not applied"
+                );
+                Ok(())
+            }
+        }
     }
 
     async fn start(&self, command: Command, start: StartExecution) -> Result<(), ExecError> {
@@ -1338,6 +1405,41 @@ impl ExecutionManager {
 
     fn spawn_actor(&self, id: Uuid, start: Start) {
         manager::spawn_actor(&self.shared, id, start);
+    }
+}
+
+/// Приёмник задач на месте: факты уходят в журнал управления, журнал попытки — через общий
+/// канал загрузки медиа. Слабая ссылка не даёт менеджеру и общему состоянию держать друг друга.
+struct JobsSink {
+    shared: std::sync::Weak<Shared>,
+}
+
+#[async_trait::async_trait]
+impl crate::jobs::JobSink for JobsSink {
+    async fn facts(
+        &self,
+        facts: Vec<Body>,
+        terminal: Vec<(String, u32)>,
+    ) -> Result<(), crate::jobs::JobError> {
+        let shared = self.shared.upgrade().ok_or(crate::jobs::JobError::Sink)?;
+        shared
+            .cj(facts, terminal)
+            .await
+            .map_err(|_| crate::jobs::JobError::Sink)
+    }
+
+    async fn upload_log(
+        &self,
+        header: canterlot_proto::worker::v1::MediaHeader,
+        path: PathBuf,
+    ) -> Result<(), crate::jobs::JobError> {
+        let shared = self.shared.upgrade().ok_or(crate::jobs::JobError::Sink)?;
+        let slot = shared.media_sink.subscribe();
+        let backoff_cap = shared.attachment_config.fetch_backoff_cap;
+        drop(shared);
+        crate::media::upload(slot, &path, header, backoff_cap)
+            .await
+            .map_err(|_| crate::jobs::JobError::Sink)
     }
 }
 
