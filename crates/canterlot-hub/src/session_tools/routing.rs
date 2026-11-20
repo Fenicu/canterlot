@@ -1635,8 +1635,7 @@ pub async fn preview(
         remote: target.is_some(),
     };
     let now = Utc::now();
-    let headroom =
-        machine_headroom(&mut tx, machine, std::time::Duration::from_secs(120)).await?;
+    let headroom = machine_headroom(&mut tx, machine, std::time::Duration::from_secs(120)).await?;
     let guard = crate::session_tools::guard::check_in_tx(
         &mut tx,
         caller.owner_id,
@@ -1647,12 +1646,11 @@ pub async fn preview(
     .await?;
     let remote_note = match target {
         Some(target) => {
-            let (name, accepts): (String, bool) = sqlx::query_as(
-                "select name,accepts_remote_work from machines where id=$1",
-            )
-            .bind(target)
-            .fetch_one(&mut *tx)
-            .await?;
+            let (name, accepts): (String, bool) =
+                sqlx::query_as("select name,accepts_remote_work from machines where id=$1")
+                    .bind(target)
+                    .fetch_one(&mut *tx)
+                    .await?;
             Some((name, accepts))
         }
         None => None,

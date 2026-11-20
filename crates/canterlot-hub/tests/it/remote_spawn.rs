@@ -113,10 +113,7 @@ impl Fx {
             &pool,
             seed.machine_id,
             "claude_code",
-            json!([
-                model(OUTSIDE, &["low", "high"]),
-                model(INSIDE, &["none"])
-            ]),
+            json!([model(OUTSIDE, &["low", "high"]), model(INSIDE, &["none"])]),
         )
         .await;
         catalog(
@@ -387,7 +384,24 @@ async fn switching_off_waits_for_a_launch_that_already_read_the_row(pool: PgPool
             .unwrap();
         tx.commit().await.unwrap();
     });
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    // Переключатель дошёл до блокировки строки и ждёт её: это видно в самой базе, без пауз.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let waiting: i64 = sqlx::query_scalar(
+                "select count(*) from pg_stat_activity
+                  where datname=current_database() and wait_event_type='Lock'",
+            )
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+            if waiting > 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the switch waits on the machine row");
     assert!(!switch.is_finished(), "the switch must wait for the launch");
     launch.commit().await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), switch)
@@ -448,12 +462,22 @@ async fn the_owner_flips_the_switch_over_http_and_the_machine_view_shows_it(pool
     let view = |client: &TestClient| {
         let path = format!("/api/v1/machines/{machine}");
         let client = client.clone();
-        async move { client.send(Method::GET, &path, None, None).await.json::<Value>() }
+        async move {
+            client
+                .send(Method::GET, &path, None, None)
+                .await
+                .json::<Value>()
+        }
     };
     assert_eq!(view(&api.client).await["accepts_remote_work"], false);
 
     let on = api.put(machine, json!(true)).await;
-    assert_eq!(on.status.as_u16(), 200, "{}", String::from_utf8_lossy(&on.body));
+    assert_eq!(
+        on.status.as_u16(),
+        200,
+        "{}",
+        String::from_utf8_lossy(&on.body)
+    );
     assert_eq!(on.json::<Value>()["accepts_remote_work"], true);
     assert_eq!(view(&api.client).await["accepts_remote_work"], true);
     let off = api.put(machine, json!(false)).await;
@@ -462,7 +486,10 @@ async fn the_owner_flips_the_switch_over_http_and_the_machine_view_shows_it(pool
 
     // Не булево значение и машина без владельца-сессии не меняют ничего.
     assert_eq!(api.put(machine, json!("yes")).await.status.as_u16(), 400);
-    assert_eq!(api.put(Uuid::now_v7(), json!(true)).await.status.as_u16(), 404);
+    assert_eq!(
+        api.put(Uuid::now_v7(), json!(true)).await.status.as_u16(),
+        404
+    );
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
@@ -696,8 +723,7 @@ async fn the_catalog_comes_from_the_target_machine(pool: PgPool) {
     // `b-model` есть только у B; вне белого списка — карточка, но каталог B её допускает.
     let answer = f.spawn(remote).await.unwrap();
     assert_eq!(answer["status"], "pending_approval", "{answer}");
-    let local =
-        json!({"harness":"claude_code","model":B_ONLY,"brief":"x","workdir":"/tmp/w2"});
+    let local = json!({"harness":"claude_code","model":B_ONLY,"brief":"x","workdir":"/tmp/w2"});
     assert_eq!(code(f.spawn(local).await), Code::ModelUnknown);
 }
 
@@ -724,21 +750,29 @@ async fn an_approved_but_unstarted_remote_spawn_is_refused_after_switching_off(p
     let answer = f.spawn(outside).await.unwrap();
     assert_eq!(answer["status"], "pending_approval", "{answer}");
     let request: Uuid = serde_json::from_value(answer["request_id"].clone()).unwrap();
-    let stored: Value =
-        sqlx::query_scalar("select request_payload from requests where id=$1")
-            .bind(request)
-            .fetch_one(&f.pool)
-            .await
-            .unwrap();
-    assert_eq!(stored["machine_id"], f.b.to_string(), "карточка хранит машину");
+    let stored: Value = sqlx::query_scalar("select request_payload from requests where id=$1")
+        .bind(request)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        stored["machine_id"],
+        f.b.to_string(),
+        "карточка хранит машину"
+    );
 
     f.switch(false).await;
     f.decide(request, PermissionBehavior::Allow).await;
     f.tick().await;
-    assert!(f.children().await.is_empty(), "после выключения запуска нет");
+    assert!(
+        f.children().await.is_empty(),
+        "после выключения запуска нет"
+    );
     let notes = f.notes().await;
     assert!(
-        notes.iter().any(|note| note.contains("remote_work_disabled")),
+        notes
+            .iter()
+            .any(|note| note.contains("remote_work_disabled")),
         "{notes:?}"
     );
 }
@@ -897,8 +931,10 @@ async fn an_isolated_remote_child_gets_its_worktree_from_the_target_machine(pool
     // Рабочая копия родителя на A не причём: источник и корень копий — у B.
     sqlx::query("update conversations set worktree=$2 where id=$1")
         .bind(f.parent)
-        .bind(json!({"source_workdir":"/tmp/w","branch":"canterlot/parent","path":"/data/worktrees/p",
-                     "base":"HEAD","state":"active"}))
+        .bind(
+            json!({"source_workdir":"/tmp/w","branch":"canterlot/parent","path":"/data/worktrees/p",
+                     "base":"HEAD","state":"active"}),
+        )
         .execute(&f.pool)
         .await
         .unwrap();
@@ -912,7 +948,10 @@ async fn an_isolated_remote_child_gets_its_worktree_from_the_target_machine(pool
     .fetch_one(&f.pool)
     .await
     .unwrap();
-    assert_eq!(payload["worktree"]["source_workdir"], "/tmp/b/p", "{payload}");
+    assert_eq!(
+        payload["worktree"]["source_workdir"], "/tmp/b/p",
+        "{payload}"
+    );
     assert_eq!(payload["worktree"]["base"], "HEAD", "{payload}");
     assert!(
         payload["workdir"]
@@ -962,7 +1001,10 @@ async fn accept_stops_a_remote_child_on_its_own_machine(pool: PgPool) {
     isolated["isolated"] = json!(true);
     let (child, _) = f.started(isolated).await;
     let accepted = f
-        .call("sessions.accept", json!({"session_id": child, "force": true}))
+        .call(
+            "sessions.accept",
+            json!({"session_id": child, "force": true}),
+        )
         .await
         .unwrap();
     assert_eq!(accepted["status"], "stopping", "{accepted}");
@@ -1023,7 +1065,12 @@ async fn route_preview_and_routed_spawn_see_the_target_machine(pool: PgPool) {
         )
         .await
         .unwrap_err();
-    assert_eq!(excluded.code, Code::NoExecutorAvailable, "{}", excluded.message);
+    assert_eq!(
+        excluded.code,
+        Code::NoExecutorAvailable,
+        "{}",
+        excluded.message
+    );
     // Без каталога на другой машине и вне её корней предпросмотр отказывает, как запуск.
     for args in [
         json!({"task_type": "t", "machine": "machine-b"}),

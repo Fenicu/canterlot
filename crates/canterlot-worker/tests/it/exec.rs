@@ -139,7 +139,8 @@ async fn remote_start_refuses_a_workdir_that_is_not_its_canonical_form() {
     // По ссылке: путь вне канонического вида.
     env.send(remote(Uuid::now_v7(), 1, &alias)).await;
     // С «..» внутри корня: тоже не канонический.
-    env.send(remote(Uuid::now_v7(), 2, &real.join("../real"))).await;
+    env.send(remote(Uuid::now_v7(), 2, &real.join("../real")))
+        .await;
     let cj = env
         .wait_cj("two refusals", |cj| rejected_reasons(cj).len() >= 2)
         .await;

@@ -56,9 +56,9 @@ async fn set_remote_work(
         move |conn| {
             Box::pin(async move {
                 match crate::machines::set_accepts_remote_work(conn, owner, id, accepts).await? {
-                    Some(accepts_remote_work) => {
-                        Ok::<_, ApiError>(RemoteWorkBody { accepts_remote_work })
-                    }
+                    Some(accepts_remote_work) => Ok::<_, ApiError>(RemoteWorkBody {
+                        accepts_remote_work,
+                    }),
                     None => Err(ApiError::new(ErrorCode::MachineNotFound)),
                 }
             })

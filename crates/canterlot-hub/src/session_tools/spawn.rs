@@ -1227,6 +1227,18 @@ fn native_request_id(caller: &Caller) -> String {
     format!("spawn:{}", caller.call_id)
 }
 
+/// Ребёнок уже прошедшего вызова: из него берётся и машина, где он живёт.
+#[derive(sqlx::FromRow)]
+struct ReplayedChild {
+    id: Uuid,
+    model: String,
+    permission_mode: String,
+    worktree: Option<Value>,
+    subscribed: bool,
+    machine_id: Uuid,
+    machine_name: String,
+}
+
 /// Этот вызов уже прошёл: повтор транспорта получает тот же ответ, вторая сессия не создаётся.
 async fn replayed(
     conn: &mut PgConnection,
@@ -1234,33 +1246,33 @@ async fn replayed(
     guards: &crate::config::GuardsConfig,
 ) -> Result<Option<Value>, sqlx::Error> {
     // Машина ребёнка читается из него самого: ответ повтора не зависит от аргументов.
-    let child: Option<(Uuid, String, String, Option<Value>, bool, Uuid, String)> =
-        sqlx::query_as(
-            "select c.id,c.model,c.permission_mode,c.worktree,exists(
+    let child: Option<ReplayedChild> = sqlx::query_as(
+        "select c.id,c.model,c.permission_mode,c.worktree,exists(
                select 1 from session_subscriptions s
-               where s.subscriber_id=$3 and s.target_id=c.id and s.closed_at is null),
-               c.machine_id,m.name
+               where s.subscriber_id=$3 and s.target_id=c.id and s.closed_at is null) subscribed,
+               c.machine_id,m.name machine_name
              from inputs i join conversations c on c.id=i.conversation_id
              join machines m on m.id=c.machine_id
              where i.owner_id=$1 and i.idempotency_key=$2 and c.parent_conversation_id=$3",
-        )
-        .bind(caller.owner_id)
-        .bind(input_key(caller))
-        .bind(caller.conversation_id)
-        .fetch_optional(&mut *conn)
-        .await?;
-    if let Some((id, model, mode, worktree, subscribed, machine, name)) = child {
-        let remote_name = (machine != caller.machine_id).then_some(name.as_str());
+    )
+    .bind(caller.owner_id)
+    .bind(input_key(caller))
+    .bind(caller.conversation_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    if let Some(child) = child {
+        let remote_name =
+            (child.machine_id != caller.machine_id).then_some(child.machine_name.as_str());
         let mut answer = started_answer(
-            id,
-            &model,
-            &mode,
-            worktree.as_ref(),
-            subscribed,
+            child.id,
+            &child.model,
+            &child.permission_mode,
+            child.worktree.as_ref(),
+            child.subscribed,
             remote_name,
         );
         let verdict =
-            guard::check_in_tx(conn, caller.owner_id, machine, guards, Utc::now()).await?;
+            guard::check_in_tx(conn, caller.owner_id, child.machine_id, guards, Utc::now()).await?;
         if verdict.stale {
             answer["machine_metrics"] = serde_json::json!("stale");
         }
@@ -1517,14 +1529,7 @@ pub async fn spawn(
     // Страж и связь — целевой машины. Недоступная цель ставит запуск в очередь.
     let target = spec.launch_machine(caller.machine_id);
     let remote_block = spawn_queue::remote_block(&context.registry, target, spec.machine_id);
-    let guard = guard::check_in_tx(
-        &mut tx,
-        caller.owner_id,
-        target,
-        &context.guards,
-        now,
-    )
-    .await?;
+    let guard = guard::check_in_tx(&mut tx, caller.owner_id, target, &context.guards, now).await?;
     let queue_reason = queue_reason
         .or_else(|| remote_block.as_ref().map(|block| block.reason))
         .or_else(|| {
@@ -1551,9 +1556,10 @@ pub async fn spawn(
             return Err(match reason {
                 super::spawn_queue::REASON_RATE => ToolError::new(ToolErrorCode::RateLimited),
                 // Частота уже названа выше; иначе причина — недоступная цель.
-                _ if remote_block.is_some() => remote_block
-                    .as_ref()
-                    .map_or_else(|| ToolError::new(ToolErrorCode::Internal), spawn_queue::RemoteBlock::error),
+                _ if remote_block.is_some() => remote_block.as_ref().map_or_else(
+                    || ToolError::new(ToolErrorCode::Internal),
+                    spawn_queue::RemoteBlock::error,
+                ),
                 super::spawn_queue::REASON_CHILDREN | super::spawn_queue::REASON_STAGGER => {
                     ToolError::with_message(
                         ToolErrorCode::MachineBusy,
