@@ -669,6 +669,157 @@ async fn workdir_must_canonicalize_to_itself_inside_the_allowed_roots() {
     );
 }
 
+/// Исполняемый файл-обёртка: тот же воркер, но оболочка попытки останавливается перед
+/// созданием процесса команды (тестовый шов `CANTERLOT_JOB_SHIM_PAUSE`).
+fn pausing_shim(dir: &Path) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("pausing-shim.sh");
+    fs::write(
+        &path,
+        format!("#!/bin/sh\nexport CANTERLOT_JOB_SHIM_PAUSE=1\nexec {WORKER} \"$@\"\n"),
+    )
+    .unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    path.display().to_string()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn workdir_swapped_for_a_symlink_while_waiting_for_the_lease_is_refused() {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir(root.path().join("data")).unwrap();
+    fs::create_dir(root.path().join("runtime")).unwrap();
+    let (stop, _) = watch::channel(false);
+    let config = ServerConfig::new(
+        Some(&root.path().join("runtime")),
+        &root.path().join("data"),
+        2,
+    );
+    let socket = config.socket.clone();
+    let server = LeaseServer::start(config, stop.subscribe());
+    let harness = Harness::with(JobsConfig::default(), Some(socket.clone()), WORKER).await;
+    let mut gate = HeldLease::take("gate", &socket, root.path());
+    snapshot_until(&server, "the gate to be held", |s| s.holders.len() == 1).await;
+
+    // Каталог проходит проверку воркера, затем попытка встаёт в очередь за гейтом.
+    let sub = harness.work().join("sub");
+    let other = harness.work().join("other");
+    fs::create_dir(&sub).unwrap();
+    fs::create_dir(&other).unwrap();
+    let marker = harness.work().join("ran");
+    let id = Uuid::now_v7().to_string();
+    let mut start = harness.start_command(
+        &id,
+        &format!("touch {}; touch ./ran-in-cwd", marker.display()),
+    );
+    start.workdir = sub.display().to_string();
+    start.lease = JobLease::Build as i32;
+    harness.start(start).await;
+    snapshot_until(&server, "the job to queue behind the gate", |s| {
+        s.waiters.len() == 1
+    })
+    .await;
+
+    // Пока попытка ждёт, каталог подменяют ссылкой на другой каталог внутри того же корня.
+    fs::remove_dir(&sub).unwrap();
+    std::os::unix::fs::symlink(&other, &sub).unwrap();
+    gate.release();
+
+    let finished = harness.finished(&id).await;
+    assert_eq!(finished.outcome, JobOutcome::WorkdirRefused as i32);
+    assert_eq!(finished.exit_code, None);
+    assert!(!marker.exists(), "the command must not run");
+    assert!(!other.join("ran-in-cwd").exists());
+    assert!(!harness.sink.kinds(&id).contains(&"started"));
+    assert!(!harness.attempt_dir(&id).join("started").exists());
+    server.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn workdir_swapped_after_the_check_does_not_move_the_command() {
+    let shims = tempfile::tempdir().unwrap();
+    let harness = Harness::with(JobsConfig::default(), None, &pausing_shim(shims.path())).await;
+    let sub = harness.work().join("sub");
+    let moved = harness.work().join("moved");
+    let other = harness.work().join("other");
+    fs::create_dir(&sub).unwrap();
+    fs::create_dir(&other).unwrap();
+    let id = Uuid::now_v7().to_string();
+    let mut start = harness.start_command(&id, "touch ./ran-in-cwd");
+    start.workdir = sub.display().to_string();
+    harness.start(start).await;
+
+    // Оболочка проверила каталог и стоит перед созданием процесса: путь подменяют.
+    let dir = harness.attempt_dir(&id);
+    harness
+        .wait("the shim to reach the start", || {
+            dir.join("pause_reached").exists()
+        })
+        .await;
+    fs::rename(&sub, &moved).unwrap();
+    std::os::unix::fs::symlink(&other, &sub).unwrap();
+    fs::write(dir.join("pause_release"), b"").unwrap();
+
+    let finished = harness.finished(&id).await;
+    assert_eq!(finished.outcome, JobOutcome::Succeeded as i32);
+    assert!(
+        moved.join("ran-in-cwd").exists(),
+        "the command runs in the directory that was checked"
+    );
+    assert!(
+        !other.join("ran-in-cwd").exists(),
+        "the swapped path must not be followed"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cancel_is_serialized_with_process_creation_and_leaves_no_survivor() {
+    let shims = tempfile::tempdir().unwrap();
+    let harness = Harness::with(JobsConfig::default(), None, &pausing_shim(shims.path())).await;
+    let marker = harness.work().join("ran");
+    let id = harness
+        .run(&format!("touch {}; sleep 300", marker.display()))
+        .await;
+    let dir = harness.attempt_dir(&id);
+    harness
+        .wait("the shim to reach the start", || {
+            dir.join("pause_reached").exists()
+        })
+        .await;
+
+    // Оболочка прошла последнюю проверку отмены и стоит перед созданием процесса. Отмена не
+    // может сохраниться в этом окне: иначе команда стартовала бы после сохранённой отмены.
+    let manager = harness.manager.clone();
+    let cancel_id = id.clone();
+    let mut cancel = tokio::spawn(async move {
+        manager
+            .cancel(&Harness::envelope(Kind::CancelInPlaceJob(CancelInPlaceJob {
+                job_id: cancel_id,
+                attempt: 1,
+            })))
+            .await
+    });
+    let early = tokio::time::timeout(Duration::from_millis(300), &mut cancel).await;
+    assert!(
+        early.is_err(),
+        "a cancel must not be persisted between the last check and the process creation"
+    );
+    assert!(!dir.join("cancel").exists());
+    fs::write(dir.join("pause_release"), b"").unwrap();
+    cancel.await.unwrap().unwrap();
+
+    // Отмена сохранена после создания процесса: группа убрана, живых не осталось.
+    let finished = harness.finished(&id).await;
+    assert_eq!(finished.outcome, JobOutcome::Canceled as i32);
+    let leader = fs::read_to_string(dir.join("pid"))
+        .unwrap()
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .parse::<i32>()
+        .unwrap();
+    assert_eq!(session_ids(leader), Vec::<i32>::new());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn log_is_capped_on_disk_and_the_upload_has_head_marker_and_tail() {
     let config = JobsConfig {

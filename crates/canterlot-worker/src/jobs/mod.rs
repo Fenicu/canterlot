@@ -11,6 +11,7 @@
 pub mod log;
 pub mod shim;
 pub mod state;
+pub mod workdir;
 
 use std::{
     collections::HashSet,
@@ -40,9 +41,9 @@ use uuid::Uuid;
 use crate::config::JobsConfig;
 use log::LogView;
 use state::{
-    ABANDONED, CANCEL, Emitted, Finished, LEASE_WAIT, Leader, Spec, UPLOADED, attempt_dir,
-    canonical_job_id, early_cancel_path, job_dir, jobs_root, now_ms, read_exit, read_json,
-    read_leader, read_started, touch, write_json,
+    ABANDONED, Emitted, Finished, LEASE_WAIT, Leader, Spec, UPLOADED, WORKDIR_REFUSED,
+    attempt_dir, canonical_job_id, early_cancel_path, job_dir, jobs_root, now_ms, read_exit,
+    read_json, read_leader, read_started, touch, write_json,
 };
 
 /// Последние байты вывода, которые уходят в факт итога.
@@ -269,6 +270,7 @@ impl JobManager {
             command_id: command.command_id.clone(),
             dispatch_attempt: command.dispatch_attempt,
             workdir: start.workdir.clone(),
+            allowed_roots: self.rt.allowed_roots.clone(),
             shell: start.shell.clone(),
             env,
             timeout_seconds: start.timeout_seconds.clamp(1, 24 * 3600),
@@ -297,12 +299,17 @@ impl JobManager {
         tokio::task::spawn_blocking(move || -> io::Result<()> {
             let dir = attempt_dir(&data_dir, &marker_job, attempt);
             if dir.is_dir() {
-                touch(&dir.join(CANCEL))
-            } else {
-                // Команды запуска ещё нет: отметка рядом с будущим каталогом.
-                fs::create_dir_all(job_dir(&data_dir, &marker_job))?;
-                touch(&early_cancel_path(&data_dir, &marker_job, attempt))
+                return state::persist_cancel(&dir);
             }
+            // Команды запуска ещё нет: отметка рядом с будущим каталогом.
+            fs::create_dir_all(job_dir(&data_dir, &marker_job))?;
+            touch(&early_cancel_path(&data_dir, &marker_job, attempt))?;
+            // Каталог мог появиться, пока писалась отметка: оболочка идёт под замком
+            // запуска, поэтому отмена сохраняется ещё раз по правилам каталога.
+            if dir.is_dir() {
+                state::persist_cancel(&dir)?;
+            }
+            Ok(())
         })
         .await
         .map_err(|_| JobError::Io)??;
@@ -641,8 +648,8 @@ impl Watcher {
             if cancel {
                 self.finish(JobOutcome::Canceled, None, None).await;
             } else if self.fresh {
-                match validate_workdir(&spec.workdir, &self.manager.rt.allowed_roots) {
-                    Ok(()) => match self.launch() {
+                match workdir::pin(&spec.workdir, &self.manager.rt.allowed_roots) {
+                    Ok(_) => match self.launch() {
                         Ok(()) => {}
                         Err(_) => {
                             self.finish(JobOutcome::LaunchInterrupted, None, None).await;
@@ -771,6 +778,12 @@ impl Watcher {
     }
 
     async fn finish_by_exit(&mut self, spec: &Spec, code: i32, finished_at: u64) {
+        if read_started(&self.dir).is_none() && self.dir.join(WORKDIR_REFUSED).exists() {
+            // Оболочка отказала каталогу после аренды: команда не запускалась.
+            self.finish(JobOutcome::WorkdirRefused, None, Some(finished_at))
+                .await;
+            return;
+        }
         let started = read_started(&self.dir).unwrap_or(finished_at);
         let duration = finished_at.saturating_sub(started);
         let timed_out =
@@ -979,25 +992,6 @@ fn dispatched_fact_for(job_id: &str, attempt: u32) -> Body {
         command_id: String::new(),
         dispatch_attempt: 0,
     })
-}
-
-/// Рабочий каталог должен быть абсолютным, существовать, быть каталогом, совпадать со своим
-/// каноническим путём (без ссылок, `..`, лишних слэшей) и лежать внутри разрешённых корней.
-fn validate_workdir(workdir: &str, roots: &[PathBuf]) -> Result<(), ()> {
-    let path = Path::new(workdir);
-    if !path.is_absolute() {
-        return Err(());
-    }
-    let canonical = path.canonicalize().map_err(|_| ())?;
-    // Сравнение строк, а не компонентов: `Path` считает `/a//b` и `/a/b` равными.
-    if canonical.as_os_str() != path.as_os_str() || !canonical.is_dir() {
-        return Err(());
-    }
-    let inside = roots.iter().any(|root| {
-        root.canonicalize()
-            .is_ok_and(|root| canonical.starts_with(root))
-    });
-    if inside { Ok(()) } else { Err(()) }
 }
 
 /// Сжимает журнал и грузит его через общий путь медиа. Идентификатор вложения выводится из

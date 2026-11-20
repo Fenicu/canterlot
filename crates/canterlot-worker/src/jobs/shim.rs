@@ -7,12 +7,15 @@
 //! 1. `pid` с временем старта пишется **до** запуска команды: каталог без `pid` доказывает,
 //!    что команда не запускалась;
 //! 2. для аренды попытка встаёт в строгую очередь и до выдачи слота ничего не запускает;
-//! 3. перед запуском проверяется, что воркер не передумал (отмена, брошенная попытка);
+//! 3. после аренды рабочий каталог проверяется заново и закрепляется дескриптором; под замком
+//!    запуска проверяется, что воркер не передумал (отмена, брошенная попытка), и создаётся
+//!    процесс команды, уже с закреплённым каталогом;
 //! 4. команда идёт под `timeout`, вывод сливается в ограниченный журнал;
 //! 5. `exit_code` пишется последним, через временный файл и переименование.
 
 use std::{
     io::Read,
+    os::fd::OwnedFd,
     path::{Path, PathBuf},
     process::ExitCode,
     time::Duration,
@@ -21,14 +24,17 @@ use std::{
 use super::{
     log::LogWriter,
     state::{
-        self, ABANDONED, CANCEL, EXIT_CODE, LEASE_WAIT, Leader, STARTED, Spec, write_atomic,
-        write_leader,
+        self, ABANDONED, CANCEL, EXIT_CODE, LEASE_WAIT, Leader, STARTED, Spec, WORKDIR_REFUSED,
+        write_atomic, write_leader,
     },
+    workdir,
 };
 use crate::lease::{Kind, client};
 
 /// Код выхода оболочки, когда аренду не дали или команду нельзя было запустить.
 const LEASE_REFUSED: i32 = 75;
+/// Каталог не прошёл проверку после выдачи аренды; итог определяет метка, а не этот код.
+const WORKDIR_REFUSED_EXIT: i32 = 126;
 const NOT_FOUND: i32 = 127;
 /// Сколько после выхода команды ждём конец потока вывода: фоновый потомок мог унести
 /// запись в канал и держать его открытым.
@@ -73,7 +79,15 @@ pub async fn run(dir: PathBuf) -> ExitCode {
     if withdrawn(&dir, &spec) {
         return ExitCode::SUCCESS;
     }
-    let code = execute(&dir, &spec, lease.as_ref()).await;
+    // Ожидание аренды могло длиться сколько угодно: путь проверяется заново и закрепляется
+    // дескриптором, который станет рабочим каталогом команды.
+    let Ok(pinned) = workdir::pin(&spec.workdir, &spec.allowed_roots) else {
+        let _ = state::touch(&dir.join(WORKDIR_REFUSED));
+        return finish(&dir, WORKDIR_REFUSED_EXIT);
+    };
+    let Some(code) = execute(&dir, &spec, lease.as_ref(), &pinned).await else {
+        return ExitCode::SUCCESS;
+    };
     drop(lease);
     finish(&dir, code)
 }
@@ -104,12 +118,18 @@ fn finish(dir: &Path, code: i32) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-async fn execute(dir: &Path, spec: &Spec, lease: Option<&client::StrictLease>) -> i32 {
+/// Запускает команду и ждёт её; `None` — попытка отозвана перед запуском, код выхода не пишется.
+async fn execute(
+    dir: &Path,
+    spec: &Spec,
+    lease: Option<&client::StrictLease>,
+    workdir: &OwnedFd,
+) -> Option<i32> {
     let Ok((reader, writer)) = std::io::pipe() else {
-        return NOT_FOUND;
+        return Some(NOT_FOUND);
     };
     let Ok(error_writer) = writer.try_clone() else {
-        return NOT_FOUND;
+        return Some(NOT_FOUND);
     };
     let mut command = tokio::process::Command::new("timeout");
     command
@@ -118,7 +138,6 @@ async fn execute(dir: &Path, spec: &Spec, lease: Option<&client::StrictLease>) -
         .arg("bash")
         .arg("-lc")
         .arg(&spec.shell)
-        .current_dir(&spec.workdir)
         .env_clear()
         .envs(spec.env.iter().map(|(name, value)| (name, value)))
         .stdin(std::process::Stdio::null())
@@ -131,18 +150,33 @@ async fn execute(dir: &Path, spec: &Spec, lease: Option<&client::StrictLease>) -
     if let Some((_, path)) = spec.env.iter().find(|(name, _)| name == "PATH") {
         command.env("PATH", path);
     }
+    // Последняя проверка отмены и создание процесса идут под замком запуска, как и сохранение
+    // отмены воркером: сохранённая отмена либо видна здесь, либо приходит, когда процесс уже
+    // создан и его группу убирает наблюдатель.
+    let Ok(lock) = state::StartLock::acquire(dir) else {
+        return Some(NOT_FOUND);
+    };
+    if withdrawn(dir, spec) {
+        return None;
+    }
+    // Команда наследует закреплённый каталог, а не путь: подменить его уже нечем.
+    if workdir::enter(workdir).is_err() {
+        return Some(NOT_FOUND);
+    }
     let log = LogWriter::create(dir, spec.log_max_bytes);
+    test_pause(dir).await;
     let _ = write_atomic(&dir.join(STARTED), state::now_ms().to_string().as_bytes());
     let mut child = match command.spawn() {
         Ok(child) => child,
-        Err(_) => return NOT_FOUND,
+        Err(_) => return Some(NOT_FOUND),
     };
+    drop(lock);
     // Свои копии концов канала закрываются вместе с `command`: иначе конца потока не будет.
     drop(command);
     let pump = tokio::task::spawn_blocking(move || pump(reader, log));
     let status = child.wait().await;
     let _ = tokio::time::timeout(DRAIN, pump).await;
-    match status {
+    Some(match status {
         Ok(status) => {
             use std::os::unix::process::ExitStatusExt;
             status
@@ -151,6 +185,19 @@ async fn execute(dir: &Path, spec: &Spec, lease: Option<&client::StrictLease>) -
                 .unwrap_or(1)
         }
         Err(_) => 1,
+    })
+}
+
+/// Тестовый шов: с `CANTERLOT_JOB_SHIM_PAUSE` оболочка перед созданием процесса команды
+/// отмечает `pause_reached` в каталоге попытки и ждёт `pause_release`. Без переменной
+/// (в работе) ничего не делает; тесты ставят её через обёртку вокруг исполняемого файла.
+async fn test_pause(dir: &Path) {
+    if std::env::var_os("CANTERLOT_JOB_SHIM_PAUSE").is_none() {
+        return;
+    }
+    let _ = state::touch(&dir.join("pause_reached"));
+    while !dir.join("pause_release").exists() {
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 
