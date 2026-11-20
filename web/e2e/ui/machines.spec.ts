@@ -160,6 +160,35 @@ test('machine_screen_shows_the_watchdog_report_from_the_snapshot', async ({ page
   expect(box!.x + box!.width).toBeLessThanOrEqual(view.width);
 });
 
+test('machine_card_has_a_remote_work_switch_that_the_owner_flips', async ({ page }) => {
+  const { api, ids } = await bootSecondary(page);
+  const main = page.locator('main');
+  const toggle = main.getByRole('switch', { name: 'Принимать делегатов и команды с других машин' });
+  await expect(toggle).toBeVisible();
+  // По умолчанию выключено, и подпись говорит, чего именно это не касается.
+  await expect(toggle).not.toBeChecked();
+  await expect(main.locator('[data-remote-work-note]')).toContainText('Свои сессии машины это не меняет');
+  await toggle.check();
+  await expect(toggle).toBeChecked();
+  expect(api.remoteWorkCalls).toHaveLength(1);
+  expect(api.remoteWorkCalls[0]).toMatchObject({ machine: ids.machine, accepts: true });
+  expect(api.remoteWorkCalls[0]!.key).toBeTruthy();
+  await toggle.uncheck();
+  await expect(toggle).not.toBeChecked();
+  expect(api.remoteWorkCalls.map((call) => call.accepts)).toEqual([true, false]);
+});
+
+test('machine_card_switch_returns_to_its_value_when_the_hub_refuses', async ({ page }) => {
+  const { api } = await bootSecondary(page);
+  api.remoteWorkFailStatus = 500;
+  const main = page.locator('main');
+  const toggle = main.getByRole('switch', { name: 'Принимать делегатов и команды с других машин' });
+  await toggle.check({ force: true }).catch(() => undefined);
+  await expect(main.getByRole('alert')).toContainText('Не удалось изменить настройку');
+  await expect(toggle).not.toBeChecked();
+  expect(api.remoteWorkCalls).toHaveLength(1);
+});
+
 test('machine_screen_applies_machine_watch_changed_live', async ({ page }) => {
   const { hub, api, ids } = await bootSecondary(page);
   const main = page.locator('main');

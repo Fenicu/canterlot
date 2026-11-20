@@ -571,6 +571,7 @@ async fn resolve_route(
         parent_mode: String::new(),
         explicit_mode: Some(mode.clone()),
         workdir,
+        remote: false,
     };
     let decision = routing::route(RouteInputs {
         policy: &policy,

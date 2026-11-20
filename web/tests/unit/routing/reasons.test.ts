@@ -78,6 +78,11 @@ describe('reason translation', () => {
     expect(refusalText('brand_new_code', '')).toBe('');
   });
 
+  test('remote spawn has its own words for the offline target and the closed switch', () => {
+    expect(queueReasonLabel('machine_offline')).toBe('машина запуска не в сети');
+    expect(refusalText('remote_work_disabled', 'x')).toBe('машина не принимает работу других машин');
+  });
+
   test('queue reasons and verdicts have Russian labels', () => {
     expect(queueReasonLabel('rate')).toBe('частота запусков');
     expect(queueReasonLabel('resources')).toBe('машина занята');

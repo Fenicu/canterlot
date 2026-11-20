@@ -1632,6 +1632,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/machines/{id}/remote-work": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Меняет выключатель только владелец и только здесь: ни инструмент агента, ни
+         *     `settings_propose_*` до него не доходят. Строка машины берётся `for update`, и запуск
+         *     делегата, читающий её `for share`, после выключения новый удалённый запуск не проведёт.
+         */
+        put: operations["put__api_v1_machines__id__remote_work"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/machines/{id}/workdirs/recent": {
         parameters: {
             query?: never;
@@ -3845,6 +3866,8 @@ export interface components {
             name: string;
         };
         MachineView: {
+            /** @description Принимает ли машина делегатов и команды сессий других машин; включает владелец. */
+            accepts_remote_work: boolean;
             allowed_roots: string[];
             availability: string;
             availability_since?: string | null;
@@ -4757,6 +4780,10 @@ export interface components {
             /** Format: int64 */
             retry_after_secs: number;
         };
+        /** @description Выключатель удалённой работы: принимает ли машина делегатов и команды других машин. */
+        RemoteWorkBody: {
+            accepts_remote_work: boolean;
+        };
         RenamePasskey: {
             /** @description 1..64 символа. */
             name: string;
@@ -5372,7 +5399,7 @@ export interface components {
          *     и состояниями элемента очереди.
          * @enum {string}
          */
-        SpawnRefusalCode: "not_in_whitelist" | "permission_mode_too_wide" | "machine_unavailable" | "capability_missing" | "no_executor_available" | "invalid_arguments" | "harness_unknown" | "model_unknown" | "effort_not_allowed" | "workdir_not_allowed" | "domain_mismatch" | "profile_unknown" | "conversation_closed" | "queue_full" | "rate_limited" | "machine_busy" | "parent_stopped" | "parent_archived" | "cancelled" | "expired" | "job_failed" | "internal_error" | "unknown";
+        SpawnRefusalCode: "not_in_whitelist" | "permission_mode_too_wide" | "machine_unavailable" | "capability_missing" | "no_executor_available" | "invalid_arguments" | "harness_unknown" | "model_unknown" | "effort_not_allowed" | "workdir_not_allowed" | "domain_mismatch" | "remote_work_disabled" | "profile_unknown" | "conversation_closed" | "queue_full" | "rate_limited" | "machine_busy" | "parent_stopped" | "parent_archived" | "cancelled" | "expired" | "job_failed" | "internal_error" | "unknown";
         SpeedStats: {
             /**
              * Format: int64
@@ -11190,6 +11217,56 @@ export interface operations {
             };
             /** @description Воркер без возможности или машина недоступна */
             409: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    put__api_v1_machines__id__remote_work: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RemoteWorkBody"];
+            };
+        };
+        responses: {
+            /** @description Выключатель удалённой работы сохранён */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RemoteWorkBody"];
+                };
+            };
+            /** @description Машины нет у владельца */
+            404: {
                 headers: {
                     /** @description Часы хаба: целые миллисекунды Unix */
                     "X-Server-Time-Ms"?: number;

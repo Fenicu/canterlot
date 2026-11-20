@@ -2240,6 +2240,11 @@ fn memory_scope_capability_list_contains_memory_scope_v1() {
     assert!(canterlot_worker::session::OPTIONAL_CAPABILITIES.contains(&"memory_scope_v1"));
 }
 
+#[test]
+fn remote_spawn_capability_is_advertised() {
+    assert!(canterlot_worker::session::OPTIONAL_CAPABILITIES.contains(&"remote_spawn_v1"));
+}
+
 #[tokio::test]
 async fn machine_watch_goes_out_at_once_when_free_disk_crosses_the_warn_threshold() {
     use canterlot_proto::worker::v1::control_up::Msg;

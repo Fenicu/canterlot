@@ -83,6 +83,10 @@ impl Drop for JobsGate {
     }
 }
 
+/// Воркер понимает `StartExecution.remote` и отказывает пути, не равному своему
+/// каноническому виду (`workdir_not_canonical`).
+pub const CAPABILITY_REMOTE_SPAWN_V1: &str = "remote_spawn_v1";
+
 pub const OPTIONAL_CAPABILITIES: &[&str] = &[
     "exec_v1",
     "pilot_v1",
@@ -115,6 +119,7 @@ pub const OPTIONAL_CAPABILITIES: &[&str] = &[
     CAPABILITY_GOALS_V1,
     CAPABILITY_MEMORY_SCOPE_V1,
     CAPABILITY_JOBS_INPLACE_V1,
+    CAPABILITY_REMOTE_SPAWN_V1,
 ];
 
 #[derive(Clone)]

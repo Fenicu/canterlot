@@ -255,6 +255,7 @@ async fn preview(
         .to_owned(),
         explicit_mode: None,
         workdir,
+        remote: false,
     };
     let now = chrono::Utc::now();
     let headroom =

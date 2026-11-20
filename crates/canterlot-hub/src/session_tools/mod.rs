@@ -108,6 +108,8 @@ pub enum ToolErrorCode {
     EffortNotAllowed,
     WorkdirNotAllowed,
     DomainMismatch,
+    /// Другая машина не принимает удалённую работу: владелец не включил выключатель.
+    RemoteWorkDisabled,
     PermissionModeTooWide,
     ProfileUnknown,
     MachineUnavailable,
@@ -145,7 +147,7 @@ pub enum ToolErrorCode {
 }
 
 impl ToolErrorCode {
-    pub const ALL: [Self; 44] = [
+    pub const ALL: [Self; 45] = [
         Self::UnknownTool,
         Self::SessionNotFound,
         Self::ReadOnlySession,
@@ -157,6 +159,7 @@ impl ToolErrorCode {
         Self::EffortNotAllowed,
         Self::WorkdirNotAllowed,
         Self::DomainMismatch,
+        Self::RemoteWorkDisabled,
         Self::PermissionModeTooWide,
         Self::ProfileUnknown,
         Self::MachineUnavailable,
@@ -205,6 +208,7 @@ impl ToolErrorCode {
             Self::EffortNotAllowed => "effort_not_allowed",
             Self::WorkdirNotAllowed => "workdir_not_allowed",
             Self::DomainMismatch => "domain_mismatch",
+            Self::RemoteWorkDisabled => "remote_work_disabled",
             Self::PermissionModeTooWide => "permission_mode_too_wide",
             Self::ProfileUnknown => "profile_unknown",
             Self::MachineUnavailable => "machine_unavailable",
@@ -254,6 +258,9 @@ impl ToolErrorCode {
             Self::EffortNotAllowed => "This effort is not available for the model",
             Self::WorkdirNotAllowed => "This working directory is not allowed",
             Self::DomainMismatch => "The working directory belongs to another memory domain",
+            Self::RemoteWorkDisabled => {
+                "The owner has not allowed other machines to start work on this machine"
+            }
             Self::PermissionModeTooWide => "The mode is wider than the parent session's",
             Self::ProfileUnknown => "Unknown instruction preset",
             Self::MachineUnavailable => "The machine is not available",
@@ -317,6 +324,9 @@ impl ToolErrorCode {
             }
             Self::DomainMismatch => {
                 "Omit workdir, or pass one inside this session's own memory domain."
+            }
+            Self::RemoteWorkDisabled => {
+                "Start the session on your own machine, or ask the owner to switch on remote work for that machine in the app."
             }
             Self::PermissionModeTooWide => {
                 "Pass a mode no wider than this session's, or ask the owner to approve."

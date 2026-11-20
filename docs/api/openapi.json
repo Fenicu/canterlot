@@ -9622,6 +9622,96 @@
         }
       }
     },
+    "/api/v1/machines/{id}/remote-work": {
+      "put": {
+        "tags": [
+          "machines"
+        ],
+        "summary": "Меняет выключатель только владелец и только здесь: ни инструмент агента, ни\n`settings_propose_*` до него не доходят. Строка машины берётся `for update`, и запуск\nделегата, читающий её `for share`, после выключения новый удалённый запуск не проведёт.",
+        "operationId": "put__api_v1_machines__id__remote_work",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RemoteWorkBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Выключатель удалённой работы сохранён",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteWorkBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Машины нет у владельца",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/machines/{id}/workdirs/recent": {
       "get": {
         "tags": [
@@ -19253,12 +19343,17 @@
           "capabilities",
           "allowed_roots",
           "limits_ok",
+          "accepts_remote_work",
           "harnesses",
           "credentials",
           "sessions",
           "warnings"
         ],
         "properties": {
+          "accepts_remote_work": {
+            "type": "boolean",
+            "description": "Принимает ли машина делегатов и команды сессий других машин; включает владелец."
+          },
           "allowed_roots": {
             "type": "array",
             "items": {
@@ -22319,6 +22414,19 @@
           }
         }
       },
+      "RemoteWorkBody": {
+        "type": "object",
+        "description": "Выключатель удалённой работы: принимает ли машина делегатов и команды других машин.",
+        "required": [
+          "accepts_remote_work"
+        ],
+        "properties": {
+          "accepts_remote_work": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
       "RenamePasskey": {
         "type": "object",
         "required": [
@@ -24422,6 +24530,7 @@
           "effort_not_allowed",
           "workdir_not_allowed",
           "domain_mismatch",
+          "remote_work_disabled",
           "profile_unknown",
           "conversation_closed",
           "queue_full",

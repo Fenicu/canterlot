@@ -1183,6 +1183,7 @@ fn n_minus_one_decoders_skip_new_fields() {
         fork_from_native: String::new(),
         canterlot_mcp: String::new(),
         disable_claude_auto_memory: true,
+        remote: true,
     };
     assert_eq!(
         OldStartExecution::decode(new.encode_to_vec().as_slice()).unwrap(),
@@ -2079,6 +2080,18 @@ fn disable_claude_auto_memory_is_field_16_and_19() {
         ..Default::default()
     };
     assert_eq!(cli.encode_to_vec(), vec![0x98, 0x01, 1]);
+}
+
+#[test]
+fn start_execution_remote_is_field_17_and_costs_nothing_when_unset() {
+    let start = StartExecution {
+        remote: true,
+        ..Default::default()
+    };
+    assert_eq!(start.encode_to_vec(), vec![0x88, 0x01, 1]);
+    assert_roundtrip(start);
+    // Старый получатель пропускает поле; у обычного запуска его нет в байтах.
+    assert!(StartExecution::default().encode_to_vec().is_empty());
 }
 
 #[test]

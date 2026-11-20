@@ -806,6 +806,13 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
         ),
         case(
             Method::PUT,
+            "/api/v1/machines/{id}/remote-work",
+            format!("/api/v1/machines/{machine}/remote-work"),
+            Some(json!({"accepts_remote_work":true})),
+            Some(json!({"accepts_remote_work":false})),
+        ),
+        case(
+            Method::PUT,
             "/api/v1/prompt-suggestion-settings",
             "/api/v1/prompt-suggestion-settings".into(),
             Some(json!({"enabled":false})),

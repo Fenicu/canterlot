@@ -26,6 +26,8 @@ export interface MachineRecord {
 	worker_version?: string | null;
 	capabilities?: string[];
 	limits_ok?: boolean;
+	/** Принимает ли машина делегатов и команды других машин; включает владелец. */
+	accepts_remote_work?: boolean;
 	allowed_roots?: string[];
 	home_dir?: string | null;
 	/** Отчёт сторожа машины: крупные кэши сборки, процессы без сессии, сборки мимо очереди. */

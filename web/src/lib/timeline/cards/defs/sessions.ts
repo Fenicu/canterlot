@@ -39,6 +39,8 @@ export interface SpawnData {
   routing: JsonObject | null;
   isolated: boolean;
   branch: string;
+  /** Имя машины запуска, если делегат пошёл не на машину родителя; иначе пусто. */
+  machine: string;
   queue: { reason: string; detail: string; notBefore: number | null; position: number | null } | null;
   /** Запрос владельцу на запуск вне белого списка. */
   requestId: string;
@@ -121,6 +123,7 @@ export const spawn: CardLogic<SpawnData> = {
       routing,
       isolated: bool(input.isolated) === true || Object.keys(worktree).length > 0,
       branch: str(worktree.branch),
+      machine: str(answer.machine_name),
       queue:
         known === 'queued'
           ? { reason, detail: str(answer.detail), notBefore: at(str(answer.not_before)), position: num(answer.position) }
@@ -186,8 +189,8 @@ export function queueLine(data: SpawnData, now: number): string {
 
 /** Где работает делегат: отдельная копия и её ветка. */
 export function placeLine(data: SpawnData): string {
-  if (data.branch) return `отдельная копия, ветка ${data.branch}`;
-  return data.isolated ? 'отдельная копия' : '';
+  const copy = data.branch ? `отдельная копия, ветка ${data.branch}` : data.isolated ? 'отдельная копия' : '';
+  return [data.machine ? `машина ${data.machine}` : '', copy].filter(Boolean).join(' · ');
 }
 
 /* ------------------------------------------------------------------ приёмка */

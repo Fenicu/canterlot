@@ -36,6 +36,53 @@ pub(crate) const REASON_RATE: &str = "rate";
 pub(crate) const REASON_RESOURCES: &str = "resources";
 pub(crate) const REASON_CHILDREN: &str = "children";
 pub(crate) const REASON_STAGGER: &str = "stagger";
+/// Целевая машина запуска на другой машине не подключена.
+pub(crate) const REASON_MACHINE_OFFLINE: &str = "machine_offline";
+
+/// Что мешает запуску на другой машине прямо сейчас: цель не подключена или её воркер
+/// не знает удалённого запуска. Оба случая лечатся ожиданием, элемент ждёт в очереди.
+pub(crate) struct RemoteBlock {
+    pub(crate) reason: &'static str,
+    pub(crate) detail: String,
+    missing_capability: bool,
+}
+
+impl RemoteBlock {
+    /// Отказ без очереди (`queue: false`).
+    pub(crate) fn error(&self) -> ToolError {
+        let code = if self.missing_capability {
+            ToolErrorCode::CapabilityMissing
+        } else {
+            ToolErrorCode::MachineUnavailable
+        };
+        ToolError::with_message(code, self.detail.clone())
+    }
+}
+
+/// Помеха запуска на другой машине (`remote` — машина запуска названа); у своей машины её нет.
+pub(crate) fn remote_block(
+    registry: &Registry,
+    machine: Uuid,
+    remote: Option<Uuid>,
+) -> Option<RemoteBlock> {
+    remote?;
+    if registry.session_info(machine).is_none() {
+        return Some(RemoteBlock {
+            reason: REASON_MACHINE_OFFLINE,
+            detail: "the target machine is not connected".to_owned(),
+            missing_capability: false,
+        });
+    }
+    if !registry.has_capability(machine, crate::session::CAPABILITY_REMOTE_SPAWN_V1) {
+        return Some(RemoteBlock {
+            reason: REASON_RESOURCES,
+            detail: "the target machine's worker does not support remote spawns yet (remote_spawn_v1): update it"
+                .to_owned(),
+            missing_capability: true,
+        });
+    }
+    None
+}
 const STATE_QUEUED: &str = "queued";
 const STATE_STARTED: &str = "started";
 const STATE_CANCELLED: &str = "cancelled";
@@ -170,6 +217,7 @@ pub enum SpawnRefusalCode {
     EffortNotAllowed,
     WorkdirNotAllowed,
     DomainMismatch,
+    RemoteWorkDisabled,
     ProfileUnknown,
     ConversationClosed,
     QueueFull,
@@ -198,6 +246,7 @@ impl SpawnRefusalCode {
             Self::EffortNotAllowed => "effort_not_allowed",
             Self::WorkdirNotAllowed => "workdir_not_allowed",
             Self::DomainMismatch => "domain_mismatch",
+            Self::RemoteWorkDisabled => "remote_work_disabled",
             Self::ProfileUnknown => "profile_unknown",
             Self::ConversationClosed => "conversation_closed",
             Self::QueueFull => "queue_full",
@@ -226,6 +275,7 @@ impl SpawnRefusalCode {
             Self::EffortNotAllowed,
             Self::WorkdirNotAllowed,
             Self::DomainMismatch,
+            Self::RemoteWorkDisabled,
             Self::ProfileUnknown,
             Self::ConversationClosed,
             Self::QueueFull,
@@ -256,6 +306,9 @@ impl SpawnRefusalCode {
             Self::EffortNotAllowed => "This effort is not available for the model",
             Self::WorkdirNotAllowed => "This working directory is not allowed",
             Self::DomainMismatch => "The working directory belongs to another memory domain",
+            Self::RemoteWorkDisabled => {
+                "The owner has not allowed other machines to start work on the target machine"
+            }
             Self::ProfileUnknown => "Unknown instruction preset",
             Self::ConversationClosed => "The session is closed",
             Self::QueueFull => "Too many spawns are already queued for this session",
@@ -959,7 +1012,7 @@ pub async fn start_now_in_tx(
                 REASON_RATE => SpawnRefusalCode::RateLimited,
                 "concurrency" => SpawnRefusalCode::MachineBusy,
                 "limits" => SpawnRefusalCode::NoExecutorAvailable,
-                REASON_RESOURCES => SpawnRefusalCode::MachineUnavailable,
+                REASON_RESOURCES | REASON_MACHINE_OFFLINE => SpawnRefusalCode::MachineUnavailable,
                 _ => SpawnRefusalCode::Unknown,
             };
             Ok(StartNowOutcome {
@@ -1053,15 +1106,6 @@ async fn try_start(
             at: retry_at(runtime.spawn_queue, now),
         });
     };
-    // После перезапуска хаба тик может обогнать повторное подключение воркера:
-    // отсутствие связи — не постоянная нехватка возможности.
-    if registry.session_info(caller.machine_id).is_none() {
-        return Ok(Attempt::Blocked {
-            reason: "resources",
-            detail: "the machine is not connected".to_owned(),
-            at: retry_at(runtime.spawn_queue, now),
-        });
-    }
     let Ok(queued) = serde_json::from_value::<QueuedSpawn>(row.spec.clone()) else {
         return Ok(Attempt::Failed {
             code: "invalid_arguments",
@@ -1069,6 +1113,43 @@ async fn try_start(
         });
     };
     let args = queued.args;
+    // Машина запуска записана в элементе при постановке; машина родителя тут ни при чём.
+    let target = args.machine_id.unwrap_or(caller.machine_id);
+    // Выключатель раньше связи: выключенная машина отказывает, а не ждёт подключения.
+    if args.machine_id.is_some() {
+        match spawn::admit_remote_in_tx(&mut *conn, caller.owner_id, target).await {
+            Ok(()) => {}
+            Err(error) if error.code == ToolErrorCode::RemoteWorkDisabled => {
+                return Ok(Attempt::Failed {
+                    code: error.code.as_str(),
+                    message: error.message,
+                });
+            }
+            Err(error) => {
+                return Ok(Attempt::Blocked {
+                    reason: REASON_RESOURCES,
+                    detail: error.message,
+                    at: retry_at(runtime.spawn_queue, now),
+                });
+            }
+        }
+        if let Some(block) = remote_block(registry, target, args.machine_id) {
+            return Ok(Attempt::Blocked {
+                reason: block.reason,
+                detail: block.detail,
+                at: retry_at(runtime.spawn_queue, now),
+            });
+        }
+    }
+    // После перезапуска хаба тик может обогнать повторное подключение воркера:
+    // отсутствие связи — не постоянная нехватка возможности.
+    if registry.session_info(target).is_none() {
+        return Ok(Attempt::Blocked {
+            reason: "resources",
+            detail: "the machine is not connected".to_owned(),
+            at: retry_at(runtime.spawn_queue, now),
+        });
+    }
     let context = runtime.spawn_context();
     let spec = match args.route.clone() {
         Some(route) => match spawn::validate_routed(
@@ -1144,7 +1225,7 @@ async fn try_start(
         "select coalesce(models->0->>'id','') from machine_harnesses
           where machine_id=$1 and harness=$2",
     )
-    .bind(caller.machine_id)
+    .bind(target)
     .bind(&spec.harness)
     .fetch_optional(&mut *conn)
     .await?
@@ -1180,14 +1261,8 @@ async fn try_start(
                 at,
             });
         }
-        let verdict = guard::check_in_tx(
-            &mut *conn,
-            caller.owner_id,
-            caller.machine_id,
-            runtime.guards,
-            now,
-        )
-        .await?;
+        let verdict =
+            guard::check_in_tx(&mut *conn, caller.owner_id, target, runtime.guards, now).await?;
         metrics_stale = verdict.stale;
         if verdict.blocked() {
             return Ok(Attempt::Blocked {
@@ -1218,7 +1293,7 @@ async fn try_start(
         spawn::Launch {
             registry,
             owner: caller.owner_id,
-            machine: caller.machine_id,
+            machine: spec.launch_machine(caller.machine_id),
             parent,
             spec: &spec,
             key: format!("spawnq:{}", row.id),

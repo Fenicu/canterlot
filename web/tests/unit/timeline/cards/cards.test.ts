@@ -37,6 +37,19 @@ describe('delegate start', () => {
     expect(spawnWord(made('canterlot_session_spawn', input, answer, { session }), resolved.data, NOW)).toEqual({ word: 'работает', tone: 'accent', live: true });
   });
 
+  it('a_start_on_another_machine_names_that_machine_and_a_local_one_stays_silent', () => {
+    const remote = hub({ machine_name: 'machine-b', permission_mode: 'ask', session_id: CHILD, status: 'started', subscribed: true }, 'Session created.');
+    const resolved = card<SpawnData>(made('mcp__canterlot__session_spawn', { ...input, isolated: false, machine: 'machine-b', workdir: '/h/u/proj' }, remote, { session }))!;
+    expect(resolved.data.machine).toBe('machine-b');
+    expect(placeLine(resolved.data)).toBe('машина machine-b');
+    const isolated = hub({ machine_name: 'machine-b', session_id: CHILD, status: 'started', worktree: { branch: 'canterlot/x', path: '/w' } });
+    const withCopy = card<SpawnData>(made('mcp__canterlot__session_spawn', { ...input, machine: 'machine-b', workdir: '/h/u/proj' }, isolated, { session }))!;
+    expect(placeLine(withCopy.data)).toBe('машина machine-b · отдельная копия, ветка canterlot/x');
+    const local = card<SpawnData>(made('mcp__canterlot__session_spawn', input, hub({ session_id: CHILD, status: 'started' }), { session }))!;
+    expect(local.data.machine).toBe('');
+    expect(placeLine(local.data)).toBe('отдельная копия');
+  });
+
   it('a_delegate_speaks_neutrally', () => {
     const answer = hub({ session_id: CHILD, status: 'started' });
     const call = made('canterlot.session_spawn', input, answer, { session, root: false });

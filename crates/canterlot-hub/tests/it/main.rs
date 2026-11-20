@@ -103,6 +103,7 @@ mod prompt_suggestions;
 mod provider_credits;
 mod provider_status;
 mod receipts;
+mod remote_spawn;
 mod requests_domain;
 mod requests_integration;
 mod rereview;
