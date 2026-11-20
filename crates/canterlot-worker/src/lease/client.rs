@@ -59,6 +59,77 @@ fn note(text: impl AsRef<str>) {
     let _ = writeln!(io::stderr(), "canterlot lease: {}", text.as_ref());
 }
 
+/// Диагностика строгого ожидания. Оболочка задачи держит её stderr в файле без ограничения
+/// размера, а сокет аренды может не отвечать часами, поэтому строки ограничены: повторы
+/// идут не чаще одной за `NOTE_GAP`, а весь объём не больше `NOTE_CAP` байт, включая
+/// последнюю строку о том, что дальше молчим.
+pub struct Notes {
+    sink: Box<dyn Write + Send>,
+    cap: usize,
+    written: usize,
+    last_retry: Option<tokio::time::Instant>,
+    closed: bool,
+}
+
+/// Сколько диагностики строгого ожидания вообще попадёт в stderr.
+pub const NOTE_CAP: usize = 4096;
+/// Не чаще одной строки о повторе подключения за этот срок.
+const NOTE_GAP: Duration = Duration::from_secs(60);
+const NOTE_SUPPRESSED: &str = "canterlot lease: further diagnostics suppressed\n";
+
+impl Notes {
+    pub fn stderr() -> Self {
+        Self::with_sink(Box::new(io::stderr()))
+    }
+
+    /// Без потолка объёма, для запуска у живого терминала.
+    fn unbounded() -> Self {
+        Self {
+            cap: usize::MAX / 2,
+            ..Self::stderr()
+        }
+    }
+
+    pub fn with_sink(sink: Box<dyn Write + Send>) -> Self {
+        Self {
+            sink,
+            cap: NOTE_CAP,
+            written: 0,
+            last_retry: None,
+            closed: false,
+        }
+    }
+
+    /// Строка о ходе ожидания: считается в общий объём, но не ограничена по частоте.
+    fn line(&mut self, text: impl AsRef<str>) {
+        if self.closed {
+            return;
+        }
+        let line = format!("canterlot lease: {}\n", text.as_ref());
+        // Место под последнюю строку остаётся всегда.
+        if self.written + line.len() + NOTE_SUPPRESSED.len() > self.cap {
+            self.closed = true;
+            let _ = self.sink.write_all(NOTE_SUPPRESSED.as_bytes());
+            return;
+        }
+        self.written += line.len();
+        let _ = self.sink.write_all(line.as_bytes());
+    }
+
+    /// Строка о повторной попытке подключения: не чаще одной за `NOTE_GAP`.
+    fn retry(&mut self, text: impl AsRef<str>) {
+        let now = tokio::time::Instant::now();
+        if self
+            .last_retry
+            .is_some_and(|last| now.duration_since(last) < NOTE_GAP)
+        {
+            return;
+        }
+        self.last_retry = Some(now);
+        self.line(text);
+    }
+}
+
 fn first_reply_timeout() -> Duration {
     std::env::var(FIRST_REPLY_TIMEOUT_ENV)
         .ok()
@@ -248,6 +319,7 @@ async fn request(
     dir: &str,
     requested_at_ms: u64,
     last_line: &mut Option<String>,
+    notes: &mut Notes,
 ) -> Wait {
     let (read, mut write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
@@ -284,7 +356,7 @@ async fn request(
                 answered = true;
                 let line = waiting_line(kind, position, &holders);
                 if last_line.as_deref() != Some(line.as_str()) {
-                    note(&line);
+                    notes.line(&line);
                     *last_line = Some(line);
                 }
             }
@@ -393,6 +465,8 @@ pub async fn run(args: RunArgs) -> ExitCode {
     let dir = current_dir_name();
     let requested_at_ms = super::now_ms();
     let mut last_line = None;
+    // Обычный запуск ждёт у живого терминала и сам решает, когда сдаться: объём не режется.
+    let mut notes = Notes::unbounded();
     let mut patience = REFUSED_RETRY;
     // Начало текущего обрыва: 30 с на переподключение считаются от него, а не от запуска.
     let mut lost_since: Option<tokio::time::Instant> = None;
@@ -411,6 +485,7 @@ pub async fn run(args: RunArgs) -> ExitCode {
             &dir,
             requested_at_ms,
             &mut last_line,
+            &mut notes,
         );
         tokio::pin!(waiting);
         let outcome = tokio::select! {
@@ -663,6 +738,17 @@ pub async fn acquire_strict(
     label: &str,
     dir: &str,
 ) -> Result<StrictLease, StrictError> {
+    acquire_strict_with(socket, kind, label, dir, &mut Notes::stderr()).await
+}
+
+/// `acquire_strict` с заданным приёмником диагностики.
+pub async fn acquire_strict_with(
+    socket: PathBuf,
+    kind: Kind,
+    label: &str,
+    dir: &str,
+    notes: &mut Notes,
+) -> Result<StrictLease, StrictError> {
     let requested_at_ms = super::now_ms();
     let mut last_line = None;
     let mut refusals = 0;
@@ -670,15 +756,25 @@ pub async fn acquire_strict(
         let stream = match connect(&socket, REFUSED_RETRY, true).await {
             Connect::Stream(stream) => stream,
             Connect::Unreachable(reason) => {
-                note(format!("worker unreachable ({reason}), still waiting"));
+                notes.retry(format!("worker unreachable ({reason}), still waiting"));
                 tokio::time::sleep(STRICT_UNREACHABLE_STEP).await;
                 continue;
             }
         };
-        match request(stream, kind, label, dir, requested_at_ms, &mut last_line).await {
+        match request(
+            stream,
+            kind,
+            label,
+            dir,
+            requested_at_ms,
+            &mut last_line,
+            notes,
+        )
+        .await
+        {
             Wait::Granted(granted) => break granted,
             Wait::Lost(reason, _) => {
-                note(format!(
+                notes.retry(format!(
                     "connection to worker lost ({reason}), reconnecting"
                 ));
                 tokio::time::sleep(RETRY_STEP).await;
@@ -976,6 +1072,102 @@ mod tests {
         assert_eq!(signal_from_raw(2), Some(Signal::INT));
         assert_eq!(signal_from_raw(15), Some(Signal::TERM));
         assert_eq!(signal_from_raw(0), None);
+    }
+
+    #[derive(Clone, Default)]
+    struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl Write for Captured {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Captured {
+        fn text(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        }
+    }
+
+    /// Сутки виртуального времени: ожидание строгой аренды никогда не заканчивается само.
+    async fn wait_a_day(socket: PathBuf, notes: &mut Notes) {
+        let waited = tokio::time::timeout(
+            Duration::from_secs(24 * 3600),
+            acquire_strict_with(socket, Kind::Build, "job", "dir", notes),
+        )
+        .await;
+        assert!(waited.is_err(), "the strict wait must not give up or run");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn diagnostics_stay_bounded_while_the_socket_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let captured = Captured::default();
+        let mut notes = Notes::with_sink(Box::new(captured.clone()));
+        wait_a_day(dir.path().join("missing.sock"), &mut notes).await;
+        let text = captured.text();
+        assert!(text.contains("still waiting"), "the first report is kept");
+        assert!(text.len() <= NOTE_CAP, "{} bytes", text.len());
+        assert!(
+            text.ends_with("further diagnostics suppressed\n"),
+            "a capped log says so: {text}"
+        );
+    }
+
+    /// Реальное время: приостановленные часы уходят вперёд раньше, чем сокет успевает ответить.
+    #[tokio::test]
+    async fn a_worker_that_drops_every_connection_gets_one_report_per_gap() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("flapping.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let acceptor = tokio::spawn(async move {
+            loop {
+                // Прочитать запрос и закрыть без ответа: клиент видит чистый конец потока.
+                if let Ok((stream, _)) = listener.accept().await {
+                    let mut lines = BufReader::new(stream).lines();
+                    let _ = lines.next_line().await;
+                }
+            }
+        });
+        let captured = Captured::default();
+        let mut notes = Notes::with_sink(Box::new(captured.clone()));
+        // Переподключение идёт каждые 250 мс; за две секунды их около восьми.
+        let waited = tokio::time::timeout(
+            Duration::from_secs(2),
+            acquire_strict_with(socket, Kind::Build, "job", "dir", &mut notes),
+        )
+        .await;
+        acceptor.abort();
+        assert!(waited.is_err(), "the strict wait must not give up or run");
+        let text = captured.text();
+        assert_eq!(
+            text.matches("connection to worker lost").count(),
+            1,
+            "{text}"
+        );
+        assert!(text.len() <= NOTE_CAP);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_lines_are_rate_limited_and_waiting_lines_are_not_dropped_early() {
+        let captured = Captured::default();
+        let mut notes = Notes::with_sink(Box::new(captured.clone()));
+        for _ in 0..50 {
+            notes.retry("again");
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+        // Пятьдесят секунд: одна строка, а не пятьдесят.
+        assert_eq!(captured.text().matches("again").count(), 1);
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        notes.retry("again");
+        assert_eq!(captured.text().matches("again").count(), 2);
+        notes.line("waiting for build, position 1");
+        assert!(captured.text().contains("position 1"));
     }
 
     #[tokio::test(flavor = "current_thread")]
