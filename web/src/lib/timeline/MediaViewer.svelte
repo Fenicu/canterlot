@@ -4,7 +4,7 @@
   import { page } from '$app/state';
   import Icon from '#lib/ui/Icon.svelte';
   import { durationMs, fadeMs } from '#lib/motion.js';
-  import { declaredSize, downloadName, shotCaption, shotPreviewSrc, shotSrc, type ViewerShot } from '#lib/viewer/shots.js';
+  import { declaredSize, downloadName, isVideoShot, shotCaption, shotPreviewSrc, shotSrc, videoPlayable, type ViewerShot } from '#lib/viewer/shots.js';
   import { Gallery, galleryId, galleryPosition, mergeGalleryShots, type GalleryAnchor, type GalleryItem } from '#lib/viewer/gallery.js';
   import { gallerySource } from '#lib/viewer/gallery-context.js';
   import {
@@ -84,6 +84,8 @@
   let previews = $state<Record<string, string>>({});
   /** Показ-миниатюра не загрузился и убран: виден текст загрузки, пока идёт оригинал. */
   let previewGone = $state<Record<string, boolean>>({});
+  /** Браузер не играет этот ролик: вместо плеера текст и «Скачать». */
+  let unplayable = $state<Record<string, boolean>>({});
 
   const list = $derived(galleryShots ?? shots);
   const index = $derived.by(() => {
@@ -91,6 +93,8 @@
     return found >= 0 ? found : Math.min(Math.max(0, start), Math.max(0, list.length - 1));
   });
   const shot = $derived(list[index] ?? list[0]!);
+  /** Ролик на сцене играет плеер браузера: его не приближают и не двигают, листают и закрывают свайпом по полям. */
+  const isClip = $derived(isVideoShot(shot));
   const position = $derived(galleryPosition(offset, index));
   const knownTotal = $derived(total ?? (gallery && !fallback ? null : list.length));
   const many = $derived((knownTotal ?? list.length) > 1);
@@ -134,8 +138,13 @@
   let samples: { time: number; x: number; y: number }[] = [];
 
   function naturalOf(entry: ViewerShot | undefined): Size | null {
-    if (!entry) return null;
+    if (!entry || isVideoShot(entry)) return null;
     return naturals[entry.media_id] ?? declaredSize(entry);
+  }
+
+  /** Размер для жестов: у ролика это вся сцена, чтобы листание и закрытие работали по его полям. */
+  function gestureSize(): Size | null {
+    return naturalOf(shot) ?? (isClip ? size : null);
   }
 
   function viewOf(i: number): View {
@@ -284,7 +293,8 @@
     if (!gallery) return;
     anchors = Object.fromEntries(gallery.items.map((item) => [item.media_id ?? item.attachment_id ?? '', item]));
     galleryShots = mergeGalleryShots(gallery.items, shots);
-    total = gallery.total;
+    // Хаб считает картинки сессии; ролики сообщения, вставленные в список, прибавляются к числу.
+    total = gallery.total === null ? null : gallery.total + (galleryShots.length - gallery.items.length);
     offset = gallery.offset;
     hasOlder = gallery.before !== null;
     hasNewer = gallery.after !== null;
@@ -335,6 +345,22 @@
     untrack(() => {
       if (older && at <= 2) void moreOlder();
       if (newer && count - 1 - at <= 2) void moreNewer();
+    });
+  });
+
+  /** Браузер, который не знает тип ролика, плеера не получает: сразу текст и «Скачать». */
+  function probe(node: HTMLVideoElement, entry: ViewerShot): void {
+    const type = entry.mime?.startsWith('video/') ? entry.mime : undefined;
+    if (!videoPlayable(type, (name) => node.canPlayType(name))) unplayable = { ...unplayable, [entry.media_id]: true };
+  }
+
+  // Ролик, с которого ушли листанием, замолкает: на сцене играет только текущий.
+  $effect(() => {
+    const at = index;
+    untrack(() => {
+      for (const node of stage?.querySelectorAll<HTMLVideoElement>('video') ?? []) {
+        if (node.closest<HTMLElement>('.slide')?.dataset.index !== String(at)) node.pause();
+      }
     });
   });
 
@@ -480,6 +506,8 @@
   function pointerDown(event: PointerEvent): void {
     if (closing) return;
     if (event.pointerType === 'mouse' && event.button !== 0) return;
+    // Плеер и его кнопки ведут нажатие сами: захват указателя сценой лишил бы их кликов.
+    if (event.target instanceof Element && event.target.closest('video, a, button')) return;
     stage.setPointerCapture?.(event.pointerId);
     const point = local(event);
     pointers.set(event.pointerId, point);
@@ -488,7 +516,7 @@
       press = { point, view, swipeX, time: performance.now(), type: event.pointerType };
       samples = [];
       record(point);
-    } else if (pointers.size === 2) {
+    } else if (pointers.size === 2 && !isClip) {
       // Второй палец превращает любой начатый жест в щипок: начатый свайп откатывается.
       clearTimeout(tapTimer);
       const [a, b] = [...pointers.values()] as [Point, Point];
@@ -512,7 +540,7 @@
     if (!pointers.has(event.pointerId) || closing) return;
     const point = local(event);
     pointers.set(event.pointerId, point);
-    const natural = naturalOf(shot);
+    const natural = gestureSize();
     if (!natural) return;
     if (gesture === 'pinch' && pinch && pointers.size >= 2) {
       const [a, b] = [...pointers.values()] as [Point, Point];
@@ -531,6 +559,7 @@
       if (isZoomed(view, size, natural)) gesture = 'pan';
       else if (many && Math.abs(dx) > Math.abs(dy)) gesture = 'swipe';
       else if (Math.abs(dy) >= Math.abs(dx)) gesture = 'dismiss';
+      else if (isClip) return;
       else gesture = 'pan';
       if (gesture !== 'swipe') hideChrome();
     }
@@ -569,7 +598,7 @@
     if (!pointers.has(event.pointerId)) return;
     const point = local(event);
     pointers.delete(event.pointerId);
-    const natural = naturalOf(shot);
+    const natural = gestureSize();
     const cancelled = event.type === 'pointercancel';
     if (gesture === 'pinch') {
       if (pointers.size === 1 && natural) {
@@ -674,6 +703,8 @@
       return;
     }
     if (event.ctrlKey || event.metaKey || event.altKey) return;
+    // Стрелки, пробел и цифры на плеере остаются ему: перемотка, пауза, громкость.
+    if (event.target instanceof HTMLVideoElement) return;
     const natural = naturalOf(shot);
     if (event.key === '+' || event.key === '=') zoomBy(1);
     else if (event.key === '-' || event.key === '_') zoomBy(-1);
@@ -788,8 +819,8 @@
     bind:this={stage}
     tabindex="-1"
     role="group"
-    aria-roledescription="картинка"
-    aria-label={many ? (knownTotal === null ? String(position) : `${position} из ${knownTotal}`) : caption || 'Картинка'}
+    aria-roledescription={isClip ? 'видео' : 'картинка'}
+    aria-label={many ? (knownTotal === null ? String(position) : `${position} из ${knownTotal}`) : caption || (isClip ? 'Видео' : 'Картинка')}
     onpointerdown={pointerDown}
     onpointermove={pointerMove}
     onpointerup={pointerUp}
@@ -799,6 +830,31 @@
     {#each slides as i (list[i]?.media_id ?? i)}
       {@const entry = list[i]!}
       <div class="slide" data-index={i} data-current={i === index ? '' : undefined}>
+        {#if isVideoShot(entry)}
+          <!-- Ролик играет плеер браузера: без автозапуска, звук и перемотка его собственные. -->
+          <div class="clip">
+            {#if unplayable[entry.media_id]}
+              <div class="unplayable" role="status">
+                <p>Браузер не может воспроизвести это видео</p>
+                <!-- Адрес служебный, маршрутизатор здесь не участвует. -->
+                <!-- eslint-disable-next-line svelte/no-navigation-without-resolve -->
+                <a class="control" href={shotSrc(entry)} download={downloadName(entry)}><Icon name="download" />Скачать</a>
+              </div>
+            {:else}
+              <!-- У ролика владельца и агента нет дорожки субтитров: заводить её нечем. -->
+              <!-- svelte-ignore a11y_media_has_caption -->
+              <video
+                src={shotSrc(entry)}
+                controls
+                playsinline
+                preload="metadata"
+                aria-label={shotCaption(entry, null) || `Видео ${i + 1}`}
+                use:probe={entry}
+                onerror={() => { unplayable = { ...unplayable, [entry.media_id]: true }; }}
+              ></video>
+            {/if}
+          </div>
+        {:else}
         <div class="frame" data-ready={ready[entry.media_id] ? '' : undefined}>
           {#if !ready[entry.media_id] || i !== index}
             <!-- Фон — уменьшенный показ: оригинал целиком грузится один раз, только для текущей картинки. -->
@@ -829,6 +885,7 @@
           <p class="status">Картинка недоступна</p>
         {:else if !ready[entry.media_id] && previewGone[entry.media_id]}
           <p class="status">Картинка загружается</p>
+        {/if}
         {/if}
       </div>
     {/each}
@@ -895,6 +952,30 @@
   .frame:not([data-ready]) .full, .frame[data-ready] .preview { pointer-events: none; }
   .frame .full { opacity: 0; }
   .frame[data-ready] .full { opacity: 1; }
+  /* Ролик по центру сцены; поля под шапкой и подписью остаются сцене: по ним листают и закрывают свайпом. */
+  .clip {
+    position: absolute;
+    inset: 0;
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: calc(var(--target) + var(--s8)) var(--s4);
+  }
+  .clip video { display: block; max-width: 100%; max-height: 100%; border-radius: var(--radius-sm); background: var(--viewer-bg); }
+  .unplayable {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--s4);
+    max-width: min(100%, var(--reading-max));
+    padding: var(--s6) var(--s8);
+    border-radius: var(--radius-sm);
+    background: var(--viewer-control);
+    color: var(--viewer-text);
+    text-align: center;
+  }
+  .unplayable p { margin: 0; font-size: var(--fs-meta); }
   .stage:global([data-settling]) .slide, .stage:global([data-settling]) .frame { transition: transform var(--duration-expand) var(--ease-expand); }
   .viewer:has(:global(.stage[data-settling])) .backdrop { transition: opacity var(--duration-expand) var(--ease-expand); }
   .status {

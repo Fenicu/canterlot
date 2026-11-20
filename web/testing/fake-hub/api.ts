@@ -13,6 +13,7 @@ import type { HubEvent } from '../../src/lib/sync/wire';
 import type { DraftRecord } from '../../src/lib/drafts/sync';
 import type { SecretRequestAnswer, SecretRequestView } from '../../src/lib/requests/secretRequest';
 import type { FakeHub } from './hub';
+import type { BlobRequest } from './range';
 import type { components } from '../../src/lib/api/generated/openapi.js';
 import { parseCron } from '../../src/lib/screens/settings/schedules.js';
 
@@ -214,6 +215,10 @@ export class FakeHubApi {
 	readonly deleted = new Set<string>();
 	readonly drafts = new Map<string, DraftRecord>();
 	readonly attachments = new Map<string, { size: number; offset: number; key: string; name: string; mime: string; conversation_id: string }>();
+	/** Готовые вложения с содержимым: `GET /attachments/{id}/content` отдаёт их с диапазонами. */
+	readonly blobs = new Map<string, { bytes: Uint8Array; mime: string }>();
+	/** Журнал запросов содержимого вложений: диапазон и код ответа. */
+	readonly blobRequests: BlobRequest[] = [];
 	draftRevision = 0;
 	groups: ListSnapshot['groups'] = [];
 	counts: Counts = { all: 0, pinned: 0, archived: 0, trashed: 0, groups: [] };

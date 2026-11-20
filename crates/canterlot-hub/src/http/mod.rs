@@ -57,6 +57,7 @@ pub mod presence;
 pub mod presets;
 pub mod preview;
 pub mod prompt_suggestions;
+pub mod range;
 pub mod routing;
 pub mod scheduled;
 pub mod schedules;

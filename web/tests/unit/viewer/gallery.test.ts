@@ -54,6 +54,28 @@ describe('mergeGalleryShots', () => {
     expect(merged[0]).toBe(local[0]);
     expect(merged[1]?.media_id).toBe('m2');
   });
+
+  it('keeps the videos of the opened message among the pictures of the session', () => {
+    const picture = (id: string): ViewerShot => ({ media_id: id, src: `/api/v1/attachments/${id}/content`, mime: 'image/png' });
+    const video = (id: string): ViewerShot => ({ media_id: id, src: `/api/v1/attachments/${id}/content`, mime: 'video/webm', kind: 'video' });
+    // Сообщение: картинка, ролик, картинка. Хаб знает только картинки сессии.
+    const local = [picture('a1'), video('v1'), picture('a2')];
+    const items = [
+      item({ kind: 'block_media', seq: '1', media_id: 'older' }),
+      item({ kind: 'input_attachment', seq: '2', attachment_id: 'a1' }),
+      item({ kind: 'input_attachment', seq: '3', attachment_id: 'a2' }),
+      item({ kind: 'block_media', seq: '4', media_id: 'newer' })
+    ];
+    expect(mergeGalleryShots(items, local).map((shot) => shot.media_id)).toEqual(['older', 'a1', 'v1', 'a2', 'newer']);
+    // Ролик перед первой картинкой и ролик в конце сообщения.
+    expect(mergeGalleryShots(items, [video('v0'), ...local, video('v2')]).map((shot) => shot.media_id)).toEqual(['older', 'v0', 'a1', 'v1', 'a2', 'v2', 'newer']);
+    // Идущие подряд ролики сохраняют свой порядок.
+    expect(mergeGalleryShots(items, [picture('a1'), video('v1'), video('v2'), picture('a2')]).map((shot) => shot.media_id)).toEqual(['older', 'a1', 'v1', 'v2', 'a2', 'newer']);
+    // Без картинок сообщения в списке роликам не за что зацепиться: остаются только картинки хаба.
+    expect(mergeGalleryShots(items.slice(0, 1), [video('v1')]).map((shot) => shot.media_id)).toEqual(['older']);
+    // Нет роликов: список хаба как был.
+    expect(mergeGalleryShots(items, [picture('a1')])).toHaveLength(4);
+  });
 });
 
 describe('Gallery', () => {

@@ -14,6 +14,24 @@ export interface ViewerShot {
   name?: string;
   /** Байты файла, если известны: тяжёлую соседнюю картинку заранее не тянем. */
   size?: number;
+  /** Что показывать: без пометки кадр считается картинкой, если тип не `video/*`. */
+  kind?: 'image' | 'video';
+}
+
+/** Ролик играет в просмотрщике плеером браузера, а не картинкой на сцене. */
+export function isVideoShot(shot: ViewerShot): boolean {
+  if (shot.kind) return shot.kind === 'video';
+  return (shot.mime ?? '').startsWith('video/');
+}
+
+/**
+ * Браузер сам говорит, умеет ли он тип: пустой ответ значит «нет», и плеер не поднимается.
+ * Тип не назван — решает само воспроизведение (событие `error`). Chrome на QuickTime отвечает
+ * пустой строкой, но H.264 в .mov играет, поэтому для него пробуем играть.
+ */
+export function videoPlayable(mime: string | undefined, canPlayType: (type: string) => CanPlayTypeResult): boolean {
+  if (!mime || mime === 'video/quicktime') return true;
+  return canPlayType(mime) !== '';
 }
 
 export function shotSrc(shot: ViewerShot): string {

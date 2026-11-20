@@ -6055,7 +6055,12 @@ export interface operations {
     get__api_v1_attachments__id__content: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /** @description Один байтовый диапазон: bytes=a-b, bytes=a- или bytes=-n; несколько диапазонов и неверная запись игнорируются */
+                Range?: string | null;
+                /** @description Сильный ETag: при другом ETag диапазон игнорируется и отдаётся весь файл */
+                "If-Range"?: string | null;
+            };
             path: {
                 id: string;
             };
@@ -6063,9 +6068,26 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Содержимое готового вложения: проверенная картинка показывается на месте, остальное скачивается; имя файла в Content-Disposition */
+            /** @description Содержимое готового вложения: проверенная картинка показывается на месте, ролик (mp4, quicktime, webm с верной сигнатурой) отдаётся своим типом для плеера, остальное скачивается; имя файла в Content-Disposition */
             200: {
                 headers: {
+                    /** @description Всегда bytes */
+                    "Accept-Ranges"?: string;
+                    /** @description SHA-256 содержимого в кавычках */
+                    ETag?: string;
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": components["schemas"]["BinaryContent"];
+                };
+            };
+            /** @description Запрошенный диапазон; те же заголовки, что у полного ответа */
+            206: {
+                headers: {
+                    /** @description bytes первый-последний/размер */
+                    "Content-Range"?: string;
                     /** @description Часы хаба: целые миллисекунды Unix */
                     "X-Server-Time-Ms"?: number;
                     [name: string]: unknown;
@@ -6077,6 +6099,17 @@ export interface operations {
             /** @description Содержимое не изменилось: отдаётся при совпадении If-None-Match */
             304: {
                 headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Диапазон целиком за пределами файла */
+            416: {
+                headers: {
+                    /** @description bytes *\/размер */
+                    "Content-Range"?: string;
                     /** @description Часы хаба: целые миллисекунды Unix */
                     "X-Server-Time-Ms"?: number;
                     [name: string]: unknown;
@@ -11787,7 +11820,12 @@ export interface operations {
     get__api_v1_media__id_: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /** @description Один байтовый диапазон: bytes=a-b, bytes=a- или bytes=-n; несколько диапазонов и неверная запись игнорируются */
+                Range?: string | null;
+                /** @description Сильный ETag: при другом ETag диапазон игнорируется и отдаётся весь файл */
+                "If-Range"?: string | null;
+            };
             path: {
                 id: string;
             };
@@ -11798,8 +11836,26 @@ export interface operations {
             /** @description Картинка, на которую смотрел агент: тип из проверенного списка, показ на месте, ETag равен SHA-256 */
             200: {
                 headers: {
+                    /** @description Всегда bytes */
+                    "Accept-Ranges"?: string;
                     /** @description SHA-256 содержимого в кавычках */
                     ETag?: string;
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "image/png": components["schemas"]["BinaryContent"];
+                    "image/jpeg": components["schemas"]["BinaryContent"];
+                    "image/webp": components["schemas"]["BinaryContent"];
+                    "image/gif": components["schemas"]["BinaryContent"];
+                };
+            };
+            /** @description Запрошенный диапазон; те же заголовки, что у полного ответа */
+            206: {
+                headers: {
+                    /** @description bytes первый-последний/размер */
+                    "Content-Range"?: string;
                     /** @description Часы хаба: целые миллисекунды Unix */
                     "X-Server-Time-Ms"?: number;
                     [name: string]: unknown;
@@ -11814,6 +11870,17 @@ export interface operations {
             /** @description Содержимое не изменилось: отдаётся при совпадении If-None-Match */
             304: {
                 headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Диапазон целиком за пределами файла */
+            416: {
+                headers: {
+                    /** @description bytes *\/размер */
+                    "Content-Range"?: string;
                     /** @description Часы хаба: целые миллисекунды Unix */
                     "X-Server-Time-Ms"?: number;
                     [name: string]: unknown;

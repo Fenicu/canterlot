@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { declaredSize, downloadName, opensViewer, shotCaption, shotFormat, shotPreviewSrc, shotSrc } from "#lib/viewer/shots.js";
+import { declaredSize, downloadName, isVideoShot, opensViewer, shotCaption, shotFormat, shotPreviewSrc, shotSrc, videoPlayable } from "#lib/viewer/shots.js";
 
 describe("viewer/shots", () => {
   it("media_and_attachments_have_their_own_addresses", () => {
@@ -30,6 +30,27 @@ describe("viewer/shots", () => {
   it("preview_uses_the_rendition_and_full_uses_the_original", () => {
     expect(shotPreviewSrc({ media_id: "m" })).toBe("/api/v1/media/m/preview");
     expect(shotPreviewSrc({ media_id: "a", src: "/api/v1/attachments/a/content" })).toBe("/api/v1/attachments/a/preview");
+  });
+
+  it("a_shot_plays_as_video_by_its_kind_or_its_video_mime", () => {
+    expect(isVideoShot({ media_id: "a", kind: "video" })).toBe(true);
+    expect(isVideoShot({ media_id: "a", mime: "video/webm" })).toBe(true);
+    expect(isVideoShot({ media_id: "a", mime: "image/png" })).toBe(false);
+    expect(isVideoShot({ media_id: "a", kind: "image", mime: "video/mp4" })).toBe(false);
+    expect(isVideoShot({ media_id: "a" })).toBe(false);
+  });
+
+  it("a_video_is_unplayable_when_the_browser_answers_no_for_its_type", () => {
+    const answers = (known: Record<string, CanPlayTypeResult>) => (type: string): CanPlayTypeResult => known[type] ?? "";
+    expect(videoPlayable("video/webm", answers({ "video/webm": "maybe" }))).toBe(true);
+    expect(videoPlayable("video/mp4", answers({ "video/mp4": "probably" }))).toBe(true);
+    expect(videoPlayable("video/x-unknown", answers({}))).toBe(false);
+    expect(videoPlayable("video/webm; codecs=vp9", answers({}))).toBe(false);
+    // Тип не назван: решает само воспроизведение, ошибку даст событие error.
+    expect(videoPlayable(undefined, answers({}))).toBe(true);
+    expect(videoPlayable("", answers({}))).toBe(true);
+    // Chrome отвечает на QuickTime пустой строкой, но H.264 в .mov играет: пробуем играть.
+    expect(videoPlayable("video/quicktime", answers({}))).toBe(true);
   });
 
   it("plain_click_opens_the_viewer_and_modified_clicks_stay_with_the_browser", () => {

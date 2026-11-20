@@ -2,8 +2,8 @@
   import type { Component } from 'svelte';
   import { fmt } from '#lib/format/ru.js';
   import AttachmentTile from '#lib/timeline/AttachmentTile.svelte';
-  import { attachmentKind, attachmentUrl } from '#lib/timeline/attachments.js';
-  import type { ViewerShot } from '#lib/viewer/shots.js';
+  import { attachmentUrl, viewerKind } from '#lib/timeline/attachments.js';
+  import { isVideoShot, type ViewerShot } from '#lib/viewer/shots.js';
   import type { GalleryAnchor } from '#lib/viewer/gallery.js';
   import CardLine from './CardLine.svelte';
   import CardShell from './CardShell.svelte';
@@ -13,16 +13,18 @@
   let { call, data, line, link, word, env }: CardProps<ShareData> = $props();
   // Просмотрщик открывается так же, как у вложений сообщения и у обычного блока: грузится при первом касании.
   let Viewer = $state<Component<{ shots: ViewerShot[]; start?: number; title: string; heading: string; anchor?: GalleryAnchor | null; onclose: () => void }> | null>(null);
-  let viewing = $state<{ index: number; anchor: GalleryAnchor } | null>(null);
+  let viewing = $state<{ index: number; anchor: GalleryAnchor | null } | null>(null);
   // Картинкой файл считается так же, как в плитке и в обычном блоке: по типу или по расширению.
-  const isImage = (file: { name: string; mime: string; size?: number }) => attachmentKind({ name: file.name, mime: file.mime, image: false, size: file.size }) === 'image';
+  // Картинки и ролики карточки листаются в одном просмотрщике.
+  const kindOf = (file: { name: string; mime: string; size?: number }) => viewerKind({ name: file.name, mime: file.mime, image: false, size: file.size });
   const shots = $derived<ViewerShot[]>(
     data.files
-      .filter(isImage)
+      .filter((file) => kindOf(file) !== null)
       .map((file) => ({
         media_id: file.attachment_id,
         src: attachmentUrl(file.attachment_id),
         mime: file.mime,
+        kind: kindOf(file) ?? 'image',
         name: file.name,
         size: file.size,
         width: file.width ?? undefined,
@@ -33,9 +35,11 @@
 
   async function view(id: string): Promise<void> {
     Viewer ??= (await import('#lib/timeline/MediaViewer.svelte')).default;
+    const shot = shots.find((entry) => entry.media_id === id);
     viewing = {
-      index: Math.max(0, shots.findIndex((shot) => shot.media_id === id)),
-      anchor: { kind: 'block_file', id }
+      index: Math.max(0, shots.findIndex((entry) => entry.media_id === id)),
+      // Хаб перечисляет только картинки сессии: с ролика список сессии не открывается.
+      anchor: shot && isVideoShot(shot) ? null : { kind: 'block_file', id }
     };
   }
 </script>

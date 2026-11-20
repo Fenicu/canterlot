@@ -128,7 +128,7 @@ Cargo-команды, которые обращаются к базе, нужн�
 node web/scripts/print-csp.mjs https://chat.example
 ```
 
-Вывод задают в переменной окружения Caddy `CANTERLOT_CSP` при каждом обновлении сборки. Это обязательная часть публикации: `script-src` не содержит `unsafe-inline`; hashes CSP должны соответствовать `200.html`. `kit.csp` сохраняет `connect-src 'self'`, заголовок Caddy добавляет конкретный WSS origin. Пример ниже заменяет API-only пример из [раздела HTTP](http.md) для установки с PWA:
+Вывод задают в переменной окружения Caddy `CANTERLOT_CSP` при каждом обновлении сборки. Это обязательная часть публикации: `script-src` не содержит `unsafe-inline`; hashes CSP должны соответствовать `200.html`. `kit.csp` сохраняет `connect-src 'self'`, заголовок Caddy добавляет конкретный WSS origin. Ролики вложений играют в просмотрщике из того же источника, поэтому политика явно содержит `media-src 'self'` (без неё их разрешил бы `default-src 'self'`); значение `CANTERLOT_CSP` из `print-csp.mjs` уже включает его, править Caddyfile не нужно. Пример ниже заменяет API-only пример из [раздела HTTP](http.md) для установки с PWA:
 
 ```caddyfile
 chat.example {
