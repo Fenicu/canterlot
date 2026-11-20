@@ -1182,6 +1182,19 @@ export interface LimitsChanged {
   kind: "limits_changed";
   payload: {
     provider: string;
+    account?: string;
+    machine_credentials?: {
+      machine_id: Uuid;
+      machine_name: string;
+      expires_at: Time | null;
+    }[];
+    machine_credits?: {
+      machine_id: Uuid;
+      machine_name: string;
+      reset_count: number | null;
+      resets: unknown[];
+      observed_at: Time;
+    }[];
     window: "five_hour" | "weekly" | "monthly" | "weekly_fable";
     used_permille: number | null;
     resets_at: Time | null;
@@ -1220,6 +1233,10 @@ export interface LimitsProvidersChanged {
   kind: "limits_providers_changed";
   payload: {
     providers: string[];
+    accounts?: {
+      provider: string;
+      account: string;
+    }[];
   };
 }
 export interface ProviderStatusChanged {
