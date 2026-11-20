@@ -280,7 +280,7 @@ async fn admission_reads_the_window_of_the_schedules_own_account(pool: PgPool) {
     due(&pool, &id, now - TimeDelta::seconds(30)).await;
     scheduler(&f).tick(now).await.unwrap();
     let rid = run_id(&pool, &id).await;
-    for _ in 0..30 {
+    for _ in 0..20_000 {
         let state: String = sqlx::query_scalar("select state from schedule_runs where id=$1")
             .bind(rid)
             .fetch_one(&pool)
@@ -293,7 +293,7 @@ async fn admission_reads_the_window_of_the_schedules_own_account(pool: PgPool) {
         if !matches!(state.as_str(), "claimed" | "prechecking") {
             break;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        tokio::task::yield_now().await;
     }
     // Красная запись самого расписания пропускает запуск.
     red("b-acct").await;
