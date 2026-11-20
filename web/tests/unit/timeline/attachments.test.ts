@@ -8,7 +8,8 @@ import {
   OFFICE_VIEW_MAX_BYTES,
   officeFitsViewer,
   officeLabel,
-  showsThumb
+  showsThumb,
+  viewerKind
 } from "#lib/timeline/attachments.js";
 
 const file = (name: string, mime: string, size = 1000, image = false) => ({ name, mime, size, image });
@@ -78,6 +79,16 @@ describe("timeline/attachments", () => {
     expect(documentFitsViewer(0)).toBe(true);
     expect(documentFitsViewer(DOCUMENT_VIEW_MAX_BYTES)).toBe(true);
     expect(documentFitsViewer(DOCUMENT_VIEW_MAX_BYTES + 1)).toBe(false);
+  });
+
+  it("the_viewer_takes_pictures_and_videos_and_nothing_else", () => {
+    expect(viewerKind(file("a.png", "image/png"))).toBe("image");
+    expect(viewerKind(file("clip.webm", "video/webm"))).toBe("video");
+    expect(viewerKind(file("clip.mov", "application/octet-stream"))).toBe("video");
+    expect(viewerKind(file("a.md", "text/markdown"))).toBeNull();
+    expect(viewerKind(file("a.docx", "application/octet-stream"))).toBeNull();
+    // Пустой файл с именем только скачивается.
+    expect(viewerKind(file("clip.mp4", "video/mp4", 0))).toBeNull();
   });
 
   it("the_url_is_the_authorised_content_route_of_the_attachment", () => {

@@ -1,6 +1,6 @@
 export const directives = {
   'default-src': ['self'], 'script-src': ['self'], 'style-src': ['self'],
-  'img-src': ['self', 'blob:', 'data:'], 'connect-src': ['self'],
+  'img-src': ['self', 'blob:', 'data:'], 'media-src': ['self'], 'connect-src': ['self'],
   'worker-src': ['self', 'blob:'], 'manifest-src': ['self'], 'object-src': ['none'],
   'base-uri': ['self'], 'form-action': ['self'], 'frame-ancestors': ['none']
 };

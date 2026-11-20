@@ -6,7 +6,8 @@
   import { opensViewer } from '#lib/viewer/shots.js';
   import type { Component } from 'svelte';
 
-  let { file, onopen }: { file: AttachmentRef; onopen: () => void } = $props();
+  // Без `onopen` у ролика остаётся прежнее скачивание: полоска правки сообщения просмотрщика не держит.
+  let { file, onopen }: { file: AttachmentRef; onopen?: () => void } = $props();
   let broken = $state(false);
   // Просмотрщик документа грузится при первом открытии: в ленте он нужен редко.
   let DocViewer = $state<Component<{ file: AttachmentRef; onclose: () => void }> | null>(null);
@@ -44,7 +45,7 @@
 {#if thumb}
   <!-- Ссылка на сам файл: долгое нажатие и правая кнопка дают меню браузера с картинкой. -->
   <!-- eslint-disable-next-line svelte/no-navigation-without-resolve -->
-  <a class="thumb" href={url} aria-label={`Открыть картинку ${name}`} onclick={(event) => { if (!opensViewer(event)) return; event.preventDefault(); onopen(); }}>
+  <a class="thumb" href={url} aria-label={`Открыть картинку ${name}`} onclick={(event) => { if (!opensViewer(event)) return; event.preventDefault(); onopen?.(); }}>
     <img src={preview} alt="" loading="lazy" decoding="async" fetchpriority="low" data-viewer-thumb={file.attachment_id} onerror={() => { broken = true; }} />
   </a>
 {:else if kind === 'image'}
@@ -68,9 +69,9 @@
     <DocViewer {file} onclose={() => { reading = false; }} />
   {/if}
 {:else}
-  <!-- Адрес служебный, маршрутизатор здесь не участвует. -->
+  <!-- Адрес служебный, маршрутизатор здесь не участвует. Ролик открывается в просмотрщике, а ссылка остаётся: меню браузера, средняя кнопка и ctrl+щелчок скачивают файл. -->
   <!-- eslint-disable-next-line svelte/no-navigation-without-resolve -->
-  <a class="tile" data-kind={kind} href={url} download={name}>
+  <a class="tile" data-kind={kind} href={url} download={name} aria-label={kind === 'video' && onopen ? `Смотреть видео ${name}` : undefined} onclick={(event) => { if (kind !== 'video' || !onopen || !opensViewer(event)) return; event.preventDefault(); onopen(); }}>
     <span class="glyph" aria-hidden="true">{#if kind === 'video'}<Icon name="play" />{:else}{extension}{/if}</span>
     <span class="info"><span class="name">{name}</span>{#if size}<span class="meta">{size}</span>{/if}</span>
   </a>

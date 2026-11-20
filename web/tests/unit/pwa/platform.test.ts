@@ -180,7 +180,9 @@ test('owner_change_starts_clean', async () => {
 test('csp_directives_are_complete_and_inline_scripts_are_hashed', async () => {
   const { scriptHashes, scriptsAllowed } = await load('csp');
   const path = '../../../csp.mjs'; const { directives } = await import(path);
-  expect(Object.keys(directives)).toEqual(['default-src', 'script-src', 'style-src', 'img-src', 'connect-src', 'worker-src', 'manifest-src', 'object-src', 'base-uri', 'form-action', 'frame-ancestors']);
+  expect(Object.keys(directives)).toEqual(['default-src', 'script-src', 'style-src', 'img-src', 'media-src', 'connect-src', 'worker-src', 'manifest-src', 'object-src', 'base-uri', 'form-action', 'frame-ancestors']);
+  // Ролики вложений играют в просмотрщике из того же источника, больше ниоткуда.
+  expect(directives['media-src']).toEqual(['self']);
   const shell = '<script src="/theme-init.js"></script><script>start()</script>';
   const hash = `sha256-${createHash('sha256').update('start()').digest('base64')}`;
   expect(await scriptHashes(shell)).toEqual([hash]); expect(await scriptsAllowed(shell, [hash])).toBe(true); expect(await scriptsAllowed(shell, [])).toBe(false); expect(await scriptsAllowed('<button onclick="x()">x</button>', [])).toBe(false);

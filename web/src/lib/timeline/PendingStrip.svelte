@@ -322,7 +322,7 @@
           <ul class="files">
             {#each input.attachments.filter((file) => (editKept[input.key] ?? []).includes(file.attachment_id)) as file (file.attachment_id)}
               <li class="edit-file">
-                <AttachmentTile {file} onopen={() => {}} />
+                <AttachmentTile {file} />
                 <IconButton icon="close" label="Убрать вложение {file.name}" onclick={() => dropEditAttachment(input, file.attachment_id)} />
               </li>
             {/each}

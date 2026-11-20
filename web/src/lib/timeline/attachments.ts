@@ -49,6 +49,12 @@ export function attachmentKind(file: Pick<AttachmentRef, 'name' | 'mime' | 'imag
 	return 'file';
 }
 
+/** Что файл открывает в просмотрщике кадров: картинку, ролик или ничего. */
+export function viewerKind(file: Pick<AttachmentRef, 'name' | 'mime' | 'image'> & { size?: number }): 'image' | 'video' | null {
+	const kind = attachmentKind(file);
+	return kind === 'image' || kind === 'video' ? kind : null;
+}
+
 export function isOfficeKind(kind: AttachmentKind): kind is OfficeKind {
 	return kind === 'word' || kind === 'excel';
 }
