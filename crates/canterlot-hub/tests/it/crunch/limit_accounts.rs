@@ -850,3 +850,170 @@ async fn migration_0122_gives_existing_rows_the_owner_account_and_keeps_pending_
         "a label outside [a-z0-9-] is refused by the table"
     );
 }
+
+/// Отчёт машины с одним харнессом `synthetic` (провайдер `claude`) и заданной меткой.
+/// Пустая метка — отчёт старого или откатившегося воркера.
+async fn report_label(env: &Env, machine: Uuid, account: &str) -> Vec<Uuid> {
+    let report = MachineReport {
+        worker_version: "test".into(),
+        allowed_roots: vec!["/tmp".into()],
+        containment: "process_group".into(),
+        os: "linux".into(),
+        max_attachment_bytes: canterlot_proto::limits::MAX_ATTACHMENT_BYTES,
+        max_attachments_per_input: canterlot_proto::limits::MAX_ATTACHMENTS_PER_INPUT as u32,
+        harnesses: vec![HarnessInfo {
+            harness: "synthetic".into(),
+            provider: "claude".into(),
+            title: "t".into(),
+            account: account.into(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    machine_info::apply_report_with_capabilities(
+        &env.pool,
+        env.owner,
+        machine,
+        &report,
+        &[],
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap()
+}
+
+async fn stored_label(pool: &PgPool, machine: Uuid) -> String {
+    sqlx::query_scalar(
+        "select account from machine_harnesses where machine_id=$1 and harness='synthetic'",
+    )
+    .bind(machine)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+fn limit_pause_of(pauses: &[PauseReason], account: &str) -> bool {
+    pauses.iter().any(
+        |p| matches!(p, PauseReason::LimitReached { account: a, .. } if a == account),
+    )
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_label_change_removes_the_old_account_pause_and_pending_wakes(pool: PgPool) {
+    let mut env = Env::with_config(&pool, patient_config()).await;
+    let b = add_account_machine(&mut env, B).await;
+    // Разговор без «кранча»: его останавливает обычная пауза лимита, не удержание.
+    let paused = env.conversation_on(b, false, true).await;
+    let now = start();
+    let reset = now + secs(3600);
+    env.limit_reached_as(paused, "claude", B, Window::FiveHour, Some(reset), now)
+        .await;
+    let before = pauses(&pool, paused).await;
+    assert!(limit_pause_of(&before, B), "{before:?}");
+    // Ожидающее пробуждение старой записи и пробуждение чужой записи того же разговора.
+    for (account, payload) in [
+        (B, json!({"provider":"claude","account":B,"window":"five_hour"})),
+        ("owner", json!({"provider":"claude","window":"weekly"})),
+    ] {
+        sqlx::query("insert into scheduled_jobs(id,kind,owner_id,conversation_id,run_at,payload) values($1,'wake',$2,$3,$4,$5)")
+            .bind(Uuid::now_v7())
+            .bind(env.owner)
+            .bind(paused)
+            .bind(reset + TimeDelta::hours(if account == B { 0 } else { 1 }))
+            .bind(payload)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    let released = report_label(&env, b, "c-acct").await;
+    assert_eq!(released, vec![paused]);
+    let after = pauses(&pool, paused).await;
+    assert!(!limit_pause_of(&after, B), "{after:?}");
+    let wakes = jobs(&pool, "wake").await;
+    let states: Vec<(Option<String>, String)> = wakes
+        .iter()
+        .filter(|job| job.conversation_id == Some(paused))
+        .map(|job| {
+            (
+                job.payload["account"].as_str().map(str::to_owned),
+                job.state.clone(),
+            )
+        })
+        .collect();
+    assert!(
+        states.contains(&(Some(B.to_owned()), "cancelled".to_owned())),
+        "{states:?}"
+    );
+    assert!(
+        states.contains(&(None, "pending".to_owned())),
+        "the other account's wake stays: {states:?}"
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_replayed_limit_reached_of_the_old_account_never_recreates_a_hold_or_pause(
+    pool: PgPool,
+) {
+    let mut env = Env::with_config(&pool, patient_config()).await;
+    let b = add_account_machine(&mut env, B).await;
+    let crunch = env.conversation_on(b, true, true).await;
+    let plain = env.conversation_on(b, false, true).await;
+    let now = start();
+    let reset = now + secs(3600);
+    report_label(&env, b, "c-acct").await;
+    assert_eq!(stored_label(&pool, b).await, "c-acct");
+    // Повтор журнала: факт ещё старой записи доходит после смены метки.
+    for conversation in [crunch, plain] {
+        env.limit_reached_as(conversation, "claude", B, Window::FiveHour, Some(reset), now)
+            .await;
+    }
+    let crunch_holds = holds(&pool, crunch).await;
+    assert!(!quota_of(&crunch_holds, B), "{crunch_holds:?}");
+    let plain_pauses = pauses(&pool, plain).await;
+    assert!(!limit_pause_of(&plain_pauses, B), "{plain_pauses:?}");
+    assert!(jobs(&pool, "wake").await.is_empty());
+    // Показание той же записи остаётся в истории: оно не трогает очереди.
+    observe_as(&env, b, B, Window::FiveHour, 990, Some(reset), now).await;
+    let kept: i64 = sqlx::query_scalar(
+        "select count(*) from limit_snapshots where provider='claude' and account=$1",
+    )
+    .bind(B)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(kept, 1);
+    // Факт новой записи по-прежнему применяется.
+    env.limit_reached_as(plain, "claude", "c-acct", Window::FiveHour, Some(reset), now)
+        .await;
+    assert!(limit_pause_of(&pauses(&pool, plain).await, "c-acct"));
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_legacy_report_without_a_label_keeps_the_stored_non_owner_label(pool: PgPool) {
+    let mut env = Env::with_config(&pool, patient_config()).await;
+    let b = add_account_machine(&mut env, B).await;
+    let conversation = env.conversation_on(b, true, true).await;
+    let now = start();
+    let reset = now + secs(3600);
+    env.limit_reached_as(conversation, "claude", B, Window::FiveHour, Some(reset), now)
+        .await;
+    // Откатившийся воркер: отчёт без метки не меняет сохранённую запись и ничего не снимает.
+    let released = report_label(&env, b, "").await;
+    assert!(released.is_empty(), "{released:?}");
+    assert_eq!(stored_label(&pool, b).await, B);
+    assert!(quota_of(&holds(&pool, conversation).await, B));
+    // Факт без метки по-прежнему отбрасывается, а не попадает в `owner`.
+    let mut conn = pool.acquire().await.unwrap();
+    assert_eq!(
+        limits::fact_account(&mut conn, b, "claude", "").await.unwrap(),
+        None
+    );
+    drop(conn);
+    // Явная метка нового воркера, в том числе `owner`, это смена записи.
+    let released = report_label(&env, b, "owner").await;
+    assert_eq!(released, vec![conversation]);
+    assert_eq!(stored_label(&pool, b).await, "owner");
+    // Теперь у машины нет чужой метки, и пустая читается как `owner`.
+    report_label(&env, b, "").await;
+    assert_eq!(stored_label(&pool, b).await, "owner");
+}

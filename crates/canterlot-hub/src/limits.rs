@@ -649,6 +649,21 @@ pub async fn record_absence_in_tx(
     .await?;
     Ok(first)
 }
+/// Совпадает ли учётная запись факта с текущей меткой харнесса разговора на его машине.
+/// Харнесс без строки в каталоге машины ничего не оспаривает.
+async fn account_is_current(
+    conn: &mut PgConnection,
+    conversation_id: Uuid,
+    account: &str,
+) -> Result<bool, sqlx::Error> {
+    let current: Option<String> = sqlx::query_scalar(
+        "select h.account from conversations c join machine_harnesses h on h.machine_id=c.machine_id and h.harness=c.harness where c.id=$1",
+    )
+    .bind(conversation_id)
+    .fetch_optional(conn)
+    .await?;
+    Ok(current.is_none_or(|current| current == account))
+}
 pub async fn on_limit_reached_in_tx(
     conn: &mut PgConnection,
     owner_id: Uuid,
@@ -672,6 +687,16 @@ pub async fn on_limit_reached_in_tx(
     }
     // Строка пары раньше очереди: общий порядок блокировок хаба.
     lock_provider(conn, &fact.provider, account).await?;
+    // Под замком пары: факт чужой учётной записи (повтор журнала после смены метки) в очередь
+    // разговора не попадает, ни удержанием, ни паузой.
+    if !account_is_current(conn, run.conversation_id, account).await? {
+        tracing::info!(
+            kind = "limit_reached_stale_account",
+            provider = fact.provider.as_str(),
+            "limit fact of an account the harness no longer has is not applied to the queue"
+        );
+        return Ok(LimitReachedEffect::Stale);
+    }
     let mut queue:LockedQueue=sqlx::query_as("select q.* from queue_state q join conversations c on c.id=q.conversation_id join executions e on e.conversation_id=c.id where e.id=$1 and c.id=$2 and c.machine_id=$3 for update of q").bind(run.execution_id).bind(run.conversation_id).bind(run.machine_id).fetch_one(&mut *conn).await?;
     let crunch: bool = sqlx::query_scalar("select crunch_enabled from conversations where id=$1")
         .bind(run.conversation_id)
