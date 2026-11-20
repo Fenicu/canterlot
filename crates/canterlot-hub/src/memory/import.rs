@@ -12,10 +12,10 @@ use serde_json::json;
 use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
-use super::MemoryDomain;
 use super::store::{
     self, Actor, Kind, Level, MemoryError, MemoryScope, NewEntry, SUBJECT_MAX_CHARS,
 };
+use super::{MemoryDomain, import_rules};
 use crate::config::MemoryConfig;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,6 +47,9 @@ pub struct ImportReport {
     pub renamed_collisions: u32,
     /// Записи, которые детектор отклонил, хотя воркер их в пакет не включил.
     pub refused_secrets: u32,
+    /// Записи с запрещённым именем источника (`MEMORY.md`, имена с учётными данными):
+    /// воркер их в пакет не кладёт, значит пакет собран вручную.
+    pub refused_names: u32,
     /// Записи, у которых вид вне восьми допустимых заменён на `reference`.
     pub kind_remapped: u32,
 }
@@ -75,6 +78,11 @@ pub async fn apply(
     config: &MemoryConfig,
 ) -> Result<ImportReport, ImportError> {
     let mut tx = crate::db::begin(pool).await?;
+    // Применения идут по одному: проверка «уже импортировано» и запись не должны
+    // разойтись между двумя параллельными транзакциями.
+    sqlx::query("select pg_advisory_xact_lock(hashtextextended('canterlot:memory:import', 0))")
+        .execute(&mut *tx)
+        .await?;
     let report = match apply_entries(&mut tx, bundle, config).await {
         Ok(report) => report,
         Err(error) => {
@@ -110,6 +118,10 @@ async fn apply_entries(
             .map(str::to_owned);
         if entry.source_path.is_empty() || entry.sha256.is_empty() {
             return Err(invalid("source"));
+        }
+        if import_rules::forbidden_name(import_rules::basename(&entry.source_path)).is_some() {
+            report.refused_names += 1;
+            continue;
         }
         if already_imported(conn, &entry.source_path, &entry.sha256).await? {
             report.skipped_existing += 1;
