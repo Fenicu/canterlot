@@ -50,6 +50,8 @@ const FIRST_REPLY_TIMEOUT_ENV: &str = "CANTERLOT_LEASE_REPLY_TIMEOUT_MS";
 pub struct RunArgs {
     pub kind: Kind,
     pub label: Option<String>,
+    /// Без запуска вне аренды; см. `acquire_strict`.
+    pub strict: bool,
     pub command: Vec<OsString>,
 }
 
@@ -365,8 +367,15 @@ pub async fn run(args: RunArgs) -> ExitCode {
         return exec_direct(&args.command, None);
     }
     let Some(socket) = discover_socket() else {
+        if args.strict {
+            note("no lease socket known, strict mode does not run without a lease");
+            return ExitCode::from(STRICT_REFUSED_EXIT);
+        }
         return unwrapped(&args.command, "no lease socket known");
     };
+    if args.strict {
+        return run_strict(socket, args).await;
+    }
     // Сигналы ловятся с самого начала: пока ждём, они завершают обёртку тем же сигналом,
     // а после запуска команды INT и QUIT игнорируются. Перехваченный (не игнорируемый)
     // сигнал при exec возвращается к умолчанию, поэтому команда получает обычные.
@@ -532,6 +541,193 @@ pub async fn run(args: RunArgs) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Строгая аренда для задач на месте: слот выдан сервером воркера, иначе команда не стартует.
+/// В отличие от `run` здесь нет запуска без аренды ни при недоступном сокете, ни при
+/// обрыве; держатель переживает перезапуск воркера, пока жив процесс, которому принадлежит
+/// объект. Конец объекта закрывает соединение, и сервер освобождает слот.
+pub struct StrictLease {
+    lease_id: String,
+    kind: Kind,
+    budget: u32,
+    playwright_workers: u32,
+    keeper: tokio::task::JoinHandle<()>,
+}
+
+impl StrictLease {
+    pub fn lease_id(&self) -> &str {
+        &self.lease_id
+    }
+
+    pub fn kind(&self) -> Kind {
+        self.kind
+    }
+
+    /// Окружение команды под арендой: номер, бюджет потоков и ограничения сборки.
+    pub fn env(&self) -> Vec<(&'static str, String)> {
+        cap_env(&self.lease_id, self.budget, self.playwright_workers)
+    }
+}
+
+impl Drop for StrictLease {
+    fn drop(&mut self) {
+        self.keeper.abort();
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum StrictError {
+    /// Сервер ответил отказом или ошибкой протокола несколько раз подряд: ждать нечего.
+    Refused(String),
+}
+
+/// Код выхода строгого запуска, которому аренду не дали (EX_TEMPFAIL).
+const STRICT_REFUSED_EXIT: u8 = 75;
+
+/// Строгий `lease run`: слот, затем команда в своей группе процессов. Сигналы завершения
+/// пересылаются группе команды; код выхода — код команды.
+async fn run_strict(socket: PathBuf, args: RunArgs) -> ExitCode {
+    let label = args.label.clone().unwrap_or_default();
+    let dir = current_dir_name();
+    let granted = tokio::select! {
+        granted = acquire_strict(socket, args.kind, &label, &dir) => granted,
+        _ = caught_termination() => return ExitCode::from(STRICT_REFUSED_EXIT),
+    };
+    let lease = match granted {
+        Ok(lease) => lease,
+        Err(StrictError::Refused(reason)) => {
+            note(format!("lease refused ({reason})"));
+            return ExitCode::from(STRICT_REFUSED_EXIT);
+        }
+    };
+    let mut command = tokio::process::Command::new(&args.command[0]);
+    command.args(&args.command[1..]).envs(lease.env());
+    command.process_group(0);
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => return spawn_failure(&args.command[0], &error),
+    };
+    let group = child
+        .id()
+        .and_then(|pid| i32::try_from(pid).ok())
+        .and_then(rustix::process::Pid::from_raw);
+    let status = loop {
+        tokio::select! {
+            status = child.wait() => break status,
+            signal = caught_termination() => {
+                if let Some(group) = group {
+                    let _ = rustix::process::kill_process_group(group, signal);
+                }
+            }
+        }
+    };
+    drop(lease);
+    match status {
+        Ok(status) => match (status.code(), status.signal()) {
+            (Some(code), _) => ExitCode::from(u8::try_from(code & 0xff).unwrap_or(1)),
+            (None, Some(number)) => ExitCode::from(u8::try_from((128 + number) & 0xff).unwrap_or(1)),
+            (None, None) => ExitCode::FAILURE,
+        },
+        Err(_) => ExitCode::FAILURE,
+    }
+}
+
+/// Ждёт TERM, INT или HUP и называет пришедший.
+async fn caught_termination() -> Signal {
+    let (Ok(mut term), Ok(mut int), Ok(mut hup)) = (
+        signal(SignalKind::terminate()),
+        signal(SignalKind::interrupt()),
+        signal(SignalKind::hangup()),
+    ) else {
+        return std::future::pending().await;
+    };
+    tokio::select! {
+        _ = term.recv() => Signal::TERM,
+        _ = int.recv() => Signal::INT,
+        _ = hup.recv() => Signal::HUP,
+    }
+}
+
+/// Сколько отказов протокола подряд терпит строгий запрос, прежде чем сдаться.
+const STRICT_REFUSALS: u32 = 3;
+const STRICT_UNREACHABLE_STEP: Duration = Duration::from_secs(1);
+
+/// Просит слот и ждёт его сколько нужно: сокета нет или он не отвечает — повторяет, обрыв
+/// посреди очереди — переподключается с прежним временем запроса (место не теряется).
+pub async fn acquire_strict(
+    socket: PathBuf,
+    kind: Kind,
+    label: &str,
+    dir: &str,
+) -> Result<StrictLease, StrictError> {
+    let requested_at_ms = super::now_ms();
+    let mut last_line = None;
+    let mut refusals = 0;
+    let granted = loop {
+        let stream = match connect(&socket, REFUSED_RETRY, true).await {
+            Connect::Stream(stream) => stream,
+            Connect::Unreachable(reason) => {
+                note(format!("worker unreachable ({reason}), still waiting"));
+                tokio::time::sleep(STRICT_UNREACHABLE_STEP).await;
+                continue;
+            }
+        };
+        match request(stream, kind, label, dir, requested_at_ms, &mut last_line).await {
+            Wait::Granted(granted) => break granted,
+            Wait::Lost(reason, _) => {
+                note(format!("connection to worker lost ({reason}), reconnecting"));
+                tokio::time::sleep(RETRY_STEP).await;
+            }
+            Wait::Failed(reason) => {
+                refusals += 1;
+                if refusals >= STRICT_REFUSALS {
+                    return Err(StrictError::Refused(reason));
+                }
+                tokio::time::sleep(STRICT_UNREACHABLE_STEP).await;
+            }
+        }
+    };
+    let Granted {
+        lease_id,
+        kind,
+        budget,
+        playwright_workers,
+        mut lines,
+        mut write,
+    } = granted;
+    let keeper = tokio::spawn({
+        let lease_id = lease_id.clone();
+        async move {
+            loop {
+                // Записывающая половина держится открытой, пока жив держатель: её закрытие
+                // сервер читает как уход клиента.
+                let _open = &write;
+                // Пока воркер на связи, он сообщений держателю не шлёт: любая строка —
+                // не повод отпустить слот, конец потока — повод переподключиться.
+                if let Ok(Some(_)) = lines.next_line().await {
+                    continue;
+                }
+                loop {
+                    if let Some((new_lines, new_write)) =
+                        reattach(socket.clone(), lease_id.clone()).await
+                    {
+                        lines = new_lines;
+                        write = new_write;
+                        break;
+                    }
+                    tokio::time::sleep(STRICT_UNREACHABLE_STEP).await;
+                }
+            }
+        }
+    });
+    Ok(StrictLease {
+        lease_id,
+        kind,
+        budget,
+        playwright_workers,
+        keeper,
+    })
 }
 
 /// Держатель после обрыва: переподключение и `attach` в пределах 30 с.

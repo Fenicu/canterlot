@@ -104,6 +104,10 @@ enum LeaseCommand {
         kind: LeaseKind,
         #[arg(long)]
         label: Option<String>,
+        /// Строгий режим: без запуска вне аренды. Нет воркера или сокета — ждать, отказ
+        /// протокола — код 75. Так ждут своей очереди задачи на месте.
+        #[arg(long)]
+        strict: bool,
         #[arg(last = true, required = true, num_args = 1..)]
         command: Vec<std::ffi::OsString>,
     },
@@ -255,6 +259,7 @@ async fn lease() -> Option<ExitCode> {
         LeaseCommand::Run {
             kind,
             label,
+            strict,
             command,
         } => {
             let kind = match kind {
@@ -264,6 +269,7 @@ async fn lease() -> Option<ExitCode> {
             client::run(client::RunArgs {
                 kind,
                 label,
+                strict,
                 command,
             })
             .await
