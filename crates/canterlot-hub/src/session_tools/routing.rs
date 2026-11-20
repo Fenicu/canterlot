@@ -568,6 +568,20 @@ pub struct ProviderView {
     pub reserve_resets_at: Option<DateTime<Utc>>,
     /// Публичный статус провайдера: сбой уводит к другому кандидату, но не запрещает.
     pub status: Option<crate::provider_status::Status>,
+    /// Учётная запись харнесса целевой машины, чьи цифры лежат выше; пусто, если машина этого
+    /// провайдера не заявляла.
+    pub account: Option<String>,
+    /// У провайдера больше одной учётной записи у владельца: объяснение тогда называет её.
+    pub multi_account: bool,
+}
+
+/// Название провайдера в объяснении маршрута: с учётной записью для удалённого запуска и
+/// провайдера с несколькими записями (`opencode@b-opencode`), иначе голое имя, как всегда.
+fn provider_label(provider: &str, view: Option<&ProviderView>, remote: bool) -> String {
+    match view.and_then(|view| view.account.as_deref().map(|a| (a, view.multi_account))) {
+        Some((account, multi)) if remote || multi => format!("{provider}@{account}"),
+        _ => provider.to_owned(),
+    }
 }
 
 /// Кандидат в ответе: пара, вердикт и короткая английская причина.
@@ -847,11 +861,13 @@ pub fn route(inputs: RouteInputs<'_>) -> Result<Decision, RouteError> {
         });
         // Правила расписаний (окна приёма) действуют и на `unlimited_models`:
         // исключение — про пороги дочерней политики, а не про красное окно.
+        let label = provider_label(&provider, limits.get(&provider), request.remote);
         if !bypass_limits
             && (!unlimited || schedule_rules.is_some())
             && let Some((verdict, reason)) = limits_verdict(
                 policy,
                 &provider,
+                &label,
                 limits.get(&provider),
                 stale,
                 now,
@@ -1100,6 +1116,7 @@ fn is_fable_model(model: &str) -> bool {
 fn limits_verdict(
     policy: &Policy,
     provider: &str,
+    label: &str,
     view: Option<&ProviderView>,
     stale: Duration,
     now: DateTime<Utc>,
@@ -1121,7 +1138,13 @@ fn limits_verdict(
             .reserve_resets_at
             .map(|reset| format!(" until {}", reset.format("%H:%M UTC")))
             .unwrap_or_default();
-        return Some(("quota_paused", format!("quota paused{when}")));
+        // Учётная запись называется, только когда подпись провайдера её несёт.
+        let who = if label == provider {
+            String::new()
+        } else {
+            format!("{label} ")
+        };
+        return Some(("quota_paused", format!("{who}quota paused{when}")));
     }
     // Правила расписаний (спека §39): только 5-часовое и недельное окна (и
     // Fable для моделей Fable) по свежим показаниям, порог — остаток приёма,
@@ -1150,7 +1173,7 @@ fn limits_verdict(
             return Some((
                 "limits_over",
                 format!(
-                    "{provider} {name} {}% remaining < {}%",
+                    "{label} {name} {}% remaining < {}%",
                     percent(remaining),
                     percent(rules.danger_remaining_pct)
                 ),
@@ -1160,7 +1183,7 @@ fn limits_verdict(
     }
     let unknown = policy.unknown_limits;
     if let Some(reason) = check_window(
-        provider,
+        label,
         "weekly",
         thresholds.and_then(|limits| limits.max_weekly_percent),
         view.weekly.as_ref(),
@@ -1174,7 +1197,7 @@ fn limits_verdict(
     }
     if fable
         && let Some(reason) = check_window(
-            provider,
+            label,
             "weekly_fable",
             thresholds.and_then(|limits| {
                 limits
@@ -1192,7 +1215,7 @@ fn limits_verdict(
         return Some(reason);
     }
     if let Some(reason) = check_window(
-        provider,
+        label,
         "five_hour",
         thresholds.and_then(|limits| limits.max_five_hour_percent),
         view.five_hour.as_ref(),
@@ -1205,7 +1228,7 @@ fn limits_verdict(
         return Some(reason);
     }
     if let Some(reason) = check_window(
-        provider,
+        label,
         "monthly",
         thresholds.and_then(|limits| limits.max_monthly_percent),
         view.monthly.as_ref(),
@@ -1390,8 +1413,27 @@ pub async fn limits_view(
     .await?
     .into_iter()
     .collect();
-    let current: Vec<_> = crate::limits::current(&mut *conn)
-        .await?
+    // Все учётные записи провайдеров у владельца: у машин и в строках лимитов.
+    let mut known: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+    for (provider, account) in sqlx::query_as::<_, (String, String)>(
+        "select distinct h.provider, h.account from machine_harnesses h
+           join machines m on m.id=h.machine_id
+          where m.owner_id=(select owner_id from machines where id=$1)",
+    )
+    .bind(machine_id)
+    .fetch_all(&mut *conn)
+    .await?
+    {
+        known.entry(provider).or_default().insert(account);
+    }
+    let all_rows = crate::limits::current(&mut *conn).await?;
+    for row in &all_rows {
+        known
+            .entry(row.provider.clone())
+            .or_default()
+            .insert(row.account.clone());
+    }
+    let current: Vec<_> = all_rows
         .into_iter()
         .filter(|row| {
             row.account
@@ -1420,8 +1462,20 @@ pub async fn limits_view(
                 reserve_active: provider.weekly_reserve_active,
                 reserve_resets_at: provider.weekly_reserve_resets_at,
                 status: provider.status,
+                ..ProviderView::default()
             },
         );
+    }
+    // Учётная запись целевой машины называется в объяснении, поэтому она нужна и тогда, когда
+    // показаний ещё нет.
+    for (provider, account) in &accounts {
+        let view = out.entry(provider.clone()).or_default();
+        view.account = Some(account.clone());
+    }
+    for (provider, set) in known {
+        if let Some(view) = out.get_mut(&provider) {
+            view.multi_account = set.len() > 1;
+        }
     }
     Ok(out)
 }
@@ -2339,6 +2393,57 @@ mod tests {
                 .considered
                 .iter()
                 .any(|entry| entry.reason == "opencode weekly 97% > 95%")
+        );
+    }
+
+    /// Причина пропуска кандидата opencode при показании 97% из `limits_with`, с учётной
+    /// записью и без.
+    fn over_reason(account: Option<&str>, multi_account: bool, remote: bool) -> String {
+        let mut limits = limits_with(97.0);
+        let view = limits.get_mut("opencode").unwrap();
+        view.account = account.map(str::to_owned);
+        view.multi_account = multi_account;
+        let mut request = request("bugfix");
+        request.remote = remote;
+        let decision = route(RouteInputs {
+            policy: &policy(),
+            revision: 0,
+            whitelist: &entries(),
+            catalogs: &catalogs(),
+            limits: &limits,
+            live: &HashMap::new(),
+            stale: Duration::from_secs(1800),
+            now: now(),
+            request: &request,
+            bypass_limits: false,
+            schedule_rules: None,
+        })
+        .unwrap();
+        decision
+            .considered
+            .iter()
+            .find(|entry| entry.verdict == "limits_over")
+            .expect("an over-limit candidate")
+            .reason
+            .clone()
+    }
+
+    #[test]
+    fn the_explanation_names_the_account_for_remote_and_multi_account_providers() {
+        // Одна учётная запись на своей машине: текст прежний, байт в байт.
+        assert_eq!(
+            over_reason(Some("owner"), false, false),
+            "opencode weekly 97% > 95%"
+        );
+        assert_eq!(over_reason(None, false, false), "opencode weekly 97% > 95%");
+        // Удалённый запуск и провайдер с несколькими записями называют ту, чьи цифры взяты.
+        assert_eq!(
+            over_reason(Some("b-opencode"), false, true),
+            "opencode@b-opencode weekly 97% > 95%"
+        );
+        assert_eq!(
+            over_reason(Some("owner"), true, false),
+            "opencode@owner weekly 97% > 95%"
         );
     }
 

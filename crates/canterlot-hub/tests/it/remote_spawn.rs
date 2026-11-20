@@ -1085,6 +1085,46 @@ async fn policy_with_b_only_model(f: &Fx) {
         .unwrap();
 }
 
+/// Предпросмотр на другую машину называет учётную запись, чьи цифры взял; свой запуск с одной
+/// записью называет провайдера по-старому.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn the_remote_explanation_names_the_account_whose_limits_it_used(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    f.switch(true).await;
+    policy_with_b_only_model(&f).await;
+    sqlx::query(
+        "update owners set routing_policy=routing_policy
+           || '{\"providers\":{\"claude\":{\"max_weekly_percent\":90}}}'::jsonb where id=$1",
+    )
+    .bind(f.owner)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    sqlx::query("update machine_harnesses set account='b-claude' where machine_id=$1")
+        .bind(f.b)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "insert into provider_limits(provider,account,weekly_used_permille,weekly_resets_at,
+                                     weekly_observed_at)
+         values('claude','b-claude',990,now()+interval '3 days',now())",
+    )
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    let error = f
+        .call(
+            "routing.preview",
+            json!({"task_type": "t", "machine": "machine-b", "workdir": "/tmp/b/p"}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, Code::NoExecutorAvailable, "{}", error.message);
+    let text = format!("{error:?}");
+    assert!(text.contains("claude@b-claude weekly 99%"), "{text}");
+}
+
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn route_preview_and_routed_spawn_see_the_target_machine(pool: PgPool) {
     let f = Fx::new(pool).await;
