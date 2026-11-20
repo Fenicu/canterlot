@@ -1,0 +1,110 @@
+import { describe, expect, it } from 'vitest';
+import { durationWord, isTerminal, jobHref, jobLabel, jobWord, machineJobs, offlineNote, refusalText, reasonText, type JobFacts } from '../../../src/lib/jobs/model';
+
+const job = (patch: Partial<JobFacts> = {}): JobFacts => ({
+  id: '01a1b3b9-0000-7000-8000-00000000cc01',
+  state: 'running',
+  machineId: 'm1',
+  machineName: 'machine-b',
+  title: null,
+  shell: 'npm test',
+  workdir: '/h/u/proj',
+  exitCode: null,
+  durationMs: null,
+  cancelRequested: false,
+  machineOffline: false,
+  endReason: null,
+  createdAt: '2026-11-21T10:00:00Z',
+  ...patch
+});
+
+describe('job words', () => {
+  it('names_every_state_in_russian_with_a_tone', () => {
+    const word = (state: string, patch: Partial<JobFacts> = {}) => jobWord(job({ state, ...patch }));
+    expect(word('queued')).toEqual({ word: 'в очереди', tone: 'muted' });
+    expect(word('dispatched')).toEqual({ word: 'передана машине', tone: 'muted' });
+    expect(word('waiting_lease')).toEqual({ word: 'ждёт очереди сборок', tone: 'warning' });
+    expect(word('running')).toEqual({ word: 'идёт', tone: 'accent', live: true });
+    expect(word('succeeded', { exitCode: 0 })).toEqual({ word: 'готово', tone: 'success' });
+    expect(word('failed', { exitCode: 2 })).toEqual({ word: 'код 2', tone: 'danger' });
+    expect(word('failed')).toEqual({ word: 'ошибка', tone: 'danger' });
+    expect(word('timed_out')).toEqual({ word: 'время вышло', tone: 'danger' });
+    expect(word('canceled')).toEqual({ word: 'отменена', tone: 'muted' });
+    expect(word('lost')).toEqual({ word: 'потеряна', tone: 'danger' });
+  });
+
+  it('a_running_job_with_a_cancel_request_says_it_is_being_canceled', () => {
+    expect(jobWord(job({ cancelRequested: true }))).toEqual({ word: 'отменяется', tone: 'warning', live: true });
+  });
+
+  it('an_unknown_state_is_shown_as_it_came', () => {
+    expect(jobWord(job({ state: 'strange' }))).toEqual({ word: 'strange', tone: 'muted' });
+  });
+
+  it('tells_terminal_states_apart', () => {
+    expect(['succeeded', 'failed', 'timed_out', 'canceled', 'lost'].every(isTerminal)).toBe(true);
+    expect(['queued', 'dispatched', 'waiting_lease', 'running'].some(isTerminal)).toBe(false);
+  });
+
+  it('a_lost_job_reads_connection_lost_and_an_offline_running_one_says_the_machine_is_away', () => {
+    expect(offlineNote(job({ state: 'lost' }))).toBe('связь с машиной потеряна');
+    expect(offlineNote(job({ machineOffline: true }))).toBe('машина не на связи');
+    expect(offlineNote(job({ state: 'succeeded', machineOffline: true }))).toBe('');
+    expect(offlineNote(job())).toBe('');
+  });
+});
+
+describe('job text', () => {
+  it('shortens_a_duration_like_the_rest_of_the_feed', () => {
+    expect(durationWord(null)).toBe('');
+    expect(durationWord(320)).toBe('0,3 с');
+    expect(durationWord(65_000)).toBe('1 мин 5 с');
+  });
+
+  it('labels_a_job_by_title_or_the_first_line_of_the_command', () => {
+    expect(jobLabel('Сборка', 'npm run build')).toBe('Сборка');
+    expect(jobLabel('', 'cd /h/u/proj && npm run build\nnpm test')).toBe('cd /h/u/proj && npm run build');
+    expect(jobLabel(null, '  ')).toBe('');
+    expect(jobLabel(null, 'x'.repeat(200)).length).toBeLessThanOrEqual(80);
+  });
+
+  it('links_the_job_sheet_on_the_machines_screen', () => {
+    expect(jobHref('abc')).toBe('/machines?job=abc');
+  });
+
+  it('words_every_refusal_and_falls_back_to_the_code', () => {
+    expect(refusalText('mode_too_narrow')).toBe('Отказ: режим не позволяет');
+    expect(refusalText('domain_mismatch')).toBe('Отказ: другой домен памяти');
+    expect(refusalText('remote_work_disabled')).toBe('Машина не принимает работу с других машин');
+    expect(refusalText('capability_missing')).toBe('Воркер машины устарел');
+    expect(refusalText('workdir_not_allowed')).toBe('Каталог не подходит');
+    expect(refusalText('workdir_refused')).toBe('Каталог не подходит');
+    expect(refusalText('weird_code')).toBe('Отказ: weird_code');
+    expect(refusalText('')).toBe('Отказ: вызов не удался');
+  });
+
+  it('words_the_end_reasons_the_hub_stores', () => {
+    expect(reasonText('canceled_by_owner')).toBe('отменена владельцем');
+    expect(reasonText('canceled_by_caller')).toBe('отменена агентом');
+    expect(reasonText('launch_interrupted')).toBe('запуск прерван сбоем машины');
+    expect(reasonText('workdir_refused')).toBe('Каталог не подходит');
+    expect(reasonText('mode_too_narrow')).toBe('Отказ: режим не позволяет');
+    expect(reasonText(null)).toBe('');
+  });
+});
+
+describe('machine jobs', () => {
+  const at = (n: number) => `2026-11-21T10:${String(n).padStart(2, '0')}:00Z`;
+  it('keeps_every_unfinished_job_and_the_last_ten_finished_ones_newest_first', () => {
+    const done = Array.from({ length: 12 }, (_, i) => job({ id: `d${i}`, state: 'succeeded', createdAt: at(i) }));
+    const live = [job({ id: 'r1', state: 'running', createdAt: at(2) }), job({ id: 'q1', state: 'queued', createdAt: at(30) })];
+    const other = job({ id: 'o1', machineId: 'm2', state: 'running', createdAt: at(40) });
+    const rows = machineJobs([...done, ...live, other], 'm1');
+    expect(rows.running.map((row) => row.id)).toEqual(['q1', 'r1']);
+    expect(rows.recent.map((row) => row.id)).toEqual(['d11', 'd10', 'd9', 'd8', 'd7', 'd6', 'd5', 'd4', 'd3', 'd2']);
+  });
+
+  it('is_empty_when_the_machine_has_no_jobs', () => {
+    expect(machineJobs([], 'm1')).toEqual({ running: [], recent: [] });
+  });
+});
