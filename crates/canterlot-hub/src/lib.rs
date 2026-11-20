@@ -37,6 +37,7 @@ pub mod http;
 pub mod idempotency;
 pub mod images;
 pub mod ingest;
+pub mod inplace_jobs;
 pub mod installation;
 pub mod leases;
 pub mod limit_settings;

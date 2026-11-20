@@ -45,7 +45,13 @@ const CANTERLOT_TOOLS: Record<string, string> = {
   memory_write: 'memory_write',
   memory_update: 'memory_update',
   memory_delete: 'memory_delete',
-  secret_request: 'secret_request'
+  secret_request: 'secret_request',
+  // Команды на месте: карточек пока нет, id нужен, чтобы лента знала инструмент.
+  job_run: 'job_run',
+  job_status: 'job_status',
+  job_log: 'job_log',
+  job_cancel: 'job_cancel',
+  jobs_list: 'jobs_list'
 };
 
 /** Все имена инструментов canterlot, как их объявляет воркер. */

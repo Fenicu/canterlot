@@ -276,6 +276,15 @@ async fn seed_everything(f: &Fixture, conversation: Uuid, machine: Uuid, group: 
         &[Uuid::now_v7(), owner, conversation, Uuid::now_v7()],
     )
     .await;
+    // Задача на месте переживает заказчика: строка остаётся владельцу без ссылки на разговор.
+    exec(
+        pool,
+        "insert into jobs(id,owner_id,conversation_id,domain,machine_id,workdir,shell,
+                          timeout_seconds,state)
+         values($1,$2,$3,'personal',$4,'/tmp/w','true',1800,'succeeded')",
+        &[Uuid::now_v7(), owner, conversation, machine],
+    )
+    .await;
     exec(
         pool,
         "insert into nudge_rules(conversation_id,owner_id,set_by,set_by_conversation,notify_conversation_id)

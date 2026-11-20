@@ -203,7 +203,19 @@ async fn handle(
                 registry: grpc.registry.clone(),
                 shutdown: grpc.shutdown.clone(),
             };
-            match crate::session_tools::call(&context, &caller, tool, arguments).await {
+            // Полный журнал задачи лежит в хранилище блобов, которого у `ToolContext` нет.
+            let outcome = if tool == "job.log" {
+                crate::session_tools::inplace_jobs::log(
+                    &context,
+                    &caller,
+                    arguments,
+                    grpc.blobs.as_deref(),
+                )
+                .await
+            } else {
+                crate::session_tools::call(&context, &caller, tool, arguments).await
+            };
+            match outcome {
                 Ok(result) => ok(result),
                 Err(error) => err(error.code.as_str(), error.text()),
             }

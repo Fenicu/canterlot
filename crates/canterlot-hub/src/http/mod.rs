@@ -42,6 +42,7 @@ pub mod groups;
 pub mod health;
 pub mod hibernate;
 pub mod history;
+pub mod jobs;
 pub mod layers;
 pub mod limit_settings;
 pub mod limits;
@@ -271,6 +272,7 @@ pub fn api_routes() -> OpenApiRouter<AppState> {
         .merge(hibernate::routes())
         .merge(dictation::routes())
         .merge(machines::routes())
+        .merge(jobs::routes())
         .merge(updates::routes())
         .merge(limits::routes())
         .merge(snapshot::routes())

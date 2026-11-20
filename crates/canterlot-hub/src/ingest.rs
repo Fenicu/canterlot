@@ -1806,19 +1806,31 @@ async fn apply_body(
             )
             .await?);
         }
-        // Факты задач на месте (`jobs_inplace_v1`): хаб пока их только принимает, таблицу
-        // задач и переходы состояний ведёт следующий этап.
-        Body::JobDispatched(_)
-        | Body::JobWaitingLease(_)
-        | Body::JobStarted(_)
-        | Body::JobFinished(_) => {}
+        // Факты задач на месте (`jobs_inplace_v1`): переходы применяются только вперёд,
+        // итог терминальной строки только записывается (`inplace_jobs::facts`).
+        Body::JobDispatched(fact) => {
+            crate::inplace_jobs::facts::apply_dispatched(conn, machine_id, fact, correlation_id)
+                .await?;
+        }
+        Body::JobWaitingLease(fact) => {
+            crate::inplace_jobs::facts::apply_waiting_lease(conn, machine_id, fact, correlation_id)
+                .await?;
+        }
+        Body::JobStarted(fact) => {
+            crate::inplace_jobs::facts::apply_started(conn, machine_id, fact, correlation_id)
+                .await?;
+        }
+        Body::JobFinished(fact) => {
+            crate::inplace_jobs::facts::apply_finished(conn, machine_id, fact, correlation_id)
+                .await?;
+        }
     }
     Ok(false)
 }
 
 /// Отказ машины принять команду: тот же итог, пришёл ли он записью журнала
 /// или хаб сам не может отправить команду этому сеансу.
-pub(crate) async fn apply_command_rejected_in_tx(
+pub async fn apply_command_rejected_in_tx(
     conn: &mut PgConnection,
     machine_id: Uuid,
     command_id: Uuid,
@@ -1871,6 +1883,17 @@ pub(crate) async fn apply_command_rejected_in_tx(
             correlation_id,
         )
         .await?;
+    } else if target.kind == "start_inplace_job" || target.kind == "cancel_inplace_job" {
+        crate::inplace_jobs::facts::apply_command_rejected(
+            conn,
+            machine_id,
+            command_id,
+            &target.kind,
+            reason,
+            correlation_id,
+        )
+        .await?;
+        complete_rejected(conn, command_id, dispatch_attempt, reason).await?;
     } else if target.kind == "revoke_secret" {
         crate::secrets::on_revoke_rejected_in_tx(
             conn,
@@ -2420,6 +2443,33 @@ impl crate::grpc::Ingest for Ingest {
         .await
         .map_err(|_| tonic::Status::internal("machine_metrics_database"))?;
         Ok(())
+    }
+    async fn jobs_report(
+        &self,
+        machine_id: Uuid,
+        report: canterlot_proto::worker::v1::JobsReport,
+    ) -> Result<(), tonic::Status> {
+        crate::db::in_tx(&self.pool, move |conn| {
+            Box::pin(async move {
+                crate::inplace_jobs::facts::apply_report(conn, machine_id, &report, Uuid::now_v7())
+                    .await
+            })
+        })
+        .await
+        .map_err(|_: sqlx::Error| tonic::Status::internal("jobs_report_database"))
+    }
+    async fn job_log_chunk(
+        &self,
+        machine_id: Uuid,
+        chunk: canterlot_proto::worker::v1::JobLogChunk,
+    ) -> Result<(), tonic::Status> {
+        crate::db::in_tx(&self.pool, move |conn| {
+            Box::pin(async move {
+                crate::inplace_jobs::facts::apply_chunk(conn, machine_id, &chunk).await
+            })
+        })
+        .await
+        .map_err(|_: sqlx::Error| tonic::Status::internal("job_log_database"))
     }
     async fn lease_state(
         &self,

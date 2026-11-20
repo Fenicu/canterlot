@@ -95,10 +95,12 @@ fn session_tools_listed_for_all_three_providers() {
         let settings_tools = 5;
         // memory_search, memory_get, memory_write, memory_update, memory_delete.
         let memory_tools = 5;
+        // job_run, job_status, job_log, job_cancel, jobs_list.
+        let job_tools = mcp::JOB_TOOLS.len();
         let expected = if tool_set == ToolSet::ApproveAndLimits {
-            2 + 3 + SESSION_TOOLS.len() + 1 + settings_tools + memory_tools
+            2 + 3 + SESSION_TOOLS.len() + 1 + settings_tools + memory_tools + job_tools
         } else {
-            1 + 3 + SESSION_TOOLS.len() + 1 + settings_tools + memory_tools
+            1 + 3 + SESSION_TOOLS.len() + 1 + settings_tools + memory_tools + job_tools
         };
         assert_eq!(tools.len(), expected, "{provider}");
         for required in [
@@ -239,6 +241,60 @@ fn read_tools_are_read_only() {
                 "{provider}: {mcp_name}"
             );
         }
+    }
+}
+
+/// Команды на месте — оболочка на машине: самый сильный класс таблицы режимов. Ни один из них
+/// не свободен от режима, у каждого схема без лишних аргументов и ответ идёт на `job.*`.
+#[test]
+fn job_tools_are_shell_power_in_the_mode_table_and_strict_in_schema() {
+    let hub = [
+        ("job_run", "job.run"),
+        ("job_status", "job.status"),
+        ("job_log", "job.log"),
+        ("job_cancel", "job.cancel"),
+        ("jobs_list", "jobs.list"),
+    ];
+    assert_eq!(mcp::JOB_TOOLS.len(), hub.len());
+    for (mcp_name, hub_name) in hub {
+        assert!(mcp::JOB_TOOLS.contains(&mcp_name), "{mcp_name}");
+        assert!(
+            !mcp::MODE_FREE_TOOLS.contains(&mcp_name),
+            "{mcp_name}: a shell tool must not skip the mode"
+        );
+        assert!(
+            mcp::AGENT_TOOLS.contains(&(mcp_name, hub_name)),
+            "{mcp_name} maps to {hub_name}"
+        );
+    }
+    for (tool_set, provider) in PROVIDERS {
+        let tools = tools_of(tool_set, provider);
+        for (mcp_name, _) in hub {
+            let tool = tools
+                .iter()
+                .find(|tool| tool["name"] == mcp_name)
+                .unwrap_or_else(|| panic!("{provider}: no {mcp_name}"));
+            assert_eq!(
+                tool["inputSchema"]["additionalProperties"],
+                json!(false),
+                "{provider}: {mcp_name}"
+            );
+            assert_ne!(
+                tool["annotations"]["readOnlyHint"],
+                json!(true),
+                "{provider}: {mcp_name} must not be marked read-only"
+            );
+            assert!(
+                tool["description"].as_str().unwrap().contains("Do not"),
+                "{mcp_name}"
+            );
+        }
+        let run = tools.iter().find(|tool| tool["name"] == "job_run").unwrap();
+        assert_eq!(run["inputSchema"]["required"], json!(["workdir", "shell"]));
+        let properties = &run["inputSchema"]["properties"];
+        assert!(properties.get("argv").is_none(), "shell only, no argv form");
+        assert_eq!(properties["wait_seconds"]["maximum"], 60);
+        assert_eq!(properties["timeout_minutes"]["maximum"], 1440);
     }
 }
 
@@ -582,11 +638,13 @@ fn no_agent_tool_applies_a_setting_itself() {
                 || hub_name.starts_with("history.")
                 || hub_name.starts_with("memory.")
                 || hub_name.starts_with("secrets.")
-                || hub_name.starts_with("settings."),
+                || hub_name.starts_with("settings.")
+                || hub_name.starts_with("job.")
+                || hub_name.starts_with("jobs."),
             "{hub_name}"
         );
     }
-    assert_eq!(mcp::AGENT_TOOLS.len(), 37);
+    assert_eq!(mcp::AGENT_TOOLS.len(), 42);
 }
 
 #[tokio::test]

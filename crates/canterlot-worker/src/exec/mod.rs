@@ -127,6 +127,13 @@ const WAIT_MAX_SECONDS: u64 = 300;
 const WAIT_RPC_SLACK: Duration = Duration::from_secs(10);
 const WAIT_SUPERVISOR_SLACK: Duration = Duration::from_secs(15);
 
+const JOB_RUN_TOOL: &str = "job.run";
+const JOB_WAIT_DEFAULT_SECONDS: u64 = 20;
+const JOB_WAIT_MAX_SECONDS: u64 = 60;
+/// Запас сверх ожидания задачи: заявка, опрос и разбор ответа.
+const JOB_RPC_SLACK: Duration = Duration::from_secs(15);
+const JOB_SUPERVISOR_SLACK: Duration = Duration::from_secs(20);
+
 /// Сроки одного вызова: у каждого уровня свой, управляющая служба всегда позже менеджера.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CallDeadlines {
@@ -137,6 +144,20 @@ pub struct CallDeadlines {
 /// Блокирующее ожидание сессии держится столько, сколько просила модель, плюс запас;
 /// остальные инструменты отвечают быстро.
 pub fn deadline_for(tool: &str, arguments: &serde_json::Value) -> CallDeadlines {
+    if tool == JOB_RUN_TOOL {
+        // Ждущий хаба держит вызов до `wait_seconds`: воркер заказчика обязан дать больше, иначе
+        // итог ушёл бы в оборванный вызов.
+        let seconds = arguments
+            .get("wait_seconds")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(JOB_WAIT_DEFAULT_SECONDS)
+            .min(JOB_WAIT_MAX_SECONDS);
+        let wait = Duration::from_secs(seconds);
+        return CallDeadlines {
+            supervisor: wait + JOB_SUPERVISOR_SLACK,
+            rpc: wait + JOB_RPC_SLACK,
+        };
+    }
     if tool != WAIT_TOOL {
         return CallDeadlines {
             supervisor: AGENT_CALL_TIMEOUT,

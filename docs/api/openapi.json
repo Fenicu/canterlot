@@ -8944,6 +8944,381 @@
         }
       }
     },
+    "/api/v1/jobs": {
+      "get": {
+        "tags": [
+          "jobs"
+        ],
+        "operationId": "get__api_v1_jobs",
+        "parameters": [
+          {
+            "name": "machine",
+            "in": "query",
+            "description": "Машина (id).",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "description": "Состояние: `queued`, `dispatched`, `waiting_lease`, `running`, `succeeded`, `failed`,\n`timed_out`, `canceled` или `lost`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "conversation",
+            "in": "query",
+            "description": "Разговор-заказчик.",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Не больше 200, по умолчанию 50; новые первыми.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Задачи на месте, новые первыми",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Неизвестное состояние или предел",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{id}": {
+      "get": {
+        "tags": [
+          "jobs"
+        ],
+        "operationId": "get__api_v1_jobs__id_",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Задача",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Задача и хвост вывода",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Задачи нет у владельца",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{id}/cancel": {
+      "post": {
+        "tags": [
+          "jobs"
+        ],
+        "operationId": "post__api_v1_jobs__id__cancel",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Задача",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "Ключ операции",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Отмена принята: очередь закрыта сразу, идущую задачу воркер подтвердит; потерянной команда уйдёт, когда машина вернётся",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobView"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Задачи нет у владельца",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{id}/log": {
+      "get": {
+        "tags": [
+          "jobs"
+        ],
+        "operationId": "get__api_v1_jobs__id__log",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Задача",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "Позиция в выводе; без неё — последние `limit` байт хвоста.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Не больше 65536, по умолчанию 16384.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Кусок журнала: хвост хаба, пока задача идёт, и полный журнал после конца",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogSlice"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Задачи нет у владельца",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/limit-settings": {
       "get": {
         "tags": [
@@ -18730,6 +19105,37 @@
           }
         }
       },
+      "JobDetail": {
+        "type": "object",
+        "description": "Задача и последний хвост её вывода.",
+        "required": [
+          "job",
+          "output_tail"
+        ],
+        "properties": {
+          "job": {
+            "$ref": "#/components/schemas/JobView"
+          },
+          "output_tail": {
+            "type": "string",
+            "description": "Хвост на хабе: живой, пока идёт, и итоговый после конца (не больше 64 КиБ)."
+          }
+        }
+      },
+      "JobList": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/JobView"
+            }
+          }
+        }
+      },
       "JobState": {
         "type": "string",
         "enum": [
@@ -18738,6 +19144,135 @@
           "cancelled",
           "failed"
         ]
+      },
+      "JobView": {
+        "type": "object",
+        "description": "Задача для клиентов: без вывода (его отдают отдельные чтения).",
+        "required": [
+          "id",
+          "state",
+          "machine_id",
+          "machine_name",
+          "workdir",
+          "shell",
+          "lease",
+          "timeout_minutes",
+          "output_bytes",
+          "truncated",
+          "cancel_requested",
+          "has_log",
+          "machine_offline",
+          "created_at"
+        ],
+        "properties": {
+          "cancel_requested": {
+            "type": "boolean"
+          },
+          "conversation_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "conversation_title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "duration_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "end_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "exit_code": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "finished_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "has_log": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "late_report": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "lease": {
+            "type": "string"
+          },
+          "machine_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "machine_name": {
+            "type": "string"
+          },
+          "machine_offline": {
+            "type": "boolean",
+            "description": "Машина не на связи, а задача не закончена; в событии всегда `false`: связь машины\nприходит событиями машин."
+          },
+          "output_bytes": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "shell": {
+            "type": "string"
+          },
+          "started_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "state": {
+            "type": "string"
+          },
+          "timeout_minutes": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "workdir": {
+            "type": "string"
+          }
+        }
       },
       "LanePage": {
         "type": "object",
@@ -19304,6 +19839,55 @@
           },
           "state": {
             "type": "string"
+          }
+        }
+      },
+      "LogSlice": {
+        "type": "object",
+        "description": "Кусок журнала для инструмента и HTTP.",
+        "required": [
+          "source",
+          "offset",
+          "next_offset",
+          "eof",
+          "text"
+        ],
+        "properties": {
+          "eof": {
+            "type": "boolean"
+          },
+          "next_offset": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`full log expired`: полный журнал убран по сроку хранения, остался хвост."
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "source": {
+            "type": "string",
+            "description": "`tail` — живой или итоговый хвост на хабе, `log` — полный журнал после конца."
+          },
+          "text": {
+            "type": "string"
+          },
+          "total_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Размер журнала, когда он известен.",
+            "minimum": 0
           }
         }
       },

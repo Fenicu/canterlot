@@ -13,6 +13,7 @@ pub mod completion;
 pub mod control;
 pub mod disk;
 pub mod guard;
+pub mod inplace_jobs;
 pub mod jobs;
 pub mod machine_text;
 pub mod memory;
@@ -88,6 +89,11 @@ pub const TOOLS: &[&str] = &[
     "settings.propose_routing",
     "settings.propose_whitelist",
     "settings.propose_preset",
+    "job.run",
+    "job.status",
+    "job.log",
+    "job.cancel",
+    "jobs.list",
 ];
 
 pub fn is_tool(name: &str) -> bool {
@@ -143,11 +149,15 @@ pub enum ToolErrorCode {
     BadLevel,
     Invalid,
     MemoryUnavailable,
+    /// `job_run` требует режим `bypass` у вызывающей сессии.
+    ModeTooNarrow,
+    /// Чужая, несуществующая и скрытая сменой домена задача отвечают одинаково.
+    JobNotFound,
     Internal,
 }
 
 impl ToolErrorCode {
-    pub const ALL: [Self; 45] = [
+    pub const ALL: [Self; 47] = [
         Self::UnknownTool,
         Self::SessionNotFound,
         Self::ReadOnlySession,
@@ -192,6 +202,8 @@ impl ToolErrorCode {
         Self::BadLevel,
         Self::Invalid,
         Self::MemoryUnavailable,
+        Self::ModeTooNarrow,
+        Self::JobNotFound,
         Self::Internal,
     ];
 
@@ -241,6 +253,8 @@ impl ToolErrorCode {
             Self::BadLevel => "bad_level",
             Self::Invalid => "invalid",
             Self::MemoryUnavailable => "memory_unavailable",
+            Self::ModeTooNarrow => "mode_too_narrow",
+            Self::JobNotFound => "job_not_found",
             Self::Internal => "internal_error",
         }
     }
@@ -293,6 +307,8 @@ impl ToolErrorCode {
             Self::BadLevel => "This session has no project, so project level is not possible",
             Self::Invalid => "Invalid memory field",
             Self::MemoryUnavailable => "This session has no memory",
+            Self::ModeTooNarrow => "This session's permission mode is too narrow to run commands",
+            Self::JobNotFound => "No such job in this session",
             Self::Internal => "The hub could not complete the call, try later",
         }
     }
@@ -388,6 +404,10 @@ impl ToolErrorCode {
             Self::BadLevel => "Pass level domain, or write from a session that has a project.",
             Self::Invalid => "Fix the named field and call again.",
             Self::MemoryUnavailable => "Continue without memory; do not retry.",
+            Self::ModeTooNarrow => {
+                "Ask the owner to switch this session to bypass mode, or run the command another way."
+            }
+            Self::JobNotFound => "Call jobs_list to see the jobs of this session.",
             Self::Internal => "Try again; if it repeats, tell the owner.",
         }
     }
@@ -534,6 +554,12 @@ pub async fn call(
         "settings.propose_preset" => {
             settings_change::propose_preset(context, caller, arguments).await
         }
+        "job.run" => inplace_jobs::run(context, caller, arguments).await,
+        "job.status" => inplace_jobs::status(context, caller, arguments).await,
+        // Полный журнал читает путь с хранилищем блобов (`grpc/agent.rs`); здесь только хвост.
+        "job.log" => inplace_jobs::log(context, caller, arguments, None).await,
+        "job.cancel" => inplace_jobs::cancel(context, caller, arguments).await,
+        "jobs.list" => inplace_jobs::list(context, caller, arguments).await,
         _ => Err(ToolError::new(ToolErrorCode::UnknownTool)),
     }
 }
