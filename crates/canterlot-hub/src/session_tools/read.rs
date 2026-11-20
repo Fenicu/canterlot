@@ -61,6 +61,7 @@ fn session_row(item: &ListItem, caller: Uuid) -> Value {
         "harness": a.harness.id,
         "model": item.model,
         "workdir": a.workdir,
+        "machine_name": a.machine.name,
         "is_self": a.id == caller,
         "parent_id": a.parent_id,
         "activity": {

@@ -844,4 +844,169 @@ async fn a_target_worker_without_remote_spawn_queues_instead_of_starting(pool: P
     let answer = f.spawn(remote_args()).await.unwrap();
     assert_eq!(answer["status"], "queued", "{answer}");
     assert!(f.children().await.is_empty());
+    let detail: String = sqlx::query_scalar("select detail->>'detail' from spawn_queue")
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert!(detail.contains("remote_spawn_v1"), "{detail}");
+    let mut no_queue = remote_args();
+    no_queue["queue"] = json!(false);
+    assert_eq!(code(f.spawn(no_queue).await), Code::CapabilityMissing);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn an_isolated_remote_child_gets_its_worktree_from_the_target_machine(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    f.switch(true).await;
+    // Рабочая копия родителя на A не причём: источник и корень копий — у B.
+    sqlx::query("update conversations set worktree=$2 where id=$1")
+        .bind(f.parent)
+        .bind(json!({"source_workdir":"/tmp/w","branch":"canterlot/parent","path":"/data/worktrees/p",
+                     "base":"HEAD","state":"active"}))
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let mut isolated = remote_args();
+    isolated["isolated"] = json!(true);
+    let (child, answer) = f.started(isolated).await;
+    let payload: Value = sqlx::query_scalar(
+        "select payload from commands where conversation_id=$1 and kind='start_execution'",
+    )
+    .bind(child)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(payload["worktree"]["source_workdir"], "/tmp/b/p", "{payload}");
+    assert_eq!(payload["worktree"]["base"], "HEAD", "{payload}");
+    assert!(
+        payload["workdir"]
+            .as_str()
+            .unwrap()
+            .starts_with("/data/b-worktrees/"),
+        "{payload}"
+    );
+    assert_eq!(payload["remote"], true);
+    assert_eq!(answer["machine_name"], "machine-b");
+    assert!(answer["worktree"]["path"].is_string(), "{answer}");
+    // Без корня рабочих копий у цели изоляция отказывается, как и у своей машины.
+    sqlx::query("update machines set worktree_root=null where id=$1")
+        .bind(f.b)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let mut again = remote_args();
+    again["isolated"] = json!(true);
+    assert_eq!(code(f.spawn(again).await), Code::CapabilityMissing);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn sessions_list_rows_carry_the_machine_name(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    f.switch(true).await;
+    let (child, _) = f.started(remote_args()).await;
+    let list = f.call("sessions.list", json!({})).await.unwrap();
+    let name_of = |id: Uuid| -> Value {
+        list["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == id.to_string())
+            .unwrap_or_else(|| panic!("{id} is not listed: {list}"))["machine_name"]
+            .clone()
+    };
+    assert_eq!(name_of(child), "machine-b");
+    assert_eq!(name_of(f.parent), "synthetic");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn accept_stops_a_remote_child_on_its_own_machine(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    f.switch(true).await;
+    let mut isolated = remote_args();
+    isolated["isolated"] = json!(true);
+    let (child, _) = f.started(isolated).await;
+    let accepted = f
+        .call("sessions.accept", json!({"session_id": child, "force": true}))
+        .await
+        .unwrap();
+    assert_eq!(accepted["status"], "stopping", "{accepted}");
+    let stops: Vec<Uuid> = sqlx::query_scalar(
+        "select machine_id from commands where conversation_id=$1 and kind='stop_execution'",
+    )
+    .bind(child)
+    .fetch_all(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(stops, vec![f.b]);
+}
+
+/// Политика с одним типом задачи; белый список разрешает модель, которая есть только у B.
+async fn policy_with_b_only_model(f: &Fx) {
+    sqlx::query("update owners set routing_policy=$2,spawn_whitelist=$3 where id=$1")
+        .bind(f.owner)
+        .bind(json!({"task_types": {"t": {"title": "Т", "candidates": [
+            {"harness":"claude_code","model":B_ONLY,"effort":"low",
+             "exclude_workdirs":["/tmp/b/secret"]}
+        ]}}}))
+        .bind(json!([
+            {"harness":"claude_code","model":INSIDE},
+            {"harness":"claude_code","model":B_ONLY},
+        ]))
+        .execute(&f.pool)
+        .await
+        .unwrap();
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn route_preview_and_routed_spawn_see_the_target_machine(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    f.switch(true).await;
+    policy_with_b_only_model(&f).await;
+    // Своя машина не знает модели `b-model`: исполнителя нет.
+    let own = f
+        .call("routing.preview", json!({"task_type": "t"}))
+        .await
+        .unwrap_err();
+    assert_eq!(own.code, Code::NoExecutorAvailable, "{}", own.message);
+    // У B она есть: предпросмотр и запуск выбирают её.
+    let preview = f
+        .call(
+            "routing.preview",
+            json!({"task_type": "t", "machine": "machine-b", "workdir": "/tmp/b/p"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(preview["decision"]["model"], B_ONLY, "{preview}");
+    assert_eq!(preview["machine_name"], "machine-b");
+    assert_eq!(preview["accepts_remote_work"], true);
+    // Исключённый каталог считается по пути цели.
+    let excluded = f
+        .call(
+            "routing.preview",
+            json!({"task_type": "t", "machine": "machine-b", "workdir": "/tmp/b/secret/x"}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(excluded.code, Code::NoExecutorAvailable, "{}", excluded.message);
+    // Без каталога на другой машине и вне её корней предпросмотр отказывает, как запуск.
+    for args in [
+        json!({"task_type": "t", "machine": "machine-b"}),
+        json!({"task_type": "t", "machine": "machine-b", "workdir": "/tmp/w"}),
+    ] {
+        let error = f.call("routing.preview", args).await.unwrap_err();
+        assert_eq!(error.code, Code::WorkdirNotAllowed);
+    }
+    let (child, answer) = f
+        .started(json!({
+            "route": "t", "machine": "machine-b", "workdir": "/tmp/b/p", "brief": "go",
+        }))
+        .await;
+    assert_eq!(answer["machine_name"], "machine-b");
+    assert_eq!(f.start_machines(child).await, vec![f.b]);
+    let model: String = sqlx::query_scalar("select model from conversations where id=$1")
+        .bind(child)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(model, B_ONLY);
 }
