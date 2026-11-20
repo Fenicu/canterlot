@@ -189,6 +189,42 @@ export function putLimitSettings(
   return http("PUT", "/api/v1/limit-settings", body, keyed(key, opts));
 }
 
+// Команды на месте (`job_run`): список, задача с хвостом, журнал и отмена.
+export function listJobs(
+  query?: Query,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["get__api_v1_jobs"]>>> {
+  return http("GET", withQuery("/api/v1/jobs", query), undefined, opts);
+}
+
+export function getJob(
+  jobId: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["get__api_v1_jobs__id_"]>>> {
+  return http("GET", `/api/v1/jobs/${id(jobId)}`, undefined, opts);
+}
+
+export function getJobLog(
+  jobId: string,
+  query?: Query,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["get__api_v1_jobs__id__log"]>>> {
+  return http(
+    "GET",
+    withQuery(`/api/v1/jobs/${id(jobId)}/log`, query),
+    undefined,
+    opts,
+  );
+}
+
+export function cancelJob(
+  jobId: string,
+  key: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["post__api_v1_jobs__id__cancel"]>>> {
+  return http("POST", `/api/v1/jobs/${id(jobId)}/cancel`, undefined, keyed(key, opts));
+}
+
 // Выключатель удалённой работы машины: принимает ли она делегатов и команды других машин.
 export function putMachineRemoteWork(
   machineId: string,
