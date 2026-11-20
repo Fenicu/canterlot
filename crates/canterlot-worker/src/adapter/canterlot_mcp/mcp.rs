@@ -163,7 +163,7 @@ pub enum ToolKind {
 }
 
 /// Агентские инструменты: имя MCP → имя инструмента хаба.
-pub const AGENT_TOOLS: [(&str, &str); 37] = [
+pub const AGENT_TOOLS: [(&str, &str); 42] = [
     ("canterlot_presets_list", "presets.list"),
     ("canterlot_preset_save", "presets.save"),
     ("canterlot_preset_apply", "presets.apply"),
@@ -201,6 +201,22 @@ pub const AGENT_TOOLS: [(&str, &str); 37] = [
     ("settings_propose_routing", "settings.propose_routing"),
     ("settings_propose_whitelist", "settings.propose_whitelist"),
     ("settings_propose_preset", "settings.propose_preset"),
+    ("job_run", "job.run"),
+    ("job_status", "job.status"),
+    ("job_log", "job.log"),
+    ("job_cancel", "job.cancel"),
+    ("jobs_list", "jobs.list"),
+];
+
+/// Инструменты команд на месте: оболочка на машине с воркером. Это самый сильный класс:
+/// они не входят в [`MODE_FREE_TOOLS`], поэтому `ask` спрашивает владельца, `read_only`
+/// отказывает, а хаб допускает только режим `bypass`.
+pub const JOB_TOOLS: [&str; 5] = [
+    "job_run",
+    "job_status",
+    "job_log",
+    "job_cancel",
+    "jobs_list",
 ];
 
 /// Инструменты, которые в режимах `ask` и `read_only` не спрашивают владельца ни у Claude Code,
@@ -273,6 +289,11 @@ fn is_session_tool(mcp_name: &str) -> bool {
             | "settings_propose_routing"
             | "settings_propose_whitelist"
             | "settings_propose_preset"
+            | "job_run"
+            | "job_status"
+            | "job_log"
+            | "job_cancel"
+            | "jobs_list"
     )
 }
 
@@ -407,6 +428,21 @@ fn session_tool_description(mcp_name: &str) -> &'static str {
         }
         "settings_propose_preset" => {
             "Propose new text for one shared instruction preset to the owner: pass its id and text from canterlot_presets_list, a reason and that preset's base_revision. The hub validates the text like the settings screen and refuses an identical or stale value. Only the owner can allow or decline; the outcome arrives as a [canterlot] message. Do not repeat the call while the card is open."
+        }
+        "job_run" => {
+            "Run a shell command in place in a directory on a machine with a worker (yours by default, or another one named by `machine`, which must allow remote work): `bash -lc` in `workdir`, which must lie in your own memory domain. Needs bypass mode. Answers within `wait_seconds` (default 20, max 60) with {job_id, state, exit_code, duration_ms, output_tail, output_bytes, truncated}; otherwise answers {job_id, state, machine} at once and the result arrives later as one [canterlot] message, so end your turn instead of polling. `timeout_minutes` 1..1440 (default 30); `lease` none, build or gate queues the command behind the machine's resource lease; `env` takes at most 32 non-secret pairs. `idempotency_key` makes a repeat return the same job. A job survives your session: cancel it with job_cancel. Do not use it for work a delegate should do, and do not put secrets in `shell` or `env`."
+        }
+        "job_status" => {
+            "Show a job of this session: state, exit code, duration and the last 32 KiB of output once it ended. A state `lost` means the machine stayed silent past the timeout; the worker's late word is shown as `late_report`. Do not call it in a loop to wait: the result arrives as a message."
+        }
+        "job_log" => {
+            "Read the output of a job of this session: the hub's last 64 KiB while it runs, the full stored log after it ended. Pass `offset` (a byte position) and `limit` (default 16 KiB, max 64 KiB); `next_offset` continues, `eof` says the end. Read-only. Do not poll it for progress: the result arrives as a message."
+        }
+        "job_cancel" => {
+            "Cancel a job of this session: a queued job ends at once, a running one gets a kill request and ends when the worker confirms that its process group is gone. Idempotent. Do not call it on a job you did not start: other sessions' jobs are not visible to you."
+        }
+        "jobs_list" => {
+            "List the jobs of this session, newest first, with state and machine; filter by `machine` or `state`, at most 50. Use it to recover a job id after a lost reply. Do not call it in a loop to wait: the result arrives as a message."
         }
         _ => "Session tool.",
     }
@@ -769,6 +805,52 @@ fn session_input_schema(mcp_name: &str) -> Value {
                 "base_revision": {"type": "integer", "description": "Revision of that preset."},
             },
             "required": ["id", "text", "reason", "base_revision"],
+            "additionalProperties": false,
+        }),
+        "job_run" => json!({
+            "type": "object",
+            "properties": {
+                "machine": {"type": "string", "description": "Machine name or id; this session's machine by default."},
+                "workdir": {"type": "string", "description": "Absolute directory on that machine, inside this session's memory domain."},
+                "shell": {"type": "string", "description": "The command line for `bash -lc`; up to 64 KiB."},
+                "title": {"type": "string", "description": "Short label for the job card."},
+                "timeout_minutes": {"type": "integer", "minimum": 1, "maximum": 1440, "default": 30},
+                "wait_seconds": {"type": "integer", "minimum": 0, "maximum": 60, "default": 20},
+                "lease": {"type": "string", "enum": ["none", "build", "gate"], "default": "none"},
+                "env": {
+                    "type": "object",
+                    "description": "Non-secret environment pairs, at most 32.",
+                    "additionalProperties": {"type": "string"},
+                    "maxProperties": 32,
+                },
+                "idempotency_key": {"type": "string", "description": "A repeat with the same key returns the same job."},
+            },
+            "required": ["workdir", "shell"],
+            "additionalProperties": false,
+        }),
+        "job_status" | "job_cancel" => json!({
+            "type": "object",
+            "properties": {"job_id": {"type": "string", "description": "Job id (UUID)."}},
+            "required": ["job_id"],
+            "additionalProperties": false,
+        }),
+        "job_log" => json!({
+            "type": "object",
+            "properties": {
+                "job_id": {"type": "string", "description": "Job id (UUID)."},
+                "offset": {"type": "integer", "minimum": 0, "description": "Byte position in the output; the last `limit` bytes by default while running."},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 65536, "default": 16384},
+            },
+            "required": ["job_id"],
+            "additionalProperties": false,
+        }),
+        "jobs_list" => json!({
+            "type": "object",
+            "properties": {
+                "machine": {"type": "string"},
+                "state": {"type": "string", "enum": ["queued", "dispatched", "waiting_lease", "running", "succeeded", "failed", "timed_out", "canceled", "lost"]},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 20},
+            },
             "additionalProperties": false,
         }),
         _ => json!({
