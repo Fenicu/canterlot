@@ -1610,6 +1610,12 @@
   --motion-base-todo-strike: 480ms;
   --duration-todo-strike: calc(var(--motion-base-todo-strike) * var(--motion-scale));
   --ease-todo-strike: cubic-bezier(.65, 0, .35, 1);
+  /* Чернила: значок, за которым стоит завершённое дело, один раз прописывается по наброску; цвет оседает за `--duration-expand`. */
+  --motion-base-ink: 480ms;
+  --duration-ink: calc(var(--motion-base-ink) * var(--motion-scale));
+  --ease-ink: cubic-bezier(.65, 0, .35, 1);
+  /* Уход поверхности, которая въехала: быстрее входа и без рывка в первом кадре, поэтому кривая разгоняется, а не тормозит, как `--ease-sheet`. */
+  --ease-exit: cubic-bezier(.3, 0, .8, .15);
   /* Агент работает: на одной строке по очереди пишутся три слова и стираются. Сжатие складывает строки по вертикали, работа пишет вдоль. */
   --motion-base-work-write: 2000ms;
   --duration-work-write: calc(var(--motion-base-work-write) * var(--motion-scale));
@@ -1669,6 +1675,7 @@
     --duration-request-arrive: 0ms;
     --duration-request-accent: 0ms;
     --duration-todo-strike: 0ms;
+    --duration-ink: 0ms;
     --duration-work-write: 0ms;
     --duration-row-fold: 0ms;
     --duration-gauge: 0ms;
