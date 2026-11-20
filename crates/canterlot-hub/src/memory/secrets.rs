@@ -101,8 +101,17 @@ fn is_jwt(token: &str) -> bool {
         })
 }
 
-const KEYWORDS: [&str; 6] = [
-    "password", "passwd", "token", "secret", "api_key", "api-key",
+const KEYWORDS: [&str; 10] = [
+    "password",
+    "passwd",
+    "pwd",
+    "token",
+    "secret",
+    "api_key",
+    "api-key",
+    "пароль",
+    "Пароль",
+    "ПАРОЛЬ",
 ];
 
 const PLACEHOLDERS: [&str; 14] = [
@@ -129,7 +138,7 @@ fn line_has_assignment(line: &str) -> bool {
             let mut rest = &line[at + keyword.len()..];
             // Хвост имени: `api_key_prod`, `tokens`, `password_hash`.
             rest = rest.trim_start_matches(|c: char| c.is_ascii_alphanumeric() || c == '_');
-            rest = rest.trim_start_matches(['"', '\'', '`', ' ', '\t']);
+            rest = rest.trim_start_matches(['"', '\'', '`', '*', ' ', '\t']);
             let Some(rest) = rest.strip_prefix(['=', ':']) else {
                 continue;
             };
@@ -138,7 +147,8 @@ fn line_has_assignment(line: &str) -> bool {
                 .chars()
                 .take_while(|c| !c.is_whitespace() && !matches!(c, '"' | '\'' | '`' | ',' | ';'))
                 .collect();
-            if looks_like_secret_value(&value) {
+            let after = rest[value.len()..].trim_start();
+            if looks_like_secret_value(&value, after) {
                 return true;
             }
         }
@@ -146,7 +156,11 @@ fn line_has_assignment(line: &str) -> bool {
     false
 }
 
-fn looks_like_secret_value(value: &str) -> bool {
+/// `value` — слово после `=`/`:`, `after` — что идёт за ним в строке. Явное присвоение
+/// пароля с значением от 8 знаков секрет при любом наборе знаков; исключения узкие:
+/// заглушки, значения вида `<…>`, `${…}`, `%…%`, и проза, где за словом идут ещё слова
+/// («password: see the manager»).
+fn looks_like_secret_value(value: &str, after: &str) -> bool {
     if value.chars().count() < 8 {
         return false;
     }
@@ -161,8 +175,12 @@ fn looks_like_secret_value(value: &str) -> bool {
     let has_upper = value.chars().any(|c| c.is_ascii_uppercase());
     let has_lower = value.chars().any(|c| c.is_ascii_lowercase());
     let has_symbol = value.chars().any(|c| c.is_ascii_punctuation());
-    // Обычное слово из прозы («token: refreshed») секретом не считается.
-    has_digit || (has_upper && has_lower) || has_symbol
+    if has_digit || (has_upper && has_lower) || has_symbol {
+        return true;
+    }
+    // Одни буквы: секрет, если за словом нет продолжения фразой.
+    let prose = after.chars().next().is_some_and(char::is_alphanumeric);
+    !prose
 }
 
 fn is_entropy_char(c: char) -> bool {
@@ -243,6 +261,39 @@ mod tests {
             "secret: Zq!pLm8#vx",
         ] {
             assert_eq!(scan(text), Some(SecretClass::Assignment), "{text}");
+        }
+    }
+
+    #[test]
+    fn lowercase_literal_passwords_are_secrets() {
+        for text in [
+            "password = hunterhunter",
+            "пароль: correcthorsebattery",
+            "Пароль: correcthorsebattery",
+            "token: abcdefghij",
+            "passwd=qwertyuiop",
+            "pwd: lowercasevalue",
+            "secret = abcdefghijkl.",
+            "- **password**: hunterhunter",
+        ] {
+            assert_eq!(scan(text), Some(SecretClass::Assignment), "{text}");
+        }
+    }
+
+    #[test]
+    fn placeholders_and_prose_after_a_keyword_pass() {
+        for text in [
+            "password: <ask the owner>",
+            "password = ${DB_PASSWORD}",
+            "password: see the password manager",
+            "password: см. менеджер паролей",
+            "пароль: хранится в менеджере паролей",
+            "token: refreshed when expired",
+            "password: %PASSWORD%",
+            "pwd = {{ vault.pwd }}",
+            "password: hunterhunter is not stored here",
+        ] {
+            assert_eq!(scan(text), None, "{text}");
         }
     }
 

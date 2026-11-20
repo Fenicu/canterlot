@@ -161,6 +161,106 @@ async fn apply_refuses_secret_entry_even_if_bundle_has_it(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn apply_refuses_index_and_credential_named_sources(pool: PgPool) {
+    testkit::seed(&pool).await;
+    let config = MemoryConfig::default();
+    let bundle = bundle(vec![
+        entry(
+            "Индекс",
+            "оглавление",
+            "-h-work-thing/memory/MEMORY.md",
+            "m1",
+        ),
+        entry(
+            "Учётки",
+            "где лежат",
+            "-h-work-thing/memory/reference_credentials_notes.md",
+            "c1",
+        ),
+        entry(
+            "Всё",
+            "всё подряд",
+            "-h-work-thing/memory/reference_all.md",
+            "r1",
+        ),
+        entry(
+            "Чистая",
+            "обычная запись",
+            "-h-work-thing/memory/ok.md",
+            "o1",
+        ),
+    ]);
+
+    let report = apply(&pool, &bundle, false, &config).await.unwrap();
+
+    assert_eq!(report.refused_names, 3);
+    assert_eq!(report.created, 1);
+    let subjects: Vec<String> = sqlx::query_scalar("select subject from memory_entries")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(subjects, ["Чистая"]);
+}
+
+async fn import_lock_waiters(pool: &PgPool) -> i64 {
+    sqlx::query_scalar(
+        "select count(*) from pg_stat_activity
+         where datname = current_database() and wait_event_type = 'Lock' and wait_event = 'advisory'
+           and query like '%canterlot:memory:import%'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn concurrent_applies_of_one_bundle_create_each_entry_once(pool: PgPool) {
+    testkit::seed(&pool).await;
+    let config = MemoryConfig::default();
+    let bundle = bundle(vec![
+        entry("Первая", "тело один", "-h-work-thing/memory/a.md", "aa"),
+        entry("Вторая", "тело два", "-h-work-thing/memory/b.md", "bb"),
+    ]);
+    // Шлюз держит блокировку импорта, пока оба применения не встанут в очередь на ней.
+    let mut gate = pool.begin().await.unwrap();
+    sqlx::query("select pg_advisory_xact_lock(hashtextextended('canterlot:memory:import', 0))")
+        .execute(&mut *gate)
+        .await
+        .unwrap();
+    let runs: Vec<_> = (0..2)
+        .map(|_| {
+            let (pool, bundle, config) = (pool.clone(), bundle.clone(), config.clone());
+            tokio::spawn(async move { apply(&pool, &bundle, false, &config).await.unwrap() })
+        })
+        .collect();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while import_lock_waiters(&pool).await < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("оба применения ждут блокировку импорта");
+    gate.rollback().await.unwrap();
+
+    let mut reports = Vec::new();
+    for run in runs {
+        reports.push(run.await.unwrap());
+    }
+
+    assert_eq!(
+        reports.iter().map(|r| r.created).sum::<u32>(),
+        2,
+        "{reports:?}"
+    );
+    assert_eq!(
+        reports.iter().map(|r| r.skipped_existing).sum::<u32>(),
+        2,
+        "{reports:?}"
+    );
+    assert_eq!(count(&pool, "memory_entries").await, 2);
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn frontmatter_description_to_subject_type_to_kind_modified_to_updated_at(pool: PgPool) {
     testkit::seed(&pool).await;
     let config = MemoryConfig::default();

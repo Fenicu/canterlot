@@ -6,6 +6,7 @@
 
 pub mod auto_memory;
 pub mod import;
+pub mod import_rules;
 pub mod secrets;
 pub mod store;
 

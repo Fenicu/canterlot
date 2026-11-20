@@ -232,3 +232,145 @@ fn frontmatter_maps_description_type_and_falls_back() {
         plain.subject
     );
 }
+
+fn entry_of<'a>(block: &'a DirBlock, name: &str) -> &'a canterlot_worker::memory_import::FileEntry {
+    block
+        .file
+        .iter()
+        .find(|file| file.path == format!("memory/{name}"))
+        .unwrap_or_else(|| panic!("нет файла {name}"))
+}
+
+#[test]
+fn skipped_manifest_entry_carries_no_content() {
+    let (_dir, root) = scratch();
+    // Без заголовка: первая строка стала бы темой, а в ней токен.
+    fs::write(
+        root.join("-solo/memory/leaky.md"),
+        "ghp_abcdefghijklmnopqrstuvwx0123\nобычная строка\n",
+    )
+    .unwrap();
+
+    let manifest = plan(&root, &options()).unwrap();
+
+    let solo = block(&manifest, "-solo");
+    let leaky = entry_of(solo, "leaky.md");
+    assert_eq!(leaky.skip, "looks_like_secret");
+    assert_eq!(leaky.subject, "");
+    assert_eq!(leaky.kind, "");
+    assert_eq!(leaky.sha256, "");
+    let text = manifest.to_toml().unwrap();
+    assert!(!text.contains("ghp_"), "{text}");
+    assert!(!text.contains("abcdefghijklmnop"), "{text}");
+    // Имя с учётными данными: содержимое не читается, тема пуста.
+    let creds = entry_of(
+        block(&manifest, "-h-work-thing"),
+        "reference_credentials_notes.md",
+    );
+    assert_eq!(creds.skip, "credential_name");
+    assert_eq!((creds.subject.as_str(), creds.kind.as_str()), ("", ""));
+    assert!(!text.contains("Где лежат учётные данные"), "{text}");
+}
+
+#[test]
+fn bundle_ignores_a_cleared_skip_on_forbidden_names() {
+    let (_dir, root) = scratch();
+    let mut manifest = plan(&root, &options()).unwrap();
+    for block in &mut manifest.dir {
+        for file in &mut block.file {
+            if file.path.ends_with("MEMORY.md")
+                || file.path.ends_with("reference_credentials_notes.md")
+                || file.path.ends_with("reference_all.md")
+            {
+                file.skip.clear();
+            }
+        }
+    }
+
+    let bundle = bundle(&manifest, "b-9", "2026-03-06T10:00:00Z").unwrap();
+
+    let json = serde_json::to_string(&bundle).unwrap();
+    for name in ["MEMORY.md", "reference_credentials_notes", "reference_all"] {
+        assert!(!json.contains(name), "{name} попал в пакет");
+    }
+    assert_eq!(bundle.entries.len(), 3);
+}
+
+#[test]
+fn symlinked_root_and_symlinked_memory_dir_are_refused() {
+    let (dir, root) = scratch();
+    let linked_root = dir.path().join("projects-link");
+    symlink(&root, &linked_root).unwrap();
+
+    let error = plan(&linked_root, &options()).unwrap_err();
+    assert_eq!(error.to_string(), "root is a symbolic link");
+
+    let manifest = plan(&root, &options()).unwrap();
+    let mut through_link = manifest.clone();
+    through_link.root = linked_root.to_string_lossy().into_owned();
+    let error = bundle(&through_link, "b-1", "2026-03-06T10:00:00Z").unwrap_err();
+    assert!(matches!(error, BundleError::Symlink { .. }), "{error:?}");
+    assert!(error.to_string().contains("symbolic link"), "{error}");
+
+    // `memory` подменена ссылкой уже после плана.
+    let moved = dir.path().join("moved-memory");
+    fs::rename(root.join("-solo/memory"), &moved).unwrap();
+    symlink(&moved, root.join("-solo/memory")).unwrap();
+    let error = bundle(&manifest, "b-1", "2026-03-06T10:00:00Z").unwrap_err();
+    assert!(matches!(error, BundleError::Symlink { .. }), "{error:?}");
+    // План такой каталог не читает вовсе.
+    let again = plan(&root, &options()).unwrap();
+    assert!(again.dir.iter().all(|b| b.source != "-solo"));
+}
+
+fn framed(front_bytes: usize, body_bytes: usize) -> String {
+    let mut text = String::from("---\ndescription: Длинный заголовок\n");
+    let mut n = 0;
+    while text.len() < front_bytes {
+        text.push_str(&format!("note{n}: value value value\n"));
+        n += 1;
+    }
+    text.push_str("---\n\n");
+    text.push_str(&"word ".repeat(body_bytes / 5));
+    text
+}
+
+#[test]
+fn body_limit_applies_to_the_parsed_body_not_the_file() {
+    let (_dir, root) = scratch();
+    fs::write(root.join("-solo/memory/framed.md"), framed(2048, 7 * 1024)).unwrap();
+    fs::write(root.join("-solo/memory/fat.md"), framed(64, 9 * 1024)).unwrap();
+
+    let manifest = plan(&root, &options()).unwrap();
+
+    let solo = block(&manifest, "-solo");
+    let framed_entry = entry_of(solo, "framed.md");
+    assert!(framed_entry.size > 8 * 1024, "файл целиком больше предела");
+    assert_eq!(framed_entry.skip, "");
+    assert_eq!(entry_of(solo, "fat.md").skip, "too_large");
+
+    // Пакет собирается по манифесту: тело в пределе берётся, лишнее отказ.
+    let mut wanted = manifest.clone();
+    let fat = fs::read(root.join("-solo/memory/fat.md")).unwrap();
+    for block in &mut wanted.dir {
+        for file in &mut block.file {
+            if file.path.ends_with("fat.md") {
+                use sha2::{Digest, Sha256};
+                file.skip.clear();
+                file.sha256 = Sha256::digest(&fat)
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect();
+            }
+        }
+    }
+    let error = bundle(&wanted, "b-1", "2026-03-06T10:00:00Z").unwrap_err();
+    assert!(matches!(error, BundleError::TooLarge { .. }), "{error:?}");
+    let bundle = bundle(&manifest, "b-1", "2026-03-06T10:00:00Z").unwrap();
+    assert!(
+        bundle
+            .entries
+            .iter()
+            .any(|e| e.source_path.ends_with("framed.md") && e.body.len() <= 8 * 1024)
+    );
+}
