@@ -100,7 +100,7 @@ test('a_search_card_opens_and_lists_the_rows_with_kind_level_and_stale_mark', as
   await expect(rows.nth(1)).toContainText('справка Сборка воркера');
   await expect(rows.nth(1)).toContainText('весь домен');
   await expect(rows.nth(1).locator('[data-role="memory-stale"]')).toHaveText('устарела');
-  await expect(rows.nth(2)).toContainText('владелец');
+  await expect(rows.nth(2)).toContainText('о владельце');
 });
 
 test('a_search_row_opens_that_entry_on_the_memory_screen', async ({ page }) => {

@@ -344,3 +344,28 @@ test('secret_warning_on_revision_restore_replays_that_restore', async ({ page })
   expect(entry()).toMatchObject({ version: 3, body: secret });
   await expect(sheet.getByRole('textbox', { name: 'Текст' })).toHaveValue(secret);
 });
+
+test('memory_screen_does_not_scroll_sideways_on_a_phone', async ({ page }) => {
+  test.skip(test.info().project.name !== 'phone', 'ширина телефона');
+  await page.setViewportSize({ width: 390, height: 844 });
+  await open(page, (api) => {
+    api.seedMemory({ domain: 'work', subject: 'Очень длинная тема записи про миграции тестовой базы данных в изолированной рабочей копии', body: 'Текст '.repeat(60), kind: 'gotcha' });
+  });
+  // Раздел лежит в контейнере, который обрезает лишнее, поэтому одного scrollWidth документа мало:
+  // меряем и правый край каждого элемента экрана.
+  const wide = () =>
+    page.evaluate(() => {
+      const inner = window.innerWidth;
+      const out = [...document.querySelectorAll('[data-memory], [data-memory] *')].filter((node) => node.getBoundingClientRect().right > inner + 0.5).map((node) => `${node.tagName}.${node.className}`);
+      return { scroll: document.scrollingElement!.scrollWidth, inner, out };
+    });
+  await expect(page.locator(LIST).first()).toBeVisible();
+  const list = await wide();
+  expect(list.scroll, 'список').toBeLessThanOrEqual(list.inner);
+  expect(list.out, 'элементы списка за правым краем').toEqual([]);
+  await page.locator('[data-memory-row]').first().click();
+  await expect(page.getByRole('dialog', { name: 'Запись' })).toBeVisible();
+  const sheet = await wide();
+  expect(sheet.scroll, 'лист записи').toBeLessThanOrEqual(sheet.inner);
+  expect(sheet.out, 'элементы под листом за правым краем').toEqual([]);
+});

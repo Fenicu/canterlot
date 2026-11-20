@@ -134,7 +134,8 @@
 {/if}
 
 <style>
-  .memory { display: grid; gap: var(--s4); }
+  /* Единственная колонка не шире контейнера: без minmax(0, …) длинная тема или поле поиска растягивают её по своему содержимому. */
+  .memory { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--s4); }
   .head { display: flex; align-items: center; justify-content: space-between; gap: var(--s4); flex-wrap: wrap; }
   h2 { margin: var(--s0); font-size: var(--fs-title); font-weight: var(--weight-semibold); }
   .note, .empty { margin: var(--s0); color: var(--muted); font-size: var(--fs-sm); }
@@ -142,7 +143,7 @@
   .tools { display: grid; gap: var(--s3); }
   .filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--gauge-width)), 1fr)); gap: var(--s4); }
   .search input { display: block; white-space: nowrap; width: 100%; min-height: var(--target); padding: var(--s5) var(--s8); border: 0; border-radius: var(--radius-pill); background: var(--raised); font-size: var(--fs-input); color: inherit; }
-  .list { display: grid; gap: var(--s3); margin: var(--s0); padding: var(--s0); list-style: none; }
+  .list { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--s3); margin: var(--s0); padding: var(--s0); list-style: none; }
   .row { display: flex; flex-direction: column; gap: var(--s2); width: 100%; padding: var(--s6); border: 0; border-radius: var(--radius-card); background: var(--surface); color: inherit; text-align: left; }
   .row strong { overflow-wrap: anywhere; }
   .meta { color: var(--secondary); font-size: var(--fs-sm); }
