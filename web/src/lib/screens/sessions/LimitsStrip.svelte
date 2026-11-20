@@ -209,7 +209,8 @@
     /* max-content, а не размер значка: отступ строки достаётся крайним колонкам как поле, и колонка стрелки растёт на него. */
     --chevron-column: max-content;
     display: grid;
-    grid-template-columns: minmax(0, max-content) minmax(calc(var(--s4) * 3), max-content) var(--gauge-width) max-content minmax(0, 1fr) var(--chevron-column);
+    /* Имя с учётной записью («OpenCode · b-opencode») не отнимает у отсчёта сброса больше трети полосы: остальное съедает многоточие. */
+    grid-template-columns: fit-content(35cqw) minmax(calc(var(--s4) * 3), max-content) var(--gauge-width) max-content minmax(0, 1fr) var(--chevron-column);
     column-gap: var(--s2);
     align-items: baseline;
     min-width: 0;
