@@ -402,7 +402,7 @@ MCP-серверы владельца и делегированные сесси
 
 ### Ошибки инструментов
 
-Модель получает код и короткое английское сообщение в `isError`. Коды: `session_not_found`, `read_only_session`, `rate_limited`, `chain_depth_exceeded`, `spawn_depth_exceeded`, `harness_unknown`, `model_unknown`, `effort_not_allowed`, `workdir_not_allowed`, `permission_mode_too_wide`, `profile_unknown`, `machine_unavailable`, `capability_missing`, `queue_full`, `conversation_closed`, `not_parent`, `not_delegated`, `attachment_not_available`, `text_too_large`, `already_decided`, `invalid_arguments`, `internal_error`, `unknown_tool`, `domain_mismatch`, `remote_work_disabled`. Тексты сообщений, итоги и пути в логи, `Debug` и метрики не попадают; ошибка базы наружу идёт одним кодом `internal_error`.
+Модель получает код и короткое английское сообщение в `isError`. Коды: `session_not_found`, `read_only_session`, `rate_limited`, `chain_depth_exceeded`, `spawn_depth_exceeded`, `harness_unknown`, `model_unknown`, `effort_not_allowed`, `workdir_not_allowed`, `permission_mode_too_wide`, `profile_unknown`, `machine_unavailable`, `capability_missing`, `queue_full`, `conversation_closed`, `not_parent`, `not_delegated`, `attachment_not_available`, `text_too_large`, `already_decided`, `invalid_arguments`, `internal_error`, `unknown_tool`, `domain_mismatch`, `remote_work_disabled`, `mode_too_narrow`, `job_not_found`. Тексты сообщений, итоги и пути в логи, `Debug` и метрики не попадают; ошибка базы наружу идёт одним кодом `internal_error`.
 
 ### 12.1. Инструменты оркестратора (после пилота, по решениям владельца 27.10 и 29.10)
 
@@ -449,6 +449,30 @@ MCP-серверы владельца и делегированные сесси
 - Навыки — только дополнение для длинных сценариев одного харнесса (например, «вести план с помощниками» в пресете оркестратора Claude Code), если инструментов с подсказками окажется мало.
 
 Подсказки есть у `canterlot_limits`, инструментов пресетов и десяти межсессионных инструментов; для инструментов §12.1 они появятся вместе с ними.
+
+### 12.4. Команды на месте: `job_run` (1.44)
+
+Команда оболочки, которую оркестратор запускает на машине с воркером: на своей или на другой (`machine`), если владелец включил там выключатель удалённой работы (§12 «Запуск сессии»). Хаб ведёт очередь, воркер выполняет (`jobs_inplace_v1`, [streams.md](streams.md)), итог приходит ответом вызова или одним сообщением `[canterlot]`.
+
+**Инструменты** (хаб: `job.run`, `job.status`, `job.log`, `job.cancel`, `jobs.list`; у модели `job_run`, `job_status`, `job_log`, `job_cancel`, `jobs_list`):
+
+| Инструмент | Что делает |
+| --- | --- |
+| `job_run` | `{machine?, workdir, shell, title?, timeout_minutes?, wait_seconds?, lease?, env?, idempotency_key?}`. `shell` идёт в `bash -lc` в `workdir`, формы с `argv` нет. `timeout_minutes` 1–1440 (30), `wait_seconds` 0–60 (20), `lease` `none`, `build` или `gate`, `env` до 32 несекретных пар. Ответ при итоге внутри ожидания: `{job_id, state, exit_code, duration_ms, output_tail, output_bytes, truncated}` (`output_tail` — последние 32 КиБ общего вывода); иначе `{job_id, state, machine}`, а итог придёт сообщением с хвостом до 8 КиБ |
+| `job_status` | Те же поля итога или текущее состояние; `machine_offline`, если машина без связи; у `lost` — `late_report` |
+| `job_log` | `{job_id, offset?, limit?}` (`limit` до 64 КиБ, по умолчанию 16): хвост на хабе, пока задача идёт, и сохранённый полный журнал после конца; `next_offset`, `eof` |
+| `job_cancel` | Очередь закрывается сразу, идущей задаче уходит команда отмены; повтор безвреден |
+| `jobs_list` | Задачи этого разговора, новые первыми: `machine`, `state`, `limit` до 50. Так находят потерянный ответ |
+
+**Кто может вызвать.** Действующий режим (более узкий из применённого и ожидающего) обязан быть `bypass`: `read_only`, `ask`, `owner`, неизвестные режимы, `ask` у Codex и боковые сессии получают `mode_too_narrow`. У вызывающего должен быть домен памяти, и `memory::path_domain(цель, workdir)` обязан его совпасть, иначе `domain_mismatch`. Другая машина должна принимать удалённую работу (`machines::accepts_remote_work_for_share`, `for share`), иначе `remote_work_disabled`; машина без `jobs_inplace_v1` — `capability_missing`. Режим, домен и выключатель перепроверяются при диспетчеризации из очереди: отказ закрывает задачу `canceled` с причиной в `end_reason`; выключатель закрывает ожидающие удалённые задачи сразу, а ушедшая на машину команда доходит. Во всех `job_*` разговор видит только свои задачи и только в том домене, в котором их заказал; чужая и скрытая смена домена задача неотличима от несуществующей (`job_not_found`). В таблице режимов воркера все пять — самый сильный класс: они не входят в `MODE_FREE_TOOLS`. Срок вызова `job_run` у воркера заказчика — `wait_seconds` плюс 15 с, ждущий хаба всегда раньше.
+
+**Единственная доставка итога.** Столбец `jobs.delivery` — пусто, `inline` или `message`, он ставится один раз под замком строки. Ждущий вызов ставит `inline`, увидев итог, пока вызов жив, и отвечает сам. Срок ожидания, оборванный вызов (страж на `Drop`) и старт хаба ставят `message` у каждой задачи без выбранной доставки; если задача уже закончена, сообщение ставится в той же транзакции. Переход в итог ставит сообщение только при `message`. Итог, обогнавший срок, решает замок строки: кто взял её первым, тот и доставляет. Сообщение — задание `session_task` `job_result` с ключом `job:<id>` (`deliver` не повторяет ввод с тем же ключом); при доставке перечитываются заказчик (удалён, в архиве или сменил домен — сообщения нет), лимиты и текст. Повтор вызова с тем же `call_id` или `idempotency_key` возвращает сохранённую задачу, а у идущей переводит итог на сообщение. Остаток: ответ, потерянный по дороге после `inline`, не повторяется; его находят `jobs_list` и `job_status`.
+
+**Таблица `jobs`** (миграция 0124): одна строка на задачу, номер попытки в `attempt`. Состояния: `queued` (хаб), `dispatched` (команда на машине), `waiting_lease`, `running`, итоговые `succeeded`, `failed`, `timed_out`, `canceled`, `lost`; факты применяются только вперёд, итоговая строка их не меняет. Ёмкость машины — `MachineReport.jobs_max_running` (4, если не названа), место резервируется при диспетчеризации, очередь идёт по порядку; диспетчеризация — при заявке, при итоге, при подключении машины и по таймеру. Задача на потерянной машине (`machine_offline` в видах) через `timeout + [jobs].lost_grace` без фактов становится `lost` и доставляется; итог воркера, пришедший позже, записывается в `late_report` и больше ничего не меняет; задача, которую воркер называет идущей, держит место. Владелец отменяет `lost` из HTTP, команда уйдёт, когда машина вернётся. Остановленный, архивный или удалённый заказчик задачу не прерывает.
+
+**Журнал.** Хаб хранит хвост 64 КиБ из кусков `JobLogChunk` и итоговый хвост `JobFinished` (32 КиБ), полный журнал — вложение gzip (`MediaHeader.job_id`, идентификатор выведен воркером из задачи и попытки), привязанное к строке (`jobs.log_media_id`); сборщик блобов его не трогает.
+
+**HTTP и события.** `GET /api/v1/jobs`, `GET /api/v1/jobs/{id}`, `GET /api/v1/jobs/{id}/log`, `POST /api/v1/jobs/{id}/cancel` и событие `job_changed` ([api.md](api.md)) — для карточек и листа задачи PWA.
 
 ## 13. Визуальный стиль
 
