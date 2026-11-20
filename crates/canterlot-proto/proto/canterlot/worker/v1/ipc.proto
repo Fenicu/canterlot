@@ -91,6 +91,9 @@ message StartCli {
   string canterlot_mcp = 18;
   // Выключить встроенную автопамять Claude Code (настройка владельца), режим «как у владельца».
   bool disable_claude_auto_memory = 19;
+  // Только у изолированного запуска: репозиторий, из которого собрана рабочая копия.
+  // Сопровождение присылает его realpath хабу в ExecutionState.canonical_source.
+  string source_workdir = 20;
 }
 
 // Вызов инструмента агента: сопровождение → управляющий процесс → хаб и обратно.

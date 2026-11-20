@@ -34,10 +34,34 @@ pub fn canonical_workdir(path: &Path) -> Option<PathBuf> {
     std::fs::canonicalize(path).ok()
 }
 
+/// Realpath репозитория, из которого собрана изолированная копия; пусто без источника или
+/// если он не разрешился.
+pub fn canonical_source(source: Option<&Path>) -> String {
+    source
+        .and_then(canonical_workdir)
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
+
+    #[test]
+    fn canonical_source_resolves_symlink_into_work_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(dir.path()).unwrap();
+        std::fs::create_dir_all(base.join("work/repo")).unwrap();
+        std::fs::create_dir_all(base.join("play")).unwrap();
+        symlink(base.join("work/repo"), base.join("play/alias")).unwrap();
+        assert_eq!(
+            canonical_source(Some(&base.join("play/alias"))),
+            base.join("work/repo").to_string_lossy()
+        );
+        assert_eq!(canonical_source(Some(&base.join("gone"))), "");
+        assert_eq!(canonical_source(None), "");
+    }
 
     #[test]
     fn canonical_roots_resolve_symlinks_and_drop_missing() {

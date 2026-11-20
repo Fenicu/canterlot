@@ -202,9 +202,17 @@ pub async fn recheck_launch(
     conn: &mut PgConnection,
     execution_id: Uuid,
     canonical_workdir: &str,
+    canonical_source: &str,
     correlation_id: Uuid,
 ) -> Result<bool, sqlx::Error> {
-    if canonical_workdir.is_empty() {
+    // Изолированная копия лежит в нейтральной базе, её домен определяет репозиторий-источник.
+    // Старый воркер и неизолированный запуск источник не шлют: проверяется сам каталог.
+    let checked = if canonical_source.is_empty() {
+        canonical_workdir
+    } else {
+        canonical_source
+    };
+    if checked.is_empty() {
         return Ok(false);
     }
     let row: Option<(Uuid, Uuid, Option<String>)> = sqlx::query_as(
@@ -224,11 +232,7 @@ pub async fn recheck_launch(
     let Some(roots) = machine_roots(conn, machine_id).await? else {
         return Ok(false);
     };
-    let actual = classify(
-        canonical_workdir,
-        &roots.work_roots,
-        roots.worktree_root.as_deref(),
-    );
+    let actual = classify(checked, &roots.work_roots, roots.worktree_root.as_deref());
     let contradicts = matches!(
         (actual, stored),
         (Classification::Work, MemoryDomain::Personal)

@@ -231,6 +231,7 @@ fn running(
     execution: &executions::StartedExecution,
     state: &str,
     canonical: &str,
+    source: &str,
 ) -> JournalRecord {
     JournalRecord {
         seq: 0,
@@ -243,18 +244,30 @@ fn running(
                 native_conversation_id: String::new(),
                 fresh_fork: false,
                 canonical_workdir: canonical.into(),
+                canonical_source: source.into(),
             })),
         }),
     }
 }
 
 async fn launch(pool: &PgPool, seed: &Seed, conversation: Uuid, canonical: &str) {
+    launch_from(pool, seed, conversation, canonical, "").await;
+}
+
+/// Запуск изолированной копии: `canonical` — нейтральная копия, `source` — репозиторий.
+async fn launch_from(
+    pool: &PgPool,
+    seed: &Seed,
+    conversation: Uuid,
+    canonical: &str,
+    source: &str,
+) {
     let execution = executions::start(pool, seed.owner_id, conversation, Uuid::now_v7())
         .await
         .unwrap();
     let mut records = vec![
-        running(&execution, "starting", ""),
-        running(&execution, "running", canonical),
+        running(&execution, "starting", "", ""),
+        running(&execution, "running", canonical, source),
     ];
     for (i, record) in records.iter_mut().enumerate() {
         record.seq = i as u64 + 1;
@@ -281,6 +294,40 @@ async fn conflicts(pool: &PgPool, conversation: Uuid) -> i64 {
     .fetch_one(pool)
     .await
     .unwrap()
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn isolated_launch_is_classified_by_its_source_repo(pool: PgPool) {
+    let (seed, registry) = fixture(&pool, &["pilot_v1", "memory_scope_v1"]).await;
+    // Личный на вид путь, за которым рабочий репозиторий; копия лежит в нейтральной базе.
+    let linked = create(&pool, &registry, request(&seed, "/h/play/link", None))
+        .await
+        .unwrap();
+    launch_from(
+        &pool,
+        &seed,
+        linked,
+        "/h/data/worktrees/c1",
+        "/h/work/secret",
+    )
+    .await;
+    assert_eq!(scope(&pool, linked).await.0, None);
+    assert_eq!(conflicts(&pool, linked).await, 1);
+
+    // Контроль: личный источник оставляет личный домен.
+    let honest = create(&pool, &registry, request(&seed, "/h/play/real", None))
+        .await
+        .unwrap();
+    launch_from(&pool, &seed, honest, "/h/data/worktrees/c2", "/h/play/real").await;
+    assert_eq!(scope(&pool, honest).await, some("personal", "/h/play/real"));
+    assert_eq!(conflicts(&pool, honest).await, 0);
+
+    // Старый воркер источник не шлёт: нейтральная копия по-прежнему ничему не противоречит.
+    let old = create(&pool, &registry, request(&seed, "/h/play/old", None))
+        .await
+        .unwrap();
+    launch_from(&pool, &seed, old, "/h/data/worktrees/c3", "").await;
+    assert_eq!(scope(&pool, old).await, some("personal", "/h/play/old"));
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]

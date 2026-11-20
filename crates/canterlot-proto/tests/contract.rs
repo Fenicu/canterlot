@@ -416,6 +416,7 @@ fn exec_records_roundtrip() {
         native_conversation_id: "native".into(),
         fresh_fork: false,
         canonical_workdir: "/h/work/p".into(),
+        canonical_source: "/h/work/src".into(),
     });
     assert_roundtrip(BlockStarted {
         block_id: "block".into(),
@@ -1382,6 +1383,7 @@ fn start_execution_capabilities_machine_report_os_and_limits_snapshot_roundtrip(
         fork_from_native: String::new(),
         canterlot_mcp: String::new(),
         disable_claude_auto_memory: true,
+        source_workdir: "/h/work/src".into(),
     });
     assert_roundtrip(ipc::CompactRequest {
         command_id: "command".into(),
@@ -2156,6 +2158,26 @@ fn side_chat_fields_are_additive_on_both_hops() {
         &wire[old_wire.len()..],
         [&[0x3a, 7][..], b"/h/work"].concat(),
         "ExecutionState.canonical_workdir is field 7"
+    );
+    assert_roundtrip(state);
+
+    // Источник изолированной копии: поле 8, тоже хвостом.
+    let old_wire = ExecutionState {
+        canonical_workdir: "/h/wt".into(),
+        ..Default::default()
+    }
+    .encode_to_vec();
+    let state = ExecutionState {
+        canonical_workdir: "/h/wt".into(),
+        canonical_source: "/h/work".into(),
+        ..Default::default()
+    };
+    let wire = state.encode_to_vec();
+    assert_eq!(&wire[..old_wire.len()], old_wire.as_slice());
+    assert_eq!(
+        &wire[old_wire.len()..],
+        [&[0x42, 7][..], b"/h/work"].concat(),
+        "ExecutionState.canonical_source is field 8"
     );
     assert_roundtrip(state);
 

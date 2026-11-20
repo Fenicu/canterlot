@@ -1108,6 +1108,7 @@ async fn fresh_fork_on_later_start_marks_the_side(pool: PgPool) {
                         outcome: String::new(),
                         fresh_fork: true,
                         canonical_workdir: String::new(),
+                        canonical_source: String::new(),
                     },
                 )),
             }),
