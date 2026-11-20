@@ -366,6 +366,42 @@ async fn the_switch_is_off_by_default_and_the_helper_reads_it(pool: PgPool) {
     );
 }
 
+/// Допуск — одна точка: пока транзакция запуска держит строку машины `for share`, смена
+/// выключателя (`for update`) ждёт её коммита, а после него видит выключатель сама.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn switching_off_waits_for_a_launch_that_already_read_the_row(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    f.switch(true).await;
+    let mut launch = canterlot_hub::db::begin(&f.pool).await.unwrap();
+    assert!(
+        machines::accepts_remote_work_for_share(&mut launch, f.b)
+            .await
+            .unwrap()
+    );
+    let pool = f.pool.clone();
+    let (owner, machine) = (f.owner, f.b);
+    let switch = tokio::spawn(async move {
+        let mut tx = canterlot_hub::db::begin(&pool).await.unwrap();
+        machines::set_accepts_remote_work(&mut tx, owner, machine, false)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    });
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(!switch.is_finished(), "the switch must wait for the launch");
+    launch.commit().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), switch)
+        .await
+        .expect("the switch proceeds after the launch commits")
+        .unwrap();
+    let mut tx = canterlot_hub::db::begin(&f.pool).await.unwrap();
+    assert!(
+        !machines::accepts_remote_work_for_share(&mut tx, f.b)
+            .await
+            .unwrap()
+    );
+}
+
 struct Api {
     client: TestClient,
     anonymous: TestClient,
