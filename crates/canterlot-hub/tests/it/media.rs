@@ -901,6 +901,98 @@ async fn media_download_is_immutable_and_supports_if_none_match(pool: PgPool) {
     timeout(WAIT, task).await.unwrap().unwrap();
 }
 
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn media_download_answers_byte_ranges(pool: PgPool) {
+    let mut f = Media::new(pool.clone()).await;
+    let (mut client, stop, task) = server(f.hub.clone()).await;
+    let block = f.tool_block().await;
+    let bytes = png(3, 2, 5000, 10);
+    let id = Uuid::now_v7();
+    put(&mut client, &f.token, f.header(id, block, &bytes), &bytes)
+        .await
+        .unwrap();
+    f.committed(vec![Media::reference(id, block, &bytes, 3, 2)])
+        .await;
+    let path = format!("/api/v1/media/{id}");
+    let ranged = |range: &str| f.files.client.clone().with_header("Range", range);
+    let full = f.download(&f.files.client, id).await;
+    assert_eq!(full.headers["accept-ranges"], "bytes");
+    let etag = full.headers["etag"].to_str().unwrap().to_owned();
+
+    let part = ranged("bytes=100-199")
+        .send(Method::GET, &path, None, None)
+        .await;
+    assert_eq!(part.status, 206);
+    let len = bytes.len();
+    assert_eq!(
+        part.headers["content-range"],
+        format!("bytes 100-199/{len}")
+    );
+    assert_eq!(part.headers["content-length"], "100");
+    assert_eq!(part.body.as_ref(), &bytes[100..200]);
+    for name in [
+        "content-type",
+        "content-disposition",
+        "etag",
+        "x-content-type-options",
+        "content-security-policy",
+        "cache-control",
+    ] {
+        assert_eq!(part.headers[name], full.headers[name], "{name}");
+    }
+    let tail = ranged("bytes=-50")
+        .send(Method::GET, &path, None, None)
+        .await;
+    assert_eq!(tail.status, 206);
+    assert_eq!(
+        tail.headers["content-range"],
+        format!("bytes {}-{}/{len}", len - 50, len - 1)
+    );
+    assert_eq!(tail.body.as_ref(), &bytes[len - 50..]);
+    let open = ranged(&format!("bytes={}-", len - 10))
+        .send(Method::GET, &path, None, None)
+        .await;
+    assert_eq!(open.status, 206);
+    assert_eq!(open.body.as_ref(), &bytes[len - 10..]);
+
+    let beyond = ranged(&format!("bytes={len}-"))
+        .send(Method::GET, &path, None, None)
+        .await;
+    assert_eq!(beyond.status, 416);
+    assert_eq!(beyond.headers["content-range"], format!("bytes */{len}"));
+    assert!(beyond.body.is_empty());
+
+    let multi = ranged("bytes=0-1,4-5")
+        .send(Method::GET, &path, None, None)
+        .await;
+    assert_eq!(multi.status, 200);
+    assert_eq!(multi.body.as_ref(), bytes.as_slice());
+
+    let fresh = ranged("bytes=0-9")
+        .with_header("If-Range", &etag)
+        .send(Method::GET, &path, None, None)
+        .await;
+    assert_eq!(fresh.status, 206);
+    let stale = ranged("bytes=0-9")
+        .with_header("If-Range", &format!("\"{}\"", "0".repeat(64)))
+        .send(Method::GET, &path, None, None)
+        .await;
+    assert_eq!(stale.status, 200);
+    assert_eq!(stale.body.as_ref(), bytes.as_slice());
+
+    // Владелец проверяется до диапазона.
+    let router = canterlot_hub::http::router(f.files.state.clone());
+    let anonymous = TestClient::in_process(router).with_header("Range", "bytes=0-9");
+    assert_error(
+        &anonymous.send(Method::GET, &path, None, None).await,
+        401,
+        "unauthenticated",
+        "after_condition",
+    );
+    stop.cancel();
+    timeout(WAIT, task).await.unwrap().unwrap();
+}
+
 fn real_png(width: u32, height: u32) -> Vec<u8> {
     let image = image::RgbImage::from_fn(width, height, |x, y| {
         image::Rgb([(x % 251) as u8, (y % 251) as u8, ((x * y) % 251) as u8])

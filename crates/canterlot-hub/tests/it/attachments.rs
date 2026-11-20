@@ -2687,3 +2687,305 @@ async fn empty_file_uploads_completes_and_downloads_as_zero_bytes(pool: PgPool) 
     assert_eq!(submitted.status, 201, "{:?}", submitted.body);
     assert_eq!(f.count("select count(*) from input_attachments").await, 2);
 }
+
+/// Тело ролика WebM: сигнатура EBML и детерминированный хвост.
+fn webm(len: usize) -> Vec<u8> {
+    let mut bytes = content(len, 31);
+    bytes[..4].copy_from_slice(&[0x1a, 0x45, 0xdf, 0xa3]);
+    bytes
+}
+
+fn range_client(f: &Fixture, headers: &[(&str, &str)]) -> TestClient {
+    headers
+        .iter()
+        .fold(f.client.clone(), |client, (name, value)| {
+            client.with_header(name, value)
+        })
+}
+
+async fn get_content(f: &Fixture, id: Uuid, headers: &[(&str, &str)]) -> testkit::TestResponse {
+    range_client(f, headers)
+        .send(
+            Method::GET,
+            &format!("/api/v1/attachments/{id}/content"),
+            None,
+            None,
+        )
+        .await
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn content_answers_single_byte_ranges_with_206(pool: PgPool) {
+    let _shared = HEAVY.read().await;
+    let f = Fixture::new(pool).await;
+    let data = webm(5000);
+    let id = f.ready("clip.webm", "video/webm", &data).await;
+
+    // Целиком: `Accept-Ranges` объявлен, ролик отдаётся своим типом, но скачивается.
+    let full = get_content(&f, id, &[]).await;
+    assert_eq!(full.status, 200);
+    assert_eq!(full.headers["accept-ranges"], "bytes");
+    assert_eq!(full.headers["content-type"], "video/webm");
+    assert!(
+        full.headers["content-disposition"]
+            .to_str()
+            .unwrap()
+            .starts_with("attachment; ")
+    );
+    assert_eq!(full.body.as_ref(), data.as_slice());
+
+    for (range, from, to) in [
+        ("bytes=10-19", 10, 19),
+        ("bytes=0-0", 0, 0),
+        ("bytes=4990-", 4990, 4999),
+        ("bytes=-100", 4900, 4999),
+        ("bytes=-1", 4999, 4999),
+        // Конец за пределами файла урезается, начало остаётся.
+        ("bytes=4000-99999", 4000, 4999),
+        // Суффикс длиннее файла даёт файл целиком.
+        ("bytes=-99999", 0, 4999),
+        ("bytes=0-", 0, 4999),
+    ] {
+        let part = get_content(&f, id, &[("Range", range)]).await;
+        assert_eq!(part.status, 206, "{range}");
+        assert_eq!(
+            part.headers["content-range"],
+            format!("bytes {from}-{to}/5000"),
+            "{range}"
+        );
+        assert_eq!(
+            part.headers["content-length"],
+            (to - from + 1).to_string(),
+            "{range}"
+        );
+        assert_eq!(part.body.as_ref(), &data[from..=to], "{range}");
+        // Заголовки безопасности и кеша те же, что у полного ответа.
+        for name in [
+            "accept-ranges",
+            "content-type",
+            "content-disposition",
+            "etag",
+            "x-content-type-options",
+            "content-security-policy",
+            "cache-control",
+        ] {
+            assert_eq!(part.headers[name], full.headers[name], "{range} {name}");
+        }
+        assert_eq!(part.headers["x-content-type-options"], "nosniff");
+        assert_eq!(part.headers["content-security-policy"], "sandbox");
+    }
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn content_unsatisfiable_range_answers_416(pool: PgPool) {
+    let _shared = HEAVY.read().await;
+    let f = Fixture::new(pool).await;
+    let data = webm(5000);
+    let id = f.ready("clip.webm", "video/webm", &data).await;
+    for range in [
+        "bytes=5000-",
+        "bytes=9000-9100",
+        "bytes=-0",
+        "bytes=5000-5000",
+    ] {
+        let response = get_content(&f, id, &[("Range", range)]).await;
+        assert_eq!(response.status, 416, "{range}");
+        assert_eq!(response.headers["content-range"], "bytes */5000", "{range}");
+        assert!(response.body.is_empty(), "{range}");
+        assert_eq!(response.headers["x-content-type-options"], "nosniff");
+    }
+    // Пустой файл не удовлетворяет никакому диапазону.
+    let empty = f.ready("empty.webm", "video/webm", b"").await;
+    let response = get_content(&f, empty, &[("Range", "bytes=0-")]).await;
+    assert_eq!(response.status, 416);
+    assert_eq!(response.headers["content-range"], "bytes */0");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn content_ignores_multi_range_and_malformed_range(pool: PgPool) {
+    let _shared = HEAVY.read().await;
+    let f = Fixture::new(pool).await;
+    let data = webm(5000);
+    let id = f.ready("clip.webm", "video/webm", &data).await;
+    for range in [
+        // Несколько диапазонов: ответ целиком, без multipart.
+        "bytes=0-1,5-6",
+        "bytes=0-1, -10",
+        // Не `bytes`, не диапазон, обратный порядок: заголовок игнорируется.
+        "items=0-1",
+        "bytes=abc",
+        "bytes=",
+        "bytes=-",
+        "bytes=5-2",
+        "bytes=1-2-3",
+        "bytes=+1-2",
+        "0-10",
+    ] {
+        let response = get_content(&f, id, &[("Range", range)]).await;
+        assert_eq!(response.status, 200, "{range}");
+        assert!(!response.headers.contains_key("content-range"), "{range}");
+        assert_eq!(response.body.as_ref(), data.as_slice(), "{range}");
+    }
+    // Два заголовка `Range` неоднозначны: тоже целиком.
+    let response = get_content(&f, id, &[("Range", "bytes=0-1"), ("Range", "bytes=2-3")]).await;
+    assert_eq!(response.status, 200);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn content_if_range_is_honoured_with_a_strong_etag(pool: PgPool) {
+    let _shared = HEAVY.read().await;
+    let f = Fixture::new(pool).await;
+    let data = webm(5000);
+    let id = f.ready("clip.webm", "video/webm", &data).await;
+    let etag = format!("\"{}\"", sha(&data));
+    let matching = get_content(&f, id, &[("Range", "bytes=10-19"), ("If-Range", &etag)]).await;
+    assert_eq!(matching.status, 206);
+    assert_eq!(matching.body.as_ref(), &data[10..20]);
+    // Другой ETag, слабый ETag и дата: условие не выполнено, отдаётся весь файл.
+    let other = format!("\"{}\"", "0".repeat(64));
+    let weak = format!("W/{etag}");
+    for condition in [
+        other.as_str(),
+        weak.as_str(),
+        "Wed, 21 Oct 2015 07:28:00 GMT",
+    ] {
+        let response =
+            get_content(&f, id, &[("Range", "bytes=10-19"), ("If-Range", condition)]).await;
+        assert_eq!(response.status, 200, "{condition}");
+        assert!(!response.headers.contains_key("content-range"));
+        assert_eq!(response.body.as_ref(), data.as_slice(), "{condition}");
+    }
+    // Условие без `Range` ничего не меняет.
+    let response = get_content(&f, id, &[("If-Range", &etag)]).await;
+    assert_eq!(response.status, 200);
+    // `If-None-Match` проверяется раньше диапазона.
+    let cached = get_content(
+        &f,
+        id,
+        &[("Range", "bytes=10-19"), ("If-None-Match", &etag)],
+    )
+    .await;
+    assert_eq!(cached.status, 304);
+    assert!(cached.body.is_empty());
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn content_range_keeps_owner_checks(pool: PgPool) {
+    let _shared = HEAVY.read().await;
+    let f = Fixture::new(pool.clone()).await;
+    let data = webm(2048);
+    let id = f.ready("clip.webm", "video/webm", &data).await;
+    let router = canterlot_hub::http::router(f.state.clone());
+    let stranger = TestClient::in_process(router.clone())
+        .with_session("unknown-session-token-0123456789abcdefghij")
+        .with_header("Range", "bytes=0-9");
+    let anonymous = TestClient::in_process(router).with_header("Range", "bytes=0-9");
+    for client in [stranger, anonymous] {
+        let response = client
+            .send(
+                Method::GET,
+                &format!("/api/v1/attachments/{id}/content"),
+                None,
+                None,
+            )
+            .await;
+        assert_eq!(response.status, 401);
+        assert!(!response.headers.contains_key("content-range"));
+    }
+    // Чужого или отсутствующего вложения диапазон не открывает.
+    let response = get_content(&f, Uuid::now_v7(), &[("Range", "bytes=0-9")]).await;
+    assert_error(&response, 404, "not_found", "never");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn content_serves_video_type_only_with_a_matching_signature(pool: PgPool) {
+    let _shared = HEAVY.read().await;
+    let f = Fixture::new(pool).await;
+    let mut mp4 = content(300, 5);
+    mp4[4..8].copy_from_slice(b"ftyp");
+    let mut quicktime = content(300, 6);
+    quicktime[4..8].copy_from_slice(b"ftyp");
+    for (name, mime, bytes, expected) in [
+        ("a.mp4", "video/mp4", mp4.clone(), "video/mp4"),
+        ("b.mov", "video/quicktime", quicktime, "video/quicktime"),
+        ("c.webm", "video/webm", webm(300), "video/webm"),
+        // Подделка под ролик и тип вне списка отдаются потоком байтов.
+        (
+            "fake.mp4",
+            "video/mp4",
+            content(300, 7),
+            "application/octet-stream",
+        ),
+        (
+            "html.webm",
+            "video/webm",
+            b"<script>alert(1)</script>".to_vec(),
+            "application/octet-stream",
+        ),
+        (
+            "d.mkv",
+            "video/x-matroska",
+            webm(300),
+            "application/octet-stream",
+        ),
+    ] {
+        let id = f.ready(name, mime, &bytes).await;
+        let response = get_content(&f, id, &[]).await;
+        assert_eq!(response.status, 200, "{name}");
+        assert_eq!(response.headers["content-type"], expected, "{name}");
+        assert_eq!(response.headers["x-content-type-options"], "nosniff");
+        assert!(
+            response.headers["content-disposition"]
+                .to_str()
+                .unwrap()
+                .starts_with("attachment; "),
+            "{name}"
+        );
+    }
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn content_range_of_a_large_file_is_not_buffered(pool: PgPool) {
+    let _exclusive = HEAVY.write().await;
+    let f = Fixture::new(pool).await;
+    let size = MAX_ATTACHMENT_BYTES;
+    let created = f
+        .client
+        .send(
+            Method::POST,
+            "/api/v1/attachments",
+            Some("range_big"),
+            Some(json!({"conversation_id": f.conversation, "name": "big.webm", "mime": "video/webm", "size": size, "sha256": generated_sha(size)})),
+        )
+        .await;
+    let id = id_of(&created);
+    upload_generated(&f, id, size, None).await;
+    assert_eq!(f.complete(id, "range_big_done", None).await.status, 200);
+    let baseline = rss_bytes();
+    let from = size - 1024 * 1024;
+    let tail = get_content(&f, id, &[("Range", &format!("bytes={from}-"))]).await;
+    assert_eq!(tail.status, 206);
+    assert_eq!(tail.headers["content-length"], (1024 * 1024).to_string());
+    assert_eq!(
+        tail.headers["content-range"],
+        format!("bytes {from}-{}/{size}", size - 1)
+    );
+    let mut expected = Vec::new();
+    for index in from / BLOCK as u64..size.div_ceil(BLOCK as u64) {
+        let data = block(index);
+        let take = (size - index * BLOCK as u64).min(BLOCK as u64) as usize;
+        expected.extend_from_slice(&data[..take]);
+    }
+    let skip = (from - from / BLOCK as u64 * BLOCK as u64) as usize;
+    assert_eq!(tail.body.as_ref(), &expected[skip..]);
+    let middle = get_content(&f, id, &[("Range", "bytes=50000000-50000099")]).await;
+    assert_eq!(middle.status, 206);
+    assert_eq!(middle.body.len(), 100);
+    let growth = rss_bytes().saturating_sub(baseline);
+    eprintln!("rss growth {} KiB", growth / 1024);
+    assert!(
+        growth < 24 * MIB as u64,
+        "RSS grew by {} MiB while reading 1 MiB of a 100 MiB file",
+        growth / MIB as u64
+    );
+}
