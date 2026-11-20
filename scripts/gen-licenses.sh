@@ -300,6 +300,15 @@ doc.append('| --- | --- | --- | --- |')
 doc.append('| «Норд» (`nord`) | Nord, Sven Greb (Arctic Ice Studio) | `MIT` | [github.com/nordtheme/nord](https://github.com/nordtheme/nord) |')
 doc.append('')
 
+# Section: Значки
+doc.append('## Значки\n')
+doc.append('Геометрия значков в `web/src/lib/ui/icons.ts`, взятая из наборов; пакеты в сборку не входят, значок переводится в строку пути скриптом `web/scripts/lucide-icon.mjs` и лежит в исходниках.\n')
+doc.append('| Набор | Версия | Лицензия | Источник |')
+doc.append('| --- | --- | --- | --- |')
+doc.append('| Lucide: `brain`, `hammer`, `wifi`, `wifi-off` | 1.77.0 (`lucide-static`), версия закреплена в скрипте | `ISC`, Copyright (c) Lucide Icons and Contributors | [github.com/lucide-icons/lucide](https://github.com/lucide-icons/lucide) |')
+doc.append('| Lucide: `paperclip`, `mic`, `wrench`, `heart` | взяты раньше, версия не записана | `ISC`, Copyright (c) Lucide Icons and Contributors | [github.com/lucide-icons/lucide](https://github.com/lucide-icons/lucide) |')
+doc.append('')
+
 output_path = 'docs/licenses/THIRD_PARTY.md'
 with open(output_path, 'w', encoding='utf-8') as out:
     out.write('\n'.join(doc) + '\n')
