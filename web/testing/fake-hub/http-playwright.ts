@@ -3,6 +3,7 @@ import type { FakeHub } from './hub';
 import { FakeDraftConflict, FakeMemoryError, NUDGE_BUILTIN_TEXT, type FakeHubApi } from './api';
 import { APP_VERSION } from '../version';
 import { installAuthRoutes } from './auth';
+import { installJobRoutes } from './jobs';
 
 const PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
@@ -2123,6 +2124,8 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     hub.presence.push({ conversation_id: body.conversation_id, visible: body.visible, at: Date.now() });
     await route.fulfill({ status: 204 });
   });
+
+  await installJobRoutes(page, hub, api);
 }
 
 function errorBody(code: string, message: string, details?: Record<string, unknown>): unknown {

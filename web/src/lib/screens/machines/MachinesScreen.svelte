@@ -1,6 +1,8 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
+  import { goto } from '$app/navigation';
   import { resolve } from '$app/paths';
+  import { page } from '$app/state';
   import { browserRuntime } from '#lib/app/browser.js';
   import type { Runtime } from '#lib/app/runtime.js';
   import { loadConfig } from '#lib/api/config.js';
@@ -16,6 +18,8 @@
   import MetricCard from './MetricCard.svelte';
   import { diskLimits, diskView, generalWarnings, hotspotRows, journalStops, leakedSummary, machineStatus, memoryLowText, unleasedText } from './model.js';
   import LeaseQueue from './LeaseQueue.svelte';
+  import JobSheet from './JobSheet.svelte';
+  import JobsSection from './JobsSection.svelte';
   import '../secondary.css';
 
   let runtime = $state<Runtime | null>(null);
@@ -40,6 +44,23 @@
   const sessions = $derived(machine?.sessions?.map(session => ({ id: session.conversation_id, title: session.title, detail: runtime?.list.items.get(session.conversation_id) })) ?? (runtime && machine ? [...runtime.list.items.values()].filter(s => s.machine.id === machine.id).map(session => ({ id: session.id, title: session.title, detail: session })) : []));
   const titleOf = (id: string) => runtime?.list.items.get(id)?.title ?? machine?.sessions?.find(session => session.conversation_id === id)?.title;
   const heartbeat = $derived(machine?.heartbeat_age_ms != null ? (machine.heartbeat_received_at === undefined ? now : machine.heartbeat_received_at + clock.offset) - machine.heartbeat_age_ms : metrics ? Date.parse(metrics.observed_at) : null);
+
+  // Лист задачи: ссылка из карточки ленты `?job=<id>` открывает его, а экран встаёт на машину задачи.
+  let openJob = $state<string | null>(null);
+  const linkedJob = $derived(page.url.searchParams.get('job'));
+  $effect(() => {
+    const id = linkedJob;
+    if (id) untrack(() => { openJob = id; });
+  });
+  $effect(() => {
+    const machineId = openJob ? runtime?.machines.jobs.get(openJob)?.machine_id : undefined;
+    if (machineId && untrack(() => selected) !== machineId && machines.some(m => m.id === machineId)) selected = machineId;
+  });
+  function closeJob() {
+    openJob = null;
+    // Ссылка снимается: тот же переход из карточки ленты откроет лист снова.
+    if (page.url.searchParams.has('job')) void goto(resolve('/machines'), { replaceState: true });
+  }
 
   // Выключатель удалённой работы: пока ответ не пришёл, переключатель занят; отказ возвращает прежнее значение.
   let remoteBusy = $state(false); let remoteNotice = $state('');
@@ -132,12 +153,14 @@
         {/if}
       </div>
       <LeaseQueue lease={machine.lease} available={machine.availability === 'available'} {titleOf} {now} />
+      {#if runtime}<JobsSection {runtime} machineId={machine.id} onopen={(id) => { openJob = id; }} />{/if}
       <h2>Сессии на машине</h2>
       {#each sessions as session (session.id)}<a class="session-link" href={resolve('/c/[id]', { id: session.id })}>{session.title}{#if session.detail}<small>{session.detail.harness.title} · {modelLabel(session.detail.model)}</small>{/if}</a>{:else}<p class="note">На этой машине пока нет сессий</p>{/each}
       <div class="heartbeat"><p>Последний сигнал {heartbeat === null ? 'ещё не получен' : fmt.ago(heartbeat, now)}</p>
       {#if machine.availability_since}<p class="note">Подключение с {fmt.clock(Date.parse(machine.availability_since))} · {fmt.dayLabel(Date.parse(machine.availability_since), now)}</p>{/if}</div>
     {/if}
   </div></div>
+  {#if openJob && runtime}{#key openJob}<JobSheet {runtime} jobId={openJob} onclose={closeJob} />{/key}{/if}
 </main>
 <style>
   .heading { display: flex; flex-wrap: wrap; gap: var(--s4); justify-content: space-between; align-items: center; margin-top: var(--s8); }

@@ -8,6 +8,9 @@ import type { BlockModel } from '#lib/stores/blocks.js';
 import AcceptCard from './AcceptCard.svelte';
 import AlarmListCard from './AlarmListCard.svelte';
 import FindCard from './FindCard.svelte';
+import JobLogCard from './JobLogCard.svelte';
+import JobRunCard from './JobRunCard.svelte';
+import JobsListCard from './JobsListCard.svelte';
 import ForgejoCard from './ForgejoCard.svelte';
 import ReadCard from './ReadCard.svelte';
 import EditCard from './EditCard.svelte';
@@ -33,6 +36,7 @@ import PlanListCard from './plan/PlanListCard.svelte';
 import PlanUpdateCard from './plan/PlanUpdateCard.svelte';
 import { planHref } from './plan/livePlan';
 import { alarmCancel, alarmList, alarmSet } from './defs/alarms';
+import * as jobs from './defs/jobs';
 import { limits } from './defs/limits';
 import { meeting } from './defs/meeting';
 import * as memory from './defs/memory';
@@ -121,6 +125,11 @@ function remembered<D>(logic: CardLogic<D>, done: (data: D) => StateWord | null)
   return { ...logic, word: (call, data) => (call.state === 'done' ? done(data) : defaultWord(call)) };
 }
 
+/** Готовый вызов задачи говорит состояние задачи; отказ, ход и обрыв — слово состояния вызова. */
+function jobbed(logic: CardLogic<jobs.JobCallData>): CardLogic<jobs.JobCallData> {
+  return { ...logic, word: (call, data) => (call.state === 'done' ? jobs.jobCallWord(data) : defaultWord(call)) };
+}
+
 const REGISTRY: Record<string, AnyCard> = {
   'canterlot.memory_search': card(remembered(memory.memorySearch, (data) => (data.refusal ? null : memory.searchWord(data))), MemorySearchCard),
   'canterlot.memory_get': card(memory.memoryGet, MemoryGetCard),
@@ -153,6 +162,11 @@ const REGISTRY: Record<string, AnyCard> = {
   'canterlot.plan_update': card(planUpdate, PlanUpdateCard),
   'canterlot.plan_list': card(toPlan(planList), PlanListCard),
   'canterlot.plan_adopt': card({ ...planAdopt, link: (call, data) => sessionLink(call, data.from) }, PlanAdoptCard),
+  'canterlot.job_run': card(jobbed(jobs.jobRun), JobRunCard),
+  'canterlot.job_status': card(jobbed(jobs.jobStatus), JobRunCard),
+  'canterlot.job_cancel': card(jobbed(jobs.jobCancel), JobRunCard),
+  'canterlot.job_log': card({ ...jobs.jobLog, word: (call, data) => (call.state === 'done' ? jobs.logWord(data) : defaultWord(call)) }, JobLogCard),
+  'canterlot.jobs_list': card({ ...jobs.jobsList, word: (call) => defaultWord(call) }, JobsListCard),
   'todo.write': card(todo, TodoCard),
   'agent.task': card(subagent, SubagentCard),
   'question.ask': card(question, QuestionCard),
