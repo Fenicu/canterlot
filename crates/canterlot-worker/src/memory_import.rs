@@ -35,10 +35,13 @@ const SUBJECT_MAX_CHARS: usize = 160;
 /// Сколько разделителей имени каталога перебирается; дальше остаётся один кандидат.
 const MAX_SEPARATORS: usize = 6;
 
-pub const SKIP_CREDENTIAL_NAME: &str = "credential_name";
+#[allow(dead_code)]
+#[path = "../../canterlot-hub/src/memory/import_rules.rs"]
+mod import_rules;
+
+pub use import_rules::{SKIP_CREDENTIAL_NAME, SKIP_INDEX_FILE};
 pub const SKIP_LOOKS_LIKE_SECRET: &str = "looks_like_secret";
 pub const SKIP_TOO_LARGE: &str = "too_large";
-pub const SKIP_INDEX_FILE: &str = "index_file";
 pub const SKIP_NOT_TEXT: &str = "not_text";
 pub const SKIP_EMPTY_BODY: &str = "empty_body";
 
@@ -121,6 +124,8 @@ pub struct BundleEntry {
 pub enum PlanError {
     #[error("root is not a readable directory")]
     Root,
+    #[error("root is a symbolic link")]
+    SymlinkRoot,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -129,6 +134,8 @@ pub enum BundleError {
     Root,
     #[error("bad manifest field {field}")]
     BadManifest { field: &'static str },
+    #[error("path component is a symbolic link, refusing to follow it: {path}")]
+    Symlink { path: String },
     #[error("file is missing or is not a regular file: {path}")]
     Missing { path: String },
     #[error("hash differs from the manifest: {path}")]
@@ -145,6 +152,9 @@ pub enum BundleError {
 
 /// Составить манифест. Только чтение; ссылки не раскрываются.
 pub fn plan(root: &Path, options: &PlanOptions) -> Result<Manifest, PlanError> {
+    if is_symlink(root) {
+        return Err(PlanError::SymlinkRoot);
+    }
     let root = fs::canonicalize(root).map_err(|_| PlanError::Root)?;
     nofollow::open_dir(&root).map_err(|_| PlanError::Root)?;
     let work_roots: Vec<PathBuf> = options
@@ -212,6 +222,11 @@ pub fn bundle(
     bundle_id: &str,
     created_at: &str,
 ) -> Result<Bundle, BundleError> {
+    if is_symlink(Path::new(&manifest.root)) {
+        return Err(BundleError::Symlink {
+            path: "manifest root".to_owned(),
+        });
+    }
     let root = fs::canonicalize(&manifest.root).map_err(|_| BundleError::Root)?;
     let mut entries = Vec::new();
     for block in &manifest.dir {
@@ -225,13 +240,40 @@ pub fn bundle(
         if !matches!(block.domain.as_str(), "work" | "personal") {
             return Err(BundleError::BadManifest { field: "domain" });
         }
-        let wanted: Vec<&FileEntry> = block.file.iter().filter(|f| f.skip.is_empty()).collect();
+        // Имена индекса и учётных данных отсекаются заново: пометка в манифесте правится рукой.
+        let wanted: Vec<&FileEntry> = block
+            .file
+            .iter()
+            .filter(|f| f.skip.is_empty())
+            .filter(|f| {
+                let base = import_rules::basename(&f.path);
+                import_rules::forbidden_name(base).is_none()
+            })
+            .collect();
         if wanted.is_empty() {
             continue;
         }
         let missing = |path: &str| BundleError::Missing {
             path: format!("{}/{path}", block.source),
         };
+        for link in [
+            root.join(&block.source),
+            root.join(&block.source).join("memory"),
+        ] {
+            if is_symlink(&link) {
+                return Err(BundleError::Symlink {
+                    path: format!(
+                        "{}{}",
+                        block.source,
+                        if link.ends_with("memory") {
+                            "/memory"
+                        } else {
+                            ""
+                        }
+                    ),
+                });
+            }
+        }
         let memory = real_dir(&root.join(&block.source).join("memory"))
             .filter(|_| real_dir(&root.join(&block.source)).is_some())
             .ok_or_else(|| missing("memory"))?;
@@ -247,9 +289,6 @@ pub fn bundle(
             if hex(&Sha256::digest(&data)) != file.sha256 {
                 return Err(BundleError::HashMismatch { path: shown });
             }
-            if loaded.size > BODY_MAX_BYTES {
-                return Err(BundleError::TooLarge { path: shown });
-            }
             let Ok(text) = String::from_utf8(data) else {
                 return Err(BundleError::NotText { path: shown });
             };
@@ -263,6 +302,9 @@ pub fn bundle(
                 });
             }
             let parsed = parse(&text, name);
+            if parsed.body.len() as u64 > BODY_MAX_BYTES {
+                return Err(BundleError::TooLarge { path: shown });
+            }
             if parsed.body.is_empty() {
                 return Err(BundleError::EmptyBody { path: shown });
             }
@@ -283,6 +325,11 @@ pub fn bundle(
         created_at: created_at.to_owned(),
         entries,
     })
+}
+
+/// Сам путь (последний компонент) ссылка; без раскрытия.
+fn is_symlink(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
 }
 
 /// Каталог, который сам не ссылка и в пути которого нет ссылок.
@@ -334,55 +381,52 @@ fn load(dir: &OwnedFd, name: &str) -> Option<Loaded> {
     Some(Loaded { size, mtime, data })
 }
 
+/// Запись манифеста. Пропущенный файл несёт только безопасные поля: путь, размер и причину.
+/// Тема, вид и хэш заполняются лишь у файла, который пойдёт в пакет, и только после
+/// проверки имени и поиска секрета по сырому тексту.
 fn describe(dir: &OwnedFd, name: &str) -> Option<FileEntry> {
-    let loaded = load(dir, name)?;
     let path = format!("memory/{name}");
-    let mut entry = FileEntry {
-        path,
+    let skipped = |size: u64, reason: &str| FileEntry {
+        path: path.clone(),
         sha256: String::new(),
-        size: loaded.size,
-        kind: "reference".to_owned(),
-        subject: name.trim_end_matches(".md").to_owned(),
-        skip: String::new(),
+        size,
+        kind: String::new(),
+        subject: String::new(),
+        skip: reason.to_owned(),
     };
-    let text = loaded.data.as_ref().and_then(|data| {
-        entry.sha256 = hex(&Sha256::digest(data));
-        String::from_utf8(data.clone())
-            .ok()
-            .filter(|text| !text.contains('\0'))
-    });
-    if let Some(text) = &text {
-        let parsed = parse(text, name);
-        entry.kind = parsed.kind;
-        entry.subject = parsed.subject;
-        if parsed.body.is_empty() {
-            entry.skip = SKIP_EMPTY_BODY.to_owned();
-        }
+    // Имя решает до чтения содержимого.
+    if let Some(reason) = import_rules::forbidden_name(name) {
+        let size = nofollow::open_file(dir, name).ok()?.metadata().ok()?.len();
+        return Some(skipped(size, reason));
     }
-    let secret = text.as_deref().and_then(secrets::scan).is_some();
-    entry.skip = if name == "MEMORY.md" {
-        SKIP_INDEX_FILE
-    } else if credential_name(name) {
-        SKIP_CREDENTIAL_NAME
-    } else if loaded.size > BODY_MAX_BYTES {
-        SKIP_TOO_LARGE
-    } else if text.is_none() {
-        SKIP_NOT_TEXT
-    } else if secret {
-        SKIP_LOOKS_LIKE_SECRET
-    } else {
-        entry.skip.as_str()
+    let loaded = load(dir, name)?;
+    let Some(data) = loaded.data else {
+        return Some(skipped(loaded.size, SKIP_TOO_LARGE));
+    };
+    let Some(text) = String::from_utf8(data.clone())
+        .ok()
+        .filter(|text| !text.contains('\0'))
+    else {
+        return Some(skipped(loaded.size, SKIP_NOT_TEXT));
+    };
+    if secrets::scan(&text).is_some() {
+        return Some(skipped(loaded.size, SKIP_LOOKS_LIKE_SECRET));
     }
-    .to_owned();
-    Some(entry)
-}
-
-fn credential_name(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    lower == "reference_all.md"
-        || ["credential", "secret", "token"]
-            .iter()
-            .any(|word| lower.contains(word))
+    let parsed = parse(&text, name);
+    if parsed.body.len() as u64 > BODY_MAX_BYTES {
+        return Some(skipped(loaded.size, SKIP_TOO_LARGE));
+    }
+    if parsed.body.is_empty() {
+        return Some(skipped(loaded.size, SKIP_EMPTY_BODY));
+    }
+    Some(FileEntry {
+        path,
+        sha256: hex(&Sha256::digest(&data)),
+        size: loaded.size,
+        kind: parsed.kind,
+        subject: parsed.subject,
+        skip: String::new(),
+    })
 }
 
 /// Все пути, в которые раскрывается имя каталога Claude (`/` и `-` кодируются одинаково),
