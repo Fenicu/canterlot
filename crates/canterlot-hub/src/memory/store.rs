@@ -841,10 +841,13 @@ pub async fn update(
     let project = match patch.level {
         None => old.project.clone(),
         Some(Level::Domain) => None,
+        // Проект области первым: владелец называет его явно, а у агента он совпадает со
+        // старым (чужую запись проекта агент заблокировать не может).
         Some(Level::Project) => Some(
-            old.project
+            scope
+                .project
                 .clone()
-                .or_else(|| scope.project.clone())
+                .or_else(|| old.project.clone())
                 .ok_or(MemoryError::BadLevel)?,
         ),
     };

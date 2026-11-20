@@ -444,3 +444,44 @@ async fn conversation_info_carries_memory_domain_and_conflict(pool: PgPool) {
     assert!(conflict["memory_domain"].is_null());
     assert_eq!(conflict["memory_conflict"], true);
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn owner_put_can_move_an_entry_between_projects(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let created = fx
+        .call(
+            Method::POST,
+            "/api/v1/memory",
+            Some(json!({
+                "domain": "work", "level": "project", "project": "/h/work/alpha",
+                "kind": "gotcha", "subject": "Правило", "body": "текст",
+            })),
+        )
+        .await;
+    assert_eq!(created.status.as_u16(), 201);
+    let id = created.json::<Value>()["id"].as_str().unwrap().to_owned();
+    let moved = fx
+        .call(
+            Method::PUT,
+            &format!("/api/v1/memory/{id}"),
+            Some(json!({
+                "domain": "work", "expected_version": 1,
+                "level": "project", "project": "/h/work/beta",
+            })),
+        )
+        .await;
+    assert_eq!(moved.status.as_u16(), 200);
+    let moved = moved.json::<Value>();
+    assert_eq!(moved["project"], "/h/work/beta");
+    assert_eq!(moved["project_label"], "beta");
+    // Без явного проекта запись остаётся там, где была.
+    let kept = fx
+        .call(
+            Method::PUT,
+            &format!("/api/v1/memory/{id}"),
+            Some(json!({"domain": "work", "expected_version": 2, "level": "project"})),
+        )
+        .await
+        .json::<Value>();
+    assert_eq!(kept["project"], "/h/work/beta");
+}

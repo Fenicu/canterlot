@@ -569,7 +569,7 @@ export class FakeHubApi {
 		let place: Partial<MemoryEntryView> = {};
 		if (body.level === 'domain') place = { level: 'domain', project: null, project_label: null };
 		if (body.level === 'project') {
-			const project = row.project ?? body.project ?? null;
+			const project = body.project || row.project || null;
 			if (!project) throw new FakeMemoryError(422, 'bad_level', 'Уровень проекта требует проект');
 			place = { level: 'project', project, project_label: project.split('/').at(-1) ?? project };
 		}

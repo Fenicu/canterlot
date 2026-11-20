@@ -295,3 +295,52 @@ test('revision_view_and_restore', async ({ page }) => {
   await prompt.getByRole('button', { name: 'Загрузить актуальную версию' }).click();
   await expect(sheet.getByRole('textbox', { name: 'Текст' })).toHaveValue('Правка с другого устройства');
 });
+
+test('revision_restore_brings_back_subject_kind_and_level', async ({ page }) => {
+  const { api } = await open(page, (hub) => {
+    const seeded = hub.seedMemory({ domain: 'work', subject: 'Старая тема', kind: 'gotcha', level: 'project', project: ALPHA, project_label: 'alpha', body: 'Старый текст' });
+    hub.updateMemory(seeded.id, { domain: 'work', expected_version: 1, subject: 'Новая тема', kind: 'decision', level: 'domain', body: 'Новый текст' });
+  });
+  const entry = () => [...api.memoryEntries.values()].find((row) => row.body === 'Старый текст' || row.body === 'Новый текст')!;
+  expect(entry()).toMatchObject({ subject: 'Новая тема', kind: 'decision', level: 'domain', project: null });
+
+  await page.locator('[data-memory-row]', { hasText: 'Новая тема' }).click();
+  const sheet = page.getByRole('dialog', { name: 'Запись' });
+  await sheet.getByText('Прошлые версии').click();
+  await sheet.locator('[data-role="memory-revisions"]').getByRole('button', { name: /Версия 1/ }).click();
+  await expect(sheet.locator('[data-role="memory-revision"]')).toContainText('тема, вид, уровень, срок и текст');
+  await sheet.getByRole('button', { name: 'Вернуть эту версию' }).click();
+
+  await expect(sheet.locator('[data-role="memory-version"]')).toHaveText('Версия 3');
+  await expect(sheet.getByRole('textbox', { name: 'Тема' })).toHaveValue('Старая тема');
+  await expect(sheet.getByRole('combobox', { name: 'Вид' })).toHaveValue('gotcha');
+  await expect(sheet.getByRole('combobox', { name: 'Уровень' })).toHaveValue('project');
+  await expect(sheet.getByRole('textbox', { name: 'Текст' })).toHaveValue('Старый текст');
+  expect(entry()).toMatchObject({ subject: 'Старая тема', kind: 'gotcha', level: 'project', project: ALPHA, body: 'Старый текст', version: 3 });
+});
+
+test('secret_warning_on_revision_restore_replays_that_restore', async ({ page }) => {
+  const secret = 'ключ sk-abcdefghijklmnop1234 для вызова';
+  const { api } = await open(page, (hub) => {
+    // Старая версия сохранена владельцем поверх предупреждения, текущая чистая.
+    const seeded = hub.seedMemory({ domain: 'work', subject: 'Доступ к API', body: secret });
+    hub.updateMemory(seeded.id, { domain: 'work', expected_version: 1, body: 'Чистый текст' });
+  });
+  const entry = () => [...api.memoryEntries.values()].find((row) => row.subject === 'Доступ к API')!;
+  await page.locator('[data-memory-row]', { hasText: 'Доступ к API' }).click();
+  const sheet = page.getByRole('dialog', { name: 'Запись' });
+  // Несохранённая правка в редакторе не должна подменить восстановление.
+  await sheet.getByRole('textbox', { name: 'Текст' }).fill('Несохранённая правка редактора');
+  await sheet.getByText('Прошлые версии').click();
+  await sheet.locator('[data-role="memory-revisions"]').getByRole('button', { name: /Версия 1/ }).click();
+  await sheet.getByRole('button', { name: 'Вернуть эту версию' }).click();
+
+  const warning = sheet.locator('[data-role="memory-secret"]');
+  await expect(warning).toContainText('Текст похож на секрет');
+  expect(entry()).toMatchObject({ version: 2, body: 'Чистый текст' });
+  await warning.getByRole('button', { name: 'Сохранить всё равно' }).click();
+
+  await expect(sheet.locator('[data-role="memory-version"]')).toHaveText('Версия 3');
+  expect(entry()).toMatchObject({ version: 3, body: secret });
+  await expect(sheet.getByRole('textbox', { name: 'Текст' })).toHaveValue(secret);
+});

@@ -39,6 +39,24 @@ export function entryStatus(entry: { status: string; expired: boolean }): { word
   return { word: "Активна", tone: "ok" };
 }
 
+/**
+ * Полный правимый снимок версии для `PUT`: вид, тема, текст, уровень с проектом и срок.
+ * Хаб кладёт в версию все эти поля; отсутствующий срок значит «без срока», и он снимается.
+ */
+export function revisionSnapshot(revision: Pick<MemoryRevision, "kind" | "subject" | "body" | "project" | "valid_until">) {
+  return {
+    kind: revision.kind,
+    subject: revision.subject,
+    body: revision.body,
+    level: revision.project ? "project" : "domain",
+    project: revision.project ?? undefined,
+    valid_until: revision.valid_until ?? null
+  };
+}
+
+export const RESTORE_NOTE = (version: number): string =>
+  `Вернутся тема, вид, уровень, срок и текст версии ${version}. Это станет новой версией записи, прежняя история сохранится`;
+
 /** Кто менял запись: `{kind: owner | agent | import, ...}` из `updated_by`. */
 export function actorLabel(actor: unknown): string {
   const value = (actor ?? {}) as { kind?: string; harness?: string };

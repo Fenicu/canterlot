@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { ApiError } from '#lib/api/http.js';
 import {
+  RESTORE_NOTE,
+  revisionSnapshot,
   actorLabel,
   changedLine,
   collectProjects,
@@ -97,6 +99,24 @@ describe('who changed an entry', () => {
     const line = changedLine({ updated_by: { kind: 'owner' }, updated_at: '2026-11-01T09:05:00Z' });
     expect(line.startsWith('Изменено владельцем, ')).toBe(true);
     expect(line.length).toBeLessThan(60);
+  });
+});
+
+describe('revision snapshot', () => {
+  it('carries every editable field of a project-level revision', () => {
+    expect(revisionSnapshot({ kind: 'gotcha', subject: 'Тема', body: 'Текст', project: '/h/work/alpha', valid_until: '2027-01-01T23:59:59Z' })).toEqual({
+      kind: 'gotcha', subject: 'Тема', body: 'Текст', level: 'project', project: '/h/work/alpha', valid_until: '2027-01-01T23:59:59Z'
+    });
+  });
+
+  it('turns a domain-level revision without expiry into level domain and no expiry', () => {
+    expect(revisionSnapshot({ kind: 'user', subject: 'Т', body: 'Б', project: null })).toEqual({
+      kind: 'user', subject: 'Т', body: 'Б', level: 'domain', project: undefined, valid_until: null
+    });
+  });
+
+  it('names what comes back', () => {
+    expect(RESTORE_NOTE(3)).toContain('тема, вид, уровень, срок и текст версии 3');
   });
 });
 

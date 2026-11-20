@@ -8,7 +8,7 @@
   import Sheet from '#lib/ui/Sheet.svelte';
   import Textarea from '#lib/ui/Textarea.svelte';
   import {
-    KINDS, actorLabel, conflictVersion, dateToValidUntil, entryStatus, kindLabel, levelLabel, secretClass, validUntilToDate,
+    KINDS, RESTORE_NOTE, actorLabel, conflictVersion, revisionSnapshot, dateToValidUntil, entryStatus, kindLabel, levelLabel, secretClass, validUntilToDate,
     type MemoryDomain, type MemoryEntry, type MemoryRevision
   } from './memory.js';
 
@@ -55,37 +55,46 @@
   }
   function clearMessages() { error = ''; notice = ''; conflict = null; secret = ''; }
 
-  async function run(action: () => Promise<void>, fallback: string) {
+  /** Запрос, вызвавший предупреждение о секрете: «Сохранить всё равно» повторяет именно его. */
+  let replay = $state<(() => void) | null>(null);
+
+  /**
+   * `send` собран из значений на момент нажатия и не читает форму заново: повтор после
+   * предупреждения уходит с теми же данными и версией, только с `force_secret_warning`.
+   */
+  async function run(send: (force: boolean) => Promise<void>, fallback: string, force = false) {
     if (busy) return;
-    busy = true; clearMessages();
-    try { await action(); }
+    busy = true; clearMessages(); replay = null;
+    try { await send(force); }
     catch (err) {
       const version = conflictVersion(err);
       const cls = secretClass(err);
       if (version !== null) conflict = version;
-      else if (cls !== null) secret = cls;
+      else if (cls !== null) { secret = cls; replay = () => void run(send, fallback, true); }
       else error = errorText(err, fallback);
     } finally { busy = false; }
   }
 
-  function save(force = false) {
-    void run(async () => {
-      const key = crypto.randomUUID();
-      const text = { kind, subject: subject.trim(), body, valid_until: dateToValidUntil(until), force_secret_warning: force || undefined };
-      if (current) {
-        const place = level !== current.level ? { level, project: level === 'project' ? project.trim() : undefined } : {};
-        const next = (await updateMemory(current.id, { domain, expected_version: current.version, ...place, ...text }, key)).data;
+  function save() {
+    const key = crypto.randomUUID();
+    const text = { kind, subject: subject.trim(), body, valid_until: dateToValidUntil(until) };
+    const target = current;
+    const place = target
+      ? (level !== target.level ? { level, project: level === 'project' ? project.trim() : undefined } : {})
+      : { level, project: level === 'project' ? project.trim() : undefined };
+    const version = target?.version;
+    void run(async (force) => {
+      const guard = { force_secret_warning: force || undefined };
+      if (target && version !== undefined) {
+        const next = (await updateMemory(target.id, { domain, expected_version: version, ...place, ...text, ...guard }, key)).data;
         fill(next); notice = `Сохранено, версия ${next.version}`;
       } else {
-        const created = (await createMemory({ domain, level, project: level === 'project' ? project.trim() : undefined, ...text }, key)).data;
+        const created = (await createMemory({ domain, level, project: level === 'project' ? project.trim() : undefined, ...text, ...guard }, key)).data;
         fill(created); notice = 'Запись создана';
       }
       onchanged();
     }, 'Не удалось сохранить запись. Повторите при восстановлении связи');
   }
-
-  /** Подтверждённая правка: хаб отказал в проверке секретов, владелец решил сохранить. */
-  const saveAnyway = () => save(true);
 
   function reload() {
     if (!current) return;
@@ -111,12 +120,15 @@
     void run(async () => { await deleteMemory(target.id, domain, crypto.randomUUID()); onchanged(); onclose(); }, 'Не удалось удалить запись');
   }
 
-  /** Тело выбранной версии пишется как новая версия записи: история не теряется. */
+  /** Выбранная версия целиком (тема, вид, уровень, срок, текст) пишется как новая: история не теряется. */
   function restoreRevision() {
     const target = current; const old = picked;
     if (!target || !old) return;
-    void run(async () => {
-      const next = (await updateMemory(target.id, { domain, expected_version: target.version, body: old.body }, crypto.randomUUID())).data;
+    const key = crypto.randomUUID();
+    const snapshot = revisionSnapshot(old);
+    const version = target.version;
+    void run(async (force) => {
+      const next = (await updateMemory(target.id, { domain, expected_version: version, ...snapshot, force_secret_warning: force || undefined }, key)).data;
       fill(next); picked = null; revisions = null;
       notice = `Версия ${old.version} возвращена как версия ${next.version}`;
       onchanged();
@@ -152,7 +164,7 @@
     {#if secret}
       <div class="alert" role="alert" data-role="memory-secret">
         <p>Текст похож на секрет (класс находки: {secret}). Память читают все сессии домена, пароли и ключи в ней не место. Если это не секрет, сохраните запись как есть.</p>
-        <Button onclick={saveAnyway}>Сохранить всё равно</Button>
+        <Button onclick={() => replay?.()}>Сохранить всё равно</Button>
       </div>
     {/if}
 
@@ -222,6 +234,7 @@
           <div class="picked" data-role="memory-revision">
             <p class="note">Версия {picked.version}: {picked.subject}</p>
             <pre data-role="memory-revision-body">{picked.body}</pre>
+            <p class="note">{RESTORE_NOTE(picked.version)}</p>
             {#if !archived}<Button onclick={restoreRevision}>Вернуть эту версию</Button>{/if}
           </div>
         {/if}
