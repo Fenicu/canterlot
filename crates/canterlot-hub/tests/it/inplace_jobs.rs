@@ -39,6 +39,21 @@ struct Fx {
     _sessions: Vec<FakeSession>,
 }
 
+/// Ждёт условия без пауз по часам: уступает исполнителю между проверками, предел — 10 с.
+async fn until<F, Fut>(what: &str, mut check: F)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !check().await {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+}
+
 fn code(result: Result<Value, ToolError>) -> Code {
     result.expect_err("the call must be refused").code
 }
@@ -244,17 +259,27 @@ impl Fx {
 
     /// Единственная заявка в базе и её id: ждёт, пока вызов в фоне её запишет.
     async fn only_job(&self) -> Uuid {
-        for _ in 0..250 {
+        let found = std::cell::Cell::new(None);
+        until("the job to be created", || async {
             let ids: Vec<Uuid> = sqlx::query_scalar("select id from jobs")
                 .fetch_all(&self.pool)
                 .await
                 .unwrap();
             if let [id] = ids.as_slice() {
-                return *id;
+                found.set(Some(*id));
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        panic!("the job was not created");
+            found.get().is_some()
+        })
+        .await;
+        found.get().expect("the job was created")
+    }
+
+    /// Ждёт выбранной доставки: оборванный вызов переводит итог на сообщение в своей задаче.
+    async fn delivery_chosen(&self, id: Uuid) {
+        until("the delivery to be chosen", || async {
+            self.job(id).await.delivery.is_some()
+        })
+        .await;
     }
 
     async fn set_mode(&self, mode: &str, pending: Option<&str>) {
@@ -365,12 +390,7 @@ async fn caller_worker_deadline_shorter_than_the_waiter_gives_one_message(pool: 
     // Воркер заказчика обрывает вызов раньше, чем ждущий хаба: обработчик отброшен.
     call.abort();
     let _ = call.await;
-    for _ in 0..100 {
-        if fx.job(id).await.delivery.is_some() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    fx.delivery_chosen(id).await;
     assert_eq!(fx.job(id).await.delivery.as_deref(), Some("message"));
     fx.started(fx.a, id).await;
     fx.finished(fx.a, id, JobOutcome::Succeeded, Some(0)).await;
@@ -395,12 +415,7 @@ async fn hub_restart_during_the_wait_turns_every_undelivered_job_into_a_message(
     // Хаб умирает вместе с ждущим вызовом; строка остаётся без выбранной доставки.
     call.abort();
     let _ = call.await;
-    for _ in 0..100 {
-        if fx.job(running).await.delivery.is_some() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    fx.delivery_chosen(running).await;
     sqlx::query("update jobs set delivery=null where id=$1")
         .bind(running)
         .execute(&fx.pool)
