@@ -893,9 +893,9 @@ async fn stored_label(pool: &PgPool, machine: Uuid) -> String {
 }
 
 fn limit_pause_of(pauses: &[PauseReason], account: &str) -> bool {
-    pauses.iter().any(
-        |p| matches!(p, PauseReason::LimitReached { account: a, .. } if a == account),
-    )
+    pauses
+        .iter()
+        .any(|p| matches!(p, PauseReason::LimitReached { account: a, .. } if a == account))
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
@@ -912,7 +912,10 @@ async fn a_label_change_removes_the_old_account_pause_and_pending_wakes(pool: Pg
     assert!(limit_pause_of(&before, B), "{before:?}");
     // Ожидающее пробуждение старой записи и пробуждение чужой записи того же разговора.
     for (account, payload) in [
-        (B, json!({"provider":"claude","account":B,"window":"five_hour"})),
+        (
+            B,
+            json!({"provider":"claude","account":B,"window":"five_hour"}),
+        ),
         ("owner", json!({"provider":"claude","window":"weekly"})),
     ] {
         sqlx::query("insert into scheduled_jobs(id,kind,owner_id,conversation_id,run_at,payload) values($1,'wake',$2,$3,$4,$5)")
@@ -951,9 +954,7 @@ async fn a_label_change_removes_the_old_account_pause_and_pending_wakes(pool: Pg
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_replayed_limit_reached_of_the_old_account_never_recreates_a_hold_or_pause(
-    pool: PgPool,
-) {
+async fn a_replayed_limit_reached_of_the_old_account_never_recreates_a_hold_or_pause(pool: PgPool) {
     let mut env = Env::with_config(&pool, patient_config()).await;
     let b = add_account_machine(&mut env, B).await;
     let crunch = env.conversation_on(b, true, true).await;
@@ -964,8 +965,15 @@ async fn a_replayed_limit_reached_of_the_old_account_never_recreates_a_hold_or_p
     assert_eq!(stored_label(&pool, b).await, "c-acct");
     // Повтор журнала: факт ещё старой записи доходит после смены метки.
     for conversation in [crunch, plain] {
-        env.limit_reached_as(conversation, "claude", B, Window::FiveHour, Some(reset), now)
-            .await;
+        env.limit_reached_as(
+            conversation,
+            "claude",
+            B,
+            Window::FiveHour,
+            Some(reset),
+            now,
+        )
+        .await;
     }
     let crunch_holds = holds(&pool, crunch).await;
     assert!(!quota_of(&crunch_holds, B), "{crunch_holds:?}");
@@ -983,8 +991,15 @@ async fn a_replayed_limit_reached_of_the_old_account_never_recreates_a_hold_or_p
     .unwrap();
     assert_eq!(kept, 1);
     // Факт новой записи по-прежнему применяется.
-    env.limit_reached_as(plain, "claude", "c-acct", Window::FiveHour, Some(reset), now)
-        .await;
+    env.limit_reached_as(
+        plain,
+        "claude",
+        "c-acct",
+        Window::FiveHour,
+        Some(reset),
+        now,
+    )
+    .await;
     assert!(limit_pause_of(&pauses(&pool, plain).await, "c-acct"));
 }
 
@@ -995,8 +1010,15 @@ async fn a_legacy_report_without_a_label_keeps_the_stored_non_owner_label(pool: 
     let conversation = env.conversation_on(b, true, true).await;
     let now = start();
     let reset = now + secs(3600);
-    env.limit_reached_as(conversation, "claude", B, Window::FiveHour, Some(reset), now)
-        .await;
+    env.limit_reached_as(
+        conversation,
+        "claude",
+        B,
+        Window::FiveHour,
+        Some(reset),
+        now,
+    )
+    .await;
     // Откатившийся воркер: отчёт без метки не меняет сохранённую запись и ничего не снимает.
     let released = report_label(&env, b, "").await;
     assert!(released.is_empty(), "{released:?}");
@@ -1005,7 +1027,9 @@ async fn a_legacy_report_without_a_label_keeps_the_stored_non_owner_label(pool: 
     // Факт без метки по-прежнему отбрасывается, а не попадает в `owner`.
     let mut conn = pool.acquire().await.unwrap();
     assert_eq!(
-        limits::fact_account(&mut conn, b, "claude", "").await.unwrap(),
+        limits::fact_account(&mut conn, b, "claude", "")
+            .await
+            .unwrap(),
         None
     );
     drop(conn);
