@@ -483,7 +483,8 @@ fn session_input_schema(mcp_name: &str) -> Value {
                 "model": {"type": "string", "description": "Catalog id or a recognizable name such as fable, Opus 5.5, claude-sonnet-5-5, deepseek-v4.1-flash; unknown or ambiguous names answer with the catalog ids."},
                 "effort": {"type": "string"},
                 "title": {"type": "string"},
-                "workdir": {"type": "string", "description": "Defaults to the workdir of this session."},
+                "machine": {"type": "string", "description": "Machine name or id to run the session on; default is your own machine. Another machine needs `workdir`, an absolute path inside that machine's allowed roots, and takes its catalog, models and permission modes. It must accept work from other machines (the owner switches that on); a child there never gets the owner mode."},
+                "workdir": {"type": "string", "description": "Defaults to the workdir of this session; required when `machine` names another machine."},
                 "isolated": {"type": "boolean", "description": "Work in a new git worktree. A workdir outside a git repository starts and fails with worktree_not_git; accept that session to archive it."},
                 "base": {"type": "string", "description": "Git ref the worktree starts from."},
                 "preset": {"type": "string", "description": "Instruction preset id, default clean."},
@@ -503,6 +504,8 @@ fn session_input_schema(mcp_name: &str) -> Value {
             "properties": {
                 "task_type": {"type": "string"},
                 "level": {"type": "string", "enum": ["low", "medium", "high", "xhigh"]},
+                "machine": {"type": "string", "description": "Machine name or id to preview for; default is your own machine. Use the same `machine` and `workdir` you will pass to session_spawn."},
+                "workdir": {"type": "string", "description": "Directory the session would work in; required with another `machine`, where exclusions and headroom are those of that machine."},
             },
             "additionalProperties": false,
         }),
@@ -1603,6 +1606,35 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn spawn_and_route_preview_take_a_target_machine() {
+        let listing = tools_list(ToolSet::ApproveAndLimits, "claude");
+        let tools = listing["tools"].as_array().expect("tools");
+        let schema = |name: &str| {
+            tools
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .unwrap_or_else(|| panic!("missing {name}"))["inputSchema"]
+                .clone()
+        };
+        for name in ["session_spawn", "route_preview"] {
+            let properties = &schema(name)["properties"];
+            assert_eq!(properties["machine"]["type"], "string", "{name}");
+            assert!(
+                properties["machine"]["description"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("name or id")),
+                "{name}"
+            );
+            assert_eq!(schema(name)["additionalProperties"], json!(false), "{name}");
+        }
+        // Предпросмотр на другую машину считается по каталогу цели: каталог берётся оттуда же.
+        assert_eq!(
+            schema("route_preview")["properties"]["workdir"]["type"],
+            "string"
+        );
     }
 
     #[test]
