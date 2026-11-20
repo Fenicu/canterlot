@@ -55,8 +55,17 @@ async function reveal(page: Page, target: Locator): Promise<Locator> {
 }
 
 const line = (found: Locator) => found.locator('.head .hit');
-/** Раскрывает карточку за шеврон: на узком экране середина строки занята ссылкой на запись. */
-const toggle = (found: Locator) => line(found).click({ position: { x: 8, y: 8 } });
+/**
+ * Раскрывает карточку за шеврон: на узком экране середина строки занята ссылкой на запись.
+ * Точка клика лежит на середине высоты, у шеврона. Угол кнопки (8, 8) скруглён радиусом карточки
+ * в 22 px и проходит попадание лишь на пару пикселей: сдвиг строки между нажатием и отпусканием
+ * под нагрузкой отдавал отпускание шапке, и клика по кнопке не выходило.
+ */
+async function toggle(found: Locator): Promise<void> {
+  const hit = line(found);
+  const box = await hit.boundingBox();
+  await hit.click({ position: { x: 20, y: (box?.height ?? 44) / 2 } });
+}
 
 test('every_memory_card_reads_its_line_and_word', async ({ page }) => {
   test.setTimeout(90_000);
