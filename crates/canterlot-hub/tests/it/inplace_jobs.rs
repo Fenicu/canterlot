@@ -636,6 +636,89 @@ async fn replay_by_call_id_and_by_idempotency_key_returns_the_stored_job(pool: P
     );
 }
 
+/// Повтор видит только задачи своего разговора и своего домена: чужой разговор с тем же
+/// идентификатором вызова и тем же ключом получает свою задачу, а не чужой итог.
+#[sqlx::test(migrations = "./migrations")]
+async fn a_replay_never_returns_another_conversations_job(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let caller = fx.caller();
+    let args = json!({"workdir": "/tmp/w", "shell": "make", "wait_seconds": 0, "idempotency_key": "k"});
+    let mine = job_id(
+        &session_tools::call(&fx.context, &caller, "job.run", args.clone())
+            .await
+            .unwrap(),
+    );
+    fx.started(fx.a, mine).await;
+    fx.finished(fx.a, mine, JobOutcome::Succeeded, Some(0)).await;
+    let (other, other_execution) = fx.other_conversation().await;
+    let mut stranger = fx.caller_of(other, other_execution);
+    stranger.call_id = caller.call_id;
+    let reply = session_tools::call(&fx.context, &stranger, "job.run", args)
+        .await
+        .unwrap();
+    assert_ne!(job_id(&reply), mine, "{reply}");
+    assert!(reply.get("output_tail").is_none(), "no foreign output: {reply}");
+    let theirs = job_id(&reply);
+    let owner: Option<Uuid> = sqlx::query_scalar("select conversation_id from jobs where id=$1")
+        .bind(theirs)
+        .fetch_one(&fx.pool)
+        .await
+        .unwrap();
+    assert_eq!(owner, Some(other));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_replay_after_a_domain_change_returns_nothing_stored(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let caller = fx.caller();
+    let args = json!({"workdir": "/tmp/w", "shell": "make", "wait_seconds": 0, "idempotency_key": "k"});
+    let id = job_id(
+        &session_tools::call(&fx.context, &caller, "job.run", args.clone())
+            .await
+            .unwrap(),
+    );
+    fx.started(fx.a, id).await;
+    fx.finished(fx.a, id, JobOutcome::Succeeded, Some(0)).await;
+    sqlx::query("update conversations set memory_domain='work' where id=$1")
+        .bind(fx.conversation)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    // Тот же ключ и тот же вызов транспорта: старый итог не отдаётся ни по одному из них.
+    let by_key = fx.call("job.run", args.clone()).await;
+    assert!(by_key.is_err(), "the stored output must not leak: {by_key:?}");
+    let by_call = session_tools::call(&fx.context, &caller, "job.run", args).await;
+    assert!(by_call.is_err(), "the stored output must not leak: {by_call:?}");
+}
+
+/// Ждущий вызов тоже не берёт итог, если домен разговора сменился после заявки.
+#[sqlx::test(migrations = "./migrations")]
+async fn the_waiter_does_not_claim_an_inline_result_after_a_domain_change(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let context = fx.context.clone();
+    let caller = fx.caller();
+    let call = tokio::spawn(async move {
+        session_tools::call(
+            &context,
+            &caller,
+            "job.run",
+            json!({"workdir": "/tmp/w", "shell": "make", "wait_seconds": 10}),
+        )
+        .await
+    });
+    let id = fx.only_job().await;
+    sqlx::query("update conversations set memory_domain='work' where id=$1")
+        .bind(fx.conversation)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    fx.started(fx.a, id).await;
+    fx.finished(fx.a, id, JobOutcome::Succeeded, Some(0)).await;
+    let reply = call.await.unwrap();
+    assert!(reply.is_err(), "the waiter must see nothing: {reply:?}");
+    assert_ne!(fx.job(id).await.delivery.as_deref(), Some("inline"));
+}
+
 // ───────── Допуск ─────────
 
 #[sqlx::test(migrations = "./migrations")]
