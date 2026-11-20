@@ -891,6 +891,7 @@ fn pilot_records_roundtrip() {
         home_dir: "/home/owner".into(),
         worktree_root: "/data/worktrees".into(),
         memory_work_roots: vec!["/h/work".into()],
+        jobs_max_running: 4,
     };
     let metrics = MachineMetrics {
         machine_time_ms: 123456,
@@ -2544,4 +2545,146 @@ fn model_usage_cost_is_optional_in_both_directions() {
         OldModelUsage::decode(free.encode_to_vec().as_slice()).unwrap(),
         old
     );
+}
+
+#[test]
+fn in_place_job_messages_keep_their_wire_shape_and_hide_the_command() {
+    use canterlot_proto::worker::v1::{
+        CancelInPlaceJob, ControlUp, JobDispatched, JobEnvVar, JobFinished, JobLease, JobLogChunk,
+        JobOutcome, JobPhase, JobSnapshot, JobStarted, JobWaitingLease, JobsReport, MachineReport,
+        MediaHeader, StartInPlaceJob, control_up,
+    };
+    const SECRET_LOOKING: &str = "hunter2-in-a-command";
+
+    let start = StartInPlaceJob {
+        job_id: "job".into(),
+        attempt: 1,
+        workdir: "/h/u/proj".into(),
+        shell: format!("deploy --token {SECRET_LOOKING}"),
+        env: vec![JobEnvVar {
+            name: "MODE".into(),
+            value: SECRET_LOOKING.into(),
+        }],
+        timeout_seconds: 60,
+        lease: JobLease::Gate as i32,
+    };
+    let debug = format!("{start:?}");
+    assert!(!debug.contains(SECRET_LOOKING), "{debug}");
+    assert!(debug.contains("/h/u/proj") && debug.contains("MODE"), "{debug}");
+    let command = Command {
+        command_id: "command".into(),
+        kind: Some(command::Kind::StartInPlaceJob(start)),
+        ..Default::default()
+    };
+    assert!(!format!("{command:?}").contains(SECRET_LOOKING));
+    let wire = command.encode_to_vec();
+    let tag = wire.iter().position(|b| *b == 0xBA).expect("field 23");
+    assert_eq!(wire[tag + 1], 0x01, "Command.start_in_place_job is field 23");
+    assert_roundtrip(command);
+    let cancel = Command {
+        command_id: "command".into(),
+        kind: Some(command::Kind::CancelInPlaceJob(CancelInPlaceJob {
+            job_id: "job".into(),
+            attempt: 1,
+        })),
+        ..Default::default()
+    };
+    let wire = cancel.encode_to_vec();
+    let tag = wire.iter().position(|b| *b == 0xC2).expect("field 24");
+    assert_eq!(wire[tag + 1], 0x01, "Command.cancel_in_place_job is field 24");
+    assert_roundtrip(cancel);
+
+    for (body, prefix) in [
+        (
+            record_body::Body::JobDispatched(JobDispatched {
+                job_id: "job".into(),
+                attempt: 1,
+                command_id: "command".into(),
+                dispatch_attempt: 1,
+            }),
+            [0x8A, 0x03],
+        ),
+        (
+            record_body::Body::JobWaitingLease(JobWaitingLease {
+                job_id: "job".into(),
+                attempt: 1,
+                lease: JobLease::Build as i32,
+            }),
+            [0x92, 0x03],
+        ),
+        (
+            record_body::Body::JobStarted(JobStarted {
+                job_id: "job".into(),
+                attempt: 1,
+                pid: 42,
+                start_time: 99,
+                started_at_ms: 7,
+            }),
+            [0x9A, 0x03],
+        ),
+        (
+            record_body::Body::JobFinished(JobFinished {
+                job_id: "job".into(),
+                attempt: 1,
+                outcome: JobOutcome::TimedOut as i32,
+                exit_code: Some(124),
+                duration_ms: 5,
+                log_bytes: 6,
+                tail: b"tail".to_vec(),
+                truncated: true,
+            }),
+            [0xA2, 0x03],
+        ),
+    ] {
+        let record = RecordBody { body: Some(body) };
+        assert_eq!(record.encode_to_vec()[..2], prefix);
+        assert_roundtrip(record);
+    }
+    let finished = JobFinished {
+        outcome: JobOutcome::Canceled as i32,
+        exit_code: None,
+        ..Default::default()
+    };
+    assert_eq!(
+        JobFinished::decode(finished.encode_to_vec().as_slice())
+            .unwrap()
+            .exit_code,
+        None,
+        "a missing exit code stays missing instead of becoming 0"
+    );
+    assert_eq!(JobOutcome::LaunchInterrupted as i32, 5);
+    assert_eq!(JobOutcome::WorkdirRefused as i32, 6);
+
+    let report = ControlUp {
+        msg: Some(control_up::Msg::JobsReport(JobsReport {
+            jobs: vec![JobSnapshot {
+                job_id: "job".into(),
+                attempt: 1,
+                phase: JobPhase::Running as i32,
+                pid: 42,
+                start_time: 99,
+                ..Default::default()
+            }],
+            observed_at_ms: 3,
+        })),
+    };
+    assert_eq!(report.encode_to_vec()[..2], [0x82, 0x01], "ControlUp field 16");
+    assert_roundtrip(report);
+    let chunk = ControlUp {
+        msg: Some(control_up::Msg::JobLogChunk(JobLogChunk {
+            job_id: "job".into(),
+            attempt: 1,
+            offset: 9,
+            data: b"out".to_vec(),
+        })),
+    };
+    assert_eq!(chunk.encode_to_vec()[..2], [0x8A, 0x01], "ControlUp field 17");
+    assert_roundtrip(chunk);
+    assert_eq!(MachineReport::default().jobs_max_running, 0);
+    let header = MediaHeader {
+        job_id: "job".into(),
+        job_attempt: 2,
+        ..Default::default()
+    };
+    assert_roundtrip(header);
 }

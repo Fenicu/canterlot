@@ -40,6 +40,45 @@ pub struct WorkerConfig {
     pub secrets: SecretConfig,
     #[serde(default)]
     pub memory: MemoryConfig,
+    #[serde(default)]
+    pub jobs: JobsConfig,
+}
+
+/// Задачи на месте (`jobs_inplace_v1`): команды оболочки по просьбе хаба.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct JobsConfig {
+    /// Сколько задач на месте воркер принимает одновременно; уходит хабу в отчёте машины,
+    /// лишнее хаб держит в своей очереди.
+    pub max_running: u32,
+    /// Предел журнала одной попытки на диске, МиБ: голова, отметка и скользящий хвост.
+    pub log_max_mib: u64,
+    /// Сколько каталог состояния законченной попытки живёт до уборки.
+    #[serde(with = "humantime_serde")]
+    pub state_retention: Duration,
+}
+
+impl JobsConfig {
+    pub const MAX_RUNNING_CEILING: u32 = 64;
+    pub const LOG_MIB_CEILING: u64 = 64;
+
+    pub fn log_max_bytes(&self) -> u64 {
+        self.log_max_mib.clamp(1, Self::LOG_MIB_CEILING) * 1024 * 1024
+    }
+
+    pub fn max_running(&self) -> u32 {
+        self.max_running.clamp(1, Self::MAX_RUNNING_CEILING)
+    }
+}
+
+impl Default for JobsConfig {
+    fn default() -> Self {
+        Self {
+            max_running: 4,
+            log_max_mib: 16,
+            state_retention: Duration::from_secs(3 * 24 * 3600),
+        }
+    }
 }
 
 /// Общая память: какие корни считаются рабочими проектами (домен `work`).
@@ -632,6 +671,40 @@ mod tests {
     fn ready_deadline_outlasts_the_cli_mcp_startup_timeout() {
         // Один зависший сервер MCP задерживает init Claude Code на 30 с.
         assert!(SupervisorTimers::default().ready_deadline >= Duration::from_secs(60));
+    }
+
+    #[test]
+    fn jobs_section_defaults_and_bounds() {
+        let base = r#"
+hub_url = "https://localhost:1"
+ca_cert = "/tmp/ca.pem"
+token_file = "/tmp/token"
+machine_id = "00000000-0000-0000-0000-000000000001"
+installation_id = "00000000-0000-0000-0000-000000000002"
+restore_generation = "00000000-0000-0000-0000-000000000003"
+data_dir = "/tmp/store"
+"#;
+        let defaults: WorkerConfig = toml::from_str(base).unwrap();
+        assert_eq!(defaults.jobs.max_running(), 4);
+        assert_eq!(defaults.jobs.log_max_bytes(), 16 * 1024 * 1024);
+        assert_eq!(
+            defaults.jobs.state_retention,
+            Duration::from_secs(3 * 24 * 3600)
+        );
+        let tuned: WorkerConfig = toml::from_str(&format!(
+            "{base}\n[jobs]\nmax_running = 2\nlog_max_mib = 1\nstate_retention = \"12h\"\n"
+        ))
+        .unwrap();
+        assert_eq!(tuned.jobs.max_running(), 2);
+        assert_eq!(tuned.jobs.log_max_bytes(), 1024 * 1024);
+        assert_eq!(tuned.jobs.state_retention, Duration::from_secs(12 * 3600));
+        // Ноль и огромные значения не ломают воркер: границы подтягиваются.
+        let wild: WorkerConfig =
+            toml::from_str(&format!("{base}\n[jobs]\nmax_running = 0\nlog_max_mib = 9999\n"))
+                .unwrap();
+        assert_eq!(wild.jobs.max_running(), 1);
+        assert_eq!(wild.jobs.log_max_bytes(), 64 * 1024 * 1024);
+        assert!(toml::from_str::<WorkerConfig>(&format!("{base}\n[jobs]\nlost_grace = 1\n")).is_err());
     }
 
     #[test]

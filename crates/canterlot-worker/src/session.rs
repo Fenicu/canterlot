@@ -68,6 +68,10 @@ pub const CAPABILITY_GOALS_V1: &str = canterlot_proto::goals::CAPABILITY_GOALS_V
 /// Воркер сообщает канонические корни работы и канонический рабочий каталог запуска.
 pub const CAPABILITY_MEMORY_SCOPE_V1: &str = "memory_scope_v1";
 
+/// Воркер выполняет команды оболочки на месте (`StartInPlaceJob`) и пишет факты задач.
+/// Команды принимаются и факты пишутся только на соединении, где возможность согласована.
+pub const CAPABILITY_JOBS_INPLACE_V1: &str = "jobs_inplace_v1";
+
 pub const OPTIONAL_CAPABILITIES: &[&str] = &[
     "exec_v1",
     "pilot_v1",
@@ -99,6 +103,7 @@ pub const OPTIONAL_CAPABILITIES: &[&str] = &[
     CAPABILITY_SCHEDULE_PRECHECK_V1,
     CAPABILITY_GOALS_V1,
     CAPABILITY_MEMORY_SCOPE_V1,
+    CAPABILITY_JOBS_INPLACE_V1,
 ];
 
 #[derive(Clone)]

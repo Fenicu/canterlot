@@ -43,6 +43,7 @@ async fn fixture(pool: &PgPool, hub: &TestHub) -> (TempDir, WorkerConfig, Worker
     let config = WorkerConfig {
         secrets: Default::default(),
         memory: Default::default(),
+        jobs: Default::default(),
         machine: Default::default(),
         attachments: Default::default(),
         claude_code: None,
