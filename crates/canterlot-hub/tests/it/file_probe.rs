@@ -702,10 +702,15 @@ async fn personal_caller_cannot_arm_a_file_alarm_inside_a_work_delegates_worktre
         .bind(json!({"path": "/h/data/worktrees/w1", "branch": "b", "source_workdir": "/h/work/p", "base": "main"}))
         .execute(&f.pool)
         .await?;
-    for answer in [missing(), exists_at("/h/data/worktrees/w1/out.md", "SECRET")] {
+    for answer in [
+        missing(),
+        exists_at("/h/data/worktrees/w1/out.md", "SECRET"),
+    ] {
         worker.push(answer);
         let error = f
-            .arm_file(json!({"kind": "file", "path": "/h/data/worktrees/w1/out.md", "read_head": true}))
+            .arm_file(
+                json!({"kind": "file", "path": "/h/data/worktrees/w1/out.md", "read_head": true}),
+            )
             .await
             .unwrap_err();
         assert_eq!(error.code, session_tools::ToolErrorCode::DomainMismatch);

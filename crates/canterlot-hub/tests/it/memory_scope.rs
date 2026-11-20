@@ -222,7 +222,10 @@ async fn spawn_into_a_worktree_is_classified_by_the_conversation_that_owns_it(po
     // Личный родитель не попадает в рабочую копию рабочего делегата, ни в корень, ни глубже.
     for path in ["/h/data/worktrees/w1", "/h/data/worktrees/w1/src"] {
         let refused = create(&pool, &registry, request(&seed, path, Some(personal))).await;
-        assert!(matches!(refused, Err(CreateError::DomainMismatch)), "{path}");
+        assert!(
+            matches!(refused, Err(CreateError::DomainMismatch)),
+            "{path}"
+        );
     }
     // Каталог в базе без хозяина неизвестен: тоже отказ.
     let refused = create(

@@ -827,7 +827,10 @@ async fn plan_list_hides_a_cross_domain_executor(pool: PgPool) {
     )
     .await;
     let list = f.call("plan.list", json!({})).await.unwrap();
-    assert_eq!(list["tasks"][0]["commits"][0]["subject"], "секретный коммит");
+    assert_eq!(
+        list["tasks"][0]["commits"][0]["subject"],
+        "секретный коммит"
+    );
     for domain in ["work", ""] {
         sqlx::query("update conversations set memory_domain=nullif($2,'') where id=$1")
             .bind(f.child)

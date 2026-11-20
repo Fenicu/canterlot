@@ -145,7 +145,11 @@ fn line_has_assignment(line: &str) -> bool {
             let rest = rest.trim_start_matches(['=', '>', ' ', '\t']);
             // Значение в кавычках берётся целиком, со всеми словами: проза-исключение
             // действует только для значения без кавычек.
-            if let Some(quote) = rest.chars().next().filter(|c| matches!(c, '"' | '\'' | '`')) {
+            if let Some(quote) = rest
+                .chars()
+                .next()
+                .filter(|c| matches!(c, '"' | '\'' | '`'))
+            {
                 let literal = &rest[quote.len_utf8()..];
                 let literal = literal.split(quote).next().unwrap_or(literal);
                 if looks_like_secret_value(literal.trim(), "") {
