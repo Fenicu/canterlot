@@ -51,6 +51,12 @@ enum Command {
         #[arg(long)]
         socket: PathBuf,
     },
+    /// Оболочка одной задачи на месте; запускается только воркером.
+    #[command(hide = true, name = "job-shim")]
+    JobShim {
+        /// Каталог попытки: `<data_dir>/jobs/<job_id>/<attempt>`.
+        dir: PathBuf,
+    },
     Supervise {
         #[arg(long)]
         exec_dir: PathBuf,
@@ -142,6 +148,9 @@ async fn main() -> ExitCode {
         return code;
     }
     if let Some(code) = codex_replay().await {
+        return code;
+    }
+    if let Some(code) = job_shim().await {
         return code;
     }
     if let Some(code) = mcp_relay().await {
@@ -250,6 +259,13 @@ fn memory() -> Option<ExitCode> {
     })
 }
 
+async fn job_shim() -> Option<ExitCode> {
+    let Command::JobShim { dir } = Cli::try_parse().ok()?.command else {
+        return None;
+    };
+    Some(canterlot_worker::jobs::shim::run(dir).await)
+}
+
 async fn lease() -> Option<ExitCode> {
     use canterlot_worker::lease::{Kind, client};
     let Command::Lease { command } = Cli::try_parse().ok()?.command else {
@@ -353,6 +369,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let path = match Cli::parse().command {
         Command::Run { config } => config,
         Command::McpRelay { .. }
+        | Command::JobShim { .. }
         | Command::Supervise { .. }
         | Command::Capabilities
         | Command::Memory { .. }

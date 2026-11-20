@@ -24,6 +24,7 @@ canterlot-journal = { version = "1.0.0", path = "../canterlot-journal" }
 canterlot-proto = { version = "1.0.0", path = "../canterlot-proto" }
 chrono = "0.4.45"
 clap = { version = "4.6.7", features = ["derive"] }
+flate2 = "1.1.11"
 humantime-serde = "1.1.1"
 prost = "0.14.4"
 rand = "0.10.3"
