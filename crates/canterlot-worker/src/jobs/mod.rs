@@ -52,6 +52,8 @@ const CHUNK_BYTES: usize = 16 * 1024;
 /// Сколько ждём `pid` от оболочки, которую сами запустили, прежде чем признать запуск сорванным.
 const PID_DEADLINE: Duration = Duration::from_secs(15);
 const SWEEP_EVERY: Duration = Duration::from_secs(3600);
+/// Сколько попыток помещается в отчёт при подключении (сообщение не больше 1 МиБ).
+const MAX_REPORT_JOBS: usize = 1000;
 const MAX_ENV_VARS: usize = 64;
 
 #[derive(Debug, thiserror::Error)]
@@ -377,10 +379,13 @@ impl JobManager {
     pub async fn report(&self) -> JobsReport {
         let data_dir = self.rt.data_dir.clone();
         let jobs = tokio::task::spawn_blocking(move || {
-            list_attempts(&data_dir)
-                .into_iter()
-                .filter_map(|(job_id, attempt)| snapshot(&data_dir, &job_id, attempt))
-                .collect()
+            cap_report(
+                list_attempts(&data_dir)
+                    .into_iter()
+                    .filter_map(|(job_id, attempt)| snapshot(&data_dir, &job_id, attempt))
+                    .collect(),
+                MAX_REPORT_JOBS,
+            )
         })
         .await
         .unwrap_or_default();
@@ -488,6 +493,20 @@ fn snapshot(data_dir: &Path, job_id: &str, attempt: u32) -> Option<JobSnapshot> 
         snapshot.truncated = finished.truncated;
     }
     Some(snapshot)
+}
+
+/// Отчёт при подключении должен влезть в сообщение: незавершённые попытки идут первыми,
+/// законченные добираются с самых свежих (идентификаторы задач упорядочены по времени).
+fn cap_report(jobs: Vec<JobSnapshot>, max: usize) -> Vec<JobSnapshot> {
+    let (finished, live): (Vec<_>, Vec<_>) = jobs
+        .into_iter()
+        .partition(|job| job.phase == JobPhase::Finished as i32);
+    let room = max.saturating_sub(live.len());
+    let skip = finished.len().saturating_sub(room);
+    live.into_iter()
+        .chain(finished.into_iter().skip(skip))
+        .take(max)
+        .collect()
 }
 
 fn outcome_name(outcome: JobOutcome) -> &'static str {
@@ -1044,5 +1063,39 @@ impl JobManager {
     /// Сколько попыток сейчас под наблюдением (для проверок и отладочных строк).
     pub fn watching(&self) -> usize {
         self.tracked_count()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn snap(index: u32, phase: JobPhase) -> JobSnapshot {
+        JobSnapshot {
+            job_id: format!("job-{index:04}"),
+            attempt: 1,
+            phase: phase as i32,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn report_cap_keeps_every_live_attempt_then_the_newest_finished() {
+        let mut jobs: Vec<_> = (0..10).map(|i| snap(i, JobPhase::Finished)).collect();
+        jobs.insert(3, snap(100, JobPhase::Running));
+        jobs.push(snap(101, JobPhase::WaitingLease));
+        let capped = cap_report(jobs.clone(), 5);
+        let ids: Vec<_> = capped.iter().map(|job| job.job_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["job-0100", "job-0101", "job-0007", "job-0008", "job-0009"]
+        );
+        assert_eq!(
+            cap_report(jobs.clone(), 100).len(),
+            12,
+            "under the cap nothing is dropped"
+        );
+        // Незавершённых больше предела: отчёт всё равно не длиннее предела.
+        assert_eq!(cap_report(jobs, 1).len(), 1);
     }
 }
