@@ -220,6 +220,19 @@ impl Env {
         resets_at: Option<DateTime<Utc>>,
         now: DateTime<Utc>,
     ) -> LimitReachedEffect {
+        self.limit_reached_as(conversation, provider, "", window, resets_at, now)
+            .await
+    }
+    /// Факт лимита с меткой учётной записи; пустая метка — старый воркер.
+    async fn limit_reached_as(
+        &self,
+        conversation: Uuid,
+        provider: &str,
+        account: &str,
+        window: Window,
+        resets_at: Option<DateTime<Utc>>,
+        now: DateTime<Utc>,
+    ) -> LimitReachedEffect {
         let (execution, machine): (Uuid, Uuid) = sqlx::query_as("select e.id,c.machine_id from executions e join conversations c on c.id=e.conversation_id where e.conversation_id=$1 order by e.generation desc limit 1")
             .bind(conversation).fetch_one(&self.pool).await.unwrap();
         let mut tx = self.pool.begin().await.unwrap();
@@ -237,7 +250,7 @@ impl Env {
                 window: proto_window(window),
                 resets_at_ms: resets_at.map_or(0, |at| at.timestamp_millis() as u64),
                 input_command_id: String::new(),
-                account: String::new(),
+                account: account.into(),
             },
             &self.config,
             now,
@@ -3526,3 +3539,6 @@ async fn wake_with_a_live_execution_still_sends_the_resume_text(pool: PgPool) {
     assert!(parent_note_texts(&pool, parent).await.is_empty());
     assert!(!resume_pending(&pool, child).await);
 }
+
+// Лимиты по учётным записям: у двух подписок одного провайдера свои удержания и пробуждения.
+mod limit_accounts;

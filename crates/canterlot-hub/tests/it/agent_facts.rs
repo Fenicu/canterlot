@@ -1437,6 +1437,63 @@ async fn limits_snapshot_is_sent_on_session_start(pool: PgPool) -> TestResult {
     Ok(())
 }
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_limits_report_without_labels_from_a_machine_with_another_account_is_dropped(
+    pool: PgPool,
+) -> TestResult {
+    let s = wire_seed(&pool).await;
+    // Машина объявила для провайдера другую учётную запись: старый воркер на ней
+    // присылает показания без метки, и чьи они, хаб не знает.
+    sqlx::query(
+        "update machine_harnesses set account='b-acct' where machine_id=$1 and provider='claude'",
+    )
+    .bind(s.machine_id)
+    .execute(&pool)
+    .await?;
+    let hub = testkit::spawn_test_hub(pool.clone(), HubTimers::default()).await;
+    let now_ms = Utc::now().timestamp_millis() as u64;
+    let c = connect(&hub, &s, Uuid::now_v7(), true, now_ms).await;
+    let observation = |used: u32, account: &str| LimitObservation {
+        provider: "claude".into(),
+        window: LimitWindow::Weekly as i32,
+        used_permille: used,
+        observed_machine_ms: now_ms + 1000,
+        account: account.into(),
+        ..Default::default()
+    };
+    // Первым идёт показание без метки, вторым — с меткой: когда второе легло, первое уже разобрано.
+    c.tx.send(ControlUp {
+        msg: Some(control_up::Msg::LimitsReport(LimitsReport {
+            observations: vec![observation(111, "")],
+            ..Default::default()
+        })),
+    })
+    .await?;
+    c.tx.send(ControlUp {
+        msg: Some(control_up::Msg::LimitsReport(LimitsReport {
+            observations: vec![observation(222, "b-acct")],
+            ..Default::default()
+        })),
+    })
+    .await?;
+    wait_until(
+        &pool,
+        "select count(*) from provider_limits where account='b-acct' and weekly_used_permille=222",
+    )
+    .await;
+    assert_eq!(
+        count(
+            &pool,
+            "select count(*) from provider_limits where account='owner' or weekly_used_permille=111"
+        )
+        .await,
+        0,
+        "the unlabelled reading is dropped, not credited to owner"
+    );
+    hub.shutdown.send(()).unwrap();
+    hub.join.await??;
+    Ok(())
+}
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn reported_absence_of_the_five_hour_window_reaches_the_state_and_the_worker_snapshot(
     pool: PgPool,
 ) -> TestResult {

@@ -228,6 +228,86 @@ async fn red_limits_window_skips_the_run(pool: PgPool) {
     assert_eq!(detail["window"], "weekly", "{detail}");
 }
 
+/// Допуск запуска смотрит окна той учётной записи, которую харнесс расписания держит на своей
+/// машине: красное окно чужой подписки того же провайдера запуск не пропускает.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn admission_reads_the_window_of_the_schedules_own_account(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
+    let updated = sqlx::query(
+        "update machine_harnesses set account='b-acct' where machine_id=$1 and provider='claude'",
+    )
+    .bind(f.seed.machine_id)
+    .execute(&pool)
+    .await
+    .unwrap()
+    .rows_affected();
+    assert!(updated > 0, "the fixture machine declares a claude harness");
+    let now = Utc::now();
+    let red = |account: &'static str| {
+        let pool = pool.clone();
+        let owner = f.seed.owner_id;
+        let machine = f.seed.machine_id;
+        async move {
+            let mut tx = pool.begin().await.unwrap();
+            record_observation_in_tx(
+                &mut tx,
+                owner,
+                &Observation {
+                    provider: "claude".into(),
+                    account: account.into(),
+                    window: Window::Weekly,
+                    used_permille: 990,
+                    resets_at: Some(now + TimeDelta::days(2)),
+                    observed_at: now,
+                    source: ObservationSource::Session,
+                    data_confidence: DataConfidence::Exact,
+                    machine_id: machine,
+                    execution_id: None,
+                },
+                now,
+                &Default::default(),
+                Uuid::now_v7(),
+            )
+            .await
+            .unwrap();
+            tx.commit().await.unwrap();
+        }
+    };
+    // Красна только запись владельца, а расписание идёт на b-acct: не пропускается.
+    red("owner").await;
+    let id = create(&f, existing(&f), "0 9 * * *").await;
+    due(&pool, &id, now - TimeDelta::seconds(30)).await;
+    scheduler(&f).tick(now).await.unwrap();
+    let rid = run_id(&pool, &id).await;
+    for _ in 0..30 {
+        let state: String = sqlx::query_scalar("select state from schedule_runs where id=$1")
+            .bind(rid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_ne!(
+            state, "skipped_limits",
+            "the other account's window is irrelevant"
+        );
+        if !matches!(state.as_str(), "claimed" | "prechecking") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    // Красная запись самого расписания пропускает запуск.
+    red("b-acct").await;
+    let id = create(&f, existing(&f), "0 9 * * *").await;
+    due(&pool, &id, now - TimeDelta::seconds(30)).await;
+    scheduler(&f)
+        .tick(now + TimeDelta::seconds(1))
+        .await
+        .unwrap();
+    let rid = run_id(&pool, &id).await;
+    let detail = wait_state(&pool, rid, "skipped_limits").await;
+    assert_eq!(detail["window"], "weekly", "{detail}");
+}
+
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn precheck_exit_zero_starts_and_nonzero_skips(pool: PgPool) {
     let f = Fixture::new(pool.clone()).await;
