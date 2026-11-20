@@ -1587,6 +1587,103 @@ async fn the_log_endpoint_reads_the_hub_tail_with_offset_and_limit(pool: PgPool)
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn switching_remote_work_off_closes_the_queued_remote_jobs_at_once(pool: PgPool) {
+    let api = Api::new(pool.clone()).await;
+    sqlx::query("update machines set accepts_remote_work=true where id=$1")
+        .bind(api.machine)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Заказчик на другой машине: задача удалённая, но её заявка уже допущена.
+    let conversation = testkit::seed_conversation(&pool, api.owner, api.machine).await;
+    sqlx::query(
+        "update conversations set memory_domain='personal',permission_mode='bypass',
+           harness='claude_code' where id=$1",
+    )
+    .bind(conversation)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let home = Uuid::now_v7();
+    sqlx::query("insert into machines(id,owner_id,name) values($1,$2,'home')")
+        .bind(home)
+        .bind(api.owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("update conversations set machine_id=$2 where id=$1")
+        .bind(conversation)
+        .bind(home)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // Два места заняты: ещё две стоят в очереди, одна из них не удалённая.
+    sqlx::query("update machines set jobs_max_running=1 where id=$1")
+        .bind(api.machine)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let running = api
+        .insert_for(api.owner, api.machine, Some(conversation), "running", "a")
+        .await;
+    let remote_a = api
+        .insert_for(api.owner, api.machine, Some(conversation), "queued", "b")
+        .await;
+    let remote_b = api
+        .insert_for(api.owner, api.machine, Some(conversation), "queued", "c")
+        .await;
+    let local = api.insert("queued", "d").await;
+    sqlx::query("update jobs set remote=true where id in ($1,$2,$3)")
+        .bind(running)
+        .bind(remote_a)
+        .bind(remote_b)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let response = api
+        .client
+        .send(
+            Method::PUT,
+            &format!("/api/v1/machines/{}/remote-work", api.machine),
+            Some(&Uuid::now_v7().to_string()),
+            Some(json!({"accepts_remote_work": false})),
+        )
+        .await;
+    assert_eq!(response.status.as_u16(), 200);
+    let state = |id: Uuid| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_as::<_, (String, Option<String>)>(
+                "select state,end_reason from jobs where id=$1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    for id in [remote_a, remote_b] {
+        assert_eq!(
+            state(id).await,
+            (
+                "canceled".to_owned(),
+                Some("remote_work_disabled".to_owned())
+            )
+        );
+    }
+    assert_eq!(
+        state(running).await.0,
+        "running",
+        "a committed start proceeds"
+    );
+    assert_eq!(
+        state(local).await.0,
+        "queued",
+        "the machine's own work is untouched"
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn the_owner_cancels_queued_running_and_lost_jobs_idempotently(pool: PgPool) {
     let api = Api::new(pool.clone()).await;
     let queued = api.insert("queued", "a").await;

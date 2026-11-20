@@ -580,6 +580,7 @@ pub async fn dispatch_machine_in_tx(
     .fetch_all(&mut *conn)
     .await?;
     let mut sent = 0;
+    let mut full = false;
     for id in queued {
         let Some(job) = lock_row(conn, id).await? else {
             continue;
@@ -621,9 +622,11 @@ pub async fn dispatch_machine_in_tx(
             .await?;
             continue;
         }
-        let busy = occupied_in_tx(conn, machine_id).await?;
-        if busy >= max {
-            break;
+        // Очередь идёт по порядку: когда места нет, остальные не обгоняют, но допуск
+        // перепроверяется у каждой, чтобы выключатель закрывал и стоящие дальше.
+        if full || occupied_in_tx(conn, machine_id).await? >= max {
+            full = true;
+            continue;
         }
         send_start_in_tx(conn, &job).await?;
         sqlx::query(
