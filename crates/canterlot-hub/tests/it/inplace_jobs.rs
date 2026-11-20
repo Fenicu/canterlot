@@ -1603,6 +1603,58 @@ async fn the_message_reaches_the_caller_once_with_an_eight_kib_tail(pool: PgPool
     assert!(text.contains("xxxx"));
 }
 
+/// Двоичный вывод (NUL, ESC) не делает итог постоянной потерей: сообщение пишет такие байты
+/// escape-последовательностями и проходит проверку ввода, а хвост в строке остаётся как был.
+#[sqlx::test(migrations = "./migrations")]
+async fn binary_output_is_escaped_in_the_message_and_kept_in_the_log(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let id = job_id(&fx.run("cat blob").await);
+    fx.started(fx.a, id).await;
+    let raw = b"ok\0bad\x1b[31mred\x07\nline two\ttab\n".to_vec();
+    let fact = JobFinished {
+        job_id: id.to_string(),
+        attempt: 1,
+        outcome: JobOutcome::Failed as i32,
+        exit_code: Some(1),
+        duration_ms: 10,
+        log_bytes: raw.len() as u64,
+        tail: raw.clone(),
+        truncated: false,
+    };
+    let a = fx.a;
+    fx.apply(move |conn| {
+        Box::pin(async move { facts::apply_finished(conn, a, &fact, Uuid::now_v7()).await })
+    })
+    .await;
+    assert!(matches!(
+        deliver_job_result(&fx, id).await,
+        canterlot_hub::crunch::JobOutcome::Done(_)
+    ));
+    let texts = input_texts(&fx).await;
+    assert_eq!(texts.len(), 1, "{texts:?}");
+    let text = &texts[0];
+    assert!(!text.contains('\0') && !text.contains('\u{1b}'), "{text:?}");
+    assert!(text.contains("ok\\x00bad\\x1b[31mred\\x07\nline two\ttab"), "{text:?}");
+    assert_eq!(fx.job(id).await.tail.as_deref(), Some(raw.as_slice()));
+}
+
+/// Если текст с хвостом всё равно не принят, доставка сжимается до короткого сообщения без
+/// хвоста, а не бросает итог.
+#[sqlx::test(migrations = "./migrations")]
+async fn a_tail_that_fails_validation_degrades_to_a_short_message(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let id = job_id(&fx.run("make").await);
+    fx.started(fx.a, id).await;
+    fx.finished(fx.a, id, JobOutcome::Failed, Some(2)).await;
+    let job = fx.job(id).await;
+    let full = inplace_jobs::message_for_delivery(&job, "machine-b", |_| true);
+    assert!(full.contains("hello\nworld"), "{full}");
+    let short = inplace_jobs::message_for_delivery(&job, "machine-b", |text| !text.contains("hello"));
+    assert!(!short.contains("hello"), "{short}");
+    assert!(short.contains("failed") && short.contains("exit code 2"), "{short}");
+    assert!(short.contains("job_log"), "{short}");
+}
+
 #[sqlx::test(migrations = "./migrations")]
 async fn an_archived_or_deleted_or_moved_caller_gets_no_message(pool: PgPool) {
     use canterlot_hub::crunch::JobOutcome as Outcome;

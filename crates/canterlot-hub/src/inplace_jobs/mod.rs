@@ -428,8 +428,48 @@ pub fn state_json(job: &Job, machine: &str) -> Value {
     value
 }
 
+/// Хвост для текста сообщения: управляющие байты, которые проверка ввода отвергает (NUL) или
+/// которые ломают отображение (ESC и прочие), записываются как `\x00`, `\x1b`. Перевод строки
+/// и табуляция остаются. В строке задачи хвост лежит как есть, экранируется только текст.
+pub fn escape_control(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c.is_control() && c != '\n' && c != '\t' {
+            let code = c as u32;
+            if code < 0x100 {
+                out.push_str(&format!("\\x{code:02x}"));
+            } else {
+                out.push_str(&format!("\\u{{{code:x}}}"));
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// Сообщение заказчику об итоге: заголовок и хвост до 8 КиБ.
 pub fn message_text(job: &Job, machine: &str) -> String {
+    render_message(job, machine, true)
+}
+
+/// Сообщение без хвоста: короткий запасной вид, если с хвостом текст не прошёл проверку ввода.
+pub fn message_text_without_tail(job: &Job, machine: &str) -> String {
+    render_message(job, machine, false)
+}
+
+/// Текст для доставки: с хвостом, а если проверка не принимает его, то короткий без хвоста.
+/// Итог не пропадает навсегда из-за содержимого вывода.
+pub fn message_for_delivery(job: &Job, machine: &str, accepts: impl Fn(&str) -> bool) -> String {
+    let full = message_text(job, machine);
+    if accepts(&full) {
+        full
+    } else {
+        message_text_without_tail(job, machine)
+    }
+}
+
+fn render_message(job: &Job, machine: &str, with_tail: bool) -> String {
     let title = job
         .title
         .as_deref()
@@ -456,14 +496,19 @@ pub fn message_text(job: &Job, machine: &str) -> String {
     }
     text.push('.');
     let tail = job.tail.as_deref().unwrap_or(&[]);
-    if tail.is_empty() {
+    if (!with_tail || tail.is_empty()) && job.output_bytes > 0 {
+        text.push_str(&format!(
+            " Output ({} bytes total) is not shown here. Use job_log {{job_id}} for the log.",
+            job.output_bytes
+        ));
+    } else if tail.is_empty() {
         text.push_str(" No output.");
     } else {
         text.push_str(&format!(
             " Output ({} bytes total{}), last part:\n{}\nUse job_log {{job_id}} for the full log.",
             job.output_bytes,
             if job.truncated { ", log truncated" } else { "" },
-            tail_text(tail, MESSAGE_TAIL_BYTES)
+            escape_control(&tail_text(tail, MESSAGE_TAIL_BYTES))
         ));
     }
     text
