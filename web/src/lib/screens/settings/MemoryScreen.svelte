@@ -2,13 +2,15 @@
   import { onMount } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
   import Select from '#lib/ui/Select.svelte';
-  import { listMemory } from '#lib/api/client.js';
+  import { untrack } from 'svelte';
+  import { page } from '$app/state';
+  import { getMemory, listMemory } from '#lib/api/client.js';
   import { errorText } from '#lib/api/errors.js';
   import Button from '#lib/ui/Button.svelte';
   import Segmented from '#lib/ui/Segmented.svelte';
   import ClaudeAutoMemorySetting from './ClaudeAutoMemorySetting.svelte';
   import MemoryEntrySheet from './MemoryEntrySheet.svelte';
-  import { DOMAINS, changedLine, collectProjects, entryStatus, kindLabel, kindOptions, levelLabel, projectOptions, type MemoryDomain, type MemoryEntry } from './memory.js';
+  import { DOMAINS, changedLine, collectProjects, entryStatus, kindLabel, kindOptions, levelLabel, projectOptions, resolveLinkedEntry, type MemoryDomain, type MemoryEntry } from './memory.js';
 
   let domain = $state<MemoryDomain>('work');
   let view = $state<'active' | 'archived'>('active');
@@ -58,6 +60,23 @@
   }
 
   onMount(() => { void load(); });
+
+  // Ссылка из карточки ленты: `?entry=<id>` открывает запись, `&domain=` подсказывает её домен.
+  let notice = $state('');
+  const linked = $derived(page.url.searchParams.get('entry'));
+  $effect(() => {
+    const id = linked;
+    const hint = page.url.searchParams.get('domain');
+    if (id) untrack(() => void openLinked(id, hint));
+  });
+
+  async function openLinked(id: string, hint: string | null) {
+    notice = '';
+    const found = await resolveLinkedEntry(async (entryId, entryDomain) => (await getMemory(entryId, entryDomain)).data, id, hint);
+    if (found.domain && found.domain !== domain) pick(found.domain, 'domain');
+    if (found.kind === 'notice') { notice = found.notice; return; }
+    open = found.entry;
+  }
   const excerpt = (text: string) => (text.length > 200 ? `${text.slice(0, 200)}…` : text);
 </script>
 
@@ -80,6 +99,7 @@
     </form>
   </div>
 
+  {#if notice}<p class="note" role="status" data-role="memory-link-notice">{notice}</p>{/if}
   {#if error}<p class="error" role="alert">{error}<Button onclick={() => load()}>Повторить</Button></p>{/if}
   {#if !loading && !error && items.length === 0}
     <p class="empty" data-role="memory-empty">{view === 'archived' ? 'В архиве записей нет' : 'Записей пока нет'}</p>

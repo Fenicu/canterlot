@@ -49,6 +49,7 @@
       events: feed.events,
       previous: () => feed.previous(block),
       planBefore: (number) => feed.planBefore?.(block, number) ?? null,
+      memorySubject: (id) => feed.memorySubject?.(block, id) ?? null,
       carrier: links.carrier(block.id)
     })
   );

@@ -107,6 +107,40 @@ export function secretClass(error: unknown): string | null {
   return error.details?.class ?? null;
 }
 
+export const LINK_NOTICE = {
+  missing: "Записи нет в этом домене: она удалена или лежит в другом",
+  archived: "Запись в архиве: откройте её во вкладке «В архиве»",
+  failed: "Не удалось открыть запись по ссылке. Повторите при восстановлении связи"
+} as const;
+
+export type LinkedEntry =
+  | { kind: "open"; entry: MemoryEntry; domain: MemoryDomain }
+  | { kind: "notice"; notice: string; domain?: MemoryDomain };
+
+/**
+ * Запись по ссылке из карточки ленты. Домен в ссылке известен не всегда (поиск агента его не
+ * называет): без подсказки запись ищется в обоих доменах, с подсказкой — только в названном.
+ * Любая неудача — короткое пояснение над списком, а не страница ошибки.
+ */
+export async function resolveLinkedEntry(
+  get: (id: string, domain: MemoryDomain) => Promise<MemoryEntry>,
+  id: string,
+  hint: string | null
+): Promise<LinkedEntry> {
+  const domains: MemoryDomain[] = hint === "work" || hint === "personal" ? [hint] : ["work", "personal"];
+  for (const domain of domains) {
+    try {
+      const entry = await get(id, domain);
+      if (entry.status === "archived") return { kind: "notice", notice: LINK_NOTICE.archived, domain };
+      return { kind: "open", entry, domain };
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) continue;
+      return { kind: "notice", notice: LINK_NOTICE.failed };
+    }
+  }
+  return { kind: "notice", notice: LINK_NOTICE.missing };
+}
+
 /** Срок действия: поле даты в конце суток по UTC; пустое поле снимает срок. */
 export function dateToValidUntil(date: string): string | null {
   return /^\d{4}-\d{2}-\d{2}$/.test(date) ? `${date}T23:59:59Z` : null;
