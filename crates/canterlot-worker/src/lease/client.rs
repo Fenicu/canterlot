@@ -1159,11 +1159,11 @@ mod tests {
         let mut notes = Notes::with_sink(Box::new(captured.clone()));
         for _ in 0..50 {
             notes.retry("again");
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            tokio::time::advance(Duration::from_secs(1)).await;
         }
         // Пятьдесят секунд: одна строка, а не пятьдесят.
         assert_eq!(captured.text().matches("again").count(), 1);
-        tokio::time::sleep(Duration::from_secs(60)).await;
+        tokio::time::advance(Duration::from_secs(60)).await;
         notes.retry("again");
         assert_eq!(captured.text().matches("again").count(), 2);
         notes.line("waiting for build, position 1");
