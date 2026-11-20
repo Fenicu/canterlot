@@ -315,6 +315,13 @@ pub async fn run(
         return Err(ToolError::new(ToolErrorCode::CapabilityMissing));
     }
     let id = Uuid::now_v7();
+    // Страж встаёт до фиксации: вызов, оборванный внутри `commit`, не оставит задачу без
+    // доставки. Если заявка не зафиксирована, строки нет и страж ничего не делает.
+    let mut guard = DeliveryGuard {
+        pool: context.pool.clone(),
+        job_id: id,
+        armed: wait > 0,
+    };
     let env: Vec<Value> = args
         .env
         .iter()
@@ -362,11 +369,6 @@ pub async fn run(
     jobs::emit_changed(&mut tx, &created, caller.call_id).await?;
     jobs::dispatch_machine_in_tx(&mut tx, machine_id, caller.call_id).await?;
     tx.commit().await?;
-    let mut guard = DeliveryGuard {
-        pool: context.pool.clone(),
-        job_id: id,
-        armed: wait > 0,
-    };
     let mut conn = context.pool.acquire().await?;
     let machine = jobs::machine_name(&mut conn, machine_id).await?;
     drop(conn);

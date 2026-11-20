@@ -33,6 +33,36 @@ pub async fn on_start(pool: &PgPool) -> Result<usize, sqlx::Error> {
     Ok(done)
 }
 
+/// Задачи, у которых давно нет выбранной доставки: ждущий вызов живёт не дольше минуты, так
+/// что за `older_than` его уже нет, а оборванный в окне между фиксацией заявки и стражем
+/// вызов не оставил сообщения. Они уходят сообщением, как при старте хаба.
+pub async fn undelivered_sweep(
+    pool: &PgPool,
+    older_than: Duration,
+    now: DateTime<Utc>,
+) -> Result<usize, sqlx::Error> {
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        "select id from jobs
+         where delivery is null and created_at < $1 - make_interval(secs => $2)
+         order by id",
+    )
+    .bind(now)
+    .bind(older_than.as_secs_f64())
+    .fetch_all(pool)
+    .await?;
+    let count = ids.len();
+    for id in ids {
+        crate::db::in_tx(pool, move |conn| {
+            Box::pin(async move { fallback_to_message_in_tx(conn, id).await })
+        })
+        .await?;
+    }
+    Ok(count)
+}
+
+/// Дольше самого долгого ожидания вызова (60 с) с запасом на сеть и разбор.
+const UNDELIVERED_AFTER: Duration = Duration::from_secs(3 * 60);
+
 /// Задачи, о которых машина молчит дольше срока команды и запаса, становятся `lost`.
 /// Молчание считается от последнего факта; машина на связи не теряет задач: её факты придут.
 pub async fn lost_sweep(
@@ -151,6 +181,7 @@ async fn sweep_once(
     grace: Duration,
 ) -> Result<(), sqlx::Error> {
     lost_sweep(pool, registry, grace, Utc::now()).await?;
+    undelivered_sweep(pool, UNDELIVERED_AFTER, Utc::now()).await?;
     for machine in queued_machines(pool).await? {
         if registry.availability(machine) == Availability::Available {
             dispatch_machine(pool, machine).await?;

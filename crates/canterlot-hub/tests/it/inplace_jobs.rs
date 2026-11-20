@@ -447,6 +447,37 @@ async fn hub_restart_during_the_wait_turns_every_undelivered_job_into_a_message(
     assert_eq!(sweep::on_start(&fx.pool).await.unwrap(), 0);
 }
 
+/// Вызов, оборванный там, где страж не успел встать, не оставляет задачу без доставки навсегда:
+/// таймер переводит давние задачи без выбранной доставки на сообщение.
+#[sqlx::test(migrations = "./migrations")]
+async fn the_sweep_gives_an_orphaned_job_a_message(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let fresh = job_id(&fx.run("a").await);
+    let orphan = job_id(&fx.run("b").await);
+    for id in [fresh, orphan] {
+        sqlx::query("update jobs set delivery=null where id=$1")
+            .bind(id)
+            .execute(&fx.pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query("update jobs set created_at=now()-interval '10 minutes' where id=$1")
+        .bind(orphan)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    fx.finished(fx.a, orphan, JobOutcome::Succeeded, Some(0))
+        .await;
+    assert_eq!(fx.messages(orphan).await, 0);
+    let swept = sweep::undelivered_sweep(&fx.pool, Duration::from_secs(180), Utc::now())
+        .await
+        .unwrap();
+    assert_eq!(swept, 1, "a fresh job may still have a live waiter");
+    assert_eq!(fx.job(orphan).await.delivery.as_deref(), Some("message"));
+    assert_eq!(fx.messages(orphan).await, 1, "terminal: queued at once");
+    assert_eq!(fx.job(fresh).await.delivery, None);
+}
+
 #[sqlx::test(migrations = "./migrations")]
 async fn a_terminal_state_racing_the_timeout_is_delivered_once(pool: PgPool) {
     let fx = Fx::new(pool).await;
