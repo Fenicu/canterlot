@@ -97,11 +97,30 @@ pub fn classify(
     Classification::Personal
 }
 
-/// Корни и база рабочих копий машины; `None`, если воркер не умеет `memory_scope_v1`
-/// или ещё не присылал корни.
+/// Корни и база рабочих копий машины; `None`, если воркер не умеет `memory_scope_v1`.
+/// Корни не присланы или список пуст (воркер отбрасывает несуществующий `~/work`) —
+/// значит «неизвестно», и тогда работает правило по умолчанию (`default_rule`).
 struct MachineRoots {
     work_roots: Vec<String>,
     worktree_root: Option<String>,
+    default_rule: bool,
+}
+
+impl MachineRoots {
+    /// Лексическая классификация с правилом по умолчанию, когда корни неизвестны.
+    fn classify(&self, path: &str) -> Classification {
+        let found = classify(path, &self.work_roots, self.worktree_root.as_deref());
+        if found == Classification::Personal && self.default_rule {
+            let normalized = normalize(path);
+            if normalized.is_absolute()
+                && !normalized.components().any(|c| c == Component::ParentDir)
+                && under_default_work_root(&normalized)
+            {
+                return Classification::Work;
+            }
+        }
+        found
+    }
 }
 
 async fn machine_roots(
@@ -120,15 +139,20 @@ async fn machine_roots(
     if !capabilities.iter().any(|c| c == CAPABILITY_MEMORY_SCOPE_V1) {
         return Ok(None);
     }
-    let Some(roots) = roots.as_ref().and_then(Value::as_array) else {
-        return Ok(None);
-    };
+    let work_roots: Vec<String> = roots
+        .as_ref()
+        .and_then(Value::as_array)
+        .map(|roots| {
+            roots
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
     Ok(Some(MachineRoots {
-        work_roots: roots
-            .iter()
-            .filter_map(Value::as_str)
-            .map(str::to_owned)
-            .collect(),
+        default_rule: work_roots.is_empty(),
+        work_roots,
         worktree_root,
     }))
 }
@@ -152,21 +176,20 @@ pub async fn path_domain(
     machine_id: Uuid,
     path: &str,
 ) -> Result<Option<MemoryDomain>, sqlx::Error> {
-    let roots = machine_roots(conn, machine_id).await?;
-    let reported = roots.is_some();
-    let (work_roots, worktree_root) = match roots {
-        Some(roots) => (roots.work_roots, roots.worktree_root),
-        None => (
-            Vec::new(),
-            sqlx::query_scalar("select worktree_root from machines where id=$1")
+    let roots = match machine_roots(conn, machine_id).await? {
+        Some(roots) => roots,
+        None => MachineRoots {
+            work_roots: Vec::new(),
+            worktree_root: sqlx::query_scalar("select worktree_root from machines where id=$1")
                 .bind(machine_id)
                 .fetch_optional(&mut *conn)
                 .await?
                 .flatten(),
-        ),
+            default_rule: true,
+        },
     };
     let normalized = normalize(path);
-    match classify(path, &work_roots, worktree_root.as_deref()) {
+    match roots.classify(path) {
         Classification::Work => Ok(Some(MemoryDomain::Work)),
         Classification::Neutral => {
             let owner: Option<Option<String>> = sqlx::query_scalar(
@@ -181,16 +204,7 @@ pub async fn path_domain(
             .await?;
             Ok(owner.flatten().as_deref().and_then(MemoryDomain::parse))
         }
-        Classification::Personal => Ok(Some(
-            if !reported
-                && !normalized.components().any(|c| c == Component::ParentDir)
-                && under_default_work_root(&normalized)
-            {
-                MemoryDomain::Work
-            } else {
-                MemoryDomain::Personal
-            },
-        )),
+        Classification::Personal => Ok(Some(MemoryDomain::Personal)),
     }
 }
 
@@ -210,13 +224,11 @@ pub async fn root_scope(
     let Some(roots) = machine_roots(conn, machine_id).await? else {
         return Ok((None, None));
     };
-    Ok(
-        match classify(workdir, &roots.work_roots, roots.worktree_root.as_deref()) {
-            Classification::Work => (Some(MemoryDomain::Work), Some(project_of(workdir))),
-            Classification::Personal => (Some(MemoryDomain::Personal), Some(project_of(workdir))),
-            Classification::Neutral => (None, None),
-        },
-    )
+    Ok(match roots.classify(workdir) {
+        Classification::Work => (Some(MemoryDomain::Work), Some(project_of(workdir))),
+        Classification::Personal => (Some(MemoryDomain::Personal), Some(project_of(workdir))),
+        Classification::Neutral => (None, None),
+    })
 }
 
 /// Область потомка (делегат, форк, копия): домен и проект родителя. Родитель без домена
@@ -307,7 +319,11 @@ pub async fn recheck_launch(
     let Some(stored) = MemoryDomain::parse(&stored) else {
         return Ok(false);
     };
-    let Some(roots) = machine_roots(conn, machine_id).await? else {
+    // Корни неизвестны: настоящий путь сверить не с чем, домен остаётся как есть.
+    let Some(roots) = machine_roots(conn, machine_id)
+        .await?
+        .filter(|roots| !roots.default_rule)
+    else {
         return Ok(false);
     };
     let actual = classify(checked, &roots.work_roots, roots.worktree_root.as_deref());

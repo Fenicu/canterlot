@@ -133,7 +133,8 @@ async fn new_root_without_capability_gets_null(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(scope(&pool, id).await, (None, None));
-    // Возможность есть, но корни ещё не приходили: классифицировать нечем.
+    // Возможность есть, но корни ещё не приходили: правило по умолчанию, `/h/work` под него
+    // не подпадает.
     sqlx::query("update machines set capabilities=array['pilot_v1','memory_scope_v1'],memory_work_roots=null where id=$1")
         .bind(seed.machine_id)
         .execute(&pool)
@@ -142,7 +143,60 @@ async fn new_root_without_capability_gets_null(pool: PgPool) {
     let id = create(&pool, &registry, request(&seed, "/h/work/p", None))
         .await
         .unwrap();
-    assert_eq!(scope(&pool, id).await, (None, None));
+    assert_eq!(scope(&pool, id).await, some("personal", "/h/work/p"));
+}
+
+/// Без этого воркер с `memory_scope_v1` не получал бы возможность на хабе, и все разговоры
+/// оставались бы без домена.
+#[test]
+fn hub_negotiates_memory_scope_v1() {
+    assert!(canterlot_hub::grpc::KNOWN_OPTIONAL_CAPABILITIES.contains(&"memory_scope_v1"));
+}
+
+/// Корни не присланы или список пуст (у воркера нет `~/work`): домен выдаёт правило по
+/// умолчанию `/home/<user>/work`, а не пустое значение.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn unknown_or_empty_work_roots_fall_back_to_the_default_rule(pool: PgPool) {
+    let (seed, registry) = fixture(&pool, &["pilot_v1", "memory_scope_v1"]).await;
+    sqlx::query("update machines set allowed_roots='[\"/home\"]' where id=$1")
+        .bind(seed.machine_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    for roots in [None, Some("[]")] {
+        sqlx::query("update machines set memory_work_roots=$2::jsonb where id=$1")
+            .bind(seed.machine_id)
+            .bind(roots)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let work = create(&pool, &registry, request(&seed, "/home/u/work/app", None))
+            .await
+            .unwrap();
+        assert_eq!(scope(&pool, work).await, some("work", "/home/u/work/app"));
+        let personal = create(&pool, &registry, request(&seed, "/home/u/play", None))
+            .await
+            .unwrap();
+        assert_eq!(
+            scope(&pool, personal).await,
+            some("personal", "/home/u/play")
+        );
+        let lookalike = create(&pool, &registry, request(&seed, "/home/u/workshop", None))
+            .await
+            .unwrap();
+        assert_eq!(scope(&pool, lookalike).await.0.as_deref(), Some("personal"));
+        // Делегат наследует домен, а чужой каталог отвергается так же.
+        let child = create(
+            &pool,
+            &registry,
+            request(&seed, "/home/u/work/x", Some(work)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(scope(&pool, child).await, some("work", "/home/u/work/app"));
+        let refused = create(&pool, &registry, request(&seed, "/home/u/play", Some(work))).await;
+        assert!(matches!(refused, Err(CreateError::DomainMismatch)));
+    }
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
