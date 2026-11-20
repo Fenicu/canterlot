@@ -317,12 +317,8 @@ pub async fn run(
     )
     .await?
     {
-        // Повтор: сохранённый итог, а у идущей задачи итог пойдёт сообщением, потому что
-        // прежний ждущий вызов мог умереть вместе со своим ответом.
-        if !job.is_terminal() {
-            jobs::fallback_to_message_in_tx(&mut tx, job.id).await?;
-        }
-        let job = jobs::load(&mut tx, job.id).await?.expect("job row exists");
+        // Повтор только читает: доставку выбирает прежний ждущий вызов, его страж или подбор.
+        // Если он умер вместе со своим ответом, итог придёт сообщением или через `jobs_list`.
         let value = answer(context, &mut tx, &job).await?;
         tx.commit().await?;
         return Ok(value);
@@ -376,8 +372,10 @@ pub async fn run(
     let inserted = sqlx::query(
         "insert into jobs (id, owner_id, conversation_id, domain, machine_id, remote, workdir,
                            shell, env, title, timeout_seconds, lease, call_id, idempotency_key,
-                           delivery)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+                           delivery, waiter_instance, waiter_deadline)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
+                 case when $16::uuid is null then null
+                      else clock_timestamp() + make_interval(secs => $17) end)
          on conflict do nothing",
     )
     .bind(id)
@@ -398,6 +396,9 @@ pub async fn run(
     .bind(args.idempotency_key.as_deref())
     // Без ожидания итог может прийти только сообщением.
     .bind((wait == 0).then_some("message"))
+    // Ждущий вызов живёт в этом экземпляре хаба до срока; срок уточняется после фиксации.
+    .bind((wait > 0).then(jobs::hub_instance))
+    .bind((wait + jobs::WAITER_SLACK_SECONDS) as f64)
     .execute(&mut *tx)
     .await?
     .rows_affected();
@@ -420,6 +421,19 @@ pub async fn run(
     jobs::dispatch_machine_in_tx(&mut tx, machine_id, caller.call_id).await?;
     tx.commit().await?;
     let mut conn = context.pool.acquire().await?;
+    if wait > 0 {
+        // Срок ожидания считается от фиксации заявки, а не от вставки строки: долгая заявка
+        // не сокращает ожидание, а подбор не видит просроченный срок у живого вызова.
+        sqlx::query(
+            "update jobs set waiter_deadline=clock_timestamp() + make_interval(secs => $2)
+             where id=$1 and delivery is null and waiter_instance=$3",
+        )
+        .bind(id)
+        .bind((wait + jobs::WAITER_SLACK_SECONDS) as f64)
+        .bind(jobs::hub_instance())
+        .execute(&mut *conn)
+        .await?;
+    }
     let machine = jobs::machine_name(&mut conn, machine_id).await?;
     drop(conn);
     if wait == 0 {

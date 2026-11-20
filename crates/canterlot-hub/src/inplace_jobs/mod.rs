@@ -22,6 +22,17 @@ use crate::{
     session_tools::{ToolErrorCode, spawn, subs},
 };
 
+/// Запас сверх `wait_seconds` на сеть и разбор до того, как срок ждущего вызова считается
+/// вышедшим.
+pub const WAITER_SLACK_SECONDS: i64 = 30;
+
+/// Идентичность этого процесса хаба: ждущий вызов записывает её в строку задачи, а старт
+/// хаба переводит на сообщение только задачи чужих экземпляров.
+pub fn hub_instance() -> Uuid {
+    static INSTANCE: std::sync::OnceLock<Uuid> = std::sync::OnceLock::new();
+    *INSTANCE.get_or_init(Uuid::now_v7)
+}
+
 /// Живой хвост на хабе и хвост итога от воркера.
 pub const LIVE_TAIL_BYTES: usize = 64 * 1024;
 pub const RESULT_TAIL_BYTES: usize = 32 * 1024;
@@ -128,6 +139,8 @@ pub struct Job {
     pub log_size: Option<i64>,
     pub log_expired_at: Option<DateTime<Utc>>,
     pub late_report: Option<Value>,
+    pub waiter_instance: Option<Uuid>,
+    pub waiter_deadline: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub dispatched_at: Option<DateTime<Utc>>,
     pub started_at: Option<DateTime<Utc>>,

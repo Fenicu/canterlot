@@ -416,8 +416,10 @@ async fn hub_restart_during_the_wait_turns_every_undelivered_job_into_a_message(
     call.abort();
     let _ = call.await;
     fx.delivery_chosen(running).await;
-    sqlx::query("update jobs set delivery=null where id=$1")
+    // Ждущий вызов жил в прежнем экземпляре хаба.
+    sqlx::query("update jobs set delivery=null, waiter_instance=$2 where id=$1")
         .bind(running)
+        .bind(Uuid::now_v7())
         .execute(&fx.pool)
         .await
         .unwrap();
@@ -445,6 +447,105 @@ async fn hub_restart_during_the_wait_turns_every_undelivered_job_into_a_message(
     assert_eq!(fx.messages(running).await, 1);
     // Второй старт ничего не меняет.
     assert_eq!(sweep::on_start(&fx.pool).await.unwrap(), 0);
+}
+
+/// Живой ждущий вызов своего экземпляра хаба не теряет доставку от подбора при повторном
+/// захвате службы-одиночки: итог по-прежнему отвечает вызов, сообщения нет.
+#[sqlx::test(migrations = "./migrations")]
+async fn a_live_waiter_keeps_its_delivery_through_the_start_sweep(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let context = fx.context.clone();
+    let caller = fx.caller();
+    let call = tokio::spawn(async move {
+        session_tools::call(
+            &context,
+            &caller,
+            "job.run",
+            json!({"workdir": "/tmp/w", "shell": "make", "wait_seconds": 20}),
+        )
+        .await
+    });
+    let id = fx.only_job().await;
+    let job = fx.job(id).await;
+    assert_eq!(job.waiter_instance, Some(inplace_jobs::hub_instance()));
+    assert!(job.waiter_deadline.is_some_and(|at| at > Utc::now()));
+    // Служба-одиночка захвачена заново в том же процессе: ждущий вызов жив.
+    assert_eq!(sweep::on_start(&fx.pool).await.unwrap(), 0);
+    assert_eq!(fx.job(id).await.delivery, None);
+    fx.started(fx.a, id).await;
+    fx.finished(fx.a, id, JobOutcome::Succeeded, Some(0)).await;
+    let reply = call.await.unwrap().unwrap();
+    assert_eq!(reply["state"], "succeeded", "{reply}");
+    assert_eq!(fx.job(id).await.delivery.as_deref(), Some("inline"));
+    assert_eq!(fx.messages(id).await, 0);
+}
+
+/// Подбор берёт задачи чужого экземпляра и задачи с вышедшим сроком ожидания, и только их.
+#[sqlx::test(migrations = "./migrations")]
+async fn the_start_sweep_takes_other_instances_and_expired_waiters_only(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let own = job_id(&fx.run("own").await);
+    let foreign = job_id(&fx.run("foreign").await);
+    let expired = job_id(&fx.run("expired").await);
+    for id in [own, foreign, expired] {
+        sqlx::query(
+            "update jobs set delivery=null, waiter_instance=$2,
+               waiter_deadline=now()+interval '1 minute' where id=$1",
+        )
+        .bind(id)
+        .bind(inplace_jobs::hub_instance())
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    }
+    sqlx::query("update jobs set waiter_instance=$2 where id=$1")
+        .bind(foreign)
+        .bind(Uuid::now_v7())
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    sqlx::query("update jobs set waiter_deadline=now()-interval '1 second' where id=$1")
+        .bind(expired)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    assert_eq!(sweep::on_start(&fx.pool).await.unwrap(), 2);
+    assert_eq!(fx.job(own).await.delivery, None);
+    assert_eq!(fx.job(foreign).await.delivery.as_deref(), Some("message"));
+    assert_eq!(fx.job(expired).await.delivery.as_deref(), Some("message"));
+}
+
+/// Обычный повтор читает существующую задачу и доставку не меняет: прежний ждущий вызов
+/// ещё жив и сам ответит итогом.
+#[sqlx::test(migrations = "./migrations")]
+async fn a_replay_never_changes_the_delivery_of_a_running_job(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let context = fx.context.clone();
+    let caller = fx.caller();
+    let call = tokio::spawn(async move {
+        session_tools::call(
+            &context,
+            &caller,
+            "job.run",
+            json!({"workdir": "/tmp/w", "shell": "make", "wait_seconds": 20, "idempotency_key": "k"}),
+        )
+        .await
+    });
+    let id = fx.only_job().await;
+    let replay = fx
+        .call(
+            "job.run",
+            json!({"workdir": "/tmp/w", "shell": "make", "wait_seconds": 0, "idempotency_key": "k"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(job_id(&replay), id);
+    assert_eq!(fx.job(id).await.delivery, None, "a replay reads, never rewrites");
+    fx.started(fx.a, id).await;
+    fx.finished(fx.a, id, JobOutcome::Succeeded, Some(0)).await;
+    let reply = call.await.unwrap().unwrap();
+    assert_eq!(reply["state"], "succeeded", "{reply}");
+    assert_eq!(fx.messages(id).await, 0);
 }
 
 /// Срок хранения журнала: вложение отпускается, строка хранит хвост, чтение отвечает хвостом
@@ -545,17 +646,29 @@ async fn the_sweep_gives_an_orphaned_job_a_message(pool: PgPool) {
             .await
             .unwrap();
     }
-    sqlx::query("update jobs set created_at=now()-interval '10 minutes' where id=$1")
-        .bind(orphan)
-        .execute(&fx.pool)
-        .await
-        .unwrap();
+    // Свежая: ждущий жив, срок впереди; давняя: срок вышел, а `created_at` старый ни при чём.
+    sqlx::query(
+        "update jobs set waiter_instance=$2, waiter_deadline=now()+interval '1 minute',
+           created_at=now()-interval '10 minutes' where id=$1",
+    )
+    .bind(fresh)
+    .bind(inplace_jobs::hub_instance())
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "update jobs set waiter_instance=$2, waiter_deadline=now()-interval '1 second'
+         where id=$1",
+    )
+    .bind(orphan)
+    .bind(inplace_jobs::hub_instance())
+    .execute(&fx.pool)
+    .await
+    .unwrap();
     fx.finished(fx.a, orphan, JobOutcome::Succeeded, Some(0))
         .await;
     assert_eq!(fx.messages(orphan).await, 0);
-    let swept = sweep::undelivered_sweep(&fx.pool, Duration::from_secs(180), Utc::now())
-        .await
-        .unwrap();
+    let swept = sweep::undelivered_sweep(&fx.pool, Utc::now()).await.unwrap();
     assert_eq!(swept, 1, "a fresh job may still have a live waiter");
     assert_eq!(fx.job(orphan).await.delivery.as_deref(), Some("message"));
     assert_eq!(fx.messages(orphan).await, 1, "terminal: queued at once");
