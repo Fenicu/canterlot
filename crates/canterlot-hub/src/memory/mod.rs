@@ -211,7 +211,7 @@ pub async fn recheck_launch(
     let row: Option<(Uuid, Uuid, Option<String>)> = sqlx::query_as(
         "select c.id, c.machine_id, c.memory_domain
            from executions e join conversations c on c.id=e.conversation_id
-          where e.id=$1 for update of c",
+          where e.id=$1",
     )
     .bind(execution_id)
     .fetch_optional(&mut *conn)
@@ -236,6 +236,18 @@ pub async fn recheck_launch(
             | (Classification::Personal, MemoryDomain::Work)
     );
     if !contradicts {
+        return Ok(false);
+    }
+    // Строка блокируется только здесь, когда домен действительно меняется, и в режиме
+    // `for no key update`, который не конфликтует с `for key share` инструментов сессий.
+    // Раньше она брала `for update` на каждый запуск, и отправка, державшая `key share`
+    // и ждавшая очередь, замыкала цикл с приёмом журнала, державшим очередь.
+    let locked: Option<Option<String>> =
+        sqlx::query_scalar("select memory_domain from conversations where id=$1 for no key update")
+            .bind(conversation_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    if locked.flatten().as_deref() != Some(stored.as_str()) {
         return Ok(false);
     }
     sqlx::query(

@@ -940,7 +940,7 @@ async fn search_queries_use_the_gin_indexes(pool: PgPool) {
                     .bind(shape.blocks)
                     .bind(shape.inputs)
                     // Область памяти агента включена: форма запроса вызова инструмента.
-                    .bind(true)
+                    .bind(Some(Uuid::nil()))
                     .bind(Some("work"));
             query = if page {
                 query

@@ -52,6 +52,18 @@ pub async fn wait(
     check_visible(context, caller, args.session_id).await?;
     let deadline = Instant::now() + Duration::from_secs(seconds as u64);
     loop {
+        // Домен цели мог измениться, пока вызов ждал: итог показывается только при
+        // действующей видимости, иначе отказ тот же, что у несуществующей сессии.
+        // Удалённая цель сюда не попадает: её исход отдаёт опрос.
+        {
+            let mut conn = context.pool.acquire().await?;
+            let hidden =
+                access::hidden_from_in_tx(&mut conn, caller.conversation_id, &[args.session_id])
+                    .await?;
+            if !hidden.is_empty() {
+                return Err(ToolError::new(ToolErrorCode::SessionNotFound));
+            }
+        }
         match poll(context, caller.owner_id, args.session_id).await? {
             Poll::Settled(current) => {
                 return settled(context, caller, args.session_id, &current).await;
@@ -138,6 +150,13 @@ async fn settled(
 ) -> Result<Value, ToolError> {
     let state = current.state;
     let mut conn = context.pool.acquire().await?;
+    // Последняя проверка видимости прямо перед чтением итога.
+    if !access::hidden_from_in_tx(&mut conn, caller.conversation_id, &[target])
+        .await?
+        .is_empty()
+    {
+        return Err(ToolError::new(ToolErrorCode::SessionNotFound));
+    }
     let armed_at: Option<DateTime<Utc>> = sqlx::query_scalar(
         "select armed_at from session_subscriptions where subscriber_id=$1 and target_id=$2",
     )

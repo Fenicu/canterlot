@@ -55,7 +55,7 @@ pub async fn search(
     }
     .check(caller.owner_id, family)
     .map_err(tool_error)?;
-    query.domain = Some(domain);
+    query.scope = Some((caller.conversation_id, domain));
     let mut page = search::search(&context.pool, &query)
         .await
         .map_err(tool_error)?;

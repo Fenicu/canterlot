@@ -412,6 +412,12 @@ async fn conversation_info_carries_memory_domain_and_conflict(pool: PgPool) {
             .json::<Value>()
     };
 
+    // Посев даёт домен `work`; здесь нужен разговор без домена.
+    sqlx::query("update conversations set memory_domain=null where id=$1")
+        .bind(seed.conversation_id)
+        .execute(&pool)
+        .await
+        .unwrap();
     let bare = info(seed.conversation_id).await;
     assert!(bare["memory_domain"].is_null());
     assert!(bare["memory_project"].is_null());

@@ -182,9 +182,9 @@ pub struct SearchQuery {
     pub text: String,
     /// Семья делегированной сессии; `None` — все сессии владельца.
     pub family: Option<Vec<Uuid>>,
-    /// Домен памяти вызывающего агента: `Some(None)` видит только разговоры без домена,
-    /// `None` (владелец, PWA) не сужает.
-    pub domain: Option<Option<String>>,
+    /// Вызывающий агент и его домен памяти: видны разговоры того же домена и он сам.
+    /// Без домена (`Some((id, None))`) виден один он сам. `None` (владелец, PWA) не сужает.
+    pub scope: Option<(Uuid, Option<String>)>,
     pub conversation_id: Option<Uuid>,
     pub since: Option<DateTime<Utc>>,
     pub until: Option<DateTime<Utc>>,
@@ -273,7 +273,7 @@ impl RawQuery {
             owner_id,
             text: text.to_owned(),
             family,
-            domain: None,
+            scope: None,
             conversation_id: self.conversation_id,
             since: self.since,
             until: self.until,
@@ -286,7 +286,8 @@ impl RawQuery {
 }
 
 /// Условия одной ветви без курсора. `$1` владелец, `$2` запрос, `$3` семья, `$4` сессия,
-/// `$5`/`$6` период, `$7` харнесс, `$8`/`$9` нужны ли ответы и сообщения, `$10`/`$11` область памяти: флаг и домен.
+/// `$5`/`$6` период, `$7` харнесс, `$8`/`$9` нужны ли ответы и сообщения, `$10`/`$11` область памяти:
+/// вызывающий агент (пусто у владельца) и его домен.
 const BLOCK_WHERE: &str = "b.kind = 'text' and b.state <> 'streaming'
    and canterlot_block_doc(b.content) @@ websearch_to_tsquery('pg_catalog.russian', $2)
    and c.owner_id = $1 and c.trashed_at is null and c.side_of is null
@@ -295,7 +296,7 @@ const BLOCK_WHERE: &str = "b.kind = 'text' and b.state <> 'streaming'
    and ($5::timestamptz is null or b.created_at >= $5::timestamptz)
    and ($6::timestamptz is null or b.created_at < $6::timestamptz)
    and ($7::text is null or c.harness = $7::text)
-   and ($10::boolean is false or c.memory_domain is not distinct from $11::text)
+   and ($10::uuid is null or c.id = $10::uuid or c.memory_domain = $11::text)
    and $8::boolean";
 
 /// Сообщения ленты: владелец, другая сессия, бриф запуска и итог делегата, в том числе
@@ -313,7 +314,7 @@ const INPUT_WHERE: &str = "i.feed_seq is not null
    and ($5::timestamptz is null or i.created_at >= $5::timestamptz)
    and ($6::timestamptz is null or i.created_at < $6::timestamptz)
    and ($7::text is null or c.harness = $7::text)
-   and ($10::boolean is false or c.memory_domain is not distinct from $11::text)
+   and ($10::uuid is null or c.id = $10::uuid or c.memory_domain = $11::text)
    and $9::boolean";
 
 /// Текст ввода для фрагмента: та же выборка, что в `canterlot_input_doc`.
@@ -391,8 +392,8 @@ macro_rules! bind_filters {
             .bind($q.harness.as_deref())
             .bind($q.kind != Some(SearchKind::Messages))
             .bind($q.kind != Some(SearchKind::Answers))
-            .bind($q.domain.is_some())
-            .bind($q.domain.clone().flatten())
+            .bind($q.scope.as_ref().map(|(caller, _)| *caller))
+            .bind($q.scope.as_ref().and_then(|(_, domain)| domain.clone()))
     };
 }
 

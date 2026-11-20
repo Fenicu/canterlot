@@ -237,6 +237,27 @@ async fn cross_domain_send_subscribe_wait_spawn_target_adopt_alarm_are_not_found
     assert_eq!(traces, 0);
 }
 
+/// Скрытая цель отвечает на `nudge_set` с путём отчёта так же, как несуществующий ID:
+/// путь не проверяется и воркер не опрашивается.
+#[sqlx::test(migrations = "./migrations")]
+async fn nudge_set_with_report_path_hides_out_of_domain_target(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let args = |target: Uuid| json!({"session_id": target, "report_file": "/h/report.md"});
+    let missing = f
+        .call(f.work, "nudge.set", args(Uuid::now_v7()))
+        .await
+        .unwrap_err();
+    assert_eq!(missing.code, Code::SessionNotFound);
+    for (from, to) in f.crossings() {
+        let error = f.call(from, "nudge.set", args(to)).await.unwrap_err();
+        assert_eq!(
+            format!("{error:?}"),
+            format!("{missing:?}"),
+            "{from} -> {to}"
+        );
+    }
+}
+
 #[sqlx::test(migrations = "./migrations")]
 async fn same_domain_send_still_works(pool: PgPool) {
     let f = Fx::new(pool).await;
@@ -264,19 +285,60 @@ async fn sessions_list_hides_other_domain_and_null_for_domained_callers(pool: Pg
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn null_caller_sees_only_null(pool: PgPool) {
+async fn null_caller_sees_only_itself(pool: PgPool) {
     let f = Fx::new(pool).await;
     let other_null = f.conversation("второй без домена", None).await;
     let listed = f.listed(f.null).await;
-    assert!(listed.contains(&f.null));
-    assert!(listed.contains(&other_null));
-    assert!(!listed.contains(&f.work));
-    assert!(!listed.contains(&f.personal));
-    f.call(
-        f.null,
-        "sessions.inspect",
-        json!({"session_id": other_null}),
-    )
-    .await
-    .unwrap();
+    assert_eq!(
+        listed,
+        vec![f.null],
+        "разговор без домена видит только себя"
+    );
+    // Домен вызывающего с доменом не видит ни одного разговора без домена.
+    for from in [f.work, f.personal] {
+        let listed = f.listed(from).await;
+        assert!(!listed.contains(&f.null) && !listed.contains(&other_null));
+    }
+    // Себя виден и по прямому вызову.
+    f.call(f.null, "sessions.inspect", json!({"session_id": f.null}))
+        .await
+        .unwrap();
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn two_null_sessions_cannot_reach_each_other(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let other = f.conversation("второй без домена", None).await;
+    for (id, seq) in [(f.null, 1), (other, 2)] {
+        f.say(id, seq, "частый токен").await;
+    }
+    for (from, to) in [(f.null, other), (other, f.null)] {
+        not_found(&f, from, "sessions.inspect", json!({"session_id": to})).await;
+        not_found(
+            &f,
+            from,
+            "sessions.send",
+            json!({"session_id": to, "text": "привет"}),
+        )
+        .await;
+        not_found(&f, from, "sessions.subscribe", json!({"session_id": to})).await;
+        not_found(
+            &f,
+            from,
+            "history.search",
+            json!({"query": "токен", "session_id": to}),
+        )
+        .await;
+        let found = f
+            .call(from, "history.search", json!({"query": "токен"}))
+            .await
+            .unwrap();
+        let ids: Vec<Uuid> = found["hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|hit| serde_json::from_value(hit["session_id"].clone()).unwrap())
+            .collect();
+        assert_eq!(ids, vec![from], "поиск без домена находит только себя");
+    }
 }

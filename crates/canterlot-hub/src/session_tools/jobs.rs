@@ -164,6 +164,23 @@ pub async fn run_in_tx(
             let Ok(event) = serde_json::from_value::<EventJob>(job.payload.clone()) else {
                 return Ok(JobOutcome::Cancelled("invalid_payload"));
             };
+            // Подписка создана при совпавших доменах, но домен цели или подписчика мог
+            // измениться: итог чужого домена не доставляется, подписчик ничего не узнаёт.
+            if !crate::session_tools::access::hidden_from_in_tx(
+                conn,
+                subscriber,
+                &[event.target_id],
+            )
+            .await?
+            .is_empty()
+            {
+                tracing::debug!(
+                    subscriber = %subscriber,
+                    target = %event.target_id,
+                    "subscription event dropped: the target left the domain"
+                );
+                return Ok(JobOutcome::Cancelled("domain_mismatch"));
+            }
             // Удаление не ждёт лимита: подписки уже нет, второго такого события не будет.
             if event.state != "deleted"
                 && let Some(at) = crate::crunch::notification_hold_in_tx(
