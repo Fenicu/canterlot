@@ -605,7 +605,45 @@ async fn migration_removes_cross_domain_subscriptions_and_alarms(pool: PgPool) {
     let alarm_cross = arm(work, personal).await;
     let alarm_null = arm(neutral, neutral_other).await;
 
+    // Ждущие вводы: от сессии того же домена, от сессии другого домена и от владельца.
+    let queue_input = |seq: i64, from: Option<Uuid>, to: Uuid| {
+        let pool = pool.clone();
+        let (owner, machine) = (seed.owner_id, seed.machine_id);
+        async move {
+            let (id, command) = (Uuid::now_v7(), Uuid::now_v7());
+            sqlx::query("insert into commands(id,machine_id,conversation_id,kind,payload,delivery_state) values($1,$2,$3,'deliver_input','{}','held')")
+                .bind(command).bind(machine).bind(to).execute(&pool).await.unwrap();
+            let origin = from.map(|from| serde_json::json!({"kind": "message", "from": from}));
+            sqlx::query("insert into inputs(id,conversation_id,owner_id,input_seq,idempotency_key,content,state,command_id,received_at,origin) values($1,$2,$3,$4,$5,'[]','queued',$6,now(),$7)")
+                .bind(id).bind(to).bind(owner).bind(seq).bind(id.to_string()).bind(command).bind(origin)
+                .execute(&pool).await.unwrap();
+            id
+        }
+    };
+    let input_same = queue_input(1, Some(work), work_other).await;
+    let input_cross = queue_input(1, Some(personal), work).await;
+    let input_owner = queue_input(2, None, work).await;
+
     canterlot_hub::db::MIGRATOR.run(&pool).await.unwrap();
+
+    let state_of = |id: Uuid| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_as::<_, (String, String)>(
+                "select i.state,c.delivery_state from inputs i join commands c on c.id=i.command_id where i.id=$1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(state_of(input_same).await.0, "queued");
+    assert_eq!(state_of(input_owner).await.0, "queued");
+    assert_eq!(
+        state_of(input_cross).await,
+        ("cancelled".to_owned(), "completed".to_owned())
+    );
 
     let kept: Vec<(Uuid, Uuid)> = sqlx::query_as(
         "select subscriber_id,target_id from session_subscriptions order by subscriber_id,target_id",

@@ -74,3 +74,28 @@ delete from alarms a
        join conversations target on target.id = named.id::uuid
       where owner_conversation.memory_domain is null
          or target.memory_domain is distinct from owner_conversation.memory_domain);
+
+-- Ждущие доставки вводы от другой сессии, у которой с получателем не совпали домены (или
+-- у одной из сторон домена нет): без этого первая же выдача после обновления передала бы
+-- их через границу. Ввод отменяется так же, как отмена владельцем: состояние `cancelled`
+-- и завершённая удержанная выдача. Вводы владельца (без отправителя-разговора) не трогаются.
+with crossing as (
+  update inputs i
+     set state = 'cancelled', cancel_requested = false
+    from conversations sender, conversations target
+   where i.state = 'queued'
+     and i.origin is not null
+     and i.origin ->> 'from' ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+     and sender.id = (i.origin ->> 'from')::uuid
+     and target.id = i.conversation_id
+     and (sender.memory_domain is null
+          or sender.memory_domain is distinct from target.memory_domain)
+  returning i.command_id
+)
+update commands c
+   set delivery_state = 'completed', completed_at = coalesce(c.completed_at, now()),
+       last_status = 'cancel_won', last_status_rank = 3,
+       result = '{"cancelled": true}'::jsonb
+  from crossing
+ where c.id = crossing.command_id
+   and c.kind = 'deliver_input' and c.delivery_state = 'held';

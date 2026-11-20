@@ -592,7 +592,42 @@ pub async fn snapshot_views(
     Ok(rows.iter().map(view).collect())
 }
 
-fn compact(tasks: &[PlanTaskDetail]) -> String {
+/// Исполнитель другого домена (или без домена), чем у оркестратора, показывается без
+/// коммитов, ответа и идентификаторов: такая связь осталась от версии без доменов, например
+/// после переноса задачи на чужую доску. Возвращает номера скрытых задач.
+async fn hide_foreign_executors(
+    conn: &mut PgConnection,
+    orchestrator: Uuid,
+    tasks: &mut [PlanTaskDetail],
+) -> Result<Vec<i32>, sqlx::Error> {
+    let executors: Vec<Uuid> = tasks
+        .iter()
+        .filter_map(|task| task.task.executor_id)
+        .collect();
+    if executors.is_empty() {
+        return Ok(Vec::new());
+    }
+    let hidden = access::hidden_from_in_tx(conn, orchestrator, &executors).await?;
+    let mut numbers = Vec::new();
+    for task in tasks.iter_mut() {
+        if task
+            .task
+            .executor_id
+            .is_some_and(|executor| hidden.contains(&executor))
+        {
+            task.task.executor_id = None;
+            task.commits = Vec::new();
+            task.commits_truncated = false;
+            task.files_changed = 0;
+            task.report_block_id = None;
+            task.report_seq = None;
+            numbers.push(task.task.number);
+        }
+    }
+    Ok(numbers)
+}
+
+fn compact(tasks: &[PlanTaskDetail], hidden: &[i32]) -> String {
     if tasks.is_empty() {
         return "Your plan is empty. Add tasks with plan_add.".to_owned();
     }
@@ -605,6 +640,9 @@ fn compact(tasks: &[PlanTaskDetail]) -> String {
             if task.task.archived { ", archived" } else { "" },
             task.task.title
         );
+        if hidden.contains(&task.task.number) {
+            line.push_str(" (executor скрыто: другой домен)");
+        }
         if let Some(executor) = task.task.executor_id {
             line.push_str(&format!(" (executor {executor}"));
             if !task.commits.is_empty() {
@@ -647,8 +685,9 @@ pub async fn list(
         let row = row_of_number(&mut conn, caller.owner_id, caller.conversation_id, number)
             .await?
             .ok_or_else(|| not_found(number))?;
-        let tasks = details(&mut conn, &[row]).await?;
-        return Ok(json!({"tasks": tasks, "hint": compact(&tasks)}));
+        let mut tasks = details(&mut conn, &[row]).await?;
+        let hidden = hide_foreign_executors(&mut conn, caller.conversation_id, &mut tasks).await?;
+        return Ok(json!({"tasks": tasks, "hint": compact(&tasks, &hidden)}));
     }
     let rows = rows_of(
         &mut conn,
@@ -657,8 +696,9 @@ pub async fn list(
         args.include_archived.unwrap_or(false),
     )
     .await?;
-    let all = details(&mut conn, &rows).await?;
-    let hint = compact(&all);
+    let mut all = details(&mut conn, &rows).await?;
+    let hidden = hide_foreign_executors(&mut conn, caller.conversation_id, &mut all).await?;
+    let hint = compact(&all, &hidden);
     // Завершённые задачи (в том числе архивные) видны одной строкой в подсказке.
     let tasks: Vec<_> = all
         .into_iter()
