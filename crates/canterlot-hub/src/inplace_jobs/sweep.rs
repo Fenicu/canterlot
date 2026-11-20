@@ -105,6 +105,41 @@ pub async fn expire_logs(
     Ok(done)
 }
 
+/// Воркер сказал в отчёте при подключении, что задача закончена, а факт с хвостом не пришёл
+/// за `wait`: задача закрывается по снимку без хвоста. Журнал воркера доставляет факт сразу
+/// после отчёта, так что срок нужен лишь для порченого журнала.
+pub async fn reported_finish_sweep(
+    pool: &PgPool,
+    wait: Duration,
+    now: DateTime<Utc>,
+) -> Result<usize, sqlx::Error> {
+    let rows: Vec<(Uuid, Uuid)> = sqlx::query_as(
+        "select id, machine_id from jobs
+         where finish_report is not null
+           and state in ('dispatched','waiting_lease','running')
+           and finish_reported_at < $1 - make_interval(secs => $2)
+         order by id",
+    )
+    .bind(now)
+    .bind(wait.as_secs_f64())
+    .fetch_all(pool)
+    .await?;
+    let mut done = 0;
+    for (id, machine_id) in rows {
+        let ended = crate::db::in_tx(pool, move |conn| {
+            Box::pin(async move {
+                super::facts::finish_from_report(conn, machine_id, id, Uuid::now_v7()).await
+            })
+        })
+        .await?;
+        done += usize::from(ended);
+    }
+    Ok(done)
+}
+
+/// Сколько хаб ждёт факт `JobFinished` после снимка «закончена».
+const REPORTED_FINISH_WAIT: Duration = Duration::from_secs(120);
+
 /// Задачи, о которых машина молчит дольше срока команды и запаса, становятся `lost`.
 /// Молчание считается от последнего факта; машина на связи не теряет задач: её факты придут.
 pub async fn lost_sweep(
@@ -226,6 +261,7 @@ async fn sweep_once(
 ) -> Result<(), sqlx::Error> {
     lost_sweep(pool, registry, grace, Utc::now()).await?;
     undelivered_sweep(pool, Utc::now()).await?;
+    reported_finish_sweep(pool, REPORTED_FINISH_WAIT, Utc::now()).await?;
     expire_logs(pool, retention, Utc::now()).await?;
     for machine in queued_machines(pool).await? {
         if registry.availability(machine) == Availability::Available {

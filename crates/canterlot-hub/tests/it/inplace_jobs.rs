@@ -1267,8 +1267,97 @@ async fn a_report_on_connect_applies_forward(pool: PgPool) {
     })
     .await;
     assert_eq!(fx.state(running).await, "running");
+    // Снимок «закончена» с выводом ждёт факт с хвостом, а не закрывает задачу пустой.
+    assert_eq!(fx.state(finished).await, "dispatched");
+    fx.finished(fx.a, finished, JobOutcome::Succeeded, Some(0)).await;
     assert_eq!(fx.state(finished).await, "succeeded");
     assert_eq!(fx.job(finished).await.exit_code, Some(0));
+}
+
+fn finished_report(id: Uuid, log_bytes: u64) -> JobsReport {
+    JobsReport {
+        jobs: vec![JobSnapshot {
+            job_id: id.to_string(),
+            attempt: 1,
+            phase: JobPhase::Finished as i32,
+            outcome: JobOutcome::Succeeded as i32,
+            exit_code: Some(0),
+            duration_ms: 10,
+            log_bytes,
+            ..Default::default()
+        }],
+        observed_at_ms: 0,
+    }
+}
+
+/// Отчёт при подключении обогнал факт `JobFinished`: хвост вывода не теряется, итог и
+/// сообщение берутся из факта.
+#[sqlx::test(migrations = "./migrations")]
+async fn a_report_arriving_before_the_finished_fact_keeps_the_output_tail(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let id = job_id(&fx.run("make").await);
+    fx.started(fx.a, id).await;
+    let a = fx.a;
+    fx.apply(move |conn| {
+        Box::pin(async move {
+            facts::apply_report(conn, a, &finished_report(id, 12), Uuid::now_v7()).await
+        })
+    })
+    .await;
+    assert_eq!(fx.state(id).await, "running", "no result without the fact");
+    assert_eq!(fx.messages(id).await, 0);
+    fx.finished(fx.a, id, JobOutcome::Succeeded, Some(0)).await;
+    let job = fx.job(id).await;
+    assert_eq!(job.state, "succeeded");
+    assert_eq!(job.tail.as_deref(), Some(&b"hello\nworld\n"[..]));
+    assert_eq!(fx.messages(id).await, 1);
+    // Отчёт, повторённый после факта, ничего не меняет.
+    fx.apply(move |conn| {
+        Box::pin(async move {
+            facts::apply_report(conn, a, &finished_report(id, 12), Uuid::now_v7()).await
+        })
+    })
+    .await;
+    assert_eq!(fx.messages(id).await, 1);
+    assert_eq!(fx.job(id).await.tail.as_deref(), Some(&b"hello\nworld\n"[..]));
+}
+
+/// Снимок без вывода закрывает задачу сразу: терять нечего. А если факт с хвостом так и не
+/// пришёл, служба закрывает задачу по снимку, а не оставляет её навсегда идущей.
+#[sqlx::test(migrations = "./migrations")]
+async fn a_report_without_output_finishes_at_once_and_a_missing_fact_times_out(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let quiet = job_id(&fx.run("true").await);
+    let loud = job_id(&fx.run("make").await);
+    let a = fx.a;
+    for (id, bytes) in [(quiet, 0), (loud, 9)] {
+        fx.apply(move |conn| {
+            Box::pin(async move {
+                facts::apply_report(conn, a, &finished_report(id, bytes), Uuid::now_v7()).await
+            })
+        })
+        .await;
+    }
+    assert_eq!(fx.state(quiet).await, "succeeded");
+    assert_eq!(fx.state(loud).await, "dispatched");
+    assert_eq!(
+        sweep::reported_finish_sweep(&fx.pool, Duration::from_secs(120), Utc::now())
+            .await
+            .unwrap(),
+        0,
+        "the fact may still be on its way"
+    );
+    let later = Utc::now() + chrono::TimeDelta::minutes(5);
+    assert_eq!(
+        sweep::reported_finish_sweep(&fx.pool, Duration::from_secs(120), later)
+            .await
+            .unwrap(),
+        1
+    );
+    let job = fx.job(loud).await;
+    assert_eq!(job.state, "succeeded");
+    assert_eq!(job.end_reason.as_deref(), Some("tail_unavailable"));
+    assert_eq!(job.output_bytes, 9);
 }
 
 // ───────── Потеря ─────────

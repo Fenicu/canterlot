@@ -141,6 +141,8 @@ pub struct Job {
     pub late_report: Option<Value>,
     pub waiter_instance: Option<Uuid>,
     pub waiter_deadline: Option<DateTime<Utc>>,
+    pub finish_report: Option<Value>,
+    pub finish_reported_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub dispatched_at: Option<DateTime<Utc>>,
     pub started_at: Option<DateTime<Utc>>,

@@ -10,3 +10,10 @@ create unique index jobs_call on jobs (conversation_id, call_id)
 alter table jobs
   add column waiter_instance uuid,
   add column waiter_deadline timestamptz;
+
+-- Снимок «закончена» из отчёта при подключении не несёт хвоста вывода: задача ждёт факта
+-- `JobFinished` из журнала воркера. Снимок запоминается, чтобы задача не повисла, если факт
+-- так и не придёт (служба закрывает её по снимку без хвоста).
+alter table jobs
+  add column finish_report jsonb,
+  add column finish_reported_at timestamptz;
