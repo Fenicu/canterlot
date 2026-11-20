@@ -151,7 +151,8 @@ test('reduced_motion_never_starts_the_video_by_itself', async ({ page }) => {
   await openChat(page, 'owner', [CLIP_FILE]);
   await tile(page, 'owner').click();
   const video = await playerLoaded(page);
-  await page.waitForTimeout(800);
+  // Просмотрщик открылся без движения и без запуска: ролик ждёт касания на «играть».
+  await settled(page);
   expect(await video.evaluate((node: HTMLVideoElement) => ({ paused: node.paused, time: node.currentTime }))).toEqual({ paused: true, time: 0 });
 });
 
