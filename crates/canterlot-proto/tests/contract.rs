@@ -814,6 +814,7 @@ fn pilot_records_roundtrip() {
                 window: LimitWindow::Weekly as i32,
                 resets_at_ms: 456789,
                 input_command_id: "input".into(),
+                account: "b-opencode".into(),
             }),
         ),
         (
@@ -922,6 +923,7 @@ fn pilot_records_roundtrip() {
             provider: "claude".into(),
             window: LimitWindow::FiveHour as i32,
             observed_machine_ms: 1_700_000_000_000,
+            account: "b-opencode".into(),
         }],
         credentials: vec![credential],
         provider_credits: vec![credits],
@@ -941,6 +943,7 @@ fn pilot_records_roundtrip() {
     let poll = PollLimits {
         provider: "codex".into(),
         owner_refresh: true,
+        account: "b-opencode".into(),
     };
     assert_roundtrip(poll.clone());
     let message = ControlDown {
@@ -1354,9 +1357,11 @@ fn start_execution_capabilities_machine_report_os_and_limits_snapshot_roundtrip(
             used_permille: 954,
             resets_at_ms: 123456,
             observed_machine_ms: 123000,
+            account: "b-opencode".into(),
             ..Default::default()
         }],
         weekly_reserve_active: true,
+        account: "b-opencode".into(),
     };
     assert_roundtrip(snapshot.clone());
     let message = ControlDown {

@@ -235,6 +235,7 @@ impl Env {
                 window: proto_window(window),
                 resets_at_ms: resets_at.map_or(0, |at| at.timestamp_millis() as u64),
                 input_command_id: String::new(),
+                account: String::new(),
             },
             &self.config,
             now,
@@ -560,6 +561,7 @@ async fn five_hour_limit_with_crunch_holds_and_schedules_wake_at_reset_plus_grac
         window: LimitWindow::FiveHour as i32,
         resets_at_ms: reset.timestamp_millis() as u64,
         input_command_id: input.command_id.to_string(),
+        account: String::new(),
     })])
     .await;
     let (pauses, holds, slot) = queue(&pool, id).await;
@@ -1665,6 +1667,7 @@ async fn rereview_sj_stop_marker_blocks_old_turn_but_allows_new_turn(pool: PgPoo
             window: LimitWindow::FiveHour as i32,
             resets_at_ms: reset.timestamp_millis() as u64,
             input_command_id: command.to_string(),
+            account: String::new(),
         })
     };
     let late = fact(first.command_id, reset);
@@ -1691,6 +1694,7 @@ async fn rereview_sj_stop_marker_blocks_old_turn_but_allows_new_turn(pool: PgPoo
         window: LimitWindow::FiveHour as i32,
         resets_at_ms: (reset + secs(7200)).timestamp_millis() as u64,
         input_command_id: second.command_id.to_string(),
+        account: String::new(),
     })])
     .await;
     assert!(

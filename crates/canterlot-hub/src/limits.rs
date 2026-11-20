@@ -929,6 +929,7 @@ fn snapshot_message(
                         .map_or(0, |at| at.timestamp_millis().max(0) as u64),
                     observed_machine_ms: seen.timestamp_millis().max(0) as u64,
                     data_confidence: p.data_confidence.proto(),
+                    account: String::new(),
                 });
             }
         }
@@ -938,6 +939,7 @@ fn snapshot_message(
             provider: provider.into(),
             current: observations,
             weekly_reserve_active: stored.is_some_and(|p| p.weekly_reserve_active),
+            account: String::new(),
         })),
     }
 }

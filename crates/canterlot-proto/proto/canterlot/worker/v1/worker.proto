@@ -741,6 +741,8 @@ message HarnessInfo {
   repeated CatalogEntry catalog = 13;
   // Поддерживает ли харнесс цели: Codex и Claude Code — да, OpenCode — нет.
   bool goals = 14;
+  // Учётная запись лимитов харнесса (`account` в worker.toml); пусто — «owner».
+  string account = 15;
 }
 
 // Строка меню slash-команд: имя, короткое описание, вид и подсказка аргумента.
@@ -853,6 +855,9 @@ message LimitObservation {
   uint64 resets_at_ms = 4;
   uint64 observed_machine_ms = 5;
   LimitDataConfidence data_confidence = 6;
+  // Учётная запись харнесса, чьё это показание (`account` в worker.toml). Пусто у старого
+  // воркера: хаб читает это как «owner».
+  string account = 7;
 }
 
 // Окно, которого у провайдера нет: полное успешное чтение не содержит его при других окнах.
@@ -860,6 +865,8 @@ message LimitAbsence {
   string provider = 1;
   LimitWindow window = 2;
   uint64 observed_machine_ms = 3;
+  // Как у LimitObservation: пусто значит «owner».
+  string account = 4;
 }
 
 message LimitsReport {
@@ -902,12 +909,16 @@ message PollLimits {
   string provider = 1;
   // Просьба владельца: воркер не ждёт ни интервала опроса, ни паузы после сбоев.
   bool owner_refresh = 2;
+  // Какую учётную запись опросить; пусто — «owner».
+  string account = 3;
 }
 
 message LimitsSnapshot {
   string provider = 1;
   repeated LimitObservation current = 2;
   bool weekly_reserve_active = 3;
+  // Учётная запись, чьё состояние это; пусто — «owner».
+  string account = 4;
 }
 
 message LimitReached {
@@ -916,6 +927,8 @@ message LimitReached {
   LimitWindow window = 3;
   uint64 resets_at_ms = 4;
   string input_command_id = 5;
+  // Как у LimitObservation: пусто значит «owner».
+  string account = 6;
 }
 
 // Необязательная возможность workdir_suggest_v1: подсказка рабочей папки во время

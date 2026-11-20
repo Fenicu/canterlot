@@ -42,6 +42,28 @@ pub struct WorkerConfig {
     pub memory: MemoryConfig,
 }
 
+impl WorkerConfig {
+    /// Учётная запись лимитов провайдера этой машины (`claude`, `codex`, `opencode`);
+    /// провайдер без таблицы и неизвестное имя дают `owner`.
+    pub fn account_for_provider(&self, provider: &str) -> &str {
+        let account = match provider {
+            "claude" => self.claude_code.as_ref().map(|c| c.account.as_str()),
+            "codex" => self.codex.as_ref().map(|c| c.account.as_str()),
+            "opencode" => self.opencode.as_ref().map(|c| c.account.as_str()),
+            _ => None,
+        };
+        account.unwrap_or(canterlot_proto::limits::OWNER_ACCOUNT)
+    }
+
+    /// То же по имени харнесса, включая синтетические.
+    pub fn account_for_harness(&self, harness: &str) -> &str {
+        match canterlot_proto::harness::provider_of(harness) {
+            Some(provider) => self.account_for_provider(provider),
+            None => canterlot_proto::limits::OWNER_ACCOUNT,
+        }
+    }
+}
+
 /// Общая память: какие корни считаются рабочими проектами (домен `work`).
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -190,6 +212,10 @@ pub enum ConfigErrorCategory {
     DelegateMcpServer {
         name: String,
     },
+    /// Негодная метка `account` в таблице харнесса: нужны 1..40 знаков `[a-z0-9-]`.
+    Account {
+        harness: &'static str,
+    },
 }
 
 impl ConfigError {
@@ -255,6 +281,11 @@ impl fmt::Display for ConfigError {
             ConfigErrorCategory::DelegateMcpServer { name } => write!(
                 f,
                 "{}: execution.delegate_mcp_servers has an invalid server name {name:?}",
+                self.path.display()
+            ),
+            ConfigErrorCategory::Account { harness } => write!(
+                f,
+                "{}: {harness}.account must be 1 to 40 characters of a-z, 0-9 and '-'",
                 self.path.display()
             ),
         }
@@ -323,6 +354,24 @@ pub fn load(path: &Path) -> Result<WorkerConfig, ConfigError> {
             path,
             ConfigErrorCategory::PaidModelPollUnsupported,
         ));
+    }
+    for (harness, account) in [
+        (
+            "claude_code",
+            config.claude_code.as_ref().map(|c| c.account.as_str()),
+        ),
+        ("codex", config.codex.as_ref().map(|c| c.account.as_str())),
+        (
+            "opencode",
+            config.opencode.as_ref().map(|c| c.account.as_str()),
+        ),
+    ] {
+        if account.is_some_and(|account| !canterlot_proto::limits::valid_account(account)) {
+            return Err(ConfigError::new(
+                path,
+                ConfigErrorCategory::Account { harness },
+            ));
+        }
     }
     if let Some(name) = config
         .execution
@@ -473,6 +522,9 @@ pub struct ClaudeCodeConfig {
     /// Явный `~/.claude.json` владельца (тесты); иначе путь из окружения.
     #[serde(skip, default)]
     pub owner_user_config: Option<PathBuf>,
+    /// Учётная запись, которой принадлежат лимиты харнесса.
+    #[serde(default = "default_account", skip_serializing_if = "is_owner_account")]
+    pub account: String,
 }
 
 impl Default for ClaudeCodeConfig {
@@ -481,8 +533,19 @@ impl Default for ClaudeCodeConfig {
             executable: PathBuf::from("claude"),
             allow_paid_model_poll: false,
             owner_user_config: None,
+            account: default_account(),
         }
     }
+}
+
+/// Учётная запись по умолчанию: лимиты единственной подписки владельца.
+pub fn default_account() -> String {
+    canterlot_proto::limits::OWNER_ACCOUNT.to_owned()
+}
+
+/// Спека сопровождения для `owner` остаётся прежней: ключ пишется только для другой метки.
+fn is_owner_account(account: &String) -> bool {
+    account == canterlot_proto::limits::OWNER_ACCOUNT
 }
 
 /// Пользовательский каталог Claude Code: `CLAUDE_CONFIG_DIR`, если задан
@@ -527,6 +590,9 @@ pub struct CodexConfig {
     /// Политика временных каталогов для дома canterlot; тесты ставят Allow.
     #[serde(skip, default)]
     pub home_policy: crate::adapter::codex::home::TempDirPolicy,
+    /// Учётная запись, которой принадлежат лимиты харнесса.
+    #[serde(default = "default_account", skip_serializing_if = "is_owner_account")]
+    pub account: String,
 }
 
 impl Default for CodexConfig {
@@ -537,6 +603,7 @@ impl Default for CodexConfig {
             home_dir: None,
             owner_home: None,
             home_policy: crate::adapter::codex::home::TempDirPolicy::Refuse,
+            account: default_account(),
         }
     }
 }
@@ -577,6 +644,9 @@ pub struct OpenCodeConfig {
     pub default_model: Option<String>,
     /// Каталог конфигурации владельца; по умолчанию `$XDG_CONFIG_HOME/opencode`.
     pub owner_config: Option<PathBuf>,
+    /// Учётная запись, которой принадлежат лимиты харнесса.
+    #[serde(skip_serializing_if = "is_owner_account")]
+    pub account: String,
 }
 
 impl Default for OpenCodeConfig {
@@ -589,6 +659,7 @@ impl Default for OpenCodeConfig {
             provider_models: BTreeMap::new(),
             default_model: None,
             owner_config: None,
+            account: default_account(),
         }
     }
 }

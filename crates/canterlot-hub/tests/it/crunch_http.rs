@@ -198,6 +198,7 @@ async fn limits_endpoint_exposes_reserve_state_and_holds(pool: PgPool) {
             window: LimitWindow::FiveHour as i32,
             resets_at_ms: reset.timestamp_millis() as u64,
             input_command_id: String::new(),
+            account: String::new(),
         },
         &LimitsConfig::default(),
         now,

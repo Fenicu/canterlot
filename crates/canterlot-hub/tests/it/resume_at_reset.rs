@@ -70,6 +70,7 @@ async fn plain_stop(
             window: proto_window(window),
             resets_at_ms: resets_at.map_or(0, |at| at.timestamp_millis() as u64),
             input_command_id: String::new(),
+            account: String::new(),
         },
         &LimitsConfig::default(),
         at,

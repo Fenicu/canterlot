@@ -273,6 +273,7 @@ async fn a_fable_limit_pauses_only_that_session_and_no_provider_reserve(pool: Pg
             window: LimitWindow::WeeklyFable as i32,
             resets_at_ms: reset.timestamp_millis() as u64,
             input_command_id: String::new(),
+            account: String::new(),
         },
         &LimitsConfig::default(),
         Utc::now(),

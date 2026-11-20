@@ -65,6 +65,7 @@ mod claude_code_parser;
 mod claude_code_presets;
 mod claude_code_process;
 mod claude_code_restart_stuck;
+mod claude_ignored;
 mod codex_containment;
 mod codex_e2e;
 mod codex_events;
@@ -97,6 +98,7 @@ mod git_facts;
 mod instructions;
 mod lease;
 mod lease_scripts;
+mod limit_account;
 mod machine;
 mod memory_import;
 #[cfg(feature = "synthetic-adapter")]

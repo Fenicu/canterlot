@@ -2,6 +2,29 @@ use prost::Message;
 
 use crate::worker::v1::{Command, JournalRecords, command, content_block};
 
+/// Учётная запись лимитов по умолчанию: её несёт всё, что не назвало другую.
+pub const OWNER_ACCOUNT: &str = "owner";
+/// Самая длинная метка учётной записи.
+pub const MAX_ACCOUNT_BYTES: usize = 40;
+
+/// Метка учётной записи лимитов: 1..40 знаков `[a-z0-9-]`.
+pub fn valid_account(account: &str) -> bool {
+    !account.is_empty()
+        && account.len() <= MAX_ACCOUNT_BYTES
+        && account
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// Метка из поля протокола: пустое поле у старого воркера значит `owner`.
+pub fn account_or_owner(account: &str) -> &str {
+    if account.is_empty() {
+        OWNER_ACCOUNT
+    } else {
+        account
+    }
+}
+
 pub const MAX_ATTACHMENT_BYTES: u64 = 104_857_600;
 pub const MAX_ATTACHMENTS_PER_INPUT: usize = 10;
 pub const MAX_ATTACHMENT_NAME_BYTES: usize = 255;

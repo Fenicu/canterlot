@@ -1809,6 +1809,7 @@ pub async fn request_poll_outcome(
         msg: Some(control_down::Msg::PollLimits(PollLimits {
             provider: provider.into(),
             owner_refresh,
+            account: String::new(),
         })),
     });
     Ok(PollRequest::Sent)

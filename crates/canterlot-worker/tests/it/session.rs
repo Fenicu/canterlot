@@ -2053,6 +2053,7 @@ async fn limits_snapshot_is_cached_volatile_and_replaced_by_the_latest() {
                     ..Default::default()
                 }],
                 weekly_reserve_active: used == 960,
+                account: String::new(),
             })),
         })
         .await;
