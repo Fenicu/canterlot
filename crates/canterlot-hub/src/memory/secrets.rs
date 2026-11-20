@@ -101,7 +101,8 @@ fn is_jwt(token: &str) -> bool {
         })
 }
 
-const KEYWORDS: [&str; 10] = [
+/// Ключевые слова в нижнем регистре: строка перед поиском приводится к нему.
+const KEYWORDS: [&str; 11] = [
     "password",
     "passwd",
     "pwd",
@@ -109,10 +110,59 @@ const KEYWORDS: [&str; 10] = [
     "secret",
     "api_key",
     "api-key",
+    "api key",
     "пароль",
-    "Пароль",
-    "ПАРОЛЬ",
+    "токен",
+    "секрет",
 ];
+
+/// Нижний регистр с сохранением байтовых смещений: символ, у которого длина в UTF-8
+/// после приведения меняется, остаётся как был.
+fn lower_same_len(line: &str) -> String {
+    line.chars()
+        .map(|c| {
+            let mut lower = c.to_lowercase();
+            match (lower.next(), lower.next()) {
+                (Some(l), None) if l.len_utf8() == c.len_utf8() => l,
+                _ => c,
+            }
+        })
+        .collect()
+}
+
+const FILE_EXTENSIONS: [&str; 10] = [
+    ".env", ".md", ".toml", ".json", ".yaml", ".yml", ".conf", ".pem", ".key", ".crt",
+];
+
+/// Имя, а не значение: переменная окружения, snake_case-идентификатор или имя файла.
+/// Только для литерала в кавычках без `:`/`=` после ключевого слова.
+fn looks_like_a_name(value: &str) -> bool {
+    let is_env = value.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+        && value
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
+    if is_env {
+        return true;
+    }
+    let mut parts = value.split('_');
+    let first_ok = parts.next().is_some_and(|p| {
+        p.chars().next().is_some_and(|c| c.is_ascii_lowercase())
+            && p.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+    });
+    let mut rest = 0;
+    let rest_ok = parts.all(|p| {
+        rest += 1;
+        !p.is_empty()
+            && p.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+    });
+    if first_ok && rest_ok && rest > 0 {
+        return true;
+    }
+    let lower = value.to_ascii_lowercase();
+    FILE_EXTENSIONS.iter().any(|ext| lower.ends_with(ext))
+}
 
 const PLACEHOLDERS: [&str; 14] = [
     "changeme",
@@ -131,13 +181,71 @@ const PLACEHOLDERS: [&str; 14] = [
     "required",
 ];
 
-fn line_has_assignment(line: &str) -> bool {
+/// `sshpass -p ЗНАЧЕНИЕ`: пароль в командной строке, значение любой длины.
+fn has_sshpass_password(line: &str) -> bool {
     let lower = line.to_ascii_lowercase();
+    for (at, _) in lower.match_indices("sshpass") {
+        // Разбираются только собственные опции sshpass, до первой команды: `-p` у ssh
+        // или sudo дальше по строке паролем не считается.
+        let mut tokens = line[at + "sshpass".len()..].split_whitespace();
+        while let Some(token) = tokens.next() {
+            let Some(option) = token.strip_prefix('-') else {
+                break;
+            };
+            let value = match option {
+                "p" => tokens.next().unwrap_or(""),
+                "f" | "d" | "P" => {
+                    tokens.next();
+                    continue;
+                }
+                _ => match option.strip_prefix('p') {
+                    Some(glued) => glued,
+                    None => continue,
+                },
+            };
+            let value = value.trim_matches(['"', '\'', '`']);
+            if !value.is_empty() && !value.starts_with(['<', '$', '{']) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn line_has_assignment(line: &str) -> bool {
+    if has_sshpass_password(line) {
+        return true;
+    }
+    let lower = lower_same_len(line);
     for keyword in KEYWORDS {
         for (at, _) in lower.match_indices(keyword) {
             let mut rest = &line[at + keyword.len()..];
             // Хвост имени: `api_key_prod`, `tokens`, `password_hash`.
             rest = rest.trim_start_matches(|c: char| c.is_ascii_alphanumeric() || c == '_');
+            // Литерал в кавычках сразу после слова, без `:`/`=`: «пароль `значение`».
+            // Кавычка вплотную к слову закрывает кодовый фрагмент (`CI_JOB_TOKEN`), а не
+            // открывает литерал: нужен хотя бы один пробел или табуляция.
+            if let Some(literal) = rest
+                .starts_with([' ', '\t'])
+                .then(|| {
+                    rest.trim_start_matches([' ', '\t'])
+                        .strip_prefix(['"', '\'', '`'])
+                })
+                .flatten()
+            {
+                let quote = rest
+                    .trim_start_matches([' ', '\t'])
+                    .chars()
+                    .next()
+                    .unwrap_or('`');
+                let literal = literal.split(quote).next().unwrap_or(literal).trim();
+                if literal.chars().count() >= 5
+                    && !looks_like_a_name(literal)
+                    && looks_like_secret_value(literal, "", 5)
+                {
+                    return true;
+                }
+            }
             rest = rest.trim_start_matches(['"', '\'', '`', '*', ' ', '\t']);
             let Some(rest) = rest.strip_prefix(['=', ':']) else {
                 continue;
@@ -152,7 +260,7 @@ fn line_has_assignment(line: &str) -> bool {
             {
                 let literal = &rest[quote.len_utf8()..];
                 let literal = literal.split(quote).next().unwrap_or(literal);
-                if looks_like_secret_value(literal.trim(), "") {
+                if looks_like_secret_value(literal.trim(), "", 8) {
                     return true;
                 }
                 continue;
@@ -163,7 +271,7 @@ fn line_has_assignment(line: &str) -> bool {
                 .take_while(|c| !c.is_whitespace() && !matches!(c, '"' | '\'' | '`' | ',' | ';'))
                 .collect();
             let after = rest[value.len()..].trim_start();
-            if looks_like_secret_value(&value, after) {
+            if looks_like_secret_value(&value, after, 8) {
                 return true;
             }
         }
@@ -175,8 +283,8 @@ fn line_has_assignment(line: &str) -> bool {
 /// пароля с значением от 8 знаков секрет при любом наборе знаков; исключения узкие:
 /// заглушки, значения вида `<…>`, `${…}`, `%…%`, и проза, где за словом идут ещё слова
 /// («password: see the manager»).
-fn looks_like_secret_value(value: &str, after: &str) -> bool {
-    if value.chars().count() < 8 {
+fn looks_like_secret_value(value: &str, after: &str, min_len: usize) -> bool {
+    if value.chars().count() < min_len {
         return false;
     }
     if value.starts_with(['<', '$', '{', '%', '*', '/', '~', '.', '[', '(']) {
@@ -215,7 +323,27 @@ fn is_high_entropy(token: &str) -> bool {
     if !has_digit || !has_letter {
         return false;
     }
+    if is_slug(token) {
+        return false;
+    }
     entropy(token) >= 4.0
+}
+
+/// Слаг с датой («autonomy-lease-watchdog-2026-11-08»): от трёх сегментов по `-`/`_`,
+/// каждый только из букв, только из цифр или номер версии вида `v2`. У base64 сегменты
+/// смешивают буквы и цифры, и такая строка остаётся находкой.
+fn is_slug(token: &str) -> bool {
+    if token.contains(['+', '=']) {
+        return false;
+    }
+    let segments: Vec<&str> = token.split(['-', '_']).filter(|s| !s.is_empty()).collect();
+    segments.len() >= 3
+        && segments.iter().all(|s| {
+            s.chars().all(|c| c.is_ascii_alphabetic())
+                || s.chars().all(|c| c.is_ascii_digit())
+                || s.strip_prefix('v')
+                    .is_some_and(|d| !d.is_empty() && d.chars().all(|c| c.is_ascii_digit()))
+        })
 }
 
 fn entropy(token: &str) -> f64 {
@@ -361,6 +489,75 @@ mod tests {
         ] {
             assert_eq!(scan(text), None, "{text}");
         }
+    }
+
+    #[test]
+    fn quoted_literal_after_a_keyword_without_separator_is_a_secret() {
+        for text in [
+            "пароль `administrator`",
+            "password `Xk9#mQ2v`",
+            "secret `4f9KxP2mQ7vL8nR3tY6wZ1bC5dE0aH2j`",
+            "token `abcdEFGH1234ijkl`",
+            "Токен: abcd1234efgh",
+            "ПАРОЛЬ `qwertyuiop`",
+            "API key: `Zq8Wv3Lp0Xn5Rt7Ys2Kd9Mf4Hb6Jc1Ga`",
+            "Ёж, Пароль `qwertyuiop`",
+            "ЁЖ Ёё ТОКЕН: abcd1234efgh",
+        ] {
+            assert_eq!(scan(text), Some(SecretClass::Assignment), "{text}");
+        }
+    }
+
+    #[test]
+    fn sshpass_value_is_a_secret() {
+        for text in [
+            "sshpass -p 1234 ssh root@h",
+            "sshpass -p 'r00t!' scp f h:/",
+            "sshpass -v -p 'r00t!' scp f h:/",
+            "sshpass -pHunter2x ssh h",
+        ] {
+            assert_eq!(scan(text), Some(SecretClass::Assignment), "{text}");
+        }
+    }
+
+    #[test]
+    fn names_and_placeholders_after_a_keyword_pass() {
+        for text in [
+            "токен `BOT_TOKEN` в `.env`",
+            "password `secrets.env`",
+            "token `api_key_file`",
+            "sshpass -p '<pass>' ssh root@<IP>",
+            "sshpass -p \"$PASS\" ssh h",
+            "sshpass -p \"$P\" ssh -J h -p 830 root@h",
+            "sshpass -e ssh -o StrictHostKeyChecking=no h; echo x | sudo -S -p \"\" true",
+            "sshpass -f /tmp/pw ssh -p 22 h",
+            "пароль в ~/.config/x/secrets.env",
+            "пароль `app`",
+            "set `CI_JOB_TOKEN` then pass `--secret build-id` and done",
+            "`secret_request` delivers it to `/run/user/1000/x`",
+        ] {
+            assert_eq!(scan(text), None, "{text}");
+        }
+    }
+
+    #[test]
+    fn dated_slugs_are_not_high_entropy() {
+        for text in [
+            "autonomy-lease-watchdog-2026-11-08",
+            "project_inference_model_ab_2026_11",
+            "docs/superpowers/specs/2026-07-15-shop-license-v2-plan-design.md",
+            "[[project_garden_august_watering_wave_2026]]",
+        ] {
+            assert_eq!(scan(text), None, "{text}");
+        }
+    }
+
+    #[test]
+    fn base64url_with_separators_stays_high_entropy() {
+        assert_eq!(
+            scan("значение Zq8Wv3-Lp0Xn5_Rt7Ys2Kd9-Mf4Hb6Jc1Ga3Pe5 дальше"),
+            Some(SecretClass::HighEntropy)
+        );
     }
 
     #[test]
