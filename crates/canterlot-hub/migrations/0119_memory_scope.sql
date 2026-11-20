@@ -49,3 +49,28 @@ update conversations c
   from chain
  where c.id = chain.id
    and chain.domain is not null;
+
+-- Связи между разговорами, созданные до появления доменов: после заполнения у части из них
+-- концы оказались в разных доменах или без домена. Агентам такие связи больше не положены
+-- (разговор без домена не равен даже другому такому же), поэтому открытые подписки и
+-- взведённые будильники на сессии с несовпавшими концами удаляются. Закрытые подписки
+-- и сработавшие будильники ничего не доставят, их не трогаем.
+delete from session_subscriptions s
+ using conversations subscriber, conversations target
+ where subscriber.id = s.subscriber_id
+   and target.id = s.target_id
+   and s.closed_at is null
+   and (subscriber.memory_domain is null
+        or subscriber.memory_domain is distinct from target.memory_domain);
+
+delete from alarms a
+ using conversations owner_conversation
+ where owner_conversation.id = a.conversation_id
+   and a.state = 'armed'
+   and a.condition ->> 'kind' = 'session_state'
+   and exists (
+     select 1
+       from jsonb_array_elements_text(a.condition -> 'session_ids') named(id)
+       join conversations target on target.id = named.id::uuid
+      where owner_conversation.memory_domain is null
+         or target.memory_domain is distinct from owner_conversation.memory_domain);

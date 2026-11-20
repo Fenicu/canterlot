@@ -418,6 +418,49 @@ async fn long_idle(pool: &PgPool, id: Uuid, now: DateTime<Utc>) {
     refresh_at(pool, id, now - TimeDelta::hours(1)).await;
 }
 
+/// Подписка создана, пока оба конца в `personal`; потом домен цели сменился: итог ей не уходит.
+async fn event_dropped_after_target_domain_change(pool: PgPool, domain: Option<&str>) {
+    let p = pair(&pool).await;
+    sqlx::query("update conversations set memory_domain='personal' where id=any($1)")
+        .bind([p.subscriber, p.target])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let execution = start(&pool, p.owner, p.target).await;
+    let now = Utc::now();
+    long_idle(&pool, p.target, now).await;
+    subscribe(&pool, &p).await;
+    finish_turn(&pool, &p, &execution, now - TimeDelta::seconds(10)).await;
+    refresh_at(&pool, p.target, now).await;
+    refresh_at(&pool, p.target, now + TimeDelta::seconds(15)).await;
+    assert_eq!(
+        jobs(&pool, p.subscriber).await.len(),
+        1,
+        "событие запланировано"
+    );
+    sqlx::query("update conversations set memory_domain=$2 where id=$1")
+        .bind(p.target)
+        .bind(domain)
+        .execute(&pool)
+        .await
+        .unwrap();
+    scheduler(&pool).tick(Utc::now()).await.unwrap();
+    assert!(
+        delivered(&pool, p.subscriber).await.is_empty(),
+        "итог чужого домена не доставлен ({domain:?})"
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn subscription_event_is_dropped_when_the_target_moves_to_work(pool: PgPool) {
+    event_dropped_after_target_domain_change(pool, Some("work")).await;
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn subscription_event_is_dropped_when_the_target_domain_becomes_null(pool: PgPool) {
+    event_dropped_after_target_domain_change(pool, None).await;
+}
+
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn turn_shorter_than_debounce_still_fires(pool: PgPool) {
     let p = pair(&pool).await;
