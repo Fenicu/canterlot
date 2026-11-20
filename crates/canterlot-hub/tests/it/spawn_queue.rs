@@ -96,7 +96,7 @@ impl Fx {
         .unwrap();
         sqlx::query(
             "update conversations set title='Родитель',harness='opencode',model='opencode-go/beam-free',
-               effort='medium',permission_mode='bypass',workdir='/tmp/w' where id=$1",
+               effort='medium',permission_mode='bypass',workdir='/tmp/w',memory_domain='personal' where id=$1",
         )
         .bind(seed.conversation_id)
         .execute(&pool)

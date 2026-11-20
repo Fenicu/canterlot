@@ -75,8 +75,19 @@ async fn start(pool: &PgPool, owner: Uuid, conversation: Uuid) -> executions::St
     execution
 }
 
+/// Разговор с личным доменом памяти: сессии одного домена видят друг друга.
+async fn personal_conversation(pool: &PgPool, owner: Uuid, machine: Uuid) -> Uuid {
+    let id = canterlot_hub::testkit::seed_conversation(pool, owner, machine).await;
+    sqlx::query("update conversations set memory_domain='personal' where id=$1")
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+    id
+}
+
 async fn child_of(pool: &PgPool, owner: Uuid, machine: Uuid, parent: Uuid) -> Uuid {
-    let child = testkit::seed_conversation(pool, owner, machine).await;
+    let child = personal_conversation(pool, owner, machine).await;
     sqlx::query(
         "update conversations set parent_conversation_id=$2,spawn_depth=1,title='child' where id=$1",
     )
@@ -97,6 +108,11 @@ impl Fx {
             .await
             .unwrap();
         let child = child_of(&pool, seed.owner_id, seed.machine_id, seed.conversation_id).await;
+        sqlx::query("update conversations set memory_domain='personal' where id=any($1)")
+            .bind([seed.conversation_id, child])
+            .execute(&pool)
+            .await
+            .unwrap();
         let execution = start(&pool, seed.owner_id, child).await;
         Self {
             context: context(&pool),
@@ -699,7 +715,7 @@ async fn adopt_moves_open_tasks_and_the_adopter_may_accept_their_executors(pool:
     f.call("plan.update", json!({"number": 3, "state": "done"}))
         .await
         .unwrap();
-    let fresh = testkit::seed_conversation(&f.pool, f.owner, f.machine).await;
+    let fresh = personal_conversation(&f.pool, f.owner, f.machine).await;
     f.call_as(fresh, "plan.add", json!({"tasks": [{"title": "Своя"}]}))
         .await
         .unwrap();
@@ -768,7 +784,7 @@ async fn adopt_refuses_delegates_foreign_and_missing_sources(pool: PgPool) {
         .unwrap_err();
     assert_eq!(error.code, Code::InvalidArguments);
     // И сам не является источником.
-    let fresh = testkit::seed_conversation(&f.pool, f.owner, f.machine).await;
+    let fresh = personal_conversation(&f.pool, f.owner, f.machine).await;
     let error = f
         .call_as(fresh, "plan.adopt", json!({"from_session_id": f.child}))
         .await
@@ -795,6 +811,46 @@ async fn adopt_refuses_delegates_foreign_and_missing_sources(pool: PgPool) {
         .await
         .unwrap_err();
     assert_eq!(error.code, Code::NotParent);
+}
+
+/// Исполнитель, оставшийся от версии без доменов и теперь из другого домена, в списке плана
+/// показан без коммитов, ответа и идентификатора.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn plan_list_hides_a_cross_domain_executor(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    f.add(&["Парсер"]).await;
+    f.link(1, f.child).await;
+    f.turn(
+        "Итог\nSTATUS: DONE",
+        Utc::now() - TimeDelta::minutes(5),
+        git("ccc", &[("ccc", "секретный коммит")], &["c.rs"]),
+    )
+    .await;
+    let list = f.call("plan.list", json!({})).await.unwrap();
+    assert_eq!(
+        list["tasks"][0]["commits"][0]["subject"],
+        "секретный коммит"
+    );
+    for domain in ["work", ""] {
+        sqlx::query("update conversations set memory_domain=nullif($2,'') where id=$1")
+            .bind(f.child)
+            .bind(domain)
+            .execute(&f.pool)
+            .await
+            .unwrap();
+        for args in [json!({}), json!({"number": 1})] {
+            let list = f.call("plan.list", args).await.unwrap();
+            let task = &list["tasks"][0];
+            assert_eq!(task["commits"], json!([]), "{domain}");
+            assert_eq!(task["executor_id"], Value::Null);
+            assert_eq!(task["report_block_id"], Value::Null);
+            assert_eq!(task["files_changed"], 0);
+            let text = list.to_string();
+            assert!(!text.contains("секретный"), "{text}");
+            assert!(!text.contains(&f.child.to_string()), "{text}");
+            assert!(text.contains("скрыто: другой домен"), "{text}");
+        }
+    }
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
@@ -880,9 +936,9 @@ async fn http_plan_and_snapshot_carry_the_contract(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    let root = testkit::seed_conversation(&pool, owner, machine).await;
+    let root = personal_conversation(&pool, owner, machine).await;
     let delegate = child_of(&pool, owner, machine, root).await;
-    let archived = testkit::seed_conversation(&pool, owner, machine).await;
+    let archived = personal_conversation(&pool, owner, machine).await;
     let f = Fx {
         context: context(&pool),
         pool: pool.clone(),
@@ -1059,7 +1115,7 @@ async fn plan_writes_share_the_lock_order_with_accept_projector_and_delete(pool:
         let f = Fx::new(pool.clone()).await;
         f.add(&["Парсер", "Тесты"]).await;
         f.link(1, f.child).await;
-        let other = testkit::seed_conversation(&f.pool, f.owner, f.machine).await;
+        let other = personal_conversation(&f.pool, f.owner, f.machine).await;
         f.call_as(other, "plan.add", json!({"tasks": [{"title": "чужое"}]}))
             .await
             .unwrap();
@@ -1282,7 +1338,7 @@ async fn plan_adopt_and_executor_projection_do_not_deadlock(pool: PgPool) {
     f.add(&["Парсер"]).await;
     f.link(1, f.child).await;
     in_review(&f).await;
-    let adopter = testkit::seed_conversation(&f.pool, f.owner, f.machine).await;
+    let adopter = personal_conversation(&f.pool, f.owner, f.machine).await;
     let mut projector = hold_owner_journal(&f).await;
     let adopt = spawn_call(
         &f,

@@ -142,6 +142,21 @@ fn line_has_assignment(line: &str) -> bool {
             let Some(rest) = rest.strip_prefix(['=', ':']) else {
                 continue;
             };
+            let rest = rest.trim_start_matches(['=', '>', ' ', '\t']);
+            // Значение в кавычках берётся целиком, со всеми словами: проза-исключение
+            // действует только для значения без кавычек.
+            if let Some(quote) = rest
+                .chars()
+                .next()
+                .filter(|c| matches!(c, '"' | '\'' | '`'))
+            {
+                let literal = &rest[quote.len_utf8()..];
+                let literal = literal.split(quote).next().unwrap_or(literal);
+                if looks_like_secret_value(literal.trim(), "") {
+                    return true;
+                }
+                continue;
+            }
             let rest = rest.trim_start_matches(['=', '>', '"', '\'', '`', ' ', '\t']);
             let value: String = rest
                 .chars()
@@ -277,6 +292,28 @@ mod tests {
             "- **password**: hunterhunter",
         ] {
             assert_eq!(scan(text), Some(SecretClass::Assignment), "{text}");
+        }
+    }
+
+    #[test]
+    fn quoted_multiword_literals_are_secrets() {
+        for text in [
+            "password: \"correct horse battery\"",
+            "token = 'abc def ghi jkl'",
+            "пароль: \"тихий серый кот\"",
+        ] {
+            assert_eq!(scan(text), Some(SecretClass::Assignment), "{text}");
+        }
+    }
+
+    #[test]
+    fn quoted_placeholders_pass() {
+        for text in [
+            "password: \"<ask the owner>\"",
+            "password = \"${DB_PASSWORD}\"",
+            "token: \"changeme please\"",
+        ] {
+            assert_eq!(scan(text), None, "{text}");
         }
     }
 

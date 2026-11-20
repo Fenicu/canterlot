@@ -676,8 +676,13 @@ impl Supervisor {
             String::new()
         };
         // Изолированная копия лежит в нейтральной базе: домен задаёт её репозиторий.
+        // Путь пришёл от менеджера уже каноническим, тем самым, из которого готовилась копия:
+        // второго разбора записи нет.
         let canonical_source = if state == "running" {
-            crate::memory_scope::canonical_source(self.source_workdir.as_deref())
+            self.source_workdir
+                .as_deref()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default()
         } else {
             String::new()
         };

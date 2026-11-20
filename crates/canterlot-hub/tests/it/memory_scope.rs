@@ -133,7 +133,8 @@ async fn new_root_without_capability_gets_null(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(scope(&pool, id).await, (None, None));
-    // Возможность есть, но корни ещё не приходили: классифицировать нечем.
+    // Возможность есть, но корни ещё не приходили: правило по умолчанию, `/h/work` под него
+    // не подпадает.
     sqlx::query("update machines set capabilities=array['pilot_v1','memory_scope_v1'],memory_work_roots=null where id=$1")
         .bind(seed.machine_id)
         .execute(&pool)
@@ -142,7 +143,60 @@ async fn new_root_without_capability_gets_null(pool: PgPool) {
     let id = create(&pool, &registry, request(&seed, "/h/work/p", None))
         .await
         .unwrap();
-    assert_eq!(scope(&pool, id).await, (None, None));
+    assert_eq!(scope(&pool, id).await, some("personal", "/h/work/p"));
+}
+
+/// Без этого воркер с `memory_scope_v1` не получал бы возможность на хабе, и все разговоры
+/// оставались бы без домена.
+#[test]
+fn hub_negotiates_memory_scope_v1() {
+    assert!(canterlot_hub::grpc::KNOWN_OPTIONAL_CAPABILITIES.contains(&"memory_scope_v1"));
+}
+
+/// Корни не присланы или список пуст (у воркера нет `~/work`): домен выдаёт правило по
+/// умолчанию `/home/<user>/work`, а не пустое значение.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn unknown_or_empty_work_roots_fall_back_to_the_default_rule(pool: PgPool) {
+    let (seed, registry) = fixture(&pool, &["pilot_v1", "memory_scope_v1"]).await;
+    sqlx::query("update machines set allowed_roots='[\"/home\"]' where id=$1")
+        .bind(seed.machine_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    for roots in [None, Some("[]")] {
+        sqlx::query("update machines set memory_work_roots=$2::jsonb where id=$1")
+            .bind(seed.machine_id)
+            .bind(roots)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let work = create(&pool, &registry, request(&seed, "/home/u/work/app", None))
+            .await
+            .unwrap();
+        assert_eq!(scope(&pool, work).await, some("work", "/home/u/work/app"));
+        let personal = create(&pool, &registry, request(&seed, "/home/u/play", None))
+            .await
+            .unwrap();
+        assert_eq!(
+            scope(&pool, personal).await,
+            some("personal", "/home/u/play")
+        );
+        let lookalike = create(&pool, &registry, request(&seed, "/home/u/workshop", None))
+            .await
+            .unwrap();
+        assert_eq!(scope(&pool, lookalike).await.0.as_deref(), Some("personal"));
+        // Делегат наследует домен, а чужой каталог отвергается так же.
+        let child = create(
+            &pool,
+            &registry,
+            request(&seed, "/home/u/work/x", Some(work)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(scope(&pool, child).await, some("work", "/home/u/work/app"));
+        let refused = create(&pool, &registry, request(&seed, "/home/u/play", Some(work))).await;
+        assert!(matches!(refused, Err(CreateError::DomainMismatch)));
+    }
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
@@ -159,8 +213,8 @@ async fn spawn_side_fork_routine_copy_inherit_parent_scope(pool: PgPool) {
     let parent = create(&pool, &registry, request(&seed, "/h/work/p", None))
         .await
         .unwrap();
-    // Делегат без своего каталога, с рабочим каталогом того же домена и в базе копий.
-    for workdir in ["/h/work/p", "/h/work/q", "/h/data/worktrees/x"] {
+    // Делегат без своего каталога и с рабочим каталогом того же домена.
+    for workdir in ["/h/work/p", "/h/work/q"] {
         let child = create(&pool, &registry, request(&seed, workdir, Some(parent)))
             .await
             .unwrap();
@@ -196,6 +250,54 @@ async fn spawn_side_fork_routine_copy_inherit_parent_scope(pool: PgPool) {
         scope(&pool, side.conversation_id).await,
         some("work", "/h/work/p")
     );
+}
+
+/// Рабочая копия в базе машины, принадлежащая разговору `owner`.
+async fn own_worktree(pool: &PgPool, owner: Uuid, path: &str) {
+    sqlx::query("update conversations set workdir=$2, worktree=$3 where id=$1")
+        .bind(owner)
+        .bind(path)
+        .bind(serde_json::json!({"path": path, "branch": "b", "source_workdir": "/h/x", "base": "main"}))
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn spawn_into_a_worktree_is_classified_by_the_conversation_that_owns_it(pool: PgPool) {
+    let (seed, registry) = fixture(&pool, &["pilot_v1", "memory_scope_v1"]).await;
+    let work = create(&pool, &registry, request(&seed, "/h/work/p", None))
+        .await
+        .unwrap();
+    own_worktree(&pool, work, "/h/data/worktrees/w1").await;
+    let personal = create(&pool, &registry, request(&seed, "/h/play", None))
+        .await
+        .unwrap();
+    // Личный родитель не попадает в рабочую копию рабочего делегата, ни в корень, ни глубже.
+    for path in ["/h/data/worktrees/w1", "/h/data/worktrees/w1/src"] {
+        let refused = create(&pool, &registry, request(&seed, path, Some(personal))).await;
+        assert!(
+            matches!(refused, Err(CreateError::DomainMismatch)),
+            "{path}"
+        );
+    }
+    // Каталог в базе без хозяина неизвестен: тоже отказ.
+    let refused = create(
+        &pool,
+        &registry,
+        request(&seed, "/h/data/worktrees/nobody", Some(personal)),
+    )
+    .await;
+    assert!(matches!(refused, Err(CreateError::DomainMismatch)));
+    // Рабочий родитель в свою рабочую копию и в копию с тем же доменом попадает.
+    let child = create(
+        &pool,
+        &registry,
+        request(&seed, "/h/data/worktrees/w1/src", Some(work)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(scope(&pool, child).await, some("work", "/h/work/p"));
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
@@ -560,7 +662,45 @@ async fn migration_removes_cross_domain_subscriptions_and_alarms(pool: PgPool) {
     let alarm_cross = arm(work, personal).await;
     let alarm_null = arm(neutral, neutral_other).await;
 
+    // Ждущие вводы: от сессии того же домена, от сессии другого домена и от владельца.
+    let queue_input = |seq: i64, from: Option<Uuid>, to: Uuid| {
+        let pool = pool.clone();
+        let (owner, machine) = (seed.owner_id, seed.machine_id);
+        async move {
+            let (id, command) = (Uuid::now_v7(), Uuid::now_v7());
+            sqlx::query("insert into commands(id,machine_id,conversation_id,kind,payload,delivery_state) values($1,$2,$3,'deliver_input','{}','held')")
+                .bind(command).bind(machine).bind(to).execute(&pool).await.unwrap();
+            let origin = from.map(|from| serde_json::json!({"kind": "message", "from": from}));
+            sqlx::query("insert into inputs(id,conversation_id,owner_id,input_seq,idempotency_key,content,state,command_id,received_at,origin) values($1,$2,$3,$4,$5,'[]','queued',$6,now(),$7)")
+                .bind(id).bind(to).bind(owner).bind(seq).bind(id.to_string()).bind(command).bind(origin)
+                .execute(&pool).await.unwrap();
+            id
+        }
+    };
+    let input_same = queue_input(1, Some(work), work_other).await;
+    let input_cross = queue_input(1, Some(personal), work).await;
+    let input_owner = queue_input(2, None, work).await;
+
     canterlot_hub::db::MIGRATOR.run(&pool).await.unwrap();
+
+    let state_of = |id: Uuid| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_as::<_, (String, String)>(
+                "select i.state,c.delivery_state from inputs i join commands c on c.id=i.command_id where i.id=$1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(state_of(input_same).await.0, "queued");
+    assert_eq!(state_of(input_owner).await.0, "queued");
+    assert_eq!(
+        state_of(input_cross).await,
+        ("cancelled".to_owned(), "completed".to_owned())
+    );
 
     let kept: Vec<(Uuid, Uuid)> = sqlx::query_as(
         "select subscriber_id,target_id from session_subscriptions order by subscriber_id,target_id",
