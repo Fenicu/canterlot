@@ -41,9 +41,9 @@ use uuid::Uuid;
 use crate::config::JobsConfig;
 use log::LogView;
 use state::{
-    ABANDONED, Emitted, Finished, LEASE_WAIT, Leader, Spec, UPLOADED, WORKDIR_REFUSED,
-    attempt_dir, canonical_job_id, early_cancel_path, job_dir, jobs_root, now_ms, read_exit,
-    read_json, read_leader, read_started, touch, write_json,
+    ABANDONED, Emitted, Finished, LEASE_WAIT, Leader, Spec, UPLOADED, WORKDIR_REFUSED, attempt_dir,
+    canonical_job_id, early_cancel_path, job_dir, jobs_root, now_ms, read_exit, read_json,
+    read_leader, read_started, touch, write_json,
 };
 
 /// Последние байты вывода, которые уходят в факт итога.
@@ -655,7 +655,7 @@ impl Watcher {
                             self.finish(JobOutcome::LaunchInterrupted, None, None).await;
                         }
                     },
-                    Err(()) => {
+                    Err(workdir::Refused) => {
                         self.finish(JobOutcome::WorkdirRefused, None, None).await;
                     }
                 }

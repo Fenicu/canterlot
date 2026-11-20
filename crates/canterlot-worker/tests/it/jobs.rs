@@ -792,10 +792,12 @@ async fn cancel_is_serialized_with_process_creation_and_leaves_no_survivor() {
     let cancel_id = id.clone();
     let mut cancel = tokio::spawn(async move {
         manager
-            .cancel(&Harness::envelope(Kind::CancelInPlaceJob(CancelInPlaceJob {
-                job_id: cancel_id,
-                attempt: 1,
-            })))
+            .cancel(&Harness::envelope(Kind::CancelInPlaceJob(
+                CancelInPlaceJob {
+                    job_id: cancel_id,
+                    attempt: 1,
+                },
+            )))
             .await
     });
     let early = tokio::time::timeout(Duration::from_millis(300), &mut cancel).await;
