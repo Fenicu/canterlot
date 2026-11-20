@@ -209,6 +209,13 @@ fn to_proto_with_capability(
     {
         return Err(OutboxError::CapabilityMissing);
     }
+    // Воркер без `remote_spawn_v1` не сверил бы каталоги с каноническими: хаб проверил их по тексту.
+    if row.kind == "start_execution"
+        && remote_flag(&row.payload)
+        && !has(crate::session::CAPABILITY_REMOTE_SPAWN_V1)
+    {
+        return Err(OutboxError::CapabilityMissing);
+    }
     // Форк от родителя понимает только воркер с боковым чатом; иначе копия
     // запустилась бы обычной сессией и получила бы запись в родительскую.
     if row.kind == "start_execution"
@@ -279,6 +286,13 @@ fn to_proto_with_capability(
         return Err(OutboxError::ResourceLimit);
     }
     Ok(command)
+}
+
+fn remote_flag(payload: &Value) -> bool {
+    payload
+        .get("remote")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 fn isolate_mcp(payload: &Value) -> bool {
@@ -370,6 +384,7 @@ pub fn to_proto(row: &CommandRow) -> Result<Command, OutboxError> {
                 .transpose()?,
             capabilities: vec![],
             isolate_mcp: isolate_mcp(&row.payload),
+            remote: remote_flag(&row.payload),
             fork_from_native: row
                 .payload
                 .get("fork_from_native")

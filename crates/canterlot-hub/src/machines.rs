@@ -141,6 +141,51 @@ async fn notify_revoke(conn: &mut sqlx::PgConnection, machine_id: Uuid) -> Resul
     Ok(())
 }
 
+/// Единственная точка допуска удалённой работы: принимает ли машина делегатов и команды
+/// с других машин. Читает строку `for share` в транзакции запуска или диспетчеризации, а
+/// смена выключателя берёт её `for update` (`set_accepts_remote_work`): после выключения
+/// новый удалённый запуск не пройдёт, а уже закоммиченный проходит. Нет строки — `false`.
+pub async fn accepts_remote_work_for_share(
+    conn: &mut sqlx::PgConnection,
+    machine_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let accepts: Option<bool> =
+        sqlx::query_scalar("select accepts_remote_work from machines where id = $1 for share")
+            .bind(machine_id)
+            .fetch_optional(conn)
+            .await?;
+    Ok(accepts.unwrap_or(false))
+}
+
+/// Меняет выключатель удалённой работы; только HTTP владельца. `None` — машины нет у владельца.
+pub async fn set_accepts_remote_work(
+    conn: &mut sqlx::PgConnection,
+    owner_id: Uuid,
+    machine_id: Uuid,
+    accepts: bool,
+) -> Result<Option<bool>, sqlx::Error> {
+    // Владелец раньше строки машины: тот же порядок, что у запуска делегата.
+    crate::conversations::lock_owner(conn, owner_id).await?;
+    let current: Option<bool> = sqlx::query_scalar(
+        "select accepts_remote_work from machines where id = $1 and owner_id = $2 for update",
+    )
+    .bind(machine_id)
+    .bind(owner_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some(current) = current else {
+        return Ok(None);
+    };
+    if current != accepts {
+        sqlx::query("update machines set accepts_remote_work = $2 where id = $1")
+            .bind(machine_id)
+            .bind(accepts)
+            .execute(&mut *conn)
+            .await?;
+    }
+    Ok(Some(accepts))
+}
+
 pub(crate) async fn credential_active(
     conn: &mut sqlx::PgConnection,
     machine_id: Uuid,

@@ -278,6 +278,19 @@ pub async fn start_in_tx_with_native(
     if delegated {
         payload["isolate_mcp"] = json!(true);
     }
+    // Запуск по просьбе сессии с другой машины: воркер сверяет каталоги с каноническими, потому что
+    // область памяти потомка хаб проверил по тексту пути. Флаг ставится при каждом старте.
+    if let Some(parent) = row.try_get::<Option<Uuid>, _>("parent_conversation_id")? {
+        let remote: Option<bool> =
+            sqlx::query_scalar("select machine_id <> $2 from conversations where id=$1")
+                .bind(parent)
+                .bind(machine_id)
+                .fetch_optional(&mut *conn)
+                .await?;
+        if remote == Some(true) {
+            payload["remote"] = json!(true);
+        }
+    }
     if crate::prompt_suggestions::enabled_for_start(
         conn,
         owner_id,

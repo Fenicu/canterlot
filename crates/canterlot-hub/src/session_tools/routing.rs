@@ -544,6 +544,8 @@ pub struct RouteRequest {
     pub parent_mode: String,
     pub explicit_mode: Option<String>,
     pub workdir: String,
+    /// Сессия пойдёт на другую машину: режим `owner` родителя там не наследуется.
+    pub remote: bool,
 }
 
 /// Показание окна лимита для маршрута.
@@ -812,6 +814,7 @@ pub fn route(inputs: RouteInputs<'_>) -> Result<Decision, RouteError> {
                 &request.parent_harness,
                 &request.parent_mode,
                 &candidate.harness,
+                request.remote,
             ),
         };
         if !catalog.has_mode(&mode) {
@@ -1558,6 +1561,10 @@ pub async fn machine_headroom(
 struct PreviewArgs {
     task_type: Option<String>,
     level: Option<String>,
+    /// Машина запуска: имя или id; без неё или своя — как прежде.
+    machine: Option<String>,
+    /// Каталог будущей сессии: на другой машине обязателен, исключения считаются по нему.
+    workdir: Option<String>,
 }
 
 /// `routing.preview`: список типов без `task_type`, иначе решение и запас машины.
@@ -1593,14 +1600,27 @@ pub async fn preview(
     };
     let parent =
         super::access::caller_in_tx(&mut tx, caller.owner_id, caller.conversation_id).await?;
-    let catalogs = load_catalogs(&mut tx, caller.machine_id).await?;
+    // Предпросмотр видит то же, что запуск: каталоги, исключения и запас целевой машины.
+    let target = super::spawn::resolve_machine(&mut tx, caller, args.machine.as_deref()).await?;
+    let machine = target.unwrap_or(caller.machine_id);
+    let catalogs = load_catalogs(&mut tx, machine).await?;
     let list = whitelist::view(&mut tx, caller.owner_id).await?;
     let limits = limits_view(&mut tx).await?;
     let live = live_counts(&mut tx, caller.owner_id).await?;
-    let place: (String,) = sqlx::query_as("select workdir from conversations where id=$1")
-        .bind(caller.conversation_id)
-        .fetch_one(&mut *tx)
-        .await?;
+    let workdir = match target {
+        Some(target) => {
+            super::spawn::remote_workdir(&mut tx, target, args.workdir.as_deref()).await?
+        }
+        None => match args.workdir.clone() {
+            Some(workdir) => workdir,
+            None => {
+                sqlx::query_scalar("select workdir from conversations where id=$1")
+                    .bind(caller.conversation_id)
+                    .fetch_one(&mut *tx)
+                    .await?
+            }
+        },
+    };
     let request = RouteRequest {
         task_type: task_type.to_owned(),
         level: args.level.clone(),
@@ -1611,23 +1631,32 @@ pub async fn preview(
         )
         .to_owned(),
         explicit_mode: None,
-        workdir: place.0,
+        workdir,
+        remote: target.is_some(),
     };
     let now = Utc::now();
-    let headroom = machine_headroom(
-        &mut tx,
-        caller.machine_id,
-        std::time::Duration::from_secs(120),
-    )
-    .await?;
+    let headroom =
+        machine_headroom(&mut tx, machine, std::time::Duration::from_secs(120)).await?;
     let guard = crate::session_tools::guard::check_in_tx(
         &mut tx,
         caller.owner_id,
-        caller.machine_id,
+        machine,
         &context.guards,
         now,
     )
     .await?;
+    let remote_note = match target {
+        Some(target) => {
+            let (name, accepts): (String, bool) = sqlx::query_as(
+                "select name,accepts_remote_work from machines where id=$1",
+            )
+            .bind(target)
+            .fetch_one(&mut *tx)
+            .await?;
+            Some((name, accepts))
+        }
+        None => None,
+    };
     let existing = policy.task_types.contains_key(task_type);
     match route(RouteInputs {
         policy: &policy,
@@ -1644,12 +1673,17 @@ pub async fn preview(
     }) {
         Ok(decision) => {
             tx.commit().await?;
-            Ok(serde_json::json!({
+            let mut answer = serde_json::json!({
                 "decision": decision,
                 "machine": headroom,
                 "guard": guard.to_value(),
                 "hint": "Read-only preview; to start the session, call session_spawn with route.",
-            }))
+            });
+            if let Some((name, accepts)) = remote_note {
+                answer["machine_name"] = serde_json::json!(name);
+                answer["accepts_remote_work"] = serde_json::json!(accepts);
+            }
+            Ok(answer)
         }
         Err(RouteError::UnknownTask { available }) => {
             let _ = existing;
@@ -1778,6 +1812,7 @@ mod tests {
             parent_mode: "bypass".to_owned(),
             explicit_mode: None,
             workdir: "/tmp/w".to_owned(),
+            remote: false,
         }
     }
 

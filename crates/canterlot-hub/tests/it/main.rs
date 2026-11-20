@@ -104,6 +104,7 @@ mod provider_credits;
 mod provider_status;
 mod receipts;
 mod requests_domain;
+mod remote_spawn;
 mod requests_integration;
 mod rereview;
 mod reserve_settings;

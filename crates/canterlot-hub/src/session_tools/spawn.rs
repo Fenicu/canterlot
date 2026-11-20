@@ -36,6 +36,7 @@ use crate::{
 const MAX_BRIEF_BYTES: usize = 64 * 1024;
 const MAX_TITLE_CHARS: usize = 256;
 const MAX_BASE_BYTES: usize = 256;
+const MAX_MACHINE_BYTES: usize = 256;
 const DEFAULT_PRESET: &str = "clean";
 const DEFAULT_EFFORT: &str = "medium";
 const DEFAULT_BASE: &str = "HEAD";
@@ -126,6 +127,13 @@ pub(crate) struct SpawnArgs {
     pub(crate) effort: Option<String>,
     pub(crate) title: Option<String>,
     pub(crate) workdir: Option<String>,
+    /// Машина запуска: имя или id. Без неё или с машиной вызывающего всё как раньше.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) machine: Option<String>,
+    /// Другая машина запуска, найденная хабом по `machine` при вызове; очередь хранит её,
+    /// а не имя. Модель её не передаёт.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) machine_id: Option<Uuid>,
     #[serde(default)]
     pub(crate) isolated: Option<bool>,
     pub(crate) base: Option<String>,
@@ -182,6 +190,17 @@ pub struct SpawnSpec {
     /// Задача плана родителя, найденная при вызове: `start_child` перепроверяет и связывает.
     #[serde(default)]
     pub(crate) plan_task_id: Option<Uuid>,
+    /// Машина запуска, если это не машина родителя. Карточка, очередь и `replayed` читают
+    /// только её; пусто — машина родителя (так выглядят все прежние карточки).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) machine_id: Option<Uuid>,
+}
+
+impl SpawnSpec {
+    /// Где живёт ребёнок: названная машина или машина родителя.
+    pub(crate) fn launch_machine(&self, parent_machine: Uuid) -> Uuid {
+        self.machine_id.unwrap_or(parent_machine)
+    }
 }
 
 impl fmt::Debug for SpawnSpec {
@@ -245,13 +264,15 @@ pub(crate) struct ChildMode {
 
 /// Режим по умолчанию: самый широкий из не сильнее родителя.
 /// `owner` значит разное у разных CLI, поэтому через границу харнесса он становится `ask`.
+/// Другая машина — тоже граница: настройки CLI там не родительские, `owner` не наследуется.
 /// Без явного режима Codex от родителя в `ask` или `owner` получает `read_only`.
 pub(crate) fn resolve_default_mode(
     parent_harness: &str,
     parent: &str,
     child_harness: &str,
+    remote: bool,
 ) -> String {
-    let same_harness = parent_harness == child_harness;
+    let same_harness = !remote && parent_harness == child_harness;
     let ceiling = if parent == OWNER_MODE && !same_harness {
         "ask"
     } else {
@@ -272,13 +293,15 @@ pub(crate) fn resolve_default_mode(
         .to_owned()
 }
 /// Режим потомка: по названию не шире родителя, по силе у его CLI не сильнее без карточки.
+/// На другой машине (`remote`) явный `owner` отказывается, а чужой харнесс считается всегда.
 pub(crate) fn resolve_mode(
     parent_harness: &str,
     parent: &str,
     child_harness: &str,
     requested: Option<&str>,
+    remote: bool,
 ) -> Result<ChildMode, ToolError> {
-    let same_harness = parent_harness == child_harness;
+    let same_harness = !remote && parent_harness == child_harness;
     let ceiling = if parent == OWNER_MODE && !same_harness {
         "ask"
     } else {
@@ -287,10 +310,16 @@ pub(crate) fn resolve_mode(
     let limit = power(parent_harness, parent);
     let Some(requested) = requested else {
         return Ok(ChildMode {
-            mode: resolve_default_mode(parent_harness, parent, child_harness),
+            mode: resolve_default_mode(parent_harness, parent, child_harness, remote),
             wider_than_parent: false,
         });
     };
+    if remote && requested == OWNER_MODE {
+        return Err(ToolError::with_message(
+            ToolErrorCode::PermissionModeTooWide,
+            "the owner mode cannot be requested for a session on another machine: its CLI settings are not yours; pick ask, bypass or read_only",
+        ));
+    }
     let fits = requested == ceiling
         || match (rank(requested), rank(ceiling)) {
             (Some(asked), Some(limit)) => asked <= limit,
@@ -335,6 +364,13 @@ fn check_arguments(args: &SpawnArgs) -> Result<(), ToolError> {
         return Err(ToolError::new(ToolErrorCode::InvalidArguments));
     }
     if args.plan_task_id.is_some() || args.plan_task.is_some_and(|number| number < 1) {
+        return Err(ToolError::new(ToolErrorCode::InvalidArguments));
+    }
+    if args.machine_id.is_some()
+        || args.machine.as_deref().is_some_and(|machine| {
+            machine.trim().is_empty() || machine.len() > MAX_MACHINE_BYTES || machine.contains('\0')
+        })
+    {
         return Err(ToolError::new(ToolErrorCode::InvalidArguments));
     }
     let usable = args.nudge.clone().unwrap_or(Value::Null);
@@ -535,6 +571,119 @@ async fn parent_place(
     })
 }
 
+/// Место запуска на другой машине: родитель ни при чём, каталог называют явно и он обязан
+/// лежать в корнях той машины. Рабочую копию там делает воркер цели; ветку по умолчанию
+/// (`HEAD`) он берёт в исходном репозитории на своей машине.
+async fn remote_place(
+    conn: &mut PgConnection,
+    machine: Uuid,
+    workdir: Option<&str>,
+) -> Result<ParentPlace, ToolError> {
+    let Some(workdir) = workdir else {
+        return Err(ToolError::with_message(
+            ToolErrorCode::WorkdirNotAllowed,
+            "a session on another machine needs `workdir`: an absolute path inside that machine's allowed roots",
+        ));
+    };
+    let row: Option<(Value, Option<String>)> =
+        sqlx::query_as("select allowed_roots,worktree_root from machines where id=$1")
+            .bind(machine)
+            .fetch_optional(conn)
+            .await?;
+    let (allowed_roots, worktree_root) =
+        row.ok_or_else(|| ToolError::new(ToolErrorCode::MachineUnavailable))?;
+    Ok(ParentPlace {
+        workdir: workdir.to_owned(),
+        worktree: None,
+        allowed_roots,
+        worktree_root,
+    })
+}
+
+/// Где работает ребёнок: у машины родителя это место родителя, у другой машины — её корни.
+async fn place_for(
+    conn: &mut PgConnection,
+    parent: Uuid,
+    caller_machine: Uuid,
+    target: Uuid,
+    workdir: Option<&str>,
+) -> Result<ParentPlace, ToolError> {
+    if target == caller_machine {
+        parent_place(conn, parent, caller_machine).await
+    } else {
+        remote_place(conn, target, workdir).await
+    }
+}
+
+/// Каталог предпросмотра на другой машине: тот же отказ, что и у запуска.
+pub(crate) async fn remote_workdir(
+    conn: &mut PgConnection,
+    machine: Uuid,
+    workdir: Option<&str>,
+) -> Result<String, ToolError> {
+    let place = remote_place(conn, machine, workdir).await?;
+    if !conversations::workdir_allowed(&place.workdir, &place.allowed_roots) {
+        return Err(ToolError::new(ToolErrorCode::WorkdirNotAllowed));
+    }
+    Ok(place.workdir)
+}
+
+/// `machine` → машина владельца: по id или по имени. Своя машина вызывающего и отсутствие
+/// аргумента дают `None` (всё как прежде); неизвестная называет известные имена.
+pub(crate) async fn resolve_machine(
+    conn: &mut PgConnection,
+    caller: &Caller,
+    requested: Option<&str>,
+) -> Result<Option<Uuid>, ToolError> {
+    let Some(requested) = requested.map(str::trim) else {
+        return Ok(None);
+    };
+    let machines: Vec<(Uuid, String)> =
+        sqlx::query_as("select id,name from machines where owner_id=$1 order by name,id")
+            .bind(caller.owner_id)
+            .fetch_all(conn)
+            .await?;
+    let by_id = Uuid::parse_str(requested).ok();
+    let exact: Vec<&(Uuid, String)> = machines
+        .iter()
+        .filter(|(id, name)| Some(*id) == by_id || name == requested)
+        .collect();
+    let folded: Vec<&(Uuid, String)> = machines
+        .iter()
+        .filter(|(_, name)| name.eq_ignore_ascii_case(requested))
+        .collect();
+    let found = match (exact.as_slice(), folded.as_slice()) {
+        ([one], _) | ([], [one]) => Some(one.0),
+        _ => None,
+    };
+    let Some(found) = found else {
+        let names: Vec<&str> = machines.iter().map(|(_, name)| name.as_str()).collect();
+        return Err(ToolError::with_message(
+            ToolErrorCode::InvalidArguments,
+            format!(
+                "session_spawn: unknown or ambiguous machine {requested:?}; known machines: {}",
+                names.join(", ")
+            ),
+        ));
+    };
+    Ok((found != caller.machine_id).then_some(found))
+}
+
+/// Допуск удалённой работы: единственная точка, общая для запуска и очереди. Строка машины
+/// читается `for share`, а выключатель меняют `for update`. Владелец уже заблокирован.
+pub(crate) async fn admit_remote_in_tx(
+    conn: &mut PgConnection,
+    owner: Uuid,
+    machine: Uuid,
+) -> Result<(), ToolError> {
+    conversations::lock_owner(conn, owner).await?;
+    if crate::machines::accepts_remote_work_for_share(conn, machine).await? {
+        Ok(())
+    } else {
+        Err(ToolError::new(ToolErrorCode::RemoteWorkDisabled))
+    }
+}
+
 /// Рабочая копия родителя вне разрешённых корней: дочерняя копия строится от его исходного
 /// репозитория и его ветки, а без изоляции каталог надо назвать явно.
 fn resolve_workdir(
@@ -608,7 +757,10 @@ pub(crate) async fn validate(
     chain_depth: i32,
 ) -> Result<(SpawnSpec, Catalog), ToolError> {
     let harness = args.harness.clone().ok_or_else(invalid)?;
-    let catalog = Catalog::load(conn, caller.machine_id, &harness).await?;
+    // Каталог, режимы и каталоги запуска берутся с машины запуска, а не вызывающего.
+    let machine = args.machine_id.unwrap_or(caller.machine_id);
+    let remote = machine != caller.machine_id;
+    let catalog = Catalog::load(conn, machine, &harness).await?;
     let model = catalog.resolve_model(&harness, args.model.as_deref())?;
     let effort = resolve_effort(model, args.effort.as_deref())?;
     let model = model["id"].as_str().unwrap_or_default().to_owned();
@@ -620,16 +772,24 @@ pub(crate) async fn validate(
         parent_mode(&parent.permission_mode, parent.pending_mode.as_deref()),
         &harness,
         args.permission_mode.as_deref(),
+        remote,
     )?;
     if !catalog.has_mode(&mode) {
         return Err(invalid());
     }
     let preset = resolve_preset(conn, caller.owner_id, args.preset.as_deref()).await?;
-    let place = parent_place(conn, parent.id, caller.machine_id).await?;
+    let place = place_for(
+        conn,
+        parent.id,
+        caller.machine_id,
+        machine,
+        args.workdir.as_deref(),
+    )
+    .await?;
     let isolated = args.isolated.unwrap_or(false);
     let (workdir, parent_branch) = resolve_workdir(args.workdir.as_deref(), isolated, &place)?;
     if isolated {
-        check_isolation(context.registry, caller.machine_id, &place)?;
+        check_isolation(context.registry, machine, &place)?;
     }
     let base = isolated.then(|| args.base.or(parent_branch)).flatten();
     let nudge_arg = args.nudge.unwrap_or(Value::Bool(false));
@@ -654,6 +814,7 @@ pub(crate) async fn validate(
             chain_depth,
             wider_than_parent,
             plan_task_id: args.plan_task_id,
+            machine_id: remote.then_some(machine),
         },
         catalog,
     ))
@@ -715,11 +876,21 @@ pub(crate) async fn validate_routed(
             ),
         )
     })?;
-    let catalogs = super::routing::load_catalogs(conn, caller.machine_id).await?;
+    // Кандидаты, каталоги и каталоги исключений — целевой машины; занятость по-прежнему общая.
+    let machine = args.machine_id.unwrap_or(caller.machine_id);
+    let remote = machine != caller.machine_id;
+    let catalogs = super::routing::load_catalogs(conn, machine).await?;
     let list = whitelist::view(conn, caller.owner_id).await?;
     let limits = super::routing::limits_view(conn).await?;
     let live = super::routing::live_counts(conn, caller.owner_id).await?;
-    let place = parent_place(conn, parent.id, caller.machine_id).await?;
+    let place = place_for(
+        conn,
+        parent.id,
+        caller.machine_id,
+        machine,
+        args.workdir.as_deref(),
+    )
+    .await?;
     let workdir = args
         .workdir
         .clone()
@@ -733,6 +904,7 @@ pub(crate) async fn validate_routed(
         parent_mode: parent_mode_value,
         explicit_mode: args.permission_mode.clone(),
         workdir,
+        remote,
     };
     // «Запустить сейчас» не смотрит лимиты, но сбой провайдера по-прежнему уводит к другому.
     let no_limits = if bypass_queue {
@@ -782,6 +954,7 @@ pub(crate) async fn validate_routed(
         parent_mode(&parent.permission_mode, parent.pending_mode.as_deref()),
         &decision.harness,
         args.permission_mode.as_deref(),
+        remote,
     )?;
     if !catalogs
         .get(&decision.harness)
@@ -805,7 +978,7 @@ pub(crate) async fn validate_routed(
     let isolated = args.isolated.or(task.isolated).unwrap_or(false);
     let (workdir, parent_branch) = resolve_workdir(args.workdir.as_deref(), isolated, &place)?;
     if isolated {
-        check_isolation(context.registry, caller.machine_id, &place)?;
+        check_isolation(context.registry, machine, &place)?;
     }
     let base = isolated.then(|| args.base.or(parent_branch)).flatten();
     let nudge_arg = args.nudge.unwrap_or(decision.nudge.clone());
@@ -835,6 +1008,7 @@ pub(crate) async fn validate_routed(
             chain_depth,
             wider_than_parent,
             plan_task_id: args.plan_task_id,
+            machine_id: remote.then_some(machine),
         },
         first_model,
     ))
@@ -886,6 +1060,11 @@ pub(crate) async fn start_child(
         key,
         correlation_id,
     } = launch;
+    // Единственная точка допуска удалённого запуска: после коммита запуска выключатель уже
+    // не отзовёт стартовую команду, а до него — отказывает. Владелец заблокирован раньше.
+    if spec.machine_id.is_some() {
+        admit_remote_in_tx(conn, owner, machine).await?;
+    }
     let brief = vec![ContentBlock::Text {
         text: spec.brief.clone(),
     }];
@@ -1004,6 +1183,7 @@ fn started_answer(
     mode: &str,
     worktree: Option<&Value>,
     subscribed: bool,
+    machine_name: Option<&str>,
 ) -> Value {
     let mut answer = json!({
         "status": "started",
@@ -1016,7 +1196,18 @@ fn started_answer(
     if let Some(worktree) = worktree {
         answer["worktree"] = json!({"branch": worktree["branch"], "path": worktree["path"]});
     }
+    // Имя машины — только у запуска на другой: ответ о своей остаётся прежним.
+    if let Some(name) = machine_name {
+        answer["machine_name"] = json!(name);
+    }
     answer
+}
+
+async fn machine_name(conn: &mut PgConnection, machine: Uuid) -> Result<String, sqlx::Error> {
+    sqlx::query_scalar("select name from machines where id=$1")
+        .bind(machine)
+        .fetch_one(conn)
+        .await
 }
 
 fn pending_answer(request_id: Uuid, model: &str) -> Value {
@@ -1042,23 +1233,34 @@ async fn replayed(
     caller: &Caller,
     guards: &crate::config::GuardsConfig,
 ) -> Result<Option<Value>, sqlx::Error> {
-    let child: Option<(Uuid, String, String, Option<Value>, bool)> = sqlx::query_as(
-        "select c.id,c.model,c.permission_mode,c.worktree,exists(
-           select 1 from session_subscriptions s
-           where s.subscriber_id=$3 and s.target_id=c.id and s.closed_at is null)
-         from inputs i join conversations c on c.id=i.conversation_id
-         where i.owner_id=$1 and i.idempotency_key=$2 and c.parent_conversation_id=$3",
-    )
-    .bind(caller.owner_id)
-    .bind(input_key(caller))
-    .bind(caller.conversation_id)
-    .fetch_optional(&mut *conn)
-    .await?;
-    if let Some((id, model, mode, worktree, subscribed)) = child {
-        let mut answer = started_answer(id, &model, &mode, worktree.as_ref(), subscribed);
+    // Машина ребёнка читается из него самого: ответ повтора не зависит от аргументов.
+    let child: Option<(Uuid, String, String, Option<Value>, bool, Uuid, String)> =
+        sqlx::query_as(
+            "select c.id,c.model,c.permission_mode,c.worktree,exists(
+               select 1 from session_subscriptions s
+               where s.subscriber_id=$3 and s.target_id=c.id and s.closed_at is null),
+               c.machine_id,m.name
+             from inputs i join conversations c on c.id=i.conversation_id
+             join machines m on m.id=c.machine_id
+             where i.owner_id=$1 and i.idempotency_key=$2 and c.parent_conversation_id=$3",
+        )
+        .bind(caller.owner_id)
+        .bind(input_key(caller))
+        .bind(caller.conversation_id)
+        .fetch_optional(&mut *conn)
+        .await?;
+    if let Some((id, model, mode, worktree, subscribed, machine, name)) = child {
+        let remote_name = (machine != caller.machine_id).then_some(name.as_str());
+        let mut answer = started_answer(
+            id,
+            &model,
+            &mode,
+            worktree.as_ref(),
+            subscribed,
+            remote_name,
+        );
         let verdict =
-            guard::check_in_tx(conn, caller.owner_id, caller.machine_id, guards, Utc::now())
-                .await?;
+            guard::check_in_tx(conn, caller.owner_id, machine, guards, Utc::now()).await?;
         if verdict.stale {
             answer["machine_metrics"] = serde_json::json!("stale");
         }
@@ -1163,6 +1365,12 @@ pub async fn spawn(
     }
     let parent = access::caller_in_tx(&mut tx, caller.owner_id, caller.conversation_id).await?;
     check_parent_domain(&parent)?;
+    // Имя или id → машина; дальше очередь, карточка и повтор помнят только её id.
+    let requested_machine = args.machine.take();
+    args.machine_id = resolve_machine(&mut tx, caller, requested_machine.as_deref()).await?;
+    if let Some(target) = args.machine_id {
+        admit_remote_in_tx(&mut tx, caller.owner_id, target).await?;
+    }
     if parent.spawn_depth >= context.config.max_spawn_depth as i32 {
         return Err(ToolError::new(ToolErrorCode::SpawnDepthExceeded));
     }
@@ -1306,19 +1514,24 @@ pub async fn spawn(
     } else {
         None
     };
+    // Страж и связь — целевой машины. Недоступная цель ставит запуск в очередь.
+    let target = spec.launch_machine(caller.machine_id);
+    let remote_block = spawn_queue::remote_block(&context.registry, target, spec.machine_id);
     let guard = guard::check_in_tx(
         &mut tx,
         caller.owner_id,
-        caller.machine_id,
+        target,
         &context.guards,
         now,
     )
     .await?;
-    let queue_reason = queue_reason.or_else(|| {
-        guard
-            .blocked()
-            .then_some(super::spawn_queue::REASON_RESOURCES)
-    });
+    let queue_reason = queue_reason
+        .or_else(|| remote_block.as_ref().map(|block| block.reason))
+        .or_else(|| {
+            guard
+                .blocked()
+                .then_some(super::spawn_queue::REASON_RESOURCES)
+        });
     let child = if queue_reason.is_none() {
         spawn_queue::child_block(
             &mut tx,
@@ -1337,6 +1550,10 @@ pub async fn spawn(
         if !args.queue {
             return Err(match reason {
                 super::spawn_queue::REASON_RATE => ToolError::new(ToolErrorCode::RateLimited),
+                // Частота уже названа выше; иначе причина — недоступная цель.
+                _ if remote_block.is_some() => remote_block
+                    .as_ref()
+                    .map_or_else(|| ToolError::new(ToolErrorCode::Internal), spawn_queue::RemoteBlock::error),
                 super::spawn_queue::REASON_CHILDREN | super::spawn_queue::REASON_STAGGER => {
                     ToolError::with_message(
                         ToolErrorCode::MachineBusy,
@@ -1377,6 +1594,16 @@ pub async fn spawn(
                     at,
                 )
             }
+            _ if remote_block.is_some() => (
+                serde_json::json!({
+                    "detail": remote_block
+                        .as_ref()
+                        .map(|block| block.detail.clone())
+                        .unwrap_or_default(),
+                }),
+                now + chrono::TimeDelta::from_std(context.spawn_queue.retry_delay)
+                    .unwrap_or_else(|_| chrono::TimeDelta::seconds(60)),
+            ),
             _ => (
                 serde_json::json!({
                     "detail": guard.detail.clone().unwrap_or_default(),
@@ -1415,7 +1642,7 @@ pub async fn spawn(
         Launch {
             registry: &context.registry,
             owner: caller.owner_id,
-            machine: caller.machine_id,
+            machine: target,
             parent: &parent,
             spec: &spec,
             key: input_key(caller),
@@ -1425,6 +1652,10 @@ pub async fn spawn(
     )
     .await?;
     let provider_status = provider_warning(&mut tx, &spec.harness, now).await?;
+    let remote_name = match spec.machine_id {
+        Some(machine) => Some(machine_name(&mut tx, machine).await?),
+        None => None,
+    };
     tx.commit().await?;
     if let Some(dispatcher) = &context.dispatcher {
         dispatcher.trigger(started.session_id);
@@ -1435,6 +1666,7 @@ pub async fn spawn(
         &spec.permission_mode,
         started.worktree.as_ref(),
         spec.subscribe,
+        remote_name.as_deref(),
     );
     if guard.stale {
         answer["machine_metrics"] = serde_json::json!("stale");
@@ -1652,6 +1884,7 @@ async fn allow(conn: &mut PgConnection, launch: Launch<'_>) -> Result<Started, T
         ),
         &launch.spec.harness,
         Some(&launch.spec.permission_mode),
+        launch.spec.machine_id.is_some(),
     )?;
     // Владелец одобрял карточку без пометки: стать сильнее родителя запуск не может.
     if mode.wider_than_parent && !launch.spec.wider_than_parent {
@@ -1720,7 +1953,8 @@ pub(crate) async fn run_job(
                         Launch {
                             registry,
                             owner: job.owner_id,
-                            machine,
+                            // Карточка помнит машину запуска; машина родителя — только у карточек без неё.
+                            machine: spec.launch_machine(machine),
                             parent: &parent,
                             spec: &spec,
                             key: format!("spawn:{request_id}"),
