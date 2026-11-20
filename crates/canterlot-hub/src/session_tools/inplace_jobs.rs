@@ -334,6 +334,15 @@ pub async fn run(
         // Владелец раньше строки машины: тот же порядок, что у запуска удалённого делегата.
         crate::conversations::lock_owner(&mut tx, caller.owner_id).await?;
     }
+    // Замок задач машины раньше любой записи и счётчика событий: итог и отмена идут в том же
+    // порядке, поэтому заявка и итог одной машины не замыкают цикл.
+    jobs::lock_machine(&mut tx, machine_id).await?;
+    // Допуск заказчика держится до фиксации и читается заново под замком: ни смена режима,
+    // ни смена домена не проскочит между проверкой и стартом команды.
+    jobs::lock_admission(&mut tx, &[caller.conversation_id]).await?;
+    let facts = jobs::caller_facts(&mut tx, caller.conversation_id)
+        .await?
+        .ok_or_else(|| ToolError::new(ToolErrorCode::SessionNotFound))?;
     jobs::admit(&mut tx, &facts, machine_id, &args.workdir)
         .await
         .map_err(refusal)?;

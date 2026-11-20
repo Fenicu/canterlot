@@ -266,6 +266,31 @@ pub async fn lock_machine(conn: &mut PgConnection, machine_id: Uuid) -> Result<(
     Ok(())
 }
 
+/// Состояние допуска заказчиков (режим, ожидающий режим, домен) держится до фиксации: очередь
+/// разговора, затем его строка `for no key update`, как у настроек и у смены домена, по
+/// возрастанию идентификатора. Берётся после замка машины и строк задач, раньше счётчиков
+/// событий; параметр — все заказчики, чьи задачи диспетчер проверит в этой транзакции.
+pub async fn lock_admission(
+    conn: &mut PgConnection,
+    conversations: &[Uuid],
+) -> Result<(), sqlx::Error> {
+    if conversations.is_empty() {
+        return Ok(());
+    }
+    sqlx::query(
+        "select conversation_id from queue_state where conversation_id = any($1)
+         order by conversation_id for update",
+    )
+    .bind(conversations)
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query("select id from conversations where id = any($1) order by id for no key update")
+        .bind(conversations)
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
 pub async fn load(conn: &mut PgConnection, id: Uuid) -> Result<Option<Job>, sqlx::Error> {
     sqlx::query_as("select * from jobs where id=$1")
         .bind(id)
@@ -574,12 +599,20 @@ pub async fn dispatch_machine_in_tx(
         Some(max) if max > 0 => i64::from(max),
         _ => DEFAULT_MAX_RUNNING,
     };
-    let queued: Vec<Uuid> = sqlx::query_scalar(
-        "select id from jobs where machine_id=$1 and state='queued' order by created_at, id",
+    let queued_rows: Vec<(Uuid, Option<Uuid>)> = sqlx::query_as(
+        "select id, conversation_id from jobs
+         where machine_id=$1 and state='queued' order by created_at, id",
     )
     .bind(machine_id)
     .fetch_all(&mut *conn)
     .await?;
+    // Допуск заказчиков фиксируется до фиксации диспетчеризации: смена режима или домена
+    // либо успевает раньше и видна проверке, либо ждёт и приходит после старта.
+    let mut callers: Vec<Uuid> = queued_rows.iter().filter_map(|(_, c)| *c).collect();
+    callers.sort_unstable();
+    callers.dedup();
+    lock_admission(conn, &callers).await?;
+    let queued: Vec<Uuid> = queued_rows.into_iter().map(|(id, _)| id).collect();
     let mut sent = 0;
     let mut full = false;
     for id in queued {

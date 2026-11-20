@@ -719,6 +719,121 @@ async fn the_waiter_does_not_claim_an_inline_result_after_a_domain_change(pool: 
     assert_ne!(fx.job(id).await.delivery.as_deref(), Some("inline"));
 }
 
+/// Заявка берёт замок задач машины раньше счётчика событий, как и итог: если бы она сначала
+/// публиковала событие, а замок брала потом, встречный итог (замок, потом событие) замкнул
+/// бы цикл, и база прервала бы одну из транзакций.
+#[sqlx::test(migrations = "./migrations")]
+async fn submission_and_completion_take_the_jobs_lock_before_the_event_counter(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let existing = job_id(&fx.run("first").await);
+    let job = fx.job(existing).await;
+    let machine = fx.a;
+    // «Итог»: замок машины уже у него, событие ещё впереди.
+    let mut completion = canterlot_hub::db::begin(&fx.pool).await.unwrap();
+    inplace_jobs::lock_machine(&mut completion, machine).await.unwrap();
+    let context = fx.context.clone();
+    let caller = fx.caller();
+    let submit = tokio::spawn(async move {
+        session_tools::call(
+            &context,
+            &caller,
+            "job.run",
+            json!({"workdir": "/tmp/w", "shell": "second", "wait_seconds": 0}),
+        )
+        .await
+    });
+    // Заявка дошла до ожидания замка машины.
+    until("the submission to wait for the jobs lock", || async {
+        sqlx::query_scalar::<_, i64>(
+            "select count(*) from pg_locks where locktype='advisory' and not granted",
+        )
+        .fetch_one(&fx.pool)
+        .await
+        .unwrap()
+            > 0
+    })
+    .await;
+    inplace_jobs::emit_changed(&mut completion, &job, Uuid::now_v7())
+        .await
+        .expect("the completion publishes without a deadlock");
+    completion.commit().await.expect("the completion commits");
+    let reply = submit.await.unwrap();
+    assert!(reply.is_ok(), "the submission must not be aborted: {reply:?}");
+}
+
+/// Допуск заказчика держится до фиксации диспетчеризации: владелец сужает режим тем же путём,
+/// что настройки (очередь, затем строка разговора); диспетчер, дойдя до этой строки, ждёт
+/// фиксации и видит уже узкий режим, а не стартует оболочку по старому снимку.
+#[sqlx::test(migrations = "./migrations")]
+async fn dispatch_waits_for_a_concurrent_mode_change_and_sees_it(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let mut running = Vec::new();
+    for n in 0..4 {
+        running.push(job_id(&fx.run(&format!("busy {n}")).await));
+    }
+    let queued = job_id(&fx.run("waiting").await);
+    assert_eq!(fx.state(queued).await, "queued");
+    assert_eq!(fx.commands(fx.a, "start_inplace_job").await, 4);
+    // Владелец сузил режим: транзакция настроек ещё не зафиксирована.
+    let mut settings = canterlot_hub::db::begin(&fx.pool).await.unwrap();
+    sqlx::query("select conversation_id from queue_state where conversation_id=$1 for update")
+        .bind(fx.conversation)
+        .execute(&mut *settings)
+        .await
+        .unwrap();
+    sqlx::query("select id from conversations where id=$1 for no key update")
+        .bind(fx.conversation)
+        .execute(&mut *settings)
+        .await
+        .unwrap();
+    sqlx::query(
+        "update conversations set pending_settings=jsonb_build_object('permission_mode','ask')
+         where id=$1",
+    )
+    .bind(fx.conversation)
+    .execute(&mut *settings)
+    .await
+    .unwrap();
+    // Место освободилось: диспетчер идёт к очереди.
+    let (pool, first, a) = (fx.pool.clone(), running[0], fx.a);
+    let finisher = tokio::spawn(async move {
+        let fact = JobFinished {
+            job_id: first.to_string(),
+            attempt: 1,
+            outcome: JobOutcome::Succeeded as i32,
+            exit_code: Some(0),
+            duration_ms: 1,
+            log_bytes: 0,
+            tail: Vec::new(),
+            truncated: false,
+        };
+        canterlot_hub::db::in_tx(&pool, move |conn| {
+            Box::pin(
+                async move { facts::apply_finished(conn, a, &fact, Uuid::now_v7()).await },
+            )
+        })
+        .await
+    });
+    until("the dispatcher to wait for the settings change", || async {
+        finisher.is_finished()
+            || sqlx::query_scalar::<_, i64>(
+                "select count(*) from pg_stat_activity where wait_event_type='Lock'
+                   and datname=current_database()",
+            )
+            .fetch_one(&fx.pool)
+            .await
+            .unwrap()
+                > 0
+    })
+    .await;
+    settings.commit().await.unwrap();
+    finisher.await.unwrap().unwrap();
+    let job = fx.job(queued).await;
+    assert_eq!(job.state, "canceled", "the narrowed mode is seen at dispatch");
+    assert_eq!(job.end_reason.as_deref(), Some("mode_too_narrow"));
+    assert_eq!(fx.commands(fx.a, "start_inplace_job").await, 4);
+}
+
 // ───────── Допуск ─────────
 
 #[sqlx::test(migrations = "./migrations")]
