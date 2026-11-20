@@ -1644,12 +1644,31 @@ async fn file_probe_in_tx(
         });
     };
     let mut fired = None;
+    // Взведённый будильник мог оказаться на рабочем файле для не рабочего вызывающего
+    // (домен или корни поменялись): ни размер, ни время, ни текст не сохраняются.
+    let canonical = match &probe {
+        PathProbe::Exists { canonical, .. } => canonical.clone(),
+        _ => None,
+    };
+    let probe = if crate::memory::file_denied_for(
+        conn,
+        row.conversation_id,
+        &condition.path,
+        canonical.as_deref(),
+    )
+    .await?
+    {
+        PathProbe::NotAllowed("domain_mismatch".into())
+    } else {
+        probe
+    };
     match probe {
         PathProbe::Exists {
             size,
             mtime,
             head,
             head_omitted,
+            ..
         } => {
             condition.observed_size = Some(size);
             condition.observed_mtime = mtime;
@@ -1955,6 +1974,24 @@ pub async fn set(
             };
             let (probe, worker_now) =
                 probe::ask_clock(&context.registry, machine, &resolved, read_head_bytes).await;
+            // Рабочие файлы не уходят в сообщения не рабочему агенту: ответ пробы при этом
+            // не показывается ни в каком виде.
+            let canonical = match &probe {
+                PathProbe::Exists { canonical, .. } => canonical.as_deref(),
+                _ => None,
+            };
+            let mut conn = context.pool.acquire().await?;
+            if crate::memory::file_denied_for(
+                &mut conn,
+                caller.conversation_id,
+                &resolved,
+                canonical,
+            )
+            .await?
+            {
+                return Err(ToolError::new(ToolErrorCode::DomainMismatch));
+            }
+            drop(conn);
             match &probe {
                 PathProbe::Missing | PathProbe::Exists { .. } => {}
                 PathProbe::NotAllowed(reason) => {
@@ -2381,6 +2418,7 @@ pub async fn set(
                             mtime,
                             head,
                             head_omitted,
+                            ..
                         } = probe
                     {
                         condition.observed_size = Some(size);

@@ -194,6 +194,35 @@ pub async fn child_scope(
     Ok((Some(domain), project))
 }
 
+/// Файл под рабочим корнем машины нельзя отдавать вызывающему не из рабочего домена:
+/// ни существование, ни метаданные, ни начало текста. Работа с файлами вне корней
+/// (`/tmp/*.done`) рабочему вызывающему остаётся. Классифицируется настоящий путь от
+/// воркера, а без него (старый воркер, файла нет) — путь как он записан. Корни неизвестны —
+/// поведение прежнее.
+pub async fn file_denied_for(
+    conn: &mut PgConnection,
+    conversation_id: Uuid,
+    lexical_path: &str,
+    canonical_path: Option<&str>,
+) -> Result<bool, sqlx::Error> {
+    let row: Option<(Uuid, Option<String>)> =
+        sqlx::query_as("select machine_id, memory_domain from conversations where id=$1")
+            .bind(conversation_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    let Some((machine_id, domain)) = row else {
+        return Ok(false);
+    };
+    if domain.as_deref().and_then(MemoryDomain::parse) == Some(MemoryDomain::Work) {
+        return Ok(false);
+    }
+    let Some(roots) = machine_roots(conn, machine_id).await? else {
+        return Ok(false);
+    };
+    let path = canonical_path.unwrap_or(lexical_path);
+    Ok(classify(path, &roots.work_roots, roots.worktree_root.as_deref()) == Classification::Work)
+}
+
 /// Проверка запуска: настоящий путь, который прислал воркер, противоречит сохранённому
 /// домену. Тогда память разговора выключается, событие остаётся владельцу, а запуск идёт
 /// дальше. Нейтральный настоящий путь домену не противоречит. Возвращает `true`, если

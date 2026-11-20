@@ -2215,6 +2215,7 @@ fn path_probe_uses_new_control_fields_and_old_decoders_skip_them() {
             mtime_ms: 1_762_345_260_000,
             head: "0".into(),
             head_omitted: String::new(),
+            canonical_path: "/h/f".into(),
         })),
         now_ms: 1_762_345_300_000,
     };

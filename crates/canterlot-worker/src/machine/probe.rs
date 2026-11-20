@@ -36,6 +36,8 @@ pub enum Outcome {
         head: Option<String>,
         /// Почему `head` пуст: `binary`, `not_requested` или `unreadable`.
         head_omitted: &'static str,
+        /// Realpath файла: хаб по нему решает, чей это домен. Пусто, если не разрешился.
+        canonical: String,
     },
     Missing,
     /// Путь не проходит защиту `share_file`; причина — короткий код, не текст.
@@ -52,6 +54,7 @@ impl std::fmt::Debug for Outcome {
                 mtime_ms,
                 head,
                 head_omitted,
+                ..
             } => f
                 .debug_struct("Exists")
                 .field("size", size)
@@ -140,11 +143,13 @@ pub fn probe(path: &str, roots: &[PathBuf], read_head_bytes: u32) -> Outcome {
         .saturating_mul(1000)
         .saturating_add(u64::try_from(checked.meta.mtime_nsec()).unwrap_or(0) / 1_000_000);
     let (head, head_omitted) = read_head(checked.file, read_head_bytes);
+    let canonical = crate::memory_scope::canonical_source(Some(Path::new(path)));
     Outcome::Exists {
         size,
         mtime_ms,
         head,
         head_omitted,
+        canonical,
     }
 }
 
@@ -193,11 +198,13 @@ pub fn reply(request_id: String, outcome: Outcome) -> PathProbe {
             mtime_ms,
             head,
             head_omitted,
+            canonical,
         } => path_probe::Outcome::Exists(PathProbeExists {
             size,
             mtime_ms,
             head: head.unwrap_or_default(),
             head_omitted: head_omitted.to_owned(),
+            canonical_path: canonical,
         }),
         Outcome::Missing => {
             path_probe::Outcome::Missing(canterlot_proto::worker::v1::PathProbeMissing {})
@@ -571,6 +578,19 @@ mod tests {
     }
 
     #[test]
+    fn exists_reports_the_canonical_path_behind_a_symlinked_directory() {
+        let dir = dir();
+        let real = fs::canonicalize(dir.path()).unwrap();
+        fs::create_dir(dir.path().join("work")).unwrap();
+        fs::write(dir.path().join("work/report.md"), b"x").unwrap();
+        std::os::unix::fs::symlink(dir.path().join("work"), dir.path().join("alias")).unwrap();
+        let Outcome::Exists { canonical, .. } = probe_in(dir.path(), "alias/report.md", 0) else {
+            panic!()
+        };
+        assert_eq!(canonical, real.join("work/report.md").to_string_lossy());
+    }
+
+    #[test]
     fn a_binary_head_is_omitted_with_a_note() {
         let dir = dir();
         fs::write(dir.path().join("blob"), [0u8, 1, 2, 3]).unwrap();
@@ -631,6 +651,7 @@ mod tests {
             mtime_ms: 1,
             head: Some("secret-token".into()),
             head_omitted: "",
+            canonical: "/h/secret-dir/f".into(),
         };
         let text = format!("{outcome:?}");
         assert!(!text.contains("secret-token"), "{text}");

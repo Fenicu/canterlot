@@ -180,6 +180,7 @@ fn exists(size: u64, mtime: DateTime<Utc>, head: Option<&str>) -> path_probe::Ou
         mtime_ms: u64::try_from(mtime.timestamp_millis()).unwrap_or(0),
         head: head.unwrap_or_default().into(),
         head_omitted: String::new(),
+        canonical_path: String::new(),
     })
 }
 
@@ -193,6 +194,7 @@ fn exists_raw(size: u64, mtime_ms: u64, head: Option<&str>) -> path_probe::Outco
         mtime_ms,
         head: head.unwrap_or_default().into(),
         head_omitted: String::new(),
+        canonical_path: String::new(),
     })
 }
 
@@ -615,6 +617,137 @@ async fn arming_refuses_a_denied_path(pool: PgPool) -> TestResult {
         .fetch_one(&f.pool)
         .await?;
     assert_eq!(count, 0);
+    f.stop().await;
+    Ok(())
+}
+
+/// Машина знает рабочий корень `/h/work`, вызывающий — в заданном домене.
+async fn scope_caller(f: &Fx, domain: Option<&str>, roots: &str) {
+    sqlx::query(
+        "update machines set capabilities=capabilities||array['memory_scope_v1'],
+           memory_work_roots=$2::jsonb where id=$1",
+    )
+    .bind(f.seed.machine_id)
+    .bind(roots)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    sqlx::query("update conversations set memory_domain=$2 where id=$1")
+        .bind(f.seed.conversation_id)
+        .bind(domain)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+}
+
+fn exists_at(canonical: &str, head: &str) -> path_probe::Outcome {
+    path_probe::Outcome::Exists(PathProbeExists {
+        size: 9,
+        mtime_ms: u64::try_from(Utc::now().timestamp_millis() + 60_000).unwrap_or(0),
+        head: head.into(),
+        head_omitted: String::new(),
+        canonical_path: canonical.into(),
+    })
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn non_work_caller_cannot_arm_a_file_alarm_under_a_work_root(pool: PgPool) -> TestResult {
+    let f = Fx::new(pool).await;
+    let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
+    for domain in [Some("personal"), None] {
+        scope_caller(&f, domain, r#"["/h/work"]"#).await;
+        // Путь под рабочим корнем: файла нет, но отказ тот же, что и у существующего.
+        worker.push(missing());
+        let error = f
+            .arm_file(json!({"kind": "file", "path": "/h/work/rep/out.md", "read_head": true}))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, session_tools::ToolErrorCode::DomainMismatch);
+        worker.push(exists_at("/h/work/rep/out.md", "SECRET-REPORT"));
+        let error = f
+            .arm_file(json!({"kind": "file", "path": "/h/work/rep/out.md", "read_head": true}))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, session_tools::ToolErrorCode::DomainMismatch);
+        // Ссылка вне рабочего корня на файл внутри него: решает настоящий путь.
+        worker.push(exists_at("/h/work/rep/out.md", "SECRET-REPORT"));
+        let error = f
+            .arm_file(json!({"kind": "file", "path": "/tmp/w/link.md", "read_head": true}))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, session_tools::ToolErrorCode::DomainMismatch);
+    }
+    assert_eq!(f.pending_probe_jobs().await, 0);
+    let count: i64 = sqlx::query_scalar("select count(*) from alarms")
+        .fetch_one(&f.pool)
+        .await?;
+    assert_eq!(count, 0);
+    f.stop().await;
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn file_alarm_outside_work_roots_and_work_callers_still_arm(pool: PgPool) -> TestResult {
+    let f = Fx::new(pool).await;
+    let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
+    // Личный вызывающий вне рабочих корней — как раньше.
+    scope_caller(&f, Some("personal"), r#"["/h/work"]"#).await;
+    worker.push(missing());
+    let armed = tool(
+        f.arm_file(json!({"kind": "file", "path": "/tmp/w/gate.rc"}))
+            .await,
+    )?;
+    assert_eq!(armed["state"], "armed");
+    // Рабочий вызывающий следит и за `/tmp`, и за файлом в рабочем корне.
+    scope_caller(&f, Some("work"), r#"["/h/work"]"#).await;
+    worker.push(missing());
+    let armed = tool(
+        f.arm_file(json!({"kind": "file", "path": "/tmp/w/other.done"}))
+            .await,
+    )?;
+    assert_eq!(armed["state"], "armed");
+    worker.push(exists_at("/h/work/rep/out.md", "mine"));
+    let armed = tool(
+        f.arm_file(json!({"kind": "file", "path": "/h/work/rep/out.md"}))
+            .await,
+    )?;
+    assert!(armed["state"] == "armed" || armed["state"] == "fired");
+    f.stop().await;
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn an_armed_alarm_on_a_file_that_became_work_delivers_nothing(pool: PgPool) -> TestResult {
+    let f = Fx::new(pool).await;
+    let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
+    scope_caller(&f, Some("personal"), r#"["/h/work"]"#).await;
+    let armed_at = Utc::now();
+    worker.push(missing());
+    let armed = tool(
+        f.arm_file(json!({"kind": "file", "path": "/tmp/w/gate.rc", "read_head": true}))
+            .await,
+    )?;
+    assert_eq!(armed["state"], "armed");
+
+    // Машина переклассифицировала `/tmp/w` как рабочий корень, файл появился.
+    scope_caller(&f, Some("personal"), r#"["/h/work","/tmp/w"]"#).await;
+    worker.push(exists_at("/tmp/w/gate.rc", "SECRET-REPORT"));
+    let scheduler = f.scheduler();
+    scheduler.tick(armed_at + TimeDelta::seconds(31)).await?;
+    worker.wait(2).await;
+    scheduler.tick(armed_at + TimeDelta::seconds(32)).await?;
+    scheduler.tick(armed_at + TimeDelta::seconds(40)).await?;
+    let state: String = sqlx::query_scalar("select state from alarms where key='gate'")
+        .fetch_one(&f.pool)
+        .await?;
+    assert_eq!(state, "armed");
+    assert!(f.files_inputs().await.is_empty());
+    let condition: String =
+        sqlx::query_scalar("select condition::text from alarms where key='gate'")
+            .fetch_one(&f.pool)
+            .await?;
+    assert!(!condition.contains("SECRET-REPORT"), "{condition}");
+    assert!(!condition.contains("\"observed_size\":9"), "{condition}");
     f.stop().await;
     Ok(())
 }

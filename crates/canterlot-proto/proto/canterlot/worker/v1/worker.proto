@@ -979,6 +979,8 @@ message PathProbeExists {
   string head = 3;
   // Пусто, `binary` (не текст) или `not_requested`.
   string head_omitted = 4;
+  // Realpath файла: хаб классифицирует его по корням работы. Пусто у старого воркера.
+  string canonical_path = 5;
 }
 
 message PathProbeMissing {}
