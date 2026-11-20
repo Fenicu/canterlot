@@ -1896,6 +1896,69 @@ async fn spawn_explicit_workdir_of_other_domain_is_domain_mismatch(pool: PgPool)
     );
 }
 
+/// Отправка авторизовала цель, потом встала в очередь; за это время запуск обнулил домен цели
+/// и закоммитился. После очереди отправка проверяет домены заново и ничего не вставляет.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn send_rechecks_the_domain_after_waiting_for_the_queue(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let target = testkit::seed_conversation(&f.pool, f.owner, f.machine).await;
+    sqlx::query("update conversations set memory_domain='personal' where id=$1")
+        .bind(target)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    // Очередь цели держит другая транзакция.
+    let mut holder = f.pool.begin().await.unwrap();
+    sqlx::query("select conversation_id from queue_state where conversation_id=$1 for update")
+        .bind(target)
+        .fetch_one(&mut *holder)
+        .await
+        .unwrap();
+    let send = {
+        let context = f.context.clone();
+        let caller = f.caller();
+        tokio::spawn(async move {
+            session_tools::call(
+                &context,
+                &caller,
+                "sessions.send",
+                json!({"session_id": target, "text": "сообщение"}),
+            )
+            .await
+        })
+    };
+    // Отправка уже прошла авторизацию и стоит на очереди.
+    loop {
+        let waiting: bool = sqlx::query_scalar(
+            "select exists(select 1 from pg_stat_activity
+              where datname=current_database() and wait_event_type='Lock'
+                and query like 'select conversation_id from queue_state%')",
+        )
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        if waiting {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    // Запуск обнуляет домен цели: `no key update` не мешает `key share` отправки.
+    sqlx::query("update conversations set memory_domain=null where id=$1")
+        .bind(target)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    holder.commit().await.unwrap();
+    let error = send.await.unwrap().unwrap_err();
+    assert_eq!(error.code, Code::SessionNotFound);
+    let inputs: i64 = sqlx::query_scalar("select count(*) from inputs where conversation_id=$1")
+        .bind(target)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(inputs, 0);
+}
+
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn a_parent_without_a_domain_cannot_spawn_but_a_personal_one_can(pool: PgPool) {
     let f = Fx::new(pool).await;
