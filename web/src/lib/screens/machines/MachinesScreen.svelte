@@ -14,6 +14,7 @@
   import { credentialLine } from '#lib/stores/limits.js';
   import { modelLabel } from '#lib/format/labels.js';
   import Segmented from '#lib/ui/Segmented.svelte';
+  import { swapOn } from '#lib/ui/swap.js';
   import SecondaryHeader from '../SecondaryHeader.svelte';
   import MetricCard from './MetricCard.svelte';
   import { diskLimits, diskView, generalWarnings, hotspotRows, journalStops, leakedSummary, machineStatus, memoryLowText, unleasedText } from './model.js';
@@ -93,7 +94,7 @@
     {:else if !machine}<p>Машины ещё не подключены. Подключите воркер к хабу</p>
     {:else}
       {#if machines.length > 1}<Segmented name="machine" label="Машина" options={machines.map(m => ({ value: m.id, label: m.availability === 'degraded' ? `${m.name} · нестабильно` : m.availability === 'unavailable' ? `${m.name} · не в сети` : m.name }))} bind:value={selected} />{/if}
-      <div class="heading"><h2>{machine.name}</h2><span class="availability" data-availability={machine.availability}>{machineStatus(machine.availability)}</span></div>
+      <div class="heading"><h2>{machine.name}</h2>{#key machine.id}<span class="availability" data-availability={machine.availability} use:swapOn={{ text: machineStatus(machine.availability), key: machine.availability }}></span>{/key}</div>
       {#if machine.os}<p class="note">{({ linux: 'Linux', darwin: 'macOS', windows: 'Windows' } as Record<string, string>)[machine.os] ?? machine.os}</p>{/if}
       {#if machine.worker_version}<p class="note">Версия воркера {machine.worker_version}</p>{/if}
       {#each machine.credentials ?? [] as credential (credential.provider)}

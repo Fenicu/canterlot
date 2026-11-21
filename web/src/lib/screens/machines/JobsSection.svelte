@@ -1,6 +1,7 @@
 <script lang="ts">
   import { listJobs } from '#lib/api/client.js';
   import type { Runtime } from '#lib/app/runtime.js';
+  import WorkMotif from '#lib/ui/WorkMotif.svelte';
   import { durationWord, jobFacts, jobLabel, jobWord, machineJobs, offlineNote, type JobFacts } from '#lib/jobs/model.js';
 
   let { runtime, machineId, onopen }: { runtime: Runtime; machineId: string; onopen: (id: string) => void } = $props();
@@ -29,7 +30,11 @@
   {@const took = durationWord(job.durationMs)}
   <li>
     <button type="button" onclick={() => onopen(job.id)} data-job={job.id}>
-      <span class="top"><span class="label">{jobLabel(job.title, job.shell) || job.id.slice(0, 8)}</span><span class="word" data-tone={word.tone}>{word.word}</span></span>
+      <span class="top">
+        <!-- Задача идёт прямо сейчас: тот же мотив пера, что у очереди и строки хода. Машина без связи не подтверждает, что идёт. -->
+        {#if word.live && !job.machineOffline}<span class="lead" data-job-mark><WorkMotif /></span>{/if}
+        <span class="label">{jobLabel(job.title, job.shell) || job.id.slice(0, 8)}</span><span class="word" data-tone={word.tone}>{word.word}</span>
+      </span>
       {#if took || note}<span class="meta">{[took, note].filter(Boolean).join(' · ')}</span>{/if}
     </button>
   </li>
@@ -60,6 +65,7 @@
   ul { display: flex; flex-direction: column; gap: var(--s2); margin: var(--s0); padding: var(--s0); list-style: none; }
   button { display: flex; flex-direction: column; gap: var(--s1); width: 100%; min-width: 0; min-height: var(--target); padding: var(--s6) var(--s8); border-radius: var(--radius-card); background: var(--surface); color: var(--text); text-align: start; }
   .top { display: flex; align-items: baseline; gap: var(--s4); min-width: 0; }
+  .lead { flex: none; align-self: center; display: inline-flex; }
   .label { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .word { flex: none; color: var(--secondary); font-size: var(--fs-sm); white-space: nowrap; }
   .word[data-tone='accent'] { color: var(--accent-link); }

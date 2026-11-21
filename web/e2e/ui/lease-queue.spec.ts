@@ -3,6 +3,7 @@ import type { HistoryBlock } from '../../src/lib/stores/chat.svelte';
 import { FakeHub, FakeHubApi, leaseEntry, seedConversation, seedLease } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
 import { expect, test } from './fixtures';
+import { foldingCount, movingCount, noMotion, slowMotion } from './ink-motion';
 import { bootSecondary } from './secondary-fixture';
 
 const OWNER = '00000000-0000-4000-8000-0000000000d1';
@@ -67,6 +68,83 @@ test('machine_screen_lists_queue_holders_and_waiters_and_hides_an_empty_or_stale
   // Пропавшая машина не подтверждает очередь: секция уходит.
   hub.append('machines', { kind: 'machine_availability_changed', payload: { machine_id: ids.machine, availability: 'unavailable' } }); hub.flush();
   await expect(section).toHaveCount(0);
+});
+
+/** Очередь с двумя держателями и одним ожидающим: на машине рабочей станции. */
+async function seededQueue(page: Page) {
+  return bootSecondary(page, '/machines', (api) => {
+    seedLease(api, [...api.machines.values()].find((machine) => machine.name === 'workstation')!.id, [
+      leaseEntry({ lease_id: 'h1', kind: 'build', label: 'cargo build', dir: 'canterlot', since: ago(12 * MIN) }),
+      leaseEntry({ lease_id: 'h2', kind: 'build', label: 'check.sh --fast', dir: 'canterlot', since: ago(47 * MIN) })
+    ], [
+      leaseEntry({ lease_id: 'w1', kind: 'gate', label: 'gate', requested_at: ago(5 * MIN), position: 1 })
+    ]);
+  });
+}
+
+const queueNow = (hub: FakeHub, machine: string, holders: unknown[], waiters: unknown[] = []) => {
+  hub.append('machines', { kind: 'machine_lease_changed', payload: { machine_id: machine, lease: { slots: 2, observed_at: new Date().toISOString(), holders, waiters } } });
+  hub.flush();
+};
+
+test('queue_rows_carry_the_pen_for_what_runs_and_an_hourglass_for_what_waits', async ({ page }, testInfo) => {
+  await frame(page, testInfo);
+  await seededQueue(page);
+  const section = page.locator('[data-lease-queue]');
+  const holders = section.locator('[data-lease-holder]');
+  await expect(holders).toHaveCount(2);
+  for (const holder of await holders.all()) {
+    await expect(holder.locator('[data-lease-mark="writing"] .write')).toHaveCount(1);
+    // Перо пишет по-настоящему: у штриха идёт анимация.
+    expect(await holder.locator('.write i').first().evaluate((node) => getComputedStyle(node).animationName)).not.toBe('none');
+  }
+  const waiter = section.locator('[data-lease-waiter]');
+  await expect(waiter.locator('[data-lease-mark="waiting"] svg')).toHaveCount(1);
+  await expect(waiter.locator('.write')).toHaveCount(0);
+  // Ожидающему ничего не пишется, песочные часы стоят.
+  expect(await waiter.locator('[data-lease-mark="waiting"] svg').evaluate((node) => node.getAnimations({ subtree: true }).length)).toBe(0);
+});
+
+test('queue_rows_fold_when_they_join_or_leave_and_the_rest_stay', async ({ page }, testInfo) => {
+  await frame(page, testInfo);
+  const { hub, ids } = await seededQueue(page);
+  const section = page.locator('[data-lease-queue]');
+  await slowMotion(page);
+  const only = leaseEntry({ lease_id: 'h1', kind: 'build', label: 'cargo build', dir: 'canterlot', since: ago(12 * MIN) });
+  // Держатель ушёл: его строка складывается, а не пропадает кадром.
+  queueNow(hub, ids.machine, [only], [leaseEntry({ lease_id: 'w1', kind: 'gate', label: 'gate', requested_at: ago(5 * MIN), position: 1 })]);
+  await expect.poll(() => foldingCount(page, '[data-lease-holder]')).toBeGreaterThan(0);
+  // Складываемая строка уже след: диктору не читается.
+  await expect(section.locator('[data-lease-holder][aria-hidden="true"]')).toHaveCount(1);
+  await expect(section.locator('[data-lease-holder]:not([aria-hidden])')).toHaveCount(1);
+  // Новый ожидающий приходит складкой.
+  queueNow(hub, ids.machine, [only], [
+    leaseEntry({ lease_id: 'w1', kind: 'gate', label: 'gate', requested_at: ago(5 * MIN), position: 1 }),
+    leaseEntry({ lease_id: 'w2', kind: 'build', label: 'npm run build', dir: 'canterlot-2a', requested_at: ago(MIN), position: 2 })
+  ]);
+  await expect.poll(() => foldingCount(page, '[data-lease-waiter]')).toBeGreaterThan(0);
+  await expect(section.locator('[data-lease-waiter]:not([aria-hidden])')).toHaveCount(2);
+});
+
+test('queue_stands_still_under_reduced_motion_and_motion_scale_zero', async ({ page }, testInfo) => {
+  await frame(page, testInfo);
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  const { hub, ids } = await seededQueue(page);
+  const section = page.locator('[data-lease-queue]');
+  await expect(section.locator('[data-lease-holder]')).toHaveCount(2);
+  // Перо стоит написанным: ни одного штриха с анимацией.
+  expect(await section.locator('.write i').evaluateAll((nodes) => nodes.map((node) => getComputedStyle(node).animationName))).toEqual(['none', 'none', 'none', 'none', 'none', 'none']);
+  queueNow(hub, ids.machine, [leaseEntry({ lease_id: 'h1', kind: 'build', label: 'cargo build', dir: 'canterlot', since: ago(12 * MIN) })]);
+  // Строка уходит сразу: ни складки, ни следа.
+  await expect(section.locator('[data-lease-holder]')).toHaveCount(1);
+  await expect(section.locator('[data-lease-waiter]')).toHaveCount(0);
+  expect(await movingCount(page, '[data-lease-queue]')).toBe(0);
+  // То же при масштабе движения 0.
+  await noMotion(page);
+  queueNow(hub, ids.machine, [], [leaseEntry({ lease_id: 'w9', kind: 'gate', label: 'gate', requested_at: ago(MIN), position: 1 })]);
+  await expect(section.locator('[data-lease-holder]')).toHaveCount(0);
+  await expect(section.locator('[data-lease-waiter]')).toHaveCount(1);
+  expect(await movingCount(page, '[data-lease-queue]')).toBe(0);
 });
 
 async function waitingChat(page: Page) {
