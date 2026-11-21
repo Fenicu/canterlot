@@ -77,6 +77,8 @@ impl fmt::Debug for command::Kind {
             Self::OwnerJobFinished(input) => {
                 f.debug_tuple("OwnerJobFinished").field(input).finish()
             }
+            // Адрес и открытый ключ: секретов в команде нет.
+            Self::AttachRunner(input) => f.debug_tuple("AttachRunner").field(input).finish(),
         }
     }
 }

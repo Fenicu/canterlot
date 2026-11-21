@@ -1207,6 +1207,7 @@ impl ExecutionManager {
                         | Kind::CollectOutputs(_)
                         | Kind::CleanupSource(_)
                         | Kind::OwnerJobFinished(_)
+                        | Kind::AttachRunner(_)
                 )
             ) {
                 continue;
@@ -1288,6 +1289,7 @@ impl ExecutionManager {
                 | Kind::CollectOutputs(_)
                 | Kind::CleanupSource(_)
                 | Kind::OwnerJobFinished(_)
+                | Kind::AttachRunner(_)
         ) {
             return self.carrier_command(command).await;
         }

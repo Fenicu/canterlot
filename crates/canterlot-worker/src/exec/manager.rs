@@ -2509,7 +2509,8 @@ impl Actor {
                 | Kind::StageSource(_)
                 | Kind::CollectOutputs(_)
                 | Kind::CleanupSource(_)
-                | Kind::OwnerJobFinished(_),
+                | Kind::OwnerJobFinished(_)
+                | Kind::AttachRunner(_),
             ) => reject_invalid(&self.shared, &command).await,
             // Хаб считает исполнение потерянным, а связь с ним цела: это и есть доказательство.
             Some(Kind::ResolveOwnerLost(_)) => {
