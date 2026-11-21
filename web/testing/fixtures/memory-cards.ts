@@ -11,6 +11,8 @@ export const LONG_SUBJECT = 'Очень длинная тема записи п�
 
 export interface MemoryCardsSeed {
   id: string;
+  /** Ход, в котором стоят вызовы: живые вызовы того же хода пишутся с ним. */
+  run: string;
   /** Записи памяти, заведённые в фиктивном хабе: по теме. */
   entries: Record<'port' | 'build' | 'recipe', { id: string; version: number }>;
   blocks: Record<string, string>;
@@ -50,5 +52,5 @@ export function seedMemoryCards(api: FakeHubApi, opts: { now?: number } = {}): M
   api.histories.set(id, feed.items);
   api.bindConversation(id);
   api.hub.reach(`conversation:${id}`, String(feed.seq));
-  return { id, entries, blocks: feed.blocks };
+  return { id, run, entries, blocks: feed.blocks };
 }

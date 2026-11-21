@@ -86,6 +86,8 @@ export interface CardEnv {
   conversationId: string;
   /** Раскрытое владельцем внутри карточки: бриф, текст сообщения, весь список задач. */
   folds: FeedFolds;
+  /** Значок семейства из описания карточки: шапка ставит его на место шеврона. `null` — у инструментов харнесса. */
+  icon: IconName | null;
 }
 
 export interface CardProps<D> {

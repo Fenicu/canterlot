@@ -133,6 +133,57 @@ test.describe('shell card', () => {
     await expect(card.locator('[data-role="card-state"]')).toHaveCount(0);
   });
 
+  test('a_harness_tool_card_has_no_family_icon_and_keeps_its_chevron_first', async ({ page }) => {
+    const { seed } = await boot(page);
+    const card = await cardOf(page, seed.blocks.shellLong!);
+    await expect(card).not.toHaveAttribute('data-icon', /.+/);
+    await expect(card.locator('[data-role="card-icon"]')).toHaveCount(0);
+    const chevron = await card.locator('.head .chevron').boundingBox();
+    const text = await card.locator('.head .lead').boundingBox();
+    expect(chevron!.x).toBeLessThan(text!.x);
+  });
+
+  test('the_state_word_swaps_out_and_leaves_the_document_when_the_call_settles', async ({ page }) => {
+    const { hub, api, seed } = await boot(page, { working: true });
+    // Масштаб движения растягивает уход слова: замер не гонится с его концом.
+    await page.evaluate(() => document.documentElement.style.setProperty('--motion-scale', '8'));
+    const fresh = streamCall(hub, api, seed.id, seed.run, 'Bash', { command: 'npm run build', description: 'Сборка веба' });
+    const card = row(page, fresh.call).locator('.feed-card');
+    const word = card.locator('[data-role="card-state"]');
+    await expect(word).toHaveText('идёт');
+    streamCall(hub, api, seed.id, seed.run, 'Bash', null, { blockId: fresh.call, resultId: fresh.result, result: 'built in 3.1s' });
+    await expect(card).toHaveAttribute('data-state', 'done');
+    // Слово ещё на месте и уходит вверх: движение читается как смена подписи, а не как обрыв.
+    await expect(word).toHaveText('идёт');
+    expect(await word.evaluate((node) => node.getAnimations().length)).toBeGreaterThan(0);
+    await expect(word).toHaveCount(0, { timeout: 15_000 });
+  });
+
+  test('a_word_that_changes_with_the_state_arrives_from_below_and_a_still_word_does_not_move', async ({ page }) => {
+    const { hub, api, seed } = await boot(page, { working: true });
+    const fresh = streamCall(hub, api, seed.id, seed.run, 'Bash', { command: 'false' });
+    const card = row(page, fresh.call).locator('.feed-card');
+    const word = card.locator('[data-role="card-state"]');
+    await expect(word).toHaveText('идёт');
+    await page.evaluate(() => document.documentElement.style.setProperty('--motion-scale', '8'));
+    streamCall(hub, api, seed.id, seed.run, 'Bash', null, { blockId: fresh.call, resultId: fresh.result, result: 'Exit code 1\nboom' });
+    await expect(word).toHaveText('код 1', { timeout: 15_000 });
+    await expect(word).toHaveAttribute('data-tone', 'danger');
+    // Покой: слово стоит и ничего не играет.
+    await expect.poll(() => word.evaluate((node) => node.getAnimations().length), { timeout: 15_000 }).toBe(0);
+  });
+
+  test('reduced_motion_replaces_the_word_at_once', async ({ page }) => {
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    const { hub, api, seed } = await boot(page, { working: true });
+    const fresh = streamCall(hub, api, seed.id, seed.run, 'Bash', { command: 'npm run build' });
+    const card = row(page, fresh.call).locator('.feed-card');
+    await expect(card.locator('[data-role="card-state"]')).toHaveText('идёт');
+    streamCall(hub, api, seed.id, seed.run, 'Bash', null, { blockId: fresh.call, resultId: fresh.result, result: 'ok' });
+    await expect(card.locator('[data-role="card-state"]')).toHaveCount(0);
+    expect(await card.evaluate((node) => node.getAnimations({ subtree: true }).length)).toBe(0);
+  });
+
   test('a_long_command_scrolls_inside_its_block_not_the_page_at_360px', async ({ page }) => {
     await page.setViewportSize({ width: 360, height: 760 });
     const { seed } = await boot(page);

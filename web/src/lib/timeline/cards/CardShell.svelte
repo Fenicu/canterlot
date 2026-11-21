@@ -1,11 +1,16 @@
 <script lang="ts">
-  import type { Snippet } from 'svelte';
+  import { untrack, type Snippet } from 'svelte';
+  import { durationMs } from '#lib/motion.js';
   import { blockFold } from '#lib/ui/fold.js';
   import Icon from '#lib/ui/Icon.svelte';
+  import InkIcon from '#lib/ui/InkIcon.svelte';
+  import type { InkState } from '#lib/ui/ink.js';
+  import { swapOn } from '#lib/ui/swap.js';
+  import { arrivedNow } from '#lib/timeline/arrival.js';
   import ToolOutput from '#lib/timeline/ToolOutput.svelte';
   import { callCaption } from '#lib/timeline/present.js';
   import type { Tone } from './copy';
-  import type { CardCall, CardEnv } from './types';
+  import type { CardCall, CardEnv, CardState } from './types';
 
   let {
     call,
@@ -46,18 +51,43 @@
   } = $props();
 
   const called = $derived(call.block.text.trim().length > 0 && call.block.state !== 'streaming');
+
+  // Значок семейства стоит на месте шеврона и сам рассказывает о состоянии вызова: набросок, пока он идёт,
+  // росчерк один раз, когда он закончился на глазах, и ровный набросок при отказе.
+  const icon = $derived(quiet ? null : env.icon);
+  const inks = (): boolean => durationMs('--duration-ink') > 0;
+  const resting = (state: CardState): InkState => (state === 'running' ? 'sketch' : state === 'done' ? 'dry' : 'refused');
+  // Чернила идут только у вызова, пришедшего или завершившегося на глазах: история и строка, вернувшаяся в окно ленты, стоят сразу.
+  let phase = $state<InkState>(untrack(() => (call.state === 'done' && env.icon && arrivedNow(`mark:${call.block.id}`, call.block.createdAt) && inks() ? 'ink' : resting(call.state))));
+  let was = untrack(() => call.state);
+  $effect(() => {
+    const state = call.state;
+    if (state === was) return;
+    const before = was;
+    was = state;
+    phase = before === 'running' && state === 'done' && inks() ? 'ink' : resting(state);
+  });
+  // Когда росчерк и оседание цвета прошли, значок стоит как у любого давно законченного вызова.
+  function dried(event: AnimationEvent): void {
+    if (phase === 'ink' && event.animationName.endsWith('mark-settle')) phase = 'dry';
+  }
+
+  // Слово состояния меняется подписью, когда сменилось состояние; число внутри («12 мин») идёт на месте, без движения.
+  const wordKey = $derived(`${tone}:${status.replace(/\d+/g, '#')}`);
 </script>
 
-<div class="feed-card" data-card={call.id} data-state={call.state} data-quiet={quiet ? '' : undefined} data-grows={grows ? '' : undefined}>
+<div class="feed-card" data-card={call.id} data-state={call.state} data-quiet={quiet ? '' : undefined} data-grows={grows ? '' : undefined} data-icon={icon ?? undefined}>
   <div class="head">
     <!-- Кнопка лежит под всей шапкой: ссылки в шапке стоят поверх неё и остаются ссылками. -->
     <button type="button" class="hit" aria-expanded={env.open} aria-label={`${line}. ${env.open ? 'Скрыть' : 'Показать'} ${reveal}`} onclick={env.onToggle}></button>
+    {#if icon}<span class="family" data-role="card-icon" onanimationend={dried}><InkIcon name={icon} state={phase} breathe={!dot} /></span>{/if}
     <span class="chevron" data-open={env.open ? '' : undefined} aria-hidden="true"><Icon name="chevron" /></span>
     <span class="lead">
       {#if head}{@render head()}{:else}<span class="line">{line}</span>{/if}
     </span>
     {#if badge}{@render badge()}{/if}
-    {#if status}<span class="word" data-tone={tone} data-role="card-state">{#if dot}<span class="dot" data-live={live ? '' : undefined} aria-hidden="true"></span>{/if}{status}</span>{/if}
+    {#if dot && status}<span class="dot" data-tone={tone} data-live={live ? '' : undefined} aria-hidden="true"></span>{/if}
+    <span class="word" data-tone={tone} data-role="card-state" use:swapOn={{ text: status, key: wordKey }}></span>
   </div>
   {#if children}<div class="content">{@render children()}</div>{/if}
   {#if env.open}
@@ -92,21 +122,26 @@
   .chevron { flex: none; display: inline-flex; color: var(--muted); pointer-events: none; transition: transform var(--duration-expand) var(--ease-expand); }
   .chevron :global(svg) { width: var(--icon-small); height: var(--icon-small); }
   .chevron[data-open] { transform: rotate(90deg); }
+  /* Значок семейства встаёт на место шеврона, шеврон уходит к правому краю: колонка текста остаётся той же, что у карточек без значка. */
+  .family { flex: none; display: inline-flex; pointer-events: none; }
+  .feed-card[data-icon] .chevron { order: 5; }
   .lead { display: flex; flex: 1 1 auto; align-items: baseline; gap: var(--s3); min-width: 0; pointer-events: none; }
   .lead :global(a) { pointer-events: auto; }
   .line { min-width: 0; overflow: hidden; color: var(--text); text-overflow: ellipsis; white-space: nowrap; }
   .feed-card[data-quiet] .line { color: var(--muted); }
-  .word { flex: none; color: var(--secondary); pointer-events: none; white-space: nowrap; transition: color var(--duration-fast) var(--ease); }
-  .word[data-tone='accent'] { color: var(--accent-link); }
-  .dot { display: inline-block; width: var(--mark); height: var(--mark); margin-inline-end: var(--s3); border-radius: var(--radius-round); background: currentColor; vertical-align: middle; transition: background-color var(--duration-fast) var(--ease); }
-  /* Сессия занята делом: точка дышит, как активный пункт плана. Без движения — ровный тон. */
+  .word, .dot { color: var(--secondary); transition: color var(--duration-fast) var(--ease); }
+  .word { flex: none; pointer-events: none; white-space: nowrap; }
+  /* Точка стоит перед словом отдельным элементом, а зазор до слова даёт шапка: слово меняется подписью и уходит из документа, когда опустело. */
+  .dot { flex: none; width: var(--mark); height: var(--mark); border-radius: var(--radius-round); background: currentColor; }
+  /* Сессия занята делом: точка дышит, как активный пункт плана, и это единственное дыхание карточки: значок рядом стоит ровно. Без движения — ровный тон. */
   .dot[data-live] { animation: card-pulse var(--duration-stage-pulse) var(--ease-stage-pulse) infinite; }
   @keyframes card-pulse { 50% { opacity: var(--opacity-stage-halo); } }
-  .word[data-tone='blue'] { color: var(--blue); }
-  .word[data-tone='success'] { color: var(--success); }
-  .word[data-tone='warning'] { color: var(--warning); }
-  .word[data-tone='danger'] { color: var(--danger); }
-  .word[data-tone='muted'] { color: var(--muted); }
+  :is(.word, .dot)[data-tone='accent'] { color: var(--accent-link); }
+  :is(.word, .dot)[data-tone='blue'] { color: var(--blue); }
+  :is(.word, .dot)[data-tone='success'] { color: var(--success); }
+  :is(.word, .dot)[data-tone='warning'] { color: var(--warning); }
+  :is(.word, .dot)[data-tone='danger'] { color: var(--danger); }
+  :is(.word, .dot)[data-tone='muted'] { color: var(--muted); }
   .content { display: flex; flex-direction: column; gap: var(--s2); min-width: 0; padding: var(--s0) var(--s5) var(--s4) calc(var(--s4) + var(--icon-small) + var(--s3)); font-size: var(--fs-sm); }
   /* Карточка передала пустой набор: тело без единого элемента не добавляет 8 px под шапкой. */
   .content:not(:has(> *)) { display: none; }
