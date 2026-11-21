@@ -94,7 +94,7 @@ pub fn hourly_kopecks(monthly_kopecks: i64) -> Result<i64, PriceError> {
 
 /// Целые оплачиваемые часы для заданных минут: `ceil(minutes / 60)`.
 pub fn ceil_hours(minutes: u64) -> u64 {
-    minutes / 60 + u64::from(minutes % 60 != 0)
+    minutes / 60 + u64::from(!minutes.is_multiple_of(60))
 }
 
 /// Сумма минут резерва: жёсткий предел, срок на доработку, запас на снос.
