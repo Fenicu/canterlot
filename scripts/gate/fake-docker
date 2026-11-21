@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Подмена docker для scripts/gate/test.sh (CANTERLOT_DOCKER): пишет вызовы в журнал и
+# изображает `image inspect`, `build`, `run` и `kill`.
+#
+#   FAKE_DOCKER_CALLS      файл журнала вызовов;
+#   FAKE_DOCKER_IMAGE_RC   код `image inspect` (0 — образ есть, по умолчанию 0);
+#   FAKE_DOCKER_RUN_RC     код `run` (по умолчанию 0);
+#   FAKE_DOCKER_WRITE      `run` кладёт state.tsv в смонтированный на /out каталог;
+#   FAKE_DOCKER_PIDFILE    `run` пишет pid и спит, `kill` останавливает его.
+set -euo pipefail
+printf '%s\n' "$*" >>"$FAKE_DOCKER_CALLS"
+case "${1:-}" in
+    image) exit "${FAKE_DOCKER_IMAGE_RC:-0}" ;;
+    build) exit 0 ;;
+    run)
+        if [[ -n "${FAKE_DOCKER_WRITE:-}" ]]; then
+            for arg in "$@"; do
+                if [[ "$arg" == *:/out ]]; then
+                    host=${arg%:/out}
+                    printf 'schema\t1\nsha\tfake\ncompleted\t1\n' >"$host/state.tsv"
+                    printf 'fake result\n' >"$host/result.txt"
+                fi
+            done
+        fi
+        if [[ -n "${FAKE_DOCKER_PIDFILE:-}" ]]; then
+            echo $$ >"$FAKE_DOCKER_PIDFILE"
+            exec sleep 60
+        fi
+        exit "${FAKE_DOCKER_RUN_RC:-0}"
+        ;;
+    kill)
+        [[ -z "${FAKE_DOCKER_PIDFILE:-}" ]] || kill "$(cat "$FAKE_DOCKER_PIDFILE")" 2>/dev/null || true
+        exit 0
+        ;;
+    *) echo "fake-docker: неожиданная команда: $*" >&2; exit 64 ;;
+esac

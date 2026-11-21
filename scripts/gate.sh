@@ -10,6 +10,10 @@
 #   scripts/gate.sh                  полный гейт с аттестацией .superpowers/gate/<full sha>.ok
 #   scripts/gate.sh --rerun-failed   перезапустить только то, что упало на этом же коммите
 #   scripts/gate.sh --no-attest      гейт без аттестации (нужен, если рабочая копия грязная)
+#   scripts/gate.sh --runner local|auto|<машина>
+#                                    где гонять гейт: local (по умолчанию) — на этой VM, как
+#                                    описано ниже; auto или имя машины — на раннере через
+#                                    canterlot-worker job run (см. «Гейт на раннере»)
 #   scripts/gate.sh --help
 #
 # Обычный прогон пишет в .superpowers/gate/<sha8>/ логи, сводку и состояние state.tsv
@@ -27,26 +31,56 @@
 #
 # Аттестация пишется только при полном успехе, чистой рабочей копии и неизменном HEAD:
 # release.sh ship принимает только аттестацию ровно того коммита, который выкатывает.
+#
+# Гейт на раннере (--runner auto|<машина>). Нужна чистая рабочая копия: на раннер уходит
+# ровно полный sha HEAD. Скрипт зовёт
+#   canterlot-worker job run --machine <значение> --lease gate --source <repo>@<sha> \
+#       --output .gate-out --wait -- scripts/gate/runner-gate.sh <sha>
+# носитель кладёт этот коммит в чистую рабочую копию на раннере, scripts/gate/runner-gate.sh
+# гоняет в ней контейнерный гейт (те же шаги, что и здесь), а результат
+# (.gate-out/result.txt и state.tsv) возвращается в каталог результатов задачи на этой VM.
+# Аттестацию .superpowers/gate/<full sha>.ok в прежнем формате плюс строка runner=<машина,
+# как её назвал раннер> гейт пишет сам, только если result.txt называет этот sha, каждый шаг
+# вышел с 0, код задачи 0, а HEAD не сместился и дерево осталось чистым. Рабочий гейт на
+# раннере берёт аренду gate на самом раннере (--lease gate), а не на этой VM.
+# Отмены у `job run` нет: Ctrl-C останавливает только ожидание, задача на раннере
+# продолжает работать. Скрипт называет её идентификатор; отменить её можно в PWA.
+# --rerun-failed с раннером в v1 не поддерживается.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 original_args=("$@")
 
 usage() {
-    echo 'Использование: scripts/gate.sh [--rerun-failed] [--no-attest]'
+    echo 'Использование: scripts/gate.sh [--rerun-failed] [--no-attest] [--runner local|auto|<машина>]'
 }
 
 attest=1
 rerun=0
+runner=local
 while (($#)); do
     case "$1" in
         --no-attest) attest=0 ;;
         --rerun-failed) rerun=1 ;;
+        --runner)
+            [[ $# -ge 2 ]] || { usage >&2; exit 2; }
+            runner=$2
+            shift
+            ;;
+        --runner=*) runner=${1#--runner=} ;;
         --help | -h) usage; exit 0 ;;
         *) usage >&2; exit 2 ;;
     esac
     shift
 done
+if [[ "$runner" != local && ! "$runner" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+    printf 'гейт: --runner: ожидается local, auto или имя машины, а не «%s»\n' "$runner" >&2
+    exit 2
+fi
+if [[ "$runner" != local ]] && ((rerun)); then
+    printf 'гейт: --rerun-failed не поддерживается вместе с --runner (v1): гейт на раннере идёт целиком; уберите --rerun-failed или --runner\n' >&2
+    exit 2
+fi
 
 # Значения частного скрипта остаются умолчаниями и перекрываются окружением.
 export CANTERLOT_WORKER_BIN="${CANTERLOT_WORKER_BIN:-$HOME/.local/opt/canterlot/current/bin/canterlot-worker}"
@@ -84,6 +118,159 @@ clean_tree() {
     out=$(git status --porcelain) || return 1
     [[ -z "$out" ]]
 }
+
+# --- гейт на раннере ---------------------------------------------------------------
+# Идёт мимо аренды этой VM и мимо шагов ниже: всё делает scripts/gate/runner-gate.sh на
+# раннере. Здесь только отправка, ожидание и проверка собранного результата.
+rj_err=""
+rj_fifo=""
+rj_note() { printf 'гейт: %s\n' "$*" >&2; }
+
+# Задача на раннере переживает этот скрипт: у `job run` нет отмены.
+runner_interrupted() {
+    local code=$1 id=""
+    [[ -z "$rj_fifo" ]] || rm -f "$rj_fifo"
+    [[ -f "$rj_err" ]] && id=$(sed -n 's/^canterlot job: \([0-9a-f-]\{36\}\) accepted$/\1/p' "$rj_err" | head -n 1)
+    printf '\nгейт: прерван. Задача%s на раннере продолжает работать: у canterlot-worker job run нет отмены. Отмените её в PWA (карточка задачи) или дождитесь конца; результат останется в каталоге результатов воркера.\n' \
+        "${id:+ $id}" >&2
+    exit "$code"
+}
+
+# Значение ключа в state.tsv раннера (первое вхождение).
+runner_state() { awk -F '\t' -v k="$2" '$1==k{print $2;exit}' "$1"; }
+
+runner_gate() {
+    local sha short log_dir started_at started_s tee_pid code=0 outputs collected state result
+    local first key value ran_on why requested=$runner attestation tmp total_s line
+    if ! clean_tree; then
+        rj_note 'рабочая копия грязная: на раннер уходит ровно закоммиченный sha; закоммитьте или уберите изменения (--no-attest этого не отменяет)'
+        git status --short >&2 || true
+        exit 1
+    fi
+    [[ -x "$CANTERLOT_WORKER_BIN" ]] || die "нет воркера $CANTERLOT_WORKER_BIN (переменная CANTERLOT_WORKER_BIN)"
+    sha=$(git rev-parse HEAD)
+    short=${sha:0:8}
+    log_dir=".superpowers/gate/$short"
+    mkdir -p "$log_dir"
+    rj_err="$log_dir/runner-job.err"
+    : >"$rj_err"
+    started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    started_s=$SECONDS
+    printf 'гейт %s на раннере %s: логи %s\n' "$short" "$requested" "$log_dir"
+
+    # stderr команды идёт и на экран, и в файл (из него берутся идентификатор задачи и
+    # каталог результатов); через канал, чтобы дождаться tee до чтения файла.
+    rj_fifo="$log_dir/.runner-job.fifo.$$"
+    rm -f "$rj_fifo"
+    mkfifo "$rj_fifo"
+    tee "$rj_err" <"$rj_fifo" >&2 &
+    tee_pid=$!
+    trap 'runner_interrupted 130' INT
+    trap 'runner_interrupted 143' TERM
+    "$CANTERLOT_WORKER_BIN" job run --title "Гейт $short" --machine "$requested" \
+        --labels kernel-6.12 --lease gate --timeout-minutes 240 --expected-minutes 45 \
+        --source "$PWD@$sha" --output .gate-out --wait \
+        -- scripts/gate/runner-gate.sh "$sha" \
+        >"$log_dir/runner-job.out" 2>"$rj_fifo" || code=$?
+    wait "$tee_pid" 2>/dev/null || true
+    trap - INT TERM
+    rm -f "$rj_fifo"
+    cat "$log_dir/runner-job.out"
+
+    outputs=$(sed -n 's/^canterlot job: outputs: //p' "$rj_err" | tail -n 1)
+    collected="$outputs/.gate-out"
+    state="$collected/state.tsv"
+    result="$collected/result.txt"
+    if [[ -n "$outputs" && -d "$collected" ]]; then
+        mkdir -p "$log_dir/runner"
+        cp -a "$collected/." "$log_dir/runner/" || true
+        [[ -f "$result" ]] && cat "$result"
+    fi
+
+    # Причина отказа в аттестации: первая из проверок, не прошедшая.
+    why=""
+    if ((code != 0)); then
+        why="код задачи $code, не 0"
+    elif [[ -z "$outputs" || ! -d "$outputs" ]]; then
+        why='задача не вернула каталог результатов'
+    elif [[ ! -f "$result" || ! -f "$state" ]]; then
+        why="в каталоге результатов нет .gate-out/result.txt или state.tsv ($outputs)"
+    else
+        read -r first _ <"$result" || first=""
+        if [[ "$first" != "$short" ]]; then
+            why="result.txt называет коммит «${first:-пусто}», а не $short"
+        elif [[ "$(runner_state "$state" schema)" != 1 || "$(runner_state "$state" completed)" != 1 ]]; then
+            why='state.tsv: неизвестный формат или прогон не завершён'
+        elif [[ "$(runner_state "$state" sha)" != "$sha" ]]; then
+            why="sha в state.tsv не $sha"
+        elif [[ "$(runner_state "$state" seams)" == 1 ]]; then
+            why='state.tsv: на раннере были включены тестовые швы'
+        else
+            for key in npm_ci_exit check_exit deploy_exit web_exit; do
+                value=$(runner_state "$state" "$key")
+                if [[ "$value" != 0 && ! ("$key" == deploy_exit && "$value" == skipped) ]]; then
+                    why="$key=${value:-нет}"
+                    break
+                fi
+            done
+        fi
+    fi
+    if [[ -n "$why" ]]; then
+        rj_note "провал на раннере: $why; аттестация не пишется (логи $log_dir)"
+        exit 1
+    fi
+
+    total_s=$((SECONDS - started_s))
+    if ((!attest)); then
+        printf 'гейт: успех без аттестации (--no-attest), логи в %s\n' "$log_dir"
+        exit 0
+    fi
+    # Аттестация честна только для того же чистого коммита, что был отправлен.
+    if [[ "$(git rev-parse HEAD)" != "$sha" ]]; then
+        rj_note "HEAD сместился с $sha за прогон; аттестация не пишется"
+        exit 1
+    fi
+    if ! clean_tree; then
+        rj_note 'рабочая копия стала грязной за прогон; аттестация не пишется'
+        git status --short >&2 || true
+        exit 1
+    fi
+
+    ran_on=$(runner_state "$state" runner)
+    if [[ -z "$ran_on" ]]; then
+        ran_on=$requested
+        [[ "$ran_on" != auto ]] || ran_on=unknown
+    fi
+    attestation=".superpowers/gate/$sha.ok"
+    tmp="$attestation.tmp.$$"
+    {
+        printf 'sha=%s\n' "$sha"
+        printf 'started=%s\n' "$started_at"
+        printf 'finished=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf 'duration_s=%s\n' "$total_s"
+        printf 'npm_ci_exit=%s\n' "$(runner_state "$state" npm_ci_exit)"
+        printf 'npm_ci_duration_s=%s\n' "$(runner_state "$state" npm_ci_duration_s)"
+        printf 'check_exit=%s\n' "$(runner_state "$state" check_exit)"
+        printf 'check_duration_s=%s\n' "$(runner_state "$state" check_duration_s)"
+        printf 'deploy_exit=%s\n' "$(runner_state "$state" deploy_exit)"
+        printf 'deploy_duration_s=%s\n' "$(runner_state "$state" deploy_duration_s)"
+        printf 'web_exit=%s\n' "$(runner_state "$state" web_exit)"
+        printf 'web_duration_s=%s\n' "$(runner_state "$state" web_duration_s)"
+        printf 'logs=%s\n' "$log_dir"
+        printf 'runner=%s\n' "$ran_on"
+        while IFS= read -r line; do
+            printf 'summary=%s\n' "$line"
+        done <"$result"
+    } >"$tmp"
+    mv -f "$tmp" "$attestation"
+    printf 'гейт %s за %ds на раннере %s\n' "$short" "$total_s" "$ran_on"
+    printf 'гейт: аттестация записана в %s\n' "$attestation"
+    exit 0
+}
+
+if [[ "$runner" != local ]]; then
+    runner_gate
+fi
 
 # Грязная копия не даёт аттестации, а без неё гейт нужен только по явной просьбе.
 if ((attest)) && ! clean_tree; then

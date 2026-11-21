@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Подмена canterlot-worker для scripts/gate/test.sh: отвечает на `job run` так, как
+# отвечает настоящая команда с --wait (строки `canterlot job: …` в stderr), и кладёт
+# собранные результаты гейта в каталог результатов.
+#
+# Управление через окружение:
+#   FAKE_WORKER_CALLS       файл, куда дописывается строка аргументов каждого вызова;
+#   FAKE_WORKER_OUT         корень, где появится job-outputs/<id>;
+#   FAKE_WORKER_CODE        код выхода «задачи» (по умолчанию 0);
+#   FAKE_WORKER_CHECK       код шага check в state.tsv (по умолчанию 0);
+#   FAKE_WORKER_RESULT_SHA  что написать в начале result.txt вместо sha8;
+#   FAKE_WORKER_STATE_SHA   что написать в sha состояния вместо полного sha;
+#   FAKE_WORKER_NO_OUTPUTS  не печатать строку `outputs:`;
+#   FAKE_WORKER_DIRTY       каталог, где «задача» оставит лишний файл;
+#   FAKE_WORKER_COMMIT      репозиторий, где «задача» сделает новый коммит;
+#   FAKE_WORKER_PIDFILE     записать pid и до конца спать (проверка прерывания).
+set -euo pipefail
+printf '%s\n' "$*" >>"$FAKE_WORKER_CALLS"
+if [[ "${1:-}" != job || "${2:-}" != run ]]; then
+    echo "fake-worker: неожиданная команда: $*" >&2
+    exit 64
+fi
+job=00000000-0000-4000-8000-000000000001
+echo "canterlot job: $job accepted" >&2
+if [[ -n "${FAKE_WORKER_PIDFILE:-}" ]]; then
+    echo $$ >"$FAKE_WORKER_PIDFILE"
+    exec sleep 60
+fi
+
+sha=${!#}
+dir="$FAKE_WORKER_OUT/job-outputs/$job"
+mkdir -p "$dir/.gate-out"
+{
+    printf '%s npm=0 check=%s 7s deploy=0 3s web=0 9s\n' "${FAKE_WORKER_RESULT_SHA:-${sha:0:8}}" "${FAKE_WORKER_CHECK:-0}"
+    printf '     Summary [   1.000s] 1 tests run: 1 passed, 0 skipped\n'
+} >"$dir/.gate-out/result.txt"
+{
+    printf 'schema\t1\n'
+    printf 'sha\t%s\n' "${FAKE_WORKER_STATE_SHA:-$sha}"
+    printf 'seams\t0\n'
+    printf 'completed\t1\n'
+    printf 'npm_ci_exit\t0\nnpm_ci_duration_s\t5\n'
+    printf 'check_exit\t%s\ncheck_duration_s\t7\n' "${FAKE_WORKER_CHECK:-0}"
+    printf 'deploy_exit\t0\ndeploy_duration_s\t3\n'
+    printf 'web_exit\t0\nweb_duration_s\t9\n'
+    printf 'runner\trunner-a\n'
+} >"$dir/.gate-out/state.tsv"
+[[ -z "${FAKE_WORKER_DIRTY:-}" ]] || : >"$FAKE_WORKER_DIRTY/stray"
+[[ -z "${FAKE_WORKER_COMMIT:-}" ]] || git -C "$FAKE_WORKER_COMMIT" commit -q --allow-empty -m moved
+
+code=${FAKE_WORKER_CODE:-0}
+state=succeeded
+((code == 0)) || state=failed
+echo "задача: хвост журнала"
+echo "canterlot job: $job $state (exit $code)" >&2
+[[ -n "${FAKE_WORKER_NO_OUTPUTS:-}" ]] || echo "canterlot job: outputs: $dir" >&2
+exit "$code"
