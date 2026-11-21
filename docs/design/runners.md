@@ -250,8 +250,9 @@ canterlot-worker job run --title T [--machine NAME|auto] [--labels a,b] [--expec
 | --- | --- | --- |
 | `create_intent` без метки вызова | первая успешная сверка в этом запуске хаба; метка `create_called_at` и пределы ставятся до вызова | вызов `create_server` |
 | вызов: `Created` | | `identified` (+`server_id`, строка раннера `cloud` готова) |
-| вызов: `Rejected` | сервера точно нет | `failed`, итог 0, резерв снят |
-| вызов: `Ambiguous`, либо метка есть, а ответа нет (упал хаб, оборвали проход) | второго POST нет никогда | `create_unknown` |
+| вызов: `Rejected` с кодом из списка перебора (409 `no_free_node`, `location_not_available`, `preset_not_found`, 400 `configuration_requires_sales_request`) | сервера точно нет | вызов следующего профиля списка в том же окне, без новой транзакции; перед каждым вызовом в строке стоят конфигуратор и цена этого профиля |
+| вызов: `Rejected` с другим кодом, либо отказали все профили | сервера точно нет | `failed`, итог 0, резерв снят, коды в `last_error` |
+| вызов: `Ambiguous`, либо метка есть, а ответа нет (упал хаб, оборвали проход) | второго POST нет никогда, и на другом профиле тоже: сервер мог появиться | `create_unknown` |
 | `create_unknown` | полная выборка показала имя | `identified` |
 | `create_unknown` | полная выборка без имени и с `create_called_at` прошло `create_unknown_window` | `failed`, итог 0 |
 | `identified` | сервер `On` с IPv4 | несущей уходит `AttachRunner`; окно ждёт воркер |
@@ -272,9 +273,11 @@ canterlot-worker job run --title T [--machine NAME|auto] [--labels a,b] [--expec
 
 ### 7.2 Создание и деньги
 
-`windows::create_in_tx(conn, config, pricing, CreateRequest {trigger, proposal_id, hard_cap_minutes, consent_over_budget_kopecks})` — одна транзакция для всех входов (карточка, кнопка, автоматика): замок `cloud_budget`; отказ `LiveWindowExists`; резерв = `reservation_kopecks(час, предел + drain_grace + teardown_margin)`; бюджет месяца = `cloud_budget.monthly_budget_kopecks` (0 по умолчанию), расход месяца = итог закончившихся окон + резерв живых (`spent_in_month`); не помещается — отказ `OverBudget`, если только `consent_over_budget_kopecks` не равно резерву в точности; вставка `create_intent` с резервом, месяцем (`YYYY-MM` по Москве на момент создания) и хостовым ключом: в базе только открытая половина, закрытая лежит в памяти (`PENDING_KEYS`) до вызова создания и уходит только в cloud-init для провайдера. После перезапуска хаба окну, которому ещё не звонили, генерируется новый ключ. Цену часа вызывающая сторона берёт у провайдера до транзакции (`CloudService::pricing`), чтобы сетевой вызов не держал замок; `CloudService::create` делает это сама. Предложения-карточки, автоматический режим и редактирование бюджета строятся поверх этой функции (задача C2b).
+`windows::create_in_tx(conn, config, pricing, CreateRequest {trigger, proposal_id, hard_cap_minutes, consent_over_budget_kopecks})` — одна транзакция для всех входов (карточка, кнопка, автоматика): замок `cloud_budget`; отказ `LiveWindowExists`; резерв = `reservation_kopecks(час самого дорогого профиля списка, предел + drain_grace + teardown_margin)` (`Pricing.profiles` — все профили `[[runners.cloud.profile]]` с ценой часа; снимок списка хранится в окне, `cloud_windows.profiles`); бюджет месяца = `cloud_budget.monthly_budget_kopecks` (0 по умолчанию), расход месяца = итог закончившихся окон + резерв живых (`spent_in_month`); не помещается — отказ `OverBudget`, если только `consent_over_budget_kopecks` не равно резерву в точности; вставка `create_intent` с резервом, месяцем (`YYYY-MM` по Москве на момент создания) и хостовым ключом: в базе только открытая половина, закрытая лежит в памяти (`PENDING_KEYS`) до вызова создания и уходит только в cloud-init для провайдера. После перезапуска хаба окну, которому ещё не звонили, генерируется новый ключ. Цену часа вызывающая сторона берёт у провайдера до транзакции (`CloudService::pricing`), чтобы сетевой вызов не держал замок; `CloudService::create` делает это сама. Предложения-карточки, автоматический режим и редактирование бюджета строятся поверх этой функции (задача C2b).
 
-Итог закончившегося окна = `final_cost_kopecks(час, минуты от create_called_at до delete_confirmed_at)`; у окна, у которого сервера не было, 0; у `gone` — до момента обнаружения.
+Профили: служба пробует их по порядку снимка окна; определённый отказ из списка (`cloud::profile_fallback`: 409 `no_free_node`, `location_not_available`, `preset_not_found`, 400 `configuration_requires_sales_request`) переходит к следующему, любой другой отказ или отказ всех закрывает окно (`failed`, итог 0, коды в `last_error`), `Ambiguous` останавливает перебор. В строке окна `configurator_id` и `price_hourly_kopecks` ставятся перед каждым вызовом: после приёма это действительные значения принятого профиля.
+
+Итог закончившегося окна = `final_cost_kopecks(действительная цена часа, минуты от create_called_at до delete_confirmed_at)`; у окна, у которого сервера не было, 0; у `gone` — до момента обнаружения.
 
 ### 7.3 Служба (`CloudService`)
 

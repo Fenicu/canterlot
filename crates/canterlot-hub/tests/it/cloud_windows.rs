@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use canterlot_hub::cloud::service::CloudService;
 use canterlot_hub::cloud::windows::{
-    self, CreateRefusal, CreateRequest, Pricing, Trigger, Window, WindowId,
+    self, CreateRefusal, CreateRequest, Trigger, Window, WindowId,
 };
 use canterlot_hub::cloud::{TimewebConfig, TimewebProvider, price};
 use canterlot_hub::config::{CloudConfig, CloudProfile};
