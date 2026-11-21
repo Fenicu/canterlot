@@ -101,6 +101,12 @@ describe('job text', () => {
     expect(reasonText('mode_too_narrow')).toBe('Отказ: режим не позволяет');
     expect(reasonText(null)).toBe('');
   });
+
+  it('words_a_failed_staging_with_the_hub_reason', () => {
+    expect(reasonText('staging_failed: git push failed')).toBe('не удалось подвезти код: git push failed');
+    expect(reasonText('staging_failed: timeout')).toBe('не удалось подвезти код: timeout');
+    expect(reasonText('staging_failed')).toBe('не удалось подвезти код');
+  });
 });
 
 describe('machine jobs', () => {

@@ -349,12 +349,14 @@
         "src/lib/stores/machines.svelte.ts",
         "src/lib/jobs/**",
         "src/lib/timeline/cards/Job*.svelte",
+        "src/lib/timeline/cards/RunnersListCard.svelte",
         "src/lib/timeline/cards/defs/jobs.ts"
       ],
       "specs": [
         "e2e/ui/jobs.spec.ts",
         "e2e/ui/lease-queue.spec.ts",
         "e2e/ui/machines.spec.ts",
+        "e2e/ui/runner-jobs.spec.ts",
         "e2e/ui/runners.spec.ts"
       ]
     },

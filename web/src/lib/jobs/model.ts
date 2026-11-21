@@ -189,7 +189,11 @@ export function reasonText(reason: string | null | undefined): string {
       return 'отменена агентом';
     case 'launch_interrupted':
       return 'запуск прерван сбоем машины';
+    case 'staging_failed':
+      return 'не удалось подвезти код';
     default:
+      // Хаб дописывает причину несущей после двоеточия: `staging_failed: git push failed`.
+      if (reason!.startsWith('staging_failed:')) return `не удалось подвезти код: ${reason!.slice('staging_failed:'.length).trim()}`;
       return refusalText(reason!);
   }
 }

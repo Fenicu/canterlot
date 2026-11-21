@@ -8,13 +8,13 @@ export type FakeJob = components['schemas']['JobView'];
 
 const TERMINAL = new Set(['succeeded', 'failed', 'timed_out', 'canceled', 'lost']);
 
-/** Задача на машине `machine`; без правок — поставленная в очередь команда. Лежит в `api.jobs`. */
-export function seedJob(api: FakeHubApi, machine: { id: string; name: string }, patch: Partial<FakeJob> = {}, log = ''): FakeJob {
+/** Задача на машине `machine` (`null` — раннер ещё не выбран); без правок — поставленная в очередь команда. Лежит в `api.jobs`. */
+export function seedJob(api: FakeHubApi, machine: { id: string; name: string } | null, patch: Partial<FakeJob> = {}, log = ''): FakeJob {
   const job: FakeJob = {
     id: api.id(),
     state: 'queued',
-    machine_id: machine.id,
-    machine_name: machine.name,
+    machine_id: machine?.id ?? null,
+    machine_name: machine?.name ?? null,
     conversation_id: null,
     conversation_title: null,
     title: null,
