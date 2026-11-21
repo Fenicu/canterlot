@@ -911,7 +911,8 @@ installation_id = "00000000-0000-0000-0000-000000000002"
 restore_generation = "00000000-0000-0000-0000-000000000003"
 data_dir = "/tmp/store"
 "#;
-        let plain = format!("{base}\n[[runners.ssh]]\nmachine = \"runner-a\"\nssh = \"build-host\"\n");
+        let plain =
+            format!("{base}\n[[runners.ssh]]\nmachine = \"runner-a\"\nssh = \"build-host\"\n");
         let config: WorkerConfig = toml::from_str(&plain).unwrap();
         let settings = crate::carrier::CarrierSettings::from_config(&config);
         assert!(settings.ssh_config.is_none() && settings.worker_binary.is_none());

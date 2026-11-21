@@ -67,6 +67,9 @@ pub struct StagerSettings {
     pub ssh_limit: Duration,
     /// Предел отправки коммита и копирования результатов.
     pub push_limit: Duration,
+    /// `[execution].allowed_workdir_roots`: репозиторий-источник обязан лежать внутри одного из
+    /// них, как рабочий каталог обычной задачи.
+    pub allowed_roots: Vec<PathBuf>,
 }
 
 /// `StageSource`: поля как в сообщении хаба. Пустой `target_root_dir` — цель сам носитель.
@@ -157,6 +160,7 @@ impl Stager {
         if !request.repo.is_absolute() || has_dot_dot(&request.repo) {
             return Err(Failure::new("bad_repo", "repo must be an absolute path"));
         }
+        self.check_repo_pinned(&request.repo).await?;
         let place = self.place(&request.target_machine_id, &request.target_root_dir)?;
         let workdir = PathBuf::from(&request.workdir);
         match &place {
@@ -196,6 +200,32 @@ impl Stager {
             }
             Place::Carrier => self.stage_local(request, &rev, &workdir).await,
         }
+    }
+
+    /// Репозиторий-источник задан каноническим путём (ни ссылок, ни `..`) и лежит внутри
+    /// разрешённых корней: хаб относит задачу к домену по тексту пути, и ссылка из личного
+    /// каталога на рабочий репозиторий перенесла бы его содержимое через границу доменов. Та же
+    /// проверка, что у рабочего каталога обычной задачи (`jobs::workdir::pin`).
+    async fn check_repo_pinned(&self, repo: &Path) -> Result<(), Failure> {
+        let bad = || {
+            Failure::new(
+                "bad_repo",
+                "repo is not a canonical path inside the allowed roots",
+            )
+        };
+        let real = tokio::fs::canonicalize(repo).await.map_err(|_| bad())?;
+        if real.as_os_str() != repo.as_os_str() {
+            return Err(bad());
+        }
+        for root in &self.settings.allowed_roots {
+            if tokio::fs::canonicalize(root)
+                .await
+                .is_ok_and(|root| real.starts_with(root))
+            {
+                return Ok(());
+            }
+        }
+        Err(bad())
     }
 
     #[allow(clippy::too_many_arguments)]

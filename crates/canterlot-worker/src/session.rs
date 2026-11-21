@@ -1088,6 +1088,7 @@ impl Worker {
                     ),
                     ssh_limit: timings.ssh_limit,
                     push_limit: timings.upload_limit,
+                    allowed_roots: self.config.execution.allowed_workdir_roots.clone(),
                 });
             manager.set_carrier(stager, store.clone());
         }

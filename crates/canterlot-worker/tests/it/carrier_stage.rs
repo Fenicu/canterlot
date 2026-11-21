@@ -102,6 +102,7 @@ fn fixture() -> Fixture {
         targets: Arc::new(move |machine| (machine == RUNNER_ID).then(|| target.clone())),
         ssh_limit: Duration::from_secs(30),
         push_limit: Duration::from_secs(60),
+        allowed_roots: vec![PathBuf::from("/tmp")],
     });
     Fixture {
         sshd,
@@ -192,6 +193,81 @@ async fn staging_on_a_runner_lands_the_right_sha_in_the_domain_dir_and_repeats_h
         fs::read_to_string(Path::new(&second.workdir).join("file.txt")).unwrap(),
         "two\n"
     );
+}
+
+#[tokio::test]
+async fn a_repo_reached_through_a_symlink_or_outside_the_allowed_roots_is_refused() {
+    let fx = fixture();
+    let src = source_repo();
+    let job = Uuid::now_v7();
+    // Ссылка внутри разрешённого корня на настоящий репозиторий: путь не канонический, и
+    // домен по тексту пути не говорит, где репозиторий на самом деле.
+    let link = src.repo.parent().unwrap().join("alias");
+    symlink(&src.repo, &link).unwrap();
+    let on_runner = StageRequest {
+        repo: link.clone(),
+        ..runner_stage(&fx, &src, &src.first, job)
+    };
+    assert_eq!(
+        reason(fx.stager.stage(&on_runner).await.unwrap_err()),
+        "bad_repo"
+    );
+    let on_carrier = StageRequest {
+        repo: link.clone(),
+        workdir: link
+            .parent()
+            .unwrap()
+            .join(".canterlot-jobs/alias")
+            .join(job.to_string())
+            .display()
+            .to_string(),
+        ..carrier_stage(&src, &src.first, job)
+    };
+    assert_eq!(
+        reason(fx.stager.stage(&on_carrier).await.unwrap_err()),
+        "bad_repo"
+    );
+    // Ссылка в середине пути.
+    let dir_link = src
+        .repo
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(format!("via-{}", Uuid::now_v7().simple()));
+    symlink(src.repo.parent().unwrap(), &dir_link).unwrap();
+    let mid = StageRequest {
+        repo: dir_link.join("project"),
+        ..runner_stage(&fx, &src, &src.first, job)
+    };
+    assert_eq!(reason(fx.stager.stage(&mid).await.unwrap_err()), "bad_repo");
+    fs::remove_file(&dir_link).unwrap();
+    // Каноническая запись, но вне разрешённых корней.
+    let strict = Stager::new(StagerSettings {
+        ssh_config: Some(fx.sshd.ssh_config.clone()),
+        outputs_root: fx.outputs.path().to_path_buf(),
+        targets: Arc::new(|_| None),
+        ssh_limit: Duration::from_secs(30),
+        push_limit: Duration::from_secs(60),
+        allowed_roots: vec![fx.root.clone()],
+    });
+    assert_eq!(
+        reason(
+            strict
+                .stage(&runner_stage(&fx, &src, &src.first, job))
+                .await
+                .unwrap_err()
+        ),
+        "bad_repo"
+    );
+    // Ничего не создано на раннере: отказ раньше любого вызова git и ssh.
+    assert!(!fx.root.join("repos").exists());
+    assert!(!fx.root.join("jobs").exists());
+    // Настоящий путь тем же складом работает.
+    fx.stager
+        .stage(&runner_stage(&fx, &src, &src.first, job))
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
