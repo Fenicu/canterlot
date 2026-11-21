@@ -34,8 +34,10 @@ impl OwnerJobServer {
         hub: Arc<dyn Hub>,
         shutdown: watch::Receiver<bool>,
     ) -> Self {
+        // Первая попытка сразу: сокет появляется к возврату из `start`, повторы — в задаче.
+        let first = bind(&socket).ok();
         Self {
-            task: tokio::spawn(serve(socket, store, hub, shutdown)),
+            task: tokio::spawn(serve(socket, first, store, hub, shutdown)),
         }
     }
 }
@@ -74,11 +76,16 @@ fn bind(socket: &Path) -> io::Result<UnixListener> {
 
 async fn serve(
     socket: PathBuf,
+    first: Option<UnixListener>,
     store: Arc<Store>,
     hub: Arc<dyn Hub>,
     mut shutdown: watch::Receiver<bool>,
 ) {
+    let mut first = first;
     let listener = loop {
+        if let Some(listener) = first.take() {
+            break listener;
+        }
         match bind(&socket) {
             Ok(listener) => break listener,
             Err(error) => {

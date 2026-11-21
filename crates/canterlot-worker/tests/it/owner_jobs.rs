@@ -20,11 +20,21 @@ use uuid::Uuid;
 
 const JOB_WAIT: Duration = Duration::from_secs(20);
 
-#[derive(Default)]
 struct FakeHub {
     specs: Mutex<Vec<JobSpec>>,
     refuse: Mutex<Option<Refusal>>,
-    issued: Mutex<Option<Uuid>>,
+    /// Идентификатор последней принятой задачи; ожидание без опроса.
+    issued: watch::Sender<Option<Uuid>>,
+}
+
+impl FakeHub {
+    fn new() -> Self {
+        Self {
+            specs: Mutex::default(),
+            refuse: Mutex::default(),
+            issued: watch::channel(None).0,
+        }
+    }
 }
 
 #[async_trait]
@@ -38,7 +48,7 @@ impl Hub for FakeHub {
             .unwrap()
             .push(serde_json::from_str(&spec_json).unwrap());
         let id = Uuid::now_v7();
-        *self.issued.lock().unwrap() = Some(id);
+        self.issued.send_replace(Some(id));
         Ok(id)
     }
 }
@@ -60,7 +70,7 @@ impl Fixture {
             .unwrap();
         let socket = dir.path().join("run/jobs.sock");
         let store = Store::open(&dir.path().join("data")).unwrap();
-        let hub = Arc::new(FakeHub::default());
+        let hub = Arc::new(FakeHub::new());
         let (stop, shutdown) = watch::channel(false);
         let server = Some(OwnerJobServer::start(
             socket.clone(),
@@ -79,8 +89,10 @@ impl Fixture {
     }
 
     /// Рестарт воркера: сокет и хранилище те же, процесс новый.
-    fn restart(&mut self) {
+    async fn restart(&mut self) {
         drop(self.server.take());
+        // Отмена задачи сервера доходит до слушателя на следующем шаге планировщика.
+        tokio::task::yield_now().await;
         self.store = Store::open(&self.dir.path().join("data")).unwrap();
         let shutdown = self.stop.subscribe();
         self.server = Some(OwnerJobServer::start(
@@ -135,13 +147,13 @@ fn finished(job_id: &str, state: &str, code: Option<i32>) -> Finished {
 }
 
 async fn issued(hub: &FakeHub) -> String {
-    for _ in 0..200 {
-        if let Some(id) = *hub.issued.lock().unwrap() {
-            return id.to_string();
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    panic!("the hub got no job");
+    let mut rx = hub.issued.subscribe();
+    let id = tokio::time::timeout(JOB_WAIT, rx.wait_for(Option::is_some))
+        .await
+        .expect("the hub got a job in time")
+        .unwrap()
+        .expect("issued");
+    id.to_string()
 }
 
 #[tokio::test]
@@ -187,8 +199,9 @@ async fn wait_returns_the_job_exit_code_whenever_the_result_arrives() {
         ("canceled", None, 130),
     ];
     for (state, code, want) in table {
-        // Итог приходит после того, как команда присоединилась.
-        *fx.hub.issued.lock().unwrap() = None;
+        // Итог записывается, как только хаб принял задачу: команда уже ждёт или ещё идёт к
+        // ожиданию, итог находится при любом порядке.
+        fx.hub.issued.send_replace(None);
         let waiting = {
             let mut a = args(&["true"]);
             a.wait = true;
@@ -196,7 +209,6 @@ async fn wait_returns_the_job_exit_code_whenever_the_result_arrives() {
         };
         let deliver = async {
             let id = issued(&fx.hub).await;
-            tokio::time::sleep(Duration::from_millis(300)).await;
             fx.store.record(&finished(&id, state, code)).unwrap();
         };
         let ((got, out, err), ()) = tokio::join!(waiting, deliver);
@@ -213,12 +225,7 @@ async fn wait_gets_a_result_that_arrived_before_the_command_attached() {
     // Задача уже принята хабом, итог уже записан, а команда ещё не спрашивала.
     let id = Uuid::now_v7().to_string();
     fx.store.record(&finished(&id, "failed", Some(7))).unwrap();
-    let mut stream = loop {
-        match tokio::net::UnixStream::connect(&fx.socket).await {
-            Ok(stream) => break stream,
-            Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
-        }
-    };
+    let mut stream = tokio::net::UnixStream::connect(&fx.socket).await.unwrap();
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     stream
         .write_all(format!("{{\"v\":1,\"op\":\"wait\",\"job_id\":\"{id}\"}}\n").as_bytes())
@@ -259,9 +266,7 @@ async fn wait_survives_a_worker_restart() {
         }
     });
     let second = issued(&fx.hub).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    fx.restart();
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    fx.restart().await;
     fx.store
         .record(&finished(&second, "failed", Some(5)))
         .unwrap();

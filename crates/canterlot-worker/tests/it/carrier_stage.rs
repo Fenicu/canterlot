@@ -730,7 +730,8 @@ fn the_retention_sweep_removes_only_old_job_dirs() {
     symlink(elsewhere.path(), old.join("escape")).unwrap();
     // Ссылка на каталог вместо каталога задачи не трогается и не разыменовывается.
     symlink(elsewhere.path(), &linked).unwrap();
-    let now = SystemTime::now();
+    // Условное «сейчас»: время изменения каталогов задаётся явно от него.
+    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000_000_000);
     let aged = |path: &Path, age: Duration| {
         let file = fs::File::open(path).unwrap();
         file.set_modified(now - age).unwrap();

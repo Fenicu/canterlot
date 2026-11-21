@@ -289,7 +289,8 @@ mod tests {
             let id = late.job_id.clone();
             tokio::spawn(async move { reopened.wait(&id).await })
         };
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Ожидающий мог начать до записи или после: итог находится при любом порядке.
+        tokio::task::yield_now().await;
         reopened.record(&late).unwrap();
         assert_eq!(waiter.await.unwrap(), Some(late));
         assert_eq!(store.wait("not-a-uuid").await, None);
@@ -305,7 +306,8 @@ mod tests {
         store.record(&fresh).unwrap();
         let stranger = dir.path().join(STORE_DIR).join("notes.txt");
         fs::write(&stranger, "x").unwrap();
-        let now = SystemTime::now();
+        // Условное «сейчас»: время изменения файлов задаётся явно от него.
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000_000_000);
         let aged = |id: &str, age: Duration| {
             fs::File::open(store.file(id).unwrap())
                 .unwrap()
