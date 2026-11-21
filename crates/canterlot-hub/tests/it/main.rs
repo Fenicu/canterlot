@@ -26,6 +26,7 @@ mod background_tasks;
 mod blocks;
 mod bookmarks;
 mod cloud_timeweb;
+mod cloud_windows;
 mod compaction;
 mod composer_drafts;
 mod config;

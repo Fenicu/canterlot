@@ -14,7 +14,9 @@ pub mod cloud_init;
 pub mod host_key;
 pub mod price;
 pub mod rate_limit;
+pub mod service;
 pub mod timeweb;
+pub mod windows;
 
 pub use timeweb::{TimewebConfig, TimewebProvider};
 

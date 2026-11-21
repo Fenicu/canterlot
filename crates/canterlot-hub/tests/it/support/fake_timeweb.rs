@@ -49,6 +49,9 @@ pub enum DeleteMode {
     NoContent,
     /// 200 с `is_moved_in_quarantine: true`, сервер убран из списков.
     Quarantine,
+    /// То же 200 с `is_moved_in_quarantine: true`, но сервер ещё виден в списках проекта: о
+    /// конце оплаты говорит только его отсутствие в полном списке.
+    QuarantineListed,
     /// 200 с `hash`: нужен код подтверждения, сервер остаётся.
     WithHash,
     /// 423: удаление по SMS, сервер остаётся.
@@ -689,6 +692,10 @@ fn delete_server(st: &mut FakeState, id: &str, auth: Option<&str>) -> Action {
                 &json!({"server_delete": {"is_moved_in_quarantine": true}, "response_id": "r"}),
             ))
         }
+        DeleteMode::QuarantineListed => Action::Respond(json_response(
+            200,
+            &json!({"server_delete": {"is_moved_in_quarantine": true}, "response_id": "r"}),
+        )),
         DeleteMode::WithHash => Action::Respond(json_response(
             200,
             &json!({"server_delete": {
