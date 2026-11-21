@@ -138,9 +138,13 @@ fn check(spec: &JobSpec) -> Result<(), Refusal> {
             "shell must be a non-empty command up to 64 KiB",
         ));
     }
-    if let Some(source) = &spec.source
-        && (source.rev.len() != 40 || !source.rev.bytes().all(|b| b.is_ascii_hexdigit()))
-    {
+    let Some(source) = &spec.source else {
+        return Err(Refusal::new(
+            "bad_spec",
+            "owner jobs run on a staged source: source is required",
+        ));
+    };
+    if source.rev.len() != 40 || !source.rev.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(Refusal::new(
             "bad_spec",
             "source rev must be a full 40-hex sha",

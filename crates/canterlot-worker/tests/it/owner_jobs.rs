@@ -60,6 +60,9 @@ struct Fixture {
     hub: Arc<FakeHub>,
     stop: watch::Sender<bool>,
     server: Option<OwnerJobServer>,
+    _repo: tempfile::TempDir,
+    /// `<репозиторий>@<sha>` настоящего репозитория для `--source`.
+    source: String,
 }
 
 impl Fixture {
@@ -68,6 +71,7 @@ impl Fixture {
             .prefix("ownerjobs-")
             .tempdir_in("/tmp")
             .unwrap();
+        let (repo_guard, repo_path, sha) = repo();
         let socket = dir.path().join("run/jobs.sock");
         let store = Store::open(&dir.path().join("data")).unwrap();
         let hub = Arc::new(FakeHub::new());
@@ -85,6 +89,8 @@ impl Fixture {
             hub,
             stop,
             server,
+            _repo: repo_guard,
+            source: format!("{}@{sha}", repo_path.display()),
         }
     }
 
@@ -126,12 +132,14 @@ impl Fixture {
     }
 }
 
-fn args(command: &[&str]) -> RunArgs {
-    RunArgs {
-        title: "gate".into(),
-        workdir: Some("/tmp".into()),
-        command: command.iter().map(OsString::from).collect(),
-        ..RunArgs::default()
+impl Fixture {
+    fn args(&self, command: &[&str]) -> RunArgs {
+        RunArgs {
+            title: "gate".into(),
+            source: Some(self.source.clone()),
+            command: command.iter().map(OsString::from).collect(),
+            ..RunArgs::default()
+        }
     }
 }
 
@@ -159,7 +167,7 @@ async fn issued(hub: &FakeHub) -> String {
 #[tokio::test]
 async fn submit_without_wait_prints_the_job_id_and_exits_zero() {
     let fx = Fixture::start();
-    let mut a = args(&["echo", "hello world"]);
+    let mut a = fx.args(&["echo", "hello world"]);
     a.labels = vec!["kernel-6.12".into()];
     a.outputs = vec!["out".into()];
     a.lease = Some("gate".into());
@@ -177,10 +185,10 @@ async fn submit_without_wait_prints_the_job_id_and_exits_zero() {
     assert_eq!(spec.lease.as_deref(), Some("gate"));
     assert_eq!(spec.expected_minutes, Some(40));
     assert_eq!(spec.timeout_minutes, Some(90));
-    assert_eq!(spec.workdir.as_deref(), Some("/tmp"));
-    assert!(spec.source.is_none());
+    assert!(spec.source.is_some());
+    assert!(spec.machine.is_none());
     // Один аргумент — это уже текст оболочки.
-    let (_, _, _) = fx.run(args(&["cd /x && make 2>&1 | tail"])).await;
+    let (_, _, _) = fx.run(fx.args(&["cd /x && make 2>&1 | tail"])).await;
     assert_eq!(
         fx.hub.specs.lock().unwrap()[1].shell,
         "cd /x && make 2>&1 | tail"
@@ -203,7 +211,7 @@ async fn wait_returns_the_job_exit_code_whenever_the_result_arrives() {
         // ожиданию, итог находится при любом порядке.
         fx.hub.issued.send_replace(None);
         let waiting = {
-            let mut a = args(&["true"]);
+            let mut a = fx.args(&["true"]);
             a.wait = true;
             fx.run(a)
         };
@@ -246,7 +254,7 @@ async fn wait_gets_a_result_that_arrived_before_the_command_attached() {
 async fn wait_survives_a_worker_restart() {
     let mut fx = Fixture::start();
     // Новая команда ждёт, воркер перезапускается, итог приходит уже после рестарта.
-    let mut again = args(&["true"]);
+    let mut again = fx.args(&["true"]);
     again.wait = true;
     let dir_data = fx.dir.path().join("data");
     let waiter = tokio::spawn({
@@ -283,13 +291,13 @@ async fn a_refusal_from_the_hub_exits_two_with_the_code() {
     let fx = Fixture::start();
     *fx.hub.refuse.lock().unwrap() =
         Some(Refusal::new("domain_mismatch", "repo is in another domain"));
-    let (code, out, err) = fx.run(args(&["true"])).await;
+    let (code, out, err) = fx.run(fx.args(&["true"])).await;
     assert_eq!(code, 2);
     assert!(out.is_empty());
     assert!(err.contains("domain_mismatch"), "{err}");
     // Негодное описание воркер отклоняет сам, до хаба.
     *fx.hub.refuse.lock().unwrap() = None;
-    let mut bad = args(&["true"]);
+    let mut bad = fx.args(&["true"]);
     bad.title = String::new();
     let (code, _, err) = fx.run(bad).await;
     assert_eq!(code, 2);
@@ -335,9 +343,8 @@ async fn source_head_requires_a_clean_tree_and_resolves_to_a_full_sha() {
     let fx = Fixture::start();
     let (_guard, repo, sha) = repo();
     let source = |text: String| {
-        let mut a = args(&["true"]);
+        let mut a = fx.args(&["true"]);
         a.source = Some(text);
-        a.workdir = None;
         a.outputs = vec!["result".into()];
         a
     };
@@ -348,8 +355,8 @@ async fn source_head_requires_a_clean_tree_and_resolves_to_a_full_sha() {
     let got = spec.source.unwrap();
     assert_eq!(got.rev, sha);
     assert_eq!(got.repo, repo.display().to_string());
-    assert_eq!(spec.machine.as_deref(), Some("auto"));
-    assert!(spec.workdir.is_none());
+    // Без названной машины выбор остаётся хабу.
+    assert!(spec.machine.is_none());
     assert_eq!(spec.outputs, ["result"]);
     // Полный sha принимается без проверки чистоты дерева.
     fs::write(repo.join("a"), "dirty").unwrap();
@@ -382,23 +389,25 @@ async fn source_head_requires_a_clean_tree_and_resolves_to_a_full_sha() {
 #[test]
 fn the_binary_exposes_job_run_and_refuses_without_a_socket() {
     let binary = env!("CARGO_BIN_EXE_canterlot-worker");
+    let (_guard, repo_path, _sha) = repo();
     let output = Command::new(binary)
-        .args([
-            "job",
-            "run",
-            "--title",
-            "t",
-            "--workdir",
-            "/tmp",
-            "--",
-            "true",
-        ])
+        .args(["job", "run", "--title", "t", "--source"])
+        .arg(format!("{}@HEAD", repo_path.display()))
+        .args(["--", "true"])
         .env("CANTERLOT_JOBS_SOCKET", "/nonexistent-dir/jobs.sock")
         .env_remove("XDG_RUNTIME_DIR")
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("not reachable"));
+    // Без `--source` хаб задачу владельца не принял бы: отказ до сокета.
+    let output = Command::new(binary)
+        .args(["job", "run", "--title", "t", "--", "true"])
+        .env("CANTERLOT_JOBS_SOCKET", "/nonexistent-dir/jobs.sock")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--source"));
     let help = Command::new(binary)
         .args(["job", "run", "--help"])
         .output()

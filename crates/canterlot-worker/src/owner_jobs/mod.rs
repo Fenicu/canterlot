@@ -66,8 +66,6 @@ pub struct JobSpec {
     pub source: Option<Source>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outputs: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workdir: Option<String>,
     /// Команда оболочки.
     pub shell: String,
 }

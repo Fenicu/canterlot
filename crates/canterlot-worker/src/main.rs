@@ -105,15 +105,13 @@ enum JobCommand {
         lease: Option<JobLease>,
         #[arg(long)]
         timeout_minutes: Option<u32>,
-        /// `<репозиторий>@<полный sha>`; `@HEAD` — текущий коммит чистого дерева.
+        /// `<репозиторий>@<полный sha>`; `@HEAD` — текущий коммит чистого дерева. Обязателен:
+        /// задача владельца идёт только на подготовленные исходники.
         #[arg(long)]
         source: Option<String>,
         /// Путь относительно рабочей копии, который надо собрать; можно повторять.
         #[arg(long)]
         output: Vec<String>,
-        /// Рабочий каталог без `--source`; по умолчанию текущий.
-        #[arg(long)]
-        workdir: Option<String>,
         #[arg(long)]
         wait: bool,
         #[arg(last = true, required = true, num_args = 1..)]
@@ -326,7 +324,6 @@ async fn owner_job() -> Option<ExitCode> {
         timeout_minutes,
         source,
         output,
-        workdir,
         wait,
         command,
     } = command;
@@ -347,7 +344,6 @@ async fn owner_job() -> Option<ExitCode> {
             timeout_minutes,
             source,
             outputs: output,
-            workdir,
             wait,
             command,
         })

@@ -44,7 +44,6 @@ pub struct RunArgs {
     /// `<репозиторий>@<sha>`; `@HEAD` — текущий коммит чистого дерева.
     pub source: Option<String>,
     pub outputs: Vec<String>,
-    pub workdir: Option<String>,
     pub wait: bool,
     pub command: Vec<OsString>,
 }
@@ -267,27 +266,23 @@ fn quote(word: &str) -> String {
 
 pub fn build_spec(args: RunArgs) -> Result<JobSpec, String> {
     let shell = shell_text(&args.command)?;
-    let source = args.source.as_deref().map(resolve_source).transpose()?;
-    let machine = match (&args.machine, &source) {
-        (Some(machine), _) => Some(machine.clone()),
-        (None, Some(_)) => Some("auto".to_owned()),
-        (None, None) => None,
-    };
-    let workdir = match (&args.workdir, &source) {
-        (Some(workdir), _) => Some(workdir.clone()),
-        (None, Some(_)) => None,
-        (None, None) => Some(path_text(&current_dir()?)?),
-    };
+    // Хаб ставит задачу владельца только на подготовленные исходники: рабочего каталога у
+    // такой задачи нет, его создаёт носитель.
+    let source = args
+        .source
+        .as_deref()
+        .ok_or_else(|| "--source <repo>@<sha> (or @HEAD) is required".to_owned())
+        .and_then(resolve_source)?;
     Ok(JobSpec {
         title: args.title,
-        machine,
+        // Без названной машины хаб выбирает сам (`auto`).
+        machine: args.machine,
         labels: args.labels,
         expected_minutes: args.expected_minutes,
         lease: args.lease,
         timeout_minutes: args.timeout_minutes,
-        source,
+        source: Some(source),
         outputs: args.outputs,
-        workdir,
         shell,
     })
 }
