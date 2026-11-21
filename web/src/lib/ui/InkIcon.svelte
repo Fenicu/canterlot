@@ -11,8 +11,9 @@
    * Цвета: `--ink-rest` (стоит написанным, по умолчанию `--secondary`) и `--ink-live`
    * (идёт и пока пишется, по умолчанию `--accent-link`) задаёт хозяин значка. При выключенном
    * движении, системном или масштабом 0, нет ни дыхания, ни росчерка: значок сразу стоит в конечном виде.
+   * `breathe={false}` оставляет набросок ровным: хозяин, у которого рядом уже дышит точка того же дела, не дублирует дыхание.
    */
-  let { name, state = 'dry', size = 'small' }: { name: IconName; state?: InkState; size?: 'small' | 'normal' } = $props();
+  let { name, state = 'dry', size = 'small', breathe = true }: { name: IconName; state?: InkState; size?: 'small' | 'normal'; breathe?: boolean } = $props();
 
   // Читается заново при каждой смене состояния: настройка движения могла измениться между делами.
   const motion = $derived.by(() => {
@@ -21,7 +22,7 @@
   });
 </script>
 
-<svg class="mark" class:normal={size === 'normal'} data-state={state} data-motion={motion} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+<svg class="mark" class:normal={size === 'normal'} class:still={!breathe} data-state={state} data-motion={motion} viewBox="0 0 24 24" aria-hidden="true" focusable="false">
   <path class="ghost" d={icons[name]} />
   <path class="ink" d={icons[name]} pathLength="1" />
 </svg>
@@ -48,7 +49,7 @@
   .mark[data-state='refused'] .ghost { opacity: var(--opacity-dim); }
 
   /* Дыхание: только прозрачность, кадр собирает композитор; идёт лишь пока дело идёт. */
-  .mark[data-state='sketch'][data-motion='on'] .ghost { animation: mark-breathe var(--duration-stage-pulse) var(--ease-stage-pulse) infinite alternate; }
+  .mark[data-state='sketch'][data-motion='on']:not(.still) .ghost { animation: mark-breathe var(--duration-stage-pulse) var(--ease-stage-pulse) infinite alternate; }
   @keyframes mark-breathe { from { opacity: var(--opacity-low); } to { opacity: var(--opacity-dim); } }
 
   /* Росчерк: чернила проходят по контуру один раз, потом цвет из тона акцента оседает в покой. */

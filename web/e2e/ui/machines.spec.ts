@@ -1,4 +1,5 @@
 import { test, expect, resizeViewport } from './fixtures';
+import { noMotion, slowMotion } from './ink-motion';
 import { bootSecondary } from './secondary-fixture';
 import { machineWatchSeed, seedMachineWatch } from '../../testing/fake-hub';
 
@@ -208,4 +209,31 @@ test('machine_screen_applies_machine_watch_changed_live', async ({ page }) => {
   hub.append('machines', { kind: 'machine_watch_changed', payload: { machine_id: ids.machine, watch: null, memory_low: false } }); hub.flush();
   await expect(main.getByRole('region', { name: 'Крупные кэши сборки' })).toHaveCount(0);
   await expect(main.locator('[data-watch="unleased"]')).toHaveCount(0);
+});
+
+test('availability_word_swaps_on_a_change_and_stands_still_under_reduced_motion', async ({ page }) => {
+  const { hub, ids } = await bootSecondary(page);
+  const word = page.locator('main .availability');
+  await expect(word).toHaveText('В сети');
+  await slowMotion(page);
+  hub.append('machines', { kind: 'machine_availability_changed', payload: { machine_id: ids.machine, availability: 'degraded' } }); hub.flush();
+  // Прежнее слово уходит, а не заменяется кадром.
+  await expect.poll(() => word.evaluate((node) => node.getAnimations().length)).toBeGreaterThan(0);
+  await expect(word).toHaveText('Связь нестабильна', { timeout: 15_000 });
+  await expect.poll(() => word.evaluate((node) => node.getAnimations().length), { timeout: 15_000 }).toBe(0);
+  await noMotion(page);
+  hub.append('machines', { kind: 'machine_availability_changed', payload: { machine_id: ids.machine, availability: 'available' } }); hub.flush();
+  await expect(word).toHaveText('В сети');
+  expect(await word.evaluate((node) => node.getAnimations().length)).toBe(0);
+});
+
+test('availability_word_does_not_swap_when_the_owner_picks_another_machine', async ({ page }) => {
+  await bootSecondary(page);
+  const main = page.locator('main');
+  const word = main.locator('.availability');
+  await expect(word).toHaveText('В сети');
+  await slowMotion(page);
+  await main.getByRole('radio', { name: 'mini · нестабильно', exact: true }).check();
+  await expect(word).toHaveText('Связь нестабильна');
+  expect(await word.evaluate((node) => node.getAnimations().length)).toBe(0);
 });

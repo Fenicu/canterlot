@@ -7,6 +7,7 @@
   import { theme } from '#lib/theme.js';
   import TopBar from '#lib/ui/TopBar.svelte';
   import Icon from '#lib/ui/Icon.svelte';
+  import EmptyMark from '#lib/ui/EmptyMark.svelte';
   import IconButton from '#lib/ui/IconButton.svelte';
   import BookmarkRow from './BookmarkRow.svelte';
   import { bookmarkHref, type BookmarkView } from './model.js';
@@ -72,7 +73,7 @@
         <button type="button" class="retry" onclick={() => void store.run()}>Повторить</button>
       </div>
     {:else if store.status === 'ready' && store.items.length === 0}
-      <p class="state" data-bookmarks-empty>Здесь появятся сообщения, отмеченные закладкой в чате.</p>
+      <div class="state empty"><EmptyMark name="bookmark" /><p data-bookmarks-empty>Здесь появятся сообщения, отмеченные закладкой в чате.</p></div>
     {:else}
       {#if store.actionError}
         <p class="error" role="alert">{store.actionError}</p>
@@ -130,6 +131,7 @@
   }
   .rows { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
   .state { margin: var(--s4) var(--s2); color: var(--secondary); }
+  .state.empty p { margin: var(--s0); }
   .error { margin: var(--s2) var(--s2) var(--s4); color: var(--danger); font-size: var(--fs-sm); }
   .retry { white-space: nowrap; min-height: var(--target); padding-inline: var(--s6); border: var(--s0); border-radius: var(--radius-pill); background: var(--transparent); color: var(--accent-link); font-size: var(--fs-meta); }
   .sentinel { height: var(--s1); }

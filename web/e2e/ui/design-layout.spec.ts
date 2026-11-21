@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { Page } from '@playwright/test';
+import type { Locator, Page } from '@playwright/test';
 import { FakeHub, FakeHubApi, seedConversation } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
 import { seedMockupSessions } from '../../testing/fixtures/mockup-sessions';
@@ -407,6 +407,9 @@ test.describe('листы и панели', () => {
   });
 });
 
+/** Складка строк очереди дошла до конца: до этого высота строки ещё сходится к настоящей. */
+const folded = (strip: Locator) => strip.evaluate((node) => Promise.all(node.getAnimations({ subtree: true }).map((animation) => animation.finished.catch(() => undefined))).then(() => undefined));
+
 test.describe('очередь и вложения', () => {
   async function queue(hub: FakeHub, api: FakeHubApi, id: string, texts: string[]) {
     texts.forEach((text, index) => hub.append(`conversation:${id}`, { kind: 'input_queued', conversation_id: id, payload: { input_id: api.id(), input_seq: String(index + 20), idempotency_key: api.id(), state: 'queued', content: [{ type: 'text', text }] } }));
@@ -420,6 +423,8 @@ test.describe('очередь и вложения', () => {
     await queue(hub, api, id, ['После тестов обнови README и добавь строку про порядок подписки и снимка журнала', 'Потом собери релиз']);
     const strip = page.locator('.strip');
     await expect(strip.locator('[data-state]')).toHaveCount(2);
+    // Сообщения встают в очередь складкой: габариты меряются, когда складка доехала.
+    await folded(strip);
     const first = await strip.locator('.pill').first().boundingBox();
     // Две строки текста и действия в той же полосе: третьей строки на заявку нет.
     expect(first!.height).toBeLessThanOrEqual(100);
@@ -459,6 +464,7 @@ test.describe('очередь и вложения', () => {
     await expect(strip.locator('[data-state]')).toHaveCount(2);
     await strip.getByRole('button', { name: 'Ещё 2 в очереди' }).click();
     await expect(strip.locator('[data-state]')).toHaveCount(4);
+    await folded(strip);
   });
 
   test('sent_attachments_stay_visible_in_the_bubble', async ({ page }) => {

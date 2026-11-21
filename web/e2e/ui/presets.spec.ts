@@ -4,6 +4,7 @@ import { FakeHub, FakeHubApi, seedPresets } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
 import { seedMockupSessions } from '../../testing/fixtures/mockup-sessions';
 import { expect, test } from './fixtures';
+import { foldingCount, noMotion, slowMotion } from './ink-motion';
 
 async function bootPresets(page: Page) {
   const hub = new FakeHub();
@@ -49,6 +50,50 @@ test('create_edit_and_delete_preset_with_confirmation', async ({ page }) => {
   await expect(page.getByText('Сессии, где он применён')).toBeVisible();
   await page.getByRole('button', { name: 'Удалить инструкцию' }).click();
   await expect(page.locator('[data-preset]').filter({ hasText: 'Проверочный пресет' })).toHaveCount(0);
+});
+
+test('a_created_preset_folds_in_and_a_deleted_one_folds_away', async ({ page }) => {
+  await bootPresets(page);
+  await expect(page.locator('[data-preset]')).toHaveCount(4);
+  // Слепок встал без складки: строки, пришедшие вместе с ним, не двигались.
+  expect(await foldingCount(page, '[data-preset]')).toBe(0);
+  await slowMotion(page);
+  await page.getByRole('button', { name: 'Новая инструкция' }).click();
+  await page.getByLabel('Название').fill('Складной пресет');
+  await page.getByLabel('Текст').fill('Отвечай кратко.');
+  await page.getByRole('button', { name: 'Сохранить' }).click();
+  const mine = page.locator('[data-preset]').filter({ hasText: 'Складной пресет' });
+  await expect.poll(() => foldingCount(page, '[data-preset]')).toBeGreaterThan(0);
+  await expect(mine).toBeVisible();
+  await expect.poll(() => foldingCount(page, '[data-preset]'), { timeout: 15_000 }).toBe(0);
+
+  await mine.getByRole('button', { name: 'Удалить' }).click();
+  await page.getByRole('button', { name: 'Удалить инструкцию' }).click();
+  await expect.poll(() => foldingCount(page, '[data-preset]')).toBeGreaterThan(0);
+  // Уходящая карточка уже след: диктору не читается.
+  await expect(page.locator('[data-preset][aria-hidden="true"]')).toHaveCount(1);
+  await expect(mine).toHaveCount(0, { timeout: 15_000 });
+});
+
+test('switching_the_preset_tab_rebuilds_the_list_without_folding_and_motion_off_folds_nothing', async ({ page }) => {
+  await bootPresets(page);
+  await expect(page.locator('[data-preset]')).toHaveCount(4);
+  await slowMotion(page);
+  const tabs = page.locator('[data-purpose-tab]');
+  await tabs.nth(1).click();
+  await expect(tabs.nth(1)).toHaveAttribute('aria-selected', 'true');
+  expect(await foldingCount(page, '[data-preset]')).toBe(0);
+  await tabs.nth(0).click();
+  await expect(page.locator('[data-preset="clean"]')).toBeVisible();
+  expect(await foldingCount(page, '[data-preset]')).toBe(0);
+
+  await noMotion(page);
+  await page.getByRole('button', { name: 'Новая инструкция' }).click();
+  await page.getByLabel('Название').fill('Без движения');
+  await page.getByLabel('Текст').fill('Отвечай кратко.');
+  await page.getByRole('button', { name: 'Сохранить' }).click();
+  await expect(page.locator('[data-preset]').filter({ hasText: 'Без движения' })).toBeVisible();
+  expect(await foldingCount(page, '[data-preset]')).toBe(0);
 });
 
 test('stale_revision_shows_conflict_and_keeps_the_draft', async ({ page }) => {

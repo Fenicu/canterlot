@@ -11,6 +11,7 @@
   import ContextIndicator from '#lib/composer/ContextIndicator.svelte';
   import DictationPanel from '#lib/composer/DictationPanel.svelte';
   import { filesFromPayload, hasFileDrag } from '#lib/composer/intake.js';
+  import { launch } from '#lib/composer/launch.js';
   import { ComposerModel, EMPTY_DRAFT_REASON, type Limits } from '#lib/composer/model.svelte.js';
   import { composerPlaceholder, sendActionLabel } from '#lib/composer/copy.js';
   import { takeAttachmentNotice } from '#lib/composer/attachmentNotice.js';
@@ -475,12 +476,13 @@
     return true;
   }
 
-  function sendClick() {
+  function sendClick(event: MouseEvent) {
     if (held) {
       held = false;
       return;
     }
     if (sideCommand()) return;
+    if (model.gate.ok && !model.sending) launch(event.currentTarget as HTMLElement | null);
     void model.send();
   }
 
@@ -835,7 +837,8 @@
     color: var(--accent-ink);
   }
   .clock { grid-area: clock; background: var(--transparent); color: var(--text); }
-  .send { grid-area: send; }
+  /* Улетающая при отправке стрелка обрезается кругом кнопки. */
+  .send { grid-area: send; overflow: clip; }
   /* Вливание — второстепенное действие: узкая стрелка у самой кнопки отправки. */
   .steer {
     grid-area: steer;

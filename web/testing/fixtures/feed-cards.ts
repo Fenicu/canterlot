@@ -221,7 +221,7 @@ export function setActivity(hub: FakeHub, api: FakeHubApi, id: string, state: st
 const sha = (text: string): string => createHash('sha256').update(text).digest('hex');
 
 /** Новый вызов на глазах владельца: начало, затем результат. */
-export function streamCall(hub: FakeHub, api: FakeHubApi, id: string, run: string, tool: string, input: unknown, opts: { blockId?: string; result?: string; resultId?: string } = {}): { call: string; result: string } {
+export function streamCall(hub: FakeHub, api: FakeHubApi, id: string, run: string, tool: string, input: unknown, opts: { blockId?: string; result?: string; resultId?: string; failed?: boolean } = {}): { call: string; result: string } {
   const call = opts.blockId ?? api.id();
   const result = opts.resultId ?? api.id();
   const scope = `conversation:${id}`;
@@ -234,8 +234,8 @@ export function streamCall(hub: FakeHub, api: FakeHubApi, id: string, run: strin
   }
   if (opts.result !== undefined) {
     api.blocks.set(result, { text: opts.result, rev: 1, state: 'final' });
-    hub.append(scope, { kind: 'block_started', conversation_id: id, payload: { block_id: result, rev: 0, kind: 'tool_result', input_command_id: run, parent_block_id: call, agent: 'orchestrator', model: MODEL, tool_name: null, summary: null, approved_by: null } });
-    hub.append(scope, { kind: 'block_final', conversation_id: id, payload: { block_id: result, rev: 1, text: opts.result, checksum: sha(opts.result), text_omitted: false, summary: null } });
+    hub.append(scope, { kind: 'block_started', conversation_id: id, payload: { block_id: result, rev: 0, kind: 'tool_result', input_command_id: run, parent_block_id: call, agent: 'orchestrator', model: MODEL, tool_name: null, summary: opts.failed ? 'error' : null, approved_by: null } });
+    hub.append(scope, { kind: 'block_final', conversation_id: id, payload: { block_id: result, rev: 1, text: opts.result, checksum: sha(opts.result), text_omitted: false, summary: opts.failed ? 'error' : null } });
   }
   hub.flush();
   return { call, result };
