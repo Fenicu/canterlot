@@ -383,7 +383,7 @@ loginctl enable-linger "$USER"
 systemctl --user enable --now canterlot-worker
 ```
 
-Раннеры (1.46, только задачи, без сессий): машину с воркером помечают несущей `canterlot-hub machine set-carrier --machine-id <uuid>`, раннер создают `canterlot-hub machine add --name runner-a --role runner --parent <uuid несущей> --root-dir /srv/runner --rank 20 --labels build-host`. Хаб не запускает на раннере сессии, а токен раннера выдаёт только своей несущей; подробности в [docs/configuration.md](docs/configuration.md).
+Раннеры (1.46, только задачи, без сессий): машину с воркером помечают несущей `canterlot-hub machine set-carrier --machine-id <uuid>`, раннер создают `canterlot-hub machine add --name runner-a --role runner --parent <uuid несущей> --root-dir /srv/runner --rank 20 --labels build-host`. Хаб не запускает на раннере сессии, а токен раннера выдаёт только своей несущей; подробности в [docs/configuration.md](docs/configuration.md). Задачу владельца без разговора (с исходниками на нужном коммите и сбором результатов) отправляет на несущей `canterlot-worker job run --title gate --source @HEAD --output result --wait -- ./run.sh`: выход с кодом задачи, каталог результатов в `~/.local/state/canterlot-worker/job-outputs/<id>`; устройство в [docs/design/runners.md](docs/design/runners.md).
 
 **5. Вторая машина: оркестратор здесь, разработка там.** Оркестратор (Claude Code или Codex) остаётся на основной машине, а делегаты, сборки, запуски и выкатка идут на второй через её воркер. Между машинами нет ssh: воркер второй машины сам подключается к хабу, ему нужен только исходящий доступ к порту воркеров хаба. Код остаётся на второй машине; через хаб идут ленты сессий и вывод команд, которые запросил оркестратор.
 
