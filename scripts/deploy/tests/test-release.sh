@@ -177,6 +177,29 @@ assert_eq "$(rres status)/$(rres published)" "done/yes" "result: done, published
 teardown_case
 case_end
 
+case_begin "ship accepts an attestation written by a gate that ran on a runner (runner= line)"
+setup_release runner-attest
+attest_head
+ATTEST_SHA="$(git -C "${RREPO}" rev-parse HEAD)"
+printf 'logs=.superpowers/gate/example\nrunner=runner-a\nsummary=ab12cd34 npm=0 check=0 7s deploy=0 3s web=0 9s\n' \
+    >>"${RREPO}/.superpowers/gate/${ATTEST_SHA}.ok"
+cutover_plan "${HAPPY_PLAN[@]}"
+run_release ship "${RVER}"
+assert_eq "${RREL_RC}" "0" "exit 0"
+assert_eq "$(rres status)/$(rres published)" "done/yes" "result: done, published"
+teardown_case
+case_end
+
+case_begin "ship refuses a runner attestation that records a failed step"
+setup_release runner-attest-failed
+attest_head
+ATTEST_SHA="$(git -C "${RREPO}" rev-parse HEAD)"
+printf 'runner=runner-a\ncheck_exit=1\n' >>"${RREPO}/.superpowers/gate/${ATTEST_SHA}.ok"
+run_release ship "${RVER}"
+assert_refused "records check_exit=1"
+teardown_case
+case_end
+
 case_begin "ship refuses an attestation produced with test seams"
 setup_release seams
 attest_head
