@@ -6,6 +6,7 @@
   import type { Runtime } from '#lib/app/runtime.js';
   import { deleteSchedule, pauseSchedule, resumeSchedule, scheduleRuns } from '#lib/api/client.js';
   import Button from '#lib/ui/Button.svelte';
+  import EmptyMark from '#lib/ui/EmptyMark.svelte';
   import { SchedulesStore } from '#lib/stores/schedules.svelte.js';
   import ScheduleEditor from './ScheduleEditor.svelte';
   import ScheduleDetail from './ScheduleDetail.svelte';
@@ -101,7 +102,7 @@
     {#if notice}<p class="error" role="alert">{notice}</p>{/if}
     {#if store.error}<p class="error" role="alert">{store.error}<Button onclick={() => store.load()}>Повторить</Button></p>{/if}
     {#if store.items.length === 0 && !store.error}
-      <p class="empty">Расписаний пока нет. Создайте первое, чтобы запускать повторяющиеся задачи без участия владельца</p>
+      <p class="empty marked"><EmptyMark inline name="clock" />Расписаний пока нет. Создайте первое, чтобы запускать повторяющиеся задачи без участия владельца</p>
     {/if}
     <div class="list" data-schedules-list>
       {#each store.items as item (item.id)}
@@ -152,7 +153,7 @@
   .head { display: flex; align-items: center; justify-content: space-between; gap: var(--s4); flex-wrap: wrap; }
   h2 { margin: var(--s0); font-size: var(--fs-title); font-weight: var(--weight-semibold); }
   .note, .empty { margin: var(--s0); color: var(--muted); font-size: var(--fs-sm); }
-  .error { margin: var(--s0); color: var(--danger); }
+  .empty.marked { display: flex; align-items: flex-start; gap: var(--s3); }  .error { margin: var(--s0); color: var(--danger); }
   .add { text-decoration: none; }
   .list { display: grid; gap: var(--s3); }
   .row { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--s4); padding: var(--s6); border-radius: var(--radius-card); background: var(--surface); }

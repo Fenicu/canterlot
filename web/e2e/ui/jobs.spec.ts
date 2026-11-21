@@ -154,6 +154,38 @@ test('the_machine_jobs_section_lists_running_and_recent_jobs_and_opens_the_sheet
   await expect(sheet(page).locator('[data-role="job-state"]')).toHaveText('идёт');
 });
 
+test('running_jobs_in_the_machine_section_carry_the_pen_and_finished_ones_do_not', async ({ page }) => {
+  const { seed, api, hub } = await boot(page, '/machines');
+  await page.locator('main').getByRole('radio', { name: 'machine-b', exact: true }).check();
+  const section = page.locator('[data-machine-jobs]');
+  const running = section.locator(`[data-job="${seed.running.id}"]`);
+  await expect(running).toContainText('идёт');
+  await expect(running.locator('[data-job-mark] .write')).toHaveCount(1);
+  expect(await running.locator('.write i').first().evaluate((node) => getComputedStyle(node).animationName)).not.toBe('none');
+  await expect(section.locator(`[data-job="${seed.done.id}"]`).locator('.write')).toHaveCount(0);
+  // Задача кончилась: перо уходит вместе со словом «идёт».
+  changeJob(hub, api, seed.running.id, { state: 'succeeded', exit_code: 0, duration_ms: 4000 });
+  await expect(running.locator('.write')).toHaveCount(0);
+  // Без движения перо стоит написанным.
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  const other = seedJob(api, seed.machine, { state: 'running', title: 'Сборка образа', shell: 'make image', created_at: new Date().toISOString() });
+  await page.goto('/machines');
+  await page.locator('main').getByRole('radio', { name: 'machine-b', exact: true }).check();
+  const row = section.locator(`[data-job="${other.id}"]`);
+  await expect(row.locator('.write')).toHaveCount(1);
+  expect(await row.locator('.write i').evaluateAll((nodes) => nodes.map((node) => getComputedStyle(node).animationName))).toEqual(['none', 'none', 'none']);
+});
+
+test('a_running_job_on_a_machine_without_a_link_does_not_write', async ({ page }) => {
+  const { seed, api } = await boot(page, '/machines');
+  const stale = seedJob(api, seed.machine, { state: 'running', title: 'Зависший прогон', shell: 'sleep 99', machine_offline: true, created_at: new Date().toISOString() });
+  await page.goto('/machines');
+  await page.locator('main').getByRole('radio', { name: 'machine-b', exact: true }).check();
+  const row = page.locator(`[data-machine-jobs] [data-job="${stale.id}"]`);
+  await expect(row).toContainText('машина не на связи');
+  await expect(row.locator('.write')).toHaveCount(0);
+});
+
 test('the_machine_jobs_section_is_empty_for_a_machine_without_jobs_and_shows_a_lost_job_in_words', async ({ page }) => {
   const { api, seed } = await boot(page, '/machines');
   await expect(page.locator('main').getByRole('heading', { name: 'workstation' })).toBeVisible();

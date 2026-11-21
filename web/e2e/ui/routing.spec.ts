@@ -4,6 +4,7 @@ import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
 import { seedConversation } from '../../testing/fake-hub/seed';
 import { DEEPSEEK, seedRoutedSpawn, seedRoutingCatalog, seedRoutingWhitelist } from '../../testing/fixtures/routing';
 import { expect, test } from './fixtures';
+import { noMotion, slowMotion } from './ink-motion';
 
 const OWNER = '00000000-0000-4000-8000-0000000000d3';
 const N = ' ';
@@ -46,6 +47,28 @@ test.describe('редактор маршрутизации', () => {
     expect(savedModels(api, 'bugfix')).toEqual(['opus[1m]', DEEPSEEK]);
     expect((api.routingPolicy as Saved).task_types.bugfix!.title).toBe('Исправление');
     await expect(page.getByRole('button', { name: 'Сохранить' })).toBeDisabled();
+  });
+
+  test('a_reordered_candidate_slides_to_its_new_place_and_stands_still_without_motion', async ({ page }) => {
+    await bootEditor(page);
+    const bugfix = page.locator('[data-task-key="bugfix"]');
+    const sliding = () => bugfix.locator('[data-candidate]').evaluateAll((nodes) => nodes.filter((node) => node.getAnimations().some((animation) => {
+      const effect = animation.effect;
+      return effect instanceof KeyframeEffect && Number(effect.getComputedTiming().duration) > 0 && effect.getKeyframes().some((frame) => 'transform' in frame);
+    })).length);
+    await slowMotion(page);
+    const order = () => bugfix.locator('[data-candidate]').evaluateAll((nodes) => nodes.map((node) => node.getAttribute('data-pair')));
+    const [first, second] = await order();
+    await page.getByRole('button', { name: 'Опустить DeepSeek' }).click();
+    // Обе строки меняются местами плавно: порядок уже новый, а положение ещё в пути.
+    expect(await order()).toEqual([second, first]);
+    await expect.poll(sliding).toBe(2);
+    await expect.poll(sliding, { timeout: 15_000 }).toBe(0);
+    // Без движения строки встают на место сразу.
+    await noMotion(page);
+    await page.getByRole('button', { name: 'Поднять DeepSeek' }).click();
+    expect(await order()).toEqual([first, second]);
+    expect(await sliding()).toBe(0);
   });
 
   test('number_fields_show_their_whole_value', async ({ page }) => {
