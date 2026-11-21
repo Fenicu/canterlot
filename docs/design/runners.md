@@ -163,7 +163,7 @@ canterlot-worker job run --title T [--machine NAME|auto] [--labels a,b] [--expec
 
 ## 5. Тесты
 
-`tests/it/carrier.rs` работает против настоящего непривилегированного `/usr/sbin/sshd` на свободном порту, с временными ключами хоста и клиента, входом только по ключу и `AllowStreamLocalForwarding yes` (`tests/it/support/sshd.rs`). Сеанс получает свои `HOME` и `XDG_RUNTIME_DIR` во временном каталоге (`SetEnv`), поэтому запущенный на нём настоящий воркер не касается ни домашнего каталога, ни рабочих сокетов хозяина теста. Носитель направляется на сервер через временный `ssh_config` (`[runners].ssh_config`, ключ для тестов); хаб — `ProtocolHub` с TLS на loopback; обмен носителя с хабом — подмена `RunnerControl`.
+`tests/it/carrier.rs` работает против настоящего непривилегированного `/usr/sbin/sshd` на свободном порту, с временными ключами хоста и клиента, входом только по ключу и `AllowStreamLocalForwarding yes` (`tests/it/support/sshd.rs`). Сеанс получает свои `HOME` и `XDG_RUNTIME_DIR` во временном каталоге (`SetEnv`), поэтому запущенный на нём настоящий воркер не касается ни домашнего каталога, ни рабочих сокетов хозяина теста. Носитель направляется на сервер через временный `ssh_config` (поле `RunnersConfig.ssh_config`, только в коде тестов, из файла не читается); хаб — `ProtocolHub` с TLS на loopback; обмен носителя с хабом — подмена `RunnerControl`.
 
 | Свойство | Проверка |
 | --- | --- |
