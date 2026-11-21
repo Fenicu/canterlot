@@ -18,7 +18,8 @@ ARG DEBIAN_FRONTEND=noninteractive
 # каталогов; procps — ps/pgrep/pkill из scripts/reap-stray-tests.sh
 # и e2e/stack/global-teardown.ts; openssl — самоподписанные сертификаты стенда;
 # libnss-wrapper — passwd-запись для uid, который приходит снаружи (её требует
-# initdb, а в контейнере пользователя нет).
+# initdb, а в контейнере пользователя нет); shellcheck и zstd — наборы
+# scripts/deploy/tests, которые гейт гоняет и в контейнере.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         binutils \
@@ -36,11 +37,13 @@ RUN apt-get update \
         procps \
         protobuf-compiler \
         python3 \
+        shellcheck \
         strace \
         tar \
         tzdata \
         util-linux \
         xz-utils \
+        zstd \
     && rm -rf /var/lib/apt/lists/*
 
 # Локаль en_US.UTF-8 — как у postgres:18.6-trixie (его ENV LANG): от неё зависит
