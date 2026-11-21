@@ -109,6 +109,12 @@ message ControlUp {
     // Только при согласованной возможности jobs_inplace_v1: живой хвост вывода задачи.
     // Непостоянное сообщение: теряется при разрыве, полный журнал уходит вложением.
     JobLogChunk job_log_chunk = 17;
+    // Только при согласованной возможности runners_v1 и только от несущей машины
+    // (`is_carrier`, роль `worker`): запрос токена раннера-потомка. Непостоянное сообщение.
+    RunnerTokenRequest runner_token_request = 18;
+    // Только при согласованной возможности runners_v1 и только от несущей машины:
+    // наблюдение достижимости раннера-потомка. Непостоянное сообщение.
+    RunnerObservation runner_observation = 19;
   }
 }
 
@@ -143,7 +149,60 @@ message ControlDown {
     SecretDeliver secret_deliver = 11;
     // Только при согласованной возможности schedule_precheck_v1.
     SchedulePrecheck schedule_precheck = 12;
+    // Только при согласованной возможности runners_v1: раннеры-потомки несущей машины.
+    // Шлётся при подключении и при каждом изменении списка. Непостоянное сообщение.
+    RunnersAssigned runners_assigned = 13;
+    // Только при согласованной возможности runners_v1: токен раннера, выданный ротацией.
+    // Это не `Command`: в outbox, журнал, лог, `Debug` и API он не попадает.
+    RunnerToken runner_token = 14;
+    // Только при согласованной возможности runners_v1: отказ в запросе токена.
+    RunnerTokenRefused runner_token_refused = 15;
   }
+}
+
+// Раннеры, чьим родителем является эта машина: строки `machines` с ролью `runner`, не
+// отозванные. Список полный, не приращение: новое сообщение заменяет прежнее.
+message RunnersAssigned {
+  repeated AssignedRunner runners = 1;
+}
+
+message AssignedRunner {
+  string machine_id = 1;
+  string name = 2;
+  // Корневой каталог раннера: абсолютный нормализованный путь на самом раннере.
+  string root_dir = 3;
+}
+
+// Несущая просит новый токен раннера. Хаб проверяет, что вызывающая — несущая и родитель
+// раннера, и ротирует токен. `reset_local_state` — как у `machine rotate-token`: новый каталог
+// состояния или смена поколения восстановления.
+message RunnerTokenRequest {
+  string machine_id = 1;
+  bool reset_local_state = 2;
+}
+
+// Токен живёт только в этом сообщении: несущая передаёт его раннеру по SSH, не записывая.
+message RunnerToken {
+  string machine_id = 1;
+  string installation_id = 2;
+  string restore_generation = 3;
+  string token = 4;
+}
+
+message RunnerTokenRefused {
+  string machine_id = 1;
+  // `not_carrier`, `not_parent`, `revoked` или `unknown_machine`.
+  string code = 2;
+}
+
+// Последнее наблюдение несущей за достижимостью раннера. Хаб кладёт его в
+// `runner_observations`; по нему считается `offline` (см. `machines::runner_availability`).
+message RunnerObservation {
+  string machine_id = 1;
+  bool reachable = 2;
+  uint32 consecutive_failures = 3;
+  // Миллисекунды Unix по часам несущей; хаб приводит их к своему времени.
+  uint64 observed_at = 4;
 }
 
 message DataUp {

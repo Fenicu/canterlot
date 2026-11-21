@@ -2725,3 +2725,83 @@ fn in_place_job_messages_keep_their_wire_shape_and_hide_the_command() {
     };
     assert_roundtrip(header);
 }
+
+// Раннеры как машины (`runners_v1`): номера полей неизменны, а токен раннера живёт только в
+// одном сообщении и не попадает в `Debug`.
+#[test]
+fn runner_messages_keep_their_wire_shape_and_hide_the_token() {
+    use canterlot_proto::worker::v1::{
+        AssignedRunner, ControlDown, ControlUp, RunnerObservation, RunnerToken,
+        RunnerTokenRefused, RunnerTokenRequest, RunnersAssigned, control_down, control_up,
+    };
+    const TOKEN: &str = "canterlot-runner-token-PROBE-value";
+
+    let assigned = ControlDown {
+        msg: Some(control_down::Msg::RunnersAssigned(RunnersAssigned {
+            runners: vec![AssignedRunner {
+                machine_id: "runner".into(),
+                name: "runner-a".into(),
+                root_dir: "/srv/runner".into(),
+            }],
+        })),
+    };
+    assert_eq!(assigned.encode_to_vec()[0], 0x6A, "ControlDown field 13");
+    assert_roundtrip(assigned);
+
+    let token = RunnerToken {
+        machine_id: "runner".into(),
+        installation_id: "installation".into(),
+        restore_generation: "1".into(),
+        token: TOKEN.into(),
+    };
+    assert!(
+        !format!("{token:?}").contains(TOKEN),
+        "token must stay out of Debug"
+    );
+    let down = ControlDown {
+        msg: Some(control_down::Msg::RunnerToken(token)),
+    };
+    assert!(
+        !format!("{down:?}").contains(TOKEN),
+        "token must stay out of the Debug of the envelope"
+    );
+    assert_eq!(down.encode_to_vec()[0], 0x72, "ControlDown field 14");
+    assert_roundtrip(down);
+
+    let refused = ControlDown {
+        msg: Some(control_down::Msg::RunnerTokenRefused(RunnerTokenRefused {
+            machine_id: "runner".into(),
+            code: "not_carrier".into(),
+        })),
+    };
+    assert_eq!(refused.encode_to_vec()[0], 0x7A, "ControlDown field 15");
+    assert_roundtrip(refused);
+
+    let request = ControlUp {
+        msg: Some(control_up::Msg::RunnerTokenRequest(RunnerTokenRequest {
+            machine_id: "runner".into(),
+            reset_local_state: true,
+        })),
+    };
+    assert_eq!(
+        request.encode_to_vec()[..2],
+        [0x92, 0x01],
+        "ControlUp field 18"
+    );
+    assert_roundtrip(request);
+
+    let observation = ControlUp {
+        msg: Some(control_up::Msg::RunnerObservation(RunnerObservation {
+            machine_id: "runner".into(),
+            reachable: false,
+            consecutive_failures: 3,
+            observed_at: 1_700_000_000_000,
+        })),
+    };
+    assert_eq!(
+        observation.encode_to_vec()[..2],
+        [0x9A, 0x01],
+        "ControlUp field 19"
+    );
+    assert_roundtrip(observation);
+}
