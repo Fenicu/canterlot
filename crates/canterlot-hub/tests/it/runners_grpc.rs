@@ -476,7 +476,7 @@ async fn observations_are_stored_only_from_the_carrier(pool: PgPool) -> TestResu
                 assert_eq!(row, (false, 3, host.carrier.machine_id));
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            tokio::task::yield_now().await;
         }
     })
     .await?;
