@@ -615,6 +615,10 @@ async fn run_source(
             crate::conversations::lock_owner(&mut tx, caller.owner_id).await?;
         }
         jobs::lock_machine(&mut tx, target).await?;
+    } else {
+        // `auto`: расстановка возьмёт замки несущей и раннеров, а диспетчер машины берёт замок
+        // машины раньше допуска заказчика. Тот же порядок и здесь: машины, потом допуск.
+        place::lock_candidates(&mut tx, carrier).await?;
     }
     jobs::lock_admission(&mut tx, &[caller.conversation_id]).await?;
     let facts = jobs::caller_facts(&mut tx, caller.conversation_id)

@@ -25,7 +25,7 @@ pub const PLACEMENT_CLOUD: &str = "cloud";
 
 /// Кандидат на размещение: сама несущая (ранг 0) или её раннер.
 #[derive(sqlx::FromRow, Debug, Clone)]
-struct Candidate {
+pub(crate) struct Candidate {
     id: Uuid,
     rank: i32,
     labels: Vec<String>,
@@ -81,6 +81,21 @@ async fn candidates(conn: &mut PgConnection, carrier: Uuid) -> Result<Vec<Candid
     .bind(carrier)
     .fetch_all(conn)
     .await
+}
+
+/// Замки машин несущей и её раннеров: все сразу и по возрастанию идентификатора. Заявка `auto`
+/// берёт их до допуска заказчика (`lock_admission`), как диспетчер машины
+/// (`dispatch_machine_in_tx`: замок машины, потом допуск), поэтому пути не замыкают цикл.
+/// Замок транзакционный и повторяемый: расстановка после этого берёт те же замки снова.
+pub(crate) async fn lock_candidates(
+    conn: &mut PgConnection,
+    carrier: Uuid,
+) -> Result<Vec<Candidate>, sqlx::Error> {
+    let all = candidates(conn, carrier).await?;
+    for candidate in &all {
+        lock_machine(conn, candidate.id).await?;
+    }
+    Ok(all)
 }
 
 /// Задача, которую можно когда-нибудь разместить: есть настроенное место с её метками среди
@@ -299,11 +314,7 @@ pub async fn place_waiting_in_tx(
     if waiting.is_empty() {
         return Ok(0);
     }
-    let mut all = candidates(conn, carrier).await?;
-    // Замки всех машин сразу и по возрастанию: параллельные расстановки не замыкают цикл.
-    for candidate in &all {
-        lock_machine(conn, candidate.id).await?;
-    }
+    let mut all = lock_candidates(conn, carrier).await?;
     all.sort_by(|a, b| {
         b.placement_rank(carrier)
             .cmp(&a.placement_rank(carrier))

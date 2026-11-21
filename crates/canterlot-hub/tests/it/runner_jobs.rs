@@ -625,6 +625,46 @@ async fn two_hubs_placing_at_once_never_bind_one_slot_twice(pool: PgPool) {
     assert_eq!(staging, 1);
 }
 
+/// Заявка `auto` берёт допуск заказчика, а расстановка после него замки машин; диспетчер
+/// машины берёт их в обратном порядке. Без общего порядка параллельные пути замыкают цикл, и
+/// Postgres прерывает один из них: вызывающий видит `internal`. Замки кандидатов берутся до
+/// допуска, и все вызовы проходят.
+#[sqlx::test(migrations = "./migrations")]
+async fn auto_submit_and_machine_dispatch_never_deadlock(pool: PgPool) {
+    let mut fx = Fx::new(pool).await;
+    let runner = fx.runner("runner-a", 5, &[], 2, true).await;
+    let first = job_id(&fx.call("job.run", named("runner-a", json!({}))).await.unwrap());
+    let second = job_id(&fx.call("job.run", named("runner-a", json!({}))).await.unwrap());
+    sqlx::query("update machines set jobs_max_running=1 where id=$1")
+        .bind(runner)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    fx.staged(fx.carrier, first).await;
+    fx.staged(fx.carrier, second).await;
+    assert_eq!(fx.state(second).await, "queued");
+    let fx = Arc::new(fx);
+    let mut tasks = Vec::new();
+    for round in 0..12 {
+        let on = fx.clone();
+        tasks.push(tokio::spawn(async move {
+            on.auto(json!({"placement": ["runner"], "title": format!("auto {round}")}))
+                .await
+                .map(|_| ())
+                .map_err(|error| format!("auto: {error:?}"))
+        }));
+        let pool = fx.pool.clone();
+        tasks.push(tokio::spawn(async move {
+            sweep::dispatch_machine(&pool, runner)
+                .await
+                .map_err(|error| format!("dispatch: {error}"))
+        }));
+    }
+    for task in tasks {
+        task.await.unwrap().unwrap();
+    }
+}
+
 // ───────── Отказы при заявке ─────────
 
 #[sqlx::test(migrations = "./migrations")]
