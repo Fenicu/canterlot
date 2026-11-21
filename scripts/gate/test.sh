@@ -515,16 +515,21 @@ grep -q 'продолжает работать' "$out" || { cat "$out" >&2; fail
 
 # --- scripts/gate/runner-gate.sh: на раннере, в подготовленной рабочей копии ---
 export FAKE_DOCKER_CALLS="$tmp/docker-calls"
+# Рабочая копия раннера — связанный worktree bare-репозитория, как её готовит
+# носитель (<корень>/repos/<домен>/<ключ>.git и <корень>/jobs/<домен>/<задача>): её
+# .git — файл, указывающий в общий каталог git вне рабочей копии.
 new_runner_worktree() {
-    local root=$1 dir
+    local root=$1 seed dir bare
+    seed="$root/seed"
     dir="$root/jobs/personal/job1"
-    mkdir -p "$dir/scripts/gate" "$dir/docker/gate" "$dir/web"
-    cp scripts/gate/runner-gate.sh scripts/gate/in-container.sh "$dir/scripts/gate/"
-    printf 'FROM scratch\n' >"$dir/docker/gate/Dockerfile"
-    printf '[toolchain]\nchannel = "1.99.1"\n' >"$dir/rust-toolchain.toml"
-    printf '{"packages":{"node_modules/playwright-core":{"version":"1.64.1"}}}\n' >"$dir/web/package-lock.json"
+    bare="$root/repos/personal/key.git"
+    mkdir -p "$seed/scripts/gate" "$seed/docker/gate" "$seed/web" "$root/repos/personal" "$root/jobs/personal"
+    cp scripts/gate/runner-gate.sh scripts/gate/in-container.sh "$seed/scripts/gate/"
+    printf 'FROM scratch\n' >"$seed/docker/gate/Dockerfile"
+    printf '[toolchain]\nchannel = "1.99.1"\n' >"$seed/rust-toolchain.toml"
+    printf '{"packages":{"node_modules/playwright-core":{"version":"1.64.1"}}}\n' >"$seed/web/package-lock.json"
     (
-        cd "$dir"
+        cd "$seed"
         git init -q
         git config user.email gate@example.invalid
         git config user.name gate
@@ -533,7 +538,30 @@ new_runner_worktree() {
         git add .
         git commit -qm init
     )
+    git clone -q --bare "$seed" "$bare"
+    git -C "$bare" worktree add -q --detach "$dir" "$(git -C "$seed" rev-parse HEAD)"
     : >"$FAKE_DOCKER_CALLS"
+}
+# Видит ли контейнер git рабочей копии? Её .git — файл с путём вне рабочей копии, а
+# внутри контейнера git читает его по тому же пути: каждый из каталогов (gitdir и общий
+# каталог) должен лежать под монтированием, у которого путь в контейнере равен пути на
+# хосте. Без этого `git -C /src rev-parse HEAD` в контейнере падает.
+assert_git_mounted() {
+    local line=$1 wt=$2 what=$3 gitdir common dir ok mount host cont mounts
+    mapfile -t mounts < <(grep -oE -- '-v [^ ]+' <<<"$line" | cut -d' ' -f2)
+    gitdir=$(sed -n 's/^gitdir: //p' "$wt/.git")
+    [[ -n "$gitdir" && -d "$gitdir" ]] || fail "$what: у $wt нет связанного gitdir"
+    common=$(cd "$gitdir" && cd "$(cat commondir)" && pwd -P)
+    for dir in "$gitdir" "$common"; do
+        ok=0
+        for mount in "${mounts[@]}"; do
+            host=${mount%%:*}
+            cont=${mount#*:}
+            cont=${cont%%:*}
+            if [[ "$host" == "$cont" && ( "$dir" == "$host" || "$dir" == "$host"/* ) ]]; then ok=1; fi
+        done
+        ((ok)) || fail "$what: каталог git $dir не смонтирован в контейнер по своему пути: $line"
+    done
 }
 rg_env=(env CANTERLOT_DOCKER="$fake_docker")
 
@@ -571,6 +599,7 @@ grep -q -- '--memory [0-9]\+m' <<<"$run_line" || fail 'runner-gate: нет --mem
 for cache in cargo target npm playwright; do
     grep -qF -- "-v $rr/cache/$cache:" <<<"$run_line" || fail "runner-gate: кэш $cache не под корнем раннера"
 done
+assert_git_mounted "$run_line" "$rwt" 'runner-gate'
 grep -qF -- "-v $rwt/.gate-out:/out" <<<"$run_line" || fail 'runner-gate: результат не в ./.gate-out'
 grep -qF -- "-v $rwt/scripts/gate/in-container.sh:/build/in-container.sh:ro" <<<"$run_line" || fail 'runner-gate: in-container.sh не из этой рабочей копии'
 grep -qE -- "canterlot-gate:[0-9a-f]{12} bash /build/in-container.sh --src /src --out /out --sha ${rsha:0:12}" <<<"$run_line" \
@@ -615,6 +644,20 @@ wait "$rg_pid" || rg_rc=$?
 name=$(sed -n 's/^run .*--name \(canterlot-gate-[0-9a-f]*-[0-9a-f]*\) .*/\1/p' "$FAKE_DOCKER_CALLS")
 [[ -n "$name" ]] || { cat "$FAKE_DOCKER_CALLS" >&2; fail 'runner-gate: не нашли имя контейнера в docker run'; }
 grep -qx "kill $name" "$FAKE_DOCKER_CALLS" || { cat "$FAKE_DOCKER_CALLS" >&2; fail 'runner-gate: TERM не убил контейнер по имени'; }
+
+# gate-remote.sh --local: рабочая копия — связанный worktree этого репозитория, и
+# контейнеру нужен общий каталог git по его собственному пути (иначе in-container.sh не
+# сверит HEAD). Docker подменён, рабочая копия убирается скриптом сама.
+: >"$FAKE_DOCKER_CALLS"
+export FAKE_DOCKER_WRITE=1
+run 0 env CANTERLOT_DOCKER="$fake_docker" CANTERLOT_GATE_OUT="$tmp/gr-out" CANTERLOT_GATE_CACHE="$tmp/gr-cache" \
+    bash "$gate" HEAD --local
+unset FAKE_DOCKER_WRITE
+run_line=$(grep '^run ' "$FAKE_DOCKER_CALLS") || { cat "$FAKE_DOCKER_CALLS" >&2; fail 'gate-remote --local: нет docker run'; }
+common=$(cd "$(git rev-parse --git-common-dir)" && pwd -P)
+src_host=$(sed -n 's/.* -v \([^ ]*\):\/src .*/\1/p' <<<"$run_line")
+[[ "$src_host" == "$common"/canterlot-gate/src-* ]] || fail "gate-remote --local: рабочая копия не там: $src_host"
+grep -qF -- " -v $common:$common:ro " <<<"$run_line" || fail "gate-remote --local: общий каталог git не смонтирован только на чтение: $run_line"
 
 if command -v shellcheck >/dev/null 2>&1; then
     shellcheck scripts/gate.sh scripts/gate-coverage.sh scripts/gate/test-pw-selection.sh scripts/gate-remote.sh \

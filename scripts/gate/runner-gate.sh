@@ -97,6 +97,13 @@ on_signal() {
 trap 'on_signal 130' INT
 trap 'on_signal 143' TERM
 
+# Рабочая копия — связанный worktree: её .git — файл, указывающий в общий каталог git
+# (<корень>/repos/<домен>/<ключ>.git) вне рабочей копии. Контейнер видит только /src, и без
+# общего каталога по его собственному пути `git -C /src rev-parse` падает до первого шага.
+# git в гейте только читает (rev-parse, status, diff, merge-base), поэтому только чтение.
+git_common=$(git rev-parse --path-format=absolute --git-common-dir) || die 'не удалось найти общий каталог git'
+[[ "$git_common" == /* && -d "$git_common" ]] || die "общий каталог git не найден: $git_common"
+
 run_args=(
     --rm --init --name "$name"
     --user "$(id -u):$(id -g)"
@@ -105,6 +112,7 @@ run_args=(
     --cap-add SYS_PTRACE
     -v "$cache/tmp:/tmp"
     -v "$wt:/src"
+    -v "$git_common:$git_common:ro"
     -v "$cache/cargo:/cache/cargo"
     -v "$cache/target:/src/target"
     -v "$cache/npm:/cache/npm"

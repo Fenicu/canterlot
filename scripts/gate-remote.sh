@@ -97,6 +97,7 @@ src=""
 script_path="$in_container"
 cache_root=""
 worktree_parent=""
+git_common=""
 cleaned=0
 
 # Уборка повторяется и на выходе по ошибке: рабочая копия и ref не должны
@@ -163,8 +164,11 @@ if [[ "$mode" == remote ]]; then
         "$src" "$remote_repo" "$remote_repo" "$remote_base" "$remote_repo" "$commit")
     remote "$cmd" || die "не удалось создать рабочую копию $src на $host"
     head=$(remote "git -C $(q "$src") rev-parse --short=12 HEAD 2>/dev/null || true")
+    git_common=$(remote "git --git-dir $(q "$remote_repo") rev-parse --absolute-git-dir") \
+        || die "не удалось узнать общий каталог git на $host"
 else
-    common=$(cd "$repo" && cd "$(git rev-parse --git-common-dir)" && pwd)
+    common=$(cd "$repo" && cd "$(git rev-parse --git-common-dir)" && pwd -P)
+    git_common=$common
     worktree_parent="$common/canterlot-gate"
     src="$worktree_parent/src-$sha12"
     mkdir -p "$worktree_parent"
@@ -238,6 +242,11 @@ run_args=(
     # и другое; каталог чистит in-container.sh в начале прогона.
     -v "$cache_root/tmp:/tmp"
     -v "$src:/src"
+    # Рабочая копия — связанный worktree: её .git — файл, указывающий в общий каталог git
+    # (bare-репозиторий на сборочной машине или .git этой копии). Контейнеру он нужен по
+    # собственному пути, иначе `git -C /src rev-parse` в in-container.sh падает до первого
+    # шага. git в гейте только читает, поэтому только чтение.
+    -v "$git_common:$git_common:ro"
     -v "$cache_root/cargo:/cache/cargo"
     -v "$cache_root/target:/src/target"
     -v "$cache_root/npm:/cache/npm"
