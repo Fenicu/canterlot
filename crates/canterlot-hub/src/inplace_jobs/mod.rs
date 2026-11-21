@@ -176,6 +176,8 @@ pub struct Job {
     pub outputs_note: Option<String>,
     pub outputs_files: Option<Value>,
     pub owner_job: bool,
+    /// Названная в заявке машина, пока задача ждёт на ней свободного места.
+    pub requested_machine_id: Option<Uuid>,
     pub outcome_state: Option<String>,
     pub outcome_reason: Option<String>,
     pub collecting_at: Option<DateTime<Utc>>,

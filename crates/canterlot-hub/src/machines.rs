@@ -98,20 +98,45 @@ pub async fn revoke(pool: &PgPool, machine_id: Uuid) -> Result<bool, sqlx::Error
     .await
 }
 
-/// Незаконченные задачи на месте машины становятся `lost`; законченные не трогаются.
+/// Незаконченные задачи на месте машины становятся `lost`; законченные не трогаются. Так же
+/// заканчиваются ждущие раннер задачи этой машины как несущей (`carrier_id`) и задачи,
+/// названные на неё и ждущие места: машины больше нет, ждать некого.
 async fn lose_jobs_in_tx(
     conn: &mut sqlx::PgConnection,
     machine_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    use crate::inplace_jobs::{Outcome, State, finish_in_tx, lock_row};
     let ids: Vec<Uuid> = sqlx::query_scalar(
-        "select id from jobs where machine_id = $1
-           and state in ('staging','queued','dispatched','waiting_lease','running')
+        "select id from jobs where
+           (machine_id = $1
+              and state in ('staging','queued','dispatched','waiting_lease','running'))
+           or (state = 'waiting_runner' and (carrier_id = $1 or requested_machine_id = $1))
          order by created_at, id",
     )
     .bind(machine_id)
     .fetch_all(&mut *conn)
     .await?;
+    finish_lost_in_tx(conn, ids).await
+}
+
+/// Снятие пометки несущей: её ждущие раннер задачи (`carrier_id`) кончаются `lost`. Задачи,
+/// уже идущие на её раннерах или на ней самой, остаются: им нужна только живая связь.
+async fn lose_waiting_of_carrier_in_tx(
+    conn: &mut sqlx::PgConnection,
+    carrier: Uuid,
+) -> Result<(), sqlx::Error> {
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        "select id from jobs where state = 'waiting_runner' and carrier_id = $1
+         order by created_at, id",
+    )
+    .bind(carrier)
+    .fetch_all(&mut *conn)
+    .await?;
+    finish_lost_in_tx(conn, ids).await
+}
+
+/// Каждая задача кончается `lost` ровно один раз и с одним сообщением: законченная пропускается.
+async fn finish_lost_in_tx(conn: &mut sqlx::PgConnection, ids: Vec<Uuid>) -> Result<(), sqlx::Error> {
+    use crate::inplace_jobs::{Outcome, State, finish_in_tx, lock_row};
     for id in ids {
         let Some(job) = lock_row(&mut *conn, id).await? else {
             continue;
@@ -395,6 +420,8 @@ pub enum SetCarrierError {
 pub async fn set_carrier(pool: &PgPool, machine_id: Uuid, on: bool) -> Result<(), SetCarrierError> {
     crate::db::in_tx(pool, move |conn| {
         Box::pin(async move {
+            // Замок машины задач раньше строки машины, как у отзыва.
+            crate::inplace_jobs::lock_machine(&mut *conn, machine_id).await?;
             let role: Option<String> =
                 sqlx::query_scalar("select role from machines where id = $1 for update")
                     .bind(machine_id)
@@ -410,6 +437,10 @@ pub async fn set_carrier(pool: &PgPool, machine_id: Uuid, on: bool) -> Result<()
                 .bind(on)
                 .execute(&mut *conn)
                 .await?;
+            if !on {
+                // Без несущей ждущие её раннер задачи никто не расставит: они кончаются `lost`.
+                lose_waiting_of_carrier_in_tx(&mut *conn, machine_id).await?;
+            }
             Ok(())
         })
     })

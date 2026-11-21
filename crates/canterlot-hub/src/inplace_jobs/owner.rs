@@ -204,6 +204,12 @@ pub async fn submit(
                         "The machine is neither this carrier nor one of its runners",
                     )));
                 }
+                if !place::machine_has_labels(conn, target, &labels).await? {
+                    return Ok(Err(OwnerRefusal::new(
+                        "no_runner_can_satisfy",
+                        "The machine does not carry the labels of the job",
+                    )));
+                }
             } else if !place::satisfiable(conn, submitter, &labels, &placement).await? {
                 return Ok(Err(OwnerRefusal::new(
                     "no_runner_can_satisfy",

@@ -153,21 +153,48 @@ async fn bind_in_tx(
     .await
 }
 
-/// Привязка к названной машине без выбора (`machine` назван в заявке): место не проверяется,
-/// задача встанет в очередь машины после подготовки, как любая удалённая. Под замком машины.
+/// Метки задачи — подмножество меток машины. Для названной машины это условие допуска: имя
+/// не отменяет требования к раннеру (например, ядро для проверки).
+pub async fn machine_has_labels(
+    conn: &mut PgConnection,
+    machine: Uuid,
+    labels: &[String],
+) -> Result<bool, sqlx::Error> {
+    let have: Option<Vec<String>> = sqlx::query_scalar("select labels from machines where id=$1")
+        .bind(machine)
+        .fetch_optional(conn)
+        .await?;
+    Ok(have.is_some_and(|have| labels.iter().all(|label| have.contains(label))))
+}
+
+/// Привязка к названной машине без выбора (`machine` назван в заявке). Есть свободное место —
+/// задача идёт на подготовку; места нет — она остаётся в `waiting_runner` с названной машиной
+/// и ждёт её, а не встаёт в очередь машины мимо проверки места. Возвращает, привязана ли.
+/// Под замком машины.
 pub async fn bind_explicit_in_tx(
     conn: &mut PgConnection,
     job: &Job,
     carrier: Uuid,
     target: Uuid,
     correlation_id: Uuid,
-) -> Result<(), sqlx::Error> {
+) -> Result<bool, sqlx::Error> {
+    if occupied_in_tx(conn, target).await? >= max_running_in_tx(conn, target).await? {
+        sqlx::query(
+            "update jobs set requested_machine_id=$2, updated_at=clock_timestamp() where id=$1",
+        )
+        .bind(job.id)
+        .bind(target)
+        .execute(&mut *conn)
+        .await?;
+        return Ok(false);
+    }
     let root: Option<String> = sqlx::query_scalar("select root_dir from machines where id=$1")
         .bind(target)
         .fetch_optional(&mut *conn)
         .await?
         .flatten();
-    bind_target_in_tx(conn, job, carrier, target, root.as_deref(), correlation_id).await
+    bind_target_in_tx(conn, job, carrier, target, root.as_deref(), correlation_id).await?;
+    Ok(true)
 }
 
 async fn bind_target_in_tx(
@@ -251,8 +278,13 @@ pub async fn place_waiting_in_tx(
         }
         let mut chosen = None;
         for candidate in &all {
+            // Названная машина берёт только свою задачу, виды места на неё не действуют.
+            let allowed = match job.requested_machine_id {
+                Some(requested) => candidate.id == requested,
+                None => candidate.allowed_by(carrier, &job.placement),
+            };
             if !candidate.capable()
-                || !candidate.allowed_by(carrier, &job.placement)
+                || !allowed
                 || !candidate.has_labels(&job.labels)
                 || registry.availability(candidate.id) != Availability::Available
             {

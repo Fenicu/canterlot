@@ -191,6 +191,51 @@ pub async fn lost_sweep(
     Ok(lost)
 }
 
+/// Задача ждёт раннер дольше `timeout` (от подачи): кончается `canceled` с причиной
+/// `no_runner`, сообщение и итог терминалу уходят как при любом конце. `0` срок отключает.
+pub async fn waiting_timeout_sweep(
+    pool: &PgPool,
+    timeout: Duration,
+    now: DateTime<Utc>,
+) -> Result<usize, sqlx::Error> {
+    if timeout.is_zero() {
+        return Ok(0);
+    }
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        "select id from jobs
+         where state='waiting_runner' and created_at + make_interval(secs => $1) < $2
+         order by created_at, id limit 200",
+    )
+    .bind(timeout.as_secs_f64())
+    .bind(now)
+    .fetch_all(pool)
+    .await?;
+    let mut done = 0;
+    for id in ids {
+        let ended = crate::db::in_tx(pool, move |conn| {
+            Box::pin(async move {
+                let Some(job) = lock_row(conn, id).await? else {
+                    return Ok::<_, sqlx::Error>(false);
+                };
+                if job.state() != State::WaitingRunner {
+                    return Ok(false);
+                }
+                finish_in_tx(
+                    conn,
+                    &job,
+                    Outcome::bare(State::Canceled, Some("no_runner")),
+                    Uuid::now_v7(),
+                )
+                .await?;
+                Ok(true)
+            })
+        })
+        .await?;
+        done += usize::from(ended);
+    }
+    Ok(done)
+}
+
 /// Машины с задачами в очереди.
 async fn queued_machines(pool: &PgPool) -> Result<Vec<Uuid>, sqlx::Error> {
     sqlx::query_scalar("select distinct machine_id from jobs where state='queued'")
@@ -334,5 +379,6 @@ async fn sweep_once(
         }
     }
     place_sweep(pool, registry).await?;
+    waiting_timeout_sweep(pool, config.waiting_timeout, Utc::now()).await?;
     Ok(())
 }

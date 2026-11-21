@@ -667,6 +667,10 @@ async fn run_source(
         }
     }
     if let Some(target) = named_target {
+        // Имя не отменяет требования к машине: метки задачи должны быть и у названной.
+        if !place::machine_has_labels(&mut tx, target, &labels).await? {
+            return Err(ToolError::new(ToolErrorCode::NoRunnerCanSatisfy));
+        }
         let capable: Option<Vec<String>> =
             sqlx::query_scalar("select capabilities from machines where id=$1 and owner_id=$2")
                 .bind(target)

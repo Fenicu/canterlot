@@ -996,6 +996,10 @@ pub struct JobsConfig {
     /// Сколько несущая может готовить исходники: дольше задача заканчивается `failed`.
     #[serde(with = "humantime_serde")]
     pub stage_timeout: Duration,
+    /// Сколько задача ждёт раннер (`waiting_runner`): дольше она заканчивается `canceled` с
+    /// причиной `no_runner`. `0` ждёт без срока.
+    #[serde(with = "humantime_serde")]
+    pub waiting_timeout: Duration,
 }
 
 impl Default for JobsConfig {
@@ -1006,6 +1010,7 @@ impl Default for JobsConfig {
             outputs_cap: 512 * 1024 * 1024,
             collect_timeout: Duration::from_secs(10 * 60),
             stage_timeout: Duration::from_secs(15 * 60),
+            waiting_timeout: Duration::from_secs(24 * 3600),
         }
     }
 }
