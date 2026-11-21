@@ -570,11 +570,18 @@ async fn project(
                         None => (crate::machines::RunnerAvailability::Unknown, None),
                     };
                     if old_runner.as_deref() != Some(state.as_str()) {
-                        sqlx::query("update machines set runner_availability=$2 where id=$1")
-                            .bind(id)
-                            .bind(state.as_str())
-                            .execute(&mut *conn)
-                            .await?;
+                        // Время хаба, с которого раннер `offline`; любое другое состояние
+                        // его снимает. Правило этапа C отсчитывает от него десять минут.
+                        sqlx::query(
+                            "update machines set runner_availability=$2,
+                                    runner_offline_since=case when $2='offline'
+                                        then clock_timestamp() end
+                             where id=$1",
+                        )
+                        .bind(id)
+                        .bind(state.as_str())
+                        .execute(&mut *conn)
+                        .await?;
                         runner_changes.push((owner, id, state.as_str(), observed_at));
                     }
                 }

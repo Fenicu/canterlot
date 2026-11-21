@@ -1698,14 +1698,28 @@ async fn an_observation_changes_the_runners_availability_and_the_event_carries_i
         observed.timestamp_millis()
     );
     assert!(availability_event_is_valid(last), "{last}");
+    // Время хаба, с которого раннер `offline`, записано; повторный разбор его не сдвигает.
+    let since = |pool: PgPool| async move {
+        sqlx::query_scalar::<_, Option<chrono::DateTime<Utc>>>(
+            "select runner_offline_since from machines where id=$1",
+        )
+        .bind(runner)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    let offline_since = since(fx.pool.clone()).await.expect("offline_since is set");
+    assert!(Utc::now() - offline_since < chrono::TimeDelta::seconds(30));
     // Повторный разбор без перемен ничего не добавляет.
     project().await;
     assert_eq!(availability_events(&fx.pool).await.len(), events.len());
+    assert_eq!(since(fx.pool.clone()).await, Some(offline_since));
     // Воркер раннера подключился: `online`, возраст наблюдения остаётся в событии.
     fx.connect(runner);
     project().await;
     let events = availability_events(&fx.pool).await;
     assert_eq!(events.last().unwrap()["availability"], "online");
+    assert_eq!(since(fx.pool.clone()).await, None, "cleared when online");
     // Наблюдение устарело (старше трёх минут): отключённый раннер снова `unknown`.
     fx.sessions.pop();
     sqlx::query("update runner_observations set observed_at = now() - interval '10 minutes'")
@@ -1715,6 +1729,7 @@ async fn an_observation_changes_the_runners_availability_and_the_event_carries_i
     project().await;
     let events = availability_events(&fx.pool).await;
     assert_eq!(events.last().unwrap()["availability"], "unknown");
+    assert_eq!(since(fx.pool.clone()).await, None, "cleared when unknown");
 }
 
 // ───────── Вид задачи и `runners_list` ─────────
