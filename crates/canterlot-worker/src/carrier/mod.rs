@@ -151,6 +151,9 @@ pub struct CarrierSettings {
     pub ca_cert: PathBuf,
     pub ssh_config: Option<PathBuf>,
     pub worker_binary: Option<PathBuf>,
+    /// Только для тестов: хэш, под которым носитель объявляет свой бинарник. Расхождение с
+    /// содержимым изображает отправку, которая дошла до раннера обрубком.
+    pub worker_sha256: Option<String>,
     pub entries: Vec<RunnerSsh>,
     pub timings: Timings,
 }
@@ -162,6 +165,7 @@ impl CarrierSettings {
             ca_cert: config.ca_cert.clone(),
             ssh_config: config.runners.ssh_config.clone(),
             worker_binary: config.runners.worker_binary.clone(),
+            worker_sha256: None,
             entries: config.runners.ssh.clone(),
             timings: Timings::default(),
         }
@@ -304,7 +308,12 @@ pub async fn run(
     })
     .await;
     let local = match local {
-        Ok(Ok(local)) => Some(Arc::new(local)),
+        Ok(Ok(mut local)) => {
+            if let Some(sha256) = settings.worker_sha256.clone() {
+                local.sha256 = sha256;
+            }
+            Some(Arc::new(local))
+        }
         _ => {
             tracing::error!("carrier binary is unreadable; runner binaries will not be installed");
             None

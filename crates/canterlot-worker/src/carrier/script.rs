@@ -174,19 +174,33 @@ pub fn receive_file(root: &Path, name: &str, mode: Mode) -> String {
     } else {
         ""
     };
-    let chmod = if matches!(mode, Mode::Executable) {
-        format!(" && chmod 755 {root}/{name}.new")
+    format!("{umask}cat > {root}/{name}.new && mv -f {root}/{name}.new {root}/{name}")
+}
+
+/// Приём исполняемого файла: во временное имя, сверка sha256 с тем, что носитель посчитал у
+/// себя, и только потом `chmod` и переименование. Оборванная отправка (истёк предел, носитель
+/// перезапустился) кончается для удалённого `cat` обычным концом файла с кодом 0, поэтому без
+/// сверки обрубок встал бы на место рабочего бинарника. При расхождении старый бинарник не
+/// тронут, код выхода не ноль; недописанный `.new` следующая отправка перезапишет. Строка идёт
+/// в `ssh` как команда оболочки входа, поэтому только `&&` и конвейер: без групп `{ }`.
+pub fn receive_binary(root: &Path, name: &str, sha256: &str) -> String {
+    let root = root.display();
+    // Хэш приходит от нас же, но в текст скрипта он идёт буквально: только 64 hex-знака.
+    let sha256 = if sha256.len() == 64 && sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+        sha256
     } else {
-        String::new()
+        "invalid"
     };
-    format!("{umask}cat > {root}/{name}.new{chmod} && mv -f {root}/{name}.new {root}/{name}")
+    format!(
+        "cat > {root}/{name}.new && echo \"{sha256}  {root}/{name}.new\" | sha256sum -c - >/dev/null \
+         && chmod 755 {root}/{name}.new && mv -f {root}/{name}.new {root}/{name}"
+    )
 }
 
 #[derive(Clone, Copy)]
 pub enum Mode {
     Secret,
     Plain,
-    Executable,
 }
 
 pub fn remove_fatal(root: &Path) -> String {
@@ -313,6 +327,54 @@ mod tests {
         let light = Probe::parse(output, false);
         assert_eq!(light.bin_sha, None);
         assert_eq!(Probe::parse("", false), Probe::default());
+    }
+
+    /// Выполняет скрипт приёма бинарника настоящим `sh` в каталоге `root`; `stdin` — то, что
+    /// дошло по ssh (возможно, обрезанное).
+    fn run_receive(root: &Path, script: &str, stdin: &[u8]) -> bool {
+        use std::io::Write;
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .current_dir(root)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(stdin).unwrap();
+        child.wait().unwrap().success()
+    }
+
+    #[test]
+    fn a_cut_binary_upload_leaves_the_old_binary_in_place() {
+        use sha2::{Digest, Sha256};
+        let dir = tempfile::Builder::new()
+            .prefix("receive-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let root = dir.path();
+        std::fs::create_dir(root.join("bin")).unwrap();
+        let target = root.join("bin/canterlot-worker");
+        std::fs::write(&target, b"old binary").unwrap();
+        let full = b"new binary, complete".to_vec();
+        let sha = crate::carrier::hex(&Sha256::digest(&full));
+        let script = receive_binary(root, "bin/canterlot-worker", &sha);
+
+        // Отправка оборвалась: `cat` увидел конец файла и вышел с нулём, но хэш не сошёлся.
+        assert!(!run_receive(root, &script, &full[..7]));
+        assert_eq!(std::fs::read(&target).unwrap(), b"old binary");
+        // Пустая отправка — тоже обрыв.
+        assert!(!run_receive(root, &script, b""));
+        assert_eq!(std::fs::read(&target).unwrap(), b"old binary");
+
+        // Целая отправка заменяет файл и делает его исполняемым.
+        assert!(run_receive(root, &script, &full));
+        assert_eq!(std::fs::read(&target).unwrap(), full);
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert!(!root.join("bin/canterlot-worker.new").exists());
     }
 
     #[test]

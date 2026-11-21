@@ -281,7 +281,11 @@ async fn an_owner_job_with_source_and_outputs_runs_on_the_runner_end_to_end(pool
             backoff_reset_after: Duration::from_millis(500),
             ..Default::default()
         },
-        execution: Default::default(),
+        // Репозиторий владельца лежит в /tmp: источник обязан быть внутри разрешённых корней.
+        execution: canterlot_worker::config::ExecutionConfig {
+            allowed_workdir_roots: vec!["/tmp".into()],
+            ..Default::default()
+        },
         opencode: None,
         legacy_ignored: None,
         runners: RunnersConfig {

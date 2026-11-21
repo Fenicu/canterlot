@@ -360,9 +360,6 @@ impl Runner {
         if !probe.root_exists {
             return Ok(());
         }
-        if full {
-            state.need_full = false;
-        }
         // Нужен ли после этого круга запуск или перезапуск воркера.
         let mut restart = false;
         let mut stopped = !probe.alive;
@@ -393,6 +390,11 @@ impl Runner {
                 return Ok(());
             }
             restart = true;
+        }
+        // Полная сверка считается сделанной только после бинарника и CA: оборванная отправка
+        // выходит выше с `return`, `need_full` остаётся, и следующий круг сверяет хэш заново.
+        if full {
+            state.need_full = false;
         }
 
         // Токен и конфиг.
@@ -493,7 +495,9 @@ impl Runner {
     }
 
     async fn upload_binary(&self, local: &LocalBinary) -> Result<bool, Unreachable> {
-        let put = script::receive_file(self.root(), "bin/canterlot-worker", Mode::Executable);
+        // Отправка сверяется на раннере по хэшу, посчитанному носителем: обрубок не встанет на
+        // место рабочего бинарника, а код выхода не ноль возвращает круг присмотра к повтору.
+        let put = script::receive_binary(self.root(), "bin/canterlot-worker", &local.sha256);
         let output = self
             .tracked(self.ssh.run(
                 &[&put],
