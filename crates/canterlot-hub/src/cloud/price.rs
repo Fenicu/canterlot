@@ -280,10 +280,7 @@ mod tests {
 
     #[test]
     fn reservation_guards_overflow_and_negative_price() {
-        assert_eq!(
-            reservation_kopecks(i64::MAX, 60),
-            Err(PriceError::Overflow)
-        );
+        assert_eq!(reservation_kopecks(i64::MAX, 60), Err(PriceError::Overflow));
         assert_eq!(reservation_kopecks(-1, 60), Err(PriceError::Invalid));
         // Часов больше, чем помещается в i64.
         assert_eq!(
