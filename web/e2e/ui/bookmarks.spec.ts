@@ -9,6 +9,7 @@ import {
 	type BookmarksSeed
 } from '../../testing/fixtures/bookmarks';
 import { expect, test } from './fixtures';
+import { foldingCount, noMotion, slowMotion } from './ink-motion';
 
 const OWNER = '00000000-0000-4000-8000-0000000000d1';
 const CARD_KEY = 'answer:bookmark-card';
@@ -201,6 +202,47 @@ test('empty_bookmarks_screen_says_where_bookmarks_come_from', async ({ page }) =
 	await expect(page.locator('[data-bookmarks-empty]')).toHaveText(
 		'Здесь появятся сообщения, отмеченные закладкой в чате.'
 	);
+});
+
+test('empty_bookmarks_screen_inks_its_mark_once_and_stands_drawn_under_reduced_motion', async ({ page }) => {
+	await boot(page, { global: false });
+	await page.getByRole('button', { name: 'Избранное' }).click();
+	const mark = page.locator('[data-empty-mark="bookmark"] svg');
+	await expect(mark).toHaveAttribute('data-state', 'ink');
+	await expect(mark).toHaveAttribute('data-motion', 'on');
+	await expect.poll(() => mark.evaluate((node) => node.getAnimations({ subtree: true }).filter((animation) => animation.effect?.getComputedTiming().iterations === Infinity).length)).toBe(0);
+	await page.emulateMedia({ reducedMotion: 'reduce' });
+	await page.reload();
+	const still = page.locator('[data-empty-mark="bookmark"] svg');
+	await expect(still).toHaveAttribute('data-motion', 'off');
+	expect(await still.evaluate((node) => node.getAnimations({ subtree: true }).length)).toBe(0);
+});
+
+test('a_removed_bookmark_row_folds_away_and_a_page_of_rows_arrives_without_folding', async ({ page }) => {
+	const { api, seed } = await boot(page);
+	await page.getByRole('button', { name: 'Избранное' }).click();
+	const rows = page.locator('[data-bookmark-row]');
+	await expect(rows).toHaveCount(20);
+	await slowMotion(page);
+	// Следующая страница приходит строками сразу: складка нужна ушедшей строке, а не подгрузке.
+	await page.locator('[data-bookmarks-results]').evaluate((node) => {
+		node.dispatchEvent(new WheelEvent('wheel', { deltaY: 600 }));
+		node.scrollTop = node.scrollHeight;
+	});
+	await expect(rows).toHaveCount(23);
+	expect(await foldingCount(page, '[data-bookmark-row]')).toBe(0);
+
+	await rows.first().getByRole('button', { name: 'Убрать из избранного' }).click();
+	await expect.poll(() => foldingCount(page, '[data-bookmark-row]')).toBeGreaterThan(0);
+	await expect(page.locator('[data-bookmark-row][aria-hidden="true"]')).toHaveCount(1);
+	await expect(rows).toHaveCount(22, { timeout: 15_000 });
+	expect(api.hasBookmark(seed.journal, 'block', seed.journalBlockIds[0]!)).toBe(false);
+
+	// Без движения строка уходит сразу.
+	await noMotion(page);
+	await rows.first().getByRole('button', { name: 'Убрать из избранного' }).click();
+	await expect(rows).toHaveCount(21);
+	expect(await foldingCount(page, '[data-bookmark-row]')).toBe(0);
 });
 
 test('bookmark_changed_updates_the_message_counts_and_both_lists_without_a_reload', async ({ page }) => {

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { rowFold } from '#lib/ui/fold.js';
   import IconButton from '#lib/ui/IconButton.svelte';
   import { timeTip } from '#lib/ui/time-tip.js';
   import { bookmarkExcerpt, bookmarkStamp, bookmarkWho, type BookmarkView } from './model.js';
@@ -25,7 +26,8 @@
   const empty = $derived(entry.excerpt.trim().length === 0);
 </script>
 
-<li class="row" data-bookmark-row data-bookmark-id={entry.id}>
+<!-- Только уход: страница, подгруженная вниз списка, приходит строками сразу, а убранная строка складывается. -->
+<li class="row" data-bookmark-row data-bookmark-id={entry.id} out:rowFold>
   <button
     type="button"
     class="open"

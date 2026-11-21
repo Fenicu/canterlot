@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { tick } from 'svelte';
   import { browserRuntime } from '#lib/app/browser.js';
   import type { Runtime } from '#lib/app/runtime.js';
   import { deletePreset, listPresets } from '#lib/api/client.js';
@@ -6,6 +7,7 @@
   import { ApiError } from '#lib/api/http.js';
   import Button from '#lib/ui/Button.svelte';
   import ConfirmDialog from '#lib/ui/ConfirmDialog.svelte';
+  import { rowFoldWhen } from '#lib/ui/fold.js';
   import Pill from '#lib/ui/Pill.svelte';
   import SecondaryHeader from '../SecondaryHeader.svelte';
   import PresetEditor from './PresetEditor.svelte';
@@ -47,10 +49,20 @@
     runtime ? [...runtime.machines.items.values()].map((m) => ({ id: m.id, name: m.name })) : [],
   );
 
+  // Карточки складываются, когда пришли или ушли на месте (новая инструкция, удаление); смена вида
+  // перестраивает список сразу. `shown` — вид, чей список уже стоит на экране и отрисован.
+  let shown: 'instructions' | 'nudge' | null = null;
+  const fold = rowFoldWhen(() => shown === purpose);
+  async function settle(kind: 'instructions' | 'nudge'): Promise<void> {
+    await tick();
+    if (purpose === kind) shown = kind;
+  }
+
   async function load(): Promise<void> {
     error = '';
     try {
       runtime = await browserRuntime();
+      void settle(purpose);
     } catch {
       error = 'Не удалось загрузить инструкции. Повторите при восстановлении связи';
     }
@@ -60,6 +72,7 @@
     nudgeError = '';
     try {
       nudgePresets = (await listPresets('nudge')).data as PresetSummaryLike[];
+      void settle('nudge');
     } catch {
       nudgeError = 'Не удалось загрузить тексты толчка. Повторите при восстановлении связи';
     }
@@ -67,10 +80,12 @@
 
   function choose(next: 'instructions' | 'nudge'): void {
     purpose = next;
+    shown = null;
     deleting = null;
     creating = false;
     editing = null;
     if (next === 'nudge') void loadNudges();
+    else void settle('instructions');
   }
 
   async function remove(): Promise<void> {
@@ -127,7 +142,7 @@
         {#if deleteError}<p class="error" role="alert">{deleteError}</p>{/if}
       <ul>
         {#each presets as preset (preset.id)}
-          <li data-preset={preset.id} data-owner-card={preset.kind === 'owner' ? '' : undefined}>
+          <li data-preset={preset.id} data-owner-card={preset.kind === 'owner' ? '' : undefined} transition:fold>
             <div class="row">
               <strong>{preset.title}</strong>
               {#if preset.kind !== 'custom'}
