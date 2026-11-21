@@ -3,6 +3,8 @@
   import { fmt } from '#lib/format/ru.js';
   import { modelAliasNote, resolvedModelLabel } from '#lib/format/labels.js';
   import Icon from '#lib/ui/Icon.svelte';
+  import { inView } from '#lib/ui/in-view.js';
+  import { swapOn } from '#lib/ui/swap.js';
   import { timeTip } from '#lib/ui/time-tip.js';
   import type { ListRow } from '#lib/stores/list.svelte.js';
   import { colorVar } from './colors';
@@ -39,6 +41,9 @@
       return null;
     }
   }
+  // Кольцо дышит только у видимой строки: сто работающих сессий не держат сто петель прозрачности.
+  let visible = $state(false);
+  const seen = (value: boolean) => { visible = value; };
   const machines = $derived(runtime()?.machines.items ?? null);
   const machine = $derived(machines?.get(item.machine.id) ?? null);
   const line = $derived(rowLine(item, now, { title: catalogTitle(item, machine), machines: machines ? onlineMachines(machines.values()) : 1 }));
@@ -86,10 +91,10 @@
   }
 </script>
 
-<article class="row" data-state={mark.state} class:dim={mark.dim} class:strong={mark.strong} class:current class:child={depth > 0} class:depth-1={depth === 1} class:depth-2={depth >= 2} data-session={copy ? undefined : item.id} data-waiting={copy ? item.id : undefined} data-vendor={vendor ?? 'letter'} oncontextmenu={(event) => { event.preventDefault(); open(event); }}>
+<article class="row" data-state={mark.state} class:dim={mark.dim} class:strong={mark.strong} class:current class:child={depth > 0} class:depth-1={depth === 1} class:depth-2={depth >= 2} data-session={copy ? undefined : item.id} data-waiting={copy ? item.id : undefined} data-vendor={vendor ?? 'letter'} use:inView={seen} oncontextmenu={(event) => { event.preventDefault(); open(event); }}>
   {#if owner}<span class="owner" data-owner-color={item.color} style:--owner="var({owner})" aria-hidden="true"></span>{/if}
   <a href={resolve(`/c/${item.id}` as '/')} aria-current={current ? 'page' : undefined} onpointerdown={down} onpointerup={up} onpointercancel={up} onclick={click}>
-    <VendorAvatar {vendor} model={item.model_resolved || item.model} title={item.title} tone={mark.dot ?? 'none'} halo={mark.halo} dashed={mark.dashed} dim={mark.dim} size={depth > 0 ? 'small' : 'row'} />
+    <VendorAvatar {vendor} model={item.model_resolved || item.model} title={item.title} tone={mark.dot ?? 'none'} halo={mark.halo} dashed={mark.dashed} dim={mark.dim} breathe={visible && mark.state === 'running'} size={depth > 0 ? 'small' : 'row'} />
     <span class="sr-only">{mark.word}</span>
     <span class="main">
       <span class="l1">
@@ -101,7 +106,7 @@
       <span class="l2">
         <span class="activity" data-tone={line.tone} data-preview={line.preview ? '' : undefined}>
           <span class="sr-only">{vendor ? VENDOR_TITLES[vendor] : ''}</span>
-          {#if line.live}<span class="live" aria-hidden="true"></span>{/if}<span class="text">{line.text}</span>
+          {#if line.live}<span class="live" aria-hidden="true"></span>{/if}<span class="text" use:swapOn={{ text: line.text, key: `${mark.state}:${line.tone}` }}></span>
           {#if line.who}<span class="who" title={modelNote}>· {line.who}</span>{/if}
         </span>
         {#if depth > 0 && item.working_ms && !line.timed}
@@ -119,10 +124,8 @@
         {#if item.pinned}
           <span class="pin" data-pinned><span class="sr-only">Закреплена</span><Icon name="pin" filled /></span>
         {/if}
-        {#if item.unread_count > 1}
-          <span class="sr-only">Непрочитанных: {item.unread_count}</span><span class="count" aria-hidden="true">{item.unread_count}</span>
-        {:else if item.unread_count === 1}
-          <span class="sr-only">Есть непрочитанное</span><span class="count unread" aria-hidden="true">1</span>
+        {#if item.unread_count > 0}
+          <span class="sr-only">{item.unread_count > 1 ? `Непрочитанных: ${item.unread_count}` : 'Есть непрочитанное'}</span><span class="count" class:unread={item.unread_count === 1} aria-hidden="true" use:swapOn={{ text: String(item.unread_count), key: String(item.unread_count) }}></span>
         {/if}
       </span>
     </span>

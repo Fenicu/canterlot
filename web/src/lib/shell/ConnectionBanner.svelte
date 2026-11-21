@@ -1,12 +1,14 @@
 <script lang="ts">
   import { page } from '$app/state';
   import { announce } from '#lib/a11y/announce.js';
-  import { durationMs, easing, fadeMs, prefersReducedMotion } from '#lib/motion.js';
   import { fmt } from '#lib/format/ru.js';
   import type { ConnectionPhase } from '#lib/sync/connection.js';
   import type { ScopeStatus } from '#lib/sync/scope.js';
+  import { arrive } from '#lib/ui/arrive.js';
   import Button from '#lib/ui/Button.svelte';
   import Icon from '#lib/ui/Icon.svelte';
+  import InkIcon from '#lib/ui/InkIcon.svelte';
+  import { swapOn } from '#lib/ui/swap.js';
 
   let {
     phase,
@@ -112,16 +114,6 @@
     return () => observer.disconnect();
   });
 
-  /** Появление: короткий сдвиг на токен --shift-enter и прозрачность. Без движения остаётся только прозрачность. */
-  function arrive(node: HTMLElement) {
-    if (prefersReducedMotion()) return { duration: fadeMs('--duration-fast'), css: (t: number) => `opacity: ${t}` };
-    const shift = parseFloat(getComputedStyle(node).getPropertyValue('--shift-enter')) || 0;
-    return {
-      duration: durationMs('--duration-enter'),
-      easing: easing('--ease-enter'),
-      css: (t: number) => `opacity: ${t}; transform: translateY(${(t - 1) * shift}px)`
-    };
-  }
 </script>
 
 <div class="layer" class:ownSlot={ownSlot && !!view} bind:this={layer} style:--banner-top={offset === null ? undefined : `${offset}px`}>
@@ -133,8 +125,13 @@
       data-update={shown.kind === 'update' ? '' : undefined}
       transition:arrive
     >
-      <Icon name={shown.tone === 'warning' || shown.tone === 'danger' ? 'warning' : 'info'} />
-      <p>{shown.text}{#if stale && lastAt > 0}<span class="stamp">· данные на {fmt.clock(lastAt)}</span>{/if}</p>
+      <!-- У связи свой значок: пока её нет, это дышащий набросок; вернулась, и он прописывается один раз в тоне успеха. -->
+      {#if shown.kind === 'link'}
+        <span class="link" data-restored={shown.tone === 'success' ? '' : undefined}><InkIcon name={shown.tone === 'success' ? 'wifi' : 'wifiOff'} size="normal" state={shown.tone === 'success' ? 'ink' : 'sketch'} /></span>
+      {:else}
+        <Icon name={shown.tone === 'warning' || shown.tone === 'danger' ? 'warning' : 'info'} />
+      {/if}
+      <p><span class="words" use:swapOn={{ text: shown.text, key: `${shown.kind}:${shown.tone}` }}></span>{#if stale && lastAt > 0}<span class="stamp">· данные на {fmt.clock(lastAt)}</span>{/if}</p>
       {#if shown.action}<Button onclick={shown.action.run}>{shown.action.label}</Button>{/if}
     </div>
   {/if}
@@ -149,9 +146,13 @@
   [data-tone='warning'] { background: var(--warning-soft); }
   [data-tone='danger'] { background: var(--danger-soft); }
   .banner :global(svg) { flex: none; }
-  [data-tone='warning'] :global(svg) { color: var(--warning); }
-  [data-tone='danger'] :global(svg) { color: var(--danger); }
-  [data-tone='success'] :global(svg) { color: var(--success); }
+  /* Общий значок красится тоном баннера; значок связи красят чернила через --ink-*. */
+  [data-tone='warning'] > :global(svg) { color: var(--warning); }
+  [data-tone='danger'] > :global(svg) { color: var(--danger); }
+  [data-tone='success'] > :global(svg) { color: var(--success); }
+  .link { flex: none; display: inline-flex; --ink-live: var(--warning); --ink-rest: var(--warning); }
+  .link[data-restored] { --ink-live: var(--success); --ink-rest: var(--success); }
   p { flex: 1; min-width: 0; margin: 0; padding-block: var(--s2); overflow-wrap: anywhere; }
+  .words { display: inline-block; max-width: 100%; vertical-align: top; }
   .stamp { margin-inline-start: var(--s2); }
 </style>

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { swapOn } from '#lib/ui/swap.js';
   import type { Tab } from './grouping';
 
   let {
@@ -74,7 +75,7 @@
       tabindex={same(item.tab, current) ? 0 : -1}
       onclick={() => onselect(item.tab)}
     >
-      {item.label} {#if counted}<span class="count">{item.count}</span>{/if}
+      {item.label} {#if counted}<span class="count" use:swapOn={{ text: String(item.count), key: String(item.count) }}></span>{/if}
     </button>
   {/each}
 </div>
