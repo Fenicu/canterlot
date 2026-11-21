@@ -289,6 +289,79 @@ async fn a_carrier_is_told_its_runners_on_connect_and_when_they_change(pool: PgP
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn the_cloud_runner_is_listed_and_gets_its_token_only_while_a_window_serves(
+    pool: PgPool,
+) -> TestResult {
+    let host = Host::start(pool.clone()).await;
+    let mut carrier = host.connect(&host.carrier, RUNNERS).await;
+    assert_eq!(
+        carrier.assigned().await,
+        vec![("runner-a".to_owned(), "/srv/runner".to_owned())]
+    );
+    // Окно создано, сервер найден (`identified`), раннера `cloud` ещё нет в базе.
+    let config: canterlot_hub::config::CloudConfig = toml::from_str(&format!(
+        "provider='timeweb'\ntoken_file='t'\nproject_id=1\nconfigurator_id=151\ncpu=1\nram_gb=1\n\
+         disk_gb=10\nrunner_public_key='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLE'\n\
+         carrier_machine_id='{}'\n",
+        host.carrier.machine_id
+    ))?;
+    let window = Uuid::now_v7();
+    sqlx::query(
+        "insert into cloud_windows (id, name, state, trigger, server_id, host_key_public,
+                                    price_hourly_kopecks, reservation_kopecks, month,
+                                    hard_cap_minutes, created_at, create_called_at)
+         values ($1, 'canterlot-runner-' || $1::text, 'identified', 'owner', 5001,
+                 'ssh-ed25519 AAAA', 2845, 11380, '2026-11', 60, now(), now())",
+    )
+    .bind(window)
+    .execute(&pool)
+    .await?;
+    let machine = {
+        let mut conn = pool.acquire().await?;
+        canterlot_hub::cloud::windows::ensure_cloud_machine(&mut conn, &config, true).await?
+    };
+    // Токена ещё нет, а несущая уже получает раннера в списке: ей пора его подключать.
+    assert_eq!(
+        carrier.assigned().await,
+        vec![
+            ("cloud".to_owned(), "/srv/canterlot-runner".to_owned()),
+            ("runner-a".to_owned(), "/srv/runner".to_owned())
+        ]
+    );
+    // Запрос токена по сети: ротация с оживлением и сбросом состояния.
+    sqlx::query("update machines set cj_journal_id = gen_random_uuid() where id = $1")
+        .bind(machine)
+        .execute(&pool)
+        .await?;
+    let reply = carrier.ask(machine, false).await.unwrap();
+    assert_eq!(reply.machine_id, machine.to_string());
+    assert_eq!(machines::verify(&pool, &reply.token).await?, Some(machine));
+    let journal: Option<Uuid> =
+        sqlx::query_scalar("select cj_journal_id from machines where id = $1")
+            .bind(machine)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(journal, None);
+    host.assert_nowhere_stored(&reply.token).await;
+
+    // Окно закончилось: раннер ушёл из списка, токен не выдаётся.
+    sqlx::query(
+        "update cloud_windows set state = 'deleting', delete_requested_at = now() where id = $1",
+    )
+    .bind(window)
+    .execute(&pool)
+    .await?;
+    machines::revoke(&pool, machine).await?;
+    assert_eq!(
+        carrier.assigned().await,
+        vec![("runner-a".to_owned(), "/srv/runner".to_owned())]
+    );
+    let refused = carrier.ask(machine, true).await.unwrap_err();
+    assert_eq!(refused.code, "revoked");
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn the_token_goes_to_the_carrier_in_one_volatile_message(pool: PgPool) -> TestResult {
     let host = Host::start(pool.clone()).await;
     let mut carrier = host.connect(&host.carrier, RUNNERS).await;

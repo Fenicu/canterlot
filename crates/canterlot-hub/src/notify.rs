@@ -821,6 +821,13 @@ pub async fn enqueue_cloud_alert(
     dedupe_key: &str,
     payload: &Value,
 ) -> Result<bool, sqlx::Error> {
+    // Без Gotify пуша не будет, а деньги идут: запись в журнале остаётся (код и имена, без
+    // значений).
+    tracing::warn!(
+        kind = "cloud_alert",
+        code = payload["code"].as_str().unwrap_or("unknown"),
+        "owner cloud alert"
+    );
     enqueue_auth(pool, KIND_CLOUD_ALERT, dedupe_key, payload).await
 }
 
