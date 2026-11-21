@@ -15879,6 +15879,14 @@
           "created_at"
         ],
         "properties": {
+          "configurator_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Конфигуратор принятого профиля; пусто, пока сервера нет."
+          },
           "cost_so_far_kopecks": {
             "type": "integer",
             "format": "int64",
@@ -15947,7 +15955,8 @@
           },
           "price_hourly_kopecks": {
             "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "description": "Цена часа: до приёма профиля самая дорогая из списка, после действительная."
           },
           "ready_at": {
             "type": [

@@ -103,22 +103,47 @@ impl CloudService {
         &self.config
     }
 
-    /// Цена часа выбранной конфигурации по ценам провайдера.
+    /// Цена часа каждого профиля списка по ценам провайдера, в порядке списка. Профиль, цену
+    /// которого получить нельзя (конфигуратора нет у провайдера), в список окна не попадает:
+    /// резерв под него не посчитать, а вызывать его без резерва нельзя. Нет ни одного
+    /// профиля с ценой — отказ.
     pub async fn pricing(&self) -> Result<Pricing, CreateRefusal> {
-        let configurator = self
-            .provider
-            .configurator(self.config.configurator_id)
-            .await
-            .map_err(CreateRefusal::Provider)?;
-        let sizing = price::Sizing {
-            cpu: self.config.cpu,
-            ram_mb: self.config.ram_mb(),
-            disk_mb: self.config.disk_mb(),
-        };
-        let monthly = price::monthly_kopecks(&configurator.prices, &sizing)?;
-        Ok(Pricing {
-            hourly_kopecks: price::hourly_kopecks(monthly)?,
-        })
+        let mut profiles = Vec::new();
+        let mut last_error = None;
+        for profile in &self.config.profile {
+            let configurator = match self.provider.configurator(profile.configurator_id).await {
+                Ok(configurator) => configurator,
+                Err(error) => {
+                    tracing::warn!(
+                        kind = "cloud_profile_unpriced",
+                        configurator_id = profile.configurator_id,
+                        error_kind = ?error.kind,
+                        "profile skipped: no price from the provider"
+                    );
+                    last_error = Some(error);
+                    continue;
+                }
+            };
+            let sizing = price::Sizing {
+                cpu: profile.cpu,
+                ram_mb: profile.ram_mb(),
+                disk_mb: profile.disk_mb(),
+            };
+            let monthly = price::monthly_kopecks(&configurator.prices, &sizing)?;
+            profiles.push(windows::PricedProfile {
+                configurator_id: profile.configurator_id,
+                cpu: profile.cpu,
+                ram_gb: profile.ram_gb,
+                disk_gb: profile.disk_gb,
+                hourly_kopecks: price::hourly_kopecks(monthly)?,
+            });
+        }
+        if profiles.is_empty() {
+            return Err(
+                last_error.map_or(CreateRefusal::Invalid("profiles"), CreateRefusal::Provider)
+            );
+        }
+        Ok(Pricing { profiles })
     }
 
     /// Создание окна из любого входа: цена у провайдера, затем одна транзакция. Вызов
@@ -314,45 +339,74 @@ impl CloudService {
         if stamped == 0 {
             return Ok(());
         }
-        let request = CreateServer {
-            name: window.name.clone(),
-            comment: "canterlot runner window".to_owned(),
-            project_id: self.config.project_id,
-            configurator_id: self.config.configurator_id,
-            cpu: self.config.cpu,
-            ram_mb: self.config.ram_mb(),
-            disk_mb: self.config.disk_mb(),
-            os_id: self.config.os_id,
-            ssh_key_ids: vec![key_id],
-            cloud_init,
-            hostname: "canterlot-runner".to_owned(),
-        };
-        let outcome = self.provider.create_server(&request).await;
-        drop(request);
-        match outcome {
-            CreateOutcome::Created { server_id } => {
-                self.identify(window.id, server_id, "create_intent").await
+        // Профили пробуются по очереди внутри одной заявки. Перед каждым вызовом в строке
+        // стоят конфигуратор и цена именно этого профиля: если ответ потеряется, сервер мог
+        // появиться только у него, и ledger считает его цену.
+        let profiles = window.profiles();
+        let mut refusals: Vec<String> = Vec::new();
+        for profile in &profiles {
+            let marked = sqlx::query(
+                "update cloud_windows set configurator_id = $2, price_hourly_kopecks = $3
+                 where id = $1 and state = 'create_intent'",
+            )
+            .bind(window.id)
+            .bind(profile.configurator_id)
+            .bind(profile.hourly_kopecks)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+            if marked == 0 {
+                return Ok(());
             }
-            CreateOutcome::Rejected { code, .. } => {
-                self.fail_called(window.id, &format!("rejected_{code}"))
-                    .await
-            }
-            CreateOutcome::Ambiguous { .. } => {
-                sqlx::query(
-                    "update cloud_windows set state = 'create_unknown', last_error = 'ambiguous'
-                     where id = $1 and state = 'create_intent'",
-                )
-                .bind(window.id)
-                .execute(&self.pool)
-                .await?;
-                Ok(())
+            let request = CreateServer {
+                name: window.name.clone(),
+                comment: "canterlot runner window".to_owned(),
+                project_id: self.config.project_id,
+                configurator_id: profile.configurator_id,
+                cpu: profile.cpu,
+                ram_mb: profile.ram_mb(),
+                disk_mb: profile.disk_mb(),
+                os_id: self.config.os_id,
+                ssh_key_ids: vec![key_id],
+                cloud_init: cloud_init.clone(),
+                hostname: "canterlot-runner".to_owned(),
+            };
+            let outcome = self.provider.create_server(&request).await;
+            drop(request);
+            match outcome {
+                CreateOutcome::Created { server_id } => {
+                    return self.identify(window.id, server_id, "create_intent").await;
+                }
+                CreateOutcome::Rejected {
+                    code, error_code, ..
+                } => {
+                    refusals.push(format!("{}:{code}/{error_code}", profile.configurator_id));
+                    // Сервера точно нет. Отказ из списка «обходится» следующим профилем,
+                    // любой другой закрывает окно.
+                    if !super::profile_fallback(code, &error_code) {
+                        return self.fail(window.id, &refusals.join(",")).await;
+                    }
+                }
+                // Сервер мог появиться: второго вызова, на другом профиле тоже, не будет.
+                CreateOutcome::Ambiguous { .. } => {
+                    sqlx::query(
+                        "update cloud_windows set state = 'create_unknown', last_error = 'ambiguous'
+                         where id = $1 and state = 'create_intent'",
+                    )
+                    .bind(window.id)
+                    .execute(&self.pool)
+                    .await?;
+                    return Ok(());
+                }
             }
         }
-    }
-
-    /// Определённый отказ после метки вызова: сервера нет, резерв снят.
-    async fn fail_called(&self, id: Uuid, reason: &str) -> Result<(), sqlx::Error> {
-        self.fail(id, reason).await
+        // Все профили отказали определённо: сервера нет, резерв снят.
+        let reason = if refusals.is_empty() {
+            "no_profiles".to_owned()
+        } else {
+            format!("all_profiles_rejected: {}", refusals.join(","))
+        };
+        self.fail(window.id, &reason).await
     }
 
     /// Сервер найден: окно становится `identified`, строка раннера `cloud` готова.
@@ -1116,10 +1170,7 @@ pub async fn from_config(
     tracing::info!(
         kind = "cloud_enabled",
         project_id = config.project_id,
-        configurator_id = config.configurator_id,
-        cpu = config.cpu,
-        ram_gb = config.ram_gb,
-        disk_gb = config.disk_gb,
+        profiles = config.profile.len(),
         carrier = %config.carrier_machine_id,
         "cloud runner windows enabled"
     );

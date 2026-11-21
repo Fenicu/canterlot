@@ -48,12 +48,15 @@ impl Api {
         sqlx::query(
             "insert into cloud_windows (id, name, state, trigger, server_id, host_key_public,
                                         price_hourly_kopecks, reservation_kopecks, final_cost_kopecks,
-                                        month, hard_cap_minutes, created_at, create_called_at)
+                                        month, hard_cap_minutes, created_at, create_called_at,
+                                        profiles, configurator_id)
              values ($1, 'canterlot-runner-' || $1::text, $2, 'owner', $3, 'ssh-ed25519 AAAA', 2845,
                      11380, case when $2 in ('ended', 'failed', 'gone') then 2845 end, '2026-11', 60,
                      now() - make_interval(mins => $4::int),
                      case when $2 = 'create_intent' then null
-                          else now() - make_interval(mins => $4::int) end)",
+                          else now() - make_interval(mins => $4::int) end,
+                     '[{\"configurator_id\":151,\"cpu\":32,\"ram_gb\":64,\"disk_gb\":80,\"hourly_kopecks\":2845}]',
+                     151)",
         )
         .bind(id)
         .bind(state)
@@ -171,9 +174,9 @@ async fn delete_now_revokes_the_cloud_runner_and_leaves_the_server_to_the_servic
     let id = api.insert("ready", 5, Some(777)).await;
     // Строка раннера `cloud` с токеном и задачей на ней.
     let config: CloudConfig = toml::from_str(&format!(
-        "provider='timeweb'\ntoken_file='t'\nproject_id=1\nconfigurator_id=151\ncpu=1\nram_gb=1\n\
-         disk_gb=10\nrunner_public_key='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLE'\n\
-         carrier_machine_id='{}'\n",
+        "provider='timeweb'\ntoken_file='t'\nproject_id=1\n\
+         runner_public_key='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLE'\n\
+         carrier_machine_id='{}'\n[[profile]]\nconfigurator_id=151\ncpu=1\nram_gb=1\ndisk_gb=10\n",
         api.carrier
     ))
     .unwrap();

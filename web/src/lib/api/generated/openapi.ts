@@ -2776,6 +2776,11 @@ export interface components {
         CloudWindowView: {
             /**
              * Format: int64
+             * @description Конфигуратор принятого профиля; пусто, пока сервера нет.
+             */
+            configurator_id?: number | null;
+            /**
+             * Format: int64
              * @description Оценка расхода живого окна: часы с вызова создания, округлённые вверх, по цене часа,
              *     не больше резерва.
              */
@@ -2800,7 +2805,10 @@ export interface components {
             last_error?: string | null;
             month: string;
             name: string;
-            /** Format: int64 */
+            /**
+             * Format: int64
+             * @description Цена часа: до приёма профиля самая дорогая из списка, после действительная.
+             */
             price_hourly_kopecks: number;
             /** Format: date-time */
             ready_at?: string | null;

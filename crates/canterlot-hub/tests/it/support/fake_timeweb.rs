@@ -38,6 +38,9 @@ pub enum CreateMode {
     Status(u16),
     /// Определённый отказ с сообщением.
     Reject { status: u16, message: String },
+    /// Определённый отказ с заданным `error_code` тела (`no_free_node`,
+    /// `configuration_requires_sales_request`, …).
+    Coded { status: u16, error_code: String },
 }
 
 /// Что делает удаление сервера.
@@ -122,6 +125,9 @@ pub struct FakeState {
     pub next_server_id: i64,
     pub next_key_id: i64,
     pub create: CreateMode,
+    /// Отказы по конфигуратору: если для `configuration.configurator_id` запроса здесь есть
+    /// запись, она заменяет `create` (годятся `Status`, `Reject`, `Coded`).
+    pub create_by_configurator: BTreeMap<i64, CreateMode>,
     pub delete: DeleteMode,
     /// Коды, которыми отвечают подряд на любые следующие запросы (очередь).
     pub fail_next: VecDeque<u16>,
@@ -174,6 +180,7 @@ impl FakeState {
             next_server_id: 5001,
             next_key_id: 71,
             create: CreateMode::Ok,
+            create_by_configurator: BTreeMap::new(),
             delete: DeleteMode::Ok,
             fail_next: VecDeque::new(),
             rate_limit_next: 0,
@@ -624,13 +631,22 @@ fn page_response(
 }
 
 fn create_server(st: &mut FakeState, body: Option<Value>, auth: Option<&str>) -> Action {
-    let mode = st.create.clone();
+    let by_configurator = body
+        .as_ref()
+        .and_then(|body| body["configuration"]["configurator_id"].as_i64())
+        .and_then(|id| st.create_by_configurator.get(&id).cloned());
+    let mode = by_configurator.unwrap_or_else(|| st.create.clone());
     match mode {
         CreateMode::Status(status) => {
             return Action::Respond(error_response(st, status, "Injected create failure", auth));
         }
         CreateMode::Reject { status, message } => {
             return Action::Respond(error_response(st, status, &message, auth));
+        }
+        CreateMode::Coded { status, error_code } => {
+            let mut payload = error_body(status, "Injected create refusal");
+            payload["error_code"] = Value::String(error_code);
+            return Action::Respond(json_response(status, &payload));
         }
         CreateMode::Ok | CreateMode::AcceptThenDrop | CreateMode::AcceptThenHang => {}
     }

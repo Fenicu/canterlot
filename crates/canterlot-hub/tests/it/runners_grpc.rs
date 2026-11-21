@@ -300,18 +300,19 @@ async fn the_cloud_runner_is_listed_and_gets_its_token_only_while_a_window_serve
     );
     // Окно создано, сервер найден (`identified`), раннера `cloud` ещё нет в базе.
     let config: canterlot_hub::config::CloudConfig = toml::from_str(&format!(
-        "provider='timeweb'\ntoken_file='t'\nproject_id=1\nconfigurator_id=151\ncpu=1\nram_gb=1\n\
-         disk_gb=10\nrunner_public_key='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLE'\n\
-         carrier_machine_id='{}'\n",
+        "provider='timeweb'\ntoken_file='t'\nproject_id=1\n\
+         runner_public_key='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLE'\n\
+         carrier_machine_id='{}'\n[[profile]]\nconfigurator_id=151\ncpu=1\nram_gb=1\ndisk_gb=10\n",
         host.carrier.machine_id
     ))?;
     let window = Uuid::now_v7();
     sqlx::query(
         "insert into cloud_windows (id, name, state, trigger, server_id, host_key_public,
                                     price_hourly_kopecks, reservation_kopecks, month,
-                                    hard_cap_minutes, created_at, create_called_at)
+                                    hard_cap_minutes, created_at, create_called_at, profiles)
          values ($1, 'canterlot-runner-' || $1::text, 'identified', 'owner', 5001,
-                 'ssh-ed25519 AAAA', 2845, 11380, '2026-11', 60, now(), now())",
+                 'ssh-ed25519 AAAA', 2845, 11380, '2026-11', 60, now(), now(),
+                 '[{\"configurator_id\":151,\"cpu\":32,\"ram_gb\":64,\"disk_gb\":80,\"hourly_kopecks\":2845}]')",
     )
     .bind(window)
     .execute(&pool)

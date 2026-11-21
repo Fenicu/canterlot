@@ -611,6 +611,14 @@ impl CloudProvider for TimewebProvider {
             }
             status @ 400..=499 => CreateOutcome::Rejected {
                 code: status,
+                error_code: serde_json::from_slice::<Value>(&reply.body)
+                    .ok()
+                    .and_then(|value| value["error_code"].as_str().map(str::to_owned))
+                    .unwrap_or_default()
+                    .chars()
+                    .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .take(64)
+                    .collect(),
                 message: self.message_of(&reply.body),
             },
             status => CreateOutcome::Ambiguous {

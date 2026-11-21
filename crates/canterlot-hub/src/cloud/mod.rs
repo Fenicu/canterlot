@@ -83,10 +83,29 @@ pub enum CreateOutcome {
     /// Сервер создан, у него есть номер.
     Created { server_id: i64 },
     /// Определённый отказ (4xx, кроме 429): сервера нет и не будет.
-    Rejected { code: u16, message: String },
+    /// `error_code` — поле `error_code` тела ответа API (`no_free_node`, …), пусто, если тела нет.
+    Rejected {
+        code: u16,
+        error_code: String,
+        message: String,
+    },
     /// Таймаут, обрыв после отправки, 5xx или нечитаемый ответ: сервер мог появиться. Не
     /// повторять, искать по имени в списке проекта.
     Ambiguous { why: String },
+}
+
+/// Отказ создания, после которого окно пробует следующий профиль: сервера нет, а причина в
+/// самой конфигурации или её месте, а не в запросе в целом. Проверено у Timeweb 21.11:
+/// 409 `no_free_node`; `location_not_available` и `preset_not_found`; 400
+/// `configuration_requires_sales_request` (16 vCPU и больше). Любой другой отказ окно не
+/// «обходит»: оно закрывается с его кодом.
+pub fn profile_fallback(status: u16, error_code: &str) -> bool {
+    matches!(
+        (status, error_code),
+        (409, "no_free_node")
+            | (400..=499, "location_not_available" | "preset_not_found")
+            | (400, "configuration_requires_sales_request")
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

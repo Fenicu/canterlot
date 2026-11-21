@@ -311,6 +311,29 @@ pub struct RunnersConfig {
     pub cloud: Option<CloudConfig>,
 }
 
+/// Столько профилей допускает список: каждый цена и, возможно, вызов создания.
+pub const MAX_CLOUD_PROFILES: usize = 8;
+
+/// Один профиль сервера: конфигуратор провайдера и размеры.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloudProfile {
+    pub configurator_id: i64,
+    pub cpu: u32,
+    pub ram_gb: u32,
+    pub disk_gb: u32,
+}
+
+impl CloudProfile {
+    pub fn ram_mb(&self) -> u64 {
+        u64::from(self.ram_gb) * 1024
+    }
+
+    pub fn disk_mb(&self) -> u64 {
+        u64::from(self.disk_gb) * 1024
+    }
+}
+
 /// Корень облачного раннера на сервере: его создаёт cloud-init, владелец `runner`.
 pub const CLOUD_ROOT_DIR: &str = "/srv/canterlot-runner";
 
@@ -324,10 +347,9 @@ pub struct CloudConfig {
     pub token_file: PathBuf,
     /// Проект провайдера, в котором живут серверы раннеров. Сверка не трогает чужие проекты.
     pub project_id: i64,
-    pub configurator_id: i64,
-    pub cpu: u32,
-    pub ram_gb: u32,
-    pub disk_gb: u32,
+    /// Упорядоченный список профилей сервера `[[runners.cloud.profile]]`: создание пробует их по
+    /// очереди, пока Timeweb не примет один. Резерв считается по самому дорогому.
+    pub profile: Vec<CloudProfile>,
     #[serde(default = "CloudConfig::default_os_id")]
     pub os_id: i64,
     /// Открытая половина `[runners].ssh_key` несущей: уходит в cloud-init и в ключи проекта.
@@ -379,10 +401,7 @@ impl std::fmt::Debug for CloudConfig {
         f.debug_struct("CloudConfig")
             .field("provider", &self.provider)
             .field("project_id", &self.project_id)
-            .field("configurator_id", &self.configurator_id)
-            .field("cpu", &self.cpu)
-            .field("ram_gb", &self.ram_gb)
-            .field("disk_gb", &self.disk_gb)
+            .field("profile", &self.profile)
             .field("carrier_machine_id", &self.carrier_machine_id)
             .field("labels", &self.labels)
             .finish_non_exhaustive()
@@ -426,11 +445,19 @@ impl CloudConfig {
         if self.provider != "timeweb" {
             return Err("invalid [runners.cloud] provider");
         }
-        if self.project_id <= 0 || self.configurator_id <= 0 || self.os_id <= 0 {
+        if self.project_id <= 0 || self.os_id <= 0 {
             return Err("invalid [runners.cloud] ids");
         }
-        if self.cpu == 0 || self.ram_gb == 0 || self.disk_gb == 0 {
-            return Err("invalid [runners.cloud] size");
+        if self.profile.is_empty() || self.profile.len() > MAX_CLOUD_PROFILES {
+            return Err("invalid [runners.cloud] profile list");
+        }
+        for profile in &self.profile {
+            if profile.configurator_id <= 0 {
+                return Err("invalid [runners.cloud.profile] ids");
+            }
+            if profile.cpu == 0 || profile.ram_gb == 0 || profile.disk_gb == 0 {
+                return Err("invalid [runners.cloud.profile] size");
+            }
         }
         if !crate::cloud::cloud_init::validate_public_key(&self.runner_public_key) {
             return Err("invalid [runners.cloud] runner_public_key");
@@ -455,14 +482,6 @@ impl CloudConfig {
             return Err("invalid [runners.cloud] timing");
         }
         Ok(())
-    }
-
-    pub fn ram_mb(&self) -> u64 {
-        u64::from(self.ram_gb) * 1024
-    }
-
-    pub fn disk_mb(&self) -> u64 {
-        u64::from(self.disk_gb) * 1024
     }
 
     pub fn drain_grace_minutes(&self) -> u64 {

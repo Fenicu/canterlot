@@ -236,10 +236,10 @@ async fn create_sends_the_documented_body_and_returns_the_id() {
 
 #[tokio::test]
 async fn definite_refusals_are_rejected_with_code_and_message() {
-    for (status, message) in [
-        (400, "Bad configuration"),
-        (403, "Forbidden"),
-        (409, "Name busy"),
+    for (status, error_code, message) in [
+        (400, "bad_request", "Bad configuration"),
+        (403, "forbidden", "Forbidden"),
+        (409, "conflict", "Name busy"),
     ] {
         let rig = rig().await;
         rig.fake.control().create = CreateMode::Reject {
@@ -254,6 +254,7 @@ async fn definite_refusals_are_rejected_with_code_and_message() {
             outcome,
             CreateOutcome::Rejected {
                 code: status,
+                error_code: error_code.to_owned(),
                 message: message.to_owned()
             }
         );

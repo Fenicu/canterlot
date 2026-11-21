@@ -70,6 +70,8 @@ pub struct Window {
     pub server_id: Option<i64>,
     pub ipv4: Option<String>,
     pub host_key_public: String,
+    pub profiles: serde_json::Value,
+    pub configurator_id: Option<i64>,
     pub price_hourly_kopecks: i64,
     pub reservation_kopecks: i64,
     pub final_cost_kopecks: Option<i64>,
@@ -209,9 +211,48 @@ pub enum CreateRefusal {
 
 /// Цена, по которой считается резерв; её получает вызывающая сторона у провайдера заранее,
 /// чтобы сетевой вызов не держал замок.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pricing {
+    /// Профили в порядке попыток, у каждого цена часа.
+    pub profiles: Vec<PricedProfile>,
+}
+
+/// Профиль с ценой часа у провайдера на момент создания окна.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct PricedProfile {
+    pub configurator_id: i64,
+    pub cpu: u32,
+    pub ram_gb: u32,
+    pub disk_gb: u32,
     pub hourly_kopecks: i64,
+}
+
+impl PricedProfile {
+    pub fn ram_mb(&self) -> u64 {
+        u64::from(self.ram_gb) * 1024
+    }
+
+    pub fn disk_mb(&self) -> u64 {
+        u64::from(self.disk_gb) * 1024
+    }
+}
+
+impl Pricing {
+    /// Самая дорогая цена часа в списке: по ней резерв и проверка бюджета, чтобы любой
+    /// принятый профиль уложился в резерв.
+    pub fn max_hourly_kopecks(&self) -> Option<i64> {
+        self.profiles
+            .iter()
+            .map(|profile| profile.hourly_kopecks)
+            .max()
+    }
+}
+
+impl Window {
+    /// Профили окна в порядке попыток (снимок на момент создания).
+    pub fn profiles(&self) -> Vec<PricedProfile> {
+        serde_json::from_value(self.profiles.clone()).unwrap_or_default()
+    }
 }
 
 pub const MAX_HARD_CAP_MINUTES: u32 = 24 * 60;
@@ -269,7 +310,10 @@ pub async fn create_in_tx(
     if existing {
         return Err(CreateRefusal::LiveWindowExists);
     }
-    let reservation = reservation_for(config, pricing.hourly_kopecks, request.hard_cap_minutes)?;
+    let Some(max_hourly) = pricing.max_hourly_kopecks() else {
+        return Err(CreateRefusal::Invalid("profiles"));
+    };
+    let reservation = reservation_for(config, max_hourly, request.hard_cap_minutes)?;
     let now = Utc::now();
     let month = month_of(now);
     let spent = spent_in_month(&mut *conn, &month).await?;
@@ -288,19 +332,20 @@ pub async fn create_in_tx(
     sqlx::query(
         "insert into cloud_windows (id, name, state, trigger, proposal_id, host_key_public,
                                     price_hourly_kopecks, reservation_kopecks, month,
-                                    hard_cap_minutes, created_at)
-         values ($1, $2, 'create_intent', $3, $4, $5, $6, $7, $8, $9, $10)",
+                                    hard_cap_minutes, created_at, profiles)
+         values ($1, $2, 'create_intent', $3, $4, $5, $6, $7, $8, $9, $10, $11)",
     )
     .bind(id)
     .bind(format!("canterlot-runner-{id}"))
     .bind(request.trigger.as_str())
     .bind(request.proposal_id)
     .bind(key.public_line())
-    .bind(pricing.hourly_kopecks)
+    .bind(max_hourly)
     .bind(reservation)
     .bind(&month)
     .bind(i32::try_from(request.hard_cap_minutes).expect("bounded by MAX_HARD_CAP_MINUTES"))
     .bind(now)
+    .bind(serde_json::to_value(&pricing.profiles).expect("profiles serialize"))
     .execute(&mut *conn)
     .await?;
     stash_key(id, key);
@@ -518,6 +563,9 @@ pub struct CloudWindowView {
     pub trigger: String,
     pub server_id: Option<i64>,
     pub ipv4: Option<String>,
+    /// Конфигуратор принятого профиля; пусто, пока сервера нет.
+    pub configurator_id: Option<i64>,
+    /// Цена часа: до приёма профиля самая дорогая из списка, после действительная.
     pub price_hourly_kopecks: i64,
     pub reservation_kopecks: i64,
     /// Итог закончившегося окна; у живого пусто.
@@ -554,6 +602,7 @@ pub fn view(window: &Window, now: DateTime<Utc>) -> CloudWindowView {
         trigger: window.trigger.clone(),
         server_id: window.server_id,
         ipv4: window.ipv4.clone(),
+        configurator_id: window.configurator_id,
         price_hourly_kopecks: window.price_hourly_kopecks,
         reservation_kopecks: window.reservation_kopecks,
         final_cost_kopecks: window.final_cost_kopecks,

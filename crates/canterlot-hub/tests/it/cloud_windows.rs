@@ -13,7 +13,7 @@ use canterlot_hub::cloud::windows::{
     self, CreateRefusal, CreateRequest, Pricing, Trigger, Window, WindowId,
 };
 use canterlot_hub::cloud::{TimewebConfig, TimewebProvider, price};
-use canterlot_hub::config::CloudConfig;
+use canterlot_hub::config::{CloudConfig, CloudProfile};
 use canterlot_hub::machines::{self, RunnerRefusal};
 use canterlot_hub::session::Registry;
 use canterlot_hub::testkit::{self, FakeSession};
@@ -48,6 +48,7 @@ struct Rig {
     owner: Uuid,
     carrier: Uuid,
     config: CloudConfig,
+    max_hourly: i64,
     _dir: tempfile::TempDir,
 }
 
@@ -57,12 +58,14 @@ fn cloud_config(carrier: Uuid) -> CloudConfig {
 provider = "timeweb"
 token_file = "token"
 project_id = {PROJECT}
+runner_public_key = "{KEY}"
+carrier_machine_id = "{carrier}"
+
+[[profile]]
 configurator_id = 151
 cpu = 32
 ram_gb = 64
 disk_gb = 80
-runner_public_key = "{KEY}"
-carrier_machine_id = "{carrier}"
 "#
     ))
     .unwrap()
@@ -93,6 +96,13 @@ async fn rig_with(pool: PgPool, tweak: impl FnOnce(&mut CloudConfig)) -> Rig {
     tweak(&mut config);
     let registry = Registry::new(Default::default());
     let service = CloudService::new(pool.clone(), registry.clone(), provider, config.clone());
+    // Резерв считается по самому дорогому профилю списка.
+    let max_hourly = service
+        .pricing()
+        .await
+        .ok()
+        .and_then(|pricing| pricing.max_hourly_kopecks())
+        .unwrap_or(HOURLY);
     Rig {
         pool,
         fake,
@@ -101,13 +111,14 @@ async fn rig_with(pool: PgPool, tweak: impl FnOnce(&mut CloudConfig)) -> Rig {
         owner,
         carrier: carrier.machine_id,
         config,
+        max_hourly,
         _dir: dir,
     }
 }
 
 impl Rig {
     fn reservation(&self, cap: u32) -> i64 {
-        windows::reservation_for(&self.config, HOURLY, cap).unwrap()
+        windows::reservation_for(&self.config, self.max_hourly, cap).unwrap()
     }
 
     async fn create(&self, cap: u32) -> WindowId {
@@ -254,18 +265,36 @@ fn load_config(extra: &str) -> Result<canterlot_hub::config::HubConfig, String> 
     canterlot_hub::config::HubConfig::load(&path).map_err(|error| error.to_string())
 }
 
-const CLOUD_TABLE: &str = "[runners.cloud]\nprovider = 'timeweb'\ntoken_file = 'tw-token'\n\
-    project_id = 7\nconfigurator_id = 151\ncpu = 32\nram_gb = 64\ndisk_gb = 80\n\
+const CLOUD_HEAD: &str = "[runners.cloud]\nprovider = 'timeweb'\ntoken_file = 'tw-token'\n\
+    project_id = 7\n\
     runner_public_key = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE0000'\n\
     carrier_machine_id = '018f0000-0000-7000-8000-000000000001'\n";
+
+const CLOUD_PROFILE: &str =
+    "[[runners.cloud.profile]]\nconfigurator_id = 151\ncpu = 32\nram_gb = 64\ndisk_gb = 80\n";
+
+/// Таблица с ключами `extra` до списка профилей (после него ключи попали бы в профиль).
+fn cloud_table(extra: &str) -> String {
+    format!("{CLOUD_HEAD}{extra}{CLOUD_PROFILE}")
+}
 
 #[test]
 fn cloud_config_is_off_when_absent_and_has_the_documented_defaults() {
     let config = load_config("").unwrap();
     assert!(config.runners.cloud.is_none());
 
-    let config = load_config(CLOUD_TABLE).unwrap();
+    let config = load_config(&cloud_table("")).unwrap();
     let cloud = config.runners.cloud.unwrap();
+    assert_eq!(cloud.profile.len(), 1);
+    assert_eq!(cloud.profile[0].configurator_id, 151);
+    assert_eq!(
+        (
+            cloud.profile[0].cpu,
+            cloud.profile[0].ram_gb,
+            cloud.profile[0].disk_gb
+        ),
+        (32, 64, 80)
+    );
     assert_eq!(cloud.os_id, 109);
     assert_eq!(cloud.labels, vec!["cloud", "kernel-6.12"]);
     assert_eq!(cloud.ready_timeout, Duration::from_secs(15 * 60));
@@ -283,16 +312,23 @@ fn cloud_config_is_off_when_absent_and_has_the_documented_defaults() {
 
 #[test]
 fn cloud_config_rejects_bad_values_with_a_code_that_has_no_values() {
+    let table = cloud_table("");
+    let nine = (0..9).fold(cloud_table(""), |all, _| format!("{all}{CLOUD_PROFILE}"));
     let bad = [
-        CLOUD_TABLE.replace("'timeweb'", "'aws'"),
-        CLOUD_TABLE.replace("cpu = 32", "cpu = 0"),
-        CLOUD_TABLE.replace("project_id = 7", "project_id = 0"),
-        CLOUD_TABLE.replace("ssh-ed25519 AAAAC3", "ssh-ed25519 not base64 !"),
-        format!("{CLOUD_TABLE}labels = ['has space']\n"),
-        format!("{CLOUD_TABLE}labels = []\n"),
-        format!("{CLOUD_TABLE}max_running = 0\n"),
-        format!("{CLOUD_TABLE}drain_grace = '10s'\n"),
-        format!("{CLOUD_TABLE}unknown_key = 1\n"),
+        table.replace("'timeweb'", "'aws'"),
+        table.replace("cpu = 32", "cpu = 0"),
+        table.replace("configurator_id = 151", "configurator_id = 0"),
+        table.replace("project_id = 7", "project_id = 0"),
+        table.replace("ssh-ed25519 AAAAC3", "ssh-ed25519 not base64 !"),
+        cloud_table("labels = ['has space']\n"),
+        cloud_table("labels = []\n"),
+        cloud_table("max_running = 0\n"),
+        cloud_table("drain_grace = '10s'\n"),
+        cloud_table("unknown_key = 1\n"),
+        // Нет профилей, их больше допустимого, или остались прежние плоские ключи.
+        CLOUD_HEAD.to_owned(),
+        nine,
+        cloud_table("cpu = 32\n"),
     ];
     for table in bad {
         let error = load_config(&table).expect_err(&table);
@@ -318,12 +354,10 @@ fn the_month_is_counted_in_moscow_time() {
 async fn the_reservation_follows_config_and_the_price_module(pool: PgPool) -> TestResult {
     let rig = rig(pool).await;
     // Цена часа берётся у конфигуратора провайдера.
-    assert_eq!(
-        rig.service.pricing().await?,
-        Pricing {
-            hourly_kopecks: HOURLY
-        }
-    );
+    let pricing = rig.service.pricing().await?;
+    assert_eq!(pricing.profiles.len(), 1);
+    assert_eq!(pricing.profiles[0].hourly_kopecks, HOURLY);
+    assert_eq!(pricing.max_hourly_kopecks(), Some(HOURLY));
     // 60 + 30 + 30 = 120 минут: 2 часа и час запаса.
     let id = rig.create(60).await;
     let window = rig.window(id).await;
@@ -518,8 +552,9 @@ async fn only_one_window_is_live_at_a_time(pool: PgPool) -> TestResult {
     // И база держит то же правило сама, помимо замка.
     let duplicate = sqlx::query(
         "insert into cloud_windows (id, name, state, trigger, host_key_public, price_hourly_kopecks,
-                                    reservation_kopecks, month, hard_cap_minutes, created_at)
-         select $1, 'canterlot-runner-' || $1::text, 'ready', 'owner', 'k', 1, 1, '2026-11', 60, now()",
+                                    reservation_kopecks, month, hard_cap_minutes, created_at, profiles)
+         select $1, 'canterlot-runner-' || $1::text, 'ready', 'owner', 'k', 1, 1, '2026-11', 60, now(),
+                '[{\"configurator_id\":151,\"cpu\":1,\"ram_gb\":1,\"disk_gb\":10,\"hourly_kopecks\":1}]'::jsonb",
     )
     .bind(Uuid::now_v7())
     .execute(&rig.pool)
@@ -528,8 +563,9 @@ async fn only_one_window_is_live_at_a_time(pool: PgPool) -> TestResult {
     duplicate.expect("the first live row");
     let second = sqlx::query(
         "insert into cloud_windows (id, name, state, trigger, host_key_public, price_hourly_kopecks,
-                                    reservation_kopecks, month, hard_cap_minutes, created_at)
-         select $1, 'canterlot-runner-' || $1::text, 'ready', 'owner', 'k', 1, 1, '2026-11', 60, now()",
+                                    reservation_kopecks, month, hard_cap_minutes, created_at, profiles)
+         select $1, 'canterlot-runner-' || $1::text, 'ready', 'owner', 'k', 1, 1, '2026-11', 60, now(),
+                '[{\"configurator_id\":151,\"cpu\":1,\"ram_gb\":1,\"disk_gb\":10,\"hourly_kopecks\":1}]'::jsonb",
     )
     .bind(Uuid::now_v7())
     .execute(&rig.pool)
@@ -710,6 +746,350 @@ async fn a_rejected_create_fails_the_window_and_releases_the_reservation(
     drop(conn);
     // Окно закрыто: можно создать следующее.
     rig.try_create(60).await.expect("the slot is free again");
+    Ok(())
+}
+
+// ───────── Список профилей ─────────
+
+/// Профиль на конфигураторе 133 (28 vCPU, 112 ГБ, 160 ГБ): 133 600 ₽ в месяц, 18 556 копеек
+/// в час.
+const DEAR: (i64, u32, u32, u32) = (133, 28, 112, 160);
+const DEAR_HOURLY: i64 = 18_556;
+/// Профиль по умолчанию на конфигураторе 151: 2845 копеек в час.
+const MID: (i64, u32, u32, u32) = (151, 32, 64, 80);
+/// 8 vCPU, 16 ГБ, 40 ГБ на конфигураторе 151: 5360 ₽ в месяц, 745 копеек в час.
+const CHEAP: (i64, u32, u32, u32) = (151, 8, 16, 40);
+const CHEAP_HOURLY: i64 = 745;
+
+fn profiles(list: &[(i64, u32, u32, u32)]) -> impl FnOnce(&mut CloudConfig) + '_ {
+    move |config| {
+        config.profile = list
+            .iter()
+            .map(|&(configurator_id, cpu, ram_gb, disk_gb)| CloudProfile {
+                configurator_id,
+                cpu,
+                ram_gb,
+                disk_gb,
+            })
+            .collect();
+    }
+}
+
+fn coded(status: u16, error_code: &str) -> CreateMode {
+    CreateMode::Coded {
+        status,
+        error_code: error_code.to_owned(),
+    }
+}
+
+/// Конфигураторы запросов создания в порядке отправки.
+fn posted_configurators(rig: &Rig) -> Vec<i64> {
+    rig.fake
+        .requests()
+        .iter()
+        .filter(|r| r.method == "POST" && r.path == "/api/v1/servers")
+        .map(|r| {
+            r.body.as_ref().unwrap()["configuration"]["configurator_id"]
+                .as_i64()
+                .unwrap()
+        })
+        .collect()
+}
+
+#[test]
+fn only_the_known_configuration_refusals_fall_back_to_the_next_profile() {
+    use canterlot_hub::cloud::profile_fallback;
+    for (status, code) in [
+        (409, "no_free_node"),
+        (404, "location_not_available"),
+        (400, "location_not_available"),
+        (404, "preset_not_found"),
+        (400, "preset_not_found"),
+        (400, "configuration_requires_sales_request"),
+    ] {
+        assert!(profile_fallback(status, code), "{status} {code}");
+    }
+    for (status, code) in [
+        (400, "bad_request"),
+        (400, "no_free_node"),
+        (409, "conflict"),
+        (409, "configuration_requires_sales_request"),
+        (403, "forbidden"),
+        (401, "unauthorized"),
+        (429, "too_many_requests"),
+        (400, ""),
+    ] {
+        assert!(!profile_fallback(status, code), "{status} {code}");
+    }
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn the_reservation_and_the_budget_use_the_most_expensive_profile_of_the_list(
+    pool: PgPool,
+) -> TestResult {
+    // Самый дорогой не первый и не последний.
+    let rig = rig_with(pool, profiles(&[MID, DEAR, CHEAP])).await;
+    let pricing = rig.service.pricing().await?;
+    let hourly: Vec<i64> = pricing.profiles.iter().map(|p| p.hourly_kopecks).collect();
+    assert_eq!(
+        hourly,
+        vec![HOURLY, DEAR_HOURLY, CHEAP_HOURLY],
+        "in list order"
+    );
+    assert_eq!(pricing.max_hourly_kopecks(), Some(DEAR_HOURLY));
+
+    // 60 + 30 + 30 = 120 минут: 3 часа резерва по самой дорогой цене.
+    let expected = 3 * DEAR_HOURLY;
+    sqlx::query("update cloud_budget set monthly_budget_kopecks = $1")
+        .bind(expected - 1)
+        .execute(&rig.pool)
+        .await?;
+    let request = |consent| CreateRequest {
+        trigger: Trigger::Auto,
+        proposal_id: None,
+        hard_cap_minutes: 60,
+        consent_over_budget_kopecks: consent,
+    };
+    // Бюджет не хватает на самый дорогой профиль, хотя на первый хватило бы.
+    match rig.service.create(request(None)).await {
+        Err(CreateRefusal::OverBudget {
+            reservation_kopecks,
+            ..
+        }) => {
+            assert_eq!(reservation_kopecks, expected)
+        }
+        other => panic!("expected over budget, got {other:?}"),
+    }
+    sqlx::query("update cloud_budget set monthly_budget_kopecks = $1")
+        .bind(expected)
+        .execute(&rig.pool)
+        .await?;
+    let id = rig.service.create(request(None)).await?;
+    let window = rig.window(id).await;
+    assert_eq!(window.reservation_kopecks, expected);
+    assert_eq!(
+        window.price_hourly_kopecks, DEAR_HOURLY,
+        "planned price is the maximum"
+    );
+    assert_eq!(window.configurator_id, None);
+    let stored: Vec<i64> = window.profiles().iter().map(|p| p.hourly_kopecks).collect();
+    assert_eq!(stored, hourly, "the snapshot keeps every price in order");
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_profile_that_cannot_be_priced_is_left_out_of_the_window(pool: PgPool) -> TestResult {
+    // Конфигуратора 999 у провайдера нет: резерва под него не посчитать.
+    let rig = rig_with(pool, profiles(&[(999, 4, 4, 20), MID])).await;
+    let pricing = rig.service.pricing().await?;
+    assert_eq!(pricing.profiles.len(), 1);
+    assert_eq!(pricing.profiles[0].configurator_id, 151);
+    let none = rig_with(rig.pool.clone(), profiles(&[(999, 4, 4, 20)])).await;
+    assert!(none.service.pricing().await.is_err());
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_definite_refusal_moves_to_the_next_profile_in_the_same_window_and_the_ledger_uses_the_real_price(
+    pool: PgPool,
+) -> TestResult {
+    let rig = rig_with(pool, profiles(&[DEAR, MID, CHEAP])).await;
+    let _carrier = rig.carrier_session();
+    rig.fake
+        .control()
+        .create_by_configurator
+        .insert(133, coded(409, "no_free_node"));
+    let t0 = now_micros();
+    let id = rig.create(60).await;
+    let reserved = rig.window(id).await.reservation_kopecks;
+    assert_eq!(reserved, 3 * DEAR_HOURLY);
+    rig.tick(t0).await;
+
+    let window = rig.window(id).await;
+    assert_eq!(
+        window.state, "identified",
+        "the same window, no new transaction"
+    );
+    assert_eq!(
+        posted_configurators(&rig),
+        vec![133, 151],
+        "in list order, stops at the first success"
+    );
+    assert_eq!(window.configurator_id, Some(151));
+    assert_eq!(
+        window.price_hourly_kopecks, HOURLY,
+        "the price of the profile that succeeded"
+    );
+    assert_eq!(
+        window.reservation_kopecks, reserved,
+        "the reservation is unchanged"
+    );
+    {
+        let state = rig.fake.control();
+        let server = state.servers.get(&window.server_id.unwrap()).unwrap();
+        assert_eq!(server.configurator_id, 151);
+        assert_eq!(server.cpu, 32);
+    }
+    // Одно окно: создать второе нельзя, пока идёт это.
+    assert!(matches!(
+        rig.try_create(60).await,
+        Err(CreateRefusal::LiveWindowExists)
+    ));
+
+    // Конец окна: итог по действительной цене, а не по цене резерва.
+    let _session = rig.attach_when_listed(t0).await;
+    windows::request_delete(
+        &rig.pool,
+        id,
+        windows::REASON_OWNER,
+        t0 + TimeDelta::minutes(10),
+    )
+    .await?;
+    rig.tick(t0 + TimeDelta::minutes(10) + TimeDelta::seconds(1))
+        .await;
+    let window = rig.window(id).await;
+    assert_eq!(window.state, "ended");
+    assert_eq!(window.final_cost_kopecks, Some(HOURLY));
+    assert!(window.final_cost_kopecks.unwrap() < reserved);
+    Ok(())
+}
+
+impl Rig {
+    /// Дойти до `ready` из `identified`: адрес, команда подключения, токен, воркер на связи.
+    async fn attach_when_listed(&self, t0: DateTime<Utc>) -> FakeSession {
+        self.tick(t0 + TimeDelta::seconds(1)).await;
+        let session = self.attach().await;
+        self.tick(t0 + TimeDelta::seconds(2)).await;
+        session
+    }
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn each_listed_refusal_code_falls_back_and_any_other_one_closes_the_window(
+    pool: PgPool,
+) -> TestResult {
+    let rig = rig_with(pool, profiles(&[DEAR, CHEAP])).await;
+    let mut t = now_micros();
+    for (status, code) in [
+        (409, "no_free_node"),
+        (404, "location_not_available"),
+        (404, "preset_not_found"),
+        (400, "configuration_requires_sales_request"),
+    ] {
+        rig.fake
+            .control()
+            .create_by_configurator
+            .insert(133, coded(status, code));
+        let id = rig.create(60).await;
+        t += TimeDelta::minutes(1);
+        rig.tick(t).await;
+        assert_eq!(rig.state(id).await, "identified", "{status} {code}");
+        assert_eq!(rig.window(id).await.configurator_id, Some(151));
+        windows::request_delete(&rig.pool, id, windows::REASON_OWNER, t).await?;
+        t += TimeDelta::seconds(1);
+        rig.tick(t).await;
+        assert_eq!(rig.state(id).await, "ended");
+    }
+    // Отказ не из списка: следующий профиль не пробуется, окно закрыто с кодом.
+    let before = rig.posts();
+    rig.fake
+        .control()
+        .create_by_configurator
+        .insert(133, coded(403, "forbidden"));
+    let id = rig.create(60).await;
+    t += TimeDelta::minutes(1);
+    rig.tick(t).await;
+    let window = rig.window(id).await;
+    assert_eq!(window.state, "failed");
+    assert_eq!(window.final_cost_kopecks, Some(0));
+    assert_eq!(window.last_error.as_deref(), Some("133:403/forbidden"));
+    assert_eq!(rig.posts(), before + 1, "the cheap profile was not tried");
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn when_every_profile_is_refused_the_window_fails_with_the_codes_and_a_zero_cost(
+    pool: PgPool,
+) -> TestResult {
+    let rig = rig_with(pool, profiles(&[DEAR, MID, CHEAP])).await;
+    {
+        let mut state = rig.fake.control();
+        state
+            .create_by_configurator
+            .insert(133, coded(409, "no_free_node"));
+        // 151 отвечает одинаково и для среднего, и для дешёвого профиля.
+        state
+            .create_by_configurator
+            .insert(151, coded(400, "configuration_requires_sales_request"));
+    }
+    let id = rig.create(60).await;
+    rig.tick(now_micros()).await;
+    let window = rig.window(id).await;
+    assert_eq!(window.state, "failed");
+    assert_eq!(window.final_cost_kopecks, Some(0));
+    assert_eq!(
+        window.last_error.as_deref(),
+        Some(
+            "all_profiles_rejected: 133:409/no_free_node,\
+             151:400/configuration_requires_sales_request,\
+             151:400/configuration_requires_sales_request"
+        )
+    );
+    assert_eq!(posted_configurators(&rig), vec![133, 151, 151]);
+    assert_eq!(rig.fake.server_count(), 0);
+    let mut conn = rig.pool.acquire().await?;
+    assert_eq!(
+        windows::spent_in_month(&mut conn, &window.month).await?,
+        0,
+        "reservation released"
+    );
+    drop(conn);
+    rig.try_create(60).await.expect("the slot is free");
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn an_ambiguous_outcome_stops_the_fallback_and_the_attempted_profile_is_billed(
+    pool: PgPool,
+) -> TestResult {
+    let rig = rig_with(pool, profiles(&[DEAR, MID])).await;
+    {
+        let mut state = rig.fake.control();
+        // Первый профиль принят провайдером, ответ потерян по дороге.
+        state.create = CreateMode::AcceptThenDrop;
+    }
+    let t0 = now_micros();
+    let id = rig.create(60).await;
+    rig.tick(t0).await;
+    let window = rig.window(id).await;
+    assert_eq!(window.state, "create_unknown");
+    assert_eq!(
+        posted_configurators(&rig),
+        vec![133],
+        "no other profile after an ambiguous answer"
+    );
+    assert_eq!(window.configurator_id, Some(133));
+    assert_eq!(window.price_hourly_kopecks, DEAR_HOURLY);
+    // Позже сервер находится по имени: ledger считает цену профиля, который мог создаться.
+    rig.tick(t0 + TimeDelta::minutes(6)).await;
+    assert_eq!(rig.state(id).await, "identified");
+    assert_eq!(posted_configurators(&rig), vec![133]);
+    assert_eq!(rig.fake.server_count(), 1);
+    assert_eq!(rig.window(id).await.price_hourly_kopecks, DEAR_HOURLY);
+
+    // Сервер 5xx на первом профиле тоже неопределён: второй не пробуется.
+    let rig2 = rig_with(rig.pool.clone(), profiles(&[DEAR, MID])).await;
+    sqlx::query("update cloud_windows set state = 'ended', final_cost_kopecks = 0")
+        .execute(&rig.pool)
+        .await?;
+    rig2.fake
+        .control()
+        .create_by_configurator
+        .insert(133, CreateMode::Status(500));
+    let id = rig2.create(60).await;
+    rig2.tick(t0).await;
+    assert_eq!(rig2.state(id).await, "create_unknown");
+    assert_eq!(posted_configurators(&rig2), vec![133]);
     Ok(())
 }
 
@@ -1303,13 +1683,14 @@ async fn raw_window(
                                     price_hourly_kopecks, reservation_kopecks, month,
                                     hard_cap_minutes, created_at, create_called_at, hard_cap_at,
                                     drain_until, teardown_until, ipv4, attach_sent_at,
-                                    delete_requested_at, delete_accepted_at)
+                                    delete_requested_at, delete_accepted_at, profiles)
          values ($1, $2, $3, 'owner', $4, 'ssh-ed25519 AAAA', $5, $6, $7, 60, $8, $9, $10,
                  $10 + interval '30 minutes', $10 + interval '60 minutes',
                  case when $4::bigint is null then null else '203.0.113.9' end,
                  case when $3 in ('ready', 'draining') then $9 else null end,
                  case when $3 = 'deleting' then $9 else null end,
-                 case when $3 = 'deleting' then $9 else null end)",
+                 case when $3 = 'deleting' then $9 else null end,
+                 '[{\"configurator_id\":151,\"cpu\":32,\"ram_gb\":64,\"disk_gb\":80,\"hourly_kopecks\":2845}]'::jsonb)",
     )
     .bind(id)
     .bind(windows::server_name(id))
@@ -1893,7 +2274,7 @@ async fn startup_enables_the_service_only_with_a_readable_token_and_a_real_carri
     );
     // Негодная конфигурация.
     let mut invalid = config;
-    invalid.cpu = 0;
+    invalid.profile[0].cpu = 0;
     assert!(
         from_config(&rig.pool, &registry, Some(invalid))
             .await

@@ -26,6 +26,14 @@ create table cloud_windows (
     ipv4 text,
     -- Только открытая часть хостового ключа: закрытая уходит лишь в cloud-init.
     host_key_public text not null,
+    -- Упорядоченный список профилей на момент создания окна с ценой часа каждого:
+    -- `[{configurator_id, cpu, ram_gb, disk_gb, hourly_kopecks}]`. Создание пробует их по
+    -- очереди, правка конфигурации хаба в этот момент окну не мешает.
+    profiles jsonb not null check (jsonb_typeof(profiles) = 'array' and jsonb_array_length(profiles) > 0),
+    -- Конфигуратор профиля, который принял провайдер; пусто, пока сервера нет.
+    configurator_id bigint,
+    -- Цена часа: до приёма профиля самая дорогая из списка (по ней резерв), после приёма
+    -- действительная цена принятого профиля (по ней итог в ledger).
     price_hourly_kopecks bigint not null check (price_hourly_kopecks >= 0),
     reservation_kopecks bigint not null check (reservation_kopecks >= 0),
     -- Пусто, пока окно живо. У окна, у которого сервера не было, 0.
