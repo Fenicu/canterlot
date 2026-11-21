@@ -15873,6 +15873,7 @@
           "state",
           "trigger",
           "price_hourly_kopecks",
+          "ipv4_hourly_kopecks",
           "reservation_kopecks",
           "cost_so_far_kopecks",
           "month",
@@ -15940,6 +15941,11 @@
               "string",
               "null"
             ]
+          },
+          "ipv4_hourly_kopecks": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Цена часа публичного IPv4 (входит в резерв и в итог)."
           },
           "last_error": {
             "type": [

@@ -23,7 +23,20 @@ create table cloud_windows (
     trigger text not null check (trigger in ('card', 'owner', 'auto')),
     proposal_id uuid,
     server_id bigint,
+    -- Публичный IPv4: у нового сервера его нет, хаб запрашивает его сразу после создания
+    -- (`POST /servers/{id}/ips`), и он живёт дольше сервера: после удаления остаётся на
+    -- аккаунте плавающим и тарифицируется, пока его не удалят.
     ipv4 text,
+    -- Цена часа адреса на момент создания окна (входит в резерв и в итог).
+    ipv4_hourly_kopecks bigint not null default 0 check (ipv4_hourly_kopecks >= 0),
+    -- Метка запроса адреса: до самого вызова, второго вызова нет.
+    ip_requested_at timestamptz,
+    floating_ip_id text,
+    -- Сервер подтверждённо пропал из полного списка; адрес ещё может тарифицироваться.
+    server_gone_at timestamptz,
+    ip_delete_accepted_at timestamptz,
+    ip_gone_at timestamptz,
+    ip_delete_attempts integer not null default 0 check (ip_delete_attempts >= 0),
     -- Только открытая часть хостового ключа: закрытая уходит лишь в cloud-init.
     host_key_public text not null,
     -- Упорядоченный список профилей на момент создания окна с ценой часа каждого:

@@ -2802,6 +2802,11 @@ export interface components {
             /** Format: uuid */
             id: string;
             ipv4?: string | null;
+            /**
+             * Format: int64
+             * @description Цена часа публичного IPv4 (входит в резерв и в итог).
+             */
+            ipv4_hourly_kopecks: number;
             last_error?: string | null;
             month: string;
             name: string;

@@ -354,6 +354,10 @@ pub struct CloudConfig {
     pub os_id: i64,
     /// Открытая половина `[runners].ssh_key` несущей: уходит в cloud-init и в ключи проекта.
     pub runner_public_key: String,
+    /// Цена публичного IPv4 в рублях в месяц (обязательный ключ: у нового сервера адреса нет,
+    /// хаб заказывает его отдельно, и он тарифицируется сам). Считается как цена сервера:
+    /// в копейках, час = `ceil(месяц / 720)`.
+    pub ipv4_monthly_rubles: f64,
     /// Несущая, которая подключает облачный раннер.
     pub carrier_machine_id: uuid::Uuid,
     #[serde(default)]
@@ -447,6 +451,11 @@ impl CloudConfig {
         }
         if self.project_id <= 0 || self.os_id <= 0 {
             return Err("invalid [runners.cloud] ids");
+        }
+        if !self.ipv4_monthly_rubles.is_finite()
+            || !(0.0..=1_000_000.0).contains(&self.ipv4_monthly_rubles)
+        {
+            return Err("invalid [runners.cloud] ipv4_monthly_rubles");
         }
         if self.profile.is_empty() || self.profile.len() > MAX_CLOUD_PROFILES {
             return Err("invalid [runners.cloud] profile list");

@@ -69,6 +69,13 @@ pub struct Window {
     pub proposal_id: Option<Uuid>,
     pub server_id: Option<i64>,
     pub ipv4: Option<String>,
+    pub ipv4_hourly_kopecks: i64,
+    pub ip_requested_at: Option<DateTime<Utc>>,
+    pub floating_ip_id: Option<String>,
+    pub server_gone_at: Option<DateTime<Utc>>,
+    pub ip_delete_accepted_at: Option<DateTime<Utc>>,
+    pub ip_gone_at: Option<DateTime<Utc>>,
+    pub ip_delete_attempts: i32,
     pub host_key_public: String,
     pub profiles: serde_json::Value,
     pub configurator_id: Option<i64>,
@@ -215,6 +222,8 @@ pub enum CreateRefusal {
 pub struct Pricing {
     /// Профили в порядке попыток, у каждого цена часа.
     pub profiles: Vec<PricedProfile>,
+    /// Цена часа публичного IPv4: адрес заказывается отдельно и тарифицируется сам.
+    pub ipv4_hourly_kopecks: i64,
 }
 
 /// Профиль с ценой часа у провайдера на момент создания окна.
@@ -257,10 +266,12 @@ impl Window {
 
 pub const MAX_HARD_CAP_MINUTES: u32 = 24 * 60;
 
-/// Резерв окна: час × (ceil((предел + срок на доработку + запас на снос) / 60) + 1).
+/// Резерв окна: (час сервера + час адреса) × (ceil((предел + срок на доработку + запас на
+/// снос) / 60) + 1); слагаемые считаются по отдельности и складываются.
 pub fn reservation_for(
     config: &CloudConfig,
     hourly_kopecks: i64,
+    ipv4_hourly_kopecks: i64,
     hard_cap_minutes: u32,
 ) -> Result<i64, PriceError> {
     let minutes = price::total_minutes(
@@ -268,7 +279,9 @@ pub fn reservation_for(
         config.drain_grace_minutes(),
         config.teardown_margin_minutes(),
     )?;
-    price::reservation_kopecks(hourly_kopecks, minutes)
+    let server = price::reservation_kopecks(hourly_kopecks, minutes)?;
+    let address = price::reservation_kopecks(ipv4_hourly_kopecks, minutes)?;
+    server.checked_add(address).ok_or(PriceError::Overflow)
 }
 
 /// Расход месяца: законченные окна по итоговой цене, живые по резерву.
@@ -313,7 +326,12 @@ pub async fn create_in_tx(
     let Some(max_hourly) = pricing.max_hourly_kopecks() else {
         return Err(CreateRefusal::Invalid("profiles"));
     };
-    let reservation = reservation_for(config, max_hourly, request.hard_cap_minutes)?;
+    let reservation = reservation_for(
+        config,
+        max_hourly,
+        pricing.ipv4_hourly_kopecks,
+        request.hard_cap_minutes,
+    )?;
     let now = Utc::now();
     let month = month_of(now);
     let spent = spent_in_month(&mut *conn, &month).await?;
@@ -332,8 +350,8 @@ pub async fn create_in_tx(
     sqlx::query(
         "insert into cloud_windows (id, name, state, trigger, proposal_id, host_key_public,
                                     price_hourly_kopecks, reservation_kopecks, month,
-                                    hard_cap_minutes, created_at, profiles)
-         values ($1, $2, 'create_intent', $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+                                    hard_cap_minutes, created_at, profiles, ipv4_hourly_kopecks)
+         values ($1, $2, 'create_intent', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
     )
     .bind(id)
     .bind(format!("canterlot-runner-{id}"))
@@ -346,6 +364,7 @@ pub async fn create_in_tx(
     .bind(i32::try_from(request.hard_cap_minutes).expect("bounded by MAX_HARD_CAP_MINUTES"))
     .bind(now)
     .bind(serde_json::to_value(&pricing.profiles).expect("profiles serialize"))
+    .bind(pricing.ipv4_hourly_kopecks)
     .execute(&mut *conn)
     .await?;
     stash_key(id, key);
@@ -567,6 +586,8 @@ pub struct CloudWindowView {
     pub configurator_id: Option<i64>,
     /// Цена часа: до приёма профиля самая дорогая из списка, после действительная.
     pub price_hourly_kopecks: i64,
+    /// Цена часа публичного IPv4 (входит в резерв и в итог).
+    pub ipv4_hourly_kopecks: i64,
     pub reservation_kopecks: i64,
     /// Итог закончившегося окна; у живого пусто.
     pub final_cost_kopecks: Option<i64>,
@@ -587,11 +608,19 @@ pub fn view(window: &Window, now: DateTime<Utc>) -> CloudWindowView {
     let cost_so_far = match (window.final_cost_kopecks, window.create_called_at) {
         (Some(cost), _) => cost,
         (None, Some(called)) => {
-            let seconds = u64::try_from((now - called).num_seconds().max(0)).unwrap_or(0);
-            price::final_cost_kopecks(window.price_hourly_kopecks, seconds.div_ceil(60))
-                .map_or(window.reservation_kopecks, |cost| {
-                    cost.min(window.reservation_kopecks)
-                })
+            let minutes = |from: DateTime<Utc>| {
+                u64::try_from((now - from).num_seconds().max(0))
+                    .unwrap_or(0)
+                    .div_ceil(60)
+            };
+            let server = price::final_cost_kopecks(window.price_hourly_kopecks, minutes(called));
+            let address = window.ip_requested_at.map_or(Ok(0), |at| {
+                price::final_cost_kopecks(window.ipv4_hourly_kopecks, minutes(at))
+            });
+            match (server, address) {
+                (Ok(server), Ok(address)) => (server + address).min(window.reservation_kopecks),
+                _ => window.reservation_kopecks,
+            }
         }
         (None, None) => 0,
     };
@@ -604,6 +633,7 @@ pub fn view(window: &Window, now: DateTime<Utc>) -> CloudWindowView {
         ipv4: window.ipv4.clone(),
         configurator_id: window.configurator_id,
         price_hourly_kopecks: window.price_hourly_kopecks,
+        ipv4_hourly_kopecks: window.ipv4_hourly_kopecks,
         reservation_kopecks: window.reservation_kopecks,
         final_cost_kopecks: window.final_cost_kopecks,
         cost_so_far_kopecks: cost_so_far,

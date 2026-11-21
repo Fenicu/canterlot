@@ -174,7 +174,7 @@ async fn delete_now_revokes_the_cloud_runner_and_leaves_the_server_to_the_servic
     let id = api.insert("ready", 5, Some(777)).await;
     // Строка раннера `cloud` с токеном и задачей на ней.
     let config: CloudConfig = toml::from_str(&format!(
-        "provider='timeweb'\ntoken_file='t'\nproject_id=1\n\
+        "provider='timeweb'\ntoken_file='t'\nproject_id=1\nipv4_monthly_rubles=72\n\
          runner_public_key='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLE'\n\
          carrier_machine_id='{}'\n[[profile]]\nconfigurator_id=151\ncpu=1\nram_gb=1\ndisk_gb=10\n",
         api.carrier

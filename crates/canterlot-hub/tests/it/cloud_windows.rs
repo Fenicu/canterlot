@@ -22,13 +22,18 @@ use sqlx::PgPool;
 use tracing_subscriber::fmt::MakeWriter;
 use uuid::Uuid;
 
-use crate::support::fake_timeweb::{CreateMode, DeleteMode, FailPage, FakeTimeweb};
+use crate::support::fake_timeweb::{CreateMode, DeleteMode, FailPage, FakeTimeweb, IpAddMode};
 
 const TOKEN: &str = "tw-windows-token-5d1c0e9a";
 const PROJECT: i64 = 4242;
 const KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE0000";
 /// Конфигуратор 151, 32 vCPU, 64 ГБ, 80 ГБ: 2845 копеек в час (см. `cloud_timeweb`).
 const HOURLY: i64 = 2845;
+/// Публичный IPv4 по 72 ₽ в месяц: 7200 копеек, час `ceil(7200 / 720)` = 10 копеек.
+const IPV4_RUBLES: u32 = 72;
+const IP_HOURLY: i64 = 10;
+/// Час сервера и адреса вместе: по этой цене идёт и резерв, и итог окна одного профиля.
+const WITH_IP: i64 = HOURLY + IP_HOURLY;
 
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
@@ -60,6 +65,7 @@ token_file = "token"
 project_id = {PROJECT}
 runner_public_key = "{KEY}"
 carrier_machine_id = "{carrier}"
+ipv4_monthly_rubles = {IPV4_RUBLES}
 
 [[profile]]
 configurator_id = 151
@@ -82,6 +88,8 @@ async fn rig_with(pool: PgPool, tweak: impl FnOnce(&mut CloudConfig)) -> Rig {
         .await
         .unwrap();
     let fake = FakeTimeweb::start(TOKEN).await;
+    // Как у настоящего Timeweb: у нового сервера публичного адреса нет, пока его не закажет хаб.
+    fake.control().auto_ipv4 = false;
     let dir = tempfile::tempdir().unwrap();
     let token_file = dir.path().join("token");
     std::fs::write(&token_file, format!("{TOKEN}\n")).unwrap();
@@ -118,7 +126,7 @@ async fn rig_with(pool: PgPool, tweak: impl FnOnce(&mut CloudConfig)) -> Rig {
 
 impl Rig {
     fn reservation(&self, cap: u32) -> i64 {
-        windows::reservation_for(&self.config, self.max_hourly, cap).unwrap()
+        windows::reservation_for(&self.config, self.max_hourly, IP_HOURLY, cap).unwrap()
     }
 
     async fn create(&self, cap: u32) -> WindowId {
@@ -149,8 +157,41 @@ impl Rig {
         self.service.tick(at).await;
     }
 
+    /// Вызовы создания сервера (не заказы адреса: `POST /servers/{id}/ips`).
     fn posts(&self) -> usize {
-        self.fake.control().count("POST", "/api/v1/servers")
+        self.fake
+            .requests()
+            .iter()
+            .filter(|r| r.method == "POST" && r.path == "/api/v1/servers")
+            .count()
+    }
+
+    /// Заказы публичного IPv4.
+    fn ip_posts(&self) -> usize {
+        self.fake
+            .requests()
+            .iter()
+            .filter(|r| r.method == "POST" && r.path.ends_with("/ips"))
+            .count()
+    }
+
+    /// Все серверы пропали у провайдера; их адреса остались на аккаунте без привязки.
+    fn vanish_servers(&self) {
+        let mut state = self.fake.control();
+        let ids: Vec<i64> = state.servers.keys().copied().collect();
+        for id in ids {
+            state.remove_server(id);
+        }
+    }
+
+    /// Адреса аккаунта: (адрес, привязан ли).
+    fn floating(&self) -> Vec<(String, bool)> {
+        self.fake
+            .control()
+            .floating_ips
+            .iter()
+            .map(|fip| (fip.ip.clone(), fip.resource_id.is_some()))
+            .collect()
     }
 
     fn deletes(&self) -> usize {
@@ -268,7 +309,7 @@ fn load_config(extra: &str) -> Result<canterlot_hub::config::HubConfig, String> 
 const CLOUD_HEAD: &str = "[runners.cloud]\nprovider = 'timeweb'\ntoken_file = 'tw-token'\n\
     project_id = 7\n\
     runner_public_key = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE0000'\n\
-    carrier_machine_id = '018f0000-0000-7000-8000-000000000001'\n";
+    carrier_machine_id = '018f0000-0000-7000-8000-000000000001'\nipv4_monthly_rubles = 72\n";
 
 const CLOUD_PROFILE: &str =
     "[[runners.cloud.profile]]\nconfigurator_id = 151\ncpu = 32\nram_gb = 64\ndisk_gb = 80\n";
@@ -361,18 +402,20 @@ async fn the_reservation_follows_config_and_the_price_module(pool: PgPool) -> Te
     // 60 + 30 + 30 = 120 минут: 2 часа и час запаса.
     let id = rig.create(60).await;
     let window = rig.window(id).await;
-    assert_eq!(window.reservation_kopecks, 3 * HOURLY);
+    assert_eq!(window.reservation_kopecks, 3 * WITH_IP);
     assert_eq!(
         window.reservation_kopecks,
-        price::reservation_kopecks(HOURLY, 120)?
+        price::reservation_kopecks(HOURLY, 120)? + price::reservation_kopecks(IP_HOURLY, 120)?,
+        "server and address are reserved separately"
     );
+    assert_eq!(window.ipv4_hourly_kopecks, IP_HOURLY);
     assert_eq!(window.price_hourly_kopecks, HOURLY);
     assert_eq!(window.month, windows::month_of(window.created_at));
     assert_eq!(window.name, format!("canterlot-runner-{id}"));
     windows::fail_in_tx(&mut *rig.pool.acquire().await?, id, "test").await?;
     // 61 минута округляется вверх: 121 минута → 3 часа и час запаса.
     let id = rig.create(61).await;
-    assert_eq!(rig.window(id).await.reservation_kopecks, 4 * HOURLY);
+    assert_eq!(rig.window(id).await.reservation_kopecks, 4 * WITH_IP);
     windows::fail_in_tx(&mut *rig.pool.acquire().await?, id, "test").await?;
 
     // Срок на доработку и запас на снос идут из конфигурации.
@@ -383,7 +426,7 @@ async fn the_reservation_follows_config_and_the_price_module(pool: PgPool) -> Te
     .await;
     let id = rig2.create(60).await;
     // 60 + 45 + 1 = 106 минут: 2 часа и час запаса.
-    assert_eq!(rig2.window(id).await.reservation_kopecks, 3 * HOURLY);
+    assert_eq!(rig2.window(id).await.reservation_kopecks, 3 * WITH_IP);
     Ok(())
 }
 
@@ -632,7 +675,7 @@ async fn the_full_cycle_create_ready_idle_delete_ended_with_the_final_cost(
     let id = rig.create(120).await;
     assert_eq!(rig.state(id).await, "create_intent");
     assert!(windows::has_pending_key(id));
-    assert_eq!(rig.reservation(120), 4 * HOURLY);
+    assert_eq!(rig.reservation(120), 4 * WITH_IP);
 
     // Первый проход: сверка (пустой проект), затем вызов создания.
     rig.tick(t0).await;
@@ -719,8 +762,8 @@ async fn the_full_cycle_create_ready_idle_delete_ended_with_the_final_cost(
         window.delete_confirmed_at,
         Some(delete_at + TimeDelta::seconds(1))
     );
-    // 16 минут от вызова создания: один оплаченный час.
-    assert_eq!(window.final_cost_kopecks, Some(HOURLY));
+    // 16 минут от вызова создания: один оплаченный час сервера и один адреса.
+    assert_eq!(window.final_cost_kopecks, Some(WITH_IP));
     assert_eq!(rig.fake.server_count(), 0);
     assert_eq!((rig.posts(), rig.deletes()), (1, 1));
     Ok(())
@@ -839,7 +882,7 @@ async fn the_reservation_and_the_budget_use_the_most_expensive_profile_of_the_li
     assert_eq!(pricing.max_hourly_kopecks(), Some(DEAR_HOURLY));
 
     // 60 + 30 + 30 = 120 минут: 3 часа резерва по самой дорогой цене.
-    let expected = 3 * DEAR_HOURLY;
+    let expected = 3 * (DEAR_HOURLY + IP_HOURLY);
     sqlx::query("update cloud_budget set monthly_budget_kopecks = $1")
         .bind(expected - 1)
         .execute(&rig.pool)
@@ -902,7 +945,7 @@ async fn a_definite_refusal_moves_to_the_next_profile_in_the_same_window_and_the
     let t0 = now_micros();
     let id = rig.create(60).await;
     let reserved = rig.window(id).await.reservation_kopecks;
-    assert_eq!(reserved, 3 * DEAR_HOURLY);
+    assert_eq!(reserved, 3 * (DEAR_HOURLY + IP_HOURLY));
     rig.tick(t0).await;
 
     let window = rig.window(id).await;
@@ -949,7 +992,7 @@ async fn a_definite_refusal_moves_to_the_next_profile_in_the_same_window_and_the
         .await;
     let window = rig.window(id).await;
     assert_eq!(window.state, "ended");
-    assert_eq!(window.final_cost_kopecks, Some(HOURLY));
+    assert_eq!(window.final_cost_kopecks, Some(WITH_IP));
     assert!(window.final_cost_kopecks.unwrap() < reserved);
     Ok(())
 }
@@ -1093,6 +1136,413 @@ async fn an_ambiguous_outcome_stops_the_fallback_and_the_attempted_profile_is_bi
     Ok(())
 }
 
+// ───────── Публичный IPv4 ─────────
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_new_server_gets_its_ipv4_at_once_exactly_once_and_attach_waits_for_it(
+    pool: PgPool,
+) -> TestResult {
+    let rig = rig(pool).await;
+    let _carrier = rig.carrier_session();
+    let t0 = now_micros();
+    let id = rig.create(120).await;
+    rig.tick(t0).await;
+    let window = rig.window(id).await;
+    assert_eq!(window.state, "identified");
+    assert_eq!((window.ipv4.clone(), rig.ip_posts()), (None, 0));
+
+    // Следующий проход: адрес заказан, записан в окно и сразу идёт в команду подключения.
+    rig.tick(t0 + TimeDelta::seconds(1)).await;
+    let window = rig.window(id).await;
+    assert_eq!(rig.ip_posts(), 1);
+    let server_id = window.server_id.unwrap();
+    let request = rig
+        .fake
+        .requests()
+        .into_iter()
+        .find(|r| r.method == "POST" && r.path.ends_with("/ips"))
+        .unwrap();
+    assert_eq!(request.path, format!("/api/v1/servers/{server_id}/ips"));
+    assert_eq!(request.body, Some(serde_json::json!({"type": "ipv4"})));
+    assert_eq!(window.ip_requested_at, Some(t0 + TimeDelta::seconds(1)));
+    let address = window.ipv4.clone().expect("the address is stored");
+    assert_eq!(rig.floating(), vec![(address.clone(), true)]);
+    let attach: serde_json::Value = sqlx::query_scalar(
+        "select payload from commands where kind = 'attach_runner' and machine_id = $1",
+    )
+    .bind(rig.carrier)
+    .fetch_one(&rig.pool)
+    .await?;
+    assert_eq!(attach["host"], address);
+
+    // Сколько бы проходов ни было, адрес заказывается один раз.
+    for seconds in [2, 3, 30] {
+        rig.tick(t0 + TimeDelta::seconds(seconds)).await;
+    }
+    assert_eq!(rig.ip_posts(), 1);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn attach_waits_until_the_server_is_on_even_when_the_address_is_known(
+    pool: PgPool,
+) -> TestResult {
+    let rig = rig(pool).await;
+    let _carrier = rig.carrier_session();
+    rig.fake.control().boot_polls = 3;
+    let t0 = now_micros();
+    let id = rig.create(120).await;
+    rig.tick(t0).await;
+    rig.tick(t0 + TimeDelta::seconds(1)).await;
+    let window = rig.window(id).await;
+    assert!(window.ipv4.is_some(), "the address is ordered at once");
+    assert!(
+        window.attach_sent_at.is_none(),
+        "the server is still installing"
+    );
+    for seconds in [2, 3] {
+        rig.tick(t0 + TimeDelta::seconds(seconds)).await;
+    }
+    rig.tick(t0 + TimeDelta::seconds(4)).await;
+    assert!(rig.window(id).await.attach_sent_at.is_some());
+    assert_eq!(rig.ip_posts(), 1);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_definite_ip_refusal_is_retried_and_an_ambiguous_one_never_is(
+    pool: PgPool,
+) -> TestResult {
+    let rig = rig(pool).await;
+    let _carrier = rig.carrier_session();
+    let t0 = now_micros();
+    let id = rig.create(120).await;
+    rig.tick(t0).await;
+    // 409: адреса точно нет, попытка повторяется на следующем проходе.
+    rig.fake.control().ip_add = IpAddMode::Status(409);
+    rig.tick(t0 + TimeDelta::seconds(1)).await;
+    assert_eq!(rig.ip_posts(), 1);
+    let window = rig.window(id).await;
+    assert_eq!(window.last_error.as_deref(), Some("ipv4_request_failed"));
+    assert_eq!(window.ip_requested_at, None);
+    rig.fake.control().ip_add = IpAddMode::Ok;
+    rig.tick(t0 + TimeDelta::seconds(2)).await;
+    assert_eq!(rig.ip_posts(), 2);
+    assert!(rig.window(id).await.ipv4.is_some());
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn an_ambiguous_ip_answer_is_never_repeated_and_the_address_is_read_from_the_server(
+    pool: PgPool,
+) -> TestResult {
+    let rig = rig(pool).await;
+    let _carrier = rig.carrier_session();
+    rig.fake.control().ip_add = IpAddMode::AcceptThenDrop;
+    let t0 = now_micros();
+    let id = rig.create(120).await;
+    rig.tick(t0).await;
+    rig.tick(t0 + TimeDelta::seconds(1)).await;
+    // Ответ потерян, но опрос сервера в том же проходе показывает выданный адрес: он
+    // записывается и идёт в подключение без повторного заказа.
+    let window = rig.window(id).await;
+    assert!(window.ip_requested_at.is_some(), "no second order");
+    rig.tick(t0 + TimeDelta::seconds(2)).await;
+    let window = rig.window(id).await;
+    assert_eq!(rig.ip_posts(), 1);
+    assert_eq!(window.ipv4.as_deref(), Some(rig.floating()[0].0.as_str()));
+    assert!(window.attach_sent_at.is_some());
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn the_ipv4_price_is_rounded_up_to_an_hour_and_joins_the_reservation(
+    pool: PgPool,
+) -> TestResult {
+    // 100,01 ₽ в месяц: 10001 копейка, час `ceil(10001 / 720)` = 14 копеек.
+    let rig = rig_with(pool, |config| config.ipv4_monthly_rubles = 100.01).await;
+    let pricing = rig.service.pricing().await?;
+    assert_eq!(pricing.ipv4_hourly_kopecks, 14);
+    let id = rig
+        .service
+        .create(CreateRequest {
+            trigger: Trigger::Owner,
+            proposal_id: None,
+            hard_cap_minutes: 60,
+            consent_over_budget_kopecks: Some(3 * (HOURLY + 14)),
+        })
+        .await?;
+    let window = rig.window(id).await;
+    assert_eq!(window.ipv4_hourly_kopecks, 14);
+    assert_eq!(window.reservation_kopecks, 3 * (HOURLY + 14));
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn deleting_a_window_also_deletes_its_floating_ip_and_confirms_it_by_absence(
+    pool: PgPool,
+) -> TestResult {
+    let rig = rig(pool).await;
+    let _carrier = rig.carrier_session();
+    let t0 = now_micros();
+    let (id, _session, at) = rig.drive_to_ready(120, t0).await;
+    let address = rig.window(id).await.ipv4.unwrap();
+    assert_eq!(rig.floating(), vec![(address.clone(), true)]);
+    windows::request_delete(&rig.pool, id, windows::REASON_OWNER, at).await?;
+    rig.tick(at + TimeDelta::seconds(1)).await;
+
+    let window = rig.window(id).await;
+    assert_eq!(window.state, "ended");
+    assert!(
+        rig.floating().is_empty(),
+        "the address is gone from the account"
+    );
+    assert_eq!(rig.fake.server_count(), 0);
+    assert!(window.server_gone_at.is_some() && window.ip_gone_at.is_some());
+    assert_eq!(
+        window
+            .floating_ip_id
+            .as_deref()
+            .map(|id| id.starts_with("fip-")),
+        Some(true)
+    );
+    // Сервер удаляется раньше адреса: пока он привязан, адрес не трогают.
+    let requests = rig.fake.requests();
+    let delete_server = requests
+        .iter()
+        .position(|r| r.method == "DELETE" && r.path.starts_with("/api/v1/servers/"))
+        .unwrap();
+    let delete_ip = requests
+        .iter()
+        .position(|r| r.method == "DELETE" && r.path.starts_with("/api/v1/floating-ips/"))
+        .unwrap();
+    assert!(delete_server < delete_ip);
+    // Конец окна подтверждён и для адреса списком: адреса в нём уже нет.
+    assert!(
+        requests
+            .iter()
+            .skip(delete_ip)
+            .any(|r| r.method == "GET" && r.path == "/api/v1/floating-ips")
+    );
+    // Итог: час сервера и час адреса.
+    assert_eq!(window.final_cost_kopecks, Some(WITH_IP));
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn the_window_stays_live_while_the_address_cannot_be_deleted_and_the_ledger_adds_its_hours(
+    pool: PgPool,
+) -> TestResult {
+    let rig = rig(pool).await;
+    enable_pushes(&rig.pool).await;
+    let _carrier = rig.carrier_session();
+    let t0 = now_micros();
+    let (id, _session, at) = rig.drive_to_ready(120, t0).await;
+    rig.fake.control().floating_delete_status = Some(500);
+    windows::request_delete(&rig.pool, id, windows::REASON_OWNER, at).await?;
+    let gone_at = at + TimeDelta::seconds(1);
+    rig.tick(gone_at).await;
+
+    // Сервер удалён и подтверждён, адрес остался плавающим: окно живо, резерв держится.
+    let window = rig.window(id).await;
+    assert_eq!(window.state, "deleting");
+    assert_eq!(window.server_gone_at, Some(gone_at));
+    assert_eq!(window.last_error.as_deref(), Some("ip_delete_failed"));
+    assert_eq!(rig.floating().len(), 1);
+    assert!(!rig.floating()[0].1, "unbound after the server is gone");
+    assert!(matches!(
+        rig.try_create(60).await,
+        Err(CreateRefusal::LiveWindowExists)
+    ));
+    // Повторы с паузой; после трёх неудач пуш.
+    rig.tick(gone_at + TimeDelta::seconds(40)).await;
+    rig.tick(gone_at + TimeDelta::minutes(3)).await;
+    assert_eq!(window_attempts(&rig, id).await, 3);
+    assert_eq!(rig.alert_codes().await, vec!["ip_delete_failing"]);
+
+    // Провайдер ожил: адрес удалён, окно кончилось, итог считает часы адреса до этого момента.
+    rig.fake.control().floating_delete_status = None;
+    let done_at = gone_at + TimeDelta::minutes(90);
+    rig.tick(done_at).await;
+    let window = rig.window(id).await;
+    assert_eq!(window.state, "ended");
+    assert_eq!(window.ip_gone_at, Some(done_at));
+    let ip_requested = window.ip_requested_at.unwrap();
+    let expected = HOURLY + IP_HOURLY * ceil_hours((done_at - ip_requested).num_seconds());
+    assert_eq!(window.final_cost_kopecks, Some(expected));
+    assert!(rig.floating().is_empty());
+    Ok(())
+}
+
+fn ceil_hours(seconds: i64) -> i64 {
+    (seconds + 3599) / 3600
+}
+
+async fn window_attempts(rig: &Rig, id: Uuid) -> i32 {
+    rig.window(id).await.ip_delete_attempts
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn reconcile_deletes_unbound_ips_of_closed_windows_and_never_other_floating_ips(
+    pool: PgPool,
+) -> TestResult {
+    let rig = rig(pool).await;
+    enable_pushes(&rig.pool).await;
+    let now = now_micros();
+    // Окна без сервера, чей адрес мог остаться: закончившееся, неудавшееся, исчезнувшее.
+    let mut mine = Vec::new();
+    for (state, ip) in [
+        ("ended", "198.51.100.1"),
+        ("failed", "198.51.100.2"),
+        ("gone", "198.51.100.3"),
+    ] {
+        let id = raw_window(&rig.pool, state, Some(1), Some(now - TimeDelta::hours(3))).await;
+        sqlx::query("update cloud_windows set ipv4 = $2, final_cost_kopecks = 0 where id = $1")
+            .bind(id)
+            .bind(ip)
+            .execute(&rig.pool)
+            .await?;
+        mine.push(ip);
+    }
+    {
+        let mut state = rig.fake.control();
+        let mut add = |id: &str, ip: &str, resource: Option<i64>| {
+            state
+                .floating_ips
+                .push(crate::support::fake_timeweb::FakeFloatingIp {
+                    id: id.to_owned(),
+                    ip: ip.to_owned(),
+                    resource_id: resource,
+                });
+        };
+        for (n, ip) in mine.iter().enumerate() {
+            add(&format!("mine-{n}"), ip, None);
+        }
+        // Чужие: никакому окну не принадлежат, или привязаны, или записаны и на живом окне.
+        add("stranger", "198.51.100.50", None);
+        add("bound", "198.51.100.1", Some(9));
+    }
+    rig.tick(now).await;
+    let left: Vec<String> = rig
+        .fake
+        .control()
+        .floating_ips
+        .iter()
+        .map(|fip| fip.id.clone())
+        .collect();
+    // Отвязанные адреса закрытых окон ушли; привязанная запись с тем же адресом осталась.
+    assert!(!left.iter().any(|id| id.starts_with("mine-")), "{left:?}");
+    assert!(
+        left.contains(&"stranger".to_owned()),
+        "a stranger's address is never touched"
+    );
+    assert!(
+        left.contains(&"bound".to_owned()),
+        "a bound address is never touched"
+    );
+    let codes = rig.alert_codes().await;
+    assert_eq!(
+        codes.iter().filter(|c| *c == "stray_ip_deleted").count(),
+        3,
+        "{codes:?}"
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn an_address_recorded_on_a_live_window_is_not_an_orphan(pool: PgPool) -> TestResult {
+    let rig = rig(pool).await;
+    let now = now_micros();
+    // Старое окно закончилось с тем же адресом, что теперь у живого (адреса переиспользуются).
+    let old = raw_window(&rig.pool, "ended", Some(1), Some(now - TimeDelta::hours(5))).await;
+    sqlx::query(
+        "update cloud_windows set ipv4 = '198.51.100.9', final_cost_kopecks = 0 where id = $1",
+    )
+    .bind(old)
+    .execute(&rig.pool)
+    .await?;
+    let live = raw_window(
+        &rig.pool,
+        "identified",
+        Some(2),
+        Some(now - TimeDelta::minutes(5)),
+    )
+    .await;
+    sqlx::query("update cloud_windows set ipv4 = '198.51.100.9' where id = $1")
+        .bind(live)
+        .execute(&rig.pool)
+        .await?;
+    {
+        let mut state = rig.fake.control();
+        let server = state.add_server(PROJECT, &windows::server_name(live));
+        state
+            .floating_ips
+            .push(crate::support::fake_timeweb::FakeFloatingIp {
+                id: "reused".into(),
+                ip: "198.51.100.9".into(),
+                resource_id: None,
+            });
+        let _ = server;
+    }
+    rig.tick(now).await;
+    assert_eq!(
+        rig.fake.control().floating_ips.len(),
+        1,
+        "the live window's address stays"
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_window_whose_ip_order_was_lost_ends_with_an_alert_and_the_floating_ips_untouched(
+    pool: PgPool,
+) -> TestResult {
+    let rig = rig(pool).await;
+    enable_pushes(&rig.pool).await;
+    ready_row(&rig).await;
+    let now = now_micros();
+    let id = raw_window(
+        &rig.pool,
+        "deleting",
+        Some(777),
+        Some(now - TimeDelta::minutes(20)),
+    )
+    .await;
+    // Заказ адреса был (метка стоит), ответа не было, адреса мы не знаем.
+    sqlx::query(
+        "update cloud_windows set ip_requested_at = $2, ipv4_hourly_kopecks = $3, ipv4 = null
+         where id = $1",
+    )
+    .bind(id)
+    .bind(now - TimeDelta::minutes(19))
+    .bind(IP_HOURLY)
+    .execute(&rig.pool)
+    .await?;
+    rig.fake
+        .control()
+        .floating_ips
+        .push(crate::support::fake_timeweb::FakeFloatingIp {
+            id: "unknown".into(),
+            ip: "198.51.100.77".into(),
+            resource_id: None,
+        });
+    rig.tick(now).await;
+    let window = rig.window(id).await;
+    assert_eq!(window.state, "ended");
+    assert_eq!(
+        window.final_cost_kopecks,
+        Some(HOURLY + IP_HOURLY),
+        "counted with the margin"
+    );
+    assert_eq!(rig.alert_codes().await, vec!["ipv4_unattributed"]);
+    assert_eq!(
+        rig.fake.control().floating_ips.len(),
+        1,
+        "an unknown address is never deleted"
+    );
+    Ok(())
+}
+
 // ───────── Неопределённое создание ─────────
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
@@ -1204,7 +1654,7 @@ async fn a_failed_or_partial_listing_changes_nothing(pool: PgPool) -> TestResult
     let t1 = t0 + TimeDelta::minutes(40);
     rig.tick(t1).await;
     assert_eq!(rig.state(id).await, "identified");
-    rig.fake.control().servers.clear();
+    rig.vanish_servers();
     rig.fake.control().list_fail_page = Some(FailPage {
         offset: 0,
         status: 500,
@@ -1296,8 +1746,9 @@ async fn the_hard_cap_drains_cancels_then_bounds_teardown_and_deletes(pool: PgPo
         .await;
     let window = rig.window(id).await;
     assert_eq!(window.state, "ended");
-    // 120 минут от вызова: два оплаченных часа; а в резерве их было четыре.
-    assert_eq!(window.final_cost_kopecks, Some(2 * HOURLY + HOURLY));
+    // Сервер: 121 минута от вызова создания, три оплаченных часа. Адрес: от заказа через
+    // секунду после создания, ровно 120 минут, два часа. В резерве было по четыре.
+    assert_eq!(window.final_cost_kopecks, Some(3 * HOURLY + 2 * IP_HOURLY));
     assert!(window.final_cost_kopecks.unwrap() <= window.reservation_kopecks);
     Ok(())
 }
@@ -1343,8 +1794,8 @@ async fn a_window_found_past_every_bound_after_an_outage_is_deleted_with_an_aler
     assert_eq!(window.delete_reason.as_deref(), Some("overrun"));
     assert_eq!(rig.alert_codes().await, vec!["outage_extra_cost"]);
     let extra = rig.alerts().await[0]["extra_kopecks"].as_i64().unwrap();
-    // Пять часов сверх предела по цене часа.
-    assert_eq!(extra, 5 * HOURLY);
+    // Пять часов сверх предела по цене часа сервера и адреса.
+    assert_eq!(extra, 5 * WITH_IP);
     Ok(())
 }
 
@@ -1424,7 +1875,7 @@ async fn a_server_deleted_by_hand_while_confirmation_is_pending_ends_the_window(
     rig.tick(when + TimeDelta::seconds(1)).await;
     assert_eq!(rig.state(id).await, "deleting");
     // Владелец подтвердил удаление в панели: сервера нет в полном списке.
-    rig.fake.control().servers.clear();
+    rig.vanish_servers();
     rig.tick(when + TimeDelta::minutes(6)).await;
     assert_eq!(rig.state(id).await, "ended");
     Ok(())
@@ -1494,7 +1945,7 @@ async fn quarantine_is_confirmed_only_by_absence_from_a_full_listing(pool: PgPoo
         "still listed: still billing"
     );
     assert_eq!(rig.deletes(), 1, "no second DELETE once it was accepted");
-    rig.fake.control().servers.remove(&server_id);
+    rig.fake.control().remove_server(server_id);
     rig.tick(when + TimeDelta::seconds(40)).await;
     assert_eq!(rig.state(id).await, "ended");
     Ok(())

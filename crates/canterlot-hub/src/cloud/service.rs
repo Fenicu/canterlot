@@ -73,6 +73,27 @@ fn minutes_between(from: DateTime<Utc>, to: DateTime<Utc>) -> u64 {
         .div_ceil(60)
 }
 
+/// Итог окна: сервер от вызова создания до подтверждённого конца и адрес от заказа до
+/// подтверждённого конца, каждый по своей цене часа и не меньше часа. У окна, которому не
+/// звонили, и без заказа адреса слагаемое 0.
+fn ledger_cost(window: &Window, server_end: DateTime<Utc>, ip_end: DateTime<Utc>) -> i64 {
+    let server = window.create_called_at.map_or(0, |called| {
+        price::final_cost_kopecks(
+            window.price_hourly_kopecks,
+            minutes_between(called, server_end),
+        )
+        .unwrap_or(window.reservation_kopecks)
+    });
+    let address = window.ip_requested_at.map_or(0, |requested| {
+        price::final_cost_kopecks(
+            window.ipv4_hourly_kopecks,
+            minutes_between(requested, ip_end),
+        )
+        .unwrap_or(window.reservation_kopecks)
+    });
+    server.saturating_add(address)
+}
+
 fn delete_backoff(attempts: i32) -> TimeDelta {
     let exponent = u32::try_from(attempts.saturating_sub(1))
         .unwrap_or(0)
@@ -143,7 +164,13 @@ impl CloudService {
                 last_error.map_or(CreateRefusal::Invalid("profiles"), CreateRefusal::Provider)
             );
         }
-        Ok(Pricing { profiles })
+        // Публичный адрес заказывается отдельно и тарифицируется сам: цена как у сервера, в
+        // копейках, час с округлением вверх.
+        let ipv4_monthly = price::rubles_to_kopecks(self.config.ipv4_monthly_rubles)?;
+        Ok(Pricing {
+            profiles,
+            ipv4_hourly_kopecks: price::hourly_kopecks(ipv4_monthly)?,
+        })
     }
 
     /// Создание окна из любого входа: цена у провайдера, затем одна транзакция. Вызов
@@ -454,13 +481,26 @@ impl CloudService {
         {
             return self.delete_now(&window, "ready_timeout", now).await;
         }
-        let (Some(server_id), mut ipv4) = (window.server_id, window.ipv4.clone()) else {
+        let Some(server_id) = window.server_id else {
             return Ok(());
         };
-        if ipv4.is_none() {
+        let mut ipv4 = window.ipv4.clone();
+        // У нового сервера публичного адреса нет, а без него нет сети: хаб заказывает адрес
+        // сразу, один раз (он тарифицируется сам и переживает сервер).
+        if window.ip_requested_at.is_none()
+            && let Some(address) = self.request_ipv4(&window, server_id, now).await?
+        {
+            ipv4 = Some(address);
+        }
+        if window.attach_sent_at.is_none() {
+            // Подключать можно, когда сервер `On` и адрес известен.
+            let mut on = false;
             match self.provider.get_server(server_id).await {
                 Ok(ServerLookup::Found(state)) if state.status == ServerStatus::On => {
-                    if let Some(address) = state.ipv4 {
+                    on = true;
+                    if let Some(address) = state.ipv4
+                        && ipv4.as_deref() != Some(address.as_str())
+                    {
                         sqlx::query("update cloud_windows set ipv4 = $2 where id = $1")
                             .bind(window.id)
                             .bind(&address)
@@ -474,11 +514,72 @@ impl CloudService {
                     tracing::warn!(kind = "cloud_poll_server", error_kind = ?error.kind, "server poll failed");
                 }
             }
-        }
-        if let (Some(host), None) = (ipv4, window.attach_sent_at) {
-            self.send_attach(&window, &host, now).await?;
+            if let (true, Some(host)) = (on, ipv4) {
+                self.send_attach(&window, &host, now).await?;
+            }
         }
         Ok(())
+    }
+
+    /// Заказ публичного IPv4. Метка ставится до вызова, второго вызова нет: после
+    /// неопределённого ответа адрес мог выдаться. Определённый отказ значит «адреса нет»:
+    /// метка снимается, на следующем проходе попытка повторится.
+    async fn request_ipv4(
+        &self,
+        window: &Window,
+        server_id: i64,
+        now: DateTime<Utc>,
+    ) -> Result<Option<String>, sqlx::Error> {
+        let stamped = sqlx::query(
+            "update cloud_windows set ip_requested_at = $2
+             where id = $1 and state = 'identified' and ip_requested_at is null",
+        )
+        .bind(window.id)
+        .bind(now)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        if stamped == 0 {
+            return Ok(None);
+        }
+        match self.provider.add_ipv4(server_id).await {
+            Ok(address) => {
+                sqlx::query("update cloud_windows set ipv4 = $2, last_error = null where id = $1")
+                    .bind(window.id)
+                    .bind(&address)
+                    .execute(&self.pool)
+                    .await?;
+                Ok(Some(address))
+            }
+            Err(error) => {
+                tracing::warn!(kind = "cloud_ipv4_request", error_kind = ?error.kind, "ipv4 request failed");
+                let definite = matches!(
+                    error.kind,
+                    super::ErrorKind::Rejected
+                        | super::ErrorKind::Conflict
+                        | super::ErrorKind::NotFound
+                        | super::ErrorKind::Auth
+                        | super::ErrorKind::RateLimited
+                );
+                // Определённый отказ: адреса нет, пробуем снова. Неопределённый: адрес мог
+                // появиться; он придёт в ответе опроса сервера, но заказывать второй нельзя.
+                sqlx::query(
+                    "update cloud_windows set last_error = $2,
+                            ip_requested_at = case when $3 then null else ip_requested_at end
+                     where id = $1",
+                )
+                .bind(window.id)
+                .bind(if definite {
+                    "ipv4_request_failed"
+                } else {
+                    "ipv4_request_unknown"
+                })
+                .bind(definite)
+                .execute(&self.pool)
+                .await?;
+                Ok(None)
+            }
+        }
     }
 
     /// Команда несущей подключить раннер. Только если машина из конфигурации действительно
@@ -759,10 +860,15 @@ impl CloudService {
         if now < limit + slack {
             return Ok(false);
         }
-        let extra =
-            price::final_cost_kopecks(window.price_hourly_kopecks, minutes_between(cap, now))
-                .ok()
-                .map(|cost| cost.min(i64::MAX / 2));
+        // Сервер и адрес сверх предела: оба тарифицируются.
+        let extra = price::final_cost_kopecks(
+            window
+                .price_hourly_kopecks
+                .saturating_add(window.ipv4_hourly_kopecks),
+            minutes_between(cap, now),
+        )
+        .ok()
+        .map(|cost| cost.min(i64::MAX / 2));
         let code = if runtime.first_tick {
             "outage_extra_cost"
         } else {
@@ -801,26 +907,146 @@ impl CloudService {
                 self.try_delete(&window, server_id, now).await?;
             }
         }
-        let accepted: bool = sqlx::query_scalar(
-            "select delete_accepted_at is not null from cloud_windows where id = $1 and state = 'deleting'",
-        )
-        .bind(window.id)
-        .fetch_optional(&self.pool)
-        .await?
-        .unwrap_or(false);
-        if accepted {
-            // Конец оплаты подтверждает только полный список без сервера.
+        let mut window = {
+            let mut conn = self.pool.acquire().await?;
+            match windows::load(&mut conn, window.id).await? {
+                Some(fresh) if fresh.state == "deleting" => fresh,
+                _ => return Ok(()),
+            }
+        };
+        if window.server_gone_at.is_none() && window.delete_accepted_at.is_some() {
+            // Конец оплаты сервера подтверждает только полный список без него.
             match self
                 .provider
                 .list_project_servers(self.config.project_id)
                 .await
             {
                 Ok(list) if !list.iter().any(|server| server.id == server_id) => {
-                    self.end(&window.id, "ended", now).await?;
+                    self.mark_server_gone(window.id, now).await?;
+                    window.server_gone_at = Some(now);
+                    window.next_delete_at = None;
                 }
                 Ok(_) => {}
                 Err(error) => {
                     tracing::warn!(kind = "cloud_confirm_listing", error = %error, "listing failed");
+                }
+            }
+        }
+        if window.server_gone_at.is_some() {
+            self.finish_ip(&window, now).await?;
+        }
+        Ok(())
+    }
+
+    /// Сервер пропал из полного списка (метка ставится один раз).
+    async fn mark_server_gone(&self, id: Uuid, now: DateTime<Utc>) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "update cloud_windows set server_gone_at = coalesce(server_gone_at, $2),
+                    next_delete_at = case when server_gone_at is null then null else next_delete_at end
+             where id = $1 and state = 'deleting'",
+        )
+        .bind(id)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Адрес окна после удаления сервера: он остаётся на аккаунте плавающим без привязки и
+    /// тарифицируется. Окно кончается, когда адреса нет в полном списке плавающих.
+    async fn finish_ip(&self, window: &Window, now: DateTime<Utc>) -> Result<(), sqlx::Error> {
+        if window.ip_requested_at.is_none() || window.ip_gone_at.is_some() {
+            return self.end(&window.id, "ended", now).await;
+        }
+        let Some(address) = window.ipv4.as_deref() else {
+            // Заказ адреса остался без ответа, и адреса мы не знаем: чужой плавающий адрес
+            // не трогаем, владелец должен проверить аккаунт. Итог считается с запасом.
+            crate::notify::enqueue_cloud_alert(
+                &self.pool,
+                &format!("cloud:ipv4_unattributed:{}", window.id),
+                &json!({"code": "ipv4_unattributed", "window_id": window.id, "name": window.name}),
+            )
+            .await?;
+            return self.end(&window.id, "ended", now).await;
+        };
+        let list = match self.provider.list_floating_ips().await {
+            Ok(list) => list,
+            Err(error) => {
+                tracing::warn!(kind = "cloud_floating_listing", error = %error, "floating ip listing failed");
+                return Ok(());
+            }
+        };
+        let Some(found) = list.iter().find(|ip| ip.ip.as_deref() == Some(address)) else {
+            // Адреса нет в полном списке: оплата закончилась.
+            sqlx::query(
+                "update cloud_windows set ip_gone_at = coalesce(ip_gone_at, $2) where id = $1",
+            )
+            .bind(window.id)
+            .bind(now)
+            .execute(&self.pool)
+            .await?;
+            return self.end(&window.id, "ended", now).await;
+        };
+        // Привязан к серверу, который ещё снимается: ждём.
+        if found.bound {
+            return Ok(());
+        }
+        let retry_due = window.next_delete_at.is_none_or(|at| at <= now)
+            && window
+                .ip_delete_accepted_at
+                .is_none_or(|at| now - at >= TimeDelta::minutes(5));
+        if !retry_due {
+            return Ok(());
+        }
+        let attempts = window.ip_delete_attempts.saturating_add(1);
+        match self.provider.delete_floating_ip(&found.id).await {
+            DeleteOutcome::Deleted { .. } | DeleteOutcome::AlreadyGone => {
+                sqlx::query(
+                    "update cloud_windows set floating_ip_id = $2, ip_delete_accepted_at = $3,
+                            ip_delete_attempts = $4
+                     where id = $1",
+                )
+                .bind(window.id)
+                .bind(&found.id)
+                .bind(now)
+                .bind(attempts)
+                .execute(&self.pool)
+                .await?;
+                // Подтверждение тем же способом, что у сервера: адреса нет в полном списке.
+                if let Ok(list) = self.provider.list_floating_ips().await
+                    && !list.iter().any(|ip| ip.ip.as_deref() == Some(address))
+                {
+                    sqlx::query(
+                        "update cloud_windows set ip_gone_at = coalesce(ip_gone_at, $2) where id = $1",
+                    )
+                    .bind(window.id)
+                    .bind(now)
+                    .execute(&self.pool)
+                    .await?;
+                    return self.end(&window.id, "ended", now).await;
+                }
+            }
+            DeleteOutcome::NeedsConfirmation | DeleteOutcome::Failed { .. } => {
+                sqlx::query(
+                    "update cloud_windows set floating_ip_id = $2, last_error = 'ip_delete_failed',
+                            ip_delete_attempts = $3, next_delete_at = $4
+                     where id = $1",
+                )
+                .bind(window.id)
+                .bind(&found.id)
+                .bind(attempts)
+                .bind(now + delete_backoff(attempts))
+                .execute(&self.pool)
+                .await?;
+                if attempts >= DELETE_FAILURES_BEFORE_ALERT {
+                    let since = window.delete_requested_at.unwrap_or(now);
+                    let slot = (now - since).num_seconds().max(0) / ALERT_EVERY.num_seconds();
+                    crate::notify::enqueue_cloud_alert(
+                        &self.pool,
+                        &format!("cloud:ip_delete_failing:{}:{slot}", window.id),
+                        &json!({"code": "ip_delete_failing", "window_id": window.id, "name": window.name}),
+                    )
+                    .await?;
                 }
             }
         }
@@ -924,15 +1150,11 @@ impl CloudService {
                 if !window.is_live() {
                     return Ok(());
                 }
-                let minutes = window
-                    .create_called_at
-                    .map_or(0, |called| minutes_between(called, now));
-                let cost = if window.create_called_at.is_some() {
-                    price::final_cost_kopecks(window.price_hourly_kopecks, minutes)
-                        .unwrap_or(window.reservation_kopecks)
-                } else {
-                    0
-                };
+                let cost = ledger_cost(
+                    &window,
+                    window.server_gone_at.unwrap_or(now),
+                    window.ip_gone_at.unwrap_or(now),
+                );
                 sqlx::query(
                     "update cloud_windows set state = $2, final_cost_kopecks = $3,
                             delete_confirmed_at = $4, last_error = null
@@ -968,7 +1190,74 @@ impl CloudService {
         };
         self.apply_listing(&listing, now).await.map_err(|error| {
             warn_db("cloud_reconcile", &error);
-        })
+        })?;
+        // Адреса идут отдельно: их список не получен — серверы всё равно сверены.
+        if let Err(error) = self.delete_orphan_ips(now).await {
+            warn_db("cloud_reconcile_ips", &error);
+        }
+        Ok(())
+    }
+
+    /// Плавающие адреса без привязки, которые записаны на закончившемся, неудавшемся или
+    /// исчезнувшем окне: адрес пережил сервер и тарифицируется. Удаляются и сообщаются
+    /// владельцу. Другие плавающие адреса аккаунта, привязанные адреса и адрес, который
+    /// сейчас записан на живом окне, не трогаются никогда.
+    async fn delete_orphan_ips(&self, now: DateTime<Utc>) -> Result<(), sqlx::Error> {
+        let rows: Vec<(Option<String>, String, bool)> = sqlx::query_as(
+            "select ipv4, name, state = any($1) from cloud_windows where ipv4 is not null",
+        )
+        .bind(windows::live_states())
+        .fetch_all(&self.pool)
+        .await?;
+        let live: std::collections::HashSet<String> = rows
+            .iter()
+            .filter(|(_, _, live)| *live)
+            .filter_map(|(ip, _, _)| ip.clone())
+            .collect();
+        let recorded: std::collections::HashMap<String, String> = rows
+            .iter()
+            .filter(|(_, _, live)| !*live)
+            .filter_map(|(ip, name, _)| ip.clone().map(|ip| (ip, name.clone())))
+            .collect();
+        if recorded.is_empty() {
+            return Ok(());
+        }
+        let list = match self.provider.list_floating_ips().await {
+            Ok(list) => list,
+            Err(error) => {
+                tracing::warn!(kind = "cloud_floating_listing", error = %error, "floating ip listing failed; nothing changed");
+                return Ok(());
+            }
+        };
+        for found in list.iter().filter(|ip| !ip.bound) {
+            let Some(address) = found.ip.as_deref() else {
+                continue;
+            };
+            let (Some(name), false) = (recorded.get(address), live.contains(address)) else {
+                continue;
+            };
+            let payload = |code: &str| json!({"code": code, "name": name, "ip": address});
+            match self.provider.delete_floating_ip(&found.id).await {
+                DeleteOutcome::Deleted { .. } | DeleteOutcome::AlreadyGone => {
+                    crate::notify::enqueue_cloud_alert(
+                        &self.pool,
+                        &format!("cloud:stray_ip:{}", found.id),
+                        &payload("stray_ip_deleted"),
+                    )
+                    .await?;
+                }
+                DeleteOutcome::NeedsConfirmation | DeleteOutcome::Failed { .. } => {
+                    let slot = now.timestamp() / ALERT_EVERY.num_seconds();
+                    crate::notify::enqueue_cloud_alert(
+                        &self.pool,
+                        &format!("cloud:stray_ip_stuck:{}:{slot}", found.id),
+                        &payload("stray_ip_stuck"),
+                    )
+                    .await?;
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn apply_listing(
@@ -1023,8 +1312,10 @@ impl CloudService {
                         self.gone(window, now).await?;
                     }
                 }
+                // Сервера нет без принятого удаления (владелец удалил в панели): оплата
+                // сервера кончилась; окно закончит шаг удаления, когда уйдёт и адрес.
                 ("deleting", None) if window.server_id.is_some() => {
-                    self.end(&window.id, "ended", now).await?;
+                    self.mark_server_gone(window.id, now).await?;
                 }
                 (state, Some(server)) if !windows::LIVE.contains(&state) => {
                     self.delete_stray(server, now).await?;
@@ -1051,11 +1342,9 @@ impl CloudService {
                 if !matches!(window.state.as_str(), "identified" | "ready" | "draining") {
                     return Ok(false);
                 }
-                let minutes = window
-                    .create_called_at
-                    .map_or(0, |called| minutes_between(called, now));
-                let cost = price::final_cost_kopecks(window.price_hourly_kopecks, minutes)
-                    .unwrap_or(window.reservation_kopecks);
+                // Сервера нет, а адрес мог остаться плавающим: считаем его до сих пор,
+                // дальше сверка удалит его (`delete_orphan_ips`).
+                let cost = ledger_cost(&window, now, now);
                 sqlx::query(
                     "update cloud_windows set state = 'gone', final_cost_kopecks = $2,
                             delete_confirmed_at = $3, last_error = 'server_missing'

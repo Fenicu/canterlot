@@ -20,8 +20,8 @@ use serde_json::{Value, json};
 use super::price::{UnitPrices, rubles_to_kopecks};
 use super::rate_limit::{RateLimit, RateLimiter};
 use super::{
-    CloudProvider, Configurator, CreateOutcome, CreateServer, DeleteOutcome, ErrorKind, Limits,
-    ListError, ProviderError, ServerLookup, ServerState, ServerStatus, ServerSummary,
+    CloudProvider, Configurator, CreateOutcome, CreateServer, DeleteOutcome, ErrorKind, FloatingIp,
+    Limits, ListError, ProviderError, ServerLookup, ServerState, ServerStatus, ServerSummary,
 };
 
 pub const DEFAULT_BASE_URL: &str = "https://api.timeweb.cloud";
@@ -277,7 +277,7 @@ impl TimewebProvider {
         key: &str,
     ) -> Result<Vec<Value>, ListError> {
         let mut items: Vec<Value> = Vec::new();
-        let mut seen: HashSet<i64> = HashSet::new();
+        let mut seen: HashSet<String> = HashSet::new();
         let mut offset = 0u64;
         for _ in 0..MAX_PAGES {
             let page_error = |error: ProviderError| ListError::Page { offset, error };
@@ -310,7 +310,7 @@ impl TimewebProvider {
 
             let mut fresh = 0u64;
             for item in page {
-                let id = item["id"].as_i64().ok_or_else(|| {
+                let id = id_text(&item["id"]).ok_or_else(|| {
                     page_error(ProviderError::new(ErrorKind::Malformed, "item has no id"))
                 })?;
                 if seen.insert(id) {
@@ -694,6 +694,87 @@ impl CloudProvider for TimewebProvider {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| ListError::Page { offset: 0, error })
     }
+
+    async fn add_ipv4(&self, server_id: i64) -> Result<String, ProviderError> {
+        let path = format!("/api/v1/servers/{server_id}/ips");
+        let body = json!({"type": "ipv4"});
+        let reply = self
+            .call(
+                Method::POST,
+                "POST /api/v1/servers/{id}/ips",
+                &path,
+                &[],
+                Some(&body),
+            )
+            .await
+            .map_err(Transport::into_error)?;
+        match reply.status {
+            200 | 201 => serde_json::from_slice::<Value>(&reply.body)
+                .ok()
+                .and_then(|value| value["server_ip"]["ip"].as_str().map(str::to_owned))
+                .filter(|ip| valid_ip(ip))
+                .ok_or_else(|| malformed("answer has no usable server_ip.ip")),
+            _ => Err(self.status_error(&reply)),
+        }
+    }
+
+    async fn list_floating_ips(&self) -> Result<Vec<FloatingIp>, ListError> {
+        let items = self
+            .walk_pages("GET /api/v1/floating-ips", "/api/v1/floating-ips", "ips")
+            .await?;
+        Ok(items
+            .iter()
+            .map(|item| FloatingIp {
+                id: id_text(&item["id"]).unwrap_or_default(),
+                ip: item["ip"].as_str().map(str::to_owned),
+                bound: !item["resource_id"].is_null() && item["resource_id"].as_str() != Some(""),
+            })
+            .collect())
+    }
+
+    async fn delete_floating_ip(&self, id: &str) -> DeleteOutcome {
+        // Номер идёт в путь: только то, что похоже на идентификатор.
+        if id.is_empty()
+            || !id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        {
+            return DeleteOutcome::Failed { retryable: false };
+        }
+        let path = format!("/api/v1/floating-ips/{id}");
+        let reply = match self
+            .call(
+                Method::DELETE,
+                "DELETE /api/v1/floating-ips/{id}",
+                &path,
+                &[],
+                None,
+            )
+            .await
+        {
+            Ok(reply) => reply,
+            Err(_) => return DeleteOutcome::Failed { retryable: true },
+        };
+        match reply.status {
+            200 | 204 => DeleteOutcome::Deleted { quarantined: false },
+            404 => DeleteOutcome::AlreadyGone,
+            409 | 500.. => DeleteOutcome::Failed { retryable: true },
+            _ => DeleteOutcome::Failed { retryable: false },
+        }
+    }
+}
+
+/// Идентификатор из JSON: число или строка.
+fn id_text(value: &Value) -> Option<String> {
+    match value {
+        Value::Number(number) => Some(number.to_string()),
+        Value::String(text) if !text.is_empty() => Some(text.clone()),
+        _ => None,
+    }
+}
+
+fn valid_ip(text: &str) -> bool {
+    text.parse::<std::net::Ipv4Addr>().is_ok()
 }
 
 #[cfg(test)]

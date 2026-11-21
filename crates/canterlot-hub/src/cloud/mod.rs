@@ -293,4 +293,25 @@ pub trait CloudProvider: Send + Sync {
     /// Все серверы проекта, все страницы. Любая неудавшаяся страница делает ошибкой весь
     /// вызов.
     async fn list_project_servers(&self, project_id: i64) -> Result<Vec<ServerSummary>, ListError>;
+
+    /// Публичный IPv4 для сервера: у нового сервера адреса нет, а без него нет сети.
+    /// Один вызов, без повторов: после неопределённого исхода адрес мог создаться и
+    /// тарифицироваться. `Ok` — выданный адрес.
+    async fn add_ipv4(&self, server_id: i64) -> Result<String, ProviderError>;
+
+    /// Все плавающие адреса аккаунта, все страницы. IPv4 сервера после его удаления остаётся
+    /// здесь без привязки (`bound = false`) и продолжает тарифицироваться.
+    async fn list_floating_ips(&self) -> Result<Vec<FloatingIp>, ListError>;
+
+    /// Удаление плавающего адреса. Исходы те же, что у сервера (`AlreadyGone` — 404).
+    async fn delete_floating_ip(&self, id: &str) -> DeleteOutcome;
+}
+
+/// Плавающий адрес аккаунта.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FloatingIp {
+    pub id: String,
+    pub ip: Option<String>,
+    /// Привязан к ресурсу (`resource_id` не пуст).
+    pub bound: bool,
 }
