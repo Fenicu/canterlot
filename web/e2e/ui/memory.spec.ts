@@ -3,6 +3,7 @@ import { FakeHub, FakeHubApi, seedMachine, seedPresets } from '../../testing/fak
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
 import { seedMockupChat } from '../../testing/fixtures/mockup-chat';
 import { expect, test } from './fixtures';
+import { foldingCount, noMotion, slowMotion } from './ink-motion';
 import { bootSecondary } from './secondary-fixture';
 
 const LIST = '[data-memory-list]';
@@ -145,6 +146,74 @@ test('archive_restore_and_hard_delete_with_confirmation', async ({ page }) => {
   await expect(sheet).toHaveCount(0);
   await expect(rowTitles(page)).toHaveText(['Сборка воркера']);
   expect([...api.memoryEntries.values()].some((row) => row.subject === 'Порт стенда')).toBe(false);
+});
+
+test('empty_memory_shows_the_brain_inked_once_and_the_archive_shows_its_own_mark', async ({ page }) => {
+  await open(page, (api) => { api.memoryEntries.clear(); });
+  const empty = page.locator('[data-role="memory-empty"]');
+  await expect(empty).toHaveText('Записей пока нет');
+  const mark = empty.locator('[data-empty-mark="brain"] svg');
+  await expect(mark).toHaveAttribute('data-state', 'ink');
+  await expect(mark).toHaveAttribute('data-motion', 'on');
+  // Росчерк идёт один раз и кончается: мотив не крутится на пустом экране.
+  await expect.poll(() => mark.evaluate((node) => node.getAnimations({ subtree: true }).filter((animation) => animation.effect?.getComputedTiming().iterations === Infinity).length)).toBe(0);
+  const before = (await empty.boundingBox())!.height;
+  await page.getByRole('radiogroup', { name: 'Показать записи' }).getByRole('radio', { name: 'В архиве' }).check();
+  await expect(empty).toHaveText('В архиве записей нет');
+  await expect(empty.locator('[data-empty-mark="archive"] svg')).toHaveCount(1);
+  // Значок стоит в строке с текстом: место под списком не растёт.
+  expect(Math.abs((await empty.boundingBox())!.height - before)).toBeLessThan(2);
+});
+
+test('empty_memory_mark_stands_drawn_under_reduced_motion', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await open(page, (api) => { api.memoryEntries.clear(); });
+  const mark = page.locator('[data-role="memory-empty"] [data-empty-mark] svg');
+  await expect(mark).toHaveAttribute('data-motion', 'off');
+  expect(await mark.evaluate((node) => node.getAnimations({ subtree: true }).length)).toBe(0);
+});
+
+test('an_archived_row_folds_away_and_a_domain_switch_does_not_fold_the_list', async ({ page }) => {
+  await open(page);
+  await slowMotion(page);
+  // Переключение домена перестраивает список целиком: строки не складываются поштучно.
+  await page.getByRole('radiogroup', { name: 'Домен памяти' }).getByRole('radio', { name: 'Личное' }).check();
+  await expect(rowTitles(page)).toHaveText(['Рецепт борща']);
+  expect(await foldingCount(page, '[data-memory-row], [data-memory-list] > li')).toBe(0);
+  await page.getByRole('radiogroup', { name: 'Домен памяти' }).getByRole('radio', { name: 'Работа' }).check();
+  await expect(rowTitles(page)).toHaveText(['Порт стенда', 'Сборка воркера']);
+  expect(await foldingCount(page, '[data-memory-list] > li')).toBe(0);
+
+  await page.locator('[data-memory-row]', { hasText: 'Сборка воркера' }).click();
+  const sheet = page.getByRole('dialog', { name: 'Запись' });
+  await sheet.getByRole('button', { name: 'В архив' }).click();
+  await expect(sheet).toHaveCount(0);
+  // Строка ушла в архив на глазах: складывается, а не пропадает кадром.
+  await expect.poll(() => foldingCount(page, '[data-memory-list] > li')).toBeGreaterThan(0);
+  await expect(page.locator('[data-memory-list] > li[aria-hidden="true"]')).toHaveCount(1);
+  await expect(rowTitles(page)).toHaveText(['Порт стенда'], { timeout: 15_000 });
+});
+
+test('a_created_row_folds_in_and_memory_rows_stand_still_without_motion', async ({ page }) => {
+  await open(page);
+  await noMotion(page);
+  await page.getByRole('button', { name: 'Новая запись' }).click();
+  const fresh = page.getByRole('dialog');
+  await fresh.getByRole('textbox', { name: 'Тема' }).fill('Ветка выпуска');
+  await fresh.getByRole('textbox', { name: 'Текст' }).fill('Выпуск идёт из int/143');
+  await fresh.getByRole('button', { name: 'Создать' }).click();
+  await expect(fresh.locator('[data-role="memory-notice"]')).toHaveText('Запись создана');
+  await expect(rowTitles(page)).toContainText(['Ветка выпуска']);
+  expect(await foldingCount(page, '[data-memory-list] > li')).toBe(0);
+  // С движением та же правка раскрывает строку.
+  await slowMotion(page);
+  await fresh.getByRole('button', { name: 'Закрыть' }).click();
+  await page.getByRole('button', { name: 'Новая запись' }).click();
+  const second = page.getByRole('dialog');
+  await second.getByRole('textbox', { name: 'Тема' }).fill('Порт сайта');
+  await second.getByRole('textbox', { name: 'Текст' }).fill('Сайт слушает 8080');
+  await second.getByRole('button', { name: 'Создать' }).click();
+  await expect.poll(() => foldingCount(page, '[data-memory-list] > li')).toBeGreaterThan(0);
 });
 
 test('session_info_shows_memory_domain_or_no_memory', async ({ page }) => {

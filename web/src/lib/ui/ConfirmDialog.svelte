@@ -8,7 +8,7 @@
   const autoKey = $props.id();
   let dismissed = $state(false);
 </script>
-<Sheet open={open && !dismissed} {title} routeKey={routeKey ?? autoKey} onclose={() => { dismissed = true; onclose?.(); }}>
+<Sheet open={open && !dismissed} {title} routeKey={routeKey ?? autoKey} onrevive={() => { dismissed = false; }} onclose={() => { dismissed = true; onclose?.(); }}>
   <p>{body}</p><div class:danger><Button variant="primary" onclick={() => { onconfirm(); dismissed = true; }}>{confirmLabel}</Button><Button variant="text" onclick={() => { dismissed = true; onclose?.(); }}>Отмена</Button></div>
 </Sheet>
 <style>

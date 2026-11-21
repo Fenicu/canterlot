@@ -53,6 +53,7 @@ import { fetchPage, search } from './defs/web';
 import { sessionLink } from './links';
 import { outcomeWord, type Outcome } from './outcome';
 import { toolFamily, toolId } from './toolId';
+import type { IconName } from '#lib/ui/icons.js';
 import LineCard from './LineCard.svelte';
 import type { AnyCard, CardCall, CardLogic, CardProps, ResolvedCard, StateWord } from './types';
 
@@ -69,6 +70,7 @@ export function card<D>(logic: CardLogic<D>, component: Component<CardProps<D>> 
     yieldsToRequest: logic.yieldsToRequest === true,
     label: logic.label ?? null,
     fold: logic.fold ?? null,
+    icon: logic.icon ?? null,
     resolve(call, now) {
       try {
         const data = logic.parse(call);
@@ -81,6 +83,7 @@ export function card<D>(logic: CardLogic<D>, component: Component<CardProps<D>> 
           line,
           link: logic.link?.(call, data) ?? null,
           word: logic.word ? logic.word(call, data, now) : defaultWord(call),
+          icon: self.icon,
           view: { data, render: component }
         };
       } catch {
@@ -89,6 +92,28 @@ export function card<D>(logic: CardLogic<D>, component: Component<CardProps<D>> 
     }
   };
   return self;
+}
+
+/**
+ * Значки семейств собственных инструментов canterlot. Один значок на семейство, а не на глагол:
+ * поиск, чтение, запись и архив памяти — всё один мозг, глагол стоит первым словом строки.
+ * У инструментов харнесса значка нет, и они этим помощником не проходят.
+ * `history_search` получит `search`, когда у него появится карточка.
+ */
+const family = {
+  memory: 'brain',
+  delegates: 'branch',
+  sessions: 'chats',
+  alarms: 'alarm',
+  plan: 'list',
+  limits: 'gauge',
+  share: 'share',
+  jobs: 'hammer'
+} as const satisfies Record<string, IconName>;
+
+/** Значок семейства в описании карточки. */
+function marked<D>(icon: IconName, logic: CardLogic<D>): CardLogic<D> {
+  return { ...logic, icon };
 }
 
 /** Ссылка на сессию по полю `session_id` входа. */
@@ -131,42 +156,43 @@ function jobbed(logic: CardLogic<jobs.JobCallData>): CardLogic<jobs.JobCallData>
 }
 
 const REGISTRY: Record<string, AnyCard> = {
-  'canterlot.memory_search': card(remembered(memory.memorySearch, (data) => (data.refusal ? null : memory.searchWord(data))), MemorySearchCard),
-  'canterlot.memory_get': card(memory.memoryGet, MemoryGetCard),
-  'canterlot.memory_write': card(memory.memoryWrite, MemoryWriteCard),
-  'canterlot.memory_update': card(remembered(memory.memoryUpdate, memory.updateWord), MemoryUpdateCard),
-  'canterlot.memory_delete': card(memory.memoryDelete),
-  'canterlot.session_spawn': card<sessions.SpawnData>({ ...sessions.spawn, grows: true, link: (call, data) => sessionLink(call, data.sessionId, data.title) }, SpawnCard),
-  'canterlot.session_accept': card(bySession(sessions.accept), AcceptCard),
-  'canterlot.session_send': card(bySession(sessions.send), SendCard),
-  'canterlot.session_inspect': card(bySession(sessions.inspect, (_call, data) => data.sessionId)),
-  'canterlot.sessions_list': card(sessions.sessionsList, SessionsCard),
-  'canterlot.session_wait': card(bySession(sessions.wait)),
-  'canterlot.session_stop': card(lined(sessions.stop)),
-  'canterlot.session_interrupt': card(lined(sessions.interrupt)),
-  'canterlot.session_subscribe': card(lined(sessions.subscribe)),
-  'canterlot.session_unsubscribe': card(lined(sessions.unsubscribe)),
-  'canterlot.nudge_set': card(lined(sessions.nudgeSet)),
-  'canterlot.nudge_clear': card(lined(sessions.nudgeClear)),
-  'canterlot.spawn_cancel': card(lined(sessions.spawnCancel)),
+  'canterlot.memory_search': card(marked(family.memory, remembered(memory.memorySearch, (data) => (data.refusal ? null : memory.searchWord(data)))), MemorySearchCard),
+  'canterlot.memory_get': card(marked(family.memory, memory.memoryGet), MemoryGetCard),
+  'canterlot.memory_write': card(marked(family.memory, memory.memoryWrite), MemoryWriteCard),
+  'canterlot.memory_update': card(marked(family.memory, remembered(memory.memoryUpdate, memory.updateWord)), MemoryUpdateCard),
+  'canterlot.memory_delete': card(marked(family.memory, memory.memoryDelete)),
+  'canterlot.session_spawn': card<sessions.SpawnData>({ ...sessions.spawn, icon: family.delegates, grows: true, link: (call, data) => sessionLink(call, data.sessionId, data.title) }, SpawnCard),
+  'canterlot.session_accept': card(marked(family.delegates, bySession(sessions.accept)), AcceptCard),
+  'canterlot.session_send': card(marked(family.delegates, bySession(sessions.send)), SendCard),
+  'canterlot.session_inspect': card(marked(family.delegates, bySession(sessions.inspect, (_call, data) => data.sessionId))),
+  'canterlot.sessions_list': card(marked(family.sessions, sessions.sessionsList), SessionsCard),
+  'canterlot.session_wait': card(marked(family.delegates, bySession(sessions.wait))),
+  'canterlot.session_stop': card(marked(family.delegates, lined(sessions.stop))),
+  'canterlot.session_interrupt': card(marked(family.delegates, lined(sessions.interrupt))),
+  'canterlot.session_subscribe': card(marked(family.delegates, lined(sessions.subscribe))),
+  'canterlot.session_unsubscribe': card(marked(family.delegates, lined(sessions.unsubscribe))),
+  'canterlot.nudge_set': card(marked(family.alarms, lined(sessions.nudgeSet))),
+  'canterlot.nudge_clear': card(marked(family.alarms, lined(sessions.nudgeClear))),
+  'canterlot.spawn_cancel': card(marked(family.delegates, lined(sessions.spawnCancel))),
   'canterlot.route_preview': card(lined(sessions.routePreview)),
   'canterlot.presets_list': card(lined(sessions.presetsList)),
   'canterlot.preset_save': card(lined(sessions.presetSave)),
   'canterlot.preset_apply': card(lined(sessions.presetApply)),
-  'canterlot.alarm_set': card({ ...alarmSet, word: (call, data) => (data.satisfied ? { word: 'уже выполнено', tone: 'success' } : defaultWord(call)) }),
-  'canterlot.alarm_cancel': card(alarmCancel),
-  'canterlot.alarm_list': card(alarmList, AlarmListCard),
-  'canterlot.share_file': card(share, ShareCard),
-  'canterlot.limits': card(limits, LimitsCard),
-  'canterlot.plan_add': card(toPlan(planAdd), PlanAddCard),
-  'canterlot.plan_update': card(planUpdate, PlanUpdateCard),
-  'canterlot.plan_list': card(toPlan(planList), PlanListCard),
-  'canterlot.plan_adopt': card({ ...planAdopt, link: (call, data) => sessionLink(call, data.from) }, PlanAdoptCard),
-  'canterlot.job_run': card(jobbed(jobs.jobRun), JobRunCard),
-  'canterlot.job_status': card(jobbed(jobs.jobStatus), JobRunCard),
-  'canterlot.job_cancel': card(jobbed(jobs.jobCancel), JobRunCard),
-  'canterlot.job_log': card({ ...jobs.jobLog, word: (call, data) => (call.state === 'done' ? jobs.logWord(data) : defaultWord(call)) }, JobLogCard),
-  'canterlot.jobs_list': card({ ...jobs.jobsList, word: (call) => defaultWord(call) }, JobsListCard),
+
+  'canterlot.alarm_set': card({ ...alarmSet, icon: family.alarms, word: (call, data) => (data.satisfied ? { word: 'уже выполнено', tone: 'success' } : defaultWord(call)) }),
+  'canterlot.alarm_cancel': card(marked(family.alarms, alarmCancel)),
+  'canterlot.alarm_list': card(marked(family.alarms, alarmList), AlarmListCard),
+  'canterlot.share_file': card(marked(family.share, share), ShareCard),
+  'canterlot.limits': card(marked(family.limits, limits), LimitsCard),
+  'canterlot.plan_add': card(marked(family.plan, toPlan(planAdd)), PlanAddCard),
+  'canterlot.plan_update': card(marked(family.plan, planUpdate), PlanUpdateCard),
+  'canterlot.plan_list': card(marked(family.plan, toPlan(planList)), PlanListCard),
+  'canterlot.plan_adopt': card({ ...planAdopt, icon: family.plan, link: (call, data) => sessionLink(call, data.from) }, PlanAdoptCard),
+  'canterlot.job_run': card(marked(family.jobs, jobbed(jobs.jobRun)), JobRunCard),
+  'canterlot.job_status': card(marked(family.jobs, jobbed(jobs.jobStatus)), JobRunCard),
+  'canterlot.job_cancel': card(marked(family.jobs, jobbed(jobs.jobCancel)), JobRunCard),
+  'canterlot.job_log': card({ ...jobs.jobLog, icon: family.jobs, word: (call, data) => (call.state === 'done' ? jobs.logWord(data) : defaultWord(call)) }, JobLogCard),
+  'canterlot.jobs_list': card({ ...jobs.jobsList, icon: family.jobs, word: (call) => defaultWord(call) }, JobsListCard),
   'todo.write': card(todo, TodoCard),
   'agent.task': card(subagent, SubagentCard),
   'question.ask': card(question, QuestionCard),

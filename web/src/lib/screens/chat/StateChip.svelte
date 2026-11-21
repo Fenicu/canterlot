@@ -2,6 +2,7 @@
 	import type { Activity } from '#lib/screens/sessions/activityText.js';
 	import type { WaitFacts } from '#lib/requests/waitCopy.js';
 	import { announce } from '#lib/a11y/announce.js';
+	import { swapOn } from '#lib/ui/swap.js';
 	import { chatStateLine } from './stateLine';
 
 	let {
@@ -35,7 +36,8 @@
 	{#if line.live}
 		<span class="live-dot" aria-hidden="true"></span>
 	{/if}
-	<span class="state-text">{line.text}</span>
+	<!-- Слово сменяется движением только при смене состояния сессии, а не на каждом инструменте: инструменты ведёт строка хода. -->
+	<span class="state-text" use:swapOn={{ text: line.text, key: `${activity?.state ?? ''}:${line.tone}` }}></span>
 </div>
 
 <style>

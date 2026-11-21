@@ -227,6 +227,20 @@ test('malformed_input_of_a_known_tool_falls_back_to_the_plain_block', async ({ p
   await expect(row(page, broken.call).locator('.feed-card')).toHaveCount(0);
 });
 
+test('a_running_delegate_card_has_one_pulse_the_dot_and_its_icon_stands_as_a_still_sketch', async ({ page }) => {
+  const { hub, api, seed } = await boot(page, { working: true });
+  // Вызов без ответа идёт, только пока сессия занята: состояние приходит событием хаба.
+  setActivity(hub, api, seed.id, 'working');
+  const fresh = streamCall(hub, api, seed.id, seed.run, 'mcp__canterlot__session_spawn', { title: 'Новый делегат', brief: 'Проверь.', harness: 'codex', model: 'gpt-6.1-sol', isolated: true });
+  const spawn = card(page, fresh.call);
+  await expect(spawn).toHaveAttribute('data-state', 'running');
+  await expect(spawn).toHaveAttribute('data-icon', 'branch');
+  await expect(spawn.locator('svg.mark')).toHaveAttribute('data-state', 'sketch');
+  await expect(spawn.locator('.dot[data-live]')).toHaveCount(1);
+  const loops = await spawn.locator('.head').evaluate((node) => node.getAnimations({ subtree: true }).filter((item) => item.effect?.getComputedTiming().iterations === Infinity).map((item) => (item as CSSAnimation).animationName.replace(/^svelte-[a-z0-9]+-/, '')));
+  expect(loops).toEqual(['card-pulse']);
+});
+
 for (const motion of ['full', 'reduced'] as const) {
   test(`feed_stays_pinned_at_the_bottom_while_cards_mount_${motion}`, async ({ page }) => {
     if (motion === 'reduced') await page.emulateMedia({ reducedMotion: 'reduce' });

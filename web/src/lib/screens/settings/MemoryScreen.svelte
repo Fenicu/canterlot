@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
   import Select from '#lib/ui/Select.svelte';
   import { untrack } from 'svelte';
@@ -7,6 +7,8 @@
   import { getMemory, listMemory } from '#lib/api/client.js';
   import { errorText } from '#lib/api/errors.js';
   import Button from '#lib/ui/Button.svelte';
+  import EmptyMark from '#lib/ui/EmptyMark.svelte';
+  import { rowFoldWhen } from '#lib/ui/fold.js';
   import Segmented from '#lib/ui/Segmented.svelte';
   import ClaudeAutoMemorySetting from './ClaudeAutoMemorySetting.svelte';
   import MemoryEntrySheet from './MemoryEntrySheet.svelte';
@@ -25,6 +27,8 @@
   let error = $state('');
   let open = $state<MemoryEntry | null>(null);
   let creating = $state(false);
+  // Лист закрытой записи ещё доигрывает уход: открытый заново должен быть чистым, а не оживлённым со старой формой.
+  let creations = $state(0);
   // Ответ прежнего домена или фильтра не должен попасть в список нового.
   let generation = 0;
 
@@ -42,6 +46,20 @@
       if (mine !== generation) return;
       error = errorText(err, 'Не удалось загрузить память. Повторите при восстановлении связи');
     } finally { if (mine === generation) loading = false; }
+  }
+
+  // Складываются только строки, что пришли или ушли после правки владельца (новая запись, архив, возврат):
+  // смена домена, вида или фильтра и подгрузка страницы строят список сразу.
+  let folding = false;
+  const fold = rowFoldWhen(() => folding);
+  async function reload() {
+    folding = true;
+    try {
+      await load();
+      await tick();
+    } finally {
+      folding = false;
+    }
   }
 
   function pick(value: string, field: 'domain' | 'view') {
@@ -83,7 +101,7 @@
 <section data-memory class="memory" aria-label="Память">
   <div class="head">
     <h2>Память</h2>
-    <Button variant="primary" onclick={() => creating = true}>Новая запись</Button>
+    <Button variant="primary" onclick={() => { creations += 1; creating = true; }}>Новая запись</Button>
   </div>
   <p class="note">Общая память агентов: сессии читают и пишут её через инструменты canterlot. Личное и Работа не смешиваются, сессия видит только свой домен</p>
 
@@ -102,12 +120,13 @@
   {#if notice}<p class="note" role="status" data-role="memory-link-notice">{notice}</p>{/if}
   {#if error}<p class="error" role="alert">{error}<Button onclick={() => load()}>Повторить</Button></p>{/if}
   {#if !loading && !error && items.length === 0}
-    <p class="empty" data-role="memory-empty">{view === 'archived' ? 'В архиве записей нет' : 'Записей пока нет'}</p>
+    <!-- Значок стоит в строке с текстом: место под списком не растёт. -->
+    <p class="empty marked" data-role="memory-empty"><EmptyMark inline name={view === 'archived' ? 'archive' : 'brain'} />{view === 'archived' ? 'В архиве записей нет' : 'Записей пока нет'}</p>
   {/if}
   <ul class="list" data-memory-list={domain} aria-busy={loading}>
     {#each items as item (item.id)}
       {@const status = entryStatus(item)}
-      <li>
+      <li transition:fold>
         <button type="button" class="row" data-memory-row={item.id} onclick={() => open = item}>
           <strong>{item.subject}</strong>
           <span class="meta">{kindLabel(item.kind)} · {levelLabel(item)} · версия {item.version}</span>
@@ -126,11 +145,13 @@
 
 {#if open}
   {#key open.id}
-    <MemoryEntrySheet entry={open} {domain} onclose={() => open = null} onchanged={() => void load()} />
+    <MemoryEntrySheet entry={open} {domain} onclose={() => open = null} onchanged={() => void reload()} />
   {/key}
 {/if}
 {#if creating}
-  <MemoryEntrySheet entry={null} {domain} onclose={() => creating = false} onchanged={() => void load()} />
+  {#key creations}
+    <MemoryEntrySheet entry={null} {domain} onclose={() => creating = false} onchanged={() => void reload()} />
+  {/key}
 {/if}
 
 <style>
@@ -139,6 +160,7 @@
   .head { display: flex; align-items: center; justify-content: space-between; gap: var(--s4); flex-wrap: wrap; }
   h2 { margin: var(--s0); font-size: var(--fs-title); font-weight: var(--weight-semibold); }
   .note, .empty { margin: var(--s0); color: var(--muted); font-size: var(--fs-sm); }
+  .empty.marked { display: flex; align-items: center; gap: var(--s3); }
   .error { margin: var(--s0); color: var(--danger); }
   .tools { display: grid; gap: var(--s3); }
   .filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--gauge-width)), 1fr)); gap: var(--s4); }

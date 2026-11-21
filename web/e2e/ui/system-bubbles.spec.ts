@@ -1,4 +1,4 @@
-import type { Page } from '@playwright/test';
+import type { Locator, Page } from '@playwright/test';
 import { FakeHub, FakeHubApi } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
 import { seedConversation } from '../../testing/fake-hub/seed';
@@ -7,13 +7,15 @@ import { expect, test } from './fixtures';
 
 const OWNER = '00000000-0000-4000-8000-0000000000d1';
 
-async function boot(page: Page, group: SystemBubbleGroup = 'all') {
+async function boot(page: Page, group: SystemBubbleGroup = 'all', opts: { fresh?: boolean } = {}) {
   const phone = test.info().project.name === 'phone';
   await page.setViewportSize({ width: phone ? 412 : 1280, height: 900 });
   const hub = new FakeHub();
   const api = new FakeHubApi(hub);
   const id = seedConversation(api, { title: 'Оркестратор' });
   const seed = seedSystemBubbles(api, id, group);
+  // Пузырь, пришедший на глазах, ленте виден как «только что»: время записи не раньше четырёх секунд назад.
+  if (opts.fresh) for (const item of api.histories.get(id) ?? []) if (item.kind === 'input') item.created_at = new Date(Date.now() + 3_600_000).toISOString();
   api.bindConversation(id);
   await installChatRoutes(page, hub, api, OWNER);
   await page.goto(`/c/${id}`);
@@ -174,6 +176,47 @@ test('the_fold_chevron_stays_with_its_label_in_every_service_card', async ({ pag
     }
     expect(seen, `раскрытие в группе ${group}`).toBeGreaterThan(0);
     expect(compared, `соседний контрол в группе ${group}`).toBeGreaterThan(0);
+  }
+});
+
+/** Анимации значка пузыря по именам: Svelte прибавляет к имени ключевых кадров свой хеш. */
+const iconMotion = (bubble: Locator) =>
+  bubble.locator('[data-role="system-icon"]').evaluate((node) => node.getAnimations({ subtree: true }).map((item) => (item as CSSAnimation).animationName.replace(/^svelte-[a-z0-9]+-/, '')));
+
+test('a_bubble_from_history_stands_drawn_and_nothing_moves', async ({ page }) => {
+  await boot(page, 'alarm');
+  const bubble = page.locator('article.system[data-event-kind="alarm"]').first();
+  await expect(bubble.locator('svg.mark')).toHaveAttribute('data-state', 'dry');
+  expect(await iconMotion(bubble)).toEqual([]);
+});
+
+test('a_bubble_that_arrives_live_is_inked_once_in_its_own_tone_then_dries', async ({ page }) => {
+  // Росчерк идёт с монтирования пузыря и кончается за полсекунды: начало анимаций записывается с первого кадра страницы.
+  await page.addInitScript(() => {
+    const started: string[] = [];
+    (window as unknown as { __started: string[] }).__started = started;
+    document.addEventListener('animationstart', (event) => started.push((event as AnimationEvent).animationName), true);
+  });
+  await boot(page, 'alarm', { fresh: true });
+  const bubble = page.locator('article.system[data-event-kind="alarm"]').first();
+  await expect(bubble.locator('svg.mark')).toBeVisible();
+  const started = () => page.evaluate(() => (window as unknown as { __started: string[] }).__started.map((name) => name.replace(/^svelte-[a-z0-9]+-/, '')));
+  await expect.poll(started).toContain('mark-ink');
+  // Дважды росчерк не идёт: после оседания цвета значок стоит написанным.
+  await expect(bubble.locator('svg.mark')).toHaveAttribute('data-state', 'dry', { timeout: 10_000 });
+  expect(await iconMotion(bubble)).toEqual([]);
+});
+
+test('the_ink_dries_into_the_tone_of_the_bubble_and_the_motion_off_fallback_is_a_drawn_icon', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await boot(page, 'all', { fresh: true });
+  const bubble = page.locator('article.system').first();
+  await expect(bubble.locator('svg.mark')).toHaveAttribute('data-state', 'dry');
+  expect(await iconMotion(bubble)).toEqual([]);
+  // Под любым тоном значок стоит в цвете заголовка пузыря: предупреждение остаётся предупреждением.
+  for (const tinted of await page.locator('article.system[data-tone="warning"], article.system[data-tone="danger"]').all()) {
+    const colors = await tinted.evaluate((node) => [getComputedStyle(node.querySelector('svg.mark')!).color, getComputedStyle(node.querySelector('.title')!).color]);
+    expect(colors[0]).toBe(colors[1]);
   }
 });
 

@@ -161,3 +161,83 @@ test('connection_banner_appears_without_a_slide_when_motion_is_reduced', async (
   await expect(banner(page)).toContainText('Связь восстановлена', { timeout: 20_000 });
   await expect(banner(page)).toHaveCount(0, { timeout: 5_000 });
 });
+
+const mark = (page: Page) => banner(page).locator('svg.mark');
+
+declare global {
+  interface Window {
+    __animated?: { cls: string; props: string[] }[];
+  }
+}
+
+/** Вызовы `element.animate` с классом и свойствами: видно, где слово сменилось с движением, а где сразу. */
+async function recordAnimations(page: Page) {
+  await page.addInitScript(() => {
+    const log: NonNullable<Window['__animated']> = [];
+    window.__animated = log;
+    const original = Element.prototype.animate;
+    Element.prototype.animate = function (this: Element, keyframes: Keyframe[] | PropertyIndexedKeyframes | null, options?: number | KeyframeAnimationOptions) {
+      const frames = Array.isArray(keyframes) ? keyframes : [];
+      log.push({ cls: this.getAttribute('class') ?? '', props: [...new Set(frames.flatMap((frame) => Object.keys(frame)))] });
+      return original.call(this, keyframes as Keyframe[], options);
+    };
+  });
+}
+
+const swaps = (page: Page) => page.evaluate(() => window.__animated!.filter((entry) => entry.cls.split(' ').includes('words')).length);
+
+test('connection_banner_sketches_wifi_off_while_offline_and_inks_wifi_on_return', async ({ page }) => {
+  const { icons } = await import('../../src/lib/ui/icons');
+  await recordAnimations(page);
+  const { hub } = await boot(page);
+  hub.acceptConnections = false;
+  hub.chaos.cut();
+  await expect(banner(page)).toContainText('Нет связи. Переподключаюсь…', { timeout: 8_000 });
+  await expect(mark(page)).toHaveAttribute('data-state', 'sketch');
+  await expect(mark(page).locator('.ghost')).toHaveAttribute('d', icons.wifiOff);
+  // Набросок дышит, пока связи нет.
+  expect(await mark(page).locator('.ghost').evaluate((node) => node.getAnimations().map((item) => (item as CSSAnimation).animationName.replace(/^.*-(?=mark-breathe$)/, '')))).toEqual(['mark-breathe']);
+  const offlineText = await swaps(page);
+  hub.acceptConnections = true;
+  await expect(banner(page)).toContainText('Связь восстановлена', { timeout: 20_000 });
+  // Окно «Связь восстановлена» две секунды: всё читается за один заход в страницу.
+  const restored = await page.evaluate(() => {
+    const node = document.querySelector('[data-banner] svg.mark')!;
+    const probe = document.createElement('span');
+    probe.style.color = 'var(--success)';
+    document.body.append(probe);
+    const success = getComputedStyle(probe).color;
+    probe.remove();
+    return {
+      state: node.getAttribute('data-state'),
+      path: node.querySelector('.ghost')!.getAttribute('d'),
+      color: getComputedStyle(node).color,
+      success,
+      svgs: document.querySelectorAll('[data-banner] svg').length,
+      swaps: window.__animated!.filter((entry) => entry.cls.split(' ').includes('words')).length
+    };
+  });
+  expect(restored.state).toBe('ink');
+  expect(restored.path).toBe(icons.wifi);
+  expect(restored.color).toBe(restored.success);
+  // Один значок связи вместо общего значка предупреждения, а слово меняется с движением.
+  expect(restored.svgs).toBe(1);
+  expect(restored.swaps).toBeGreaterThan(offlineText);
+  await expect(banner(page)).toHaveCount(0, { timeout: 5_000 });
+});
+
+test('connection_banner_words_swap_in_place_and_stand_still_when_motion_is_reduced', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await recordAnimations(page);
+  const { hub } = await boot(page);
+  hub.acceptConnections = false;
+  hub.chaos.cut();
+  await expect(banner(page)).toContainText('Нет связи. Переподключаюсь…', { timeout: 8_000 });
+  // Без движения набросок стоит ровно, а слова не двигаются.
+  expect(await mark(page).locator('.ghost').evaluate((node) => node.getAnimations().length)).toBe(0);
+  hub.acceptConnections = true;
+  await expect(banner(page)).toContainText('Связь восстановлена', { timeout: 20_000 });
+  expect(await mark(page).evaluate((node) => node.getAnimations({ subtree: true }).length)).toBe(0);
+  expect(await swaps(page)).toBe(0);
+  await expect(banner(page)).toHaveCount(0, { timeout: 5_000 });
+});

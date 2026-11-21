@@ -7,6 +7,7 @@ import type { HubEvent } from '#lib/timeline/hubEvent.js';
 import type { FeedFolds } from '#lib/timeline/folds.js';
 import type { JsonObject } from './json';
 import type { Tone } from './copy';
+import type { IconName } from '#lib/ui/icons.js';
 
 /** Состояние вызова словами ленты: идёт, готов, ошибка, оборван. */
 export type CardState = 'running' | 'done' | 'error' | 'interrupted';
@@ -85,6 +86,8 @@ export interface CardEnv {
   conversationId: string;
   /** Раскрытое владельцем внутри карточки: бриф, текст сообщения, весь список задач. */
   folds: FeedFolds;
+  /** Значок семейства из описания карточки: шапка ставит его на место шеврона. `null` — у инструментов харнесса. */
+  icon: IconName | null;
 }
 
 export interface CardProps<D> {
@@ -128,6 +131,11 @@ export interface CardDef<D = unknown> {
   yieldsToRequest?: boolean;
   /** Короткое имя для подсчёта в свёрнутых шагах. */
   label?: string;
+  /**
+   * Значок семейства: один на семейство собственных инструментов canterlot, а не на глагол.
+   * У инструментов харнесса значка нет: их знак — имя инструмента.
+   */
+  icon?: IconName;
   /** Часть строки, которая ведёт дальше: сессия, страница, история Taiga. */
   link?: (call: CardCall, data: D) => CardLink | null;
   /** Слово состояния справа; без него — по состоянию вызова. */
@@ -171,6 +179,8 @@ export interface ResolvedCard {
   line: string;
   link: CardLink | null;
   word: StateWord | null;
+  /** Значок семейства из описания карточки; `null` у инструментов харнесса. */
+  icon: IconName | null;
   view: CardView<unknown>;
 }
 
@@ -185,6 +195,8 @@ export interface AnyCard {
   readonly yieldsToRequest: boolean;
   readonly label: string | null;
   readonly fold: string | null;
+  /** Значок семейства; `null` у инструментов харнесса и у карточек без значка. */
+  readonly icon: IconName | null;
   /** Карточка вызова, если вход ей по форме; `null` — лента покажет обычный блок. */
   resolve(call: CardCall, now: number): ResolvedCard | null;
 }

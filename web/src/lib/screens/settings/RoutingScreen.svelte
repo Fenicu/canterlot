@@ -9,7 +9,7 @@
   import { errorText } from '#lib/api/errors.js';
   import { ApiError } from '#lib/api/http.js';
   import { effortLabel } from '#lib/format/labels.js';
-  import { durationMs } from '#lib/motion.js';
+  import { durationMs, easing } from '#lib/motion.js';
   import { catalogTitles, pairName } from '#lib/routing/decision.js';
   import Button from '#lib/ui/Button.svelte';
   import ConfirmDialog from '#lib/ui/ConfirmDialog.svelte';
@@ -231,7 +231,7 @@
               {#each task.candidates as candidate, index (candidate.uid)}
                 {@const name = pairName(candidate.harness, candidate.model, titles)}
                 {@const candidateIssues = issuesAt(issues, `candidate:${candidate.uid}`)}
-                <li class="candidate" data-candidate={candidate.uid} data-pair="{candidate.harness}/{candidate.model}" class:dragging={dragging?.candidate === candidate.uid} animate:flip={{ duration: () => durationMs('--duration-row-fold') }}>
+                <li class="candidate" data-candidate={candidate.uid} data-pair="{candidate.harness}/{candidate.model}" class:dragging={dragging?.candidate === candidate.uid} animate:flip={{ duration: () => durationMs('--duration-row-fold'), easing: easing('--ease-row-fold') }}>
                   <div class="row">
                     <button type="button" class="grip" aria-label="Перетащить {name}" title="Перетащить" onpointerdown={(event) => dragStart(event, task, candidate)} onpointermove={dragMove} onpointerup={dragEnd} onpointercancel={dragEnd}><Icon name="grip" /></button>
                     <span class="order">{index + 1}</span>

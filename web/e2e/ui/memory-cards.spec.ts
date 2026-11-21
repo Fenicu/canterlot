@@ -1,6 +1,8 @@
 import type { Locator, Page } from '@playwright/test';
+import { icons } from '../../src/lib/ui/icons';
 import { FakeHub, FakeHubApi } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
+import { hubText, setActivity, streamCall } from '../../testing/fixtures/feed-cards';
 import { LONG_SUBJECT, seedMemoryCards, type MemoryCardsSeed } from '../../testing/fixtures/memory-cards';
 import { expect, test } from './fixtures';
 
@@ -170,6 +172,118 @@ test('an_update_card_lists_the_changed_fields_and_the_new_text', async ({ page }
   await toggle(found);
   await expect(found.locator('[data-role="memory-details"]')).toHaveText('Срок снят');
   await expect(found.locator('[data-role="memory-body"] code')).toHaveText('55884');
+});
+
+/** Анимации значка карточки по именам: Svelte прибавляет к имени ключевых кадров свой хеш. */
+async function markMotion(found: Locator): Promise<string[]> {
+  return found.locator('[data-role="card-icon"]').evaluate((node) => node.getAnimations({ subtree: true }).map((item) => (item as CSSAnimation).animationName.replace(/^svelte-[a-z0-9]+-/, '')));
+}
+const mark = (found: Locator) => found.locator('[data-role="card-icon"] svg.mark');
+
+test('a_memory_card_leads_with_the_brain_and_its_chevron_sits_at_the_right_edge', async ({ page }) => {
+  const { seed } = await boot(page);
+  const found = await reveal(page, card(page, seed.blocks.search!));
+  const icon = await found.locator('[data-role="card-icon"]').boundingBox();
+  const text = await found.locator('.head .line, .head .lead').first().boundingBox();
+  const word = await found.locator('[data-role="card-state"]').boundingBox();
+  const chevron = await found.locator('.head .chevron').boundingBox();
+  const head = await found.locator('.head').boundingBox();
+  expect(icon && text && word && chevron && head).toBeTruthy();
+  expect(icon!.x).toBeLessThan(text!.x);
+  expect(word!.x + word!.width).toBeLessThanOrEqual(chevron!.x + 0.5);
+  expect(head!.x + head!.width - (chevron!.x + chevron!.width)).toBeLessThan(40);
+  await expect(found.locator('[data-role="card-icon"] path.ink')).toHaveAttribute('d', icons.brain);
+  // Значок стоит в слоте шеврона: колонка текста у карточек со значком и без него одна.
+  await expect(found.locator('.head .chevron')).toHaveCSS('order', '5');
+});
+
+test('a_card_from_history_stands_drawn_and_a_refused_one_stays_a_muted_sketch', async ({ page }) => {
+  const { seed } = await boot(page);
+  const written = await reveal(page, card(page, seed.blocks.write!));
+  await expect(mark(written)).toHaveAttribute('data-state', 'dry');
+  expect(await markMotion(written)).toEqual([]);
+  const refused = await reveal(page, card(page, seed.blocks.writeSecret!));
+  await expect(mark(refused)).toHaveAttribute('data-state', 'refused');
+  // Ничего не записано: чернил нет, контур приглушён и не дышит.
+  await expect(refused.locator('svg.mark path.ink')).toHaveCSS('opacity', '0');
+  expect(Number(await refused.locator('svg.mark path.ghost').evaluate((node) => getComputedStyle(node).opacity))).toBeGreaterThan(0);
+  expect(await markMotion(refused)).toEqual([]);
+});
+
+test.describe('a live memory call', () => {
+  const WRITE = { kind: 'feedback', subject: 'Значки только из Lucide', body: 'Из лицензированного набора.', level: 'project' };
+  const written = (api: FakeHubApi) => hubText({ id: api.id(), domain: 'work', level: 'project', project_label: 'canterlot', version: 1 });
+
+  async function working(page: Page) {
+    const booted = await boot(page);
+    // Вызов без ответа идёт, только пока сессия занята: состояние приходит событием хаба, как в жизни.
+    setActivity(booted.hub, booted.api, booted.seed.id, 'working');
+    return booted;
+  }
+
+  test('sketches_and_breathes_while_it_runs_then_is_inked_once_and_dries', async ({ page }) => {
+    const { hub, api, seed } = await working(page);
+    // Масштаб движения растягивает росчерк: замер не гонится с его концом.
+    await page.evaluate(() => document.documentElement.style.setProperty('--motion-scale', '8'));
+    const fresh = streamCall(hub, api, seed.id, seed.run, 'mcp__canterlot__memory_write', WRITE);
+    const found = card(page, fresh.call);
+    await expect(found).toHaveAttribute('data-state', 'running');
+    await expect(mark(found)).toHaveAttribute('data-state', 'sketch');
+    await expect(found.locator('[data-role="card-state"]')).toHaveText('идёт');
+    expect(await markMotion(found)).toContain('mark-breathe');
+    streamCall(hub, api, seed.id, seed.run, 'mcp__canterlot__memory_write', null, { blockId: fresh.call, resultId: fresh.result, result: written(api) });
+    await expect(found).toHaveAttribute('data-state', 'done');
+    await expect(mark(found)).toHaveAttribute('data-state', 'ink');
+    expect(await markMotion(found)).toContain('mark-ink');
+    expect(await markMotion(found)).not.toContain('mark-breathe');
+    // Слово «идёт» ушло сменой подписи и покинуло документ.
+    await expect(found.locator('[data-role="card-state"]')).toHaveCount(0, { timeout: 15_000 });
+    // Росчерк идёт один раз: потом значок стоит написанным и ничего не крутится.
+    await expect(mark(found)).toHaveAttribute('data-state', 'dry', { timeout: 30_000 });
+    expect(await markMotion(found)).toEqual([]);
+  });
+
+  test('a_refusal_that_arrives_live_stays_a_muted_sketch_and_says_so_in_words', async ({ page }) => {
+    const { hub, api, seed } = await working(page);
+    const fresh = streamCall(hub, api, seed.id, seed.run, 'mcp__canterlot__memory_write', WRITE);
+    const found = card(page, fresh.call);
+    await expect(mark(found)).toHaveAttribute('data-state', 'sketch');
+    streamCall(hub, api, seed.id, seed.run, 'mcp__canterlot__memory_write', null, { blockId: fresh.call, resultId: fresh.result, result: 'looks_like_secret: The text looks like a secret {"class":"assignment"}', failed: true });
+    await expect(found).toHaveAttribute('data-state', 'error');
+    await expect(mark(found)).toHaveAttribute('data-state', 'refused');
+    await expect(found.locator('[data-role="card-state"]')).toHaveText('ошибка');
+    expect(await markMotion(found)).not.toContain('mark-ink');
+  });
+
+  test('reduced_motion_leaves_a_still_outline_while_running_and_a_finished_icon_after', async ({ page }) => {
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    const { hub, api, seed } = await working(page);
+    const fresh = streamCall(hub, api, seed.id, seed.run, 'mcp__canterlot__memory_write', WRITE);
+    const found = card(page, fresh.call);
+    await expect(mark(found)).toHaveAttribute('data-state', 'sketch');
+    await expect(mark(found)).toHaveAttribute('data-motion', 'off');
+    expect(await markMotion(found)).toEqual([]);
+    expect(Number(await found.locator('svg.mark path.ghost').evaluate((node) => getComputedStyle(node).opacity))).toBeGreaterThan(0);
+    streamCall(hub, api, seed.id, seed.run, 'mcp__canterlot__memory_write', null, { blockId: fresh.call, resultId: fresh.result, result: written(api) });
+    await expect(found).toHaveAttribute('data-state', 'done');
+    // Без движения нечего прописывать: значок сразу стоит написанным, слово заменено без перехода.
+    await expect(mark(found)).toHaveAttribute('data-state', 'dry');
+    expect(await markMotion(found)).toEqual([]);
+    await expect(found.locator('[data-role="card-state"]')).toHaveCount(0);
+  });
+
+  test('motion_scale_zero_is_the_same_static_fallback', async ({ page }) => {
+    const { hub, api, seed } = await working(page);
+    await page.evaluate(() => document.documentElement.style.setProperty('--motion-scale', '0'));
+    const fresh = streamCall(hub, api, seed.id, seed.run, 'mcp__canterlot__memory_write', WRITE);
+    const found = card(page, fresh.call);
+    await expect(mark(found)).toHaveAttribute('data-state', 'sketch');
+    expect(await markMotion(found)).toEqual([]);
+    streamCall(hub, api, seed.id, seed.run, 'mcp__canterlot__memory_write', null, { blockId: fresh.call, resultId: fresh.result, result: written(api) });
+    await expect(mark(found)).toHaveAttribute('data-state', 'dry');
+    expect(await markMotion(found)).toEqual([]);
+    await expect(found.locator('[data-role="card-state"]')).toHaveCount(0);
+  });
 });
 
 test('a_long_subject_and_a_long_row_stay_inside_the_bubble', async ({ page }) => {

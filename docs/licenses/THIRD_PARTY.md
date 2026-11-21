@@ -895,3 +895,12 @@
 | --- | --- | --- | --- |
 | «Норд» (`nord`) | Nord, Sven Greb (Arctic Ice Studio) | `MIT` | [github.com/nordtheme/nord](https://github.com/nordtheme/nord) |
 
+## Значки
+
+Геометрия значков в `web/src/lib/ui/icons.ts`, взятая из наборов; пакеты в сборку не входят, значок переводится в строку пути скриптом `web/scripts/lucide-icon.mjs` и лежит в исходниках.
+
+| Набор | Версия | Лицензия | Источник |
+| --- | --- | --- | --- |
+| Lucide: `brain`, `hammer`, `wifi`, `wifi-off` | 1.77.0 (`lucide-static`), версия закреплена в скрипте | `ISC`, Copyright (c) Lucide Icons and Contributors | [github.com/lucide-icons/lucide](https://github.com/lucide-icons/lucide) |
+| Lucide: `paperclip`, `mic`, `wrench`, `heart` | взяты раньше, версия не записана | `ISC`, Copyright (c) Lucide Icons and Contributors | [github.com/lucide-icons/lucide](https://github.com/lucide-icons/lucide) |
+

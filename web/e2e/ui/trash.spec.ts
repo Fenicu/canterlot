@@ -124,3 +124,59 @@ test('trash_tab_loads_its_own_paginated_listing', async ({ page }) => {
   await expect(page.locator(`[data-session="${id}"]`)).toContainText('удалится через');
   expect(calls.length).toBeGreaterThan(0);
 });
+
+declare global {
+  interface Window {
+    __animated?: { role: string | null; props: string[] }[];
+  }
+}
+
+async function recordAnimations(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const log: NonNullable<Window['__animated']> = [];
+    window.__animated = log;
+    const original = Element.prototype.animate;
+    Element.prototype.animate = function (this: Element, keyframes: Keyframe[] | PropertyIndexedKeyframes | null, options?: number | KeyframeAnimationOptions) {
+      const frames = Array.isArray(keyframes) ? keyframes : [];
+      log.push({ role: this.getAttribute('role'), props: [...new Set(frames.flatMap((frame) => Object.keys(frame)))] });
+      return original.call(this, keyframes as Keyframe[], options);
+    };
+  });
+}
+
+const toastMoves = (page: Page) => page.evaluate(() => window.__animated!.filter((entry) => entry.role === 'status').map((entry) => entry.props));
+
+test('trash_toast_arrives_and_leaves_with_a_move_and_a_fade', async ({ page }) => {
+  await recordAnimations(page);
+  const { id } = await boot(page);
+  await moveToTrash(page);
+  const toast = page.getByRole('status').filter({ hasText: 'Сессия в корзине' });
+  await expect(toast).toBeVisible();
+  // Появление: сдвиг и прозрачность; само место тоста посередине экрана не меняется.
+  await expect.poll(async () => (await toastMoves(page)).length).toBeGreaterThanOrEqual(1);
+  expect((await toastMoves(page))[0]).toEqual(expect.arrayContaining(['opacity', 'transform']));
+  const box = (await toast.boundingBox())!;
+  const view = page.viewportSize()!;
+  await page.waitForFunction(() => document.querySelector('[role="status"]')?.getAnimations().length === 0);
+  const settled = (await toast.boundingBox())!;
+  expect(Math.abs(settled.x + settled.width / 2 - view.width / 2)).toBeLessThanOrEqual(2);
+  expect(settled.y).toBeGreaterThanOrEqual(box.y - 40);
+  const before = (await toastMoves(page)).length;
+  await page.getByRole('button', { name: 'Вернуть' }).click();
+  // Уход: тост ещё есть, пока рисуется выход, но уже не принимает нажатий.
+  await expect.poll(async () => (await toastMoves(page)).length).toBeGreaterThan(before);
+  expect((await toastMoves(page)).at(-1)).toEqual(expect.arrayContaining(['opacity', 'transform']));
+  await expect(page.getByText('Сессия в корзине')).toHaveCount(0);
+  await expect(page.locator(`[data-session="${id}"]`)).toBeVisible();
+});
+
+test('trash_toast_only_fades_when_motion_is_reduced', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await recordAnimations(page);
+  await boot(page);
+  await moveToTrash(page);
+  await expect(page.getByRole('status').filter({ hasText: 'Сессия в корзине' })).toBeVisible();
+  await page.getByRole('button', { name: 'Вернуть' }).click();
+  await expect(page.getByText('Сессия в корзине')).toHaveCount(0);
+  for (const props of await toastMoves(page)) expect(props).not.toContain('transform');
+});

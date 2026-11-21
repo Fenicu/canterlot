@@ -47,6 +47,21 @@ async function reveal(page: Page, target: Locator): Promise<Locator> {
   return target.first();
 }
 
+test('plan_cards_lead_with_the_list_icon_and_a_failed_one_stays_a_muted_sketch', async ({ page }) => {
+  const { seed } = await boot(page);
+  const added = await reveal(page, card(page, seed.blocks.add!));
+  await expect(added).toHaveAttribute('data-icon', 'list');
+  await expect(added.locator('svg.mark')).toHaveAttribute('data-state', 'dry');
+  const failed = await reveal(page, card(page, seed.blocks.addError!));
+  await expect(failed.locator('svg.mark')).toHaveAttribute('data-state', 'refused');
+  // Шеврон ушёл к правому краю, колонка текста та же.
+  const icon = await failed.locator('[data-role="card-icon"]').boundingBox();
+  const text = await failed.locator('.head .lead').boundingBox();
+  const chevron = await failed.locator('.head .chevron').boundingBox();
+  expect(icon!.x).toBeLessThan(text!.x);
+  expect(chevron!.x).toBeGreaterThan(text!.x);
+});
+
 test('every_plan_card_renders_its_line_success_and_error', async ({ page }) => {
   test.setTimeout(90_000);
   const { seed } = await boot(page);

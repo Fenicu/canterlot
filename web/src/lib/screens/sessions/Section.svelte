@@ -2,6 +2,7 @@
   import { kidsTitle, type TreeNode } from './grouping';
   import Icon from '#lib/ui/Icon.svelte';
   import { rowFold } from '#lib/ui/fold.js';
+  import { swapOn } from '#lib/ui/swap.js';
   import SessionRow from './SessionRow.svelte';
 
   let {
@@ -76,7 +77,7 @@
       <button type="button" class="section-head" aria-expanded={!collapsed} aria-label={headingLabel || undefined} onclick={() => ontoggle(id)}>
         <span class="title" data-tone={tone}>{title}</span>
         <span class="chevron" class:open={!collapsed}><Icon name="chevron" /></span>
-        <span class="count" data-tone={tone}>{count}</span>
+        <span class="count" data-tone={tone} use:swapOn={{ text: String(count), key: String(count) }}></span>
       </button>
     </h2>
   {/if}
