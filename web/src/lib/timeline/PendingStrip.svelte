@@ -23,6 +23,8 @@
   import Sheet from '#lib/ui/Sheet.svelte';
   import Textarea from '#lib/ui/Textarea.svelte';
   import { tick } from 'svelte';
+  import { gapFold } from '#lib/ui/fold.js';
+  import { swapOn } from '#lib/ui/swap.js';
 
   let { chat }: { chat: ChatStore } = $props();
   const items = $derived(chat.strip());
@@ -251,10 +253,11 @@
 <div class="strip">
   {#each shownItems as input (input.key)}
     {@const op = getRuntime().journal.ops.get(input.key)}
-    <div class="item" data-state={input.state}>
+    <!-- Сообщение встаёт в очередь и уходит из неё складкой, а слово доставки сменяется подписью. -->
+    <div class="item" data-state={input.state} transition:gapFold>
       <span class="pill">
         <span class="body">
-          <span class="label accent">{input.state === 'saving' && offline ? 'Ждёт связи' : deliveryLabel(input.state)}</span>
+          <span class="label accent" use:swapOn={{ text: input.state === 'saving' && offline ? 'Ждёт связи' : deliveryLabel(input.state), key: `${input.state}:${offline}` }}></span>
           <span class="text" title={input.text}>{input.text}</span>
         </span>
         {#if input.state === 'queued' && input.id && turnLive && canSteer}
@@ -359,7 +362,7 @@
     </div>
   {/each}
   {#each shownScheduled as item (item.id)}
-    <div class="item">
+    <div class="item" transition:gapFold>
       <span class="pill">
         <span class="body">
           <span class="label">{atOf(item)}</span>

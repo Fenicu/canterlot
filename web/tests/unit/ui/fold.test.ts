@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from 'vitest';
 import { cubicBezier, easing } from '../../../src/lib/motion';
+import { gapFold } from '../../../src/lib/ui/fold';
 
 afterEach(() => {
   document.documentElement.style.removeProperty('--ease-row-fold');
@@ -24,6 +25,20 @@ test('easing_reads_the_curve_from_the_token', () => {
   const fn = easing('--ease-row-fold');
   expect(fn(0.5)).toBeCloseTo(0.5, 4);
   expect(fn(0.25)).toBeCloseTo(cubicBezier(0.42, 0, 0.58, 1)(0.25), 6);
+});
+
+test('gap_fold_takes_the_column_gap_away_with_the_row_so_neighbours_do_not_jump_at_the_end', () => {
+  const column = document.createElement('div');
+  column.style.cssText = 'display: flex; flex-direction: column; row-gap: 8px;';
+  const row = document.createElement('div');
+  column.append(row);
+  document.body.append(column);
+  const fold = gapFold(row);
+  // Сложенная строка гасит свой зазор, раскрытая не трогает поля.
+  expect(fold.css!(0, 1)).toContain('margin-block-end: -8.000px;');
+  expect(fold.css!(1, 0)).toContain('margin-block-end: 0.000px;');
+  expect(fold.css!(0.5, 0.5)).toContain('margin-block-end: -4.000px;');
+  column.remove();
 });
 
 test('easing_without_a_curve_falls_back_to_linear', () => {

@@ -17,6 +17,16 @@ export function rowFold(node: HTMLElement): TransitionConfig {
 }
 
 /**
+ * Строка колонки с зазором (`gap`): складка строки, а зазор складывается вместе с ней, чтобы в конце
+ * хода соседи не дёрнулись на ширину зазора. Лишний зазор гасит отрицательное нижнее поле.
+ */
+export function gapFold(node: HTMLElement): TransitionConfig {
+  const fold = rowFold(node);
+  const gap = parseFloat(getComputedStyle(node.parentElement ?? node).rowGap) || 0;
+  return { ...fold, css: (t, u) => `${fold.css?.(t, u) ?? ''} margin-block-end: ${(-(1 - t) * gap).toFixed(3)}px;` };
+}
+
+/**
  * Новая ветка дерева делегирования вырастает из своей связи: место раскрывается по высоте,
  * а строка выходит от ствола «└» вправо.
  */
