@@ -10,13 +10,18 @@ use uuid::Uuid;
 
 /// Корень раннера: абсолютный, нормализованный, из знаков, которым не нужны кавычки.
 pub fn valid_root(root: &Path) -> bool {
-    let Some(text) = root.to_str() else {
+    // Путь сокета `<root>/hub.sock` должен влезть в `sun_path` (108 байт).
+    valid_path(root) && root.as_os_str().len() <= 90
+}
+
+/// Абсолютный нормализованный путь из знаков, которым не нужны кавычки: так его можно
+/// вставлять в текст скрипта буквально. Длина не ограничена.
+pub fn valid_path(path: &Path) -> bool {
+    let Some(text) = path.to_str() else {
         return false;
     };
-    // Путь сокета `<root>/hub.sock` должен влезть в `sun_path` (108 байт).
     text.starts_with('/')
         && text.len() > 1
-        && text.len() <= 90
         && !text.ends_with('/')
         && !text.contains("//")
         && text

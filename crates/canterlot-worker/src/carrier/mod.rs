@@ -9,9 +9,11 @@
 //! отправляются через него, а список раннеров приходит каналом `watch`.
 
 pub mod bridge;
+mod collect;
 mod runner;
 pub mod script;
 pub mod ssh;
+pub mod stage;
 
 use std::{
     collections::BTreeMap,
