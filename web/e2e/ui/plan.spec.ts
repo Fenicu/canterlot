@@ -271,6 +271,8 @@ test('deleted_orchestrator_drops_its_plan_and_deleted_executor_reads_as_removed'
 	await expect(page.locator('[data-secondary-ready]')).toBeVisible({ timeout: 15_000 });
 	await expect(page.locator('[data-plan-orchestrator]')).toHaveCount(0);
 	await expect(page.getByText('Планов пока нет')).toBeVisible();
+	// Пустой экран носит значок семейства, прописанный чернилами один раз.
+	await expect(page.locator('[data-empty-mark="list"] svg')).toHaveAttribute('data-state', 'ink');
 });
 
 test('snapshot_replaces_the_plan_instead_of_merging', async ({ page }) => {

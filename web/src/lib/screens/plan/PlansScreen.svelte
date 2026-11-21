@@ -3,6 +3,7 @@
 	import { resolve } from '$app/paths';
 	import { browserRuntime } from '#lib/app/browser.js';
 	import { getRuntime, type Runtime } from '#lib/app/runtime.js';
+	import EmptyMark from '#lib/ui/EmptyMark.svelte';
 	import Icon from '#lib/ui/Icon.svelte';
 	import SecondaryHeader from '../SecondaryHeader.svelte';
 	import { planBadge, planSummary } from './planText';
@@ -38,6 +39,7 @@
 	<div class="secondary-body" data-secondary-ready={ready ? '' : undefined}>
 		<div class="secondary-content">
 			{#if ready && plans.length === 0}
+				<EmptyMark name="list" />
 				<p class="note">Планов пока нет. Оркестратор заводит план инструментом plan_add</p>
 			{/if}
 			<ul class="plans" data-role="plans-list">
