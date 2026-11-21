@@ -337,6 +337,7 @@ fn settings_json_modes_match_the_plan() {
                 "mcp__canterlot__memory_delete",
                 "mcp__canterlot__canterlot_routing_policy",
                 "mcp__canterlot__canterlot_spawn_whitelist",
+                "mcp__canterlot__runners_list",
             ]},
         })
     );

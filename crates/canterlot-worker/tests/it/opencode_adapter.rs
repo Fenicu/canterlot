@@ -5096,7 +5096,8 @@ async fn relay_sees_the_preset_tools_and_the_opencode_budget() {
             "job_status",
             "job_log",
             "job_cancel",
-            "jobs_list"
+            "jobs_list",
+            "runners_list"
         ]
     );
     bench.close(CloseMode::Graceful).await;
