@@ -31,6 +31,8 @@ pub struct BackgroundDeps {
     pub owner_push: Option<crate::notify::Sender>,
     /// Опрос страниц статуса провайдеров; `None` — выключен (и у тестовых стендов).
     pub provider_status: Option<crate::config::ProviderStatusConfig>,
+    /// Служба облачных окон; `None` без `[runners.cloud]` (и у тестовых стендов).
+    pub cloud: Option<std::sync::Arc<crate::cloud::service::CloudService>>,
     /// Готовность службы секретов: `true` после стартового восстановления и
     /// сверки. В бою `None`; тестовый стенд ждёт сигнал, чтобы не гоняться
     /// со стартовой работой за одни и те же строки.
@@ -68,6 +70,7 @@ impl Background {
             attachments,
             owner_push,
             provider_status,
+            cloud,
             secrets_ready,
         } = deps;
         let bus = crate::bus::EventBus::spawn(pool.clone(), multi_process, stopped.clone());
@@ -175,6 +178,12 @@ impl Background {
             tasks.push((
                 "owner_push_task_error",
                 tokio::spawn(crate::notify::run(pool.clone(), sender, stopped.clone())),
+            ));
+        }
+        if let Some(service) = cloud {
+            tasks.push((
+                "cloud_windows_task_error",
+                tokio::spawn(service.run(stopped.clone())),
             ));
         }
         if let Some(config) = provider_status.filter(|config| config.enabled) {

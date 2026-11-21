@@ -371,6 +371,7 @@ pub async fn spawn_test_hub_with(pool: PgPool, options: TestHubOptions) -> TestH
         attachments: Some((blobs.clone(), attachments.clone())),
         owner_push: None,
         provider_status: None,
+        cloud: None,
         secrets_ready: Some(secrets_ready),
     });
     // Стартовая работа службы секретов идёт в фоне: дождёмся её, иначе тест

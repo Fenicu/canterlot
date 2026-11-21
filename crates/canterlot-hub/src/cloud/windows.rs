@@ -353,26 +353,9 @@ pub async fn request_delete(
     reason: &str,
     now: DateTime<Utc>,
 ) -> Result<DeleteRequested, sqlx::Error> {
-    let outcome = crate::db::in_tx(pool, |conn| {
-        let reason = reason.to_owned();
-        Box::pin(async move {
-            let Some(window) = load_for_update(conn, id).await? else {
-                return Ok::<_, sqlx::Error>(DeleteRequested::NotFound);
-            };
-            match window.state.as_str() {
-                "create_intent" if window.create_called_at.is_none() => {
-                    fail_in_tx(conn, id, "canceled").await?;
-                    Ok(DeleteRequested::Canceled)
-                }
-                "create_intent" | "create_unknown" => Ok(DeleteRequested::NotYet),
-                "identified" | "ready" | "draining" => {
-                    mark_deleting_in_tx(conn, &window, &reason, now).await?;
-                    Ok(DeleteRequested::Deleting)
-                }
-                "deleting" => Ok(DeleteRequested::Deleting),
-                _ => Ok(DeleteRequested::AlreadyEnded),
-            }
-        })
+    let reason = reason.to_owned();
+    let outcome = crate::db::in_tx(pool, move |conn| {
+        Box::pin(async move { request_delete_in_tx(conn, id, &reason, now).await })
     })
     .await?;
     if outcome == DeleteRequested::Deleting {
@@ -383,7 +366,34 @@ pub async fn request_delete(
     Ok(outcome)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ToSchema)]
+/// Переход «удалить сейчас» в чужой транзакции. Раннера не отзывает: это делает вызывающая
+/// после фиксации (`revoke_cloud_machine`), а при её отказе служба повторяет отзыв перед
+/// каждой попыткой удаления.
+pub async fn request_delete_in_tx(
+    conn: &mut PgConnection,
+    id: Uuid,
+    reason: &str,
+    now: DateTime<Utc>,
+) -> Result<DeleteRequested, sqlx::Error> {
+    let Some(window) = load_for_update(conn, id).await? else {
+        return Ok(DeleteRequested::NotFound);
+    };
+    match window.state.as_str() {
+        "create_intent" if window.create_called_at.is_none() => {
+            fail_in_tx(conn, id, "canceled").await?;
+            Ok(DeleteRequested::Canceled)
+        }
+        "create_intent" | "create_unknown" => Ok(DeleteRequested::NotYet),
+        "identified" | "ready" | "draining" => {
+            mark_deleting_in_tx(conn, &window, reason, now).await?;
+            Ok(DeleteRequested::Deleting)
+        }
+        "deleting" => Ok(DeleteRequested::Deleting),
+        _ => Ok(DeleteRequested::AlreadyEnded),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum DeleteRequested {
     NotFound,
@@ -497,8 +507,8 @@ pub async fn ensure_cloud_machine(
 // ───────── Чтение для HTTP ─────────
 
 /// Окно для клиентов: деньги в копейках, время RFC 3339.
-#[derive(Debug, Clone, Serialize, ToSchema)]
-pub struct WindowView {
+#[derive(Debug, Clone, Serialize, serde::Deserialize, ToSchema)]
+pub struct CloudWindowView {
     pub id: Uuid,
     pub name: String,
     pub state: String,
@@ -522,7 +532,7 @@ pub struct WindowView {
     pub last_error: Option<String>,
 }
 
-pub fn view(window: &Window, now: DateTime<Utc>) -> WindowView {
+pub fn view(window: &Window, now: DateTime<Utc>) -> CloudWindowView {
     let cost_so_far = match (window.final_cost_kopecks, window.create_called_at) {
         (Some(cost), _) => cost,
         (None, Some(called)) => {
@@ -534,7 +544,7 @@ pub fn view(window: &Window, now: DateTime<Utc>) -> WindowView {
         }
         (None, None) => 0,
     };
-    WindowView {
+    CloudWindowView {
         id: window.id,
         name: window.name.clone(),
         state: window.state.clone(),

@@ -25,6 +25,7 @@ mod auth_ws;
 mod background_tasks;
 mod blocks;
 mod bookmarks;
+mod cloud_http;
 mod cloud_timeweb;
 mod cloud_windows;
 mod compaction;

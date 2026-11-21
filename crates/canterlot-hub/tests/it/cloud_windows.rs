@@ -1829,6 +1829,89 @@ async fn delete_now_cancels_an_unsent_create_and_revokes_a_running_window(
     Ok(())
 }
 
+// ───────── Включение при старте ─────────
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn startup_enables_the_service_only_with_a_readable_token_and_a_real_carrier(
+    pool: PgPool,
+) -> TestResult {
+    use canterlot_hub::cloud::service::from_config;
+    let capture = Capture::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .with_writer(capture.clone())
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let rig = rig(pool).await;
+    let registry = Registry::new(Default::default());
+    // Нет таблицы: облако выключено без единого сообщения.
+    assert!(from_config(&rig.pool, &registry, None).await.is_none());
+
+    let dir = tempfile::tempdir()?;
+    let token_file = dir.path().join("secret-token-file");
+    std::fs::write(&token_file, format!("{TOKEN}\n"))?;
+    let mut config = rig.config.clone();
+    config.token_file = token_file.clone();
+    assert!(
+        from_config(&rig.pool, &registry, Some(config.clone()))
+            .await
+            .is_some()
+    );
+
+    // Файла токена нет или он пуст.
+    let mut missing = config.clone();
+    missing.token_file = dir.path().join("absent");
+    assert!(
+        from_config(&rig.pool, &registry, Some(missing))
+            .await
+            .is_none()
+    );
+    let empty = dir.path().join("empty");
+    std::fs::write(&empty, "\n")?;
+    let mut blank = config.clone();
+    blank.token_file = empty;
+    assert!(
+        from_config(&rig.pool, &registry, Some(blank))
+            .await
+            .is_none()
+    );
+
+    // Машина из конфигурации не несущая: окно без несущей только жгло бы деньги.
+    machines::set_carrier(&rig.pool, rig.carrier, false).await?;
+    assert!(
+        from_config(&rig.pool, &registry, Some(config.clone()))
+            .await
+            .is_none()
+    );
+    let mut stranger = config.clone();
+    stranger.carrier_machine_id = Uuid::now_v7();
+    assert!(
+        from_config(&rig.pool, &registry, Some(stranger))
+            .await
+            .is_none()
+    );
+    // Негодная конфигурация.
+    let mut invalid = config;
+    invalid.cpu = 0;
+    assert!(
+        from_config(&rig.pool, &registry, Some(invalid))
+            .await
+            .is_none()
+    );
+
+    let logs = String::from_utf8(capture.0.lock().unwrap().clone())?;
+    assert_eq!(logs.matches("cloud_disabled").count(), 5, "{logs}");
+    assert!(logs.contains("cloud_enabled") || logs.contains("cloud runner windows enabled"));
+    for secret in [TOKEN, "secret-token-file", KEY] {
+        assert!(
+            !logs.contains(secret),
+            "{secret} leaked into the startup log"
+        );
+    }
+    Ok(())
+}
+
 // ───────── Секреты ─────────
 
 #[derive(Clone, Default)]

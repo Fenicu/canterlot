@@ -356,6 +356,19 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
     .execute(&pool)
     .await
     .unwrap();
+    // Облачное окно, которое владелец удаляет сейчас: заявка на создание ещё не отправлена, и
+    // «удалить» отменяет её, не трогая провайдера.
+    let window = Uuid::now_v7();
+    sqlx::query(
+        "insert into cloud_windows(id,name,state,trigger,host_key_public,price_hourly_kopecks,
+                                   reservation_kopecks,month,hard_cap_minutes,created_at)
+         values($1,'canterlot-runner-'||$1::text,'create_intent','owner','ssh-ed25519 AAAA',2845,
+                11380,'2026-11',60,now())",
+    )
+    .bind(window)
+    .execute(&pool)
+    .await
+    .unwrap();
     let id = testkit::seed_conversation(&pool, owner, machine).await;
     let doomed = testkit::seed_conversation(&pool, owner, machine).await;
     let resume_id = testkit::seed_conversation(&pool, owner, machine).await;
@@ -827,6 +840,13 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
             Method::POST,
             "/api/v1/jobs/{id}/cancel",
             format!("/api/v1/jobs/{job}/cancel"),
+            None,
+            None,
+        ),
+        case(
+            Method::POST,
+            "/api/v1/cloud/windows/{id}/delete",
+            format!("/api/v1/cloud/windows/{window}/delete"),
             None,
             None,
         ),

@@ -472,6 +472,7 @@ async fn serve(
         auth,
         provider_status,
         dictation,
+        runners,
         ..
     } = config;
     if let Some(http) = &http_config {
@@ -543,6 +544,7 @@ async fn serve(
         }
     }
     let registry = Registry::new(timers.clone());
+    let cloud = canterlot_hub::cloud::service::from_config(&pool, &registry, runners.cloud).await;
     let (dispatcher, dispatch_rx) = dispatcher::Dispatcher::channel();
     let scheduler = canterlot_hub::scheduler::Scheduler::new(
         pool.clone(),
@@ -596,6 +598,7 @@ async fn serve(
         attachments: Some((blobs.clone(), attachments.clone())),
         owner_push,
         provider_status: Some(provider_status),
+        cloud,
         secrets_ready: None,
     });
     let root = tokio_util::sync::CancellationToken::new();

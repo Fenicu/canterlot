@@ -1066,6 +1066,71 @@ impl CloudService {
     }
 }
 
+/// Служба по конфигурации хаба. Нет таблицы `[runners.cloud]` — облако выключено. Токен
+/// читается из файла и дальше живёт только внутри клиента. Всё, что мешает включению
+/// (негодная конфигурация, нечитаемый токен, несущая не помечена), пишется предупреждением с
+/// кодом причины и без значений, а облако остаётся выключенным: окно без несущей только жгло
+/// бы деньги до `ready_timeout`.
+pub async fn from_config(
+    pool: &PgPool,
+    registry: &Registry,
+    config: Option<CloudConfig>,
+) -> Option<Arc<CloudService>> {
+    let config = config?;
+    let disabled = |reason: &str| {
+        tracing::warn!(
+            kind = "cloud_disabled",
+            reason,
+            "[runners.cloud] is configured but cloud windows are off"
+        );
+    };
+    if let Err(code) = config.validate() {
+        disabled(code);
+        return None;
+    }
+    let provider = match super::TimewebProvider::new(super::TimewebConfig::new(&config.token_file))
+    {
+        Ok(provider) => provider,
+        Err(error) => {
+            // Текст ошибки — только вид сбоя ввода-вывода, без содержимого файла.
+            disabled(&error.to_string());
+            return None;
+        }
+    };
+    let carrier: Result<Option<bool>, sqlx::Error> =
+        sqlx::query_scalar("select role = 'worker' and is_carrier from machines where id = $1")
+            .bind(config.carrier_machine_id)
+            .fetch_optional(pool)
+            .await;
+    match carrier {
+        Ok(Some(true)) => {}
+        Ok(_) => {
+            disabled("carrier_machine_is_not_a_carrier");
+            return None;
+        }
+        Err(error) => {
+            disabled(&format!("database: {}", crate::dberr::describe(&error)));
+            return None;
+        }
+    }
+    tracing::info!(
+        kind = "cloud_enabled",
+        project_id = config.project_id,
+        configurator_id = config.configurator_id,
+        cpu = config.cpu,
+        ram_gb = config.ram_gb,
+        disk_gb = config.disk_gb,
+        carrier = %config.carrier_machine_id,
+        "cloud runner windows enabled"
+    );
+    Some(CloudService::new(
+        pool.clone(),
+        registry.clone(),
+        Arc::new(provider),
+        config,
+    ))
+}
+
 fn grace(duration: Duration) -> TimeDelta {
     TimeDelta::from_std(duration).unwrap_or(TimeDelta::hours(24))
 }
