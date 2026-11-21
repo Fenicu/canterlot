@@ -81,10 +81,13 @@ test('runner_availability_follows_the_hub_event_live', async ({ page }) => {
   const runner = [...api.machines.values()].find((machine) => machine.name === 'runner-a')!;
   const state = page.locator('main [data-runner-availability]');
   await expect(state).toHaveText('на связи');
-  // Хаб шлёт раннеру то же событие связи, что и машине: «пропал» значит «неизвестно», а не «недоступен».
-  hub.append('machines', { kind: 'machine_availability_changed', payload: { machine_id: runner.id, availability: 'unavailable' } }); hub.flush();
+  // Хаб шлёт раннеру свои слова `online|offline|unknown` и возраст проверки несущей: экран берёт их как есть.
+  hub.append('machines', { kind: 'machine_availability_changed', payload: { machine_id: runner.id, availability: 'offline', observed_at: new Date(Date.now() - 45_000).toISOString() } }); hub.flush();
+  await expect(state).toHaveText('недоступен · проверка меньше минуты назад');
+  await expect(state).toHaveAttribute('data-tone', 'danger');
+  hub.append('machines', { kind: 'machine_availability_changed', payload: { machine_id: runner.id, availability: 'unknown' } }); hub.flush();
   await expect(state).toHaveText('неизвестно · нет свежей проверки');
-  hub.append('machines', { kind: 'machine_availability_changed', payload: { machine_id: runner.id, availability: 'available' } }); hub.flush();
+  hub.append('machines', { kind: 'machine_availability_changed', payload: { machine_id: runner.id, availability: 'online' } }); hub.flush();
   await expect(state).toHaveText('на связи');
 });
 
