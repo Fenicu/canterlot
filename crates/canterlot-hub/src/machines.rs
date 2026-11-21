@@ -106,7 +106,7 @@ async fn lose_jobs_in_tx(
     use crate::inplace_jobs::{Outcome, State, finish_in_tx, lock_row};
     let ids: Vec<Uuid> = sqlx::query_scalar(
         "select id from jobs where machine_id = $1
-           and state in ('queued','dispatched','waiting_lease','running')
+           and state in ('staging','queued','dispatched','waiting_lease','running')
          order by created_at, id",
     )
     .bind(machine_id)

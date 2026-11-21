@@ -113,6 +113,7 @@ mod resume_at_reset;
 mod retention_keyset;
 mod routine_reports;
 mod routing;
+mod runner_jobs;
 mod runners_grpc;
 mod runners_http;
 mod runners_hub;

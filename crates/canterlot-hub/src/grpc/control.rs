@@ -250,6 +250,11 @@ impl WorkerControl for HubGrpc {
                                 if !runners_enabled { Err(session_log.error(Status::invalid_argument("capability_missing")))?; }
                                 state.runner_observation(machine_id, &observation).await.map_err(|error| session_log.error(error))?;
                             }
+                            Some(control_up::Msg::OwnerJobSubmit(submit)) => {
+                                if !runners_enabled { Err(session_log.error(Status::invalid_argument("capability_missing")))?; }
+                                let reply = state.owner_job_reply(machine_id, &submit).await.map_err(|error| session_log.error(error))?;
+                                yield checked(reply)?;
+                            }
                             Some(control_up::Msg::ReconcileReport(report)) => {
                                 lane.submit_reconcile(report).map_err(|error| session_log.error(error))?;
                             }

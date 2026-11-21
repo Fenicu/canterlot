@@ -10044,10 +10044,13 @@
         },
         "state": {
           "enum": [
+            "waiting_runner",
+            "staging",
             "queued",
             "dispatched",
             "waiting_lease",
             "running",
+            "collecting",
             "succeeded",
             "failed",
             "timed_out",
@@ -10056,10 +10059,20 @@
           ]
         },
         "machine_id": {
-          "$ref": "#/$defs/Uuid"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "machine_name": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "conversation_id": {
           "anyOf": [
@@ -10084,7 +10097,10 @@
           ]
         },
         "workdir": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "shell": {
           "type": "string"
@@ -10138,6 +10154,51 @@
             "null"
           ]
         },
+        "labels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "expected_minutes": {
+          "type": "integer"
+        },
+        "source": {
+          "anyOf": [
+            {
+              "type": "object",
+              "description": "Источник задачи: имя каталога репозитория и короткая ревизия, без локального пути",
+              "properties": {
+                "repo": {
+                  "type": "string"
+                },
+                "rev": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "repo",
+                "rev"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "outputs_dir": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "outputs_note": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "created_at": {
           "$ref": "#/$defs/Time"
         },
@@ -10183,6 +10244,11 @@
         "has_log",
         "machine_offline",
         "late_report",
+        "labels",
+        "expected_minutes",
+        "source",
+        "outputs_dir",
+        "outputs_note",
         "created_at",
         "started_at",
         "finished_at"

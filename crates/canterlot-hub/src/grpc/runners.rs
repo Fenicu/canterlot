@@ -3,8 +3,9 @@
 //! ни в outbox, ни в журнал, ни в лог они не попадают, токен — тем более.
 
 use canterlot_proto::worker::v1::{
-    AssignedRunner, ControlDown, RunnerObservation, RunnerToken, RunnerTokenRefused,
-    RunnerTokenRequest, RunnersAssigned, control_down,
+    AssignedRunner, ControlDown, OwnerJobAccepted, OwnerJobRefused, OwnerJobSubmit,
+    RunnerObservation, RunnerToken, RunnerTokenRefused, RunnerTokenRequest, RunnersAssigned,
+    control_down,
 };
 use tonic::Status;
 use uuid::Uuid;
@@ -66,6 +67,37 @@ impl HubGrpc {
                 None => Err(Status::internal("runner token unavailable")),
             },
         }
+    }
+
+    /// Ответ на `OwnerJobSubmit`: идентификатор принятой задачи или отказ с кодом. `Err` —
+    /// только сбой базы. Описание задачи в журнал не попадает (в `Debug` у него лишь размер).
+    pub(super) async fn owner_job_reply(
+        &self,
+        caller: Uuid,
+        submit: &OwnerJobSubmit,
+    ) -> Result<ControlDown, Status> {
+        let message = match crate::inplace_jobs::owner::submit(
+            &self.pool,
+            &self.registry,
+            caller,
+            &submit.spec_json,
+        )
+        .await
+        {
+            Ok(job_id) => control_down::Msg::OwnerJobAccepted(OwnerJobAccepted {
+                request_id: submit.request_id.clone(),
+                job_id: job_id.to_string(),
+            }),
+            Err(refusal) if refusal.code == "internal" => {
+                return Err(Status::internal("owner job unavailable"));
+            }
+            Err(refusal) => control_down::Msg::OwnerJobRefused(OwnerJobRefused {
+                request_id: submit.request_id.clone(),
+                code: refusal.code,
+                message: refusal.message,
+            }),
+        };
+        Ok(ControlDown { msg: Some(message) })
     }
 
     /// `RunnerObservation`: после допуска в `runner_observations`. Отказ отбрасывает сообщение

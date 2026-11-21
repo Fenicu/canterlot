@@ -71,6 +71,9 @@ async fn set_remote_work(
     // диспетчеризации (замок машины, строки задач, строка машины).
     if !outcome.value.accepts_remote_work {
         crate::inplace_jobs::sweep::dispatch_machine(&s.pool, id).await?;
+    } else {
+        // Включили (для раннера: пауза снята): ожидающие раннер задачи могут встать на него.
+        crate::inplace_jobs::sweep::place_for_machine(&s.pool, &s.registry, id).await?;
     }
     Ok(Json(outcome.value))
 }
