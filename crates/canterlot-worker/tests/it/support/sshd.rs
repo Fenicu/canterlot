@@ -5,10 +5,10 @@
 
 use std::{
     fs,
-    net::{Ipv4Addr, TcpListener, TcpStream},
+    io::{BufRead, BufReader, Write},
+    net::{Ipv4Addr, TcpListener},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
-    time::{Duration, Instant},
 };
 
 use tempfile::TempDir;
@@ -78,7 +78,7 @@ impl TestSshd {
                  AuthorizedKeysFile {authorized}\nPasswordAuthentication no\n\
                  KbdInteractiveAuthentication no\nPubkeyAuthentication yes\nUsePAM no\n\
                  StrictModes no\nPidFile none\nAllowStreamLocalForwarding yes\n\
-                 AllowTcpForwarding yes\nLogLevel ERROR\n\
+                 AllowTcpForwarding yes\nLogLevel INFO\n\
                  SetEnv HOME={home} XDG_RUNTIME_DIR={run_dir}\n",
                 host = host_key.display(),
                 authorized = base.join("authorized_keys").display(),
@@ -97,20 +97,30 @@ impl TestSshd {
             ),
         )
         .unwrap();
-        let log = fs::File::create(base.join("sshd.log")).unwrap();
-        let child = Command::new("/usr/sbin/sshd")
+        let mut log = fs::File::create(base.join("sshd.log")).unwrap();
+        let mut child = Command::new("/usr/sbin/sshd")
             .args(["-D", "-e", "-f"])
             .arg(&sshd_config)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(log)
+            .stderr(Stdio::piped())
             .spawn()
             .expect("start sshd");
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while TcpStream::connect((Ipv4Addr::LOCALHOST, port)).is_err() {
-            assert!(Instant::now() < deadline, "sshd did not start");
-            std::thread::sleep(Duration::from_millis(50));
+        // Готовность — строка «Server listening» в его журнале, без опроса порта.
+        let mut stderr = BufReader::new(child.stderr.take().unwrap());
+        loop {
+            let mut line = String::new();
+            let read = stderr.read_line(&mut line).expect("sshd log");
+            assert!(read > 0, "sshd exited before it started listening");
+            writeln!(log, "{}", line.trim_end()).unwrap();
+            if line.contains("Server listening") {
+                break;
+            }
         }
+        // Остальной журнал уходит в файл, чтобы канал не заполнился; поток кончается вместе с sshd.
+        std::thread::spawn(move || {
+            let _ = std::io::copy(&mut stderr, &mut log);
+        });
         Self {
             ssh_config: base.join("ssh_config"),
             dir,

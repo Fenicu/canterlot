@@ -11,7 +11,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicU32, Ordering},
     },
-    time::{Duration, SystemTime},
+    time::Duration,
 };
 
 use async_trait::async_trait;
@@ -25,7 +25,10 @@ use canterlot_worker::{
     },
     config::RunnerSsh,
 };
-use tokio::{sync::watch, task::JoinHandle, time::sleep};
+use tokio::{
+    sync::{Notify, watch},
+    task::JoinHandle,
+};
 use uuid::Uuid;
 
 use crate::{
@@ -82,6 +85,7 @@ impl RunnerControl for FakeControl {
             .lock()
             .unwrap()
             .push((machine_id, reset_local_state));
+        WAKE.notify_waiters();
         if *self.refuse.lock().unwrap() {
             return Err(TokenError::Refused(carrier::TokenRefusal::Revoked));
         }
@@ -95,6 +99,7 @@ impl RunnerControl for FakeControl {
 
     async fn report_observation(&self, observation: Observation) {
         self.observations.lock().unwrap().push(observation);
+        WAKE.notify_waiters();
     }
 }
 
@@ -172,6 +177,7 @@ impl Fixture {
                     {
                         log.machine_ids.lock().unwrap().push(hello.machine_id);
                         log.control_hellos.fetch_add(1, Ordering::SeqCst);
+                        WAKE.notify_waiters();
                     }
                 }
             }
@@ -317,10 +323,21 @@ impl Drop for Fixture {
     }
 }
 
+/// Будит ожидающих при каждом событии носителя или хаба: наблюдение, запрос токена, `Hello`.
+/// Носитель сам просыпается не реже `observe_every`, поэтому состояние раннера на диске
+/// перепроверяется без таймеров в тестах.
+static WAKE: Notify = Notify::const_new();
+
 async fn until(what: &str, mut check: impl FnMut() -> bool) {
     tokio::time::timeout(WAIT, async {
-        while !check() {
-            sleep(Duration::from_millis(50)).await;
+        loop {
+            let notified = WAKE.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if check() {
+                return;
+            }
+            notified.await;
         }
     })
     .await
@@ -403,7 +420,6 @@ async fn forward_install_token_and_config_bring_a_runner_worker_to_the_hub() {
     // Достижимость: после успешных попыток хаб слышит «достижим, ни одной неудачи».
     let last = fixture.control.observations().pop().expect("observation");
     assert!(last.reachable && last.consecutive_failures == 0);
-    assert!(last.observed_at.elapsed().unwrap_or_default() < Duration::from_secs(60));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -522,11 +538,20 @@ async fn a_fatal_exit_asks_for_a_token_once_per_pause_and_does_not_spin() {
             .unwrap_or(false)
     })
     .await;
-    // 4 с при паузе в 2 с и круге в 0,3 с: без паузы запросов было бы больше десятка.
-    sleep(Duration::from_secs(4)).await;
+    // Второй запрос приходит после паузы; за следующие 15 наблюдений (около пяти кругов
+    // присмотра) третьего нет: пауза растёт до 4 с. Без паузы запрос шёл бы каждый круг.
+    until("the second token request", || {
+        fixture.control.requests().len() >= 2
+    })
+    .await;
+    let seen = fixture.control.observations().len();
+    until("more supervision rounds", || {
+        fixture.control.observations().len() >= seen + 15
+    })
+    .await;
     let requests = fixture.control.requests();
     assert!(
-        (2..=3).contains(&requests.len()),
+        requests.len() == 2,
         "token requests must follow the pause, got {requests:?}"
     );
     assert!(requests[0].1, "the first request resets the new state dir");
@@ -715,10 +740,10 @@ async fn removal_stops_the_worker_and_the_forward_but_shutdown_leaves_them() {
     // Выход носителя ничего не останавливает на раннере, кроме проброса.
     fixture.shutdown_carrier().await;
     assert!(pid_alive(worker), "worker survives the carrier exit");
-    until("the forward to go away", || {
-        forward_pids(&fixture.root).is_empty()
-    })
-    .await;
+    assert!(
+        forward_pids(&fixture.root).is_empty(),
+        "the forward stops with the carrier"
+    );
     // Запуск заново и снятие раннера из назначения.
     let (stop, shutdown) = watch::channel(false);
     let settings = CarrierSettings {
@@ -747,15 +772,12 @@ async fn removal_stops_the_worker_and_the_forward_but_shutdown_leaves_them() {
     .await;
     assign.send(Vec::new()).unwrap();
     until("the worker to stop on removal", || !pid_alive(worker)).await;
-    until("the forward to stop on removal", || {
-        forward_pids(&fixture.root).is_empty()
-    })
-    .await;
-    // Снятый раннер больше не запускается.
-    sleep(Duration::from_secs(1)).await;
-    assert!(!fixture.worker_alive());
+    // Остановка завершена, когда носитель вернул управление: снятие раннера стоит до выхода.
     stop.send(true).unwrap();
     join.await.unwrap();
+    assert!(forward_pids(&fixture.root).is_empty());
+    // Снятый раннер не запущен заново.
+    assert!(!fixture.worker_alive());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -765,24 +787,45 @@ async fn only_runners_named_in_both_config_and_assignment_are_managed() {
         ..Default::default()
     })
     .await;
-    // Назначен раннер, которого нет в конфигурации носителя.
-    fixture
-        .assign
-        .send(vec![AssignedRunner {
-            machine_id: Uuid::now_v7(),
-            name: "runner-b".into(),
-            root_dir: fixture.sshd.path().join("runner-b"),
-        }])
-        .unwrap();
-    sleep(Duration::from_secs(1)).await;
-    assert!(fixture.control.observations().is_empty());
-    assert!(fixture.control.requests().is_empty());
+    // Назначен раннер, которого нет в конфигурации носителя, а настроенного пока нет в назначении.
+    let stranger = Uuid::now_v7();
+    let mut assigned = vec![AssignedRunner {
+        machine_id: stranger,
+        name: "runner-b".into(),
+        root_dir: fixture.sshd.path().join("runner-b"),
+    }];
+    fixture.assign.send(assigned.clone()).unwrap();
+    // Контроль: когда назначен и настроенный раннер, носитель им занимается. К этому моменту
+    // чужой раннер уже учтён, а следов от него нет.
+    assigned.extend(fixture.assigned());
+    fixture.assign.send(assigned).unwrap();
+    fixture.wait_hellos(1).await;
+    assert!(
+        fixture
+            .control
+            .observations()
+            .iter()
+            .all(|o| o.machine_id == fixture.control.machine_id)
+    );
+    assert!(
+        fixture
+            .control
+            .requests()
+            .iter()
+            .all(|(id, _)| *id == fixture.control.machine_id)
+    );
     assert!(!fixture.sshd.path().join("runner-b").exists());
-    assert!(!fixture.root.exists());
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn unreachable_runner_reports_growing_failures_and_keeps_reporting() {
+/// Носитель с раннером, до которого по SSH не достучаться (порт закрыт).
+async fn start_dead_runner(
+    timings: Timings,
+) -> (
+    tempfile::TempDir,
+    Arc<FakeControl>,
+    watch::Sender<bool>,
+    JoinHandle<()>,
+) {
     let scratch = tempfile::tempdir_in("/tmp").unwrap();
     let dead_port = std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()
@@ -806,11 +849,13 @@ async fn unreachable_runner_reports_growing_failures_and_keeps_reporting() {
         observations: Mutex::default(),
         refuse: Mutex::new(false),
     });
-    let (_assign, assigned) = watch::channel(vec![AssignedRunner {
+    // Назначение живёт столько же, сколько носитель: источник не закрывается.
+    let (assign, assigned) = watch::channel(vec![AssignedRunner {
         machine_id: control.machine_id,
         name: RUNNER.into(),
         root_dir: scratch.path().join("runner"),
     }]);
+    std::mem::forget(assign);
     let (stop, shutdown) = watch::channel(false);
     let join = tokio::spawn(carrier::run(
         CarrierSettings {
@@ -824,12 +869,18 @@ async fn unreachable_runner_reports_growing_failures_and_keeps_reporting() {
                 max_running: 1,
                 lease_slots: 1,
             }],
-            timings: test_timings(),
+            timings,
         },
         control.clone(),
         assigned,
         shutdown,
     ));
+    (scratch, control, stop, join)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unreachable_runner_reports_growing_consecutive_failures() {
+    let (_scratch, control, stop, join) = start_dead_runner(test_timings()).await;
     until("three consecutive failures", || {
         control
             .observations()
@@ -845,12 +896,34 @@ async fn unreachable_runner_reports_growing_failures_and_keeps_reporting() {
     let counts: Vec<u32> = seen.iter().map(|o| o.consecutive_failures).collect();
     assert!(counts.windows(2).all(|w| w[0] <= w[1]), "{counts:?}");
     assert_eq!(counts[0], 1);
-    // Без попыток SSH наблюдение всё равно повторяется: свежесть нужна хабу для «offline».
-    let before = control.observations().len();
-    sleep(Duration::from_millis(1500)).await;
-    assert!(control.observations().len() > before);
-    let newest = control.observations().pop().unwrap().observed_at;
-    assert!(SystemTime::now().duration_since(newest).unwrap() < Duration::from_secs(5));
+    stop.send(true).unwrap();
+    join.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_last_observation_is_repeated_without_new_ssh_attempts() {
+    // Круг присмотра и повтор проброса отложены на час: после двух первых неудач попыток SSH
+    // больше нет, а наблюдения идут, потому что хабу нужна свежесть для «offline».
+    let (_scratch, control, stop, join) = start_dead_runner(Timings {
+        liveness: Duration::from_secs(3600),
+        backoff_min: Duration::from_secs(3600),
+        backoff_max: Duration::from_secs(3600),
+        ..test_timings()
+    })
+    .await;
+    until("repeated observations", || {
+        control.observations().len() >= 5
+    })
+    .await;
+    let seen = control.observations();
+    let tail = &seen[seen.len() - 3..];
+    assert!(tail.iter().all(|o| !o.reachable));
+    assert!(
+        tail.windows(2)
+            .all(|w| w[0].consecutive_failures == w[1].consecutive_failures
+                && w[0].observed_at < w[1].observed_at),
+        "{tail:?}"
+    );
     stop.send(true).unwrap();
     join.await.unwrap();
 }

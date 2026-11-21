@@ -70,8 +70,10 @@ async fn a_certificate_for_another_name_is_refused_even_through_the_socket() {
     // Сертификат хаба выписан на `localhost`; `hub_url` называет другое имя.
     hub.config.hub_url = "https://wrong.example:1".into();
     let (stop, mut state, join) = spawn(&hub, store);
+    // Две неудачные попытки подряд: Backoff, новая попытка, снова Backoff.
     wait_for(&mut state, |s| matches!(s, SessionState::Backoff { .. })).await;
-    tokio::time::sleep(Duration::from_millis(600)).await;
+    wait_for(&mut state, |s| !matches!(s, SessionState::Backoff { .. })).await;
+    wait_for(&mut state, |s| matches!(s, SessionState::Backoff { .. })).await;
     assert!(
         hub.events.try_recv().is_err(),
         "the handshake must fail before any hello reaches the hub"
