@@ -11,6 +11,8 @@ pub const MAX_OUTPUTS: usize = 32;
 pub const MAX_LABELS: usize = 16;
 pub const MAX_LABEL_BYTES: usize = 64;
 pub const MAX_PATH_BYTES: usize = 4096;
+/// Предел пути результата, как у несущей (`collect::valid_relative`).
+pub const MAX_OUTPUT_PATH_BYTES: usize = 512;
 pub const DEFAULT_EXPECTED_MINUTES: i64 = 30;
 
 /// Исходники: абсолютный путь репозитория на машине заказчика и полный sha коммита.
@@ -47,7 +49,23 @@ pub fn check_source(repo: &str, rev: &str) -> Result<Source, &'static str> {
     })
 }
 
-/// Относительные пути результатов: не больше 32, без `..`, без абсолютных.
+/// Путь результата в том виде, который примет несущая при сборе: относительный, из знаков
+/// `[A-Za-z0-9._/+@-]`, без пустых частей, `.` и `..`, не с `-`, до 512 байт. Хаб отказывает
+/// заранее, чтобы задача не выполнялась и не падала на имени после работы.
+fn valid_output_path(path: &str) -> bool {
+    !path.is_empty()
+        && path.len() <= MAX_OUTPUT_PATH_BYTES
+        && !path.starts_with('/')
+        && !path.starts_with('-')
+        && path
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != "..")
+        && path.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-' | b'+' | b'@')
+        })
+}
+
+/// Относительные пути результатов: не больше 32, из безопасных знаков, без `..`, без абсолютных.
 pub fn check_outputs(outputs: &[String]) -> Result<Vec<String>, &'static str> {
     if outputs.len() > MAX_OUTPUTS {
         return Err("at most 32 outputs");
@@ -55,14 +73,10 @@ pub fn check_outputs(outputs: &[String]) -> Result<Vec<String>, &'static str> {
     let mut out = Vec::with_capacity(outputs.len());
     for path in outputs {
         let trimmed = path.trim_end_matches('/');
-        if trimmed.is_empty()
-            || path.starts_with('/')
-            || path.len() > MAX_PATH_BYTES
-            || path.contains('\0')
-            || path.contains('\n')
-            || has_parent_component(path)
-        {
-            return Err("outputs must be relative paths without '..'");
+        if !valid_output_path(trimmed) {
+            return Err(
+                "outputs must be relative paths of [A-Za-z0-9._/+@-] without '..', up to 512 bytes",
+            );
         }
         if !out.iter().any(|seen| seen == trimmed) {
             out.push(trimmed.to_owned());

@@ -91,16 +91,26 @@ pub async fn satisfiable(
     carrier: Uuid,
     labels: &[String],
     placement: &[String],
+    repo: &str,
+    domain: &str,
 ) -> Result<bool, sqlx::Error> {
+    // Несущая подходит, только если её рабочий каталог остаётся в домене исходников.
+    let local_ok = carrier_workdir_in_domain(conn, carrier, repo, domain).await?;
     Ok(candidates(conn, carrier).await?.iter().any(|candidate| {
         candidate.capable()
             && candidate.allowed_by(carrier, placement)
             && candidate.has_labels(labels)
+            && (local_ok || !candidate.is_carrier(carrier))
     }))
 }
 
 /// Ключ голого репозитория: имя каталога и 12 первых шестнадцатеричных знаков sha256 от
 /// абсолютного пути. Одинаковые имена в разных местах не делят хранилище объектов.
+///
+/// Имя в ключе сводится к `[A-Za-z0-9._-]`: другие знаки (пробел, `+`, юникод) заменяются на
+/// `-`, а точки и пустое имя (`.`, `..`, ``) дают `repo`. Хеш считается от настоящего пути, так
+/// что разные пути с одинаково сведённым именем ключей не делят. Несущая принимает ровно этот
+/// алфавит (`valid_key`), поэтому задача не доходит до подготовки и не падает на имени.
 pub fn repo_key(repo: &str) -> String {
     let digest = Sha256::digest(repo.as_bytes());
     let hash: String = digest
@@ -108,23 +118,54 @@ pub fn repo_key(repo: &str) -> String {
         .take(6)
         .map(|byte| format!("{byte:02x}"))
         .collect();
-    format!("{}-{hash}", repo_dir_name(repo))
+    let name: String = repo_dir_name(repo)
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let name = if name.chars().all(|c| c == '.') {
+        "repo".to_owned()
+    } else {
+        name
+    };
+    format!("{name}-{hash}")
+}
+
+/// Рабочий каталог задачи на самой несущей:
+/// `<каталог над репозиторием>/.canterlot-jobs/<имя репозитория>/<id>`.
+pub fn carrier_workdir(repo: &str, job: Uuid) -> String {
+    let trimmed = repo.trim_end_matches('/');
+    let parent = trimmed.rsplit_once('/').map_or("", |(parent, _)| parent);
+    format!("{parent}/.canterlot-jobs/{}/{job}", repo_dir_name(repo))
+}
+
+/// Рабочий каталог на несущей остаётся в домене исходников? Он лежит над репозиторием, и если
+/// сам репозиторий — рабочий корень, то каталог над ним уже по пути «личный». Такой задаче на
+/// несущей места нет: она отказывается (`domain_mismatch`) или идёт только на раннер.
+/// Проще, чем класть каталог внутрь репозитория и прятать его в `.git/info/exclude`.
+pub async fn carrier_workdir_in_domain(
+    conn: &mut PgConnection,
+    carrier: Uuid,
+    repo: &str,
+    domain: &str,
+) -> Result<bool, sqlx::Error> {
+    let workdir = carrier_workdir(repo, Uuid::nil());
+    let found = crate::memory::path_domain(conn, carrier, &workdir).await?;
+    Ok(found.map(crate::memory::MemoryDomain::as_str) == Some(domain))
 }
 
 /// Рабочий каталог задачи: на раннере `<root>/jobs/<домен>/<id>`, на самой несущей
-/// `<каталог над репозиторием>/.canterlot-jobs/<имя репозитория>/<id>`. Второй лежит рядом с
-/// исходным репозиторием, поэтому домен по пути у него тот же.
+/// `carrier_workdir`.
 pub fn workdir_for(job: &Job, root_dir: Option<&str>, on_carrier: bool) -> Option<String> {
     let repo = job.source_repo.as_deref()?;
     let domain = job.source_domain.as_deref()?;
     if on_carrier {
-        let trimmed = repo.trim_end_matches('/');
-        let parent = trimmed.rsplit_once('/').map_or("", |(parent, _)| parent);
-        Some(format!(
-            "{parent}/.canterlot-jobs/{}/{}",
-            repo_dir_name(repo),
-            job.id
-        ))
+        Some(carrier_workdir(repo, job.id))
     } else {
         Some(format!(
             "{}/jobs/{domain}/{}",
@@ -277,7 +318,25 @@ pub async fn place_waiting_in_tx(
             continue;
         }
         let mut chosen = None;
+        let mut local_ok = None;
         for candidate in &all {
+            // Рабочий каталог на несущей обязан остаться в домене исходников.
+            if candidate.is_carrier(carrier) {
+                if local_ok.is_none() {
+                    local_ok = Some(
+                        carrier_workdir_in_domain(
+                            conn,
+                            carrier,
+                            job.source_repo.as_deref().unwrap_or_default(),
+                            job.source_domain.as_deref().unwrap_or_default(),
+                        )
+                        .await?,
+                    );
+                }
+                if local_ok == Some(false) {
+                    continue;
+                }
+            }
             // Названная машина берёт только свою задачу, виды места на неё не действуют.
             let allowed = match job.requested_machine_id {
                 Some(requested) => candidate.id == requested,

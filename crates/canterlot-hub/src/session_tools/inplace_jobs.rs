@@ -659,9 +659,23 @@ async fn run_source(
                 return Err(ToolError::new(ToolErrorCode::RemoteWorkDisabled));
             }
         }
-        Some(_) => {}
+        Some(_) => {
+            // Сама несущая: её рабочий каталог остаётся в домене исходников или отказ.
+            if !place::carrier_workdir_in_domain(&mut tx, carrier, &source.repo, domain).await? {
+                return Err(ToolError::new(ToolErrorCode::DomainMismatch));
+            }
+        }
         None => {
-            if !place::satisfiable(&mut tx, carrier, &labels, &placement).await? {
+            if !place::satisfiable(
+                &mut tx,
+                carrier,
+                &labels,
+                &placement,
+                &source.repo,
+                domain,
+            )
+            .await?
+            {
                 return Err(ToolError::new(ToolErrorCode::NoRunnerCanSatisfy));
             }
         }

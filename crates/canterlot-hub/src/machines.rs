@@ -282,7 +282,9 @@ pub async fn set_accepts_remote_work(
 pub const ROLE_WORKER: &str = "worker";
 pub const ROLE_RUNNER: &str = "runner";
 
-const MAX_ROOT_DIR_BYTES: usize = 1024;
+/// Предел корня раннера, как у несущей (`script::valid_root`): путь сокета `<root>/hub.sock`
+/// обязан влезть в `sun_path`.
+const MAX_ROOT_DIR_BYTES: usize = 90;
 const MAX_LABELS: usize = 32;
 const MAX_LABEL_BYTES: usize = 64;
 

@@ -677,6 +677,13 @@ async fn source_and_outputs_are_checked(pool: PgPool) {
         json!({"source": {"repo": "/srv/../etc", "rev": REV}}),
         json!({"outputs": ["../escape"]}),
         json!({"outputs": ["/abs/path"]}),
+        // Несущая отказала бы им после запуска: хаб отказывает до него.
+        json!({"outputs": ["test results"]}),
+        json!({"outputs": ["out/$HOME"]}),
+        json!({"outputs": ["out//log"]}),
+        json!({"outputs": ["out/./log"]}),
+        json!({"outputs": ["-rf"]}),
+        json!({"outputs": ["x".repeat(513)]}),
         json!({"outputs": (0..33).map(|n| format!("out/{n}")).collect::<Vec<_>>()}),
         json!({"expected_minutes": 0}),
         json!({"placement": []}),
@@ -1921,6 +1928,110 @@ async fn revoking_the_carrier_ends_its_waiting_jobs_lost(pool: PgPool) {
     machines::revoke(&fx.pool, fx.carrier).await.unwrap();
     assert_eq!(fx.state(waiting).await, "lost");
     assert_eq!(fx.messages(waiting).await, 1);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn an_owner_job_is_checked_for_outputs_before_it_runs(pool: PgPool) {
+    let mut fx = Fx::new(pool).await;
+    fx.runner("runner-a", 5, &["kernel-6.12"], 1, true).await;
+    for bad in [
+        json!({"outputs": ["test results"]}),
+        json!({"outputs": ["a/../b"]}),
+        json!({"outputs": ["/etc"]}),
+    ] {
+        let refused = owner::submit(&fx.pool, &fx.registry, fx.carrier, &owner_spec(bad.clone()))
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code, "invalid_arguments", "{bad}");
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_repository_name_the_carrier_would_refuse_gets_a_safe_key(pool: PgPool) {
+    let mut fx = Fx::new(pool).await;
+    let runner = fx.runner("runner-a", 20, &[], 1, true).await;
+    let repo = "/srv/src/my app+v2 ё";
+    let id = job_id(
+        &fx.auto(json!({"source": {"repo": repo, "rev": REV}, "placement": ["runner"]}))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(fx.job(id).await.machine_id, Some(runner));
+    let key = place::repo_key(repo);
+    assert!(
+        key.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')),
+        "{key}"
+    );
+    assert!(key.starts_with("my-app-v2---"), "{key}");
+    let stage = fx.command(fx.carrier, "stage_source").await;
+    let Some(Kind::StageSource(stage)) = outbox::to_proto(&stage).unwrap().kind else {
+        panic!("stage command expected");
+    };
+    assert_eq!(stage.repo_key, key);
+    // Разные пути с одинаково сведённым именем ключей не делят.
+    assert_ne!(place::repo_key("/a/x y"), place::repo_key("/b/x y"));
+    // Имя из точек не бывает именем ключа.
+    for odd in ["/srv/src/.", "/srv/src/..."] {
+        assert!(place::repo_key(odd).starts_with("repo-"), "{odd}");
+    }
+}
+
+/// Рабочий каталог на несущей лежит над репозиторием. Репозиторий, который сам рабочий корень,
+/// дал бы каталог «личного» домена: на несущей такой задаче места нет.
+#[sqlx::test(migrations = "./migrations")]
+async fn the_workdir_on_the_carrier_never_leaves_the_domain_of_the_source(pool: PgPool) {
+    let mut fx = Fx::new(pool).await;
+    let runner = fx.runner("runner-a", 20, &[], 2, true).await;
+    sqlx::query("update conversations set memory_domain='work' where id=$1")
+        .bind(fx.conversation)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    let root = json!({"repo": "/home/dev/work", "rev": REV});
+    // Названная несущая: отказ с кодом домена.
+    assert_eq!(
+        code(
+            fx.call("job.run", named("carrier", json!({"source": root.clone()})))
+                .await
+        ),
+        Code::DomainMismatch
+    );
+    // Только на несущую: места нет вовсе.
+    assert_eq!(
+        code(
+            fx.auto(json!({"source": root.clone(), "placement": ["local"]}))
+                .await
+        ),
+        Code::NoRunnerCanSatisfy
+    );
+    // Раннер берёт: его каталог `jobs/work` не зависит от пути на несущей.
+    let id = job_id(&fx.auto(json!({"source": root.clone()})).await.unwrap());
+    assert_eq!(fx.job(id).await.machine_id, Some(runner));
+    // Раннер занят полностью: задача ждёт раннер, а не уходит на несущую.
+    let second = job_id(&fx.auto(json!({"source": root})).await.unwrap());
+    let third = job_id(
+        &fx.auto(json!({"source": {"repo": "/home/dev/work", "rev": REV}}))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(fx.job(second).await.machine_id, Some(runner));
+    assert_eq!(fx.state(third).await, "waiting_runner");
+    // Обычный репозиторий внутри рабочего корня остаётся в домене и идёт на несущую.
+    let inner = job_id(
+        &fx.auto(json!({
+            "source": {"repo": "/home/dev/work/app", "rev": REV},
+            "placement": ["local"],
+        }))
+        .await
+        .unwrap(),
+    );
+    let job = fx.job(inner).await;
+    assert_eq!(job.machine_id, Some(fx.carrier));
+    assert_eq!(
+        job.workdir.as_deref(),
+        Some(format!("/home/dev/work/.canterlot-jobs/app/{inner}").as_str())
+    );
 }
 
 #[sqlx::test(migrations = "./migrations")]
