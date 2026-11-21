@@ -123,6 +123,7 @@ mod opencode_process;
 mod opencode_review_findings;
 #[cfg(all(feature = "fault-injection", feature = "synthetic-adapter"))]
 mod opencode_worker;
+mod owner_jobs;
 #[cfg(all(feature = "fault-injection", feature = "synthetic-adapter"))]
 mod pilot_e2e;
 mod precheck;

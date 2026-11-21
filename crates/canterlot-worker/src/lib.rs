@@ -19,6 +19,7 @@ pub mod mcp_relay;
 pub mod media;
 pub mod memory_import;
 pub mod memory_scope;
+pub mod owner_jobs;
 pub mod ownership;
 pub mod secret;
 pub mod session;

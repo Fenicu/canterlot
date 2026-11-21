@@ -1122,6 +1122,13 @@ impl Worker {
                 shutdown.clone(),
             ))))
         });
+        // Собранные результаты задач живут `[jobs].output_retention`; чистит и носитель без раннеров:
+        // задача на самой несущей тоже собирает результаты.
+        let _outputs_sweep = AbortOnDrop(tokio::spawn(crate::carrier::stage::sweep_loop(
+            self.config.data_dir.join("job-outputs"),
+            self.config.jobs.output_retention,
+            shutdown.clone(),
+        )));
         // Воркер готов принимать работу; с этого места главный цикл шлёт пинги.
         self.systemd_watchdog.ready();
         loop {

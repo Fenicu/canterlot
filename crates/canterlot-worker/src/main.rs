@@ -76,6 +76,56 @@ enum Command {
         #[command(subcommand)]
         command: MemoryCommand,
     },
+    /// Задачи владельца на раннерах и на этой машине без разговора (только на несущей).
+    Job {
+        #[command(subcommand)]
+        command: JobCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum JobCommand {
+    /// Отправить команду хабу как задачу владельца.
+    ///
+    /// Без `--wait` печатает идентификатор задачи и выходит с нулём. С `--wait` ждёт итог,
+    /// печатает хвост журнала, каталог результатов и выходит с кодом задачи: 124 по таймауту,
+    /// 130 при отмене, 1 для `failed` и `lost` без кода. Отказ принять задачу — код 2.
+    Run {
+        #[arg(long)]
+        title: String,
+        /// Имя машины или `auto`; с `--source` по умолчанию `auto`.
+        #[arg(long)]
+        machine: Option<String>,
+        /// Метки раннера через запятую.
+        #[arg(long, value_delimiter = ',')]
+        labels: Vec<String>,
+        #[arg(long)]
+        expected_minutes: Option<u32>,
+        #[arg(long, value_enum)]
+        lease: Option<JobLease>,
+        #[arg(long)]
+        timeout_minutes: Option<u32>,
+        /// `<репозиторий>@<полный sha>`; `@HEAD` — текущий коммит чистого дерева.
+        #[arg(long)]
+        source: Option<String>,
+        /// Путь относительно рабочей копии, который надо собрать; можно повторять.
+        #[arg(long)]
+        output: Vec<String>,
+        /// Рабочий каталог без `--source`; по умолчанию текущий.
+        #[arg(long)]
+        workdir: Option<String>,
+        #[arg(long)]
+        wait: bool,
+        #[arg(last = true, required = true, num_args = 1..)]
+        command: Vec<std::ffi::OsString>,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum JobLease {
+    None,
+    Build,
+    Gate,
 }
 
 #[derive(Subcommand)]
@@ -142,6 +192,9 @@ async fn main() -> ExitCode {
         return code;
     }
     if let Some(code) = lease().await {
+        return code;
+    }
+    if let Some(code) = owner_job().await {
         return code;
     }
     if let Some(code) = memory() {
@@ -259,6 +312,49 @@ fn memory() -> Option<ExitCode> {
     })
 }
 
+async fn owner_job() -> Option<ExitCode> {
+    use canterlot_worker::owner_jobs::client;
+    let Command::Job { command } = Cli::try_parse().ok()?.command else {
+        return None;
+    };
+    let JobCommand::Run {
+        title,
+        machine,
+        labels,
+        expected_minutes,
+        lease,
+        timeout_minutes,
+        source,
+        output,
+        workdir,
+        wait,
+        command,
+    } = command;
+    Some(
+        client::run(client::RunArgs {
+            title,
+            machine,
+            labels,
+            expected_minutes,
+            lease: lease.map(|lease| {
+                match lease {
+                    JobLease::None => "none",
+                    JobLease::Build => "build",
+                    JobLease::Gate => "gate",
+                }
+                .to_owned()
+            }),
+            timeout_minutes,
+            source,
+            outputs: output,
+            workdir,
+            wait,
+            command,
+        })
+        .await,
+    )
+}
+
 async fn job_shim() -> Option<ExitCode> {
     let Command::JobShim { dir } = Cli::try_parse().ok()?.command else {
         return None;
@@ -373,6 +469,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         | Command::Supervise { .. }
         | Command::Capabilities
         | Command::Memory { .. }
+        | Command::Job { .. }
         | Command::Lease { .. } => {
             return Ok(());
         }
