@@ -11,6 +11,7 @@ import FindCard from './FindCard.svelte';
 import JobLogCard from './JobLogCard.svelte';
 import JobRunCard from './JobRunCard.svelte';
 import JobsListCard from './JobsListCard.svelte';
+import RunnersListCard from './RunnersListCard.svelte';
 import ForgejoCard from './ForgejoCard.svelte';
 import ReadCard from './ReadCard.svelte';
 import EditCard from './EditCard.svelte';
@@ -193,6 +194,7 @@ const REGISTRY: Record<string, AnyCard> = {
   'canterlot.job_cancel': card(marked(family.jobs, jobbed(jobs.jobCancel)), JobRunCard),
   'canterlot.job_log': card({ ...jobs.jobLog, icon: family.jobs, word: (call, data) => (call.state === 'done' ? jobs.logWord(data) : defaultWord(call)) }, JobLogCard),
   'canterlot.jobs_list': card({ ...jobs.jobsList, icon: family.jobs, word: (call) => defaultWord(call) }, JobsListCard),
+  'canterlot.runners_list': card({ ...jobs.runnersList, icon: family.jobs, word: (call) => defaultWord(call) }, RunnersListCard),
   'todo.write': card(todo, TodoCard),
   'agent.task': card(subagent, SubagentCard),
   'question.ask': card(question, QuestionCard),

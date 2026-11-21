@@ -52,7 +52,7 @@ const CANTERLOT_TOOLS: Record<string, string> = {
   job_log: 'job_log',
   job_cancel: 'job_cancel',
   jobs_list: 'jobs_list',
-  // Раннеры несущей: карточки пока нет, ответ показывается обычным блоком инструмента.
+  // Раннеры несущей: список с доступностью и местами.
   runners_list: 'runners_list'
 };
 
