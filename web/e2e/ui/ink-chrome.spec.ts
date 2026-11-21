@@ -65,7 +65,7 @@ function working(hub: FakeHub, api: FakeHubApi, id: string, evidence: Record<str
  * а короткое движение опросом не поймать, поэтому запуски пишутся журналом с первого кадра страницы.
  */
 const moving = (node: Locator) => node.evaluate((el) => ((window as unknown as { __started: Element[] }).__started ?? []).filter((started) => started === el).length);
-const settled = (node: Locator) => node.evaluate((el) => Promise.all(el.getAnimations({ subtree: true }).map((a) => a.finished)).then(() => undefined));
+const settled = (node: Locator) => node.evaluate((el) => Promise.all(el.getAnimations({ subtree: true }).map((a) => a.finished.catch(() => undefined))).then(() => undefined));
 
 test('live_line_swaps_its_label_on_a_new_occupation_and_stands_a_hammer_in_the_queue', async ({ page }) => {
   const { hub, api, id } = await boot(page);

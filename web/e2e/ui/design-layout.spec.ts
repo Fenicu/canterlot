@@ -408,7 +408,7 @@ test.describe('листы и панели', () => {
 });
 
 /** Складка строк очереди дошла до конца: до этого высота строки ещё сходится к настоящей. */
-const folded = (strip: Locator) => strip.evaluate((node) => Promise.all(node.getAnimations({ subtree: true }).map((animation) => animation.finished)).then(() => undefined));
+const folded = (strip: Locator) => strip.evaluate((node) => Promise.all(node.getAnimations({ subtree: true }).map((animation) => animation.finished.catch(() => undefined))).then(() => undefined));
 
 test.describe('очередь и вложения', () => {
   async function queue(hub: FakeHub, api: FakeHubApi, id: string, texts: string[]) {
