@@ -406,6 +406,122 @@ pub async fn add_runner(
     .await
 }
 
+/// Что `machine set` меняет у машины; пустое поле остаётся как есть.
+#[derive(Clone, Debug, Default)]
+pub struct MachineAttrs {
+    /// Ранг размещения раннера: больше — предпочтительнее. У несущей учитывается как 0.
+    pub rank: Option<i32>,
+    /// Метки целиком (пустой список снимает все).
+    pub labels: Option<Vec<String>>,
+    /// Корень раннера: только у раннера и только пока на нём нет незаконченных задач.
+    pub root_dir: Option<String>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SetMachineError {
+    #[error("machine_not_found")]
+    NotFound,
+    #[error("nothing_to_set")]
+    NothingToSet,
+    #[error("labels_invalid")]
+    InvalidLabels,
+    #[error("root_dir_invalid")]
+    InvalidRootDir,
+    /// Корень есть только у раннера.
+    #[error("root_dir_needs_runner")]
+    RootDirNeedsRunner,
+    /// Смена корня под идущими задачами оставила бы на старом месте их каталоги.
+    #[error("runner_has_unfinished_jobs")]
+    RunnerHasJobs,
+    #[error("db_error")]
+    Database(#[from] sqlx::Error),
+}
+
+/// Меняет ранг, метки и корень машины (`machine set`): владелец метит и саму VM (например
+/// `kernel-6.12`), и раннеры. Только CLI владельца.
+pub async fn set_attrs(
+    pool: &PgPool,
+    machine_id: Uuid,
+    attrs: &MachineAttrs,
+) -> Result<(), SetMachineError> {
+    if attrs.rank.is_none() && attrs.labels.is_none() && attrs.root_dir.is_none() {
+        return Err(SetMachineError::NothingToSet);
+    }
+    if attrs
+        .labels
+        .as_ref()
+        .is_some_and(|labels| !valid_labels(labels))
+    {
+        return Err(SetMachineError::InvalidLabels);
+    }
+    if attrs
+        .root_dir
+        .as_deref()
+        .is_some_and(|root| !valid_root_dir(root))
+    {
+        return Err(SetMachineError::InvalidRootDir);
+    }
+    let attrs = attrs.clone();
+    crate::db::in_tx(pool, move |conn| {
+        Box::pin(async move {
+            // Замок машины задач раньше строки машины, как у отзыва.
+            crate::inplace_jobs::lock_machine(&mut *conn, machine_id).await?;
+            let role: Option<String> =
+                sqlx::query_scalar("select role from machines where id = $1 for update")
+                    .bind(machine_id)
+                    .fetch_optional(&mut *conn)
+                    .await?;
+            let Some(role) = role else {
+                return Err(SetMachineError::NotFound);
+            };
+            if let Some(root) = &attrs.root_dir {
+                if role != ROLE_RUNNER {
+                    return Err(SetMachineError::RootDirNeedsRunner);
+                }
+                let busy: bool = sqlx::query_scalar(
+                    "select exists(select 1 from jobs where machine_id = $1
+                       and state not in ('succeeded','failed','timed_out','canceled','lost'))",
+                )
+                .bind(machine_id)
+                .fetch_one(&mut *conn)
+                .await?;
+                let current: Option<String> =
+                    sqlx::query_scalar("select root_dir from machines where id = $1")
+                        .bind(machine_id)
+                        .fetch_one(&mut *conn)
+                        .await?;
+                if busy && current.as_deref() != Some(root.as_str()) {
+                    return Err(SetMachineError::RunnerHasJobs);
+                }
+                sqlx::query("update machines set root_dir = $2 where id = $1")
+                    .bind(machine_id)
+                    .bind(root)
+                    .execute(&mut *conn)
+                    .await?;
+            }
+            if let Some(rank) = attrs.rank {
+                sqlx::query("update machines set rank = $2 where id = $1")
+                    .bind(machine_id)
+                    .bind(rank)
+                    .execute(&mut *conn)
+                    .await?;
+            }
+            if let Some(labels) = &attrs.labels {
+                sqlx::query("update machines set labels = $2 where id = $1")
+                    .bind(machine_id)
+                    .bind(labels)
+                    .execute(&mut *conn)
+                    .await?;
+            }
+            // Метки и ранг меняют выбор места: ждущим задачам пора на расстановку.
+            crate::inplace_jobs::carrier::notify_place_for_machine(&mut *conn, Some(machine_id))
+                .await?;
+            Ok(())
+        })
+    })
+    .await
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SetCarrierError {
     #[error("machine_not_found")]

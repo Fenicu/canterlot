@@ -114,6 +114,23 @@ enum MachineCommand {
         #[arg(long)]
         off: bool,
     },
+    /// Изменить ранг, метки или корень машины: метки у любой (в том числе у самой VM, например
+    /// `kernel-6.12`), корень только у раннера.
+    Set {
+        #[command(flatten)]
+        config: ConfigArgs,
+        #[arg(long)]
+        machine_id: Uuid,
+        /// Ранг размещения, больше — предпочтительнее.
+        #[arg(long, allow_hyphen_values = true)]
+        rank: Option<i32>,
+        /// Метки через запятую; пустое значение снимает все.
+        #[arg(long, value_delimiter = ',')]
+        labels: Option<Vec<String>>,
+        /// Раннер: корневой каталог, абсолютный и нормализованный, до 90 байт.
+        #[arg(long)]
+        root_dir: Option<String>,
+    },
     RotateToken {
         #[command(flatten)]
         config: ConfigArgs,
@@ -214,6 +231,7 @@ async fn run(args: Args) -> Result<(), String> {
         Command::Machine { command } => match command {
             MachineCommand::Add { config, .. }
             | MachineCommand::SetCarrier { config, .. }
+            | MachineCommand::Set { config, .. }
             | MachineCommand::Revoke { config, .. }
             | MachineCommand::RotateToken { config, .. } => config,
         },
@@ -409,6 +427,24 @@ async fn run(args: Args) -> Result<(), String> {
                     machine_id, off, ..
                 } => {
                     machines::set_carrier(&pool, machine_id, !off)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                }
+                MachineCommand::Set {
+                    machine_id,
+                    rank,
+                    labels,
+                    root_dir,
+                    ..
+                } => {
+                    let attrs = machines::MachineAttrs {
+                        rank,
+                        labels: labels.map(|labels| {
+                            labels.into_iter().filter(|label| !label.is_empty()).collect()
+                        }),
+                        root_dir,
+                    };
+                    machines::set_attrs(&pool, machine_id, &attrs)
                         .await
                         .map_err(|error| error.to_string())?;
                 }
