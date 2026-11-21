@@ -57,7 +57,9 @@ mod canterlot_mcp_presets;
 mod canterlot_mcp_sessions;
 mod capabilities_cli;
 mod carrier;
+mod carrier_commands;
 mod carrier_hub;
+mod carrier_stage;
 mod claude_code_containment;
 mod claude_code_e2e;
 mod claude_code_input;
@@ -122,6 +124,7 @@ mod opencode_process;
 mod opencode_review_findings;
 #[cfg(all(feature = "fault-injection", feature = "synthetic-adapter"))]
 mod opencode_worker;
+mod owner_jobs;
 #[cfg(all(feature = "fault-injection", feature = "synthetic-adapter"))]
 mod pilot_e2e;
 mod precheck;

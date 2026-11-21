@@ -13,8 +13,8 @@ use std::{
 
 use async_trait::async_trait;
 use canterlot_proto::worker::v1::{
-    ControlUp, RunnerObservation, RunnerToken, RunnerTokenRefused, RunnerTokenRequest,
-    RunnersAssigned, control_up,
+    ControlUp, OwnerJobAccepted, OwnerJobRefused, OwnerJobSubmit, RunnerObservation, RunnerToken,
+    RunnerTokenRefused, RunnerTokenRequest, RunnersAssigned, control_up,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use uuid::Uuid;
@@ -23,13 +23,17 @@ use super::{
     AssignedRunner, Observation, RunnerControl, RunnerCredentials, SecretToken, TokenError,
     TokenRefusal,
 };
+use crate::owner_jobs::Refusal;
 
 type Waiter = oneshot::Sender<Result<RunnerCredentials, TokenRefusal>>;
+type OwnerWaiter = oneshot::Sender<Result<Uuid, Refusal>>;
 
 #[derive(Default)]
 struct State {
     connected: bool,
     pending: HashMap<Uuid, Waiter>,
+    /// Задачи владельца, ждущие ответа хаба, по `request_id`.
+    owner_pending: HashMap<String, OwnerWaiter>,
 }
 
 pub struct ControlBridge {
@@ -47,6 +51,15 @@ impl Drop for Connected {
         let mut state = self.0.state.lock().unwrap();
         state.connected = false;
         state.pending.clear();
+        state.owner_pending.clear();
+    }
+}
+
+struct OwnerGuard<'a>(&'a ControlBridge, String);
+
+impl Drop for OwnerGuard<'_> {
+    fn drop(&mut self) {
+        self.0.state.lock().unwrap().owner_pending.remove(&self.1);
     }
 }
 
@@ -140,6 +153,38 @@ impl ControlBridge {
         }
     }
 
+    /// Приёмник списка раннеров: по нему носитель команд находит раннер по идентификатору машины.
+    pub fn assigned_rx(&self) -> watch::Receiver<Vec<AssignedRunner>> {
+        self.assigned.subscribe()
+    }
+
+    pub fn on_owner_accepted(&self, message: OwnerJobAccepted) {
+        let waiter = self
+            .state
+            .lock()
+            .unwrap()
+            .owner_pending
+            .remove(&message.request_id);
+        if let Some(waiter) = waiter {
+            let _ = waiter.send(
+                Uuid::parse_str(&message.job_id)
+                    .map_err(|_| Refusal::new("hub_protocol", "the hub sent an invalid job id")),
+            );
+        }
+    }
+
+    pub fn on_owner_refused(&self, message: OwnerJobRefused) {
+        let waiter = self
+            .state
+            .lock()
+            .unwrap()
+            .owner_pending
+            .remove(&message.request_id);
+        if let Some(waiter) = waiter {
+            let _ = waiter.send(Err(Refusal::new(&message.code, message.message)));
+        }
+    }
+
     pub fn on_refused(&self, message: RunnerTokenRefused) {
         let Ok(machine_id) = Uuid::parse_str(&message.machine_id) else {
             return;
@@ -198,5 +243,96 @@ impl RunnerControl for ControlBridge {
                 observed_at,
             })),
         });
+    }
+}
+
+#[async_trait]
+impl crate::owner_jobs::Hub for ControlBridge {
+    async fn submit(&self, spec_json: String) -> Result<Uuid, Refusal> {
+        let request_id = Uuid::now_v7().to_string();
+        let (tx, rx) = oneshot::channel();
+        {
+            let mut state = self.state.lock().unwrap();
+            if !state.connected {
+                return Err(Refusal::new(
+                    "hub_unavailable",
+                    "the worker is not connected to the hub",
+                ));
+            }
+            state.owner_pending.insert(request_id.clone(), tx);
+        }
+        let _guard = OwnerGuard(self, request_id.clone());
+        self.up_tx
+            .try_send(ControlUp {
+                msg: Some(control_up::Msg::OwnerJobSubmit(OwnerJobSubmit {
+                    request_id,
+                    spec_json,
+                })),
+            })
+            .map_err(|_| Refusal::new("hub_unavailable", "the worker queue to the hub is full"))?;
+        match rx.await {
+            Ok(answer) => answer,
+            Err(_) => Err(Refusal::new(
+                "hub_unavailable",
+                "the connection to the hub was lost",
+            )),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::owner_jobs::Hub;
+
+    #[tokio::test]
+    async fn owner_jobs_wait_for_the_hubs_answer_and_fail_without_a_connection() {
+        let (bridge, _assigned) = ControlBridge::new();
+        // Не подключён: сразу отказ, в очередь ничего не попадает.
+        let refusal = bridge.submit("{}".into()).await.unwrap_err();
+        assert_eq!(refusal.code, "hub_unavailable");
+        let connected = bridge.connect();
+        let accepted = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move { bridge.submit("{\"a\":1}".into()).await })
+        };
+        let up = bridge.next_up().await.unwrap();
+        let Some(control_up::Msg::OwnerJobSubmit(submit)) = up.msg else {
+            panic!("expected OwnerJobSubmit");
+        };
+        assert_eq!(submit.spec_json, "{\"a\":1}");
+        let job = Uuid::now_v7();
+        // Ответ с чужим request_id никого не будит.
+        bridge.on_owner_accepted(OwnerJobAccepted {
+            request_id: "other".into(),
+            job_id: Uuid::now_v7().to_string(),
+        });
+        bridge.on_owner_accepted(OwnerJobAccepted {
+            request_id: submit.request_id,
+            job_id: job.to_string(),
+        });
+        assert_eq!(accepted.await.unwrap().unwrap(), job);
+        let refused = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move { bridge.submit("{}".into()).await })
+        };
+        let up = bridge.next_up().await.unwrap();
+        let Some(control_up::Msg::OwnerJobSubmit(submit)) = up.msg else {
+            panic!("expected OwnerJobSubmit");
+        };
+        bridge.on_owner_refused(OwnerJobRefused {
+            request_id: submit.request_id,
+            code: "domain_mismatch".into(),
+            message: "no".into(),
+        });
+        assert_eq!(refused.await.unwrap().unwrap_err().code, "domain_mismatch");
+        // Обрыв соединения будит ожидающего отказом, а не вешает его.
+        let lost = {
+            let bridge = bridge.clone();
+            tokio::spawn(async move { bridge.submit("{}".into()).await })
+        };
+        let _ = bridge.next_up().await.unwrap();
+        drop(connected);
+        assert_eq!(lost.await.unwrap().unwrap_err().code, "hub_unavailable");
     }
 }

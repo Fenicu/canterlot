@@ -91,6 +91,17 @@ impl Drop for AbortOnDrop {
     }
 }
 
+/// Снимает согласованность команд носителя при любом выходе из сеанса.
+struct CarrierGate(Option<std::sync::Arc<crate::carrier::commands::CarrierCommands>>);
+
+impl Drop for CarrierGate {
+    fn drop(&mut self) {
+        if let Some(carrier) = &self.0 {
+            carrier.set_enabled(false);
+        }
+    }
+}
+
 /// Снимает согласованность задач на месте при любом выходе из сеанса.
 struct JobsGate(Option<std::sync::Arc<crate::jobs::JobManager>>);
 
@@ -666,6 +677,8 @@ pub struct Worker {
     /// Уборка файлов секретов: живёт столько же, сколько менеджер исполнений.
     sweeper: Option<tokio::task::JoinHandle<()>>,
     lease: Option<crate::lease::server::LeaseServer>,
+    /// Сокет `canterlot-worker job run`; только у несущей.
+    owner_jobs: Option<crate::owner_jobs::server::OwnerJobServer>,
     runners: Option<RunnersLink>,
 }
 
@@ -821,6 +834,7 @@ impl Worker {
             catalog_tasks: Vec::new(),
             sweeper: None,
             lease: None,
+            owner_jobs: None,
             #[cfg(feature = "fault-injection")]
             probe: Default::default(),
             #[cfg(test)]
@@ -968,8 +982,25 @@ impl Worker {
             runtime_dir.as_deref(),
             &self.config.data_dir,
         ));
+        // Итоги задач владельца (`canterlot-worker job run`) и сокет для команды: только на
+        // несущей, то есть с `[[runners.ssh]]`.
+        let owner_store = self.runners.as_ref().and_then(|_| {
+            crate::owner_jobs::Store::open(&self.config.data_dir)
+                .inspect_err(|error| {
+                    tracing::warn!(kind = ?error.kind(), "owner job store is unavailable; job run is off");
+                })
+                .ok()
+        });
         // Тестовая сборка не поднимает сокет аренды в общем каталоге сокетов.
         if crate::exec::maintenance::ensure_test_runtime_allowed(runtime_dir.as_deref()).is_ok() {
+            if let (Some(link), Some(store)) = (&self.runners, &owner_store) {
+                self.owner_jobs = Some(crate::owner_jobs::server::OwnerJobServer::start(
+                    crate::owner_jobs::socket_path(runtime_dir.as_deref(), &self.config.data_dir),
+                    store.clone(),
+                    link.bridge.clone(),
+                    shutdown.clone(),
+                ));
+            }
             self.lease = Some(crate::lease::server::LeaseServer::start(
                 crate::lease::server::ServerConfig::new(
                     runtime_dir.as_deref(),
@@ -1042,6 +1073,23 @@ impl Worker {
         ));
         if let Some(jobs) = manager.jobs() {
             jobs.recover().await;
+        }
+        // Команды несущей: исходники, результаты, уборка и итоги задач владельца. Возможность
+        // включается на каждом соединении отдельно.
+        if let (Some(link), Some(store)) = (&self.runners, &owner_store) {
+            let timings = crate::carrier::Timings::default();
+            let stager =
+                crate::carrier::stage::Stager::new(crate::carrier::stage::StagerSettings {
+                    ssh_config: self.config.runners.ssh_config.clone(),
+                    outputs_root: self.config.data_dir.join("job-outputs"),
+                    targets: crate::carrier::targets(
+                        self.config.runners.ssh.clone(),
+                        link.bridge.assigned_rx(),
+                    ),
+                    ssh_limit: timings.ssh_limit,
+                    push_limit: timings.upload_limit,
+                });
+            manager.set_carrier(stager, store.clone());
         }
         // Восстановление до приёма любых доставок: брошенные временные файлы,
         // значения без манифеста и неполные публикации убираются раньше, чем
@@ -1121,6 +1169,21 @@ impl Worker {
                 assigned,
                 shutdown.clone(),
             ))))
+        });
+        // Собранные результаты задач живут `[jobs].output_retention`; чистит и носитель без раннеров:
+        // задача на самой несущей тоже собирает результаты.
+        let _outputs_sweep = AbortOnDrop(tokio::spawn(crate::carrier::stage::sweep_loop(
+            self.config.data_dir.join("job-outputs"),
+            self.config.jobs.output_retention,
+            shutdown.clone(),
+        )));
+        // Итоги задач владельца живут тот же срок.
+        let _owner_sweep = owner_store.as_ref().map(|store| {
+            AbortOnDrop(tokio::spawn(crate::owner_jobs::sweep_loop(
+                store.clone(),
+                self.config.jobs.output_retention,
+                shutdown.clone(),
+            )))
         });
         // Воркер готов принимать работу; с этого места главный цикл шлёт пинги.
         self.systemd_watchdog.ready();
@@ -1579,6 +1642,13 @@ impl Worker {
             })
             .map(|link| link.bridge.clone());
         let _runners_link = runners_bridge.as_ref().map(|bridge| bridge.connect());
+        // Команды и факты носителя живут ровно на согласованном соединении.
+        let runners_enabled = runners_bridge.is_some();
+        let carrier = self.manager.as_ref().unwrap().carrier();
+        if let Some(carrier) = &carrier {
+            carrier.set_enabled(runners_enabled);
+        }
+        let _carrier_gate = CarrierGate(carrier);
         let mut runners_outbound: Option<ControlUp> = None;
         let watch_enabled = pilot && accepted.capabilities.iter().any(|cap| cap == "watchdog_v1");
         if watch_enabled {
@@ -1989,10 +2059,13 @@ impl Worker {
                         let head = store.cj_records_from(from, 0)?.into_iter().next();
                         let head = head.as_ref().and_then(|r| r.body.as_ref());
                         let withheld = (!pilot && head.is_some_and(crate::store::requires_pilot))
-                            || (!jobs_enabled && head.is_some_and(crate::store::requires_jobs));
+                            || (!jobs_enabled && head.is_some_and(crate::store::requires_jobs))
+                            || (!runners_enabled
+                                && head.is_some_and(crate::store::requires_runners));
                         Ok(StoreReply::Batch(
                             from,
-                            batch_for_session(store, from, pilot, jobs_enabled)?.map(Box::new),
+                            batch_for_session(store, from, pilot, jobs_enabled, runners_enabled)?
+                                .map(Box::new),
                             withheld,
                         ))
                     })));
@@ -2076,6 +2149,12 @@ impl Worker {
                         }
                         Some(control_down::Msg::RunnerToken(token)) if runners_bridge.is_some() => {
                             runners_bridge.as_ref().unwrap().on_token(token);
+                        }
+                        Some(control_down::Msg::OwnerJobAccepted(accepted)) if runners_bridge.is_some() => {
+                            runners_bridge.as_ref().unwrap().on_owner_accepted(accepted);
+                        }
+                        Some(control_down::Msg::OwnerJobRefused(refused)) if runners_bridge.is_some() => {
+                            runners_bridge.as_ref().unwrap().on_owner_refused(refused);
                         }
                         Some(control_down::Msg::RunnerTokenRefused(refused)) if runners_bridge.is_some() => {
                             runners_bridge.as_ref().unwrap().on_refused(refused);
@@ -2485,6 +2564,7 @@ fn batch_for_session(
     from: u64,
     pilot: bool,
     jobs: bool,
+    runners: bool,
 ) -> Result<Option<(ControlUp, u64)>, WorkerError> {
     let mut batch = JournalRecords {
         journal_id: store.cj_journal_id()?.to_string(),
@@ -2505,6 +2585,11 @@ fn batch_for_session(
                     .body
                     .as_ref()
                     .is_some_and(crate::store::requires_jobs))
+            || (!runners
+                && record
+                    .body
+                    .as_ref()
+                    .is_some_and(crate::store::requires_runners))
         {
             break;
         }

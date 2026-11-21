@@ -2504,7 +2504,8 @@ impl Actor {
                 | Kind::RevokeSecret(_)
                 | Kind::StartInPlaceJob(_)
                 | Kind::CancelInPlaceJob(_)
-                // Команды несущей (`runners_v1`): воркерная половина — задача R5.
+                // Команды несущей (`runners_v1`) идут мимо исполнений (`Executions::route`) и
+                // сюда попасть не могут; на случай ошибки маршрута они отклоняются.
                 | Kind::StageSource(_)
                 | Kind::CollectOutputs(_)
                 | Kind::CleanupSource(_)

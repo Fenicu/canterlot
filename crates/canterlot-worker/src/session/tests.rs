@@ -683,7 +683,7 @@ fn an_oversized_cj_record_is_replaced_instead_of_blocking_the_session() {
     let second = store
         .append_cj_fact(record_body::Body::CommandStored(CommandStored::default()))
         .unwrap();
-    let (message, last) = batch_for_session(&store, first, true, false)
+    let (message, last) = batch_for_session(&store, first, true, false, false)
         .unwrap()
         .expect("a batch is sent");
     let Some(control_up::Msg::CjRecords(batch)) = message.msg else {
@@ -699,7 +699,7 @@ fn an_oversized_cj_record_is_replaced_instead_of_blocking_the_session() {
     ));
     assert_eq!(last, first);
     // Следующая запись не заперта заменённой: она уходит следующим пакетом.
-    let (message, last) = batch_for_session(&store, first + 1, true, false)
+    let (message, last) = batch_for_session(&store, first + 1, true, false, false)
         .unwrap()
         .expect("the next batch is sent");
     let Some(control_up::Msg::CjRecords(batch)) = message.msg else {
@@ -737,7 +737,7 @@ fn job_facts_stay_in_the_journal_until_a_negotiated_connection() {
         .unwrap();
 
     let seqs = |negotiated: bool| -> Vec<u64> {
-        let Some((message, _)) = batch_for_session(&store, before, true, negotiated).unwrap()
+        let Some((message, _)) = batch_for_session(&store, before, true, negotiated, true).unwrap()
         else {
             return vec![];
         };
@@ -756,6 +756,45 @@ fn job_facts_stay_in_the_journal_until_a_negotiated_connection() {
     assert!(crate::store::requires_jobs(&RecordBody {
         body: Some(record_body::Body::JobStarted(Default::default()))
     }));
+}
+
+#[test]
+fn carrier_facts_stay_in_the_journal_until_runners_are_negotiated() {
+    use canterlot_proto::worker::v1::{SourceCleaned, SourceStageFailed, SourceStaged};
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut store = WorkerStore::open(root.path()).unwrap();
+    let before = store
+        .append_cj_fact(record_body::Body::CommandStored(CommandStored::default()))
+        .unwrap();
+    let staged = store
+        .append_cj_fact(record_body::Body::SourceStaged(SourceStaged::default()))
+        .unwrap();
+    store
+        .append_cj_fact(record_body::Body::SourceStageFailed(
+            SourceStageFailed::default(),
+        ))
+        .unwrap();
+    store
+        .append_cj_fact(record_body::Body::SourceCleaned(SourceCleaned::default()))
+        .unwrap();
+    let seqs = |negotiated: bool| -> Vec<u64> {
+        let Some((message, _)) = batch_for_session(&store, before, true, true, negotiated).unwrap()
+        else {
+            return vec![];
+        };
+        let Some(control_up::Msg::CjRecords(batch)) = message.msg else {
+            panic!("expected CjRecords");
+        };
+        batch.records.iter().map(|record| record.seq).collect()
+    };
+    assert_eq!(
+        seqs(false),
+        [before],
+        "the batch stops at the first carrier fact"
+    );
+    assert_eq!(seqs(true), [before, staged, staged + 1, staged + 2]);
 }
 
 // Подтверждение за пределами отправленного — ошибка протокола хаба,

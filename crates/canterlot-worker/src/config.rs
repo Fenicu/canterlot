@@ -109,6 +109,10 @@ pub struct JobsConfig {
     /// Сколько каталог состояния законченной попытки живёт до уборки.
     #[serde(with = "humantime_serde")]
     pub state_retention: Duration,
+    /// Сколько каталог собранных результатов задачи (`job-outputs/<job_id>`) и запись
+    /// итога задачи владельца живут до уборки.
+    #[serde(with = "humantime_serde")]
+    pub output_retention: Duration,
 }
 
 impl JobsConfig {
@@ -130,6 +134,7 @@ impl Default for JobsConfig {
             max_running: 4,
             log_max_mib: 16,
             state_retention: Duration::from_secs(3 * 24 * 3600),
+            output_retention: Duration::from_secs(7 * 24 * 3600),
         }
     }
 }
@@ -864,10 +869,18 @@ data_dir = "/tmp/store"
             defaults.jobs.state_retention,
             Duration::from_secs(3 * 24 * 3600)
         );
+        assert_eq!(
+            defaults.jobs.output_retention,
+            Duration::from_secs(7 * 24 * 3600)
+        );
         let tuned: WorkerConfig = toml::from_str(&format!(
-            "{base}\n[jobs]\nmax_running = 2\nlog_max_mib = 1\nstate_retention = \"12h\"\n"
+            "{base}\n[jobs]\nmax_running = 2\nlog_max_mib = 1\nstate_retention = \"12h\"\noutput_retention = \"2d\"\n"
         ))
         .unwrap();
+        assert_eq!(
+            tuned.jobs.output_retention,
+            Duration::from_secs(2 * 24 * 3600)
+        );
         assert_eq!(tuned.jobs.max_running(), 2);
         assert_eq!(tuned.jobs.log_max_bytes(), 1024 * 1024);
         assert_eq!(tuned.jobs.state_retention, Duration::from_secs(12 * 3600));

@@ -336,6 +336,8 @@ pub(crate) struct Shared {
     pub secrets: OnceCell<crate::config::SecretConfig>,
     /// Задачи на месте; ставит сеанс вместе с настройками. Без него команды задач отклоняются.
     pub jobs: OnceCell<Arc<crate::jobs::JobManager>>,
+    /// Команды несущей (`runners_v1`); ставит сеанс несущей. Без него они отклоняются.
+    pub carrier: OnceCell<Arc<crate::carrier::commands::CarrierCommands>>,
     #[cfg(feature = "fault-injection")]
     pub spawn_delay: Mutex<std::time::Duration>,
     #[cfg(feature = "fault-injection")]
@@ -643,6 +645,30 @@ impl ExecutionManager {
         self.shared.jobs.get().cloned()
     }
 
+    pub fn carrier(&self) -> Option<Arc<crate::carrier::commands::CarrierCommands>> {
+        self.shared.carrier.get().cloned()
+    }
+
+    /// Включает команды несущей: факты идут в журнал управления. Возможность на соединении
+    /// включается отдельно (`CarrierCommands::set_enabled`).
+    pub fn set_carrier(
+        &self,
+        stager: crate::carrier::stage::Stager,
+        store: Arc<crate::owner_jobs::Store>,
+    ) -> Arc<crate::carrier::commands::CarrierCommands> {
+        let sink = Arc::new(JobsSink {
+            shared: Arc::downgrade(&self.shared),
+        });
+        let commands = crate::carrier::commands::CarrierCommands::new(
+            stager,
+            store,
+            sink,
+            self.shared.shutdown.clone(),
+        );
+        let _ = self.shared.carrier.set(commands.clone());
+        commands
+    }
+
     /// `jobs_inplace_v1` согласована на текущем соединении (или соединения больше нет).
     pub fn set_jobs_enabled(&self, enabled: bool) {
         if let Some(jobs) = self.shared.jobs.get() {
@@ -727,6 +753,7 @@ impl ExecutionManager {
                 boot_id: OnceCell::new(),
                 secrets: OnceCell::new(),
                 jobs: OnceCell::new(),
+                carrier: OnceCell::new(),
                 #[cfg(feature = "fault-injection")]
                 spawn_delay: Mutex::new(std::time::Duration::ZERO),
                 #[cfg(feature = "fault-injection")]
@@ -1173,7 +1200,14 @@ impl ExecutionManager {
             // годную команду. Сеанс доиграет их при подключении.
             if matches!(
                 command.kind,
-                Some(Kind::StartInPlaceJob(_) | Kind::CancelInPlaceJob(_))
+                Some(
+                    Kind::StartInPlaceJob(_)
+                        | Kind::CancelInPlaceJob(_)
+                        | Kind::StageSource(_)
+                        | Kind::CollectOutputs(_)
+                        | Kind::CleanupSource(_)
+                        | Kind::OwnerJobFinished(_)
+                )
             ) {
                 continue;
             }
@@ -1248,6 +1282,15 @@ impl ExecutionManager {
         if matches!(kind, Kind::StartInPlaceJob(_) | Kind::CancelInPlaceJob(_)) {
             return self.in_place_job(command).await;
         }
+        if matches!(
+            kind,
+            Kind::StageSource(_)
+                | Kind::CollectOutputs(_)
+                | Kind::CleanupSource(_)
+                | Kind::OwnerJobFinished(_)
+        ) {
+            return self.carrier_command(command).await;
+        }
         let Ok(id) = Uuid::parse_str(&command.execution_id) else {
             return manager::reject_invalid(&self.shared, &command).await;
         };
@@ -1264,6 +1307,29 @@ impl ExecutionManager {
             return Ok(());
         }
         manager::answer_without_execution(&self.shared, &command).await
+    }
+
+    /// Команды несущей уровня машины: исполнения у них нет, ответ — факты журнала. Пока
+    /// `runners_v1` не согласована на соединении, команда остаётся непогашенной и доигрывается
+    /// сеансом, где она согласована.
+    async fn carrier_command(&self, command: Command) -> Result<(), ExecError> {
+        use crate::carrier::commands::CommandError;
+        let Some(carrier) = self.shared.carrier.get().cloned() else {
+            return manager::reject(&self.shared, &command, "capability_missing").await;
+        };
+        match carrier.handle(&command).await {
+            Ok(()) | Err(CommandError::NotNegotiated) => Ok(()),
+            Err(CommandError::Invalid) => {
+                manager::reject(&self.shared, &command, "unsupported_command").await
+            }
+            Err(CommandError::Io) => {
+                tracing::warn!(
+                    kind = "carrier_command_failed",
+                    "carrier command was not applied"
+                );
+                Ok(())
+            }
+        }
     }
 
     /// Команды задач на месте уровня машины: исполнения у них нет, ответ — факты задач.
@@ -1461,6 +1527,14 @@ impl crate::jobs::JobSink for JobsSink {
         crate::media::upload(slot, &path, header, backoff_cap)
             .await
             .map_err(|_| crate::jobs::JobError::Sink)
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::carrier::commands::FactSink for JobsSink {
+    async fn facts(&self, facts: Vec<Body>, terminal: Vec<(String, u32)>) -> Result<(), ()> {
+        let shared = self.shared.upgrade().ok_or(())?;
+        shared.cj(facts, terminal).await.map_err(|_| ())
     }
 }
 
