@@ -5,9 +5,11 @@
 //! с `runners_v1`. Факты принимаются только от `carrier_id` задачи и только через допуск
 //! несущей (роль `worker`, флаг `is_carrier`); чужой факт ничего не меняет.
 //!
-//! Порядок после конца на раннере: `collecting` → сбор (если есть пути) → очистка → конец.
-//! Сообщение об итоге и ждущий вызов срабатывают только при настоящем конце. Сбой или срок
-//! сбора заканчивает задачу итогом раннера с пометкой `outputs not collected`.
+//! Порядок после конца на раннере: без путей результатов задача кончается сразу; с путями —
+//! `collecting` и сбор, и конец по факту сбора. Очистка выдаётся после конца
+//! (`finish_in_tx`), её повтор ведёт `cleanup_retry_sweep`, а итог, сообщение и ждущий вызов её
+//! не ждут. Сбой или срок сбора заканчивает задачу итогом раннера с пометкой
+//! `outputs not collected`.
 
 use std::{
     sync::atomic::{AtomicU64, Ordering},
@@ -230,20 +232,18 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 /// Результаты стоит собирать, когда команда реально шла: отмена и отказ запуска собирать нечего.
-fn wants_collect(job: &Job) -> bool {
-    if job.outputs.is_empty() {
-        return false;
-    }
-    let state = job.outcome_state.as_deref().and_then(State::parse);
-    let reason = job.outcome_reason.as_deref();
-    matches!(
-        state,
-        Some(State::Succeeded | State::Failed | State::TimedOut)
-    ) && !matches!(reason, Some("launch_interrupted" | "workdir_refused"))
+pub fn wants_collect(outputs: &[String], state: State, reason: &Option<String>) -> bool {
+    !outputs.is_empty()
+        && matches!(state, State::Succeeded | State::Failed | State::TimedOut)
+        && !matches!(
+            reason.as_deref(),
+            Some("launch_interrupted" | "workdir_refused")
+        )
 }
 
-/// Раннер закончил: итог сохраняется, задача переходит в `collecting`; сбор (если есть пути)
-/// или сразу очистка. Под замками машины и строки.
+/// Раннер закончил, а результаты просили: итог сохраняется, задача переходит в `collecting` и
+/// несущей уходит команда сбора. Конец наступит по факту сбора или по сроку. Под замками
+/// машины и строки.
 pub async fn begin_collecting_in_tx(
     conn: &mut PgConnection,
     job: &Job,
@@ -277,11 +277,7 @@ pub async fn begin_collecting_in_tx(
     .execute(&mut *conn)
     .await?;
     let moved = load(conn, job.id).await?.expect("job row just updated");
-    if wants_collect(&moved) {
-        send_collect_in_tx(conn, &moved).await?;
-    } else {
-        ensure_cleanup_in_tx(conn, &moved).await?;
-    }
+    send_collect_in_tx(conn, &moved).await?;
     notify_place_for_machine(conn, moved.machine_id).await?;
     let moved = load(conn, job.id).await?.expect("job row exists");
     emit_changed(conn, &moved, correlation_id).await?;
@@ -460,6 +456,23 @@ pub async fn apply_source_staged(
         return Ok(());
     };
     complete_commands(conn, reporter, job.id, "stage_source").await?;
+    if job.is_terminal() {
+        // Задачу закончили (отмена, срок подготовки), пока подготовка ещё шла: очистка, что
+        // несущая сделала раньше (или ещё сделает), не застала ни checkout, ни ссылки. Прежнее
+        // подтверждение не считается, очистка выдаётся заново.
+        if job.has_source() && job.machine_id.is_some() {
+            sqlx::query(
+                "update jobs set cleaned_at=null, cleanup_sent_at=null, cleanup_attempts=0
+                 where id=$1",
+            )
+            .bind(job.id)
+            .execute(&mut *conn)
+            .await?;
+            let reset = load(conn, job.id).await?.expect("job row exists");
+            ensure_cleanup_in_tx(conn, &reset).await?;
+        }
+        return Ok(());
+    }
     if job.state() != State::Staging {
         return Ok(());
     }
@@ -541,14 +554,13 @@ pub async fn apply_outputs_collected(
     .bind(note)
     .execute(&mut *conn)
     .await?;
+    // Сбор закончен: задача кончается итогом раннера; очистку выдаёт `finish_in_tx`.
     let moved = load(conn, job.id).await?.expect("job row exists");
-    ensure_cleanup_in_tx(conn, &moved).await?;
-    let moved = load(conn, job.id).await?.expect("job row exists");
-    emit_changed(conn, &moved, correlation_id).await?;
+    finish_collecting_in_tx(conn, &moved, None, correlation_id).await?;
     Ok(())
 }
 
-/// `OutputsCollectFailed`: итог раннера остаётся, к нему пометка; дальше очистка.
+/// `OutputsCollectFailed`: итог раннера остаётся, к нему пометка; задача кончается.
 pub async fn apply_collect_failed(
     conn: &mut PgConnection,
     reporter: Uuid,
@@ -565,25 +577,17 @@ pub async fn apply_collect_failed(
         return Ok(());
     }
     let note = format!("outputs not collected: {}", clean_reason(&fact.reason));
-    sqlx::query("update jobs set outputs_note=$2, updated_at=clock_timestamp() where id=$1")
-        .bind(job.id)
-        .bind(note)
-        .execute(&mut *conn)
-        .await?;
-    let moved = load(conn, job.id).await?.expect("job row exists");
-    ensure_cleanup_in_tx(conn, &moved).await?;
-    let moved = load(conn, job.id).await?.expect("job row exists");
-    emit_changed(conn, &moved, correlation_id).await?;
+    finish_collecting_in_tx(conn, &job, Some(&note), correlation_id).await?;
     Ok(())
 }
 
-/// `SourceCleaned`: очистка подтверждена; задача в `collecting` заканчивается настоящим
-/// итогом, законченная только отмечается чистой.
+/// `SourceCleaned`: очистка подтверждена, задача отмечается чистой. Конец задачи от очистки
+/// не зависит.
 pub async fn apply_source_cleaned(
     conn: &mut PgConnection,
     reporter: Uuid,
     fact: &SourceCleaned,
-    correlation_id: Uuid,
+    _correlation_id: Uuid,
 ) -> Result<(), sqlx::Error> {
     let Some(job) = locked_for_carrier(conn, reporter, &fact.job_id, "source_cleaned").await?
     else {
@@ -594,9 +598,6 @@ pub async fn apply_source_cleaned(
         .bind(job.id)
         .execute(&mut *conn)
         .await?;
-    if job.state() == State::Collecting {
-        finish_collecting_in_tx(conn, &job, None, correlation_id).await?;
-    }
     Ok(())
 }
 
@@ -631,8 +632,8 @@ pub async fn collect_timeout_sweep(
                 if job.state() != State::Collecting {
                     return Ok(false);
                 }
-                let pending =
-                    wants_collect(&job) && job.outputs_dir.is_none() && job.outputs_note.is_none();
+                // В `collecting` задача стоит только за сбором, которого так и не дождались.
+                let pending = job.outputs_dir.is_none() && job.outputs_note.is_none();
                 let note = pending.then_some("outputs not collected: timeout");
                 if pending {
                     complete_commands(
@@ -643,8 +644,6 @@ pub async fn collect_timeout_sweep(
                     )
                     .await?;
                 }
-                ensure_cleanup_in_tx(conn, &job).await?;
-                let job = load(conn, id).await?.expect("job row exists");
                 finish_collecting_in_tx(conn, &job, note, Uuid::now_v7()).await?;
                 Ok(true)
             })

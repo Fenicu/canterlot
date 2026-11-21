@@ -522,10 +522,10 @@ async fn a_slot_freeing_places_the_waiting_job(pool: PgPool) {
     assert_eq!(fx.state(second).await, "waiting_runner");
     fx.run_to_running(runner, first).await;
     assert_eq!(fx.place().await, 0, "the only slot is still busy");
-    // Раннер закончил: место свободно, как только задача перешла в `collecting`.
+    // Раннер закончил: место свободно сразу, без сбора (результатов не просили).
     fx.finished(runner, first, JobOutcome::Succeeded, Some(0))
         .await;
-    assert_eq!(fx.state(first).await, "collecting");
+    assert_eq!(fx.state(first).await, "succeeded");
     assert_eq!(fx.place().await, 1);
     assert_eq!(fx.state(second).await, "staging");
     assert_eq!(fx.job(second).await.machine_id, Some(runner));
@@ -820,10 +820,7 @@ async fn the_result_waits_for_collection_and_goes_out_once(pool: PgPool) {
     assert_eq!(collect.target_machine_id, runner.to_string());
     assert_eq!(collect.target_root_dir, "/srv/runner-a");
     fx.collected(id, false).await;
-    assert_eq!(fx.state(id).await, "collecting");
-    assert_eq!(fx.commands(fx.carrier, "cleanup_source").await, 1);
-    assert_eq!(fx.messages(id).await, 0, "still waiting for the cleanup");
-    fx.cleaned(id).await;
+    // Сбор закончен: задача кончается сразу, очистка идёт следом и конец не держит.
     let job = fx.job(id).await;
     assert_eq!(job.state, "succeeded");
     assert_eq!(
@@ -831,7 +828,11 @@ async fn the_result_waits_for_collection_and_goes_out_once(pool: PgPool) {
         Some(format!("/var/outputs/{id}").as_str())
     );
     assert!(job.outputs_note.is_none());
-    assert!(job.cleaned_at.is_some());
+    assert!(job.cleaned_at.is_none());
+    assert_eq!(fx.commands(fx.carrier, "cleanup_source").await, 1);
+    assert_eq!(fx.messages(id).await, 1, "no waiting for the cleanup");
+    fx.cleaned(id).await;
+    assert!(fx.job(id).await.cleaned_at.is_some());
     assert_eq!(fx.messages(id).await, 1);
     // Повторные факты ничего не меняют и не множат сообщение.
     fx.finished(runner, id, JobOutcome::Succeeded, Some(0))
@@ -879,8 +880,8 @@ async fn an_inline_waiter_sees_the_result_after_the_collection(pool: PgPool) {
         fx.job(id).await.delivery.is_none(),
         "the waiter has not taken a result yet"
     );
+    // Ждущий вызов не ждёт очистки: подтверждения несущей нет, ответ всё равно приходит.
     fx.collected(id, false).await;
-    fx.cleaned(id).await;
     let reply = call.await.unwrap().unwrap();
     assert_eq!(reply["state"], "succeeded", "{reply}");
     assert_eq!(reply["machine"], "runner-a");
@@ -897,13 +898,13 @@ async fn a_job_without_outputs_still_collects_to_clean_up(pool: PgPool) {
     let id = job_id(&fx.auto(json!({"placement": ["runner"]})).await.unwrap());
     fx.run_to_running(runner, id).await;
     fx.finished(runner, id, JobOutcome::Failed, Some(2)).await;
-    assert_eq!(fx.state(id).await, "collecting");
-    assert_eq!(fx.commands(fx.carrier, "collect_outputs").await, 0);
-    assert_eq!(fx.commands(fx.carrier, "cleanup_source").await, 1);
-    assert_eq!(fx.messages(id).await, 0);
-    fx.cleaned(id).await;
+    // Собирать нечего: задача кончается сразу, очистка выдана.
     let job = fx.job(id).await;
     assert_eq!((job.state.as_str(), job.exit_code), ("failed", Some(2)));
+    assert_eq!(fx.commands(fx.carrier, "collect_outputs").await, 0);
+    assert_eq!(fx.commands(fx.carrier, "cleanup_source").await, 1);
+    assert_eq!(fx.messages(id).await, 1);
+    fx.cleaned(id).await;
     assert_eq!(fx.messages(id).await, 1);
     let cleanup = fx.command(fx.carrier, "cleanup_source").await;
     let Some(Kind::CleanupSource(cleanup)) = outbox::to_proto(&cleanup).unwrap().kind else {
@@ -953,8 +954,6 @@ async fn a_failed_collection_keeps_the_runners_outcome_with_a_note(pool: PgPool)
     fx.finished(runner, id, JobOutcome::Succeeded, Some(0))
         .await;
     fx.collect_failed(id, "disk full").await;
-    assert_eq!(fx.state(id).await, "collecting");
-    fx.cleaned(id).await;
     let job = fx.job(id).await;
     assert_eq!(job.state, "succeeded");
     assert_eq!(job.exit_code, Some(0));
@@ -1121,6 +1120,73 @@ async fn cancel_in_staging_cleans_up_and_a_late_staged_fact_changes_nothing(pool
     assert_eq!(fx.messages(id).await, 1);
 }
 
+/// Отмена во время подготовки: несущая успела убрать «пока ничего нет» и подтвердила, а её
+/// задача подготовки закончила работу позже. Факт о готовности опоздавшей подготовки заново
+/// просит очистку, иначе checkout и ссылка остаются на раннере навсегда.
+#[sqlx::test(migrations = "./migrations")]
+async fn a_late_staged_fact_for_a_finished_job_asks_for_the_cleanup_again(pool: PgPool) {
+    let mut fx = Fx::new(pool).await;
+    fx.runner("runner-a", 20, &[], 1, true).await;
+    let id = job_id(&fx.auto(json!({"placement": ["runner"]})).await.unwrap());
+    fx.call("job.cancel", json!({"job_id": id})).await.unwrap();
+    assert_eq!(fx.commands(fx.carrier, "cleanup_source").await, 1);
+    fx.cleaned(id).await;
+    assert!(fx.job(id).await.cleaned_at.is_some());
+    fx.staged(fx.carrier, id).await;
+    let job = fx.job(id).await;
+    assert_eq!(job.state, "canceled");
+    assert!(job.cleaned_at.is_none(), "the earlier cleanup no longer counts");
+    assert!(job.cleanup_sent_at.is_some());
+    assert_eq!(fx.commands(fx.carrier, "cleanup_source").await, 2);
+    // Подтверждение новой очистки закрывает дело; повтор факта о готовности лишнего не шлёт
+    // после того, как очистка подтверждена.
+    fx.cleaned(id).await;
+    assert!(fx.job(id).await.cleaned_at.is_some());
+    assert_eq!(fx.messages(id).await, 1);
+}
+
+/// Очистка не отвечает вовсе: задача уже закончена, сообщение и итог терминалу ушли,
+/// а повтор очистки остаётся за службой по сроку.
+#[sqlx::test(migrations = "./migrations")]
+async fn a_cleanup_that_never_answers_does_not_delay_the_result(pool: PgPool) {
+    let mut fx = Fx::new(pool).await;
+    let runner = fx.runner("runner-a", 20, &[], 1, true).await;
+    let id = job_id(
+        &fx.auto(json!({"outputs": ["out"], "placement": ["runner"]}))
+            .await
+            .unwrap(),
+    );
+    fx.run_to_running(runner, id).await;
+    fx.finished(runner, id, JobOutcome::Succeeded, Some(0))
+        .await;
+    assert_eq!(fx.state(id).await, "collecting");
+    fx.collect_failed(id, "ssh dropped").await;
+    let job = fx.job(id).await;
+    assert_eq!(job.state, "succeeded");
+    assert_eq!(
+        job.outputs_note.as_deref(),
+        Some("outputs not collected: ssh dropped")
+    );
+    assert_eq!(fx.messages(id).await, 1);
+    assert_eq!(fx.commands(fx.carrier, "cleanup_source").await, 1);
+    // Подтверждения нет сколько угодно: коллектор по сроку ничего не находит, повтор идёт.
+    let later = Utc::now() + chrono::TimeDelta::hours(2);
+    assert_eq!(
+        carrier::collect_timeout_sweep(&fx.pool, Duration::from_secs(600), later)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        carrier::cleanup_retry_sweep(&fx.pool, &fx.registry, Duration::from_secs(600), later)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(fx.state(id).await, "succeeded");
+    assert_eq!(fx.messages(id).await, 1);
+}
+
 #[sqlx::test(migrations = "./migrations")]
 async fn cancel_of_a_queued_source_job_ends_at_once_and_cleans_up(pool: PgPool) {
     let mut fx = Fx::new(pool).await;
@@ -1165,8 +1231,8 @@ async fn cancel_of_a_running_job_asks_the_worker_and_then_cleans_up(pool: PgPool
     assert_eq!(reply["cancel_requested"], true);
     assert_eq!(fx.commands(runner, "cancel_inplace_job").await, 1);
     fx.finished(runner, id, JobOutcome::Canceled, None).await;
-    // Отменённой команде собирать нечего: только очистка.
-    assert_eq!(fx.state(id).await, "collecting");
+    // Отменённой команде собирать нечего: задача кончается сразу, остаётся очистка.
+    assert_eq!(fx.state(id).await, "canceled");
     assert_eq!(fx.commands(fx.carrier, "collect_outputs").await, 0);
     assert_eq!(fx.commands(fx.carrier, "cleanup_source").await, 1);
     fx.cleaned(id).await;
@@ -1191,7 +1257,6 @@ async fn cancel_in_collecting_is_ignored_and_the_job_ends_with_the_runners_outco
     let job = fx.job(id).await;
     assert!(job.cancel_requested_at.is_none());
     fx.collected(id, false).await;
-    fx.cleaned(id).await;
     assert_eq!(fx.state(id).await, "succeeded");
 }
 
@@ -1218,7 +1283,11 @@ async fn facts_from_anything_but_the_jobs_carrier_change_nothing(pool: PgPool) {
         .await
         .unwrap();
     let plain = machines::add(&fx.pool, fx.owner, "plain").await.unwrap();
-    let id = job_id(&fx.auto(json!({"placement": ["runner"]})).await.unwrap());
+    let id = job_id(
+        &fx.auto(json!({"outputs": ["out"], "placement": ["runner"]}))
+            .await
+            .unwrap(),
+    );
     // Сам раннер, другая несущая и обычная машина: ни один факт не принимается.
     for from in [runner, other.machine_id, plain.machine_id] {
         fx.staged(from, id).await;
@@ -1229,24 +1298,27 @@ async fn facts_from_anything_but_the_jobs_carrier_change_nothing(pool: PgPool) {
     fx.finished(runner, id, JobOutcome::Succeeded, Some(0))
         .await;
     assert_eq!(fx.state(id).await, "collecting");
-    // Чужое подтверждение очистки не заканчивает задачу.
-    let fact = SourceCleaned {
+    // Чужой сбор результатов не заканчивает задачу.
+    let fact = OutputsCollected {
         job_id: id.to_string(),
+        local_dir: "/var/outputs/foreign".into(),
+        files: vec![],
+        truncated: false,
     };
     let from = other.machine_id;
     fx.apply(move |conn| {
-        Box::pin(
-            async move { carrier::apply_source_cleaned(conn, from, &fact, Uuid::now_v7()).await },
-        )
+        Box::pin(async move {
+            carrier::apply_outputs_collected(conn, from, &fact, Uuid::now_v7()).await
+        })
     })
     .await;
     assert_eq!(fx.state(id).await, "collecting");
-    assert!(fx.job(id).await.cleaned_at.is_none());
+    assert!(fx.job(id).await.outputs_dir.is_none());
     // Флаг несущей, снятый владельцем, закрывает и своей несущей.
     machines::set_carrier(&fx.pool, fx.carrier, false)
         .await
         .unwrap();
-    fx.cleaned(id).await;
+    fx.collected(id, false).await;
     assert_eq!(fx.state(id).await, "collecting");
 }
 
@@ -1382,8 +1454,8 @@ async fn the_owner_job_result_goes_to_the_submitting_terminal_and_survives_a_res
         "not before the end"
     );
     fx.collected(id, false).await;
-    fx.cleaned(id).await;
     assert_eq!(fx.commands(fx.carrier, "owner_job_finished").await, 1);
+    fx.cleaned(id).await;
     // Повторный конец и повторные факты не плодят команд.
     fx.cleaned(id).await;
     assert_eq!(fx.commands(fx.carrier, "owner_job_finished").await, 1);
