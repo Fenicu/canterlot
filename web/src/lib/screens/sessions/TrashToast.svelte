@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { arrive, leave } from '#lib/ui/arrive.js';
 
   let {
     onundo,
@@ -17,19 +18,26 @@
   });
 </script>
 
-<div class="toast" role="status" aria-live="polite">
-  <span>Сессия в корзине</span>
-  <span class="dot" aria-hidden="true">·</span>
-  <button type="button" onclick={onundo}>Вернуть</button>
+<!-- Внешний слой расставляет тост по центру, внутренний приходит и уходит: переход пишет transform, а центровка не должна его терять.
+     Переход глобальный, потому что тост убирает условный блок хозяина, а не свой. -->
+<div class="layer">
+  <div class="toast" role="status" aria-live="polite" in:arrive|global out:leave|global>
+    <span>Сессия в корзине</span>
+    <span class="dot" aria-hidden="true">·</span>
+    <button type="button" onclick={onundo}>Вернуть</button>
+  </div>
 </div>
 
 <style>
-  .toast {
+  .layer {
     position: fixed;
     z-index: 6;
-    left: 50%;
-    bottom: calc(var(--target) + var(--s6));
-    transform: translateX(-50%);
+    inset: auto var(--s0) calc(var(--target) + var(--s6));
+    display: flex;
+    justify-content: center;
+    pointer-events: none;
+  }
+  .toast {
     display: flex;
     align-items: center;
     gap: var(--s3);
@@ -40,6 +48,7 @@
     color: var(--text);
     box-shadow: var(--shadow);
     font-size: var(--fs-sm);
+    pointer-events: auto;
   }
   .dot { color: var(--muted); }
   button {

@@ -10,7 +10,8 @@
     size = 'row',
     halo = null,
     dashed = false,
-    dim = false
+    dim = false,
+    breathe = false
   }: {
     vendor: Vendor | null;
     model?: string;
@@ -24,13 +25,16 @@
     dashed?: boolean;
     /** Процесса нет: аватар серый и приглушённый. */
     dim?: boolean;
+    /** Кольцо дышит: сессия работает прямо сейчас и строка в окне. Ждущее и упавшее кольцо не дышит. */
+    breathe?: boolean;
   } = $props();
 
   const logo = $derived(vendor ? LOGOS[vendor] : undefined);
   const letter = $derived(vendorLetter(model, title));
+  const breathing = $derived(breathe && !!halo && !dashed);
 </script>
 
-<span class="avatar size-{size}" class:haloed={halo} class:dashed class:dim data-halo={halo} data-vendor={vendor ?? 'letter'} aria-hidden="true">
+<span class="avatar size-{size}" class:haloed={halo} class:dashed class:dim class:breathe={breathing} data-breathe={breathing ? '' : undefined} data-halo={halo} data-vendor={vendor ?? 'letter'} aria-hidden="true">
   {#if logo}
     <svg viewBox={logo.viewBox} fill-rule={logo.evenodd ? 'evenodd' : undefined} focusable="false">
       {#each logo.paths as d, index (index)}<path {d} />{/each}
@@ -74,6 +78,14 @@
   .haloed { outline: var(--s1) solid var(--halo); outline-offset: var(--s1); }
   .size-small.haloed { outline-offset: var(--hairline); }
   .haloed.dashed { outline-style: dashed; }
+  /* Дыхание: кольцо работающей сессии — отдельный слой той же геометрии, меняется только его прозрачность.
+     Без движения (система или масштаб 0) длительность токена нулевая и слой стоит сплошным кольцом. */
+  .haloed.breathe { outline-color: var(--transparent); }
+  .haloed.breathe::before { content: ''; position: absolute; inset: calc(var(--s1) * -2); border: var(--s1) solid var(--halo); border-radius: var(--radius-round); animation: avatar-breathe var(--duration-stage-pulse) var(--ease-stage-pulse) infinite alternate; }
+  .size-small.haloed.breathe::before { inset: calc((var(--s1) + var(--hairline)) * -1); }
+  @keyframes avatar-breathe { from { opacity: var(--opacity-high); } to { opacity: var(--opacity-stage-halo); } }
+  /* Связь пропала: живое кольцо замирает вместе с часами. */
+  :global([data-stale]) .haloed.breathe::before { animation: none; }
   [data-halo='--accent'] { --halo: var(--accent); }
   [data-halo='--warning'] { --halo: var(--warning); }
   [data-halo='--danger'] { --halo: var(--danger); }
