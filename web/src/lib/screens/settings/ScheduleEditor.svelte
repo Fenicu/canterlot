@@ -15,6 +15,7 @@
   import WorkdirField from '../sessions/WorkdirField.svelte';
   import { keptHarness, machineProblem, workdirProblem } from '../sessions/newSessionModel.js';
   import { sortPresets, type PresetSummaryLike } from '../presets/presetsModel.js';
+  import { sessionMachines } from '../machines/runner.js';
   import {
     CRON_PRESETS, OVERLAP_OPTIONS, defaultTimezone, fireTime, parseCron, type Schedule, type ScheduleTarget
   } from './schedules.js';
@@ -98,7 +99,8 @@
     { id: 'owner', kind: 'owner', purpose: 'instructions', title: 'Как у владельца', description: 'Конфигурация агента владельца без изменений', revision: null, text_bytes: null, created: { by: 'builtin', conversation_id: null, conversation_title: null, at: null }, last_edit: null, used_by: 0 }
   ];
 
-  const machines = $derived([...runtime.machines.items.values()]);
+  // Расписание запускает сессию, а раннеры сессий не принимают: в выборе только обычные машины.
+  const machines = $derived(sessionMachines([...runtime.machines.items.values()]));
   const machine = $derived(machines.find((item) => item.id === machineId));
   const harnesses = $derived(machine?.harnesses ?? []);
   const selectedHarness = $derived(harnesses.find((item) => item.id === harness));

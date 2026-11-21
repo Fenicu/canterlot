@@ -29,6 +29,17 @@ export interface MachineRecord {
 	/** Принимает ли машина делегатов и команды других машин; включает владелец. */
 	accepts_remote_work?: boolean;
 	allowed_roots?: string[];
+	/** `worker` (обычная машина) или `runner`; у снимка старого хаба поля нет. */
+	role?: string;
+	/** Несущая машина раннера. */
+	parent_machine_id?: string | null;
+	/** Ранг размещения раннера: больше — предпочтительнее. */
+	rank?: number;
+	labels?: string[];
+	/** Машина помечена несущей раннеров. */
+	is_carrier?: boolean;
+	/** Раннер: когда несущая последний раз проверила его достижимость. */
+	observed_at?: string | null;
 	home_dir?: string | null;
 	/** Отчёт сторожа машины: крупные кэши сборки, процессы без сессии, сборки мимо очереди. */
 	watch?: MachineWatch | null;
@@ -134,7 +145,10 @@ export class MachinesStore {
 		if (kind === 'machine_availability_changed' && event.kind === 'machine_availability_changed') {
 			const machine = this.items.get(event.payload.machine_id);
 			// Пропавшая машина не подтверждает очередь: хаб снимает её тем же решением.
-			if (machine) this.items.set(machine.id, { ...machine, availability: event.payload.availability, availability_since: event.committed_at, ...(event.payload.availability === 'unavailable' ? { lease: null } : {}) });
+			// Событие хаба знает только связь воркера. Раннеру оно даёт `online` или `unknown`: `offline` хаб называет
+			// по наблюдению несущей, и без свежего снимка его не угадать.
+			const availability = machine?.role === 'runner' ? (event.payload.availability === 'available' ? 'online' : 'unknown') : event.payload.availability;
+			if (machine) this.items.set(machine.id, { ...machine, availability, availability_since: event.committed_at, ...(event.payload.availability === 'unavailable' ? { lease: null } : {}) });
 			return;
 		}
 		if (kind === 'machine_report_updated' && event.kind === 'machine_report_updated') {
