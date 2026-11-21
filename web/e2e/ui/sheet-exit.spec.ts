@@ -58,6 +58,28 @@ test('sheet_exit_closes_at_once_and_is_drawn_where_overlay_is_supported', async 
   await expect.poll(() => leaving.evaluate((el) => getComputedStyle(el).display), { timeout: 10_000 }).toBe('none');
 });
 
+test('desktop_sheet_exit_fades_and_sinks_a_little_instead_of_sliding_off_the_screen', async ({ page, browserName }) => {
+  test.skip(browserName !== 'chromium', 'в Firefox нет `overlay`: окно закрывается сразу, как раньше');
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await chat(page);
+  await expect(page.locator('[data-layout="desktop"]')).toHaveCount(1);
+  await page.getByRole('button', { name: 'Заготовки' }).click();
+  const sheet = page.getByRole('dialog');
+  await expect(sheet).toBeVisible();
+  await expect.poll(() => sheet.evaluate((el) => el.getAnimations().length)).toBe(0);
+  const resting = await sheet.evaluate((el) => el.getBoundingClientRect().top);
+  await slow(page);
+
+  await page.keyboard.press('Escape');
+  const leaving = page.locator('dialog:not([open])');
+  // Окно не уезжает за край, как лист телефона: оно гаснет и опускается на сдвиг входа.
+  await expect.poll(() => leaving.evaluate((el, top) => {
+    const style = getComputedStyle(el);
+    return { shown: style.display !== 'none', opacity: Number(style.opacity), drop: el.getBoundingClientRect().top - top };
+  }, resting).then((state) => state.shown && state.opacity < 1 && state.drop > 0 && state.drop < 12), { message: 'окно гаснет и чуть опускается' }).toBe(true);
+  await expect.poll(() => leaving.evaluate((el) => getComputedStyle(el).display), { timeout: 10_000 }).toBe('none');
+});
+
 for (const mode of ['reduced', 'scale_zero'] as const) {
   test(`sheet_and_menu_close_at_once_without_motion_${mode}`, async ({ page }) => {
     await chat(page);
@@ -95,6 +117,56 @@ test('menu_exit_mirrors_the_entrance_and_takes_nothing_while_leaving', async ({ 
   await expect(menu).toHaveCount(0);
   await expect.poll(() => leaving.evaluate((el) => Number(getComputedStyle(el).opacity))).toBeLessThan(1);
   await expect(leaving).toHaveCount(0, { timeout: 10_000 });
+});
+
+test('menu_opened_again_during_its_exit_is_a_whole_menu_and_still_exits_the_second_time', async ({ page }) => {
+  await chat(page);
+  const button = page.getByRole('button', { name: 'Меню сессии' });
+  await button.click();
+  const menu = page.getByRole('menu', { name: 'Действия над сессией' });
+  await expect(menu).toBeVisible();
+  await expect.poll(() => menu.evaluate((el) => el.getAnimations().length)).toBe(0);
+  await slow(page);
+
+  await page.keyboard.press('Escape');
+  await expect(page.locator('[role="menu"][data-leaving]')).toHaveCount(1);
+  // Svelte оживляет уходящий узел, а не строит новый: метки ухода должны сойти, а пункты стать доступными.
+  await button.click();
+  await expect(menu).toBeVisible();
+  const alive = page.locator('[role="menu"]');
+  await expect(alive).toHaveCount(1);
+  await expect(alive).not.toHaveAttribute('data-leaving', /.*/);
+  await expect(alive).not.toHaveAttribute('aria-hidden', /.*/);
+  expect(await alive.evaluate((el) => (el as HTMLElement).inert)).toBe(false);
+  await expect(menu.getByRole('menuitem').first()).toBeEnabled();
+
+  // Второй уход того же узла снова рисуется: настройка ухода не залипла с первого раза.
+  await page.keyboard.press('Escape');
+  await expect(page.locator('[role="menu"][data-leaving]')).toHaveCount(1);
+  await expect(page.locator('[role="menu"]')).toHaveCount(0, { timeout: 10_000 });
+});
+
+test('sheet_opened_again_during_its_exit_opens_again', async ({ page }) => {
+  const field = await chat(page);
+  const opener = page.getByRole('button', { name: 'Заготовки' });
+  await opener.click();
+  const sheet = page.getByRole('dialog');
+  await expect(sheet).toBeVisible();
+  await expect.poll(() => sheet.evaluate((el) => el.getAnimations().length)).toBe(0);
+  await slow(page);
+
+  await page.keyboard.press('Escape');
+  expect(await closedAtOnce(page)).toEqual({ open: 0, inert: false });
+  await opener.click();
+  await expect(sheet).toBeVisible();
+  expect(await closedAtOnce(page)).toEqual({ open: 1, inert: true });
+  await expect(sheet).not.toHaveAttribute('aria-hidden', /.*/);
+
+  await page.keyboard.press('Escape');
+  expect(await closedAtOnce(page)).toEqual({ open: 0, inert: false });
+  await expect(field).toBeEnabled();
+  // Лист остаётся в документе или уходит из него, но дорисованным не виден.
+  await expect.poll(() => page.evaluate(() => [...document.querySelectorAll('dialog')].every((node) => getComputedStyle(node).display === 'none')), { timeout: 10_000 }).toBe(true);
 });
 
 test('send_later_exit_is_drawn_for_the_popover_and_the_sheet', async ({ page, isMobile }) => {

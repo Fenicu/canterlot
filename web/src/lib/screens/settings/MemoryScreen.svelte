@@ -27,6 +27,8 @@
   let error = $state('');
   let open = $state<MemoryEntry | null>(null);
   let creating = $state(false);
+  // Лист закрытой записи ещё доигрывает уход: открытый заново должен быть чистым, а не оживлённым со старой формой.
+  let creations = $state(0);
   // Ответ прежнего домена или фильтра не должен попасть в список нового.
   let generation = 0;
 
@@ -99,7 +101,7 @@
 <section data-memory class="memory" aria-label="Память">
   <div class="head">
     <h2>Память</h2>
-    <Button variant="primary" onclick={() => creating = true}>Новая запись</Button>
+    <Button variant="primary" onclick={() => { creations += 1; creating = true; }}>Новая запись</Button>
   </div>
   <p class="note">Общая память агентов: сессии читают и пишут её через инструменты canterlot. Личное и Работа не смешиваются, сессия видит только свой домен</p>
 
@@ -147,7 +149,9 @@
   {/key}
 {/if}
 {#if creating}
-  <MemoryEntrySheet entry={null} {domain} onclose={() => creating = false} onchanged={() => void reload()} />
+  {#key creations}
+    <MemoryEntrySheet entry={null} {domain} onclose={() => creating = false} onchanged={() => void reload()} />
+  {/key}
 {/if}
 
 <style>

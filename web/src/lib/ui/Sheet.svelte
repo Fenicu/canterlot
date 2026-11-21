@@ -1,12 +1,12 @@
 <script lang="ts">
-  import { onMount, onDestroy, type Snippet } from 'svelte';
+  import { onMount, onDestroy, tick, type Snippet } from 'svelte';
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
   import IconButton from './IconButton.svelte';
   import { leave } from './exit';
   // `marker` — приглушённая пометка в строке заголовка: заголовок тогда держится одной строкой и режется многоточием.
   // `feed` — лист с лентой чата: фон ленты, тело без своей прокрутки и отступов, прокручивает сама лента.
-  let { open, title, subtitle, marker, feed = false, routeKey, onclose, actions, children }: { open: boolean; title: string; subtitle?: string; marker?: string; feed?: boolean; routeKey?: string; onclose: () => void; actions?: Snippet; children: Snippet } = $props();
+  let { open, title, subtitle, marker, feed = false, routeKey, onclose, onrevive, actions, children }: { open: boolean; title: string; subtitle?: string; marker?: string; feed?: boolean; routeKey?: string; onclose: () => void; onrevive?: () => void; actions?: Snippet; children: Snippet } = $props();
   const id = $props.id();
   let dialog: HTMLDialogElement;
   let heading: HTMLHeadingElement | undefined;
@@ -73,31 +73,41 @@
   }
   onMount(() => { mounted = true; });
   onDestroy(() => { if (dialog?.open) restore(); });
+  function show() {
+    opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    shell = document.getElementById('app-shell');
+    previousInert = shell?.inert ?? false;
+
+    if (routeKey && page.state.sheet !== routeKey) {
+      // eslint-disable-next-line svelte/no-navigation-without-resolve
+      void goto('', { shallow: true, state: { ...page.state, sheet: routeKey } }).then(() => {
+        entry = true;
+      });
+    }
+
+    dialog.removeAttribute('aria-hidden');
+    dialog.showModal();
+    // Сам showModal ставит фокус на «Закрыть», и без указателя на нём загорается кольцо.
+    // Заголовок принимает фокус тихо, а Tab ведёт дальше по листу.
+    heading?.focus({ preventScroll: true });
+    if (shell) shell.inert = true;
+  }
+  // Хозяин вернул лист, пока тот уходил: Svelte оживил тот же экземпляр со всем его состоянием, а `open` мог не
+  // меняться, и эффект ниже молчит. `onrevive` даёт обёртке сбросить своё «закрыто» (см. `ConfirmDialog`).
+  // Хозяин мог тут же заменить экземпляр новым (`{#key}`): тогда этот снова ушёл и открывать его не нужно.
+  async function revive() {
+    onrevive?.();
+    await tick();
+    if (open && !dialog.open && !dialog.hasAttribute('data-leaving')) show();
+  }
   $effect(() => {
     if (!mounted) return;
-    if (open && !dialog.open) {
-      opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-      shell = document.getElementById('app-shell');
-      previousInert = shell?.inert ?? false;
-
-      if (routeKey && page.state.sheet !== routeKey) {
-        // eslint-disable-next-line svelte/no-navigation-without-resolve
-        void goto('', { shallow: true, state: { ...page.state, sheet: routeKey } }).then(() => {
-          entry = true;
-        });
-      }
-
-      dialog.removeAttribute('aria-hidden');
-      dialog.showModal();
-      // Сам showModal ставит фокус на «Закрыть», и без указателя на нём загорается кольцо.
-      // Заголовок принимает фокус тихо, а Tab ведёт дальше по листу.
-      heading?.focus({ preventScroll: true });
-      if (shell) shell.inert = true;
-    } else if (!open && dialog.open) close();
+    if (open && !dialog.open) show();
+    else if (!open && dialog.open) close();
   });
   $effect(() => { if (mounted && entry && routeKey && page.state.sheet !== routeKey) close(); });
 </script>
-<dialog bind:this={dialog} class:feed-sheet={feed} aria-labelledby={id} aria-modal="true" out:leave|global={{ before: leaving }} onkeydown={keydown} onpointerdown={(event) => { pressedBackdrop = overBackdrop(event); }} onclick={backdropClick} oncancel={(event) => { event.preventDefault(); close(); }}>
+<dialog bind:this={dialog} class:feed-sheet={feed} aria-labelledby={id} aria-modal="true" out:leave|global={{ before: leaving, revive }} onkeydown={keydown} onpointerdown={(event) => { pressedBackdrop = overBackdrop(event); }} onclick={backdropClick} oncancel={(event) => { event.preventDefault(); close(); }}>
   <div class="handle" aria-hidden="true"></div>
   <header><div class="titles"><h2 id={id} bind:this={heading} tabindex="-1" class:line={marker}>{#if marker}<span class="name">{title}</span> <span class="marker">· {marker}</span>{:else}{title}{/if}</h2>{#if subtitle}<p>{subtitle}</p>{/if}</div><div class="sheet-actions">{#if actions}{@render actions()}{/if}<IconButton icon="close" label="Закрыть" onclick={close} /></div></header>
   <div class="body">{@render children()}</div>
