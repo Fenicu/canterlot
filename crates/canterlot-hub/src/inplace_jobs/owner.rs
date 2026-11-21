@@ -204,7 +204,31 @@ pub async fn submit(
                         "The machine is neither this carrier nor one of its runners",
                     )));
                 }
-            } else if !place::satisfiable(conn, submitter, &labels, &placement).await? {
+                if !place::machine_has_labels(conn, target, &labels).await? {
+                    return Ok(Err(OwnerRefusal::new(
+                        "no_runner_can_satisfy",
+                        "The machine does not carry the labels of the job",
+                    )));
+                }
+                if target == submitter
+                    && !place::carrier_workdir_in_domain(conn, submitter, &source.repo, domain)
+                        .await?
+                {
+                    return Ok(Err(OwnerRefusal::new(
+                        "domain_mismatch",
+                        "The working directory on the carrier would leave the domain of the source",
+                    )));
+                }
+            } else if !place::satisfiable(
+                conn,
+                submitter,
+                &labels,
+                &placement,
+                &source.repo,
+                domain,
+            )
+            .await?
+            {
                 return Ok(Err(OwnerRefusal::new(
                     "no_runner_can_satisfy",
                     "No runner can ever satisfy the labels and placement",

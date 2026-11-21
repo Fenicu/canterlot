@@ -126,6 +126,10 @@ async fn add_runner_validates_parent_and_root_dir(pool: PgPool) -> TestResult {
         "/srv/runner/",
         "",
         "/",
+        // Знаки, которым нужны кавычки, и длиннее 90 байт (путь сокета не влезет в `sun_path`).
+        "/srv/run ner",
+        "/srv/ru$ner",
+        &format!("/srv/{}", "a".repeat(86)),
     ] {
         let mut s = spec(parent.machine_id);
         s.root_dir = bad.into();
@@ -135,6 +139,11 @@ async fn add_runner_validates_parent_and_root_dir(pool: PgPool) -> TestResult {
             "{bad:?} must be refused"
         );
     }
+    // Ровно 90 байт ещё проходит.
+    let mut edge = spec(parent.machine_id);
+    edge.root_dir = format!("/srv/{}", "a".repeat(85));
+    assert_eq!(edge.root_dir.len(), 90);
+    machines::add_runner(&pool, owner, "edge", &edge).await?;
     // Метки: пустая, с пробелом, слишком длинная.
     for bad in ["", "a b", &"x".repeat(65)] {
         let mut s = spec(parent.machine_id);
@@ -154,13 +163,13 @@ async fn add_runner_validates_parent_and_root_dir(pool: PgPool) -> TestResult {
         sqlx::query_scalar::<_, i64>("select count(*) from machines")
             .fetch_one(&pool)
             .await?,
-        2
+        3
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("select count(*) from machine_credentials")
             .fetch_one(&pool)
             .await?,
-        2
+        3
     );
     Ok(())
 }

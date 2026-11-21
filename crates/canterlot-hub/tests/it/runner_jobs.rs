@@ -522,10 +522,10 @@ async fn a_slot_freeing_places_the_waiting_job(pool: PgPool) {
     assert_eq!(fx.state(second).await, "waiting_runner");
     fx.run_to_running(runner, first).await;
     assert_eq!(fx.place().await, 0, "the only slot is still busy");
-    // Раннер закончил: место свободно, как только задача перешла в `collecting`.
+    // Раннер закончил: место свободно сразу, без сбора (результатов не просили).
     fx.finished(runner, first, JobOutcome::Succeeded, Some(0))
         .await;
-    assert_eq!(fx.state(first).await, "collecting");
+    assert_eq!(fx.state(first).await, "succeeded");
     assert_eq!(fx.place().await, 1);
     assert_eq!(fx.state(second).await, "staging");
     assert_eq!(fx.job(second).await.machine_id, Some(runner));
@@ -625,6 +625,54 @@ async fn two_hubs_placing_at_once_never_bind_one_slot_twice(pool: PgPool) {
     assert_eq!(staging, 1);
 }
 
+/// Заявка `auto` берёт допуск заказчика, а расстановка после него замки машин; диспетчер
+/// машины берёт их в обратном порядке. Без общего порядка параллельные пути замыкают цикл, и
+/// Postgres прерывает один из них: вызывающий видит `internal`. Замки кандидатов берутся до
+/// допуска, и все вызовы проходят.
+#[sqlx::test(migrations = "./migrations")]
+async fn auto_submit_and_machine_dispatch_never_deadlock(pool: PgPool) {
+    let mut fx = Fx::new(pool).await;
+    let runner = fx.runner("runner-a", 5, &[], 2, true).await;
+    let first = job_id(
+        &fx.call("job.run", named("runner-a", json!({})))
+            .await
+            .unwrap(),
+    );
+    let second = job_id(
+        &fx.call("job.run", named("runner-a", json!({})))
+            .await
+            .unwrap(),
+    );
+    sqlx::query("update machines set jobs_max_running=1 where id=$1")
+        .bind(runner)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    fx.staged(fx.carrier, first).await;
+    fx.staged(fx.carrier, second).await;
+    assert_eq!(fx.state(second).await, "queued");
+    let fx = Arc::new(fx);
+    let mut tasks = Vec::new();
+    for round in 0..12 {
+        let on = fx.clone();
+        tasks.push(tokio::spawn(async move {
+            on.auto(json!({"placement": ["runner"], "title": format!("auto {round}")}))
+                .await
+                .map(|_| ())
+                .map_err(|error| format!("auto: {error:?}"))
+        }));
+        let pool = fx.pool.clone();
+        tasks.push(tokio::spawn(async move {
+            sweep::dispatch_machine(&pool, runner)
+                .await
+                .map_err(|error| format!("dispatch: {error}"))
+        }));
+    }
+    for task in tasks {
+        task.await.unwrap().unwrap();
+    }
+}
+
 // ───────── Отказы при заявке ─────────
 
 #[sqlx::test(migrations = "./migrations")]
@@ -677,6 +725,13 @@ async fn source_and_outputs_are_checked(pool: PgPool) {
         json!({"source": {"repo": "/srv/../etc", "rev": REV}}),
         json!({"outputs": ["../escape"]}),
         json!({"outputs": ["/abs/path"]}),
+        // Несущая отказала бы им после запуска: хаб отказывает до него.
+        json!({"outputs": ["test results"]}),
+        json!({"outputs": ["out/$HOME"]}),
+        json!({"outputs": ["out//log"]}),
+        json!({"outputs": ["out/./log"]}),
+        json!({"outputs": ["-rf"]}),
+        json!({"outputs": ["x".repeat(513)]}),
         json!({"outputs": (0..33).map(|n| format!("out/{n}")).collect::<Vec<_>>()}),
         json!({"expected_minutes": 0}),
         json!({"placement": []}),
@@ -820,10 +875,7 @@ async fn the_result_waits_for_collection_and_goes_out_once(pool: PgPool) {
     assert_eq!(collect.target_machine_id, runner.to_string());
     assert_eq!(collect.target_root_dir, "/srv/runner-a");
     fx.collected(id, false).await;
-    assert_eq!(fx.state(id).await, "collecting");
-    assert_eq!(fx.commands(fx.carrier, "cleanup_source").await, 1);
-    assert_eq!(fx.messages(id).await, 0, "still waiting for the cleanup");
-    fx.cleaned(id).await;
+    // Сбор закончен: задача кончается сразу, очистка идёт следом и конец не держит.
     let job = fx.job(id).await;
     assert_eq!(job.state, "succeeded");
     assert_eq!(
@@ -831,7 +883,11 @@ async fn the_result_waits_for_collection_and_goes_out_once(pool: PgPool) {
         Some(format!("/var/outputs/{id}").as_str())
     );
     assert!(job.outputs_note.is_none());
-    assert!(job.cleaned_at.is_some());
+    assert!(job.cleaned_at.is_none());
+    assert_eq!(fx.commands(fx.carrier, "cleanup_source").await, 1);
+    assert_eq!(fx.messages(id).await, 1, "no waiting for the cleanup");
+    fx.cleaned(id).await;
+    assert!(fx.job(id).await.cleaned_at.is_some());
     assert_eq!(fx.messages(id).await, 1);
     // Повторные факты ничего не меняют и не множат сообщение.
     fx.finished(runner, id, JobOutcome::Succeeded, Some(0))
@@ -879,8 +935,8 @@ async fn an_inline_waiter_sees_the_result_after_the_collection(pool: PgPool) {
         fx.job(id).await.delivery.is_none(),
         "the waiter has not taken a result yet"
     );
+    // Ждущий вызов не ждёт очистки: подтверждения несущей нет, ответ всё равно приходит.
     fx.collected(id, false).await;
-    fx.cleaned(id).await;
     let reply = call.await.unwrap().unwrap();
     assert_eq!(reply["state"], "succeeded", "{reply}");
     assert_eq!(reply["machine"], "runner-a");
@@ -897,13 +953,13 @@ async fn a_job_without_outputs_still_collects_to_clean_up(pool: PgPool) {
     let id = job_id(&fx.auto(json!({"placement": ["runner"]})).await.unwrap());
     fx.run_to_running(runner, id).await;
     fx.finished(runner, id, JobOutcome::Failed, Some(2)).await;
-    assert_eq!(fx.state(id).await, "collecting");
-    assert_eq!(fx.commands(fx.carrier, "collect_outputs").await, 0);
-    assert_eq!(fx.commands(fx.carrier, "cleanup_source").await, 1);
-    assert_eq!(fx.messages(id).await, 0);
-    fx.cleaned(id).await;
+    // Собирать нечего: задача кончается сразу, очистка выдана.
     let job = fx.job(id).await;
     assert_eq!((job.state.as_str(), job.exit_code), ("failed", Some(2)));
+    assert_eq!(fx.commands(fx.carrier, "collect_outputs").await, 0);
+    assert_eq!(fx.commands(fx.carrier, "cleanup_source").await, 1);
+    assert_eq!(fx.messages(id).await, 1);
+    fx.cleaned(id).await;
     assert_eq!(fx.messages(id).await, 1);
     let cleanup = fx.command(fx.carrier, "cleanup_source").await;
     let Some(Kind::CleanupSource(cleanup)) = outbox::to_proto(&cleanup).unwrap().kind else {
@@ -953,8 +1009,6 @@ async fn a_failed_collection_keeps_the_runners_outcome_with_a_note(pool: PgPool)
     fx.finished(runner, id, JobOutcome::Succeeded, Some(0))
         .await;
     fx.collect_failed(id, "disk full").await;
-    assert_eq!(fx.state(id).await, "collecting");
-    fx.cleaned(id).await;
     let job = fx.job(id).await;
     assert_eq!(job.state, "succeeded");
     assert_eq!(job.exit_code, Some(0));
@@ -1121,10 +1175,80 @@ async fn cancel_in_staging_cleans_up_and_a_late_staged_fact_changes_nothing(pool
     assert_eq!(fx.messages(id).await, 1);
 }
 
+/// Отмена во время подготовки: несущая успела убрать «пока ничего нет» и подтвердила, а её
+/// задача подготовки закончила работу позже. Факт о готовности опоздавшей подготовки заново
+/// просит очистку, иначе checkout и ссылка остаются на раннере навсегда.
+#[sqlx::test(migrations = "./migrations")]
+async fn a_late_staged_fact_for_a_finished_job_asks_for_the_cleanup_again(pool: PgPool) {
+    let mut fx = Fx::new(pool).await;
+    fx.runner("runner-a", 20, &[], 1, true).await;
+    let id = job_id(&fx.auto(json!({"placement": ["runner"]})).await.unwrap());
+    fx.call("job.cancel", json!({"job_id": id})).await.unwrap();
+    assert_eq!(fx.commands(fx.carrier, "cleanup_source").await, 1);
+    fx.cleaned(id).await;
+    assert!(fx.job(id).await.cleaned_at.is_some());
+    fx.staged(fx.carrier, id).await;
+    let job = fx.job(id).await;
+    assert_eq!(job.state, "canceled");
+    assert!(
+        job.cleaned_at.is_none(),
+        "the earlier cleanup no longer counts"
+    );
+    assert!(job.cleanup_sent_at.is_some());
+    assert_eq!(fx.commands(fx.carrier, "cleanup_source").await, 2);
+    // Подтверждение новой очистки закрывает дело; повтор факта о готовности лишнего не шлёт
+    // после того, как очистка подтверждена.
+    fx.cleaned(id).await;
+    assert!(fx.job(id).await.cleaned_at.is_some());
+    assert_eq!(fx.messages(id).await, 1);
+}
+
+/// Очистка не отвечает вовсе: задача уже закончена, сообщение и итог терминалу ушли,
+/// а повтор очистки остаётся за службой по сроку.
+#[sqlx::test(migrations = "./migrations")]
+async fn a_cleanup_that_never_answers_does_not_delay_the_result(pool: PgPool) {
+    let mut fx = Fx::new(pool).await;
+    let runner = fx.runner("runner-a", 20, &[], 1, true).await;
+    let id = job_id(
+        &fx.auto(json!({"outputs": ["out"], "placement": ["runner"]}))
+            .await
+            .unwrap(),
+    );
+    fx.run_to_running(runner, id).await;
+    fx.finished(runner, id, JobOutcome::Succeeded, Some(0))
+        .await;
+    assert_eq!(fx.state(id).await, "collecting");
+    fx.collect_failed(id, "ssh dropped").await;
+    let job = fx.job(id).await;
+    assert_eq!(job.state, "succeeded");
+    assert_eq!(
+        job.outputs_note.as_deref(),
+        Some("outputs not collected: ssh dropped")
+    );
+    assert_eq!(fx.messages(id).await, 1);
+    assert_eq!(fx.commands(fx.carrier, "cleanup_source").await, 1);
+    // Подтверждения нет сколько угодно: коллектор по сроку ничего не находит, повтор идёт.
+    let later = Utc::now() + chrono::TimeDelta::hours(2);
+    assert_eq!(
+        carrier::collect_timeout_sweep(&fx.pool, Duration::from_secs(600), later)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        carrier::cleanup_retry_sweep(&fx.pool, &fx.registry, Duration::from_secs(600), later)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(fx.state(id).await, "succeeded");
+    assert_eq!(fx.messages(id).await, 1);
+}
+
 #[sqlx::test(migrations = "./migrations")]
 async fn cancel_of_a_queued_source_job_ends_at_once_and_cleans_up(pool: PgPool) {
     let mut fx = Fx::new(pool).await;
-    let runner = fx.runner("runner-a", 1, &[], 1, true).await;
+    let runner = fx.runner("runner-a", 1, &[], 2, true).await;
     let call = |extra: Value| {
         let mut args = json!({
             "machine": "runner-a", "shell": "true", "wait_seconds": 0,
@@ -1137,6 +1261,12 @@ async fn cancel_of_a_queued_source_job_ends_at_once_and_cleans_up(pool: PgPool) 
     };
     let first = job_id(&fx.call("job.run", call(json!({}))).await.unwrap());
     let second = job_id(&fx.call("job.run", call(json!({}))).await.unwrap());
+    // Раннер при подготовке сообщил, что мест стало одно: вторая задача встанет в очередь.
+    sqlx::query("update machines set jobs_max_running=1 where id=$1")
+        .bind(runner)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
     fx.staged(fx.carrier, first).await;
     fx.staged(fx.carrier, second).await;
     assert_eq!(fx.state(first).await, "dispatched");
@@ -1165,8 +1295,8 @@ async fn cancel_of_a_running_job_asks_the_worker_and_then_cleans_up(pool: PgPool
     assert_eq!(reply["cancel_requested"], true);
     assert_eq!(fx.commands(runner, "cancel_inplace_job").await, 1);
     fx.finished(runner, id, JobOutcome::Canceled, None).await;
-    // Отменённой команде собирать нечего: только очистка.
-    assert_eq!(fx.state(id).await, "collecting");
+    // Отменённой команде собирать нечего: задача кончается сразу, остаётся очистка.
+    assert_eq!(fx.state(id).await, "canceled");
     assert_eq!(fx.commands(fx.carrier, "collect_outputs").await, 0);
     assert_eq!(fx.commands(fx.carrier, "cleanup_source").await, 1);
     fx.cleaned(id).await;
@@ -1191,7 +1321,6 @@ async fn cancel_in_collecting_is_ignored_and_the_job_ends_with_the_runners_outco
     let job = fx.job(id).await;
     assert!(job.cancel_requested_at.is_none());
     fx.collected(id, false).await;
-    fx.cleaned(id).await;
     assert_eq!(fx.state(id).await, "succeeded");
 }
 
@@ -1218,7 +1347,11 @@ async fn facts_from_anything_but_the_jobs_carrier_change_nothing(pool: PgPool) {
         .await
         .unwrap();
     let plain = machines::add(&fx.pool, fx.owner, "plain").await.unwrap();
-    let id = job_id(&fx.auto(json!({"placement": ["runner"]})).await.unwrap());
+    let id = job_id(
+        &fx.auto(json!({"outputs": ["out"], "placement": ["runner"]}))
+            .await
+            .unwrap(),
+    );
     // Сам раннер, другая несущая и обычная машина: ни один факт не принимается.
     for from in [runner, other.machine_id, plain.machine_id] {
         fx.staged(from, id).await;
@@ -1229,24 +1362,27 @@ async fn facts_from_anything_but_the_jobs_carrier_change_nothing(pool: PgPool) {
     fx.finished(runner, id, JobOutcome::Succeeded, Some(0))
         .await;
     assert_eq!(fx.state(id).await, "collecting");
-    // Чужое подтверждение очистки не заканчивает задачу.
-    let fact = SourceCleaned {
+    // Чужой сбор результатов не заканчивает задачу.
+    let fact = OutputsCollected {
         job_id: id.to_string(),
+        local_dir: "/var/outputs/foreign".into(),
+        files: vec![],
+        truncated: false,
     };
     let from = other.machine_id;
     fx.apply(move |conn| {
-        Box::pin(
-            async move { carrier::apply_source_cleaned(conn, from, &fact, Uuid::now_v7()).await },
-        )
+        Box::pin(async move {
+            carrier::apply_outputs_collected(conn, from, &fact, Uuid::now_v7()).await
+        })
     })
     .await;
     assert_eq!(fx.state(id).await, "collecting");
-    assert!(fx.job(id).await.cleaned_at.is_none());
+    assert!(fx.job(id).await.outputs_dir.is_none());
     // Флаг несущей, снятый владельцем, закрывает и своей несущей.
     machines::set_carrier(&fx.pool, fx.carrier, false)
         .await
         .unwrap();
-    fx.cleaned(id).await;
+    fx.collected(id, false).await;
     assert_eq!(fx.state(id).await, "collecting");
 }
 
@@ -1382,8 +1518,8 @@ async fn the_owner_job_result_goes_to_the_submitting_terminal_and_survives_a_res
         "not before the end"
     );
     fx.collected(id, false).await;
-    fx.cleaned(id).await;
     assert_eq!(fx.commands(fx.carrier, "owner_job_finished").await, 1);
+    fx.cleaned(id).await;
     // Повторный конец и повторные факты не плодят команд.
     fx.cleaned(id).await;
     assert_eq!(fx.commands(fx.carrier, "owner_job_finished").await, 1);
@@ -1573,14 +1709,28 @@ async fn an_observation_changes_the_runners_availability_and_the_event_carries_i
         observed.timestamp_millis()
     );
     assert!(availability_event_is_valid(last), "{last}");
+    // Время хаба, с которого раннер `offline`, записано; повторный разбор его не сдвигает.
+    let since = |pool: PgPool| async move {
+        sqlx::query_scalar::<_, Option<chrono::DateTime<Utc>>>(
+            "select runner_offline_since from machines where id=$1",
+        )
+        .bind(runner)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    let offline_since = since(fx.pool.clone()).await.expect("offline_since is set");
+    assert!(Utc::now() - offline_since < chrono::TimeDelta::seconds(30));
     // Повторный разбор без перемен ничего не добавляет.
     project().await;
     assert_eq!(availability_events(&fx.pool).await.len(), events.len());
+    assert_eq!(since(fx.pool.clone()).await, Some(offline_since));
     // Воркер раннера подключился: `online`, возраст наблюдения остаётся в событии.
     fx.connect(runner);
     project().await;
     let events = availability_events(&fx.pool).await;
     assert_eq!(events.last().unwrap()["availability"], "online");
+    assert_eq!(since(fx.pool.clone()).await, None, "cleared when online");
     // Наблюдение устарело (старше трёх минут): отключённый раннер снова `unknown`.
     fx.sessions.pop();
     sqlx::query("update runner_observations set observed_at = now() - interval '10 minutes'")
@@ -1590,6 +1740,7 @@ async fn an_observation_changes_the_runners_availability_and_the_event_carries_i
     project().await;
     let events = availability_events(&fx.pool).await;
     assert_eq!(events.last().unwrap()["availability"], "unknown");
+    assert_eq!(since(fx.pool.clone()).await, None, "cleared when unknown");
 }
 
 // ───────── Вид задачи и `runners_list` ─────────
@@ -1684,4 +1835,329 @@ async fn runners_list_describes_the_carrier_and_its_runners(pool: PgPool) {
         code(fx.call("runners.list", json!({"machine": "x"})).await),
         Code::InvalidArguments
     );
+}
+
+// ───────── Исправления по ревью: метки названной цели, ожидание без конца ─────────
+
+fn named(machine: &str, extra: Value) -> Value {
+    let mut args = json!({
+        "machine": machine, "shell": "true", "wait_seconds": 0,
+        "source": {"repo": "/srv/src/app", "rev": REV},
+    });
+    for (key, value) in extra.as_object().unwrap() {
+        args[key] = value.clone();
+    }
+    args
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_named_target_must_carry_the_labels_of_the_job(pool: PgPool) {
+    let mut fx = Fx::new(pool).await;
+    fx.runner("runner-a", 5, &[], 2, true).await;
+    fx.runner("runner-b", 5, &["kernel-6.12"], 2, true).await;
+    // Раннер без метки отказывается, называй его хоть по имени, хоть по идентификатору.
+    assert_eq!(
+        code(
+            fx.call(
+                "job.run",
+                named("runner-a", json!({"labels": ["kernel-6.12"]}))
+            )
+            .await
+        ),
+        Code::NoRunnerCanSatisfy
+    );
+    // Сама несущая тоже машина со своими метками.
+    assert_eq!(
+        code(
+            fx.call(
+                "job.run",
+                named("carrier", json!({"labels": ["kernel-6.12"]}))
+            )
+            .await
+        ),
+        Code::NoRunnerCanSatisfy
+    );
+    let ok = fx
+        .call(
+            "job.run",
+            named("runner-b", json!({"labels": ["kernel-6.12"]})),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ok["machine"], "runner-b", "{ok}");
+    // Задача владельца: то же правило и тот же код.
+    let refused = owner::submit(
+        &fx.pool,
+        &fx.registry,
+        fx.carrier,
+        &owner_spec(json!({"machine": "runner-a"})),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(refused.code, "no_runner_can_satisfy");
+    let id = owner::submit(
+        &fx.pool,
+        &fx.registry,
+        fx.carrier,
+        &owner_spec(json!({"machine": "runner-b"})),
+    )
+    .await
+    .unwrap();
+    assert_eq!(fx.job(id).await.state, "staging");
+    // Отказ не оставляет строки: заняты только две принятые задачи.
+    let jobs: i64 = sqlx::query_scalar("select count(*) from jobs")
+        .fetch_one(&fx.pool)
+        .await
+        .unwrap();
+    assert_eq!(jobs, 2);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_named_job_onto_a_full_runner_waits_for_that_runner(pool: PgPool) {
+    let mut fx = Fx::new(pool).await;
+    let runner = fx.runner("runner-a", 5, &[], 1, true).await;
+    // Другой раннер свободен и ранг у него выше: названную задачу он не получит.
+    let other = fx.runner("runner-b", 50, &[], 1, true).await;
+    let first = job_id(
+        &fx.call("job.run", named("runner-a", json!({})))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(fx.state(first).await, "staging");
+    let reply = fx
+        .call("job.run", named("runner-a", json!({})))
+        .await
+        .unwrap();
+    let second = job_id(&reply);
+    assert_eq!(reply["state"], "waiting_runner", "{reply}");
+    assert_eq!(reply["machine"], Value::Null);
+    let job = fx.job(second).await;
+    assert!(job.machine_id.is_none());
+    assert_eq!(fx.commands(runner, "start_inplace_job").await, 0);
+    assert_eq!(
+        fx.place().await,
+        0,
+        "runner-a is full, runner-b is not its stand-in"
+    );
+    assert_eq!(fx.job(second).await.state, "waiting_runner");
+    assert_eq!(fx.commands(fx.carrier, "stage_source").await, 1);
+    // Место освободилось: ждавшая задача идёт именно на названный раннер.
+    fx.call("job.cancel", json!({"job_id": first}))
+        .await
+        .unwrap();
+    assert_eq!(fx.place().await, 1);
+    let job = fx.job(second).await;
+    assert_eq!(job.state, "staging");
+    assert_eq!(job.machine_id, Some(runner));
+    assert_ne!(job.machine_id, Some(other));
+    // То же для задачи владельца.
+    let owned = owner::submit(
+        &fx.pool,
+        &fx.registry,
+        fx.carrier,
+        &owner_spec(json!({"machine": "runner-a", "labels": []})),
+    )
+    .await
+    .unwrap();
+    assert_eq!(fx.state(owned).await, "waiting_runner");
+    // Отзыв названного раннера закрывает и ждущих его: ждать больше нечего.
+    machines::revoke(&fx.pool, runner).await.unwrap();
+    assert_eq!(fx.state(owned).await, "lost");
+    assert_eq!(fx.state(second).await, "lost");
+    assert_eq!(fx.messages(second).await, 1);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn revoking_or_unmarking_the_carrier_ends_its_waiting_jobs_lost_once(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    // Несущая полна двумя задачами, третья и четвёртая ждут.
+    let local = json!({"placement": ["local"]});
+    fx.auto(local.clone()).await.unwrap();
+    fx.auto(local.clone()).await.unwrap();
+    let w1 = job_id(&fx.auto(local.clone()).await.unwrap());
+    let w2 = job_id(&fx.auto(local).await.unwrap());
+    assert_eq!(fx.state(w1).await, "waiting_runner");
+    machines::set_carrier(&fx.pool, fx.carrier, false)
+        .await
+        .unwrap();
+    for id in [w1, w2] {
+        let job = fx.job(id).await;
+        assert_eq!(job.state, "lost");
+        assert_eq!(job.end_reason.as_deref(), Some("lost"));
+        assert_eq!(fx.messages(id).await, 1);
+    }
+    // Повторный вызов и отзыв ничего не множат.
+    machines::set_carrier(&fx.pool, fx.carrier, false)
+        .await
+        .unwrap();
+    machines::revoke(&fx.pool, fx.carrier).await.unwrap();
+    for id in [w1, w2] {
+        assert_eq!(fx.messages(id).await, 1);
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn revoking_the_carrier_ends_its_waiting_jobs_lost(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let local = json!({"placement": ["local"]});
+    fx.auto(local.clone()).await.unwrap();
+    fx.auto(local.clone()).await.unwrap();
+    let waiting = job_id(&fx.auto(local).await.unwrap());
+    assert_eq!(fx.state(waiting).await, "waiting_runner");
+    machines::revoke(&fx.pool, fx.carrier).await.unwrap();
+    assert_eq!(fx.state(waiting).await, "lost");
+    assert_eq!(fx.messages(waiting).await, 1);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn an_owner_job_is_checked_for_outputs_before_it_runs(pool: PgPool) {
+    let mut fx = Fx::new(pool).await;
+    fx.runner("runner-a", 5, &["kernel-6.12"], 1, true).await;
+    for bad in [
+        json!({"outputs": ["test results"]}),
+        json!({"outputs": ["a/../b"]}),
+        json!({"outputs": ["/etc"]}),
+    ] {
+        let refused = owner::submit(&fx.pool, &fx.registry, fx.carrier, &owner_spec(bad.clone()))
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code, "invalid_arguments", "{bad}");
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_repository_name_the_carrier_would_refuse_gets_a_safe_key(pool: PgPool) {
+    let mut fx = Fx::new(pool).await;
+    let runner = fx.runner("runner-a", 20, &[], 1, true).await;
+    let repo = "/srv/src/my app+v2 ё";
+    let id = job_id(
+        &fx.auto(json!({"source": {"repo": repo, "rev": REV}, "placement": ["runner"]}))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(fx.job(id).await.machine_id, Some(runner));
+    let key = place::repo_key(repo);
+    assert!(
+        key.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')),
+        "{key}"
+    );
+    assert!(key.starts_with("my-app-v2---"), "{key}");
+    let stage = fx.command(fx.carrier, "stage_source").await;
+    let Some(Kind::StageSource(stage)) = outbox::to_proto(&stage).unwrap().kind else {
+        panic!("stage command expected");
+    };
+    assert_eq!(stage.repo_key, key);
+    // Разные пути с одинаково сведённым именем ключей не делят.
+    assert_ne!(place::repo_key("/a/x y"), place::repo_key("/b/x y"));
+    // Имя из точек не бывает именем ключа.
+    for odd in ["/srv/src/.", "/srv/src/..."] {
+        assert!(place::repo_key(odd).starts_with("repo-"), "{odd}");
+    }
+}
+
+/// Рабочий каталог на несущей лежит над репозиторием. Репозиторий, который сам рабочий корень,
+/// дал бы каталог «личного» домена: на несущей такой задаче места нет.
+#[sqlx::test(migrations = "./migrations")]
+async fn the_workdir_on_the_carrier_never_leaves_the_domain_of_the_source(pool: PgPool) {
+    let mut fx = Fx::new(pool).await;
+    let runner = fx.runner("runner-a", 20, &[], 2, true).await;
+    sqlx::query("update conversations set memory_domain='work' where id=$1")
+        .bind(fx.conversation)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    let root = json!({"repo": "/home/dev/work", "rev": REV});
+    // Названная несущая: отказ с кодом домена.
+    assert_eq!(
+        code(
+            fx.call("job.run", named("carrier", json!({"source": root.clone()})))
+                .await
+        ),
+        Code::DomainMismatch
+    );
+    // Только на несущую: места нет вовсе.
+    assert_eq!(
+        code(
+            fx.auto(json!({"source": root.clone(), "placement": ["local"]}))
+                .await
+        ),
+        Code::NoRunnerCanSatisfy
+    );
+    // Раннер берёт: его каталог `jobs/work` не зависит от пути на несущей.
+    let id = job_id(&fx.auto(json!({"source": root.clone()})).await.unwrap());
+    assert_eq!(fx.job(id).await.machine_id, Some(runner));
+    // Раннер занят полностью: задача ждёт раннер, а не уходит на несущую.
+    let second = job_id(&fx.auto(json!({"source": root})).await.unwrap());
+    let third = job_id(
+        &fx.auto(json!({"source": {"repo": "/home/dev/work", "rev": REV}}))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(fx.job(second).await.machine_id, Some(runner));
+    assert_eq!(fx.state(third).await, "waiting_runner");
+    // Обычный репозиторий внутри рабочего корня остаётся в домене и идёт на несущую.
+    let inner = job_id(
+        &fx.auto(json!({
+            "source": {"repo": "/home/dev/work/app", "rev": REV},
+            "placement": ["local"],
+        }))
+        .await
+        .unwrap(),
+    );
+    let job = fx.job(inner).await;
+    assert_eq!(job.machine_id, Some(fx.carrier));
+    assert_eq!(
+        job.workdir.as_deref(),
+        Some(format!("/home/dev/work/.canterlot-jobs/app/{inner}").as_str())
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_job_waiting_for_a_runner_past_the_timeout_is_canceled_no_runner(pool: PgPool) {
+    let mut fx = Fx::new(pool).await;
+    fx.runner("runner-a", 5, &["kernel-6.12"], 1, false).await;
+    let id = job_id(
+        &fx.auto(json!({"labels": ["kernel-6.12"], "placement": ["runner"]}))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(fx.state(id).await, "waiting_runner");
+    let day = Duration::from_secs(24 * 3600);
+    assert_eq!(
+        sweep::waiting_timeout_sweep(&fx.pool, day, Utc::now() + chrono::TimeDelta::hours(23))
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(fx.state(id).await, "waiting_runner");
+    // Ноль выключает срок.
+    assert_eq!(
+        sweep::waiting_timeout_sweep(
+            &fx.pool,
+            Duration::ZERO,
+            Utc::now() + chrono::TimeDelta::days(30)
+        )
+        .await
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        sweep::waiting_timeout_sweep(&fx.pool, day, Utc::now() + chrono::TimeDelta::hours(25))
+            .await
+            .unwrap(),
+        1
+    );
+    let job = fx.job(id).await;
+    assert_eq!(job.state, "canceled");
+    assert_eq!(job.end_reason.as_deref(), Some("no_runner"));
+    assert_eq!(fx.messages(id).await, 1);
+    // Повтор ничего не меняет.
+    assert_eq!(
+        sweep::waiting_timeout_sweep(&fx.pool, day, Utc::now() + chrono::TimeDelta::hours(26))
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(fx.messages(id).await, 1);
 }

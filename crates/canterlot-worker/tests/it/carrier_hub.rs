@@ -421,8 +421,14 @@ async fn an_owner_job_with_source_and_outputs_runs_on_the_runner_end_to_end(pool
     assert_eq!(machine, Some(runner.machine_id));
     assert_eq!(state, "succeeded");
     // Рабочая копия и ссылка на раннере убраны, исходный репозиторий не тронут.
-    let leftovers = fs::read_dir(root.join("jobs/personal")).unwrap().count();
-    assert_eq!(leftovers, 0, "the runner worktree was removed");
+    // Хаб заканчивает задачу по сбору, не дожидаясь очистки: она идёт следом, ждём её.
+    timeout(Duration::from_secs(30), async {
+        while fs::read_dir(root.join("jobs/personal")).unwrap().count() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the runner worktree was removed");
     assert_eq!(git_in(&repo, &["worktree", "list"]).lines().count(), 1);
 
     // Код выхода команды доходит до `job run --wait`.

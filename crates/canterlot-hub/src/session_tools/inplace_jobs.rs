@@ -615,6 +615,10 @@ async fn run_source(
             crate::conversations::lock_owner(&mut tx, caller.owner_id).await?;
         }
         jobs::lock_machine(&mut tx, target).await?;
+    } else {
+        // `auto`: расстановка возьмёт замки несущей и раннеров, а диспетчер машины берёт замок
+        // машины раньше допуска заказчика. Тот же порядок и здесь: машины, потом допуск.
+        place::lock_candidates(&mut tx, carrier).await?;
     }
     jobs::lock_admission(&mut tx, &[caller.conversation_id]).await?;
     let facts = jobs::caller_facts(&mut tx, caller.conversation_id)
@@ -659,14 +663,25 @@ async fn run_source(
                 return Err(ToolError::new(ToolErrorCode::RemoteWorkDisabled));
             }
         }
-        Some(_) => {}
+        Some(_) => {
+            // Сама несущая: её рабочий каталог остаётся в домене исходников или отказ.
+            if !place::carrier_workdir_in_domain(&mut tx, carrier, &source.repo, domain).await? {
+                return Err(ToolError::new(ToolErrorCode::DomainMismatch));
+            }
+        }
         None => {
-            if !place::satisfiable(&mut tx, carrier, &labels, &placement).await? {
+            if !place::satisfiable(&mut tx, carrier, &labels, &placement, &source.repo, domain)
+                .await?
+            {
                 return Err(ToolError::new(ToolErrorCode::NoRunnerCanSatisfy));
             }
         }
     }
     if let Some(target) = named_target {
+        // Имя не отменяет требования к машине: метки задачи должны быть и у названной.
+        if !place::machine_has_labels(&mut tx, target, &labels).await? {
+            return Err(ToolError::new(ToolErrorCode::NoRunnerCanSatisfy));
+        }
         let capable: Option<Vec<String>> =
             sqlx::query_scalar("select capabilities from machines where id=$1 and owner_id=$2")
                 .bind(target)
