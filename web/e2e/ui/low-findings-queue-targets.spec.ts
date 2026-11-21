@@ -152,6 +152,8 @@ async function boxes(pill: Locator): Promise<{
 
 /** «⋯» стоит по центру первой строки, а цель касания не выходит за карточку. */
 async function expectOverflowOnFirstLine(pill: Locator, label: string): Promise<void> {
+  // Сообщения встают в очередь складкой: цель меряется, когда складка доехала.
+  await pill.evaluate((node) => Promise.all((node.closest('.strip') ?? node).getAnimations({ subtree: true }).map((animation) => animation.finished.catch(() => undefined))).then(() => undefined));
   const found = await boxes(pill);
   const firstLineCentre = found.body.top + found.line / 2;
   const iconCentre = found.icon.top + found.icon.height / 2;
