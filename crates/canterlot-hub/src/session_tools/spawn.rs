@@ -418,6 +418,7 @@ fn create_error(error: CreateError) -> ToolError {
         CreateError::MachineNotFound | CreateError::MachineUnavailable => {
             ToolErrorCode::MachineUnavailable
         }
+        CreateError::MachineIsRunner => ToolErrorCode::MachineIsRunner,
         CreateError::CapabilityMissing => ToolErrorCode::CapabilityMissing,
         CreateError::HarnessUnknown => ToolErrorCode::HarnessUnknown,
         CreateError::ModelUnknown => ToolErrorCode::ModelUnknown,
@@ -675,6 +676,28 @@ pub(crate) async fn resolve_machine(
         ));
     };
     Ok((found != caller.machine_id).then_some(found))
+}
+
+/// Сессий на раннере нет (решение 1: готовые команды, агент на раннере не работает): отказ
+/// `machine_is_runner` для `session_spawn` и `route_preview`, что бы раннер о себе ни сообщал.
+/// `job_run` сюда не ходит: задача на раннер с явным `machine` разрешена.
+pub(crate) async fn refuse_runner(
+    conn: &mut PgConnection,
+    machine: Option<Uuid>,
+) -> Result<(), ToolError> {
+    let Some(machine) = machine else {
+        return Ok(());
+    };
+    let runner: bool = sqlx::query_scalar(
+        "select exists(select 1 from machines where id = $1 and role = 'runner')",
+    )
+    .bind(machine)
+    .fetch_one(conn)
+    .await?;
+    if runner {
+        return Err(ToolError::new(ToolErrorCode::MachineIsRunner));
+    }
+    Ok(())
 }
 
 /// Допуск удалённой работы: единственная точка, общая для запуска и очереди. Строка машины
@@ -1402,6 +1425,7 @@ pub async fn spawn(
     // Имя или id → машина; дальше очередь, карточка и повтор помнят только её id.
     let requested_machine = args.machine.take();
     args.machine_id = resolve_machine(&mut tx, caller, requested_machine.as_deref()).await?;
+    refuse_runner(&mut tx, args.machine_id).await?;
     // Поколение допуска записывается при заявке; присланное моделью значение не доверяется.
     args.admission_generation = None;
     if let Some(target) = args.machine_id {

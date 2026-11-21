@@ -27,6 +27,9 @@ pub enum ExecutionError {
     ConversationNotFound,
     #[error("conversation closed")]
     ConversationClosed,
+    /// Исполнение на раннере не стартует: сессий на раннерах нет.
+    #[error("machine is a runner")]
+    MachineIsRunner,
     #[error("worktree already removed")]
     WorktreeRemoved,
     #[error("invalid execution transition from {from:?} to {to:?}")]
@@ -149,19 +152,26 @@ pub async fn start_in_tx_with_native(
     correlation_id: Uuid,
     native_override: Option<&str>,
 ) -> Result<StartedExecution, ExecutionError> {
-    let found: Option<(String, Uuid)> = sqlx::query_as(
-        "select harness, machine_id from conversations where id=$1 and owner_id=$2 and trashed_at is null",
+    let found: Option<(String, Uuid, String)> = sqlx::query_as(
+        "select c.harness, c.machine_id, m.role from conversations c join machines m on m.id = c.machine_id
+         where c.id=$1 and c.owner_id=$2 and c.trashed_at is null",
     )
     .bind(conversation_id)
     .bind(owner_id)
     .fetch_optional(&mut *conn)
     .await?;
+    if found
+        .as_ref()
+        .is_some_and(|(_, _, role)| role == crate::machines::ROLE_RUNNER)
+    {
+        return Err(ExecutionError::MachineIsRunner);
+    }
     // Строка пары раньше очереди: возобновление и вход в резерв сериализуются.
     let provider = found
         .as_ref()
-        .and_then(|(harness, _)| canterlot_proto::harness::provider_of(harness));
+        .and_then(|(harness, _, _)| canterlot_proto::harness::provider_of(harness));
     let account = match &found {
-        Some((harness, machine_id)) => {
+        Some((harness, machine_id, _)) => {
             crate::limits::harness_account(conn, *machine_id, harness).await?
         }
         None => crate::model::owner_account(),
