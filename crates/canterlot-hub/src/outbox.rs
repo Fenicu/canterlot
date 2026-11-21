@@ -240,6 +240,14 @@ fn to_proto_with_capability(
     {
         return Err(OutboxError::CapabilityMissing);
     }
+    // Команды несущей: только на соединении с `runners_v1`.
+    if matches!(
+        row.kind.as_str(),
+        "stage_source" | "collect_outputs" | "cleanup_source" | "owner_job_finished"
+    ) && !has(crate::session::CAPABILITY_RUNNERS_V1)
+    {
+        return Err(OutboxError::CapabilityMissing);
+    }
     if row.kind == "resolve_owner_lost" && !has(crate::session::CAPABILITY_OWNER_EXIT_V1) {
         return Err(OutboxError::CapabilityMissing);
     }
@@ -607,6 +615,87 @@ pub fn to_proto(row: &CommandRow) -> Result<Command, OutboxError> {
                 attempt: job_attempt(&row.payload)?,
             })
         }
+        "stage_source" => command::Kind::StageSource(canterlot_proto::worker::v1::StageSource {
+            job_id: text(&row.payload, "job_id")?,
+            repo: text(&row.payload, "repo")?,
+            rev: text(&row.payload, "rev")?,
+            domain: text(&row.payload, "domain")?,
+            target_machine_id: text(&row.payload, "target_machine_id")?,
+            target_root_dir: text(&row.payload, "target_root_dir")?,
+            workdir: text(&row.payload, "workdir")?,
+            repo_key: text(&row.payload, "repo_key")?,
+        }),
+        "collect_outputs" => {
+            command::Kind::CollectOutputs(canterlot_proto::worker::v1::CollectOutputs {
+                job_id: text(&row.payload, "job_id")?,
+                target_machine_id: text(&row.payload, "target_machine_id")?,
+                target_root_dir: text(&row.payload, "target_root_dir")?,
+                workdir: text(&row.payload, "workdir")?,
+                paths: row
+                    .payload
+                    .get("paths")
+                    .and_then(Value::as_array)
+                    .ok_or(OutboxError::InvalidCommand)?
+                    .iter()
+                    .map(|path| {
+                        path.as_str()
+                            .map(str::to_owned)
+                            .ok_or(OutboxError::InvalidCommand)
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+                cap_bytes: row
+                    .payload
+                    .get("cap_bytes")
+                    .and_then(Value::as_u64)
+                    .ok_or(OutboxError::InvalidCommand)?,
+            })
+        }
+        "cleanup_source" => {
+            command::Kind::CleanupSource(canterlot_proto::worker::v1::CleanupSource {
+                job_id: text(&row.payload, "job_id")?,
+                target_machine_id: text(&row.payload, "target_machine_id")?,
+                target_root_dir: text(&row.payload, "target_root_dir")?,
+                workdir: text(&row.payload, "workdir")?,
+                repo_key: text(&row.payload, "repo_key")?,
+                domain: text(&row.payload, "domain")?,
+            })
+        }
+        "owner_job_finished" => {
+            let hex = row
+                .payload
+                .get("tail_hex")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if !hex.len().is_multiple_of(2) || !hex.is_ascii() {
+                return Err(OutboxError::InvalidCommand);
+            }
+            let tail = (0..hex.len() / 2)
+                .map(|at| u8::from_str_radix(&hex[at * 2..at * 2 + 2], 16))
+                .collect::<Result<Vec<u8>, _>>()
+                .map_err(|_| OutboxError::InvalidCommand)?;
+            command::Kind::OwnerJobFinished(canterlot_proto::worker::v1::OwnerJobFinished {
+                job_id: text(&row.payload, "job_id")?,
+                state: text(&row.payload, "state")?,
+                exit_code: row
+                    .payload
+                    .get("exit_code")
+                    .and_then(Value::as_i64)
+                    .and_then(|code| i32::try_from(code).ok()),
+                tail,
+                outputs_dir: row
+                    .payload
+                    .get("outputs_dir")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                outputs_note: row
+                    .payload
+                    .get("outputs_note")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+            })
+        }
         "stop_execution" => command::Kind::StopExecution(StopExecution {
             force: match row.payload.get("force") {
                 None => false,
@@ -618,7 +707,13 @@ pub fn to_proto(row: &CommandRow) -> Result<Command, OutboxError> {
     // Отзыв секрета и задачи на месте не привязаны к исполнению: уровень машины.
     let (execution_id, execution_generation) = if matches!(
         row.kind.as_str(),
-        "revoke_secret" | "start_inplace_job" | "cancel_inplace_job"
+        "revoke_secret"
+            | "start_inplace_job"
+            | "cancel_inplace_job"
+            | "stage_source"
+            | "collect_outputs"
+            | "cleanup_source"
+            | "owner_job_finished"
     ) {
         (String::new(), 0)
     } else {

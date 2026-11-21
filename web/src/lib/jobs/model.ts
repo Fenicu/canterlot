@@ -36,11 +36,12 @@ export function jobFacts(view: JobView): JobFacts {
   return {
     id: view.id,
     state: view.state,
-    machineId: view.machine_id,
-    machineName: view.machine_name,
+    // Пока задача ждёт раннер, машины нет: пустая строка не совпадает ни с одной машиной.
+    machineId: view.machine_id ?? '',
+    machineName: view.machine_name ?? '',
     title: view.title ?? null,
     shell: view.shell,
-    workdir: view.workdir,
+    workdir: view.workdir ?? '',
     exitCode: view.exit_code ?? null,
     durationMs: view.duration_ms ?? null,
     cancelRequested: view.cancel_requested,
@@ -51,6 +52,7 @@ export function jobFacts(view: JobView): JobFacts {
 }
 
 const TERMINAL = new Set(['succeeded', 'failed', 'timed_out', 'canceled', 'lost']);
+// `waiting_runner`, `staging` и `collecting` — ещё не конец: итог придёт после сбора результатов.
 
 export function isTerminal(state: string): boolean {
   return TERMINAL.has(state);
@@ -59,6 +61,12 @@ export function isTerminal(state: string): boolean {
 /** Состояние задачи одним словом. */
 export function jobWord(job: Pick<JobFacts, 'state' | 'exitCode' | 'cancelRequested'>): JobWord {
   switch (job.state) {
+    case 'waiting_runner':
+      return { word: 'ждёт раннер', tone: 'warning' };
+    case 'staging':
+      return { word: 'готовит исходники', tone: 'accent', live: true };
+    case 'collecting':
+      return { word: 'собирает результаты', tone: 'accent', live: true };
     case 'queued':
       return { word: 'в очереди', tone: 'muted' };
     case 'dispatched':
@@ -118,6 +126,10 @@ export function refusalText(code: string): string {
     case 'workdir_not_allowed':
     case 'workdir_refused':
       return 'Каталог не подходит';
+    case 'source_required':
+      return 'Для автоматического размещения нужны исходники';
+    case 'no_runner_can_satisfy':
+      return 'Ни один раннер не подходит по меткам';
     case '':
       return 'Отказ: вызов не удался';
     default:

@@ -1824,6 +1824,52 @@ async fn apply_body(
             crate::inplace_jobs::facts::apply_finished(conn, machine_id, fact, correlation_id)
                 .await?;
         }
+        // Факты несущей (`runners_v1`): принимаются только от несущей задачи.
+        Body::SourceStaged(fact) => {
+            crate::inplace_jobs::carrier::apply_source_staged(
+                conn,
+                machine_id,
+                fact,
+                correlation_id,
+            )
+            .await?;
+        }
+        Body::SourceStageFailed(fact) => {
+            crate::inplace_jobs::carrier::apply_stage_failed(
+                conn,
+                machine_id,
+                fact,
+                correlation_id,
+            )
+            .await?;
+        }
+        Body::OutputsCollected(fact) => {
+            crate::inplace_jobs::carrier::apply_outputs_collected(
+                conn,
+                machine_id,
+                fact,
+                correlation_id,
+            )
+            .await?;
+        }
+        Body::OutputsCollectFailed(fact) => {
+            crate::inplace_jobs::carrier::apply_collect_failed(
+                conn,
+                machine_id,
+                fact,
+                correlation_id,
+            )
+            .await?;
+        }
+        Body::SourceCleaned(fact) => {
+            crate::inplace_jobs::carrier::apply_source_cleaned(
+                conn,
+                machine_id,
+                fact,
+                correlation_id,
+            )
+            .await?;
+        }
     }
     Ok(false)
 }
@@ -1885,6 +1931,20 @@ pub async fn apply_command_rejected_in_tx(
         .await?;
     } else if target.kind == "start_inplace_job" || target.kind == "cancel_inplace_job" {
         crate::inplace_jobs::facts::apply_command_rejected(
+            conn,
+            machine_id,
+            command_id,
+            &target.kind,
+            reason,
+            correlation_id,
+        )
+        .await?;
+        complete_rejected(conn, command_id, dispatch_attempt, reason).await?;
+    } else if matches!(
+        target.kind.as_str(),
+        "stage_source" | "collect_outputs" | "cleanup_source" | "owner_job_finished"
+    ) {
+        crate::inplace_jobs::carrier::apply_command_rejected(
             conn,
             machine_id,
             command_id,

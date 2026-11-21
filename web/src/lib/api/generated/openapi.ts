@@ -3748,16 +3748,22 @@ export interface components {
             end_reason?: string | null;
             /** Format: int32 */
             exit_code?: number | null;
+            /** Format: int32 */
+            expected_minutes: number;
             /** Format: date-time */
             finished_at?: string | null;
             has_log: boolean;
             /** Format: uuid */
             id: string;
+            labels: string[];
             late_report?: Record<string, never> | null;
             lease: string;
-            /** Format: uuid */
-            machine_id: string;
-            machine_name: string;
+            /**
+             * Format: uuid
+             * @description Пусто, пока задача ждёт раннер (`waiting_runner`).
+             */
+            machine_id?: string | null;
+            machine_name?: string | null;
             /**
              * @description Машина не на связи, а задача не закончена; в событии всегда `false`: связь машины
              *     приходит событиями машин.
@@ -3765,7 +3771,11 @@ export interface components {
             machine_offline: boolean;
             /** Format: int64 */
             output_bytes: number;
+            /** @description Каталог на несущей, куда собраны результаты. */
+            outputs_dir?: string | null;
+            outputs_note?: string | null;
             shell: string;
+            source?: components["schemas"]["SourceView"] | null;
             /** Format: date-time */
             started_at?: string | null;
             state: string;
@@ -3773,7 +3783,7 @@ export interface components {
             timeout_minutes: number;
             title?: string | null;
             truncated: boolean;
-            workdir: string;
+            workdir?: string | null;
         };
         /** @description Страница ленты одного субагента: корень (вызов) и его потомки по любой глубине. */
         LanePage: {
@@ -5566,6 +5576,11 @@ export interface components {
              * @description Абсолютное время возврата в UTC.
              */
             until: string;
+        };
+        /** @description Источник задачи для клиентов: имя каталога и короткая ревизия, не полный локальный путь. */
+        SourceView: {
+            repo: string;
+            rev: string;
         };
         SpawnQueueActionView: {
             harness?: string | null;

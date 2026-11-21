@@ -71,6 +71,12 @@ impl fmt::Debug for command::Kind {
             Self::CancelInPlaceJob(input) => {
                 f.debug_tuple("CancelInPlaceJob").field(input).finish()
             }
+            Self::StageSource(input) => f.debug_tuple("StageSource").field(input).finish(),
+            Self::CollectOutputs(input) => f.debug_tuple("CollectOutputs").field(input).finish(),
+            Self::CleanupSource(input) => f.debug_tuple("CleanupSource").field(input).finish(),
+            Self::OwnerJobFinished(input) => {
+                f.debug_tuple("OwnerJobFinished").field(input).finish()
+            }
         }
     }
 }
@@ -604,6 +610,30 @@ impl fmt::Debug for crate::worker::v1::SecretRemoved {
             .field("conversation_id", &self.conversation_id)
             .field("cap", &self.cap)
             .field("reason", &self.reason)
+            .finish()
+    }
+}
+
+// Описание задачи владельца несёт его команду и окружение: в логи идёт только размер.
+impl fmt::Debug for crate::worker::v1::OwnerJobSubmit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OwnerJobSubmit")
+            .field("request_id", &self.request_id)
+            .field("spec_bytes", &self.spec_json.len())
+            .finish()
+    }
+}
+
+// Хвост вывода — данные владельца: в логи идёт только размер.
+impl fmt::Debug for crate::worker::v1::OwnerJobFinished {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OwnerJobFinished")
+            .field("job_id", &self.job_id)
+            .field("state", &self.state)
+            .field("exit_code", &self.exit_code)
+            .field("tail_bytes", &self.tail.len())
+            .field("outputs_dir", &self.outputs_dir)
+            .field("outputs_note", &self.outputs_note)
             .finish()
     }
 }

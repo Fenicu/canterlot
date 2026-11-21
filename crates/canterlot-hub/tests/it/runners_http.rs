@@ -250,3 +250,63 @@ async fn an_execution_on_a_runner_is_refused(pool: PgPool) {
         .await
         .unwrap();
 }
+
+/// Пауза раннера (выключатель) закрывает новые привязки, а её снятие через HTTP ставит
+/// ожидающую задачу на раннер без ожидания таймера.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn switching_the_runner_on_places_the_waiting_job(pool: PgPool) {
+    let mut api = Api::new(pool).await;
+    sqlx::query(
+        "update machines set capabilities=array['jobs_inplace_v1'], jobs_max_running=1
+          where id=$1",
+    )
+    .bind(api.runner)
+    .execute(&api.pool)
+    .await
+    .unwrap();
+    api.connect(api.runner);
+    let switch = |on: bool| json!({"accepts_remote_work": on});
+    api.call(
+        Method::PUT,
+        &format!("/api/v1/machines/{}/remote-work", api.runner),
+        Some(switch(false)),
+        200,
+    )
+    .await;
+    let spec = json!({
+        "shell": "make", "placement": ["runner"],
+        "source": {"repo": "/srv/src/app", "rev": "0123456789abcdef0123456789abcdef01234567"},
+    });
+    let id = canterlot_hub::inplace_jobs::owner::submit(
+        &api.pool,
+        &api.registry,
+        api.carrier,
+        &spec.to_string(),
+    )
+    .await
+    .unwrap();
+    let state = || async {
+        sqlx::query_scalar::<_, String>("select state from jobs where id=$1")
+            .bind(id)
+            .fetch_one(&api.pool)
+            .await
+            .unwrap()
+    };
+    assert_eq!(state().await, "waiting_runner");
+    api.call(
+        Method::PUT,
+        &format!("/api/v1/machines/{}/remote-work", api.runner),
+        Some(switch(true)),
+        200,
+    )
+    .await;
+    assert_eq!(state().await, "staging");
+    let listed = api.call(Method::GET, "/api/v1/jobs", None, 200).await;
+    let item = &listed["items"][0];
+    assert_eq!(item["state"], "staging");
+    assert_eq!(item["machine_name"], "runner-a");
+    assert_eq!(
+        item["source"],
+        json!({"repo": "app", "rev": "0123456789ab"})
+    );
+}

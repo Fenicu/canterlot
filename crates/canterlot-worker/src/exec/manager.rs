@@ -2503,7 +2503,12 @@ impl Actor {
                 Kind::RemoveWorktree(_)
                 | Kind::RevokeSecret(_)
                 | Kind::StartInPlaceJob(_)
-                | Kind::CancelInPlaceJob(_),
+                | Kind::CancelInPlaceJob(_)
+                // Команды несущей (`runners_v1`): воркерная половина — задача R5.
+                | Kind::StageSource(_)
+                | Kind::CollectOutputs(_)
+                | Kind::CleanupSource(_)
+                | Kind::OwnerJobFinished(_),
             ) => reject_invalid(&self.shared, &command).await,
             // Хаб считает исполнение потерянным, а связь с ним цела: это и есть доказательство.
             Some(Kind::ResolveOwnerLost(_)) => {
