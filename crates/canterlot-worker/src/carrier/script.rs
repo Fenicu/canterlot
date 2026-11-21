@@ -23,9 +23,9 @@ pub fn valid_root(root: &Path) -> bool {
             .split('/')
             .skip(1)
             .all(|part| part != "." && part != "..")
-        && text
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-'))
+        && text.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || matches!(b, b'/' | b'.' | b'_' | b'-' | b'+' | b'@')
+        })
 }
 
 /// Состояние раннера, как его видит зонд.
@@ -272,6 +272,7 @@ mod tests {
             "/srv/runner",
             "/home/builder/canterlot-runner",
             "/a/b_c.d-e",
+            "/srv/a+b@c",
         ] {
             assert!(valid_root(Path::new(good)), "{good}");
         }

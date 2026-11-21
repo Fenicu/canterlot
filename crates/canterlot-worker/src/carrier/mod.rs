@@ -8,6 +8,7 @@
 //! Обмен с хабом спрятан за [`RunnerControl`]: токен запрашивается и наблюдения
 //! отправляются через него, а список раннеров приходит каналом `watch`.
 
+pub mod bridge;
 mod runner;
 pub mod script;
 pub mod ssh;
@@ -16,7 +17,10 @@ use std::{
     collections::BTreeMap,
     fmt,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, SystemTime},
 };
 
@@ -259,6 +263,8 @@ struct Handle {
     spec: RunnerSpec,
     stop: watch::Sender<Stop>,
     join: JoinHandle<()>,
+    /// Хаб отказал в токене: петли раннера остановлены до следующего списка.
+    parked: Arc<AtomicBool>,
 }
 
 /// Ведёт раннеры, пока не придёт `shutdown`.
@@ -309,6 +315,18 @@ pub async fn run(
     });
     let mut running: BTreeMap<String, Handle> = BTreeMap::new();
     while !*shutdown.borrow() {
+        // Раннер, которого остановил отказ хаба, запускается заново со следующим списком.
+        let parked: Vec<String> = running
+            .iter()
+            .filter(|(_, handle)| handle.parked.load(Ordering::SeqCst))
+            .map(|(name, _)| name.clone())
+            .collect();
+        for name in parked {
+            if let Some(handle) = running.remove(&name) {
+                let _ = handle.join.await;
+            }
+        }
+        running.retain(|_, handle| !handle.join.is_finished());
         let wanted = desired(&settings.entries, &assigned.borrow_and_update());
         let gone: Vec<String> = running
             .iter()
@@ -326,8 +344,19 @@ pub async fn run(
             running.entry(name).or_insert_with(|| {
                 tracing::info!(runner = %spec.machine_id, "runner joins the carrier");
                 let (stop, stopped) = watch::channel(Stop::Run);
-                let join = tokio::spawn(runner::run(spec.clone(), shared.clone(), stopped));
-                Handle { spec, stop, join }
+                let parked = Arc::new(AtomicBool::new(false));
+                let join = tokio::spawn(runner::run(
+                    spec.clone(),
+                    shared.clone(),
+                    stopped,
+                    parked.clone(),
+                ));
+                Handle {
+                    spec,
+                    stop,
+                    join,
+                    parked,
+                }
             });
         }
         tokio::select! {

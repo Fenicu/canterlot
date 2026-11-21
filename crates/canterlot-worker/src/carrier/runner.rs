@@ -5,7 +5,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant, SystemTime},
 };
@@ -147,9 +147,16 @@ struct Runner {
     reach: Arc<Reach>,
     /// Сколько раз проброс поднимался: смена значения — повод заново сверить бинарник.
     connects: Arc<AtomicU64>,
+    halt: watch::Sender<Stop>,
+    parked: Arc<AtomicBool>,
 }
 
-pub(super) async fn run(spec: RunnerSpec, shared: Arc<Shared>, stop: watch::Receiver<Stop>) {
+pub(super) async fn run(
+    spec: RunnerSpec,
+    shared: Arc<Shared>,
+    stop: watch::Receiver<Stop>,
+    parked: Arc<AtomicBool>,
+) {
     let ssh = Ssh::new(spec.alias.clone(), shared.ssh_config.clone());
     let reach = Arc::new(Reach {
         machine_id: spec.machine_id,
@@ -157,20 +164,39 @@ pub(super) async fn run(spec: RunnerSpec, shared: Arc<Shared>, stop: watch::Rece
         state: Mutex::default(),
     });
     let connects = Arc::new(AtomicU64::new(0));
+    // Внутренний сигнал остановки: внешний пересылается в него, а отказ хаба в токене
+    // останавливает обе петли раннера сам (`Detach`: воркер раннера остаётся как есть).
+    let (halt, inner) = watch::channel(Stop::Run);
+    let forward = tokio::spawn({
+        let halt = halt.clone();
+        let mut stop = stop;
+        async move {
+            while stop.changed().await.is_ok() {
+                let value = *stop.borrow();
+                halt.send_replace(value);
+                if value != Stop::Run {
+                    break;
+                }
+            }
+        }
+    });
     let runner = Arc::new(Runner {
         spec,
         shared,
         ssh,
         reach,
         connects,
+        halt,
+        parked,
     });
     let tunnel = tokio::spawn({
         let runner = runner.clone();
-        let stop = stop.clone();
-        async move { runner.tunnel_loop(stop).await }
+        let inner = inner.clone();
+        async move { runner.tunnel_loop(inner).await }
     });
-    runner.maintenance_loop(stop).await;
+    runner.maintenance_loop(inner).await;
     let _ = tunnel.await;
+    forward.abort();
 }
 
 impl Runner {
@@ -399,7 +425,12 @@ impl Runner {
             {
                 Ok(Ok(credentials)) => credentials,
                 Ok(Err(TokenError::Refused(refusal))) => {
-                    tracing::warn!(runner = %self.spec.machine_id, ?refusal, "hub refused the runner token");
+                    // Повтор ничего не изменит: петли раннера останавливаются до следующего
+                    // списка от хаба (его присылают при каждом подключении).
+                    tracing::warn!(runner = %self.spec.machine_id, ?refusal,
+                        "hub refused the runner token; the runner is parked");
+                    self.parked.store(true, Ordering::SeqCst);
+                    self.halt.send_replace(Stop::Detach);
                     return Ok(());
                 }
                 Ok(Err(TokenError::Unavailable)) | Err(_) => {

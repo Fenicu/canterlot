@@ -127,6 +127,8 @@ struct Options {
     behavior: Behavior,
     worker_binary: Option<PathBuf>,
     assigned: bool,
+    /// Хаб отказывает в токене с кодом `revoked`.
+    refuse: bool,
 }
 
 impl Default for Options {
@@ -135,6 +137,7 @@ impl Default for Options {
             behavior: Behavior::default(),
             worker_binary: None,
             assigned: true,
+            refuse: false,
         }
     }
 }
@@ -145,6 +148,7 @@ impl Fixture {
             mut behavior,
             worker_binary,
             assigned,
+            refuse,
         } = options;
         let token = format!("carrier-secret-{}", Uuid::now_v7());
         behavior.token = token.clone();
@@ -164,7 +168,7 @@ impl Fixture {
             token,
             requests: Mutex::default(),
             observations: Mutex::default(),
-            refuse: Mutex::new(false),
+            refuse: Mutex::new(refuse),
         });
         let log = Arc::new(HubLog::default());
         let mut events = std::mem::replace(&mut hub.events, tokio::sync::mpsc::channel(1).1);
@@ -898,6 +902,48 @@ async fn unreachable_runner_reports_growing_consecutive_failures() {
     assert_eq!(counts[0], 1);
     stop.send(true).unwrap();
     join.await.unwrap();
+}
+
+/// Условие, которое сам носитель событием не объявляет (остановка проброса после отказа):
+/// проверяется по тику, пока не выполнится.
+async fn until_polled(what: &str, mut check: impl FnMut() -> bool) {
+    let mut tick = tokio::time::interval(Duration::from_millis(50));
+    tokio::time::timeout(WAIT, async {
+        loop {
+            tick.tick().await;
+            if check() {
+                return;
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_refused_token_parks_the_runner_until_the_next_list() {
+    let fixture = Fixture::start(Options {
+        refuse: true,
+        ..Default::default()
+    })
+    .await;
+    until("the first token request", || {
+        !fixture.control.requests().is_empty()
+    })
+    .await;
+    // Хаб отказал: проброс остановлен, воркер раннера не запускался, повторов вплотную нет.
+    until_polled("the forward to stop", || {
+        forward_pids(&fixture.root).is_empty()
+    })
+    .await;
+    assert_eq!(fixture.control.requests().len(), 1);
+    assert!(!fixture.root.join("worker.toml").exists());
+    // Следующий список от хаба (его присылают при каждом подключении) пробует снова.
+    fixture.assign.send(fixture.assigned()).unwrap();
+    until("the second token request", || {
+        fixture.control.requests().len() >= 2
+    })
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
