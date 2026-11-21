@@ -13,6 +13,7 @@ pub mod blocks;
 pub mod bookmarks;
 pub mod bus;
 pub mod cache_hint;
+pub mod cloud;
 pub mod compactions;
 pub mod config;
 pub mod conversations;
