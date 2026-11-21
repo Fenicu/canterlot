@@ -168,6 +168,23 @@ impl CarrierSettings {
     }
 }
 
+/// Раннер по идентификатору машины для команд носителя: пересечение конфигурации и текущего
+/// назначения хаба, как у присмотра (`desired`).
+pub fn targets(
+    entries: Vec<RunnerSsh>,
+    assigned: watch::Receiver<Vec<AssignedRunner>>,
+) -> stage::Targets {
+    Arc::new(move |machine| {
+        let list = assigned.borrow();
+        let runner = list.iter().find(|runner| runner.machine_id == machine)?;
+        let entry = entries.iter().find(|entry| entry.machine == runner.name)?;
+        script::valid_root(&runner.root_dir).then(|| stage::RunnerTarget {
+            alias: entry.ssh.clone(),
+            root: runner.root_dir.clone(),
+        })
+    })
+}
+
 /// Бинарник, который носитель кладёт на раннеры: свой собственный.
 #[derive(Clone, Debug)]
 pub(crate) struct LocalBinary {

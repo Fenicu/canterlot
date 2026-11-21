@@ -241,6 +241,28 @@ impl Store {
     }
 }
 
+/// Раз в час и при запуске убирает старые итоги, пока не придёт `shutdown`.
+pub async fn sweep_loop(
+    store: Arc<Store>,
+    retention: Duration,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
+    loop {
+        let sweeping = store.clone();
+        let removed =
+            tokio::task::spawn_blocking(move || sweeping.sweep(retention, SystemTime::now()))
+                .await
+                .unwrap_or(0);
+        if removed > 0 {
+            tracing::info!(removed, "old owner job results removed");
+        }
+        tokio::select! {
+            () = tokio::time::sleep(Duration::from_secs(3600)) => {}
+            _ = shutdown.wait_for(|stop| *stop) => return,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
