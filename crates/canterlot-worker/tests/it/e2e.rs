@@ -146,6 +146,8 @@ impl Fixture {
             execution: Default::default(),
             opencode: None,
             legacy_ignored: None,
+            hub_dial: None,
+            runners: Default::default(),
         };
         let mut fixture = Self {
             pool: pool.clone(),

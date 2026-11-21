@@ -26,6 +26,7 @@ chrono = "0.4.45"
 clap = { version = "4.6.7", features = ["derive"] }
 flate2 = "1.1.11"
 humantime-serde = "1.1.1"
+hyper-util = { version = "0.1.21", features = ["tokio"] }
 prost = "0.14.4"
 rand = "0.10.3"
 reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls-native-roots", "json"] }
@@ -39,6 +40,7 @@ tokio-stream = "0.1.19"
 tokio-util = { version = "0.7.20", features = ["rt"] }
 toml = "1.1.8"
 tonic = { version = "0.14.6", features = ["tls-ring"] }
+tower = { version = "0.5.3", features = ["util"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "env-filter"] }
 url = "2.5.8"

@@ -44,6 +44,8 @@ mod opencode;
 #[cfg(feature = "opencode-live")]
 #[path = "support/opencode_stub.rs"]
 mod opencode_stub;
+#[path = "support/sshd.rs"]
+mod sshd;
 #[cfg(feature = "synthetic-adapter")]
 #[path = "support/trace.rs"]
 mod trace;
@@ -54,6 +56,8 @@ mod attachments;
 mod canterlot_mcp_presets;
 mod canterlot_mcp_sessions;
 mod capabilities_cli;
+mod carrier;
+mod carrier_hub;
 mod claude_code_containment;
 mod claude_code_e2e;
 mod claude_code_input;
@@ -94,7 +98,9 @@ mod exec_attachments;
 mod exec_e2e;
 #[cfg(all(feature = "synthetic-adapter", feature = "fault-injection"))]
 mod exec_media;
+mod fatal_exit;
 mod git_facts;
+mod hub_dial;
 mod instructions;
 mod jobs;
 mod lease;

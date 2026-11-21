@@ -5,9 +5,11 @@ compile_error!("fault-injection must not be built in release");
 
 pub mod adapter;
 pub mod attachments;
+pub mod carrier;
 pub mod config;
 pub mod containment;
 pub mod exec;
+pub mod fatal;
 #[cfg(feature = "fault-injection")]
 pub mod fault_injection;
 pub mod jobs;

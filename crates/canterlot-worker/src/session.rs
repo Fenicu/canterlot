@@ -72,6 +72,25 @@ pub const CAPABILITY_MEMORY_SCOPE_V1: &str = "memory_scope_v1";
 /// Команды принимаются и факты пишутся только на соединении, где возможность согласована.
 pub const CAPABILITY_JOBS_INPLACE_V1: &str = "jobs_inplace_v1";
 
+/// Воркер-носитель ведёт раннеры по SSH: слушает `RunnersAssigned`, просит токены и шлёт
+/// наблюдения. Объявляется только с `[[runners.ssh]]`; хаб принимает сообщения лишь от несущей.
+pub const CAPABILITY_RUNNERS_V1: &str = "runners_v1";
+
+/// Носитель раннеров и его связь с потоком управления; создаётся только с `[[runners.ssh]]`.
+struct RunnersLink {
+    bridge: std::sync::Arc<crate::carrier::bridge::ControlBridge>,
+    assigned: Option<watch::Receiver<Vec<crate::carrier::AssignedRunner>>>,
+}
+
+/// Останавливает задачу носителя при любом выходе из `run`.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// Снимает согласованность задач на месте при любом выходе из сеанса.
 struct JobsGate(Option<std::sync::Arc<crate::jobs::JobManager>>);
 
@@ -120,6 +139,7 @@ pub const OPTIONAL_CAPABILITIES: &[&str] = &[
     CAPABILITY_MEMORY_SCOPE_V1,
     CAPABILITY_JOBS_INPLACE_V1,
     CAPABILITY_REMOTE_SPAWN_V1,
+    CAPABILITY_RUNNERS_V1,
 ];
 
 /// Возможности, которые воркер объявляет хабу. Без таблицы `[claude_code]` Claude Code
@@ -128,6 +148,7 @@ pub fn advertised_capabilities(config: &WorkerConfig) -> Vec<String> {
     OPTIONAL_CAPABILITIES
         .iter()
         .filter(|cap| **cap != "claude_histories_v1" || config.claude_code.is_some())
+        .filter(|cap| **cap != CAPABILITY_RUNNERS_V1 || !config.runners.ssh.is_empty())
         .map(|cap| (*cap).to_owned())
         .collect()
 }
@@ -413,9 +434,67 @@ impl WorkerError {
         }
     }
 
+    /// Слово для `<data_dir>/fatal`, если воркер сам не оправится и носителю нужно действие.
+    pub fn fatal_reason(&self) -> Option<&'static str> {
+        match self {
+            Self::Hub {
+                code: tonic::Code::Unauthenticated,
+                ..
+            }
+            | Self::Rejected {
+                retryable: false, ..
+            } => Some(crate::fatal::UNAUTHENTICATED),
+            Self::RestoreGenerationChanged | Self::GenerationMismatch | Self::StateDivergence => {
+                Some(crate::fatal::RESTORE_GENERATION)
+            }
+            Self::InvalidConfig => Some(crate::fatal::CONFIG),
+            Self::Config(error) => error.fatal_reason(),
+            _ => None,
+        }
+    }
+
     /// Код выхода процесса, если ошибка требует штатного перезапуска службы.
     pub fn exit_code(&self) -> Option<u8> {
         matches!(self, Self::StorageRestart).then_some(STORAGE_RESTART_EXIT_CODE)
+    }
+}
+
+/// Соединитель `hub_dial`: любой адрес из `hub_url` ведёт в один Unix-сокет. Имя из `hub_url`
+/// остаётся только для TLS, поэтому сертификат хаба проверяется как при прямом соединении.
+fn unix_connector(
+    path: &std::path::Path,
+) -> impl tower::Service<
+    tonic::codegen::http::Uri,
+    Response = hyper_util::rt::TokioIo<tokio::net::UnixStream>,
+    Error = std::io::Error,
+    Future = impl Send,
+> + Send
++ 'static {
+    let path = path.to_path_buf();
+    tower::service_fn(move |_: tonic::codegen::http::Uri| {
+        let path = path.clone();
+        async move {
+            Ok::<_, std::io::Error>(hyper_util::rt::TokioIo::new(
+                tokio::net::UnixStream::connect(path).await?,
+            ))
+        }
+    })
+}
+
+async fn dial_hub(
+    endpoint: &Endpoint,
+    dial: Option<&std::path::Path>,
+) -> Result<tonic::transport::Channel, tonic::transport::Error> {
+    match dial {
+        Some(path) => endpoint.connect_with_connector(unix_connector(path)).await,
+        None => endpoint.connect().await,
+    }
+}
+
+fn dial_hub_lazy(endpoint: &Endpoint, dial: Option<&std::path::Path>) -> tonic::transport::Channel {
+    match dial {
+        Some(path) => endpoint.connect_with_connector_lazy(unix_connector(path)),
+        None => endpoint.connect_lazy(),
     }
 }
 
@@ -587,6 +666,7 @@ pub struct Worker {
     /// Уборка файлов секретов: живёт столько же, сколько менеджер исполнений.
     sweeper: Option<tokio::task::JoinHandle<()>>,
     lease: Option<crate::lease::server::LeaseServer>,
+    runners: Option<RunnersLink>,
 }
 
 type MetricsFuture = Pin<
@@ -717,7 +797,15 @@ impl Worker {
             PathBuf::from(crate::machine::worktree_root(&config.data_dir)),
             config.machine.hotspot_roots(),
         );
+        let runners = (!config.runners.ssh.is_empty()).then(|| {
+            let (bridge, assigned) = crate::carrier::bridge::ControlBridge::new();
+            RunnersLink {
+                bridge,
+                assigned: Some(assigned),
+            }
+        });
         Self {
+            runners,
             watchdog: std::sync::Arc::new(watchdog),
             systemd_watchdog: crate::watchdog::SystemdWatchdog::from_env(),
             limits_cache,
@@ -1024,6 +1112,16 @@ impl Worker {
         let mut cap = self.config.timers.backoff_min;
         let mut read_retries = 0;
         let mut refusal = None;
+        // Носитель живёт дольше одного соединения и останавливается вместе с воркером.
+        let _carrier = self.runners.as_mut().and_then(|link| {
+            let assigned = link.assigned.take()?;
+            Some(AbortOnDrop(tokio::spawn(crate::carrier::run(
+                crate::carrier::CarrierSettings::from_config(&self.config),
+                link.bridge.clone(),
+                assigned,
+                shutdown.clone(),
+            ))))
+        });
         // Воркер готов принимать работу; с этого места главный цикл шлёт пинги.
         self.systemd_watchdog.ready();
         loop {
@@ -1254,13 +1352,15 @@ impl Worker {
             .keep_alive_timeout(self.config.timers.http2_keepalive_timeout)
             .keep_alive_while_idle(true)
             .buffer_size(8);
+        let dial = self
+            .config
+            .hub_dial_path()
+            .map_err(|_| WorkerError::InvalidConfig)?;
         let (control, data) = timeout(self.config.timers.handshake, async {
-            let control = endpoint
-                .connect()
+            let control = dial_hub(&endpoint, dial.as_deref())
                 .await
                 .map_err(|_| WorkerError::Transport)?;
-            let data = endpoint
-                .connect()
+            let data = dial_hub(&endpoint, dial.as_deref())
                 .await
                 .map_err(|_| WorkerError::Transport)?;
             Ok::<_, WorkerError>((control, data))
@@ -1306,9 +1406,12 @@ impl Worker {
             .max_decoding_message_size(MAX_MESSAGE_BYTES)
             .max_encoding_message_size(MAX_MESSAGE_BYTES);
         // Третье соединение подключается при первой загрузке картинки.
-        let media = WorkerDataClient::with_interceptor(endpoint.connect_lazy(), auth.clone())
-            .max_decoding_message_size(MAX_MESSAGE_BYTES)
-            .max_encoding_message_size(MAX_MESSAGE_BYTES);
+        let media = WorkerDataClient::with_interceptor(
+            dial_hub_lazy(&endpoint, dial.as_deref()),
+            auth.clone(),
+        )
+        .max_decoding_message_size(MAX_MESSAGE_BYTES)
+        .max_encoding_message_size(MAX_MESSAGE_BYTES);
         let mut data = WorkerDataClient::with_interceptor(data, auth)
             .max_decoding_message_size(MAX_MESSAGE_BYTES)
             .max_encoding_message_size(MAX_MESSAGE_BYTES);
@@ -1463,6 +1566,20 @@ impl Worker {
             .map(|jobs| jobs.subscribe_chunks());
         let mut jobs_outbound: Option<ControlUp> = None;
         let mut chunk_outbound: VecDeque<ControlUp> = VecDeque::new();
+        // Мост носителя принимает запросы только на соединении, где `runners_v1` согласована:
+        // иначе хаб закрыл бы поток отказом `capability_missing`.
+        let runners_bridge = self
+            .runners
+            .as_ref()
+            .filter(|_| {
+                accepted
+                    .capabilities
+                    .iter()
+                    .any(|cap| cap == CAPABILITY_RUNNERS_V1)
+            })
+            .map(|link| link.bridge.clone());
+        let _runners_link = runners_bridge.as_ref().map(|bridge| bridge.connect());
+        let mut runners_outbound: Option<ControlUp> = None;
         let watch_enabled = pilot && accepted.capabilities.iter().any(|cap| cap == "watchdog_v1");
         if watch_enabled {
             self.watchdog.ensure_started();
@@ -1904,6 +2021,7 @@ impl Worker {
                 || lease_outbound.is_some()
                 || jobs_outbound.is_some()
                 || !chunk_outbound.is_empty()
+                || runners_outbound.is_some()
                 || watch_outbound.is_some()
                 || report_outbound.is_some()
                 || range_outbound.is_some()
@@ -1953,6 +2071,15 @@ impl Worker {
                             }
                         }
                         Some(control_down::Msg::Command(command)) => { commands.push_back(command); }
+                        Some(control_down::Msg::RunnersAssigned(list)) if runners_bridge.is_some() => {
+                            runners_bridge.as_ref().unwrap().on_assigned(list);
+                        }
+                        Some(control_down::Msg::RunnerToken(token)) if runners_bridge.is_some() => {
+                            runners_bridge.as_ref().unwrap().on_token(token);
+                        }
+                        Some(control_down::Msg::RunnerTokenRefused(refused)) if runners_bridge.is_some() => {
+                            runners_bridge.as_ref().unwrap().on_refused(refused);
+                        }
                         Some(control_down::Msg::SecretDeliver(request)) if secret_enabled => {
                             // Запись файла коротка и не держит пульс: значение живёт
                             // только в этом сообщении и в файле.
@@ -2073,6 +2200,7 @@ impl Worker {
                     else if let Some(message)=lease_outbound.take() {message}
                     else if let Some(message)=jobs_outbound.take() {message}
                     else if let Some(message)=chunk_outbound.pop_front() {message}
+                    else if let Some(message)=runners_outbound.take() {message}
                     else if let Some(message)=watch_outbound.take() {message}
                     else if let Some(message) = report_outbound.take() {
                         manager.on_hub_session(data::session_committed(&hello, &accepted,self.manager.as_ref().unwrap())?);
@@ -2166,6 +2294,9 @@ impl Worker {
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => chunk_updates = None,
                     }
+                }
+                up = async { runners_bridge.as_ref().unwrap().next_up().await }, if runners_bridge.is_some() && runners_outbound.is_none() => {
+                    runners_outbound = up;
                 }
                 _ = sleep_until(watch_at), if watch_enabled && watch_operation.is_none() => {
                     watch_at = Instant::now() + crate::machine::watch::SHORT_PASS;

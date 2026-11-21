@@ -396,20 +396,47 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     init_tracing();
-    let (config, store) = tokio::task::spawn_blocking(move || {
+    // Каталог данных нужен для слова `fatal` и тогда, когда сам конфиг не разобрался.
+    let data_dir_hint = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| canterlot_worker::fatal::data_dir_hint(&text));
+    let loaded = tokio::task::spawn_blocking(move || {
         let config = config::load(&path)?;
         let _token = config::read_token(&config.token_file)?;
         let store = WorkerStore::open(&config.data_dir)?;
+        // Обычный запуск: слово прошлого смертельного выхода отработано.
+        canterlot_worker::fatal::clear(&config.data_dir);
         Ok::<_, Box<dyn std::error::Error + Send + Sync>>((config, store))
     })
-    .await?
-    .map_err(|error| -> Box<dyn std::error::Error> { error })?;
+    .await?;
+    let (config, store) = match loaded {
+        Ok(loaded) => loaded,
+        Err(error) => {
+            if let (Some(dir), Some(reason)) = (
+                &data_dir_hint,
+                error
+                    .downcast_ref::<config::ConfigError>()
+                    .and_then(config::ConfigError::fatal_reason),
+            ) {
+                canterlot_worker::fatal::write(dir, reason);
+            }
+            return Err(error);
+        }
+    };
+    let data_dir = config.data_dir.clone();
     let (stop, shutdown) = watch::channel(false);
     let worker = Worker::new(config, store);
     let run = worker.run(shutdown);
     tokio::pin!(run);
     tokio::select! {
-        result = &mut run => result?,
+        result = &mut run => {
+            if let Err(error) = &result
+                && let Some(reason) = error.fatal_reason()
+            {
+                canterlot_worker::fatal::write(&data_dir, reason);
+            }
+            result?
+        }
         result = shutdown_signals(stop) => result?,
     }
     Ok(())

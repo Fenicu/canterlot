@@ -498,6 +498,8 @@ impl Pilot {
             },
             opencode: None,
             legacy_ignored: None,
+            hub_dial: None,
+            runners: Default::default(),
             secrets: options.secrets,
             memory: Default::default(),
             jobs: Default::default(),
