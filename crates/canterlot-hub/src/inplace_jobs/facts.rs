@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use super::{
     Job, LIVE_TAIL_BYTES, Outcome, RESULT_TAIL_BYTES, State, advance_to_in_tx,
-    dispatch_machine_in_tx, finish_in_tx, load, lock_machine, lock_row,
+    dispatch_machine_in_tx, finish_in_tx, load, lock_machine, lock_row, runner_finished_in_tx,
 };
 
 /// Строка задачи этой машины и этой попытки под замками; `None` — чужая или неизвестная.
@@ -25,11 +25,11 @@ async fn locked(
     let Ok(id) = Uuid::parse_str(job_id) else {
         return Ok(None);
     };
-    let owned: Option<Uuid> = sqlx::query_scalar("select machine_id from jobs where id=$1")
+    let owned: Option<Option<Uuid>> = sqlx::query_scalar("select machine_id from jobs where id=$1")
         .bind(id)
         .fetch_optional(&mut *conn)
         .await?;
-    if owned != Some(machine_id) {
+    if owned.flatten() != Some(machine_id) {
         return Ok(None);
     }
     lock_machine(conn, machine_id).await?;
@@ -83,7 +83,7 @@ pub async fn apply_command_rejected(
     let Some(job) = lock_row(conn, id).await? else {
         return Ok(());
     };
-    if job.machine_id != machine_id || job.is_terminal() {
+    if job.machine_id != Some(machine_id) || job.is_terminal() {
         return Ok(());
     }
     let reason: String = reason
@@ -257,10 +257,14 @@ pub async fn apply_finished(
         }
         return Ok(());
     }
+    // Итог уже сохранён, идёт сбор: повтор факта ничего не меняет.
+    if job.state() == State::Collecting {
+        return Ok(());
+    }
     let keep = fact.tail.len().saturating_sub(RESULT_TAIL_BYTES);
     let tail = fact.tail[keep..].to_vec();
     let reason = reason.map(str::to_owned);
-    finish_in_tx(
+    runner_finished_in_tx(
         conn,
         &job,
         Outcome {
@@ -335,7 +339,8 @@ pub async fn finish_from_report(
         .bind(id)
         .fetch_one(&mut *conn)
         .await?;
-    let Some(report) = report.filter(|_| !job.is_terminal()) else {
+    let Some(report) = report.filter(|_| !job.is_terminal() && job.state() != State::Collecting)
+    else {
         return Ok(false);
     };
     let outcome = report["outcome"]
@@ -343,7 +348,7 @@ pub async fn finish_from_report(
         .and_then(|v| i32::try_from(v).ok());
     let (state, reason) = finished_state(outcome.unwrap_or_default());
     let reason = reason.unwrap_or("tail_unavailable");
-    finish_in_tx(
+    runner_finished_in_tx(
         conn,
         &job,
         Outcome {

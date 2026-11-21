@@ -94,6 +94,7 @@ pub const TOOLS: &[&str] = &[
     "job.log",
     "job.cancel",
     "jobs.list",
+    "runners.list",
 ];
 
 pub fn is_tool(name: &str) -> bool {
@@ -118,6 +119,10 @@ pub enum ToolErrorCode {
     RemoteWorkDisabled,
     /// Машина — раннер: сессий на ней нет, задачи (`job_run`) идут.
     MachineIsRunner,
+    /// `machine: "auto"` без `source`: хаб размещает только задачи с исходниками.
+    SourceRequired,
+    /// Ни один раннер несущей и ни одно разрешённое место не подходит по меткам.
+    NoRunnerCanSatisfy,
     PermissionModeTooWide,
     ProfileUnknown,
     MachineUnavailable,
@@ -159,7 +164,7 @@ pub enum ToolErrorCode {
 }
 
 impl ToolErrorCode {
-    pub const ALL: [Self; 48] = [
+    pub const ALL: [Self; 50] = [
         Self::UnknownTool,
         Self::SessionNotFound,
         Self::ReadOnlySession,
@@ -173,6 +178,8 @@ impl ToolErrorCode {
         Self::DomainMismatch,
         Self::RemoteWorkDisabled,
         Self::MachineIsRunner,
+        Self::SourceRequired,
+        Self::NoRunnerCanSatisfy,
         Self::PermissionModeTooWide,
         Self::ProfileUnknown,
         Self::MachineUnavailable,
@@ -225,6 +232,8 @@ impl ToolErrorCode {
             Self::DomainMismatch => "domain_mismatch",
             Self::RemoteWorkDisabled => "remote_work_disabled",
             Self::MachineIsRunner => "machine_is_runner",
+            Self::SourceRequired => "source_required",
+            Self::NoRunnerCanSatisfy => "no_runner_can_satisfy",
             Self::PermissionModeTooWide => "permission_mode_too_wide",
             Self::ProfileUnknown => "profile_unknown",
             Self::MachineUnavailable => "machine_unavailable",
@@ -280,6 +289,8 @@ impl ToolErrorCode {
                 "The owner has not allowed other machines to start work on this machine"
             }
             Self::MachineIsRunner => "This machine is a runner: sessions do not start on it",
+            Self::SourceRequired => "Automatic placement needs a source",
+            Self::NoRunnerCanSatisfy => "No runner can ever satisfy the labels and placement",
             Self::PermissionModeTooWide => "The mode is wider than the parent session's",
             Self::ProfileUnknown => "Unknown instruction preset",
             Self::MachineUnavailable => "The machine is not available",
@@ -351,6 +362,12 @@ impl ToolErrorCode {
             }
             Self::MachineIsRunner => {
                 "Start the session on a worker machine, or run the command there with job_run and machine set to the runner."
+            }
+            Self::SourceRequired => {
+                "Pass source {repo, rev} (absolute repo path, full 40-hex commit), or name the machine and workdir."
+            }
+            Self::NoRunnerCanSatisfy => {
+                "Call runners_list to see the labels of the runners, drop a label, or allow more placement kinds."
             }
             Self::PermissionModeTooWide => {
                 "Pass a mode no wider than this session's, or ask the owner to approve."
@@ -568,6 +585,7 @@ pub async fn call(
         "job.log" => inplace_jobs::log(context, caller, arguments, None).await,
         "job.cancel" => inplace_jobs::cancel(context, caller, arguments).await,
         "jobs.list" => inplace_jobs::list(context, caller, arguments).await,
+        "runners.list" => inplace_jobs::runners(context, caller, arguments).await,
         _ => Err(ToolError::new(ToolErrorCode::UnknownTool)),
     }
 }

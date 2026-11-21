@@ -97,10 +97,24 @@ fn session_tools_listed_for_all_three_providers() {
         let memory_tools = 5;
         // job_run, job_status, job_log, job_cancel, jobs_list.
         let job_tools = mcp::JOB_TOOLS.len();
+        // runners_list: раннеры несущей, только чтение.
+        let runners_tools = 1;
         let expected = if tool_set == ToolSet::ApproveAndLimits {
-            2 + 3 + SESSION_TOOLS.len() + 1 + settings_tools + memory_tools + job_tools
+            2 + 3
+                + SESSION_TOOLS.len()
+                + 1
+                + settings_tools
+                + memory_tools
+                + job_tools
+                + runners_tools
         } else {
-            1 + 3 + SESSION_TOOLS.len() + 1 + settings_tools + memory_tools + job_tools
+            1 + 3
+                + SESSION_TOOLS.len()
+                + 1
+                + settings_tools
+                + memory_tools
+                + job_tools
+                + runners_tools
         };
         assert_eq!(tools.len(), expected, "{provider}");
         for required in [
@@ -233,6 +247,7 @@ fn read_tools_are_read_only() {
                         | "route_preview"
                         | "plan_list"
                         | "history_search"
+                        | "runners_list"
                 )
             };
             assert_eq!(
@@ -290,7 +305,12 @@ fn job_tools_are_shell_power_in_the_mode_table_and_strict_in_schema() {
             );
         }
         let run = tools.iter().find(|tool| tool["name"] == "job_run").unwrap();
-        assert_eq!(run["inputSchema"]["required"], json!(["workdir", "shell"]));
+        // `workdir` нужен без `source`; с `source` каталог выбирает хаб.
+        assert_eq!(run["inputSchema"]["required"], json!(["shell"]));
+        assert_eq!(
+            run["inputSchema"]["properties"]["source"]["required"],
+            json!(["repo", "rev"])
+        );
         let properties = &run["inputSchema"]["properties"];
         assert!(properties.get("argv").is_none(), "shell only, no argv form");
         assert_eq!(properties["wait_seconds"]["maximum"], 60);
@@ -640,11 +660,12 @@ fn no_agent_tool_applies_a_setting_itself() {
                 || hub_name.starts_with("secrets.")
                 || hub_name.starts_with("settings.")
                 || hub_name.starts_with("job.")
-                || hub_name.starts_with("jobs."),
+                || hub_name.starts_with("jobs.")
+                || hub_name.starts_with("runners."),
             "{hub_name}"
         );
     }
-    assert_eq!(mcp::AGENT_TOOLS.len(), 42);
+    assert_eq!(mcp::AGENT_TOOLS.len(), 43);
 }
 
 #[tokio::test]

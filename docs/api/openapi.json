@@ -19319,9 +19319,6 @@
         "required": [
           "id",
           "state",
-          "machine_id",
-          "machine_name",
-          "workdir",
           "shell",
           "lease",
           "timeout_minutes",
@@ -19330,6 +19327,8 @@
           "cancel_requested",
           "has_log",
           "machine_offline",
+          "labels",
+          "expected_minutes",
           "created_at"
         ],
         "properties": {
@@ -19373,6 +19372,10 @@
             ],
             "format": "int32"
           },
+          "expected_minutes": {
+            "type": "integer",
+            "format": "int32"
+          },
           "finished_at": {
             "type": [
               "string",
@@ -19387,6 +19390,12 @@
             "type": "string",
             "format": "uuid"
           },
+          "labels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
           "late_report": {
             "type": [
               "object",
@@ -19397,11 +19406,18 @@
             "type": "string"
           },
           "machine_id": {
-            "type": "string",
-            "format": "uuid"
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Пусто, пока задача ждёт раннер (`waiting_runner`)."
           },
           "machine_name": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "machine_offline": {
             "type": "boolean",
@@ -19411,8 +19427,31 @@
             "type": "integer",
             "format": "int64"
           },
+          "outputs_dir": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Каталог на несущей, куда собраны результаты."
+          },
+          "outputs_note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "shell": {
             "type": "string"
+          },
+          "source": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SourceView"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "started_at": {
             "type": [
@@ -19438,7 +19477,10 @@
             "type": "boolean"
           },
           "workdir": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -25354,6 +25396,22 @@
           }
         },
         "additionalProperties": false
+      },
+      "SourceView": {
+        "type": "object",
+        "description": "Источник задачи для клиентов: имя каталога и короткая ревизия, не полный локальный путь.",
+        "required": [
+          "repo",
+          "rev"
+        ],
+        "properties": {
+          "repo": {
+            "type": "string"
+          },
+          "rev": {
+            "type": "string"
+          }
+        }
       },
       "SpawnQueueActionView": {
         "type": "object",

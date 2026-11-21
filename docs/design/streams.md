@@ -8,6 +8,8 @@
 
 Необязательная возможность `runners_v1` (1.46) согласуется через `Hello.optional_capabilities` и включает на потоке управления пять непостоянных сообщений для несущей раннеров: `RunnersAssigned`, `RunnerToken` и `RunnerTokenRefused` вниз (`ControlDown` 13–15), `RunnerTokenRequest` и `RunnerObservation` вверх (`ControlUp` 18–19). Хаб принимает вверх идущие сообщения только на соединении с согласованной возможностью и от машины с ролью `worker` и флагом `is_carrier`; без возможности поток закрывается `invalid_argument capability_missing`, прочим отправителям отвечает код отказа. Эти сообщения не попадают в outbox и журналы; `RunnerToken` несёт токен раннера и скрыт в `Debug`. Подробности: pilot.md, «Раннеры как машины».
 
+Этап B2 той же возможности (`runners_v1`) добавляет задачи на раннерах. На потоке управления: `OwnerJobSubmit` вверх (`ControlUp` 20; задача владельца из терминала несущей, непостоянное, `Debug` печатает лишь размер описания) и `OwnerJobAccepted`/`OwnerJobRefused` вниз (`ControlDown` 16–17). Долговечные команды несущей в outbox (`Command` 25–28, уровень машины, `execution_id` пуст, идемпотентны по `job_id`, на соединении без `runners_v1` не уходят и не переигрываются): `StageSource`, `CollectOutputs`, `CleanupSource`, `OwnerJobFinished` (тело итога скрыто в `Debug`). Ответ несущей — факты журнала (`RecordBody` 53–57): `SourceStaged`, `SourceStageFailed`, `OutputsCollected`, `OutputsCollectFailed`, `SourceCleaned`; хаб применяет их только от несущей этой задачи (`jobs.carrier_id`, роль `worker`, флаг `is_carrier`), чужой факт записывает предупреждением `carrier_fact_refused` и ничего не меняет.
+
 ### Первое сообщение каждого потока (§8.6 п. 2)
 
 | Поле | Назначение |

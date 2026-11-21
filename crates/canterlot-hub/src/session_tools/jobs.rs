@@ -338,7 +338,7 @@ pub async fn run_in_tx(
             {
                 return Ok(JobOutcome::Retry { at, poll: false });
             }
-            let machine = crate::inplace_jobs::machine_name(conn, task.machine_id).await?;
+            let machine = crate::inplace_jobs::job_machine_name(conn, &task).await?;
             // Хвост вывода бывает чем угодно: текст, не прошедший проверку ввода, не должен
             // стать постоянной потерей итога, поэтому он сжимается до короткого без хвоста.
             let text = crate::inplace_jobs::message_for_delivery(&task, &machine, |text| {
@@ -353,7 +353,7 @@ pub async fn run_in_tx(
             let event = origin::HubEvent {
                 kind: "job_result".to_owned(),
                 state: Some(task.state.clone()),
-                machine_id: Some(task.machine_id),
+                machine_id: task.machine_id,
                 machine_name: Some(origin::clean_title(&machine)),
                 details: Some(json!({
                     "job_id": task.id,

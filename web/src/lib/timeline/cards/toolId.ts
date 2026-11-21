@@ -51,7 +51,9 @@ const CANTERLOT_TOOLS: Record<string, string> = {
   job_status: 'job_status',
   job_log: 'job_log',
   job_cancel: 'job_cancel',
-  jobs_list: 'jobs_list'
+  jobs_list: 'jobs_list',
+  // Раннеры несущей: карточки пока нет, ответ показывается обычным блоком инструмента.
+  runners_list: 'runners_list'
 };
 
 /** Все имена инструментов canterlot, как их объявляет воркер. */
