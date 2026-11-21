@@ -13,7 +13,6 @@
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
 
 use axum::Extension;
 use axum::Router;
@@ -77,7 +76,11 @@ pub struct FakeServer {
     pub cpu: u64,
     pub ram_mb: u64,
     pub disk_mb: u64,
-    pub created: Instant,
+    /// Сколько ещё запросов `GET /servers/{id}` ответят `installing`, прежде чем сервер
+    /// станет `on` с адресом.
+    pub boot_polls_left: u32,
+    /// Сколько ещё листингов проекта (первых страниц) не покажут сервер.
+    pub hidden_polls_left: u32,
     pub request: Value,
 }
 
@@ -106,7 +109,6 @@ pub struct RecordedRequest {
     pub query: HashMap<String, String>,
     pub body: Option<Value>,
     pub authorization: Option<String>,
-    pub at: Instant,
 }
 
 pub struct FakeState {
@@ -131,10 +133,12 @@ pub struct FakeState {
     pub list_ignores_paging: bool,
     /// Подменить `meta.total`.
     pub list_total_override: Option<u64>,
-    /// Сервер виден в списке проекта только через это время после создания.
-    pub listing_delay: Duration,
-    /// Сервер из `installing` становится `on` с адресом через это время после создания.
-    pub boot_delay: Duration,
+    /// Сервер, созданный запросом, не виден в первых стольких листингах проекта. Счёт
+    /// идёт по листингам, а не по часам: тест не зависит от скорости машины.
+    pub listing_hidden_polls: u32,
+    /// Сервер, созданный запросом, отвечает `installing` на первые столько запросов
+    /// `GET /servers/{id}`, потом становится `on` с адресом.
+    pub boot_polls: u32,
     /// Подмешивать в тексты ошибок заголовок Authorization, как делает неряшливый сервер.
     pub echo_authorization_in_errors: bool,
     pub requests: Vec<RecordedRequest>,
@@ -175,8 +179,8 @@ impl FakeState {
             list_fail_page: None,
             list_ignores_paging: false,
             list_total_override: None,
-            listing_delay: Duration::ZERO,
-            boot_delay: Duration::ZERO,
+            listing_hidden_polls: 0,
+            boot_polls: 0,
             echo_authorization_in_errors: false,
             requests: Vec::new(),
         }
@@ -197,7 +201,8 @@ impl FakeState {
                 cpu: 1,
                 ram_mb: 1024,
                 disk_mb: 10240,
-                created: Instant::now(),
+                boot_polls_left: 0,
+                hidden_polls_left: 0,
                 request: Value::Null,
             },
         );
@@ -342,8 +347,8 @@ fn error_response(state: &FakeState, status: u16, message: &str, auth: Option<&s
     json_response(status, &error_body(status, &message))
 }
 
-fn server_json(server: &FakeServer, state: &FakeState) -> Value {
-    let booted = server.created.elapsed() >= state.boot_delay;
+fn server_json(server: &FakeServer) -> Value {
+    let booted = server.boot_polls_left == 0;
     let ips = if booted {
         let host = u8::try_from(server.id % 250).unwrap_or(1).max(1);
         json!([{"type": "ipv4", "ip": format!("203.0.113.{host}"), "is_main": true}])
@@ -416,7 +421,6 @@ async fn dispatch(state: Arc<Mutex<FakeState>>, kill: Kill, request: Request) ->
             query: query.clone(),
             body: body.clone(),
             authorization: auth.clone(),
-            at: Instant::now(),
         });
         route(&mut st, &method, &path, &query, body, auth.as_deref())
     };
@@ -522,12 +526,19 @@ fn route(
         }
         ("POST", ["api", "v1", "servers"]) => create_server(st, body, auth),
         ("GET", ["api", "v1", "servers", id]) => {
-            let found = id.parse::<i64>().ok().and_then(|id| st.servers.get(&id));
+            let found = id
+                .parse::<i64>()
+                .ok()
+                .and_then(|id| st.servers.get_mut(&id));
             match found {
-                Some(server) => Action::Respond(json_response(
-                    200,
-                    &json!({"server": server_json(server, st), "response_id": "r"}),
-                )),
+                Some(server) => {
+                    let rendered = server_json(server);
+                    server.boot_polls_left = server.boot_polls_left.saturating_sub(1);
+                    Action::Respond(json_response(
+                        200,
+                        &json!({"server": rendered, "response_id": "r"}),
+                    ))
+                }
                 None => Action::Respond(error_response(st, 404, "Resource not found", auth)),
             }
         }
@@ -536,13 +547,22 @@ fn route(
             let Ok(project_id) = project.parse::<i64>() else {
                 return Action::Respond(error_response(st, 400, "Bad project", auth));
             };
-            let delay = st.listing_delay;
-            let visible: Vec<Value> = st
+            // Скрытый сервер «стареет» по листингам: счётчик убывает на первой странице.
+            let first_page = query.get("offset").is_none_or(|offset| offset == "0");
+            let mut visible: Vec<Value> = Vec::new();
+            for server in st
                 .servers
-                .values()
-                .filter(|s| s.project_id == project_id && s.created.elapsed() >= delay)
-                .map(|s| server_json(s, st))
-                .collect();
+                .values_mut()
+                .filter(|s| s.project_id == project_id)
+            {
+                if server.hidden_polls_left > 0 {
+                    if first_page {
+                        server.hidden_polls_left -= 1;
+                    }
+                    continue;
+                }
+                visible.push(server_json(server));
+            }
             page_response(st, query, visible, "servers")
         }
         _ => Action::Respond(error_response(st, 404, "Resource not found", auth)),
@@ -626,10 +646,11 @@ fn create_server(st: &mut FakeState, body: Option<Value>, auth: Option<&str>) ->
         cpu: configuration["cpu"].as_u64().unwrap_or(0),
         ram_mb: configuration["ram"].as_u64().unwrap_or(0),
         disk_mb: configuration["disk"].as_u64().unwrap_or(0),
-        created: Instant::now(),
+        boot_polls_left: st.boot_polls,
+        hidden_polls_left: st.listing_hidden_polls,
         request: body,
     };
-    let rendered = server_json(&server, st);
+    let rendered = server_json(&server);
     st.servers.insert(id, server);
     match mode {
         CreateMode::AcceptThenDrop => Action::Drop,

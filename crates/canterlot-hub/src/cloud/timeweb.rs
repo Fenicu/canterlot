@@ -215,20 +215,15 @@ impl TimewebProvider {
                 tracing::warn!(endpoint, "timeweb rate limit did not clear, giving up");
                 return Err(Transport::RateLimited);
             }
-            let wait = match retry_after {
-                Some(seconds) => Duration::from_secs(seconds),
-                None => self
-                    .default_backoff
-                    .saturating_mul(2u32.saturating_pow(attempt))
-                    .min(self.max_backoff),
-            };
-            if wait > self.max_backoff {
+            let Some(wait) =
+                rate_limit_wait(retry_after, attempt, self.default_backoff, self.max_backoff)
+            else {
                 tracing::warn!(
                     endpoint,
                     "timeweb Retry-After is beyond the bound, giving up"
                 );
                 return Err(Transport::RateLimited);
-            }
+            };
             tracing::debug!(
                 endpoint,
                 wait_ms = wait.as_millis() as u64,
@@ -348,6 +343,25 @@ impl TimewebProvider {
             expected: 0,
             got: seen.len() as u64,
         })
+    }
+}
+
+/// Пауза перед повтором после 429, номер повтора с нуля. `Retry-After` берётся как есть;
+/// без него пауза `default × 2^attempt`, не больше `max`. `None`: `Retry-After` больше
+/// границы, ждать столько не будем.
+fn rate_limit_wait(
+    retry_after_seconds: Option<u64>,
+    attempt: u32,
+    default: Duration,
+    max: Duration,
+) -> Option<Duration> {
+    match retry_after_seconds {
+        Some(seconds) => Some(Duration::from_secs(seconds)).filter(|wait| *wait <= max),
+        None => Some(
+            default
+                .saturating_mul(2u32.saturating_pow(attempt))
+                .min(max),
+        ),
     }
 }
 
@@ -671,5 +685,46 @@ impl CloudProvider for TimewebProvider {
             .map(parse_summary)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| ListError::Page { offset: 0, error })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const DEFAULT: Duration = Duration::from_millis(100);
+    const MAX: Duration = Duration::from_secs(60);
+
+    #[test]
+    fn retry_after_is_honoured_up_to_the_bound() {
+        assert_eq!(
+            rate_limit_wait(Some(0), 0, DEFAULT, MAX),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(
+            rate_limit_wait(Some(7), 3, DEFAULT, MAX),
+            Some(Duration::from_secs(7))
+        );
+        assert_eq!(rate_limit_wait(Some(60), 0, DEFAULT, MAX), Some(MAX));
+        assert_eq!(rate_limit_wait(Some(61), 0, DEFAULT, MAX), None);
+        assert_eq!(rate_limit_wait(Some(u64::MAX), 0, DEFAULT, MAX), None);
+    }
+
+    #[test]
+    fn without_retry_after_the_pause_doubles_and_is_capped() {
+        let waits: Vec<_> = (0..4)
+            .map(|attempt| rate_limit_wait(None, attempt, DEFAULT, MAX).unwrap())
+            .collect();
+        assert_eq!(
+            waits,
+            [
+                Duration::from_millis(100),
+                Duration::from_millis(200),
+                Duration::from_millis(400),
+                Duration::from_millis(800),
+            ]
+        );
+        assert_eq!(rate_limit_wait(None, 40, DEFAULT, MAX), Some(MAX));
+        assert_eq!(rate_limit_wait(None, u32::MAX, DEFAULT, MAX), Some(MAX));
     }
 }

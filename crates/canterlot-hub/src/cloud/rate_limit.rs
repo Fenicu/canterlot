@@ -72,83 +72,99 @@ impl RateLimiter {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use futures_util::FutureExt as _;
+
     use super::*;
+
+    /// Запрос проходит сразу, без ожидания. Незавершённое ожидание отбрасывается и ничего
+    /// не записывает.
+    fn passes_now(limiter: &RateLimiter, endpoint: &'static str) -> bool {
+        limiter.acquire(endpoint).now_or_never().is_some()
+    }
+
+    fn limiter(max: u32, per: Duration) -> RateLimiter {
+        RateLimiter::new(RateLimit { max, per })
+    }
 
     #[tokio::test(start_paused = true)]
     async fn spreads_requests_over_the_window() {
-        let limiter = RateLimiter::new(RateLimit {
-            max: 3,
-            per: Duration::from_secs(1),
-        });
-        let start = Instant::now();
-        let mut stamps = Vec::new();
-        for _ in 0..7 {
-            limiter.acquire("GET /a").await;
-            stamps.push(start.elapsed());
+        let limiter = limiter(3, Duration::from_secs(1));
+        for _ in 0..3 {
+            assert!(passes_now(&limiter, "GET /a"));
         }
-        for window in stamps.windows(4) {
-            assert!(
-                window[3] - window[0] >= Duration::from_secs(1),
-                "four requests inside one second: {window:?}"
-            );
+        assert!(!passes_now(&limiter, "GET /a"), "fourth inside the window");
+        tokio::time::advance(Duration::from_millis(999)).await;
+        assert!(!passes_now(&limiter, "GET /a"), "still inside the window");
+        tokio::time::advance(Duration::from_millis(1)).await;
+        // Окно целиком вышло: снова три запроса сразу.
+        for _ in 0..3 {
+            assert!(passes_now(&limiter, "GET /a"));
         }
-        // Первые три идут сразу.
-        assert_eq!(stamps[2], Duration::ZERO);
+        assert!(!passes_now(&limiter, "GET /a"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_window_slides_instead_of_resetting() {
+        let limiter = limiter(2, Duration::from_secs(10));
+        assert!(passes_now(&limiter, "GET /a"));
+        tokio::time::advance(Duration::from_secs(6)).await;
+        assert!(passes_now(&limiter, "GET /a"));
+        assert!(!passes_now(&limiter, "GET /a"));
+        // Первый запрос вышел из окна, второй ещё внутри: освободилось одно место.
+        tokio::time::advance(Duration::from_secs(4)).await;
+        assert!(passes_now(&limiter, "GET /a"));
+        assert!(!passes_now(&limiter, "GET /a"));
     }
 
     #[tokio::test(start_paused = true)]
     async fn endpoints_are_limited_independently() {
-        let limiter = RateLimiter::new(RateLimit {
-            max: 1,
-            per: Duration::from_secs(10),
-        });
-        let start = Instant::now();
-        limiter.acquire("GET /a").await;
-        limiter.acquire("GET /b").await;
-        limiter.acquire("POST /a").await;
-        assert_eq!(start.elapsed(), Duration::ZERO);
-        limiter.acquire("GET /a").await;
-        assert_eq!(start.elapsed(), Duration::from_secs(10));
+        let limiter = limiter(1, Duration::from_secs(10));
+        assert!(passes_now(&limiter, "GET /a"));
+        assert!(passes_now(&limiter, "GET /b"));
+        assert!(passes_now(&limiter, "POST /a"));
+        assert!(!passes_now(&limiter, "GET /a"));
+        tokio::time::advance(Duration::from_millis(9_999)).await;
+        assert!(!passes_now(&limiter, "GET /a"));
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(passes_now(&limiter, "GET /a"));
     }
 
     #[tokio::test(start_paused = true)]
     async fn default_is_twenty_per_second() {
         let limiter = RateLimiter::new(RateLimit::default());
-        let start = Instant::now();
         for _ in 0..20 {
-            limiter.acquire("GET /a").await;
+            assert!(passes_now(&limiter, "GET /a"));
         }
-        assert_eq!(start.elapsed(), Duration::ZERO);
-        limiter.acquire("GET /a").await;
-        assert_eq!(start.elapsed(), Duration::from_secs(1));
+        assert!(!passes_now(&limiter, "GET /a"));
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(passes_now(&limiter, "GET /a"));
     }
 
     #[tokio::test(start_paused = true)]
-    async fn concurrent_callers_share_the_window() {
-        let limiter = std::sync::Arc::new(RateLimiter::new(RateLimit {
-            max: 2,
-            per: Duration::from_secs(1),
-        }));
-        let start = Instant::now();
-        let tasks: Vec<_> = (0..6)
-            .map(|_| {
-                let limiter = limiter.clone();
-                tokio::spawn(async move {
-                    limiter.acquire("GET /a").await;
-                    start.elapsed()
-                })
-            })
-            .collect();
-        let mut stamps = Vec::new();
-        for task in tasks {
-            stamps.push(task.await.unwrap());
+    async fn waiting_callers_are_released_a_window_at_a_time() {
+        let limiter = Arc::new(limiter(2, Duration::from_secs(1)));
+        let passed = Arc::new(AtomicUsize::new(0));
+        for _ in 0..6 {
+            let limiter = limiter.clone();
+            let passed = passed.clone();
+            tokio::spawn(async move {
+                limiter.acquire("GET /a").await;
+                passed.fetch_add(1, Ordering::SeqCst);
+            });
         }
-        stamps.sort();
-        for window in stamps.windows(3) {
-            assert!(
-                window[2] - window[0] >= Duration::from_secs(1),
-                "{stamps:?}"
-            );
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(passed.load(Ordering::SeqCst), 2);
+        for expected in [4, 6] {
+            tokio::time::advance(Duration::from_secs(1)).await;
+            for _ in 0..10 {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(passed.load(Ordering::SeqCst), expected);
         }
     }
 }

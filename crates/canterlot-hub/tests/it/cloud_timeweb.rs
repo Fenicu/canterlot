@@ -3,7 +3,7 @@
 
 use std::io;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use canterlot_hub::cloud::price::{Sizing, hourly_kopecks, monthly_kopecks};
 use canterlot_hub::cloud::rate_limit::RateLimit;
@@ -282,7 +282,6 @@ async fn connection_dropped_after_accept_is_ambiguous_and_not_retried() {
 async fn timeout_is_ambiguous_and_not_retried() {
     let rig = rig_with(|c| c.request_timeout = Duration::from_millis(300)).await;
     rig.fake.control().create = CreateMode::AcceptThenHang;
-    let started = Instant::now();
     let outcome = rig
         .provider
         .create_server(&create_request("canterlot-runner-w1"))
@@ -291,7 +290,6 @@ async fn timeout_is_ambiguous_and_not_retried() {
         matches!(outcome, CreateOutcome::Ambiguous { .. }),
         "{outcome:?}"
     );
-    assert!(started.elapsed() < Duration::from_secs(2));
     assert_eq!(posts_to_servers(&rig), 1);
     assert_eq!(rig.fake.server_count(), 1);
 }
@@ -334,7 +332,6 @@ async fn rate_limited_create_waits_for_retry_after_and_then_succeeds() {
         state.rate_limit_next = 1;
         state.retry_after = Some("1".to_owned());
     }
-    let started = Instant::now();
     let outcome = rig
         .provider
         .create_server(&create_request("canterlot-runner-w1"))
@@ -343,37 +340,46 @@ async fn rate_limited_create_waits_for_retry_after_and_then_succeeds() {
         matches!(outcome, CreateOutcome::Created { .. }),
         "{outcome:?}"
     );
-    assert!(
-        started.elapsed() >= Duration::from_millis(990),
-        "{:?}",
-        started.elapsed()
-    );
     // 429 не доходит до создания: сервер один, а запросов два.
     assert_eq!(rig.fake.server_count(), 1);
     assert_eq!(posts_to_servers(&rig), 2);
 }
 
+/// Пока `Retry-After` не вышел, повтора нет: запрос ждёт, и на сервере остаётся одна попытка.
 #[tokio::test]
-async fn rate_limit_without_retry_after_backs_off_and_gives_up() {
+async fn nothing_is_resent_before_retry_after_expires() {
+    let rig = rig_with(|c| c.max_backoff = Duration::from_secs(30)).await;
+    {
+        let mut state = rig.fake.control();
+        state.rate_limit_next = 1;
+        state.retry_after = Some("20".to_owned());
+    }
+    let waited = tokio::time::timeout(
+        Duration::from_millis(300),
+        rig.provider
+            .create_server(&create_request("canterlot-runner-w1")),
+    )
+    .await;
+    assert!(waited.is_err(), "the call must still be waiting");
+    assert_eq!(posts_to_servers(&rig), 1);
+    assert_eq!(rig.fake.server_count(), 0);
+}
+
+#[tokio::test]
+async fn rate_limit_without_retry_after_gives_up_after_the_retries() {
     let rig = rig_with(|c| {
-        c.default_backoff = Duration::from_millis(100);
+        c.default_backoff = Duration::from_millis(10);
         c.max_backoff = Duration::from_secs(5);
         c.max_rate_limit_retries = 2;
     })
     .await;
     rig.fake.control().rate_limit_next = 100;
-    let started = Instant::now();
     let outcome = rig
         .provider
         .create_server(&create_request("canterlot-runner-w1"))
         .await;
-    // Попытка и два повтора, паузы 100 и 200 мс.
+    // Попытка и два повтора; сами паузы проверены на чистой функции `rate_limit_wait`.
     assert_eq!(posts_to_servers(&rig), 3);
-    assert!(
-        started.elapsed() >= Duration::from_millis(290),
-        "{:?}",
-        started.elapsed()
-    );
     assert!(
         matches!(outcome, CreateOutcome::Ambiguous { .. }),
         "{outcome:?}"
@@ -389,10 +395,8 @@ async fn retry_after_beyond_the_bound_is_not_waited_for() {
         state.rate_limit_next = 100;
         state.retry_after = Some("3600".to_owned());
     }
-    let started = Instant::now();
     let outcome = rig.provider.delete_server(1).await;
     assert_eq!(outcome, DeleteOutcome::Failed { retryable: true });
-    assert!(started.elapsed() < Duration::from_secs(2));
     assert_eq!(rig.fake.control().count("DELETE", "/api/v1/servers/1"), 1);
 }
 
@@ -401,7 +405,7 @@ async fn retry_after_beyond_the_bound_is_not_waited_for() {
 #[tokio::test]
 async fn get_server_reports_status_and_address_once_booted() {
     let rig = rig_with(|_| {}).await;
-    rig.fake.control().boot_delay = Duration::from_millis(400);
+    rig.fake.control().boot_polls = 2;
     let CreateOutcome::Created { server_id } = rig
         .provider
         .create_server(&create_request("canterlot-runner-w1"))
@@ -417,7 +421,11 @@ async fn get_server_reports_status_and_address_once_booted() {
     assert_eq!(state.status, ServerStatus::Installing);
     assert_eq!(state.ipv4, None);
 
-    tokio::time::sleep(Duration::from_millis(450)).await;
+    // Второй опрос ещё `installing`, третий уже `on` с адресом.
+    let ServerLookup::Found(state) = rig.provider.get_server(server_id).await.unwrap() else {
+        panic!("not found");
+    };
+    assert_eq!(state.status, ServerStatus::Installing);
     let ServerLookup::Found(state) = rig.provider.get_server(server_id).await.unwrap() else {
         panic!("not found");
     };
@@ -754,9 +762,9 @@ async fn pages_that_do_not_add_up_to_the_total_are_incomplete() {
 }
 
 #[tokio::test]
-async fn servers_appear_in_the_listing_only_after_the_delay() {
+async fn servers_appear_in_the_listing_only_after_a_few_listings() {
     let rig = rig().await;
-    rig.fake.control().listing_delay = Duration::from_millis(400);
+    rig.fake.control().listing_hidden_polls = 2;
     let CreateOutcome::Created { server_id } = rig
         .provider
         .create_server(&create_request("canterlot-runner-w1"))
@@ -764,19 +772,21 @@ async fn servers_appear_in_the_listing_only_after_the_delay() {
     else {
         panic!("create");
     };
-    assert!(
-        rig.provider
-            .list_project_servers(PROJECT)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    // Прямой запрос по номеру сервер уже видит.
+    // Два листинга сервер не видят, хотя он создан.
+    for _ in 0..2 {
+        assert!(
+            rig.provider
+                .list_project_servers(PROJECT)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+    // Прямой запрос по номеру сервер видит сразу.
     assert!(matches!(
         rig.provider.get_server(server_id).await.unwrap(),
         ServerLookup::Found(_)
     ));
-    tokio::time::sleep(Duration::from_millis(450)).await;
     let listed = rig.provider.list_project_servers(PROJECT).await.unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].id, server_id);
@@ -925,24 +935,21 @@ fn defaults_match_the_documented_limits() {
 // ---- предел частоты ----
 
 #[tokio::test]
-async fn client_side_rate_limit_spaces_requests_to_one_endpoint() {
+async fn client_side_rate_limit_holds_back_the_request_over_the_limit() {
+    // Окно в час: третий запрос к той же точке не уйдёт, пока окно не откроется. Сами сроки
+    // окна проверены на часах без хода в модульных тестах предела.
     let rig = rig_with(|c| {
         c.rate_limit = RateLimit {
-            max: 3,
-            per: Duration::from_millis(300),
+            max: 2,
+            per: Duration::from_secs(3600),
         }
     })
     .await;
-    for _ in 0..7 {
-        rig.provider.get_server(1).await.unwrap();
-    }
-    let stamps: Vec<Instant> = rig.fake.requests().iter().map(|r| r.at).collect();
-    assert_eq!(stamps.len(), 7);
-    for window in stamps.windows(4) {
-        assert!(
-            window[3].duration_since(window[0]) >= Duration::from_millis(280),
-            "four requests within {:?}",
-            window[3].duration_since(window[0])
-        );
-    }
+    rig.provider.get_server(1).await.unwrap();
+    rig.provider.get_server(2).await.unwrap();
+    let held = tokio::time::timeout(Duration::from_millis(300), rig.provider.get_server(3)).await;
+    assert!(held.is_err(), "the third request must be held back");
+    assert_eq!(rig.fake.control().count("GET", "/api/v1/servers/"), 2);
+    // Другая точка считается отдельно.
+    rig.provider.configurator(151).await.unwrap();
 }
