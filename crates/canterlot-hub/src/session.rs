@@ -61,6 +61,10 @@ pub const CAPABILITY_NUDGE_V1: &str = "nudge_v1";
 pub const CAPABILITY_RESOURCE_LEASE_V1: &str = "resource_lease_v1";
 pub const CAPABILITY_SECRET_REQUESTS_V2: &str = "secret_requests_v2";
 pub const CAPABILITY_SCHEDULE_PRECHECK_V1: &str = "schedule_precheck_v1";
+/// Воркер умеет быть несущей раннеров: получает `RunnersAssigned`, просит токены раннеров и
+/// шлёт наблюдения. Хаб принимает эти сообщения только на соединении с этой возможностью и
+/// только от машины `worker` с флагом `is_carrier`.
+pub const CAPABILITY_RUNNERS_V1: &str = "runners_v1";
 
 /// Параллельных предпроверок на машину: одна попытка на расписание.
 pub const MAX_PRECHECKS_PER_MACHINE: usize = 4;

@@ -254,10 +254,6 @@ pub async fn set_accepts_remote_work(
 pub const ROLE_WORKER: &str = "worker";
 pub const ROLE_RUNNER: &str = "runner";
 
-/// Возможность `runners_v1`: воркер, который умеет быть несущей (получает `RunnersAssigned`,
-/// просит токены раннеров, шлёт наблюдения).
-pub const CAPABILITY_RUNNERS_V1: &str = "runners_v1";
-
 const MAX_ROOT_DIR_BYTES: usize = 1024;
 const MAX_LABELS: usize = 32;
 const MAX_LABEL_BYTES: usize = 64;
