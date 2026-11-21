@@ -22,6 +22,17 @@ use crate::{
     session_tools::{ToolErrorCode, spawn, subs},
 };
 
+/// Запас сверх `wait_seconds` на сеть и разбор до того, как срок ждущего вызова считается
+/// вышедшим.
+pub const WAITER_SLACK_SECONDS: i64 = 30;
+
+/// Идентичность этого процесса хаба: ждущий вызов записывает её в строку задачи, а старт
+/// хаба переводит на сообщение только задачи чужих экземпляров.
+pub fn hub_instance() -> Uuid {
+    static INSTANCE: std::sync::OnceLock<Uuid> = std::sync::OnceLock::new();
+    *INSTANCE.get_or_init(Uuid::now_v7)
+}
+
 /// Живой хвост на хабе и хвост итога от воркера.
 pub const LIVE_TAIL_BYTES: usize = 64 * 1024;
 pub const RESULT_TAIL_BYTES: usize = 32 * 1024;
@@ -128,6 +139,11 @@ pub struct Job {
     pub log_size: Option<i64>,
     pub log_expired_at: Option<DateTime<Utc>>,
     pub late_report: Option<Value>,
+    pub waiter_instance: Option<Uuid>,
+    pub waiter_deadline: Option<DateTime<Utc>>,
+    pub admission_generation: Option<i64>,
+    pub finish_report: Option<Value>,
+    pub finish_reported_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub dispatched_at: Option<DateTime<Utc>>,
     pub started_at: Option<DateTime<Utc>>,
@@ -266,6 +282,31 @@ pub async fn lock_machine(conn: &mut PgConnection, machine_id: Uuid) -> Result<(
     Ok(())
 }
 
+/// Состояние допуска заказчиков (режим, ожидающий режим, домен) держится до фиксации: очередь
+/// разговора, затем его строка `for no key update`, как у настроек и у смены домена, по
+/// возрастанию идентификатора. Берётся после замка машины и строк задач, раньше счётчиков
+/// событий; параметр — все заказчики, чьи задачи диспетчер проверит в этой транзакции.
+pub async fn lock_admission(
+    conn: &mut PgConnection,
+    conversations: &[Uuid],
+) -> Result<(), sqlx::Error> {
+    if conversations.is_empty() {
+        return Ok(());
+    }
+    sqlx::query(
+        "select conversation_id from queue_state where conversation_id = any($1)
+         order by conversation_id for update",
+    )
+    .bind(conversations)
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query("select id from conversations where id = any($1) order by id for no key update")
+        .bind(conversations)
+        .execute(conn)
+        .await?;
+    Ok(())
+}
+
 pub async fn load(conn: &mut PgConnection, id: Uuid) -> Result<Option<Job>, sqlx::Error> {
     sqlx::query_as("select * from jobs where id=$1")
         .bind(id)
@@ -388,8 +429,48 @@ pub fn state_json(job: &Job, machine: &str) -> Value {
     value
 }
 
+/// Хвост для текста сообщения: управляющие байты, которые проверка ввода отвергает (NUL) или
+/// которые ломают отображение (ESC и прочие), записываются как `\x00`, `\x1b`. Перевод строки
+/// и табуляция остаются. В строке задачи хвост лежит как есть, экранируется только текст.
+pub fn escape_control(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c.is_control() && c != '\n' && c != '\t' {
+            let code = c as u32;
+            if code < 0x100 {
+                out.push_str(&format!("\\x{code:02x}"));
+            } else {
+                out.push_str(&format!("\\u{{{code:x}}}"));
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// Сообщение заказчику об итоге: заголовок и хвост до 8 КиБ.
 pub fn message_text(job: &Job, machine: &str) -> String {
+    render_message(job, machine, true)
+}
+
+/// Сообщение без хвоста: короткий запасной вид, если с хвостом текст не прошёл проверку ввода.
+pub fn message_text_without_tail(job: &Job, machine: &str) -> String {
+    render_message(job, machine, false)
+}
+
+/// Текст для доставки: с хвостом, а если проверка не принимает его, то короткий без хвоста.
+/// Итог не пропадает навсегда из-за содержимого вывода.
+pub fn message_for_delivery(job: &Job, machine: &str, accepts: impl Fn(&str) -> bool) -> String {
+    let full = message_text(job, machine);
+    if accepts(&full) {
+        full
+    } else {
+        message_text_without_tail(job, machine)
+    }
+}
+
+fn render_message(job: &Job, machine: &str, with_tail: bool) -> String {
     let title = job
         .title
         .as_deref()
@@ -416,14 +497,19 @@ pub fn message_text(job: &Job, machine: &str) -> String {
     }
     text.push('.');
     let tail = job.tail.as_deref().unwrap_or(&[]);
-    if tail.is_empty() {
+    if (!with_tail || tail.is_empty()) && job.output_bytes > 0 {
+        text.push_str(&format!(
+            " Output ({} bytes total) is not shown here. Use job_log {{job_id}} for the log.",
+            job.output_bytes
+        ));
+    } else if tail.is_empty() {
         text.push_str(" No output.");
     } else {
         text.push_str(&format!(
             " Output ({} bytes total{}), last part:\n{}\nUse job_log {{job_id}} for the full log.",
             job.output_bytes,
             if job.truncated { ", log truncated" } else { "" },
-            tail_text(tail, MESSAGE_TAIL_BYTES)
+            escape_control(&tail_text(tail, MESSAGE_TAIL_BYTES))
         ));
     }
     text
@@ -574,12 +660,20 @@ pub async fn dispatch_machine_in_tx(
         Some(max) if max > 0 => i64::from(max),
         _ => DEFAULT_MAX_RUNNING,
     };
-    let queued: Vec<Uuid> = sqlx::query_scalar(
-        "select id from jobs where machine_id=$1 and state='queued' order by created_at, id",
+    let queued_rows: Vec<(Uuid, Option<Uuid>)> = sqlx::query_as(
+        "select id, conversation_id from jobs
+         where machine_id=$1 and state='queued' order by created_at, id",
     )
     .bind(machine_id)
     .fetch_all(&mut *conn)
     .await?;
+    // Допуск заказчиков фиксируется до фиксации диспетчеризации: смена режима или домена
+    // либо успевает раньше и видна проверке, либо ждёт и приходит после старта.
+    let mut callers: Vec<Uuid> = queued_rows.iter().filter_map(|(_, c)| *c).collect();
+    callers.sort_unstable();
+    callers.dedup();
+    lock_admission(conn, &callers).await?;
+    let queued: Vec<Uuid> = queued_rows.into_iter().map(|(id, _)| id).collect();
     let mut sent = 0;
     let mut full = false;
     for id in queued {
@@ -588,6 +682,22 @@ pub async fn dispatch_machine_in_tx(
         };
         if job.state() != State::Queued {
             continue;
+        }
+        // Удалённая задача, ждавшая в очереди, пока машину выключали, не оживает от повторного
+        // включения: поколение допуска выросло с её заявки.
+        if job.remote {
+            let (accepts, generation) =
+                crate::machines::remote_admission_for_share(conn, job.machine_id).await?;
+            if !accepts || job.admission_generation.unwrap_or(0) < generation {
+                finish_in_tx(
+                    conn,
+                    &job,
+                    Outcome::bare(State::Canceled, Some(Refusal::RemoteWorkDisabled.reason())),
+                    correlation_id,
+                )
+                .await?;
+                continue;
+            }
         }
         // Заказчик, чьё разрешение сменилось, больше не может ставить новую работу;
         // удалённый заказчик не мешает: заявка была допущена, задача принадлежит владельцу.

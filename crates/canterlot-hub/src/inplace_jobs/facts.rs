@@ -294,6 +294,76 @@ pub async fn apply_report(
     Ok(())
 }
 
+fn finished_from_snapshot(snapshot: &JobSnapshot) -> JobFinished {
+    JobFinished {
+        job_id: snapshot.job_id.clone(),
+        attempt: snapshot.attempt,
+        outcome: snapshot.outcome,
+        exit_code: snapshot.exit_code,
+        duration_ms: snapshot.duration_ms,
+        log_bytes: snapshot.log_bytes,
+        tail: Vec::new(),
+        truncated: snapshot.truncated,
+    }
+}
+
+fn snapshot_json(snapshot: &JobSnapshot) -> Value {
+    json!({
+        "attempt": snapshot.attempt,
+        "outcome": snapshot.outcome,
+        "exit_code": snapshot.exit_code,
+        "duration_ms": snapshot.duration_ms,
+        "log_bytes": snapshot.log_bytes,
+        "truncated": snapshot.truncated,
+    })
+}
+
+/// Снимок «закончена» без факта за срок: журнал воркера не доставил `JobFinished`, задача
+/// закрывается по снимку без хвоста (`tail_unavailable`), а не висит вечно. Под замками
+/// машины и строки; `false` — задача уже закончена или снимка нет.
+pub async fn finish_from_report(
+    conn: &mut PgConnection,
+    machine_id: Uuid,
+    id: Uuid,
+    correlation_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    lock_machine(conn, machine_id).await?;
+    let Some(job) = lock_row(conn, id).await? else {
+        return Ok(false);
+    };
+    let report: Option<Value> = sqlx::query_scalar("select finish_report from jobs where id=$1")
+        .bind(id)
+        .fetch_one(&mut *conn)
+        .await?;
+    let Some(report) = report.filter(|_| !job.is_terminal()) else {
+        return Ok(false);
+    };
+    let outcome = report["outcome"]
+        .as_i64()
+        .and_then(|v| i32::try_from(v).ok());
+    let (state, reason) = finished_state(outcome.unwrap_or_default());
+    let reason = reason.unwrap_or("tail_unavailable");
+    finish_in_tx(
+        conn,
+        &job,
+        Outcome {
+            state,
+            reason: Some(reason.to_owned()),
+            exit_code: report["exit_code"]
+                .as_i64()
+                .and_then(|v| i32::try_from(v).ok()),
+            duration_ms: report["duration_ms"].as_i64(),
+            output_bytes: report["log_bytes"].as_i64(),
+            tail: None,
+            truncated: report["truncated"].as_bool().unwrap_or(false),
+        },
+        correlation_id,
+    )
+    .await?;
+    dispatch_machine_in_tx(conn, machine_id, correlation_id).await?;
+    Ok(true)
+}
+
 async fn apply_snapshot(
     conn: &mut PgConnection,
     machine_id: Uuid,
@@ -328,16 +398,28 @@ async fn apply_snapshot(
             apply_started(conn, machine_id, &fact, correlation_id).await
         }
         JobPhase::Finished => {
-            let fact = JobFinished {
-                job_id: snapshot.job_id.clone(),
-                attempt: snapshot.attempt,
-                outcome: snapshot.outcome,
-                exit_code: snapshot.exit_code,
-                duration_ms: snapshot.duration_ms,
-                log_bytes: snapshot.log_bytes,
-                tail: Vec::new(),
-                truncated: snapshot.truncated,
-            };
+            let fact = finished_from_snapshot(snapshot);
+            // Снимок не несёт хвоста вывода. Если задача ещё не закончена на хабе и у неё есть
+            // вывод, итог не фиксируется: журнал воркера доставит `JobFinished` с хвостом,
+            // а закончить задачу без него значило бы навсегда потерять хвост (поздний факт
+            // уже ничего не меняет). Снимок запоминается; не пришёл факт за срок —
+            // `sweep::reported_finish_sweep` закрывает задачу по снимку.
+            if let Some(job) = locked(conn, machine_id, &snapshot.job_id, snapshot.attempt).await?
+                && !job.is_terminal()
+                && snapshot.log_bytes > 0
+            {
+                sqlx::query(
+                    "update jobs set finish_report=$2,
+                            finish_reported_at=coalesce(finish_reported_at, clock_timestamp()),
+                            last_fact_at=clock_timestamp()
+                     where id=$1",
+                )
+                .bind(job.id)
+                .bind(snapshot_json(snapshot))
+                .execute(&mut *conn)
+                .await?;
+                return Ok(());
+            }
             apply_finished(conn, machine_id, &fact, correlation_id).await
         }
         JobPhase::Unspecified => Ok(()),
