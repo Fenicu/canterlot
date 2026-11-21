@@ -6,9 +6,9 @@
 
 use std::{
     fs,
-    io::Read,
+    io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
-    process::{Command as Process, Stdio},
+    process::{Child, Command as Process, Stdio},
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -98,6 +98,34 @@ async fn until(progress: Arc<Notify>, what: &str, mut check: impl FnMut() -> boo
     })
     .await
     .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+}
+
+/// Убивает потомка по его pid и ждёт, даже если проверка в тесте упала.
+struct ChildGuard(Child);
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Запускает лидера своей сессии: строка из канала означает, что `setsid` уже выполнен.
+fn spawn_session_leader() -> ChildGuard {
+    let mut child = ChildGuard(
+        Process::new("setsid")
+            .args(["sh", "-c", "echo ready; exec sleep 600"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let mut line = String::new();
+    BufReader::new(child.0.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    assert_eq!(line.trim(), "ready");
+    child
 }
 
 struct Harness {
@@ -1008,7 +1036,15 @@ async fn sweep_removes_only_the_expired_attempt_directory() {
     // Соседняя незавершённая попытка той же задачи и посторонние файлы остаются.
     let sibling = harness.data.path().join("jobs").join(&old).join("2");
     fs::create_dir_all(&sibling).unwrap();
-    fs::write(sibling.join("pid"), "1 1\n").unwrap();
+    // Настоящий лидер своей сессии: поддельный pid 1 в контейнере убил бы весь гейт.
+    let sibling_leader = spawn_session_leader();
+    let leader_pid = sibling_leader.0.id();
+    let leader_ticks = canterlot_worker::containment::start_ticks(leader_pid).unwrap();
+    fs::write(
+        sibling.join("pid"),
+        format!("{leader_pid} {leader_ticks}\n"),
+    )
+    .unwrap();
     let stranger = harness.data.path().join("jobs").join("stranger.txt");
     fs::write(&stranger, "keep").unwrap();
     let workfile = harness.work().join("data.txt");

@@ -256,15 +256,33 @@ fn is_zombie(pid: u32) -> bool {
 /// Пока лидер жив, это его сессия; после смерти лидера номер сессии остаётся за её
 /// участниками, и пока они живы, ядро не отдаёт его другому процессу.
 pub fn session_members(leader: Leader) -> Vec<u32> {
+    // pid 1 в контейнере — docker-init, лидер сессии всех его процессов: сигнал туда
+    // убил бы весь контейнер вместе с гейтом. Нули и единица не могут быть лидером
+    // попытки, какой бы ни был записан в pid-файле номер.
+    if leader.pid <= 1 {
+        return Vec::new();
+    }
+    // Оболочка попытки всегда уходит в свою сессию через setsid, поэтому сессия
+    // самого воркера — чужая, даже если pid-файл указывает ровно на неё.
+    let Ok(own_sid) = rustix::process::getsid(None).map(|sid| sid.as_raw_pid() as u32) else {
+        return Vec::new();
+    };
+    if leader.pid == own_sid {
+        return Vec::new();
+    }
     let Ok(table) = crate::containment::process_table() else {
         return Vec::new();
     };
     let leader_alive = is_same_process(leader);
+    let own_pid = std::process::id();
     table
         .iter()
         .filter(|(pid, stat)| {
             !stat.zombie
                 && stat.session == leader.pid
+                // Сессия и процесс воркера не бывают участниками попытки.
+                && stat.session != own_sid
+                && **pid != own_pid
                 // Другой процесс с тем же номером, но иным временем старта — не наш лидер.
                 && (**pid != leader.pid || leader_alive)
         })
@@ -275,6 +293,38 @@ pub fn session_members(leader: Leader) -> Vec<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        io::{BufRead, BufReader},
+        process::{Child, Command, Stdio},
+    };
+
+    /// Убивает потомка и ждёт его даже при упавшей проверке.
+    struct ChildGuard(Child);
+
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    /// Запускает лидера своей сессии: строка из канала означает, что `setsid` уже выполнен.
+    fn spawn_session_leader() -> ChildGuard {
+        let mut child = ChildGuard(
+            Command::new("setsid")
+                .args(["sh", "-c", "echo ready; exec sleep 600"])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let mut line = String::new();
+        BufReader::new(child.0.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        assert_eq!(line.trim(), "ready");
+        child
+    }
 
     #[test]
     fn ids_become_paths_only_through_uuid_parsing() {
@@ -332,5 +382,80 @@ mod tests {
             pid: own,
             start_ticks: ticks + 1
         }));
+    }
+
+    #[test]
+    fn session_members_of_pid_one_is_empty() {
+        // В контейнере pid 1 — docker-init и лидер сессии всего контейнера: даже верные
+        // такты в подделанном pid-файле не должны превращать её в сессию попытки.
+        let ticks = crate::containment::start_ticks(1).unwrap_or(1);
+        assert!(
+            session_members(Leader {
+                pid: 1,
+                start_ticks: ticks
+            })
+            .is_empty(),
+            "pid 1 не должен давать участников"
+        );
+        assert!(
+            session_members(Leader {
+                pid: 0,
+                start_ticks: 1
+            })
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn session_members_ignores_the_callers_own_session() {
+        // Сосед по сессии самого воркера (обычный потомок без setsid) — не участник
+        // попытки: в контейнере так выглядит любая команда гейта.
+        let own_sid = rustix::process::getsid(None).unwrap().as_raw_pid() as u32;
+        let child = ChildGuard(
+            Command::new("sleep")
+                .arg("600")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let pid = child.0.id();
+        assert_eq!(
+            crate::containment::process_table()
+                .unwrap()
+                .get(&pid)
+                .unwrap()
+                .session,
+            own_sid,
+            "потомок без setsid остался в сессии теста"
+        );
+        assert!(
+            !session_members(Leader {
+                pid: own_sid,
+                start_ticks: 1
+            })
+            .contains(&pid),
+            "сосед по сессии воркера не должен считаться участником"
+        );
+    }
+
+    #[test]
+    fn session_members_lists_a_leader_in_its_own_session() {
+        // Обычная попытка: оболочка уходит в свою сессию, и её лидер остаётся участником.
+        let child = spawn_session_leader();
+        let pid = child.0.id();
+        let ticks = crate::containment::start_ticks(pid).unwrap();
+        let members = session_members(Leader {
+            pid,
+            start_ticks: ticks,
+        });
+        assert!(
+            members.contains(&pid),
+            "лидер своей сессии — участник: {members:?}"
+        );
+        assert!(
+            !members.contains(&std::process::id()),
+            "сам воркер не должен быть участником"
+        );
     }
 }
