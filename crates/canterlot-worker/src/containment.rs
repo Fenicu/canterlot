@@ -165,6 +165,29 @@ pub fn start_ticks(pid: u32) -> Result<u64, ContainmentError> {
     Ok(stat(pid)?.member.start_ticks)
 }
 
+/// Процесс `pid` сам один из `roots` (pid и время старта) или потомок одного из них. Родитель
+/// берётся из `/proc` на каждом шаге, поэтому снятая метка окружения или выход предка из
+/// группы процессов ничего не меняют: осиротевшие потомки исполнения переходят к его
+/// сопровождению (оно держит `PR_SET_CHILD_SUBREAPER`), которое само в `roots`. Процесс,
+/// чьё родство прочесть нельзя, считается внутренним: отказ безопаснее.
+pub fn descends_from_any(pid: u32, roots: &[(u32, u64)]) -> bool {
+    if roots.is_empty() {
+        return false;
+    }
+    let mut current = pid;
+    let mut seen = HashSet::new();
+    while current > 1 && seen.insert(current) {
+        let Ok(info) = stat(current) else {
+            return true;
+        };
+        if roots.contains(&(info.member.pid, info.member.start_ticks)) {
+            return true;
+        }
+        current = info.parent;
+    }
+    false
+}
+
 /// Значение метки группы в окружении процесса. Время старта сверяется после чтения
 /// `environ`: pid мог смениться между опознанием и чтением, тогда ответ — `None`.
 /// Закрытый от чтения или исчезнувший процесс метки не показывает.

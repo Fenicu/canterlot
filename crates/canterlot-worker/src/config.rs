@@ -57,9 +57,13 @@ pub struct WorkerConfig {
 pub struct RunnersConfig {
     /// Ключ для облачных раннеров; нужен только этапу C, статические ходят по `~/.ssh/config`.
     pub ssh_key: Option<PathBuf>,
-    /// Только для тестов: файл `ssh_config`, который носитель передаёт в каждый `ssh` ключом `-F`.
+    /// Только для тестов, в файле не читается (`skip`: ключ отвергается как неизвестный):
+    /// файл `ssh_config`, который носитель передаёт в каждый `ssh` ключом `-F`.
+    #[serde(skip)]
     pub ssh_config: Option<PathBuf>,
-    /// Только для тестов: бинарник, который носитель кладёт на раннер вместо собственного.
+    /// Только для тестов, в файле не читается: бинарник, который носитель кладёт на раннер
+    /// вместо собственного.
+    #[serde(skip)]
     pub worker_binary: Option<PathBuf>,
     pub ssh: Vec<RunnerSsh>,
 }
@@ -894,6 +898,33 @@ data_dir = "/tmp/store"
         assert!(
             toml::from_str::<WorkerConfig>(&format!("{base}\n[jobs]\nlost_grace = 1\n")).is_err()
         );
+    }
+
+    #[test]
+    fn runners_test_hooks_cannot_be_set_from_a_production_config() {
+        let base = r#"
+hub_url = "https://localhost:1"
+ca_cert = "/tmp/ca.pem"
+token_file = "/tmp/token"
+machine_id = "00000000-0000-0000-0000-000000000001"
+installation_id = "00000000-0000-0000-0000-000000000002"
+restore_generation = "00000000-0000-0000-0000-000000000003"
+data_dir = "/tmp/store"
+"#;
+        let plain =
+            format!("{base}\n[[runners.ssh]]\nmachine = \"runner-a\"\nssh = \"build-host\"\n");
+        let config: WorkerConfig = toml::from_str(&plain).unwrap();
+        let settings = crate::carrier::CarrierSettings::from_config(&config);
+        assert!(settings.ssh_config.is_none() && settings.worker_binary.is_none());
+        // Подмена ssh и бинарника раннера задаётся только полями структуры из тестов
+        // (`#[serde(skip)]`), но не файлом: ключ в рабочем конфиге отвергается.
+        for key in ["ssh_config", "worker_binary"] {
+            let text = format!("{base}\n[runners]\n{key} = \"/tmp/x\"\n");
+            assert!(
+                toml::from_str::<WorkerConfig>(&text).is_err(),
+                "[runners].{key} must be rejected"
+            );
+        }
     }
 
     #[test]

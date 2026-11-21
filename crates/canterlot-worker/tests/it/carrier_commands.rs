@@ -142,6 +142,7 @@ fn fixture() -> Fixture {
         targets: Arc::new(move |machine| (machine == RUNNER_ID).then(|| target.clone())),
         ssh_limit: Duration::from_secs(30),
         push_limit: Duration::from_secs(60),
+        allowed_roots: vec![PathBuf::from("/tmp")],
     });
     let store = Store::open(&data).unwrap();
     let sink = Arc::new(Sink::default());

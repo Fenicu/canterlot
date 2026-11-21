@@ -190,7 +190,8 @@ impl Stager {
         let (chosen, truncated) = select(entries, request.cap_bytes);
         make_local_dir(&local_dir)?;
         if !chosen.is_empty() {
-            self.rsync(alias, workdir, &local_dir, &chosen).await?;
+            self.rsync(alias, workdir, &local_dir, &chosen, request.cap_bytes)
+                .await?;
         }
         let files = chosen
             .into_iter()
@@ -211,13 +212,16 @@ impl Stager {
         })
     }
 
-    async fn rsync(
+    /// Команда копирования. `--max-size=<cap>` не даёт файлу, который успел вырасти между
+    /// измерением и копированием (задача с таймаутом, чей контейнер пережил её), перетянуть
+    /// предел: больший файл `rsync` просто пропускает.
+    fn rsync_command(
         &self,
         alias: &str,
         workdir: &Path,
         local_dir: &Path,
-        files: &[(String, u64)],
-    ) -> Result<(), Failure> {
+        cap_bytes: u64,
+    ) -> Command {
         let mut command = Command::new("rsync");
         command
             .args([
@@ -227,6 +231,7 @@ impl Stager {
                 "--no-devices",
                 "--files-from=-",
             ])
+            .arg(format!("--max-size={cap_bytes}"))
             .arg("-e")
             .arg(self.ssh_command())
             .arg(format!("{alias}:{}/", workdir.display()))
@@ -235,6 +240,18 @@ impl Stager {
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        command
+    }
+
+    async fn rsync(
+        &self,
+        alias: &str,
+        workdir: &Path,
+        local_dir: &Path,
+        files: &[(String, u64)],
+        cap_bytes: u64,
+    ) -> Result<(), Failure> {
+        let mut command = self.rsync_command(alias, workdir, local_dir, cap_bytes);
         let list: String = files.iter().map(|(path, _)| format!("{path}\n")).collect();
         let work = async {
             let mut child = command.spawn()?;
@@ -476,5 +493,74 @@ pub async fn sweep_loop(
             () = tokio::time::sleep(Duration::from_secs(3600)) => {}
             _ = shutdown.wait_for(|stop| *stop) => return,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::carrier::stage::StagerSettings;
+
+    /// Правила носителя для путей результатов. Хаб проверяет те же при приёме задачи
+    /// (`inplace_jobs::spec::valid_output_path`): расхождение значило бы задачу, которая
+    /// отработала и упала на имени. При правке меняйте обе стороны.
+    #[test]
+    fn output_path_rules_match_what_the_hub_checks_at_submit() {
+        for good in [
+            "out",
+            "a/b/c.txt",
+            ".gate-out",
+            "dir.v2/x+y@z_1-2",
+            &"a".repeat(512),
+        ] {
+            assert!(valid_relative(good), "{good:?}");
+        }
+        for bad in [
+            "",
+            "/abs",
+            "-flag",
+            "a/../b",
+            "..",
+            "a//b",
+            "./a",
+            "a/./b",
+            "test results",
+            "tab\there",
+            "ünï",
+            "a;b",
+            "a$b",
+            &"a".repeat(513),
+        ] {
+            assert!(!valid_relative(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn the_copy_is_capped_per_file_so_a_growing_file_cannot_blow_the_total_cap() {
+        let stager = Stager::new(StagerSettings {
+            ssh_config: None,
+            outputs_root: PathBuf::from("/tmp/outputs"),
+            targets: Arc::new(|_| None),
+            ssh_limit: Duration::from_secs(1),
+            push_limit: Duration::from_secs(1),
+            allowed_roots: Vec::new(),
+        });
+        let command = stager.rsync_command(
+            "runner-a",
+            Path::new("/srv/runner/jobs/work/j"),
+            Path::new("/tmp/outputs/j"),
+            4096,
+        );
+        let args: Vec<_> = command
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            args.iter().any(|arg| arg == "--max-size=4096"),
+            "rsync must be told the cap: {args:?}"
+        );
     }
 }

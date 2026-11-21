@@ -24,7 +24,6 @@ use super::{
     ClientMessage, Finished, JobSpec, SOCKET_ENV, SOCKET_NAME, ServerMessage, Source, decode,
     encode,
 };
-use crate::containment::LEASE_SOCKET_ENV;
 
 /// Сколько команда терпит недоступный сокет, пока ещё не отправила задачу.
 const SUBMIT_PATIENCE: Duration = Duration::from_secs(10);
@@ -48,18 +47,15 @@ pub struct RunArgs {
     pub command: Vec<OsString>,
 }
 
-/// Путь сокета: переменная, иначе `$XDG_RUNTIME_DIR/canterlot/jobs.sock`, иначе рядом с
-/// сокетом аренды из окружения исполнения.
+/// Путь сокета: переменная, иначе `$XDG_RUNTIME_DIR/canterlot/jobs.sock`. Окружение
+/// исполнения (`CANTERLOT_LEASE_SOCKET`) путь к этому сокету не подсказывает: сессия агента
+/// получает сокет аренды, а не сокет задач владельца.
 pub fn discover_socket() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os(SOCKET_ENV).filter(|p| !p.is_empty()) {
         return Some(PathBuf::from(path));
     }
-    if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR").filter(|p| !p.is_empty()) {
-        return Some(PathBuf::from(runtime).join("canterlot").join(SOCKET_NAME));
-    }
-    std::env::var_os(LEASE_SOCKET_ENV)
-        .filter(|p| !p.is_empty())
-        .and_then(|lease| Path::new(&lease).parent().map(|dir| dir.join(SOCKET_NAME)))
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR").filter(|p| !p.is_empty())?;
+    Some(PathBuf::from(runtime).join("canterlot").join(SOCKET_NAME))
 }
 
 pub async fn run(args: RunArgs) -> ExitCode {
