@@ -391,6 +391,9 @@ impl Stager {
                      if [ -e {wd} ]; then git -C {bare} worktree remove --force {wd} >/dev/null 2>&1; fi\n\
                      git -C {bare} worktree prune >/dev/null 2>&1\n\
                      git -C {bare} update-ref -d refs/canterlot/{job} >/dev/null 2>&1\n\
+                     if [ -z \"$(git -C {bare} for-each-ref --count=1 refs/canterlot 2>/dev/null)\" ]; then\n\
+                     git -C {bare} gc --prune=now --quiet >/dev/null 2>&1\n\
+                     fi\n\
                      fi\n\
                      if [ -e {wd} ]; then rmdir {wd} 2>/dev/null; fi\n\
                      if [ -e {wd} ]; then echo fail=workdir_remains; else echo cleaned=1; fi\n"

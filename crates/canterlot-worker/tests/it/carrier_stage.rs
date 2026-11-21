@@ -756,6 +756,58 @@ async fn cleanup_removes_only_that_worktree_and_ref_and_repeats() {
     }
 }
 
+fn has_object(repo: &Path, sha: &str) -> bool {
+    Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["cat-file", "-e", &format!("{sha}^{{commit}}")])
+        .status()
+        .unwrap()
+        .success()
+}
+
+#[tokio::test]
+async fn cleanup_prunes_the_sources_of_finished_jobs_from_the_runner_repo() {
+    let fx = fixture();
+    let src = source_repo();
+    let live = Uuid::now_v7();
+    let done = Uuid::now_v7();
+    let keep = runner_stage(&fx, &src, &src.second, live);
+    let finished = runner_stage(&fx, &src, &src.first, done);
+    let bare = fx
+        .root
+        .join("repos/work")
+        .join(format!("{}.git", keep.repo_key));
+    fx.stager.stage(&keep).await.unwrap();
+    fx.stager.stage(&finished).await.unwrap();
+    let cleanup = |request: &StageRequest| CleanupRequest {
+        job_id: request.job_id.clone(),
+        target_machine_id: request.target_machine_id.clone(),
+        target_root_dir: request.target_root_dir.clone(),
+        workdir: request.workdir.clone(),
+        repo_key: request.repo_key.clone(),
+        domain: request.domain.clone(),
+    };
+    // Пока рядом живёт другая задача того же репозитория, её объекты на месте.
+    fx.stager.cleanup(&cleanup(&finished)).await.unwrap();
+    assert!(has_object(&bare, &src.second));
+    assert!(Path::new(&keep.workdir).join("file.txt").exists());
+    // Последняя задача ушла: исходники не остаются на раннере, сам репозиторий цел.
+    fx.stager.cleanup(&cleanup(&keep)).await.unwrap();
+    assert!(
+        !has_object(&bare, &src.second) && !has_object(&bare, &src.first),
+        "the sources of finished jobs must not linger on the runner"
+    );
+    assert_eq!(git(&bare, &["rev-parse", "--is-bare-repository"]), "true");
+    // Следующая задача снова ставится в тот же репозиторий.
+    let again = runner_stage(&fx, &src, &src.second, Uuid::now_v7());
+    fx.stager.stage(&again).await.unwrap();
+    assert_eq!(
+        fs::read_to_string(Path::new(&again.workdir).join("file.txt")).unwrap(),
+        "two\n"
+    );
+}
+
 #[tokio::test]
 async fn cleanup_rejects_a_workdir_outside_the_job_tree_and_removes_no_files() {
     let fx = fixture();
