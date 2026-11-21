@@ -650,12 +650,14 @@ pub async fn runner_availability_of(
     runner: Uuid,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<(RunnerAvailability, Option<chrono::DateTime<chrono::Utc>>), sqlx::Error> {
-    let row: Option<(
-        Option<Uuid>,
-        Option<bool>,
-        Option<i32>,
-        Option<chrono::DateTime<chrono::Utc>>,
-    )> = sqlx::query_as(
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        parent_machine_id: Option<Uuid>,
+        reachable: Option<bool>,
+        consecutive_failures: Option<i32>,
+        observed_at: Option<chrono::DateTime<chrono::Utc>>,
+    }
+    let row: Option<Row> = sqlx::query_as(
         "select m.parent_machine_id, o.reachable, o.consecutive_failures, o.observed_at
              from machines m
              left join runner_observations o
@@ -665,7 +667,13 @@ pub async fn runner_availability_of(
     .bind(runner)
     .fetch_optional(conn)
     .await?;
-    let Some((parent, reachable, failures, observed_at)) = row else {
+    let Some(Row {
+        parent_machine_id: parent,
+        reachable,
+        consecutive_failures: failures,
+        observed_at,
+    }) = row
+    else {
         return Ok((RunnerAvailability::Unknown, None));
     };
     let connected =
