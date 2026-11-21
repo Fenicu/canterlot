@@ -419,6 +419,45 @@ impl WorkerError {
     }
 }
 
+/// Соединитель `hub_dial`: любой адрес из `hub_url` ведёт в один Unix-сокет. Имя из `hub_url`
+/// остаётся только для TLS, поэтому сертификат хаба проверяется как при прямом соединении.
+fn unix_connector(
+    path: &std::path::Path,
+) -> impl tower::Service<
+    tonic::codegen::http::Uri,
+    Response = hyper_util::rt::TokioIo<tokio::net::UnixStream>,
+    Error = std::io::Error,
+    Future = impl Send,
+> + Send
++ 'static {
+    let path = path.to_path_buf();
+    tower::service_fn(move |_: tonic::codegen::http::Uri| {
+        let path = path.clone();
+        async move {
+            Ok::<_, std::io::Error>(hyper_util::rt::TokioIo::new(
+                tokio::net::UnixStream::connect(path).await?,
+            ))
+        }
+    })
+}
+
+async fn dial_hub(
+    endpoint: &Endpoint,
+    dial: Option<&std::path::Path>,
+) -> Result<tonic::transport::Channel, tonic::transport::Error> {
+    match dial {
+        Some(path) => endpoint.connect_with_connector(unix_connector(path)).await,
+        None => endpoint.connect().await,
+    }
+}
+
+fn dial_hub_lazy(endpoint: &Endpoint, dial: Option<&std::path::Path>) -> tonic::transport::Channel {
+    match dial {
+        Some(path) => endpoint.connect_with_connector_lazy(unix_connector(path)),
+        None => endpoint.connect_lazy(),
+    }
+}
+
 #[derive(Clone)]
 struct Bearer(MetadataValue<Ascii>);
 
@@ -1254,13 +1293,15 @@ impl Worker {
             .keep_alive_timeout(self.config.timers.http2_keepalive_timeout)
             .keep_alive_while_idle(true)
             .buffer_size(8);
+        let dial = self
+            .config
+            .hub_dial_path()
+            .map_err(|_| WorkerError::InvalidConfig)?;
         let (control, data) = timeout(self.config.timers.handshake, async {
-            let control = endpoint
-                .connect()
+            let control = dial_hub(&endpoint, dial.as_deref())
                 .await
                 .map_err(|_| WorkerError::Transport)?;
-            let data = endpoint
-                .connect()
+            let data = dial_hub(&endpoint, dial.as_deref())
                 .await
                 .map_err(|_| WorkerError::Transport)?;
             Ok::<_, WorkerError>((control, data))
@@ -1306,9 +1347,12 @@ impl Worker {
             .max_decoding_message_size(MAX_MESSAGE_BYTES)
             .max_encoding_message_size(MAX_MESSAGE_BYTES);
         // Третье соединение подключается при первой загрузке картинки.
-        let media = WorkerDataClient::with_interceptor(endpoint.connect_lazy(), auth.clone())
-            .max_decoding_message_size(MAX_MESSAGE_BYTES)
-            .max_encoding_message_size(MAX_MESSAGE_BYTES);
+        let media = WorkerDataClient::with_interceptor(
+            dial_hub_lazy(&endpoint, dial.as_deref()),
+            auth.clone(),
+        )
+        .max_decoding_message_size(MAX_MESSAGE_BYTES)
+        .max_encoding_message_size(MAX_MESSAGE_BYTES);
         let mut data = WorkerDataClient::with_interceptor(data, auth)
             .max_decoding_message_size(MAX_MESSAGE_BYTES)
             .max_encoding_message_size(MAX_MESSAGE_BYTES);

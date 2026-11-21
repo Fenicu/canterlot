@@ -95,6 +95,7 @@ mod exec_e2e;
 #[cfg(all(feature = "synthetic-adapter", feature = "fault-injection"))]
 mod exec_media;
 mod git_facts;
+mod hub_dial;
 mod instructions;
 mod jobs;
 mod lease;

@@ -13,6 +13,10 @@ use uuid::Uuid;
 #[serde(deny_unknown_fields)]
 pub struct WorkerConfig {
     pub hub_url: String,
+    /// `unix:<абсолютный путь>`: соединения с хабом идут через этот сокет, а TLS проверяет
+    /// имя сервера из `hub_url`. Так работает воркер раннера за SSH-пробросом носителя.
+    #[serde(default)]
+    pub hub_dial: Option<String>,
     pub ca_cert: PathBuf,
     pub token_file: PathBuf,
     pub machine_id: Uuid,
@@ -42,6 +46,55 @@ pub struct WorkerConfig {
     pub memory: MemoryConfig,
     #[serde(default)]
     pub jobs: JobsConfig,
+    /// Раннеры, которых этот воркер как носитель ведёт по SSH (`runners_v1`).
+    #[serde(default)]
+    pub runners: RunnersConfig,
+}
+
+/// `[runners]`: носитель ведёт перечисленные раннеры, если хаб тоже назвал их своими.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RunnersConfig {
+    /// Ключ для облачных раннеров; нужен только этапу C, статические ходят по `~/.ssh/config`.
+    pub ssh_key: Option<PathBuf>,
+    /// Только для тестов: файл `ssh_config`, который носитель передаёт в каждый `ssh` ключом `-F`.
+    pub ssh_config: Option<PathBuf>,
+    /// Только для тестов: бинарник, который носитель кладёт на раннер вместо собственного.
+    pub worker_binary: Option<PathBuf>,
+    pub ssh: Vec<RunnerSsh>,
+}
+
+/// Одна запись `[[runners.ssh]]`.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunnerSsh {
+    /// Имя машины-раннера в хабе; корень каталога приходит от хаба.
+    pub machine: String,
+    /// Псевдоним из `~/.ssh/config`.
+    pub ssh: String,
+    #[serde(default = "RunnerSsh::default_max_running")]
+    pub max_running: u32,
+    #[serde(default = "RunnerSsh::default_lease_slots")]
+    pub lease_slots: u32,
+}
+
+impl RunnerSsh {
+    fn default_max_running() -> u32 {
+        4
+    }
+
+    fn default_lease_slots() -> u32 {
+        2
+    }
+
+    /// Псевдоним уходит `ssh` отдельным словом: без пробелов и ведущего `-`.
+    pub fn valid_alias(alias: &str) -> bool {
+        !alias.is_empty()
+            && !alias.starts_with('-')
+            && alias
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'@'))
+    }
 }
 
 /// Задачи на месте (`jobs_inplace_v1`): команды оболочки по просьбе хаба.
@@ -82,6 +135,25 @@ impl Default for JobsConfig {
 }
 
 impl WorkerConfig {
+    /// Путь сокета из `hub_dial`; `None`, если ключа нет.
+    pub fn hub_dial_path(&self) -> Result<Option<PathBuf>, ConfigErrorCategory> {
+        let Some(dial) = &self.hub_dial else {
+            return Ok(None);
+        };
+        let path = dial
+            .strip_prefix("unix:")
+            .map(Path::new)
+            .filter(|path| {
+                path.is_absolute()
+                    && path.file_name().is_some()
+                    && !path
+                        .components()
+                        .any(|part| matches!(part, std::path::Component::ParentDir))
+            })
+            .ok_or(ConfigErrorCategory::HubDial)?;
+        Ok(Some(path.to_path_buf()))
+    }
+
     /// Учётная запись лимитов провайдера этой машины (`claude`, `codex`, `opencode`);
     /// провайдер без таблицы и неизвестное имя дают `owner`.
     pub fn account_for_provider(&self, provider: &str) -> &str {
@@ -239,6 +311,8 @@ pub enum ConfigErrorCategory {
     Io(io::ErrorKind),
     Parse,
     HubUrl,
+    /// `hub_dial` не вида `unix:<абсолютный путь без ..>`.
+    HubDial,
     TokenPermissions,
     UnsupportedTokenPermissions,
     PaidModelPollUnsupported,
@@ -287,6 +361,11 @@ impl fmt::Display for ConfigError {
             ConfigErrorCategory::HubUrl => write!(
                 f,
                 "{}: hub URL must use HTTPS with a host and no credentials",
+                self.path.display()
+            ),
+            ConfigErrorCategory::HubDial => write!(
+                f,
+                "{}: hub_dial must be unix:<absolute socket path>",
                 self.path.display()
             ),
             ConfigErrorCategory::TokenPermissions => write!(
@@ -382,6 +461,17 @@ pub fn load(path: &Path) -> Result<WorkerConfig, ConfigError> {
         || url.password().is_some()
     {
         return Err(invalid_url());
+    }
+    config
+        .hub_dial_path()
+        .map_err(|category| ConfigError::new(path, category))?;
+    if config
+        .runners
+        .ssh
+        .iter()
+        .any(|runner| !RunnerSsh::valid_alias(&runner.ssh))
+    {
+        return Err(ConfigError::new(path, ConfigErrorCategory::Parse));
     }
     // Платный запрос к модели ради лимитов в пилоте не делается: явный отказ вместо тихого пути.
     if config

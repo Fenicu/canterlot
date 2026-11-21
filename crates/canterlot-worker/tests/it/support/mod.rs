@@ -79,6 +79,28 @@ impl Default for Behavior {
     }
 }
 
+/// Адрес партнёра; у соединения через Unix-сокет его нет, тогда нулевой.
+fn peer_of<T>(request: &Request<T>) -> SocketAddr {
+    request
+        .remote_addr()
+        .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 0)))
+}
+
+/// Где тестовый хаб принимает соединения.
+#[derive(Clone, Debug)]
+pub enum Listen {
+    /// Случайный порт loopback; `hub_url` указывает на него.
+    Tcp,
+    /// Unix-сокет в каталоге хаба; в `hub_url` имя `localhost`, порт никто не слушает,
+    /// в конфиг попадает `hub_dial`.
+    Unix,
+}
+
+enum Incoming {
+    Tcp(TcpListener),
+    Unix(tokio::net::UnixListener),
+}
+
 pub enum Observed {
     Hello(Hello, SocketAddr),
     Control(ControlUp),
@@ -148,7 +170,7 @@ impl WorkerControl for Service {
         request: Request<Streaming<ControlUp>>,
     ) -> Result<Response<Self::ControlStream>, Status> {
         self.check(&request);
-        let peer = request.remote_addr().unwrap();
+        let peer = peer_of(&request);
         let mut inbound = request.into_inner();
         let Some(control_up::Msg::Hello(hello)) = inbound.message().await?.and_then(|m| m.msg)
         else {
@@ -353,7 +375,7 @@ impl WorkerData for Service {
         request: Request<Streaming<DataUp>>,
     ) -> Result<Response<Self::DataStream>, Status> {
         self.check(&request);
-        let peer = request.remote_addr().unwrap();
+        let peer = peer_of(&request);
         let mut inbound = request.into_inner();
         let Some(data_up::Msg::Hello(hello)) = inbound.message().await?.and_then(|m| m.msg) else {
             panic!("missing data hello");
@@ -420,6 +442,10 @@ pub struct ProtocolHub {
 
 impl ProtocolHub {
     pub async fn start(behavior: Behavior) -> (Self, WorkerStore) {
+        Self::start_on(behavior, Listen::Tcp).await
+    }
+
+    pub async fn start_on(behavior: Behavior, listen: Listen) -> (Self, WorkerStore) {
         let directory = TempDir::new().unwrap();
         let pki = test_pki();
         let ca_cert = directory.path().join("ca.pem");
@@ -427,8 +453,26 @@ impl ProtocolHub {
         let token_file = directory.path().join("token");
         fs::write(&token_file, "protocol-test").unwrap();
         fs::set_permissions(&token_file, fs::Permissions::from_mode(0o600)).unwrap();
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
+        let (hub_url, hub_dial, incoming) = match listen {
+            Listen::Tcp => {
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let port = listener.local_addr().unwrap().port();
+                (
+                    format!("https://localhost:{port}"),
+                    None,
+                    Incoming::Tcp(listener),
+                )
+            }
+            Listen::Unix => {
+                let path = directory.path().join("hub.sock");
+                let listener = tokio::net::UnixListener::bind(&path).unwrap();
+                (
+                    "https://localhost:1".to_owned(),
+                    Some(format!("unix:{}", path.display())),
+                    Incoming::Unix(listener),
+                )
+            }
+        };
         let (events, receiver) = mpsc::channel(4096);
         let restore_generation = behavior.generation;
         let downstream = Arc::new(Mutex::new(None));
@@ -442,7 +486,7 @@ impl ProtocolHub {
             connections: Arc::default(),
         };
         let task = tokio::spawn(async move {
-            Server::builder()
+            let router = Server::builder()
                 .initial_stream_window_size(65_535)
                 .initial_connection_window_size(65_535)
                 .tls_config(
@@ -458,9 +502,21 @@ impl ProtocolHub {
                     WorkerDataServer::new(service)
                         .max_encoding_message_size(MAX_MESSAGE_BYTES)
                         .max_decoding_message_size(MAX_MESSAGE_BYTES),
-                )
-                .serve_with_incoming(TcpListenerStream::new(listener))
-                .await
+                );
+            match incoming {
+                Incoming::Tcp(listener) => {
+                    router
+                        .serve_with_incoming(TcpListenerStream::new(listener))
+                        .await
+                }
+                Incoming::Unix(listener) => {
+                    router
+                        .serve_with_incoming(tokio_stream::wrappers::UnixListenerStream::new(
+                            listener,
+                        ))
+                        .await
+                }
+            }
         });
         let config = WorkerConfig {
             secrets: Default::default(),
@@ -470,7 +526,9 @@ impl ProtocolHub {
             attachments: Default::default(),
             claude_code: None,
             codex: None,
-            hub_url: format!("https://localhost:{}", address.port()),
+            hub_url,
+            hub_dial,
+            runners: Default::default(),
             ca_cert,
             token_file,
             machine_id: Uuid::now_v7(),
