@@ -38,7 +38,7 @@ export interface MachineRecord {
 
 export type JobRecord = components['schemas']['JobView'];
 
-const JOB_RANK: Record<string, number> = { queued: 0, dispatched: 1, waiting_lease: 2, running: 3 };
+const JOB_RANK: Record<string, number> = { waiting_runner: 0, staging: 1, queued: 2, dispatched: 3, waiting_lease: 4, running: 5, collecting: 6 };
 
 /** Состояние задачи ведёт только вперёд: опоздавшая копия, список или событие, прежнее не затирает. */
 function jobMayReplace(old: JobRecord | undefined, next: JobRecord): boolean {

@@ -21,6 +21,11 @@ const job = (patch: Partial<JobFacts> = {}): JobFacts => ({
 describe('job words', () => {
   it('names_every_state_in_russian_with_a_tone', () => {
     const word = (state: string, patch: Partial<JobFacts> = {}) => jobWord(job({ state, ...patch }));
+    expect(word('waiting_runner')).toEqual({ word: 'ждёт раннер', tone: 'warning' });
+    expect(word('staging')).toEqual({ word: 'готовит исходники', tone: 'accent', live: true });
+    expect(word('collecting')).toEqual({ word: 'собирает результаты', tone: 'accent', live: true });
+    expect(isTerminal('collecting')).toBe(false);
+    expect(refusalText('source_required')).toBe('Для автоматического размещения нужны исходники');
     expect(word('queued')).toEqual({ word: 'в очереди', tone: 'muted' });
     expect(word('dispatched')).toEqual({ word: 'передана машине', tone: 'muted' });
     expect(word('waiting_lease')).toEqual({ word: 'ждёт очереди сборок', tone: 'warning' });

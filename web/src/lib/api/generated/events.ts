@@ -1659,13 +1659,24 @@ export interface JobChanged {
 export interface JobView {
   id: Uuid;
   state:
-    "queued" | "dispatched" | "waiting_lease" | "running" | "succeeded" | "failed" | "timed_out" | "canceled" | "lost";
-  machine_id: Uuid;
-  machine_name: string;
+    | "waiting_runner"
+    | "staging"
+    | "queued"
+    | "dispatched"
+    | "waiting_lease"
+    | "running"
+    | "collecting"
+    | "succeeded"
+    | "failed"
+    | "timed_out"
+    | "canceled"
+    | "lost";
+  machine_id: Uuid | null;
+  machine_name: string | null;
   conversation_id: Uuid | null;
   conversation_title: string | null;
   title: string | null;
-  workdir: string;
+  workdir: string | null;
   shell: string;
   lease: "none" | "build" | "gate";
   timeout_minutes: number;
@@ -1678,6 +1689,14 @@ export interface JobView {
   has_log: boolean;
   machine_offline: boolean;
   late_report: {} | null;
+  labels: string[];
+  expected_minutes: number;
+  source: {
+    repo: string;
+    rev: string;
+  } | null;
+  outputs_dir: string | null;
+  outputs_note: string | null;
   created_at: Time;
   started_at: Time | null;
   finished_at: Time | null;
