@@ -10,6 +10,7 @@
   import { dismissable, type DismissReason } from '#lib/ui/dismiss.js';
   import Field from '#lib/ui/Field.svelte';
   import IconButton from '#lib/ui/IconButton.svelte';
+  import { leave } from '#lib/ui/exit.js';
   import Sheet from '#lib/ui/Sheet.svelte';
 
   let {
@@ -141,12 +142,13 @@
   {/if}
 {/snippet}
 
-{#if touch && open}
-  <Sheet open title="Отправить позже" onclose={onclose}>
+{#if touch}
+  <!-- Лист стоит в документе и при закрытом окне: так он успевает нарисовать свой уход. -->
+  <Sheet {open} title="Отправить позже" onclose={onclose}>
     {@render fields()}
   </Sheet>
 {:else if open}
-  <div class="popover" id={panelId} role="dialog" aria-labelledby="{panelId}-title" use:dismissable={{ onclose: dismissBy, keep: (target) => target.closest(`[aria-controls="${panelId}"]`) !== null }}>
+  <div class="popover" id={panelId} role="dialog" aria-labelledby="{panelId}-title" out:leave|global use:dismissable={{ onclose: dismissBy, keep: (target) => target.closest(`[aria-controls="${panelId}"]`) !== null }}>
     <header>
       <h2 id="{panelId}-title">Отправить позже</h2>
       <IconButton icon="close" label="Закрыть" onclick={dismiss} />
@@ -173,6 +175,8 @@
     gap: var(--s4);
     animation: popover-enter var(--duration-fast) var(--ease);
   }
+  /* Уход зеркалит вход (`ui/exit.ts`): окно опускается и гаснет, уходящее ничего не принимает. */
+  .popover:global([data-leaving]) { animation: none; opacity: 0; transform: translateY(var(--shift-label)); pointer-events: none; transition: opacity var(--duration-fast) var(--ease-exit), transform var(--duration-fast) var(--ease-exit); }
   @keyframes popover-enter { from { opacity: 0; transform: translateY(var(--shift-label)); } to { opacity: 1; transform: none; } }
   header { display: flex; align-items: center; justify-content: space-between; gap: var(--s4); }
   h2 { margin: 0; font-size: var(--fs-title); font-weight: var(--weight-semibold); }
