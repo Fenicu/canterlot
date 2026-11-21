@@ -531,6 +531,27 @@ async fn a_slot_freeing_places_the_waiting_job(pool: PgPool) {
     assert_eq!(fx.job(second).await.machine_id, Some(runner));
 }
 
+/// Освободившееся место будит службу расстановки: уведомление несёт несущую, и приходит оно
+/// после фиксации (когда факт раннера применён в своей транзакции).
+#[sqlx::test(migrations = "./migrations")]
+async fn a_slot_freeing_wakes_the_placement_service_of_the_carrier(pool: PgPool) {
+    let mut fx = Fx::new(pool).await;
+    let runner = fx.runner("runner-a", 20, &[], 1, true).await;
+    let id = job_id(&fx.auto(json!({"placement": ["runner"]})).await.unwrap());
+    fx.run_to_running(runner, id).await;
+    let mut listener = sqlx::postgres::PgListener::connect_with(&fx.pool)
+        .await
+        .unwrap();
+    listener.listen("canterlot_place").await.unwrap();
+    fx.finished(runner, id, JobOutcome::Succeeded, Some(0))
+        .await;
+    let notification = tokio::time::timeout(Duration::from_secs(10), listener.recv())
+        .await
+        .expect("a notification")
+        .unwrap();
+    assert_eq!(notification.payload(), fx.carrier.to_string());
+}
+
 #[sqlx::test(migrations = "./migrations")]
 async fn a_runner_connecting_places_the_waiting_job(pool: PgPool) {
     let mut fx = Fx::new(pool).await;

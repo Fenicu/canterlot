@@ -521,3 +521,108 @@ async fn observations_are_stored_only_from_the_carrier(pool: PgPool) -> TestResu
     .await?;
     Ok(())
 }
+
+fn owner_spec() -> String {
+    serde_json::json!({
+        "shell": "make gate",
+        "source": {"repo": "/srv/src/app", "rev": "0123456789abcdef0123456789abcdef01234567"},
+        "outputs": ["result"],
+    })
+    .to_string()
+}
+
+impl Worker {
+    async fn submit(&mut self, request_id: &str, spec: String) -> Result<String, (String, String)> {
+        self.send(control_up::Msg::OwnerJobSubmit(OwnerJobSubmit {
+            request_id: request_id.to_owned(),
+            spec_json: spec,
+        }))
+        .await;
+        let request_id = request_id.to_owned();
+        self.expect(|msg| match msg {
+            control_down::Msg::OwnerJobAccepted(done) => {
+                assert_eq!(done.request_id, request_id);
+                Some(Ok(done.job_id))
+            }
+            control_down::Msg::OwnerJobRefused(refused) => {
+                assert_eq!(refused.request_id, request_id);
+                Some(Err((refused.code, refused.message)))
+            }
+            _ => None,
+        })
+        .await
+    }
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn an_owner_job_goes_over_the_control_stream_and_is_answered_by_request(
+    pool: PgPool,
+) -> TestResult {
+    let host = Host::start(pool.clone()).await;
+    sqlx::query("update machines set capabilities=array['jobs_inplace_v1'] where id=$1")
+        .bind(host.carrier.machine_id)
+        .execute(&pool)
+        .await?;
+    let mut carrier = host.connect(&host.carrier, RUNNERS).await;
+    carrier.assigned().await;
+    let job_id = carrier.submit("req-1", owner_spec()).await.unwrap();
+    let row: (bool, Option<Uuid>, Uuid, String) = sqlx::query_as(
+        "select owner_job, conversation_id, carrier_id, shell from jobs where id=$1::uuid",
+    )
+    .bind(&job_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        row,
+        (true, None, host.carrier.machine_id, "make gate".to_owned())
+    );
+    // Отказ приходит с кодом и тем же `request_id`, строки нет.
+    let (code, message) = carrier
+        .submit(
+            "req-2",
+            serde_json::json!({"shell": "x", "source": {"repo": "/srv/src/app", "rev": "abc"}})
+                .to_string(),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(code, "invalid_arguments");
+    assert!(!message.is_empty());
+    let jobs: i64 = sqlx::query_scalar("select count(*) from jobs")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(jobs, 1);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn only_a_carrier_with_the_capability_may_submit_owner_jobs(pool: PgPool) -> TestResult {
+    let host = Host::start(pool.clone()).await;
+    // Обычная машина с возможностью: отказ кодом `not_carrier`, поток остаётся.
+    let mut plain = host.connect(&host.plain, RUNNERS).await;
+    let (code, _) = plain.submit("req-1", owner_spec()).await.unwrap_err();
+    assert_eq!(code, "not_carrier");
+    // Несущая без возможности: поток закрывается `capability_missing`.
+    let mut carrier = host.connect(&host.carrier, &[]).await;
+    carrier
+        .send(control_up::Msg::OwnerJobSubmit(OwnerJobSubmit {
+            request_id: "req-2".into(),
+            spec_json: owner_spec(),
+        }))
+        .await;
+    let status = loop {
+        match timeout(WAIT, carrier.stream.message()).await.unwrap() {
+            Err(status) => break status,
+            Ok(Some(down)) => assert!(!matches!(
+                down.msg,
+                Some(control_down::Msg::OwnerJobAccepted(_))
+            )),
+            Ok(None) => panic!("the stream must fail, not end quietly"),
+        }
+    };
+    assert_eq!(status.message(), "capability_missing");
+    let jobs: i64 = sqlx::query_scalar("select count(*) from jobs")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(jobs, 0);
+    Ok(())
+}
