@@ -503,6 +503,40 @@ mod tests {
     use super::*;
     use crate::carrier::stage::StagerSettings;
 
+    /// Правила носителя для путей результатов. Хаб проверяет те же при приёме задачи
+    /// (`inplace_jobs::spec::valid_output_path`): расхождение значило бы задачу, которая
+    /// отработала и упала на имени. При правке меняйте обе стороны.
+    #[test]
+    fn output_path_rules_match_what_the_hub_checks_at_submit() {
+        for good in [
+            "out",
+            "a/b/c.txt",
+            ".gate-out",
+            "dir.v2/x+y@z_1-2",
+            &"a".repeat(512),
+        ] {
+            assert!(valid_relative(good), "{good:?}");
+        }
+        for bad in [
+            "",
+            "/abs",
+            "-flag",
+            "a/../b",
+            "..",
+            "a//b",
+            "./a",
+            "a/./b",
+            "test results",
+            "tab\there",
+            "ünï",
+            "a;b",
+            "a$b",
+            &"a".repeat(513),
+        ] {
+            assert!(!valid_relative(bad), "{bad:?}");
+        }
+    }
+
     #[test]
     fn the_copy_is_capped_per_file_so_a_growing_file_cannot_blow_the_total_cap() {
         let stager = Stager::new(StagerSettings {

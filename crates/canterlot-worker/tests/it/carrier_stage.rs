@@ -396,6 +396,14 @@ async fn invalid_stage_requests_are_refused_before_any_command_runs() {
                 ..good.clone()
             },
         ),
+        // Хаб сводит имя к [A-Za-z0-9._-] (`place::repo_key`): «+» и юникод до сюда не доходят.
+        (
+            "bad_repo_key",
+            StageRequest {
+                repo_key: "my+repo-0123456789ab".into(),
+                ..good.clone()
+            },
+        ),
         (
             "bad_repo_key",
             StageRequest {
