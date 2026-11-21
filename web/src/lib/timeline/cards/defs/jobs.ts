@@ -43,6 +43,21 @@ export interface JobCallData {
   lateReport: boolean;
   /** Код отказа; `null` — вызов не отказан. */
   refusal: string | null;
+  /** Размещение выбирает хаб (`machine: "auto"`): машину задачи называет ответ, а не вызов. */
+  auto: boolean;
+  /** Исходники из вызова: репозиторий и ревизия. */
+  source: { repo: string; rev: string } | null;
+  /** Каталог на несущей, куда собраны результаты; только в итоговом ответе. */
+  outputsDir: string;
+  outputsNote: string;
+}
+
+function sourceOf(value: unknown): JobCallData['source'] {
+  if (!isObject(value as never)) return null;
+  const source = value as JsonObject;
+  const repo = str(source.repo);
+  const rev = str(source.rev);
+  return repo && rev ? { repo, rev } : null;
 }
 
 function jobParse(tool: JobCallData['tool']): CardLogic<JobCallData>['parse'] {
@@ -55,11 +70,13 @@ function jobParse(tool: JobCallData['tool']): CardLogic<JobCallData>['parse'] {
     if (refusal === null && !answered && !waiting) return null;
     if (tool !== 'run' && refusal === null && !jobId) return null;
     const a = answered ? answer : null;
+    const auto = str(call.input.machine) === 'auto';
     return {
       tool,
       jobId,
       state: str(a?.state),
-      machine: str(a?.machine) || str(call.input.machine),
+      // `auto` — не имя машины: пока хаб не выбрал раннер, места в строке нет.
+      machine: str(a?.machine) || (auto ? '' : str(call.input.machine)),
       title: str(call.input.title).trim(),
       shell: str(call.input.shell),
       workdir: str(call.input.workdir),
@@ -72,7 +89,11 @@ function jobParse(tool: JobCallData['tool']): CardLogic<JobCallData>['parse'] {
       cancelRequested: bool(a?.cancel_requested) === true,
       offline: bool(a?.machine_offline) === true,
       lateReport: isObject(a?.late_report as never),
-      refusal
+      refusal,
+      auto,
+      source: sourceOf(call.input.source),
+      outputsDir: str(a?.outputs_dir),
+      outputsNote: str(a?.outputs_note)
     };
   };
 }
@@ -218,6 +239,64 @@ function rowOf(value: unknown): JobRow | null {
     createdAt: str(item.created_at)
   };
 }
+
+/* ------------------------------------------------------------------ раннеры */
+
+export interface RunnerRow {
+  name: string;
+  /** `online`, `offline` или `unknown`: слова хаба. */
+  availability: string;
+  /** Возраст свежей проверки несущей; у `online` и `unknown` его нет. */
+  ageSeconds: number | null;
+  slotsUsed: number;
+  slotsMax: number;
+  /** Владелец поставил раннер на паузу. */
+  paused: boolean;
+  /** Эта строка — сама несущая, а не раннер. */
+  local: boolean;
+}
+
+export interface RunnersListData {
+  rows: RunnerRow[];
+  /** Задачи несущей, которым ещё не нашёлся раннер. */
+  waiting: number;
+  refusal: string | null;
+}
+
+function runnerRow(value: unknown): RunnerRow | null {
+  if (!isObject(value as never)) return null;
+  const item = value as JsonObject;
+  const name = str(item.name);
+  if (!name) return null;
+  return {
+    name,
+    availability: str(item.availability) || 'unknown',
+    ageSeconds: num(item.observation_age_seconds),
+    slotsUsed: num(item.slots_used) ?? 0,
+    slotsMax: num(item.slots_max) ?? 0,
+    paused: bool(item.paused) === true,
+    local: str(item.role) === 'local'
+  };
+}
+
+export const runnersList: CardLogic<RunnersListData> = {
+  label: 'Раннеры',
+  parse(call) {
+    const refusal = refusalCode(call);
+    if (refusal !== null) return { rows: [], waiting: 0, refusal };
+    if (!Array.isArray(call.answer?.runners) && !running(call)) return null;
+    return { rows: list(call.answer?.runners).map(runnerRow).filter((row): row is RunnerRow => row !== null), waiting: num(call.answer?.waiting_runner_jobs) ?? 0, refusal: null };
+  },
+  summary(call, data) {
+    if (data.refusal !== null) return refusalText(data.refusal);
+    const head = running(call) ? 'Поиск раннеров' : say(call.voice, 'Смотрела раннеры', 'Раннеры');
+    if (running(call)) return head;
+    if (data.rows.length === 0) return `${head}: нет`;
+    const online = data.rows.filter((row) => row.availability === 'online').length;
+    const parts = [`${online} на связи`, data.waiting > 0 ? `ждут ${data.waiting}` : ''].filter(Boolean);
+    return `${head}: ${data.rows.length} · ${parts.join(' · ')}`;
+  }
+};
 
 const QUEUED = new Set(['queued', 'dispatched', 'waiting_lease']);
 

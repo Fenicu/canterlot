@@ -6,13 +6,16 @@
   import type { Runtime } from '#lib/app/runtime.js';
   import { clock } from '#lib/clock.js';
   import { fmt } from '#lib/format/ru.js';
-  import { durationWord, isTerminal, jobFacts, jobLabel, jobWord, offlineNote, reasonText } from '#lib/jobs/model.js';
+  import { durationWord, isTerminal, jobFacts, jobLabel, jobWord, offlineNote, outputsLine, reasonText, runnerLine, sourceLine } from '#lib/jobs/model.js';
   import { connectionStale } from '#lib/sync/stale.svelte.js';
   import { ticker } from '#lib/ticker.svelte.js';
   import Button from '#lib/ui/Button.svelte';
   import ConfirmDialog from '#lib/ui/ConfirmDialog.svelte';
   import Sheet from '#lib/ui/Sheet.svelte';
+  import { swapOn } from '#lib/ui/swap.js';
+  import WorkMotif from '#lib/ui/WorkMotif.svelte';
   import CodeLines from '#lib/timeline/cards/CodeLines.svelte';
+  import CopyButton from '#lib/timeline/cards/CopyButton.svelte';
 
   let { runtime, jobId, onclose }: { runtime: Runtime; jobId: string; onclose: () => void } = $props();
 
@@ -111,6 +114,10 @@
   const took = $derived(job ? durationWord(job.duration_ms) : '');
   const note = $derived(facts ? offlineNote(facts) : '');
   const why = $derived(job ? reasonText(job.end_reason) : '');
+  const runner = $derived(facts ? runnerLine(facts) : '');
+  const source = $derived(facts ? sourceLine(facts.source) : '');
+  const results = $derived(facts ? outputsLine(facts) : null);
+  const staged = $derived(job?.state === 'staging' || job?.state === 'collecting');
   const commandLines = $derived((job?.shell ?? '').split('\n'));
   const command = $derived((allCommand ? commandLines : commandLines.slice(0, COMMAND_LINES)).map((line) => ({ text: line })));
   const late = $derived(job?.late_report ? 'Воркер сообщил об итоге после потери связи; состояние осталось прежним' : '');
@@ -128,7 +135,7 @@
   }
 </script>
 
-<Sheet open {title} subtitle={job ? [job.machine_name, job.workdir].filter(Boolean).join(' · ') : undefined} {onclose}>
+<Sheet open {title} subtitle={job ? [runner, job.workdir].filter(Boolean).join(' · ') : undefined} {onclose}>
   <div class="job" data-job-sheet>
     {#if missing}
       <p class="note" role="status">Такой задачи нет у хаба</p>
@@ -136,9 +143,13 @@
       {#if loadError}<p class="error" role="alert">{loadError}</p><Button onclick={() => void loadJob()}>Повторить</Button>{:else}<p class="note" role="status">Загружаю задачу…</p>{/if}
     {:else}
       <dl class="facts">
-        <div><dt>Состояние</dt><dd><span class="state" data-tone={word?.tone ?? 'muted'} data-role="job-state">{word?.word}</span>{#if note}<span class="away" data-role="job-offline">{note}</span>{/if}</dd></div>
-        <div><dt>Машина</dt><dd data-role="job-machine">{job.machine_name}</dd></div>
-        <div><dt>Каталог</dt><dd class="mono" data-role="job-workdir">{job.workdir}</dd></div>
+        <div><dt>Состояние</dt><dd>{#if staged}<span class="stage" data-role="job-stage"><WorkMotif /></span>{/if}<span class="state" data-tone={word?.tone ?? 'muted'} data-role="job-state" use:swapOn={{ text: word?.word ?? '', key: job.state }}></span>{#if note}<span class="away" data-role="job-offline">{note}</span>{/if}</dd></div>
+        <div><dt>{job.machine_id || !runner ? 'Машина' : 'Раннер'}</dt><dd data-role="job-machine">{runner}</dd></div>
+        {#if source}<div><dt>Исходники</dt><dd class="mono" data-role="job-source">{source}</dd></div>{/if}
+        {#if job.labels.length > 0}<div><dt>Метки</dt><dd data-role="job-labels">{job.labels.join(', ')}</dd></div>{/if}
+        {#if job.workdir}<div><dt>Каталог</dt><dd class="mono" data-role="job-workdir">{job.workdir}</dd></div>{/if}
+        {#if results?.dir}<div><dt>Результаты</dt><dd class="dir"><code data-role="job-outputs-dir">{results.dir}</code><CopyButton text={results.dir} label="Скопировать путь к результатам" /></dd></div>{/if}
+        {#if results?.note}<div><dt>Результаты</dt><dd data-role="job-outputs-note">{results.note}</dd></div>{/if}
         {#if terminal && job.exit_code !== null && job.exit_code !== undefined}<div><dt>Код выхода</dt><dd data-role="job-exit">{job.exit_code}</dd></div>{/if}
         {#if took || elapsed}<div><dt>Длительность</dt><dd data-role="job-duration">{took || elapsed}</dd></div>{/if}
         {#if why}<div><dt>Причина</dt><dd data-role="job-reason">{why}</dd></div>{/if}
@@ -195,7 +206,10 @@
   .facts div { display: flex; flex-wrap: wrap; gap: var(--s1) var(--s4); min-width: 0; }
   dt { flex: none; min-width: var(--s15); color: var(--muted); }
   dd { flex: 1 1 0; min-width: 0; margin: var(--s0); overflow-wrap: anywhere; }
-  .mono { font-family: var(--font-mono); }
+  .mono, code { font-family: var(--font-mono); }
+  .stage { display: inline-flex; vertical-align: middle; margin-inline-end: var(--s3); }
+  .dir { display: flex; align-items: center; gap: var(--s3); }
+  .dir code { min-width: 0; overflow-wrap: anywhere; }
   .away { margin-inline-start: var(--s4); color: var(--warning); }
   .state[data-tone='accent'] { color: var(--accent-link); }
   .state[data-tone='success'] { color: var(--success); }
