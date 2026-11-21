@@ -57,7 +57,7 @@
   const card = $derived(block.kind === 'tool_call' && !block.media.length ? resolveCard(call, now) : null);
   // Растёт только карточка, пришедшая на глазах; прочитанная история стоит сразу.
   const grows = untrack(() => (card?.def.grows ? arrivedNow(`card:${block.id}`, block.createdAt) : false));
-  const env: CardEnv = $derived({ open, onToggle, load, now, working, links, background, conversationId, folds });
+  const env: CardEnv = $derived({ open, onToggle, load, now, working, links, background, conversationId, folds, icon: card?.icon ?? null });
 </script>
 
 {#if card}

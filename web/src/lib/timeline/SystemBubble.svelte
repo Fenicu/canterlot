@@ -4,8 +4,13 @@
   import type { SystemView } from '#lib/timeline/system.js';
   import TextBlock from '#lib/timeline/TextBlock.svelte';
   import Button from '#lib/ui/Button.svelte';
+  import { untrack } from 'svelte';
+  import { durationMs } from '#lib/motion.js';
+  import { arrivedNow } from '#lib/timeline/arrival.js';
   import Icon from '#lib/ui/Icon.svelte';
   import IconButton from '#lib/ui/IconButton.svelte';
+  import InkIcon from '#lib/ui/InkIcon.svelte';
+  import type { InkState } from '#lib/ui/ink.js';
   import { timeTip } from '#lib/ui/time-tip.js';
 
   let {
@@ -25,6 +30,14 @@
     bookmark?: { marked: boolean; label: string; onToggle: () => void } | null;
   } = $props();
 
+  // Значок пузыря, пришедшего на глазах, один раз прописывается чернилами; история и строка, вернувшаяся в окно ленты, стоят сразу.
+  let ink = $state<InkState>(
+    untrack(() => (createdAt !== null && arrivedNow(`bubble:${view.kind}:${createdAt}`, createdAt) && durationMs('--duration-ink') > 0 ? 'ink' : 'dry'))
+  );
+  function dried(event: AnimationEvent): void {
+    if (ink === 'ink' && event.animationName.endsWith('mark-settle')) ink = 'dry';
+  }
+
   let noteOpen = $state(false);
   const hasNote = $derived(Boolean(view.note));
 </script>
@@ -32,7 +45,7 @@
 <!-- Служебный пузырь: слева, как карточка итога делегата, с тем же набором фактов. -->
 <article class="system" data-event-kind={view.kind} data-tone={view.tone} aria-label={view.title}>
   <header>
-    <span class="icon"><Icon name={view.icon} /></span>
+    <span class="icon" data-role="system-icon" onanimationend={dried}><InkIcon name={view.icon} state={ink} /></span>
     {#if view.titleHref}
       <a class="title tap-target" href={resolve(view.titleHref as '/')}>{view.title}</a>
     {:else}
@@ -151,7 +164,10 @@
     align-self: start;
     margin-block-start: calc((var(--fs-body) * var(--lh-body) - var(--icon-small)) / 2);
     color: var(--muted);
+    /* Чернила высыхают в тон самого пузыря: предупреждение остаётся предупреждением. */
+    --ink-rest: currentColor;
   }
+  [data-tone='warning'] .icon, [data-tone='danger'] .icon { --ink-live: currentColor; }
   .icon :global(svg) { width: var(--icon-small); height: var(--icon-small); }
   [data-tone='warning'] .icon, [data-tone='warning'] .title { color: var(--warning); }
   [data-tone='danger'] .icon, [data-tone='danger'] .title { color: var(--danger); }
