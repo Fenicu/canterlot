@@ -2,6 +2,7 @@ import type { Locator, Page } from '@playwright/test';
 import { changeJob, seedJob } from '../../testing/fake-hub';
 import { DONE_LOG, LONG_TITLE, seedJobCards, type JobCardsSeed } from '../../testing/fixtures/job-cards';
 import { expect, test } from './fixtures';
+import { cardOf, reveal } from './job-feed';
 import { bootSecondary } from './secondary-fixture';
 
 /** Лента с вызовами `job_*` и экран машин на одном фейковом хабе. */
@@ -17,35 +18,7 @@ async function boot(page: Page, path?: string) {
   return { ...booted, seed };
 }
 
-const feed = (page: Page) => page.locator('.feed');
 const sheet = (page: Page) => page.locator('[data-job-sheet]');
-
-/** Лента виртуальная: строка далеко от низа не смонтирована, пока до неё не докрутили. */
-async function reveal(page: Page, target: Locator): Promise<Locator> {
-  const settle = () => page.evaluate(() => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done))));
-  await feed(page).evaluate((node) => {
-    node.dispatchEvent(new WheelEvent('wheel', { deltaY: -100 }));
-    node.scrollTop = 0;
-  });
-  await settle();
-  for (let step = 0; step < 40; step++) {
-    if ((await target.count()) > 0) {
-      try {
-        await target.first().scrollIntoViewIfNeeded({ timeout: 2_000 });
-        await settle();
-        if ((await target.count()) > 0) return target.first();
-      } catch {
-        // Строку сняли с окна, пока до неё крутили: ищем дальше.
-      }
-    }
-    await feed(page).evaluate((node) => { node.scrollTop += node.clientHeight * 0.6; });
-    await settle();
-  }
-  await expect(target.first()).toBeAttached();
-  return target.first();
-}
-
-const cardOf = (page: Page, blockId: string) => page.locator(`[data-key="block:${blockId}"] .feed-card`).first();
 
 test('a_job_run_card_opens_the_sheet_with_the_tail_and_the_exit_code', async ({ page }) => {
   const { seed } = await boot(page, undefined);

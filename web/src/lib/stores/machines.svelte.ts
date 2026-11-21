@@ -145,10 +145,16 @@ export class MachinesStore {
 		if (kind === 'machine_availability_changed' && event.kind === 'machine_availability_changed') {
 			const machine = this.items.get(event.payload.machine_id);
 			// Пропавшая машина не подтверждает очередь: хаб снимает её тем же решением.
-			// Событие хаба знает только связь воркера. Раннеру оно даёт `online` или `unknown`: `offline` хаб называет
-			// по наблюдению несущей, и без свежего снимка его не угадать.
-			const availability = machine?.role === 'runner' ? (event.payload.availability === 'available' ? 'online' : 'unknown') : event.payload.availability;
-			if (machine) this.items.set(machine.id, { ...machine, availability, availability_since: event.committed_at, ...(event.payload.availability === 'unavailable' ? { lease: null } : {}) });
+			if (!machine) return;
+			// Раннеру хаб присылает свои слова `online|offline|unknown` и возраст проверки несущей `observed_at`;
+			// без свежей проверки поля нет, и прежний возраст не доживает. Обычная машина остаётся со старыми значениями.
+			if (machine.role === 'runner') {
+				const word = event.payload.availability;
+				const availability = word === 'online' || word === 'offline' ? word : 'unknown';
+				this.items.set(machine.id, { ...machine, availability, observed_at: event.payload.observed_at ?? null, availability_since: event.committed_at, ...(availability === 'online' ? {} : { lease: null }) });
+				return;
+			}
+			this.items.set(machine.id, { ...machine, availability: event.payload.availability, availability_since: event.committed_at, ...(event.payload.availability === 'unavailable' ? { lease: null } : {}) });
 			return;
 		}
 		if (kind === 'machine_report_updated' && event.kind === 'machine_report_updated') {

@@ -13,24 +13,40 @@ function setup() {
 		api: { snapshot: () => api.machinesSnapshot(), events: async () => ({ events: [], head: '0' }) as never }
 	});
 	store.applier.applySnapshot({ items: [worker, runner] }, '1');
-	const apply = (machine: string, availability: string) =>
-		store.applier.applyEvents([{ event: { kind: 'machine_availability_changed', payload: { machine_id: machine, availability }, committed_at: '2026-11-21T12:05:00.000Z' } }] as never);
+	const apply = (machine: string, availability: string, observedAt?: string) =>
+		store.applier.applyEvents([{ event: { kind: 'machine_availability_changed', payload: { machine_id: machine, availability, ...(observedAt ? { observed_at: observedAt } : {}) }, committed_at: '2026-11-21T12:05:00.000Z' } }] as never);
 	return { worker, runner, store, apply };
 }
 
 describe('machines store: availability events of a runner', () => {
-	it('keeps_the_runner_words_when_the_worker_connects', () => {
+	it('takes_the_hub_runner_words_as_they_are', () => {
 		const { runner, store, apply } = setup();
-		apply(runner.id, 'unavailable');
-		expect(store.items.get(runner.id)!.availability).toBe('unknown');
-		apply(runner.id, 'available');
+		apply(runner.id, 'offline', '2026-11-21T12:04:30.000Z');
+		expect(store.items.get(runner.id)!.availability).toBe('offline');
+		apply(runner.id, 'online');
 		expect(store.items.get(runner.id)!.availability).toBe('online');
+		apply(runner.id, 'unknown');
+		expect(store.items.get(runner.id)!.availability).toBe('unknown');
 	});
 
-	it('does_not_claim_offline_without_the_hub_saying_so', () => {
+	it('takes_the_age_of_the_check_from_the_event', () => {
 		const { runner, store, apply } = setup();
-		apply(runner.id, 'degraded');
-		expect(store.items.get(runner.id)!.availability).toBe('unknown');
+		apply(runner.id, 'offline', '2026-11-21T12:04:30.000Z');
+		expect(store.items.get(runner.id)!.observed_at).toBe('2026-11-21T12:04:30.000Z');
+		apply(runner.id, 'offline', '2026-11-21T12:05:30.000Z');
+		expect(store.items.get(runner.id)!.observed_at).toBe('2026-11-21T12:05:30.000Z');
+		// Без свежей проверки хаб `observed_at` не присылает: прежняя метка возраста не доживает.
+		apply(runner.id, 'unknown');
+		expect(store.items.get(runner.id)!.observed_at).toBeNull();
+	});
+
+	it('does_not_keep_the_queue_of_a_runner_that_left', () => {
+		const { runner, store, apply } = setup();
+		store.items.set(runner.id, { ...store.items.get(runner.id)!, lease: { holders: [], queue: [] } as never });
+		apply(runner.id, 'online');
+		expect(store.items.get(runner.id)!.lease).not.toBeNull();
+		apply(runner.id, 'offline', '2026-11-21T12:04:30.000Z');
+		expect(store.items.get(runner.id)!.lease).toBeNull();
 	});
 
 	it('leaves_an_ordinary_machine_with_its_own_values', () => {

@@ -29,6 +29,14 @@ export interface JobFacts {
   machineOffline: boolean;
   endReason: string | null;
   createdAt: string;
+  /** Метки, которые задача требует от раннера. */
+  labels: string[];
+  expectedMinutes: number;
+  /** Исходники для раннера: репозиторий и ревизия. */
+  source: { repo: string; rev: string } | null;
+  /** Каталог на несущей, куда собраны результаты; только после конца. */
+  outputsDir: string | null;
+  outputsNote: string | null;
 }
 
 /** Строка хаба (`JobView`) в виде, который читают слова и списки. */
@@ -47,8 +55,41 @@ export function jobFacts(view: JobView): JobFacts {
     cancelRequested: view.cancel_requested,
     machineOffline: view.machine_offline,
     endReason: view.end_reason ?? null,
-    createdAt: view.created_at
+    createdAt: view.created_at,
+    labels: view.labels ?? [],
+    expectedMinutes: view.expected_minutes,
+    source: view.source ? { repo: view.source.repo, rev: view.source.rev } : null,
+    outputsDir: view.outputs_dir ?? null,
+    outputsNote: view.outputs_note ?? null
   };
+}
+
+/** Раннер задачи словами: имя выбранного или «ждёт раннер», пока машины нет; у отменённой до размещения — пусто. */
+export function runnerLine(job: Pick<JobFacts, 'state' | 'machineName'>): string {
+  if (job.state === 'waiting_runner') return 'ждёт раннер';
+  return job.machineName;
+}
+
+/** Исходники одной строкой: `репозиторий @ ревизия`. */
+export function sourceLine(source: { repo: string; rev: string } | null | undefined): string {
+  return source ? `${source.repo} @ ${source.rev}` : '';
+}
+
+/** Пометки хаба о результатах словами; незнакомая остаётся как пришла. */
+function outputsNoteText(note: string): string {
+  const failed = 'outputs not collected';
+  if (note === failed) return 'Результаты не собраны';
+  if (note.startsWith(`${failed}:`)) return `Результаты не собраны: ${note.slice(failed.length + 1).trim()}`;
+  if (note === 'outputs truncated at the size cap') return 'Результаты обрезаны по пределу размера';
+  return note;
+}
+
+/** Результаты после конца: каталог на несущей и пометка. До конца и без того и другого — `null`. */
+export function outputsLine(job: Pick<JobFacts, 'state' | 'outputsDir' | 'outputsNote'>): { dir: string; note: string } | null {
+  if (!isTerminal(job.state)) return null;
+  const dir = job.outputsDir ?? '';
+  const note = job.outputsNote ? outputsNoteText(job.outputsNote) : '';
+  return dir || note ? { dir, note } : null;
 }
 
 const TERMINAL = new Set(['succeeded', 'failed', 'timed_out', 'canceled', 'lost']);
@@ -64,7 +105,7 @@ export function jobWord(job: Pick<JobFacts, 'state' | 'exitCode' | 'cancelReques
     case 'waiting_runner':
       return { word: 'ждёт раннер', tone: 'warning' };
     case 'staging':
-      return { word: 'готовит исходники', tone: 'accent', live: true };
+      return { word: 'подвозит код', tone: 'accent', live: true };
     case 'collecting':
       return { word: 'собирает результаты', tone: 'accent', live: true };
     case 'queued':
@@ -148,15 +189,22 @@ export function reasonText(reason: string | null | undefined): string {
       return 'отменена агентом';
     case 'launch_interrupted':
       return 'запуск прерван сбоем машины';
+    case 'staging_failed':
+      return 'не удалось подвезти код';
     default:
+      // Хаб дописывает причину несущей после двоеточия: `staging_failed: git push failed`.
+      if (reason!.startsWith('staging_failed:')) return `не удалось подвезти код: ${reason!.slice('staging_failed:'.length).trim()}`;
       return refusalText(reason!);
   }
 }
 
 const RECENT = 10;
 
-/** Раздел «Задачи» машины: все незаконченные и десять последних законченных, новые первыми. */
-export function machineJobs<T extends Pick<JobFacts, 'id' | 'state' | 'machineId' | 'createdAt'>>(jobs: Iterable<T>, machineId: string): { running: T[]; recent: T[] } {
-  const own = [...jobs].filter((job) => job.machineId === machineId).sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt) || b.id.localeCompare(a.id));
+/**
+ * Раздел «Задачи» машины: все незаконченные и десять последних законченных, новые первыми. Задачи раннера
+ * лежат на его карточке, а не на несущей: у несущей свои и те, что ещё никто не взял (машины у них нет).
+ */
+export function machineJobs<T extends Pick<JobFacts, 'id' | 'state' | 'machineId' | 'createdAt'>>(jobs: Iterable<T>, machineId: string, opts: { carrier?: boolean } = {}): { running: T[]; recent: T[] } {
+  const own = [...jobs].filter((job) => job.machineId === machineId || (opts.carrier === true && job.machineId === '')).sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt) || b.id.localeCompare(a.id));
   return { running: own.filter((job) => !isTerminal(job.state)), recent: own.filter((job) => isTerminal(job.state)).slice(0, RECENT) };
 }

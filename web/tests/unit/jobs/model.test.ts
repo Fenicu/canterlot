@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { durationWord, isTerminal, jobHref, jobLabel, jobWord, machineJobs, offlineNote, refusalText, reasonText, type JobFacts } from '../../../src/lib/jobs/model';
+import { durationWord, isTerminal, jobFacts, jobHref, jobLabel, jobWord, machineJobs, offlineNote, outputsLine, refusalText, reasonText, runnerLine, sourceLine, type JobFacts, type JobView } from '../../../src/lib/jobs/model';
 
 const job = (patch: Partial<JobFacts> = {}): JobFacts => ({
   id: '01a1b3b9-0000-7000-8000-00000000cc01',
@@ -15,6 +15,11 @@ const job = (patch: Partial<JobFacts> = {}): JobFacts => ({
   machineOffline: false,
   endReason: null,
   createdAt: '2026-11-21T10:00:00Z',
+  labels: [],
+  expectedMinutes: 30,
+  source: null,
+  outputsDir: null,
+  outputsNote: null,
   ...patch
 });
 
@@ -22,7 +27,7 @@ describe('job words', () => {
   it('names_every_state_in_russian_with_a_tone', () => {
     const word = (state: string, patch: Partial<JobFacts> = {}) => jobWord(job({ state, ...patch }));
     expect(word('waiting_runner')).toEqual({ word: 'ждёт раннер', tone: 'warning' });
-    expect(word('staging')).toEqual({ word: 'готовит исходники', tone: 'accent', live: true });
+    expect(word('staging')).toEqual({ word: 'подвозит код', tone: 'accent', live: true });
     expect(word('collecting')).toEqual({ word: 'собирает результаты', tone: 'accent', live: true });
     expect(isTerminal('collecting')).toBe(false);
     expect(refusalText('source_required')).toBe('Для автоматического размещения нужны исходники');
@@ -96,6 +101,12 @@ describe('job text', () => {
     expect(reasonText('mode_too_narrow')).toBe('Отказ: режим не позволяет');
     expect(reasonText(null)).toBe('');
   });
+
+  it('words_a_failed_staging_with_the_hub_reason', () => {
+    expect(reasonText('staging_failed: git push failed')).toBe('не удалось подвезти код: git push failed');
+    expect(reasonText('staging_failed: timeout')).toBe('не удалось подвезти код: timeout');
+    expect(reasonText('staging_failed')).toBe('не удалось подвезти код');
+  });
 });
 
 describe('machine jobs', () => {
@@ -111,5 +122,54 @@ describe('machine jobs', () => {
 
   it('is_empty_when_the_machine_has_no_jobs', () => {
     expect(machineJobs([], 'm1')).toEqual({ running: [], recent: [] });
+  });
+
+  it('a_carrier_shows_the_jobs_nobody_has_taken_yet_and_not_those_on_its_runners', () => {
+    const runnerJob = job({ id: 'r1', machineId: 'runner-a', state: 'running', createdAt: at(5) });
+    const waiting = job({ id: 'w1', machineId: '', machineName: '', state: 'waiting_runner', createdAt: at(6) });
+    const ownJob = job({ id: 'c1', machineId: 'carrier', state: 'running', createdAt: at(4) });
+    const canceled = job({ id: 'w2', machineId: '', machineName: '', state: 'canceled', createdAt: at(3) });
+    const rows = machineJobs([runnerJob, waiting, ownJob, canceled], 'carrier', { carrier: true });
+    expect(rows.running.map((row) => row.id)).toEqual(['w1', 'c1']);
+    expect(rows.recent.map((row) => row.id)).toEqual(['w2']);
+    // Карточка раннера держит только свои задачи; несущая без пометки не берёт чужие и ничьи.
+    expect(machineJobs([runnerJob, waiting], 'runner-a').running.map((row) => row.id)).toEqual(['r1']);
+    expect(machineJobs([runnerJob, waiting], 'carrier').running).toEqual([]);
+  });
+});
+
+describe('runner job facts', () => {
+  const view = (patch: Partial<JobView> = {}): JobView => ({
+    id: 'j1', state: 'staging', machine_id: null, machine_name: null, conversation_id: null, conversation_title: null, title: null, workdir: null,
+    shell: 'scripts/gate.sh', lease: 'none', timeout_minutes: 30, exit_code: null, duration_ms: null, output_bytes: 0, truncated: false, end_reason: null,
+    cancel_requested: false, has_log: false, machine_offline: false, late_report: null, labels: ['kernel-6.12'], expected_minutes: 45,
+    source: { repo: 'project', rev: '1a2b3c4' }, outputs_dir: null, outputs_note: null, created_at: '2026-11-21T10:00:00Z', started_at: null, finished_at: null, ...patch
+  });
+
+  it('reads_the_runner_fields_of_the_hub_row', () => {
+    const facts = jobFacts(view({ outputs_dir: '/srv/jobs/outputs/j1', outputs_note: 'cap reached' }));
+    expect(facts).toMatchObject({ machineId: '', workdir: '', labels: ['kernel-6.12'], expectedMinutes: 45, source: { repo: 'project', rev: '1a2b3c4' }, outputsDir: '/srv/jobs/outputs/j1', outputsNote: 'cap reached' });
+    expect(jobFacts(view({ source: null })).source).toBeNull();
+  });
+
+  it('names_the_runner_or_says_the_job_waits_for_one', () => {
+    expect(runnerLine(job({ state: 'waiting_runner', machineId: '', machineName: '' }))).toBe('ждёт раннер');
+    expect(runnerLine(job({ state: 'staging', machineName: 'runner-a' }))).toBe('runner-a');
+    expect(runnerLine(job({ state: 'canceled', machineId: '', machineName: '' }))).toBe('');
+  });
+
+  it('shows_the_source_as_repo_at_rev', () => {
+    expect(sourceLine({ repo: 'project', rev: '1a2b3c4' })).toBe('project @ 1a2b3c4');
+    expect(sourceLine(null)).toBe('');
+  });
+
+  it('tells_where_the_outputs_are_only_after_the_end', () => {
+    expect(outputsLine(job({ state: 'succeeded', outputsDir: '/srv/jobs/outputs/j1' }))).toEqual({ dir: '/srv/jobs/outputs/j1', note: '' });
+    expect(outputsLine(job({ state: 'failed', outputsDir: null, outputsNote: 'outputs not collected: collection timed out' }))).toEqual({ dir: '', note: 'Результаты не собраны: collection timed out' });
+    expect(outputsLine(job({ state: 'failed', outputsDir: null, outputsNote: 'outputs not collected' }))).toEqual({ dir: '', note: 'Результаты не собраны' });
+    expect(outputsLine(job({ state: 'succeeded', outputsDir: '/srv/jobs/outputs/j1', outputsNote: 'outputs truncated at the size cap' }))).toEqual({ dir: '/srv/jobs/outputs/j1', note: 'Результаты обрезаны по пределу размера' });
+    expect(outputsLine(job({ state: 'succeeded', outputsDir: null, outputsNote: 'something new' }))).toEqual({ dir: '', note: 'something new' });
+    expect(outputsLine(job({ state: 'collecting', outputsDir: '/srv/jobs/outputs/j1' }))).toBeNull();
+    expect(outputsLine(job({ state: 'succeeded' }))).toBeNull();
   });
 });
