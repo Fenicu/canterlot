@@ -24,6 +24,7 @@
   import { latestSession, prefillFromSession, shortenHomePath } from './newSessionPrefill';
   import WorkdirField from './WorkdirField.svelte';
   import { sortPresets, type PresetSummaryLike } from '../presets/presetsModel.js';
+  import { sessionMachines } from '../machines/runner.js';
 
   const touch = isTouchPrimary();
   let runtime = $state<Runtime | null>(null);
@@ -51,7 +52,8 @@
   let touched = $state(false);
   const groupId = page.url.searchParams.get('group') ?? '';
 
-  const machines = $derived(runtime ? [...runtime.machines.items.values()] : []);
+  // Раннеры исполняют только задачи: сессию на них не начать, поэтому в выборе их нет.
+  const machines = $derived(runtime ? sessionMachines([...runtime.machines.items.values()]) : []);
   const machine = $derived(machines.find((item) => item.id === machineId));
   const home = $derived(machine?.home_dir ?? '');
   const harnesses = $derived(machine?.harnesses ?? []);

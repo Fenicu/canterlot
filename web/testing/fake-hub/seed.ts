@@ -144,6 +144,13 @@ export function seedMachine(api: FakeHubApi, patch: Partial<MachineRecord> = {})
 		metrics: patch.metrics ?? { observed_at: '2026-10-28T12:00:00.000Z' },
 		home_dir: patch.home_dir ?? null,
 		lease: patch.lease ?? null,
+		...(patch.role !== undefined ? { role: patch.role } : {}),
+		...(patch.parent_machine_id !== undefined ? { parent_machine_id: patch.parent_machine_id } : {}),
+		...(patch.rank !== undefined ? { rank: patch.rank } : {}),
+		...(patch.labels !== undefined ? { labels: patch.labels } : {}),
+		...(patch.is_carrier !== undefined ? { is_carrier: patch.is_carrier } : {}),
+		...(patch.observed_at !== undefined ? { observed_at: patch.observed_at } : {}),
+		...(patch.accepts_remote_work !== undefined ? { accepts_remote_work: patch.accepts_remote_work } : {}),
 		harnesses: patch.harnesses ?? [
 			{
 				id: 'claude',

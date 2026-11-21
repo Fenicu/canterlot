@@ -354,7 +354,8 @@
       "specs": [
         "e2e/ui/jobs.spec.ts",
         "e2e/ui/lease-queue.spec.ts",
-        "e2e/ui/machines.spec.ts"
+        "e2e/ui/machines.spec.ts",
+        "e2e/ui/runners.spec.ts"
       ]
     },
     {
