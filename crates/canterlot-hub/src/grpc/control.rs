@@ -19,12 +19,25 @@ fn accepted_secret_v2(state: &HubGrpc, machine_id: Uuid, connection_id: Uuid) ->
         })
 }
 
+fn negotiated_runners(state: &HubGrpc, machine_id: Uuid, connection_id: Uuid) -> bool {
+    state
+        .registry
+        .capabilities_for_connection(machine_id, connection_id)
+        .is_some_and(|capabilities| {
+            capabilities
+                .iter()
+                .any(|capability| capability == crate::session::CAPABILITY_RUNNERS_V1)
+        })
+}
+
 // Команды растут с аддитивными полями; ожидание живёт на стеке один шаг.
 #[allow(clippy::large_enum_variant)]
 enum Next {
     Ack(Option<Result<Option<JournalRangeAck>, Status>>),
     Inbound(Result<Option<ControlUp>, Status>),
     Command(Option<ControlDown>),
+    /// Пора сверить список раннеров несущей.
+    Runners,
     #[cfg(feature = "fault-injection")]
     Fault(tonic::Code),
 }
@@ -124,6 +137,12 @@ impl WorkerControl for HubGrpc {
             yield reply;
             let cj_journal = Uuid::parse_str(&hello.cj_journal_id).ok();
             let mut lane = IngestLane::start(state.ingest.clone(), machine_id, authenticated.credential.clone(), LaneKind::Cj);
+            // Раннеры несущей: список идёт, только если воркер согласовал `runners_v1`; первый
+            // тик таймера приходит сразу, так что список уходит при подключении.
+            let runners_enabled = negotiated_runners(&state, machine_id, connection_id);
+            let mut runners_sent = super::runners::Sent::default();
+            let mut runners_tick = tokio::time::interval(state.timers.dispatch_sweep);
+            runners_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 let next = tokio::select! {
                     biased;
@@ -133,8 +152,18 @@ impl WorkerControl for HubGrpc {
                     ack = lane.next_ack() => Next::Ack(ack),
                     next = inbound.message() => Next::Inbound(next),
                     command = commands.recv() => Next::Command(command),
+                    _ = runners_tick.tick(), if runners_enabled => Next::Runners,
                 };
                 match next {
+                    Next::Runners => {
+                        match state.runners_assigned_if_changed(machine_id, &mut runners_sent).await {
+                            Ok(Some(list)) => { yield checked(list)?; }
+                            Ok(None) => {}
+                            Err(error) => tracing::warn!(kind = "runners_assigned_database",
+                                error = %crate::dberr::describe(&error), machine_id = %machine_id,
+                                "runner list check failed"),
+                        }
+                    }
                     Next::Ack(ack) => {
                         let Some(ack) = ack else { break; };
                         let Some(ack) = ack.map_err(|error| session_log.error(state.revoked_by_ingest(machine_id, connection_id, error)))? else {
@@ -211,6 +240,15 @@ impl WorkerControl for HubGrpc {
                                     Err(session_log.error(Status::invalid_argument("invalid_record")))?;
                                 }
                                 lane.submit(records).map_err(|error| session_log.error(error))?;
+                            }
+                            Some(control_up::Msg::RunnerTokenRequest(request)) => {
+                                if !runners_enabled { Err(session_log.error(Status::invalid_argument("capability_missing")))?; }
+                                let reply = state.runner_token_reply(machine_id, &request).await.map_err(|error| session_log.error(error))?;
+                                yield checked(reply)?;
+                            }
+                            Some(control_up::Msg::RunnerObservation(observation)) => {
+                                if !runners_enabled { Err(session_log.error(Status::invalid_argument("capability_missing")))?; }
+                                state.runner_observation(machine_id, &observation).await.map_err(|error| session_log.error(error))?;
                             }
                             Some(control_up::Msg::ReconcileReport(report)) => {
                                 lane.submit_reconcile(report).map_err(|error| session_log.error(error))?;

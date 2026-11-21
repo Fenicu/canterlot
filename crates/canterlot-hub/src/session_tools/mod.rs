@@ -116,6 +116,8 @@ pub enum ToolErrorCode {
     DomainMismatch,
     /// Другая машина не принимает удалённую работу: владелец не включил выключатель.
     RemoteWorkDisabled,
+    /// Машина — раннер: сессий на ней нет, задачи (`job_run`) идут.
+    MachineIsRunner,
     PermissionModeTooWide,
     ProfileUnknown,
     MachineUnavailable,
@@ -157,7 +159,7 @@ pub enum ToolErrorCode {
 }
 
 impl ToolErrorCode {
-    pub const ALL: [Self; 47] = [
+    pub const ALL: [Self; 48] = [
         Self::UnknownTool,
         Self::SessionNotFound,
         Self::ReadOnlySession,
@@ -170,6 +172,7 @@ impl ToolErrorCode {
         Self::WorkdirNotAllowed,
         Self::DomainMismatch,
         Self::RemoteWorkDisabled,
+        Self::MachineIsRunner,
         Self::PermissionModeTooWide,
         Self::ProfileUnknown,
         Self::MachineUnavailable,
@@ -221,6 +224,7 @@ impl ToolErrorCode {
             Self::WorkdirNotAllowed => "workdir_not_allowed",
             Self::DomainMismatch => "domain_mismatch",
             Self::RemoteWorkDisabled => "remote_work_disabled",
+            Self::MachineIsRunner => "machine_is_runner",
             Self::PermissionModeTooWide => "permission_mode_too_wide",
             Self::ProfileUnknown => "profile_unknown",
             Self::MachineUnavailable => "machine_unavailable",
@@ -275,6 +279,7 @@ impl ToolErrorCode {
             Self::RemoteWorkDisabled => {
                 "The owner has not allowed other machines to start work on this machine"
             }
+            Self::MachineIsRunner => "This machine is a runner: sessions do not start on it",
             Self::PermissionModeTooWide => "The mode is wider than the parent session's",
             Self::ProfileUnknown => "Unknown instruction preset",
             Self::MachineUnavailable => "The machine is not available",
@@ -343,6 +348,9 @@ impl ToolErrorCode {
             }
             Self::RemoteWorkDisabled => {
                 "Start the session on your own machine, or ask the owner to switch on remote work for that machine in the app."
+            }
+            Self::MachineIsRunner => {
+                "Start the session on a worker machine, or run the command there with job_run and machine set to the runner."
             }
             Self::PermissionModeTooWide => {
                 "Pass a mode no wider than this session's, or ask the owner to approve."

@@ -119,6 +119,7 @@ error_codes! {
     ScheduleRevisionConflict => "schedule_revision_conflict", 409, Browser, AfterCondition, "Расписание изменено с другого устройства";
     MachineNotFound => "machine_not_found", 404, Browser, Never, "Машина не найдена";
     MachineUnavailable => "machine_unavailable", 409, Delivery, AfterCondition, "Машина недоступна";
+    MachineIsRunner => "machine_is_runner", 409, Browser, Never, "Машина — раннер: сессии на ней не запускаются";
     MachineOffline => "machine_offline", 409, Delivery, AfterCondition, "Машина не на связи";
     NotOpen => "not_open", 409, Browser, Never, "Запрос секрета уже закрыт";
     NotDelivered => "not_delivered", 409, Browser, Never, "Значение ещё не доставлено";
@@ -645,6 +646,7 @@ impl From<ExecutionError> for ApiError {
             ExecutionError::AlreadyLive { .. } => ApiError::new(ErrorCode::ExecutionAlreadyLive),
             ExecutionError::ConversationNotFound => ApiError::new(ErrorCode::NotFound),
             ExecutionError::ConversationClosed => ApiError::new(ErrorCode::ConversationClosed),
+            ExecutionError::MachineIsRunner => ApiError::new(ErrorCode::MachineIsRunner),
             ExecutionError::WorktreeRemoved => ApiError::new(ErrorCode::WorktreeRemoved),
             ExecutionError::InvalidTransition { .. } => ApiError::new(ErrorCode::InvalidState),
             ExecutionError::Db(error) => error.into(),
@@ -670,6 +672,7 @@ impl From<crate::conversations::CreateError> for ApiError {
         Self::new(match e {
             E::MachineNotFound => ErrorCode::MachineNotFound,
             E::MachineUnavailable => ErrorCode::MachineUnavailable,
+            E::MachineIsRunner => ErrorCode::MachineIsRunner,
             E::CapabilityMissing => ErrorCode::CapabilityMissing,
             E::HarnessUnknown => ErrorCode::HarnessUnknown,
             E::ModelUnknown => ErrorCode::ModelUnknown,

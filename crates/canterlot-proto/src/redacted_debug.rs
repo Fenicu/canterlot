@@ -608,6 +608,18 @@ impl fmt::Debug for crate::worker::v1::SecretRemoved {
     }
 }
 
+/// Токен раннера — данные одного сообщения: в `Debug` его нет, только размер.
+impl fmt::Debug for crate::worker::v1::RunnerToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RunnerToken")
+            .field("machine_id", &self.machine_id)
+            .field("installation_id", &self.installation_id)
+            .field("restore_generation", &self.restore_generation)
+            .field("token_bytes", &self.token.len())
+            .finish()
+    }
+}
+
 impl fmt::Debug for crate::worker::v1::SecretRemoveFailed {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SecretRemoveFailed")

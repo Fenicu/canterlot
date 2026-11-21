@@ -1087,6 +1087,24 @@ async fn the_directory_must_belong_to_the_callers_domain(pool: PgPool) {
     fx.call("job.run", work).await.unwrap();
 }
 
+/// `job_run` на раннер с явным `machine` остаётся разрешённым: раннеры созданы для задач.
+#[sqlx::test(migrations = "./migrations")]
+async fn job_run_on_a_runner_machine_stays_allowed(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    sqlx::query(
+        "update machines set role='runner', parent_machine_id=$2, root_dir='/srv/runner',
+           accepts_remote_work=true where id=$1",
+    )
+    .bind(fx.b)
+    .bind(fx.a)
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+    let reply = fx.run_on_b("true").await.unwrap();
+    assert_eq!(reply["machine"], "machine-b");
+    assert_eq!(fx.commands(fx.b, "start_inplace_job").await, 1);
+}
+
 #[sqlx::test(migrations = "./migrations")]
 async fn another_machine_needs_the_owners_switch_and_the_capability(pool: PgPool) {
     let fx = Fx::new(pool).await;
