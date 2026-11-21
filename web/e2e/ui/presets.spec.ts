@@ -54,6 +54,9 @@ test('create_edit_and_delete_preset_with_confirmation', async ({ page }) => {
 
 test('a_created_preset_folds_in_and_a_deleted_one_folds_away', async ({ page }) => {
   await bootPresets(page);
+  await expect(page.locator('[data-preset]')).toHaveCount(4);
+  // Слепок встал без складки: строки, пришедшие вместе с ним, не двигались.
+  expect(await foldingCount(page, '[data-preset]')).toBe(0);
   await slowMotion(page);
   await page.getByRole('button', { name: 'Новая инструкция' }).click();
   await page.getByLabel('Название').fill('Складной пресет');
@@ -74,6 +77,7 @@ test('a_created_preset_folds_in_and_a_deleted_one_folds_away', async ({ page }) 
 
 test('switching_the_preset_tab_rebuilds_the_list_without_folding_and_motion_off_folds_nothing', async ({ page }) => {
   await bootPresets(page);
+  await expect(page.locator('[data-preset]')).toHaveCount(4);
   await slowMotion(page);
   const tabs = page.locator('[data-purpose-tab]');
   await tabs.nth(1).click();

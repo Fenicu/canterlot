@@ -109,6 +109,9 @@ test('queue_rows_fold_when_they_join_or_leave_and_the_rest_stay', async ({ page 
   await frame(page, testInfo);
   const { hub, ids } = await seededQueue(page);
   const section = page.locator('[data-lease-queue]');
+  // Строки уже на экране: складываются только те, что пришли или ушли после.
+  await expect(section.locator('[data-lease-holder]')).toHaveCount(2);
+  await expect(section.locator('[data-lease-waiter]')).toHaveCount(1);
   await slowMotion(page);
   const only = leaseEntry({ lease_id: 'h1', kind: 'build', label: 'cargo build', dir: 'canterlot', since: ago(12 * MIN) });
   // Держатель ушёл: его строка складывается, а не пропадает кадром.

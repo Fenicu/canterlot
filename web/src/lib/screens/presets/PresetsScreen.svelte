@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import { browserRuntime } from '#lib/app/browser.js';
   import type { Runtime } from '#lib/app/runtime.js';
   import { deletePreset, listPresets } from '#lib/api/client.js';
@@ -52,7 +52,9 @@
   // Карточки складываются, когда пришли или ушли на месте (новая инструкция, удаление); смена вида
   // перестраивает список сразу. `shown` — вид, чей список уже стоит на экране и отрисован.
   let shown: 'instructions' | 'nudge' | null = null;
-  const fold = rowFoldWhen(() => shown === purpose);
+  // Уходящая строка сверяется с видом, под которым создана (`data-kind` пишется один раз): при смене вида
+  // она уходит сразу, как бы ни легли события загрузки нового списка.
+  const fold = rowFoldWhen((node) => shown === purpose && node.dataset.kind === purpose);
   async function settle(kind: 'instructions' | 'nudge'): Promise<void> {
     await tick();
     if (purpose === kind) shown = kind;
@@ -62,7 +64,6 @@
     error = '';
     try {
       runtime = await browserRuntime();
-      void settle(purpose);
     } catch {
       error = 'Не удалось загрузить инструкции. Повторите при восстановлении связи';
     }
@@ -101,6 +102,11 @@
     }
   }
 
+  // Список инструкций стоит на экране, когда пришёл слепок хаба: встроенные есть всегда, поэтому пустой список
+  // значит «слепка ещё нет», и строки, что встают вместе с ним, не складываются.
+  $effect(() => {
+    if (purpose === 'instructions' && presets.length > 0) void settle('instructions');
+  });
   $effect(() => {
     void load();
   });
@@ -142,7 +148,7 @@
         {#if deleteError}<p class="error" role="alert">{deleteError}</p>{/if}
       <ul>
         {#each presets as preset (preset.id)}
-          <li data-preset={preset.id} data-owner-card={preset.kind === 'owner' ? '' : undefined} transition:fold>
+          <li data-preset={preset.id} data-owner-card={preset.kind === 'owner' ? '' : undefined} data-kind={untrack(() => purpose)} transition:fold>
             <div class="row">
               <strong>{preset.title}</strong>
               {#if preset.kind !== 'custom'}
