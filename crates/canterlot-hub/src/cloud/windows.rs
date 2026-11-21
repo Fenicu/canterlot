@@ -158,9 +158,12 @@ pub fn take_or_generate(id: Uuid) -> Result<(HostKey, bool), super::host_key::Ho
     }
 }
 
-/// Сколько ключей ждёт вызова создания (для тестов).
-pub fn pending_key_count() -> usize {
-    PENDING_KEYS.lock().expect("pending host keys lock").len()
+/// Ждёт ли закрытый ключ окна вызова создания (для тестов: ключ не должен пережить вызов).
+pub fn has_pending_key(id: Uuid) -> bool {
+    PENDING_KEYS
+        .lock()
+        .expect("pending host keys lock")
+        .contains_key(&id)
 }
 
 pub fn forget_key(id: Uuid) {
@@ -536,8 +539,8 @@ pub fn view(window: &Window, now: DateTime<Utc>) -> CloudWindowView {
     let cost_so_far = match (window.final_cost_kopecks, window.create_called_at) {
         (Some(cost), _) => cost,
         (None, Some(called)) => {
-            let minutes = u64::try_from((now - called).num_seconds().max(0)).unwrap_or(0);
-            price::final_cost_kopecks(window.price_hourly_kopecks, minutes.div_ceil(60))
+            let seconds = u64::try_from((now - called).num_seconds().max(0)).unwrap_or(0);
+            price::final_cost_kopecks(window.price_hourly_kopecks, seconds.div_ceil(60))
                 .map_or(window.reservation_kopecks, |cost| {
                     cost.min(window.reservation_kopecks)
                 })

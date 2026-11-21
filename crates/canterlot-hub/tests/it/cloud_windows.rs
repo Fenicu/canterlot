@@ -595,7 +595,7 @@ async fn the_full_cycle_create_ready_idle_delete_ended_with_the_final_cost(
     let t0 = now_micros();
     let id = rig.create(120).await;
     assert_eq!(rig.state(id).await, "create_intent");
-    assert_eq!(windows::pending_key_count() > 0, true);
+    assert!(windows::has_pending_key(id));
     assert_eq!(rig.reservation(120), 4 * HOURLY);
 
     // Первый проход: сверка (пустой проект), затем вызов создания.
@@ -620,9 +620,8 @@ async fn the_full_cycle_create_ready_idle_delete_ended_with_the_final_cost(
         .fetch_one(&rig.pool)
         .await?;
     assert!(!dump.contains("PRIVATE KEY"));
-    assert_eq!(
-        windows::pending_key_count(),
-        0,
+    assert!(
+        !windows::has_pending_key(id),
         "the private half left memory"
     );
 
@@ -1148,16 +1147,17 @@ async fn reconcile_deletes_a_stray_and_never_touches_other_names_or_projects(
         )
     };
     rig.tick(now_micros()).await;
-    let state = rig.fake.control();
-    assert!(!state.servers.contains_key(&ours), "the stray is deleted");
-    for kept in [other_name, malformed, upper, other_project] {
-        assert!(
-            state.servers.contains_key(&kept),
-            "server {kept} is not ours to touch"
-        );
+    {
+        let state = rig.fake.control();
+        assert!(!state.servers.contains_key(&ours), "the stray is deleted");
+        for kept in [other_name, malformed, upper, other_project] {
+            assert!(
+                state.servers.contains_key(&kept),
+                "server {kept} is not ours to touch"
+            );
+        }
+        assert_eq!(state.count("DELETE", "/api/v1/servers"), 1);
     }
-    assert_eq!(state.count("DELETE", "/api/v1/servers"), 1);
-    drop(state);
     assert_eq!(rig.alert_codes().await, vec!["stray_server_deleted"]);
     Ok(())
 }
