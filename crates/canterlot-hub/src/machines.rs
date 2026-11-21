@@ -301,7 +301,7 @@ pub fn valid_root_dir(path: &str) -> bool {
             .all(|part| !part.is_empty() && part != "." && part != "..")
 }
 
-fn valid_labels(labels: &[String]) -> bool {
+pub fn valid_labels(labels: &[String]) -> bool {
     labels.len() <= MAX_LABELS
         && labels.iter().all(|label| {
             !label.is_empty()
@@ -497,6 +497,32 @@ async fn carrier_gate(
     }
 }
 
+/// Флаги ротации для запроса токена. Статический раннер: как просила несущая, без оживления
+/// отозванного. Раннер `cloud` (строка из `cloud_budget`): пока окно подключается
+/// (`identified`), новый сервер — это новое состояние воркера и снятый прежним окном токен,
+/// поэтому `reset_local_state = true, reactivate = true`; пока окно работает (`ready`,
+/// `draining`), токен тоже можно выдать заново (воркер потерял его), но с флагом несущей.
+/// Вне окна оживать нечему: отказ `revoked`, как у любого отозванного.
+async fn cloud_token_flags(
+    conn: &mut sqlx::PgConnection,
+    runner: Uuid,
+    requested_reset: bool,
+) -> Result<(bool, bool), sqlx::Error> {
+    let state: Option<String> = sqlx::query_scalar(
+        "select w.state from cloud_budget b
+           join cloud_windows w on w.state in ('identified', 'ready', 'draining')
+         where b.cloud_machine_id = $1",
+    )
+    .bind(runner)
+    .fetch_optional(conn)
+    .await?;
+    Ok(match state.as_deref() {
+        Some("identified") => (true, true),
+        Some(_) => (requested_reset, true),
+        None => (requested_reset, false),
+    })
+}
+
 /// Токен раннера по запросу несущей: допуск, затем `rotate_token(.., reactivate = false)`.
 /// Отозванный раннер не оживает (`Revoked`). Значение вернётся только вызывающему и нигде не
 /// сохраняется.
@@ -509,7 +535,9 @@ pub async fn request_runner_token(
     crate::db::in_tx(pool, move |conn| {
         Box::pin(async move {
             carrier_gate(&mut *conn, caller, runner).await?;
-            rotate_token_in_tx(&mut *conn, runner, reset_local_state, false)
+            let (reset_local_state, reactivate) =
+                cloud_token_flags(&mut *conn, runner, reset_local_state).await?;
+            rotate_token_in_tx(&mut *conn, runner, reset_local_state, reactivate)
                 .await?
                 .ok_or(RunnerRefusal::UnknownMachine)
         })
@@ -564,13 +592,18 @@ pub struct AssignedRunner {
 }
 
 /// Неотозванные раннеры-потомки машины, по имени. Отозванный раннер из списка уходит, и
-/// несущая останавливает его воркер.
+/// несущая останавливает его воркер. Раннер `cloud` стоит в списке не по токену, а пока окно
+/// `identified`, `ready` или `draining`: до выдачи токена несущей уже нужно его подключать.
 pub async fn runners_of(pool: &PgPool, carrier: Uuid) -> Result<Vec<AssignedRunner>, sqlx::Error> {
     sqlx::query_as(
         "select m.id machine_id, m.name, m.root_dir from machines m
          where m.parent_machine_id = $1 and m.role = 'runner'
-           and exists(select 1 from machine_credentials c
-                       where c.machine_id = m.id and c.revoked_at is null)
+           and case when exists(select 1 from cloud_budget b where b.cloud_machine_id = m.id)
+                    then exists(select 1 from cloud_windows w
+                                 where w.state in ('identified', 'ready', 'draining'))
+                    else exists(select 1 from machine_credentials c
+                                 where c.machine_id = m.id and c.revoked_at is null)
+               end
          order by m.name, m.id",
     )
     .bind(carrier)

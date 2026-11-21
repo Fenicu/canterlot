@@ -116,6 +116,11 @@ fn check_public_key<'a>(line: &'a str, which: &'static str) -> Result<&'a str, C
     }
 }
 
+/// Открытый ключ входа для конфигурации хаба: те же требования, что у cloud-init.
+pub fn validate_public_key(line: &str) -> bool {
+    check_public_key(line, "runner_public_key").is_ok()
+}
+
 fn check_root_dir(path: &str) -> Result<(), CloudInitError> {
     let safe = path.len() > 1
         && path.len() <= 200

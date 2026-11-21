@@ -51,6 +51,9 @@ pub struct HubConfig {
     pub provider_status: ProviderStatusConfig,
     #[serde(default)]
     pub dictation: DictationConfig,
+    /// `[runners.cloud]`: облачные окна раннеров. Нет таблицы — облако выключено.
+    #[serde(default)]
+    pub runners: RunnersConfig,
     /// Свои цены моделей: сильнее таблицы `pricing.rs`.
     #[serde(default)]
     pub pricing: BTreeMap<String, PriceConfig>,
@@ -275,6 +278,16 @@ impl HubConfig {
             error.path = path.to_owned();
             error
         })?;
+        if let Some(cloud) = &mut config.runners.cloud {
+            if cloud.token_file.is_relative() {
+                cloud.token_file = base.join(&cloud.token_file);
+            }
+            cloud.validate().map_err(|category| ConfigError {
+                path: path.to_owned(),
+                category,
+                location: None,
+            })?;
+        }
         if let Some(gotify) = &mut config.notify.gotify {
             if gotify.token_file.is_relative() {
                 gotify.token_file = base.join(&gotify.token_file);
@@ -287,6 +300,177 @@ impl HubConfig {
             gotify.resolve(path, origins)?;
         }
         Ok(config)
+    }
+}
+
+/// `[runners]` в `hub.toml`. Сейчас здесь только облако; статические раннеры живут строками
+/// `machines` и `worker.toml` несущей.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RunnersConfig {
+    pub cloud: Option<CloudConfig>,
+}
+
+/// Корень облачного раннера на сервере: его создаёт cloud-init, владелец `runner`.
+pub const CLOUD_ROOT_DIR: &str = "/srv/canterlot-runner";
+
+/// `[runners.cloud]`: облачные окна раннеров. Токен провайдера лежит только в файле
+/// `token_file` и нигде не показывается: ни в `Debug`, ни в журнале, ни в API.
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloudConfig {
+    /// Провайдер; сейчас только `timeweb`.
+    pub provider: String,
+    pub token_file: PathBuf,
+    /// Проект провайдера, в котором живут серверы раннеров. Сверка не трогает чужие проекты.
+    pub project_id: i64,
+    pub configurator_id: i64,
+    pub cpu: u32,
+    pub ram_gb: u32,
+    pub disk_gb: u32,
+    #[serde(default = "CloudConfig::default_os_id")]
+    pub os_id: i64,
+    /// Открытая половина `[runners].ssh_key` несущей: уходит в cloud-init и в ключи проекта.
+    pub runner_public_key: String,
+    /// Несущая, которая подключает облачный раннер.
+    pub carrier_machine_id: uuid::Uuid,
+    #[serde(default)]
+    pub rank: i32,
+    #[serde(default = "CloudConfig::default_labels")]
+    pub labels: Vec<String>,
+    #[serde(default = "CloudConfig::default_max_running")]
+    pub max_running: u32,
+    #[serde(default = "CloudConfig::default_lease_slots")]
+    pub lease_slots: u32,
+    /// От вызова создания до подключения воркера; позже сервер удаляется.
+    #[serde(
+        default = "CloudConfig::default_ready_timeout",
+        with = "humantime_serde"
+    )]
+    pub ready_timeout: Duration,
+    /// Сколько окно без работы живёт до удаления.
+    #[serde(default = "CloudConfig::default_idle_minutes")]
+    pub idle_minutes: u32,
+    /// От жёсткого предела до отмены идущих задач.
+    #[serde(default = "CloudConfig::default_drain_grace", with = "humantime_serde")]
+    pub drain_grace: Duration,
+    /// От отмены до того, как неподтверждённые задачи станут `lost`.
+    #[serde(
+        default = "CloudConfig::default_teardown_margin",
+        with = "humantime_serde"
+    )]
+    pub teardown_margin: Duration,
+    #[serde(
+        default = "CloudConfig::default_reconcile_interval",
+        with = "humantime_serde"
+    )]
+    pub reconcile_interval: Duration,
+    /// Сколько ждать появления сервера в полных списках, прежде чем счесть создание
+    /// неудавшимся.
+    #[serde(
+        default = "CloudConfig::default_create_unknown_window",
+        with = "humantime_serde"
+    )]
+    pub create_unknown_window: Duration,
+}
+
+impl std::fmt::Debug for CloudConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CloudConfig")
+            .field("provider", &self.provider)
+            .field("project_id", &self.project_id)
+            .field("configurator_id", &self.configurator_id)
+            .field("cpu", &self.cpu)
+            .field("ram_gb", &self.ram_gb)
+            .field("disk_gb", &self.disk_gb)
+            .field("carrier_machine_id", &self.carrier_machine_id)
+            .field("labels", &self.labels)
+            .finish_non_exhaustive()
+    }
+}
+
+impl CloudConfig {
+    fn default_os_id() -> i64 {
+        109
+    }
+    fn default_labels() -> Vec<String> {
+        vec!["cloud".to_owned(), "kernel-6.12".to_owned()]
+    }
+    fn default_max_running() -> u32 {
+        4
+    }
+    fn default_lease_slots() -> u32 {
+        2
+    }
+    fn default_ready_timeout() -> Duration {
+        Duration::from_secs(15 * 60)
+    }
+    fn default_idle_minutes() -> u32 {
+        15
+    }
+    fn default_drain_grace() -> Duration {
+        Duration::from_secs(30 * 60)
+    }
+    fn default_teardown_margin() -> Duration {
+        Duration::from_secs(30 * 60)
+    }
+    fn default_reconcile_interval() -> Duration {
+        Duration::from_secs(5 * 60)
+    }
+    fn default_create_unknown_window() -> Duration {
+        Duration::from_secs(10 * 60)
+    }
+
+    /// Всё, что видно по самой конфигурации, без базы и сети. Код отказа не содержит значений.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.provider != "timeweb" {
+            return Err("invalid [runners.cloud] provider");
+        }
+        if self.project_id <= 0 || self.configurator_id <= 0 || self.os_id <= 0 {
+            return Err("invalid [runners.cloud] ids");
+        }
+        if self.cpu == 0 || self.ram_gb == 0 || self.disk_gb == 0 {
+            return Err("invalid [runners.cloud] size");
+        }
+        if !crate::cloud::cloud_init::validate_public_key(&self.runner_public_key) {
+            return Err("invalid [runners.cloud] runner_public_key");
+        }
+        if self.labels.is_empty() || !crate::machines::valid_labels(&self.labels) {
+            return Err("invalid [runners.cloud] labels");
+        }
+        if self.max_running == 0 || self.lease_slots == 0 || self.idle_minutes == 0 {
+            return Err("invalid [runners.cloud] slots");
+        }
+        let minute = Duration::from_secs(60);
+        if [
+            self.ready_timeout,
+            self.drain_grace,
+            self.teardown_margin,
+            self.reconcile_interval,
+            self.create_unknown_window,
+        ]
+        .iter()
+        .any(|timing| *timing < minute)
+        {
+            return Err("invalid [runners.cloud] timing");
+        }
+        Ok(())
+    }
+
+    pub fn ram_mb(&self) -> u64 {
+        u64::from(self.ram_gb) * 1024
+    }
+
+    pub fn disk_mb(&self) -> u64 {
+        u64::from(self.disk_gb) * 1024
+    }
+
+    pub fn drain_grace_minutes(&self) -> u64 {
+        self.drain_grace.as_secs().div_ceil(60)
+    }
+
+    pub fn teardown_margin_minutes(&self) -> u64 {
+        self.teardown_margin.as_secs().div_ceil(60)
     }
 }
 
