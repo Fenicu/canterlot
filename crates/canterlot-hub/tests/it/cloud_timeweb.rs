@@ -14,7 +14,7 @@ use canterlot_hub::cloud::{
 use serde_json::json;
 use tracing_subscriber::fmt::MakeWriter;
 
-use crate::support::fake_timeweb::{CreateMode, DeleteMode, FailPage, FakeTimeweb};
+use crate::support::fake_timeweb::{CreateMode, DeleteMode, FailPage, FakeTimeweb, IpAddMode};
 
 const TOKEN: &str = "tw-test-token-9f3a7c21";
 const PROJECT: i64 = 4242;
@@ -792,6 +792,135 @@ async fn servers_appear_in_the_listing_only_after_a_few_listings() {
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].id, server_id);
     assert_eq!(listed[0].name, "canterlot-runner-w1");
+}
+
+// ---- публичный IPv4 и плавающие адреса ----
+
+#[tokio::test]
+async fn a_new_server_has_no_address_until_one_is_ordered() {
+    let rig = rig().await;
+    rig.fake.control().auto_ipv4 = false;
+    let CreateOutcome::Created { server_id } = rig
+        .provider
+        .create_server(&create_request("canterlot-runner-w1"))
+        .await
+    else {
+        panic!("created");
+    };
+    let ServerLookup::Found(state) = rig.provider.get_server(server_id).await.unwrap() else {
+        panic!("found");
+    };
+    assert_eq!((state.status, state.ipv4), (ServerStatus::On, None));
+
+    let address = rig.provider.add_ipv4(server_id).await.unwrap();
+    assert!(address.starts_with("203.0.113."));
+    let ServerLookup::Found(state) = rig.provider.get_server(server_id).await.unwrap() else {
+        panic!("found");
+    };
+    assert_eq!(state.ipv4.as_deref(), Some(address.as_str()));
+    let order = rig
+        .fake
+        .requests()
+        .into_iter()
+        .find(|r| r.method == "POST" && r.path.ends_with("/ips"))
+        .unwrap();
+    assert_eq!(order.path, format!("/api/v1/servers/{server_id}/ips"));
+    assert_eq!(order.body, Some(json!({"type": "ipv4"})));
+}
+
+#[tokio::test]
+async fn an_ip_order_is_never_retried_and_failures_are_classified() {
+    let rig = rig().await;
+    rig.fake.control().auto_ipv4 = false;
+    let id = rig.fake.control().add_server(PROJECT, "s");
+    for (status, kind) in [
+        (400, ErrorKind::Rejected),
+        (409, ErrorKind::Conflict),
+        (500, ErrorKind::Unavailable),
+    ] {
+        rig.fake.control().ip_add = IpAddMode::Status(status);
+        let error = rig.provider.add_ipv4(id).await.unwrap_err();
+        assert_eq!(error.kind, kind, "{status}");
+    }
+    assert_eq!(
+        rig.fake
+            .requests()
+            .iter()
+            .filter(|r| r.method == "POST" && r.path.ends_with("/ips"))
+            .count(),
+        3,
+        "one request per call, none inside the client"
+    );
+    // Сервера нет.
+    rig.fake.control().ip_add = IpAddMode::Ok;
+    assert_eq!(
+        rig.provider.add_ipv4(999_999).await.unwrap_err().kind,
+        ErrorKind::NotFound
+    );
+    // Обрыв после приёма: неопределённо, адрес мог выдаться.
+    rig.fake.control().ip_add = IpAddMode::AcceptThenDrop;
+    let error = rig.provider.add_ipv4(id).await.unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Unavailable);
+    assert_eq!(rig.fake.control().floating_ips.len(), 1);
+}
+
+#[tokio::test]
+async fn floating_ips_are_listed_with_string_ids_pages_and_binding_and_deleted_by_id() {
+    let rig = rig().await;
+    {
+        let mut state = rig.fake.control();
+        for n in 0..250 {
+            state
+                .floating_ips
+                .push(crate::support::fake_timeweb::FakeFloatingIp {
+                    id: format!("4df0e781-cafb-4419-9636-{n:012}"),
+                    ip: format!("198.51.100.{}", n % 250),
+                    resource_id: (n % 2 == 0).then_some(7),
+                });
+        }
+    }
+    let all = rig.provider.list_floating_ips().await.unwrap();
+    assert_eq!(all.len(), 250, "every page is walked");
+    assert_eq!(all.iter().filter(|ip| ip.bound).count(), 125);
+    assert!(all[0].id.starts_with("4df0e781-"));
+    // Страница отказала: целого списка нет.
+    rig.fake.control().list_fail_page = Some(FailPage {
+        offset: 100,
+        status: 500,
+        times: None,
+    });
+    assert!(rig.provider.list_floating_ips().await.is_err());
+    rig.fake.control().list_fail_page = None;
+
+    let unbound = all.iter().find(|ip| !ip.bound).unwrap().clone();
+    let bound = all.iter().find(|ip| ip.bound).unwrap().clone();
+    assert!(matches!(
+        rig.provider.delete_floating_ip(&unbound.id).await,
+        DeleteOutcome::Deleted { quarantined: false }
+    ));
+    assert_eq!(
+        rig.provider.delete_floating_ip(&unbound.id).await,
+        DeleteOutcome::AlreadyGone
+    );
+    // Привязанный адрес провайдер не отдаёт (409): повторять можно, но ничего не удалено.
+    assert_eq!(
+        rig.provider.delete_floating_ip(&bound.id).await,
+        DeleteOutcome::Failed { retryable: true }
+    );
+    rig.fake.control().floating_delete_status = Some(500);
+    assert_eq!(
+        rig.provider.delete_floating_ip(&bound.id).await,
+        DeleteOutcome::Failed { retryable: true }
+    );
+    // В путь идёт только то, что похоже на идентификатор.
+    for bad in ["", "../servers/1", "a/b", "a b", "a?x"] {
+        assert_eq!(
+            rig.provider.delete_floating_ip(bad).await,
+            DeleteOutcome::Failed { retryable: false },
+            "{bad:?}"
+        );
+    }
+    assert_eq!(rig.fake.control().floating_ips.len(), 249);
 }
 
 // ---- токен ----

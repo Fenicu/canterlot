@@ -213,6 +213,9 @@ canterlot-worker job run --title T [--machine NAME|auto] [--labels a,b] [--expec
 | `get_server(id)` | `Found(ServerState {status, ipv4, …})` или `NotFound` |
 | `delete_server(id)` | `Deleted {quarantined}`, `AlreadyGone` (404), `NeedsConfirmation` (хеш в ответе или 423: у токена нет `is_able_to_delete`), `Failed {retryable}` |
 | `list_project_servers(project_id)` | все серверы проекта или `ListError`; частичный список успехом не бывает |
+| `add_ipv4(server_id)` | `POST /servers/{id}/ips {"type":"ipv4"}` → выданный адрес (`server_ip.ip`) или `ProviderError`; один вызов, без повторов (С2, §7.3a) |
+| `list_floating_ips()` | все плавающие адреса аккаунта (`{id: строка, ip, bound}`, идентификаторы строки, как у API) или `ListError` |
+| `delete_floating_ip(id)` | `DELETE /floating-ips/{id}`: `Deleted`, `AlreadyGone` (404), `Failed`; идентификатор в путь проходит только из знаков `A-Za-z0-9_-` |
 
 `Ambiguous` значит «сервер мог появиться»: создание не повторяется, вызывающий ищет имя в списке проекта. `NeedsConfirmation` не повторяется никогда. `CreateServer` в `Debug` не показывает облачный скрипт (в нём закрытый хостовый ключ).
 
@@ -290,6 +293,15 @@ canterlot-worker job run --title T [--machine NAME|auto] [--labels a,b] [--expec
 
 **Удаление.** Раннер `cloud` отзывается (токен гаснет, незаконченные задачи `lost`), затем `delete_server`: `Deleted` (в том числе `quarantined`) и `AlreadyGone` ждут подтверждения полным списком; `NeedsConfirmation` оставляет окно в `deleting` с `last_error = needs_confirmation`, пуш `delete_needs_confirmation` сразу и с каждой повторной попыткой раз в 30 минут (токен не может удалить, сервер тарифицируется); `Failed` повторяется с паузой 30 с, 1 мин, 2 мин… до 10 мин, после трёх неудач пуш `delete_failing` раз в 30 минут. Открытое обязательство удаления не снимается и не вычищается.
 
+### 7.3a Публичный IPv4 (проверено на живом Timeweb 22.11)
+
+- У нового сервера адреса нет. Служба на первом проходе после `identified` ставит метку `ip_requested_at` и вызывает `add_ipv4` (`POST /servers/{id}/ips {"type":"ipv4"}`, ответ `server_ip {ip, type}`); адрес пишется в `cloud_windows.ipv4`. Определённый отказ (`Rejected`, `Conflict`, `NotFound`, `Auth`, 429) снимает метку, и следующий проход повторяет заказ; неопределённый (обрыв, 5xx) оставляет метку: второго заказа нет, а адрес появится в ответе `get_server`. Подключение (`AttachRunner`) уходит, когда сервер `On` и адрес известен.
+- Цена: `ipv4_hourly_kopecks` в окне (из `ipv4_monthly_rubles`), резерв = резерв сервера + резерв адреса (каждый `час × (ceil(минуты / 60) + 1)`).
+- Конец окна: после принятого удаления сервера и подтверждения его отсутствия в полном списке (`server_gone_at`) служба ищет адрес окна в полном списке плавающих адресов (`list_floating_ips`). Привязан — ждёт; отвязан — `delete_floating_ip(id)` и повторный список; нет в списке — `ip_gone_at`, окно `ended`. Отказ удаления повторяется с паузой, после трёх неудач пуш `ip_delete_failing`. Окно, в котором заказ адреса остался без ответа и адрес неизвестен, кончается пушем `ipv4_unattributed` (чужие плавающие адреса не трогаются, итог считается с запасом до конца окна).
+- Итог = `final_cost(цена сервера, от create_called_at до server_gone_at) + final_cost(цена адреса, от ip_requested_at до ip_gone_at)`.
+- Сверка: отвязанный плавающий адрес, записанный на окне в `ended`/`failed`/`gone` и не записанный ни на одном живом, удаляется (пуш `stray_ip_deleted`, при отказе `stray_ip_stuck` раз в 30 минут). Привязанные и чужие адреса не трогаются никогда.
+- Cloud-init: пакеты ставятся не модулем `packages` (без сети он падает и не повторяется), а `runcmd`-циклами, которые ждут сеть; маркер готовности по-прежнему последний.
+
 ### 7.4 Раннер `cloud` и несущая
 
 Одна строка `machines` с именем `cloud`, ролью `runner`, родителем `carrier_machine_id`, корнем `/srv/canterlot-runner`, рангом и метками из конфигурации; создаётся при первом окне и переиспользуется (`cloud_budget.cloud_machine_id`). Несущей в `RunnersAssigned` она попадает, пока окно `identified`, `ready` или `draining`, независимо от токена. Подключение:
@@ -302,7 +314,7 @@ canterlot-worker job run --title T [--machine NAME|auto] [--labels a,b] [--expec
 
 ### 7.5 Пуши владельцу (`cloud_alert`)
 
-Через `owner_pushes` (вид `cloud_alert`, без разговора, ключ `dedupe_key` с номером попытки или получасового слота): `stray_server_deleted`, `stray_server_stuck`, `delete_needs_confirmation`, `delete_failing`, `window_overrun`, `outage_extra_cost` (с оценкой лишнего расхода), `window_gone`. Без `[notify.gotify]` пуша нет, но запись в журнале (`cloud_alert`, код без значений) остаётся.
+Через `owner_pushes` (вид `cloud_alert`, без разговора, ключ `dedupe_key` с номером попытки или получасового слота): `stray_server_deleted`, `stray_server_stuck`, `delete_needs_confirmation`, `delete_failing`, `window_overrun`, `outage_extra_cost` (с оценкой лишнего расхода), `window_gone`, `stray_ip_deleted`, `stray_ip_stuck`, `ip_delete_failing`, `ipv4_unattributed`. Без `[notify.gotify]` пуша нет, но запись в журнале (`cloud_alert`, код без значений) остаётся.
 
 ### 7.6 Тесты
 
