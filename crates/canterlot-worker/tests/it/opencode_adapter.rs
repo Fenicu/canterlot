@@ -897,6 +897,7 @@ async fn modes_become_session_rules() {
                 {"action": "canterlot_memory_delete", "resource": "*", "effect": "allow"},
                 {"action": "canterlot_canterlot_routing_policy", "resource": "*", "effect": "allow"},
                 {"action": "canterlot_canterlot_spawn_whitelist", "resource": "*", "effect": "allow"},
+                {"action": "canterlot_runners_list", "resource": "*", "effect": "allow"},
             ]),
         ),
         (
@@ -928,6 +929,7 @@ async fn modes_become_session_rules() {
                 {"action": "canterlot_memory_delete", "resource": "*", "effect": "allow"},
                 {"action": "canterlot_canterlot_routing_policy", "resource": "*", "effect": "allow"},
                 {"action": "canterlot_canterlot_spawn_whitelist", "resource": "*", "effect": "allow"},
+                {"action": "canterlot_runners_list", "resource": "*", "effect": "allow"},
             ]),
         ),
     ] {
