@@ -633,8 +633,16 @@ async fn two_hubs_placing_at_once_never_bind_one_slot_twice(pool: PgPool) {
 async fn auto_submit_and_machine_dispatch_never_deadlock(pool: PgPool) {
     let mut fx = Fx::new(pool).await;
     let runner = fx.runner("runner-a", 5, &[], 2, true).await;
-    let first = job_id(&fx.call("job.run", named("runner-a", json!({}))).await.unwrap());
-    let second = job_id(&fx.call("job.run", named("runner-a", json!({}))).await.unwrap());
+    let first = job_id(
+        &fx.call("job.run", named("runner-a", json!({})))
+            .await
+            .unwrap(),
+    );
+    let second = job_id(
+        &fx.call("job.run", named("runner-a", json!({})))
+            .await
+            .unwrap(),
+    );
     sqlx::query("update machines set jobs_max_running=1 where id=$1")
         .bind(runner)
         .execute(&fx.pool)
@@ -1182,7 +1190,10 @@ async fn a_late_staged_fact_for_a_finished_job_asks_for_the_cleanup_again(pool: 
     fx.staged(fx.carrier, id).await;
     let job = fx.job(id).await;
     assert_eq!(job.state, "canceled");
-    assert!(job.cleaned_at.is_none(), "the earlier cleanup no longer counts");
+    assert!(
+        job.cleaned_at.is_none(),
+        "the earlier cleanup no longer counts"
+    );
     assert!(job.cleanup_sent_at.is_some());
     assert_eq!(fx.commands(fx.carrier, "cleanup_source").await, 2);
     // Подтверждение новой очистки закрывает дело; повтор факта о готовности лишнего не шлёт
@@ -1907,20 +1918,33 @@ async fn a_named_job_onto_a_full_runner_waits_for_that_runner(pool: PgPool) {
     let runner = fx.runner("runner-a", 5, &[], 1, true).await;
     // Другой раннер свободен и ранг у него выше: названную задачу он не получит.
     let other = fx.runner("runner-b", 50, &[], 1, true).await;
-    let first = job_id(&fx.call("job.run", named("runner-a", json!({}))).await.unwrap());
+    let first = job_id(
+        &fx.call("job.run", named("runner-a", json!({})))
+            .await
+            .unwrap(),
+    );
     assert_eq!(fx.state(first).await, "staging");
-    let reply = fx.call("job.run", named("runner-a", json!({}))).await.unwrap();
+    let reply = fx
+        .call("job.run", named("runner-a", json!({})))
+        .await
+        .unwrap();
     let second = job_id(&reply);
     assert_eq!(reply["state"], "waiting_runner", "{reply}");
     assert_eq!(reply["machine"], Value::Null);
     let job = fx.job(second).await;
     assert!(job.machine_id.is_none());
     assert_eq!(fx.commands(runner, "start_inplace_job").await, 0);
-    assert_eq!(fx.place().await, 0, "runner-a is full, runner-b is not its stand-in");
+    assert_eq!(
+        fx.place().await,
+        0,
+        "runner-a is full, runner-b is not its stand-in"
+    );
     assert_eq!(fx.job(second).await.state, "waiting_runner");
     assert_eq!(fx.commands(fx.carrier, "stage_source").await, 1);
     // Место освободилось: ждавшая задача идёт именно на названный раннер.
-    fx.call("job.cancel", json!({"job_id": first})).await.unwrap();
+    fx.call("job.cancel", json!({"job_id": first}))
+        .await
+        .unwrap();
     assert_eq!(fx.place().await, 1);
     let job = fx.job(second).await;
     assert_eq!(job.state, "staging");

@@ -440,7 +440,10 @@ async fn run(args: Args) -> Result<(), String> {
                     let attrs = machines::MachineAttrs {
                         rank,
                         labels: labels.map(|labels| {
-                            labels.into_iter().filter(|label| !label.is_empty()).collect()
+                            labels
+                                .into_iter()
+                                .filter(|label| !label.is_empty())
+                                .collect()
                         }),
                         root_dir,
                     };

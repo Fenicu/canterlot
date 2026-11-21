@@ -174,11 +174,7 @@ async fn machine_set_cli_changes_rank_labels_and_root(pool: PgPool) -> TestResul
             vec!["--root-dir", "/srv/../x"],
             "root_dir_invalid",
         ),
-        (
-            runner.machine_id,
-            vec!["--labels", "a b"],
-            "labels_invalid",
-        ),
+        (runner.machine_id, vec!["--labels", "a b"], "labels_invalid"),
         (runner.machine_id, vec![], "nothing_to_set"),
         (Uuid::now_v7(), vec!["--rank", "1"], "machine_not_found"),
     ] {

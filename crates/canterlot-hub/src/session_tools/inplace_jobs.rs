@@ -670,15 +670,8 @@ async fn run_source(
             }
         }
         None => {
-            if !place::satisfiable(
-                &mut tx,
-                carrier,
-                &labels,
-                &placement,
-                &source.repo,
-                domain,
-            )
-            .await?
+            if !place::satisfiable(&mut tx, carrier, &labels, &placement, &source.repo, domain)
+                .await?
             {
                 return Err(ToolError::new(ToolErrorCode::NoRunnerCanSatisfy));
             }

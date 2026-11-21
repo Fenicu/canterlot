@@ -135,7 +135,10 @@ async fn lose_waiting_of_carrier_in_tx(
 }
 
 /// Каждая задача кончается `lost` ровно один раз и с одним сообщением: законченная пропускается.
-async fn finish_lost_in_tx(conn: &mut sqlx::PgConnection, ids: Vec<Uuid>) -> Result<(), sqlx::Error> {
+async fn finish_lost_in_tx(
+    conn: &mut sqlx::PgConnection,
+    ids: Vec<Uuid>,
+) -> Result<(), sqlx::Error> {
     use crate::inplace_jobs::{Outcome, State, finish_in_tx, lock_row};
     for id in ids {
         let Some(job) = lock_row(&mut *conn, id).await? else {
