@@ -10,6 +10,7 @@
 
 pub mod bridge;
 mod collect;
+pub mod commands;
 mod runner;
 pub mod script;
 pub mod ssh;

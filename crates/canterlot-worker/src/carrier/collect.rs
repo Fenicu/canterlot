@@ -299,6 +299,12 @@ fn collect_local(
     cap: u64,
     local_dir: PathBuf,
 ) -> Result<Outputs, Failure> {
+    if !std::fs::symlink_metadata(workdir).is_ok_and(|meta| meta.is_dir()) {
+        return Err(Failure::new(
+            "no_workdir",
+            "the working directory does not exist",
+        ));
+    }
     let mut entries = Vec::new();
     let mut missing = Vec::new();
     let mut skipped = Vec::new();
