@@ -666,7 +666,7 @@ pub fn to_proto(row: &CommandRow) -> Result<Command, OutboxError> {
                 .get("tail_hex")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
-            if hex.len() % 2 != 0 || !hex.is_ascii() {
+            if !hex.len().is_multiple_of(2) || !hex.is_ascii() {
                 return Err(OutboxError::InvalidCommand);
             }
             let tail = (0..hex.len() / 2)

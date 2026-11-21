@@ -594,14 +594,11 @@ async fn run_source(
         .transpose()
         .map_err(|message| invalid(&format!("job_run: {message}")))?
         .expect("source checked by the caller");
-    let outputs = spec::check_outputs(args.outputs.as_deref().unwrap_or_default())
-        .map_err(|message| invalid(message))?;
-    let labels = spec::check_labels(args.labels.as_deref().unwrap_or_default())
-        .map_err(|message| invalid(message))?;
-    let placement =
-        spec::check_placement(args.placement.as_deref()).map_err(|message| invalid(message))?;
-    let expected_minutes =
-        spec::check_expected_minutes(args.expected_minutes).map_err(|message| invalid(message))?;
+    let outputs =
+        spec::check_outputs(args.outputs.as_deref().unwrap_or_default()).map_err(invalid)?;
+    let labels = spec::check_labels(args.labels.as_deref().unwrap_or_default()).map_err(invalid)?;
+    let placement = spec::check_placement(args.placement.as_deref()).map_err(invalid)?;
+    let expected_minutes = spec::check_expected_minutes(args.expected_minutes).map_err(invalid)?;
     let carrier = caller.machine_id;
     // Названная машина (не `auto`) и её отношение к несущей.
     let named_target = if args.is_auto() {

@@ -152,7 +152,7 @@ pub async fn submit(
     let machine = spec.machine.clone();
     let lease = spec.lease.clone().unwrap_or_else(|| "none".to_owned());
     let timeout_seconds = i32::try_from(spec.timeout_minutes.unwrap_or(30) * 60).unwrap_or(1800);
-    let result = crate::db::in_tx(pool, move |conn| {
+    crate::db::in_tx(pool, move |conn| {
         Box::pin(async move {
             // Только несущая подаёт задачи владельца.
             let row: Option<(Uuid, bool)> = sqlx::query_as(
@@ -253,8 +253,7 @@ pub async fn submit(
             Ok(Ok(id))
         })
     })
-    .await?;
-    result
+    .await?
 }
 
 /// Машина владельца по идентификатору или имени.
