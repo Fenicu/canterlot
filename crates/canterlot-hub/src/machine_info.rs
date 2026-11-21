@@ -136,12 +136,7 @@ pub async fn apply_report_with_capabilities(
             .iter()
             .map(|e| json!({"name":e.name,"description":e.description,"kind":e.kind,"argument_hint":e.argument_hint}))
             .collect();
-        // Пустая метка — воркер старше учётных записей; негодная метка тоже читается как `owner`.
-        let account = if canterlot_proto::limits::valid_account(&h.account) {
-            h.account.as_str()
-        } else {
-            canterlot_proto::limits::OWNER_ACCOUNT
-        };
+        let account = reported_account(&previous_accounts, h);
         sqlx::query("insert into machine_harnesses(machine_id,harness,provider,title,images,settings_midsession,permission_modes,models,settings_midsession_effort,installed_version,latest_version,min_version,update_command,catalog,goals,account) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)")
   .bind(machine_id).bind(&h.harness).bind(&h.provider).bind(&h.title).bind(h.images).bind(h.settings_midsession).bind(json!(h.permission_modes)).bind(json!(models)).bind(h.settings_midsession_effort.unwrap_or(true)).bind(&h.installed_version).bind(&h.latest_version).bind(&h.min_version).bind(&h.update_command).bind(json!(catalog)).bind(h.goals).bind(account).execute(&mut *conn).await?;
     }
@@ -150,11 +145,7 @@ pub async fn apply_report_with_capabilities(
         let Some(current) = report.harnesses.iter().find(|h| &h.harness == harness) else {
             continue;
         };
-        let new_account = if canterlot_proto::limits::valid_account(&current.account) {
-            current.account.as_str()
-        } else {
-            canterlot_proto::limits::OWNER_ACCOUNT
-        };
+        let new_account = reported_account(&previous_accounts, current);
         if new_account != old_account {
             released.extend(
                 crate::crunch::release_relabelled_in_tx(
@@ -224,6 +215,31 @@ pub async fn apply_report_with_capabilities(
     })
     .await
 }
+/// Метка харнесса, которую отчёт делает сохранённой. Воркер с учётными записями всегда
+/// называет метку явно, в том числе `owner`; пустая метка значит воркер старше учётных
+/// записей или откатившийся, и такой отчёт не меняет прежде сохранённую метку (для харнесса,
+/// которого ещё не было, это `owner`). Так факты без метки продолжают отбрасываться, пока
+/// машина объявляла чужую запись, и не попадают в данные `owner`. Негодная непустая метка
+/// читается как `owner`.
+fn reported_account<'a>(
+    previous: &'a [(String, String, String)],
+    harness: &'a canterlot_proto::worker::v1::HarnessInfo,
+) -> &'a str {
+    if harness.account.is_empty() {
+        return previous
+            .iter()
+            .find(|(name, _, _)| *name == harness.harness)
+            .map_or(canterlot_proto::limits::OWNER_ACCOUNT, |(_, _, account)| {
+                account.as_str()
+            });
+    }
+    if canterlot_proto::limits::valid_account(&harness.account) {
+        harness.account.as_str()
+    } else {
+        canterlot_proto::limits::OWNER_ACCOUNT
+    }
+}
+
 /// Машинный `cpu_permille` нормирован на всю машину, поэтому 1000 — его потолок.
 /// Битые счётчики исполнений отбрасываются по одному в `sanitize_executions`.
 fn validate(metrics: &MachineMetrics) -> Option<&'static str> {

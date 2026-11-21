@@ -176,11 +176,32 @@ enum Settled {
     Pending(Job),
 }
 
-async fn settle(pool: &PgPool, id: Uuid, at_deadline: bool) -> Result<Settled, ToolError> {
+async fn settle(
+    pool: &PgPool,
+    caller: &Caller,
+    id: Uuid,
+    at_deadline: bool,
+) -> Result<Settled, ToolError> {
     let mut tx = crate::db::begin(pool).await?;
     let Some(job) = jobs::lock_row(&mut tx, id).await? else {
         return Err(ToolError::new(ToolErrorCode::JobNotFound));
     };
+    // Те же правила видимости, что у чтений: разговор, сменивший домен после заявки, не
+    // получает ни итога в ответе, ни сообщения. Итог не берётся внутрь вызова.
+    let visible: bool = sqlx::query_scalar(
+        "select exists(select 1 from conversations
+          where id=$1 and owner_id=$2 and memory_domain=$3)",
+    )
+    .bind(caller.conversation_id)
+    .bind(caller.owner_id)
+    .bind(&job.domain)
+    .fetch_one(&mut *tx)
+    .await?;
+    if !visible || job.conversation_id != Some(caller.conversation_id) {
+        jobs::fallback_to_message_in_tx(&mut tx, id).await?;
+        tx.commit().await?;
+        return Err(ToolError::new(ToolErrorCode::JobNotFound));
+    }
     let settled = if job.is_terminal() {
         if job.delivery.is_none() && jobs::claim_inline_in_tx(&mut tx, id).await? {
             Settled::Inline(job)
@@ -208,19 +229,27 @@ fn refusal(error: jobs::Refusal) -> ToolError {
     }
 }
 
+/// Повтор: задача этого же разговора и его нынешнего домена, найденная по идентификатору
+/// вызова или по ключу. Чужая задача и задача старого домена не видны.
 async fn replay_by_keys(
     conn: &mut PgConnection,
     caller: &Caller,
+    domain: Option<&str>,
     key: Option<&str>,
 ) -> Result<Option<Job>, sqlx::Error> {
+    let Some(domain) = domain else {
+        return Ok(None);
+    };
     sqlx::query_as(
         "select * from jobs
-         where owner_id=$1 and (call_id=$2 or (conversation_id=$3 and idempotency_key=$4))
+         where owner_id=$1 and conversation_id=$2 and domain=$3
+           and (call_id=$4 or ($5::text is not null and idempotency_key=$5))
          order by created_at limit 1",
     )
     .bind(caller.owner_id)
-    .bind(caller.call_id)
     .bind(caller.conversation_id)
+    .bind(domain)
+    .bind(caller.call_id)
     .bind(key)
     .fetch_optional(conn)
     .await
@@ -277,20 +306,23 @@ pub async fn run(
     let wait = args.wait_seconds.unwrap_or(DEFAULT_WAIT_SECONDS);
     let mut tx = crate::db::begin(&context.pool).await?;
     send::lock_sender(&mut tx, caller.conversation_id).await?;
-    if let Some(job) = replay_by_keys(&mut tx, caller, args.idempotency_key.as_deref()).await? {
-        // Повтор: сохранённый итог, а у идущей задачи итог пойдёт сообщением, потому что
-        // прежний ждущий вызов мог умереть вместе со своим ответом.
-        if !job.is_terminal() {
-            jobs::fallback_to_message_in_tx(&mut tx, job.id).await?;
-        }
-        let job = jobs::load(&mut tx, job.id).await?.expect("job row exists");
+    let facts = jobs::caller_facts(&mut tx, caller.conversation_id)
+        .await?
+        .ok_or_else(|| ToolError::new(ToolErrorCode::SessionNotFound))?;
+    if let Some(job) = replay_by_keys(
+        &mut tx,
+        caller,
+        facts.memory_domain.as_deref(),
+        args.idempotency_key.as_deref(),
+    )
+    .await?
+    {
+        // Повтор только читает: доставку выбирает прежний ждущий вызов, его страж или подбор.
+        // Если он умер вместе со своим ответом, итог придёт сообщением или через `jobs_list`.
         let value = answer(context, &mut tx, &job).await?;
         tx.commit().await?;
         return Ok(value);
     }
-    let facts = jobs::caller_facts(&mut tx, caller.conversation_id)
-        .await?
-        .ok_or_else(|| ToolError::new(ToolErrorCode::SessionNotFound))?;
     let target = spawn::resolve_machine(&mut tx, caller, args.machine.as_deref()).await?;
     let machine_id = target.unwrap_or(caller.machine_id);
     let remote = machine_id != facts.machine_id;
@@ -298,6 +330,15 @@ pub async fn run(
         // Владелец раньше строки машины: тот же порядок, что у запуска удалённого делегата.
         crate::conversations::lock_owner(&mut tx, caller.owner_id).await?;
     }
+    // Замок задач машины раньше любой записи и счётчика событий: итог и отмена идут в том же
+    // порядке, поэтому заявка и итог одной машины не замыкают цикл.
+    jobs::lock_machine(&mut tx, machine_id).await?;
+    // Допуск заказчика держится до фиксации и читается заново под замком: ни смена режима,
+    // ни смена домена не проскочит между проверкой и стартом команды.
+    jobs::lock_admission(&mut tx, &[caller.conversation_id]).await?;
+    let facts = jobs::caller_facts(&mut tx, caller.conversation_id)
+        .await?
+        .ok_or_else(|| ToolError::new(ToolErrorCode::SessionNotFound))?;
     jobs::admit(&mut tx, &facts, machine_id, &args.workdir)
         .await
         .map_err(refusal)?;
@@ -314,6 +355,17 @@ pub async fn run(
     if !capable {
         return Err(ToolError::new(ToolErrorCode::CapabilityMissing));
     }
+    // Удалённая задача запоминает поколение допуска машины: выключение до диспетчеризации
+    // закроет её, даже если выключатель потом включат снова. Строка машины уже прочитана
+    // `for share` в `admit`.
+    let admission_generation: Option<i64> = if remote {
+        sqlx::query_scalar("select remote_admission_generation from machines where id=$1")
+            .bind(machine_id)
+            .fetch_optional(&mut *tx)
+            .await?
+    } else {
+        None
+    };
     let id = Uuid::now_v7();
     // Страж встаёт до фиксации: вызов, оборванный внутри `commit`, не оставит задачу без
     // доставки. Если заявка не зафиксирована, строки нет и страж ничего не делает.
@@ -331,8 +383,11 @@ pub async fn run(
     let inserted = sqlx::query(
         "insert into jobs (id, owner_id, conversation_id, domain, machine_id, remote, workdir,
                            shell, env, title, timeout_seconds, lease, call_id, idempotency_key,
-                           delivery)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+                           delivery, waiter_instance, waiter_deadline, admission_generation)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
+                 case when $16::uuid is null then null
+                      else clock_timestamp() + make_interval(secs => $17) end,
+                 $18)
          on conflict do nothing",
     )
     .bind(id)
@@ -353,14 +408,23 @@ pub async fn run(
     .bind(args.idempotency_key.as_deref())
     // Без ожидания итог может прийти только сообщением.
     .bind((wait == 0).then_some("message"))
+    // Ждущий вызов живёт в этом экземпляре хаба до срока; срок уточняется после фиксации.
+    .bind((wait > 0).then(jobs::hub_instance))
+    .bind((wait + jobs::WAITER_SLACK_SECONDS) as f64)
+    .bind(admission_generation)
     .execute(&mut *tx)
     .await?
     .rows_affected();
     if inserted == 0 {
         // Гонка двух повторов с одним ключом: выигравший уже зафиксирован.
-        let job = replay_by_keys(&mut tx, caller, args.idempotency_key.as_deref())
-            .await?
-            .ok_or_else(|| ToolError::new(ToolErrorCode::Internal))?;
+        let job = replay_by_keys(
+            &mut tx,
+            caller,
+            facts.memory_domain.as_deref(),
+            args.idempotency_key.as_deref(),
+        )
+        .await?
+        .ok_or_else(|| ToolError::new(ToolErrorCode::Internal))?;
         let value = answer(context, &mut tx, &job).await?;
         tx.commit().await?;
         return Ok(value);
@@ -370,6 +434,19 @@ pub async fn run(
     jobs::dispatch_machine_in_tx(&mut tx, machine_id, caller.call_id).await?;
     tx.commit().await?;
     let mut conn = context.pool.acquire().await?;
+    if wait > 0 {
+        // Срок ожидания считается от фиксации заявки, а не от вставки строки: долгая заявка
+        // не сокращает ожидание, а подбор не видит просроченный срок у живого вызова.
+        sqlx::query(
+            "update jobs set waiter_deadline=clock_timestamp() + make_interval(secs => $2)
+             where id=$1 and delivery is null and waiter_instance=$3",
+        )
+        .bind(id)
+        .bind((wait + jobs::WAITER_SLACK_SECONDS) as f64)
+        .bind(jobs::hub_instance())
+        .execute(&mut *conn)
+        .await?;
+    }
     let machine = jobs::machine_name(&mut conn, machine_id).await?;
     drop(conn);
     if wait == 0 {
@@ -381,7 +458,7 @@ pub async fn run(
     let deadline = Instant::now() + Duration::from_secs(u64::try_from(wait).unwrap_or(20));
     loop {
         let at_deadline = Instant::now() >= deadline;
-        match settle(&context.pool, id, at_deadline).await? {
+        match settle(&context.pool, caller, id, at_deadline).await? {
             Settled::Inline(job) => {
                 guard.armed = false;
                 return Ok(jobs::result_json(&job, &machine));

@@ -13,6 +13,7 @@ import type { HubEvent } from '../../src/lib/sync/wire';
 import type { DraftRecord } from '../../src/lib/drafts/sync';
 import type { SecretRequestAnswer, SecretRequestView } from '../../src/lib/requests/secretRequest';
 import type { FakeHub } from './hub';
+import type { BlobRequest } from './range';
 import type { components } from '../../src/lib/api/generated/openapi.js';
 import { parseCron } from '../../src/lib/screens/settings/schedules.js';
 
@@ -181,6 +182,16 @@ export class FakeHubApi {
 	readonly runs = new Map<string, RunInfo>();
 	readonly usage = new Map<string, components['schemas']['SessionUsageView']>();
 	readonly machines = new Map<string, MachineRecord>();
+	/** Задачи на месте (`job_run`) по id: строка, как её отдаёт хаб, без вывода. */
+	readonly jobs = new Map<string, components['schemas']['JobView']>();
+	/** Вывод задач: журнал целиком; хвост хаба — его последние байты. */
+	readonly jobLogs = new Map<string, string>();
+	/** Задачи, чей полный журнал убран по сроку хранения: остался хвост. */
+	readonly jobLogsExpired = new Set<string>();
+	/** Отмены владельца: задача и ключ идемпотентности. */
+	readonly jobCancelCalls: { id: string; key: string }[] = [];
+	/** Запросы журнала: позиция и предел, как их прислал экран. */
+	readonly jobLogCalls: { id: string; offset: string | null; limit: string | null }[] = [];
 	/** Лента обновлений и моделей, которую раздаёт фиктивный хаб. */
 	updates: FakeUpdate[] = [];
 	readonly updatesCalls: { limit?: number; cursor?: string | null; machine?: string | null; kind?: string | null }[] = [];
@@ -204,6 +215,10 @@ export class FakeHubApi {
 	readonly deleted = new Set<string>();
 	readonly drafts = new Map<string, DraftRecord>();
 	readonly attachments = new Map<string, { size: number; offset: number; key: string; name: string; mime: string; conversation_id: string }>();
+	/** Готовые вложения с содержимым: `GET /attachments/{id}/content` отдаёт их с диапазонами. */
+	readonly blobs = new Map<string, { bytes: Uint8Array; mime: string }>();
+	/** Журнал запросов содержимого вложений: диапазон и код ответа. */
+	readonly blobRequests: BlobRequest[] = [];
 	draftRevision = 0;
 	groups: ListSnapshot['groups'] = [];
 	counts: Counts = { all: 0, pinned: 0, archived: 0, trashed: 0, groups: [] };

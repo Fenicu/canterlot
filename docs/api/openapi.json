@@ -3,7 +3,7 @@
   "info": {
     "title": "canterlot hub API",
     "description": "HTTP и WSS контракт хаба. Личность задаёт прокси перед хабом; изменяющим запросам нужны Origin, X-Canterlot-Client: 1 и Idempotency-Key.",
-    "version": "1.43.2"
+    "version": "1.44.0"
   },
   "paths": {
     "/api/v1/attachments": {
@@ -284,12 +284,73 @@
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "name": "Range",
+            "in": "header",
+            "description": "Один байтовый диапазон: bytes=a-b, bytes=a- или bytes=-n; несколько диапазонов и неверная запись игнорируются",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "If-Range",
+            "in": "header",
+            "description": "Сильный ETag: при другом ETag диапазон игнорируется и отдаётся весь файл",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
           "200": {
-            "description": "Содержимое готового вложения: проверенная картинка показывается на месте, остальное скачивается; имя файла в Content-Disposition",
+            "description": "Содержимое готового вложения: проверенная картинка показывается на месте, ролик (mp4, quicktime, webm с верной сигнатурой) отдаётся своим типом для плеера, остальное скачивается; имя файла в Content-Disposition",
             "headers": {
+              "Accept-Ranges": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Всегда bytes"
+              },
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "SHA-256 содержимого в кавычках"
+              },
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/BinaryContent"
+                }
+              }
+            }
+          },
+          "206": {
+            "description": "Запрошенный диапазон; те же заголовки, что у полного ответа",
+            "headers": {
+              "Content-Range": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "bytes первый-последний/размер"
+              },
               "X-Server-Time-Ms": {
                 "schema": {
                   "type": "integer",
@@ -309,6 +370,24 @@
           "304": {
             "description": "Содержимое не изменилось: отдаётся при совпадении If-None-Match",
             "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            }
+          },
+          "416": {
+            "description": "Диапазон целиком за пределами файла",
+            "headers": {
+              "Content-Range": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "bytes */размер"
+              },
               "X-Server-Time-Ms": {
                 "schema": {
                   "type": "integer",
@@ -10305,12 +10384,42 @@
               "type": "string",
               "format": "uuid"
             }
+          },
+          {
+            "name": "Range",
+            "in": "header",
+            "description": "Один байтовый диапазон: bytes=a-b, bytes=a- или bytes=-n; несколько диапазонов и неверная запись игнорируются",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "If-Range",
+            "in": "header",
+            "description": "Сильный ETag: при другом ETag диапазон игнорируется и отдаётся весь файл",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
           }
         ],
         "responses": {
           "200": {
             "description": "Картинка, на которую смотрел агент: тип из проверенного списка, показ на месте, ETag равен SHA-256",
             "headers": {
+              "Accept-Ranges": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Всегда bytes"
+              },
               "ETag": {
                 "schema": {
                   "type": "string"
@@ -10348,9 +10457,67 @@
               }
             }
           },
+          "206": {
+            "description": "Запрошенный диапазон; те же заголовки, что у полного ответа",
+            "headers": {
+              "Content-Range": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "bytes первый-последний/размер"
+              },
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "image/png": {
+                "schema": {
+                  "$ref": "#/components/schemas/BinaryContent"
+                }
+              },
+              "image/jpeg": {
+                "schema": {
+                  "$ref": "#/components/schemas/BinaryContent"
+                }
+              },
+              "image/webp": {
+                "schema": {
+                  "$ref": "#/components/schemas/BinaryContent"
+                }
+              },
+              "image/gif": {
+                "schema": {
+                  "$ref": "#/components/schemas/BinaryContent"
+                }
+              }
+            }
+          },
           "304": {
             "description": "Содержимое не изменилось: отдаётся при совпадении If-None-Match",
             "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            }
+          },
+          "416": {
+            "description": "Диапазон целиком за пределами файла",
+            "headers": {
+              "Content-Range": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "bytes */размер"
+              },
               "X-Server-Time-Ms": {
                 "schema": {
                   "type": "integer",

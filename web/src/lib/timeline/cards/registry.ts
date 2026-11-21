@@ -8,6 +8,9 @@ import type { BlockModel } from '#lib/stores/blocks.js';
 import AcceptCard from './AcceptCard.svelte';
 import AlarmListCard from './AlarmListCard.svelte';
 import FindCard from './FindCard.svelte';
+import JobLogCard from './JobLogCard.svelte';
+import JobRunCard from './JobRunCard.svelte';
+import JobsListCard from './JobsListCard.svelte';
 import ForgejoCard from './ForgejoCard.svelte';
 import ReadCard from './ReadCard.svelte';
 import EditCard from './EditCard.svelte';
@@ -33,6 +36,7 @@ import PlanListCard from './plan/PlanListCard.svelte';
 import PlanUpdateCard from './plan/PlanUpdateCard.svelte';
 import { planHref } from './plan/livePlan';
 import { alarmCancel, alarmList, alarmSet } from './defs/alarms';
+import * as jobs from './defs/jobs';
 import { limits } from './defs/limits';
 import { meeting } from './defs/meeting';
 import * as memory from './defs/memory';
@@ -94,8 +98,7 @@ export function card<D>(logic: CardLogic<D>, component: Component<CardProps<D>> 
  * Значки семейств собственных инструментов canterlot. Один значок на семейство, а не на глагол:
  * поиск, чтение, запись и архив памяти — всё один мозг, глагол стоит первым словом строки.
  * У инструментов харнесса значка нет, и они этим помощником не проходят.
- * Задачи на месте (`job_*`) получат `hammer`, когда у них появятся карточки; `history_search`
- * (`search`) — когда у него появится карточка.
+ * `history_search` получит `search`, когда у него появится карточка.
  */
 const family = {
   memory: 'brain',
@@ -104,7 +107,8 @@ const family = {
   alarms: 'alarm',
   plan: 'list',
   limits: 'gauge',
-  share: 'share'
+  share: 'share',
+  jobs: 'hammer'
 } as const satisfies Record<string, IconName>;
 
 /** Значок семейства в описании карточки. */
@@ -146,6 +150,11 @@ function remembered<D>(logic: CardLogic<D>, done: (data: D) => StateWord | null)
   return { ...logic, word: (call, data) => (call.state === 'done' ? done(data) : defaultWord(call)) };
 }
 
+/** Готовый вызов задачи говорит состояние задачи; отказ, ход и обрыв — слово состояния вызова. */
+function jobbed(logic: CardLogic<jobs.JobCallData>): CardLogic<jobs.JobCallData> {
+  return { ...logic, word: (call, data) => (call.state === 'done' ? jobs.jobCallWord(data) : defaultWord(call)) };
+}
+
 const REGISTRY: Record<string, AnyCard> = {
   'canterlot.memory_search': card(marked(family.memory, remembered(memory.memorySearch, (data) => (data.refusal ? null : memory.searchWord(data)))), MemorySearchCard),
   'canterlot.memory_get': card(marked(family.memory, memory.memoryGet), MemoryGetCard),
@@ -169,6 +178,7 @@ const REGISTRY: Record<string, AnyCard> = {
   'canterlot.presets_list': card(lined(sessions.presetsList)),
   'canterlot.preset_save': card(lined(sessions.presetSave)),
   'canterlot.preset_apply': card(lined(sessions.presetApply)),
+
   'canterlot.alarm_set': card({ ...alarmSet, icon: family.alarms, word: (call, data) => (data.satisfied ? { word: 'уже выполнено', tone: 'success' } : defaultWord(call)) }),
   'canterlot.alarm_cancel': card(marked(family.alarms, alarmCancel)),
   'canterlot.alarm_list': card(marked(family.alarms, alarmList), AlarmListCard),
@@ -178,6 +188,11 @@ const REGISTRY: Record<string, AnyCard> = {
   'canterlot.plan_update': card(marked(family.plan, planUpdate), PlanUpdateCard),
   'canterlot.plan_list': card(marked(family.plan, toPlan(planList)), PlanListCard),
   'canterlot.plan_adopt': card({ ...planAdopt, icon: family.plan, link: (call, data) => sessionLink(call, data.from) }, PlanAdoptCard),
+  'canterlot.job_run': card(marked(family.jobs, jobbed(jobs.jobRun)), JobRunCard),
+  'canterlot.job_status': card(marked(family.jobs, jobbed(jobs.jobStatus)), JobRunCard),
+  'canterlot.job_cancel': card(marked(family.jobs, jobbed(jobs.jobCancel)), JobRunCard),
+  'canterlot.job_log': card({ ...jobs.jobLog, icon: family.jobs, word: (call, data) => (call.state === 'done' ? jobs.logWord(data) : defaultWord(call)) }, JobLogCard),
+  'canterlot.jobs_list': card({ ...jobs.jobsList, icon: family.jobs, word: (call) => defaultWord(call) }, JobsListCard),
   'todo.write': card(todo, TodoCard),
   'agent.task': card(subagent, SubagentCard),
   'question.ask': card(question, QuestionCard),

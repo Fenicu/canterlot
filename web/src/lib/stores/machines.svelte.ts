@@ -36,8 +36,25 @@ export interface MachineRecord {
 	lease?: components['schemas']['LeaseStateView'] | null;
 }
 
+export type JobRecord = components['schemas']['JobView'];
+
+const JOB_RANK: Record<string, number> = { queued: 0, dispatched: 1, waiting_lease: 2, running: 3 };
+
+/** Состояние задачи ведёт только вперёд: опоздавшая копия, список или событие, прежнее не затирает. */
+function jobMayReplace(old: JobRecord | undefined, next: JobRecord): boolean {
+	if (!old) return true;
+	const was = JOB_RANK[old.state];
+	if (was === undefined) return next.state === old.state;
+	const now = JOB_RANK[next.state];
+	return now === undefined || now >= was;
+}
+
 export class MachinesStore {
 	readonly items = new SvelteMap<string, MachineRecord>();
+	/** Задачи на месте: события машин и списки, которые читали экраны. */
+	readonly jobs = new SvelteMap<string, JobRecord>();
+	/** Растёт с каждой перезагрузкой снимка: события могли пропасть, экраны читают задачи заново. */
+	jobsEpoch = $state(0);
 	unknownKinds = $state(0);
 	/** Живые записи ленты обновлений приходят в области машин, без опроса ленты. */
 	onUpdate: ((item: UpdateItem) => void) | null = null;
@@ -69,6 +86,7 @@ export class MachinesStore {
 				const items = (data as { items?: MachineRecord[] }).items ?? [];
 				this.items.clear();
 				for (const item of items) this.items.set(item.id, { ...item, heartbeat_received_at: this.deps.clock.now() });
+				this.jobsEpoch += 1;
 			},
 			applyEvents: (batch) => {
 				for (const item of batch) this.#apply(item.event);
@@ -84,6 +102,11 @@ export class MachinesStore {
 	close(): void {
 		this.#sub?.release();
 		this.#sub = null;
+	}
+
+	/** Принять задачи из ответа хаба; то, что событие уже довело дальше, остаётся как есть. */
+	mergeJobs(items: readonly JobRecord[]): void {
+		for (const job of items) if (jobMayReplace(this.jobs.get(job.id), job)) this.jobs.set(job.id, job);
 	}
 
 	catalog(): MachineRecord['harnesses'] {
@@ -159,6 +182,10 @@ export class MachinesStore {
 			const kept = machine.warnings.filter(warning => warning !== 'memory_low' && warning !== 'processes_leaked');
 			const warnings = [...kept, ...(event.payload.memory_low ? ['memory_low'] : []), ...((watch?.leaked.length ?? 0) > 0 ? ['processes_leaked'] : [])];
 			this.items.set(machine.id, { ...machine, watch, warnings });
+			return;
+		}
+		if (kind === 'job_changed' && event.kind === 'job_changed') {
+			this.mergeJobs([event.payload.job]);
 			return;
 		}
 		if (kind !== 'hidden') this.unknownKinds += 1;

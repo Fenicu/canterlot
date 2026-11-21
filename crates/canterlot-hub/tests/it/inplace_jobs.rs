@@ -416,8 +416,10 @@ async fn hub_restart_during_the_wait_turns_every_undelivered_job_into_a_message(
     call.abort();
     let _ = call.await;
     fx.delivery_chosen(running).await;
-    sqlx::query("update jobs set delivery=null where id=$1")
+    // Ждущий вызов жил в прежнем экземпляре хаба.
+    sqlx::query("update jobs set delivery=null, waiter_instance=$2 where id=$1")
         .bind(running)
+        .bind(Uuid::now_v7())
         .execute(&fx.pool)
         .await
         .unwrap();
@@ -445,6 +447,109 @@ async fn hub_restart_during_the_wait_turns_every_undelivered_job_into_a_message(
     assert_eq!(fx.messages(running).await, 1);
     // Второй старт ничего не меняет.
     assert_eq!(sweep::on_start(&fx.pool).await.unwrap(), 0);
+}
+
+/// Живой ждущий вызов своего экземпляра хаба не теряет доставку от подбора при повторном
+/// захвате службы-одиночки: итог по-прежнему отвечает вызов, сообщения нет.
+#[sqlx::test(migrations = "./migrations")]
+async fn a_live_waiter_keeps_its_delivery_through_the_start_sweep(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let context = fx.context.clone();
+    let caller = fx.caller();
+    let call = tokio::spawn(async move {
+        session_tools::call(
+            &context,
+            &caller,
+            "job.run",
+            json!({"workdir": "/tmp/w", "shell": "make", "wait_seconds": 20}),
+        )
+        .await
+    });
+    let id = fx.only_job().await;
+    let job = fx.job(id).await;
+    assert_eq!(job.waiter_instance, Some(inplace_jobs::hub_instance()));
+    assert!(job.waiter_deadline.is_some_and(|at| at > Utc::now()));
+    // Служба-одиночка захвачена заново в том же процессе: ждущий вызов жив.
+    assert_eq!(sweep::on_start(&fx.pool).await.unwrap(), 0);
+    assert_eq!(fx.job(id).await.delivery, None);
+    fx.started(fx.a, id).await;
+    fx.finished(fx.a, id, JobOutcome::Succeeded, Some(0)).await;
+    let reply = call.await.unwrap().unwrap();
+    assert_eq!(reply["state"], "succeeded", "{reply}");
+    assert_eq!(fx.job(id).await.delivery.as_deref(), Some("inline"));
+    assert_eq!(fx.messages(id).await, 0);
+}
+
+/// Подбор берёт задачи чужого экземпляра и задачи с вышедшим сроком ожидания, и только их.
+#[sqlx::test(migrations = "./migrations")]
+async fn the_start_sweep_takes_other_instances_and_expired_waiters_only(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let own = job_id(&fx.run("own").await);
+    let foreign = job_id(&fx.run("foreign").await);
+    let expired = job_id(&fx.run("expired").await);
+    for id in [own, foreign, expired] {
+        sqlx::query(
+            "update jobs set delivery=null, waiter_instance=$2,
+               waiter_deadline=now()+interval '1 minute' where id=$1",
+        )
+        .bind(id)
+        .bind(inplace_jobs::hub_instance())
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    }
+    sqlx::query("update jobs set waiter_instance=$2 where id=$1")
+        .bind(foreign)
+        .bind(Uuid::now_v7())
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    sqlx::query("update jobs set waiter_deadline=now()-interval '1 second' where id=$1")
+        .bind(expired)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    assert_eq!(sweep::on_start(&fx.pool).await.unwrap(), 2);
+    assert_eq!(fx.job(own).await.delivery, None);
+    assert_eq!(fx.job(foreign).await.delivery.as_deref(), Some("message"));
+    assert_eq!(fx.job(expired).await.delivery.as_deref(), Some("message"));
+}
+
+/// Обычный повтор читает существующую задачу и доставку не меняет: прежний ждущий вызов
+/// ещё жив и сам ответит итогом.
+#[sqlx::test(migrations = "./migrations")]
+async fn a_replay_never_changes_the_delivery_of_a_running_job(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let context = fx.context.clone();
+    let caller = fx.caller();
+    let call = tokio::spawn(async move {
+        session_tools::call(
+            &context,
+            &caller,
+            "job.run",
+            json!({"workdir": "/tmp/w", "shell": "make", "wait_seconds": 20, "idempotency_key": "k"}),
+        )
+        .await
+    });
+    let id = fx.only_job().await;
+    let replay = fx
+        .call(
+            "job.run",
+            json!({"workdir": "/tmp/w", "shell": "make", "wait_seconds": 0, "idempotency_key": "k"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(job_id(&replay), id);
+    assert_eq!(
+        fx.job(id).await.delivery,
+        None,
+        "a replay reads, never rewrites"
+    );
+    fx.started(fx.a, id).await;
+    fx.finished(fx.a, id, JobOutcome::Succeeded, Some(0)).await;
+    let reply = call.await.unwrap().unwrap();
+    assert_eq!(reply["state"], "succeeded", "{reply}");
+    assert_eq!(fx.messages(id).await, 0);
 }
 
 /// Срок хранения журнала: вложение отпускается, строка хранит хвост, чтение отвечает хвостом
@@ -545,15 +650,29 @@ async fn the_sweep_gives_an_orphaned_job_a_message(pool: PgPool) {
             .await
             .unwrap();
     }
-    sqlx::query("update jobs set created_at=now()-interval '10 minutes' where id=$1")
-        .bind(orphan)
-        .execute(&fx.pool)
-        .await
-        .unwrap();
+    // Свежая: ждущий жив, срок впереди; давняя: срок вышел, а `created_at` старый ни при чём.
+    sqlx::query(
+        "update jobs set waiter_instance=$2, waiter_deadline=now()+interval '1 minute',
+           created_at=now()-interval '10 minutes' where id=$1",
+    )
+    .bind(fresh)
+    .bind(inplace_jobs::hub_instance())
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "update jobs set waiter_instance=$2, waiter_deadline=now()-interval '1 second'
+         where id=$1",
+    )
+    .bind(orphan)
+    .bind(inplace_jobs::hub_instance())
+    .execute(&fx.pool)
+    .await
+    .unwrap();
     fx.finished(fx.a, orphan, JobOutcome::Succeeded, Some(0))
         .await;
     assert_eq!(fx.messages(orphan).await, 0);
-    let swept = sweep::undelivered_sweep(&fx.pool, Duration::from_secs(180), Utc::now())
+    let swept = sweep::undelivered_sweep(&fx.pool, Utc::now())
         .await
         .unwrap();
     assert_eq!(swept, 1, "a fresh job may still have a live waiter");
@@ -634,6 +753,246 @@ async fn replay_by_call_id_and_by_idempotency_key_returns_the_stored_job(pool: P
         1,
         "a replay is not a second delivery"
     );
+}
+
+/// Повтор видит только задачи своего разговора и своего домена: чужой разговор с тем же
+/// идентификатором вызова и тем же ключом получает свою задачу, а не чужой итог.
+#[sqlx::test(migrations = "./migrations")]
+async fn a_replay_never_returns_another_conversations_job(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let caller = fx.caller();
+    let args =
+        json!({"workdir": "/tmp/w", "shell": "make", "wait_seconds": 0, "idempotency_key": "k"});
+    let mine = job_id(
+        &session_tools::call(&fx.context, &caller, "job.run", args.clone())
+            .await
+            .unwrap(),
+    );
+    fx.started(fx.a, mine).await;
+    fx.finished(fx.a, mine, JobOutcome::Succeeded, Some(0))
+        .await;
+    let (other, other_execution) = fx.other_conversation().await;
+    let mut stranger = fx.caller_of(other, other_execution);
+    stranger.call_id = caller.call_id;
+    let reply = session_tools::call(&fx.context, &stranger, "job.run", args)
+        .await
+        .unwrap();
+    assert_ne!(job_id(&reply), mine, "{reply}");
+    assert!(
+        reply.get("output_tail").is_none(),
+        "no foreign output: {reply}"
+    );
+    let theirs = job_id(&reply);
+    let owner: Option<Uuid> = sqlx::query_scalar("select conversation_id from jobs where id=$1")
+        .bind(theirs)
+        .fetch_one(&fx.pool)
+        .await
+        .unwrap();
+    assert_eq!(owner, Some(other));
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_replay_after_a_domain_change_returns_nothing_stored(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let caller = fx.caller();
+    let args =
+        json!({"workdir": "/tmp/w", "shell": "make", "wait_seconds": 0, "idempotency_key": "k"});
+    let id = job_id(
+        &session_tools::call(&fx.context, &caller, "job.run", args.clone())
+            .await
+            .unwrap(),
+    );
+    fx.started(fx.a, id).await;
+    fx.finished(fx.a, id, JobOutcome::Succeeded, Some(0)).await;
+    sqlx::query("update conversations set memory_domain='work' where id=$1")
+        .bind(fx.conversation)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    // Тот же ключ и тот же вызов транспорта: старый итог не отдаётся ни по одному из них.
+    let by_key = fx.call("job.run", args.clone()).await;
+    assert!(
+        by_key.is_err(),
+        "the stored output must not leak: {by_key:?}"
+    );
+    let by_call = session_tools::call(&fx.context, &caller, "job.run", args).await;
+    assert!(
+        by_call.is_err(),
+        "the stored output must not leak: {by_call:?}"
+    );
+}
+
+/// Ждущий вызов тоже не берёт итог, если домен разговора сменился после заявки.
+#[sqlx::test(migrations = "./migrations")]
+async fn the_waiter_does_not_claim_an_inline_result_after_a_domain_change(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let context = fx.context.clone();
+    let caller = fx.caller();
+    let call = tokio::spawn(async move {
+        session_tools::call(
+            &context,
+            &caller,
+            "job.run",
+            json!({"workdir": "/tmp/w", "shell": "make", "wait_seconds": 10}),
+        )
+        .await
+    });
+    let id = fx.only_job().await;
+    sqlx::query("update conversations set memory_domain='work' where id=$1")
+        .bind(fx.conversation)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    fx.started(fx.a, id).await;
+    fx.finished(fx.a, id, JobOutcome::Succeeded, Some(0)).await;
+    let reply = call.await.unwrap();
+    assert!(reply.is_err(), "the waiter must see nothing: {reply:?}");
+    assert_ne!(fx.job(id).await.delivery.as_deref(), Some("inline"));
+}
+
+/// Заявка берёт замок задач машины раньше счётчика событий, как и итог: если бы она сначала
+/// публиковала событие, а замок брала потом, встречный итог (замок, потом событие) замкнул
+/// бы цикл, и база прервала бы одну из транзакций.
+#[sqlx::test(migrations = "./migrations")]
+async fn submission_and_completion_take_the_jobs_lock_before_the_event_counter(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let existing = job_id(&fx.run("first").await);
+    let job = fx.job(existing).await;
+    let machine = fx.a;
+    // «Итог»: замок машины уже у него, событие ещё впереди.
+    let mut completion = canterlot_hub::db::begin(&fx.pool).await.unwrap();
+    inplace_jobs::lock_machine(&mut completion, machine)
+        .await
+        .unwrap();
+    let context = fx.context.clone();
+    let caller = fx.caller();
+    let submit = tokio::spawn(async move {
+        session_tools::call(
+            &context,
+            &caller,
+            "job.run",
+            json!({"workdir": "/tmp/w", "shell": "second", "wait_seconds": 0}),
+        )
+        .await
+    });
+    // Заявка дошла до ожидания замка машины.
+    until("the submission to wait for the jobs lock", || async {
+        sqlx::query_scalar::<_, i64>(
+            "select count(*) from pg_locks where locktype='advisory' and not granted",
+        )
+        .fetch_one(&fx.pool)
+        .await
+        .unwrap()
+            > 0
+    })
+    .await;
+    inplace_jobs::emit_changed(&mut completion, &job, Uuid::now_v7())
+        .await
+        .expect("the completion publishes without a deadlock");
+    completion.commit().await.expect("the completion commits");
+    let reply = submit.await.unwrap();
+    assert!(
+        reply.is_ok(),
+        "the submission must not be aborted: {reply:?}"
+    );
+}
+
+/// Допуск заказчика держится до фиксации диспетчеризации: владелец сужает режим тем же путём,
+/// что настройки (очередь, затем строка разговора); диспетчер, дойдя до этой строки, ждёт
+/// фиксации и видит уже узкий режим, а не стартует оболочку по старому снимку.
+#[sqlx::test(migrations = "./migrations")]
+async fn dispatch_waits_for_a_concurrent_mode_change_and_sees_it(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let mut running = Vec::new();
+    for n in 0..4 {
+        running.push(job_id(&fx.run(&format!("busy {n}")).await));
+    }
+    let queued = job_id(&fx.run("waiting").await);
+    assert_eq!(fx.state(queued).await, "queued");
+    assert_eq!(fx.commands(fx.a, "start_inplace_job").await, 4);
+    // Владелец сузил режим: транзакция настроек ещё не зафиксирована.
+    let mut settings = canterlot_hub::db::begin(&fx.pool).await.unwrap();
+    sqlx::query("select conversation_id from queue_state where conversation_id=$1 for update")
+        .bind(fx.conversation)
+        .execute(&mut *settings)
+        .await
+        .unwrap();
+    sqlx::query("select id from conversations where id=$1 for no key update")
+        .bind(fx.conversation)
+        .execute(&mut *settings)
+        .await
+        .unwrap();
+    sqlx::query(
+        "update conversations set pending_settings=jsonb_build_object('permission_mode','ask')
+         where id=$1",
+    )
+    .bind(fx.conversation)
+    .execute(&mut *settings)
+    .await
+    .unwrap();
+    // Место освободилось: диспетчер идёт к очереди.
+    let (pool, first, a) = (fx.pool.clone(), running[0], fx.a);
+    let finisher = tokio::spawn(async move {
+        let fact = JobFinished {
+            job_id: first.to_string(),
+            attempt: 1,
+            outcome: JobOutcome::Succeeded as i32,
+            exit_code: Some(0),
+            duration_ms: 1,
+            log_bytes: 0,
+            tail: Vec::new(),
+            truncated: false,
+        };
+        canterlot_hub::db::in_tx(&pool, move |conn| {
+            Box::pin(async move { facts::apply_finished(conn, a, &fact, Uuid::now_v7()).await })
+        })
+        .await
+    });
+    until("the dispatcher to wait for the settings change", || async {
+        finisher.is_finished()
+            || sqlx::query_scalar::<_, i64>(
+                "select count(*) from pg_stat_activity where wait_event_type='Lock'
+                   and datname=current_database()",
+            )
+            .fetch_one(&fx.pool)
+            .await
+            .unwrap()
+                > 0
+    })
+    .await;
+    settings.commit().await.unwrap();
+    finisher.await.unwrap().unwrap();
+    let job = fx.job(queued).await;
+    assert_eq!(
+        job.state, "canceled",
+        "the narrowed mode is seen at dispatch"
+    );
+    assert_eq!(job.end_reason.as_deref(), Some("mode_too_narrow"));
+    assert_eq!(fx.commands(fx.a, "start_inplace_job").await, 4);
+}
+
+/// Выключатель выключили и включили до диспетчеризации: удалённая задача, ждавшая в очереди
+/// в момент выключения, не стартует, а закрывается `remote_work_disabled`.
+#[sqlx::test(migrations = "./migrations")]
+async fn a_queued_remote_job_does_not_revive_after_off_and_on(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    fx.switch(true).await;
+    let first = job_id(&fx.run_on_b("one").await.unwrap());
+    let _second = job_id(&fx.run_on_b("two").await.unwrap());
+    let waiting = job_id(&fx.run_on_b("three").await.unwrap());
+    assert_eq!(fx.state(waiting).await, "queued");
+    fx.switch(false).await;
+    fx.switch(true).await;
+    fx.started(fx.b, first).await;
+    fx.finished(fx.b, first, JobOutcome::Succeeded, Some(0))
+        .await;
+    let job = fx.job(waiting).await;
+    assert_eq!(job.state, "canceled");
+    assert_eq!(job.end_reason.as_deref(), Some("remote_work_disabled"));
+    assert_eq!(fx.commands(fx.b, "start_inplace_job").await, 2);
+    // Заявка после повторного включения проходит.
+    let fresh = job_id(&fx.run_on_b("four").await.unwrap());
+    assert_eq!(fx.state(fresh).await, "dispatched");
 }
 
 // ───────── Допуск ─────────
@@ -956,8 +1315,101 @@ async fn a_report_on_connect_applies_forward(pool: PgPool) {
     })
     .await;
     assert_eq!(fx.state(running).await, "running");
+    // Снимок «закончена» с выводом ждёт факт с хвостом, а не закрывает задачу пустой.
+    assert_eq!(fx.state(finished).await, "dispatched");
+    fx.finished(fx.a, finished, JobOutcome::Succeeded, Some(0))
+        .await;
     assert_eq!(fx.state(finished).await, "succeeded");
     assert_eq!(fx.job(finished).await.exit_code, Some(0));
+}
+
+fn finished_report(id: Uuid, log_bytes: u64) -> JobsReport {
+    JobsReport {
+        jobs: vec![JobSnapshot {
+            job_id: id.to_string(),
+            attempt: 1,
+            phase: JobPhase::Finished as i32,
+            outcome: JobOutcome::Succeeded as i32,
+            exit_code: Some(0),
+            duration_ms: 10,
+            log_bytes,
+            ..Default::default()
+        }],
+        observed_at_ms: 0,
+    }
+}
+
+/// Отчёт при подключении обогнал факт `JobFinished`: хвост вывода не теряется, итог и
+/// сообщение берутся из факта.
+#[sqlx::test(migrations = "./migrations")]
+async fn a_report_arriving_before_the_finished_fact_keeps_the_output_tail(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let id = job_id(&fx.run("make").await);
+    fx.started(fx.a, id).await;
+    let a = fx.a;
+    fx.apply(move |conn| {
+        Box::pin(async move {
+            facts::apply_report(conn, a, &finished_report(id, 12), Uuid::now_v7()).await
+        })
+    })
+    .await;
+    assert_eq!(fx.state(id).await, "running", "no result without the fact");
+    assert_eq!(fx.messages(id).await, 0);
+    fx.finished(fx.a, id, JobOutcome::Succeeded, Some(0)).await;
+    let job = fx.job(id).await;
+    assert_eq!(job.state, "succeeded");
+    assert_eq!(job.tail.as_deref(), Some(&b"hello\nworld\n"[..]));
+    assert_eq!(fx.messages(id).await, 1);
+    // Отчёт, повторённый после факта, ничего не меняет.
+    fx.apply(move |conn| {
+        Box::pin(async move {
+            facts::apply_report(conn, a, &finished_report(id, 12), Uuid::now_v7()).await
+        })
+    })
+    .await;
+    assert_eq!(fx.messages(id).await, 1);
+    assert_eq!(
+        fx.job(id).await.tail.as_deref(),
+        Some(&b"hello\nworld\n"[..])
+    );
+}
+
+/// Снимок без вывода закрывает задачу сразу: терять нечего. А если факт с хвостом так и не
+/// пришёл, служба закрывает задачу по снимку, а не оставляет её навсегда идущей.
+#[sqlx::test(migrations = "./migrations")]
+async fn a_report_without_output_finishes_at_once_and_a_missing_fact_times_out(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let quiet = job_id(&fx.run("true").await);
+    let loud = job_id(&fx.run("make").await);
+    let a = fx.a;
+    for (id, bytes) in [(quiet, 0), (loud, 9)] {
+        fx.apply(move |conn| {
+            Box::pin(async move {
+                facts::apply_report(conn, a, &finished_report(id, bytes), Uuid::now_v7()).await
+            })
+        })
+        .await;
+    }
+    assert_eq!(fx.state(quiet).await, "succeeded");
+    assert_eq!(fx.state(loud).await, "dispatched");
+    assert_eq!(
+        sweep::reported_finish_sweep(&fx.pool, Duration::from_secs(120), Utc::now())
+            .await
+            .unwrap(),
+        0,
+        "the fact may still be on its way"
+    );
+    let later = Utc::now() + chrono::TimeDelta::minutes(5);
+    assert_eq!(
+        sweep::reported_finish_sweep(&fx.pool, Duration::from_secs(120), later)
+            .await
+            .unwrap(),
+        1
+    );
+    let job = fx.job(loud).await;
+    assert_eq!(job.state, "succeeded");
+    assert_eq!(job.end_reason.as_deref(), Some("tail_unavailable"));
+    assert_eq!(job.output_bytes, 9);
 }
 
 // ───────── Потеря ─────────
@@ -1201,6 +1653,65 @@ async fn the_message_reaches_the_caller_once_with_an_eight_kib_tail(pool: PgPool
         text.len()
     );
     assert!(text.contains("xxxx"));
+}
+
+/// Двоичный вывод (NUL, ESC) не делает итог постоянной потерей: сообщение пишет такие байты
+/// escape-последовательностями и проходит проверку ввода, а хвост в строке остаётся как был.
+#[sqlx::test(migrations = "./migrations")]
+async fn binary_output_is_escaped_in_the_message_and_kept_in_the_log(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let id = job_id(&fx.run("cat blob").await);
+    fx.started(fx.a, id).await;
+    let raw = b"ok\0bad\x1b[31mred\x07\nline two\ttab\n".to_vec();
+    let fact = JobFinished {
+        job_id: id.to_string(),
+        attempt: 1,
+        outcome: JobOutcome::Failed as i32,
+        exit_code: Some(1),
+        duration_ms: 10,
+        log_bytes: raw.len() as u64,
+        tail: raw.clone(),
+        truncated: false,
+    };
+    let a = fx.a;
+    fx.apply(move |conn| {
+        Box::pin(async move { facts::apply_finished(conn, a, &fact, Uuid::now_v7()).await })
+    })
+    .await;
+    assert!(matches!(
+        deliver_job_result(&fx, id).await,
+        canterlot_hub::crunch::JobOutcome::Done(_)
+    ));
+    let texts = input_texts(&fx).await;
+    assert_eq!(texts.len(), 1, "{texts:?}");
+    let text = &texts[0];
+    assert!(!text.contains('\0') && !text.contains('\u{1b}'), "{text:?}");
+    assert!(
+        text.contains("ok\\x00bad\\x1b[31mred\\x07\nline two\ttab"),
+        "{text:?}"
+    );
+    assert_eq!(fx.job(id).await.tail.as_deref(), Some(raw.as_slice()));
+}
+
+/// Если текст с хвостом всё равно не принят, доставка сжимается до короткого сообщения без
+/// хвоста, а не бросает итог.
+#[sqlx::test(migrations = "./migrations")]
+async fn a_tail_that_fails_validation_degrades_to_a_short_message(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let id = job_id(&fx.run("make").await);
+    fx.started(fx.a, id).await;
+    fx.finished(fx.a, id, JobOutcome::Failed, Some(2)).await;
+    let job = fx.job(id).await;
+    let full = inplace_jobs::message_for_delivery(&job, "machine-b", |_| true);
+    assert!(full.contains("hello\nworld"), "{full}");
+    let short =
+        inplace_jobs::message_for_delivery(&job, "machine-b", |text| !text.contains("hello"));
+    assert!(!short.contains("hello"), "{short}");
+    assert!(
+        short.contains("failed") && short.contains("exit code 2"),
+        "{short}"
+    );
+    assert!(short.contains("job_log"), "{short}");
 }
 
 #[sqlx::test(migrations = "./migrations")]

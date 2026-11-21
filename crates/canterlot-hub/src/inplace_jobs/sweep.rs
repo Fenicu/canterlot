@@ -15,39 +15,36 @@ use crate::session::{Availability, Registry};
 
 const TICK: Duration = Duration::from_secs(30);
 
-/// Старт хаба: ждавший вызов, если и был, умер вместе с процессом. Каждая задача без выбранной
-/// доставки уходит на сообщение; уже терминальная ставит его в той же транзакции.
+/// Старт хаба и повторный захват службы-одиночки: задача без выбранной доставки уходит на
+/// сообщение, только если её ждущий вызов не может быть жив: он принадлежит другому экземпляру
+/// хаба, его срок вышел или строка не знает ждущего. Ждущий вызов этого же экземпляра, чей срок
+/// ещё не вышел, остаётся при своей доставке. Уже терминальная задача ставит сообщение в той
+/// же транзакции.
 pub async fn on_start(pool: &PgPool) -> Result<usize, sqlx::Error> {
-    let ids: Vec<Uuid> =
-        sqlx::query_scalar("select id from jobs where delivery is null order by id")
-            .fetch_all(pool)
-            .await?;
-    let mut done = 0;
-    for id in ids {
-        crate::db::in_tx(pool, move |conn| {
-            Box::pin(async move { fallback_to_message_in_tx(conn, id).await })
-        })
-        .await?;
-        done += 1;
-    }
-    Ok(done)
+    sweep_undelivered(pool, Some(super::hub_instance()), Utc::now()).await
 }
 
-/// Задачи, у которых давно нет выбранной доставки: ждущий вызов живёт не дольше минуты, так
-/// что за `older_than` его уже нет, а оборванный в окне между фиксацией заявки и стражем
-/// вызов не оставил сообщения. Они уходят сообщением, как при старте хаба.
-pub async fn undelivered_sweep(
+/// Таймер: давно ничего не выбравшие задачи. Срок записан при заявке и уточнён после её
+/// фиксации, так что долгая заявка не делает живой вызов «давним»; чужой экземпляр здесь не
+/// проверяется, его ждущий отпускается по сроку.
+pub async fn undelivered_sweep(pool: &PgPool, now: DateTime<Utc>) -> Result<usize, sqlx::Error> {
+    sweep_undelivered(pool, None, now).await
+}
+
+async fn sweep_undelivered(
     pool: &PgPool,
-    older_than: Duration,
+    own_instance: Option<Uuid>,
     now: DateTime<Utc>,
 ) -> Result<usize, sqlx::Error> {
     let ids: Vec<Uuid> = sqlx::query_scalar(
         "select id from jobs
-         where delivery is null and created_at < $1 - make_interval(secs => $2)
+         where delivery is null
+           and (waiter_deadline is null or waiter_deadline < $1
+                or ($2::uuid is not null and waiter_instance is distinct from $2))
          order by id",
     )
     .bind(now)
-    .bind(older_than.as_secs_f64())
+    .bind(own_instance)
     .fetch_all(pool)
     .await?;
     let count = ids.len();
@@ -108,8 +105,40 @@ pub async fn expire_logs(
     Ok(done)
 }
 
-/// Дольше самого долгого ожидания вызова (60 с) с запасом на сеть и разбор.
-const UNDELIVERED_AFTER: Duration = Duration::from_secs(3 * 60);
+/// Воркер сказал в отчёте при подключении, что задача закончена, а факт с хвостом не пришёл
+/// за `wait`: задача закрывается по снимку без хвоста. Журнал воркера доставляет факт сразу
+/// после отчёта, так что срок нужен лишь для порченого журнала.
+pub async fn reported_finish_sweep(
+    pool: &PgPool,
+    wait: Duration,
+    now: DateTime<Utc>,
+) -> Result<usize, sqlx::Error> {
+    let rows: Vec<(Uuid, Uuid)> = sqlx::query_as(
+        "select id, machine_id from jobs
+         where finish_report is not null
+           and state in ('dispatched','waiting_lease','running')
+           and finish_reported_at < $1 - make_interval(secs => $2)
+         order by id",
+    )
+    .bind(now)
+    .bind(wait.as_secs_f64())
+    .fetch_all(pool)
+    .await?;
+    let mut done = 0;
+    for (id, machine_id) in rows {
+        let ended = crate::db::in_tx(pool, move |conn| {
+            Box::pin(async move {
+                super::facts::finish_from_report(conn, machine_id, id, Uuid::now_v7()).await
+            })
+        })
+        .await?;
+        done += usize::from(ended);
+    }
+    Ok(done)
+}
+
+/// Сколько хаб ждёт факт `JobFinished` после снимка «закончена».
+const REPORTED_FINISH_WAIT: Duration = Duration::from_secs(120);
 
 /// Задачи, о которых машина молчит дольше срока команды и запаса, становятся `lost`.
 /// Молчание считается от последнего факта; машина на связи не теряет задач: её факты придут.
@@ -231,7 +260,8 @@ async fn sweep_once(
     retention: Duration,
 ) -> Result<(), sqlx::Error> {
     lost_sweep(pool, registry, grace, Utc::now()).await?;
-    undelivered_sweep(pool, UNDELIVERED_AFTER, Utc::now()).await?;
+    undelivered_sweep(pool, Utc::now()).await?;
+    reported_finish_sweep(pool, REPORTED_FINISH_WAIT, Utc::now()).await?;
     expire_logs(pool, retention, Utc::now()).await?;
     for machine in queued_machines(pool).await? {
         if registry.availability(machine) == Availability::Available {

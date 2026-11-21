@@ -344,9 +344,13 @@
       "sources": [
         "src/lib/screens/machines/**",
         "src/routes/machines/+page.svelte",
-        "src/lib/stores/machines.svelte.ts"
+        "src/lib/stores/machines.svelte.ts",
+        "src/lib/jobs/**",
+        "src/lib/timeline/cards/Job*.svelte",
+        "src/lib/timeline/cards/defs/jobs.ts"
       ],
       "specs": [
+        "e2e/ui/jobs.spec.ts",
         "e2e/ui/lease-queue.spec.ts",
         "e2e/ui/machines.spec.ts"
       ]
@@ -388,7 +392,8 @@
         "e2e/ui/image-native-menu.spec.ts",
         "e2e/ui/image-viewer.spec.ts",
         "e2e/ui/markdown-viewer.spec.ts",
-        "e2e/ui/office-viewer.spec.ts"
+        "e2e/ui/office-viewer.spec.ts",
+        "e2e/ui/video-viewer.spec.ts"
       ]
     },
     {

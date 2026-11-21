@@ -1117,8 +1117,9 @@ async fn try_start(
     let target = args.machine_id.unwrap_or(caller.machine_id);
     // Выключатель раньше связи: выключенная машина отказывает, а не ждёт подключения.
     if args.machine_id.is_some() {
-        match spawn::admit_remote_in_tx(&mut *conn, caller.owner_id, target).await {
-            Ok(()) => {}
+        let recorded = Some(args.admission_generation.unwrap_or(0));
+        match spawn::admit_remote_in_tx(&mut *conn, caller.owner_id, target, recorded).await {
+            Ok(_) => {}
             Err(error) if error.code == ToolErrorCode::RemoteWorkDisabled => {
                 return Ok(Attempt::Failed {
                     code: error.code.as_str(),

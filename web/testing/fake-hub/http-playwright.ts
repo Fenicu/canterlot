@@ -2,7 +2,9 @@ import type { Page, Route } from '@playwright/test';
 import type { FakeHub } from './hub';
 import { FakeDraftConflict, FakeMemoryError, NUDGE_BUILTIN_TEXT, type FakeHubApi } from './api';
 import { APP_VERSION } from '../version';
+import { answerRange } from './range';
 import { installAuthRoutes } from './auth';
+import { installJobRoutes } from './jobs';
 
 const PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
@@ -475,6 +477,27 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     const id = parts[4] ?? '';
     const tail = parts[5] ?? '';
     const record = attachments.get(id);
+    const blob = api.blobs.get(id);
+    if (method === 'GET' && tail === 'content' && blob) {
+      // Как настоящий хаб: один диапазон отвечает 206, недостижимый 416, остальное целиком.
+      const size = blob.bytes.length;
+      const range = route.request().headers()['range'];
+      const answer = answerRange(range, size);
+      const common = { 'Content-Type': blob.mime, 'Accept-Ranges': 'bytes', ETag: `"${id}"`, 'Cache-Control': 'private, max-age=86400, immutable' };
+      api.blobRequests.push({ id, range: range ?? null, status: answer.kind === 'partial' ? 206 : answer.kind === 'unsatisfiable' ? 416 : 200 });
+      if (answer.kind === 'unsatisfiable') {
+        await route.fulfill({ status: 416, headers: { 'Accept-Ranges': 'bytes', 'Content-Range': `bytes */${size}` } });
+      } else if (answer.kind === 'partial') {
+        await route.fulfill({
+          status: 206,
+          headers: { ...common, 'Content-Range': `bytes ${answer.start}-${answer.end}/${size}` },
+          body: Buffer.from(blob.bytes.subarray(answer.start, answer.end + 1))
+        });
+      } else {
+        await route.fulfill({ status: 200, headers: common, body: Buffer.from(blob.bytes) });
+      }
+      return;
+    }
     if (method === 'GET' && !tail) {
       await route.fulfill({
         headers: headers(),
@@ -2123,6 +2146,8 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     hub.presence.push({ conversation_id: body.conversation_id, visible: body.visible, at: Date.now() });
     await route.fulfill({ status: 204 });
   });
+
+  await installJobRoutes(page, hub, api);
 }
 
 function errorBody(code: string, message: string, details?: Record<string, unknown>): unknown {

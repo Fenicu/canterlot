@@ -23,8 +23,7 @@ use super::{
     extract::{ApiJson, ApiPath},
 };
 use crate::attachments::{
-    self, AttachmentError, AttachmentView, IMAGE_MIMES, NewAttachment, UPLOAD_CHUNK_BYTES,
-    blobstore::IO_CHUNK_BYTES, upload,
+    self, AttachmentError, AttachmentView, IMAGE_MIMES, NewAttachment, UPLOAD_CHUNK_BYTES, upload,
 };
 
 const UPLOAD_OFFSET: &str = "upload-offset";
@@ -209,9 +208,13 @@ async fn upload_chunk(
     Ok((StatusCode::NO_CONTENT, offset_headers(written, None)).into_response())
 }
 
-/// Тип изображения отдаётся только из списка и при совпадающей сигнатуре файла.
+/// Ролики, которые плеер браузера играет прямо из вложения; остальные только скачиваются.
+const VIDEO_MIMES: &[&str] = &["video/mp4", "video/quicktime", "video/webm"];
+
+/// Тип изображения или ролика отдаётся только из списка и при совпадающей сигнатуре файла.
+/// Без верного типа `<video>` не играет: iOS Safari не берёт поток байтов.
 async fn served_type(mime: &str, file: &mut tokio::fs::File) -> io::Result<&'static str> {
-    let Some(expected) = IMAGE_MIMES.iter().find(|m| **m == mime) else {
+    let Some(expected) = IMAGE_MIMES.iter().chain(VIDEO_MIMES).find(|m| **m == mime) else {
         return Ok("application/octet-stream");
     };
     let mut head = [0u8; 12];
@@ -230,6 +233,9 @@ async fn served_type(mime: &str, file: &mut tokio::fs::File) -> io::Result<&'sta
         "image/jpeg" => head.starts_with(&[0xff, 0xd8, 0xff]),
         "image/gif" => head.starts_with(b"GIF87a") || head.starts_with(b"GIF89a"),
         "image/webp" => head.len() == 12 && &head[..4] == b"RIFF" && &head[8..] == b"WEBP",
+        // MP4 и QuickTime начинаются с атома `ftyp` после его длины; WebM — с заголовка EBML.
+        "video/mp4" | "video/quicktime" => head.len() >= 8 && &head[4..8] == b"ftyp",
+        "video/webm" => head.starts_with(&[0x1a, 0x45, 0xdf, 0xa3]),
         _ => false,
     };
     Ok(if matches {
@@ -277,7 +283,7 @@ async fn preview(
     super::preview::serve_preview(found.mime, found.size, found.sha256, found.file, &headers).await
 }
 
-#[utoipa::path(get,path="/api/v1/attachments/{id}/content",tag="attachments",params(("id"=Uuid,Path)),responses((status=200,description="Содержимое готового вложения: проверенная картинка показывается на месте, остальное скачивается; имя файла в Content-Disposition",content_type="application/octet-stream",body=BinaryContent),(status=304,description="Содержимое не изменилось: отдаётся при совпадении If-None-Match")))]
+#[utoipa::path(get,path="/api/v1/attachments/{id}/content",tag="attachments",params(("id"=Uuid,Path),("Range"=Option<String>,Header,description="Один байтовый диапазон: bytes=a-b, bytes=a- или bytes=-n; несколько диапазонов и неверная запись игнорируются"),("If-Range"=Option<String>,Header,description="Сильный ETag: при другом ETag диапазон игнорируется и отдаётся весь файл")),responses((status=200,description="Содержимое готового вложения: проверенная картинка показывается на месте, ролик (mp4, quicktime, webm с верной сигнатурой) отдаётся своим типом для плеера, остальное скачивается; имя файла в Content-Disposition",content_type="application/octet-stream",body=BinaryContent,headers(("ETag"=String,description="SHA-256 содержимого в кавычках"),("Accept-Ranges"=String,description="Всегда bytes"))),(status=206,description="Запрошенный диапазон; те же заголовки, что у полного ответа",content_type="application/octet-stream",body=BinaryContent,headers(("Content-Range"=String,description="bytes первый-последний/размер"))),(status=304,description="Содержимое не изменилось: отдаётся при совпадении If-None-Match"),(status=416,description="Диапазон целиком за пределами файла",headers(("Content-Range"=String,description="bytes */размер")))))]
 async fn download(
     State(s): State<AppState>,
     o: Owner,
@@ -289,32 +295,30 @@ async fn download(
     if super::etag_matches(&headers, &etag) {
         return Ok(StatusCode::NOT_MODIFIED.into_response());
     }
-    let etag = HeaderValue::from_str(&etag).map_err(|_| ApiError::new(ErrorCode::Internal))?;
+    let etag_value =
+        HeaderValue::from_str(&etag).map_err(|_| ApiError::new(ErrorCode::Internal))?;
     let content_type = served_type(&found.mime, &mut found.file)
         .await
         .map_err(AttachmentError::from)?;
-    let stream =
-        tokio_util::io::ReaderStream::with_capacity(found.file.take(found.size), IO_CHUNK_BYTES);
-    let mut headers = HeaderMap::new();
-    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
-    headers.insert(header::CONTENT_LENGTH, HeaderValue::from(found.size));
-    headers.insert(header::ETAG, etag);
-    headers.insert(
+    let mut response = HeaderMap::new();
+    response.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    response.insert(header::ETAG, etag_value);
+    response.insert(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
     );
-    headers.insert(
+    response.insert(
         header::CONTENT_DISPOSITION,
         disposition(&found.name, content_type),
     );
-    headers.insert(
+    response.insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static("sandbox"),
     );
     // Готовое вложение неизменно, а строки ленты при прокрутке монтируются заново.
-    headers.insert(
+    response.insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static("private, max-age=86400, immutable"),
     );
-    Ok((StatusCode::OK, headers, Body::from_stream(stream)).into_response())
+    super::range::respond(found.file, found.size, &headers, &etag, response).await
 }

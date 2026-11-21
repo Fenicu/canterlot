@@ -157,6 +157,24 @@ pub async fn accepts_remote_work_for_share(
     Ok(accepts.unwrap_or(false))
 }
 
+/// Допуск удалённой работы вместе с поколением: тем же чтением `for share`, что и
+/// `accepts_remote_work_for_share`. Поколение растёт при каждом выключении (триггер миграции
+/// 0126), так что работа, запомнившая прежнее поколение, после повторного включения не
+/// проходит. Нет строки — выключено, поколение 0.
+pub async fn remote_admission_for_share(
+    conn: &mut sqlx::PgConnection,
+    machine_id: Uuid,
+) -> Result<(bool, i64), sqlx::Error> {
+    let row: Option<(bool, i64)> = sqlx::query_as(
+        "select accepts_remote_work, remote_admission_generation from machines
+         where id = $1 for share",
+    )
+    .bind(machine_id)
+    .fetch_optional(conn)
+    .await?;
+    Ok(row.unwrap_or((false, 0)))
+}
+
 /// Меняет выключатель удалённой работы; только HTTP владельца. `None` — машины нет у владельца.
 pub async fn set_accepts_remote_work(
     conn: &mut sqlx::PgConnection,
