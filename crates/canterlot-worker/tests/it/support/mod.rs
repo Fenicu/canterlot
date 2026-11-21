@@ -54,6 +54,8 @@ pub struct Behavior {
     pub status: Option<(tonic::Code, &'static str)>,
     pub fetch_failures: Arc<Mutex<std::collections::VecDeque<tonic::Code>>>,
     pub attachment: Vec<u8>,
+    /// Токен, который хаб принимает; воркеры носителя получают свой, а не из `config`.
+    pub token: String,
 }
 
 impl Default for Behavior {
@@ -75,6 +77,7 @@ impl Default for Behavior {
             status: None,
             fetch_failures: Arc::default(),
             attachment: Vec::new(),
+            token: "protocol-test".into(),
         }
     }
 }
@@ -154,10 +157,9 @@ impl Service {
 
     fn check<T>(&self, request: &Request<T>) {
         assert!(
-            request
-                .metadata()
-                .get("authorization")
-                .is_some_and(|m| m == "Bearer protocol-test")
+            request.metadata().get("authorization").is_some_and(
+                |m| m.as_bytes() == format!("Bearer {}", self.behavior.token).as_bytes()
+            )
         );
     }
 }
@@ -451,7 +453,7 @@ impl ProtocolHub {
         let ca_cert = directory.path().join("ca.pem");
         fs::write(&ca_cert, &pki.ca_pem).unwrap();
         let token_file = directory.path().join("token");
-        fs::write(&token_file, "protocol-test").unwrap();
+        fs::write(&token_file, &behavior.token).unwrap();
         fs::set_permissions(&token_file, fs::Permissions::from_mode(0o600)).unwrap();
         let (hub_url, hub_dial, incoming) = match listen {
             Listen::Tcp => {
