@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Полный гейт Canterlot внутри контейнера canterlot-gate: прежние три шага
-# /tmp/gate/run.sh (scripts/gate.sh на VM гоняет веб один раз), со своей
-# PostgreSQL на 127.0.0.1:55441.
+# Полный гейт Canterlot внутри контейнера canterlot-gate: тот же scripts/gate.sh, что
+# идёт на VM (npm ci, check.sh --all --no-web, наборы выката, check-web.sh --stack),
+# со своей PostgreSQL на 127.0.0.1:55441.
 #
 #   scripts/gate/in-container.sh --src DIR --out DIR --sha SHA12
 #
@@ -10,13 +10,15 @@
 #                     web/node_modules);
 #   /src/target       кэш сборки Rust, смонтирован снаружи (стенд ищет бинарники
 #                     в target/debug, поэтому target лежит внутри /src, а не в /cache);
-#   /out              каталог результата: build.log, check.log, web.log, result.txt;
+#   /out              каталог результата: result.txt, state.tsv и логи шагов
+#                     (npm-ci.log, check.log, deploy.log, web.log) из scripts/gate.sh,
+#                     gate.log с его выводом;
 #   /cache/cargo      CARGO_HOME;
 #   /cache/npm        npm_config_cache;
 #   /cache/playwright PLAYWRIGHT_BROWSERS_PATH, пустой кэш наполняется браузерами
 #                     из образа (/opt/ms-playwright).
 #
-# Формат result.txt — как у /tmp/gate/run.sh: строка с кодами возврата и
+# Формат result.txt и state.tsv — как у scripts/gate.sh: строка с кодами возврата и
 # временами, затем сводка nextest, сводка Playwright и первые упавшие тесты.
 set -euo pipefail
 
@@ -157,45 +159,29 @@ fi
 printf '    в кэше: %s\n' "$(find "$PLAYWRIGHT_BROWSERS_PATH" -mindepth 1 -maxdepth 1 -printf '%f ')"
 phase_done "браузеры"
 
-# --- шаг 1: зависимости и сборка web ---
-phase "npm ci"
-(cd "$src/web" && npm ci --no-audit --no-fund) >"$out/build.log" 2>&1 \
-    || { tail -n 60 "$out/build.log" >&2; die "npm ci не удался (см. $out/build.log)"; }
-phase_done "npm ci"
+# --- сам гейт: scripts/gate.sh ---
+# Шаги не перечисляются здесь заново: контейнер гоняет тот же scripts/gate.sh, что и VM
+# (npm ci, check.sh --all --no-web, наборы scripts/deploy/tests/run.sh, check-web.sh
+# --stack), без аттестации и без аренды (воркера в контейнере нет). Покрытие проверяет
+# scripts/gate-coverage.sh. Дерево с чужим HEAD гейт бы не заметил, поэтому sha проверяется.
+[[ "$(git -C "$src" rev-parse --short=12 HEAD)" == "$want_sha" ]] \
+    || die "HEAD в $src не $want_sha"
+phase "scripts/gate.sh --no-attest"
+g=0
+(cd "$src" && CANTERLOT_NO_LEASE=1 bash scripts/gate.sh --no-attest) >"$out/gate.log" 2>&1 || g=$?
+phase_done "scripts/gate.sh"
 
-phase "сборка web"
-b=0
-(cd "$src/web" && VITE_UI_TESTS=1 npm run build) >>"$out/build.log" 2>&1 || b=$?
-# npm ci и сборка оставляют сотни мегабайт грязных страниц. На медленном диске
-# их отложенная запись совпадает с линтом и тестами, и запуск процессов внутри
-# тестов растягивается до таймаутов; сбрасываем запись до check.sh.
-sync
-phase_done "сборка web"
-
-# --- шаг 2: scripts/check.sh --all ---
-phase "scripts/check.sh --all"
-s=$SECONDS
-c=0
-bash "$src/scripts/check.sh" --all >"$out/check.log" 2>&1 || c=$?
-t1=$((SECONDS - s))
-phase_done "scripts/check.sh --all"
-
-# --- шаг 3: scripts/check-web.sh --stack ---
-phase "scripts/check-web.sh --stack"
-s=$SECONDS
-w=0
-bash "$src/scripts/check-web.sh" --stack >"$out/web.log" 2>&1 || w=$?
-t2=$((SECONDS - s))
-phase_done "scripts/check-web.sh --stack"
-
-{
-    printf '%s build=%s check=%s %ss web=%s %ss\n' "${sha:0:8}" "$b" "$c" "$t1" "$w" "$t2"
-    grep -E 'Summary \[' "$out/check.log" | tail -1 || true
-    grep -E '^\s+[0-9]+ (passed|failed|flaky|did not run)' "$out/web.log" || true
-    grep -E '^\s+[0-9]+\) ' "$out/web.log" | sort -u | head || true
-} >"$out/result.txt"
+# Состояние, сводка и логи шагов лежат в .superpowers/gate/<sha8> рабочей копии;
+# выносим их в каталог результата, откуда их забирает scripts/gate-remote.sh (или носитель).
+results="$src/.superpowers/gate/${sha:0:8}"
+if [[ -d "$results" ]]; then
+    cp -a "$results/." "$out/" || die "не удалось скопировать результаты из $results"
+else
+    printf 'FATAL: гейт не оставил %s\n' "$results" >&2
+    g=1
+fi
 printf '\n'
-cat "$out/result.txt"
-printf '\nгейт %s за %ds, коды: build=%s check=%s web=%s\n' "${sha:0:8}" $((SECONDS - started)) "$b" "$c" "$w"
+[[ ! -f "$out/result.txt" ]] || cat "$out/result.txt"
+printf '\nгейт %s за %ds, код scripts/gate.sh: %s\n' "${sha:0:8}" $((SECONDS - started)) "$g"
 
-((b == 0 && c == 0 && w == 0)) || exit 1
+((g == 0)) || exit 1

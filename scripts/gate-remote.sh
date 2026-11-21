@@ -291,7 +291,7 @@ if [[ -f "$out/result.txt" ]]; then
 else
     printf 'result.txt нет: гейт не дошёл до проверок\n'
 fi
-printf '\nлоги: %s/{build,check,web}.log\n' "$out"
+printf '\nлоги: %s/{gate,npm-ci,check,deploy,web}.log\n' "$out"
 printf 'гейт %s закончил за %ds, код %s\n' "$sha12" $((SECONDS - started)) "$gate_code"
 [[ "$gate_code" != 0 ]] || [[ -f "$out/result.txt" ]] || gate_code=1
 exit "$gate_code"
