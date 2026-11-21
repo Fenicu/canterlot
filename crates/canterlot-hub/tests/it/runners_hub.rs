@@ -63,15 +63,25 @@ async fn add_runner_creates_a_runner_row_that_accepts_remote_work(pool: PgPool) 
     let owner = owner(&pool).await;
     let parent = machines::add(&pool, owner, "carrier").await?;
     let runner = machines::add_runner(&pool, owner, "runner-a", &spec(parent.machine_id)).await?;
-    assert_eq!(machines::verify(&pool, &runner.token).await?, Some(runner.machine_id));
-    let row: (String, Option<Uuid>, Option<String>, i32, Vec<String>, bool, bool) =
-        sqlx::query_as(
-            "select role, parent_machine_id, root_dir, rank, labels, is_carrier, accepts_remote_work
+    assert_eq!(
+        machines::verify(&pool, &runner.token).await?,
+        Some(runner.machine_id)
+    );
+    let row: (
+        String,
+        Option<Uuid>,
+        Option<String>,
+        i32,
+        Vec<String>,
+        bool,
+        bool,
+    ) = sqlx::query_as(
+        "select role, parent_machine_id, root_dir, rank, labels, is_carrier, accepts_remote_work
              from machines where id = $1",
-        )
-        .bind(runner.machine_id)
-        .fetch_one(&pool)
-        .await?;
+    )
+    .bind(runner.machine_id)
+    .fetch_one(&pool)
+    .await?;
     assert_eq!(
         row,
         (
@@ -108,7 +118,15 @@ async fn add_runner_validates_parent_and_root_dir(pool: PgPool) -> TestResult {
     let nested = machines::add_runner(&pool, owner, "r", &spec(runner.machine_id)).await;
     assert!(matches!(nested, Err(AddRunnerError::ParentNotWorker)));
     // Корень: относительный, ненормализованный, пустой.
-    for bad in ["relative/dir", "/srv/../etc", "/srv//runner", "/srv/./runner", "/srv/runner/", "", "/"] {
+    for bad in [
+        "relative/dir",
+        "/srv/../etc",
+        "/srv//runner",
+        "/srv/./runner",
+        "/srv/runner/",
+        "",
+        "/",
+    ] {
         let mut s = spec(parent.machine_id);
         s.root_dir = bad.into();
         let result = machines::add_runner(&pool, owner, "r", &s).await;
@@ -122,7 +140,10 @@ async fn add_runner_validates_parent_and_root_dir(pool: PgPool) -> TestResult {
         let mut s = spec(parent.machine_id);
         s.labels = vec![bad.to_owned()];
         let result = machines::add_runner(&pool, owner, "r", &s).await;
-        assert!(matches!(result, Err(AddRunnerError::InvalidLabels)), "{bad:?}");
+        assert!(
+            matches!(result, Err(AddRunnerError::InvalidLabels)),
+            "{bad:?}"
+        );
     }
     // Отозванный родитель.
     machines::revoke(&pool, parent.machine_id).await?;
@@ -161,11 +182,13 @@ async fn the_runner_shape_is_enforced_by_the_database(pool: PgPool) -> TestResul
         .execute(&pool)
         .await;
     assert!(no_root.is_err(), "a runner needs a root dir");
-    let bad_role = sqlx::query("insert into machines (id, owner_id, name, role) values ($1, $2, 'x', 'cloud')")
-        .bind(Uuid::now_v7())
-        .bind(owner)
-        .execute(&pool)
-        .await;
+    let bad_role = sqlx::query(
+        "insert into machines (id, owner_id, name, role) values ($1, $2, 'x', 'cloud')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(owner)
+    .execute(&pool)
+    .await;
     assert!(bad_role.is_err(), "unknown role");
     Ok(())
 }
@@ -223,11 +246,21 @@ async fn cli_adds_runners_and_marks_carriers(pool: PgPool) -> TestResult {
     let added = run(&["machine", "add", "--name", "carrier"])?;
     assert!(added.status.success());
     let text = String::from_utf8(added.stdout)?;
-    let carrier = Uuid::parse_str(text.lines().next().unwrap().strip_prefix("machine_id=").unwrap())?;
+    let carrier = Uuid::parse_str(
+        text.lines()
+            .next()
+            .unwrap()
+            .strip_prefix("machine_id=")
+            .unwrap(),
+    )?;
     let carrier_text = carrier.to_string();
 
     let set = run(&["machine", "set-carrier", "--machine-id", &carrier_text])?;
-    assert!(set.status.success(), "{}", String::from_utf8_lossy(&set.stderr));
+    assert!(
+        set.status.success(),
+        "{}",
+        String::from_utf8_lossy(&set.stderr)
+    );
     assert!(set.stdout.is_empty() && set.stderr.is_empty());
     assert!(
         sqlx::query_scalar::<_, bool>("select is_carrier from machines where id = $1")
@@ -237,14 +270,40 @@ async fn cli_adds_runners_and_marks_carriers(pool: PgPool) -> TestResult {
     );
 
     let runner = run(&[
-        "machine", "add", "--name", "runner-a", "--role", "runner", "--parent", &carrier_text,
-        "--root-dir", "/srv/runner", "--rank", "20", "--labels", "build-host,kernel-6.12",
+        "machine",
+        "add",
+        "--name",
+        "runner-a",
+        "--role",
+        "runner",
+        "--parent",
+        &carrier_text,
+        "--root-dir",
+        "/srv/runner",
+        "--rank",
+        "20",
+        "--labels",
+        "build-host,kernel-6.12",
     ])?;
-    assert!(runner.status.success(), "{}", String::from_utf8_lossy(&runner.stderr));
+    assert!(
+        runner.status.success(),
+        "{}",
+        String::from_utf8_lossy(&runner.stderr)
+    );
     assert!(runner.stderr.is_empty());
     let text = String::from_utf8(runner.stdout)?;
-    assert_eq!(text.lines().count(), 4, "the same four lines as a worker: {text}");
-    let runner_id = Uuid::parse_str(text.lines().next().unwrap().strip_prefix("machine_id=").unwrap())?;
+    assert_eq!(
+        text.lines().count(),
+        4,
+        "the same four lines as a worker: {text}"
+    );
+    let runner_id = Uuid::parse_str(
+        text.lines()
+            .next()
+            .unwrap()
+            .strip_prefix("machine_id=")
+            .unwrap(),
+    )?;
     let row: (String, Option<Uuid>, Option<String>, i32, Vec<String>, bool) = sqlx::query_as(
         "select role, parent_machine_id, root_dir, rank, labels, accepts_remote_work from machines where id = $1",
     )
@@ -273,10 +332,52 @@ async fn cli_adds_runners_and_marks_carriers(pool: PgPool) -> TestResult {
     let before = count().await;
     for args in [
         vec!["machine", "add", "--name", "x", "--role", "runner"],
-        vec!["machine", "add", "--name", "x", "--role", "runner", "--parent", &carrier_text],
-        vec!["machine", "add", "--name", "x", "--role", "runner", "--parent", &carrier_text, "--root-dir", "relative"],
-        vec!["machine", "add", "--name", "x", "--role", "runner", "--parent", &carrier_text, "--root-dir", "/srv/a/../b"],
-        vec!["machine", "add", "--name", "x", "--role", "runner", "--parent", &text.lines().next().unwrap()["machine_id=".len()..], "--root-dir", "/srv/x"],
+        vec![
+            "machine",
+            "add",
+            "--name",
+            "x",
+            "--role",
+            "runner",
+            "--parent",
+            &carrier_text,
+        ],
+        vec![
+            "machine",
+            "add",
+            "--name",
+            "x",
+            "--role",
+            "runner",
+            "--parent",
+            &carrier_text,
+            "--root-dir",
+            "relative",
+        ],
+        vec![
+            "machine",
+            "add",
+            "--name",
+            "x",
+            "--role",
+            "runner",
+            "--parent",
+            &carrier_text,
+            "--root-dir",
+            "/srv/a/../b",
+        ],
+        vec![
+            "machine",
+            "add",
+            "--name",
+            "x",
+            "--role",
+            "runner",
+            "--parent",
+            &text.lines().next().unwrap()["machine_id=".len()..],
+            "--root-dir",
+            "/srv/x",
+        ],
         vec!["machine", "add", "--name", "x", "--parent", &carrier_text],
         vec!["machine", "add", "--name", "x", "--rank", "3"],
     ] {
@@ -286,11 +387,22 @@ async fn cli_adds_runners_and_marks_carriers(pool: PgPool) -> TestResult {
     }
     assert_eq!(count().await, before);
     // Раннер не станет несущей.
-    let refused = run(&["machine", "set-carrier", "--machine-id", &runner_id.to_string()])?;
+    let refused = run(&[
+        "machine",
+        "set-carrier",
+        "--machine-id",
+        &runner_id.to_string(),
+    ])?;
     assert!(!refused.status.success());
     assert_eq!(refused.stderr, b"machine_is_runner\n");
     // Снятие флага.
-    let off = run(&["machine", "set-carrier", "--machine-id", &carrier_text, "--off"])?;
+    let off = run(&[
+        "machine",
+        "set-carrier",
+        "--machine-id",
+        &carrier_text,
+        "--off",
+    ])?;
     assert!(off.status.success());
     assert!(
         !sqlx::query_scalar::<_, bool>("select is_carrier from machines where id = $1")
@@ -298,7 +410,12 @@ async fn cli_adds_runners_and_marks_carriers(pool: PgPool) -> TestResult {
             .fetch_one(&pool)
             .await?
     );
-    let missing = run(&["machine", "set-carrier", "--machine-id", &Uuid::now_v7().to_string()])?;
+    let missing = run(&[
+        "machine",
+        "set-carrier",
+        "--machine-id",
+        &Uuid::now_v7().to_string(),
+    ])?;
     assert_eq!(missing.stderr, b"machine_not_found\n");
     Ok(())
 }
@@ -461,14 +578,23 @@ async fn runners_of_lists_only_live_children_of_the_carrier(pool: PgPool) -> Tes
         &pool,
         f.owner,
         "runner-b",
-        &RunnerSpec { root_dir: "/srv/b".into(), ..spec(f.carrier) },
+        &RunnerSpec {
+            root_dir: "/srv/b".into(),
+            ..spec(f.carrier)
+        },
     )
     .await?;
     let other = machines::add(&pool, f.owner, "other").await?;
     machines::add_runner(&pool, f.owner, "foreign", &spec(other.machine_id)).await?;
     let list = machines::runners_of(&pool, f.carrier).await?;
-    let names: Vec<_> = list.iter().map(|r| (r.name.as_str(), r.root_dir.as_str())).collect();
-    assert_eq!(names, vec![("runner-a", "/srv/runner"), ("runner-b", "/srv/b")]);
+    let names: Vec<_> = list
+        .iter()
+        .map(|r| (r.name.as_str(), r.root_dir.as_str()))
+        .collect();
+    assert_eq!(
+        names,
+        vec![("runner-a", "/srv/runner"), ("runner-b", "/srv/b")]
+    );
     machines::revoke(&pool, second.machine_id).await?;
     let list = machines::runners_of(&pool, f.carrier).await?;
     assert_eq!(list.len(), 1);
@@ -498,18 +624,48 @@ fn facts(runner: bool, carrier: bool, observation: Option<(bool, u32, i64)>) -> 
 fn availability_follows_the_spec_rule() {
     use RunnerAvailability::{Offline, Online, Unknown};
     // Воркер раннера на связи — online, что бы ни говорило наблюдение.
-    assert_eq!(machines::runner_availability(&facts(true, true, None)), Online);
-    assert_eq!(machines::runner_availability(&facts(true, false, Some((false, 9, 1)))), Online);
+    assert_eq!(
+        machines::runner_availability(&facts(true, true, None)),
+        Online
+    );
+    assert_eq!(
+        machines::runner_availability(&facts(true, false, Some((false, 9, 1)))),
+        Online
+    );
     // Отключён, но нет наблюдения, несущей или свежести — unknown.
-    assert_eq!(machines::runner_availability(&facts(false, true, None)), Unknown);
-    assert_eq!(machines::runner_availability(&facts(false, false, Some((false, 9, 1)))), Unknown);
-    assert_eq!(machines::runner_availability(&facts(false, true, Some((false, 9, 181)))), Unknown);
-    assert_eq!(machines::runner_availability(&facts(false, true, Some((false, 2, 1)))), Unknown);
-    assert_eq!(machines::runner_availability(&facts(false, true, Some((true, 0, 1)))), Unknown);
+    assert_eq!(
+        machines::runner_availability(&facts(false, true, None)),
+        Unknown
+    );
+    assert_eq!(
+        machines::runner_availability(&facts(false, false, Some((false, 9, 1)))),
+        Unknown
+    );
+    assert_eq!(
+        machines::runner_availability(&facts(false, true, Some((false, 9, 181)))),
+        Unknown
+    );
+    assert_eq!(
+        machines::runner_availability(&facts(false, true, Some((false, 2, 1)))),
+        Unknown
+    );
+    assert_eq!(
+        machines::runner_availability(&facts(false, true, Some((true, 0, 1)))),
+        Unknown
+    );
     // Все условия вместе — offline; граница свежести 3 минуты, число отказов 3.
-    assert_eq!(machines::runner_availability(&facts(false, true, Some((false, 3, 1)))), Offline);
-    assert_eq!(machines::runner_availability(&facts(false, true, Some((false, 7, 179)))), Offline);
-    assert_eq!(machines::runner_availability(&facts(false, true, Some((false, 7, 180)))), Unknown);
+    assert_eq!(
+        machines::runner_availability(&facts(false, true, Some((false, 3, 1)))),
+        Offline
+    );
+    assert_eq!(
+        machines::runner_availability(&facts(false, true, Some((false, 7, 179)))),
+        Offline
+    );
+    assert_eq!(
+        machines::runner_availability(&facts(false, true, Some((false, 7, 180)))),
+        Unknown
+    );
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -574,7 +730,13 @@ async fn availability_reads_the_registry_and_the_stored_observation(pool: PgPool
 
 // ───────── Отзыв ─────────
 
-async fn seed_job(pool: &PgPool, owner: Uuid, machine: Uuid, conversation: Option<Uuid>, state: &str) -> Uuid {
+async fn seed_job(
+    pool: &PgPool,
+    owner: Uuid,
+    machine: Uuid,
+    conversation: Option<Uuid>,
+    state: &str,
+) -> Uuid {
     let id = Uuid::now_v7();
     sqlx::query(
         "insert into jobs (id, owner_id, conversation_id, domain, machine_id, remote, workdir, shell,
@@ -597,7 +759,8 @@ async fn seed_job(pool: &PgPool, owner: Uuid, machine: Uuid, conversation: Optio
 async fn revoke_ends_in_place_jobs_as_lost_with_one_message_each(pool: PgPool) -> TestResult {
     let seed = testkit::seed(&pool).await;
     let carrier = machines::add(&pool, seed.owner_id, "carrier").await?;
-    let runner = machines::add_runner(&pool, seed.owner_id, "runner-a", &spec(carrier.machine_id)).await?;
+    let runner =
+        machines::add_runner(&pool, seed.owner_id, "runner-a", &spec(carrier.machine_id)).await?;
     let c = Some(seed.conversation_id);
     let mut live = Vec::new();
     for state in ["queued", "dispatched", "waiting_lease", "running"] {
@@ -615,7 +778,10 @@ async fn revoke_ends_in_place_jobs_as_lost_with_one_message_each(pool: PgPool) -
         .bind(id)
         .fetch_one(&pool)
         .await?;
-        assert_eq!((state.as_str(), reason.as_deref(), finished), ("lost", Some("lost"), true));
+        assert_eq!(
+            (state.as_str(), reason.as_deref(), finished),
+            ("lost", Some("lost"), true)
+        );
         let messages: i64 = sqlx::query_scalar(
             "select count(*) from scheduled_jobs where payload->>'action'='job_result' and payload->>'job_id'=$1",
         )
@@ -634,8 +800,16 @@ async fn revoke_ends_in_place_jobs_as_lost_with_one_message_each(pool: PgPool) -
                 .unwrap()
         }
     };
-    assert_eq!(state_of(done).await, "succeeded", "a finished job is not touched");
-    assert_eq!(state_of(elsewhere).await, "running", "other machines are not touched");
+    assert_eq!(
+        state_of(done).await,
+        "succeeded",
+        "a finished job is not touched"
+    );
+    assert_eq!(
+        state_of(elsewhere).await,
+        "running",
+        "other machines are not touched"
+    );
 
     // Повторный отзыв (и отзыв уже отозванной машины) ничего не удваивает.
     assert!(!machines::revoke(&pool, runner.machine_id).await?);
@@ -652,7 +826,14 @@ async fn revoke_ends_in_place_jobs_as_lost_with_one_message_each(pool: PgPool) -
 async fn revoke_of_an_ordinary_machine_also_ends_its_jobs(pool: PgPool) -> TestResult {
     let seed = testkit::seed(&pool).await;
     let worker = machines::add(&pool, seed.owner_id, "build-host").await?;
-    let queued = seed_job(&pool, seed.owner_id, worker.machine_id, Some(seed.conversation_id), "queued").await;
+    let queued = seed_job(
+        &pool,
+        seed.owner_id,
+        worker.machine_id,
+        Some(seed.conversation_id),
+        "queued",
+    )
+    .await;
     machines::revoke(&pool, worker.machine_id).await?;
     let state: String = sqlx::query_scalar("select state from jobs where id = $1")
         .bind(queued)

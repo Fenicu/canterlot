@@ -384,7 +384,10 @@ async fn run(args: Args) -> Result<(), String> {
                             .map_err(|error| error.to_string())?
                     } else {
                         // Флаги раннера без `--role runner` — ошибка, а не молчаливое «worker».
-                        if parent.is_some() || root_dir.is_some() || rank.is_some() || !labels.is_empty()
+                        if parent.is_some()
+                            || root_dir.is_some()
+                            || rank.is_some()
+                            || !labels.is_empty()
                         {
                             return Err("runner_flags_need_role_runner".into());
                         }

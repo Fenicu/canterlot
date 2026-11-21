@@ -99,7 +99,10 @@ pub async fn revoke(pool: &PgPool, machine_id: Uuid) -> Result<bool, sqlx::Error
 }
 
 /// Незаконченные задачи на месте машины становятся `lost`; законченные не трогаются.
-async fn lose_jobs_in_tx(conn: &mut sqlx::PgConnection, machine_id: Uuid) -> Result<(), sqlx::Error> {
+async fn lose_jobs_in_tx(
+    conn: &mut sqlx::PgConnection,
+    machine_id: Uuid,
+) -> Result<(), sqlx::Error> {
     use crate::inplace_jobs::{Outcome, State, finish_in_tx, lock_row};
     let ids: Vec<Uuid> = sqlx::query_scalar(
         "select id from jobs where machine_id = $1
@@ -134,9 +137,9 @@ pub async fn rotate_token(
     reactivate: bool,
 ) -> Result<Option<String>, RotateTokenError> {
     crate::db::in_tx(pool, move |conn| {
-        Box::pin(
-            async move { rotate_token_in_tx(conn, machine_id, reset_local_state, reactivate).await },
-        )
+        Box::pin(async move {
+            rotate_token_in_tx(conn, machine_id, reset_local_state, reactivate).await
+        })
     })
     .await
 }
@@ -647,23 +650,26 @@ pub async fn runner_availability_of(
     runner: Uuid,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<(RunnerAvailability, Option<chrono::DateTime<chrono::Utc>>), sqlx::Error> {
-    let row: Option<(Option<Uuid>, Option<bool>, Option<i32>, Option<chrono::DateTime<chrono::Utc>>)> =
-        sqlx::query_as(
-            "select m.parent_machine_id, o.reachable, o.consecutive_failures, o.observed_at
+    let row: Option<(
+        Option<Uuid>,
+        Option<bool>,
+        Option<i32>,
+        Option<chrono::DateTime<chrono::Utc>>,
+    )> = sqlx::query_as(
+        "select m.parent_machine_id, o.reachable, o.consecutive_failures, o.observed_at
              from machines m
              left join runner_observations o
                on o.machine_id = m.id and o.carrier_id = m.parent_machine_id
              where m.id = $1 and m.role = 'runner'",
-        )
-        .bind(runner)
-        .fetch_optional(conn)
-        .await?;
+    )
+    .bind(runner)
+    .fetch_optional(conn)
+    .await?;
     let Some((parent, reachable, failures, observed_at)) = row else {
         return Ok((RunnerAvailability::Unknown, None));
     };
-    let connected = |id: Uuid| {
-        registry.availability(id) != crate::session::Availability::Unavailable
-    };
+    let connected =
+        |id: Uuid| registry.availability(id) != crate::session::Availability::Unavailable;
     let observation = match (reachable, failures, observed_at) {
         (Some(reachable), Some(failures), Some(observed_at)) => Some(RunnerObservationFact {
             reachable,

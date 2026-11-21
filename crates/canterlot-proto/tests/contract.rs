@@ -2731,8 +2731,8 @@ fn in_place_job_messages_keep_their_wire_shape_and_hide_the_command() {
 #[test]
 fn runner_messages_keep_their_wire_shape_and_hide_the_token() {
     use canterlot_proto::worker::v1::{
-        AssignedRunner, ControlDown, ControlUp, RunnerObservation, RunnerToken,
-        RunnerTokenRefused, RunnerTokenRequest, RunnersAssigned, control_down, control_up,
+        AssignedRunner, ControlDown, ControlUp, RunnerObservation, RunnerToken, RunnerTokenRefused,
+        RunnerTokenRequest, RunnersAssigned, control_down, control_up,
     };
     const TOKEN: &str = "canterlot-runner-token-PROBE-value";
 

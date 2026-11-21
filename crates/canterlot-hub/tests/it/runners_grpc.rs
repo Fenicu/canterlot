@@ -295,8 +295,14 @@ async fn the_token_goes_to_the_carrier_in_one_volatile_message(pool: PgPool) -> 
     carrier.assigned().await;
     let reply = carrier.ask(host.runner.machine_id, true).await.unwrap();
     assert_eq!(reply.machine_id, host.runner.machine_id.to_string());
-    assert_eq!(reply.installation_id, host.installation.installation_id.to_string());
-    assert_eq!(reply.restore_generation, host.installation.restore_generation.to_string());
+    assert_eq!(
+        reply.installation_id,
+        host.installation.installation_id.to_string()
+    );
+    assert_eq!(
+        reply.restore_generation,
+        host.installation.restore_generation.to_string()
+    );
     assert_eq!(
         machines::verify(&pool, &reply.token).await?,
         Some(host.runner.machine_id)
@@ -341,28 +347,48 @@ async fn token_requests_are_refused_with_a_code_and_rotate_nothing(pool: PgPool)
         "unknown_machine"
     );
     assert_eq!(
-        carrier.ask(host.plain.machine_id, false).await.unwrap_err().code,
+        carrier
+            .ask(host.plain.machine_id, false)
+            .await
+            .unwrap_err()
+            .code,
         "unknown_machine"
     );
     assert_eq!(
-        carrier.ask(revoked.machine_id, false).await.unwrap_err().code,
+        carrier
+            .ask(revoked.machine_id, false)
+            .await
+            .unwrap_err()
+            .code,
         "revoked"
     );
     let mut stranger = host.connect(&other, RUNNERS).await;
     stranger.assigned().await;
     assert_eq!(
-        stranger.ask(host.runner.machine_id, false).await.unwrap_err().code,
+        stranger
+            .ask(host.runner.machine_id, false)
+            .await
+            .unwrap_err()
+            .code,
         "not_parent"
     );
     // Раннер сам не несущая: даже со своим токеном и возможностью он не получит токен.
     let mut runner = host.connect(&host.runner, RUNNERS).await;
     assert_eq!(
-        runner.ask(host.runner.machine_id, false).await.unwrap_err().code,
+        runner
+            .ask(host.runner.machine_id, false)
+            .await
+            .unwrap_err()
+            .code,
         "not_carrier"
     );
     let mut plain = host.connect(&host.plain, RUNNERS).await;
     assert_eq!(
-        plain.ask(host.runner.machine_id, false).await.unwrap_err().code,
+        plain
+            .ask(host.runner.machine_id, false)
+            .await
+            .unwrap_err()
+            .code,
         "not_carrier"
     );
     // Ничего не ротировано: токен раннера действует.
@@ -372,11 +398,7 @@ async fn token_requests_are_refused_with_a_code_and_rotate_nothing(pool: PgPool)
     );
     // Мусорный идентификатор — тоже отказ `unknown_machine`, а не обрыв потока.
     assert_eq!(
-        carrier
-            .ask_raw("not-a-uuid")
-            .await
-            .unwrap_err()
-            .code,
+        carrier.ask_raw("not-a-uuid").await.unwrap_err().code,
         "unknown_machine"
     );
     Ok(())
@@ -411,7 +433,10 @@ async fn runner_messages_without_the_capability_end_the_stream(pool: PgPool) -> 
                 assert!(
                     !matches!(
                         down.msg,
-                        Some(control_down::Msg::RunnerToken(_) | control_down::Msg::RunnersAssigned(_))
+                        Some(
+                            control_down::Msg::RunnerToken(_)
+                                | control_down::Msg::RunnersAssigned(_)
+                        )
                     ),
                     "nothing runner-related without the capability"
                 );
@@ -441,16 +466,28 @@ async fn observations_are_stored_only_from_the_carrier(pool: PgPool) -> TestResu
     };
     // Не несущая шлёт наблюдение: оно отброшено, поток жив (следующий запрос отвечает).
     let mut plain = host.connect(&host.plain, RUNNERS).await;
-    plain.send(observation(host.runner.machine_id, false, 9)).await;
+    plain
+        .send(observation(host.runner.machine_id, false, 9))
+        .await;
     assert_eq!(
-        plain.ask(host.runner.machine_id, false).await.unwrap_err().code,
+        plain
+            .ask(host.runner.machine_id, false)
+            .await
+            .unwrap_err()
+            .code,
         "not_carrier"
     );
     // Раннер о самом себе тоже не может.
     let mut runner = host.connect(&host.runner, RUNNERS).await;
-    runner.send(observation(host.runner.machine_id, false, 9)).await;
+    runner
+        .send(observation(host.runner.machine_id, false, 9))
+        .await;
     assert_eq!(
-        runner.ask(host.runner.machine_id, false).await.unwrap_err().code,
+        runner
+            .ask(host.runner.machine_id, false)
+            .await
+            .unwrap_err()
+            .code,
         "not_carrier"
     );
     let stored: i64 = sqlx::query_scalar("select count(*) from runner_observations")
@@ -460,7 +497,9 @@ async fn observations_are_stored_only_from_the_carrier(pool: PgPool) -> TestResu
 
     let mut carrier = host.connect(&host.carrier, RUNNERS).await;
     carrier.assigned().await;
-    carrier.send(observation(host.runner.machine_id, false, 3)).await;
+    carrier
+        .send(observation(host.runner.machine_id, false, 3))
+        .await;
     // Ответа нет: ждём, пока строка появится.
     timeout(WAIT, async {
         loop {

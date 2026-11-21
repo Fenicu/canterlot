@@ -371,7 +371,10 @@ pub(crate) async fn load_stored(
             }
             None => (crate::machines::RunnerAvailability::Unknown, None),
         };
-        (state.as_str().to_owned(), observed_at.map(conversations::time))
+        (
+            state.as_str().to_owned(),
+            observed_at.map(conversations::time),
+        )
     } else {
         (r.try_get("availability")?, None)
     };

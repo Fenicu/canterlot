@@ -182,7 +182,12 @@ async fn the_new_session_route_refuses_a_runner(pool: PgPool) {
         "model": "synthetic-small", "effort": "high",
     });
     let error = api
-        .call(Method::POST, "/api/v1/conversations", Some(body.clone()), 409)
+        .call(
+            Method::POST,
+            "/api/v1/conversations",
+            Some(body.clone()),
+            409,
+        )
         .await;
     assert_eq!(error["error"]["code"], "machine_is_runner", "{error}");
     let mut with_catalog = body;
@@ -204,11 +209,12 @@ async fn the_new_session_route_refuses_a_runner(pool: PgPool) {
         "{}",
         String::from_utf8_lossy(&r.body)
     );
-    let on_runner: i64 = sqlx::query_scalar("select count(*) from conversations where machine_id=$1")
-        .bind(api.runner)
-        .fetch_one(&api.pool)
-        .await
-        .unwrap();
+    let on_runner: i64 =
+        sqlx::query_scalar("select count(*) from conversations where machine_id=$1")
+            .bind(api.runner)
+            .fetch_one(&api.pool)
+            .await
+            .unwrap();
     assert_eq!(on_runner, 0);
 }
 
@@ -231,11 +237,12 @@ async fn an_execution_on_a_runner_is_refused(pool: PgPool) {
         direct,
         Err(executions::ExecutionError::MachineIsRunner)
     ));
-    let started: i64 = sqlx::query_scalar("select count(*) from executions where conversation_id=$1")
-        .bind(conversation)
-        .fetch_one(&api.pool)
-        .await
-        .unwrap();
+    let started: i64 =
+        sqlx::query_scalar("select count(*) from executions where conversation_id=$1")
+            .bind(conversation)
+            .fetch_one(&api.pool)
+            .await
+            .unwrap();
     assert_eq!(started, 0);
     // На обычной машине тот же вызов работает.
     let ordinary = testkit::seed_conversation(&api.pool, api.owner, api.worker).await;
