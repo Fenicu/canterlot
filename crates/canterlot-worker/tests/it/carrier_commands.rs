@@ -31,9 +31,12 @@ const RUNNER_ID: Uuid = Uuid::from_u128(0x1111);
 const LOCAL_ID: Uuid = Uuid::from_u128(0x2222);
 const WAIT: Duration = Duration::from_secs(30);
 
+/// Одна запись журнала: факты и погашенные ими команды `(command_id, dispatch_attempt)`.
+type Write = (Vec<Body>, Vec<(String, u32)>);
+
 #[derive(Default)]
 struct Sink {
-    written: Mutex<Vec<(Vec<Body>, Vec<(String, u32)>)>>,
+    written: Mutex<Vec<Write>>,
     written_notify: Notify,
     /// Сколько ближайших записей отказать (хранилище не ответило).
     fail: Mutex<u32>,
@@ -56,7 +59,7 @@ impl FactSink for Sink {
 }
 
 impl Sink {
-    async fn next(&self, index: usize) -> (Vec<Body>, Vec<(String, u32)>) {
+    async fn next(&self, index: usize) -> Write {
         tokio::time::timeout(WAIT, async {
             loop {
                 let notified = self.written_notify.notified();

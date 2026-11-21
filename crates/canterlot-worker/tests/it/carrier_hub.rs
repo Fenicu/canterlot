@@ -382,23 +382,14 @@ async fn an_owner_job_with_source_and_outputs_runs_on_the_runner_end_to_end(pool
         "mkdir -p result && cat marker.txt > result/marker.txt && git rev-parse HEAD > result/rev.txt && echo tail-line",
     )
     .await;
-    let row: Option<(String, Option<String>, Option<String>, Option<String>)> = sqlx::query_as(
-        "select state, outputs_note, convert_from(tail, 'UTF8'), workdir from jobs where owner_job
-          order by created_at desc limit 1",
+    let row: Option<String> = sqlx::query_scalar(
+        "select concat_ws(' | ', state, outputs_note, convert_from(tail, 'UTF8'), workdir)
+           from jobs where owner_job order by created_at desc limit 1",
     )
     .fetch_optional(&pool)
     .await
     .unwrap();
-    let machines_row: Vec<(String, Vec<String>, bool)> = sqlx::query_as(
-        "select name, capabilities, accepts_remote_work from machines order by name",
-    )
-    .fetch_all(&pool)
-    .await
-    .unwrap();
-    assert_eq!(
-        code, 0,
-        "stdout: {out}\nstderr: {err}\njob row: {row:?}\nmachines: {machines_row:?}"
-    );
+    assert_eq!(code, 0, "stdout: {out}\nstderr: {err}\njob row: {row:?}");
     assert!(out.contains("tail-line"), "{out}");
     let dir_line = err
         .lines()
