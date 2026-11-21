@@ -188,6 +188,10 @@ const ERROR_TABLE: Record<ErrorCode, ErrorDescriptor> = {
     action: "restore_connection",
     message: "Машина недоступна",
   },
+  machine_is_runner: {
+    action: "none",
+    message: "Машина — раннер: сессии на ней не запускаются",
+  },
   machine_offline: {
     action: "restore_connection",
     message: "Машина не на связи, попробуйте позже",

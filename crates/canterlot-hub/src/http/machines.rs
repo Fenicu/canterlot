@@ -85,8 +85,25 @@ const HISTORY_WAIT: Duration = Duration::from_secs(4);
 pub struct MachineView {
     pub id: Uuid,
     pub name: String,
+    /// Обычная машина: `available`, `degraded` или `unavailable` по связи её воркера. Раннер
+    /// (`role = "runner"`): `online`, `offline` или `unknown` по правилу доступности раннера
+    /// (воркер подключён; `offline` только при отключённом воркере, подключённой несущей,
+    /// свежем наблюдении и не меньше чем трёх неудачах подряд).
     pub availability: String,
     pub availability_since: Option<String>,
+    /// `worker` (обычная машина) или `runner` (раннер, которого ведёт несущая машина).
+    pub role: String,
+    /// Несущая машина раннера; у обычной машины `null`.
+    pub parent_machine_id: Option<Uuid>,
+    /// Ранг размещения раннера: больше — предпочтительнее; у обычной машины 0.
+    pub rank: i32,
+    /// Метки раннера (например `build-host`, `kernel-6.12`); у обычной машины пусто.
+    pub labels: Vec<String>,
+    /// Машина помечена несущей раннеров (`canterlot-hub machine set-carrier`).
+    pub is_carrier: bool,
+    /// Раннер: когда несущая сделала последнее наблюдение его достижимости (возраст берётся
+    /// от этого времени); `null` у обычной машины и пока наблюдений нет.
+    pub observed_at: Option<String>,
     pub heartbeat_age_ms: Option<u64>,
     pub capabilities: Vec<String>,
     pub os: Option<String>,
@@ -221,9 +238,12 @@ async fn claude_histories(
     Ok(Json(ClaudeHistoryList { histories }))
 }
 
+/// `registry` нужен только раннеру: его доступность считается по сеансам воркеров. Без реестра
+/// (снимок без живого хаба) раннер `unknown`.
 pub(crate) async fn load_stored(
     conn: &mut PgConnection,
     config: &crate::config::MachinesConfig,
+    registry: Option<&crate::session::Registry>,
     owner: Uuid,
     id: Uuid,
 ) -> Result<MachineView, sqlx::Error> {
@@ -342,13 +362,32 @@ pub(crate) async fn load_stored(
         warnings.push(MachineWarning::ProcessesLeaked);
     }
     let roots: sqlx::types::Json<Vec<String>> = r.try_get("allowed_roots")?;
+    let role: String = r.try_get("role")?;
+    let (availability, observed_at) = if role == crate::machines::ROLE_RUNNER {
+        let (state, observed_at) = match registry {
+            Some(registry) => {
+                crate::machines::runner_availability_of(&mut *conn, registry, id, Utc::now())
+                    .await?
+            }
+            None => (crate::machines::RunnerAvailability::Unknown, None),
+        };
+        (state.as_str().to_owned(), observed_at.map(conversations::time))
+    } else {
+        (r.try_get("availability")?, None)
+    };
     Ok(MachineView {
         id,
         name: r.try_get("name")?,
-        availability: r.try_get("availability")?,
+        availability,
         availability_since: r
             .try_get::<Option<DateTime<Utc>>, _>("availability_at")?
             .map(conversations::time),
+        role,
+        parent_machine_id: r.try_get("parent_machine_id")?,
+        rank: r.try_get("rank")?,
+        labels: r.try_get("labels")?,
+        is_carrier: r.try_get("is_carrier")?,
+        observed_at,
         heartbeat_age_ms: None,
         capabilities: r.try_get("capabilities")?,
         os: r.try_get("os")?,
@@ -373,7 +412,7 @@ async fn load(
     owner: Uuid,
     id: Uuid,
 ) -> Result<MachineView, ApiError> {
-    let mut view = load_stored(conn, &s.machines, owner, id)
+    let mut view = load_stored(conn, &s.machines, Some(&s.registry), owner, id)
         .await
         .map_err(|e| match e {
             sqlx::Error::RowNotFound => ApiError::new(ErrorCode::NotFound),

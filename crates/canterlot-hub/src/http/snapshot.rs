@@ -35,7 +35,7 @@ async fn machines(
     o: Owner,
 ) -> Result<Json<Snapshot<MachinesSnapshot>>, ApiError> {
     Ok(Json(
-        snapshot::machines_with_config(&s.pool, o.owner_id, &s.machines).await?,
+        snapshot::machines_with_config(&s.pool, o.owner_id, &s.machines, Some(&s.registry)).await?,
     ))
 }
 #[utoipa::path(get,path="/api/v1/conversations/{id}/snapshot",tag="snapshots",params(("id"=Uuid,Path),SnapshotParams),responses((status=200,description="Снимок разговора и граница журнала",body=Snapshot<ConversationSnapshot>)))]
