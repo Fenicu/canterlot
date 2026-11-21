@@ -13,11 +13,13 @@
   import { fmt } from '#lib/format/ru.js';
   import { credentialLine } from '#lib/stores/limits.js';
   import { modelLabel } from '#lib/format/labels.js';
+  import Pill from '#lib/ui/Pill.svelte';
   import Segmented from '#lib/ui/Segmented.svelte';
   import { swapOn } from '#lib/ui/swap.js';
   import SecondaryHeader from '../SecondaryHeader.svelte';
   import MetricCard from './MetricCard.svelte';
   import { diskLimits, diskView, generalWarnings, hotspotRows, journalStops, leakedSummary, machineStatus, memoryLowText, unleasedText } from './model.js';
+  import { carrierLine, isRunner, remoteWorkText, runnerAvailability } from './runner.js';
   import LeaseQueue from './LeaseQueue.svelte';
   import JobSheet from './JobSheet.svelte';
   import JobsSection from './JobsSection.svelte';
@@ -44,6 +46,11 @@
   const unleased = $derived(watch ? unleasedText(watch.unleased_count) : null);
   const sessions = $derived(machine?.sessions?.map(session => ({ id: session.conversation_id, title: session.title, detail: runtime?.list.items.get(session.conversation_id) })) ?? (runtime && machine ? [...runtime.list.items.values()].filter(s => s.machine.id === machine.id).map(session => ({ id: session.id, title: session.title, detail: session })) : []));
   const titleOf = (id: string) => runtime?.list.items.get(id)?.title ?? machine?.sessions?.find(session => session.conversation_id === id)?.title;
+  const runner = $derived(machine ? isRunner(machine) : false);
+  const runnerState = $derived(machine && runner ? runnerAvailability(machine, now) : null);
+  const parent = $derived(machine?.parent_machine_id ? machines.find(m => m.id === machine.parent_machine_id) : undefined);
+  const carrier = $derived(machine ? carrierLine(machine, machines) : null);
+  const remoteText = $derived(remoteWorkText(machine ?? {}));
   const heartbeat = $derived(machine?.heartbeat_age_ms != null ? (machine.heartbeat_received_at === undefined ? now : machine.heartbeat_received_at + clock.offset) - machine.heartbeat_age_ms : metrics ? Date.parse(metrics.observed_at) : null);
 
   // Лист задачи: ссылка из карточки ленты `?job=<id>` открывает его, а экран встаёт на машину задачи.
@@ -57,6 +64,17 @@
     const machineId = openJob ? runtime?.machines.jobs.get(openJob)?.machine_id : undefined;
     if (machineId && untrack(() => selected) !== machineId && machines.some(m => m.id === machineId)) selected = machineId;
   });
+  // Ссылка на карточку другой машины `?machine=<id>`: родитель раннера и раннеры несущей.
+  const linkedMachine = $derived(page.url.searchParams.get('machine'));
+  $effect(() => {
+    const id = linkedMachine;
+    if (id && machines.some(m => m.id === id)) untrack(() => { selected = id; });
+  });
+  function openMachine(event: MouseEvent, id: string) {
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.button !== 0) return;
+    event.preventDefault();
+    selected = id;
+  }
   function closeJob() {
     openJob = null;
     // Ссылка снимается: тот же переход из карточки ленты откроет лист снова.
@@ -93,8 +111,21 @@
     {:else if !runtime || runtime.machines.status === 'idle' || runtime.machines.status === 'loading_snapshot'}<p>Загружаю машины…</p>
     {:else if !machine}<p>Машины ещё не подключены. Подключите воркер к хабу</p>
     {:else}
-      {#if machines.length > 1}<Segmented name="machine" label="Машина" options={machines.map(m => ({ value: m.id, label: m.availability === 'degraded' ? `${m.name} · нестабильно` : m.availability === 'unavailable' ? `${m.name} · не в сети` : m.name }))} bind:value={selected} />{/if}
-      <div class="heading"><h2>{machine.name}</h2>{#key machine.id}<span class="availability" data-availability={machine.availability} use:swapOn={{ text: machineStatus(machine.availability), key: machine.availability }}></span>{/key}</div>
+      {#if machines.length > 1}<Segmented name="machine" label="Машина" options={machines.map(m => ({ value: m.id, label: m.availability === 'degraded' ? `${m.name} · нестабильно` : m.availability === 'unavailable' ? `${m.name} · не в сети` : m.availability === 'offline' && isRunner(m) ? `${m.name} · недоступен` : m.name }))} bind:value={selected} />{/if}
+      <div class="heading"><h2>{machine.name}</h2>{#key machine.id}
+        {#if runnerState}<span class="availability" data-availability={machine.availability} data-tone={runnerState.tone} data-runner-availability use:swapOn={{ text: runnerState.text, key: machine.availability }}></span>
+        {:else}<span class="availability" data-availability={machine.availability} use:swapOn={{ text: machineStatus(machine.availability), key: machine.availability }}></span>{/if}{/key}</div>
+      {#if runner}
+        <div class="runner-facts" data-runner>
+          <div class="runner-line">
+            <Pill color="accent"><span data-runner-badge>Раннер</span></Pill>
+            {#if parent}<span data-runner-parent>Несущая: <a href={resolve(`/machines?machine=${parent.id}` as '/machines')} onclick={(event) => openMachine(event, parent.id)}>{parent.name}</a></span>{/if}
+            <span data-runner-rank>Ранг {machine.rank ?? 0}</span>
+          </div>
+          {#if machine.labels?.length}<ul class="labels" aria-label="Метки раннера">{#each machine.labels as label (label)}<li><Pill>{label}</Pill></li>{/each}</ul>{/if}
+        </div>
+      {/if}
+      {#if carrier}<p class="note" data-carrier-line>Несущая раннеров: {#each carrier.runners as item, index (item.id)}{index ? ', ' : ''}<a href={resolve(`/machines?machine=${item.id}` as '/machines')} onclick={(event) => openMachine(event, item.id)}>{item.name}</a>{:else}раннеров пока нет{/each}</p>{/if}
       {#if machine.os}<p class="note">{({ linux: 'Linux', darwin: 'macOS', windows: 'Windows' } as Record<string, string>)[machine.os] ?? machine.os}</p>{/if}
       {#if machine.worker_version}<p class="note">Версия воркера {machine.worker_version}</p>{/if}
       {#each machine.credentials ?? [] as credential (credential.provider)}
@@ -107,9 +138,9 @@
             aria-labelledby="remote-work-label" aria-describedby="remote-work-note"
             onchange={(event) => void setRemoteWork(event.currentTarget)} />
           <span class="track"></span>
-          <span id="remote-work-label">Принимать делегатов и команды с других машин</span>
+          <span id="remote-work-label">{remoteText.label}</span>
         </label>
-        <p class="note" id="remote-work-note" data-remote-work-note>Выключено: сессии других машин не могут запускать здесь делегатов. Свои сессии машины это не меняет</p>
+        <p class="note" id="remote-work-note" data-remote-work-note>{remoteText.hint}</p>
         {#if remoteNotice}<p class="error" role="alert">{remoteNotice}</p>{/if}
       </section>
       {#if machine.availability === 'unavailable'}<p class="notice">Машина не в сети. Данные от последнего сигнала</p>{/if}
@@ -153,10 +184,12 @@
           {#each journalStops(machine?.warnings ?? []) as warning (warning)}<p class="notice">{warning}</p>{/each}
         {/if}
       </div>
-      <LeaseQueue lease={machine.lease} available={machine.availability === 'available'} {titleOf} {now} />
+      <LeaseQueue lease={machine.lease} available={machine.availability === 'available' || machine.availability === 'online'} {titleOf} {now} />
       {#if runtime}<JobsSection {runtime} machineId={machine.id} onopen={(id) => { openJob = id; }} />{/if}
-      <h2>Сессии на машине</h2>
-      {#each sessions as session (session.id)}<a class="session-link" href={resolve('/c/[id]', { id: session.id })}>{session.title}{#if session.detail}<small>{session.detail.harness.title} · {modelLabel(session.detail.model)}</small>{/if}</a>{:else}<p class="note">На этой машине пока нет сессий</p>{/each}
+      {#if !runner}
+        <h2>Сессии на машине</h2>
+        {#each sessions as session (session.id)}<a class="session-link" href={resolve('/c/[id]', { id: session.id })}>{session.title}{#if session.detail}<small>{session.detail.harness.title} · {modelLabel(session.detail.model)}</small>{/if}</a>{:else}<p class="note">На этой машине пока нет сессий</p>{/each}
+      {/if}
       <div class="heartbeat"><p>Последний сигнал {heartbeat === null ? 'ещё не получен' : fmt.ago(heartbeat, now)}</p>
       {#if machine.availability_since}<p class="note">Подключение с {fmt.clock(Date.parse(machine.availability_since))} · {fmt.dayLabel(Date.parse(machine.availability_since), now)}</p>{/if}</div>
     {/if}
@@ -170,6 +203,14 @@
   .availability { color: var(--success); font-size: var(--fs-meta); font-weight: var(--weight-medium); }
   [data-availability='degraded'], .notice { color: var(--warning); }
   [data-availability='unavailable'] { color: var(--muted); }
+  /* Раннер: тон несёт слово доступности, цвет только подкрепляет его. */
+  .availability[data-tone='success'] { color: var(--success); }
+  .availability[data-tone='danger'] { color: var(--danger); }
+  .availability[data-tone='muted'] { color: var(--muted); }
+  .runner-facts { display: flex; flex-direction: column; gap: var(--s3); margin-block: var(--s3); }
+  .runner-line { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s4) var(--s6); color: var(--muted); font-size: var(--fs-meta); }
+  .runner-line a, [data-carrier-line] a { color: var(--accent-link); }
+  .labels { display: flex; flex-wrap: wrap; gap: var(--s3); list-style: none; margin: 0; padding: 0; }
   .stale { color: var(--muted); }
   /* Конец входа провайдера: дата на карточке машины, тревогу несут слова. */
   .credential { color: var(--muted); font-size: var(--fs-meta); }
