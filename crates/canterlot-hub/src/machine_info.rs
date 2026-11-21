@@ -530,13 +530,18 @@ async fn project(
     let decided_at = Utc::now();
     crate::db::in_tx(pool, move |conn| {
         Box::pin(async move {
-            let rows: Vec<(Uuid, Uuid, String)> = sqlx::query_as(
-                "select id,owner_id,availability from machines order by id for no key update",
+            let rows: Vec<(Uuid, Uuid, String, String, Option<String>)> = sqlx::query_as(
+                "select id,owner_id,availability,role,runner_availability from machines
+                 order by id for no key update",
             )
             .fetch_all(&mut *conn)
             .await?;
             let mut changes = Vec::new();
-            for (id, owner, old) in rows {
+            // Раннер сообщает клиентам свой словарь (online, offline, unknown) с возрастом
+            // наблюдения; прежняя колонка `availability` у него по-прежнему идёт по сеансу
+            // воркера (аренды, простои), но отдельного события не даёт.
+            let mut runner_changes = Vec::new();
+            for (id, owner, old, role, old_runner) in rows {
                 let new = registry
                     .as_ref()
                     .map_or("unavailable", |r| availability(r.availability(id)));
@@ -548,25 +553,66 @@ async fn project(
             .bind(new)
             .execute(&mut *conn)
             .await?;
-                    changes.push((owner, id, new));
+                    changes.push((owner, id, new, role == crate::machines::ROLE_RUNNER));
+                }
+                if role == crate::machines::ROLE_RUNNER {
+                    // Первый разбор после старта хаба реестра не имеет: доступность неизвестна.
+                    let (state, observed_at) = match registry.as_ref() {
+                        Some(registry) => {
+                            crate::machines::runner_availability_of(
+                                &mut *conn,
+                                registry,
+                                id,
+                                Utc::now(),
+                            )
+                            .await?
+                        }
+                        None => (crate::machines::RunnerAvailability::Unknown, None),
+                    };
+                    if old_runner.as_deref() != Some(state.as_str()) {
+                        sqlx::query("update machines set runner_availability=$2 where id=$1")
+                            .bind(id)
+                            .bind(state.as_str())
+                            .execute(&mut *conn)
+                            .await?;
+                        runner_changes.push((owner, id, state.as_str(), observed_at));
+                    }
                 }
             }
             changes.sort_unstable();
-            for &(owner, id, new) in &changes {
+            runner_changes.sort_unstable_by_key(|change| (change.0, change.1));
+            for &(owner, id, new, is_runner) in &changes {
                 if new == "unavailable" {
                     crate::leases::clear_in_tx(&mut *conn, owner, id, decided_at, correlation_id)
                         .await?;
+                }
+                if !is_runner {
+                    emit(
+                        &mut *conn,
+                        owner,
+                        "machine_availability_changed",
+                        json!({"machine_id":id,"availability":new}),
+                        correlation_id,
+                    )
+                    .await?;
+                }
+            }
+            for &(owner, id, state, observed_at) in &runner_changes {
+                let mut payload = json!({"machine_id":id,"availability":state});
+                if let Some(at) = observed_at {
+                    payload["observed_at"] =
+                        json!(at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
                 }
                 emit(
                     &mut *conn,
                     owner,
                     "machine_availability_changed",
-                    json!({"machine_id":id,"availability":new}),
+                    payload,
                     correlation_id,
                 )
                 .await?;
             }
-            Ok(changes.len())
+            Ok(changes.len() + runner_changes.len())
         })
     })
     .await

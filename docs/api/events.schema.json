@@ -7532,8 +7532,14 @@
               "enum": [
                 "available",
                 "degraded",
-                "unavailable"
+                "unavailable",
+                "online",
+                "offline",
+                "unknown"
               ]
+            },
+            "observed_at": {
+              "$ref": "#/$defs/Time"
             }
           },
           "required": [

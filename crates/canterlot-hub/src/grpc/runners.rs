@@ -127,7 +127,24 @@ impl HubGrpc {
         )
         .await
         {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                // Наблюдение могло сменить доступность раннера: клиенты узнают об этом сразу,
+                // а не на следующем обходе проектора.
+                if let Err(error) = crate::machine_info::project_availability(
+                    &self.pool,
+                    &self.registry,
+                    Uuid::now_v7(),
+                )
+                .await
+                {
+                    tracing::warn!(
+                        kind = "runner_availability_projection",
+                        error = %crate::dberr::describe(&error),
+                        "runner availability projection failed"
+                    );
+                }
+                Ok(())
+            }
             Err(RunnerRefusal::Internal) => Err(Status::internal("runner observation unavailable")),
             Err(refusal) => {
                 warn_refused(

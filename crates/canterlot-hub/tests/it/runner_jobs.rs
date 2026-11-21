@@ -1453,6 +1453,145 @@ async fn an_owner_job_canceled_while_waiting_still_reports_to_the_terminal(pool:
     assert_eq!(fx.commands(fx.carrier, "owner_job_finished").await, 1);
 }
 
+// ───────── Событие доступности раннера ─────────
+
+async fn availability_events(pool: &PgPool) -> Vec<Value> {
+    sqlx::query_scalar(
+        "select payload from events where kind='machine_availability_changed' order by scope_seq",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+fn availability_event_is_valid(payload: &Value) -> bool {
+    let mut schema: Value =
+        serde_json::from_str(include_str!("../../../../docs/api/events.schema.json")).unwrap();
+    schema["$ref"] = json!("#/$defs/machine_availability_changed");
+    schema.as_object_mut().unwrap().remove("oneOf");
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    validator.is_valid(&json!({
+        "v": 1,
+        "id": Uuid::now_v7(),
+        "scope": "machines",
+        "scope_seq": "3",
+        "scope_seq_from": "3",
+        "committed_at": "2026-11-21T12:00:00.000Z",
+        "committed_at_from": "2026-11-21T12:00:00.000Z",
+        "conversation_id": null,
+        "execution_id": null,
+        "correlation_id": Uuid::now_v7(),
+        "kind": "machine_availability_changed",
+        "payload": payload,
+    }))
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_runner_reports_its_own_availability_vocabulary_and_a_worker_keeps_the_old_one(
+    pool: PgPool,
+) {
+    let mut fx = Fx::new(pool).await;
+    let online = fx.runner("runner-a", 20, &[], 1, true).await;
+    let silent = fx.runner("runner-b", 10, &[], 1, false).await;
+    sqlx::query("update machines set availability='unavailable', runner_availability=null")
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        canterlot_hub::machine_info::project_availability(&fx.pool, &fx.registry, Uuid::now_v7())
+            .await
+            .unwrap();
+    }
+    let events = availability_events(&fx.pool).await;
+    let of = |machine: Uuid| -> Vec<&Value> {
+        events
+            .iter()
+            .filter(|event| event["machine_id"] == machine.to_string())
+            .collect()
+    };
+    // Обычная машина: прежний словарь, без возраста наблюдения.
+    assert_eq!(
+        of(fx.carrier),
+        [&json!({"machine_id": fx.carrier, "availability": "available"})]
+    );
+    // Раннеры: словарь раннера и ни одного события прежнего словаря.
+    assert_eq!(
+        of(online),
+        [&json!({"machine_id": online, "availability": "online"})]
+    );
+    assert_eq!(
+        of(silent),
+        [&json!({"machine_id": silent, "availability": "unknown"})]
+    );
+    for event in &events {
+        assert!(availability_event_is_valid(event), "{event}");
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn an_observation_changes_the_runners_availability_and_the_event_carries_its_age(
+    pool: PgPool,
+) {
+    let mut fx = Fx::new(pool).await;
+    let runner = fx.runner("runner-a", 20, &[], 1, false).await;
+    let (pool, registry) = (fx.pool.clone(), fx.registry.clone());
+    let project = move || {
+        let (pool, registry) = (pool.clone(), registry.clone());
+        async move {
+            canterlot_hub::machine_info::project_availability(&pool, &registry, Uuid::now_v7())
+                .await
+                .unwrap();
+        }
+    };
+    sqlx::query("update machines set availability='unavailable', runner_availability=null")
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    project().await;
+    let count = |events: &Vec<Value>| {
+        events
+            .iter()
+            .filter(|event| event["machine_id"] == runner.to_string())
+            .count()
+    };
+    assert_eq!(count(&availability_events(&fx.pool).await), 1);
+    // Три неудачи подряд при подключённой несущей: раннер `offline`, событие с возрастом.
+    let observed = Utc::now() - chrono::TimeDelta::seconds(20);
+    machines::record_runner_observation(&fx.pool, fx.carrier, runner, false, 3, observed)
+        .await
+        .unwrap();
+    project().await;
+    let events = availability_events(&fx.pool).await;
+    let last = events.last().unwrap();
+    assert_eq!(last["machine_id"], runner.to_string());
+    assert_eq!(last["availability"], "offline", "{last}");
+    let at = last["observed_at"].as_str().expect("observed_at");
+    assert_eq!(
+        chrono::DateTime::parse_from_rfc3339(at)
+            .unwrap()
+            .timestamp_millis(),
+        observed.timestamp_millis()
+    );
+    assert!(availability_event_is_valid(last), "{last}");
+    // Повторный разбор без перемен ничего не добавляет.
+    project().await;
+    assert_eq!(availability_events(&fx.pool).await.len(), events.len());
+    // Воркер раннера подключился: `online`, возраст наблюдения остаётся в событии.
+    fx.connect(runner);
+    project().await;
+    let events = availability_events(&fx.pool).await;
+    assert_eq!(events.last().unwrap()["availability"], "online");
+    // Наблюдение устарело (старше трёх минут): отключённый раннер снова `unknown`.
+    fx.sessions.pop();
+    sqlx::query("update runner_observations set observed_at = now() - interval '10 minutes'")
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    project().await;
+    let events = availability_events(&fx.pool).await;
+    assert_eq!(events.last().unwrap()["availability"], "unknown");
+}
+
 // ───────── Вид задачи и `runners_list` ─────────
 
 #[sqlx::test(migrations = "./migrations")]

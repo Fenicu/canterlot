@@ -1656,7 +1656,8 @@ export interface MachineAvailabilityChanged {
   kind: "machine_availability_changed";
   payload: {
     machine_id: Uuid;
-    availability: "available" | "degraded" | "unavailable";
+    availability: "available" | "degraded" | "unavailable" | "online" | "offline" | "unknown";
+    observed_at?: Time;
   };
 }
 export interface MachineReportUpdated {

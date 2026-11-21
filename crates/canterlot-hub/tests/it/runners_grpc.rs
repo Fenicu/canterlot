@@ -626,3 +626,42 @@ async fn only_a_carrier_with_the_capability_may_submit_owner_jobs(pool: PgPool) 
     assert_eq!(jobs, 0);
     Ok(())
 }
+
+/// Наблюдение, сменившее доступность раннера, сразу даёт клиентам событие со словарём раннера
+/// и временем наблюдения, не дожидаясь обхода проектора.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn an_observation_publishes_the_runners_availability_at_once(pool: PgPool) -> TestResult {
+    let host = Host::start(pool.clone()).await;
+    let mut carrier = host.connect(&host.carrier, RUNNERS).await;
+    carrier.assigned().await;
+    carrier
+        .send(control_up::Msg::RunnerObservation(RunnerObservation {
+            machine_id: host.runner.machine_id.to_string(),
+            reachable: false,
+            consecutive_failures: 3,
+            observed_at: now_ms(),
+        }))
+        .await;
+    let runner = host.runner.machine_id.to_string();
+    let payload = timeout(WAIT, async {
+        loop {
+            let found: Option<serde_json::Value> = sqlx::query_scalar(
+                "select payload from events
+                 where kind='machine_availability_changed' and payload->>'machine_id'=$1
+                 order by scope_seq desc limit 1",
+            )
+            .bind(&runner)
+            .fetch_optional(&pool)
+            .await
+            .unwrap();
+            if let Some(found) = found {
+                break found;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    assert_eq!(payload["availability"], "offline", "{payload}");
+    assert!(payload["observed_at"].is_string(), "{payload}");
+    Ok(())
+}
