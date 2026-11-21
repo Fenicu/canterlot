@@ -1260,6 +1260,35 @@ async fn without_a_successful_reconcile_nothing_is_created(pool: PgPool) -> Test
     Ok(())
 }
 
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_create_call_interrupted_by_a_crash_is_never_repeated(pool: PgPool) -> TestResult {
+    let rig = rig(pool).await;
+    ready_row(&rig).await;
+    let now = now_micros();
+    // Метка вызова есть, ответа нет, сервера в списке нет: звонок мог дойти.
+    let orphan = raw_window(&rig.pool, "create_intent", None, Some(now)).await;
+    let service = CloudService::new(
+        rig.pool.clone(),
+        rig.registry.clone(),
+        provider_for(&rig),
+        rig.config.clone(),
+    );
+    for seconds in [0, 10, 20, 400] {
+        service.tick(now + TimeDelta::seconds(seconds)).await;
+    }
+    assert_eq!(rig.state(orphan).await, "create_unknown");
+    assert_eq!(
+        rig.posts(),
+        0,
+        "no POST at all: the window already had its call"
+    );
+    // Окно ожидания вышло, полный список пуст: окно закрыто, звонка так и не было.
+    service.tick(now + TimeDelta::minutes(12)).await;
+    assert_eq!(rig.state(orphan).await, "failed");
+    assert_eq!(rig.posts(), 0);
+    Ok(())
+}
+
 /// Строка окна в нужном состоянии, как её оставил бы упавший хаб.
 async fn raw_window(
     pool: &PgPool,
