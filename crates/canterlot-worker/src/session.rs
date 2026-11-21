@@ -413,6 +413,25 @@ impl WorkerError {
         }
     }
 
+    /// Слово для `<data_dir>/fatal`, если воркер сам не оправится и носителю нужно действие.
+    pub fn fatal_reason(&self) -> Option<&'static str> {
+        match self {
+            Self::Hub {
+                code: tonic::Code::Unauthenticated,
+                ..
+            }
+            | Self::Rejected {
+                retryable: false, ..
+            } => Some(crate::fatal::UNAUTHENTICATED),
+            Self::RestoreGenerationChanged | Self::GenerationMismatch | Self::StateDivergence => {
+                Some(crate::fatal::RESTORE_GENERATION)
+            }
+            Self::InvalidConfig => Some(crate::fatal::CONFIG),
+            Self::Config(error) => error.fatal_reason(),
+            _ => None,
+        }
+    }
+
     /// Код выхода процесса, если ошибка требует штатного перезапуска службы.
     pub fn exit_code(&self) -> Option<u8> {
         matches!(self, Self::StorageRestart).then_some(STORAGE_RESTART_EXIT_CODE)

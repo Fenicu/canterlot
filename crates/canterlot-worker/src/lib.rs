@@ -8,6 +8,7 @@ pub mod attachments;
 pub mod config;
 pub mod containment;
 pub mod exec;
+pub mod fatal;
 #[cfg(feature = "fault-injection")]
 pub mod fault_injection;
 pub mod jobs;

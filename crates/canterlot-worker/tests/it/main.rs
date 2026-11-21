@@ -94,6 +94,7 @@ mod exec_attachments;
 mod exec_e2e;
 #[cfg(all(feature = "synthetic-adapter", feature = "fault-injection"))]
 mod exec_media;
+mod fatal_exit;
 mod git_facts;
 mod hub_dial;
 mod instructions;

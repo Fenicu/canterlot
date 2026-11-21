@@ -341,6 +341,18 @@ impl ConfigError {
     }
 }
 
+impl ConfigError {
+    /// Слово для `<data_dir>/fatal`: правка файла конфига исправит всё, кроме чтения диска и прав токена.
+    pub fn fatal_reason(&self) -> Option<&'static str> {
+        match self.category {
+            ConfigErrorCategory::Io(_)
+            | ConfigErrorCategory::TokenPermissions
+            | ConfigErrorCategory::UnsupportedTokenPermissions => None,
+            _ => Some(crate::fatal::CONFIG),
+        }
+    }
+}
+
 impl fmt::Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.category {
