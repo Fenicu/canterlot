@@ -733,6 +733,18 @@ fn under_roots(roots: &[PathBuf], path: &Path) -> Option<PathBuf> {
         .then_some(path)
 }
 
+/// Присланные пути равны своему каноническому виду: каталог запуска и, у рабочей копии,
+/// источник. Сравнение строгое, по тексту, без нормализации.
+fn validated_matches_request(start: &StartExecution, validated: &Validated) -> bool {
+    let same = |given: &str, canonical: &Path| canonical.as_os_str() == std::ffi::OsStr::new(given);
+    same(&start.workdir, &validated.workdir)
+        && match (&start.worktree, &validated.source) {
+            (Some(spec), Some(source)) => same(&spec.source_workdir, source),
+            (None, None) => true,
+            _ => false,
+        }
+}
+
 pub(super) async fn validate(
     shared: &Shared,
     command: &Command,
@@ -797,6 +809,11 @@ pub(super) async fn validate(
     let Some(validated) = canonical else {
         return Ok(Err("workdir_not_allowed"));
     };
+    // Запуск по просьбе другой машины: хаб отнёс каталог к области памяти по тексту пути.
+    // Путь, который воркер разрешает иначе (ссылка, `..`), мог бы лежать в другой области.
+    if start.remote && !validated_matches_request(start, &validated) {
+        return Ok(Err("workdir_not_canonical"));
+    }
     let conversation = conversation_id.to_string();
     let stored = shared
         .store
@@ -2482,9 +2499,12 @@ impl Actor {
                     self.shared.cj(vec![], self_terminal).await
                 }
             }
-            Some(Kind::RemoveWorktree(_) | Kind::RevokeSecret(_)) => {
-                reject_invalid(&self.shared, &command).await
-            }
+            Some(
+                Kind::RemoveWorktree(_)
+                | Kind::RevokeSecret(_)
+                | Kind::StartInPlaceJob(_)
+                | Kind::CancelInPlaceJob(_),
+            ) => reject_invalid(&self.shared, &command).await,
             // Хаб считает исполнение потерянным, а связь с ним цела: это и есть доказательство.
             Some(Kind::ResolveOwnerLost(_)) => {
                 if live && command.execution_generation == self.generation {
@@ -2817,6 +2837,8 @@ impl Actor {
             share: true,
             width: request.width,
             height: request.height,
+            job_id: String::new(),
+            job_attempt: 0,
         };
         let task = tokio::spawn(async move {
             let path = media::media_path(&exec_dir, share_id);

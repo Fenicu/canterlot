@@ -206,6 +206,7 @@ pub fn report() -> MachineReport {
         home_dir: "/home/worker".into(),
         worktree_root: String::new(),
         memory_work_roots: vec![],
+        jobs_max_running: 0,
     }
 }
 pub fn metrics(ms: u64) -> MachineMetrics {

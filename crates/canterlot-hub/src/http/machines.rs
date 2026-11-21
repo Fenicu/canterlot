@@ -1,10 +1,10 @@
 use super::{
     AppState,
-    auth::Owner,
+    auth::{IdempotencyKey, Owner},
     error::{ApiError, ErrorCode},
-    extract::{ApiPath, ApiQuery},
+    extract::{ApiJson, ApiPath, ApiQuery},
 };
-use crate::conversations;
+use crate::{conversations, idempotency};
 use axum::{Json, extract::State};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -23,6 +23,56 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(claude_histories))
         .routes(routes!(owner_overview))
         .routes(routes!(owner_file))
+        .routes(routes!(set_remote_work))
+}
+
+/// Выключатель удалённой работы: принимает ли машина делегатов и команды других машин.
+#[derive(Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteWorkBody {
+    pub accepts_remote_work: bool,
+}
+
+/// Меняет выключатель только владелец и только здесь: ни инструмент агента, ни
+/// `settings_propose_*` до него не доходят. Строка машины берётся `for update`, и запуск
+/// делегата, читающий её `for share`, после выключения новый удалённый запуск не проведёт.
+#[utoipa::path(put,path="/api/v1/machines/{id}/remote-work",tag="machines",params(("id"=Uuid,Path),("Idempotency-Key"=String,Header)),request_body=RemoteWorkBody,responses((status=200,description="Выключатель удалённой работы сохранён",body=RemoteWorkBody),(status=404,description="Машины нет у владельца")))]
+async fn set_remote_work(
+    State(s): State<AppState>,
+    o: Owner,
+    IdempotencyKey(key): IdempotencyKey,
+    ApiPath(id): ApiPath<Uuid>,
+    ApiJson(body): ApiJson<RemoteWorkBody>,
+) -> Result<Json<RemoteWorkBody>, ApiError> {
+    let owner = o.owner_id;
+    let accepts = body.accepts_remote_work;
+    let outcome = idempotency::run_in_tx(
+        &s.pool,
+        owner,
+        &key,
+        "put_machine_remote_work",
+        &(id, &body),
+        None,
+        move |conn| {
+            Box::pin(async move {
+                match crate::machines::set_accepts_remote_work(conn, owner, id, accepts).await? {
+                    Some(accepts_remote_work) => Ok::<_, ApiError>(RemoteWorkBody {
+                        accepts_remote_work,
+                    }),
+                    None => Err(ApiError::new(ErrorCode::MachineNotFound)),
+                }
+            })
+        },
+    )
+    .await?;
+    // Выключили: ожидающие удалённые задачи этой машины закрываются сразу, не дожидаясь
+    // следующего места. Уже ушедшие на машину команды доходят: срез — коммит диспетчеризации.
+    // Отдельной транзакцией после коммита выключателя: порядок блокировок тот же, что у
+    // диспетчеризации (замок машины, строки задач, строка машины).
+    if !outcome.value.accepts_remote_work {
+        crate::inplace_jobs::sweep::dispatch_machine(&s.pool, id).await?;
+    }
+    Ok(Json(outcome.value))
 }
 
 /// Дольше воркера: его собственный срок 2 с, ответ о пустом списке ещё должен дойти.
@@ -45,6 +95,8 @@ pub struct MachineView {
     pub worker_version: Option<String>,
     pub containment: Option<String>,
     pub limits_ok: bool,
+    /// Принимает ли машина делегатов и команды сессий других машин; включает владелец.
+    pub accepts_remote_work: bool,
     pub harnesses: Vec<HarnessView>,
     /// Конец входа провайдера на этой машине: по строке на провайдера с известной датой.
     pub credentials: Vec<CredentialView>,
@@ -62,6 +114,8 @@ pub struct HarnessView {
     pub id: String,
     pub title: String,
     pub provider: String,
+    /// Учётная запись лимитов харнесса (`account` в worker.toml); `owner` по умолчанию.
+    pub account: String,
     pub images: bool,
     pub settings_midsession: bool,
     pub settings_midsession_effort: bool,
@@ -203,6 +257,7 @@ pub(crate) async fn load_stored(
                     id: harness,
                     title: h.try_get("title")?,
                     provider: h.try_get("provider")?,
+                    account: h.try_get("account")?,
                     images: h.try_get("images")?,
                     settings_midsession: h.try_get("settings_midsession")?,
                     settings_midsession_effort: h.try_get("settings_midsession_effort")?,
@@ -302,6 +357,7 @@ pub(crate) async fn load_stored(
         worker_version: r.try_get("worker_version")?,
         containment: r.try_get("containment")?,
         limits_ok,
+        accepts_remote_work: r.try_get("accepts_remote_work")?,
         harnesses,
         credentials,
         metrics,

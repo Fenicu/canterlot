@@ -8,7 +8,7 @@
   import IconButton from '#lib/ui/IconButton.svelte';
   import Textarea from '#lib/ui/Textarea.svelte';
   import AttachmentTile from '#lib/timeline/AttachmentTile.svelte';
-  import { attachmentKind, attachmentUrl, showsThumb } from '#lib/timeline/attachments.js';
+  import { attachmentUrl, showsThumb, viewerKind } from '#lib/timeline/attachments.js';
   import type { Component } from 'svelte';
   import type { GalleryAnchor } from '#lib/viewer/gallery.js';
   import type { ViewerShot } from '#lib/viewer/shots.js';
@@ -60,14 +60,16 @@
       (input.state === 'accepted' && !agentWorking)
   );
   // Просмотрщик грузится при первом открытии: в ленте он нужен редко.
-  let viewing = $state<{ index: number; anchor: GalleryAnchor } | null>(null);
+  let viewing = $state<{ index: number; anchor: GalleryAnchor | null } | null>(null);
   let Viewer = $state<Component<{ shots: ViewerShot[]; start?: number; title: string; heading: string; anchor?: GalleryAnchor | null; onclose: () => void }> | null>(null);
-  const images = $derived(input.attachments.filter((file) => attachmentKind(file) === 'image'));
-  const shots = $derived(
-    images.map((file) => ({
+  // Картинки и ролики сообщения листаются в одном просмотрщике.
+  const viewable = $derived(input.attachments.filter((file) => viewerKind(file) !== null));
+  const shots = $derived<ViewerShot[]>(
+    viewable.map((file) => ({
       media_id: file.attachment_id,
       src: attachmentUrl(file.attachment_id),
       mime: file.mime,
+      kind: viewerKind(file) ?? 'image',
       name: file.name,
       size: file.size,
       caption: [file.name, file.size > 0 ? fmt.bytes(file.size) : ''].filter(Boolean).join(' · ')
@@ -76,9 +78,11 @@
 
   async function view(attachmentId: string): Promise<void> {
     Viewer ??= (await import('#lib/timeline/MediaViewer.svelte')).default;
+    const file = viewable.find((entry) => entry.attachment_id === attachmentId);
     viewing = {
-      index: Math.max(0, images.findIndex((file) => file.attachment_id === attachmentId)),
-      anchor: { kind: 'input_attachment', id: attachmentId }
+      index: Math.max(0, viewable.findIndex((entry) => entry.attachment_id === attachmentId)),
+      // Хаб перечисляет только картинки сессии: с ролика список сессии не открывается.
+      anchor: file && viewerKind(file) === 'video' ? null : { kind: 'input_attachment', id: attachmentId }
     };
   }
   const unsure = $derived(unconfirmed(getRuntime().journal.ops.get(input.key)));

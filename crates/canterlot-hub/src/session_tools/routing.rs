@@ -544,6 +544,8 @@ pub struct RouteRequest {
     pub parent_mode: String,
     pub explicit_mode: Option<String>,
     pub workdir: String,
+    /// Сессия пойдёт на другую машину: режим `owner` родителя там не наследуется.
+    pub remote: bool,
 }
 
 /// Показание окна лимита для маршрута.
@@ -566,6 +568,20 @@ pub struct ProviderView {
     pub reserve_resets_at: Option<DateTime<Utc>>,
     /// Публичный статус провайдера: сбой уводит к другому кандидату, но не запрещает.
     pub status: Option<crate::provider_status::Status>,
+    /// Учётная запись харнесса целевой машины, чьи цифры лежат выше; пусто, если машина этого
+    /// провайдера не заявляла.
+    pub account: Option<String>,
+    /// У провайдера больше одной учётной записи у владельца: объяснение тогда называет её.
+    pub multi_account: bool,
+}
+
+/// Название провайдера в объяснении маршрута: с учётной записью для удалённого запуска и
+/// провайдера с несколькими записями (`opencode@b-opencode`), иначе голое имя, как всегда.
+fn provider_label(provider: &str, view: Option<&ProviderView>, remote: bool) -> String {
+    match view.and_then(|view| view.account.as_deref().map(|a| (a, view.multi_account))) {
+        Some((account, multi)) if remote || multi => format!("{provider}@{account}"),
+        _ => provider.to_owned(),
+    }
 }
 
 /// Кандидат в ответе: пара, вердикт и короткая английская причина.
@@ -812,6 +828,7 @@ pub fn route(inputs: RouteInputs<'_>) -> Result<Decision, RouteError> {
                 &request.parent_harness,
                 &request.parent_mode,
                 &candidate.harness,
+                request.remote,
             ),
         };
         if !catalog.has_mode(&mode) {
@@ -844,11 +861,13 @@ pub fn route(inputs: RouteInputs<'_>) -> Result<Decision, RouteError> {
         });
         // Правила расписаний (окна приёма) действуют и на `unlimited_models`:
         // исключение — про пороги дочерней политики, а не про красное окно.
+        let label = provider_label(&provider, limits.get(&provider), request.remote);
         if !bypass_limits
             && (!unlimited || schedule_rules.is_some())
             && let Some((verdict, reason)) = limits_verdict(
                 policy,
                 &provider,
+                &label,
                 limits.get(&provider),
                 stale,
                 now,
@@ -1097,6 +1116,7 @@ fn is_fable_model(model: &str) -> bool {
 fn limits_verdict(
     policy: &Policy,
     provider: &str,
+    label: &str,
     view: Option<&ProviderView>,
     stale: Duration,
     now: DateTime<Utc>,
@@ -1118,7 +1138,13 @@ fn limits_verdict(
             .reserve_resets_at
             .map(|reset| format!(" until {}", reset.format("%H:%M UTC")))
             .unwrap_or_default();
-        return Some(("quota_paused", format!("quota paused{when}")));
+        // Учётная запись называется, только когда подпись провайдера её несёт.
+        let who = if label == provider {
+            String::new()
+        } else {
+            format!("{label} ")
+        };
+        return Some(("quota_paused", format!("{who}quota paused{when}")));
     }
     // Правила расписаний (спека §39): только 5-часовое и недельное окна (и
     // Fable для моделей Fable) по свежим показаниям, порог — остаток приёма,
@@ -1147,7 +1173,7 @@ fn limits_verdict(
             return Some((
                 "limits_over",
                 format!(
-                    "{provider} {name} {}% remaining < {}%",
+                    "{label} {name} {}% remaining < {}%",
                     percent(remaining),
                     percent(rules.danger_remaining_pct)
                 ),
@@ -1157,7 +1183,7 @@ fn limits_verdict(
     }
     let unknown = policy.unknown_limits;
     if let Some(reason) = check_window(
-        provider,
+        label,
         "weekly",
         thresholds.and_then(|limits| limits.max_weekly_percent),
         view.weekly.as_ref(),
@@ -1171,7 +1197,7 @@ fn limits_verdict(
     }
     if fable
         && let Some(reason) = check_window(
-            provider,
+            label,
             "weekly_fable",
             thresholds.and_then(|limits| {
                 limits
@@ -1189,7 +1215,7 @@ fn limits_verdict(
         return Some(reason);
     }
     if let Some(reason) = check_window(
-        provider,
+        label,
         "five_hour",
         thresholds.and_then(|limits| limits.max_five_hour_percent),
         view.five_hour.as_ref(),
@@ -1202,7 +1228,7 @@ fn limits_verdict(
         return Some(reason);
     }
     if let Some(reason) = check_window(
-        provider,
+        label,
         "monthly",
         thresholds.and_then(|limits| limits.max_monthly_percent),
         view.monthly.as_ref(),
@@ -1371,11 +1397,51 @@ pub async fn status_view(
         .collect())
 }
 
-/// Снимок лимитов и статуса провайдеров для маршрута.
+/// Снимок лимитов и статуса провайдеров для маршрута с машины `machine_id`: по каждому
+/// провайдеру берётся учётная запись харнесса этой машины (нет харнесса — `owner`),
+/// так что подписка другой машины кандидата не краснит и не освобождает.
 pub async fn limits_view(
     conn: &mut PgConnection,
+    machine_id: Uuid,
 ) -> Result<HashMap<String, ProviderView>, sqlx::Error> {
-    let current = crate::limits::current(&mut *conn).await?;
+    let accounts: HashMap<String, String> = sqlx::query_as::<_, (String, String)>(
+        "select distinct on (provider) provider, account from machine_harnesses
+          where machine_id=$1 order by provider, account",
+    )
+    .bind(machine_id)
+    .fetch_all(&mut *conn)
+    .await?
+    .into_iter()
+    .collect();
+    // Все учётные записи провайдеров у владельца: у машин и в строках лимитов.
+    let mut known: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+    for (provider, account) in sqlx::query_as::<_, (String, String)>(
+        "select distinct h.provider, h.account from machine_harnesses h
+           join machines m on m.id=h.machine_id
+          where m.owner_id=(select owner_id from machines where id=$1)",
+    )
+    .bind(machine_id)
+    .fetch_all(&mut *conn)
+    .await?
+    {
+        known.entry(provider).or_default().insert(account);
+    }
+    let all_rows = crate::limits::current(&mut *conn).await?;
+    for row in &all_rows {
+        known
+            .entry(row.provider.clone())
+            .or_default()
+            .insert(row.account.clone());
+    }
+    let current: Vec<_> = all_rows
+        .into_iter()
+        .filter(|row| {
+            row.account
+                == accounts
+                    .get(&row.provider)
+                    .map_or(canterlot_proto::limits::OWNER_ACCOUNT, String::as_str)
+        })
+        .collect();
     let mut out = status_view(conn).await?;
     for provider in current {
         let window = |state: Option<crate::limits::WindowState>| {
@@ -1396,19 +1462,34 @@ pub async fn limits_view(
                 reserve_active: provider.weekly_reserve_active,
                 reserve_resets_at: provider.weekly_reserve_resets_at,
                 status: provider.status,
+                ..ProviderView::default()
             },
         );
+    }
+    // Учётная запись целевой машины называется в объяснении, поэтому она нужна и тогда, когда
+    // показаний ещё нет.
+    for (provider, account) in &accounts {
+        let view = out.entry(provider.clone()).or_default();
+        view.account = Some(account.clone());
+    }
+    for (provider, set) in known {
+        if let Some(view) = out.get_mut(&provider) {
+            view.multi_account = set.len() > 1;
+        }
     }
     Ok(out)
 }
 
 /// Отпечаток занятых пар: живые делегированные сессии владельца с той же
 /// разрешённой парой: `working`, `stalled`, `idle` с очередью, ожидающий толчок.
+/// Потолок `max_parallel` бережёт подписку, поэтому считаются только сессии той же
+/// учётной записи, что у харнесса машины `machine_id`, откуда идёт запуск.
 pub async fn live_counts(
     conn: &mut PgConnection,
     owner: Uuid,
+    machine_id: Uuid,
 ) -> Result<HashMap<(String, String), i64>, sqlx::Error> {
-    live_counts_filtered(conn, owner, true).await
+    live_counts_filtered(conn, owner, machine_id, true).await
 }
 
 /// Тот же отпечаток, но с корнями (F): запланированные сессии — корни, как
@@ -1417,19 +1498,24 @@ pub async fn live_counts(
 pub async fn live_counts_with_roots(
     conn: &mut PgConnection,
     owner: Uuid,
+    machine_id: Uuid,
 ) -> Result<HashMap<(String, String), i64>, sqlx::Error> {
-    live_counts_filtered(conn, owner, false).await
+    live_counts_filtered(conn, owner, machine_id, false).await
 }
 
 async fn live_counts_filtered(
     conn: &mut PgConnection,
     owner: Uuid,
+    machine_id: Uuid,
     children_only: bool,
 ) -> Result<HashMap<(String, String), i64>, sqlx::Error> {
     let rows: Vec<(String, String, i64)> = sqlx::query_as(
         "select c.harness,c.model,count(*) from conversations c
           join conversation_derived d on d.conversation_id=c.id
+          left join machine_harnesses own on own.machine_id=c.machine_id and own.harness=c.harness
+          left join machine_harnesses target on target.machine_id=$3 and target.harness=c.harness
           where c.owner_id=$1 and c.trashed_at is null
+            and coalesce(own.account,'owner')=coalesce(target.account,'owner')
             and (not $2 or c.parent_conversation_id is not null)
             and (d.activity_state in ('working','stalled')
               or (d.activity_state='idle' and d.queue_queued > 0)
@@ -1450,6 +1536,7 @@ async fn live_counts_filtered(
     )
     .bind(owner)
     .bind(children_only)
+    .bind(machine_id)
     .fetch_all(conn)
     .await?;
     Ok(rows
@@ -1558,6 +1645,10 @@ pub async fn machine_headroom(
 struct PreviewArgs {
     task_type: Option<String>,
     level: Option<String>,
+    /// Машина запуска: имя или id; без неё или своя — как прежде.
+    machine: Option<String>,
+    /// Каталог будущей сессии: на другой машине обязателен, исключения считаются по нему.
+    workdir: Option<String>,
 }
 
 /// `routing.preview`: список типов без `task_type`, иначе решение и запас машины.
@@ -1593,14 +1684,27 @@ pub async fn preview(
     };
     let parent =
         super::access::caller_in_tx(&mut tx, caller.owner_id, caller.conversation_id).await?;
-    let catalogs = load_catalogs(&mut tx, caller.machine_id).await?;
+    // Предпросмотр видит то же, что запуск: каталоги, исключения и запас целевой машины.
+    let target = super::spawn::resolve_machine(&mut tx, caller, args.machine.as_deref()).await?;
+    let machine = target.unwrap_or(caller.machine_id);
+    let catalogs = load_catalogs(&mut tx, machine).await?;
     let list = whitelist::view(&mut tx, caller.owner_id).await?;
-    let limits = limits_view(&mut tx).await?;
-    let live = live_counts(&mut tx, caller.owner_id).await?;
-    let place: (String,) = sqlx::query_as("select workdir from conversations where id=$1")
-        .bind(caller.conversation_id)
-        .fetch_one(&mut *tx)
-        .await?;
+    let limits = limits_view(&mut tx, machine).await?;
+    let live = live_counts(&mut tx, caller.owner_id, machine).await?;
+    let workdir = match target {
+        Some(target) => {
+            super::spawn::remote_workdir(&mut tx, target, args.workdir.as_deref()).await?
+        }
+        None => match args.workdir.clone() {
+            Some(workdir) => workdir,
+            None => {
+                sqlx::query_scalar("select workdir from conversations where id=$1")
+                    .bind(caller.conversation_id)
+                    .fetch_one(&mut *tx)
+                    .await?
+            }
+        },
+    };
     let request = RouteRequest {
         task_type: task_type.to_owned(),
         level: args.level.clone(),
@@ -1611,23 +1715,30 @@ pub async fn preview(
         )
         .to_owned(),
         explicit_mode: None,
-        workdir: place.0,
+        workdir,
+        remote: target.is_some(),
     };
     let now = Utc::now();
-    let headroom = machine_headroom(
-        &mut tx,
-        caller.machine_id,
-        std::time::Duration::from_secs(120),
-    )
-    .await?;
+    let headroom = machine_headroom(&mut tx, machine, std::time::Duration::from_secs(120)).await?;
     let guard = crate::session_tools::guard::check_in_tx(
         &mut tx,
         caller.owner_id,
-        caller.machine_id,
+        machine,
         &context.guards,
         now,
     )
     .await?;
+    let remote_note = match target {
+        Some(target) => {
+            let (name, accepts): (String, bool) =
+                sqlx::query_as("select name,accepts_remote_work from machines where id=$1")
+                    .bind(target)
+                    .fetch_one(&mut *tx)
+                    .await?;
+            Some((name, accepts))
+        }
+        None => None,
+    };
     let existing = policy.task_types.contains_key(task_type);
     match route(RouteInputs {
         policy: &policy,
@@ -1644,12 +1755,17 @@ pub async fn preview(
     }) {
         Ok(decision) => {
             tx.commit().await?;
-            Ok(serde_json::json!({
+            let mut answer = serde_json::json!({
                 "decision": decision,
                 "machine": headroom,
                 "guard": guard.to_value(),
                 "hint": "Read-only preview; to start the session, call session_spawn with route.",
-            }))
+            });
+            if let Some((name, accepts)) = remote_note {
+                answer["machine_name"] = serde_json::json!(name);
+                answer["accepts_remote_work"] = serde_json::json!(accepts);
+            }
+            Ok(answer)
         }
         Err(RouteError::UnknownTask { available }) => {
             let _ = existing;
@@ -1778,6 +1894,7 @@ mod tests {
             parent_mode: "bypass".to_owned(),
             explicit_mode: None,
             workdir: "/tmp/w".to_owned(),
+            remote: false,
         }
     }
 
@@ -2276,6 +2393,57 @@ mod tests {
                 .considered
                 .iter()
                 .any(|entry| entry.reason == "opencode weekly 97% > 95%")
+        );
+    }
+
+    /// Причина пропуска кандидата opencode при показании 97% из `limits_with`, с учётной
+    /// записью и без.
+    fn over_reason(account: Option<&str>, multi_account: bool, remote: bool) -> String {
+        let mut limits = limits_with(97.0);
+        let view = limits.get_mut("opencode").unwrap();
+        view.account = account.map(str::to_owned);
+        view.multi_account = multi_account;
+        let mut request = request("bugfix");
+        request.remote = remote;
+        let decision = route(RouteInputs {
+            policy: &policy(),
+            revision: 0,
+            whitelist: &entries(),
+            catalogs: &catalogs(),
+            limits: &limits,
+            live: &HashMap::new(),
+            stale: Duration::from_secs(1800),
+            now: now(),
+            request: &request,
+            bypass_limits: false,
+            schedule_rules: None,
+        })
+        .unwrap();
+        decision
+            .considered
+            .iter()
+            .find(|entry| entry.verdict == "limits_over")
+            .expect("an over-limit candidate")
+            .reason
+            .clone()
+    }
+
+    #[test]
+    fn the_explanation_names_the_account_for_remote_and_multi_account_providers() {
+        // Одна учётная запись на своей машине: текст прежний, байт в байт.
+        assert_eq!(
+            over_reason(Some("owner"), false, false),
+            "opencode weekly 97% > 95%"
+        );
+        assert_eq!(over_reason(None, false, false), "opencode weekly 97% > 95%");
+        // Удалённый запуск и провайдер с несколькими записями называют ту, чьи цифры взяты.
+        assert_eq!(
+            over_reason(Some("b-opencode"), false, true),
+            "opencode@b-opencode weekly 97% > 95%"
+        );
+        assert_eq!(
+            over_reason(Some("owner"), true, false),
+            "opencode@owner weekly 97% > 95%"
         );
     }
 

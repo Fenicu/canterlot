@@ -536,6 +536,7 @@ async fn poll_claude(hub: &mut support::ProtocolHub) {
         msg: Some(control_down::Msg::PollLimits(PollLimits {
             provider: "claude".into(),
             owner_refresh: false,
+            account: String::new(),
         })),
     })
     .await;
@@ -649,6 +650,7 @@ async fn credits_report(capabilities: &[&str]) -> LimitsReport {
         msg: Some(control_down::Msg::PollLimits(PollLimits {
             provider: "codex".into(),
             owner_refresh: false,
+            account: String::new(),
         })),
     })
     .await;
@@ -705,6 +707,7 @@ async fn empty_poll_sends_no_report() {
                 msg: Some(control_down::Msg::PollLimits(PollLimits {
                     provider: provider.into(),
                     owner_refresh: false,
+                    account: String::new(),
                 })),
             })
             .await;
@@ -738,6 +741,7 @@ impl LimitsSource for AbsenceOnlySource {
                 provider: provider.to_owned(),
                 window: ProtoWindow::FiveHour as i32,
                 observed_machine_ms: 7,
+                account: String::new(),
             }],
             credentials: Vec::new(),
             provider_credits: Vec::new(),
@@ -764,6 +768,7 @@ async fn absence_alone_is_reported_to_the_hub() {
             msg: Some(control_down::Msg::PollLimits(PollLimits {
                 provider: "claude".into(),
                 owner_refresh: false,
+                account: String::new(),
             })),
         })
         .await;
@@ -844,6 +849,7 @@ async fn idle_ticker_requests_a_claude_poll_each_interval() {
             msg: Some(control_down::Msg::PollLimits(PollLimits {
                 provider: "claude".into(),
                 owner_refresh: false,
+                account: String::new(),
             })),
         })
         .await;

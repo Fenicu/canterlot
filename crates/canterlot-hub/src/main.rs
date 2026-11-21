@@ -405,6 +405,7 @@ async fn serve(
         attachments,
         session_tools,
         memory,
+        jobs,
         sessions,
         orchestrator,
         notify,
@@ -526,6 +527,7 @@ async fn serve(
         presence: presence.clone(),
         machines: machines.clone(),
         session_tools: session_tools.clone(),
+        jobs,
         nudge_enabled: orchestrator.nudge.enabled,
         lease_warn_hold: orchestrator.lease_warn_hold(),
         multi_process: http_parts

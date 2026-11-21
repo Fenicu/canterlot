@@ -500,6 +500,7 @@ impl Pilot {
             legacy_ignored: None,
             secrets: options.secrets,
             memory: Default::default(),
+            jobs: Default::default(),
         };
         let api = TestClient::over_socket(hub.http_addr()).await.as_owner();
         let mut pilot = Self {

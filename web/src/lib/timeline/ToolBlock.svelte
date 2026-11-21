@@ -8,7 +8,7 @@
   import { callCaption, firstLine, toolBackground, toolError, toolLabel, toolPillText, toolTiming, toolTitle } from '#lib/timeline/present.js';
   import StepHead from '#lib/timeline/StepHead.svelte';
   import AttachmentTile from '#lib/timeline/AttachmentTile.svelte';
-  import { attachmentKind, attachmentUrl } from '#lib/timeline/attachments.js';
+  import { attachmentUrl, viewerKind } from '#lib/timeline/attachments.js';
   import { opensViewer, shotPreviewSrc, type ViewerShot } from '#lib/viewer/shots.js';
   import type { GalleryAnchor } from '#lib/viewer/gallery.js';
   import ToolOutput from '#lib/timeline/ToolOutput.svelte';
@@ -61,14 +61,17 @@
   const readyShots = $derived(shots.filter((shot) => shot.ready));
   const files = $derived(block.files);
   // Картинкой файл считается так же, как в плитке: по типу или по расширению файла без типа.
-  const isImage = (file: { name: string; mime: string; size?: number }) => attachmentKind({ name: file.name, mime: file.mime, image: false, size: file.size }) === 'image';
+  const kindOf = (file: { name: string; mime: string; size?: number }) => viewerKind({ name: file.name, mime: file.mime, image: false, size: file.size });
+  const isImage = (file: { name: string; mime: string; size?: number }) => kindOf(file) === 'image';
+  // Картинки и ролики файлов блока листаются в одном просмотрщике.
   const fileShots = $derived<ViewerShot[]>(
     files
-      .filter(isImage)
+      .filter((file) => kindOf(file) !== null)
       .map((file) => ({
         media_id: file.attachment_id,
         src: attachmentUrl(file.attachment_id),
         mime: file.mime,
+        kind: kindOf(file) ?? 'image',
         name: file.name,
         size: file.size,
         width: file.width,
@@ -76,14 +79,16 @@
         caption: [file.title || file.name, file.size > 0 ? fmt.bytes(file.size) : ''].filter(Boolean).join(' · ')
       }))
   );
-  let fileViewing = $state<{ index: number; anchor: GalleryAnchor } | null>(null);
+  let fileViewing = $state<{ index: number; anchor: GalleryAnchor | null } | null>(null);
 
   async function viewFile(file: { attachment_id: string; name: string; mime: string; size?: number }): Promise<void> {
-    if (!isImage(file)) return;
+    const kind = kindOf(file);
+    if (!kind) return;
     Viewer ??= (await import('#lib/timeline/MediaViewer.svelte')).default;
     fileViewing = {
       index: Math.max(0, fileShots.findIndex((shot) => shot.media_id === file.attachment_id)),
-      anchor: { kind: 'block_file', id: file.attachment_id }
+      // Хаб перечисляет только картинки сессии: с ролика список сессии не открывается.
+      anchor: kind === 'video' ? null : { kind: 'block_file', id: file.attachment_id }
     };
   }
   // Пометка жила на вызове, теперь на результате: читаем оба места.

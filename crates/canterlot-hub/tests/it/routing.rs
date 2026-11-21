@@ -408,7 +408,7 @@ async fn spawn_with_route_reports_no_executor(pool: PgPool) {
     for provider in ["opencode", "claude", "codex"] {
         sqlx::query(
             "insert into provider_limits(provider,weekly_used_permille,weekly_observed_at)
-             values($1,990,now()) on conflict(provider) do update
+             values($1,990,now()) on conflict(provider,account) do update
              set weekly_used_permille=990,weekly_observed_at=now()",
         )
         .bind(provider)
@@ -724,7 +724,7 @@ async fn routing_preview_no_executor_has_structured_details(pool: PgPool) {
     for provider in ["opencode", "claude", "codex"] {
         sqlx::query(
             "insert into provider_limits(provider,weekly_used_permille,weekly_observed_at,weekly_resets_at)
-             values($1,990,now(),now()+interval '1 hour') on conflict(provider) do update
+             values($1,990,now(),now()+interval '1 hour') on conflict(provider,account) do update
              set weekly_used_permille=990,weekly_observed_at=now(),weekly_resets_at=now()+interval '1 hour'",
         )
         .bind(provider)

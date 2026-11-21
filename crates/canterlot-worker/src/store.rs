@@ -1034,6 +1034,20 @@ enum AppendBoundary {
 #[cfg(test)]
 mod tests;
 
+/// Факты задач на месте уходят только на соединение с `jobs_inplace_v1`: хаб без неё
+/// отказал бы всей партии на незнакомой записи.
+pub(crate) fn requires_jobs(record: &RecordBody) -> bool {
+    matches!(
+        &record.body,
+        Some(
+            record_body::Body::JobDispatched(_)
+                | record_body::Body::JobWaitingLease(_)
+                | record_body::Body::JobStarted(_)
+                | record_body::Body::JobFinished(_)
+        )
+    )
+}
+
 pub(crate) fn requires_pilot(record: &RecordBody) -> bool {
     matches!(
         &record.body,

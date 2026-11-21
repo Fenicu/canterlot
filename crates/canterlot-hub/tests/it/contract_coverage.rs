@@ -344,6 +344,18 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
         .await
         .unwrap();
     testkit::seed_catalog(&pool, machine).await;
+    // Задача на месте, которую владелец отменяет: стоит в очереди и закрывается сразу.
+    let job = Uuid::now_v7();
+    sqlx::query(
+        "insert into jobs(id,owner_id,domain,machine_id,workdir,shell,timeout_seconds,state)
+         values($1,$2,'personal',$3,'/tmp/w','true',1800,'queued')",
+    )
+    .bind(job)
+    .bind(owner)
+    .bind(machine)
+    .execute(&pool)
+    .await
+    .unwrap();
     let id = testkit::seed_conversation(&pool, owner, machine).await;
     let doomed = testkit::seed_conversation(&pool, owner, machine).await;
     let resume_id = testkit::seed_conversation(&pool, owner, machine).await;
@@ -803,6 +815,20 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
                 json!({"settings":{"warn_remaining_pct":20,"danger_remaining_pct":5,"reserve_remaining_pct":10}}),
             ),
             Some(json!({"settings":null})),
+        ),
+        case(
+            Method::PUT,
+            "/api/v1/machines/{id}/remote-work",
+            format!("/api/v1/machines/{machine}/remote-work"),
+            Some(json!({"accepts_remote_work":true})),
+            Some(json!({"accepts_remote_work":false})),
+        ),
+        case(
+            Method::POST,
+            "/api/v1/jobs/{id}/cancel",
+            format!("/api/v1/jobs/{job}/cancel"),
+            None,
+            None,
         ),
         case(
             Method::PUT,

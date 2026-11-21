@@ -42,6 +42,13 @@ pub fn now_ms() -> u64 {
 /// Новые поля версий уходят только хабу, объявившему `cli_versions_v1`.
 /// Старый хаб получает прежнюю форму отчёта: пустые строки в добавленных полях.
 pub fn gated_report(mut report: MachineReport, capabilities: &[String]) -> MachineReport {
+    // Ёмкость задач на месте видна только хабу, который их принимает.
+    if !capabilities
+        .iter()
+        .any(|capability| capability == crate::session::CAPABILITY_JOBS_INPLACE_V1)
+    {
+        report.jobs_max_running = 0;
+    }
     let versions = capabilities
         .iter()
         .any(|capability| capability == crate::session::CAPABILITY_CLI_VERSIONS_V1);
@@ -125,6 +132,7 @@ pub fn build_report_with_extras(
                     settings_midsession: c.settings_midsession,
                     settings_midsession_effort: Some(c.settings_midsession_effort),
                     goals: c.goals,
+                    account: config.account_for_harness(c.harness).into(),
                     installed_version: version.map_or_else(String::new, |v| v.installed.clone()),
                     latest_version: version.map_or_else(String::new, |v| v.latest.clone()),
                     min_version: version.map_or_else(String::new, |v| v.minimum.clone()),
@@ -164,6 +172,7 @@ pub fn build_report_with_extras(
             .into_iter()
             .filter_map(|root| root.to_str().map(str::to_owned))
             .collect(),
+        jobs_max_running: config.jobs.max_running(),
     }
 }
 

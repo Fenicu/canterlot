@@ -10,8 +10,8 @@
   <table aria-label="Сегодня по сессиям">
     <thead><tr><th scope="col">Сессия / модель</th><th scope="col">Токены</th><th scope="col">≈ доля недели</th></tr></thead>
     <!-- Группа на провайдера: у каждого своя неделя, итог группы — сколько её ушло сегодня. -->
-    {#each groups as group (group.provider)}
-      <tbody data-provider={group.provider}>
+    {#each groups as group (group.key)}
+      <tbody data-provider={group.provider} data-account={group.named ? group.account : undefined}>
         <tr class="group"><th scope="rowgroup" colspan="2">{group.label}</th><td class="total">{group.total}</td></tr>
         {#each group.rows as row (row.id)}<tr>
           <td><a href={resolve('/c/[id]', { id: row.conversationId })}>{row.title}</a><small>{row.detail}</small>{#if row.overlapped}<small>Запуски пересекались</small>{/if}</td>

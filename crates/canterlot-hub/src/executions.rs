@@ -149,19 +149,25 @@ pub async fn start_in_tx_with_native(
     correlation_id: Uuid,
     native_override: Option<&str>,
 ) -> Result<StartedExecution, ExecutionError> {
-    let harness: Option<String> = sqlx::query_scalar(
-        "select harness from conversations where id=$1 and owner_id=$2 and trashed_at is null",
+    let found: Option<(String, Uuid)> = sqlx::query_as(
+        "select harness, machine_id from conversations where id=$1 and owner_id=$2 and trashed_at is null",
     )
     .bind(conversation_id)
     .bind(owner_id)
     .fetch_optional(&mut *conn)
     .await?;
-    // Строка провайдера раньше очереди: возобновление и вход в резерв сериализуются.
-    let provider = harness
-        .as_deref()
-        .and_then(canterlot_proto::harness::provider_of);
+    // Строка пары раньше очереди: возобновление и вход в резерв сериализуются.
+    let provider = found
+        .as_ref()
+        .and_then(|(harness, _)| canterlot_proto::harness::provider_of(harness));
+    let account = match &found {
+        Some((harness, machine_id)) => {
+            crate::limits::harness_account(conn, *machine_id, harness).await?
+        }
+        None => crate::model::owner_account(),
+    };
     if let Some(provider) = provider {
-        crate::limits::share_provider(conn, provider).await?;
+        crate::limits::share_provider(conn, provider, &account).await?;
     }
     let mut queue: LockedQueue = sqlx::query_as(
         "select * from queue_state
@@ -278,6 +284,19 @@ pub async fn start_in_tx_with_native(
     if delegated {
         payload["isolate_mcp"] = json!(true);
     }
+    // Запуск по просьбе сессии с другой машины: воркер сверяет каталоги с каноническими, потому что
+    // область памяти потомка хаб проверил по тексту пути. Флаг ставится при каждом старте.
+    if let Some(parent) = row.try_get::<Option<Uuid>, _>("parent_conversation_id")? {
+        let remote: Option<bool> =
+            sqlx::query_scalar("select machine_id <> $2 from conversations where id=$1")
+                .bind(parent)
+                .bind(machine_id)
+                .fetch_optional(&mut *conn)
+                .await?;
+        if remote == Some(true) {
+            payload["remote"] = json!(true);
+        }
+    }
     if crate::prompt_suggestions::enabled_for_start(
         conn,
         owner_id,
@@ -346,10 +365,8 @@ pub async fn start_in_tx_with_native(
         .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("reserve_override_until")?
         .is_some_and(|until| until > chrono::Utc::now());
     if let Some(provider) = provider.filter(|_| !overridden) {
-        for hold in crate::crunch::initial_holds_in_tx(conn, provider).await? {
-            if !queue.hold_reasons.0.iter().any(|h| {
-                matches!((h, &hold), (HoldReason::WeeklyReserve { provider: a, .. }, HoldReason::WeeklyReserve { provider: b, .. }) if a == b)
-            }) {
+        for hold in crate::crunch::initial_holds_in_tx(conn, provider, &account).await? {
+            if !queue.hold_reasons.0.iter().any(|h| h.same_reserve(&hold)) {
                 queue.hold_reasons.0.push(hold);
             }
         }

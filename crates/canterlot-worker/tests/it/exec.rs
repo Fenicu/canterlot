@@ -119,6 +119,94 @@ fn command(id: Uuid, attempt: u32, execution: Uuid, generation: u64, kind: Kind)
     }
 }
 
+/// Удалённый запуск: хаб проверил область памяти по тексту пути, поэтому воркер принимает
+/// только путь, равный своему каноническому виду. Обычный запуск по ссылке по-прежнему идёт.
+#[tokio::test]
+async fn remote_start_refuses_a_workdir_that_is_not_its_canonical_form() {
+    let mut env = Env::new().await;
+    let real = env.work.join("real");
+    fs::create_dir_all(&real).unwrap();
+    let alias = env.work.join("alias");
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    let conversation = Uuid::now_v7();
+    let remote = |execution: Uuid, generation: u64, workdir: &Path| {
+        let mut command = start_command(execution, generation, conversation, "synthetic", workdir);
+        if let Some(Kind::StartExecution(start)) = command.kind.as_mut() {
+            start.remote = true;
+        }
+        command
+    };
+    // По ссылке: путь вне канонического вида.
+    env.send(remote(Uuid::now_v7(), 1, &alias)).await;
+    // С «..» внутри корня: тоже не канонический.
+    env.send(remote(Uuid::now_v7(), 2, &real.join("../real")))
+        .await;
+    let cj = env
+        .wait_cj("two refusals", |cj| rejected_reasons(cj).len() >= 2)
+        .await;
+    assert_eq!(
+        rejected_reasons(&cj),
+        ["workdir_not_canonical", "workdir_not_canonical"]
+    );
+    // Канонический путь той же команды проходит, а без флага ссылка допустима как раньше.
+    let plain = Uuid::now_v7();
+    env.send(start_command(plain, 3, conversation, "synthetic", &alias))
+        .await;
+    env.hub_session();
+    env.execution = plain;
+    env.wait_running().await;
+}
+
+#[tokio::test]
+async fn remote_start_refuses_a_worktree_source_that_is_not_canonical() {
+    let env = Env::new().await;
+    let real = env.work.join("repo");
+    fs::create_dir_all(&real).unwrap();
+    let alias = env.work.join("repo-link");
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    let root = fs::canonicalize(env.root.path())
+        .unwrap()
+        .join("store/worktrees");
+    fs::create_dir_all(&root).unwrap();
+    let mut command = start_command(
+        Uuid::now_v7(),
+        1,
+        Uuid::now_v7(),
+        "synthetic",
+        &root.join("wt-1"),
+    );
+    if let Some(Kind::StartExecution(start)) = command.kind.as_mut() {
+        start.remote = true;
+        start.worktree = Some(canterlot_proto::worker::v1::WorktreeSpec {
+            source_workdir: alias.to_string_lossy().into_owned(),
+            branch: "canterlot/wt-1".into(),
+            base: "HEAD".into(),
+        });
+    }
+    env.send(command).await;
+    let cj = env
+        .wait_cj("source refusal", |cj| !rejected_reasons(cj).is_empty())
+        .await;
+    assert_eq!(rejected_reasons(&cj), ["workdir_not_canonical"]);
+}
+
+#[tokio::test]
+async fn remote_start_accepts_a_canonical_workdir() {
+    let mut env = Env::new().await;
+    let real = fs::canonicalize(&env.work).unwrap().join("real");
+    fs::create_dir_all(&real).unwrap();
+    let conversation = Uuid::now_v7();
+    let execution = Uuid::now_v7();
+    let mut command = start_command(execution, 1, conversation, "synthetic", &real);
+    if let Some(Kind::StartExecution(start)) = command.kind.as_mut() {
+        start.remote = true;
+    }
+    env.send(command).await;
+    env.hub_session();
+    env.execution = execution;
+    env.wait_running().await;
+}
+
 fn start_command(
     execution: Uuid,
     generation: u64,

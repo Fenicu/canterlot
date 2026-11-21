@@ -33,6 +33,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ".canterlot.worker.v1.DataUp.msg",
             "#[allow(clippy::large_enum_variant)]",
         )
+        // `MediaHeader` растёт аддитивно (журнал задачи): форма oneof не меняется.
+        .type_attribute(
+            ".canterlot.worker.v1.MediaChunk.part",
+            "#[allow(clippy::large_enum_variant)]",
+        )
         .skip_debug([
             ".canterlot.worker.v1.DeliverDecision",
             ".canterlot.worker.v1.RequestOpened",
@@ -77,6 +82,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ".canterlot.worker.v1.GoalState",
             ".canterlot.worker.v1.GoalChanged",
             ".canterlot.worker.v1.GoalCommand",
+            ".canterlot.worker.v1.StartInPlaceJob",
+            ".canterlot.worker.v1.JobLogChunk",
+            ".canterlot.worker.v1.JobFinished",
         ])
         .build_server(true)
         .build_client(true)

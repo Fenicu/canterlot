@@ -95,9 +95,29 @@ impl From<limits::Credits> for CreditsView {
         }
     }
 }
+/// Вход провайдера на одной машине учётной записи.
+#[derive(Serialize, ToSchema)]
+pub struct MachineCredentialView {
+    pub machine_id: uuid::Uuid,
+    pub machine_name: String,
+    /// `null` — дата неизвестна (API-ключ, старый CLI).
+    pub expires_at: Option<String>,
+}
+
+/// Сбросы лимитов, о которых сообщила одна машина учётной записи.
+#[derive(Serialize, ToSchema)]
+pub struct MachineCreditsView {
+    pub machine_id: uuid::Uuid,
+    pub machine_name: String,
+    #[serde(flatten)]
+    pub credits: CreditsView,
+}
 #[derive(Serialize, ToSchema)]
 pub struct ProviderView {
     pub provider: String,
+    /// Учётная запись провайдера (`account` харнесса в worker.toml); `owner` по умолчанию.
+    /// У провайдера на нескольких подписках строк по одной на каждую.
+    pub account: String,
     pub weekly: Option<WindowView>,
     pub five_hour: Option<WindowView>,
     pub monthly: Option<WindowView>,
@@ -109,11 +129,17 @@ pub struct ProviderView {
     pub five_hour_absent: bool,
     /// `estimated`, когда CodexBar вывел расход из локальных журналов, иначе `exact`.
     pub data_confidence: limits::DataConfidence,
-    /// Самый ранний конец входа провайдера на машинах владельца; `null` — дата неизвестна
-    /// (API-ключ, старый CLI) или у провайдера такого входа нет.
+    /// Самый ранний конец входа провайдера на машинах этой учётной записи; `null` — дата
+    /// неизвестна (API-ключ, старый CLI) или у провайдера такого входа нет. Сводное поле для
+    /// клиентов, которые ещё не читают `machine_credentials`.
     pub credential_expires_at: Option<String>,
-    /// Сбросы лимитов Codex с самой свежей машины; `null` — провайдер о них молчит.
+    /// Сбросы лимитов Codex с самой свежей машины учётной записи; `null` — провайдер о них
+    /// молчит. Сводное поле для клиентов, которые ещё не читают `machine_credits`.
     pub credits: Option<CreditsView>,
+    /// Вход по машинам: у каждой машины он свой и в одну дату не сливается.
+    pub machine_credentials: Vec<MachineCredentialView>,
+    /// Сбросы лимитов по машинам.
+    pub machine_credits: Vec<MachineCreditsView>,
     /// Публичный статус провайдера со страницы statuspage; `null`, пока хаб её не опрашивал
     /// или провайдер без такой страницы (OpenCode).
     pub status: Option<crate::provider_status::ProviderStatusView>,
@@ -122,6 +148,7 @@ impl From<limits::ProviderLimits> for ProviderView {
     fn from(p: limits::ProviderLimits) -> Self {
         Self {
             provider: p.provider,
+            account: p.account,
             weekly: p.weekly.map(window),
             five_hour: p.five_hour.map(window),
             monthly: p.monthly.map(window),
@@ -132,6 +159,24 @@ impl From<limits::ProviderLimits> for ProviderView {
             data_confidence: p.data_confidence,
             credential_expires_at: p.credential_expires_at.map(time),
             credits: p.credits.map(CreditsView::from),
+            machine_credentials: p
+                .machine_credentials
+                .into_iter()
+                .map(|c| MachineCredentialView {
+                    machine_id: c.machine_id,
+                    machine_name: c.machine_name,
+                    expires_at: c.expires_at.map(time),
+                })
+                .collect(),
+            machine_credits: p
+                .machine_credits
+                .into_iter()
+                .map(|c| MachineCreditsView {
+                    machine_id: c.machine_id,
+                    machine_name: c.machine_name,
+                    credits: CreditsView::from(c.credits),
+                })
+                .collect(),
             status: p
                 .status
                 .as_ref()
@@ -146,12 +191,21 @@ const REFRESH_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs
 pub struct RefreshView {
     /// Провайдеры, чьим машинам отправлена просьба об опросе.
     pub requested: Vec<String>,
+    /// Те же просьбы по учётным записям: у провайдера их может быть несколько.
+    pub requested_accounts: Vec<RequestedAccount>,
     pub retry_after_secs: u64,
+}
+#[derive(Serialize, ToSchema)]
+pub struct RequestedAccount {
+    pub provider: String,
+    pub account: String,
 }
 #[derive(Deserialize, IntoParams)]
 #[into_params(parameter_in = Query)]
 pub struct HistoryParams {
     pub provider: Option<String>,
+    /// Только эта учётная запись провайдера; без параметра — все.
+    pub account: Option<String>,
     pub from: Option<DateTime<Utc>>,
     pub to: Option<DateTime<Utc>>,
     pub tz: Option<String>,
@@ -165,6 +219,7 @@ pub struct Point {
 #[derive(Serialize, ToSchema)]
 pub struct ProviderSeries {
     pub provider: String,
+    pub account: String,
     pub five_hour: Vec<Point>,
     pub weekly: Vec<Point>,
     pub weekly_fable: Vec<Point>,
@@ -201,6 +256,9 @@ async fn history(
         || p.provider
             .as_ref()
             .is_some_and(|p| !limits::known_provider(p))
+        || p.account
+            .as_deref()
+            .is_some_and(|a| !canterlot_proto::limits::valid_account(a))
     {
         return Err(ApiError::new(ErrorCode::InvalidRequest));
     }
@@ -223,13 +281,35 @@ async fn history(
         p.tz.as_deref().unwrap_or("UTC"),
     )
     .await?;
-    let providers = if let Some(provider) = p.provider {
-        vec![provider]
+    // Ряды по парам (провайдер, учётная запись): подписки разных учётных записей не смешиваются.
+    let pairs: Vec<(String, String)> = sqlx::query_as(
+        "select distinct h.provider, h.account from machine_harnesses h join machines m on m.id=h.machine_id
+          where m.owner_id=$1 and ($2::text is null or h.provider=$2) and ($3::text is null or h.account=$3)
+          order by h.provider, h.account",
+    )
+    .bind(o.owner_id)
+    .bind(p.provider.as_deref())
+    .bind(p.account.as_deref())
+    .fetch_all(&s.pool)
+    .await?;
+    let pairs = if pairs.is_empty() {
+        // Запрошенный провайдер без харнесса в каталоге: ряд по `owner`, как раньше.
+        p.provider
+            .clone()
+            .map(|provider| {
+                vec![(
+                    provider,
+                    p.account
+                        .clone()
+                        .unwrap_or_else(crate::model::owner_account),
+                )]
+            })
+            .unwrap_or_default()
     } else {
-        sqlx::query_scalar("select distinct provider from machine_harnesses h join machines m on m.id=h.machine_id where m.owner_id=$1 order by provider").bind(o.owner_id).fetch_all(&s.pool).await?
+        pairs
     };
     let mut series = Vec::new();
-    for provider in providers {
+    for (provider, account) in pairs {
         let points = |items: Vec<(DateTime<Utc>, u16)>| {
             items
                 .into_iter()
@@ -240,15 +320,42 @@ async fn history(
                 })
                 .collect()
         };
-        let five_hour =
-            points(limits::series(&s.pool, &provider, limits::Window::FiveHour, from, to).await?);
-        let weekly =
-            points(limits::series(&s.pool, &provider, limits::Window::Weekly, from, to).await?);
+        let five_hour = points(
+            limits::series(
+                &s.pool,
+                &provider,
+                &account,
+                limits::Window::FiveHour,
+                from,
+                to,
+            )
+            .await?,
+        );
+        let weekly = points(
+            limits::series(
+                &s.pool,
+                &provider,
+                &account,
+                limits::Window::Weekly,
+                from,
+                to,
+            )
+            .await?,
+        );
         let weekly_fable = points(
-            limits::series(&s.pool, &provider, limits::Window::WeeklyFable, from, to).await?,
+            limits::series(
+                &s.pool,
+                &provider,
+                &account,
+                limits::Window::WeeklyFable,
+                from,
+                to,
+            )
+            .await?,
         );
         series.push(ProviderSeries {
             provider,
+            account,
             five_hour,
             weekly,
             weekly_fable,
@@ -266,25 +373,31 @@ async fn refresh(
     _o: Owner,
 ) -> Result<(StatusCode, Json<RefreshView>), ApiError> {
     use crate::crunch::{PollRequest, request_poll_outcome};
-    let providers: Vec<String> = sqlx::query_scalar(
-        "select distinct provider from machine_harnesses where provider in ('claude','codex','opencode') order by provider",
+    let pairs: Vec<(String, String)> = sqlx::query_as(
+        "select distinct provider, account from machine_harnesses where provider in ('claude','codex','opencode') order by provider, account",
     )
     .fetch_all(&s.pool)
     .await?;
     let now = Utc::now();
-    let (mut requested, mut throttled) = (Vec::new(), false);
-    for provider in providers {
+    let (mut requested, mut requested_accounts, mut throttled) = (Vec::new(), Vec::new(), false);
+    for (provider, account) in pairs {
         match request_poll_outcome(
             &s.pool,
             &s.registry,
             &provider,
+            &account,
             REFRESH_MIN_INTERVAL,
             true,
             now,
         )
         .await?
         {
-            PollRequest::Sent => requested.push(provider),
+            PollRequest::Sent => {
+                if !requested.contains(&provider) {
+                    requested.push(provider.clone());
+                }
+                requested_accounts.push(RequestedAccount { provider, account });
+            }
             PollRequest::Throttled => throttled = true,
             PollRequest::NoMachine => {}
         }
@@ -300,6 +413,7 @@ async fn refresh(
         StatusCode::ACCEPTED,
         Json(RefreshView {
             requested,
+            requested_accounts,
             retry_after_secs: REFRESH_MIN_INTERVAL.as_secs(),
         }),
     ))

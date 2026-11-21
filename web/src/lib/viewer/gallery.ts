@@ -1,6 +1,6 @@
 import type { components } from '#lib/api/generated/openapi.js';
 import { fmt } from '#lib/format/ru.js';
-import type { ViewerShot } from '#lib/viewer/shots.js';
+import { isVideoShot, type ViewerShot } from '#lib/viewer/shots.js';
 
 export type GalleryItem = components['schemas']['ImageItem'];
 export type GalleryPage = components['schemas']['ImagesPage'];
@@ -45,7 +45,19 @@ export function galleryShot(item: GalleryItem): ViewerShot {
 /** Карточка, из которой открыли просмотрщик, уже знает подпись и имя кадра: у того же id они остаются. */
 export function mergeGalleryShots(items: readonly GalleryItem[], local: readonly ViewerShot[]): ViewerShot[] {
   const known = new Map(local.map((shot) => [shot.media_id, shot]));
-  return items.map((item) => known.get(item.media_id ?? item.attachment_id ?? '') ?? galleryShot(item));
+  const merged = items.map((item) => known.get(item.media_id ?? item.attachment_id ?? '') ?? galleryShot(item));
+  // Хаб перечисляет картинки сессии; ролики сообщения встают рядом с его соседями по порядку.
+  local.forEach((shot, at) => {
+    if (!isVideoShot(shot) || merged.includes(shot)) return;
+    const before = local.slice(0, at).reverse().map((other) => merged.indexOf(other)).find((place) => place >= 0);
+    if (before !== undefined) {
+      merged.splice(before + 1, 0, shot);
+      return;
+    }
+    const after = local.slice(at + 1).map((other) => merged.indexOf(other)).find((place) => place >= 0);
+    if (after !== undefined) merged.splice(after, 0, shot);
+  });
+  return merged;
 }
 
 export class GalleryMissing extends Error {

@@ -1275,6 +1275,7 @@ async fn a_red_limit_window_of_the_parents_model_skips_the_run(pool: PgPool) {
         f.seed.owner_id,
         &Observation {
             provider: "claude".into(),
+            account: "owner".into(),
             window: Window::Weekly,
             used_permille: 990,
             resets_at: Some(now + TimeDelta::days(2)),

@@ -5,8 +5,8 @@ import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
 import type { HistoryBlock, HistoryInput } from '../../src/lib/stores/chat.svelte';
 import { expect } from './fixtures';
 
-const OWNER = '00000000-0000-4000-8000-0000000000e1';
-const AT = '2026-11-02T12:00:00.000Z';
+export const OWNER = '00000000-0000-4000-8000-0000000000e1';
+export const AT = '2026-11-02T12:00:00.000Z';
 
 const cache = new Map<string, Buffer>();
 
@@ -61,7 +61,7 @@ export const PICTURES: Picture[] = [
   { id: 'shot-c', width: 900, height: 1400, hue: 130 }
 ];
 
-function block(api: FakeHubApi, patch: Partial<HistoryBlock>): HistoryBlock {
+export function block(api: FakeHubApi, patch: Partial<HistoryBlock>): HistoryBlock {
   const id = api.id();
   api.blocks.set(id, { text: '', rev: 1, state: 'final' });
   return {

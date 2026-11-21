@@ -7,7 +7,7 @@ import { FakeHub } from '../../../testing/fake-hub/index.js';
 import type { components } from '#lib/api/generated/openapi.js';
 
 type Usage = components['schemas']['UsageDay'];
-const usage = (patch: Partial<Usage>): Usage => ({ day: '2026-10-29', conversation_id: 'abcdef12-0000', provider: 'claude', agent: 'main', model: 'opus', input_tokens: 100, output_tokens: 10, cache_read_tokens: 20, cache_write_tokens: 30, weekly_delta_permille: 20, overlapped_runs: 0, runs: 1, ...patch });
+const usage = (patch: Partial<Usage>): Usage => ({ day: '2026-10-29', conversation_id: 'abcdef12-0000', provider: 'claude', account: 'owner', agent: 'main', model: 'opus', input_tokens: 100, output_tokens: 10, cache_read_tokens: 20, cache_write_tokens: 30, weekly_delta_permille: 20, overlapped_runs: 0, runs: 1, ...patch });
 
 describe('Task 9b', () => {
   it('machine_status_labels_and_warnings_are_russian', () => {
@@ -36,7 +36,7 @@ describe('Task 9b', () => {
   });
   it('limits_history_shows_the_remaining_weekly_share_and_ignores_five_hours', () => {
     const days = ['2026-10-28', '2026-10-29'];
-    const series = [{ provider: 'claude', five_hour: [{ observed_at: '2026-10-29T12:00:00Z', used_permille: 340, used_pct: 34 }], weekly: [{ observed_at: '2026-10-29T12:00:00Z', used_permille: 960, used_pct: 96 }], weekly_fable: [] }];
+    const series = [{ provider: 'claude', account: 'owner', five_hour: [{ observed_at: '2026-10-29T12:00:00Z', used_permille: 340, used_pct: 34 }], weekly: [{ observed_at: '2026-10-29T12:00:00Z', used_permille: 960, used_pct: 96 }], weekly_fable: [] }];
     const model = historyCharts(series, days, 'UTC');
     expect(model[0]?.days[0]).toMatchObject({ value: null, text: '' });
     expect(model[0]?.days[1]).toMatchObject({ value: 4, text: '4%' });
@@ -75,7 +75,7 @@ it('share_does_not_consume_the_record_when_draft_persistence_fails', async () =>
 });
 
 it('limits_calendar_and_snapshots_use_local_days_and_the_latest_point', () => {
-  const series = [{ provider: 'codex', five_hour: [], weekly: [
+  const series = [{ provider: 'codex', account: 'owner', five_hour: [], weekly: [
     { observed_at: '2026-10-28T23:30:00Z', used_permille: 500, used_pct: 50 },
     { observed_at: '2026-10-28T21:30:00Z', used_permille: 200, used_pct: 20 }
   ], weekly_fable: [] }];

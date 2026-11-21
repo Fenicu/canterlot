@@ -74,10 +74,13 @@ pub async fn apply_report(
     report: &MachineReport,
     correlation_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    apply_report_with_capabilities(pool, owner_id, machine_id, report, &[], correlation_id).await
+    apply_report_with_capabilities(pool, owner_id, machine_id, report, &[], correlation_id)
+        .await
+        .map(|_| ())
 }
 
 /// `negotiated` — необязательные возможности живого соединения: PWA читает их из строки машины.
+/// Возвращает разговоры, у которых смена метки харнесса сняла удержания: их очередь надо разбудить.
 pub async fn apply_report_with_capabilities(
     pool: &PgPool,
     owner_id: Uuid,
@@ -85,7 +88,7 @@ pub async fn apply_report_with_capabilities(
     report: &MachineReport,
     negotiated: &[String],
     correlation_id: Uuid,
-) -> Result<(), sqlx::Error> {
+) -> Result<Vec<Uuid>, sqlx::Error> {
     let mut capabilities = vec!["pilot_v1".to_owned()];
     let mut extra: Vec<String> = negotiated
         .iter()
@@ -106,10 +109,17 @@ pub async fn apply_report_with_capabilities(
          from conversations c left join machine_harnesses h on h.machine_id=c.machine_id and h.harness=c.harness
          where c.machine_id=$1 and c.owner_id=$2 order by c.id",
     ).bind(machine_id).bind(owner_id).fetch_all(&mut *conn).await?;
-    sqlx::query("update machines set capabilities=$9,worker_version=$2,allowed_roots=$3,containment=$4,os=$5,reported_at=clock_timestamp(),limits_ok=$6,home_dir=nullif($7,''),worktree_root=nullif($8,''),memory_work_roots=case when 'memory_scope_v1'=any($9) then $10 end where id=$1")
- .bind(machine_id).bind(&report.worker_version).bind(json!(report.allowed_roots)).bind(&report.containment).bind(&report.os).bind(report.max_attachment_bytes==MAX_ATTACHMENT_BYTES && report.max_attachments_per_input as usize==MAX_ATTACHMENTS_PER_INPUT).bind(&report.home_dir).bind(&report.worktree_root).bind(&capabilities).bind(json!(report.memory_work_roots)).execute(&mut *conn).await?;
-    let offered = crate::limits::offered_providers(&mut *conn, owner_id).await?;
+    sqlx::query("update machines set capabilities=$9,worker_version=$2,allowed_roots=$3,containment=$4,os=$5,reported_at=clock_timestamp(),limits_ok=$6,home_dir=nullif($7,''),worktree_root=nullif($8,''),memory_work_roots=case when 'memory_scope_v1'=any($9) then $10 end,jobs_max_running=case when 'jobs_inplace_v1'=any($9) and $11>0 then $11 end where id=$1")
+ .bind(machine_id).bind(&report.worker_version).bind(json!(report.allowed_roots)).bind(&report.containment).bind(&report.os).bind(report.max_attachment_bytes==MAX_ATTACHMENT_BYTES && report.max_attachments_per_input as usize==MAX_ATTACHMENTS_PER_INPUT).bind(&report.home_dir).bind(&report.worktree_root).bind(&capabilities).bind(json!(report.memory_work_roots)).bind(i32::try_from(report.jobs_max_running).unwrap_or(0)).execute(&mut *conn).await?;
+    let offered = crate::limits::offered_accounts(&mut *conn, owner_id).await?;
     let harness_state = crate::machine_updates::previous_for_report(&mut *conn, machine_id).await?;
+    // Метки до отчёта: сменившаяся метка снимает удержания по прежней учётной записи.
+    let previous_accounts: Vec<(String, String, String)> = sqlx::query_as(
+        "select harness, provider, account from machine_harnesses where machine_id=$1 order by harness",
+    )
+    .bind(machine_id)
+    .fetch_all(&mut *conn)
+    .await?;
     sqlx::query("delete from machine_harnesses where machine_id=$1")
         .bind(machine_id)
         .execute(&mut *conn)
@@ -126,8 +136,32 @@ pub async fn apply_report_with_capabilities(
             .iter()
             .map(|e| json!({"name":e.name,"description":e.description,"kind":e.kind,"argument_hint":e.argument_hint}))
             .collect();
-        sqlx::query("insert into machine_harnesses(machine_id,harness,provider,title,images,settings_midsession,permission_modes,models,settings_midsession_effort,installed_version,latest_version,min_version,update_command,catalog,goals) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)")
-  .bind(machine_id).bind(&h.harness).bind(&h.provider).bind(&h.title).bind(h.images).bind(h.settings_midsession).bind(json!(h.permission_modes)).bind(json!(models)).bind(h.settings_midsession_effort.unwrap_or(true)).bind(&h.installed_version).bind(&h.latest_version).bind(&h.min_version).bind(&h.update_command).bind(json!(catalog)).bind(h.goals).execute(&mut *conn).await?;
+        let account = reported_account(&previous_accounts, h);
+        sqlx::query("insert into machine_harnesses(machine_id,harness,provider,title,images,settings_midsession,permission_modes,models,settings_midsession_effort,installed_version,latest_version,min_version,update_command,catalog,goals,account) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)")
+  .bind(machine_id).bind(&h.harness).bind(&h.provider).bind(&h.title).bind(h.images).bind(h.settings_midsession).bind(json!(h.permission_modes)).bind(json!(models)).bind(h.settings_midsession_effort.unwrap_or(true)).bind(&h.installed_version).bind(&h.latest_version).bind(&h.min_version).bind(&h.update_command).bind(json!(catalog)).bind(h.goals).bind(account).execute(&mut *conn).await?;
+    }
+    let mut released = Vec::new();
+    for (harness, provider, old_account) in &previous_accounts {
+        let Some(current) = report.harnesses.iter().find(|h| &h.harness == harness) else {
+            continue;
+        };
+        let new_account = reported_account(&previous_accounts, current);
+        if new_account != old_account {
+            released.extend(
+                crate::crunch::release_relabelled_in_tx(
+                    &mut *conn,
+                    owner_id,
+                    machine_id,
+                    harness,
+                    provider,
+                    old_account,
+                    new_account,
+                    chrono::Utc::now(),
+                    correlation_id,
+                )
+                .await?,
+            );
+        }
     }
     let versions_enabled = capabilities
         .iter()
@@ -176,11 +210,36 @@ pub async fn apply_report_with_capabilities(
     }
     crate::limits::emit_offered_changed(&mut *conn, owner_id, &offered, correlation_id).await?;
     emit(&mut *conn,owner_id,"machine_report_updated",json!({"machine_id":machine_id,"worker_version":report.worker_version,"capabilities":capabilities,"limits_ok":report.max_attachment_bytes==MAX_ATTACHMENT_BYTES&&report.max_attachments_per_input as usize==MAX_ATTACHMENTS_PER_INPUT,"home_dir":(!report.home_dir.is_empty()).then_some(&report.home_dir)}),correlation_id).await?;
-    Ok(())
+    Ok(released)
         })
     })
     .await
 }
+/// Метка харнесса, которую отчёт делает сохранённой. Воркер с учётными записями всегда
+/// называет метку явно, в том числе `owner`; пустая метка значит воркер старше учётных
+/// записей или откатившийся, и такой отчёт не меняет прежде сохранённую метку (для харнесса,
+/// которого ещё не было, это `owner`). Так факты без метки продолжают отбрасываться, пока
+/// машина объявляла чужую запись, и не попадают в данные `owner`. Негодная непустая метка
+/// читается как `owner`.
+fn reported_account<'a>(
+    previous: &'a [(String, String, String)],
+    harness: &'a canterlot_proto::worker::v1::HarnessInfo,
+) -> &'a str {
+    if harness.account.is_empty() {
+        return previous
+            .iter()
+            .find(|(name, _, _)| *name == harness.harness)
+            .map_or(canterlot_proto::limits::OWNER_ACCOUNT, |(_, _, account)| {
+                account.as_str()
+            });
+    }
+    if canterlot_proto::limits::valid_account(&harness.account) {
+        harness.account.as_str()
+    } else {
+        canterlot_proto::limits::OWNER_ACCOUNT
+    }
+}
+
 /// Машинный `cpu_permille` нормирован на всю машину, поэтому 1000 — его потолок.
 /// Битые счётчики исполнений отбрасываются по одному в `sanitize_executions`.
 fn validate(metrics: &MachineMetrics) -> Option<&'static str> {

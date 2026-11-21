@@ -130,7 +130,7 @@ struct BatchProgress {
 
 // Итог SJ-транзакции: смены лимитов, прогресс, счётчик, отложенные ошибка и разрыв.
 type SjBatchOutcome = (
-    BTreeSet<(String, crate::limits::Window)>,
+    BTreeSet<(String, String, crate::limits::Window)>,
     u64,
     u64,
     Option<(IngestError, u64)>,
@@ -718,19 +718,28 @@ impl Ingest {
                 let rows = sqlx::query_as("select machine_id, kind, committed_seq, last_record_digest from journal_cursors where journal_id = $1 for update")
                     .bind(journal_id).fetch_all(&mut *conn).await?;
                 (up_to_seq, last_digest) = checked_cursor(machine_id, JournalKind::Sj, rows)?;
-                let providers: BTreeSet<_> = pending
-                    .iter()
-                    .filter_map(
-                        |(record, _)| match record.body.as_ref().and_then(|b| b.body.as_ref()) {
-                            Some(Body::LimitObserved(f)) => Some(f.provider.as_str()),
-                            Some(Body::LimitReached(f)) => Some(f.provider.as_str()),
-                            _ => None,
-                        },
-                    )
-                    .filter(|provider| crate::limits::known_provider(provider))
-                    .collect();
-                for provider in providers {
-                    crate::limits::lock_provider(&mut *conn, provider).await?;
+                // Строки пар (провайдер, учётная запись) берутся в отсортированном порядке.
+                // Факт без метки получает учётную запись так же, как при применении ниже.
+                let mut providers: BTreeSet<(String, String)> = BTreeSet::new();
+                for (record, _) in &pending {
+                    let (provider, stamped) =
+                        match record.body.as_ref().and_then(|b| b.body.as_ref()) {
+                            Some(Body::LimitObserved(f)) => (&f.provider, &f.account),
+                            Some(Body::LimitReached(f)) => (&f.provider, &f.account),
+                            _ => continue,
+                        };
+                    if !crate::limits::known_provider(provider) {
+                        continue;
+                    }
+                    if let Some(account) =
+                        crate::limits::fact_account_quiet(&mut *conn, machine_id, provider, stamped)
+                            .await?
+                    {
+                        providers.insert((provider.clone(), account));
+                    }
+                }
+                for (provider, account) in &providers {
+                    crate::limits::lock_provider(&mut *conn, provider, account).await?;
                 }
                 if pending.iter().any(|(record, _)| {
                     matches!(
@@ -852,9 +861,16 @@ impl Ingest {
                 .execute(&mut *conn)
                 .await?;
         }
-        for (provider, window) in &changed_limits {
-            crate::limits::emit_changed(&mut *conn, owner_id, provider, *window, Uuid::now_v7())
-                .await?;
+        for (provider, account, window) in &changed_limits {
+            crate::limits::emit_changed(
+                &mut *conn,
+                owner_id,
+                provider,
+                account,
+                *window,
+                Uuid::now_v7(),
+            )
+            .await?;
         }
         for (kind, diagnostic) in diagnostics {
             events::append(
@@ -884,9 +900,9 @@ impl Ingest {
             tracing::warn!(kind = "credential_push_failed", reason = %error, "credential push failed");
         }
         if let Some(registry) = &self.registry {
-            let providers: BTreeSet<_> = changed_limits.iter().map(|(p, _)| p).collect();
-            for provider in providers {
-                if crate::limits::push_limits_snapshot(&self.pool, registry, provider)
+            let pairs: BTreeSet<_> = changed_limits.iter().map(|(p, a, _)| (p, a)).collect();
+            for (provider, account) in pairs {
+                if crate::limits::push_limits_snapshot(&self.pool, registry, provider, account)
                     .await
                     .is_err()
                 {
@@ -946,7 +962,7 @@ impl Ingest {
         journal: Uuid,
         body: &Body,
         correlation: Uuid,
-    ) -> Result<(bool, Option<(String, crate::limits::Window)>, bool), IngestError> {
+    ) -> Result<(bool, Option<(String, String, crate::limits::Window)>, bool), IngestError> {
         use crate::limits::{self, DataConfidence, Observation, ObservationSource, Window};
         let PilotConfig { limits, prices } = config;
         let now = chrono::Utc::now();
@@ -1030,8 +1046,17 @@ impl Ingest {
                     let at = registry
                         .as_ref()
                         .and_then(|r| r.to_hub_time(machine, f.observed_machine_ms));
+                    // Факт без метки от машины с чужой учётной записью провайдера отбрасывается.
+                    let Some(account) =
+                        limits::fact_account(conn, machine, &f.provider, &f.account)
+                            .await
+                            .map_err(pilot_error)?
+                    else {
+                        return Ok((true, None, false));
+                    };
                     let observation = Observation {
                         provider: f.provider.clone(),
+                        account,
                         window: Window::from_proto(f.window)
                             .map_err(|_| IngestError::InvalidRecord)?,
                         used_permille: u16::try_from(f.used_permille)
@@ -1059,8 +1084,11 @@ impl Ingest {
                     .map_err(pilot_error)?;
                     Ok((
                         at.is_none(),
-                        (result.provider_changed || result.refreshed)
-                            .then_some((observation.provider, observation.window)),
+                        (result.provider_changed || result.refreshed).then_some((
+                            observation.provider,
+                            observation.account,
+                            observation.window,
+                        )),
                         at.is_none(),
                     ))
                 }
@@ -1076,9 +1104,27 @@ impl Ingest {
                             return Err(IngestError::ForeignExecution);
                         }
                     }
-                    limits::on_limit_reached_in_tx(conn, owner, &run, f, limits, now, correlation)
-                        .await
-                        .map_err(pilot_error)?;
+                    // Факт без метки от машины с чужой учётной записью провайдера отбрасывается.
+                    let Some(account) =
+                        limits::fact_account(conn, machine, &f.provider, &f.account)
+                            .await
+                            .map_err(pilot_error)?
+                    else {
+                        return Ok((true, None, false));
+                    };
+                    let mut fact = f.clone();
+                    fact.account = account;
+                    limits::on_limit_reached_in_tx(
+                        conn,
+                        owner,
+                        &run,
+                        &fact,
+                        limits,
+                        now,
+                        correlation,
+                    )
+                    .await
+                    .map_err(pilot_error)?;
                     Ok((false, None, false))
                 }
                 _ => unreachable!(),
@@ -1760,13 +1806,31 @@ async fn apply_body(
             )
             .await?);
         }
+        // Факты задач на месте (`jobs_inplace_v1`): переходы применяются только вперёд,
+        // итог терминальной строки только записывается (`inplace_jobs::facts`).
+        Body::JobDispatched(fact) => {
+            crate::inplace_jobs::facts::apply_dispatched(conn, machine_id, fact, correlation_id)
+                .await?;
+        }
+        Body::JobWaitingLease(fact) => {
+            crate::inplace_jobs::facts::apply_waiting_lease(conn, machine_id, fact, correlation_id)
+                .await?;
+        }
+        Body::JobStarted(fact) => {
+            crate::inplace_jobs::facts::apply_started(conn, machine_id, fact, correlation_id)
+                .await?;
+        }
+        Body::JobFinished(fact) => {
+            crate::inplace_jobs::facts::apply_finished(conn, machine_id, fact, correlation_id)
+                .await?;
+        }
     }
     Ok(false)
 }
 
 /// Отказ машины принять команду: тот же итог, пришёл ли он записью журнала
 /// или хаб сам не может отправить команду этому сеансу.
-pub(crate) async fn apply_command_rejected_in_tx(
+pub async fn apply_command_rejected_in_tx(
     conn: &mut PgConnection,
     machine_id: Uuid,
     command_id: Uuid,
@@ -1819,6 +1883,17 @@ pub(crate) async fn apply_command_rejected_in_tx(
             correlation_id,
         )
         .await?;
+    } else if target.kind == "start_inplace_job" || target.kind == "cancel_inplace_job" {
+        crate::inplace_jobs::facts::apply_command_rejected(
+            conn,
+            machine_id,
+            command_id,
+            &target.kind,
+            reason,
+            correlation_id,
+        )
+        .await?;
+        complete_rejected(conn, command_id, dispatch_attempt, reason).await?;
     } else if target.kind == "revoke_secret" {
         crate::secrets::on_revoke_rejected_in_tx(
             conn,
@@ -2324,7 +2399,7 @@ impl crate::grpc::Ingest for Ingest {
             .as_ref()
             .map(|registry| registry.capabilities(machine_id))
             .unwrap_or_default();
-        crate::machine_info::apply_report_with_capabilities(
+        let released = crate::machine_info::apply_report_with_capabilities(
             &self.pool,
             owner,
             machine_id,
@@ -2334,6 +2409,12 @@ impl crate::grpc::Ingest for Ingest {
         )
         .await
         .map_err(|_| tonic::Status::internal("machine_report_database"))?;
+        // Смена метки учётной записи сняла удержания: очереди этих разговоров снова идут.
+        if let Some(dispatcher) = &self.dispatcher {
+            for id in released {
+                dispatcher.trigger(id);
+            }
+        }
         if let Some(registry) = &self.registry {
             crate::limits::push_machine_snapshot(&self.pool, registry, machine_id)
                 .await
@@ -2362,6 +2443,33 @@ impl crate::grpc::Ingest for Ingest {
         .await
         .map_err(|_| tonic::Status::internal("machine_metrics_database"))?;
         Ok(())
+    }
+    async fn jobs_report(
+        &self,
+        machine_id: Uuid,
+        report: canterlot_proto::worker::v1::JobsReport,
+    ) -> Result<(), tonic::Status> {
+        crate::db::in_tx(&self.pool, move |conn| {
+            Box::pin(async move {
+                crate::inplace_jobs::facts::apply_report(conn, machine_id, &report, Uuid::now_v7())
+                    .await
+            })
+        })
+        .await
+        .map_err(|_: sqlx::Error| tonic::Status::internal("jobs_report_database"))
+    }
+    async fn job_log_chunk(
+        &self,
+        machine_id: Uuid,
+        chunk: canterlot_proto::worker::v1::JobLogChunk,
+    ) -> Result<(), tonic::Status> {
+        crate::db::in_tx(&self.pool, move |conn| {
+            Box::pin(async move {
+                crate::inplace_jobs::facts::apply_chunk(conn, machine_id, &chunk).await
+            })
+        })
+        .await
+        .map_err(|_: sqlx::Error| tonic::Status::internal("job_log_database"))
     }
     async fn lease_state(
         &self,
@@ -2435,6 +2543,8 @@ impl crate::grpc::Ingest for Ingest {
             observations.push((
                 Observation {
                     provider: f.provider,
+                    // Метка воркера как пришла; пустую хаб разбирает в транзакции (`fact_account`).
+                    account: f.account,
                     window,
                     used_permille: used,
                     resets_at: reset,
@@ -2450,7 +2560,7 @@ impl crate::grpc::Ingest for Ingest {
         }
         observations.sort_by(|(a, _), (b, _)| a.provider.cmp(&b.provider));
         // Отсутствие окна принимается только со сверенными часами: без них не понять, не устарел ли отчёт.
-        let absences: Vec<(String, chrono::DateTime<chrono::Utc>)> = report
+        let absences: Vec<(String, String, chrono::DateTime<chrono::Utc>)> = report
             .absent
             .into_iter()
             .filter(|a| a.window == canterlot_proto::worker::v1::LimitWindow::FiveHour as i32)
@@ -2459,7 +2569,7 @@ impl crate::grpc::Ingest for Ingest {
                     .registry
                     .as_ref()
                     .and_then(|r| r.to_hub_time(machine_id, a.observed_machine_ms))?;
-                Some((a.provider, at))
+                Some((a.provider, a.account, at))
             })
             .collect();
         // Даты конца входа опрос может принести наравне с окнами: тот же отчёт, та же дата.
@@ -2507,22 +2617,77 @@ impl crate::grpc::Ingest for Ingest {
                     .bind(machine_id)
                     .fetch_one(&mut *conn)
                     .await?;
-                let providers: BTreeSet<_> = observations
+                // Учётную запись каждого факта называет воркер. Пустая метка — старый воркер:
+                // `owner`, если машина не объявила для провайдера другую, иначе факт отбрасывается.
+                let mut stamped = Vec::with_capacity(observations.len());
+                for (mut o, mapped) in observations {
+                    if !limits::known_provider(&o.provider)
+                        || (!o.account.is_empty()
+                            && !canterlot_proto::limits::valid_account(&o.account))
+                    {
+                        continue;
+                    }
+                    let Some(account) =
+                        limits::fact_account(&mut *conn, machine_id, &o.provider, &o.account)
+                            .await?
+                    else {
+                        continue;
+                    };
+                    o.account = account;
+                    stamped.push((o, mapped));
+                }
+                let observations = stamped;
+                let mut stamped_absences = Vec::with_capacity(absences.len());
+                for (provider, account, at) in absences {
+                    if !limits::known_provider(&provider)
+                        || (!account.is_empty()
+                            && !canterlot_proto::limits::valid_account(&account))
+                    {
+                        continue;
+                    }
+                    let Some(account) =
+                        limits::fact_account(&mut *conn, machine_id, &provider, &account).await?
+                    else {
+                        continue;
+                    };
+                    stamped_absences.push((provider, account, at));
+                }
+                let absences = stamped_absences;
+                // Даты входа и сбросы машины относятся к её собственным учётным записям.
+                let mut machine_pairs: Vec<(String, String)> = Vec::new();
+                for provider in credentials
                     .iter()
-                    .map(|(o, _)| o.provider.as_str())
-                    .chain(absences.iter().map(|(provider, _)| provider.as_str()))
-                    .chain(credentials.iter().map(|(provider, _, _)| provider.as_str()))
+                    .map(|(provider, _, _)| provider.as_str())
+                    .chain(credits.iter().map(|(provider, _, _)| provider.as_str()))
                     .filter(|provider| limits::known_provider(provider))
+                    .collect::<BTreeSet<_>>()
+                {
+                    for account in
+                        limits::machine_accounts(&mut *conn, machine_id, provider).await?
+                    {
+                        machine_pairs.push((provider.to_owned(), account));
+                    }
+                }
+                let providers: BTreeSet<(&str, &str)> = observations
+                    .iter()
+                    .map(|(o, _)| (o.provider.as_str(), o.account.as_str()))
+                    .chain(
+                        absences
+                            .iter()
+                            .map(|(provider, account, _)| (provider.as_str(), account.as_str())),
+                    )
+                    .chain(
+                        machine_pairs
+                            .iter()
+                            .map(|(provider, account)| (provider.as_str(), account.as_str())),
+                    )
                     .collect();
-                for provider in providers {
-                    limits::lock_provider(&mut *conn, provider).await?;
+                for (provider, account) in providers {
+                    limits::lock_provider(&mut *conn, provider, account).await?;
                 }
                 let mut changed = BTreeSet::new();
                 let mut unmapped = 0_u64;
                 for (o, mapped) in observations {
-                    if !limits::known_provider(&o.provider) {
-                        continue;
-                    }
                     let recorded = limits::record_in_tx(
                         &mut *conn,
                         owner,
@@ -2534,7 +2699,7 @@ impl crate::grpc::Ingest for Ingest {
                     )
                     .await?;
                     if recorded.provider_changed || recorded.refreshed {
-                        changed.insert((o.provider, o.window));
+                        changed.insert((o.provider, o.account, o.window));
                     }
                     if !mapped {
                         unmapped += 1;
@@ -2552,25 +2717,40 @@ impl crate::grpc::Ingest for Ingest {
                     .await?
                     {
                         // Обновление показа ждёт события лимитов; окно-носитель — недельное.
-                        changed.insert((provider.clone(), limits::Window::Weekly));
+                        // Сбросы машины видны в строках её учётных записей этого провайдера.
+                        for (pair_provider, account) in &machine_pairs {
+                            if pair_provider == provider {
+                                changed.insert((
+                                    provider.clone(),
+                                    account.clone(),
+                                    limits::Window::Weekly,
+                                ));
+                            }
+                        }
                     }
                 }
-                for (provider, window) in &changed {
-                    limits::emit_changed(&mut *conn, owner, provider, *window, Uuid::now_v7())
-                        .await?;
+                for (provider, account, window) in &changed {
+                    limits::emit_changed(
+                        &mut *conn,
+                        owner,
+                        provider,
+                        account,
+                        *window,
+                        Uuid::now_v7(),
+                    )
+                    .await?;
                 }
-                for (provider, at) in absences {
-                    if limits::known_provider(&provider) {
-                        limits::record_absence_in_tx(
-                            &mut *conn,
-                            owner,
-                            &provider,
-                            limits::Window::FiveHour,
-                            at,
-                            Uuid::now_v7(),
-                        )
-                        .await?;
-                    }
+                for (provider, account, at) in absences {
+                    limits::record_absence_in_tx(
+                        &mut *conn,
+                        owner,
+                        &provider,
+                        &account,
+                        limits::Window::FiveHour,
+                        at,
+                        Uuid::now_v7(),
+                    )
+                    .await?;
                 }
                 for (provider, expires_at, observed_at) in &credentials {
                     if limits::known_provider(provider) {
@@ -2613,9 +2793,9 @@ impl crate::grpc::Ingest for Ingest {
         }
         self.ignored.fetch_add(unmapped, Ordering::Relaxed);
         if let Some(registry) = &self.registry {
-            let providers: BTreeSet<_> = changed.iter().map(|(p, _)| p).collect();
-            for provider in providers {
-                if limits::push_limits_snapshot(&self.pool, registry, provider)
+            let pairs: BTreeSet<_> = changed.iter().map(|(p, a, _)| (p, a)).collect();
+            for (provider, account) in pairs {
+                if limits::push_limits_snapshot(&self.pool, registry, provider, account)
                     .await
                     .is_err()
                 {

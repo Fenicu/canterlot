@@ -19,6 +19,7 @@
   import Button from '#lib/ui/Button.svelte';
   import Icon from '#lib/ui/Icon.svelte';
   import { limitStrip } from '../sessions/limitsText.js';
+  import { multiAccountProviders } from '#lib/stores/limits.js';
   import { LimitsRefresh } from '#lib/stores/limitsRefresh.svelte.js';
   import { limitsSubtitle, sevenDays, usageRows, usageGroups, historyRange, speedRows, currentBlocks, historyCharts, alignCharts, providersWithWeekly } from './model.js';
   import '../secondary.css';
@@ -29,10 +30,12 @@
   let days = $state<string[]>([]); let zone = $state(''); let error = $state(''); let loading = $state(true);
   const now = $derived.by(() => { void ticker.second; return connectionStale.now(); });
   const weekly = $derived(providersWithWeekly(runtime?.list.limits ?? []));
-  const groups = $derived(usageGroups(usageRows(usage, days.at(-1) ?? '', runtime?.list.items ?? new Map(), weekly)));
+  /** Провайдеры с несколькими учётными записями: графики и расход подписываются именем записи так же, как карточки. */
+  const accounts = $derived(multiAccountProviders(runtime?.list.limits ?? []));
+  const groups = $derived(usageGroups(usageRows(usage, days.at(-1) ?? '', runtime?.list.items ?? new Map(), weekly), accounts));
   const subtitle = $derived(limitsSubtitle(runtime?.list.limits ?? []));
   const blocks = $derived(currentBlocks(runtime?.list.limits ?? [], now, limitThresholds));
-  const charts = $derived(alignCharts(historyCharts(series, days, zone), blocks));
+  const charts = $derived(alignCharts(historyCharts(series, days, zone, accounts), blocks));
   const strip = $derived(limitStrip(runtime?.list.limits ?? [], now, limitThresholds));
   const refresher = new LimitsRefresh();
   $effect(() => refresher.observe(strip.updatedAt));

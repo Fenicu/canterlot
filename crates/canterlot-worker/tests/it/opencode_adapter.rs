@@ -5091,7 +5091,12 @@ async fn relay_sees_the_preset_tools_and_the_opencode_budget() {
             "canterlot_spawn_whitelist",
             "settings_propose_routing",
             "settings_propose_whitelist",
-            "settings_propose_preset"
+            "settings_propose_preset",
+            "job_run",
+            "job_status",
+            "job_log",
+            "job_cancel",
+            "jobs_list"
         ]
     );
     bench.close(CloseMode::Graceful).await;

@@ -166,6 +166,9 @@
       "$ref": "#/$defs/machine_lease_changed"
     },
     {
+      "$ref": "#/$defs/job_changed"
+    },
+    {
       "$ref": "#/$defs/machine_update"
     },
     {
@@ -5366,6 +5369,25 @@
               "items": {
                 "type": "string"
               }
+            },
+            "accounts": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "provider": {
+                    "type": "string"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "provider",
+                  "account"
+                ],
+                "additionalProperties": false
+              }
             }
           },
           "required": [
@@ -6109,6 +6131,77 @@
           "properties": {
             "provider": {
               "type": "string"
+            },
+            "account": {
+              "type": "string",
+              "pattern": "^[a-z0-9-]{1,40}$"
+            },
+            "machine_credentials": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "machine_id": {
+                    "$ref": "#/$defs/Uuid"
+                  },
+                  "machine_name": {
+                    "type": "string"
+                  },
+                  "expires_at": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/Time"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "machine_id",
+                  "machine_name",
+                  "expires_at"
+                ]
+              }
+            },
+            "machine_credits": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "machine_id": {
+                    "$ref": "#/$defs/Uuid"
+                  },
+                  "machine_name": {
+                    "type": "string"
+                  },
+                  "reset_count": {
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "resets": {
+                    "type": "array"
+                  },
+                  "observed_at": {
+                    "$ref": "#/$defs/Time"
+                  }
+                },
+                "required": [
+                  "machine_id",
+                  "machine_name",
+                  "reset_count",
+                  "resets",
+                  "observed_at"
+                ]
+              }
             },
             "window": {
               "enum": [
@@ -8369,6 +8462,9 @@
                   "$ref": "#/$defs/machine_lease_changed"
                 },
                 {
+                  "$ref": "#/$defs/job_changed"
+                },
+                {
                   "$ref": "#/$defs/machine_update"
                 },
                 {
@@ -9857,6 +9953,239 @@
         "correlation_id",
         "kind",
         "payload"
+      ],
+      "additionalProperties": false
+    },
+    "job_changed": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "scope_seq": {
+          "$ref": "#/$defs/Seq"
+        },
+        "scope_seq_from": {
+          "$ref": "#/$defs/Seq"
+        },
+        "committed_at": {
+          "$ref": "#/$defs/Time"
+        },
+        "committed_at_from": {
+          "$ref": "#/$defs/Time"
+        },
+        "conversation_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "execution_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "correlation_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "kind": {
+          "const": "job_changed"
+        },
+        "payload": {
+          "type": "object",
+          "properties": {
+            "job": {
+              "$ref": "#/$defs/JobView"
+            }
+          },
+          "required": [
+            "job"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "v",
+        "id",
+        "scope",
+        "scope_seq",
+        "scope_seq_from",
+        "committed_at",
+        "committed_at_from",
+        "conversation_id",
+        "execution_id",
+        "correlation_id",
+        "kind",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    "JobView": {
+      "type": "object",
+      "description": "Задача на месте целиком, без вывода; состояние ведёт только вперёд",
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "state": {
+          "enum": [
+            "queued",
+            "dispatched",
+            "waiting_lease",
+            "running",
+            "succeeded",
+            "failed",
+            "timed_out",
+            "canceled",
+            "lost"
+          ]
+        },
+        "machine_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "machine_name": {
+          "type": "string"
+        },
+        "conversation_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "conversation_title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "workdir": {
+          "type": "string"
+        },
+        "shell": {
+          "type": "string"
+        },
+        "lease": {
+          "enum": [
+            "none",
+            "build",
+            "gate"
+          ]
+        },
+        "timeout_minutes": {
+          "type": "integer"
+        },
+        "exit_code": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "duration_ms": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "output_bytes": {
+          "type": "integer"
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "end_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "cancel_requested": {
+          "type": "boolean"
+        },
+        "has_log": {
+          "type": "boolean"
+        },
+        "machine_offline": {
+          "type": "boolean"
+        },
+        "late_report": {
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "created_at": {
+          "$ref": "#/$defs/Time"
+        },
+        "started_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "finished_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "state",
+        "machine_id",
+        "machine_name",
+        "conversation_id",
+        "conversation_title",
+        "title",
+        "workdir",
+        "shell",
+        "lease",
+        "timeout_minutes",
+        "exit_code",
+        "duration_ms",
+        "output_bytes",
+        "truncated",
+        "end_reason",
+        "cancel_requested",
+        "has_log",
+        "machine_offline",
+        "late_report",
+        "created_at",
+        "started_at",
+        "finished_at"
       ],
       "additionalProperties": false
     },

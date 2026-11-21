@@ -1,9 +1,12 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
+  import { goto } from '$app/navigation';
   import { resolve } from '$app/paths';
+  import { page } from '$app/state';
   import { browserRuntime } from '#lib/app/browser.js';
   import type { Runtime } from '#lib/app/runtime.js';
   import { loadConfig } from '#lib/api/config.js';
+  import { putMachineRemoteWork } from '#lib/api/client.js';
   import { clock } from '#lib/clock.js';
   import { connectionStale } from '#lib/sync/stale.svelte.js';
   import { ticker } from '#lib/ticker.svelte.js';
@@ -15,6 +18,8 @@
   import MetricCard from './MetricCard.svelte';
   import { diskLimits, diskView, generalWarnings, hotspotRows, journalStops, leakedSummary, machineStatus, memoryLowText, unleasedText } from './model.js';
   import LeaseQueue from './LeaseQueue.svelte';
+  import JobSheet from './JobSheet.svelte';
+  import JobsSection from './JobsSection.svelte';
   import '../secondary.css';
 
   let runtime = $state<Runtime | null>(null);
@@ -40,6 +45,38 @@
   const titleOf = (id: string) => runtime?.list.items.get(id)?.title ?? machine?.sessions?.find(session => session.conversation_id === id)?.title;
   const heartbeat = $derived(machine?.heartbeat_age_ms != null ? (machine.heartbeat_received_at === undefined ? now : machine.heartbeat_received_at + clock.offset) - machine.heartbeat_age_ms : metrics ? Date.parse(metrics.observed_at) : null);
 
+  // Лист задачи: ссылка из карточки ленты `?job=<id>` открывает его, а экран встаёт на машину задачи.
+  let openJob = $state<string | null>(null);
+  const linkedJob = $derived(page.url.searchParams.get('job'));
+  $effect(() => {
+    const id = linkedJob;
+    if (id) untrack(() => { openJob = id; });
+  });
+  $effect(() => {
+    const machineId = openJob ? runtime?.machines.jobs.get(openJob)?.machine_id : undefined;
+    if (machineId && untrack(() => selected) !== machineId && machines.some(m => m.id === machineId)) selected = machineId;
+  });
+  function closeJob() {
+    openJob = null;
+    // Ссылка снимается: тот же переход из карточки ленты откроет лист снова.
+    if (page.url.searchParams.has('job')) void goto(resolve('/machines'), { replaceState: true });
+  }
+
+  // Выключатель удалённой работы: пока ответ не пришёл, переключатель занят; отказ возвращает прежнее значение.
+  let remoteBusy = $state(false); let remoteNotice = $state('');
+  async function setRemoteWork(input: HTMLInputElement) {
+    const target = machine;
+    if (!target || !runtime || remoteBusy) { input.checked = target?.accepts_remote_work === true; return; }
+    const next = input.checked; remoteBusy = true; remoteNotice = '';
+    try {
+      const { data } = await putMachineRemoteWork(target.id, { accepts_remote_work: next }, crypto.randomUUID());
+      const current = runtime.machines.items.get(target.id) ?? target;
+      runtime.machines.items.set(target.id, { ...current, accepts_remote_work: data.accepts_remote_work });
+    } catch {
+      input.checked = !next;
+      remoteNotice = 'Не удалось изменить настройку. Повторите при восстановлении связи';
+    } finally { remoteBusy = false; }
+  }
   async function load() {
     error = '';
     try { const [value, cfg] = await Promise.all([browserRuntime(), loadConfig()]); runtime = value; config = cfg.machines; }
@@ -63,6 +100,17 @@
         {@const line = credentialLine(credential.provider, credential.expires_at, now)}
         {#if line}<p class="credential" data-provider={credential.provider} data-tone={line.tone}>{line.text}</p>{/if}
       {/each}
+      <section class="remote" aria-labelledby="remote-work-label" data-remote-work>
+        <label class="switch">
+          <input type="checkbox" role="switch" checked={machine.accepts_remote_work === true} disabled={remoteBusy}
+            aria-labelledby="remote-work-label" aria-describedby="remote-work-note"
+            onchange={(event) => void setRemoteWork(event.currentTarget)} />
+          <span class="track"></span>
+          <span id="remote-work-label">Принимать делегатов и команды с других машин</span>
+        </label>
+        <p class="note" id="remote-work-note" data-remote-work-note>Выключено: сессии других машин не могут запускать здесь делегатов. Свои сессии машины это не меняет</p>
+        {#if remoteNotice}<p class="error" role="alert">{remoteNotice}</p>{/if}
+      </section>
       {#if machine.availability === 'unavailable'}<p class="notice">Машина не в сети. Данные от последнего сигнала</p>{/if}
       {#if machine.availability === 'degraded'}<p class="notice">Связь нестабильна. Показаны последние полученные данные</p>{/if}
       <div data-stale={stale} class:stale>
@@ -105,12 +153,14 @@
         {/if}
       </div>
       <LeaseQueue lease={machine.lease} available={machine.availability === 'available'} {titleOf} {now} />
+      {#if runtime}<JobsSection {runtime} machineId={machine.id} onopen={(id) => { openJob = id; }} />{/if}
       <h2>Сессии на машине</h2>
       {#each sessions as session (session.id)}<a class="session-link" href={resolve('/c/[id]', { id: session.id })}>{session.title}{#if session.detail}<small>{session.detail.harness.title} · {modelLabel(session.detail.model)}</small>{/if}</a>{:else}<p class="note">На этой машине пока нет сессий</p>{/each}
       <div class="heartbeat"><p>Последний сигнал {heartbeat === null ? 'ещё не получен' : fmt.ago(heartbeat, now)}</p>
       {#if machine.availability_since}<p class="note">Подключение с {fmt.clock(Date.parse(machine.availability_since))} · {fmt.dayLabel(Date.parse(machine.availability_since), now)}</p>{/if}</div>
     {/if}
   </div></div>
+  {#if openJob && runtime}{#key openJob}<JobSheet {runtime} jobId={openJob} onclose={closeJob} />{/key}{/if}
 </main>
 <style>
   .heading { display: flex; flex-wrap: wrap; gap: var(--s4); justify-content: space-between; align-items: center; margin-top: var(--s8); }
@@ -140,5 +190,17 @@
   .watch .path { font-family: var(--font-mono); font-size: var(--fs-sm); overflow-wrap: anywhere; }
   .watch .meta, .watch .hint { color: var(--muted); font-size: var(--fs-meta); }
   .watch .hint { margin-block: var(--s2) 0; }
+  /* Выключатель — одна поверхность с подписью; зависит от владельца, а не от метрик. */
+  .remote { background: var(--surface); border-radius: var(--radius-card); padding: var(--s5) var(--s6); margin-block: var(--s4); }
+  .remote .note { margin: var(--s3) 0 0; color: var(--muted); font-size: var(--fs-meta); }
+  .remote .error { margin: var(--s3) 0 0; color: var(--danger); font-size: var(--fs-meta); }
+  .switch { position: relative; display: flex; align-items: center; gap: var(--s6); min-height: var(--target); cursor: pointer; }
+  .switch input { position: absolute; opacity: 0; width: var(--toggle-width); height: var(--toggle-height); margin: 0; cursor: pointer; }
+  .track { flex: none; width: var(--toggle-width); height: var(--toggle-height); border-radius: var(--radius-pill); background: var(--control-line); padding: var(--s2); pointer-events: none; white-space: nowrap; }
+  .track::after { content: ''; display: block; width: var(--toggle-knob); height: var(--toggle-knob); border-radius: var(--radius-round); background: var(--surface); }
+  .switch input:checked + .track { background: var(--accent); }
+  .switch input:checked + .track::after { margin-left: auto; background: var(--accent-ink); }
+  .switch input:focus-visible + .track { outline: var(--focus-width) solid var(--accent); outline-offset: var(--s1); }
+  .switch input:disabled + .track { opacity: 0.6; }
   .heartbeat { margin-block: var(--s6); padding: var(--s6); border-radius: var(--radius); background: var(--surface); font-size: var(--fs-sm); color: var(--muted); }
 </style>

@@ -31,8 +31,58 @@ export interface ProviderStatus {
   stale: boolean;
 }
 
+/** Учётная запись лимитов по умолчанию: ключ строки у неё остаётся прежним, просто провайдером. */
+export const OWNER_ACCOUNT = "owner";
+
+export function accountOf(item: { account?: string | null }): string {
+  return item.account || OWNER_ACCOUNT;
+}
+
+/** Ключ строки лимитов: пара (провайдер, учётная запись); у `owner` — сам провайдер. */
+export function limitKey(provider: string, account?: string | null): string {
+  return account && account !== OWNER_ACCOUNT ? `${provider}@${account}` : provider;
+}
+
+/** Порядок записей одного провайдера: `owner` первой, остальные по имени. */
+export function accountRank(item: { account?: string | null }): string {
+  const account = accountOf(item);
+  return account === OWNER_ACCOUNT ? "" : account;
+}
+
+/** Провайдеры с несколькими учётными записями: только их строки подписываются именем записи. */
+export function multiAccountProviders(items: { provider: string; account?: string | null }[]): Set<string> {
+  const accounts = new Map<string, Set<string>>();
+  for (const item of items) {
+    const known = accounts.get(item.provider) ?? new Set<string>();
+    known.add(accountOf(item));
+    accounts.set(item.provider, known);
+  }
+  return new Set([...accounts].filter(([, known]) => known.size > 1).map(([provider]) => provider));
+}
+
+/** «OpenCode · b-opencode» у провайдера с несколькими записями, иначе просто «OpenCode». */
+export function accountLabel(provider: string, account: string | null | undefined, multi: ReadonlySet<string>): string {
+  const name = providerLabel(provider);
+  return multi.has(provider) ? `${name} · ${account || OWNER_ACCOUNT}` : name;
+}
+
+/** Вход провайдера на одной машине учётной записи. */
+export interface MachineCredential {
+  machine_id: string;
+  machine_name: string;
+  expires_at: string | null;
+}
+
+/** Сбросы лимитов, о которых сообщила одна машина учётной записи. */
+export interface MachineCredits extends ProviderCredits {
+  machine_id: string;
+  machine_name: string;
+}
+
 export interface ProviderLimits {
   provider: string;
+  /** Учётная запись лимитов; нет поля или `owner` — запись по умолчанию. */
+  account?: string;
   five_hour?: LimitWindow | null;
   weekly?: LimitWindow | null;
   weekly_fable?: LimitWindow | null;
@@ -49,6 +99,10 @@ export interface ProviderLimits {
   credential_expires_at?: string | null;
   /** Сбросы лимитов Codex с самой свежей машины; `null`/нет — провайдер о них молчит. */
   credits?: ProviderCredits | null;
+  /** Конец входа по машинам: у каждой машины он свой и в одну дату не сливается. */
+  machine_credentials?: MachineCredential[];
+  /** Сбросы лимитов по машинам. */
+  machine_credits?: MachineCredits[];
 }
 
 /** Сброс лимитов, подаренный провайдером: заголовок и срок, когда он сгорит. */
@@ -81,13 +135,64 @@ export function creditTitle(title: string | null | undefined): string {
 export interface CreditEntry {
   title: string;
   expiresAt: number | null;
+  /** Машина, чьи это сбросы, когда у учётной записи их несколько; иначе нет поля. */
+  machine?: string;
 }
 
-export function creditEntries(credits: ProviderCredits | null | undefined): CreditEntry[] {
+export function creditEntries(credits: ProviderCredits | null | undefined, machine?: string): CreditEntry[] {
   if (!credits) return [];
   return credits.resets.map((credit) => {
     const at = credit.expires_at ? Date.parse(credit.expires_at) : Number.NaN;
-    return { title: creditTitle(credit.title), expiresAt: Number.isFinite(at) ? at : null };
+    return {
+      title: creditTitle(credit.title),
+      expiresAt: Number.isFinite(at) ? at : null,
+      ...(machine ? { machine } : {}),
+    };
+  });
+}
+
+/** Подпись с машиной: «Claude (machine-b)». */
+function onMachine(label: string, machine: string | undefined): string {
+  return machine ? `${label} (${machine})` : label;
+}
+
+/** Сбросы учётной записи по машинам; одна машина (или сводное поле старого хаба) — без имени машины. */
+function creditSources(item: ProviderLimits): { machine?: string; credits: ProviderCredits }[] {
+  const perMachine = item.machine_credits ?? [];
+  if (perMachine.length === 0) return item.credits ? [{ credits: item.credits }] : [];
+  const named = perMachine.length > 1;
+  return perMachine.map((credits) => ({ credits, ...(named ? { machine: credits.machine_name } : {}) }));
+}
+
+/** Каждый сброс учётной записи со сроком; у нескольких машин — с именем машины. */
+export function accountCreditEntries(item: ProviderLimits): CreditEntry[] {
+  return creditSources(item).flatMap((source) => creditEntries(source.credits, source.machine));
+}
+
+/** Строки о сбросах: по одной на машину, у одной машины — одна строка без её имени. */
+export function accountCreditLines(item: ProviderLimits, label: string, now: number): CreditsLine[] {
+  return creditSources(item).flatMap((source) => {
+    const line = creditsLine(item.provider, source.credits, now, onMachine(label, source.machine));
+    return line ? [line] : [];
+  });
+}
+
+/** Строки о конце входа: по одной на машину с известной датой; у одной машины без имени машины. */
+export function accountCredentialLines(item: ProviderLimits, label: string, now: number): CredentialLine[] {
+  const perMachine = item.machine_credentials ?? [];
+  if (perMachine.length === 0) {
+    const line = credentialLine(item.provider, item.credential_expires_at, now, label);
+    return line ? [line] : [];
+  }
+  const named = perMachine.length > 1;
+  return perMachine.flatMap((credential) => {
+    const line = credentialLine(
+      item.provider,
+      credential.expires_at,
+      now,
+      onMachine(label, named ? credential.machine_name : undefined),
+    );
+    return line ? [line] : [];
   });
 }
 
@@ -113,12 +218,13 @@ export function creditsLine(
   provider: string,
   credits: ProviderCredits | null | undefined,
   now: number,
+  name?: string,
 ): CreditsLine | null {
   if (provider !== "codex" || !credits) return null;
   const count = credits.reset_count ?? 0;
   if (count <= 0) return null;
   const nearest = nearestCredit(credits);
-  const label = providerLabel(provider);
+  const label = name ?? providerLabel(provider);
   if (nearest === null) return { text: `${label}: сбросы лимитов ${count}`, tone: "normal" };
   const burning = nearest - now <= CREDITS_WARN_MS;
   return {
@@ -144,11 +250,12 @@ export function credentialLine(
   provider: string,
   expiresAt: string | null | undefined,
   now: number,
+  name?: string,
 ): CredentialLine | null {
   if (!expiresAt) return null;
   const at = Date.parse(expiresAt);
   if (!Number.isFinite(at)) return null;
-  const label = providerLabel(provider);
+  const label = name ?? providerLabel(provider);
   if (at < now) return { text: `Вход ${label}, вероятно, закончился — войдите заново`, tone: "danger" };
   if (at - now <= CREDENTIAL_WARN_MS)
     return { text: `Вход ${label} заканчивается ${fmt.shortDate(at)} — войдите заново`, tone: "warning" };

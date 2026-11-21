@@ -549,6 +549,7 @@ mod manager_tests {
                 canterlot_mcp: String::new(),
                 prompt_suggestions: false,
                 disable_claude_auto_memory: false,
+                remote: false,
             }),
         )
     }
@@ -1041,6 +1042,41 @@ mod manager_tests {
             let short = deadline_for(tool, &json!({"timeout_seconds": 300}));
             assert_eq!(short.rpc, AGENT_CALL_RPC_TIMEOUT, "{tool}");
             assert_eq!(short.supervisor, AGENT_CALL_TIMEOUT, "{tool}");
+        }
+    }
+
+    /// `job_run` держит вызов `wait_seconds` плюс 15 с: ждущий хаба всегда раньше воркера
+    /// заказчика, иначе итог ушёл бы в оборванный вызов.
+    #[test]
+    fn job_run_deadline_is_the_wait_plus_fifteen_seconds() {
+        use canterlot_worker::exec::{AGENT_CALL_RPC_TIMEOUT, deadline_for};
+        use serde_json::json;
+
+        let job = |arguments| deadline_for("job.run", &arguments);
+        for (arguments, seconds) in [
+            (json!({"wait_seconds": 60}), 60),
+            (json!({"wait_seconds": 7}), 7),
+            (json!({"wait_seconds": 0}), 0),
+            (json!({}), 20),
+            // Ненормальное значение хаб отвергнет сам; срок не растёт выше предела.
+            (json!({"wait_seconds": 9999}), 60),
+            (json!({"wait_seconds": "abc"}), 20),
+        ] {
+            let deadlines = job(arguments.clone());
+            assert_eq!(
+                deadlines.rpc,
+                Duration::from_secs(seconds + 15),
+                "{arguments}"
+            );
+            assert!(deadlines.supervisor > deadlines.rpc, "{arguments}");
+        }
+        // Остальные инструменты задач отвечают быстро.
+        for tool in ["job.status", "job.log", "job.cancel", "jobs.list"] {
+            assert_eq!(
+                deadline_for(tool, &json!({"wait_seconds": 60})).rpc,
+                AGENT_CALL_RPC_TIMEOUT,
+                "{tool}"
+            );
         }
     }
 

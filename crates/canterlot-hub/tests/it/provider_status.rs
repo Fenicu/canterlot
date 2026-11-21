@@ -271,7 +271,7 @@ async fn status_survives_a_restart_and_reaches_the_limits_api(pool: PgPool) {
     for provider in ["claude", "codex"] {
         sqlx::query(
             "insert into provider_limits(provider,weekly_used_permille,weekly_resets_at,weekly_observed_at)
-             values($1,100,$2,$3) on conflict(provider) do update set weekly_used_permille=100,
+             values($1,100,$2,$3) on conflict(provider,account) do update set weekly_used_permille=100,
                weekly_resets_at=$2,weekly_observed_at=$3",
         )
         .bind(provider)
@@ -432,7 +432,7 @@ async fn disabled_polling_clears_a_stored_outage_for_every_reader(pool: PgPool) 
         .unwrap();
     assert_eq!(stored.level, ProviderStatusLevel::Unknown);
     assert!(!stored.stale && stored.components.is_empty() && stored.incidents.is_empty());
-    let routed = session_tools::routing::limits_view(&mut conn)
+    let routed = session_tools::routing::limits_view(&mut conn, Uuid::nil())
         .await
         .unwrap();
     assert_eq!(

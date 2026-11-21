@@ -42,6 +42,7 @@ async fn observe(f: &Fixture, used: u16, resets_at: DateTime<Utc>, now: DateTime
         f.seed.owner_id,
         &Observation {
             provider: "claude".into(),
+            account: "owner".into(),
             window: Window::Weekly,
             used_permille: used,
             resets_at: Some(resets_at),
@@ -215,7 +216,7 @@ async fn reserve_change_and_ingest_lock_providers_in_one_order(pool: PgPool) {
         .await
         .unwrap();
     for provider in ["claude", "codex"] {
-        sqlx::query("insert into provider_limits(provider,weekly_used_permille,weekly_resets_at,weekly_observed_at,weekly_reserve_active) values($1,960,$2,$3,true) on conflict(provider) do update set weekly_used_permille=960,weekly_resets_at=$2,weekly_observed_at=$3,weekly_reserve_active=true")
+        sqlx::query("insert into provider_limits(provider,weekly_used_permille,weekly_resets_at,weekly_observed_at,weekly_reserve_active) values($1,960,$2,$3,true) on conflict(provider,account) do update set weekly_used_permille=960,weekly_resets_at=$2,weekly_observed_at=$3,weekly_reserve_active=true")
             .bind(provider)
             .bind(weekly_reset)
             .bind(now)

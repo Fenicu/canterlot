@@ -533,6 +533,7 @@ async fn background_services_stop_on_shutdown_and_release_their_locks(pool: PgPo
         presence: Default::default(),
         machines: Default::default(),
         session_tools: Default::default(),
+        jobs: Default::default(),
         nudge_enabled: true,
         lease_warn_hold: std::time::Duration::from_secs(90 * 60),
         multi_process: false,

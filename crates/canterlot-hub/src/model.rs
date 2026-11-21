@@ -114,6 +114,16 @@ impl FromStr for ExecutionState {
     }
 }
 
+/// Учётная запись лимитов по умолчанию. В JSON удержаний и пауз она не пишется:
+/// хранимые до появления учётных записей значения читаются как `owner` и пишутся так же.
+pub fn owner_account() -> String {
+    canterlot_proto::limits::OWNER_ACCOUNT.to_owned()
+}
+
+pub fn is_owner_account(account: &String) -> bool {
+    account == canterlot_proto::limits::OWNER_ACCOUNT
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(tag = "reason", rename_all = "snake_case")]
 pub enum PauseReason {
@@ -123,6 +133,9 @@ pub enum PauseReason {
     LimitReached {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider: Option<String>,
+        /// Учётная запись провайдера; для `owner` ключа в JSON нет.
+        #[serde(default = "owner_account", skip_serializing_if = "is_owner_account")]
+        account: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         window: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -177,6 +190,7 @@ impl FromStr for PauseReason {
             "process_exited" => Ok(Self::ProcessExited),
             "limit_reached" => Ok(Self::LimitReached {
                 provider: None,
+                account: owner_account(),
                 window: None,
                 resets_at: None,
             }),
@@ -210,12 +224,18 @@ pub enum HoldReason {
     },
     QuotaExhausted {
         provider: String,
+        /// Учётная запись провайдера; для `owner` ключа в JSON нет.
+        #[serde(default = "owner_account", skip_serializing_if = "is_owner_account")]
+        account: String,
         window: String,
         #[serde(with = "utc_time")]
         wake_at: DateTime<Utc>,
     },
     WeeklyReserve {
         provider: String,
+        /// Учётная запись провайдера; для `owner` ключа в JSON нет.
+        #[serde(default = "owner_account", skip_serializing_if = "is_owner_account")]
+        account: String,
         #[serde(default, with = "optional_utc_time")]
         resets_at: Option<DateTime<Utc>>,
     },
@@ -224,6 +244,14 @@ pub enum HoldReason {
 }
 
 impl HoldReason {
+    /// Оба удержания — недельный резерв одной и той же учётной записи одного провайдера.
+    pub fn same_reserve(&self, other: &HoldReason) -> bool {
+        matches!((self, other), (
+            Self::WeeklyReserve { provider: a, account: x, .. },
+            Self::WeeklyReserve { provider: b, account: y, .. },
+        ) if a == b && x == y)
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::RunInProgress => "run_in_progress",
@@ -288,12 +316,18 @@ pub enum HoldView {
     },
     QuotaExhausted {
         provider: String,
+        /// Учётная запись провайдера; для `owner` ключа в JSON нет.
+        #[serde(default = "owner_account", skip_serializing_if = "is_owner_account")]
+        account: String,
         window: String,
         #[serde(with = "utc_time")]
         wake_at: DateTime<Utc>,
     },
     WeeklyReserve {
         provider: String,
+        /// Учётная запись провайдера; для `owner` ключа в JSON нет.
+        #[serde(default = "owner_account", skip_serializing_if = "is_owner_account")]
+        account: String,
         #[serde(default, with = "optional_utc_time")]
         resets_at: Option<DateTime<Utc>>,
     },
@@ -324,18 +358,22 @@ impl From<HoldReason> for HoldView {
             },
             HoldReason::QuotaExhausted {
                 provider,
+                account,
                 window,
                 wake_at,
             } => Self::QuotaExhausted {
                 provider,
+                account,
                 window,
                 wake_at,
             },
             HoldReason::WeeklyReserve {
                 provider,
+                account,
                 resets_at,
             } => Self::WeeklyReserve {
                 provider,
+                account,
                 resets_at,
             },
             HoldReason::SideParentBusy => Self::SideParentBusy,
@@ -404,6 +442,8 @@ pub enum CommandKind {
     RemoveWorktree,
     ResolveOwnerLost,
     RevokeSecret,
+    StartInPlaceJob,
+    CancelInPlaceJob,
 }
 
 impl CommandKind {
@@ -420,6 +460,8 @@ impl CommandKind {
             Self::RemoveWorktree => "remove_worktree",
             Self::ResolveOwnerLost => "resolve_owner_lost",
             Self::RevokeSecret => "revoke_secret",
+            Self::StartInPlaceJob => "start_inplace_job",
+            Self::CancelInPlaceJob => "cancel_inplace_job",
         }
     }
 }
@@ -440,6 +482,8 @@ impl FromStr for CommandKind {
             "remove_worktree" => Ok(Self::RemoveWorktree),
             "resolve_owner_lost" => Ok(Self::ResolveOwnerLost),
             "revoke_secret" => Ok(Self::RevokeSecret),
+            "start_inplace_job" => Ok(Self::StartInPlaceJob),
+            "cancel_inplace_job" => Ok(Self::CancelInPlaceJob),
             _ => Err(ModelError::UnknownValue {
                 kind: "command kind",
                 value: value.into(),

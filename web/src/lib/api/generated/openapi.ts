@@ -1488,6 +1488,70 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/jobs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get__api_v1_jobs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/jobs/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get__api_v1_jobs__id_"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/jobs/{id}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["post__api_v1_jobs__id__cancel"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/jobs/{id}/log": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get__api_v1_jobs__id__log"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/limit-settings": {
         parameters: {
             query?: never;
@@ -1625,6 +1689,27 @@ export interface paths {
         };
         get: operations["get__api_v1_machines__id__owner_instructions_file"];
         put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/machines/{id}/remote-work": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Меняет выключатель только владелец и только здесь: ни инструмент агента, ни
+         *     `settings_propose_*` до него не доходят. Строка машины берётся `for update`, и запуск
+         *     делегата, читающий её `for share`, после выключения новый удалённый запуск не проведёт.
+         */
+        put: operations["put__api_v1_machines__id__remote_work"];
         post?: never;
         delete?: never;
         options?: never;
@@ -2329,6 +2414,8 @@ export interface components {
         };
         /** @description То, что видят PWA и HTTP: без заметки и без внутренних отметок. */
         AlarmView: {
+            /** @description Учётная запись провайдера, закреплённая при взводе; только у `limit_reset`. */
+            account?: string | null;
             /** Format: uuid */
             alarm_id: string;
             batch: boolean;
@@ -3269,6 +3356,8 @@ export interface components {
             title: string;
         };
         HarnessView: {
+            /** @description Учётная запись лимитов харнесса (`account` в worker.toml); `owner` по умолчанию. */
+            account: string;
             /** @description Команды и навыки, которые CLI может выполнить; пусто без `slash_catalog_v1`. */
             catalog: components["schemas"]["CatalogView"][];
             /** @description Поддерживает ли харнесс цели. */
@@ -3367,6 +3456,8 @@ export interface components {
             /** @enum {string} */
             reason: "attachments_pending";
         } | {
+            /** @description Учётная запись провайдера; для `owner` ключа в JSON нет. */
+            account?: string;
             provider: string;
             /** @enum {string} */
             reason: "quota_exhausted";
@@ -3374,6 +3465,8 @@ export interface components {
             wake_at: string;
             window: string;
         } | {
+            /** @description Учётная запись провайдера; для `owner` ключа в JSON нет. */
+            account?: string;
             provider: string;
             /** @enum {string} */
             reason: "weekly_reserve";
@@ -3631,8 +3724,57 @@ export interface components {
             revision: number;
             state: string;
         };
+        /** @description Задача и последний хвост её вывода. */
+        JobDetail: {
+            job: components["schemas"]["JobView"];
+            /** @description Хвост на хабе: живой, пока идёт, и итоговый после конца (не больше 64 КиБ). */
+            output_tail: string;
+        };
+        JobList: {
+            items: components["schemas"]["JobView"][];
+        };
         /** @enum {string} */
         JobState: "pending" | "fired" | "cancelled" | "failed";
+        /** @description Задача для клиентов: без вывода (его отдают отдельные чтения). */
+        JobView: {
+            cancel_requested: boolean;
+            /** Format: uuid */
+            conversation_id?: string | null;
+            conversation_title?: string | null;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: int64 */
+            duration_ms?: number | null;
+            end_reason?: string | null;
+            /** Format: int32 */
+            exit_code?: number | null;
+            /** Format: date-time */
+            finished_at?: string | null;
+            has_log: boolean;
+            /** Format: uuid */
+            id: string;
+            late_report?: Record<string, never> | null;
+            lease: string;
+            /** Format: uuid */
+            machine_id: string;
+            machine_name: string;
+            /**
+             * @description Машина не на связи, а задача не закончена; в событии всегда `false`: связь машины
+             *     приходит событиями машин.
+             */
+            machine_offline: boolean;
+            /** Format: int64 */
+            output_bytes: number;
+            shell: string;
+            /** Format: date-time */
+            started_at?: string | null;
+            state: string;
+            /** Format: int32 */
+            timeout_minutes: number;
+            title?: string | null;
+            truncated: boolean;
+            workdir: string;
+        };
         /** @description Страница ленты одного субагента: корень (вызов) и его потомки по любой глубине. */
         LanePage: {
             /** @description Потомки корня по возрастанию `created_seq`; сам корень сюда не входит. */
@@ -3824,6 +3966,38 @@ export interface components {
             outcome?: string | null;
             state: string;
         };
+        /** @description Кусок журнала для инструмента и HTTP. */
+        LogSlice: {
+            eof: boolean;
+            /** Format: int64 */
+            next_offset: number;
+            /** @description `full log expired`: полный журнал убран по сроку хранения, остался хвост. */
+            note?: string | null;
+            /** Format: int64 */
+            offset: number;
+            /** @description `tail` — живой или итоговый хвост на хабе, `log` — полный журнал после конца. */
+            source: string;
+            text: string;
+            /**
+             * Format: int64
+             * @description Размер журнала, когда он известен.
+             */
+            total_bytes?: number | null;
+        };
+        /** @description Вход провайдера на одной машине учётной записи. */
+        MachineCredentialView: {
+            /** @description `null` — дата неизвестна (API-ключ, старый CLI). */
+            expires_at?: string | null;
+            /** Format: uuid */
+            machine_id: string;
+            machine_name: string;
+        };
+        /** @description Сбросы лимитов, о которых сообщила одна машина учётной записи. */
+        MachineCreditsView: components["schemas"]["CreditsView"] & {
+            /** Format: uuid */
+            machine_id: string;
+            machine_name: string;
+        };
         /**
          * @description Запас машины для предпросмотра: минимум свободного диска, нагрузка на ядро,
          *     свободная память и свежесть метрик.
@@ -3845,6 +4019,8 @@ export interface components {
             name: string;
         };
         MachineView: {
+            /** @description Принимает ли машина делегатов и команды сессий других машин; включает владелец. */
+            accepts_remote_work: boolean;
             allowed_roots: string[];
             availability: string;
             availability_since?: string | null;
@@ -4341,6 +4517,8 @@ export interface components {
             /** @enum {string} */
             reason: "process_exited";
         } | {
+            /** @description Учётная запись провайдера; для `owner` ключа в JSON нет. */
+            account?: string;
             provider?: string | null;
             /** @enum {string} */
             reason: "limit_reached";
@@ -4556,6 +4734,7 @@ export interface components {
             url?: string | null;
         };
         ProviderSeries: {
+            account: string;
             five_hour: components["schemas"]["Point"][];
             provider: string;
             weekly: components["schemas"]["Point"][];
@@ -4611,8 +4790,14 @@ export interface components {
         };
         ProviderView: {
             /**
-             * @description Самый ранний конец входа провайдера на машинах владельца; `null` — дата неизвестна
-             *     (API-ключ, старый CLI) или у провайдера такого входа нет.
+             * @description Учётная запись провайдера (`account` харнесса в worker.toml); `owner` по умолчанию.
+             *     У провайдера на нескольких подписках строк по одной на каждую.
+             */
+            account: string;
+            /**
+             * @description Самый ранний конец входа провайдера на машинах этой учётной записи; `null` — дата
+             *     неизвестна (API-ключ, старый CLI) или у провайдера такого входа нет. Сводное поле для
+             *     клиентов, которые ещё не читают `machine_credentials`.
              */
             credential_expires_at?: string | null;
             credits?: components["schemas"]["CreditsView"] | null;
@@ -4621,6 +4806,10 @@ export interface components {
             five_hour?: components["schemas"]["WindowView"] | null;
             /** @description У провайдера нет пятичасового окна (например, план без этого лимита): счётчик скрывается. */
             five_hour_absent: boolean;
+            /** @description Вход по машинам: у каждой машины он свой и в одну дату не сливается. */
+            machine_credentials: components["schemas"]["MachineCredentialView"][];
+            /** @description Сбросы лимитов по машинам. */
+            machine_credits: components["schemas"]["MachineCreditsView"][];
             monthly?: components["schemas"]["WindowView"] | null;
             provider: string;
             status?: components["schemas"]["ProviderStatusView"] | null;
@@ -4754,8 +4943,14 @@ export interface components {
         RefreshView: {
             /** @description Провайдеры, чьим машинам отправлена просьба об опросе. */
             requested: string[];
+            /** @description Те же просьбы по учётным записям: у провайдера их может быть несколько. */
+            requested_accounts: components["schemas"]["RequestedAccount"][];
             /** Format: int64 */
             retry_after_secs: number;
+        };
+        /** @description Выключатель удалённой работы: принимает ли машина делегатов и команды других машин. */
+        RemoteWorkBody: {
+            accepts_remote_work: boolean;
         };
         RenamePasskey: {
             /** @description 1..64 символа. */
@@ -4810,6 +5005,10 @@ export interface components {
             updated_at: string;
             /** Format: uuid */
             winner_decision_id?: string | null;
+        };
+        RequestedAccount: {
+            account: string;
+            provider: string;
         };
         /** @description Сброс лимитов, подаренный провайдером (сбросы Codex): когда сгорит. */
         ResetView: {
@@ -5372,7 +5571,7 @@ export interface components {
          *     и состояниями элемента очереди.
          * @enum {string}
          */
-        SpawnRefusalCode: "not_in_whitelist" | "permission_mode_too_wide" | "machine_unavailable" | "capability_missing" | "no_executor_available" | "invalid_arguments" | "harness_unknown" | "model_unknown" | "effort_not_allowed" | "workdir_not_allowed" | "domain_mismatch" | "profile_unknown" | "conversation_closed" | "queue_full" | "rate_limited" | "machine_busy" | "parent_stopped" | "parent_archived" | "cancelled" | "expired" | "job_failed" | "internal_error" | "unknown";
+        SpawnRefusalCode: "not_in_whitelist" | "permission_mode_too_wide" | "machine_unavailable" | "capability_missing" | "no_executor_available" | "invalid_arguments" | "harness_unknown" | "model_unknown" | "effort_not_allowed" | "workdir_not_allowed" | "domain_mismatch" | "remote_work_disabled" | "profile_unknown" | "conversation_closed" | "queue_full" | "rate_limited" | "machine_busy" | "parent_stopped" | "parent_archived" | "cancelled" | "expired" | "job_failed" | "internal_error" | "unknown";
         SpeedStats: {
             /**
              * Format: int64
@@ -5585,6 +5784,8 @@ export interface components {
             upload_chunk_bytes: number;
         };
         UsageDay: {
+            /** @description Учётная запись провайдера, на которой шли ходы. */
+            account: string;
             agent: string;
             /** Format: int64 */
             cache_read_tokens: number;
@@ -5854,7 +6055,12 @@ export interface operations {
     get__api_v1_attachments__id__content: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /** @description Один байтовый диапазон: bytes=a-b, bytes=a- или bytes=-n; несколько диапазонов и неверная запись игнорируются */
+                Range?: string | null;
+                /** @description Сильный ETag: при другом ETag диапазон игнорируется и отдаётся весь файл */
+                "If-Range"?: string | null;
+            };
             path: {
                 id: string;
             };
@@ -5862,9 +6068,26 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Содержимое готового вложения: проверенная картинка показывается на месте, остальное скачивается; имя файла в Content-Disposition */
+            /** @description Содержимое готового вложения: проверенная картинка показывается на месте, ролик (mp4, quicktime, webm с верной сигнатурой) отдаётся своим типом для плеера, остальное скачивается; имя файла в Content-Disposition */
             200: {
                 headers: {
+                    /** @description Всегда bytes */
+                    "Accept-Ranges"?: string;
+                    /** @description SHA-256 содержимого в кавычках */
+                    ETag?: string;
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": components["schemas"]["BinaryContent"];
+                };
+            };
+            /** @description Запрошенный диапазон; те же заголовки, что у полного ответа */
+            206: {
+                headers: {
+                    /** @description bytes первый-последний/размер */
+                    "Content-Range"?: string;
                     /** @description Часы хаба: целые миллисекунды Unix */
                     "X-Server-Time-Ms"?: number;
                     [name: string]: unknown;
@@ -5876,6 +6099,17 @@ export interface operations {
             /** @description Содержимое не изменилось: отдаётся при совпадении If-None-Match */
             304: {
                 headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Диапазон целиком за пределами файла */
+            416: {
+                headers: {
+                    /** @description bytes *\/размер */
+                    "Content-Range"?: string;
                     /** @description Часы хаба: целые миллисекунды Unix */
                     "X-Server-Time-Ms"?: number;
                     [name: string]: unknown;
@@ -10815,6 +11049,211 @@ export interface operations {
             };
         };
     };
+    get__api_v1_jobs: {
+        parameters: {
+            query?: {
+                /** @description Машина (id). */
+                machine?: string;
+                /**
+                 * @description Состояние: `queued`, `dispatched`, `waiting_lease`, `running`, `succeeded`, `failed`,
+                 *     `timed_out`, `canceled` или `lost`.
+                 */
+                state?: string;
+                /** @description Разговор-заказчик. */
+                conversation?: string;
+                /** @description Не больше 200, по умолчанию 50; новые первыми. */
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Задачи на месте, новые первыми */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JobList"];
+                };
+            };
+            /** @description Неизвестное состояние или предел */
+            400: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get__api_v1_jobs__id_: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Задача */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Задача и хвост вывода */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JobDetail"];
+                };
+            };
+            /** @description Задачи нет у владельца */
+            404: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    post__api_v1_jobs__id__cancel: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Ключ операции */
+                "Idempotency-Key": string;
+            };
+            path: {
+                /** @description Задача */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Отмена принята: очередь закрыта сразу, идущую задачу воркер подтвердит; потерянной команда уйдёт, когда машина вернётся */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JobView"];
+                };
+            };
+            /** @description Задачи нет у владельца */
+            404: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get__api_v1_jobs__id__log: {
+        parameters: {
+            query?: {
+                /** @description Позиция в выводе; без неё — последние `limit` байт хвоста. */
+                offset?: number;
+                /** @description Не больше 65536, по умолчанию 16384. */
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Задача */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Кусок журнала: хвост хаба, пока задача идёт, и полный журнал после конца */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LogSlice"];
+                };
+            };
+            /** @description Задачи нет у владельца */
+            404: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
     get__api_v1_limit_settings: {
         parameters: {
             query?: never;
@@ -10924,6 +11363,8 @@ export interface operations {
         parameters: {
             query?: {
                 provider?: string;
+                /** @description Только эта учётная запись провайдера; без параметра — все. */
+                account?: string;
                 from?: string;
                 to?: string;
                 tz?: string;
@@ -11210,6 +11651,56 @@ export interface operations {
             };
         };
     };
+    put__api_v1_machines__id__remote_work: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RemoteWorkBody"];
+            };
+        };
+        responses: {
+            /** @description Выключатель удалённой работы сохранён */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RemoteWorkBody"];
+                };
+            };
+            /** @description Машины нет у владельца */
+            404: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
     get__api_v1_machines__id__workdirs_recent: {
         parameters: {
             query?: never;
@@ -11329,7 +11820,12 @@ export interface operations {
     get__api_v1_media__id_: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                /** @description Один байтовый диапазон: bytes=a-b, bytes=a- или bytes=-n; несколько диапазонов и неверная запись игнорируются */
+                Range?: string | null;
+                /** @description Сильный ETag: при другом ETag диапазон игнорируется и отдаётся весь файл */
+                "If-Range"?: string | null;
+            };
             path: {
                 id: string;
             };
@@ -11340,8 +11836,26 @@ export interface operations {
             /** @description Картинка, на которую смотрел агент: тип из проверенного списка, показ на месте, ETag равен SHA-256 */
             200: {
                 headers: {
+                    /** @description Всегда bytes */
+                    "Accept-Ranges"?: string;
                     /** @description SHA-256 содержимого в кавычках */
                     ETag?: string;
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "image/png": components["schemas"]["BinaryContent"];
+                    "image/jpeg": components["schemas"]["BinaryContent"];
+                    "image/webp": components["schemas"]["BinaryContent"];
+                    "image/gif": components["schemas"]["BinaryContent"];
+                };
+            };
+            /** @description Запрошенный диапазон; те же заголовки, что у полного ответа */
+            206: {
+                headers: {
+                    /** @description bytes первый-последний/размер */
+                    "Content-Range"?: string;
                     /** @description Часы хаба: целые миллисекунды Unix */
                     "X-Server-Time-Ms"?: number;
                     [name: string]: unknown;
@@ -11356,6 +11870,17 @@ export interface operations {
             /** @description Содержимое не изменилось: отдаётся при совпадении If-None-Match */
             304: {
                 headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Диапазон целиком за пределами файла */
+            416: {
+                headers: {
+                    /** @description bytes *\/размер */
+                    "Content-Range"?: string;
                     /** @description Часы хаба: целые миллисекунды Unix */
                     "X-Server-Time-Ms"?: number;
                     [name: string]: unknown;

@@ -93,7 +93,27 @@ pub(super) async fn put(
     else {
         return Err(Status::invalid_argument("media_header_required"));
     };
-    let header = media::parse_header(&raw).map_err(|error| status(&error))?;
+    // Журнал задачи на месте (`jobs_inplace_v1`): свой заголовок и своя привязка.
+    let job_log = if raw.job_id.is_empty() {
+        None
+    } else {
+        if !hub
+            .registry
+            .has_capability(machine, crate::session::CAPABILITY_JOBS_INPLACE_V1)
+        {
+            return Err(Status::invalid_argument("capability_missing"));
+        }
+        Some(crate::inplace_jobs::logs::parse_header(&raw).map_err(|error| status(&error))?)
+    };
+    let header = match &job_log {
+        Some(_) => None,
+        None => Some(media::parse_header(&raw).map_err(|error| status(&error))?),
+    };
+    let media_id = job_log
+        .as_ref()
+        .map(|log| log.id)
+        .or(header.as_ref().map(|header| header.id))
+        .expect("one header is parsed");
     let _permit = hub.media_slots.acquire(machine)?;
     let blobs = hub
         .blobs
@@ -133,18 +153,24 @@ pub(super) async fn put(
     let result = tokio::select! {
         biased;
         _ = hub.shutdown.cancelled() => return Err(Status::unavailable("hub_shutdown")),
-        result = media::put(&hub.pool, &*blobs, machine, &header, hub.media_quota_bytes, body) => result,
+        result = async {
+            match (&job_log, &header) {
+                (Some(log), _) => crate::inplace_jobs::logs::put(&hub.pool, &*blobs, machine, log, body).await,
+                (None, Some(header)) => media::put(&hub.pool, &*blobs, machine, header, hub.media_quota_bytes, body).await,
+                (None, None) => unreachable!("one header is parsed"),
+            }
+        } => result,
     };
     match result {
         Ok(()) => Ok(Response::new(MediaStored {
-            media_id: header.id.to_string(),
+            media_id: media_id.to_string(),
         })),
         Err(MediaError::Interrupted) if invalid.load(Ordering::Relaxed) => {
             Err(Status::invalid_argument("media_invalid_frame"))
         }
         Err(error) => {
             if matches!(error, MediaError::Db(_) | MediaError::Blob(_)) {
-                tracing::warn!(kind = error.kind(), machine_id = %machine, media_id = %header.id, "media upload failed");
+                tracing::warn!(kind = error.kind(), machine_id = %machine, media_id = %media_id, "media upload failed");
             }
             Err(status(&error))
         }
