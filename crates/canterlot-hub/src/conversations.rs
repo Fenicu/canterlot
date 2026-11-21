@@ -72,6 +72,9 @@ pub enum CreateError {
     MachineNotFound,
     #[error("machine unavailable")]
     MachineUnavailable,
+    /// Машина — раннер: сессии на ней не начинаются ни у владельца, ни у делегата.
+    #[error("machine is a runner")]
+    MachineIsRunner,
     #[error("capability missing")]
     CapabilityMissing,
     #[error("harness unknown")]
@@ -1377,6 +1380,10 @@ pub(crate) async fn create_in_tx(
         .fetch_optional(&mut *conn)
         .await?
         .ok_or(CreateError::MachineNotFound)?;
+    // Раньше всех остальных проверок: каталог и возможности раннера не имеют значения.
+    if m.try_get::<String, _>("role")? == crate::machines::ROLE_RUNNER {
+        return Err(CreateError::MachineIsRunner);
+    }
     if !m
         .try_get::<Vec<String>, _>("capabilities")?
         .iter()

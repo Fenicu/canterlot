@@ -1,0 +1,523 @@
+//! Раннеры на потоке управления: возможность `runners_v1`, допуск несущей, токен раннера,
+//! наблюдения и список раннеров. Настоящий gRPC-сервер хаба и клиент воркера.
+
+use std::{net::SocketAddr, time::Duration};
+
+use canterlot_hub::{
+    config::HubTimers,
+    grpc::{self, HubGrpc, PROTOCOL_VERSION},
+    installation::{self, Installation},
+    machines::{self, NewMachine, RunnerSpec},
+    session::Registry,
+    testkit::tls::{TestPki, test_pki},
+};
+use canterlot_proto::{limits::MAX_MESSAGE_BYTES, worker::v1::*};
+use sqlx::PgPool;
+use tokio::{net::TcpListener, sync::mpsc, task::JoinHandle, time::timeout};
+use tokio_stream::wrappers::ReceiverStream;
+use tonic::{
+    Request, Streaming,
+    transport::{Certificate, Channel, ClientTlsConfig, Endpoint},
+};
+use uuid::Uuid;
+
+const WAIT: Duration = Duration::from_secs(15);
+
+type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+struct Host {
+    address: SocketAddr,
+    pki: TestPki,
+    installation: Installation,
+    pool: PgPool,
+    task: JoinHandle<Result<(), tonic::transport::Error>>,
+    carrier: NewMachine,
+    runner: NewMachine,
+    plain: NewMachine,
+}
+
+impl Host {
+    async fn start(pool: PgPool) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let installation = installation::init(&pool, &dir.path().join("manifest"))
+            .await
+            .unwrap();
+        let owner = installation.owner_id;
+        let carrier = machines::add(&pool, owner, "carrier").await.unwrap();
+        machines::set_carrier(&pool, carrier.machine_id, true)
+            .await
+            .unwrap();
+        let runner = machines::add_runner(
+            &pool,
+            owner,
+            "runner-a",
+            &RunnerSpec {
+                parent: carrier.machine_id,
+                root_dir: "/srv/runner".into(),
+                rank: 20,
+                labels: vec!["build-host".into()],
+            },
+        )
+        .await
+        .unwrap();
+        let plain = machines::add(&pool, owner, "plain").await.unwrap();
+        let timers = HubTimers {
+            handshake: Duration::from_secs(5),
+            dispatch_sweep: Duration::from_millis(100),
+            ..HubTimers::default()
+        };
+        let registry = Registry::new(timers.clone());
+        let state = HubGrpc::new(pool.clone(), registry, installation, timers);
+        let pki = test_pki();
+        let (cert, key) = (pki.server_cert_pem.clone(), pki.server_key_pem.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            grpc::serve_with_listener(state, listener, &cert, &key, std::future::pending()).await
+        });
+        Self {
+            address,
+            pki,
+            installation,
+            pool,
+            task,
+            carrier,
+            runner,
+            plain,
+        }
+    }
+
+    async fn channel(&self) -> Channel {
+        Endpoint::from_shared(format!("https://{}", self.address))
+            .unwrap()
+            .tls_config(
+                ClientTlsConfig::new()
+                    .ca_certificate(Certificate::from_pem(&self.pki.ca_pem))
+                    .domain_name("localhost"),
+            )
+            .unwrap()
+            .connect_timeout(WAIT)
+            .connect()
+            .await
+            .unwrap()
+    }
+
+    /// Подключение воркера машины с токеном: рукопожатие пройдено, поток готов.
+    async fn connect(&self, machine: &NewMachine, optional: &[&str]) -> Worker {
+        let (tx, rx) = mpsc::channel(8);
+        let hello = Hello {
+            installation_id: self.installation.installation_id.to_string(),
+            machine_id: machine.machine_id.to_string(),
+            restore_generation: self.installation.restore_generation.to_string(),
+            protocol_version: PROTOCOL_VERSION,
+            connection_id: Uuid::now_v7().to_string(),
+            cj_journal_id: Uuid::now_v7().to_string(),
+            boot_id: Uuid::now_v7().to_string(),
+            stream_kind: StreamKind::Control as i32,
+            optional_capabilities: optional.iter().map(|c| (*c).to_owned()).collect(),
+            ..Hello::default()
+        };
+        tx.send(ControlUp {
+            msg: Some(control_up::Msg::Hello(hello)),
+        })
+        .await
+        .unwrap();
+        let mut client = worker_control_client::WorkerControlClient::new(self.channel().await)
+            .max_decoding_message_size(MAX_MESSAGE_BYTES)
+            .max_encoding_message_size(MAX_MESSAGE_BYTES);
+        let mut request = Request::new(ReceiverStream::new(rx));
+        let mut credential = format!("Bearer {}", machine.token)
+            .parse::<tonic::metadata::MetadataValue<_>>()
+            .unwrap();
+        credential.set_sensitive(true);
+        request.metadata_mut().insert("authorization", credential);
+        let mut stream = client.control(request).await.unwrap().into_inner();
+        let Some(control_down::Msg::HelloReply(HelloReply {
+            result: Some(hello_reply::Result::Accepted(accepted)),
+        })) = next(&mut stream).await.unwrap().msg
+        else {
+            panic!("expected accepted handshake")
+        };
+        Worker {
+            tx,
+            stream,
+            capabilities: accepted.capabilities,
+        }
+    }
+
+    /// Каждая таблица базы без значения токена: он живёт только в сообщении.
+    async fn assert_nowhere_stored(&self, token: &str) {
+        let hits: Vec<(String, i32)> = sqlx::query_as(
+            "select table_name::text,
+                    (xpath('/row/c/text()', query_to_xml(
+                       format('select count(*) as c from %I t where row_to_json(t)::text like %L',
+                              table_name, '%' || $1 || '%'), false, true, '')))[1]::text::int
+             from information_schema.tables
+             where table_schema = 'public' and table_type = 'BASE TABLE'",
+        )
+        .bind(token)
+        .fetch_all(&self.pool)
+        .await
+        .unwrap();
+        assert!(hits.len() > 20, "the scan must cover the schema");
+        for (table, count) in hits {
+            assert_eq!(count, 0, "the token was stored in {table}");
+        }
+    }
+}
+
+impl Drop for Host {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+struct Worker {
+    tx: mpsc::Sender<ControlUp>,
+    stream: Streaming<ControlDown>,
+    capabilities: Vec<String>,
+}
+
+async fn next(stream: &mut Streaming<ControlDown>) -> Result<ControlDown, tonic::Status> {
+    Ok(timeout(WAIT, stream.message())
+        .await
+        .expect("hub message in time")?
+        .expect("stream open"))
+}
+
+impl Worker {
+    async fn send(&self, msg: control_up::Msg) {
+        self.tx.send(ControlUp { msg: Some(msg) }).await.unwrap();
+    }
+
+    /// Первое сообщение, которое выбирает `pick`; остальное (опросы лимитов и т. п.) пропускается.
+    async fn expect<T>(&mut self, mut pick: impl FnMut(control_down::Msg) -> Option<T>) -> T {
+        loop {
+            let message = next(&mut self.stream).await.unwrap().msg.expect("message");
+            if let Some(found) = pick(message) {
+                return found;
+            }
+        }
+    }
+
+    async fn assigned(&mut self) -> Vec<(String, String)> {
+        self.expect(|msg| match msg {
+            control_down::Msg::RunnersAssigned(list) => Some(
+                list.runners
+                    .into_iter()
+                    .map(|r| (r.name, r.root_dir))
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .await
+    }
+
+    async fn token_reply(&mut self) -> Result<RunnerToken, RunnerTokenRefused> {
+        self.expect(|msg| match msg {
+            control_down::Msg::RunnerToken(token) => Some(Ok(token)),
+            control_down::Msg::RunnerTokenRefused(refused) => Some(Err(refused)),
+            _ => None,
+        })
+        .await
+    }
+
+    async fn ask(&mut self, runner: Uuid, reset: bool) -> Result<RunnerToken, RunnerTokenRefused> {
+        self.send(control_up::Msg::RunnerTokenRequest(RunnerTokenRequest {
+            machine_id: runner.to_string(),
+            reset_local_state: reset,
+        }))
+        .await;
+        self.token_reply().await
+    }
+}
+
+fn now_ms() -> u64 {
+    u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap()
+}
+
+const RUNNERS: &[&str] = &["runners_v1"];
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn runners_v1_is_negotiated_only_when_the_worker_asks_for_it(pool: PgPool) -> TestResult {
+    let host = Host::start(pool).await;
+    let with = host.connect(&host.carrier, RUNNERS).await;
+    assert!(with.capabilities.iter().any(|c| c == "runners_v1"));
+    let without = host.connect(&host.plain, &[]).await;
+    assert!(!without.capabilities.iter().any(|c| c == "runners_v1"));
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_carrier_is_told_its_runners_on_connect_and_when_they_change(pool: PgPool) -> TestResult {
+    let host = Host::start(pool.clone()).await;
+    let mut carrier = host.connect(&host.carrier, RUNNERS).await;
+    assert_eq!(
+        carrier.assigned().await,
+        vec![("runner-a".to_owned(), "/srv/runner".to_owned())]
+    );
+    // Новый раннер: список приходит сам.
+    let second = machines::add_runner(
+        &pool,
+        host.installation.owner_id,
+        "runner-b",
+        &RunnerSpec {
+            parent: host.carrier.machine_id,
+            root_dir: "/srv/b".into(),
+            rank: 0,
+            labels: vec![],
+        },
+    )
+    .await?;
+    assert_eq!(
+        carrier.assigned().await,
+        vec![
+            ("runner-a".to_owned(), "/srv/runner".to_owned()),
+            ("runner-b".to_owned(), "/srv/b".to_owned())
+        ]
+    );
+    // Отозванный раннер уходит из списка.
+    machines::revoke(&pool, second.machine_id).await?;
+    assert_eq!(
+        carrier.assigned().await,
+        vec![("runner-a".to_owned(), "/srv/runner".to_owned())]
+    );
+    // Снят флаг несущей: список опустошается.
+    machines::set_carrier(&pool, host.carrier.machine_id, false).await?;
+    assert!(carrier.assigned().await.is_empty());
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn the_token_goes_to_the_carrier_in_one_volatile_message(pool: PgPool) -> TestResult {
+    let host = Host::start(pool.clone()).await;
+    let mut carrier = host.connect(&host.carrier, RUNNERS).await;
+    carrier.assigned().await;
+    let reply = carrier.ask(host.runner.machine_id, true).await.unwrap();
+    assert_eq!(reply.machine_id, host.runner.machine_id.to_string());
+    assert_eq!(
+        reply.installation_id,
+        host.installation.installation_id.to_string()
+    );
+    assert_eq!(
+        reply.restore_generation,
+        host.installation.restore_generation.to_string()
+    );
+    assert_eq!(
+        machines::verify(&pool, &reply.token).await?,
+        Some(host.runner.machine_id)
+    );
+    // Прежний токен раннера отозван ротацией.
+    assert_eq!(machines::verify(&pool, &host.runner.token).await?, None);
+    host.assert_nowhere_stored(&reply.token).await;
+    // Потерянное сообщение: несущая просит снова, хаб ротирует ещё раз.
+    let again = carrier.ask(host.runner.machine_id, false).await.unwrap();
+    assert_ne!(again.token, reply.token);
+    assert_eq!(machines::verify(&pool, &reply.token).await?, None);
+    assert_eq!(
+        machines::verify(&pool, &again.token).await?,
+        Some(host.runner.machine_id)
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn token_requests_are_refused_with_a_code_and_rotate_nothing(pool: PgPool) -> TestResult {
+    let host = Host::start(pool.clone()).await;
+    let other = machines::add(&pool, host.installation.owner_id, "other-carrier").await?;
+    machines::set_carrier(&pool, other.machine_id, true).await?;
+    let revoked = machines::add_runner(
+        &pool,
+        host.installation.owner_id,
+        "runner-gone",
+        &RunnerSpec {
+            parent: host.carrier.machine_id,
+            root_dir: "/srv/gone".into(),
+            rank: 0,
+            labels: vec![],
+        },
+    )
+    .await?;
+    machines::revoke(&pool, revoked.machine_id).await?;
+
+    let mut carrier = host.connect(&host.carrier, RUNNERS).await;
+    carrier.assigned().await;
+    assert_eq!(
+        carrier.ask(Uuid::now_v7(), false).await.unwrap_err().code,
+        "unknown_machine"
+    );
+    assert_eq!(
+        carrier
+            .ask(host.plain.machine_id, false)
+            .await
+            .unwrap_err()
+            .code,
+        "unknown_machine"
+    );
+    assert_eq!(
+        carrier
+            .ask(revoked.machine_id, false)
+            .await
+            .unwrap_err()
+            .code,
+        "revoked"
+    );
+    let mut stranger = host.connect(&other, RUNNERS).await;
+    stranger.assigned().await;
+    assert_eq!(
+        stranger
+            .ask(host.runner.machine_id, false)
+            .await
+            .unwrap_err()
+            .code,
+        "not_parent"
+    );
+    // Раннер сам не несущая: даже со своим токеном и возможностью он не получит токен.
+    let mut runner = host.connect(&host.runner, RUNNERS).await;
+    assert_eq!(
+        runner
+            .ask(host.runner.machine_id, false)
+            .await
+            .unwrap_err()
+            .code,
+        "not_carrier"
+    );
+    let mut plain = host.connect(&host.plain, RUNNERS).await;
+    assert_eq!(
+        plain
+            .ask(host.runner.machine_id, false)
+            .await
+            .unwrap_err()
+            .code,
+        "not_carrier"
+    );
+    // Ничего не ротировано: токен раннера действует.
+    assert_eq!(
+        machines::verify(&pool, &host.runner.token).await?,
+        Some(host.runner.machine_id)
+    );
+    // Мусорный идентификатор — тоже отказ `unknown_machine`, а не обрыв потока.
+    assert_eq!(
+        carrier.ask_raw("not-a-uuid").await.unwrap_err().code,
+        "unknown_machine"
+    );
+    Ok(())
+}
+
+impl Worker {
+    async fn ask_raw(&mut self, machine_id: &str) -> Result<RunnerToken, RunnerTokenRefused> {
+        self.send(control_up::Msg::RunnerTokenRequest(RunnerTokenRequest {
+            machine_id: machine_id.to_owned(),
+            reset_local_state: false,
+        }))
+        .await;
+        self.token_reply().await
+    }
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn runner_messages_without_the_capability_end_the_stream(pool: PgPool) -> TestResult {
+    let host = Host::start(pool).await;
+    // Несущая по флагу, но воркер возможность не объявил: запрос не принимается.
+    let mut carrier = host.connect(&host.carrier, &[]).await;
+    carrier
+        .send(control_up::Msg::RunnerTokenRequest(RunnerTokenRequest {
+            machine_id: host.runner.machine_id.to_string(),
+            reset_local_state: false,
+        }))
+        .await;
+    let status = loop {
+        match timeout(WAIT, carrier.stream.message()).await.unwrap() {
+            Err(status) => break status,
+            Ok(Some(down)) => {
+                assert!(
+                    !matches!(
+                        down.msg,
+                        Some(
+                            control_down::Msg::RunnerToken(_)
+                                | control_down::Msg::RunnersAssigned(_)
+                        )
+                    ),
+                    "nothing runner-related without the capability"
+                );
+            }
+            Ok(None) => panic!("the stream must fail, not end quietly"),
+        }
+    };
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    assert_eq!(status.message(), "capability_missing");
+    assert_eq!(
+        machines::verify(&host.pool, &host.runner.token).await?,
+        Some(host.runner.machine_id)
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn observations_are_stored_only_from_the_carrier(pool: PgPool) -> TestResult {
+    let host = Host::start(pool.clone()).await;
+    let observation = |machine: Uuid, reachable: bool, failures: u32| {
+        control_up::Msg::RunnerObservation(RunnerObservation {
+            machine_id: machine.to_string(),
+            reachable,
+            consecutive_failures: failures,
+            observed_at: now_ms(),
+        })
+    };
+    // Не несущая шлёт наблюдение: оно отброшено, поток жив (следующий запрос отвечает).
+    let mut plain = host.connect(&host.plain, RUNNERS).await;
+    plain
+        .send(observation(host.runner.machine_id, false, 9))
+        .await;
+    assert_eq!(
+        plain
+            .ask(host.runner.machine_id, false)
+            .await
+            .unwrap_err()
+            .code,
+        "not_carrier"
+    );
+    // Раннер о самом себе тоже не может.
+    let mut runner = host.connect(&host.runner, RUNNERS).await;
+    runner
+        .send(observation(host.runner.machine_id, false, 9))
+        .await;
+    assert_eq!(
+        runner
+            .ask(host.runner.machine_id, false)
+            .await
+            .unwrap_err()
+            .code,
+        "not_carrier"
+    );
+    let stored: i64 = sqlx::query_scalar("select count(*) from runner_observations")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(stored, 0, "refused observations are not stored");
+
+    let mut carrier = host.connect(&host.carrier, RUNNERS).await;
+    carrier.assigned().await;
+    carrier
+        .send(observation(host.runner.machine_id, false, 3))
+        .await;
+    // Ответа нет: ждём, пока строка появится.
+    timeout(WAIT, async {
+        loop {
+            let row: Option<(bool, i32, Uuid)> = sqlx::query_as(
+                "select reachable, consecutive_failures, carrier_id from runner_observations
+                 where machine_id = $1",
+            )
+            .bind(host.runner.machine_id)
+            .fetch_optional(&pool)
+            .await
+            .unwrap();
+            if let Some(row) = row {
+                assert_eq!(row, (false, 3, host.carrier.machine_id));
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    Ok(())
+}
