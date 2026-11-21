@@ -190,7 +190,23 @@ lease_self_wrap gate gate bash "$(realpath "$0")" "$@"
 `.superpowers/carry/flaky-tests.md`; гейт этот файл не редактирует.
 `--no-attest` сохраняет работу и с полным прогоном, и с перезапуском.
 
-Совпадение покрытия с прежней последовательностью проверяет `scripts/gate-coverage.sh`: он перечисляет идентичности Playwright (проект, спека, тест) через `playwright test --list` в конфигурациях обоих путей и проверяет, что новый гейт запускает ровно объединение прежних прогонов; там же сверяются шаги версии, Rust, речи, статики и vitest.
+Совпадение покрытия с прежней последовательностью проверяет `scripts/gate-coverage.sh`: он перечисляет идентичности Playwright (проект, спека, тест) через `playwright test --list` в конфигурациях обоих путей и проверяет, что новый гейт запускает ровно объединение прежних прогонов; там же сверяются шаги версии, Rust, речи, статики и vitest. Те же проверки доказывают паритет контейнерного пути: `scripts/gate/in-container.sh` не перечисляет шаги заново, а зовёт `scripts/gate.sh --no-attest` (с `CANTERLOT_NO_LEASE=1`), поэтому `scripts/gate-remote.sh` и гейт на раннере гоняют те же `npm ci`, `check.sh --all --no-web`, наборы выката и `check-web.sh --stack`, без тестовых швов `CANTERLOT_GATE_*`; образ `docker/gate/Dockerfile` несёт `shellcheck` и `zstd` для наборов выката. Сверка падает, если контейнерный путь начал вызывать шаги сам, подменять их или перестал запускать наборы выката.
+
+### Гейт на раннере
+
+`scripts/gate.sh --runner local|auto|<имя машины>` (по умолчанию `local`: всё как выше, без изменений) отправляет гейт на раннер через `canterlot-worker job run` (`docs/design/runners.md`, §4.1). Не-локальное значение требует чистой рабочей копии (`--no-attest` её не отменяет) и берёт полный sha `HEAD`; аренду `gate` оно берёт на раннере, а не на VM:
+
+```
+canterlot-worker job run --title "Гейт <sha8>" --machine <значение> --labels kernel-6.12 \
+    --lease gate --timeout-minutes 240 --expected-minutes 45 --source <repo>@<sha> \
+    --output .gate-out --wait -- scripts/gate/runner-gate.sh <sha>
+```
+
+`scripts/gate/runner-gate.sh <sha>` работает в подготовленной носителем рабочей копии `<корень>/jobs/<домен>/<задача>`: проверяет `git rev-parse HEAD` против аргумента, находит корень по пути (без `<корень>/worker.toml` отказывает), собирает или берёт готовый образ `canterlot-gate:<hash Dockerfile + rust-toolchain.toml + версия Playwright>` из `docker/gate/Dockerfile` этой же копии, запускает контейнер `canterlot-gate-<sha12>-<случайное>` (`--cpus` и `--memory` от `nproc` и `free` минус 2 ядра и 4 ГБ; TERM и INT делают `docker kill` по имени) с кэшами `<корень>/cache/{cargo,target,npm,playwright,tmp}` и оставляет `result.txt`, `state.tsv` и логи в `./.gate-out`. В `state.tsv` попадает строка `runner<TAB>имя` (`CANTERLOT_RUNNER_NAME`, иначе имя хоста). Код выхода — код гейта.
+
+`gate.sh --runner` читает собранные `<каталог результатов>/.gate-out/result.txt` и `state.tsv` (каталог печатает `job run` строкой `canterlot job: outputs:`) и атомарно пишет `.superpowers/gate/<full sha>.ok` в прежнем формате плюс `runner=<имя, как его назвал раннер>`, только если result.txt называет этот sha8, `state.tsv` — этот полный sha без тестовых швов, каждый шаг вышел с 0 (`deploy_exit=skipped` допустим), код задачи 0, `HEAD` не сместился и дерево осталось чистым. Иначе называет причину и ничего не пишет. Копия собранного лежит в `.superpowers/gate/<sha8>/runner/`, а вывод `job run` — в `runner-job.out` и `runner-job.err` рядом. `release.sh ship` принимает такую аттестацию без изменений (набор `release` проверяет строку `runner=`). `--rerun-failed` с раннером в v1 отказывается: гейт на раннере идёт целиком.
+
+Отмены у `job run` нет, и новых API хаба для неё не заведено: Ctrl-C (или TERM) на `gate.sh --runner` останавливает только ожидание, печатает идентификатор задачи, а сама задача на раннере продолжает работать (иначе она остановится по своему таймауту в 240 минут). Отменить задачу можно в PWA, в её карточке. Проверки без сети и без настоящего docker — `scripts/gate/test.sh` с подменами `scripts/gate/fake-worker` (`CANTERLOT_WORKER_BIN`) и `scripts/gate/fake-docker` (`CANTERLOT_DOCKER`).
 
 ## Сборка выпуска и кэш
 
