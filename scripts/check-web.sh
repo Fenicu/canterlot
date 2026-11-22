@@ -108,7 +108,6 @@ background unit "${unit[@]}"
 
 if ((!fast)); then
     VITE_UI_TESTS=1 npm run build
-    VITE_UI_TESTS=1 PWA_BUILD_DIR=build-update PWA_VERSION=ui-update-fixture npm run build
     built=1
 fi
 join_background

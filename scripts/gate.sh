@@ -4,7 +4,7 @@
 #   1. npm ci в web/ — один раз на весь прогон;
 #   2. scripts/check.sh --all --no-web — версия, fmt, clippy, nextest, речь;
 #   3. scripts/check-web.sh — вся веб-половина (статические проверки, vitest,
-#      две сборки PWA и vitest.build). Браузерные тесты удалены 22.11.2026.
+#      сборка PWA и vitest.build). Браузерные тесты удалены 22.11.2026.
 #
 #   scripts/gate.sh                  полный гейт с аттестацией .superpowers/gate/<full sha>.ok
 #   scripts/gate.sh --rerun-failed   перезапустить только то, что упало на этом же коммите

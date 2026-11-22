@@ -54,7 +54,6 @@ web_steps=(
     'background tokens npm run lint:tokens'
     'npx --no-install vitest run'
     'VITE_UI_TESTS=1 npm run build'
-    'PWA_BUILD_DIR=build-update'
     'npx --no-install vitest run --config vitest.build.config.ts'
 )
 for step in "${rust_steps[@]}"; do
