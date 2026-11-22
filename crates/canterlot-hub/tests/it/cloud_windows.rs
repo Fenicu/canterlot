@@ -450,8 +450,8 @@ async fn full_cycle_uses_network_dnat_and_attach_then_ends_with_the_cost(
     rig.tick_until(id, "ended", at + TimeDelta::seconds(2))
         .await;
     let window = rig.window(id).await;
-    assert_eq!(window.server_gone_at.is_some(), true);
-    assert_eq!(window.dnat_gone_at.is_some(), true);
+    assert!(window.server_gone_at.is_some());
+    assert!(window.dnat_gone_at.is_some());
     assert_eq!(rig.dnat_deletes(), 1);
     assert!(rig.fake.control().dnat_rules.is_empty());
     assert_eq!(window.final_cost_kopecks, Some(HOURLY));
