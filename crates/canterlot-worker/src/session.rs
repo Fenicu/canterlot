@@ -992,15 +992,9 @@ impl Worker {
                 .ok()
         });
         // Тестовая сборка не поднимает сокет аренды в общем каталоге сокетов.
-        if crate::exec::maintenance::ensure_test_runtime_allowed(runtime_dir.as_deref()).is_ok() {
-            if let (Some(link), Some(store)) = (&self.runners, &owner_store) {
-                self.owner_jobs = Some(crate::owner_jobs::server::OwnerJobServer::start(
-                    crate::owner_jobs::socket_path(runtime_dir.as_deref(), &self.config.data_dir),
-                    store.clone(),
-                    link.bridge.clone(),
-                    shutdown.clone(),
-                ));
-            }
+        let runtime_allowed =
+            crate::exec::maintenance::ensure_test_runtime_allowed(runtime_dir.as_deref()).is_ok();
+        if runtime_allowed {
             self.lease = Some(crate::lease::server::LeaseServer::start(
                 crate::lease::server::ServerConfig::new(
                     runtime_dir.as_deref(),
@@ -1010,6 +1004,8 @@ impl Worker {
                 shutdown.clone(),
             ));
         }
+        let jobs_socket =
+            crate::owner_jobs::socket_path(runtime_dir.as_deref(), &self.config.data_dir);
         let manager = ExecutionManager::new_with_attachments_and_runtime_dir(
             self.config.execution.clone(),
             self.store.client(),
@@ -1017,6 +1013,26 @@ impl Worker {
             self.config.attachments.clone(),
             runtime_dir,
         );
+        // Сокет задач владельца отказывает процессам внутри исполнений: сессия агента не
+        // должна сама запускать работу на других машинах, да ещё выбирая домен.
+        if runtime_allowed && let (Some(link), Some(store)) = (&self.runners, &owner_store) {
+            let shared = manager.shared();
+            self.owner_jobs = Some(crate::owner_jobs::server::OwnerJobServer::start(
+                jobs_socket,
+                store.clone(),
+                link.bridge.clone(),
+                std::sync::Arc::new(move || {
+                    shared
+                        .probes
+                        .lock()
+                        .expect("probes lock")
+                        .values()
+                        .flat_map(|probe| probe.members.iter().copied())
+                        .collect()
+                }),
+                shutdown.clone(),
+            ));
+        }
         manager.set_cache_ages(crate::exec::CacheAges {
             idle: Duration::from_secs(self.config.machine.idle_cache_hours.saturating_mul(3600)),
             released: Duration::from_secs(
@@ -1088,6 +1104,7 @@ impl Worker {
                     ),
                     ssh_limit: timings.ssh_limit,
                     push_limit: timings.upload_limit,
+                    allowed_roots: self.config.execution.allowed_workdir_roots.clone(),
                 });
             manager.set_carrier(stager, store.clone());
         }

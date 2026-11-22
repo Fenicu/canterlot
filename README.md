@@ -3,7 +3,7 @@
 <p align="center">
 
 [![GitHub](https://img.shields.io/badge/GitHub-Fenicu%2Fcanterlot-brightgreen?logo=github)](https://github.com/Fenicu/canterlot)
-![версия](https://img.shields.io/badge/%D0%B2%D0%B5%D1%80%D1%81%D0%B8%D1%8F-1.45.0-00f4ee)
+![версия](https://img.shields.io/badge/%D0%B2%D0%B5%D1%80%D1%81%D0%B8%D1%8F-1.46.0-00f4ee)
 [![история](https://img.shields.io/badge/%D0%B8%D1%81%D1%82%D0%BE%D1%80%D0%B8%D1%8F-CHANGES.rst-6c757d)](CHANGES.rst)
 [![лицензия](https://img.shields.io/badge/%D0%BB%D0%B8%D1%86%D0%B5%D0%BD%D0%B7%D0%B8%D1%8F-MIT-blue)](LICENSE)
 ![агенты](https://img.shields.io/badge/%D0%B0%D0%B3%D0%B5%D0%BD%D1%82%D1%8B-Claude%20Code%20%C2%B7%20Codex%20%C2%B7%20OpenCode-1f5457)
@@ -439,7 +439,7 @@ loginctl enable-linger "$USER"
 systemctl --user enable --now canterlot-worker
 ```
 
-Раннеры (1.46, только задачи, без сессий): машину с воркером помечают несущей `canterlot-hub machine set-carrier --machine-id <uuid>`, раннер создают `canterlot-hub machine add --name runner-a --role runner --parent <uuid несущей> --root-dir /srv/runner --rank 20 --labels build-host`. Хаб не запускает на раннере сессии, а токен раннера выдаёт только своей несущей; подробности в [docs/configuration.md](docs/configuration.md). `job_run` с `source` {`repo`, `rev`} и `machine: "auto"` отдаёт выбор места хабу: задача идёт на свободный раннер несущей (больший ранг, нужные `labels`) или на саму несущую, иначе ждёт в `waiting_runner`; несущая готовит ровно этот коммит (`staging`) и после запуска забирает `outputs` (`collecting`), итог приходит один раз после сбора. Инструмент `runners_list` показывает раннеры и занятость. Задачу владельца без разговора (с исходниками на нужном коммите и сбором результатов) отправляет на несущей `canterlot-worker job run --title gate --source @HEAD --output result --wait -- ./run.sh`: выход с кодом задачи, каталог результатов в `~/.local/state/canterlot-worker/job-outputs/<id>`; устройство в [docs/design/runners.md](docs/design/runners.md).
+Раннеры (1.46, только задачи, без сессий): машину с воркером помечают несущей `canterlot-hub machine set-carrier --machine-id <uuid>`, раннер создают `canterlot-hub machine add --name runner-a --role runner --parent <uuid несущей> --root-dir /srv/runner --rank 20 --labels build-host`. Хаб не запускает на раннере сессии, а токен раннера выдаёт только своей несущей; подробности в [docs/configuration.md](docs/configuration.md). `job_run` с `source` {`repo`, `rev`} и `machine: "auto"` отдаёт выбор места хабу: задача идёт на свободный раннер несущей (больший ранг, нужные `labels`) или на саму несущую, иначе ждёт в `waiting_runner`; несущая готовит ровно этот коммит (`staging`) и после запуска забирает `outputs` (`collecting`), итог приходит один раз после сбора (очистку исходников он не ждёт). Названная машина обязана нести все `labels` задачи; ждущая раннер задача заканчивается через `[jobs].waiting_timeout` (24 часа) как `canceled` с причиной `no_runner`. Ранг, метки и корень меняет `canterlot-hub machine set --machine-id <uuid> [--rank N] [--labels a,b] [--root-dir P]` (метки можно и у самой VM, например `kernel-6.12`). Инструмент `runners_list` показывает раннеры и занятость. Задачу владельца без разговора (с исходниками на нужном коммите и сбором результатов) отправляет на несущей `canterlot-worker job run --title gate --source @HEAD --output result --wait -- ./run.sh`: выход с кодом задачи, каталог результатов в `~/.local/state/canterlot-worker/job-outputs/<id>`; устройство в [docs/design/runners.md](docs/design/runners.md).
 
 **5. Вторая машина: оркестратор здесь, разработка там.** Оркестратор (Claude Code или Codex) остаётся на основной машине, а делегаты, сборки, запуски и выкатка идут на второй через её воркер. Между машинами нет ssh: воркер второй машины сам подключается к хабу, ему нужен только исходящий доступ к порту воркеров хаба. Код остаётся на второй машине; через хаб идут ленты сессий и вывод команд, которые запросил оркестратор.
 
@@ -480,7 +480,7 @@ work_roots = ["/srv/projects/work"]
 
 ## Версии
 
-Текущая версия — 1.45.0. История изменений для человека — [CHANGES.rst](CHANGES.rst), правила бампа — [docs/versioning.md](docs/versioning.md).
+Текущая версия — 1.46.0. История изменений для человека — [CHANGES.rst](CHANGES.rst), правила бампа — [docs/versioning.md](docs/versioning.md).
 
 Архивы выпуска публикует `scripts/publish-release.sh vX.Y.Z` из сборки, сделанной при выкатке, без повторной компиляции.
 

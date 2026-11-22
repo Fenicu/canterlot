@@ -150,6 +150,16 @@ async fn a_runners_availability_follows_the_spec_rule(pool: PgPool) {
     let runner = api.machine(api.runner).await;
     assert_eq!(runner["availability"], "offline");
     assert!(runner["observed_at"].is_string(), "{runner}");
+    // «С какого времени offline» ставит проектор по времени хаба; правило этапа C отсчитывает
+    // десять минут от него.
+    canterlot_hub::machine_info::project_availability(&api.pool, &api.registry, Uuid::now_v7())
+        .await
+        .unwrap();
+    let runner = api.machine(api.runner).await;
+    let since = runner["offline_since"].as_str().expect("offline_since");
+    let since = chrono::DateTime::parse_from_rfc3339(since).unwrap();
+    assert!(Utc::now() - since.with_timezone(&Utc) < chrono::TimeDelta::seconds(30));
+    assert_eq!(api.machine(api.worker).await["offline_since"], Value::Null);
 
     // Два отказа — ещё unknown.
     machines::record_runner_observation(&api.pool, api.carrier, api.runner, false, 2, Utc::now())
@@ -168,9 +178,14 @@ async fn a_runners_availability_follows_the_spec_rule(pool: PgPool) {
         .unwrap();
     assert_eq!(api.machine(api.runner).await["availability"], "unknown");
 
-    // Воркер раннера подключён — online.
+    // Воркер раннера подключён — online, отметка «offline с» снята.
     api.connect(api.runner);
-    assert_eq!(api.machine(api.runner).await["availability"], "online");
+    canterlot_hub::machine_info::project_availability(&api.pool, &api.registry, Uuid::now_v7())
+        .await
+        .unwrap();
+    let runner = api.machine(api.runner).await;
+    assert_eq!(runner["availability"], "online");
+    assert_eq!(runner["offline_since"], Value::Null);
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]

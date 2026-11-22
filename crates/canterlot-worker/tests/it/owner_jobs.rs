@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use canterlot_worker::owner_jobs::{
     Finished, Hub, JobSpec, Refusal, Store,
     client::{RunArgs, execute},
-    server::OwnerJobServer,
+    server::{Executions, OwnerJobServer},
 };
 use tokio::sync::watch;
 use uuid::Uuid;
@@ -60,6 +60,8 @@ struct Fixture {
     hub: Arc<FakeHub>,
     stop: watch::Sender<bool>,
     server: Option<OwnerJobServer>,
+    /// Участники «исполнений», которые сервер считает сессиями агентов.
+    executions: Arc<Mutex<Vec<(u32, u64)>>>,
     _repo: tempfile::TempDir,
     /// `<репозиторий>@<sha>` настоящего репозитория для `--source`.
     source: String,
@@ -76,10 +78,12 @@ impl Fixture {
         let store = Store::open(&dir.path().join("data")).unwrap();
         let hub = Arc::new(FakeHub::new());
         let (stop, shutdown) = watch::channel(false);
+        let executions: Arc<Mutex<Vec<(u32, u64)>>> = Arc::default();
         let server = Some(OwnerJobServer::start(
             socket.clone(),
             store.clone(),
             hub.clone(),
+            Self::provider(&executions),
             shutdown,
         ));
         Self {
@@ -89,9 +93,15 @@ impl Fixture {
             hub,
             stop,
             server,
+            executions,
             _repo: repo_guard,
             source: format!("{}@{sha}", repo_path.display()),
         }
+    }
+
+    fn provider(executions: &Arc<Mutex<Vec<(u32, u64)>>>) -> Executions {
+        let executions = executions.clone();
+        Arc::new(move || executions.lock().unwrap().clone())
     }
 
     /// Рестарт воркера: сокет и хранилище те же, процесс новый.
@@ -105,6 +115,7 @@ impl Fixture {
             self.socket.clone(),
             self.store.clone(),
             self.hub.clone(),
+            Self::provider(&self.executions),
             shutdown,
         ));
     }
@@ -384,6 +395,90 @@ async fn source_head_requires_a_clean_tree_and_resolves_to_a_full_sha() {
         .run(source(format!("{}@{sha}", repo.join("sub").display())))
         .await;
     assert_eq!(code, 2, "{err}");
+}
+
+/// `sh`, который ждёт строку на stdin и только потом зовёт настоящую команду `job run`:
+/// сначала тест успевает записать оболочку в список исполнений.
+fn waiting_job_run(fx: &Fixture) -> std::process::Child {
+    Command::new("sh")
+        .arg("-c")
+        .arg(r#"read _; "$0" job run --title t --source "$1" -- true; echo "exit=$?" >&2"#)
+        .arg(env!("CARGO_BIN_EXE_canterlot-worker"))
+        .arg(&fx.source)
+        .env("CANTERLOT_JOBS_SOCKET", &fx.socket)
+        .env_remove("XDG_RUNTIME_DIR")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+/// Отпускает оболочку и ждёт её, не занимая поток сервера.
+async fn release(mut child: std::process::Child) -> (bool, String) {
+    use std::io::Write;
+    child.stdin.take().unwrap().write_all(b"go\n").unwrap();
+    tokio::task::spawn_blocking(move || {
+        let output = child.wait_with_output().unwrap();
+        (
+            output.status.success(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_process_started_as_an_execution_cannot_submit_jobs() {
+    let fx = Fixture::start();
+    // Не исполнение: та же команда проходит.
+    let (ok, err) = release(waiting_job_run(&fx)).await;
+    assert!(ok, "{err}");
+    assert_eq!(fx.hub.specs.lock().unwrap().len(), 1, "{err}");
+    // Оболочка записана как участник исполнения, а `job run` — её потомок. Метку окружения
+    // потомок мог бы снять, а предка в дереве процессов — нет.
+    let child = waiting_job_run(&fx);
+    let ticks = canterlot_worker::containment::start_ticks(child.id()).unwrap();
+    fx.executions.lock().unwrap().push((child.id(), ticks));
+    let (_ok, err) = release(child).await;
+    assert!(err.contains("refused: not_allowed"), "{err}");
+    assert!(err.contains("exit=2"), "{err}");
+    assert_eq!(
+        fx.hub.specs.lock().unwrap().len(),
+        1,
+        "the hub must not see a job from inside an execution"
+    );
+    // Исполнение закончилось и ушло из списка: владелец снова проходит.
+    fx.executions.lock().unwrap().clear();
+    let (ok, err) = release(waiting_job_run(&fx)).await;
+    assert!(ok, "{err}");
+    assert_eq!(fx.hub.specs.lock().unwrap().len(), 2);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_client_does_not_find_the_jobs_socket_through_the_lease_socket_env() {
+    let fx = Fixture::start();
+    // Сокет аренды лежит в одном каталоге с jobs.sock; прежний запасной путь находил его так.
+    let output = Command::new(env!("CARGO_BIN_EXE_canterlot-worker"))
+        .args([
+            "job", "run", "--title", "t", "--source", &fx.source, "--", "true",
+        ])
+        .env(
+            "CANTERLOT_LEASE_SOCKET",
+            fx.socket.with_file_name("lease.sock"),
+        )
+        .env_remove("CANTERLOT_JOBS_SOCKET")
+        .env_remove("XDG_RUNTIME_DIR")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("no worker socket known"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(fx.hub.specs.lock().unwrap().is_empty());
 }
 
 #[test]

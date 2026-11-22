@@ -107,6 +107,9 @@ pub struct MachineView {
     /// Раннер: когда несущая сделала последнее наблюдение его достижимости (возраст берётся
     /// от этого времени); `null` у обычной машины и пока наблюдений нет.
     pub observed_at: Option<String>,
+    /// Раннер: время хаба, с которого он `offline`; `null`, пока он в другом состоянии, и у
+    /// обычной машины. По нему этап C отсчитывает десять минут недоступности.
+    pub offline_since: Option<String>,
     pub heartbeat_age_ms: Option<u64>,
     pub capabilities: Vec<String>,
     pub os: Option<String>,
@@ -381,6 +384,12 @@ pub(crate) async fn load_stored(
     } else {
         (r.try_get("availability")?, None)
     };
+    let offline_since = if availability == crate::machines::RunnerAvailability::Offline.as_str() {
+        r.try_get::<Option<DateTime<Utc>>, _>("runner_offline_since")?
+            .map(conversations::time)
+    } else {
+        None
+    };
     Ok(MachineView {
         id,
         name: r.try_get("name")?,
@@ -394,6 +403,7 @@ pub(crate) async fn load_stored(
         labels: r.try_get("labels")?,
         is_carrier: r.try_get("is_carrier")?,
         observed_at,
+        offline_since,
         heartbeat_age_ms: None,
         capabilities: r.try_get("capabilities")?,
         os: r.try_get("os")?,

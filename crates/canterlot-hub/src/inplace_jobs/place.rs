@@ -25,7 +25,7 @@ pub const PLACEMENT_CLOUD: &str = "cloud";
 
 /// Кандидат на размещение: сама несущая (ранг 0) или её раннер.
 #[derive(sqlx::FromRow, Debug, Clone)]
-struct Candidate {
+pub(crate) struct Candidate {
     id: Uuid,
     rank: i32,
     labels: Vec<String>,
@@ -83,6 +83,21 @@ async fn candidates(conn: &mut PgConnection, carrier: Uuid) -> Result<Vec<Candid
     .await
 }
 
+/// Замки машин несущей и её раннеров: все сразу и по возрастанию идентификатора. Заявка `auto`
+/// берёт их до допуска заказчика (`lock_admission`), как диспетчер машины
+/// (`dispatch_machine_in_tx`: замок машины, потом допуск), поэтому пути не замыкают цикл.
+/// Замок транзакционный и повторяемый: расстановка после этого берёт те же замки снова.
+pub(crate) async fn lock_candidates(
+    conn: &mut PgConnection,
+    carrier: Uuid,
+) -> Result<Vec<Candidate>, sqlx::Error> {
+    let all = candidates(conn, carrier).await?;
+    for candidate in &all {
+        lock_machine(conn, candidate.id).await?;
+    }
+    Ok(all)
+}
+
 /// Задача, которую можно когда-нибудь разместить: есть настроенное место с её метками среди
 /// разрешённых видов. Включённость, связь и свободные места не считаются: это отказ при
 /// подаче, а не ожидание. Облако (`cloud`) пока места не даёт: оно относится к этапу C.
@@ -91,16 +106,26 @@ pub async fn satisfiable(
     carrier: Uuid,
     labels: &[String],
     placement: &[String],
+    repo: &str,
+    domain: &str,
 ) -> Result<bool, sqlx::Error> {
+    // Несущая подходит, только если её рабочий каталог остаётся в домене исходников.
+    let local_ok = carrier_workdir_in_domain(conn, carrier, repo, domain).await?;
     Ok(candidates(conn, carrier).await?.iter().any(|candidate| {
         candidate.capable()
             && candidate.allowed_by(carrier, placement)
             && candidate.has_labels(labels)
+            && (local_ok || !candidate.is_carrier(carrier))
     }))
 }
 
 /// Ключ голого репозитория: имя каталога и 12 первых шестнадцатеричных знаков sha256 от
 /// абсолютного пути. Одинаковые имена в разных местах не делят хранилище объектов.
+///
+/// Имя в ключе сводится к `[A-Za-z0-9._-]`: другие знаки (пробел, `+`, юникод) заменяются на
+/// `-`, а точки и пустое имя (`.`, `..`, ``) дают `repo`. Хеш считается от настоящего пути, так
+/// что разные пути с одинаково сведённым именем ключей не делят. Несущая принимает ровно этот
+/// алфавит (`valid_key`), поэтому задача не доходит до подготовки и не падает на имени.
 pub fn repo_key(repo: &str) -> String {
     let digest = Sha256::digest(repo.as_bytes());
     let hash: String = digest
@@ -108,23 +133,54 @@ pub fn repo_key(repo: &str) -> String {
         .take(6)
         .map(|byte| format!("{byte:02x}"))
         .collect();
-    format!("{}-{hash}", repo_dir_name(repo))
+    let name: String = repo_dir_name(repo)
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let name = if name.chars().all(|c| c == '.') {
+        "repo".to_owned()
+    } else {
+        name
+    };
+    format!("{name}-{hash}")
+}
+
+/// Рабочий каталог задачи на самой несущей:
+/// `<каталог над репозиторием>/.canterlot-jobs/<имя репозитория>/<id>`.
+pub fn carrier_workdir(repo: &str, job: Uuid) -> String {
+    let trimmed = repo.trim_end_matches('/');
+    let parent = trimmed.rsplit_once('/').map_or("", |(parent, _)| parent);
+    format!("{parent}/.canterlot-jobs/{}/{job}", repo_dir_name(repo))
+}
+
+/// Рабочий каталог на несущей остаётся в домене исходников? Он лежит над репозиторием, и если
+/// сам репозиторий — рабочий корень, то каталог над ним уже по пути «личный». Такой задаче на
+/// несущей места нет: она отказывается (`domain_mismatch`) или идёт только на раннер.
+/// Проще, чем класть каталог внутрь репозитория и прятать его в `.git/info/exclude`.
+pub async fn carrier_workdir_in_domain(
+    conn: &mut PgConnection,
+    carrier: Uuid,
+    repo: &str,
+    domain: &str,
+) -> Result<bool, sqlx::Error> {
+    let workdir = carrier_workdir(repo, Uuid::nil());
+    let found = crate::memory::path_domain(conn, carrier, &workdir).await?;
+    Ok(found.map(crate::memory::MemoryDomain::as_str) == Some(domain))
 }
 
 /// Рабочий каталог задачи: на раннере `<root>/jobs/<домен>/<id>`, на самой несущей
-/// `<каталог над репозиторием>/.canterlot-jobs/<имя репозитория>/<id>`. Второй лежит рядом с
-/// исходным репозиторием, поэтому домен по пути у него тот же.
+/// `carrier_workdir`.
 pub fn workdir_for(job: &Job, root_dir: Option<&str>, on_carrier: bool) -> Option<String> {
     let repo = job.source_repo.as_deref()?;
     let domain = job.source_domain.as_deref()?;
     if on_carrier {
-        let trimmed = repo.trim_end_matches('/');
-        let parent = trimmed.rsplit_once('/').map_or("", |(parent, _)| parent);
-        Some(format!(
-            "{parent}/.canterlot-jobs/{}/{}",
-            repo_dir_name(repo),
-            job.id
-        ))
+        Some(carrier_workdir(repo, job.id))
     } else {
         Some(format!(
             "{}/jobs/{domain}/{}",
@@ -153,21 +209,48 @@ async fn bind_in_tx(
     .await
 }
 
-/// Привязка к названной машине без выбора (`machine` назван в заявке): место не проверяется,
-/// задача встанет в очередь машины после подготовки, как любая удалённая. Под замком машины.
+/// Метки задачи — подмножество меток машины. Для названной машины это условие допуска: имя
+/// не отменяет требования к раннеру (например, ядро для проверки).
+pub async fn machine_has_labels(
+    conn: &mut PgConnection,
+    machine: Uuid,
+    labels: &[String],
+) -> Result<bool, sqlx::Error> {
+    let have: Option<Vec<String>> = sqlx::query_scalar("select labels from machines where id=$1")
+        .bind(machine)
+        .fetch_optional(conn)
+        .await?;
+    Ok(have.is_some_and(|have| labels.iter().all(|label| have.contains(label))))
+}
+
+/// Привязка к названной машине без выбора (`machine` назван в заявке). Есть свободное место —
+/// задача идёт на подготовку; места нет — она остаётся в `waiting_runner` с названной машиной
+/// и ждёт её, а не встаёт в очередь машины мимо проверки места. Возвращает, привязана ли.
+/// Под замком машины.
 pub async fn bind_explicit_in_tx(
     conn: &mut PgConnection,
     job: &Job,
     carrier: Uuid,
     target: Uuid,
     correlation_id: Uuid,
-) -> Result<(), sqlx::Error> {
+) -> Result<bool, sqlx::Error> {
+    if occupied_in_tx(conn, target).await? >= max_running_in_tx(conn, target).await? {
+        sqlx::query(
+            "update jobs set requested_machine_id=$2, updated_at=clock_timestamp() where id=$1",
+        )
+        .bind(job.id)
+        .bind(target)
+        .execute(&mut *conn)
+        .await?;
+        return Ok(false);
+    }
     let root: Option<String> = sqlx::query_scalar("select root_dir from machines where id=$1")
         .bind(target)
         .fetch_optional(&mut *conn)
         .await?
         .flatten();
-    bind_target_in_tx(conn, job, carrier, target, root.as_deref(), correlation_id).await
+    bind_target_in_tx(conn, job, carrier, target, root.as_deref(), correlation_id).await?;
+    Ok(true)
 }
 
 async fn bind_target_in_tx(
@@ -231,11 +314,7 @@ pub async fn place_waiting_in_tx(
     if waiting.is_empty() {
         return Ok(0);
     }
-    let mut all = candidates(conn, carrier).await?;
-    // Замки всех машин сразу и по возрастанию: параллельные расстановки не замыкают цикл.
-    for candidate in &all {
-        lock_machine(conn, candidate.id).await?;
-    }
+    let mut all = lock_candidates(conn, carrier).await?;
     all.sort_by(|a, b| {
         b.placement_rank(carrier)
             .cmp(&a.placement_rank(carrier))
@@ -250,9 +329,32 @@ pub async fn place_waiting_in_tx(
             continue;
         }
         let mut chosen = None;
+        let mut local_ok = None;
         for candidate in &all {
+            // Рабочий каталог на несущей обязан остаться в домене исходников.
+            if candidate.is_carrier(carrier) {
+                if local_ok.is_none() {
+                    local_ok = Some(
+                        carrier_workdir_in_domain(
+                            conn,
+                            carrier,
+                            job.source_repo.as_deref().unwrap_or_default(),
+                            job.source_domain.as_deref().unwrap_or_default(),
+                        )
+                        .await?,
+                    );
+                }
+                if local_ok == Some(false) {
+                    continue;
+                }
+            }
+            // Названная машина берёт только свою задачу, виды места на неё не действуют.
+            let allowed = match job.requested_machine_id {
+                Some(requested) => candidate.id == requested,
+                None => candidate.allowed_by(carrier, &job.placement),
+            };
             if !candidate.capable()
-                || !candidate.allowed_by(carrier, &job.placement)
+                || !allowed
                 || !candidate.has_labels(&job.labels)
                 || registry.availability(candidate.id) != Availability::Available
             {

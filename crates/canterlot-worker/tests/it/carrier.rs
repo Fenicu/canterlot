@@ -191,6 +191,7 @@ impl Fixture {
             ca_cert: hub.config.ca_cert.clone(),
             ssh_config: Some(sshd.ssh_config.clone()),
             worker_binary: Some(worker_binary.unwrap_or_else(|| PathBuf::from(WORKER))),
+            worker_sha256: None,
             entries: vec![RunnerSsh {
                 machine: RUNNER.into(),
                 ssh: ALIAS.into(),
@@ -466,6 +467,7 @@ async fn updating_the_binary_restarts_the_worker_and_a_running_job_survives() {
         ca_cert: fixture.hub.config.ca_cert.clone(),
         ssh_config: Some(fixture.sshd.ssh_config.clone()),
         worker_binary: Some(newer.clone()),
+        worker_sha256: None,
         entries: vec![RunnerSsh {
             machine: RUNNER.into(),
             ssh: ALIAS.into(),
@@ -498,6 +500,76 @@ async fn updating_the_binary_restarts_the_worker_and_a_running_job_survives() {
     fixture.wait_hellos(2).await;
     // Токен не запрашивался заново: обновление не сбрасывает учётные данные.
     assert_eq!(fixture.control.requests().len(), 1);
+    stop.send(true).unwrap();
+    join.await.unwrap();
+}
+
+// Один поток: подписчик журнала действует только на своём потоке, а задачи носителя должны быть на нём.
+#[tokio::test(flavor = "current_thread")]
+async fn a_cut_binary_upload_keeps_the_old_binary_and_the_next_round_retries() {
+    let (writer, captured) = LogCapture::new();
+    let _guard = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_writer(writer)
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .finish(),
+    );
+    let scratch = tempfile::tempdir_in("/tmp").unwrap();
+    let newer = scratch.path().join("canterlot-worker");
+    let mut bytes = fs::read(WORKER).unwrap();
+    bytes.extend_from_slice(b"\0carrier-cut-marker");
+    fs::write(&newer, &bytes).unwrap();
+    fs::set_permissions(&newer, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut fixture = Fixture::start(Options::default()).await;
+    fixture.wait_hellos(1).await;
+    let original = fs::read(fixture.root.join("bin/canterlot-worker")).unwrap();
+    let worker_before = fixture.worker_pid().unwrap();
+    fixture.shutdown_carrier().await;
+
+    // Носитель объявляет хэш не того, что пойдёт по ssh: на раннер дойдёт «обрубок».
+    let (stop, shutdown) = watch::channel(false);
+    let settings = CarrierSettings {
+        hub_url: fixture.hub.config.hub_url.clone(),
+        ca_cert: fixture.hub.config.ca_cert.clone(),
+        ssh_config: Some(fixture.sshd.ssh_config.clone()),
+        worker_binary: Some(newer.clone()),
+        worker_sha256: Some("0".repeat(64)),
+        entries: vec![RunnerSsh {
+            machine: RUNNER.into(),
+            ssh: ALIAS.into(),
+            max_running: 3,
+            lease_slots: 2,
+        }],
+        timings: test_timings(),
+    };
+    let (_assign, assigned) = watch::channel(fixture.assigned());
+    let join = tokio::spawn(carrier::run(
+        settings,
+        fixture.control.clone(),
+        assigned,
+        shutdown,
+    ));
+    let failures = || {
+        String::from_utf8_lossy(&captured.lock().unwrap())
+            .matches("runner binary upload failed")
+            .count()
+    };
+    // Повтор не ждёт переподключения туннеля: отправка сверяется на каждом круге присмотра
+    // (раз в 300 мс). Прежний код сбрасывал `need_full` до отправки, и неудач было бы столько,
+    // сколько раз поднимался туннель (два-три).
+    until("the upload to be retried round after round", || {
+        failures() >= 5
+    })
+    .await;
+    assert_eq!(
+        fs::read(fixture.root.join("bin/canterlot-worker")).unwrap(),
+        original,
+        "the old binary must stay in place"
+    );
+    assert_eq!(fixture.worker_pid(), Some(worker_before));
+    assert!(pid_alive(worker_before), "the worker must not be restarted");
     stop.send(true).unwrap();
     join.await.unwrap();
 }
@@ -755,6 +827,7 @@ async fn removal_stops_the_worker_and_the_forward_but_shutdown_leaves_them() {
         ca_cert: fixture.hub.config.ca_cert.clone(),
         ssh_config: Some(fixture.sshd.ssh_config.clone()),
         worker_binary: Some(PathBuf::from(WORKER)),
+        worker_sha256: None,
         entries: vec![RunnerSsh {
             machine: RUNNER.into(),
             ssh: ALIAS.into(),
@@ -867,6 +940,7 @@ async fn start_dead_runner(
             ca_cert: ca,
             ssh_config: Some(config),
             worker_binary: Some(PathBuf::from(WORKER)),
+            worker_sha256: None,
             entries: vec![RunnerSsh {
                 machine: RUNNER.into(),
                 ssh: "dead".into(),

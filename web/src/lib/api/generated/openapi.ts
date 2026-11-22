@@ -4158,6 +4158,11 @@ export interface components {
              *     от этого времени); `null` у обычной машины и пока наблюдений нет.
              */
             observed_at?: string | null;
+            /**
+             * @description Раннер: время хаба, с которого он `offline`; `null`, пока он в другом состоянии, и у
+             *     обычной машины. По нему этап C отсчитывает десять минут недоступности.
+             */
+            offline_since?: string | null;
             os?: string | null;
             /**
              * Format: uuid

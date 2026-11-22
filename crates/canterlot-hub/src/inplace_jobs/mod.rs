@@ -176,6 +176,8 @@ pub struct Job {
     pub outputs_note: Option<String>,
     pub outputs_files: Option<Value>,
     pub owner_job: bool,
+    /// Названная в заявке машина, пока задача ждёт на ней свободного места.
+    pub requested_machine_id: Option<Uuid>,
     pub outcome_state: Option<String>,
     pub outcome_reason: Option<String>,
     pub collecting_at: Option<DateTime<Utc>>,
@@ -770,10 +772,10 @@ pub async fn finish_in_tx(
     Ok(Some(done))
 }
 
-/// Итог пришёл от раннера: задача с исходниками не заканчивается, а переходит в `collecting`,
-/// пока несущая собирает результаты и убирает исходники; остальные заканчиваются сразу.
-/// Сообщение об итоге и ждущий вызов срабатывают только при настоящем конце (`finish_in_tx`).
-/// Под замками машины и строки.
+/// Итог пришёл от раннера: задача с исходниками и результатами для сбора переходит в
+/// `collecting`, пока несущая собирает результаты; остальные заканчиваются сразу. Очистка
+/// исходников идёт после конца (`finish_in_tx`) и конец не держит. Сообщение об итоге и ждущий
+/// вызов срабатывают только при настоящем конце. Под замками машины и строки.
 pub async fn runner_finished_in_tx(
     conn: &mut PgConnection,
     job: &Job,
@@ -783,7 +785,7 @@ pub async fn runner_finished_in_tx(
     if job.is_terminal() || job.state() == State::Collecting {
         return Ok(None);
     }
-    if !job.has_source() {
+    if !job.has_source() || !carrier::wants_collect(&job.outputs, outcome.state, &outcome.reason) {
         return finish_in_tx(conn, job, outcome, correlation_id).await;
     }
     carrier::begin_collecting_in_tx(conn, job, outcome, correlation_id).await

@@ -23,21 +23,28 @@ const BIND_RETRY: Duration = Duration::from_secs(2);
 /// Хаб не ответил на `OwnerJobSubmit`: задача не принята.
 const HUB_REPLY: Duration = Duration::from_secs(30);
 
+/// Участники работающих исполнений (pid и время старта супервизора и CLI): процесс под любым из
+/// них — часть исполнения, то есть сессия агента, а не терминал владельца.
+pub type Executions = Arc<dyn Fn() -> Vec<(u32, u64)> + Send + Sync>;
+
 pub struct OwnerJobServer {
     task: JoinHandle<()>,
 }
 
 impl OwnerJobServer {
+    /// `executions` отвечает, кто сейчас считается исполнением: сокет не принимает задачи от
+    /// процессов внутри них (`job run` для владельца, а не для агентов; см. `connection`).
     pub fn start(
         socket: PathBuf,
         store: Arc<Store>,
         hub: Arc<dyn Hub>,
+        executions: Executions,
         shutdown: watch::Receiver<bool>,
     ) -> Self {
         // Первая попытка сразу: сокет появляется к возврату из `start`, повторы — в задаче.
         let first = bind(&socket).ok();
         Self {
-            task: tokio::spawn(serve(socket, first, store, hub, shutdown)),
+            task: tokio::spawn(serve(socket, first, store, hub, executions, shutdown)),
         }
     }
 }
@@ -79,6 +86,7 @@ async fn serve(
     first: Option<UnixListener>,
     store: Arc<Store>,
     hub: Arc<dyn Hub>,
+    executions: Executions,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut first = first;
@@ -103,9 +111,9 @@ async fn serve(
         tokio::select! {
             accepted = listener.accept() => {
                 let Ok((stream, _)) = accepted else { continue };
-                let (store, hub) = (store.clone(), hub.clone());
+                let (store, hub, executions) = (store.clone(), hub.clone(), executions.clone());
                 connections.spawn(async move {
-                    if let Err(error) = connection(stream, store, hub).await {
+                    if let Err(error) = connection(stream, store, hub, executions).await {
                         tracing::debug!(%error, "jobs connection ended");
                     }
                 });
@@ -153,7 +161,30 @@ fn check(spec: &JobSpec) -> Result<(), Refusal> {
     Ok(())
 }
 
-async fn connection(stream: UnixStream, store: Arc<Store>, hub: Arc<dyn Hub>) -> io::Result<()> {
+async fn connection(
+    stream: UnixStream,
+    store: Arc<Store>,
+    hub: Arc<dyn Hub>,
+    executions: Executions,
+) -> io::Result<()> {
+    // `job run` запускает работу на других машинах и выбирает домен по пути исходников:
+    // это дело владельца в его терминале. Сессия агента (процесс внутри исполнения) получает
+    // отказ на любое сообщение. Процесс без читаемого pid или с чужим uid — тоже отказ.
+    let denied = match stream.peer_cred() {
+        Ok(peer) => match peer.pid().and_then(|pid| u32::try_from(pid).ok()) {
+            Some(pid) => {
+                let roots = executions();
+                peer.uid() != rustix::process::getuid().as_raw()
+                    || tokio::task::spawn_blocking(move || {
+                        crate::containment::descends_from_any(pid, &roots)
+                    })
+                    .await
+                    .unwrap_or(true)
+            }
+            None => true,
+        },
+        Err(_) => true,
+    };
     let mut stream = BufReader::new(stream);
     loop {
         let mut line = String::new();
@@ -172,6 +203,14 @@ async fn connection(stream: UnixStream, store: Arc<Store>, hub: Arc<dyn Hub>) ->
                 return Ok(());
             }
         };
+        if denied {
+            let reply = refused(Refusal::new(
+                "not_allowed",
+                "job run is for the owner's terminal: sessions running inside an execution cannot submit jobs",
+            ));
+            send(stream.get_mut(), reply).await?;
+            return Ok(());
+        }
         match message {
             ClientMessage::Submit { spec } => {
                 let reply = match check(&spec) {
