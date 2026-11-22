@@ -166,12 +166,13 @@ for f in "$in_container" "$runner_gate" "$gate_remote"; do
         fail "$f задаёт тестовые швы CANTERLOT_GATE_*: шаги гейта были бы подменены или пропущены"
     fi
 done
-# Наборы выката идут в гейте и, значит, в контейнере; им нужны shellcheck и zstd.
+# Наборы выката идут в гейте и, значит, в контейнере; им нужны shellcheck и zstd,
+# а тестам носителя — openssh (ssh, ssh-keygen, sshd) и rsync для копирования файлов.
 printf '%s\n' "$code" | grep -q 'scripts/deploy/tests/run.sh' \
     || fail 'gate.sh не зовёт scripts/deploy/tests/run.sh'
-for tool in shellcheck zstd; do
+for tool in shellcheck zstd openssh-client openssh-server rsync; do
     grep -qE "^[[:space:]]+$tool( |\\\\|$)" "$dockerfile" \
-        || fail "docker/gate/Dockerfile: нет пакета $tool, нужного наборам scripts/deploy/tests"
+        || fail "docker/gate/Dockerfile: нет пакета $tool, нужного наборам scripts/deploy/tests и тестам носителя"
 done
 # runner-gate.sh гоняет именно in-container.sh из той же рабочей копии, а gate.sh
 # --runner — именно runner-gate.sh на полном sha.

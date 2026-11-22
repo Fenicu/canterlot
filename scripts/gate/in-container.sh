@@ -59,6 +59,21 @@ export TMPDIR=/tmp
 # тесты не увидели чужие временные файлы. Всё в нём создаём мы сами.
 find /tmp -mindepth 1 -maxdepth 1 -exec rm -rf {} +
 
+# uid приходит снаружи (--user), записи о нём в /etc/passwd контейнера нет.
+# libnss-wrapper подставляет запись из файла: она нужна не только initdb и postgres,
+# но и тестам носителя — sshd ищет пользователя по имени из `id -un`, а без записи
+# остаётся числовой uid, и sshd отвечает «Invalid user». Env держится до конца гейта.
+if [[ -z "$(getent passwd "$(id -u)" || true)" ]]; then
+    identity=$TMPDIR/identity
+    mkdir -p "$identity"
+    printf 'gate:x:%s:%s:Canterlot gate:%s:/bin/sh\nroot:x:0:0:root:/root:/bin/sh\n' \
+        "$(id -u)" "$(id -g)" "$HOME" >"$identity/passwd"
+    printf 'gate:x:%s:\nroot:x:0:\n' "$(id -g)" >"$identity/group"
+    export NSS_WRAPPER_PASSWD="$identity/passwd"
+    export NSS_WRAPPER_GROUP="$identity/group"
+    export LD_PRELOAD=libnss_wrapper.so
+fi
+
 # Playwright берёт 50% от nproc, но nproc в контейнере — потоки хоста, а не квота
 # --cpus. На 30 CPU квоты 18 воркеров с Chromium и Firefox не успевают довести
 # страницу до [data-ready] за 15 с, и тесты падают по таймауту. Один воркер на
@@ -94,20 +109,9 @@ for candidate in /usr/lib/postgresql/*/bin; do
 done
 [[ -n "$pgbin" ]] || die "нет initdb в /usr/lib/postgresql/*/bin"
 pgdata=/tmp/canterlot-gate-pg
-# uid приходит снаружи (--user), записи о нём в /etc/passwd контейнера нет, а
-# initdb и postgres ищут свой uid через getpwuid. libnss-wrapper подставляет
-# запись из файла; env выставлен только вокруг базы, тесты его не видят.
+# Запись для uid уже подставлена выше, поэтому initdb и postgres видят своего
+# пользователя; окружение общее для всего гейта, включая тесты носителя с sshd.
 (
-    if [[ -z "$(getent passwd "$(id -u)" || true)" ]]; then
-        identity=$TMPDIR/identity
-        mkdir -p "$identity"
-        printf 'gate:x:%s:%s:Canterlot gate:%s:/bin/sh\nroot:x:0:0:root:/root:/bin/sh\n' \
-            "$(id -u)" "$(id -g)" "$HOME" >"$identity/passwd"
-        printf 'gate:x:%s:\nroot:x:0:\n' "$(id -g)" >"$identity/group"
-        export NSS_WRAPPER_PASSWD="$identity/passwd"
-        export NSS_WRAPPER_GROUP="$identity/group"
-        export LD_PRELOAD=libnss_wrapper.so
-    fi
     rm -rf "$pgdata"
     # Локаль как у postgres:18.6-trixie из scripts/test-db.sh: от неё зависит
     # порядок кириллицы в тестах пресетов (en_US, а не байтовый C).
