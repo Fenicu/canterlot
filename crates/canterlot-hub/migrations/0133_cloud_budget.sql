@@ -39,6 +39,8 @@ create table cloud_auto_unavailable (
 create table cloud_auto_episode (
     singleton boolean primary key default true check (singleton),
     active boolean not null default false,
-    card_id uuid references requests(id)
+    -- Ссылка по id без внешнего ключа: карточка живёт в requests, episode хранит только
+    -- её идентификатор и не удерживает строку запроса при удалении разговора.
+    card_id uuid
 );
 insert into cloud_auto_episode (singleton) values (true);
