@@ -213,7 +213,7 @@ canterlot-worker job run --title T [--machine NAME|auto] [--labels a,b] [--expec
 | `get_server(id)` | `Found(ServerState {status, ipv4, …})` или `NotFound` |
 | `delete_server(id)` | `Deleted {quarantined}`, `AlreadyGone` (404), `NeedsConfirmation` (хеш в ответе или 423: у токена нет `is_able_to_delete`), `Failed {retryable}` |
 | `list_project_servers(project_id)` | все серверы проекта или `ListError`; частичный список успехом не бывает |
-| `add_ipv4(server_id)` | `POST /servers/{id}/ips {"type":"ipv4"}` → выданный адрес (`server_ip.ip`) или `ProviderError`; один вызов, без повторов (С2, §7.3a) |
+| `ensure_public_ipv4(server_id)` | `POST /servers/{id}/ips {"type":"ipv4"}` → `Assigned(ip)`, `Refused {status, code, required_balance}` (4xx, кроме 429), `NotProcessed` (429), `Ambiguous`; один вызов, без повторов (С2, §7.3a) |
 | `list_floating_ips()` | все плавающие адреса аккаунта (`{id: строка, ip, bound}`, идентификаторы строки, как у API) или `ListError` |
 | `delete_floating_ip(id)` | `DELETE /floating-ips/{id}`: `Deleted`, `AlreadyGone` (404), `Failed`; идентификатор в путь проходит только из знаков `A-Za-z0-9_-` |
 
@@ -296,6 +296,9 @@ canterlot-worker job run --title T [--machine NAME|auto] [--labels a,b] [--expec
 ### 7.3a Публичный IPv4 (проверено на живом Timeweb 22.11)
 
 - У нового сервера адреса нет. Служба на первом проходе после `identified` ставит метку `ip_requested_at` и вызывает `add_ipv4` (`POST /servers/{id}/ips {"type":"ipv4"}`, ответ `server_ip {ip, type}`); адрес пишется в `cloud_windows.ipv4`. Определённый отказ (`Rejected`, `Conflict`, `NotFound`, `Auth`, 429) снимает метку, и следующий проход повторяет заказ; неопределённый (обрыв, 5xx) оставляет метку: второго заказа нет, а адрес появится в ответе `get_server`. Подключение (`AttachRunner`) уходит, когда сервер `On` и адрес известен.
+- **Единая точка.** Адрес получает один метод провайдера, `ensure_public_ipv4(server_id) -> Ipv4Outcome {Assigned(ip), Refused{status, code, required_balance}, NotProcessed, Ambiguous}`; способ за ним (сейчас заказ нового адреса, позже, возможно, привязка заранее купленного плавающего через `POST /floating-ips/{id}/bind`) можно сменить, не трогая машину состояний окна. Привязку плавающего адреса сейчас не делаем.
+- **Отказ провайдера.** Любой 4xx, кроме 429, — определённый отказ: адреса нет, повтор не поможет (например 400 `abuse_prepayment_required` с `details.required_balance`: правило против злоупотреблений на аккаунте). Окно сразу уходит на удаление по обычному пути (`delete_reason = ipv4_refused`, отзыв раннера, удаление сервера, подтверждение отсутствием в полном списке), метка заказа снимается (адреса нет, итог без него: только сервер от `create_called_at`), в `last_error` остаётся `error_code` ответа. Владельцу пуш `ipv4_refused` сразу: «Timeweb отказал в публичном IPv4 (<код>), сервер удалён» и `required_balance` в рублях, если он был, больше ничего из ответа. 429 — запрос не обработан, метка снимается и заказ повторяется. 5xx, таймаут, обрыв, нечитаемый ответ — неопределённый исход: сервер перечитывается тем же проходом, второго заказа для окна нет.
+- **Блок провайдера.** Отказ `abuse_prepayment_required` пишет `cloud_budget.provider_block_code` и `provider_block_at`; пока блок стоит, `create_in_tx` отказывает `CreateRefusal::ProviderBlocked {code}`, а список окон (`GET /api/v1/cloud/windows`) показывает `provider_block_code` и `provider_block_at`. Снимает блок только владелец: функция `windows::clear_provider_block` оставлена задаче C2b (кнопка в PWA).
 - Цена: `ipv4_hourly_kopecks` в окне (из `ipv4_monthly_rubles`), резерв = резерв сервера + резерв адреса (каждый `час × (ceil(минуты / 60) + 1)`).
 - Конец окна: после принятого удаления сервера и подтверждения его отсутствия в полном списке (`server_gone_at`) служба ищет адрес окна в полном списке плавающих адресов (`list_floating_ips`). Привязан — ждёт; отвязан — `delete_floating_ip(id)` и повторный список; нет в списке — `ip_gone_at`, окно `ended`. Отказ удаления повторяется с паузой, после трёх неудач пуш `ip_delete_failing`. Окно, в котором заказ адреса остался без ответа и адрес неизвестен, кончается пушем `ipv4_unattributed` (чужие плавающие адреса не трогаются, итог считается с запасом до конца окна).
 - Итог = `final_cost(цена сервера, от create_called_at до server_gone_at) + final_cost(цена адреса, от ip_requested_at до ip_gone_at)`.
@@ -314,7 +317,7 @@ canterlot-worker job run --title T [--machine NAME|auto] [--labels a,b] [--expec
 
 ### 7.5 Пуши владельцу (`cloud_alert`)
 
-Через `owner_pushes` (вид `cloud_alert`, без разговора, ключ `dedupe_key` с номером попытки или получасового слота): `stray_server_deleted`, `stray_server_stuck`, `delete_needs_confirmation`, `delete_failing`, `window_overrun`, `outage_extra_cost` (с оценкой лишнего расхода), `window_gone`, `stray_ip_deleted`, `stray_ip_stuck`, `ip_delete_failing`, `ipv4_unattributed`. Без `[notify.gotify]` пуша нет, но запись в журнале (`cloud_alert`, код без значений) остаётся.
+Через `owner_pushes` (вид `cloud_alert`, без разговора, ключ `dedupe_key` с номером попытки или получасового слота): `stray_server_deleted`, `stray_server_stuck`, `delete_needs_confirmation`, `delete_failing`, `window_overrun`, `outage_extra_cost` (с оценкой лишнего расхода), `window_gone`, `stray_ip_deleted`, `stray_ip_stuck`, `ip_delete_failing`, `ipv4_unattributed`, `ipv4_refused` (с `error_code` и `required_balance`). Без `[notify.gotify]` пуша нет, но запись в журнале (`cloud_alert`, код без значений) остаётся.
 
 ### 7.6 Тесты
 
