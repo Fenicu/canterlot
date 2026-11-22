@@ -1,4 +1,5 @@
 type UpdateState = 'idle' | 'available' | 'applying' | 'failed';
+export type CheckResult = 'available' | 'current' | 'failed' | 'skipped';
 export let needsUpdate = false;
 export function notifyIncompatible(): void {
   needsUpdate = true;
@@ -40,23 +41,27 @@ export class UpdateController extends EventTarget {
     this.#set('available');
   }
   incompatible(): void { if (this.#state === 'idle') this.notify(); }
-  /** Сверяет _app/version.json без HTTP-кэша. Сетевые ошибки ничего не меняют. */
-  async check(): Promise<void> {
+  /** Сверяет _app/version.json без HTTP-кэша. Сетевые ошибки состояние не меняют, но возвращаются как `failed`. */
+  async check(): Promise<CheckResult> {
     const fetcher = this.env.fetch ?? (typeof fetch === 'undefined' ? undefined : fetch);
-    if (this.#destroyed || !this.env.version || !fetcher) return;
+    if (this.#destroyed || !this.env.version || !fetcher) return 'skipped';
     let version: string | undefined;
     try {
       const response = await fetcher('/_app/version.json', {
         cache: 'no-store',
         headers: { 'cache-control': 'no-cache' }
       });
-      if (!response.ok) return;
+      if (!response.ok) return 'failed';
       const data = await response.json() as { version?: unknown };
       version = typeof data.version === 'string' ? data.version : undefined;
     } catch {
-      return;
+      return 'failed';
     }
-    if (!this.#destroyed && version !== undefined && version !== this.env.version) this.notify();
+    if (this.#destroyed) return 'skipped';
+    if (version === undefined) return 'failed';
+    if (version === this.env.version) return 'current';
+    this.notify();
+    return 'available';
   }
   async apply(force = false): Promise<void> {
     if (this.#destroyed || this.#applying) return;
