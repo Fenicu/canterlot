@@ -10,6 +10,7 @@
 
 pub mod bridge;
 mod collect;
+pub mod cloud;
 pub mod commands;
 mod runner;
 pub mod script;
@@ -156,6 +157,8 @@ pub struct CarrierSettings {
     pub worker_sha256: Option<String>,
     pub entries: Vec<RunnerSsh>,
     pub timings: Timings,
+    /// Долговечные облачные подключения; без них носитель ведёт только статические раннеры.
+    pub cloud: Option<Arc<cloud::CloudState>>,
 }
 
 impl CarrierSettings {
@@ -168,6 +171,7 @@ impl CarrierSettings {
             worker_sha256: None,
             entries: config.runners.ssh.clone(),
             timings: Timings::default(),
+            cloud: None,
         }
     }
 }
@@ -234,6 +238,19 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+/// Отличие облачного раннера от статического: явный адрес и маркер готовности cloud-init.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CloudRunner {
+    pub window_id: String,
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    pub identity: Option<PathBuf>,
+    pub known_hosts: PathBuf,
+    pub ready_marker: PathBuf,
+    pub ready_timeout: Duration,
+}
+
 /// Что нужно знать задаче одного раннера.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RunnerSpec {
@@ -243,10 +260,16 @@ pub(crate) struct RunnerSpec {
     pub alias: String,
     pub max_running: u32,
     pub lease_slots: u32,
+    pub cloud: Option<CloudRunner>,
 }
 
-/// Пересечение конфигурации и назначения хаба; раннер с негодным корнем пропускается.
-fn desired(entries: &[RunnerSsh], assigned: &[AssignedRunner]) -> BTreeMap<String, RunnerSpec> {
+/// Пересечение конфигурации и назначения хаба, плюс облачные подключения. Раннер с негодным
+/// корнем пропускается; облачный заводится только пока хаб поручает его машину.
+fn desired(
+    entries: &[RunnerSsh],
+    assigned: &[AssignedRunner],
+    cloud: &[cloud::CloudSpec],
+) -> BTreeMap<String, RunnerSpec> {
     let mut specs = BTreeMap::new();
     for entry in entries {
         let Some(assigned) = assigned.iter().find(|runner| runner.name == entry.machine) else {
@@ -268,7 +291,41 @@ fn desired(entries: &[RunnerSsh], assigned: &[AssignedRunner]) -> BTreeMap<Strin
                 alias: entry.ssh.clone(),
                 max_running: entry.max_running,
                 lease_slots: entry.lease_slots,
+                cloud: None,
             });
+    }
+    for spec in cloud {
+        if !assigned.iter().any(|runner| runner.machine_id == spec.machine_id) {
+            continue;
+        }
+        if !script::valid_root(&spec.root) {
+            tracing::warn!(
+                runner = %spec.machine_id,
+                "cloud root_dir is not an absolute normalized path of safe characters; runner skipped"
+            );
+            continue;
+        }
+        specs.insert(
+            format!("cloud/{}", spec.machine_id),
+            RunnerSpec {
+                machine_id: spec.machine_id,
+                name: spec.host.clone(),
+                root: spec.root.clone(),
+                alias: String::new(),
+                max_running: spec.max_running,
+                lease_slots: spec.lease_slots,
+                cloud: Some(CloudRunner {
+                    window_id: spec.window_id.clone(),
+                    host: spec.host.clone(),
+                    port: spec.port,
+                    user: spec.user.clone(),
+                    identity: spec.identity.clone(),
+                    known_hosts: spec.known_hosts.clone(),
+                    ready_marker: spec.ready_marker.clone(),
+                    ready_timeout: spec.ready_timeout,
+                }),
+            },
+        );
     }
     specs
 }
@@ -332,6 +389,8 @@ pub async fn run(
         );
         return;
     };
+    let cloud = settings.cloud.clone();
+    let mut cloud_rx = cloud.as_ref().map(|state| state.subscribe());
     let shared = Arc::new(runner::Shared {
         hub_url: settings.hub_url.clone(),
         ssh_config: settings.ssh_config.clone(),
@@ -341,6 +400,7 @@ pub async fn run(
         ca_pem,
         local,
         control,
+        cloud: cloud.clone(),
     });
     let mut running: BTreeMap<String, Handle> = BTreeMap::new();
     while !*shutdown.borrow() {
@@ -356,7 +416,9 @@ pub async fn run(
             }
         }
         running.retain(|_, handle| !handle.join.is_finished());
-        let wanted = desired(&settings.entries, &assigned.borrow_and_update());
+        let assigned_list = assigned.borrow_and_update().clone();
+        let cloud_specs = cloud.as_ref().map(|state| state.specs()).unwrap_or_default();
+        let wanted = desired(&settings.entries, &assigned_list, &cloud_specs);
         let gone: Vec<String> = running
             .iter()
             .filter(|(name, handle)| wanted.get(*name) != Some(&handle.spec))
@@ -364,9 +426,17 @@ pub async fn run(
             .collect();
         for name in gone {
             if let Some(handle) = running.remove(&name) {
-                tracing::info!(runner = %handle.spec.machine_id, "runner leaves the carrier");
+                let machine = handle.spec.machine_id;
+                let cloud_left = handle.spec.cloud.is_some()
+                    && !assigned_list.iter().any(|runner| runner.machine_id == machine);
+                tracing::info!(runner = %machine, "runner leaves the carrier");
                 let _ = handle.stop.send(Stop::Remove);
                 let _ = handle.join.await;
+                if cloud_left && !*shutdown.borrow() && let Some(state) = &cloud {
+                    // Сервер окна удалит хаб: локально забываем подключение и больше не
+                    // поднимаем его по старой записи.
+                    state.forget(machine);
+                }
             }
         }
         for (name, spec) in wanted {
@@ -396,6 +466,12 @@ pub async fn run(
                     break;
                 }
             }
+            _ = async {
+                match &mut cloud_rx {
+                    Some(rx) => { let _ = rx.changed().await; }
+                    None => std::future::pending::<()>().await,
+                }
+            } => {}
             _ = shutdown.changed() => {}
         }
     }

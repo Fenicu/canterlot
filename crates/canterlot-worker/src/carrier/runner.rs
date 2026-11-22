@@ -19,7 +19,9 @@ use url::Url;
 use crate::fatal;
 
 use super::{
-    LocalBinary, Observation, RunnerControl, RunnerSpec, Stop, Timings, TokenError, script,
+    CloudRunner, LocalBinary, Observation, RunnerControl, RunnerSpec, Stop, Timings, TokenError,
+    cloud::{AttachOutcome, CloudState},
+    script,
     script::{ConfigInputs, Ids, Mode, Probe},
     ssh::{Input, Output, Ssh, Unreachable},
 };
@@ -35,6 +37,8 @@ pub(super) struct Shared {
     pub ca_sha: String,
     pub local: Option<Arc<LocalBinary>>,
     pub control: Arc<dyn RunnerControl>,
+    /// Итоги облачных подключений: короткие коды без секретов.
+    pub cloud: Option<Arc<CloudState>>,
 }
 
 /// Адрес хаба для обратного проброса, из `hub_url` самого носителя.
@@ -147,6 +151,8 @@ struct Runner {
     reach: Arc<Reach>,
     /// Сколько раз проброс поднимался: смена значения — повод заново сверить бинарник.
     connects: Arc<AtomicU64>,
+    /// Успех облачного подключения сообщается один раз за жизнь задачи.
+    started: AtomicBool,
     halt: watch::Sender<Stop>,
     parked: Arc<AtomicBool>,
 }
@@ -157,7 +163,16 @@ pub(super) async fn run(
     stop: watch::Receiver<Stop>,
     parked: Arc<AtomicBool>,
 ) {
-    let ssh = Ssh::new(spec.alias.clone(), shared.ssh_config.clone());
+    let ssh = match &spec.cloud {
+        Some(cloud) => Ssh::host(
+            cloud.host.clone(),
+            cloud.port,
+            cloud.user.clone(),
+            cloud.identity.clone(),
+            cloud.known_hosts.clone(),
+        ),
+        None => Ssh::new(spec.alias.clone(), shared.ssh_config.clone()),
+    };
     let reach = Arc::new(Reach {
         machine_id: spec.machine_id,
         control: shared.control.clone(),
@@ -186,9 +201,17 @@ pub(super) async fn run(
         ssh,
         reach,
         connects,
+        started: AtomicBool::new(false),
         halt,
         parked,
     });
+    if let Some(cloud) = &runner.spec.cloud {
+        if let Err(code) = runner.wait_ready(cloud).await {
+            runner.cloud_fail(cloud, code);
+            forward.abort();
+            return;
+        }
+    }
     let tunnel = tokio::spawn({
         let runner = runner.clone();
         let inner = inner.clone();
@@ -202,6 +225,62 @@ pub(super) async fn run(
 impl Runner {
     fn root(&self) -> &std::path::Path {
         &self.spec.root
+    }
+
+    fn cloud_fail(&self, cloud: &CloudRunner, code: &'static str) {
+        if let Some(state) = &self.shared.cloud {
+            state.report(AttachOutcome::Failed {
+                window_id: cloud.window_id.clone(),
+                machine_id: self.spec.machine_id,
+                code,
+            });
+        }
+    }
+
+    fn install_failed(&self) {
+        if let Some(cloud) = &self.spec.cloud {
+            self.cloud_fail(cloud, "install_failed");
+        }
+    }
+
+    fn cloud_started(&self, cloud: &CloudRunner) {
+        if self.started.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        if let Some(state) = &self.shared.cloud {
+            state.report(AttachOutcome::Started {
+                window_id: cloud.window_id.clone(),
+                machine_id: self.spec.machine_id,
+            });
+        }
+    }
+
+    /// Ждёт маркер готовности cloud-init с откатом до предельного срока. Закреплённый ключ
+    /// хоста проверяется первым: при расхождении ничего не ставится и повтор не помогает.
+    async fn wait_ready(&self, cloud: &CloudRunner) -> Result<(), &'static str> {
+        let deadline = Instant::now() + cloud.ready_timeout;
+        let marker = cloud.ready_marker.display().to_string();
+        let mut backoff = self.shared.timings.backoff_min;
+        let mut connected = false;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(if connected { "ready_timeout" } else { "ssh_unreachable" });
+            }
+            let limit = self.shared.timings.ssh_limit.min(remaining);
+            match self.ssh.raw(&["test", "-f", &marker], limit).await {
+                Ok(output) if output.code == 0 => return Ok(()),
+                Ok(output) if Ssh::host_key_rejected(&output) => return Err("host_key_mismatch"),
+                Ok(_) => connected = true,
+                Err(Unreachable) => {}
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(if connected { "ready_timeout" } else { "ssh_unreachable" });
+            }
+            tokio::time::sleep(backoff.min(remaining)).await;
+            backoff = (backoff * 2).min(self.shared.timings.backoff_max);
+        }
     }
 
     /// Одна короткая команда: итог попытки сразу идёт в наблюдения.
@@ -292,6 +371,9 @@ impl Runner {
         }
         self.reach.record(true).await;
         self.connects.fetch_add(1, Ordering::SeqCst);
+        if let Some(cloud) = &self.spec.cloud {
+            self.cloud_started(cloud);
+        }
         tracing::info!(runner = %self.spec.machine_id, "runner tunnel is up");
         tokio::select! {
             _ = child.wait() => {
@@ -329,6 +411,11 @@ impl Runner {
                     }
                     if self.sync(&mut state).await.is_err() {
                         // Связи нет: попытка уже учтена, следующий круг повторит.
+                        if !self.started.load(Ordering::SeqCst)
+                            && let Some(cloud) = &self.spec.cloud
+                        {
+                            self.cloud_fail(cloud, "ssh_unreachable");
+                        }
                         state.alive_streak = 0;
                     }
                 }
@@ -375,6 +462,7 @@ impl Runner {
             if remote_sha != local.sha256 || version_differs {
                 tracing::info!(runner = %self.spec.machine_id, "runner binary is replaced");
                 if !self.upload_binary(local).await? {
+                    self.install_failed();
                     return Ok(());
                 }
                 restart = true;
@@ -386,6 +474,7 @@ impl Runner {
                 .call(&[&put], Input::Bytes(&self.shared.ca_pem))
                 .await?;
             if sent.code != 0 {
+                self.install_failed();
                 tracing::warn!(runner = %self.spec.machine_id, "ca.pem could not be installed");
                 return Ok(());
             }
@@ -429,6 +518,9 @@ impl Runner {
                 Ok(Err(TokenError::Refused(refusal))) => {
                     // Повтор ничего не изменит: петли раннера останавливаются до следующего
                     // списка от хаба (его присылают при каждом подключении).
+                    if let Some(cloud) = &self.spec.cloud {
+                        self.cloud_fail(cloud, "token_refused");
+                    }
                     tracing::warn!(runner = %self.spec.machine_id, ?refusal,
                         "hub refused the runner token; the runner is parked");
                     self.parked.store(true, Ordering::SeqCst);
@@ -450,6 +542,7 @@ impl Runner {
                 .call(&[&put], Input::Bytes(credentials.token.expose().as_bytes()))
                 .await?;
             if sent.code != 0 {
+                self.install_failed();
                 tracing::warn!(runner = %self.spec.machine_id, "runner token could not be installed; will ask again");
                 return Ok(());
             }
@@ -459,6 +552,7 @@ impl Runner {
                 restore_generation: credentials.restore_generation,
             };
             if !self.write_config(&ids).await? {
+                self.install_failed();
                 return Ok(());
             }
             self.call(&[&script::remove_fatal(self.root())], Input::None)
@@ -486,6 +580,7 @@ impl Runner {
         if stopped || restart {
             let started = self.script(&script::start(self.root())).await?;
             if started.code != 0 {
+                self.install_failed();
                 tracing::warn!(runner = %self.spec.machine_id, "runner worker could not be started");
             } else {
                 tracing::info!(runner = %self.spec.machine_id, "runner worker started");

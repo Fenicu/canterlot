@@ -17,6 +17,7 @@ use canterlot_proto::worker::v1::{
 };
 use canterlot_worker::{
     carrier::{
+        cloud::{CloudConfig, CloudState},
         commands::{CarrierCommands, CommandError, FactSink},
         stage::{RunnerTarget, Stager, StagerSettings},
     },
@@ -147,7 +148,11 @@ fn fixture() -> Fixture {
     let store = Store::open(&data).unwrap();
     let sink = Arc::new(Sink::default());
     let (stop, shutdown) = watch::channel(false);
-    let commands = CarrierCommands::new(stager, store.clone(), sink.clone(), shutdown);
+    let cloud = Arc::new(CloudState::open(CloudConfig {
+        data_dir: data.clone(),
+        ..CloudConfig::default()
+    }));
+    let commands = CarrierCommands::new(stager, store.clone(), sink.clone(), cloud, shutdown);
     commands.set_enabled(true);
     Fixture {
         sshd,
