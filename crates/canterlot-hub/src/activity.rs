@@ -339,7 +339,8 @@ pub fn extract_request_summary(
             }
         }
         crate::requests::RequestKind::SpawnApproval
-        | crate::requests::RequestKind::SettingsChange => None,
+        | crate::requests::RequestKind::SettingsChange
+        | crate::requests::RequestKind::CloudWindow => None,
         crate::requests::RequestKind::Permission => {
             if let Some(tool) = payload.get("tool_name").and_then(|v| v.as_str()) {
                 if let Some(cmd) = payload
@@ -819,7 +820,7 @@ pub async fn load_inputs(
     let open_requests_rows: Vec<(String, Value)> = sqlx::query_as(
         "select r.kind, r.request_payload from requests r join executions e on e.id = r.execution_id
          where r.conversation_id = $1 and r.state = 'open'
-           and r.kind not in ('spawn_approval', 'settings_change')
+           and r.kind not in ('spawn_approval', 'settings_change', 'cloud_window')
            and e.state not in ('stopped', 'failed', 'owner_lost')
          order by r.created_at asc",
     )

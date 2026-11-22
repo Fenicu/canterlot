@@ -213,7 +213,7 @@ async fn request_views(
     // Как в снимке: незавершённому запросу остановленного исполнения ответа уже не будет;
     // предложение настройки живёт в разговоре сутки и показывается настоящим состоянием.
     let rows = sqlx::query(
-        "select r.id,r.kind,case when r.state in ('open','decision_saved','decision_transmitting') and e.state in ('stopped','failed','owner_lost') and r.kind <> 'settings_change' then 'closed_without_decision' else r.state end state,r.request_payload,r.decision_payload,r.created_seq,r.created_at from requests r join executions e on e.id=r.execution_id where r.id=any($1)",
+        "select r.id,r.kind,case when r.state in ('open','decision_saved','decision_transmitting') and e.state in ('stopped','failed','owner_lost') and r.kind not in ('settings_change', 'cloud_window') then 'closed_without_decision' else r.state end state,r.request_payload,r.decision_payload,r.created_seq,r.created_at from requests r join executions e on e.id=r.execution_id where r.id=any($1)",
     )
     .bind(ids)
     .fetch_all(conn)

@@ -619,6 +619,8 @@ pub struct Scheduler {
     /// Пробы пути: задание не ждёт RPC в транзакции, ответ забирается следующим тиком.
     probes: std::sync::Arc<crate::session_tools::probe::Prefetch>,
     blobs: Option<Arc<dyn BlobStore>>,
+    /// Служба облачных окон для заданий карточек предложений.
+    cloud: Option<Arc<crate::cloud::service::CloudService>>,
     /// Когда уборке принятых делегаций снова можно работать: не чаще раза в несколько часов.
     retention_next: Arc<AtomicI64>,
     #[cfg(feature = "fault-injection")]
@@ -654,6 +656,7 @@ impl Scheduler {
             thresholds: crate::activity::Thresholds::from(&crate::config::ActivityConfig::default()),
             probes: std::sync::Arc::default(),
             blobs: None,
+            cloud: None,
             retention_next: Arc::new(AtomicI64::new(0)),
             #[cfg(feature = "fault-injection")]
             faults: Default::default(),
@@ -704,6 +707,11 @@ impl Scheduler {
     /// Хранилище вложений: уборка по сроку освобождает файлы сразу, как ручное удаление.
     pub fn with_blobs(mut self, blobs: Arc<dyn BlobStore>) -> Self {
         self.blobs = Some(blobs);
+        self
+    }
+
+    pub fn with_cloud(mut self, cloud: Option<Arc<crate::cloud::service::CloudService>>) -> Self {
+        self.cloud = cloud;
         self
     }
     pub fn notify(&self) {
@@ -1358,6 +1366,7 @@ impl Scheduler {
                     &self.settle,
                     &self.thresholds,
                     Some(&runtime),
+                    self.cloud.as_ref(),
                     probe,
                     &self.limits,
                     self.service.config.retry_queue_full,

@@ -10,6 +10,7 @@ use std::fmt;
 
 use async_trait::async_trait;
 
+pub mod budget;
 pub mod cloud_init;
 pub mod host_key;
 pub mod price;

@@ -661,7 +661,7 @@ pub async fn turn_in_progress(
                                  'awaiting_permission', 'awaiting_answer')
                   or exists(select 1 from requests r
                             where r.execution_id = e.id and r.state = 'open'
-                              and r.kind not in ('spawn_approval', 'settings_change'))))",
+                              and r.kind not in ('spawn_approval', 'settings_change', 'cloud_window'))))",
     )
     .bind(conversation_id)
     .fetch_one(conn)

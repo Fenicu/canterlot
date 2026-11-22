@@ -100,6 +100,7 @@ error_codes! {
     MethodNotAllowed => "method_not_allowed", 405, Browser, Never, "Метод не поддерживается";
     IdempotencyConflict => "idempotency_conflict", 409, Browser, Never, "Ключ идемпотентности уже использован с другим запросом";
     DraftRevisionConflict => "draft_revision_conflict", 409, Browser, AfterCondition, "Черновик уже изменён с другого устройства";
+    StaleRevision => "stale_revision", 409, Browser, AfterCondition, "Настройки облака изменились, обновите их";
     DecisionConflict => "decision_conflict", 409, Browser, Never, "Решение уже принято с другого устройства";
     RequestNotOpen => "request_not_open", 409, Browser, Never, "Запрос уже закрыт";
     DecisionInvalid => "decision_invalid", 422, Browser, Never, "Ответ не подходит к вопросу";

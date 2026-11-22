@@ -9,6 +9,7 @@ pub mod accept;
 pub mod access;
 pub mod alarms;
 pub mod catalog;
+pub mod cloud_propose;
 pub mod completion;
 pub mod control;
 pub mod disk;
@@ -95,6 +96,7 @@ pub const TOOLS: &[&str] = &[
     "job.cancel",
     "jobs.list",
     "runners.list",
+    "runner.propose",
 ];
 
 pub fn is_tool(name: &str) -> bool {
@@ -515,6 +517,8 @@ pub struct ToolContext {
     /// Пороги стража машины перед запуском.
     pub guards: Arc<crate::config::GuardsConfig>,
     pub dispatcher: Option<Dispatcher>,
+    /// Служба облачных окон: цена профилей и карточки предложений; `None`, когда облако выключено.
+    pub cloud: Option<std::sync::Arc<crate::cloud::service::CloudService>>,
     pub registry: Registry,
     /// Останов хаба: долгие вызовы (`sessions.wait`) возвращаются, не дожидаясь срока.
     pub shutdown: CancellationToken,
@@ -586,6 +590,7 @@ pub async fn call(
         "job.cancel" => inplace_jobs::cancel(context, caller, arguments).await,
         "jobs.list" => inplace_jobs::list(context, caller, arguments).await,
         "runners.list" => inplace_jobs::runners(context, caller, arguments).await,
+        "runner.propose" => cloud_propose::propose(context, caller, arguments).await,
         _ => Err(ToolError::new(ToolErrorCode::UnknownTool)),
     }
 }
