@@ -55,6 +55,7 @@ pub(super) fn submit_error(error: SubmitError) -> ToolError {
         SubmitError::QueueFull { .. } => ToolError::new(ToolErrorCode::QueueFull),
         SubmitError::ConversationClosed => ToolError::new(ToolErrorCode::ConversationClosed),
         SubmitError::ConversationNotFound => ToolError::new(ToolErrorCode::SessionNotFound),
+        SubmitError::SystemConversation => ToolError::new(ToolErrorCode::SystemConversation),
         SubmitError::ResourceLimit { .. } => ToolError::new(ToolErrorCode::TextTooLarge),
         SubmitError::Db(error) => error.into(),
         SubmitError::InvalidContent { .. }
@@ -260,6 +261,13 @@ async fn send_in_tx(
     args: &SendArgs,
 ) -> Result<(Value, bool), ToolError> {
     let target_id = args.session_id;
+    let harness: String = sqlx::query_scalar("select harness from conversations where id = $1")
+        .bind(target_id)
+        .fetch_one(&mut *conn)
+        .await?;
+    if harness == super::cloud_propose::SYSTEM_HARNESS {
+        return Err(ToolError::new(ToolErrorCode::SystemConversation));
+    }
     let sha256 = origin::text_sha256(&args.text);
     let key = format!("agent:{}", caller.call_id);
     if let Some(input_id) = replayed(conn, caller, &key, target_id, &sha256).await? {

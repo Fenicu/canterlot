@@ -30,6 +30,9 @@ pub enum ExecutionError {
     /// Исполнение на раннере не стартует: сессий на раннерах нет.
     #[error("machine is a runner")]
     MachineIsRunner,
+    /// Служебный разговор облачных карточек не принимает сообщений и ходов.
+    #[error("system conversation")]
+    SystemConversation,
     #[error("worktree already removed")]
     WorktreeRemoved,
     #[error("invalid execution transition from {from:?} to {to:?}")]
@@ -160,6 +163,11 @@ pub async fn start_in_tx_with_native(
     .bind(owner_id)
     .fetch_optional(&mut *conn)
     .await?;
+    if found.as_ref().is_some_and(|(harness, _, _)| {
+        harness == crate::session_tools::cloud_propose::SYSTEM_HARNESS
+    }) {
+        return Err(ExecutionError::SystemConversation);
+    }
     if found
         .as_ref()
         .is_some_and(|(_, _, role)| role == crate::machines::ROLE_RUNNER)

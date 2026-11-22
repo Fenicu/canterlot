@@ -17742,6 +17742,7 @@
           "machine_not_found",
           "machine_unavailable",
           "machine_is_runner",
+          "system_conversation",
           "machine_offline",
           "not_open",
           "not_delivered",
@@ -20601,9 +20602,17 @@
           "groups",
           "presets",
           "limits",
-          "plan_tasks"
+          "plan_tasks",
+          "cloud_cards"
         ],
         "properties": {
+          "cloud_cards": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RequestView"
+            },
+            "description": "Открытые карточки облачных окон из служебного разговора: приходят через requests,\nхотя сам разговор не чат и в списке сессий не показан."
+          },
           "counts": {
             "$ref": "#/components/schemas/Counts"
           },
@@ -26012,9 +26021,17 @@
               "groups",
               "presets",
               "limits",
-              "plan_tasks"
+              "plan_tasks",
+              "cloud_cards"
             ],
             "properties": {
+              "cloud_cards": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/RequestView"
+                },
+                "description": "Открытые карточки облачных окон из служебного разговора: приходят через requests,\nхотя сам разговор не чат и в списке сессий не показан."
+              },
               "counts": {
                 "$ref": "#/components/schemas/Counts"
               },

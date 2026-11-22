@@ -478,8 +478,8 @@ fn item(row: &PgRow) -> Result<ListItem, sqlx::Error> {
     })
 }
 pub async fn counts(conn: &mut PgConnection, owner_id: Uuid) -> Result<Counts, sqlx::Error> {
-    let (all,pinned,archived,trashed)=sqlx::query_as("select count(*) filter(where side_of is null and archived_at is null and trashed_at is null),count(*) filter(where side_of is null and archived_at is null and trashed_at is null and pinned),count(*) filter(where side_of is null and archived_at is not null and accepted_at is null and trashed_at is null),count(*) filter(where side_of is null and trashed_at is not null) from conversations where owner_id=$1").bind(owner_id).fetch_one(&mut *conn).await?;
-    let groups=sqlx::query_as::<_,(Uuid,i64)>("select g.id,count(c.id) from conversation_groups g left join conversation_group_members gm on gm.group_id=g.id left join conversations c on c.id=gm.conversation_id and c.owner_id=$1 and c.side_of is null and c.archived_at is null and c.trashed_at is null where g.owner_id=$1 group by g.id order by g.position,g.id").bind(owner_id).fetch_all(conn).await?.into_iter().map(|(id,count)|GroupCount{id,count}).collect();
+    let (all,pinned,archived,trashed)=sqlx::query_as("select count(*) filter(where side_of is null and harness <> 'cloud' and archived_at is null and trashed_at is null),count(*) filter(where side_of is null and harness <> 'cloud' and archived_at is null and trashed_at is null and pinned),count(*) filter(where side_of is null and harness <> 'cloud' and archived_at is not null and accepted_at is null and trashed_at is null),count(*) filter(where side_of is null and harness <> 'cloud' and trashed_at is not null) from conversations where owner_id=$1").bind(owner_id).fetch_one(&mut *conn).await?;
+    let groups=sqlx::query_as::<_,(Uuid,i64)>("select g.id,count(c.id) from conversation_groups g left join conversation_group_members gm on gm.group_id=g.id left join conversations c on c.id=gm.conversation_id and c.owner_id=$1 and c.side_of is null and c.harness <> 'cloud' and c.archived_at is null and c.trashed_at is null where g.owner_id=$1 group by g.id order by g.position,g.id").bind(owner_id).fetch_all(conn).await?.into_iter().map(|(id,count)|GroupCount{id,count}).collect();
     Ok(Counts {
         all,
         pinned,
@@ -500,8 +500,9 @@ pub async fn list(conn: &mut PgConnection, q: &ListQuery) -> Result<ListPage, sq
     }
     let mut sql = sqlx::QueryBuilder::new(SELECT);
     sql.push(" where c.owner_id=").push_bind(q.owner_id);
-    // Боковые чаты живут только в своей панели: в списках и счётчиках их нет.
-    sql.push(" and c.side_of is null");
+    // Боковые чаты живут только в своей панели; служебный разговор облачных карточек
+    // не чат и в списке сессий не показывается (карточки приходят через open requests).
+    sql.push(" and c.side_of is null and c.harness <> 'cloud'");
     if q.filter == ListFilter::Trashed {
         sql.push(" and c.trashed_at is not null");
     } else {
@@ -708,7 +709,7 @@ pub async fn snapshot_items(
 ) -> Result<Vec<ListItem>, sqlx::Error> {
     let mut q = sqlx::QueryBuilder::new(SELECT);
     q.push(" where c.owner_id=").push_bind(owner_id)
-        .push(" and c.side_of is null")
+        .push(" and c.side_of is null and c.harness <> 'cloud'")
         .push(" order by c.pinned desc,c.pinned_at desc nulls last,d.last_activity_at desc nulls last,c.id limit 501");
     q.build().fetch_all(conn).await?.iter().map(item).collect()
 }
@@ -2355,18 +2356,21 @@ async fn ensure_owned_in_tx(
     conn: &mut PgConnection,
     req: &SubmitMessage,
 ) -> Result<(), crate::delivery::SubmitError> {
-    let owned: bool = sqlx::query_scalar(
-        "select exists(select 1 from conversations
-                       where id=$1 and owner_id=$2 and trashed_at is null)",
+    let harness: Option<String> = sqlx::query_scalar(
+        "select harness from conversations
+          where id=$1 and owner_id=$2 and trashed_at is null",
     )
     .bind(req.conversation_id)
     .bind(req.owner_id)
-    .fetch_one(&mut *conn)
+    .fetch_optional(&mut *conn)
     .await?;
-    if !owned {
-        return Err(crate::delivery::SubmitError::ConversationNotFound);
+    match harness {
+        None => Err(crate::delivery::SubmitError::ConversationNotFound),
+        Some(harness) if harness == crate::session_tools::cloud_propose::SYSTEM_HARNESS => {
+            Err(crate::delivery::SubmitError::SystemConversation)
+        }
+        Some(_) => Ok(()),
     }
-    Ok(())
 }
 
 pub(crate) async fn auto_title_in_tx(

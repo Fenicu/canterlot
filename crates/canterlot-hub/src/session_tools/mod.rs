@@ -121,6 +121,8 @@ pub enum ToolErrorCode {
     RemoteWorkDisabled,
     /// Машина — раннер: сессий на ней нет, задачи (`job_run`) идут.
     MachineIsRunner,
+    /// Служебный разговор облачных карточек не чат: в него нельзя писать.
+    SystemConversation,
     /// `machine: "auto"` без `source`: хаб размещает только задачи с исходниками.
     SourceRequired,
     /// Ни один раннер несущей и ни одно разрешённое место не подходит по меткам.
@@ -166,7 +168,7 @@ pub enum ToolErrorCode {
 }
 
 impl ToolErrorCode {
-    pub const ALL: [Self; 50] = [
+    pub const ALL: [Self; 51] = [
         Self::UnknownTool,
         Self::SessionNotFound,
         Self::ReadOnlySession,
@@ -180,6 +182,7 @@ impl ToolErrorCode {
         Self::DomainMismatch,
         Self::RemoteWorkDisabled,
         Self::MachineIsRunner,
+        Self::SystemConversation,
         Self::SourceRequired,
         Self::NoRunnerCanSatisfy,
         Self::PermissionModeTooWide,
@@ -234,6 +237,7 @@ impl ToolErrorCode {
             Self::DomainMismatch => "domain_mismatch",
             Self::RemoteWorkDisabled => "remote_work_disabled",
             Self::MachineIsRunner => "machine_is_runner",
+            Self::SystemConversation => "system_conversation",
             Self::SourceRequired => "source_required",
             Self::NoRunnerCanSatisfy => "no_runner_can_satisfy",
             Self::PermissionModeTooWide => "permission_mode_too_wide",
@@ -291,6 +295,9 @@ impl ToolErrorCode {
                 "The owner has not allowed other machines to start work on this machine"
             }
             Self::MachineIsRunner => "This machine is a runner: sessions do not start on it",
+            Self::SystemConversation => {
+                "This is a system conversation: messages and starts are refused"
+            }
             Self::SourceRequired => "Automatic placement needs a source",
             Self::NoRunnerCanSatisfy => "No runner can ever satisfy the labels and placement",
             Self::PermissionModeTooWide => "The mode is wider than the parent session's",
@@ -364,6 +371,9 @@ impl ToolErrorCode {
             }
             Self::MachineIsRunner => {
                 "Start the session on a worker machine, or run the command there with job_run and machine set to the runner."
+            }
+            Self::SystemConversation => {
+                "Wait for the owner's decision on the proposal card; do not send messages into the cloud conversation."
             }
             Self::SourceRequired => {
                 "Pass source {repo, rev} (absolute repo path, full 40-hex commit), or name the machine and workdir."

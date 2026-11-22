@@ -16,7 +16,7 @@ use canterlot_hub::{
     scheduler::{ClaimedJob, JobKind},
     session::Registry,
     session_tools::{
-        Caller, ToolContext,
+        Caller, ToolContext, ToolErrorCode,
         cloud_propose::{self, Source},
     },
     testkit::{self, Method, TestClient},
@@ -245,7 +245,7 @@ impl Rig {
             &self.config,
             &pricing,
             &proposer,
-            hours,
+            hours * 60,
             reason.to_owned(),
         )
         .await
@@ -866,6 +866,10 @@ async fn hub_issues_one_card_per_episode_of_waiting_work(pool: PgPool) -> TestRe
     .fetch_one(&rig.pool)
     .await?;
     assert_eq!(payload["source"], "hub");
+    assert_eq!(
+        payload["hard_cap_minutes"], 90,
+        "min(240, 60 minutes of work + 30)"
+    );
     let active: bool = sqlx::query_scalar("select active from cloud_auto_episode where singleton")
         .fetch_one(&rig.pool)
         .await?;
@@ -951,6 +955,199 @@ async fn budget_alerts_fire_once_per_month_and_never_for_zero(pool: PgPool) -> T
         2,
         "zero budget never alerts"
     );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn system_conversation_refuses_message_start_and_resume(pool: PgPool) -> TestResult {
+    let rig = Rig::new(pool.clone()).await;
+    rig.set_budget(1_000_000, false).await;
+    let api = Api::new(pool, Some(rig.service.clone())).await;
+    let (status, opened) = api
+        .send(
+            Method::POST,
+            "/api/v1/cloud/proposals",
+            Some(json!({"hours": 2, "reason": "карточка"})),
+            "propose-1",
+        )
+        .await;
+    assert_eq!(status, 200, "{opened}");
+    let request = Uuid::parse_str(opened["request_id"].as_str().unwrap())?;
+    let conversation: Uuid = sqlx::query_scalar("select conversation_id from requests where id=$1")
+        .bind(request)
+        .fetch_one(&rig.pool)
+        .await?;
+    let harness: String = sqlx::query_scalar("select harness from conversations where id=$1")
+        .bind(conversation)
+        .fetch_one(&rig.pool)
+        .await?;
+    assert_eq!(harness, "cloud");
+
+    for (path, body) in [
+        (
+            format!("/api/v1/conversations/{conversation}/inputs"),
+            Some(json!({"content": [{"type": "text", "text": "привет"}]})),
+        ),
+        (
+            format!("/api/v1/conversations/{conversation}/executions"),
+            None,
+        ),
+        (
+            format!("/api/v1/conversations/{conversation}/resume"),
+            Some(json!({"continue_queue": false})),
+        ),
+    ] {
+        let (status, answer) = api
+            .send(Method::POST, &path, body, &Uuid::now_v7().to_string())
+            .await;
+        assert_eq!(status, 409, "{path}: {answer}");
+        assert_eq!(answer["error"]["code"], "system_conversation", "{path}");
+    }
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn system_conversation_refuses_an_agent_send(pool: PgPool) -> TestResult {
+    let rig = Rig::new(pool.clone()).await;
+    rig.card(2, "карточка", Source::Owner).await;
+    let conversation: Uuid = sqlx::query_scalar(
+        "select conversation_id from requests where kind='cloud_window' limit 1",
+    )
+    .fetch_one(&rig.pool)
+    .await?;
+    let context = rig.tool_context();
+    let caller = rig.caller().await;
+    let error = canterlot_hub::session_tools::call(
+        &context,
+        &caller,
+        "sessions.send",
+        json!({"session_id": conversation, "text": "привет"}),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.code, ToolErrorCode::SystemConversation);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn system_conversation_is_hidden_from_lists_but_its_card_is_visible(
+    pool: PgPool,
+) -> TestResult {
+    let rig = Rig::new(pool.clone()).await;
+    rig.set_budget(1_000_000, false).await;
+    let api = Api::new(pool, Some(rig.service.clone())).await;
+    let (status, opened) = api
+        .send(
+            Method::POST,
+            "/api/v1/cloud/proposals",
+            Some(json!({"hours": 2, "reason": "карточка"})),
+            "propose-1",
+        )
+        .await;
+    assert_eq!(status, 200, "{opened}");
+    let request = Uuid::parse_str(opened["request_id"].as_str().unwrap())?;
+    let conversation: Uuid = sqlx::query_scalar("select conversation_id from requests where id=$1")
+        .bind(request)
+        .fetch_one(&rig.pool)
+        .await?;
+
+    let (status, list) = api
+        .send(Method::GET, "/api/v1/conversations", None, "")
+        .await;
+    assert_eq!(status, 200);
+    let items = list["items"].as_array().unwrap();
+    assert!(
+        !items
+            .iter()
+            .any(|item| item["id"] == conversation.to_string())
+    );
+    assert_eq!(list["counts"]["all"], 0);
+
+    let (status, snapshot) = api
+        .send(Method::GET, "/api/v1/snapshot/conversations", None, "")
+        .await;
+    assert_eq!(status, 200, "{snapshot}");
+    let items = snapshot["data"]["items"].as_array().unwrap();
+    assert!(
+        !items
+            .iter()
+            .any(|item| item["id"] == conversation.to_string())
+    );
+    let cards = snapshot["data"]["cloud_cards"].as_array().unwrap();
+    assert_eq!(cards.len(), 1);
+    assert_eq!(cards[0]["id"], request.to_string());
+
+    // Карточка остаётся доступной и для решения по requests.
+    let (status, detail) = api
+        .send(
+            Method::GET,
+            &format!("/api/v1/conversations/{conversation}/snapshot"),
+            None,
+            "",
+        )
+        .await;
+    assert_eq!(status, 200, "{detail}");
+    let requests = detail["data"]["open_requests"].as_array().unwrap();
+    assert!(requests.iter().any(|row| row["id"] == request.to_string()));
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn trashing_the_system_conversation_closes_its_card_without_errors(
+    pool: PgPool,
+) -> TestResult {
+    let rig = Rig::new(pool.clone()).await;
+    rig.set_budget(1_000_000, false).await;
+    let api = Api::new(pool, Some(rig.service.clone())).await;
+    let (status, opened) = api
+        .send(
+            Method::POST,
+            "/api/v1/cloud/proposals",
+            Some(json!({"hours": 2, "reason": "карточка"})),
+            "propose-1",
+        )
+        .await;
+    assert_eq!(status, 200, "{opened}");
+    let request = Uuid::parse_str(opened["request_id"].as_str().unwrap())?;
+    let conversation: Uuid = sqlx::query_scalar("select conversation_id from requests where id=$1")
+        .bind(request)
+        .fetch_one(&rig.pool)
+        .await?;
+    let (status, _) = api
+        .send(
+            Method::DELETE,
+            &format!("/api/v1/conversations/{conversation}"),
+            None,
+            "trash-1",
+        )
+        .await;
+    assert_eq!(status, 204);
+    assert_eq!(
+        rig.request_state(request).await,
+        "closed_without_decision",
+        "the card closes with its conversation, the way a settings card does"
+    );
+    let (status, snapshot) = api
+        .send(Method::GET, "/api/v1/snapshot/conversations", None, "")
+        .await;
+    assert_eq!(status, 200);
+    let cards = snapshot["data"]["cloud_cards"].as_array().unwrap();
+    assert!(cards.is_empty());
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn hub_card_cap_is_clamped_to_four_hours(pool: PgPool) -> TestResult {
+    let rig = Rig::new(pool).await;
+    rig.set_budget(1_000_000, false).await;
+    rig.seed_waiting(600).await;
+    rig.service.tick(now_micros()).await;
+    let payload: Value = sqlx::query_scalar(
+        "select request_payload from requests where kind='cloud_window' order by created_at desc limit 1",
+    )
+    .fetch_one(&rig.pool)
+    .await?;
+    assert_eq!(payload["hard_cap_minutes"], 240, "min(240, 600 + 30)");
     Ok(())
 }
 

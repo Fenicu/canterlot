@@ -579,6 +579,7 @@ fn submit_failure(error: &SubmitError) -> (&'static str, bool) {
         SubmitError::QueueFull { .. } => ("queue_full", false),
         SubmitError::ConversationClosed => ("conversation_closed", true),
         SubmitError::ConversationNotFound => ("conversation_not_found", true),
+        SubmitError::SystemConversation => ("system_conversation", true),
         SubmitError::ResourceLimit { .. } => ("resource_limit", true),
         SubmitError::InvalidContent { .. } => ("invalid_content", true),
         SubmitError::InvalidRequest { .. } => ("invalid_request", true),

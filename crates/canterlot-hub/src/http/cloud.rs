@@ -259,7 +259,7 @@ async fn propose(
                     cloud.config(),
                     &pricing,
                     &proposer,
-                    body.hours,
+                    body.hours * 60,
                     body.reason.clone(),
                 )
                 .await

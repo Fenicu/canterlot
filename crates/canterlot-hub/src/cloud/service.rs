@@ -350,9 +350,15 @@ impl CloudService {
                     "выключен"
                 }
             );
-            let opened =
-                cloud_propose::open_in_tx(&mut conn, &self.config, &pricing, &proposer, 4, reason)
-                    .await;
+            let opened = cloud_propose::open_in_tx(
+                &mut conn,
+                &self.config,
+                &pricing,
+                &proposer,
+                cap,
+                reason,
+            )
+            .await;
             match opened {
                 Ok(opened) => {
                     budget::episode_start(&mut conn, opened.request_id).await?;

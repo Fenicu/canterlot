@@ -116,6 +116,10 @@ const ERROR_TABLE: Record<ErrorCode, ErrorDescriptor> = {
     action: "reload",
     message: "Настройки облака изменились, обновите их",
   },
+  system_conversation: {
+    action: "none",
+    message: "Служебный разговор: сообщения и запуски в нём запрещены",
+  },
   decision_conflict: {
     action: "none",
     message: "Решение уже принято с другого устройства",

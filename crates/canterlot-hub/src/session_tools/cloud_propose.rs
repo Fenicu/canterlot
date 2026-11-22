@@ -32,6 +32,8 @@ use crate::{
 
 /// Карточка живёт полчаса: просроченное предложение закрывается без окна.
 pub const EXPIRY: TimeDelta = TimeDelta::minutes(30);
+/// Харнесс служебного разговора, который только якорь для карточек владельца и хаба.
+pub const SYSTEM_HARNESS: &str = "cloud";
 const HINT_PENDING: &str = "The owner decides in the app; wait for the outcome message.";
 
 /// Откуда пришло предложение. В окно попадает одно из значений `trigger`; для всех карточек
@@ -185,24 +187,26 @@ pub async fn open(
     let pricing = cloud.pricing().await.map_err(|_| CardError::Provider)?;
     let config = cloud.config().clone();
     let mut tx = crate::db::begin(pool).await?;
-    let opened = open_in_tx(&mut tx, &config, &pricing, &proposer, hours, reason).await?;
+    let opened = open_in_tx(&mut tx, &config, &pricing, &proposer, hours * 60, reason).await?;
     tx.commit().await?;
     Ok(opened)
 }
 
-/// То же в чужой транзакции: вызывающая сторона решает, когда фиксировать.
+/// То же в чужой транзакции: вызывающая сторона решает, когда фиксировать. Предел задаётся
+/// минутами: у карточки агента это `hours * 60`, у карточки хаба — та же формула, что у
+/// автоматического режима, `min(240, ожидание + 30)`.
 pub async fn open_in_tx(
     conn: &mut PgConnection,
     config: &CloudConfig,
     pricing: &Pricing,
     proposer: &Proposer,
-    hours: u32,
+    hard_cap: u32,
     reason: String,
 ) -> Result<Opened, CardError> {
-    if !(1..=4).contains(&hours) {
+    if hard_cap == 0 || hard_cap > windows::MAX_HARD_CAP_MINUTES {
         return Err(CardError::InvalidHours);
     }
-    let hard_cap = hours * 60;
+    let hours = hard_cap.div_ceil(60);
     if budget::has_live_window(conn).await? {
         return Err(CardError::LiveWindow);
     }
@@ -363,7 +367,7 @@ pub async fn approve_in_tx(
             config,
             &pricing,
             &proposer,
-            card.hours,
+            card.hard_cap_minutes,
             card.reason.clone(),
         )
         .await
@@ -733,10 +737,11 @@ pub async fn system_proposer(
     machine_id: Uuid,
 ) -> Result<Proposer, sqlx::Error> {
     let existing: Option<Uuid> = sqlx::query_scalar(
-        "select id from conversations where owner_id=$1 and machine_id=$2 and harness='cloud' order by created_at limit 1",
+        "select id from conversations where owner_id=$1 and machine_id=$2 and harness=$3 order by created_at limit 1",
     )
     .bind(owner_id)
     .bind(machine_id)
+    .bind(SYSTEM_HARNESS)
     .fetch_optional(&mut *conn)
     .await?;
     let conversation = match existing {
@@ -781,11 +786,12 @@ async fn create_system_conversation(
     let id = Uuid::now_v7();
     sqlx::query(
         "insert into conversations (id, owner_id, machine_id, harness, workdir, title, title_source)
-         values ($1, $2, $3, 'cloud', '/srv/canterlot-runner', 'Облачные окна', 'auto')",
+         values ($1, $2, $3, $4, '/srv/canterlot-runner', 'Облачные окна', 'auto')",
     )
     .bind(id)
     .bind(owner_id)
     .bind(machine_id)
+    .bind(SYSTEM_HARNESS)
     .execute(&mut *conn)
     .await?;
     sqlx::query("insert into queue_state (conversation_id, hold_reasons) values ($1, '[]'::jsonb)")
