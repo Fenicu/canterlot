@@ -21,7 +21,8 @@ use super::price::{UnitPrices, rubles_to_kopecks};
 use super::rate_limit::{RateLimit, RateLimiter};
 use super::{
     CloudProvider, Configurator, CreateOutcome, CreateServer, DeleteOutcome, ErrorKind, FloatingIp,
-    Limits, ListError, ProviderError, ServerLookup, ServerState, ServerStatus, ServerSummary,
+    Ipv4Outcome, Limits, ListError, ProviderError, ServerLookup, ServerState, ServerStatus,
+    ServerSummary,
 };
 
 pub const DEFAULT_BASE_URL: &str = "https://api.timeweb.cloud";
@@ -695,10 +696,12 @@ impl CloudProvider for TimewebProvider {
             .map_err(|error| ListError::Page { offset: 0, error })
     }
 
-    async fn add_ipv4(&self, server_id: i64) -> Result<String, ProviderError> {
+    /// Способ сейчас один: заказ нового адреса (`POST /servers/{id}/ips`). Привязка
+    /// заранее купленного плавающего (`POST /floating-ips/{id}/bind`) встанет сюда же.
+    async fn ensure_public_ipv4(&self, server_id: i64) -> Ipv4Outcome {
         let path = format!("/api/v1/servers/{server_id}/ips");
         let body = json!({"type": "ipv4"});
-        let reply = self
+        let reply = match self
             .call(
                 Method::POST,
                 "POST /api/v1/servers/{id}/ips",
@@ -707,14 +710,55 @@ impl CloudProvider for TimewebProvider {
                 Some(&body),
             )
             .await
-            .map_err(Transport::into_error)?;
+        {
+            Ok(reply) => reply,
+            Err(Transport::RateLimited) => {
+                return Ipv4Outcome::NotProcessed {
+                    why: "rate limited".to_owned(),
+                };
+            }
+            Err(failure) => {
+                return Ipv4Outcome::Ambiguous {
+                    why: failure.describe().to_owned(),
+                };
+            }
+        };
         match reply.status {
             200 | 201 => serde_json::from_slice::<Value>(&reply.body)
                 .ok()
                 .and_then(|value| value["server_ip"]["ip"].as_str().map(str::to_owned))
                 .filter(|ip| valid_ip(ip))
-                .ok_or_else(|| malformed("answer has no usable server_ip.ip")),
-            _ => Err(self.status_error(&reply)),
+                .map_or_else(
+                    || Ipv4Outcome::Ambiguous {
+                        why: "answer has no usable server_ip.ip".to_owned(),
+                    },
+                    Ipv4Outcome::Assigned,
+                ),
+            429 => Ipv4Outcome::NotProcessed {
+                why: "rate limited".to_owned(),
+            },
+            status @ 400..=499 => {
+                let value: Value = serde_json::from_slice(&reply.body).unwrap_or(Value::Null);
+                let clean = |text: &str, limit: usize, extra: &[char]| -> String {
+                    text.chars()
+                        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || extra.contains(c))
+                        .take(limit)
+                        .collect()
+                };
+                Ipv4Outcome::Refused {
+                    status,
+                    code: clean(value["error_code"].as_str().unwrap_or_default(), 64, &[]),
+                    // Только число из `details.required_balance`, рубли; ничего больше.
+                    required_balance: match &value["details"]["required_balance"] {
+                        Value::Number(number) => Some(clean(&number.to_string(), 24, &['.'])),
+                        _ => None,
+                    }
+                    .filter(|text| !text.is_empty()),
+                }
+            }
+            status => Ipv4Outcome::Ambiguous {
+                why: format!("HTTP {status}"),
+            },
         }
     }
 

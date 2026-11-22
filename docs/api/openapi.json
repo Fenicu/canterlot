@@ -26755,6 +26755,20 @@
               "$ref": "#/components/schemas/CloudWindowView"
             },
             "description": "Живые окна и последние 20 законченных, новые первыми."
+          },
+          "provider_block_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "provider_block_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Код блока провайдера (`abuse_prepayment_required`), пока он стоит: новые окна не\nсоздаются, пока владелец не снимет блок. Пусто, когда блока нет."
           }
         }
       },

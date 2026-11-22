@@ -197,6 +197,10 @@ pub enum CreateRefusal {
     /// Живое окно уже есть: окно одно.
     #[error("live_window_exists")]
     LiveWindowExists,
+    /// Блок провайдера (`cloud_budget.provider_block_code`): создание закрыто, пока владелец
+    /// не снимет его (`clear_provider_block`).
+    #[error("provider_blocked")]
+    ProviderBlocked { code: String },
     /// Резерв не помещается в бюджет месяца, а согласие не равно резерву.
     #[error("over_budget")]
     OverBudget {
@@ -310,11 +314,17 @@ pub async fn create_in_tx(
     if request.hard_cap_minutes == 0 || request.hard_cap_minutes > MAX_HARD_CAP_MINUTES {
         return Err(CreateRefusal::Invalid("hard_cap_minutes"));
     }
-    let budget: i64 = sqlx::query_scalar(
-        "select monthly_budget_kopecks from cloud_budget where singleton for update",
+    let (budget, block): (i64, Option<String>) = sqlx::query_as(
+        "select monthly_budget_kopecks, provider_block_code from cloud_budget
+         where singleton for update",
     )
     .fetch_one(&mut *conn)
     .await?;
+    // Провайдер заблокировал аккаунт правилом против злоупотреблений: новые серверы
+    // создавать бесполезно и дорого, пока владелец не снимет блок.
+    if let Some(code) = block {
+        return Err(CreateRefusal::ProviderBlocked { code });
+    }
     let existing: bool =
         sqlx::query_scalar("select exists(select 1 from cloud_windows where state = any($1))")
             .bind(live_states())
@@ -406,6 +416,55 @@ pub async fn fail_in_tx(
         forget_key(id);
     }
     Ok(changed)
+}
+
+/// Код отказа провайдера, после которого новые окна не создаются: у аккаунта правило против
+/// злоупотреблений, требующее предоплаты.
+pub const BLOCK_ABUSE_PREPAYMENT: &str = "abuse_prepayment_required";
+
+/// Блок провайдера: код и момент пишутся в `cloud_budget`, пока блок стоит, `create_in_tx`
+/// отказывает `ProviderBlocked`. Повторный отказ обновляет момент.
+pub async fn set_provider_block(
+    pool: &PgPool,
+    code: &str,
+    at: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "update cloud_budget set provider_block_code = $1, provider_block_at = $2 where singleton",
+    )
+    .bind(code)
+    .bind(at)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Снять блок провайдера. Только для владельца: вызывает её его действие (задача C2b), не
+/// служба и не автоматика. Возвращает, стоял ли блок.
+pub async fn clear_provider_block(conn: &mut PgConnection) -> Result<bool, sqlx::Error> {
+    Ok(sqlx::query(
+        "update cloud_budget set provider_block_code = null, provider_block_at = null
+         where singleton and provider_block_code is not null",
+    )
+    .execute(conn)
+    .await?
+    .rows_affected()
+        > 0)
+}
+
+/// Текущий блок провайдера: код и момент.
+pub async fn provider_block(
+    conn: &mut PgConnection,
+) -> Result<Option<(String, DateTime<Utc>)>, sqlx::Error> {
+    let row: (Option<String>, Option<DateTime<Utc>>) = sqlx::query_as(
+        "select provider_block_code, provider_block_at from cloud_budget where singleton",
+    )
+    .fetch_one(conn)
+    .await?;
+    Ok(match row {
+        (Some(code), Some(at)) => Some((code, at)),
+        _ => None,
+    })
 }
 
 /// Причина удаления окна, которое было запрошено.

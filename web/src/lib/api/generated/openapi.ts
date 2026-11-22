@@ -5989,6 +5989,13 @@ export interface components {
         WindowList: {
             /** @description Живые окна и последние 20 законченных, новые первыми. */
             items: components["schemas"]["CloudWindowView"][];
+            /** Format: date-time */
+            provider_block_at?: string | null;
+            /**
+             * @description Код блока провайдера (`abuse_prepayment_required`), пока он стоит: новые окна не
+             *     создаются, пока владелец не снимет блок. Пусто, когда блока нет.
+             */
+            provider_block_code?: string | null;
         };
         WindowView: {
             forecast?: components["schemas"]["ForecastView"] | null;

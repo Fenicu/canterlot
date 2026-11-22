@@ -102,7 +102,7 @@ pub struct FakeFloatingIp {
 }
 
 /// Что делает запрос IPv4 для сервера.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum IpAddMode {
     /// 201 с `server_ip`, адрес выдан.
     Ok,
@@ -110,6 +110,13 @@ pub enum IpAddMode {
     Status(u16),
     /// Адрес выдан и записан, соединение закрыто без ответа.
     AcceptThenDrop,
+    /// Определённый отказ с `error_code` и, если задан, `details.required_balance` (так
+    /// Timeweb отвечает правилом против злоупотреблений: 400 `abuse_prepayment_required`).
+    Refuse {
+        status: u16,
+        error_code: String,
+        required_balance: Option<f64>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -771,6 +778,19 @@ fn add_ip(st: &mut FakeState, id: &str, body: Option<Value>, auth: Option<&str>)
     let mode = st.ip_add.clone();
     if let IpAddMode::Status(status) = mode {
         return Action::Respond(error_response(st, status, "Injected IP failure", auth));
+    }
+    if let IpAddMode::Refuse {
+        status,
+        error_code,
+        required_balance,
+    } = mode
+    {
+        let mut payload = error_body(status, "Injected IP refusal");
+        payload["error_code"] = Value::String(error_code);
+        if let Some(balance) = required_balance {
+            payload["details"] = json!({"required_balance": balance});
+        }
+        return Action::Respond(json_response(status, &payload));
     }
     let ip = format!("203.0.113.{}", st.next_ip_host);
     st.next_ip_host = st.next_ip_host.saturating_add(1);

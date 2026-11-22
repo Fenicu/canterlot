@@ -21,8 +21,8 @@ use tokio::sync::{Mutex, watch};
 use uuid::Uuid;
 
 use super::{
-    CloudProvider, CreateOutcome, CreateServer, DeleteOutcome, ServerLookup, ServerStatus,
-    ServerSummary,
+    CloudProvider, CreateOutcome, CreateServer, DeleteOutcome, Ipv4Outcome, ServerLookup,
+    ServerStatus, ServerSummary,
     cloud_init::{self, CloudInitParams},
     price,
     windows::{
@@ -72,6 +72,18 @@ fn minutes_between(from: DateTime<Utc>, to: DateTime<Utc>) -> u64 {
         .unwrap_or(0)
         .div_ceil(60)
 }
+
+/// Чем кончилась попытка получить адрес за один проход.
+enum Ordered {
+    Address(String),
+    /// Адреса пока нет (запрос не обработан или ответа нет): окно живёт дальше.
+    Pending,
+    /// Провайдер отказал, окно ушло на удаление.
+    Refused,
+}
+
+/// Причина удаления окна, в котором провайдер отказал в публичном адресе.
+pub const REASON_IPV4_REFUSED: &str = "ipv4_refused";
 
 /// Итог окна: сервер от вызова создания до подтверждённого конца и адрес от заказа до
 /// подтверждённого конца, каждый по своей цене часа и не меньше часа. У окна, которому не
@@ -487,10 +499,13 @@ impl CloudService {
         let mut ipv4 = window.ipv4.clone();
         // У нового сервера публичного адреса нет, а без него нет сети: хаб заказывает адрес
         // сразу, один раз (он тарифицируется сам и переживает сервер).
-        if window.ip_requested_at.is_none()
-            && let Some(address) = self.request_ipv4(&window, server_id, now).await?
-        {
-            ipv4 = Some(address);
+        if window.ip_requested_at.is_none() {
+            match self.request_ipv4(&window, server_id, now).await? {
+                Ordered::Address(address) => ipv4 = Some(address),
+                Ordered::Pending => {}
+                // Провайдер отказал: окно уже в `deleting`, подключать нечего.
+                Ordered::Refused => return Ok(()),
+            }
         }
         if window.attach_sent_at.is_none() {
             // Подключать можно, когда сервер `On` и адрес известен.
@@ -521,15 +536,17 @@ impl CloudService {
         Ok(())
     }
 
-    /// Заказ публичного IPv4. Метка ставится до вызова, второго вызова нет: после
-    /// неопределённого ответа адрес мог выдаться. Определённый отказ значит «адреса нет»:
-    /// метка снимается, на следующем проходе попытка повторится.
+    /// Получение публичного IPv4 одним методом провайдера (`ensure_public_ipv4`): способ
+    /// получения за ним можно сменить, машина состояний окна не изменится. Метка ставится до
+    /// вызова, второго вызова нет: после неопределённого ответа адрес мог выдаться. Не
+    /// обработанный запрос (429) снимает метку, следующий проход повторит; отказ провайдера
+    /// отправляет окно на удаление (`ipv4_refused`).
     async fn request_ipv4(
         &self,
         window: &Window,
         server_id: i64,
         now: DateTime<Utc>,
-    ) -> Result<Option<String>, sqlx::Error> {
+    ) -> Result<Ordered, sqlx::Error> {
         let stamped = sqlx::query(
             "update cloud_windows set ip_requested_at = $2
              where id = $1 and state = 'identified' and ip_requested_at is null",
@@ -540,46 +557,96 @@ impl CloudService {
         .await?
         .rows_affected();
         if stamped == 0 {
-            return Ok(None);
+            return Ok(Ordered::Pending);
         }
-        match self.provider.add_ipv4(server_id).await {
-            Ok(address) => {
+        match self.provider.ensure_public_ipv4(server_id).await {
+            Ipv4Outcome::Assigned(address) => {
                 sqlx::query("update cloud_windows set ipv4 = $2, last_error = null where id = $1")
                     .bind(window.id)
                     .bind(&address)
                     .execute(&self.pool)
                     .await?;
-                Ok(Some(address))
+                Ok(Ordered::Address(address))
             }
-            Err(error) => {
-                tracing::warn!(kind = "cloud_ipv4_request", error_kind = ?error.kind, "ipv4 request failed");
-                let definite = matches!(
-                    error.kind,
-                    super::ErrorKind::Rejected
-                        | super::ErrorKind::Conflict
-                        | super::ErrorKind::NotFound
-                        | super::ErrorKind::Auth
-                        | super::ErrorKind::RateLimited
-                );
-                // Определённый отказ: адреса нет, пробуем снова. Неопределённый: адрес мог
-                // появиться; он придёт в ответе опроса сервера, но заказывать второй нельзя.
+            Ipv4Outcome::Refused {
+                status,
+                code,
+                required_balance,
+            } => {
+                self.ipv4_refused(window, status, &code, required_balance.as_deref(), now)
+                    .await?;
+                Ok(Ordered::Refused)
+            }
+            // Запрос не обработан: адреса нет, метка снимается, следующий проход повторит.
+            Ipv4Outcome::NotProcessed { .. } => {
                 sqlx::query(
-                    "update cloud_windows set last_error = $2,
-                            ip_requested_at = case when $3 then null else ip_requested_at end
+                    "update cloud_windows set last_error = 'ipv4_request_failed',
+                            ip_requested_at = null
                      where id = $1",
                 )
                 .bind(window.id)
-                .bind(if definite {
-                    "ipv4_request_failed"
-                } else {
-                    "ipv4_request_unknown"
-                })
-                .bind(definite)
                 .execute(&self.pool)
                 .await?;
-                Ok(None)
+                Ok(Ordered::Pending)
+            }
+            // Адрес мог выдаться: второго заказа нет, сервер перечитывается тем же проходом
+            // (опрос покажет выданный адрес).
+            Ipv4Outcome::Ambiguous { .. } => {
+                sqlx::query(
+                    "update cloud_windows set last_error = 'ipv4_request_unknown' where id = $1",
+                )
+                .bind(window.id)
+                .execute(&self.pool)
+                .await?;
+                Ok(Ordered::Pending)
             }
         }
+    }
+
+    /// Провайдер отказал в публичном IPv4 (любой 4xx кроме 429): повтор не поможет, а сервер
+    /// без сети бесполезен и тарифицируется. Окно уходит на удаление по обычному пути
+    /// (отзыв раннера, удаление, подтверждение отсутствием), заказ адреса снят с метки (адреса
+    /// нет, итог без него), а код ответа остаётся в `last_error`. Правило против злоупотреблений
+    /// (`abuse_prepayment_required`) блокирует и создание новых окон, пока владелец не снимет
+    /// блок. Владельцу пуш сразу: код и требуемый баланс, больше ничего из ответа.
+    async fn ipv4_refused(
+        &self,
+        window: &Window,
+        status: u16,
+        code: &str,
+        required_balance: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<(), sqlx::Error> {
+        tracing::warn!(
+            kind = "cloud_ipv4_refused",
+            status,
+            code,
+            "provider refused the public ipv4"
+        );
+        let code = if code.is_empty() { "refused" } else { code };
+        sqlx::query(
+            "update cloud_windows set ip_requested_at = null, last_error = $2 where id = $1",
+        )
+        .bind(window.id)
+        .bind(code)
+        .execute(&self.pool)
+        .await?;
+        if code == windows::BLOCK_ABUSE_PREPAYMENT {
+            windows::set_provider_block(&self.pool, code, now).await?;
+        }
+        crate::notify::enqueue_cloud_alert(
+            &self.pool,
+            &format!("cloud:ipv4_refused:{}", window.id),
+            &json!({
+                "code": "ipv4_refused",
+                "name": window.name,
+                "error_code": code,
+                "required_balance": required_balance,
+            }),
+        )
+        .await?;
+        windows::request_delete(&self.pool, window.id, REASON_IPV4_REFUSED, now).await?;
+        Ok(())
     }
 
     /// Команда несущей подключить раннер. Только если машина из конфигурации действительно
@@ -1064,7 +1131,8 @@ impl CloudService {
         match outcome {
             DeleteOutcome::Deleted { quarantined } => {
                 sqlx::query(
-                    "update cloud_windows set delete_accepted_at = $2, last_error = null,
+                    "update cloud_windows set delete_accepted_at = $2,
+                            last_error = case when delete_reason = 'ipv4_refused' then last_error end,
                             delete_attempts = $3,
                             alert_state = alert_state || jsonb_build_object('quarantined', $4::boolean)
                      where id = $1 and state = 'deleting'",
@@ -1078,7 +1146,8 @@ impl CloudService {
             }
             DeleteOutcome::AlreadyGone => {
                 sqlx::query(
-                    "update cloud_windows set delete_accepted_at = $2, last_error = null,
+                    "update cloud_windows set delete_accepted_at = $2,
+                            last_error = case when delete_reason = 'ipv4_refused' then last_error end,
                             delete_attempts = $3
                      where id = $1 and state = 'deleting'",
                 )
@@ -1157,7 +1226,8 @@ impl CloudService {
                 );
                 sqlx::query(
                     "update cloud_windows set state = $2, final_cost_kopecks = $3,
-                            delete_confirmed_at = $4, last_error = null
+                            delete_confirmed_at = $4,
+                            last_error = case when delete_reason = 'ipv4_refused' then last_error end
                      where id = $1",
                 )
                 .bind(id)

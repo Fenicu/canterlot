@@ -1210,25 +1210,160 @@ async fn attach_waits_until_the_server_is_on_even_when_the_address_is_known(
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_definite_ip_refusal_is_retried_and_an_ambiguous_one_never_is(
-    pool: PgPool,
-) -> TestResult {
+async fn a_rate_limited_ip_order_was_not_processed_and_is_retried(pool: PgPool) -> TestResult {
     let rig = rig(pool).await;
     let _carrier = rig.carrier_session();
     let t0 = now_micros();
     let id = rig.create(120).await;
     rig.tick(t0).await;
-    // 409: адреса точно нет, попытка повторяется на следующем проходе.
-    rig.fake.control().ip_add = IpAddMode::Status(409);
+    // 429: запрос не обработан, адреса нет, метка снята; сервер не удаляется.
+    rig.fake.control().ip_add = IpAddMode::Status(429);
     rig.tick(t0 + TimeDelta::seconds(1)).await;
-    assert_eq!(rig.ip_posts(), 1);
     let window = rig.window(id).await;
+    assert_eq!(window.state, "identified");
     assert_eq!(window.last_error.as_deref(), Some("ipv4_request_failed"));
     assert_eq!(window.ip_requested_at, None);
     rig.fake.control().ip_add = IpAddMode::Ok;
     rig.tick(t0 + TimeDelta::seconds(2)).await;
-    assert_eq!(rig.ip_posts(), 2);
     assert!(rig.window(id).await.ipv4.is_some());
+    assert_eq!(rig.floating().len(), 1, "one address in the end");
+    Ok(())
+}
+
+fn refuse(status: u16, code: &str, balance: Option<f64>) -> IpAddMode {
+    IpAddMode::Refuse {
+        status,
+        error_code: code.to_owned(),
+        required_balance: balance,
+    }
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_refused_ipv4_deletes_the_server_charges_only_the_server_blocks_creation_and_alerts(
+    pool: PgPool,
+) -> TestResult {
+    let rig = rig(pool).await;
+    enable_pushes(&rig.pool).await;
+    let _carrier = rig.carrier_session();
+    rig.fake.control().ip_add = refuse(400, "abuse_prepayment_required", Some(28863.9));
+    let t0 = now_micros();
+    let id = rig.create(120).await;
+    rig.tick(t0).await;
+    assert_eq!(rig.state(id).await, "identified");
+
+    // Заказ адреса: отказ определённый, окно уходит на удаление в том же проходе.
+    rig.tick(t0 + TimeDelta::seconds(1)).await;
+    let window = rig.window(id).await;
+    assert_eq!(window.state, "deleting");
+    assert_eq!(window.delete_reason.as_deref(), Some("ipv4_refused"));
+    assert_eq!(
+        window.last_error.as_deref(),
+        Some("abuse_prepayment_required")
+    );
+    assert_eq!(
+        window.ip_requested_at, None,
+        "no address, so no address hours"
+    );
+    assert_eq!(window.attach_sent_at, None, "nothing to attach");
+    assert_eq!(rig.ip_posts(), 1);
+
+    // Блок провайдера стоит, о нём видно в API-слое и в базе.
+    let mut conn = rig.pool.acquire().await?;
+    let (code, at) = windows::provider_block(&mut conn)
+        .await?
+        .expect("the block is set");
+    assert_eq!(code, "abuse_prepayment_required");
+    assert!(at >= t0);
+    drop(conn);
+
+    // Владельцу пуш сразу: код и баланс, больше ничего из ответа.
+    let alerts = rig.alerts().await;
+    assert_eq!(alerts.len(), 1);
+    assert_eq!(
+        alerts[0],
+        serde_json::json!({
+            "code": "ipv4_refused",
+            "name": window.name,
+            "error_code": "abuse_prepayment_required",
+            "required_balance": "28863.9",
+        })
+    );
+
+    // Обычный путь удаления: сервер удалён, отсутствие подтверждено списком, окно кончилось.
+    rig.tick(t0 + TimeDelta::seconds(2)).await;
+    let window = rig.window(id).await;
+    assert_eq!(window.state, "ended");
+    assert_eq!(rig.fake.server_count(), 0);
+    assert_eq!(rig.deletes(), 1);
+    // Итог — только сервер: один оплаченный час от вызова создания, адрес не тарифицировался.
+    assert_eq!(window.final_cost_kopecks, Some(HOURLY));
+    assert_eq!(
+        window.last_error.as_deref(),
+        Some("abuse_prepayment_required")
+    );
+    assert!(rig.floating().is_empty());
+    // Сколько бы проходов ни было, второго заказа адреса нет.
+    for seconds in [3, 400, 800] {
+        rig.tick(t0 + TimeDelta::seconds(seconds)).await;
+    }
+    assert_eq!(rig.ip_posts(), 1, "one IPv4 order per window");
+
+    // Следующее окно отказано, пока владелец не снимет блок.
+    match rig.try_create(60).await {
+        Err(CreateRefusal::ProviderBlocked { code }) => {
+            assert_eq!(code, "abuse_prepayment_required")
+        }
+        other => panic!("expected the provider block, got {other:?}"),
+    }
+    let rows: i64 = sqlx::query_scalar("select count(*) from cloud_windows")
+        .fetch_one(&rig.pool)
+        .await?;
+    assert_eq!(rows, 1, "a refusal leaves no row");
+    let mut conn = rig.pool.acquire().await?;
+    assert!(windows::clear_provider_block(&mut conn).await?);
+    assert!(
+        !windows::clear_provider_block(&mut conn).await?,
+        "nothing left to clear"
+    );
+    drop(conn);
+    rig.try_create(60)
+        .await
+        .expect("creation works again once the block is cleared");
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn any_other_4xx_ipv4_refusal_deletes_the_server_too_but_sets_no_block(
+    pool: PgPool,
+) -> TestResult {
+    for (status, code) in [(403, "forbidden"), (409, "conflict"), (400, "bad_request")] {
+        let rig = rig(pool.clone()).await;
+        sqlx::query("update cloud_windows set state = 'ended', final_cost_kopecks = 0")
+            .execute(&rig.pool)
+            .await?;
+        let _carrier = rig.carrier_session();
+        rig.fake.control().ip_add = refuse(status, code, None);
+        let t0 = now_micros();
+        let id = rig.create(120).await;
+        rig.tick(t0).await;
+        rig.tick(t0 + TimeDelta::seconds(1)).await;
+        rig.tick(t0 + TimeDelta::seconds(2)).await;
+        let window = rig.window(id).await;
+        assert_eq!(window.state, "ended", "{status} {code}");
+        assert_eq!(window.last_error.as_deref(), Some(code));
+        assert_eq!(rig.ip_posts(), 1);
+        assert_eq!(rig.fake.server_count(), 0);
+        let mut conn = rig.pool.acquire().await?;
+        assert!(
+            windows::provider_block(&mut conn).await?.is_none(),
+            "{code} blocks nothing"
+        );
+        drop(conn);
+        // Отказ без `details`: в пуше баланса нет.
+        sqlx::query("delete from owner_pushes")
+            .execute(&rig.pool)
+            .await?;
+    }
     Ok(())
 }
 
@@ -1654,6 +1789,8 @@ async fn a_failed_or_partial_listing_changes_nothing(pool: PgPool) -> TestResult
     let t1 = t0 + TimeDelta::minutes(40);
     rig.tick(t1).await;
     assert_eq!(rig.state(id).await, "identified");
+    // Адрес заказан до того, как сервер пропал.
+    rig.tick(t1 + TimeDelta::seconds(1)).await;
     rig.vanish_servers();
     rig.fake.control().list_fail_page = Some(FailPage {
         offset: 0,
@@ -1671,7 +1808,12 @@ async fn a_failed_or_partial_listing_changes_nothing(pool: PgPool) -> TestResult
     let window = rig.window(id).await;
     assert_eq!(window.state, "gone");
     assert!(window.final_cost_kopecks.is_some());
-    assert_eq!(rig.alert_codes().await, vec!["window_gone"]);
+    // Адрес исчезнувшего сервера остался плавающим: сверка в том же проходе его удаляет.
+    assert_eq!(
+        rig.alert_codes().await,
+        vec!["window_gone", "stray_ip_deleted"]
+    );
+    assert!(rig.floating().is_empty());
     Ok(())
 }
 

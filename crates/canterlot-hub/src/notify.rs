@@ -805,6 +805,17 @@ fn cloud_alert_text(payload: &Value) -> Option<(String, String)> {
                     .unwrap_or_default()
             ),
         ),
+        "ipv4_refused" => (
+            "Облако: Timeweb отказал в публичном IPv4".to_owned(),
+            format!(
+                "Timeweb отказал в публичном IPv4 ({}), сервер удалён.{}",
+                clip(payload["error_code"].as_str().unwrap_or("?"), TITLE_CHARS),
+                payload["required_balance"]
+                    .as_str()
+                    .map(|balance| format!(" Требуется баланс: {} ₽.", clip(balance, TITLE_CHARS)))
+                    .unwrap_or_default()
+            ),
+        ),
         "stray_ip_deleted" => (
             "Облако: удалён лишний IP-адрес".to_owned(),
             format!(

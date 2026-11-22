@@ -32,6 +32,10 @@ const ENDED_LIMIT: i64 = 20;
 pub struct WindowList {
     /// Живые окна и последние 20 законченных, новые первыми.
     pub items: Vec<CloudWindowView>,
+    /// Код блока провайдера (`abuse_prepayment_required`), пока он стоит: новые окна не
+    /// создаются, пока владелец не снимет блок. Пусто, когда блока нет.
+    pub provider_block_code: Option<String>,
+    pub provider_block_at: Option<chrono::DateTime<Utc>>,
 }
 
 #[derive(Serialize, Deserialize, ToSchema)]
@@ -54,7 +58,12 @@ async fn list(State(state): State<AppState>, _owner: Owner) -> Result<Json<Windo
         .iter()
         .map(|window| windows::view(window, now))
         .collect();
-    Ok(Json(WindowList { items }))
+    let block = windows::provider_block(&mut conn).await?;
+    Ok(Json(WindowList {
+        items,
+        provider_block_code: block.as_ref().map(|(code, _)| code.clone()),
+        provider_block_at: block.map(|(_, at)| at),
+    }))
 }
 
 #[utoipa::path(post,path="/api/v1/cloud/windows/{id}/delete",tag="cloud",params(("id"=Uuid,Path,description="Окно"),("Idempotency-Key"=String,Header,description="Ключ операции")),responses(

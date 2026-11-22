@@ -8,8 +8,8 @@ use std::time::Duration;
 use canterlot_hub::cloud::price::{Sizing, hourly_kopecks, monthly_kopecks};
 use canterlot_hub::cloud::rate_limit::RateLimit;
 use canterlot_hub::cloud::{
-    CloudProvider as _, CreateOutcome, CreateServer, DeleteOutcome, ErrorKind, ListError,
-    ServerLookup, ServerStatus, TimewebConfig, TimewebProvider,
+    CloudProvider as _, CreateOutcome, CreateServer, DeleteOutcome, ErrorKind, Ipv4Outcome,
+    ListError, ServerLookup, ServerStatus, TimewebConfig, TimewebProvider,
 };
 use serde_json::json;
 use tracing_subscriber::fmt::MakeWriter;
@@ -812,7 +812,9 @@ async fn a_new_server_has_no_address_until_one_is_ordered() {
     };
     assert_eq!((state.status, state.ipv4), (ServerStatus::On, None));
 
-    let address = rig.provider.add_ipv4(server_id).await.unwrap();
+    let Ipv4Outcome::Assigned(address) = rig.provider.ensure_public_ipv4(server_id).await else {
+        panic!("assigned");
+    };
     assert!(address.starts_with("203.0.113."));
     let ServerLookup::Found(state) = rig.provider.get_server(server_id).await.unwrap() else {
         panic!("found");
@@ -829,39 +831,97 @@ async fn a_new_server_has_no_address_until_one_is_ordered() {
 }
 
 #[tokio::test]
-async fn an_ip_order_is_never_retried_and_failures_are_classified() {
+async fn an_ip_order_is_never_retried_and_outcomes_are_classified() {
     let rig = rig().await;
     rig.fake.control().auto_ipv4 = false;
     let id = rig.fake.control().add_server(PROJECT, "s");
-    for (status, kind) in [
-        (400, ErrorKind::Rejected),
-        (409, ErrorKind::Conflict),
-        (500, ErrorKind::Unavailable),
+    // Любой 4xx, кроме 429, — определённый отказ с кодом ответа.
+    for (status, code) in [
+        (400, "bad_request"),
+        (403, "forbidden"),
+        (404, "not_found"),
+        (409, "conflict"),
     ] {
         rig.fake.control().ip_add = IpAddMode::Status(status);
-        let error = rig.provider.add_ipv4(id).await.unwrap_err();
-        assert_eq!(error.kind, kind, "{status}");
+        let outcome = rig.provider.ensure_public_ipv4(id).await;
+        assert_eq!(
+            outcome,
+            Ipv4Outcome::Refused {
+                status,
+                code: code.to_owned(),
+                required_balance: None
+            }
+        );
     }
-    assert_eq!(
+    // 5xx неопределён: адрес мог выдаться.
+    rig.fake.control().ip_add = IpAddMode::Status(500);
+    assert!(matches!(
+        rig.provider.ensure_public_ipv4(id).await,
+        Ipv4Outcome::Ambiguous { .. }
+    ));
+    // Один запрос на вызов, повторов внутри клиента нет.
+    let orders = |rig: &Rig| {
         rig.fake
             .requests()
             .iter()
             .filter(|r| r.method == "POST" && r.path.ends_with("/ips"))
-            .count(),
-        3,
-        "one request per call, none inside the client"
-    );
-    // Сервера нет.
+            .count()
+    };
+    assert_eq!(orders(&rig), 5);
+    // Сервера нет: тоже определённый отказ.
     rig.fake.control().ip_add = IpAddMode::Ok;
-    assert_eq!(
-        rig.provider.add_ipv4(999_999).await.unwrap_err().kind,
-        ErrorKind::NotFound
-    );
+    assert!(matches!(
+        rig.provider.ensure_public_ipv4(999_999).await,
+        Ipv4Outcome::Refused { status: 404, .. }
+    ));
     // Обрыв после приёма: неопределённо, адрес мог выдаться.
     rig.fake.control().ip_add = IpAddMode::AcceptThenDrop;
-    let error = rig.provider.add_ipv4(id).await.unwrap_err();
-    assert_eq!(error.kind, ErrorKind::Unavailable);
+    assert!(matches!(
+        rig.provider.ensure_public_ipv4(id).await,
+        Ipv4Outcome::Ambiguous { .. }
+    ));
     assert_eq!(rig.fake.control().floating_ips.len(), 1);
+    // 429 после ожидания клиента: запрос не обработан, адреса нет.
+    rig.fake.control().ip_add = IpAddMode::Status(429);
+    assert!(matches!(
+        rig.provider.ensure_public_ipv4(id).await,
+        Ipv4Outcome::NotProcessed { .. }
+    ));
+}
+
+#[tokio::test]
+async fn the_anti_abuse_refusal_carries_its_code_and_the_required_balance_and_nothing_else() {
+    let rig = rig().await;
+    rig.fake.control().auto_ipv4 = false;
+    let id = rig.fake.control().add_server(PROJECT, "s");
+    rig.fake.control().ip_add = IpAddMode::Refuse {
+        status: 400,
+        error_code: "abuse_prepayment_required".to_owned(),
+        required_balance: Some(28863.9),
+    };
+    assert_eq!(
+        rig.provider.ensure_public_ipv4(id).await,
+        Ipv4Outcome::Refused {
+            status: 400,
+            code: "abuse_prepayment_required".to_owned(),
+            required_balance: Some("28863.9".to_owned()),
+        }
+    );
+    // Код и сумма очищаются от всего, что не годится в журнал и пуш.
+    rig.fake.control().ip_add = IpAddMode::Refuse {
+        status: 400,
+        error_code: "bad code <script>".to_owned(),
+        required_balance: None,
+    };
+    let Ipv4Outcome::Refused {
+        code,
+        required_balance,
+        ..
+    } = rig.provider.ensure_public_ipv4(id).await
+    else {
+        panic!("refused");
+    };
+    assert_eq!((code.as_str(), required_balance), ("badcodescript", None));
 }
 
 #[tokio::test]

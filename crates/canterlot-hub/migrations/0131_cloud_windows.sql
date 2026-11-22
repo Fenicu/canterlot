@@ -9,7 +9,12 @@
 create table cloud_budget (
     singleton boolean primary key default true check (singleton),
     monthly_budget_kopecks bigint not null default 0 check (monthly_budget_kopecks >= 0),
-    cloud_machine_id uuid references machines(id)
+    cloud_machine_id uuid references machines(id),
+    -- Блок провайдера: аккаунт под правилом против злоупотреблений (`abuse_prepayment_required`).
+    -- Пока он стоит, новые окна не создаются; снимает его только владелец.
+    provider_block_code text,
+    provider_block_at timestamptz,
+    constraint cloud_budget_block_check check ((provider_block_code is null) = (provider_block_at is null))
 );
 insert into cloud_budget (singleton) values (true);
 
