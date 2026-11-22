@@ -96,7 +96,7 @@ pub const TOOLS: &[&str] = &[
     "job.cancel",
     "jobs.list",
     "runners.list",
-    "runner.propose",
+    "runners.propose",
 ];
 
 pub fn is_tool(name: &str) -> bool {
@@ -590,7 +590,7 @@ pub async fn call(
         "job.cancel" => inplace_jobs::cancel(context, caller, arguments).await,
         "jobs.list" => inplace_jobs::list(context, caller, arguments).await,
         "runners.list" => inplace_jobs::runners(context, caller, arguments).await,
-        "runner.propose" => cloud_propose::propose(context, caller, arguments).await,
+        "runners.propose" => cloud_propose::propose(context, caller, arguments).await,
         _ => Err(ToolError::new(ToolErrorCode::UnknownTool)),
     }
 }

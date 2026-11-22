@@ -665,7 +665,7 @@ fn no_agent_tool_applies_a_setting_itself() {
             "{hub_name}"
         );
     }
-    assert_eq!(mcp::AGENT_TOOLS.len(), 43);
+    assert_eq!(mcp::AGENT_TOOLS.len(), 44);
 }
 
 #[tokio::test]

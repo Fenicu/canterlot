@@ -207,7 +207,7 @@ pub const AGENT_TOOLS: [(&str, &str); 44] = [
     ("job_cancel", "job.cancel"),
     ("jobs_list", "jobs.list"),
     ("runners_list", "runners.list"),
-    ("runner_propose", "runner.propose"),
+    ("runner_propose", "runners.propose"),
 ];
 
 /// Инструменты команд на месте: оболочка на машине с воркером. Это самый сильный класс:

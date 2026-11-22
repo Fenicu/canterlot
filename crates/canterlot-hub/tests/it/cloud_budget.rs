@@ -514,13 +514,13 @@ async fn owner_form_and_agent_tool_create_cards_not_windows(pool: PgPool) -> Tes
         .bind(request)
         .execute(&rig.pool)
         .await?;
-    assert!(canterlot_hub::session_tools::is_tool("runner.propose"));
+    assert!(canterlot_hub::session_tools::is_tool("runners.propose"));
     let context = rig.tool_context();
     let caller = rig.caller().await;
     let answer = canterlot_hub::session_tools::call(
         &context,
         &caller,
-        "runner.propose",
+        "runners.propose",
         json!({"hours": 1, "reason": "нужен раннер"}),
     )
     .await
@@ -535,7 +535,7 @@ async fn owner_form_and_agent_tool_create_cards_not_windows(pool: PgPool) -> Tes
     let bad = canterlot_hub::session_tools::call(
         &context,
         &caller,
-        "runner.propose",
+        "runners.propose",
         json!({"hours": 5, "reason": "слишком много"}),
     )
     .await;
