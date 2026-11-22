@@ -1186,3 +1186,61 @@ async fn route_preview_and_routed_spawn_see_the_target_machine(pool: PgPool) {
         .unwrap();
     assert_eq!(model, B_ONLY);
 }
+
+/// Машина B становится раннером машины A: сессий на раннере нет, что бы он ни сообщал.
+async fn turn_b_into_a_runner(f: &Fx) {
+    sqlx::query(
+        "update machines set role='runner', parent_machine_id=$2, root_dir='/srv/runner'
+         where id=$1",
+    )
+    .bind(f.b)
+    .bind(f.a)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn session_spawn_and_route_preview_refuse_a_runner_machine(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    f.switch(true).await;
+    policy_with_b_only_model(&f).await;
+    // Пока B обычная машина, тот же вызов проходит.
+    let preview = f
+        .call(
+            "routing.preview",
+            json!({"task_type": "t", "machine": "machine-b", "workdir": "/tmp/b/p"}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(preview["machine_name"], "machine-b");
+    turn_b_into_a_runner(&f).await;
+
+    for machine in ["machine-b".to_owned(), f.b.to_string()] {
+        let mut args = remote_args();
+        args["machine"] = json!(machine);
+        assert_eq!(code(f.spawn(args).await), Code::MachineIsRunner);
+        let error = f
+            .call(
+                "routing.preview",
+                json!({"task_type": "t", "machine": machine, "workdir": "/tmp/b/p"}),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, Code::MachineIsRunner);
+        // Маршрут с запуском: тот же отказ, ничего не создано.
+        let routed = f
+            .spawn(json!({
+                "route": "t", "machine": machine, "workdir": "/tmp/b/p", "brief": "go",
+            }))
+            .await;
+        assert_eq!(code(routed), Code::MachineIsRunner);
+    }
+    assert!(f.children().await.is_empty(), "no session was created");
+    let commands: i64 = sqlx::query_scalar("select count(*) from commands where machine_id=$1")
+        .bind(f.b)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(commands, 0, "nothing was sent to the runner");
+}

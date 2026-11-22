@@ -6,8 +6,12 @@
 //! затем счётчик событий. Любой путь, который может освободить место или занять его
 //! (заявка, итог, отмена, подключение машины), берёт замок машины первым.
 
+pub mod carrier;
 pub mod facts;
 pub mod logs;
+pub mod owner;
+pub mod place;
+pub mod spec;
 pub mod sweep;
 
 use chrono::{DateTime, Utc};
@@ -43,10 +47,16 @@ pub const DEFAULT_MAX_RUNNING: i64 = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
+    /// Нет места на раннере: задача ждёт в хабе без машины.
+    WaitingRunner,
+    /// Несущая готовит исходники на выбранной машине.
+    Staging,
     Queued,
     Dispatched,
     WaitingLease,
     Running,
+    /// Раннер закончил, итог сохранён; несущая собирает результаты и убирает исходники.
+    Collecting,
     Succeeded,
     Failed,
     TimedOut,
@@ -57,10 +67,13 @@ pub enum State {
 impl State {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::WaitingRunner => "waiting_runner",
+            Self::Staging => "staging",
             Self::Queued => "queued",
             Self::Dispatched => "dispatched",
             Self::WaitingLease => "waiting_lease",
             Self::Running => "running",
+            Self::Collecting => "collecting",
             Self::Succeeded => "succeeded",
             Self::Failed => "failed",
             Self::TimedOut => "timed_out",
@@ -71,10 +84,13 @@ impl State {
 
     pub fn parse(value: &str) -> Option<Self> {
         Some(match value {
+            "waiting_runner" => Self::WaitingRunner,
+            "staging" => Self::Staging,
             "queued" => Self::Queued,
             "dispatched" => Self::Dispatched,
             "waiting_lease" => Self::WaitingLease,
             "running" => Self::Running,
+            "collecting" => Self::Collecting,
             "succeeded" => Self::Succeeded,
             "failed" => Self::Failed,
             "timed_out" => Self::TimedOut,
@@ -94,11 +110,14 @@ impl State {
     /// Порядок «вперёд»: итог выше любого хода.
     fn rank(self) -> u8 {
         match self {
-            Self::Queued => 0,
-            Self::Dispatched => 1,
-            Self::WaitingLease => 2,
-            Self::Running => 3,
-            _ => 4,
+            Self::WaitingRunner => 0,
+            Self::Staging => 1,
+            Self::Queued => 2,
+            Self::Dispatched => 3,
+            Self::WaitingLease => 4,
+            Self::Running => 5,
+            Self::Collecting => 6,
+            _ => 7,
         }
     }
 }
@@ -110,9 +129,10 @@ pub struct Job {
     pub owner_id: Uuid,
     pub conversation_id: Option<Uuid>,
     pub domain: String,
-    pub machine_id: Uuid,
+    /// Пусто, пока задача в `waiting_runner` (и у отменённой оттуда).
+    pub machine_id: Option<Uuid>,
     pub remote: bool,
-    pub workdir: String,
+    pub workdir: Option<String>,
     pub shell: String,
     pub env: Value,
     pub title: Option<String>,
@@ -144,6 +164,26 @@ pub struct Job {
     pub admission_generation: Option<i64>,
     pub finish_report: Option<Value>,
     pub finish_reported_at: Option<DateTime<Utc>>,
+    pub labels: Vec<String>,
+    pub expected_minutes: i32,
+    pub placement: Vec<String>,
+    pub source_repo: Option<String>,
+    pub source_rev: Option<String>,
+    pub source_domain: Option<String>,
+    pub outputs: Vec<String>,
+    pub carrier_id: Option<Uuid>,
+    pub outputs_dir: Option<String>,
+    pub outputs_note: Option<String>,
+    pub outputs_files: Option<Value>,
+    pub owner_job: bool,
+    /// Названная в заявке машина, пока задача ждёт на ней свободного места.
+    pub requested_machine_id: Option<Uuid>,
+    pub outcome_state: Option<String>,
+    pub outcome_reason: Option<String>,
+    pub collecting_at: Option<DateTime<Utc>>,
+    pub cleanup_attempts: i32,
+    pub cleanup_sent_at: Option<DateTime<Utc>>,
+    pub cleaned_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub dispatched_at: Option<DateTime<Utc>>,
     pub started_at: Option<DateTime<Utc>>,
@@ -159,6 +199,32 @@ impl Job {
     pub fn is_terminal(&self) -> bool {
         self.state().is_terminal()
     }
+
+    /// Исходники подготавливает и убирает несущая: задача проходит `staging` и `collecting`.
+    pub fn has_source(&self) -> bool {
+        self.source_repo.is_some() && self.carrier_id.is_some()
+    }
+
+    /// Раннер или несущая как цель задачи: машина, на которой лежит рабочий каталог.
+    pub fn target(&self) -> Option<Uuid> {
+        self.machine_id
+    }
+}
+
+/// Источник задачи для клиентов: имя каталога и короткая ревизия, не полный локальный путь.
+#[derive(Serialize, serde::Deserialize, ToSchema, Clone, Debug, PartialEq, Eq)]
+pub struct SourceView {
+    pub repo: String,
+    pub rev: String,
+}
+
+/// Последний компонент пути: имя каталога репозитория.
+pub fn repo_dir_name(path: &str) -> &str {
+    path.trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or("repo")
 }
 
 /// Задача для клиентов: без вывода (его отдают отдельные чтения).
@@ -166,12 +232,13 @@ impl Job {
 pub struct JobView {
     pub id: Uuid,
     pub state: String,
-    pub machine_id: Uuid,
-    pub machine_name: String,
+    /// Пусто, пока задача ждёт раннер (`waiting_runner`).
+    pub machine_id: Option<Uuid>,
+    pub machine_name: Option<String>,
     pub conversation_id: Option<Uuid>,
     pub conversation_title: Option<String>,
     pub title: Option<String>,
-    pub workdir: String,
+    pub workdir: Option<String>,
     pub shell: String,
     pub lease: String,
     pub timeout_minutes: i32,
@@ -187,6 +254,12 @@ pub struct JobView {
     pub machine_offline: bool,
     #[schema(value_type = Option<Object>)]
     pub late_report: Option<Value>,
+    pub labels: Vec<String>,
+    pub expected_minutes: i32,
+    pub source: Option<SourceView>,
+    /// Каталог на несущей, куда собраны результаты.
+    pub outputs_dir: Option<String>,
+    pub outputs_note: Option<String>,
     pub created_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,
@@ -330,8 +403,16 @@ pub async fn machine_name(conn: &mut PgConnection, machine: Uuid) -> Result<Stri
         .unwrap_or_default())
 }
 
+/// Имя машины задачи; пусто, пока машины нет (`waiting_runner`).
+pub async fn job_machine_name(conn: &mut PgConnection, job: &Job) -> Result<String, sqlx::Error> {
+    match job.machine_id {
+        Some(machine) => machine_name(conn, machine).await,
+        None => Ok(String::new()),
+    }
+}
+
 pub async fn view(conn: &mut PgConnection, job: &Job) -> Result<JobView, sqlx::Error> {
-    let machine_name = machine_name(conn, job.machine_id).await?;
+    let machine_name = job_machine_name(conn, job).await?;
     let conversation_title = match job.conversation_id {
         Some(id) => {
             sqlx::query_scalar("select title from conversations where id=$1")
@@ -349,7 +430,7 @@ pub fn view_with(job: &Job, machine_name: String, conversation_title: Option<Str
         id: job.id,
         state: job.state.clone(),
         machine_id: job.machine_id,
-        machine_name,
+        machine_name: job.machine_id.map(|_| machine_name),
         conversation_id: job.conversation_id,
         conversation_title,
         title: job.title.clone(),
@@ -366,6 +447,17 @@ pub fn view_with(job: &Job, machine_name: String, conversation_title: Option<Str
         has_log: job.log_media_id.is_some(),
         machine_offline: false,
         late_report: job.late_report.clone(),
+        labels: job.labels.clone(),
+        expected_minutes: job.expected_minutes,
+        source: match (&job.source_repo, &job.source_rev) {
+            (Some(repo), Some(rev)) => Some(SourceView {
+                repo: repo_dir_name(repo).to_owned(),
+                rev: rev.chars().take(12).collect(),
+            }),
+            _ => None,
+        },
+        outputs_dir: job.outputs_dir.clone(),
+        outputs_note: job.outputs_note.clone(),
         created_at: job.created_at,
         started_at: job.started_at,
         finished_at: job.finished_at,
@@ -407,7 +499,7 @@ pub fn result_json(job: &Job, machine: &str) -> Value {
     let mut value = json!({
         "job_id": job.id,
         "state": job.state,
-        "machine": machine,
+        "machine": job.machine_id.map(|_| machine),
         "exit_code": job.exit_code,
         "duration_ms": job.duration_ms,
         "output_tail": tail_text(tail, RESULT_TAIL_BYTES),
@@ -417,12 +509,26 @@ pub fn result_json(job: &Job, machine: &str) -> Value {
     if let Some(reason) = &job.end_reason {
         value["reason"] = json!(reason);
     }
+    if let Some(dir) = &job.outputs_dir {
+        value["outputs_dir"] = json!(dir);
+    }
+    if let Some(note) = &job.outputs_note {
+        value["outputs_note"] = json!(note);
+    }
     value
 }
 
 /// Ответ о задаче, у которой ещё нет итога или итог уйдёт сообщением.
 pub fn state_json(job: &Job, machine: &str) -> Value {
-    let mut value = json!({"job_id": job.id, "state": job.state, "machine": machine});
+    // Пока машины нет (`waiting_runner`), в ответе `machine: null` и признак ожидания.
+    let mut value = json!({
+        "job_id": job.id,
+        "state": job.state,
+        "machine": job.machine_id.map(|_| machine),
+    });
+    if job.state() == State::WaitingRunner {
+        value["waiting_runner"] = json!(true);
+    }
     if job.cancel_requested_at.is_some() && !job.is_terminal() {
         value["cancel_requested"] = json!(true);
     }
@@ -496,6 +602,18 @@ fn render_message(job: &Job, machine: &str, with_tail: bool) -> String {
         text.push_str(&format!(" ({reason})"));
     }
     text.push('.');
+    if let Some(dir) = &job.outputs_dir {
+        text.push_str(&format!(
+            " Outputs collected on the carrier in {}.",
+            crate::session_tools::origin::clean_title(dir)
+        ));
+    }
+    if let Some(note) = &job.outputs_note {
+        text.push_str(&format!(
+            " {}.",
+            crate::session_tools::origin::clean_title(note)
+        ));
+    }
     let tail = job.tail.as_deref().unwrap_or(&[]);
     if (!with_tail || tail.is_empty()) && job.output_bytes > 0 {
         text.push_str(&format!(
@@ -628,19 +746,49 @@ pub async fn finish_in_tx(
     .await?;
     sqlx::query(
         "update commands set delivery_state='completed', completed_at=coalesce(completed_at, now())
-         where machine_id=$1 and kind in ('start_inplace_job','cancel_inplace_job')
+         where ((machine_id=$1 and kind in ('start_inplace_job','cancel_inplace_job'))
+             or (machine_id=$3 and kind in ('stage_source','collect_outputs')))
            and payload->>'job_id'=$2 and delivery_state<>'completed'",
     )
     .bind(job.machine_id)
     .bind(job.id.to_string())
+    .bind(job.carrier_id)
     .execute(&mut *conn)
     .await?;
     let done = load(conn, job.id).await?.expect("job row just updated");
     if done.delivery.as_deref() == Some("message") {
         enqueue_message_in_tx(conn, &done).await?;
     }
+    // Исходники убирает несущая: команда очистки уходит при любом конце, если цель была выбрана.
+    if done.has_source() && done.machine_id.is_some() {
+        carrier::ensure_cleanup_in_tx(conn, &done).await?;
+    }
+    if done.owner_job {
+        carrier::enqueue_owner_finished_in_tx(conn, &done).await?;
+    }
+    // Место освободилось (или ожидание закрыто): расстановка несущей пойдёт после фиксации.
+    carrier::notify_place_for_machine(conn, done.machine_id.or(done.carrier_id)).await?;
     emit_changed(conn, &done, correlation_id).await?;
     Ok(Some(done))
+}
+
+/// Итог пришёл от раннера: задача с исходниками и результатами для сбора переходит в
+/// `collecting`, пока несущая собирает результаты; остальные заканчиваются сразу. Очистка
+/// исходников идёт после конца (`finish_in_tx`) и конец не держит. Сообщение об итоге и ждущий
+/// вызов срабатывают только при настоящем конце. Под замками машины и строки.
+pub async fn runner_finished_in_tx(
+    conn: &mut PgConnection,
+    job: &Job,
+    outcome: Outcome,
+    correlation_id: Uuid,
+) -> Result<Option<Job>, sqlx::Error> {
+    if job.is_terminal() || job.state() == State::Collecting {
+        return Ok(None);
+    }
+    if !job.has_source() || !carrier::wants_collect(&job.outputs, outcome.state, &outcome.reason) {
+        return finish_in_tx(conn, job, outcome, correlation_id).await;
+    }
+    carrier::begin_collecting_in_tx(conn, job, outcome, correlation_id).await
 }
 
 /// Машина освободила место или появилась: очередные задачи уходят на неё командами.
@@ -651,15 +799,7 @@ pub async fn dispatch_machine_in_tx(
     correlation_id: Uuid,
 ) -> Result<usize, sqlx::Error> {
     lock_machine(conn, machine_id).await?;
-    let max: Option<i32> = sqlx::query_scalar("select jobs_max_running from machines where id=$1")
-        .bind(machine_id)
-        .fetch_optional(&mut *conn)
-        .await?
-        .flatten();
-    let max = match max {
-        Some(max) if max > 0 => i64::from(max),
-        _ => DEFAULT_MAX_RUNNING,
-    };
+    let max = max_running_in_tx(conn, machine_id).await?;
     let queued_rows: Vec<(Uuid, Option<Uuid>)> = sqlx::query_as(
         "select id, conversation_id from jobs
          where machine_id=$1 and state='queued' order by created_at, id",
@@ -684,10 +824,12 @@ pub async fn dispatch_machine_in_tx(
             continue;
         }
         // Удалённая задача, ждавшая в очереди, пока машину выключали, не оживает от повторного
-        // включения: поколение допуска выросло с её заявки.
-        if job.remote {
+        // включения: поколение допуска выросло с её заявки. Задача с исходниками размещена
+        // хабом в свободное место и уже подготовлена: пауза раннера (выключатель) закрывает
+        // только новые привязки, а не её.
+        if job.remote && !job.has_source() {
             let (accepts, generation) =
-                crate::machines::remote_admission_for_share(conn, job.machine_id).await?;
+                crate::machines::remote_admission_for_share(conn, machine_id).await?;
             if !accepts || job.admission_generation.unwrap_or(0) < generation {
                 finish_in_tx(
                     conn,
@@ -706,10 +848,19 @@ pub async fn dispatch_machine_in_tx(
         {
             let refusal = if facts.memory_domain.as_deref() != Some(job.domain.as_str()) {
                 Some(Refusal::DomainMismatch)
+            } else if job.has_source() {
+                // Домен проверен по пути исходников при заявке; у раннера путь рабочего
+                // каталога не говорит о домене, остаётся проверка режима.
+                admit_mode(&facts).err()
             } else {
-                admit(conn, &facts, job.machine_id, &job.workdir)
-                    .await
-                    .err()
+                admit(
+                    conn,
+                    &facts,
+                    machine_id,
+                    job.workdir.as_deref().unwrap_or_default(),
+                )
+                .await
+                .err()
             };
             if let Some(refusal) = refusal {
                 finish_in_tx(
@@ -722,7 +873,8 @@ pub async fn dispatch_machine_in_tx(
                 continue;
             }
         } else if job.remote
-            && !crate::machines::accepts_remote_work_for_share(conn, job.machine_id).await?
+            && !job.has_source()
+            && !crate::machines::accepts_remote_work_for_share(conn, machine_id).await?
         {
             finish_in_tx(
                 conn,
@@ -739,7 +891,7 @@ pub async fn dispatch_machine_in_tx(
             full = true;
             continue;
         }
-        send_start_in_tx(conn, &job).await?;
+        send_start_in_tx(conn, &job, machine_id).await?;
         sqlx::query(
             "update jobs set state='dispatched', dispatched_at=clock_timestamp(),
                     last_fact_at=clock_timestamp(), updated_at=clock_timestamp()
@@ -755,11 +907,22 @@ pub async fn dispatch_machine_in_tx(
     Ok(sent)
 }
 
-/// Занятые места: задачи у воркера и потерянные, о которых он говорит, что они идут.
+/// Режим заказчика при допуске: `bypass` и не боковая сессия. Домен и выключатель проверяет
+/// вызывающий.
+pub fn admit_mode(facts: &CallerFacts) -> Result<(), Refusal> {
+    let mode = spawn::parent_mode(&facts.permission_mode, facts.pending_mode.as_deref());
+    if mode != "bypass" || facts.side {
+        return Err(Refusal::ModeTooNarrow);
+    }
+    Ok(())
+}
+
+/// Занятые места: задачи у воркера, потерянные, о которых он говорит, что они идут, и задачи,
+/// которым несущая готовит исходники на этой машине: место закреплено за ними с привязки.
 pub async fn occupied_in_tx(conn: &mut PgConnection, machine_id: Uuid) -> Result<i64, sqlx::Error> {
     sqlx::query_scalar(
         "select count(*) from jobs where machine_id=$1 and (
-           state in ('dispatched','waiting_lease','running')
+           state in ('staging','dispatched','waiting_lease','running')
            or (state='lost' and late_report->>'phase'='running'))",
     )
     .bind(machine_id)
@@ -767,7 +930,26 @@ pub async fn occupied_in_tx(conn: &mut PgConnection, machine_id: Uuid) -> Result
     .await
 }
 
-async fn notify_outbox(conn: &mut PgConnection, machine_id: Uuid) -> Result<(), sqlx::Error> {
+/// Сколько задач машина принимает одновременно: из отчёта воркера или по умолчанию.
+pub async fn max_running_in_tx(
+    conn: &mut PgConnection,
+    machine_id: Uuid,
+) -> Result<i64, sqlx::Error> {
+    let max: Option<i32> = sqlx::query_scalar("select jobs_max_running from machines where id=$1")
+        .bind(machine_id)
+        .fetch_optional(conn)
+        .await?
+        .flatten();
+    Ok(match max {
+        Some(max) if max > 0 => i64::from(max),
+        _ => DEFAULT_MAX_RUNNING,
+    })
+}
+
+pub(super) async fn notify_outbox(
+    conn: &mut PgConnection,
+    machine_id: Uuid,
+) -> Result<(), sqlx::Error> {
     sqlx::query("select pg_notify('canterlot_outbox', $1)")
         .bind(machine_id.to_string())
         .execute(conn)
@@ -775,14 +957,18 @@ async fn notify_outbox(conn: &mut PgConnection, machine_id: Uuid) -> Result<(), 
     Ok(())
 }
 
-async fn send_start_in_tx(conn: &mut PgConnection, job: &Job) -> Result<(), sqlx::Error> {
+async fn send_start_in_tx(
+    conn: &mut PgConnection,
+    job: &Job,
+    machine_id: Uuid,
+) -> Result<(), sqlx::Error> {
     sqlx::query(
         "insert into commands (id, machine_id, conversation_id, execution_id, execution_generation,
                                kind, payload, delivery_state)
          values ($1, $2, null, null, null, 'start_inplace_job', $3, 'pending')",
     )
     .bind(Uuid::now_v7())
-    .bind(job.machine_id)
+    .bind(machine_id)
     .bind(json!({
         "job_id": job.id,
         "attempt": job.attempt,
@@ -794,7 +980,7 @@ async fn send_start_in_tx(conn: &mut PgConnection, job: &Job) -> Result<(), sqlx
     }))
     .execute(&mut *conn)
     .await?;
-    notify_outbox(conn, job.machine_id).await
+    notify_outbox(conn, machine_id).await
 }
 
 async fn send_cancel_in_tx(conn: &mut PgConnection, job: &Job) -> Result<(), sqlx::Error> {
@@ -807,6 +993,9 @@ async fn send_cancel_in_tx(conn: &mut PgConnection, job: &Job) -> Result<(), sql
     .bind(job.id.to_string())
     .fetch_one(&mut *conn)
     .await?;
+    let Some(machine_id) = job.machine_id else {
+        return Ok(());
+    };
     if exists {
         return Ok(());
     }
@@ -816,11 +1005,11 @@ async fn send_cancel_in_tx(conn: &mut PgConnection, job: &Job) -> Result<(), sql
          values ($1, $2, null, null, null, 'cancel_inplace_job', $3, 'pending')",
     )
     .bind(Uuid::now_v7())
-    .bind(job.machine_id)
+    .bind(machine_id)
     .bind(json!({"job_id": job.id, "attempt": job.attempt}))
     .execute(&mut *conn)
     .await?;
-    notify_outbox(conn, job.machine_id).await
+    notify_outbox(conn, machine_id).await
 }
 
 /// Отмена: очередь закрывается сразу, идущая задача получает команду отмены и остаётся в
@@ -832,19 +1021,25 @@ pub async fn cancel_in_tx(
     reason: &str,
     correlation_id: Uuid,
 ) -> Result<Option<Job>, sqlx::Error> {
-    let machine: Option<Uuid> = sqlx::query_scalar("select machine_id from jobs where id=$1")
-        .bind(id)
-        .fetch_optional(&mut *conn)
-        .await?;
+    let machine: Option<Option<Uuid>> =
+        sqlx::query_scalar("select machine_id from jobs where id=$1")
+            .bind(id)
+            .fetch_optional(&mut *conn)
+            .await?;
     let Some(machine) = machine else {
         return Ok(None);
     };
-    lock_machine(conn, machine).await?;
+    // У ожидающей раннера задачи машины нет: замок машины не нужен, строку держит она сама.
+    if let Some(machine) = machine {
+        lock_machine(conn, machine).await?;
+    }
     let Some(job) = lock_row(conn, id).await? else {
         return Ok(None);
     };
     match job.state() {
-        State::Queued => {
+        // Ожидание, подготовка и очередь закрываются сразу; подготовленное убирает очистка,
+        // которую `finish_in_tx` ставит для любой задачи с исходниками и выбранной целью.
+        State::WaitingRunner | State::Staging | State::Queued => {
             finish_in_tx(
                 conn,
                 &job,

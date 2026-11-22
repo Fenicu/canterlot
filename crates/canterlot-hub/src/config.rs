@@ -986,6 +986,20 @@ pub struct JobsConfig {
     /// оставляет метаданные и хвост. `0` хранит журналы без срока.
     #[serde(with = "humantime_serde")]
     pub log_retention: Duration,
+    /// Предел суммарного размера результатов задачи, которые несущая собирает с раннера, в
+    /// байтах (`outputs`). По умолчанию 512 МиБ.
+    pub outputs_cap: u64,
+    /// Сколько задача ждёт сбора результатов и очистки после конца на раннере; потом она
+    /// заканчивается итогом раннера с пометкой «outputs not collected».
+    #[serde(with = "humantime_serde")]
+    pub collect_timeout: Duration,
+    /// Сколько несущая может готовить исходники: дольше задача заканчивается `failed`.
+    #[serde(with = "humantime_serde")]
+    pub stage_timeout: Duration,
+    /// Сколько задача ждёт раннер (`waiting_runner`): дольше она заканчивается `canceled` с
+    /// причиной `no_runner`. `0` ждёт без срока.
+    #[serde(with = "humantime_serde")]
+    pub waiting_timeout: Duration,
 }
 
 impl Default for JobsConfig {
@@ -993,6 +1007,10 @@ impl Default for JobsConfig {
         Self {
             lost_grace: Duration::from_secs(10 * 60),
             log_retention: Duration::from_secs(14 * 86400),
+            outputs_cap: 512 * 1024 * 1024,
+            collect_timeout: Duration::from_secs(10 * 60),
+            stage_timeout: Duration::from_secs(15 * 60),
+            waiting_timeout: Duration::from_secs(24 * 3600),
         }
     }
 }

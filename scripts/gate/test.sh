@@ -386,9 +386,283 @@ else
     printf 'выбор Playwright по file:line: пропущен, нет web/node_modules\n'
 fi
 
+# --- scripts/gate.sh --runner: гейт на раннере ---
+# Подмена canterlot-worker (CANTERLOT_WORKER_BIN) отвечает на `job run` и кладёт
+# «собранные» result.txt и state.tsv; настоящих задач, docker и сети нет.
+fake_worker="$PWD/scripts/gate/fake-worker"
+fake_docker="$PWD/scripts/gate/fake-docker"
+export FAKE_WORKER_CALLS="$tmp/worker-calls"
+runner_env=(env CANTERLOT_WORKER_BIN="$fake_worker" FAKE_WORKER_OUT="$tmp/worker-out")
+reset_worker() {
+    : >"$FAKE_WORKER_CALLS"
+    rm -rf "$tmp/worker-out"
+    mkdir -p "$tmp/worker-out"
+}
+new_runner_repo() {
+    new_gate_repo "$1"
+    reset_worker
+}
+
+# Успех: ровно одна команда `job run` с зафиксированными аргументами, аттестация
+# с runner= из состояния раннера, аренда на VM не берётся.
+r1="$tmp/r1"
+new_runner_repo "$r1"
+r1sha=$(git -C "$r1" rev-parse HEAD)
+run 0 "${runner_env[@]}" bash "$r1/scripts/gate.sh" --runner auto
+[[ $(grep -c . "$FAKE_WORKER_CALLS") == 1 ]] || { cat "$FAKE_WORKER_CALLS" >&2; fail 'гейт на раннере сделал не один вызов воркера (аренда на VM не нужна)'; }
+expected="job run --title Гейт ${r1sha:0:8} --machine auto --labels kernel-6.12 --lease gate --timeout-minutes 240 --expected-minutes 45 --source $r1@$r1sha --output .gate-out --wait -- scripts/gate/runner-gate.sh $r1sha"
+[[ $(cat "$FAKE_WORKER_CALLS") == "$expected" ]] || { cat "$FAKE_WORKER_CALLS" >&2; fail 'команда job run не та, что зафиксирована'; }
+att="$r1/.superpowers/gate/$r1sha.ok"
+[[ -s "$att" ]] || { cat "$out" >&2; fail 'успешный гейт на раннере не записал аттестацию'; }
+grep -qx "sha=$r1sha" "$att" || fail 'аттестация раннера: нет полного sha'
+grep -qx 'runner=runner-a' "$att" || fail 'аттестация раннера: нет runner= из отчёта раннера'
+for key in started finished duration_s npm_ci_exit npm_ci_duration_s check_exit check_duration_s deploy_exit deploy_duration_s web_exit web_duration_s logs; do
+    grep -q "^$key=" "$att" || fail "аттестация раннера: нет ключа $key"
+done
+grep -qx 'check_exit=0' "$att" || fail 'аттестация раннера: check_exit не взят из состояния'
+grep -q '^summary=' "$att" || fail 'аттестация раннера: нет строк summary'
+if grep -q '^test_seams=' "$att"; then fail 'аттестация раннера помечена тестовыми швами'; fi
+for leftover in "$r1/.superpowers/gate/"*.tmp.*; do
+    [[ ! -e "$leftover" ]] || fail 'после записи остался временный файл аттестации'
+done
+# Ровно те ключи, которые release.sh проверяет: все *_exit равны 0 или deploy skipped.
+while IFS='=' read -r key value; do
+    if [[ $key == *_exit && $value != 0 && $value != skipped ]]; then fail "аттестация раннера: $key=$value"; fi
+done <"$att"
+
+# --no-attest: гейт идёт, аттестации нет.
+r1b="$tmp/r1b"
+new_runner_repo "$r1b"
+run 0 "${runner_env[@]}" bash "$r1b/scripts/gate.sh" --runner runner-a --no-attest
+[[ ! -e "$r1b/.superpowers/gate/$(git -C "$r1b" rev-parse HEAD).ok" ]] || fail '--no-attest записал аттестацию на раннере'
+grep -qF -- '--machine runner-a ' "$FAKE_WORKER_CALLS" || fail 'имя машины не дошло до job run'
+
+# Чужой sha в result.txt, чужой sha в состоянии, упавший шаг, код задачи, нет
+# каталога результатов: аттестации нет, причина названа.
+fail_cases=(
+    "FAKE_WORKER_RESULT_SHA=deadbeef|result.txt"
+    "FAKE_WORKER_STATE_SHA=deadbeefdeadbeefdeadbeefdeadbeefdeadbeef|sha"
+    "FAKE_WORKER_CHECK=1|check_exit"
+    "FAKE_WORKER_CODE=1|код задачи"
+    "FAKE_WORKER_NO_OUTPUTS=1|каталог результатов"
+)
+for case_spec in "${fail_cases[@]}"; do
+    var=${case_spec%%|*}
+    why=${case_spec#*|}
+    rf="$tmp/rf"
+    rm -rf "$rf"
+    new_runner_repo "$rf"
+    run 1 "${runner_env[@]}" "$var" bash "$rf/scripts/gate.sh" --runner auto
+    [[ ! -e "$rf/.superpowers/gate/$(git -C "$rf" rev-parse HEAD).ok" ]] || fail "аттестация записана при $var"
+    grep -q 'аттестация не пишется' "$out" || { cat "$out" >&2; fail "нет сообщения об отказе в аттестации при $var"; }
+    grep -qF -- "$why" "$out" || { cat "$out" >&2; fail "в отказе при $var не названа причина «$why»"; }
+done
+
+# HEAD сместился или дерево стало грязным за прогон: аттестации нет.
+rd="$tmp/rd"
+new_runner_repo "$rd"
+run 1 "${runner_env[@]}" FAKE_WORKER_DIRTY="$rd" bash "$rd/scripts/gate.sh" --runner auto
+[[ ! -e "$rd/.superpowers/gate/$(git -C "$rd" rev-parse HEAD).ok" ]] || fail 'аттестация записана при грязном дереве'
+grep -q 'грязной' "$out" || { cat "$out" >&2; fail 'нет отказа из-за грязного дерева после прогона'; }
+rm -f "$rd/stray"
+rm -rf "$rd" && new_runner_repo "$rd"
+rd_before=$(git -C "$rd" rev-parse HEAD)
+run 1 "${runner_env[@]}" FAKE_WORKER_COMMIT="$rd" bash "$rd/scripts/gate.sh" --runner auto
+[[ ! -e "$rd/.superpowers/gate/$rd_before.ok" && ! -e "$rd/.superpowers/gate/$(git -C "$rd" rev-parse HEAD).ok" ]] \
+    || fail 'аттестация записана после смещения HEAD'
+grep -q 'HEAD сместился' "$out" || { cat "$out" >&2; fail 'нет отказа из-за смещения HEAD'; }
+
+# Грязное дерево не отправляется на раннер, даже с --no-attest.
+rg="$tmp/rg-dirty"
+new_runner_repo "$rg"
+: >"$rg/stray"
+run 1 "${runner_env[@]}" bash "$rg/scripts/gate.sh" --runner auto
+grep -q 'грязная' "$out" || { cat "$out" >&2; fail 'грязное дерево на раннере не отказано'; }
+run 1 "${runner_env[@]}" bash "$rg/scripts/gate.sh" --runner auto --no-attest
+[[ ! -s "$FAKE_WORKER_CALLS" ]] || fail 'грязное дерево дошло до воркера'
+
+# --rerun-failed на раннере не поддерживается (v1).
+run 2 "${runner_env[@]}" bash "$r1/scripts/gate.sh" --runner x --rerun-failed
+grep -q 'rerun-failed.*runner' "$out" || { cat "$out" >&2; fail 'нет понятного отказа для --rerun-failed с --runner'; }
+[[ ! -s "$FAKE_WORKER_CALLS" ]] || fail '--rerun-failed с --runner дошёл до воркера'
+run 2 bash "$r1/scripts/gate.sh" --runner
+
+# --runner local — прежнее поведение: аренда, а не job run.
+rl="$tmp/rl"
+new_gate_repo "$rl"
+run 0 env CANTERLOT_LEASE_DRY=1 bash "$rl/scripts/gate.sh" --runner local
+grep -q 'kind=gate' "$out" || { cat "$out" >&2; fail '--runner local не дошёл до аренды'; }
+
+# Прерывание: гейт не оставляет задачу молча, называет её и способ отмены.
+rt="$tmp/rt"
+new_runner_repo "$rt"
+pidfile="$tmp/worker.pid"
+rm -f "$pidfile"
+"${runner_env[@]}" FAKE_WORKER_PIDFILE="$pidfile" bash "$rt/scripts/gate.sh" --runner auto >"$out" 2>&1 &
+gate_pid=$!
+for _ in $(seq 1 100); do
+    grep -q 'accepted' "$out" 2>/dev/null && [[ -s "$pidfile" ]] && break
+    sleep 0.1
+done
+[[ -s "$pidfile" ]] || { cat "$out" >&2; fail 'прерывание: задача не стартовала'; }
+kill -TERM "$(cat "$pidfile")" "$gate_pid"
+gate_rc=0
+wait "$gate_pid" || gate_rc=$?
+[[ "$gate_rc" == 143 || "$gate_rc" == 130 ]] || { cat "$out" >&2; fail "прерывание: код $gate_rc"; }
+grep -q '00000000-0000-4000-8000-000000000001' "$out" || { cat "$out" >&2; fail 'прерывание: не назван идентификатор задачи'; }
+grep -q 'продолжает работать' "$out" || { cat "$out" >&2; fail 'прерывание: нет предупреждения, что задача продолжает работать'; }
+[[ ! -e "$rt/.superpowers/gate/$(git -C "$rt" rev-parse HEAD).ok" ]] || fail 'прерванный гейт записал аттестацию'
+
+# --- scripts/gate/runner-gate.sh: на раннере, в подготовленной рабочей копии ---
+export FAKE_DOCKER_CALLS="$tmp/docker-calls"
+# Рабочая копия раннера — связанный worktree bare-репозитория, как её готовит
+# носитель (<корень>/repos/<домен>/<ключ>.git и <корень>/jobs/<домен>/<задача>): её
+# .git — файл, указывающий в общий каталог git вне рабочей копии.
+new_runner_worktree() {
+    local root=$1 seed dir bare
+    seed="$root/seed"
+    dir="$root/jobs/personal/job1"
+    bare="$root/repos/personal/key.git"
+    mkdir -p "$seed/scripts/gate" "$seed/docker/gate" "$seed/web" "$root/repos/personal" "$root/jobs/personal"
+    cp scripts/gate/runner-gate.sh scripts/gate/in-container.sh "$seed/scripts/gate/"
+    printf 'FROM scratch\n' >"$seed/docker/gate/Dockerfile"
+    printf '[toolchain]\nchannel = "1.99.1"\n' >"$seed/rust-toolchain.toml"
+    printf '{"packages":{"node_modules/playwright-core":{"version":"1.64.1"}}}\n' >"$seed/web/package-lock.json"
+    (
+        cd "$seed"
+        git init -q
+        git config user.email gate@example.invalid
+        git config user.name gate
+        git config commit.gpgsign false
+        printf '.gate-out/\n' >.gitignore
+        git add .
+        git commit -qm init
+    )
+    git clone -q --bare "$seed" "$bare"
+    git -C "$bare" worktree add -q --detach "$dir" "$(git -C "$seed" rev-parse HEAD)"
+    : >"$FAKE_DOCKER_CALLS"
+}
+# Видит ли контейнер git рабочей копии? Её .git — файл с путём вне рабочей копии, а
+# внутри контейнера git читает его по тому же пути: каждый из каталогов (gitdir и общий
+# каталог) должен лежать под монтированием, у которого путь в контейнере равен пути на
+# хосте. Без этого `git -C /src rev-parse HEAD` в контейнере падает.
+assert_git_mounted() {
+    local line=$1 wt=$2 what=$3 gitdir common dir ok mount host cont mounts
+    mapfile -t mounts < <(grep -oE -- '-v [^ ]+' <<<"$line" | cut -d' ' -f2)
+    gitdir=$(sed -n 's/^gitdir: //p' "$wt/.git")
+    [[ -n "$gitdir" && -d "$gitdir" ]] || fail "$what: у $wt нет связанного gitdir"
+    common=$(cd "$gitdir" && cd "$(cat commondir)" && pwd -P)
+    for dir in "$gitdir" "$common"; do
+        ok=0
+        for mount in "${mounts[@]}"; do
+            host=${mount%%:*}
+            cont=${mount#*:}
+            cont=${cont%%:*}
+            if [[ "$host" == "$cont" && ( "$dir" == "$host" || "$dir" == "$host"/* ) ]]; then ok=1; fi
+        done
+        ((ok)) || fail "$what: каталог git $dir не смонтирован в контейнер по своему пути: $line"
+    done
+}
+rg_env=(env CANTERLOT_DOCKER="$fake_docker")
+
+# Без worker.toml в корне раннера скрипт отказывает до docker.
+rr="$tmp/runner-root"
+new_runner_worktree "$rr"
+rwt="$rr/jobs/personal/job1"
+rsha=$(git -C "$rwt" rev-parse HEAD)
+run 1 "${rg_env[@]}" bash "$rwt/scripts/gate/runner-gate.sh" "$rsha"
+grep -q 'worker.toml' "$out" || { cat "$out" >&2; fail 'runner-gate: нет отказа без worker.toml'; }
+[[ ! -s "$FAKE_DOCKER_CALLS" ]] || fail 'runner-gate: docker вызван без worker.toml'
+
+# Рабочая копия не в <корень>/jobs/<домен>/<задача>: корень не найти.
+mkdir -p "$tmp/not-a-runner"
+cp -a "$rwt" "$tmp/not-a-runner/wt"
+run 1 "${rg_env[@]}" bash "$tmp/not-a-runner/wt/scripts/gate/runner-gate.sh" "$rsha"
+grep -q 'корень раннера' "$out" || { cat "$out" >&2; fail 'runner-gate: нет отказа вне <корень>/jobs/<домен>/<задача>'; }
+
+# Другой sha, чем у HEAD: отказ до docker.
+: >"$rr/worker.toml"
+run 1 "${rg_env[@]}" bash "$rwt/scripts/gate/runner-gate.sh" "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+grep -q 'не совпадает' "$out" || { cat "$out" >&2; fail 'runner-gate: нет отказа для чужого sha'; }
+[[ ! -s "$FAKE_DOCKER_CALLS" ]] || fail 'runner-gate: docker вызван при несовпадении sha'
+run 2 "${rg_env[@]}" bash "$rwt/scripts/gate/runner-gate.sh"
+run 1 "${rg_env[@]}" bash "$rwt/scripts/gate/runner-gate.sh" "not-a-sha"
+
+# Успешный запуск: образ уже есть, контейнер именован, лимиты и кэши под корнем
+# раннера, результат в ./.gate-out с именем раннера.
+export FAKE_DOCKER_WRITE=1
+run 0 "${rg_env[@]}" CANTERLOT_RUNNER_NAME=runner-a bash "$rwt/scripts/gate/runner-gate.sh" "$rsha"
+run_line=$(grep '^run ' "$FAKE_DOCKER_CALLS") || { cat "$FAKE_DOCKER_CALLS" >&2; fail 'runner-gate: нет docker run'; }
+grep -q -- "--name canterlot-gate-${rsha:0:12}-[0-9a-f]\{8\} " <<<"$run_line" || fail "runner-gate: нет имени canterlot-gate-<sha12>-<случайное>: $run_line"
+grep -q -- '--cpus [0-9]' <<<"$run_line" || fail 'runner-gate: нет --cpus'
+grep -q -- '--memory [0-9]\+m' <<<"$run_line" || fail 'runner-gate: нет --memory'
+for cache in cargo target npm playwright; do
+    grep -qF -- "-v $rr/cache/$cache:" <<<"$run_line" || fail "runner-gate: кэш $cache не под корнем раннера"
+done
+assert_git_mounted "$run_line" "$rwt" 'runner-gate'
+grep -qF -- "-v $rwt/.gate-out:/out" <<<"$run_line" || fail 'runner-gate: результат не в ./.gate-out'
+grep -qF -- "-v $rwt/scripts/gate/in-container.sh:/build/in-container.sh:ro" <<<"$run_line" || fail 'runner-gate: in-container.sh не из этой рабочей копии'
+grep -qE -- "canterlot-gate:[0-9a-f]{12} bash /build/in-container.sh --src /src --out /out --sha ${rsha:0:12}" <<<"$run_line" \
+    || fail "runner-gate: не та команда в контейнере: $run_line"
+if grep -q '^build ' "$FAKE_DOCKER_CALLS"; then fail 'runner-gate: образ пересобран, хотя он есть'; fi
+grep -qx 'runner	runner-a' "$rwt/.gate-out/state.tsv" || fail 'runner-gate: имя раннера не дописано в state.tsv'
+[[ -s "$rwt/.gate-out/result.txt" ]] || fail 'runner-gate: нет result.txt в .gate-out'
+
+# Образа нет: он собирается из Dockerfile ЭТОЙ рабочей копии с версиями из неё.
+rm -rf "$rwt/.gate-out"
+: >"$FAKE_DOCKER_CALLS"
+run 0 "${rg_env[@]}" FAKE_DOCKER_IMAGE_RC=1 bash "$rwt/scripts/gate/runner-gate.sh" "$rsha"
+build_line=$(grep '^build ' "$FAKE_DOCKER_CALLS") || fail 'runner-gate: образ не собран'
+grep -qF -- "-f $rwt/docker/gate/Dockerfile" <<<"$build_line" || fail "runner-gate: Dockerfile не из этой рабочей копии: $build_line"
+grep -qF -- 'RUST_VERSION=1.99.1' <<<"$build_line" || fail 'runner-gate: нет версии Rust из rust-toolchain.toml'
+grep -qF -- 'PLAYWRIGHT_VERSION=1.64.1' <<<"$build_line" || fail 'runner-gate: нет версии Playwright из package-lock.json'
+
+# Код гейта проходит наружу; без state.tsv и result.txt — провал даже при коде 0.
+rm -rf "$rwt/.gate-out"
+run 3 "${rg_env[@]}" FAKE_DOCKER_RUN_RC=3 bash "$rwt/scripts/gate/runner-gate.sh" "$rsha"
+rm -rf "$rwt/.gate-out"
+unset FAKE_DOCKER_WRITE
+run 1 "${rg_env[@]}" bash "$rwt/scripts/gate/runner-gate.sh" "$rsha"
+grep -q 'result.txt' "$out" || { cat "$out" >&2; fail 'runner-gate: не сказал, что результата нет'; }
+
+# TERM: контейнер убирается по имени.
+rm -rf "$rwt/.gate-out"
+: >"$FAKE_DOCKER_CALLS"
+dpid="$tmp/docker.pid"
+rm -f "$dpid"
+"${rg_env[@]}" FAKE_DOCKER_PIDFILE="$dpid" bash "$rwt/scripts/gate/runner-gate.sh" "$rsha" >"$out" 2>&1 &
+rg_pid=$!
+for _ in $(seq 1 100); do
+    [[ -s "$dpid" ]] && break
+    sleep 0.1
+done
+[[ -s "$dpid" ]] || { cat "$out" >&2; fail 'runner-gate: контейнер не стартовал'; }
+kill -TERM "$rg_pid"
+rg_rc=0
+wait "$rg_pid" || rg_rc=$?
+[[ "$rg_rc" == 143 ]] || { cat "$out" >&2; fail "runner-gate: код после TERM $rg_rc"; }
+name=$(sed -n 's/^run .*--name \(canterlot-gate-[0-9a-f]*-[0-9a-f]*\) .*/\1/p' "$FAKE_DOCKER_CALLS")
+[[ -n "$name" ]] || { cat "$FAKE_DOCKER_CALLS" >&2; fail 'runner-gate: не нашли имя контейнера в docker run'; }
+grep -qx "kill $name" "$FAKE_DOCKER_CALLS" || { cat "$FAKE_DOCKER_CALLS" >&2; fail 'runner-gate: TERM не убил контейнер по имени'; }
+
+# gate-remote.sh --local: рабочая копия — связанный worktree этого репозитория, и
+# контейнеру нужен общий каталог git по его собственному пути (иначе in-container.sh не
+# сверит HEAD). Docker подменён, рабочая копия убирается скриптом сама.
+: >"$FAKE_DOCKER_CALLS"
+export FAKE_DOCKER_WRITE=1
+run 0 env CANTERLOT_DOCKER="$fake_docker" CANTERLOT_GATE_OUT="$tmp/gr-out" CANTERLOT_GATE_CACHE="$tmp/gr-cache" \
+    bash "$gate" HEAD --local
+unset FAKE_DOCKER_WRITE
+run_line=$(grep '^run ' "$FAKE_DOCKER_CALLS") || { cat "$FAKE_DOCKER_CALLS" >&2; fail 'gate-remote --local: нет docker run'; }
+common=$(cd "$(git rev-parse --git-common-dir)" && pwd -P)
+src_host=$(sed -n 's/.* -v \([^ ]*\):\/src .*/\1/p' <<<"$run_line")
+[[ "$src_host" == "$common"/canterlot-gate/src-* ]] || fail "gate-remote --local: рабочая копия не там: $src_host"
+grep -qF -- " -v $common:$common:ro " <<<"$run_line" || fail "gate-remote --local: общий каталог git не смонтирован только на чтение: $run_line"
+
 if command -v shellcheck >/dev/null 2>&1; then
     shellcheck scripts/gate.sh scripts/gate-coverage.sh scripts/gate/test-pw-selection.sh scripts/gate-remote.sh \
-        scripts/gate/in-container.sh scripts/gate/test.sh scripts/gate/fake-npx scripts/gate/fake-check-web.sh \
+        scripts/gate/in-container.sh scripts/gate/runner-gate.sh scripts/gate/test.sh scripts/gate/fake-npx \
+        scripts/gate/fake-check-web.sh scripts/gate/fake-worker scripts/gate/fake-docker \
         || fail "shellcheck"
 fi
 

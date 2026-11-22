@@ -1048,6 +1048,20 @@ pub(crate) fn requires_jobs(record: &RecordBody) -> bool {
     )
 }
 
+/// Факты носителя (`runners_v1`): хаб без согласованной возможности отказал бы всей партии.
+pub(crate) fn requires_runners(record: &RecordBody) -> bool {
+    matches!(
+        &record.body,
+        Some(
+            record_body::Body::SourceStaged(_)
+                | record_body::Body::SourceStageFailed(_)
+                | record_body::Body::OutputsCollected(_)
+                | record_body::Body::OutputsCollectFailed(_)
+                | record_body::Body::SourceCleaned(_)
+        )
+    )
+}
+
 pub(crate) fn requires_pilot(record: &RecordBody) -> bool {
     matches!(
         &record.body,

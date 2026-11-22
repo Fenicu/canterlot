@@ -97,6 +97,7 @@ src=""
 script_path="$in_container"
 cache_root=""
 worktree_parent=""
+git_common=""
 cleaned=0
 
 # Уборка повторяется и на выходе по ошибке: рабочая копия и ref не должны
@@ -163,8 +164,11 @@ if [[ "$mode" == remote ]]; then
         "$src" "$remote_repo" "$remote_repo" "$remote_base" "$remote_repo" "$commit")
     remote "$cmd" || die "не удалось создать рабочую копию $src на $host"
     head=$(remote "git -C $(q "$src") rev-parse --short=12 HEAD 2>/dev/null || true")
+    git_common=$(remote "git --git-dir $(q "$remote_repo") rev-parse --absolute-git-dir") \
+        || die "не удалось узнать общий каталог git на $host"
 else
-    common=$(cd "$repo" && cd "$(git rev-parse --git-common-dir)" && pwd)
+    common=$(cd "$repo" && cd "$(git rev-parse --git-common-dir)" && pwd -P)
+    git_common=$common
     worktree_parent="$common/canterlot-gate"
     src="$worktree_parent/src-$sha12"
     mkdir -p "$worktree_parent"
@@ -238,6 +242,11 @@ run_args=(
     # и другое; каталог чистит in-container.sh в начале прогона.
     -v "$cache_root/tmp:/tmp"
     -v "$src:/src"
+    # Рабочая копия — связанный worktree: её .git — файл, указывающий в общий каталог git
+    # (bare-репозиторий на сборочной машине или .git этой копии). Контейнеру он нужен по
+    # собственному пути, иначе `git -C /src rev-parse` в in-container.sh падает до первого
+    # шага. git в гейте только читает, поэтому только чтение.
+    -v "$git_common:$git_common:ro"
     -v "$cache_root/cargo:/cache/cargo"
     -v "$cache_root/target:/src/target"
     -v "$cache_root/npm:/cache/npm"
@@ -278,6 +287,19 @@ else
 fi
 [[ -f "$staging/result.txt" ]] || log "ВНИМАНИЕ: гейт не оставил result.txt (см. вывод выше)"
 mv "$staging" "$out" || die "не удалось переименовать $staging в $out"
+if [[ ! -f "$out/result.txt" ]]; then
+    # Убитый контейнер не успел скопировать логи шагов из рабочей копии в /out.
+    # Забираем их оттуда до уборки, иначе worktree remove уничтожит следы прогона.
+    steps="$src/.superpowers/gate/${sha12:0:8}"
+    log "result.txt нет: переношу логи шагов из $steps"
+    if [[ "$mode" == remote ]]; then
+        ssh -o BatchMode=yes -o ConnectTimeout=15 "$host" \
+            "if [ -d $(q "$steps") ]; then tar -C $(q "$steps") -cf - .; fi" \
+            | tar -C "$out" -xf - || log "ВНИМАНИЕ: не удалось перенести логи шагов с $host"
+    elif [[ -d "$steps" ]]; then
+        cp -a "$steps/." "$out/" || log "ВНИМАНИЕ: не удалось скопировать логи шагов из $steps"
+    fi
+fi
 log "результат: $out"
 phase_done "перенос результата"
 
@@ -291,7 +313,13 @@ if [[ -f "$out/result.txt" ]]; then
 else
     printf 'result.txt нет: гейт не дошёл до проверок\n'
 fi
-printf '\nлоги: %s/{build,check,web}.log\n' "$out"
+log_list=""
+for name in gate npm-ci check deploy web; do
+    if [[ -f "$out/$name.log" ]]; then
+        log_list+="${log_list:+ }$out/$name.log"
+    fi
+done
+printf '\nлоги: %s\n' "${log_list:-нет}"
 printf 'гейт %s закончил за %ds, код %s\n' "$sha12" $((SECONDS - started)) "$gate_code"
 [[ "$gate_code" != 0 ]] || [[ -f "$out/result.txt" ]] || gate_code=1
 exit "$gate_code"

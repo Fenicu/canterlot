@@ -241,6 +241,7 @@ describe("sessions/new", () => {
     const codes: [string, Field][] = [
       ["machine_not_found", "machine"],
       ["capability_missing", "machine"],
+      ["machine_is_runner", "machine"],
       ["harness_unknown", "harness"],
       ["model_unknown", "model"],
       ["effort_not_allowed", "effort"],
@@ -266,6 +267,31 @@ describe("sessions/new", () => {
       await expect(model.submit()).rejects.toBeInstanceOf(ApiError);
       expect(model.errors[field]?.length).toBeGreaterThan(0);
     }
+  });
+
+  it("new_session_says_in_words_that_a_runner_takes_no_sessions", async () => {
+    const journal = ops();
+    journal.run = vi.fn(async () => {
+      throw new ApiError(
+        422,
+        "machine_is_runner" as never,
+        "раннер",
+        "browser",
+        "never",
+        "00000000-0000-4000-8000-0000000000e1",
+      );
+    });
+    const model = new NewSessionModel(store([machine()]), config, journal);
+    ready(model);
+    await expect(model.submit()).rejects.toBeInstanceOf(ApiError);
+    expect(model.errors.machine).toBe("Раннер выполняет только задачи: сессии на нём не запускаются");
+  });
+
+  it("new_session_gate_refuses_a_runner_before_the_hub_does", () => {
+    const model = new NewSessionModel(store([machine({ role: "runner" })]), config, ops());
+    ready(model);
+    expect(model.errors.machine).toBe("Раннер выполняет только задачи: сессии на нём не запускаются");
+    expect(model.canSubmit.ok).toBe(false);
   });
 
   it("new_session_refusal_lasts_only_until_the_form_changes", async () => {

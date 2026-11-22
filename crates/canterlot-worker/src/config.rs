@@ -13,6 +13,10 @@ use uuid::Uuid;
 #[serde(deny_unknown_fields)]
 pub struct WorkerConfig {
     pub hub_url: String,
+    /// `unix:<абсолютный путь>`: соединения с хабом идут через этот сокет, а TLS проверяет
+    /// имя сервера из `hub_url`. Так работает воркер раннера за SSH-пробросом носителя.
+    #[serde(default)]
+    pub hub_dial: Option<String>,
     pub ca_cert: PathBuf,
     pub token_file: PathBuf,
     pub machine_id: Uuid,
@@ -42,6 +46,59 @@ pub struct WorkerConfig {
     pub memory: MemoryConfig,
     #[serde(default)]
     pub jobs: JobsConfig,
+    /// Раннеры, которых этот воркер как носитель ведёт по SSH (`runners_v1`).
+    #[serde(default)]
+    pub runners: RunnersConfig,
+}
+
+/// `[runners]`: носитель ведёт перечисленные раннеры, если хаб тоже назвал их своими.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RunnersConfig {
+    /// Ключ для облачных раннеров; нужен только этапу C, статические ходят по `~/.ssh/config`.
+    pub ssh_key: Option<PathBuf>,
+    /// Только для тестов, в файле не читается (`skip`: ключ отвергается как неизвестный):
+    /// файл `ssh_config`, который носитель передаёт в каждый `ssh` ключом `-F`.
+    #[serde(skip)]
+    pub ssh_config: Option<PathBuf>,
+    /// Только для тестов, в файле не читается: бинарник, который носитель кладёт на раннер
+    /// вместо собственного.
+    #[serde(skip)]
+    pub worker_binary: Option<PathBuf>,
+    pub ssh: Vec<RunnerSsh>,
+}
+
+/// Одна запись `[[runners.ssh]]`.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RunnerSsh {
+    /// Имя машины-раннера в хабе; корень каталога приходит от хаба.
+    pub machine: String,
+    /// Псевдоним из `~/.ssh/config`.
+    pub ssh: String,
+    #[serde(default = "RunnerSsh::default_max_running")]
+    pub max_running: u32,
+    #[serde(default = "RunnerSsh::default_lease_slots")]
+    pub lease_slots: u32,
+}
+
+impl RunnerSsh {
+    fn default_max_running() -> u32 {
+        4
+    }
+
+    fn default_lease_slots() -> u32 {
+        2
+    }
+
+    /// Псевдоним уходит `ssh` отдельным словом: без пробелов и ведущего `-`.
+    pub fn valid_alias(alias: &str) -> bool {
+        !alias.is_empty()
+            && !alias.starts_with('-')
+            && alias
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'@'))
+    }
 }
 
 /// Задачи на месте (`jobs_inplace_v1`): команды оболочки по просьбе хаба.
@@ -56,6 +113,10 @@ pub struct JobsConfig {
     /// Сколько каталог состояния законченной попытки живёт до уборки.
     #[serde(with = "humantime_serde")]
     pub state_retention: Duration,
+    /// Сколько каталог собранных результатов задачи (`job-outputs/<job_id>`) и запись
+    /// итога задачи владельца живут до уборки.
+    #[serde(with = "humantime_serde")]
+    pub output_retention: Duration,
 }
 
 impl JobsConfig {
@@ -77,11 +138,31 @@ impl Default for JobsConfig {
             max_running: 4,
             log_max_mib: 16,
             state_retention: Duration::from_secs(3 * 24 * 3600),
+            output_retention: Duration::from_secs(7 * 24 * 3600),
         }
     }
 }
 
 impl WorkerConfig {
+    /// Путь сокета из `hub_dial`; `None`, если ключа нет.
+    pub fn hub_dial_path(&self) -> Result<Option<PathBuf>, ConfigErrorCategory> {
+        let Some(dial) = &self.hub_dial else {
+            return Ok(None);
+        };
+        let path = dial
+            .strip_prefix("unix:")
+            .map(Path::new)
+            .filter(|path| {
+                path.is_absolute()
+                    && path.file_name().is_some()
+                    && !path
+                        .components()
+                        .any(|part| matches!(part, std::path::Component::ParentDir))
+            })
+            .ok_or(ConfigErrorCategory::HubDial)?;
+        Ok(Some(path.to_path_buf()))
+    }
+
     /// Учётная запись лимитов провайдера этой машины (`claude`, `codex`, `opencode`);
     /// провайдер без таблицы и неизвестное имя дают `owner`.
     pub fn account_for_provider(&self, provider: &str) -> &str {
@@ -239,6 +320,8 @@ pub enum ConfigErrorCategory {
     Io(io::ErrorKind),
     Parse,
     HubUrl,
+    /// `hub_dial` не вида `unix:<абсолютный путь без ..>`.
+    HubDial,
     TokenPermissions,
     UnsupportedTokenPermissions,
     PaidModelPollUnsupported,
@@ -267,6 +350,18 @@ impl ConfigError {
     }
 }
 
+impl ConfigError {
+    /// Слово для `<data_dir>/fatal`: правка файла конфига исправит всё, кроме чтения диска и прав токена.
+    pub fn fatal_reason(&self) -> Option<&'static str> {
+        match self.category {
+            ConfigErrorCategory::Io(_)
+            | ConfigErrorCategory::TokenPermissions
+            | ConfigErrorCategory::UnsupportedTokenPermissions => None,
+            _ => Some(crate::fatal::CONFIG),
+        }
+    }
+}
+
 impl fmt::Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.category {
@@ -287,6 +382,11 @@ impl fmt::Display for ConfigError {
             ConfigErrorCategory::HubUrl => write!(
                 f,
                 "{}: hub URL must use HTTPS with a host and no credentials",
+                self.path.display()
+            ),
+            ConfigErrorCategory::HubDial => write!(
+                f,
+                "{}: hub_dial must be unix:<absolute socket path>",
                 self.path.display()
             ),
             ConfigErrorCategory::TokenPermissions => write!(
@@ -382,6 +482,17 @@ pub fn load(path: &Path) -> Result<WorkerConfig, ConfigError> {
         || url.password().is_some()
     {
         return Err(invalid_url());
+    }
+    config
+        .hub_dial_path()
+        .map_err(|category| ConfigError::new(path, category))?;
+    if config
+        .runners
+        .ssh
+        .iter()
+        .any(|runner| !RunnerSsh::valid_alias(&runner.ssh))
+    {
+        return Err(ConfigError::new(path, ConfigErrorCategory::Parse));
     }
     // Платный запрос к модели ради лимитов в пилоте не делается: явный отказ вместо тихого пути.
     if config
@@ -762,10 +873,18 @@ data_dir = "/tmp/store"
             defaults.jobs.state_retention,
             Duration::from_secs(3 * 24 * 3600)
         );
+        assert_eq!(
+            defaults.jobs.output_retention,
+            Duration::from_secs(7 * 24 * 3600)
+        );
         let tuned: WorkerConfig = toml::from_str(&format!(
-            "{base}\n[jobs]\nmax_running = 2\nlog_max_mib = 1\nstate_retention = \"12h\"\n"
+            "{base}\n[jobs]\nmax_running = 2\nlog_max_mib = 1\nstate_retention = \"12h\"\noutput_retention = \"2d\"\n"
         ))
         .unwrap();
+        assert_eq!(
+            tuned.jobs.output_retention,
+            Duration::from_secs(2 * 24 * 3600)
+        );
         assert_eq!(tuned.jobs.max_running(), 2);
         assert_eq!(tuned.jobs.log_max_bytes(), 1024 * 1024);
         assert_eq!(tuned.jobs.state_retention, Duration::from_secs(12 * 3600));
@@ -779,6 +898,33 @@ data_dir = "/tmp/store"
         assert!(
             toml::from_str::<WorkerConfig>(&format!("{base}\n[jobs]\nlost_grace = 1\n")).is_err()
         );
+    }
+
+    #[test]
+    fn runners_test_hooks_cannot_be_set_from_a_production_config() {
+        let base = r#"
+hub_url = "https://localhost:1"
+ca_cert = "/tmp/ca.pem"
+token_file = "/tmp/token"
+machine_id = "00000000-0000-0000-0000-000000000001"
+installation_id = "00000000-0000-0000-0000-000000000002"
+restore_generation = "00000000-0000-0000-0000-000000000003"
+data_dir = "/tmp/store"
+"#;
+        let plain =
+            format!("{base}\n[[runners.ssh]]\nmachine = \"runner-a\"\nssh = \"build-host\"\n");
+        let config: WorkerConfig = toml::from_str(&plain).unwrap();
+        let settings = crate::carrier::CarrierSettings::from_config(&config);
+        assert!(settings.ssh_config.is_none() && settings.worker_binary.is_none());
+        // Подмена ssh и бинарника раннера задаётся только полями структуры из тестов
+        // (`#[serde(skip)]`), но не файлом: ключ в рабочем конфиге отвергается.
+        for key in ["ssh_config", "worker_binary"] {
+            let text = format!("{base}\n[runners]\n{key} = \"/tmp/x\"\n");
+            assert!(
+                toml::from_str::<WorkerConfig>(&text).is_err(),
+                "[runners].{key} must be rejected"
+            );
+        }
     }
 
     #[test]

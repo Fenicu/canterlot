@@ -1686,6 +1686,7 @@ pub async fn preview(
         super::access::caller_in_tx(&mut tx, caller.owner_id, caller.conversation_id).await?;
     // Предпросмотр видит то же, что запуск: каталоги, исключения и запас целевой машины.
     let target = super::spawn::resolve_machine(&mut tx, caller, args.machine.as_deref()).await?;
+    super::spawn::refuse_runner(&mut tx, target).await?;
     let machine = target.unwrap_or(caller.machine_id);
     let catalogs = load_catalogs(&mut tx, machine).await?;
     let list = whitelist::view(&mut tx, caller.owner_id).await?;

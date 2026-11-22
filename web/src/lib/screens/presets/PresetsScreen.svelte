@@ -12,6 +12,7 @@
   import SecondaryHeader from '../SecondaryHeader.svelte';
   import PresetEditor from './PresetEditor.svelte';
   import { formatOrigin, isAgentMarked, sortPresets, type PresetSummaryLike } from './presetsModel.js';
+  import { sessionMachines } from '../machines/runner.js';
   import '../secondary.css';
   import type { Component } from 'svelte';
 
@@ -46,7 +47,7 @@
         : sortPresets([...runtime.list.presets]),
   );
   const ownerMachines = $derived(
-    runtime ? [...runtime.machines.items.values()].map((m) => ({ id: m.id, name: m.name })) : [],
+    runtime ? sessionMachines([...runtime.machines.items.values()]).map((m) => ({ id: m.id, name: m.name })) : [],
   );
 
   // Карточки складываются, когда пришли или ушли на месте (новая инструкция, удаление); смена вида

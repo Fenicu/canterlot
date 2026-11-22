@@ -85,6 +85,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ".canterlot.worker.v1.StartInPlaceJob",
             ".canterlot.worker.v1.JobLogChunk",
             ".canterlot.worker.v1.JobFinished",
+            ".canterlot.worker.v1.RunnerToken",
+            ".canterlot.worker.v1.OwnerJobSubmit",
+            ".canterlot.worker.v1.OwnerJobFinished",
         ])
         .build_server(true)
         .build_client(true)

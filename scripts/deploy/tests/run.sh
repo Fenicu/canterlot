@@ -96,7 +96,11 @@ declare -A PIDS=()
 run_suite() {
     local t="$1" s rc=0
     s="$(date +%s)"
-    bash "scripts/deploy/tests/test-${t}.sh" >"${RUN_LOG_DIR}/${t}.log" 2>&1 || rc=$?
+    # Фоновый набор в неинтерактивном bash наследует SIGINT/SIGQUIT=SIG_IGN:
+    # ловушки INT в тестах cutover и в проверяемом скрипте тогда не срабатывают.
+    # env возвращает оба сигнала к умолчанию до запуска набора.
+    env --default-signal=INT,QUIT bash "scripts/deploy/tests/test-${t}.sh" \
+        >"${RUN_LOG_DIR}/${t}.log" 2>&1 || rc=$?
     printf '%s %s\n' "${rc}" "$(( $(date +%s) - s ))" >"${RUN_LOG_DIR}/${t}.rc"
 }
 running() {

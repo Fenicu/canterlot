@@ -109,7 +109,24 @@ message ControlUp {
     // Только при согласованной возможности jobs_inplace_v1: живой хвост вывода задачи.
     // Непостоянное сообщение: теряется при разрыве, полный журнал уходит вложением.
     JobLogChunk job_log_chunk = 17;
+    // Только при согласованной возможности runners_v1 и только от несущей машины
+    // (`is_carrier`, роль `worker`): запрос токена раннера-потомка. Непостоянное сообщение.
+    RunnerTokenRequest runner_token_request = 18;
+    // Только при согласованной возможности runners_v1 и только от несущей машины:
+    // наблюдение достижимости раннера-потомка. Непостоянное сообщение.
+    RunnerObservation runner_observation = 19;
+    // Только при согласованной возможности runners_v1 и только от несущей машины: задача
+    // владельца из терминала (`canterlot-worker job run`), без разговора. Непостоянное
+    // сообщение: ответ приходит `OwnerJobAccepted` или `OwnerJobRefused` с тем же `request_id`.
+    OwnerJobSubmit owner_job_submit = 20;
   }
+}
+
+// Задача владельца: `spec_json` — те же поля, что у `job_run` (`shell`, `labels`, `source`,
+// `outputs`, ...), разбирает хаб. `request_id` связывает ответ с запросом.
+message OwnerJobSubmit {
+  string request_id = 1;
+  string spec_json = 2;
 }
 
 message ReconcileReport {
@@ -143,7 +160,76 @@ message ControlDown {
     SecretDeliver secret_deliver = 11;
     // Только при согласованной возможности schedule_precheck_v1.
     SchedulePrecheck schedule_precheck = 12;
+    // Только при согласованной возможности runners_v1: раннеры-потомки несущей машины.
+    // Шлётся при подключении и при каждом изменении списка. Непостоянное сообщение.
+    RunnersAssigned runners_assigned = 13;
+    // Только при согласованной возможности runners_v1: токен раннера, выданный ротацией.
+    // Это не `Command`: в outbox, журнал, лог, `Debug` и API он не попадает.
+    RunnerToken runner_token = 14;
+    // Только при согласованной возможности runners_v1: отказ в запросе токена.
+    RunnerTokenRefused runner_token_refused = 15;
+    // Только при согласованной возможности runners_v1: ответ на `OwnerJobSubmit`.
+    OwnerJobAccepted owner_job_accepted = 16;
+    OwnerJobRefused owner_job_refused = 17;
   }
+}
+
+message OwnerJobAccepted {
+  string request_id = 1;
+  string job_id = 2;
+}
+
+message OwnerJobRefused {
+  string request_id = 1;
+  // Код отказа инструмента: `invalid_arguments`, `source_required`, `domain_mismatch`,
+  // `no_runner_can_satisfy`, `not_carrier`, ...
+  string code = 2;
+  string message = 3;
+}
+
+// Раннеры, чьим родителем является эта машина: строки `machines` с ролью `runner`, не
+// отозванные. Список полный, не приращение: новое сообщение заменяет прежнее.
+message RunnersAssigned {
+  repeated AssignedRunner runners = 1;
+}
+
+message AssignedRunner {
+  string machine_id = 1;
+  string name = 2;
+  // Корневой каталог раннера: абсолютный нормализованный путь на самом раннере.
+  string root_dir = 3;
+}
+
+// Несущая просит новый токен раннера. Хаб проверяет, что вызывающая — несущая и родитель
+// раннера, и ротирует токен. `reset_local_state` — как у `machine rotate-token`: новый каталог
+// состояния или смена поколения восстановления.
+message RunnerTokenRequest {
+  string machine_id = 1;
+  bool reset_local_state = 2;
+}
+
+// Токен живёт только в этом сообщении: несущая передаёт его раннеру по SSH, не записывая.
+message RunnerToken {
+  string machine_id = 1;
+  string installation_id = 2;
+  string restore_generation = 3;
+  string token = 4;
+}
+
+message RunnerTokenRefused {
+  string machine_id = 1;
+  // `not_carrier`, `not_parent`, `revoked` или `unknown_machine`.
+  string code = 2;
+}
+
+// Последнее наблюдение несущей за достижимостью раннера. Хаб кладёт его в
+// `runner_observations`; по нему считается `offline` (см. `machines::runner_availability`).
+message RunnerObservation {
+  string machine_id = 1;
+  bool reachable = 2;
+  uint32 consecutive_failures = 3;
+  // Миллисекунды Unix по часам несущей; хаб приводит их к своему времени.
+  uint64 observed_at = 4;
 }
 
 message DataUp {
@@ -214,7 +300,59 @@ message Command {
     // `execution_id` пуст, поколение 0, как у `RevokeSecret`.
     StartInPlaceJob start_in_place_job = 23;
     CancelInPlaceJob cancel_in_place_job = 24;
+    // Только при согласованной возможности runners_v1 и только несущей машине. Команды уровня
+    // машины, долговечные, идемпотентные по `job_id`; ответ — факт журнала.
+    StageSource stage_source = 25;
+    CollectOutputs collect_outputs = 26;
+    CleanupSource cleanup_source = 27;
+    OwnerJobFinished owner_job_finished = 28;
   }
+}
+
+// Подготовить исходники: `git push --no-verify` sha `rev` из `repo` в голый репозиторий
+// `repo_key` на цели как `refs/canterlot/<job_id>`, затем отдельное рабочее дерево в
+// `workdir`. `target_root_dir` пуст, когда цель — сама несущая. Ответ: `SourceStaged` или
+// `SourceStageFailed`.
+message StageSource {
+  string job_id = 1;
+  string repo = 2;
+  string rev = 3;
+  string domain = 4;
+  string target_machine_id = 5;
+  string target_root_dir = 6;
+  string workdir = 7;
+  string repo_key = 8;
+}
+
+// Забрать результаты `paths` (относительные пути в `workdir`) на несущую; суммарный предел
+// `cap_bytes`. Ответ: `OutputsCollected` или `OutputsCollectFailed`.
+message CollectOutputs {
+  string job_id = 1;
+  string target_machine_id = 2;
+  string target_root_dir = 3;
+  string workdir = 4;
+  repeated string paths = 5;
+  uint64 cap_bytes = 6;
+}
+
+// Убрать рабочее дерево и ссылку задачи. Ответ: `SourceCleaned`.
+message CleanupSource {
+  string job_id = 1;
+  string target_machine_id = 2;
+  string target_root_dir = 3;
+  string workdir = 4;
+  string repo_key = 5;
+  string domain = 6;
+}
+
+// Итог задачи владельца для терминала, который её подал.
+message OwnerJobFinished {
+  string job_id = 1;
+  string state = 2;
+  optional int32 exit_code = 3;
+  bytes tail = 4;
+  string outputs_dir = 5;
+  string outputs_note = 6;
 }
 
 // Аренда ресурсов машины, внутри которой идёт команда задачи.
@@ -451,7 +589,44 @@ message RecordBody {
     JobWaitingLease job_waiting_lease = 50;
     JobStarted job_started = 51;
     JobFinished job_finished = 52;
+    // Только при согласованной возможности runners_v1, только от несущей задачи.
+    SourceStaged source_staged = 53;
+    SourceStageFailed source_stage_failed = 54;
+    OutputsCollected outputs_collected = 55;
+    OutputsCollectFailed outputs_collect_failed = 56;
+    SourceCleaned source_cleaned = 57;
   }
+}
+
+message SourceStaged {
+  string job_id = 1;
+}
+
+message SourceStageFailed {
+  string job_id = 1;
+  string reason = 2;
+}
+
+message OutputFile {
+  string path = 1;
+  uint64 bytes = 2;
+}
+
+// `local_dir` — каталог на несущей, куда собраны результаты; `truncated` — предел превышен.
+message OutputsCollected {
+  string job_id = 1;
+  string local_dir = 2;
+  repeated OutputFile files = 3;
+  bool truncated = 4;
+}
+
+message OutputsCollectFailed {
+  string job_id = 1;
+  string reason = 2;
+}
+
+message SourceCleaned {
+  string job_id = 1;
 }
 
 // Команда запуска сохранена на воркере и попытка занята (каталог состояния создан).

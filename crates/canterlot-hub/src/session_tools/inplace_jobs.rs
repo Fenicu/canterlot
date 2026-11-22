@@ -16,6 +16,7 @@ use crate::{
     inplace_jobs::{
         self as jobs, Job, State,
         logs::{self, DEFAULT_READ_BYTES},
+        place, spec,
     },
     session::{Availability, Registry},
 };
@@ -33,9 +34,18 @@ pub const MAX_LIST: i64 = 50;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct SourceArgs {
+    repo: String,
+    rev: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RunArgs {
+    /// Имя или идентификатор машины либо `"auto"`: размещение выбирает хаб (нужен `source`).
     machine: Option<String>,
-    workdir: String,
+    /// Нужен без `source`; с `source` каталог выбирает хаб.
+    workdir: Option<String>,
     shell: String,
     title: Option<String>,
     timeout_minutes: Option<i64>,
@@ -43,6 +53,19 @@ struct RunArgs {
     lease: Option<String>,
     env: Option<BTreeMap<String, String>>,
     idempotency_key: Option<String>,
+    labels: Option<Vec<String>>,
+    expected_minutes: Option<i64>,
+    placement: Option<Vec<String>>,
+    source: Option<SourceArgs>,
+    outputs: Option<Vec<String>>,
+}
+
+const AUTO: &str = "auto";
+
+impl RunArgs {
+    fn is_auto(&self) -> bool {
+        self.machine.as_deref() == Some(AUTO)
+    }
 }
 
 #[derive(Deserialize)]
@@ -81,9 +104,41 @@ fn valid_env_name(name: &str) -> bool {
 }
 
 fn check_run(args: &RunArgs) -> Result<(), ToolError> {
-    if !args.workdir.starts_with('/') || args.workdir.contains('\0') {
-        return Err(invalid("job_run: workdir must be an absolute path"));
+    // Хаб размещает только задачи с исходниками: без них нечего готовить на выбранной машине.
+    if args.is_auto() && args.source.is_none() {
+        return Err(ToolError::new(ToolErrorCode::SourceRequired));
     }
+    match (&args.workdir, &args.source) {
+        (Some(workdir), _) if !workdir.starts_with('/') || workdir.contains('\0') => {
+            return Err(invalid("job_run: workdir must be an absolute path"));
+        }
+        (None, None) => {
+            return Err(invalid("job_run: workdir is required without source"));
+        }
+        _ => {}
+    }
+    if let Some(source) = &args.source {
+        spec::check_source(&source.repo, &source.rev)
+            .map_err(|message| invalid(&format!("job_run: {message}")))?;
+    }
+    if args.source.is_none()
+        && (args.outputs.is_some()
+            || args.labels.is_some()
+            || args.placement.is_some()
+            || args.expected_minutes.is_some())
+    {
+        return Err(invalid(
+            "job_run: outputs, labels, placement and expected_minutes need source",
+        ));
+    }
+    spec::check_outputs(args.outputs.as_deref().unwrap_or_default())
+        .map_err(|message| invalid(&format!("job_run: {message}")))?;
+    spec::check_labels(args.labels.as_deref().unwrap_or_default())
+        .map_err(|message| invalid(&format!("job_run: {message}")))?;
+    spec::check_placement(args.placement.as_deref())
+        .map_err(|message| invalid(&format!("job_run: {message}")))?;
+    spec::check_expected_minutes(args.expected_minutes)
+        .map_err(|message| invalid(&format!("job_run: {message}")))?;
     if args.shell.trim().is_empty() || args.shell.len() > MAX_SHELL_BYTES {
         return Err(invalid(
             "job_run: shell must be a non-empty command up to 64 KiB",
@@ -257,8 +312,13 @@ async fn replay_by_keys(
 
 fn machine_offline(registry: &Registry, job: &Job) -> bool {
     !job.is_terminal()
-        && job.state() != State::Queued
-        && registry.availability(job.machine_id) != Availability::Available
+        && !matches!(
+            job.state(),
+            State::WaitingRunner | State::Staging | State::Queued
+        )
+        && job
+            .machine_id
+            .is_some_and(|machine| registry.availability(machine) != Availability::Available)
 }
 
 /// Видимость задачи: свой разговор и тот же домен, что при заявке. Чужая и несуществующая
@@ -281,7 +341,7 @@ async fn answer(
     conn: &mut PgConnection,
     job: &Job,
 ) -> Result<Value, ToolError> {
-    let machine = jobs::machine_name(conn, job.machine_id).await?;
+    let machine = jobs::job_machine_name(conn, job).await?;
     let mut value = if job.is_terminal() {
         jobs::result_json(job, &machine)
     } else {
@@ -323,6 +383,10 @@ pub async fn run(
         tx.commit().await?;
         return Ok(value);
     }
+    if args.source.is_some() {
+        return run_source(context, caller, args, tx, wait).await;
+    }
+    let workdir = args.workdir.clone().unwrap_or_default();
     let target = spawn::resolve_machine(&mut tx, caller, args.machine.as_deref()).await?;
     let machine_id = target.unwrap_or(caller.machine_id);
     let remote = machine_id != facts.machine_id;
@@ -339,7 +403,7 @@ pub async fn run(
     let facts = jobs::caller_facts(&mut tx, caller.conversation_id)
         .await?
         .ok_or_else(|| ToolError::new(ToolErrorCode::SessionNotFound))?;
-    jobs::admit(&mut tx, &facts, machine_id, &args.workdir)
+    jobs::admit(&mut tx, &facts, machine_id, &workdir)
         .await
         .map_err(refusal)?;
     let capabilities: Option<Vec<String>> =
@@ -369,7 +433,7 @@ pub async fn run(
     let id = Uuid::now_v7();
     // Страж встаёт до фиксации: вызов, оборванный внутри `commit`, не оставит задачу без
     // доставки. Если заявка не зафиксирована, строки нет и страж ничего не делает.
-    let mut guard = DeliveryGuard {
+    let guard = DeliveryGuard {
         pool: context.pool.clone(),
         job_id: id,
         armed: wait > 0,
@@ -396,7 +460,7 @@ pub async fn run(
     .bind(facts.memory_domain.as_deref().unwrap_or_default())
     .bind(machine_id)
     .bind(remote)
-    .bind(&args.workdir)
+    .bind(&workdir)
     .bind(&args.shell)
     .bind(json!(env))
     .bind(args.title.as_deref())
@@ -433,6 +497,18 @@ pub async fn run(
     jobs::emit_changed(&mut tx, &created, caller.call_id).await?;
     jobs::dispatch_machine_in_tx(&mut tx, machine_id, caller.call_id).await?;
     tx.commit().await?;
+    await_result(context, caller, id, wait, guard).await
+}
+
+/// После фиксации заявки: срок ожидания, ответ и ожидание итога. Страж снимается, когда вызов
+/// сам решил, как доставить итог.
+async fn await_result(
+    context: &ToolContext,
+    caller: &Caller,
+    id: Uuid,
+    wait: i64,
+    mut guard: DeliveryGuard,
+) -> Result<Value, ToolError> {
     let mut conn = context.pool.acquire().await?;
     if wait > 0 {
         // Срок ожидания считается от фиксации заявки, а не от вставки строки: долгая заявка
@@ -447,28 +523,29 @@ pub async fn run(
         .execute(&mut *conn)
         .await?;
     }
-    let machine = jobs::machine_name(&mut conn, machine_id).await?;
-    drop(conn);
     if wait == 0 {
-        let job = jobs::load(&mut *context.pool.acquire().await?, id)
-            .await?
-            .expect("job row exists");
+        let job = jobs::load(&mut conn, id).await?.expect("job row exists");
+        let machine = jobs::job_machine_name(&mut conn, &job).await?;
         return Ok(jobs::state_json(&job, &machine));
     }
+    drop(conn);
     let deadline = Instant::now() + Duration::from_secs(u64::try_from(wait).unwrap_or(20));
     loop {
         let at_deadline = Instant::now() >= deadline;
         match settle(&context.pool, caller, id, at_deadline).await? {
             Settled::Inline(job) => {
                 guard.armed = false;
+                let machine = named(context, &job).await?;
                 return Ok(jobs::result_json(&job, &machine));
             }
             Settled::Message(job) => {
                 guard.armed = false;
+                let machine = named(context, &job).await?;
                 return Ok(jobs::state_json(&job, &machine));
             }
             Settled::Pending(job) if at_deadline => {
                 guard.armed = false;
+                let machine = named(context, &job).await?;
                 return Ok(jobs::state_json(&job, &machine));
             }
             Settled::Pending(_) => {}
@@ -485,6 +562,206 @@ pub async fn run(
             }
         }
     }
+}
+
+async fn named(context: &ToolContext, job: &Job) -> Result<String, ToolError> {
+    let mut conn = context.pool.acquire().await?;
+    Ok(jobs::job_machine_name(&mut conn, job).await?)
+}
+
+fn carrier_refusal() -> ToolError {
+    ToolError::with_message(
+        ToolErrorCode::CapabilityMissing,
+        "job_run with source needs the calling machine to be a carrier with runners_v1",
+    )
+}
+
+/// Заявка с исходниками (`source`): названная машина или размещение хабом (`machine: "auto"`).
+/// Несущая задачи — машина заказчика. Домен исходников обязан совпасть с доменом заказчика
+/// (`domain_mismatch`), режим проверяется как у любой задачи. Транзакция уже открыта, замок
+/// отправителя взят.
+async fn run_source(
+    context: &ToolContext,
+    caller: &Caller,
+    args: RunArgs,
+    mut tx: sqlx::Transaction<'static, sqlx::Postgres>,
+    wait: i64,
+) -> Result<Value, ToolError> {
+    let source = args
+        .source
+        .as_ref()
+        .map(|source| spec::check_source(&source.repo, &source.rev))
+        .transpose()
+        .map_err(|message| invalid(&format!("job_run: {message}")))?
+        .expect("source checked by the caller");
+    let outputs =
+        spec::check_outputs(args.outputs.as_deref().unwrap_or_default()).map_err(invalid)?;
+    let labels = spec::check_labels(args.labels.as_deref().unwrap_or_default()).map_err(invalid)?;
+    let placement = spec::check_placement(args.placement.as_deref()).map_err(invalid)?;
+    let expected_minutes = spec::check_expected_minutes(args.expected_minutes).map_err(invalid)?;
+    let carrier = caller.machine_id;
+    // Названная машина (не `auto`) и её отношение к несущей.
+    let named_target = if args.is_auto() {
+        None
+    } else {
+        Some(
+            spawn::resolve_machine(&mut tx, caller, args.machine.as_deref())
+                .await?
+                .unwrap_or(carrier),
+        )
+    };
+    if let Some(target) = named_target {
+        if target != carrier {
+            crate::conversations::lock_owner(&mut tx, caller.owner_id).await?;
+        }
+        jobs::lock_machine(&mut tx, target).await?;
+    } else {
+        // `auto`: расстановка возьмёт замки несущей и раннеров, а диспетчер машины берёт замок
+        // машины раньше допуска заказчика. Тот же порядок и здесь: машины, потом допуск.
+        place::lock_candidates(&mut tx, carrier).await?;
+    }
+    jobs::lock_admission(&mut tx, &[caller.conversation_id]).await?;
+    let facts = jobs::caller_facts(&mut tx, caller.conversation_id)
+        .await?
+        .ok_or_else(|| ToolError::new(ToolErrorCode::SessionNotFound))?;
+    jobs::admit_mode(&facts).map_err(refusal)?;
+    // Домен: путь исходников на машине заказчика должен принадлежать домену заказчика.
+    let Some(domain) = facts.memory_domain.as_deref() else {
+        return Err(ToolError::new(ToolErrorCode::DomainMismatch));
+    };
+    let path = crate::memory::path_domain(&mut tx, carrier, &source.repo)
+        .await
+        .map_err(|_| ToolError::new(ToolErrorCode::DomainMismatch))?;
+    if path.map(crate::memory::MemoryDomain::as_str) != Some(domain) {
+        return Err(ToolError::new(ToolErrorCode::DomainMismatch));
+    }
+    let carrier_ok: bool = sqlx::query_scalar(
+        "select coalesce((select role = 'worker' and is_carrier from machines
+                           where id = $1 and owner_id = $2), false)",
+    )
+    .bind(carrier)
+    .bind(caller.owner_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if !carrier_ok {
+        return Err(carrier_refusal());
+    }
+    match named_target {
+        Some(target) if target != carrier => {
+            let child: bool = sqlx::query_scalar(
+                "select coalesce((select role = 'runner' and parent_machine_id = $1
+                                    from machines where id = $2), false)",
+            )
+            .bind(carrier)
+            .bind(target)
+            .fetch_one(&mut *tx)
+            .await?;
+            if !child {
+                return Err(ToolError::new(ToolErrorCode::NoRunnerCanSatisfy));
+            }
+            if !crate::machines::accepts_remote_work_for_share(&mut tx, target).await? {
+                return Err(ToolError::new(ToolErrorCode::RemoteWorkDisabled));
+            }
+        }
+        Some(_) => {
+            // Сама несущая: её рабочий каталог остаётся в домене исходников или отказ.
+            if !place::carrier_workdir_in_domain(&mut tx, carrier, &source.repo, domain).await? {
+                return Err(ToolError::new(ToolErrorCode::DomainMismatch));
+            }
+        }
+        None => {
+            if !place::satisfiable(&mut tx, carrier, &labels, &placement, &source.repo, domain)
+                .await?
+            {
+                return Err(ToolError::new(ToolErrorCode::NoRunnerCanSatisfy));
+            }
+        }
+    }
+    if let Some(target) = named_target {
+        // Имя не отменяет требования к машине: метки задачи должны быть и у названной.
+        if !place::machine_has_labels(&mut tx, target, &labels).await? {
+            return Err(ToolError::new(ToolErrorCode::NoRunnerCanSatisfy));
+        }
+        let capable: Option<Vec<String>> =
+            sqlx::query_scalar("select capabilities from machines where id=$1 and owner_id=$2")
+                .bind(target)
+                .bind(caller.owner_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if !capable.is_some_and(|list| {
+            list.iter()
+                .any(|capability| capability == crate::session::CAPABILITY_JOBS_INPLACE_V1)
+        }) {
+            return Err(ToolError::new(ToolErrorCode::CapabilityMissing));
+        }
+    }
+    let id = Uuid::now_v7();
+    let guard = DeliveryGuard {
+        pool: context.pool.clone(),
+        job_id: id,
+        armed: wait > 0,
+    };
+    let env: Vec<Value> = args
+        .env
+        .iter()
+        .flatten()
+        .map(|(name, value)| json!({"name": name, "value": value}))
+        .collect();
+    let new = spec::NewRunnerJob {
+        id,
+        owner_id: caller.owner_id,
+        conversation_id: Some(caller.conversation_id),
+        domain: domain.to_owned(),
+        carrier_id: carrier,
+        shell: args.shell.clone(),
+        env: json!(env),
+        title: args.title.clone(),
+        timeout_seconds: i32::try_from(
+            args.timeout_minutes.unwrap_or(DEFAULT_TIMEOUT_MINUTES) * 60,
+        )
+        .unwrap_or(1800),
+        lease: args.lease.clone().unwrap_or_else(|| "none".to_owned()),
+        labels,
+        expected_minutes,
+        placement,
+        source: spec::Source {
+            repo: source.repo.clone(),
+            rev: source.rev.clone(),
+        },
+        source_domain: domain.to_owned(),
+        outputs,
+        owner_job: false,
+        call_id: Some(caller.call_id),
+        idempotency_key: args.idempotency_key.clone(),
+        delivery: (wait == 0).then_some("message"),
+        waiter_instance: (wait > 0).then(jobs::hub_instance),
+        waiter_seconds: (wait + jobs::WAITER_SLACK_SECONDS) as f64,
+    };
+    if !spec::insert_runner_job(&mut tx, &new).await? {
+        let job = replay_by_keys(
+            &mut tx,
+            caller,
+            Some(domain),
+            args.idempotency_key.as_deref(),
+        )
+        .await?
+        .ok_or_else(|| ToolError::new(ToolErrorCode::Internal))?;
+        let value = answer(context, &mut tx, &job).await?;
+        tx.commit().await?;
+        return Ok(value);
+    }
+    let created = jobs::load(&mut tx, id).await?.expect("job row inserted");
+    jobs::emit_changed(&mut tx, &created, caller.call_id).await?;
+    match named_target {
+        Some(target) => {
+            place::bind_explicit_in_tx(&mut tx, &created, carrier, target, caller.call_id).await?;
+        }
+        None => {
+            place::place_waiting_in_tx(&mut tx, &context.registry, carrier, caller.call_id).await?;
+        }
+    }
+    tx.commit().await?;
+    await_result(context, caller, id, wait, guard).await
 }
 
 pub async fn status(
@@ -599,11 +876,11 @@ pub async fn list(
     .await?;
     let mut out = Vec::with_capacity(rows.len());
     for job in &rows {
-        let name = jobs::machine_name(&mut conn, job.machine_id).await?;
+        let name = jobs::job_machine_name(&mut conn, job).await?;
         out.push(json!({
             "job_id": job.id,
             "state": job.state,
-            "machine": name,
+            "machine": job.machine_id.map(|_| name),
             "title": job.title,
             "shell": job.shell.chars().take(120).collect::<String>(),
             "exit_code": job.exit_code,
@@ -613,4 +890,89 @@ pub async fn list(
         }));
     }
     Ok(json!({"jobs": out, "count": out.len()}))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NoArgs {}
+
+/// `runners_list`: раннеры несущей вызывающей машины и она сама (`local`). Только чтение.
+/// Окна облака и остаток бюджета (этап C) добавляются в каждую запись и в корень ответа рядом
+/// с `runners`; пока их нет, поля не выдаются.
+pub async fn runners(
+    context: &ToolContext,
+    caller: &Caller,
+    arguments: Value,
+) -> Result<Value, ToolError> {
+    let NoArgs {} = parse_arguments("runners_list", arguments)?;
+    let mut conn = context.pool.acquire().await?;
+    let now = chrono::Utc::now();
+    let carrier = caller.machine_id;
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        id: Uuid,
+        name: String,
+        role: String,
+        rank: i32,
+        labels: Vec<String>,
+        accepts_remote_work: bool,
+        is_carrier: bool,
+    }
+    let rows: Vec<Row> = sqlx::query_as(
+        "select m.id, m.name, m.role, m.rank, m.labels, m.accepts_remote_work, m.is_carrier
+         from machines m
+         where m.owner_id = $2 and (m.id = $1
+            or (m.parent_machine_id = $1 and m.role = 'runner'
+                and exists(select 1 from machine_credentials c
+                            where c.machine_id = m.id and c.revoked_at is null)))
+         order by (m.id = $1) desc, m.rank desc, m.name, m.id",
+    )
+    .bind(carrier)
+    .bind(caller.owner_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let local = row.id == carrier;
+        let (availability, observed_at) = if local {
+            let online = context.registry.availability(row.id) != Availability::Unavailable;
+            (if online { "online" } else { "offline" }.to_owned(), None)
+        } else {
+            let (availability, observed_at) =
+                crate::machines::runner_availability_of(&mut conn, &context.registry, row.id, now)
+                    .await?;
+            (availability.as_str().to_owned(), observed_at)
+        };
+        let used = jobs::occupied_in_tx(&mut conn, row.id).await?;
+        let max = jobs::max_running_in_tx(&mut conn, row.id).await?;
+        let (queued, running): (i64, i64) = sqlx::query_as(
+            "select count(*) filter (where state = 'queued'),
+                    count(*) filter (where state in ('dispatched','waiting_lease','running'))
+             from jobs where machine_id = $1",
+        )
+        .bind(row.id)
+        .fetch_one(&mut *conn)
+        .await?;
+        out.push(json!({
+            "name": row.name,
+            "role": if local { "local" } else { row.role.as_str() },
+            "availability": availability,
+            "observation_age_seconds": observed_at.map(|at| (now - at).num_seconds().max(0)),
+            "rank": if local { 0 } else { row.rank },
+            "labels": row.labels,
+            "paused": !local && !row.accepts_remote_work,
+            "carrier": local && row.is_carrier,
+            "slots_used": used,
+            "slots_max": max,
+            "queued": queued,
+            "running": running,
+        }));
+    }
+    let waiting: i64 = sqlx::query_scalar(
+        "select count(*) from jobs where carrier_id = $1 and state = 'waiting_runner'",
+    )
+    .bind(carrier)
+    .fetch_one(&mut *conn)
+    .await?;
+    Ok(json!({"runners": out, "count": out.len(), "waiting_runner_jobs": waiting}))
 }

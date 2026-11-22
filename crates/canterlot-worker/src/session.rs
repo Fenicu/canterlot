@@ -72,6 +72,36 @@ pub const CAPABILITY_MEMORY_SCOPE_V1: &str = "memory_scope_v1";
 /// Команды принимаются и факты пишутся только на соединении, где возможность согласована.
 pub const CAPABILITY_JOBS_INPLACE_V1: &str = "jobs_inplace_v1";
 
+/// Воркер-носитель ведёт раннеры по SSH: слушает `RunnersAssigned`, просит токены и шлёт
+/// наблюдения. Объявляется только с `[[runners.ssh]]`; хаб принимает сообщения лишь от несущей.
+pub const CAPABILITY_RUNNERS_V1: &str = "runners_v1";
+
+/// Носитель раннеров и его связь с потоком управления; создаётся только с `[[runners.ssh]]`.
+struct RunnersLink {
+    bridge: std::sync::Arc<crate::carrier::bridge::ControlBridge>,
+    assigned: Option<watch::Receiver<Vec<crate::carrier::AssignedRunner>>>,
+}
+
+/// Останавливает задачу носителя при любом выходе из `run`.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Снимает согласованность команд носителя при любом выходе из сеанса.
+struct CarrierGate(Option<std::sync::Arc<crate::carrier::commands::CarrierCommands>>);
+
+impl Drop for CarrierGate {
+    fn drop(&mut self) {
+        if let Some(carrier) = &self.0 {
+            carrier.set_enabled(false);
+        }
+    }
+}
+
 /// Снимает согласованность задач на месте при любом выходе из сеанса.
 struct JobsGate(Option<std::sync::Arc<crate::jobs::JobManager>>);
 
@@ -120,6 +150,7 @@ pub const OPTIONAL_CAPABILITIES: &[&str] = &[
     CAPABILITY_MEMORY_SCOPE_V1,
     CAPABILITY_JOBS_INPLACE_V1,
     CAPABILITY_REMOTE_SPAWN_V1,
+    CAPABILITY_RUNNERS_V1,
 ];
 
 /// Возможности, которые воркер объявляет хабу. Без таблицы `[claude_code]` Claude Code
@@ -128,6 +159,7 @@ pub fn advertised_capabilities(config: &WorkerConfig) -> Vec<String> {
     OPTIONAL_CAPABILITIES
         .iter()
         .filter(|cap| **cap != "claude_histories_v1" || config.claude_code.is_some())
+        .filter(|cap| **cap != CAPABILITY_RUNNERS_V1 || !config.runners.ssh.is_empty())
         .map(|cap| (*cap).to_owned())
         .collect()
 }
@@ -413,9 +445,67 @@ impl WorkerError {
         }
     }
 
+    /// Слово для `<data_dir>/fatal`, если воркер сам не оправится и носителю нужно действие.
+    pub fn fatal_reason(&self) -> Option<&'static str> {
+        match self {
+            Self::Hub {
+                code: tonic::Code::Unauthenticated,
+                ..
+            }
+            | Self::Rejected {
+                retryable: false, ..
+            } => Some(crate::fatal::UNAUTHENTICATED),
+            Self::RestoreGenerationChanged | Self::GenerationMismatch | Self::StateDivergence => {
+                Some(crate::fatal::RESTORE_GENERATION)
+            }
+            Self::InvalidConfig => Some(crate::fatal::CONFIG),
+            Self::Config(error) => error.fatal_reason(),
+            _ => None,
+        }
+    }
+
     /// Код выхода процесса, если ошибка требует штатного перезапуска службы.
     pub fn exit_code(&self) -> Option<u8> {
         matches!(self, Self::StorageRestart).then_some(STORAGE_RESTART_EXIT_CODE)
+    }
+}
+
+/// Соединитель `hub_dial`: любой адрес из `hub_url` ведёт в один Unix-сокет. Имя из `hub_url`
+/// остаётся только для TLS, поэтому сертификат хаба проверяется как при прямом соединении.
+fn unix_connector(
+    path: &std::path::Path,
+) -> impl tower::Service<
+    tonic::codegen::http::Uri,
+    Response = hyper_util::rt::TokioIo<tokio::net::UnixStream>,
+    Error = std::io::Error,
+    Future = impl Send,
+> + Send
++ 'static {
+    let path = path.to_path_buf();
+    tower::service_fn(move |_: tonic::codegen::http::Uri| {
+        let path = path.clone();
+        async move {
+            Ok::<_, std::io::Error>(hyper_util::rt::TokioIo::new(
+                tokio::net::UnixStream::connect(path).await?,
+            ))
+        }
+    })
+}
+
+async fn dial_hub(
+    endpoint: &Endpoint,
+    dial: Option<&std::path::Path>,
+) -> Result<tonic::transport::Channel, tonic::transport::Error> {
+    match dial {
+        Some(path) => endpoint.connect_with_connector(unix_connector(path)).await,
+        None => endpoint.connect().await,
+    }
+}
+
+fn dial_hub_lazy(endpoint: &Endpoint, dial: Option<&std::path::Path>) -> tonic::transport::Channel {
+    match dial {
+        Some(path) => endpoint.connect_with_connector_lazy(unix_connector(path)),
+        None => endpoint.connect_lazy(),
     }
 }
 
@@ -587,6 +677,9 @@ pub struct Worker {
     /// Уборка файлов секретов: живёт столько же, сколько менеджер исполнений.
     sweeper: Option<tokio::task::JoinHandle<()>>,
     lease: Option<crate::lease::server::LeaseServer>,
+    /// Сокет `canterlot-worker job run`; только у несущей.
+    owner_jobs: Option<crate::owner_jobs::server::OwnerJobServer>,
+    runners: Option<RunnersLink>,
 }
 
 type MetricsFuture = Pin<
@@ -717,7 +810,15 @@ impl Worker {
             PathBuf::from(crate::machine::worktree_root(&config.data_dir)),
             config.machine.hotspot_roots(),
         );
+        let runners = (!config.runners.ssh.is_empty()).then(|| {
+            let (bridge, assigned) = crate::carrier::bridge::ControlBridge::new();
+            RunnersLink {
+                bridge,
+                assigned: Some(assigned),
+            }
+        });
         Self {
+            runners,
             watchdog: std::sync::Arc::new(watchdog),
             systemd_watchdog: crate::watchdog::SystemdWatchdog::from_env(),
             limits_cache,
@@ -733,6 +834,7 @@ impl Worker {
             catalog_tasks: Vec::new(),
             sweeper: None,
             lease: None,
+            owner_jobs: None,
             #[cfg(feature = "fault-injection")]
             probe: Default::default(),
             #[cfg(test)]
@@ -880,8 +982,19 @@ impl Worker {
             runtime_dir.as_deref(),
             &self.config.data_dir,
         ));
+        // Итоги задач владельца (`canterlot-worker job run`) и сокет для команды: только на
+        // несущей, то есть с `[[runners.ssh]]`.
+        let owner_store = self.runners.as_ref().and_then(|_| {
+            crate::owner_jobs::Store::open(&self.config.data_dir)
+                .inspect_err(|error| {
+                    tracing::warn!(kind = ?error.kind(), "owner job store is unavailable; job run is off");
+                })
+                .ok()
+        });
         // Тестовая сборка не поднимает сокет аренды в общем каталоге сокетов.
-        if crate::exec::maintenance::ensure_test_runtime_allowed(runtime_dir.as_deref()).is_ok() {
+        let runtime_allowed =
+            crate::exec::maintenance::ensure_test_runtime_allowed(runtime_dir.as_deref()).is_ok();
+        if runtime_allowed {
             self.lease = Some(crate::lease::server::LeaseServer::start(
                 crate::lease::server::ServerConfig::new(
                     runtime_dir.as_deref(),
@@ -891,6 +1004,8 @@ impl Worker {
                 shutdown.clone(),
             ));
         }
+        let jobs_socket =
+            crate::owner_jobs::socket_path(runtime_dir.as_deref(), &self.config.data_dir);
         let manager = ExecutionManager::new_with_attachments_and_runtime_dir(
             self.config.execution.clone(),
             self.store.client(),
@@ -898,6 +1013,26 @@ impl Worker {
             self.config.attachments.clone(),
             runtime_dir,
         );
+        // Сокет задач владельца отказывает процессам внутри исполнений: сессия агента не
+        // должна сама запускать работу на других машинах, да ещё выбирая домен.
+        if runtime_allowed && let (Some(link), Some(store)) = (&self.runners, &owner_store) {
+            let shared = manager.shared();
+            self.owner_jobs = Some(crate::owner_jobs::server::OwnerJobServer::start(
+                jobs_socket,
+                store.clone(),
+                link.bridge.clone(),
+                std::sync::Arc::new(move || {
+                    shared
+                        .probes
+                        .lock()
+                        .expect("probes lock")
+                        .values()
+                        .flat_map(|probe| probe.members.iter().copied())
+                        .collect()
+                }),
+                shutdown.clone(),
+            ));
+        }
         manager.set_cache_ages(crate::exec::CacheAges {
             idle: Duration::from_secs(self.config.machine.idle_cache_hours.saturating_mul(3600)),
             released: Duration::from_secs(
@@ -954,6 +1089,24 @@ impl Worker {
         ));
         if let Some(jobs) = manager.jobs() {
             jobs.recover().await;
+        }
+        // Команды несущей: исходники, результаты, уборка и итоги задач владельца. Возможность
+        // включается на каждом соединении отдельно.
+        if let (Some(link), Some(store)) = (&self.runners, &owner_store) {
+            let timings = crate::carrier::Timings::default();
+            let stager =
+                crate::carrier::stage::Stager::new(crate::carrier::stage::StagerSettings {
+                    ssh_config: self.config.runners.ssh_config.clone(),
+                    outputs_root: self.config.data_dir.join("job-outputs"),
+                    targets: crate::carrier::targets(
+                        self.config.runners.ssh.clone(),
+                        link.bridge.assigned_rx(),
+                    ),
+                    ssh_limit: timings.ssh_limit,
+                    push_limit: timings.upload_limit,
+                    allowed_roots: self.config.execution.allowed_workdir_roots.clone(),
+                });
+            manager.set_carrier(stager, store.clone());
         }
         // Восстановление до приёма любых доставок: брошенные временные файлы,
         // значения без манифеста и неполные публикации убираются раньше, чем
@@ -1024,6 +1177,31 @@ impl Worker {
         let mut cap = self.config.timers.backoff_min;
         let mut read_retries = 0;
         let mut refusal = None;
+        // Носитель живёт дольше одного соединения и останавливается вместе с воркером.
+        let _carrier = self.runners.as_mut().and_then(|link| {
+            let assigned = link.assigned.take()?;
+            Some(AbortOnDrop(tokio::spawn(crate::carrier::run(
+                crate::carrier::CarrierSettings::from_config(&self.config),
+                link.bridge.clone(),
+                assigned,
+                shutdown.clone(),
+            ))))
+        });
+        // Собранные результаты задач живут `[jobs].output_retention`; чистит и носитель без раннеров:
+        // задача на самой несущей тоже собирает результаты.
+        let _outputs_sweep = AbortOnDrop(tokio::spawn(crate::carrier::stage::sweep_loop(
+            self.config.data_dir.join("job-outputs"),
+            self.config.jobs.output_retention,
+            shutdown.clone(),
+        )));
+        // Итоги задач владельца живут тот же срок.
+        let _owner_sweep = owner_store.as_ref().map(|store| {
+            AbortOnDrop(tokio::spawn(crate::owner_jobs::sweep_loop(
+                store.clone(),
+                self.config.jobs.output_retention,
+                shutdown.clone(),
+            )))
+        });
         // Воркер готов принимать работу; с этого места главный цикл шлёт пинги.
         self.systemd_watchdog.ready();
         loop {
@@ -1254,13 +1432,15 @@ impl Worker {
             .keep_alive_timeout(self.config.timers.http2_keepalive_timeout)
             .keep_alive_while_idle(true)
             .buffer_size(8);
+        let dial = self
+            .config
+            .hub_dial_path()
+            .map_err(|_| WorkerError::InvalidConfig)?;
         let (control, data) = timeout(self.config.timers.handshake, async {
-            let control = endpoint
-                .connect()
+            let control = dial_hub(&endpoint, dial.as_deref())
                 .await
                 .map_err(|_| WorkerError::Transport)?;
-            let data = endpoint
-                .connect()
+            let data = dial_hub(&endpoint, dial.as_deref())
                 .await
                 .map_err(|_| WorkerError::Transport)?;
             Ok::<_, WorkerError>((control, data))
@@ -1306,9 +1486,12 @@ impl Worker {
             .max_decoding_message_size(MAX_MESSAGE_BYTES)
             .max_encoding_message_size(MAX_MESSAGE_BYTES);
         // Третье соединение подключается при первой загрузке картинки.
-        let media = WorkerDataClient::with_interceptor(endpoint.connect_lazy(), auth.clone())
-            .max_decoding_message_size(MAX_MESSAGE_BYTES)
-            .max_encoding_message_size(MAX_MESSAGE_BYTES);
+        let media = WorkerDataClient::with_interceptor(
+            dial_hub_lazy(&endpoint, dial.as_deref()),
+            auth.clone(),
+        )
+        .max_decoding_message_size(MAX_MESSAGE_BYTES)
+        .max_encoding_message_size(MAX_MESSAGE_BYTES);
         let mut data = WorkerDataClient::with_interceptor(data, auth)
             .max_decoding_message_size(MAX_MESSAGE_BYTES)
             .max_encoding_message_size(MAX_MESSAGE_BYTES);
@@ -1463,6 +1646,27 @@ impl Worker {
             .map(|jobs| jobs.subscribe_chunks());
         let mut jobs_outbound: Option<ControlUp> = None;
         let mut chunk_outbound: VecDeque<ControlUp> = VecDeque::new();
+        // Мост носителя принимает запросы только на соединении, где `runners_v1` согласована:
+        // иначе хаб закрыл бы поток отказом `capability_missing`.
+        let runners_bridge = self
+            .runners
+            .as_ref()
+            .filter(|_| {
+                accepted
+                    .capabilities
+                    .iter()
+                    .any(|cap| cap == CAPABILITY_RUNNERS_V1)
+            })
+            .map(|link| link.bridge.clone());
+        let _runners_link = runners_bridge.as_ref().map(|bridge| bridge.connect());
+        // Команды и факты носителя живут ровно на согласованном соединении.
+        let runners_enabled = runners_bridge.is_some();
+        let carrier = self.manager.as_ref().unwrap().carrier();
+        if let Some(carrier) = &carrier {
+            carrier.set_enabled(runners_enabled);
+        }
+        let _carrier_gate = CarrierGate(carrier);
+        let mut runners_outbound: Option<ControlUp> = None;
         let watch_enabled = pilot && accepted.capabilities.iter().any(|cap| cap == "watchdog_v1");
         if watch_enabled {
             self.watchdog.ensure_started();
@@ -1872,10 +2076,13 @@ impl Worker {
                         let head = store.cj_records_from(from, 0)?.into_iter().next();
                         let head = head.as_ref().and_then(|r| r.body.as_ref());
                         let withheld = (!pilot && head.is_some_and(crate::store::requires_pilot))
-                            || (!jobs_enabled && head.is_some_and(crate::store::requires_jobs));
+                            || (!jobs_enabled && head.is_some_and(crate::store::requires_jobs))
+                            || (!runners_enabled
+                                && head.is_some_and(crate::store::requires_runners));
                         Ok(StoreReply::Batch(
                             from,
-                            batch_for_session(store, from, pilot, jobs_enabled)?.map(Box::new),
+                            batch_for_session(store, from, pilot, jobs_enabled, runners_enabled)?
+                                .map(Box::new),
                             withheld,
                         ))
                     })));
@@ -1904,6 +2111,7 @@ impl Worker {
                 || lease_outbound.is_some()
                 || jobs_outbound.is_some()
                 || !chunk_outbound.is_empty()
+                || runners_outbound.is_some()
                 || watch_outbound.is_some()
                 || report_outbound.is_some()
                 || range_outbound.is_some()
@@ -1953,6 +2161,21 @@ impl Worker {
                             }
                         }
                         Some(control_down::Msg::Command(command)) => { commands.push_back(command); }
+                        Some(control_down::Msg::RunnersAssigned(list)) if runners_bridge.is_some() => {
+                            runners_bridge.as_ref().unwrap().on_assigned(list);
+                        }
+                        Some(control_down::Msg::RunnerToken(token)) if runners_bridge.is_some() => {
+                            runners_bridge.as_ref().unwrap().on_token(token);
+                        }
+                        Some(control_down::Msg::OwnerJobAccepted(accepted)) if runners_bridge.is_some() => {
+                            runners_bridge.as_ref().unwrap().on_owner_accepted(accepted);
+                        }
+                        Some(control_down::Msg::OwnerJobRefused(refused)) if runners_bridge.is_some() => {
+                            runners_bridge.as_ref().unwrap().on_owner_refused(refused);
+                        }
+                        Some(control_down::Msg::RunnerTokenRefused(refused)) if runners_bridge.is_some() => {
+                            runners_bridge.as_ref().unwrap().on_refused(refused);
+                        }
                         Some(control_down::Msg::SecretDeliver(request)) if secret_enabled => {
                             // Запись файла коротка и не держит пульс: значение живёт
                             // только в этом сообщении и в файле.
@@ -2073,6 +2296,7 @@ impl Worker {
                     else if let Some(message)=lease_outbound.take() {message}
                     else if let Some(message)=jobs_outbound.take() {message}
                     else if let Some(message)=chunk_outbound.pop_front() {message}
+                    else if let Some(message)=runners_outbound.take() {message}
                     else if let Some(message)=watch_outbound.take() {message}
                     else if let Some(message) = report_outbound.take() {
                         manager.on_hub_session(data::session_committed(&hello, &accepted,self.manager.as_ref().unwrap())?);
@@ -2166,6 +2390,9 @@ impl Worker {
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => chunk_updates = None,
                     }
+                }
+                up = async { runners_bridge.as_ref().unwrap().next_up().await }, if runners_bridge.is_some() && runners_outbound.is_none() => {
+                    runners_outbound = up;
                 }
                 _ = sleep_until(watch_at), if watch_enabled && watch_operation.is_none() => {
                     watch_at = Instant::now() + crate::machine::watch::SHORT_PASS;
@@ -2354,6 +2581,7 @@ fn batch_for_session(
     from: u64,
     pilot: bool,
     jobs: bool,
+    runners: bool,
 ) -> Result<Option<(ControlUp, u64)>, WorkerError> {
     let mut batch = JournalRecords {
         journal_id: store.cj_journal_id()?.to_string(),
@@ -2374,6 +2602,11 @@ fn batch_for_session(
                     .body
                     .as_ref()
                     .is_some_and(crate::store::requires_jobs))
+            || (!runners
+                && record
+                    .body
+                    .as_ref()
+                    .is_some_and(crate::store::requires_runners))
         {
             break;
         }

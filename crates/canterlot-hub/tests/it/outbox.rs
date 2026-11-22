@@ -640,6 +640,10 @@ fn to_proto_maps_all_command_variants_and_rejects_unknown_kinds() {
             command::Kind::StartInPlaceJob(_) | command::Kind::CancelInPlaceJob(_) => {
                 panic!("unexpected in-place job command")
             }
+            command::Kind::StageSource(_)
+            | command::Kind::CollectOutputs(_)
+            | command::Kind::CleanupSource(_)
+            | command::Kind::OwnerJobFinished(_) => panic!("unexpected carrier command"),
         }
     }
     assert!(matches!(

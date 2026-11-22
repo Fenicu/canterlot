@@ -78,6 +78,122 @@ async fn rotate_cli_preserves_identity_revokes_old_and_resets_only_explicitly(
     Ok(())
 }
 
+/// `machine set` меняет ранг, метки и корень: метки у любой машины (в том числе у самой
+/// несущей, чтобы пометить VM ядром), корень только у раннера и только допустимый.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn machine_set_cli_changes_rank_labels_and_root(pool: PgPool) -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let installation = installation::init(&pool, &dir.path().join("installation.toml")).await?;
+    let carrier = machines::add(&pool, installation.owner_id, "carrier").await?;
+    let runner = machines::add_runner(
+        &pool,
+        installation.owner_id,
+        "runner-a",
+        &machines::RunnerSpec {
+            parent: carrier.machine_id,
+            root_dir: "/srv/runner".into(),
+            rank: 1,
+            labels: vec!["old".into()],
+        },
+    )
+    .await?;
+    let config = dir.path().join("hub.toml");
+    fs::write(
+        dir.path().join("database-url"),
+        pool.connect_options().to_url_lossy().as_str().as_bytes(),
+    )?;
+    fs::write(
+        &config,
+        "database_url_file = 'database-url'\ngrpc_listen = '127.0.0.1:7443'\ntls_cert = 'cert.pem'\ntls_key = 'key.pem'\nmanifest = 'installation.toml'\n",
+    )?;
+    let set = |machine: Uuid, args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_canterlot-hub"))
+            .args(["machine", "set", "--config"])
+            .arg(&config)
+            .args(["--machine-id", &machine.to_string()])
+            .args(args)
+            .output()
+    };
+    let row = |machine: Uuid| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_as::<_, (i32, Vec<String>, Option<String>)>(
+                "select rank, labels, root_dir from machines where id = $1",
+            )
+            .bind(machine)
+            .fetch_one(&pool)
+            .await
+        }
+    };
+    // Раннер: всё сразу.
+    let output = set(
+        runner.machine_id,
+        &[
+            "--rank",
+            "-3",
+            "--labels",
+            "kernel-6.12,build-host",
+            "--root-dir",
+            "/srv/new-root",
+        ],
+    )?;
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        row(runner.machine_id).await?,
+        (
+            -3,
+            vec!["kernel-6.12".to_owned(), "build-host".to_owned()],
+            Some("/srv/new-root".to_owned())
+        )
+    );
+    // Только то, что названо: ранг остаётся.
+    let output = set(runner.machine_id, &["--labels", "gpu"])?;
+    assert!(output.status.success());
+    assert_eq!(
+        row(runner.machine_id).await?,
+        (-3, vec!["gpu".to_owned()], Some("/srv/new-root".to_owned()))
+    );
+    // Пустое значение снимает метки.
+    assert!(set(runner.machine_id, &["--labels", ""])?.status.success());
+    assert!(row(runner.machine_id).await?.1.is_empty());
+    // Сама несущая: метки можно, корня у неё нет.
+    let output = set(carrier.machine_id, &["--labels", "kernel-6.12"])?;
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        row(carrier.machine_id).await?.1,
+        vec!["kernel-6.12".to_owned()]
+    );
+    for (machine, args, reason) in [
+        (
+            carrier.machine_id,
+            vec!["--root-dir", "/srv/x"],
+            "root_dir_needs_runner",
+        ),
+        (
+            runner.machine_id,
+            vec!["--root-dir", "/srv/../x"],
+            "root_dir_invalid",
+        ),
+        (runner.machine_id, vec!["--labels", "a b"], "labels_invalid"),
+        (runner.machine_id, vec![], "nothing_to_set"),
+        (Uuid::now_v7(), vec!["--rank", "1"], "machine_not_found"),
+    ] {
+        let output = set(machine, &args)?;
+        assert!(!output.status.success(), "{args:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(reason),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    // Отказы ничего не изменили.
+    assert_eq!(
+        row(runner.machine_id).await?,
+        (-3, vec![], Some("/srv/new-root".to_owned()))
+    );
+    Ok(())
+}
+
 #[sqlx::test(migrations = false)]
 async fn serve_applies_pending_migrations_before_listening_and_logs_version(
     pool: PgPool,

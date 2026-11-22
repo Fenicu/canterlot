@@ -444,6 +444,10 @@ pub enum CommandKind {
     RevokeSecret,
     StartInPlaceJob,
     CancelInPlaceJob,
+    StageSource,
+    CollectOutputs,
+    CleanupSource,
+    OwnerJobFinished,
 }
 
 impl CommandKind {
@@ -462,6 +466,10 @@ impl CommandKind {
             Self::RevokeSecret => "revoke_secret",
             Self::StartInPlaceJob => "start_inplace_job",
             Self::CancelInPlaceJob => "cancel_inplace_job",
+            Self::StageSource => "stage_source",
+            Self::CollectOutputs => "collect_outputs",
+            Self::CleanupSource => "cleanup_source",
+            Self::OwnerJobFinished => "owner_job_finished",
         }
     }
 }
@@ -484,6 +492,10 @@ impl FromStr for CommandKind {
             "revoke_secret" => Ok(Self::RevokeSecret),
             "start_inplace_job" => Ok(Self::StartInPlaceJob),
             "cancel_inplace_job" => Ok(Self::CancelInPlaceJob),
+            "stage_source" => Ok(Self::StageSource),
+            "collect_outputs" => Ok(Self::CollectOutputs),
+            "cleanup_source" => Ok(Self::CleanupSource),
+            "owner_job_finished" => Ok(Self::OwnerJobFinished),
             _ => Err(ModelError::UnknownValue {
                 kind: "command kind",
                 value: value.into(),

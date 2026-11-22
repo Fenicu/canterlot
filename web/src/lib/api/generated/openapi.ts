@@ -3104,7 +3104,7 @@ export interface components {
             scope: components["schemas"]["ErrorScope"];
         };
         /** @enum {string} */
-        ErrorCode: "unauthenticated" | "invalid_credentials" | "too_many_attempts" | "session_revoked" | "session_expired" | "reauth_required" | "wrong_password" | "qr_expired" | "qr_approvals_exhausted" | "passkey_rejected" | "no_passkeys" | "passkeys_unavailable" | "origin_rejected" | "invalid_request" | "invalid_offset" | "not_found" | "method_not_allowed" | "idempotency_conflict" | "draft_revision_conflict" | "decision_conflict" | "request_not_open" | "decision_invalid" | "resource_limit" | "not_implemented" | "too_many_requests" | "db_unavailable" | "internal" | "queue_full" | "conversation_closed" | "execution_already_live" | "invalid_state" | "not_pending" | "schedule_time_out_of_range" | "too_many_scheduled" | "schedule_invalid" | "schedule_revision_conflict" | "machine_not_found" | "machine_unavailable" | "machine_offline" | "not_open" | "not_delivered" | "limit" | "capability_missing" | "limits_mismatch" | "harness_unknown" | "model_unknown" | "effort_not_allowed" | "permission_mode_unknown" | "settings_midsession_unsupported" | "profile_unknown" | "workdir_not_allowed" | "resume_harness_unsupported" | "group_not_found" | "group_name_taken" | "archive_active" | "conversation_deleted" | "conversation_live" | "attachment_not_ready" | "attachment_not_uploadable" | "attachment_unsupported" | "attachment_unavailable" | "offset_mismatch" | "upload_in_progress" | "checksum_mismatch" | "attachment_conflict" | "preset_not_found" | "preset_builtin" | "preset_revision_conflict" | "preset_title_taken" | "preset_limit_reached" | "preset_invalid" | "message_snippet_not_found" | "message_snippet_revision_conflict" | "message_snippet_title_taken" | "message_snippet_limit_reached" | "message_snippet_invalid" | "spawn_whitelist_invalid" | "limit_settings_invalid" | "routing_policy_invalid" | "routing_policy_conflict" | "task_type_unknown" | "no_executor_available" | "not_delegated" | "worktree_removed" | "worktree_not_removed" | "too_many_terms" | "term_empty" | "term_too_long" | "duplicate_term" | "version_conflict" | "looks_like_secret" | "subject_exists" | "domain_full" | "bad_level";
+        ErrorCode: "unauthenticated" | "invalid_credentials" | "too_many_attempts" | "session_revoked" | "session_expired" | "reauth_required" | "wrong_password" | "qr_expired" | "qr_approvals_exhausted" | "passkey_rejected" | "no_passkeys" | "passkeys_unavailable" | "origin_rejected" | "invalid_request" | "invalid_offset" | "not_found" | "method_not_allowed" | "idempotency_conflict" | "draft_revision_conflict" | "decision_conflict" | "request_not_open" | "decision_invalid" | "resource_limit" | "not_implemented" | "too_many_requests" | "db_unavailable" | "internal" | "queue_full" | "conversation_closed" | "execution_already_live" | "invalid_state" | "not_pending" | "schedule_time_out_of_range" | "too_many_scheduled" | "schedule_invalid" | "schedule_revision_conflict" | "machine_not_found" | "machine_unavailable" | "machine_is_runner" | "machine_offline" | "not_open" | "not_delivered" | "limit" | "capability_missing" | "limits_mismatch" | "harness_unknown" | "model_unknown" | "effort_not_allowed" | "permission_mode_unknown" | "settings_midsession_unsupported" | "profile_unknown" | "workdir_not_allowed" | "resume_harness_unsupported" | "group_not_found" | "group_name_taken" | "archive_active" | "conversation_deleted" | "conversation_live" | "attachment_not_ready" | "attachment_not_uploadable" | "attachment_unsupported" | "attachment_unavailable" | "offset_mismatch" | "upload_in_progress" | "checksum_mismatch" | "attachment_conflict" | "preset_not_found" | "preset_builtin" | "preset_revision_conflict" | "preset_title_taken" | "preset_limit_reached" | "preset_invalid" | "message_snippet_not_found" | "message_snippet_revision_conflict" | "message_snippet_title_taken" | "message_snippet_limit_reached" | "message_snippet_invalid" | "spawn_whitelist_invalid" | "limit_settings_invalid" | "routing_policy_invalid" | "routing_policy_conflict" | "task_type_unknown" | "no_executor_available" | "not_delegated" | "worktree_removed" | "worktree_not_removed" | "too_many_terms" | "term_empty" | "term_too_long" | "duplicate_term" | "version_conflict" | "looks_like_secret" | "subject_exists" | "domain_full" | "bad_level";
         /** @description Детали ответа владельцу; содержимое решения не должно попадать в журналы ошибок. */
         ErrorDetails: {
             /** @description Разбор кандидатов маршрута (`no_executor_available`): не текст в `reason`. */
@@ -3748,16 +3748,22 @@ export interface components {
             end_reason?: string | null;
             /** Format: int32 */
             exit_code?: number | null;
+            /** Format: int32 */
+            expected_minutes: number;
             /** Format: date-time */
             finished_at?: string | null;
             has_log: boolean;
             /** Format: uuid */
             id: string;
+            labels: string[];
             late_report?: Record<string, never> | null;
             lease: string;
-            /** Format: uuid */
-            machine_id: string;
-            machine_name: string;
+            /**
+             * Format: uuid
+             * @description Пусто, пока задача ждёт раннер (`waiting_runner`).
+             */
+            machine_id?: string | null;
+            machine_name?: string | null;
             /**
              * @description Машина не на связи, а задача не закончена; в событии всегда `false`: связь машины
              *     приходит событиями машин.
@@ -3765,7 +3771,11 @@ export interface components {
             machine_offline: boolean;
             /** Format: int64 */
             output_bytes: number;
+            /** @description Каталог на несущей, куда собраны результаты. */
+            outputs_dir?: string | null;
+            outputs_note?: string | null;
             shell: string;
+            source?: components["schemas"]["SourceView"] | null;
             /** Format: date-time */
             started_at?: string | null;
             state: string;
@@ -3773,7 +3783,7 @@ export interface components {
             timeout_minutes: number;
             title?: string | null;
             truncated: boolean;
-            workdir: string;
+            workdir?: string | null;
         };
         /** @description Страница ленты одного субагента: корень (вызов) и его потомки по любой глубине. */
         LanePage: {
@@ -4022,6 +4032,12 @@ export interface components {
             /** @description Принимает ли машина делегатов и команды сессий других машин; включает владелец. */
             accepts_remote_work: boolean;
             allowed_roots: string[];
+            /**
+             * @description Обычная машина: `available`, `degraded` или `unavailable` по связи её воркера. Раннер
+             *     (`role = "runner"`): `online`, `offline` или `unknown` по правилу доступности раннера
+             *     (воркер подключён; `offline` только при отключённом воркере, подключённой несущей,
+             *     свежем наблюдении и не меньше чем трёх неудачах подряд).
+             */
             availability: string;
             availability_since?: string | null;
             capabilities: string[];
@@ -4034,11 +4050,37 @@ export interface components {
             home_dir?: string | null;
             /** Format: uuid */
             id: string;
+            /** @description Машина помечена несущей раннеров (`canterlot-hub machine set-carrier`). */
+            is_carrier: boolean;
+            /** @description Метки раннера (например `build-host`, `kernel-6.12`); у обычной машины пусто. */
+            labels: string[];
             lease?: components["schemas"]["LeaseStateView"] | null;
             limits_ok: boolean;
             metrics?: components["schemas"]["MetricsView"] | null;
             name: string;
+            /**
+             * @description Раннер: когда несущая сделала последнее наблюдение его достижимости (возраст берётся
+             *     от этого времени); `null` у обычной машины и пока наблюдений нет.
+             */
+            observed_at?: string | null;
+            /**
+             * @description Раннер: время хаба, с которого он `offline`; `null`, пока он в другом состоянии, и у
+             *     обычной машины. По нему этап C отсчитывает десять минут недоступности.
+             */
+            offline_since?: string | null;
             os?: string | null;
+            /**
+             * Format: uuid
+             * @description Несущая машина раннера; у обычной машины `null`.
+             */
+            parent_machine_id?: string | null;
+            /**
+             * Format: int32
+             * @description Ранг размещения раннера: больше — предпочтительнее; у обычной машины 0.
+             */
+            rank: number;
+            /** @description `worker` (обычная машина) или `runner` (раннер, которого ведёт несущая машина). */
+            role: string;
             sessions: components["schemas"]["SessionView"][];
             warnings: components["schemas"]["MachineWarning"][];
             watch?: components["schemas"]["WatchView"] | null;
@@ -5539,6 +5581,11 @@ export interface components {
              * @description Абсолютное время возврата в UTC.
              */
             until: string;
+        };
+        /** @description Источник задачи для клиентов: имя каталога и короткая ревизия, не полный локальный путь. */
+        SourceView: {
+            repo: string;
+            rev: string;
         };
         SpawnQueueActionView: {
             harness?: string | null;

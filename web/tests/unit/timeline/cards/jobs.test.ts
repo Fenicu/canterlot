@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { cardCall } from '../../../../src/lib/timeline/cards/call';
-import type { JobCallData, JobListData, JobLogData } from '../../../../src/lib/timeline/cards/defs/jobs';
+import type { JobCallData, JobListData, JobLogData, RunnersListData } from '../../../../src/lib/timeline/cards/defs/jobs';
 import { cardIds, resolveCard } from '../../../../src/lib/timeline/cards/registry';
 import { callBlock, hub, made, resultBlock } from './helpers';
 
@@ -61,6 +61,38 @@ describe('job_run', () => {
     const running = card<JobCallData>(made('mcp__canterlot__job_run', RUN, hub({ job_id: ID, state: 'running', machine: 'machine-b', machine_offline: true })))!;
     expect(running.word).toMatchObject({ word: 'идёт', live: true });
     expect(running.data.offline).toBe(true);
+  });
+
+  describe('on_a_runner', () => {
+    const AUTO = { machine: 'auto', shell: 'scripts/gate.sh', title: 'Полная проверка', source: { repo: 'project', rev: '1a2b3c4' }, labels: ['kernel-6.12'], outputs: ['result'] };
+
+    it('a_job_waiting_for_a_runner_does_not_call_auto_a_machine', () => {
+      const waiting = card<JobCallData>(made('mcp__canterlot__job_run', AUTO, hub({ job_id: ID, state: 'waiting_runner', machine: null, waiting_runner: true }, 'No runner is free')))!;
+      expect(waiting.line).toBe('Запустила команду: Полная проверка');
+      expect(waiting.word).toEqual({ word: 'ждёт раннер', tone: 'warning' });
+      expect(waiting.data).toMatchObject({ jobId: ID, state: 'waiting_runner', machine: '', auto: true, source: { repo: 'project', rev: '1a2b3c4' } });
+      const asking = card<JobCallData>(made('mcp__canterlot__job_run', AUTO, null, { working: true }))!;
+      expect(asking.line).toBe('Запускает команду: Полная проверка');
+    });
+
+    it('a_placed_job_names_the_runner_the_hub_chose', () => {
+      const placed = card<JobCallData>(made('mcp__canterlot__job_run', AUTO, hub({ job_id: ID, state: 'staging', machine: 'runner-a' })))!;
+      expect(placed.line).toBe('Запустила команду на runner-a: Полная проверка');
+      expect(placed.word).toEqual({ word: 'подвозит код', tone: 'accent', live: true });
+      expect(placed.data.auto).toBe(true);
+    });
+
+    it('a_finished_answer_carries_the_outputs_dir_and_the_note', () => {
+      const done = card<JobCallData>(made('mcp__canterlot__job_run', AUTO, hub(finished({ machine: 'runner-a', outputs_dir: '/srv/jobs/outputs/j1', outputs_note: 'outputs truncated at the size cap' }))))!;
+      expect(done.data).toMatchObject({ outputsDir: '/srv/jobs/outputs/j1', outputsNote: 'outputs truncated at the size cap' });
+      const plain = card<JobCallData>(made('mcp__canterlot__job_run', RUN, hub(finished())))!;
+      expect(plain.data).toMatchObject({ auto: false, source: null, outputsDir: '', outputsNote: '' });
+    });
+
+    it('the_list_row_of_a_waiting_job_has_no_machine', () => {
+      const listed = card<JobListData>(made('mcp__canterlot__jobs_list', {}, hub({ jobs: [{ job_id: ID, state: 'waiting_runner', machine: null, title: 'Полная проверка', shell: 'scripts/gate.sh', created_at: '2026-11-21T10:00:00Z' }], count: 1 })))!;
+      expect(listed.data.rows[0]).toMatchObject({ state: 'waiting_runner', machine: '' });
+    });
   });
 
   it('a_call_still_waiting_for_its_answer_says_it_is_starting', () => {
@@ -164,6 +196,37 @@ describe('job_cancel', () => {
   it('refusals_and_a_missing_answer', () => {
     expect(card<JobCallData>(failed('mcp__canterlot__job_cancel', { job_id: ID }, 'job_not_found: x'))!.line).toBe('Отказ: job_not_found');
     expect(card(made('mcp__canterlot__job_cancel', { job_id: ID }, ''))).toBeNull();
+  });
+});
+
+describe('runners_list', () => {
+  const runner = (patch: Record<string, unknown> = {}) => ({ name: 'runner-a', role: 'runner', availability: 'online', observation_age_seconds: null, rank: 20, labels: ['kernel-6.12'], paused: false, carrier: false, slots_used: 1, slots_max: 4, queued: 0, running: 1, ...patch });
+  const answer = hub({ count: 3, waiting_runner_jobs: 2, runners: [runner({ name: 'carrier', role: 'local', rank: 0, carrier: true, slots_used: 0, slots_max: 2 }), runner(), runner({ name: 'runner-b', availability: 'offline', observation_age_seconds: 130, slots_used: 0, paused: true })] });
+
+  it('is_a_card_of_its_own', () => {
+    expect(cardIds()).toContain('canterlot.runners_list');
+  });
+
+  it('counts_the_runners_on_the_line_in_both_voices', () => {
+    const she = card<RunnersListData>(made('mcp__canterlot__runners_list', {}, answer))!;
+    expect(she.line).toBe('Смотрела раннеры: 3 · 2 на связи · ждут 2');
+    const delegate = cardCall(callBlock('mcp__canterlot__runners_list', {}), resultBlock(answer), { root: false });
+    expect(card<RunnersListData>(delegate)!.line).toBe('Раннеры: 3 · 2 на связи · ждут 2');
+  });
+
+  it('keeps_name_availability_and_slots_of_each_row', () => {
+    const rows = card<RunnersListData>(made('mcp__canterlot__runners_list', {}, answer))!.data.rows;
+    expect(rows.map((row) => [row.name, row.availability, row.slotsUsed, row.slotsMax, row.paused, row.local])).toEqual([
+      ['carrier', 'online', 0, 2, false, true],
+      ['runner-a', 'online', 1, 4, false, false],
+      ['runner-b', 'offline', 0, 4, true, false]
+    ]);
+  });
+
+  it('drops_rows_without_a_name_and_shows_the_plain_block_without_an_answer', () => {
+    expect(card<RunnersListData>(made('mcp__canterlot__runners_list', {}, hub({ count: 2, runners: [runner(), { slots_used: 1 }] })))!.data.rows).toHaveLength(1);
+    expect(card(made('mcp__canterlot__runners_list', {}, ''))).toBeNull();
+    expect(card<RunnersListData>(made('mcp__canterlot__runners_list', {}, hub({ count: 0, runners: [] })))!.line).toBe('Смотрела раннеры: нет');
   });
 });
 

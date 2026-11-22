@@ -17112,6 +17112,7 @@
           "schedule_revision_conflict",
           "machine_not_found",
           "machine_unavailable",
+          "machine_is_runner",
           "machine_offline",
           "not_open",
           "not_delivered",
@@ -19318,9 +19319,6 @@
         "required": [
           "id",
           "state",
-          "machine_id",
-          "machine_name",
-          "workdir",
           "shell",
           "lease",
           "timeout_minutes",
@@ -19329,6 +19327,8 @@
           "cancel_requested",
           "has_log",
           "machine_offline",
+          "labels",
+          "expected_minutes",
           "created_at"
         ],
         "properties": {
@@ -19372,6 +19372,10 @@
             ],
             "format": "int32"
           },
+          "expected_minutes": {
+            "type": "integer",
+            "format": "int32"
+          },
           "finished_at": {
             "type": [
               "string",
@@ -19386,6 +19390,12 @@
             "type": "string",
             "format": "uuid"
           },
+          "labels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
           "late_report": {
             "type": [
               "object",
@@ -19396,11 +19406,18 @@
             "type": "string"
           },
           "machine_id": {
-            "type": "string",
-            "format": "uuid"
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Пусто, пока задача ждёт раннер (`waiting_runner`)."
           },
           "machine_name": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "machine_offline": {
             "type": "boolean",
@@ -19410,8 +19427,31 @@
             "type": "integer",
             "format": "int64"
           },
+          "outputs_dir": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Каталог на несущей, куда собраны результаты."
+          },
+          "outputs_note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "shell": {
             "type": "string"
+          },
+          "source": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SourceView"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "started_at": {
             "type": [
@@ -19437,7 +19477,10 @@
             "type": "boolean"
           },
           "workdir": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -20168,6 +20211,10 @@
           "id",
           "name",
           "availability",
+          "role",
+          "rank",
+          "labels",
+          "is_carrier",
           "capabilities",
           "allowed_roots",
           "limits_ok",
@@ -20189,7 +20236,8 @@
             }
           },
           "availability": {
-            "type": "string"
+            "type": "string",
+            "description": "Обычная машина: `available`, `degraded` или `unavailable` по связи её воркера. Раннер\n(`role = \"runner\"`): `online`, `offline` или `unknown` по правилу доступности раннера\n(воркер подключён; `offline` только при отключённом воркере, подключённой несущей,\nсвежем наблюдении и не меньше чем трёх неудачах подряд)."
           },
           "availability_since": {
             "type": [
@@ -20240,6 +20288,17 @@
             "type": "string",
             "format": "uuid"
           },
+          "is_carrier": {
+            "type": "boolean",
+            "description": "Машина помечена несущей раннеров (`canterlot-hub machine set-carrier`)."
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Метки раннера (например `build-host`, `kernel-6.12`); у обычной машины пусто."
+          },
           "lease": {
             "oneOf": [
               {
@@ -20267,11 +20326,42 @@
           "name": {
             "type": "string"
           },
+          "observed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Раннер: когда несущая сделала последнее наблюдение его достижимости (возраст берётся\nот этого времени); `null` у обычной машины и пока наблюдений нет."
+          },
+          "offline_since": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Раннер: время хаба, с которого он `offline`; `null`, пока он в другом состоянии, и у\nобычной машины. По нему этап C отсчитывает десять минут недоступности."
+          },
           "os": {
             "type": [
               "string",
               "null"
             ]
+          },
+          "parent_machine_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Несущая машина раннера; у обычной машины `null`."
+          },
+          "rank": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Ранг размещения раннера: больше — предпочтительнее; у обычной машины 0."
+          },
+          "role": {
+            "type": "string",
+            "description": "`worker` (обычная машина) или `runner` (раннер, которого ведёт несущая машина)."
           },
           "sessions": {
             "type": "array",
@@ -25313,6 +25403,22 @@
           }
         },
         "additionalProperties": false
+      },
+      "SourceView": {
+        "type": "object",
+        "description": "Источник задачи для клиентов: имя каталога и короткая ревизия, не полный локальный путь.",
+        "required": [
+          "repo",
+          "rev"
+        ],
+        "properties": {
+          "repo": {
+            "type": "string"
+          },
+          "rev": {
+            "type": "string"
+          }
+        }
       },
       "SpawnQueueActionView": {
         "type": "object",

@@ -1,26 +1,30 @@
 <script lang="ts">
   import { listJobs } from '#lib/api/client.js';
   import type { Runtime } from '#lib/app/runtime.js';
+  import type { JobRecord } from '#lib/stores/machines.svelte.js';
   import WorkMotif from '#lib/ui/WorkMotif.svelte';
-  import { durationWord, jobFacts, jobLabel, jobWord, machineJobs, offlineNote, type JobFacts } from '#lib/jobs/model.js';
+  import { durationWord, jobFacts, jobLabel, jobWord, machineJobs, offlineNote, sourceLine, type JobFacts } from '#lib/jobs/model.js';
 
   let { runtime, machineId, onopen }: { runtime: Runtime; machineId: string; onopen: (id: string) => void } = $props();
+
+  // Несущая показывает и задачи, которые ещё никто не взял: машины у них нет, а хозяин раннера — она. Задачи её раннеров лежат на карточках раннеров.
+  const carrier = $derived(runtime.machines.items.get(machineId)?.is_carrier === true);
 
   let failed = $state(false);
   // Список приходит один раз и после каждой перезагрузки снимка; дальше его ведут события хаба.
   $effect(() => {
     const machine = machineId;
+    const waiting = carrier;
     void runtime.machines.jobsEpoch;
     failed = false;
     let alive = true;
-    void listJobs({ machine, limit: 50 }).then(
-      ({ data }) => { if (alive) runtime.machines.mergeJobs(data.items); },
-      () => { if (alive) failed = true; }
-    );
+    const take = ({ data }: { data: { items: JobRecord[] } }) => { if (alive) runtime.machines.mergeJobs(data.items); };
+    void listJobs({ machine, limit: 50 }).then(take, () => { if (alive) failed = true; });
+    if (waiting) void listJobs({ state: 'waiting_runner', limit: 50 }).then(take, () => { if (alive) failed = true; });
     return () => { alive = false; };
   });
 
-  const rows = $derived(machineJobs([...runtime.machines.jobs.values()].map(jobFacts), machineId));
+  const rows = $derived(machineJobs([...runtime.machines.jobs.values()].map(jobFacts), machineId, { carrier }));
   const empty = $derived(rows.running.length === 0 && rows.recent.length === 0);
 </script>
 
@@ -28,6 +32,8 @@
   {@const word = jobWord(job)}
   {@const note = offlineNote(job)}
   {@const took = durationWord(job.durationMs)}
+  {@const source = sourceLine(job.source)}
+  {@const wants = job.state === 'waiting_runner' && job.labels.length > 0 ? `метки: ${job.labels.join(', ')}` : ''}
   <li>
     <button type="button" onclick={() => onopen(job.id)} data-job={job.id}>
       <span class="top">
@@ -35,7 +41,7 @@
         {#if word.live && !job.machineOffline}<span class="lead" data-job-mark><WorkMotif /></span>{/if}
         <span class="label">{jobLabel(job.title, job.shell) || job.id.slice(0, 8)}</span><span class="word" data-tone={word.tone}>{word.word}</span>
       </span>
-      {#if took || note}<span class="meta">{[took, note].filter(Boolean).join(' · ')}</span>{/if}
+      {#if source || wants || took || note}<span class="meta">{[source, wants, took, note].filter(Boolean).join(' · ')}</span>{/if}
     </button>
   </li>
 {/snippet}

@@ -70,8 +70,13 @@ pub struct LogParams {
 
 fn offline(registry: &Registry, job: &Job) -> bool {
     !job.is_terminal()
-        && job.state() != JobState::Queued
-        && registry.availability(job.machine_id) != Availability::Available
+        && !matches!(
+            job.state(),
+            JobState::WaitingRunner | JobState::Staging | JobState::Queued
+        )
+        && job
+            .machine_id
+            .is_some_and(|machine| registry.availability(machine) != Availability::Available)
 }
 
 async fn view(

@@ -285,14 +285,17 @@ pub async fn machines(
     pool: &PgPool,
     owner_id: Uuid,
 ) -> Result<Snapshot<MachinesSnapshot>, sqlx::Error> {
-    machines_with_config(pool, owner_id, &Default::default()).await
+    machines_with_config(pool, owner_id, &Default::default(), None).await
 }
+/// `registry` нужен для доступности раннеров; без него они `unknown`.
 pub async fn machines_with_config(
     pool: &PgPool,
     owner_id: Uuid,
     config: &crate::config::MachinesConfig,
+    registry: Option<&Registry>,
 ) -> Result<Snapshot<MachinesSnapshot>, sqlx::Error> {
     let config = config.clone();
+    let registry = registry.cloned();
     crate::db::in_tx(pool, move |conn| {
         Box::pin(async move {
             sqlx::query("set transaction isolation level repeatable read read only")
@@ -308,7 +311,14 @@ pub async fn machines_with_config(
             let mut items = Vec::with_capacity(ids.len());
             for id in ids {
                 items.push(
-                    crate::http::machines::load_stored(&mut *conn, &config, owner_id, id).await?,
+                    crate::http::machines::load_stored(
+                        &mut *conn,
+                        &config,
+                        registry.as_ref(),
+                        owner_id,
+                        id,
+                    )
+                    .await?,
                 );
             }
             Ok(Snapshot {

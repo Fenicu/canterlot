@@ -24,6 +24,7 @@ type Config = components["schemas"]["ConfigView"];
 const FIELD_OF: Record<string, Field> = {
   machine_not_found: "machine",
   capability_missing: "machine",
+  machine_is_runner: "machine",
   harness_unknown: "harness",
   model_unknown: "model",
   effort_not_allowed: "effort",
@@ -33,9 +34,12 @@ const FIELD_OF: Record<string, Field> = {
   group_not_found: "group",
 };
 
+const RUNNER_PROBLEM = "Раннер выполняет только задачи: сессии на нём не запускаются";
+
 const MESSAGE: Record<string, string> = {
   machine_not_found: "Машина не найдена",
   capability_missing: "У машины нет возможности пилота",
+  machine_is_runner: RUNNER_PROBLEM,
   harness_unknown: "Агент неизвестен",
   model_unknown: "Модель неизвестна",
   effort_not_allowed: "Усилие недоступно",
@@ -111,6 +115,7 @@ export function machineProblem(
   machine: MachineRecord | undefined,
 ): string | null {
   if (!machine) return "Выберите машину";
+  if (machine.role === "runner") return RUNNER_PROBLEM;
   if (
     machine.availability === "unavailable" ||
     machine.availability === "degraded"

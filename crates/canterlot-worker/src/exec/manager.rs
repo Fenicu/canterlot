@@ -2503,7 +2503,13 @@ impl Actor {
                 Kind::RemoveWorktree(_)
                 | Kind::RevokeSecret(_)
                 | Kind::StartInPlaceJob(_)
-                | Kind::CancelInPlaceJob(_),
+                | Kind::CancelInPlaceJob(_)
+                // Команды несущей (`runners_v1`) идут мимо исполнений (`Executions::route`) и
+                // сюда попасть не могут; на случай ошибки маршрута они отклоняются.
+                | Kind::StageSource(_)
+                | Kind::CollectOutputs(_)
+                | Kind::CleanupSource(_)
+                | Kind::OwnerJobFinished(_),
             ) => reject_invalid(&self.shared, &command).await,
             // Хаб считает исполнение потерянным, а связь с ним цела: это и есть доказательство.
             Some(Kind::ResolveOwnerLost(_)) => {

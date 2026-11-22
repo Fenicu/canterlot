@@ -32,11 +32,16 @@ export -f date
 # печатает имя по argv[0] и версию, `openapi` — файл $FAKE_ROOT/state/openapi.json.
 # Тот же бинарь служит хабом и воркером целевого dist: target-check спрашивает их.
 fake_worker_build() {
-    local cache uid
+    local cache uid source_tmp binary_tmp
     uid="$(id -u)"
     cache="${HARNESS_CACHE_DIR:-/tmp}/canterlot-fake-worker-v5.${uid}"
     if [ ! -x "${cache}" ]; then
-        cat >"${cache}.c" <<'EOF'
+        # Наборы идут параллельно: исходник и бинарь — личные для процесса сборщика,
+        # чтобы чужой cat не обнулил компилируемый файл. Готовый бинарь встаёт на место
+        # атомарно, исходник после сборки убирается.
+        source_tmp="${cache}.c.$$"
+        binary_tmp="${cache}.tmp.$$"
+        cat >"${source_tmp}" <<'EOF'
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -95,7 +100,9 @@ int main(int argc, char **argv) {
     for (;;) pause();
 }
 EOF
-        cc -O0 -o "${cache}.tmp.$$" "${cache}.c" && mv -f "${cache}.tmp.$$" "${cache}"
+        # Суффикс .$$ после .c не распознаётся gcc как язык: -x c задаёт его явно.
+        cc -x c -O0 -o "${binary_tmp}" "${source_tmp}" && mv -f "${binary_tmp}" "${cache}"
+        rm -f "${source_tmp}"
     fi
     printf '%s' "${cache}"
 }

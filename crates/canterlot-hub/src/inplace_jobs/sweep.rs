@@ -191,6 +191,51 @@ pub async fn lost_sweep(
     Ok(lost)
 }
 
+/// Задача ждёт раннер дольше `timeout` (от подачи): кончается `canceled` с причиной
+/// `no_runner`, сообщение и итог терминалу уходят как при любом конце. `0` срок отключает.
+pub async fn waiting_timeout_sweep(
+    pool: &PgPool,
+    timeout: Duration,
+    now: DateTime<Utc>,
+) -> Result<usize, sqlx::Error> {
+    if timeout.is_zero() {
+        return Ok(0);
+    }
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        "select id from jobs
+         where state='waiting_runner' and created_at + make_interval(secs => $1) < $2
+         order by created_at, id limit 200",
+    )
+    .bind(timeout.as_secs_f64())
+    .bind(now)
+    .fetch_all(pool)
+    .await?;
+    let mut done = 0;
+    for id in ids {
+        let ended = crate::db::in_tx(pool, move |conn| {
+            Box::pin(async move {
+                let Some(job) = lock_row(conn, id).await? else {
+                    return Ok::<_, sqlx::Error>(false);
+                };
+                if job.state() != State::WaitingRunner {
+                    return Ok(false);
+                }
+                finish_in_tx(
+                    conn,
+                    &job,
+                    Outcome::bare(State::Canceled, Some("no_runner")),
+                    Uuid::now_v7(),
+                )
+                .await?;
+                Ok(true)
+            })
+        })
+        .await?;
+        done += usize::from(ended);
+    }
+    Ok(done)
+}
+
 /// Машины с задачами в очереди.
 async fn queued_machines(pool: &PgPool) -> Result<Vec<Uuid>, sqlx::Error> {
     sqlx::query_scalar("select distinct machine_id from jobs where state='queued'")
@@ -209,6 +254,39 @@ pub async fn dispatch_machine(pool: &PgPool, machine_id: Uuid) -> Result<(), sql
     .await
 }
 
+/// Расстановка ожидающих задач у каждой несущей, у которой они есть: страховка поверх
+/// триггеров (освобождение места, подключение раннера, включение выключателя).
+pub async fn place_sweep(pool: &PgPool, registry: &Registry) -> Result<usize, sqlx::Error> {
+    let mut placed = 0;
+    for carrier in super::place::carriers_with_waiting(pool).await? {
+        placed += super::place::place_carrier(pool, registry, carrier).await?;
+    }
+    Ok(placed)
+}
+
+/// Подключился раннер или сама несущая, включён выключатель, освободилось место: расстановка
+/// несущей этой машины.
+pub async fn place_for_machine(
+    pool: &PgPool,
+    registry: &Registry,
+    machine: Uuid,
+) -> Result<usize, sqlx::Error> {
+    match super::place::carrier_of(pool, machine).await? {
+        Some(carrier) => super::place::place_carrier(pool, registry, carrier).await,
+        None => Ok(0),
+    }
+}
+
+/// Раз в столько расстановка идёт без повода: потерянный сигнал не оставляет задачу ждать.
+const PLACE_TICK: Duration = Duration::from_secs(5);
+
+async fn listen_place(pool: &PgPool) -> Result<sqlx::postgres::PgListener, sqlx::Error> {
+    let mut listener =
+        sqlx::postgres::PgListener::connect_with(&crate::db::listener_pool(pool)).await?;
+    listener.listen("canterlot_place").await?;
+    Ok(listener)
+}
+
 /// Служба-одиночка: старт, подключение машины и таймер.
 pub async fn run(
     pool: PgPool,
@@ -216,11 +294,12 @@ pub async fn run(
     config: crate::config::JobsConfig,
     shutdown: watch::Receiver<bool>,
 ) {
-    let (grace, retention) = (config.lost_grace, config.log_retention);
+    super::carrier::set_outputs_cap(config.outputs_cap);
     let supervisor = pool.clone();
     crate::singleton::supervise(&supervisor, "inplace_jobs", shutdown, move || {
         let pool = pool.clone();
         let registry = registry.clone();
+        let config = config.clone();
         async move {
             if let Err(error) = on_start(&pool).await {
                 tracing::warn!(
@@ -232,13 +311,36 @@ pub async fn run(
             let mut changes = registry.subscribe_changes();
             let mut tick = tokio::time::interval(TICK);
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut place_tick = tokio::time::interval(PLACE_TICK);
+            place_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut listener = listen_place(&pool).await.ok();
             loop {
                 let result = tokio::select! {
                     change = changes.recv() => match change {
-                        Ok((machine, Availability::Available)) => dispatch_machine(&pool, machine).await,
+                        Ok((machine, Availability::Available)) => {
+                            match dispatch_machine(&pool, machine).await {
+                                Ok(()) => place_for_machine(&pool, &registry, machine).await.map(|_| ()),
+                                Err(error) => Err(error),
+                            }
+                        }
                         _ => Ok(()),
                     },
-                    _ = tick.tick() => sweep_once(&pool, &registry, grace, retention).await,
+                    notification = async { listener.as_mut().expect("listener").recv().await }, if listener.is_some() => {
+                        match notification {
+                            Ok(notification) => match Uuid::parse_str(notification.payload()) {
+                                Ok(carrier) => super::place::place_carrier(&pool, &registry, carrier).await.map(|_| ()),
+                                Err(_) => Ok(()),
+                            },
+                            Err(_) => { listener = None; Ok(()) }
+                        }
+                    },
+                    _ = place_tick.tick() => {
+                        if listener.is_none() {
+                            listener = listen_place(&pool).await.ok();
+                        }
+                        place_sweep(&pool, &registry).await.map(|_| ())
+                    },
+                    _ = tick.tick() => sweep_once(&pool, &registry, &config).await,
                 };
                 if let Err(error) = result {
                     tracing::warn!(
@@ -256,17 +358,27 @@ pub async fn run(
 async fn sweep_once(
     pool: &PgPool,
     registry: &Registry,
-    grace: Duration,
-    retention: Duration,
+    config: &crate::config::JobsConfig,
 ) -> Result<(), sqlx::Error> {
-    lost_sweep(pool, registry, grace, Utc::now()).await?;
+    lost_sweep(pool, registry, config.lost_grace, Utc::now()).await?;
     undelivered_sweep(pool, Utc::now()).await?;
     reported_finish_sweep(pool, REPORTED_FINISH_WAIT, Utc::now()).await?;
-    expire_logs(pool, retention, Utc::now()).await?;
+    expire_logs(pool, config.log_retention, Utc::now()).await?;
+    super::carrier::stage_timeout_sweep(pool, config.stage_timeout, Utc::now()).await?;
+    super::carrier::collect_timeout_sweep(pool, config.collect_timeout, Utc::now()).await?;
+    super::carrier::cleanup_retry_sweep(
+        pool,
+        registry,
+        super::carrier::CLEANUP_RETRY_AFTER,
+        Utc::now(),
+    )
+    .await?;
     for machine in queued_machines(pool).await? {
         if registry.availability(machine) == Availability::Available {
             dispatch_machine(pool, machine).await?;
         }
     }
+    place_sweep(pool, registry).await?;
+    waiting_timeout_sweep(pool, config.waiting_timeout, Utc::now()).await?;
     Ok(())
 }

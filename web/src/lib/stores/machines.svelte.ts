@@ -29,6 +29,17 @@ export interface MachineRecord {
 	/** Принимает ли машина делегатов и команды других машин; включает владелец. */
 	accepts_remote_work?: boolean;
 	allowed_roots?: string[];
+	/** `worker` (обычная машина) или `runner`; у снимка старого хаба поля нет. */
+	role?: string;
+	/** Несущая машина раннера. */
+	parent_machine_id?: string | null;
+	/** Ранг размещения раннера: больше — предпочтительнее. */
+	rank?: number;
+	labels?: string[];
+	/** Машина помечена несущей раннеров. */
+	is_carrier?: boolean;
+	/** Раннер: когда несущая последний раз проверила его достижимость. */
+	observed_at?: string | null;
 	home_dir?: string | null;
 	/** Отчёт сторожа машины: крупные кэши сборки, процессы без сессии, сборки мимо очереди. */
 	watch?: MachineWatch | null;
@@ -38,7 +49,7 @@ export interface MachineRecord {
 
 export type JobRecord = components['schemas']['JobView'];
 
-const JOB_RANK: Record<string, number> = { queued: 0, dispatched: 1, waiting_lease: 2, running: 3 };
+const JOB_RANK: Record<string, number> = { waiting_runner: 0, staging: 1, queued: 2, dispatched: 3, waiting_lease: 4, running: 5, collecting: 6 };
 
 /** Состояние задачи ведёт только вперёд: опоздавшая копия, список или событие, прежнее не затирает. */
 function jobMayReplace(old: JobRecord | undefined, next: JobRecord): boolean {
@@ -134,7 +145,16 @@ export class MachinesStore {
 		if (kind === 'machine_availability_changed' && event.kind === 'machine_availability_changed') {
 			const machine = this.items.get(event.payload.machine_id);
 			// Пропавшая машина не подтверждает очередь: хаб снимает её тем же решением.
-			if (machine) this.items.set(machine.id, { ...machine, availability: event.payload.availability, availability_since: event.committed_at, ...(event.payload.availability === 'unavailable' ? { lease: null } : {}) });
+			if (!machine) return;
+			// Раннеру хаб присылает свои слова `online|offline|unknown` и возраст проверки несущей `observed_at`;
+			// без свежей проверки поля нет, и прежний возраст не доживает. Обычная машина остаётся со старыми значениями.
+			if (machine.role === 'runner') {
+				const word = event.payload.availability;
+				const availability = word === 'online' || word === 'offline' ? word : 'unknown';
+				this.items.set(machine.id, { ...machine, availability, observed_at: event.payload.observed_at ?? null, availability_since: event.committed_at, ...(availability === 'online' ? {} : { lease: null }) });
+				return;
+			}
+			this.items.set(machine.id, { ...machine, availability: event.payload.availability, availability_since: event.committed_at, ...(event.payload.availability === 'unavailable' ? { lease: null } : {}) });
 			return;
 		}
 		if (kind === 'machine_report_updated' && event.kind === 'machine_report_updated') {

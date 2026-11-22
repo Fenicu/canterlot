@@ -158,6 +158,7 @@ scripts/publish-release.sh v1.24.0
 ```bash
 scripts/release.sh prepare 1.35.0    # бамп версии во всех местах, cargo update -w, check-version, коммит «Выпустить версию 1.35.0»
 scripts/gate.sh                      # полный гейт, аттестация .superpowers/gate/<sha>.ok
+scripts/gate.sh --runner auto        # то же на раннере (canterlot-worker job run), аттестация с runner=
 scripts/release.sh ship 1.35.0       # тег, push, сборка, stage, репетиция, боевой прогон, check-proxy, публикация, журнал
 scripts/release.sh ship 1.35.0 --full   # то же без быстрого пути: всегда репетиция и vzdump
 ```
@@ -234,16 +235,18 @@ scripts/gate-remote.sh 4d884712 --local    # то же на местном docke
 
 `REV` — любой коммит, не только тег (по умолчанию `HEAD`). Скрипт отправляет его
 в `~/canterlot.git` как `refs/gate/<sha12>`, создаёт отсоединённую рабочую копию
-`~/gate/src-<sha12>` и запускает в контейнере прежнюю трёхшаговую последовательность
-(как у частного `/tmp/gate/run.sh`):
+`~/gate/src-<sha12>` и запускает в контейнере тот же `scripts/gate.sh --no-attest`,
+что идёт на VM (через `scripts/gate/in-container.sh`, с тестовой PostgreSQL):
 
-1. `VITE_UI_TESTS=1 npm run build` (после своего `npm ci`);
-2. `scripts/check.sh --all` — fmt, clippy, nextest с тестовой PostgreSQL;
-3. `scripts/check-web.sh --stack` — проверки web, Playwright и сквозные сценарии
+1. `npm ci` в `web/`;
+2. `scripts/check.sh --all --no-web` — fmt, clippy, nextest;
+3. наборы `scripts/deploy/tests/run.sh` (без тега `vX.Y.Z` в рабочей копии они идут
+   всегда; образ несёт для них `shellcheck` и `zstd`);
+4. `scripts/check-web.sh --stack` — проверки web, Playwright и сквозные сценарии
    на настоящем хабе и воркере.
 
-Наборы `scripts/deploy/tests/run.sh` контейнерный гейт не запускает: их гоняет
-`scripts/gate.sh` на самой VM отдельным шагом.
+Шаги не перечисляются в контейнерном пути заново, поэтому разойтись с `scripts/gate.sh`
+им нечем; `scripts/gate-coverage.sh` это проверяет.
 
 Образ `canterlot-gate:<hash>` (`docker/gate/Dockerfile`) — Debian trixie по digest,
 Rust из `rust-toolchain.toml`, Node 24, PostgreSQL 18 (как у тестовой базы VM),
@@ -264,16 +267,59 @@ Rust из `rust-toolchain.toml`, Node 24, PostgreSQL 18 (как у тестов�
 каталоги тестов и профили браузеров): на overlayfs и на tmpfs те же проверки
 ловят таймауты, на обычной ФС хоста проходят.
 
-Результат и логи (`build.log`, `check.log`, `web.log`, `result.txt` в формате
-`/tmp/gate/run.sh`) складываются в `/tmp/gate-remote/<sha12>`
-(`CANTERLOT_GATE_OUT`). Код возврата — код гейта. Рабочая копия и ref на
-сборочной машине убираются автоматически (`git worktree remove --force` и
-`update-ref -d`, без `rm`).
+Результат и логи (`gate.log`, `npm-ci.log`, `check.log`, `deploy.log`, `web.log`,
+`result.txt` и `state.tsv` в формате `scripts/gate.sh`) складываются в
+`/tmp/gate-remote/<sha12>` (`CANTERLOT_GATE_OUT`). Код возврата — код гейта. Рабочая
+копия и ref на сборочной машине убираются автоматически (`git worktree remove --force`
+и `update-ref -d`, без `rm`).
 
-Гейт на самой VM — `scripts/gate.sh` с `CANTERLOT_TEST_PG_PORT=55441`. Контейнерный
-`scripts/gate-remote.sh` повторяет прежнюю трёхшаговую последовательность (отдельная
-сборка web, `check.sh --all` с веб-половиной и `check-web.sh --stack`) и остаётся для
-сборочной машины.
+Гейт на самой VM — `scripts/gate.sh` с `CANTERLOT_TEST_PG_PORT=55441`; контейнерный
+`scripts/gate-remote.sh` остаётся для сборочной машины.
+
+### Гейт на раннере
+
+`scripts/gate.sh --runner local|auto|<имя машины>` выбирает, где идёт гейт. `local`
+(по умолчанию) — на этой VM, как выше, байт в байт. Всё остальное отправляет гейт
+раннеру через `canterlot-worker job run`:
+
+```bash
+scripts/gate.sh --runner auto        # место выбирает хаб (метка kernel-6.12)
+scripts/gate.sh --runner runner-a    # конкретная машина
+```
+
+Нужна чистая рабочая копия: на раннер уходит ровно полный sha `HEAD` (`--no-attest`
+грязное дерево не разрешает). Скрипт выполняет
+
+```
+canterlot-worker job run --title "Гейт <sha8>" --machine <значение> --labels kernel-6.12 \
+    --lease gate --timeout-minutes 240 --expected-minutes 45 --source <repo>@<sha> \
+    --output .gate-out --wait -- scripts/gate/runner-gate.sh <sha>
+```
+
+Носитель кладёт этот коммит в чистую рабочую копию `<корень раннера>/jobs/<домен>/<задача>`,
+а `scripts/gate/runner-gate.sh` в ней проверяет, что `HEAD` равен sha, собирает (или
+берёт готовый) образ `canterlot-gate:<hash>` из `docker/gate/Dockerfile` **этой рабочей
+копии** (с VM не копируется ничего) и запускает контейнер `canterlot-gate-<sha12>-<случайное>`
+с `--cpus` и `--memory` по `nproc` и `free` (хосту остаются 2 ядра и 4 ГБ). Кэши лежат в
+`<корень раннера>/cache/{cargo,target,npm,playwright,tmp}`; корень находится по пути
+рабочей копии, а без `<корень>/worker.toml` скрипт отказывает. По TERM и INT контейнер
+убивается по имени. Результат (`result.txt`, `state.tsv`, логи) попадает в `./.gate-out`,
+носитель забирает его в `~/.local/state/canterlot-worker/job-outputs/<job_id>/`, а
+`runner-gate.sh` дописывает в `state.tsv` строку `runner<TAB>имя`: имя берётся из
+`CANTERLOT_RUNNER_NAME`, иначе это имя хоста.
+
+Аттестацию `.superpowers/gate/<полный sha>.ok` пишет сам `gate.sh` на VM, атомарно,
+в прежнем формате плюс строка `runner=<имя, как его назвал раннер>`, и только если
+одновременно: `result.txt` называет именно этот sha, `state.tsv` относится к тому же
+полному sha без тестовых швов, каждый шаг вышел с 0 (`deploy_exit=skipped` допустим), код
+задачи 0, `HEAD` не сместился, а дерево осталось чистым. Иначе скрипт называет причину
+и ничего не пишет. `release.sh ship` принимает такую аттестацию без изменений. Логи
+раннера лежат в `.superpowers/gate/<sha8>/runner/`.
+
+`--rerun-failed` с раннером в первой версии отказывается: гейт на раннере идёт целиком.
+У `job run` отмены нет: Ctrl-C на `gate.sh --runner` останавливает только ожидание и
+печатает идентификатор задачи, а сама задача на раннере продолжает работать. Отменить её
+можно в PWA (карточка задачи). Аренда `gate` берётся на раннере (`--lease gate`), не на VM.
 
 ## Развёртывание из готовых архивов
 
@@ -382,6 +428,8 @@ sudo tar -xzf canterlot-worker-$VER-x86_64-linux-gnu.tar.gz -C /usr/local/bin
 loginctl enable-linger "$USER"
 systemctl --user enable --now canterlot-worker
 ```
+
+Раннеры (1.46, только задачи, без сессий): машину с воркером помечают несущей `canterlot-hub machine set-carrier --machine-id <uuid>`, раннер создают `canterlot-hub machine add --name runner-a --role runner --parent <uuid несущей> --root-dir /srv/runner --rank 20 --labels build-host`. Хаб не запускает на раннере сессии, а токен раннера выдаёт только своей несущей; подробности в [docs/configuration.md](docs/configuration.md). `job_run` с `source` {`repo`, `rev`} и `machine: "auto"` отдаёт выбор места хабу: задача идёт на свободный раннер несущей (больший ранг, нужные `labels`) или на саму несущую, иначе ждёт в `waiting_runner`; несущая готовит ровно этот коммит (`staging`) и после запуска забирает `outputs` (`collecting`), итог приходит один раз после сбора (очистку исходников он не ждёт). Названная машина обязана нести все `labels` задачи; ждущая раннер задача заканчивается через `[jobs].waiting_timeout` (24 часа) как `canceled` с причиной `no_runner`. Ранг, метки и корень меняет `canterlot-hub machine set --machine-id <uuid> [--rank N] [--labels a,b] [--root-dir P]` (метки можно и у самой VM, например `kernel-6.12`). Инструмент `runners_list` показывает раннеры и занятость. Задачу владельца без разговора (с исходниками на нужном коммите и сбором результатов) отправляет на несущей `canterlot-worker job run --title gate --source @HEAD --output result --wait -- ./run.sh`: выход с кодом задачи, каталог результатов в `~/.local/state/canterlot-worker/job-outputs/<id>`; устройство в [docs/design/runners.md](docs/design/runners.md).
 
 **5. Вторая машина: оркестратор здесь, разработка там.** Оркестратор (Claude Code или Codex) остаётся на основной машине, а делегаты, сборки, запуски и выкатка идут на второй через её воркер. Между машинами нет ssh: воркер второй машины сам подключается к хабу, ему нужен только исходящий доступ к порту воркеров хаба. Код остаётся на второй машине; через хаб идут ленты сессий и вывод команд, которые запросил оркестратор.
 

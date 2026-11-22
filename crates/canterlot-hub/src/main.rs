@@ -89,6 +89,47 @@ enum MachineCommand {
         config: ConfigArgs,
         #[arg(long)]
         name: String,
+        /// `worker` (по умолчанию) или `runner`: раннер ведёт несущая машина по SSH.
+        #[arg(long, value_parser = ["worker", "runner"])]
+        role: Option<String>,
+        /// Раннер: несущая машина (существующая неотозванная машина `worker`).
+        #[arg(long)]
+        parent: Option<Uuid>,
+        /// Раннер: корневой каталог на раннере, абсолютный и нормализованный.
+        #[arg(long)]
+        root_dir: Option<String>,
+        /// Раннер: ранг размещения, больше — предпочтительнее.
+        #[arg(long, allow_hyphen_values = true)]
+        rank: Option<i32>,
+        /// Раннер: метки через запятую.
+        #[arg(long, value_delimiter = ',')]
+        labels: Vec<String>,
+    },
+    /// Пометить машину несущей раннеров или снять пометку.
+    SetCarrier {
+        #[command(flatten)]
+        config: ConfigArgs,
+        #[arg(long)]
+        machine_id: Uuid,
+        #[arg(long)]
+        off: bool,
+    },
+    /// Изменить ранг, метки или корень машины: метки у любой (в том числе у самой VM, например
+    /// `kernel-6.12`), корень только у раннера.
+    Set {
+        #[command(flatten)]
+        config: ConfigArgs,
+        #[arg(long)]
+        machine_id: Uuid,
+        /// Ранг размещения, больше — предпочтительнее.
+        #[arg(long, allow_hyphen_values = true)]
+        rank: Option<i32>,
+        /// Метки через запятую; пустое значение снимает все.
+        #[arg(long, value_delimiter = ',')]
+        labels: Option<Vec<String>>,
+        /// Раннер: корневой каталог, абсолютный и нормализованный, до 90 байт.
+        #[arg(long)]
+        root_dir: Option<String>,
     },
     RotateToken {
         #[command(flatten)]
@@ -189,6 +230,8 @@ async fn run(args: Args) -> Result<(), String> {
         Command::Init(config) | Command::Serve(config) => config,
         Command::Machine { command } => match command {
             MachineCommand::Add { config, .. }
+            | MachineCommand::SetCarrier { config, .. }
+            | MachineCommand::Set { config, .. }
             | MachineCommand::Revoke { config, .. }
             | MachineCommand::RotateToken { config, .. } => config,
         },
@@ -338,10 +381,38 @@ async fn run(args: Args) -> Result<(), String> {
                 .await
                 .map_err(|error| error.to_string())?;
             match command {
-                MachineCommand::Add { name, .. } => {
-                    let machine = machines::add(&pool, installation.owner_id, &name)
-                        .await
-                        .map_err(|_| "db_error".to_owned())?;
+                MachineCommand::Add {
+                    name,
+                    role,
+                    parent,
+                    root_dir,
+                    rank,
+                    labels,
+                    ..
+                } => {
+                    let machine = if role.as_deref() == Some(machines::ROLE_RUNNER) {
+                        let spec = machines::RunnerSpec {
+                            parent: parent.ok_or("parent_required")?,
+                            root_dir: root_dir.ok_or("root_dir_required")?,
+                            rank: rank.unwrap_or(0),
+                            labels,
+                        };
+                        machines::add_runner(&pool, installation.owner_id, &name, &spec)
+                            .await
+                            .map_err(|error| error.to_string())?
+                    } else {
+                        // Флаги раннера без `--role runner` — ошибка, а не молчаливое «worker».
+                        if parent.is_some()
+                            || root_dir.is_some()
+                            || rank.is_some()
+                            || !labels.is_empty()
+                        {
+                            return Err("runner_flags_need_role_runner".into());
+                        }
+                        machines::add(&pool, installation.owner_id, &name)
+                            .await
+                            .map_err(|_| "db_error".to_owned())?
+                    };
                     writeln!(
                         std::io::stdout().lock(),
                         "machine_id={}\ninstallation_id={}\nrestore_generation={}\ntoken={}",
@@ -351,6 +422,34 @@ async fn run(args: Args) -> Result<(), String> {
                         machine.token
                     )
                     .map_err(|_| "output_error".to_owned())?;
+                }
+                MachineCommand::SetCarrier {
+                    machine_id, off, ..
+                } => {
+                    machines::set_carrier(&pool, machine_id, !off)
+                        .await
+                        .map_err(|error| error.to_string())?;
+                }
+                MachineCommand::Set {
+                    machine_id,
+                    rank,
+                    labels,
+                    root_dir,
+                    ..
+                } => {
+                    let attrs = machines::MachineAttrs {
+                        rank,
+                        labels: labels.map(|labels| {
+                            labels
+                                .into_iter()
+                                .filter(|label| !label.is_empty())
+                                .collect()
+                        }),
+                        root_dir,
+                    };
+                    machines::set_attrs(&pool, machine_id, &attrs)
+                        .await
+                        .map_err(|error| error.to_string())?;
                 }
                 MachineCommand::RotateToken {
                     machine_id,

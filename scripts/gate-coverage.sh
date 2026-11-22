@@ -47,6 +47,8 @@ web_line=$(grep -E '^[[:space:]]*npx --no-install playwright test e2e/' "$web_ch
 [[ -n "$web_line" && $(printf '%s\n' "$web_line" | grep -c .) == 1 ]] \
     || fail 'check-web.sh: не одна полная команда Playwright вида «npx --no-install playwright test e2e/…»'
 web_filters=${web_line##*playwright test }
+# Команда может кончаться обработкой кода («… e2e/parity || ui_status=$?»): в фильтры это не входит.
+web_filters=${web_filters%%[[:space:]]||*}
 # test:stack может быть обёрткой над шардами (node scripts/stack-shards.mjs): она
 # зовёт ту же команду, что и test:stack:single, — «playwright test e2e/stack».
 stack_line=$(node -e "const s = require('./web/package.json').scripts; const v = s['test:stack'] || ''; process.stdout.write(v.startsWith('playwright test ') ? v : (s['test:stack:single'] || ''))")
@@ -136,10 +138,58 @@ for step in "${web_steps[@]}"; do
     printf '%s\n' "$web_code" | grep -qF -- "$step" || fail "check-web.sh: пропал шаг «$step»"
 done
 
+# --- контейнерный путь (gate-remote.sh, runner-gate.sh) = те же шаги ---
+# Гейт на раннере и gate-remote.sh --local гоняют scripts/gate/in-container.sh. Он не
+# перечисляет шаги заново, а зовёт сам scripts/gate.sh --no-attest: npm ci, check.sh --all
+# --no-web, наборы scripts/deploy/tests/run.sh и check-web.sh --stack идут оттуда же, поэтому
+# отдельного списка, который мог бы разойтись, нет. Проверяем: путь действительно
+# делегирует, не подменяет шаги и не пропускает наборы выката, а образ несёт то, что им нужно.
+runner_gate=scripts/gate/runner-gate.sh
+in_container=scripts/gate/in-container.sh
+gate_remote=scripts/gate-remote.sh
+dockerfile=docker/gate/Dockerfile
+for f in "$runner_gate" "$in_container" "$gate_remote" "$dockerfile"; do
+    [[ -f "$f" ]] || fail "нет $f"
+done
+container_code=$(grep -vE '^[[:space:]]*#' "$in_container")
+printf '%s\n' "$container_code" | grep -qE 'bash scripts/gate\.sh --no-attest' \
+    || fail 'in-container.sh не зовёт scripts/gate.sh --no-attest: контейнерный путь перестал совпадать с гейтом'
+printf '%s\n' "$container_code" | grep -qE 'CANTERLOT_NO_LEASE=1' \
+    || fail 'in-container.sh не отключает аренду: гейт в контейнере ждал бы воркер, которого там нет'
+# Шагов в контейнере по отдельности нет: каждый такой вызов был бы вторым списком.
+if printf '%s\n' "$container_code" | grep -qE 'scripts/check(-web)?\.sh|npm (ci|run)|deploy/tests/run\.sh'; then
+    fail 'in-container.sh вызывает шаги сам, а не через scripts/gate.sh: списки шагов могут разойтись'
+fi
+# Тестовые швы подменяют или пропускают шаги: в контейнерном пути их быть не должно.
+for f in "$in_container" "$runner_gate" "$gate_remote"; do
+    if grep -vE '^[[:space:]]*#' "$f" | grep -qE 'CANTERLOT_GATE_(STEP_|DEPLOY_NEEDED)'; then
+        fail "$f задаёт тестовые швы CANTERLOT_GATE_*: шаги гейта были бы подменены или пропущены"
+    fi
+done
+# Наборы выката идут в гейте и, значит, в контейнере; им нужны shellcheck и zstd,
+# а тестам носителя — openssh (ssh, ssh-keygen, sshd) и rsync для копирования файлов.
+printf '%s\n' "$code" | grep -q 'scripts/deploy/tests/run.sh' \
+    || fail 'gate.sh не зовёт scripts/deploy/tests/run.sh'
+for tool in shellcheck zstd openssh-client openssh-server rsync; do
+    grep -qE "^[[:space:]]+$tool( |\\\\|$)" "$dockerfile" \
+        || fail "docker/gate/Dockerfile: нет пакета $tool, нужного наборам scripts/deploy/tests и тестам носителя"
+done
+# runner-gate.sh гоняет именно in-container.sh из той же рабочей копии, а gate.sh
+# --runner — именно runner-gate.sh на полном sha.
+grep -vE '^[[:space:]]*#' "$runner_gate" | grep -q 'bash /build/in-container.sh' \
+    || fail 'runner-gate.sh не запускает in-container.sh'
+# shellcheck disable=SC2016 # ищем буквальный текст «$in_container», а не его значение
+grep -vE '^[[:space:]]*#' "$runner_gate" | grep -qF -- '"$in_container:/build/in-container.sh:ro"' \
+    || fail 'runner-gate.sh берёт in-container.sh не из рабочей копии'
+# shellcheck disable=SC2016 # ищем буквальный текст «$sha»
+printf '%s\n' "$code" | grep -qF 'scripts/gate/runner-gate.sh "$sha"' \
+    || fail 'gate.sh --runner не запускает scripts/gate/runner-gate.sh на полном sha'
+
 printf 'Не-Playwright шаги:\n'
 printf '  версия, fmt, clippy, nextest, речь                 %s\n' "$check"
 printf '  статические проверки, vitest, сборки, vitest.build, Playwright  %s\n' "$web_check"
 printf '  --no-web снимает только веб-этап, Rust и речь целы: да\n'
 printf '  один npm ci, check.sh --all --no-web, check-web.sh --stack: да\n'
 printf '  шаги не изменились: да\n'
+printf '  контейнерный путь (gate-remote.sh, runner-gate.sh) = scripts/gate.sh, наборы выката включены: да\n'
 printf 'Итог: покрытие совпадает\n'

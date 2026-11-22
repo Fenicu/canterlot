@@ -4,6 +4,8 @@ node_modules/
 .env
 *.local.toml
 /.superpowers/
+# Результаты гейта в контейнере (scripts/gate-remote.sh, scripts/gate/runner-gate.sh)
+/.gate-out/
 
 # PWA
 web/node_modules/

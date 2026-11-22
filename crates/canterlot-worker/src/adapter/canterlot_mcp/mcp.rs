@@ -163,7 +163,7 @@ pub enum ToolKind {
 }
 
 /// Агентские инструменты: имя MCP → имя инструмента хаба.
-pub const AGENT_TOOLS: [(&str, &str); 42] = [
+pub const AGENT_TOOLS: [(&str, &str); 43] = [
     ("canterlot_presets_list", "presets.list"),
     ("canterlot_preset_save", "presets.save"),
     ("canterlot_preset_apply", "presets.apply"),
@@ -206,6 +206,7 @@ pub const AGENT_TOOLS: [(&str, &str); 42] = [
     ("job_log", "job.log"),
     ("job_cancel", "job.cancel"),
     ("jobs_list", "jobs.list"),
+    ("runners_list", "runners.list"),
 ];
 
 /// Инструменты команд на месте: оболочка на машине с воркером. Это самый сильный класс:
@@ -226,7 +227,7 @@ pub const JOB_TOOLS: [&str; 5] = [
 /// `session_interrupt`, `session_stop`, `session_accept`, `spawn_cancel`, `nudge_set`,
 /// `nudge_clear`, `share_file`, `canterlot_preset_save`, `canterlot_preset_apply`,
 /// `plan_adopt`), решает режим. Имена без префикса сервера: адаптер добавляет свой.
-pub const MODE_FREE_TOOLS: [&str; 23] = [
+pub const MODE_FREE_TOOLS: [&str; 24] = [
     "canterlot_limits",
     "canterlot_presets_list",
     "sessions_list",
@@ -250,6 +251,7 @@ pub const MODE_FREE_TOOLS: [&str; 23] = [
     "memory_delete",
     "canterlot_routing_policy",
     "canterlot_spawn_whitelist",
+    "runners_list",
 ];
 
 fn is_session_tool(mcp_name: &str) -> bool {
@@ -294,6 +296,7 @@ fn is_session_tool(mcp_name: &str) -> bool {
             | "job_log"
             | "job_cancel"
             | "jobs_list"
+            | "runners_list"
     )
 }
 
@@ -430,7 +433,7 @@ fn session_tool_description(mcp_name: &str) -> &'static str {
             "Propose new text for one shared instruction preset to the owner: pass its id and text from canterlot_presets_list, a reason and that preset's base_revision. The hub validates the text like the settings screen and refuses an identical or stale value. Only the owner can allow or decline; the outcome arrives as a [canterlot] message. Do not repeat the call while the card is open."
         }
         "job_run" => {
-            "Run a shell command in place in a directory on a machine with a worker (yours by default, or another one named by `machine`, which must allow remote work): `bash -lc` in `workdir`, which must lie in your own memory domain. Needs bypass mode. Answers within `wait_seconds` (default 20, max 60) with {job_id, state, exit_code, duration_ms, output_tail, output_bytes, truncated}; otherwise answers {job_id, state, machine} at once and the result arrives later as one [canterlot] message, so end your turn instead of polling. `timeout_minutes` 1..1440 (default 30); `lease` none, build or gate queues the command behind the machine's resource lease; `env` takes at most 32 non-secret pairs. `idempotency_key` makes a repeat return the same job. A job survives your session: cancel it with job_cancel. Do not use it for work a delegate should do, and do not put secrets in `shell` or `env`."
+            "Run a shell command in place in a directory on a machine with a worker (yours by default, or another one named by `machine`, which must allow remote work): `bash -lc` in `workdir`, which must lie in your own memory domain. Needs bypass mode. Answers within `wait_seconds` (default 20, max 60) with {job_id, state, exit_code, duration_ms, output_tail, output_bytes, truncated}; otherwise answers {job_id, state, machine} at once and the result arrives later as one [canterlot] message, so end your turn instead of polling. `timeout_minutes` 1..1440 (default 30); `lease` none, build or gate queues the command behind the machine's resource lease; `env` takes at most 32 non-secret pairs. `idempotency_key` makes a repeat return the same job. Full gates and long builds go through job_run with machine \"auto\" and `source` {repo, rev}: the hub places the job on a free runner (or this carrier) that has every `labels` entry, the carrier stages that exact commit, `outputs` paths are collected afterwards, and the answer names the machine or says waiting_runner. `source.repo` must lie in your memory domain; without `source` the job needs `workdir`. A job survives your session: cancel it with job_cancel. Do not use it for work a delegate should do, and do not put secrets in `shell` or `env`."
         }
         "job_status" => {
             "Show a job of this session: state, exit code, duration and the last 32 KiB of output once it ended. A state `lost` means the machine stayed silent past the timeout; the worker's late word is shown as `late_report`. Do not call it in a loop to wait: the result arrives as a message."
@@ -443,6 +446,9 @@ fn session_tool_description(mcp_name: &str) -> &'static str {
         }
         "jobs_list" => {
             "List the jobs of this session, newest first, with state and machine; filter by `machine` or `state`, at most 50. Use it to recover a job id after a lost reply. Do not call it in a loop to wait: the result arrives as a message."
+        }
+        "runners_list" => {
+            "List the runners of this machine's carrier and this machine itself as `local`: name, role, availability with the age of the last observation, rank, labels, slots used and max, queued and running counts. Read-only. Use it to see which labels `job_run` with machine \"auto\" can place; do not call it in a loop to wait for a job."
         }
         _ => "Session tool.",
     }
@@ -811,8 +817,22 @@ fn session_input_schema(mcp_name: &str) -> Value {
         "job_run" => json!({
             "type": "object",
             "properties": {
-                "machine": {"type": "string", "description": "Machine name or id; this session's machine by default."},
-                "workdir": {"type": "string", "description": "Absolute directory on that machine, inside this session's memory domain."},
+                "machine": {"type": "string", "description": "Machine name or id; this session's machine by default; \"auto\" lets the hub place the job on a runner or this carrier (needs `source`)."},
+                "workdir": {"type": "string", "description": "Absolute directory on that machine, inside this session's memory domain. Needed without `source`; with `source` the hub chooses it."},
+                "labels": {"type": "array", "items": {"type": "string"}, "maxItems": 16, "description": "Labels the runner must have (with `source`)."},
+                "expected_minutes": {"type": "integer", "minimum": 1, "maximum": 1440, "default": 30, "description": "How long the job is expected to run (with `source`)."},
+                "placement": {"type": "array", "items": {"type": "string", "enum": ["local", "runner", "cloud"]}, "description": "Allowed kinds of place; all by default (with `source`)."},
+                "source": {
+                    "type": "object",
+                    "description": "Stage this exact commit from a repository on this machine: the carrier pushes it to the target and the job runs in a clean checkout.",
+                    "properties": {
+                        "repo": {"type": "string", "description": "Absolute path of the repository on this machine, inside this session's memory domain."},
+                        "rev": {"type": "string", "description": "Full 40-hex commit sha."},
+                    },
+                    "required": ["repo", "rev"],
+                    "additionalProperties": false,
+                },
+                "outputs": {"type": "array", "items": {"type": "string"}, "maxItems": 32, "description": "Relative paths in the job directory to collect onto the carrier after the run (with `source`)."},
                 "shell": {"type": "string", "description": "The command line for `bash -lc`; up to 64 KiB."},
                 "title": {"type": "string", "description": "Short label for the job card."},
                 "timeout_minutes": {"type": "integer", "minimum": 1, "maximum": 1440, "default": 30},
@@ -826,7 +846,7 @@ fn session_input_schema(mcp_name: &str) -> Value {
                 },
                 "idempotency_key": {"type": "string", "description": "A repeat with the same key returns the same job."},
             },
-            "required": ["workdir", "shell"],
+            "required": ["shell"],
             "additionalProperties": false,
         }),
         "job_status" | "job_cancel" => json!({
@@ -849,9 +869,14 @@ fn session_input_schema(mcp_name: &str) -> Value {
             "type": "object",
             "properties": {
                 "machine": {"type": "string"},
-                "state": {"type": "string", "enum": ["queued", "dispatched", "waiting_lease", "running", "succeeded", "failed", "timed_out", "canceled", "lost"]},
+                "state": {"type": "string", "enum": ["waiting_runner", "staging", "queued", "dispatched", "waiting_lease", "running", "collecting", "succeeded", "failed", "timed_out", "canceled", "lost"]},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 20},
             },
+            "additionalProperties": false,
+        }),
+        "runners_list" => json!({
+            "type": "object",
+            "properties": {},
             "additionalProperties": false,
         }),
         _ => json!({
