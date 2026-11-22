@@ -581,6 +581,23 @@ impl ProtocolHub {
             legacy_ignored: None,
         };
         let store = WorkerStore::open(&config.data_dir).unwrap();
+        // Тесты на остановленных часах tokio не должны зависеть от скорости
+        // registry.npmjs.org: стартовый `Probe::discover` воркера зовёт
+        // `LatestVersions::fetch` под `tokio::time::timeout`, который на паузе
+        // в реальном времени не срабатывает никогда. Запись дискового кэша
+        // с меткой из будущего свежа при любом реальном `now_ms` (срок 6 ч
+        // через `saturating_sub`), поэтому `latest` отдаётся без запросов в сеть.
+        // Часы здесь не читаем специально: храповик запрещает `SystemTime` в тестах.
+        let seeded = serde_json::json!({
+            "@anthropic-ai/claude-code": {"version": "0.0.0", "fetched_at_ms": u64::MAX},
+            "@openai/codex": {"version": "0.0.0", "fetched_at_ms": u64::MAX},
+            "opencode-ai": {"version": "0.0.0", "fetched_at_ms": u64::MAX},
+        });
+        fs::write(
+            config.data_dir.join(".npm-latest.json"),
+            serde_json::to_vec(&seeded).unwrap(),
+        )
+        .unwrap();
         (
             Self {
                 events: receiver,
