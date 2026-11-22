@@ -141,7 +141,7 @@ async fn budget_get(
 }
 
 /// Изменить бюджет и режим: устаревшая ревизия меняет ничего и даёт 409.
-#[utoipa::path(put,path="/api/v1/cloud/budget",tag="cloud",params(("Idempotency-Key"=String,Header,description="Ключ операции")),responses(
+#[utoipa::path(put,path="/api/v1/cloud/budget",tag="cloud",params(("Idempotency-Key"=String,Header,description="Ключ операции")),request_body=budget::Update,responses(
     (status=200,description="Новая ревизия настроек",body=budget::BudgetView),
     (status=409,description="Настройки изменились с другого устройства",body=super::error::ErrorEnvelope)
 ))]
@@ -217,7 +217,7 @@ struct ProposeBody {
 }
 
 /// Форма владельца «Запустить облачный раннер»: создаёт карточку, не окно.
-#[utoipa::path(post,path="/api/v1/cloud/proposals",tag="cloud",params(("Idempotency-Key"=String,Header,description="Ключ операции")),responses(
+#[utoipa::path(post,path="/api/v1/cloud/proposals",tag="cloud",params(("Idempotency-Key"=String,Header,description="Ключ операции")),request_body=ProposeBody,responses(
     (status=200,description="Карточка создана: владелец решает отдельно",body=Opened),
     (status=409,description="Облако выключено, есть живое окно или открытая карточка",body=super::error::ErrorEnvelope)
 ))]

@@ -2860,6 +2860,284 @@
         }
       }
     },
+    "/api/v1/cloud/budget": {
+      "get": {
+        "tags": [
+          "cloud"
+        ],
+        "summary": "Бюджет облака: настройки владельца, расход текущего месяца и цены профилей.",
+        "operationId": "get__api_v1_cloud_budget",
+        "responses": {
+          "200": {
+            "description": "Бюджет облака: месяц, расход, остаток, режим, ревизия, блок и профили с ценой часа",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BudgetView"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "cloud"
+        ],
+        "summary": "Изменить бюджет и режим: устаревшая ревизия меняет ничего и даёт 409.",
+        "operationId": "put__api_v1_cloud_budget",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "Ключ операции",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Update"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Новая ревизия настроек",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BudgetView"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Настройки изменились с другого устройства",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/cloud/budget/clear-block": {
+      "post": {
+        "tags": [
+          "cloud"
+        ],
+        "summary": "Снять блок провайдера: снова разрешить создание окон.",
+        "operationId": "post__api_v1_cloud_budget_clear_block",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "Ключ операции",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Блок снят (или его не было)",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/cloud/proposals": {
+      "post": {
+        "tags": [
+          "cloud"
+        ],
+        "summary": "Форма владельца «Запустить облачный раннер»: создаёт карточку, не окно.",
+        "operationId": "post__api_v1_cloud_proposals",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "Ключ операции",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProposeBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Карточка создана: владелец решает отдельно",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Opened"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Облако выключено, есть живое окно или открытая карточка",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/cloud/windows": {
       "get": {
         "tags": [
@@ -15639,6 +15917,65 @@
           }
         }
       },
+      "BudgetView": {
+        "type": "object",
+        "description": "Всё, что показывает экран бюджета владельца и инструмент `runners_list`.",
+        "required": [
+          "month",
+          "monthly_budget_kopecks",
+          "spent_kopecks",
+          "remaining_kopecks",
+          "auto_mode",
+          "revision",
+          "profiles"
+        ],
+        "properties": {
+          "auto_mode": {
+            "type": "boolean"
+          },
+          "month": {
+            "type": "string",
+            "description": "Месяц, за который посчитан расход (`YYYY-MM`, Европа/Москва)."
+          },
+          "monthly_budget_kopecks": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "profiles": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProfileView"
+            },
+            "description": "Профили из конфигурации с текущей ценой часа (только чтение)."
+          },
+          "provider_block_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "provider_block_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "remaining_kopecks": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "revision": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "spent_kopecks": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Законченные окна по итоговой цене плюс живые по резерву."
+          }
+        }
+      },
       "CacheHint": {
         "type": "object",
         "required": [
@@ -17384,6 +17721,7 @@
           "method_not_allowed",
           "idempotency_conflict",
           "draft_revision_conflict",
+          "stale_revision",
           "decision_conflict",
           "request_not_open",
           "decision_invalid",
@@ -21510,6 +21848,32 @@
           }
         }
       },
+      "Opened": {
+        "type": "object",
+        "required": [
+          "request_id",
+          "reservation_kopecks",
+          "over_budget",
+          "expires_at"
+        ],
+        "properties": {
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "over_budget": {
+            "type": "boolean"
+          },
+          "request_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "reservation_kopecks": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
       "OriginKind": {
         "type": "string",
         "description": "Кто написал найденное сообщение: владелец, другая сессия, бриф запуска или итог делегата.",
@@ -22915,6 +23279,46 @@
           }
         }
       },
+      "ProfileView": {
+        "type": "object",
+        "description": "Профиль в настройках бюджета: цена часа из провайдера на момент чтения.",
+        "required": [
+          "configurator_id",
+          "cpu",
+          "ram_gb",
+          "disk_gb",
+          "hourly_kopecks",
+          "availability_zone"
+        ],
+        "properties": {
+          "availability_zone": {
+            "type": "string"
+          },
+          "configurator_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "cpu": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "disk_gb": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "hourly_kopecks": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "ram_gb": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
       "PromptSuggestionSettings": {
         "type": "object",
         "required": [
@@ -22949,6 +23353,26 @@
             "description": "Предсказанное следующее сообщение владельца, не длиннее 2 КиБ."
           }
         }
+      },
+      "ProposeBody": {
+        "type": "object",
+        "required": [
+          "hours",
+          "reason"
+        ],
+        "properties": {
+          "hours": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Сколько часов: 1..=4.",
+            "minimum": 0
+          },
+          "reason": {
+            "type": "string",
+            "description": "Причина, которую увидит владелец на карточке."
+          }
+        },
+        "additionalProperties": false
       },
       "ProviderIncident": {
         "type": "object",
@@ -26367,6 +26791,28 @@
           "allow",
           "skip"
         ]
+      },
+      "Update": {
+        "type": "object",
+        "required": [
+          "monthly_budget_kopecks",
+          "auto_mode",
+          "base_revision"
+        ],
+        "properties": {
+          "auto_mode": {
+            "type": "boolean"
+          },
+          "base_revision": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "monthly_budget_kopecks": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "additionalProperties": false
       },
       "UpdateMemoryBody": {
         "type": "object",

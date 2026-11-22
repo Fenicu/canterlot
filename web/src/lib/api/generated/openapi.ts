@@ -527,6 +527,58 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/cloud/budget": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Бюджет облака: настройки владельца, расход текущего месяца и цены профилей. */
+        get: operations["get__api_v1_cloud_budget"];
+        /** Изменить бюджет и режим: устаревшая ревизия меняет ничего и даёт 409. */
+        put: operations["put__api_v1_cloud_budget"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/cloud/budget/clear-block": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Снять блок провайдера: снова разрешить создание окон. */
+        post: operations["post__api_v1_cloud_budget_clear_block"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/cloud/proposals": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Форма владельца «Запустить облачный раннер»: создаёт карточку, не окно. */
+        post: operations["post__api_v1_cloud_proposals"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/cloud/windows": {
         parameters: {
             query?: never;
@@ -2708,6 +2760,28 @@ export interface components {
             target_id: string;
             target_kind: components["schemas"]["TargetKind"];
         };
+        /** @description Всё, что показывает экран бюджета владельца и инструмент `runners_list`. */
+        BudgetView: {
+            auto_mode: boolean;
+            /** @description Месяц, за который посчитан расход (`YYYY-MM`, Европа/Москва). */
+            month: string;
+            /** Format: int64 */
+            monthly_budget_kopecks: number;
+            /** @description Профили из конфигурации с текущей ценой часа (только чтение). */
+            profiles: components["schemas"]["ProfileView"][];
+            /** Format: date-time */
+            provider_block_at?: string | null;
+            provider_block_code?: string | null;
+            /** Format: int64 */
+            remaining_kopecks: number;
+            /** Format: int64 */
+            revision: number;
+            /**
+             * Format: int64
+             * @description Законченные окна по итоговой цене плюс живые по резерву.
+             */
+            spent_kopecks: number;
+        };
         CacheHint: {
             /**
              * Format: int64
@@ -3200,7 +3274,7 @@ export interface components {
             scope: components["schemas"]["ErrorScope"];
         };
         /** @enum {string} */
-        ErrorCode: "unauthenticated" | "invalid_credentials" | "too_many_attempts" | "session_revoked" | "session_expired" | "reauth_required" | "wrong_password" | "qr_expired" | "qr_approvals_exhausted" | "passkey_rejected" | "no_passkeys" | "passkeys_unavailable" | "origin_rejected" | "invalid_request" | "invalid_offset" | "not_found" | "method_not_allowed" | "idempotency_conflict" | "draft_revision_conflict" | "decision_conflict" | "request_not_open" | "decision_invalid" | "resource_limit" | "not_implemented" | "too_many_requests" | "db_unavailable" | "internal" | "queue_full" | "conversation_closed" | "execution_already_live" | "invalid_state" | "not_pending" | "schedule_time_out_of_range" | "too_many_scheduled" | "schedule_invalid" | "schedule_revision_conflict" | "machine_not_found" | "machine_unavailable" | "machine_is_runner" | "machine_offline" | "not_open" | "not_delivered" | "limit" | "capability_missing" | "limits_mismatch" | "harness_unknown" | "model_unknown" | "effort_not_allowed" | "permission_mode_unknown" | "settings_midsession_unsupported" | "profile_unknown" | "workdir_not_allowed" | "resume_harness_unsupported" | "group_not_found" | "group_name_taken" | "archive_active" | "conversation_deleted" | "conversation_live" | "attachment_not_ready" | "attachment_not_uploadable" | "attachment_unsupported" | "attachment_unavailable" | "offset_mismatch" | "upload_in_progress" | "checksum_mismatch" | "attachment_conflict" | "preset_not_found" | "preset_builtin" | "preset_revision_conflict" | "preset_title_taken" | "preset_limit_reached" | "preset_invalid" | "message_snippet_not_found" | "message_snippet_revision_conflict" | "message_snippet_title_taken" | "message_snippet_limit_reached" | "message_snippet_invalid" | "spawn_whitelist_invalid" | "limit_settings_invalid" | "routing_policy_invalid" | "routing_policy_conflict" | "task_type_unknown" | "no_executor_available" | "not_delegated" | "worktree_removed" | "worktree_not_removed" | "too_many_terms" | "term_empty" | "term_too_long" | "duplicate_term" | "version_conflict" | "looks_like_secret" | "subject_exists" | "domain_full" | "bad_level";
+        ErrorCode: "unauthenticated" | "invalid_credentials" | "too_many_attempts" | "session_revoked" | "session_expired" | "reauth_required" | "wrong_password" | "qr_expired" | "qr_approvals_exhausted" | "passkey_rejected" | "no_passkeys" | "passkeys_unavailable" | "origin_rejected" | "invalid_request" | "invalid_offset" | "not_found" | "method_not_allowed" | "idempotency_conflict" | "draft_revision_conflict" | "stale_revision" | "decision_conflict" | "request_not_open" | "decision_invalid" | "resource_limit" | "not_implemented" | "too_many_requests" | "db_unavailable" | "internal" | "queue_full" | "conversation_closed" | "execution_already_live" | "invalid_state" | "not_pending" | "schedule_time_out_of_range" | "too_many_scheduled" | "schedule_invalid" | "schedule_revision_conflict" | "machine_not_found" | "machine_unavailable" | "machine_is_runner" | "machine_offline" | "not_open" | "not_delivered" | "limit" | "capability_missing" | "limits_mismatch" | "harness_unknown" | "model_unknown" | "effort_not_allowed" | "permission_mode_unknown" | "settings_midsession_unsupported" | "profile_unknown" | "workdir_not_allowed" | "resume_harness_unsupported" | "group_not_found" | "group_name_taken" | "archive_active" | "conversation_deleted" | "conversation_live" | "attachment_not_ready" | "attachment_not_uploadable" | "attachment_unsupported" | "attachment_unavailable" | "offset_mismatch" | "upload_in_progress" | "checksum_mismatch" | "attachment_conflict" | "preset_not_found" | "preset_builtin" | "preset_revision_conflict" | "preset_title_taken" | "preset_limit_reached" | "preset_invalid" | "message_snippet_not_found" | "message_snippet_revision_conflict" | "message_snippet_title_taken" | "message_snippet_limit_reached" | "message_snippet_invalid" | "spawn_whitelist_invalid" | "limit_settings_invalid" | "routing_policy_invalid" | "routing_policy_conflict" | "task_type_unknown" | "no_executor_available" | "not_delegated" | "worktree_removed" | "worktree_not_removed" | "too_many_terms" | "term_empty" | "term_too_long" | "duplicate_term" | "version_conflict" | "looks_like_secret" | "subject_exists" | "domain_full" | "bad_level";
         /** @description Детали ответа владельцу; содержимое решения не должно попадать в журналы ошибок. */
         ErrorDetails: {
             /** @description Разбор кандидатов маршрута (`no_executor_available`): не текст в `reason`. */
@@ -4446,6 +4520,15 @@ export interface components {
             events: components["schemas"]["NudgeEventView"][];
             rule?: components["schemas"]["NudgeRuleView"] | null;
         };
+        Opened: {
+            /** Format: date-time */
+            expires_at: string;
+            over_budget: boolean;
+            /** Format: uuid */
+            request_id: string;
+            /** Format: int64 */
+            reservation_kopecks: number;
+        };
         /**
          * @description Кто написал найденное сообщение: владелец, другая сессия, бриф запуска или итог делегата.
          * @enum {string}
@@ -4853,6 +4936,20 @@ export interface components {
             /** Format: int64 */
             rss_bytes: number;
         };
+        /** @description Профиль в настройках бюджета: цена часа из провайдера на момент чтения. */
+        ProfileView: {
+            availability_zone: string;
+            /** Format: int64 */
+            configurator_id: number;
+            /** Format: int32 */
+            cpu: number;
+            /** Format: int32 */
+            disk_gb: number;
+            /** Format: int64 */
+            hourly_kopecks: number;
+            /** Format: int32 */
+            ram_gb: number;
+        };
         PromptSuggestionSettings: {
             /** @description Подсказки следующего сообщения в пустом поле ввода сессий Claude Code. */
             enabled: boolean;
@@ -4864,6 +4961,15 @@ export interface components {
             execution_id: string;
             /** @description Предсказанное следующее сообщение владельца, не длиннее 2 КиБ. */
             text: string;
+        };
+        ProposeBody: {
+            /**
+             * Format: int32
+             * @description Сколько часов: 1..=4.
+             */
+            hours: number;
+            /** @description Причина, которую увидит владелец на карточке. */
+            reason: string;
         };
         /** @description Незакрытый инцидент страницы статуса. */
         ProviderIncident: {
@@ -5878,6 +5984,13 @@ export interface components {
         TodoStatus: "pending" | "in_progress" | "completed" | "cancelled";
         /** @enum {string} */
         UnknownLimits: "allow" | "skip";
+        Update: {
+            auto_mode: boolean;
+            /** Format: int64 */
+            base_revision: number;
+            /** Format: int64 */
+            monthly_budget_kopecks: number;
+        };
         UpdateMemoryBody: {
             body?: string | null;
             /** @description Обязателен: `work` или `personal`. */
@@ -7773,6 +7886,175 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ClaudeAutoMemorySettings"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get__api_v1_cloud_budget: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Бюджет облака: месяц, расход, остаток, режим, ревизия, блок и профили с ценой часа */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BudgetView"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    put__api_v1_cloud_budget: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Ключ операции */
+                "Idempotency-Key": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["Update"];
+            };
+        };
+        responses: {
+            /** @description Новая ревизия настроек */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BudgetView"];
+                };
+            };
+            /** @description Настройки изменились с другого устройства */
+            409: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    post__api_v1_cloud_budget_clear_block: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Ключ операции */
+                "Idempotency-Key": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Блок снят (или его не было) */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    post__api_v1_cloud_proposals: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Ключ операции */
+                "Idempotency-Key": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProposeBody"];
+            };
+        };
+        responses: {
+            /** @description Карточка создана: владелец решает отдельно */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Opened"];
+                };
+            };
+            /** @description Облако выключено, есть живое окно или открытая карточка */
+            409: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
