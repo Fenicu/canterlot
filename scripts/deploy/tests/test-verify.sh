@@ -609,6 +609,62 @@ assert_contains "${FAKE_ROOT}/verify.log" "capability check: machine lacks brand
 teardown_case
 case_end
 
+# --- Условные возможности воркера: verifier повторяет правило advertised_capabilities ---
+case_begin "verify ignores runners_v1 when the worker has no runners configured"
+setup_verify conditional-runners-absent
+write_expect "claude_histories_v1 runners_v1 path_probe_v1" "claude_code"
+printf '\n[claude_code]\n' >>"${WORKER_CONFIG}"
+# Машина не объявляет runners_v1 (значение FAKE_CAPABILITIES по умолчанию), конфиг без [[runners.ssh]].
+if run_verify; then case_ok "verify PASS without runners_v1"; else case_fail "verify failed"; grep -E 'HARD|FATAL' "${FAKE_ROOT}/verify.log" | head -5; fi
+assert_contains "${FAKE_ROOT}/verify.log" "capability runners_v1 is not required: worker.toml has no [[runners.ssh]] entry, so the worker is not a carrier" "runners_v1 dropped with a reason"
+assert_contains "${FAKE_ROOT}/verify.log" "capabilities present: claude_histories_v1, path_probe_v1 (source: ${FAKE_ROOT}/dist/${SHA_PREV}/EXPECT)" "only the required capabilities are checked"
+teardown_case
+case_end
+
+case_begin "verify still requires runners_v1 when the worker carries runners"
+setup_verify conditional-runners-present
+write_expect "claude_histories_v1 runners_v1 path_probe_v1" "claude_code"
+printf '\n[claude_code]\n[[runners.ssh]]\nmachine = "runner-a"\nssh = "build-host"\n' >>"${WORKER_CONFIG}"
+if run_verify; then case_fail "verify passed without runners_v1"; else case_ok "verify failed"; fi
+assert_contains "${FAKE_ROOT}/verify.log" "capability check: machine lacks runners_v1" "runners_v1 required for a carrier"
+assert_not_contains "${FAKE_ROOT}/verify.log" "capability runners_v1 is not required" "runners_v1 not dropped for a carrier"
+teardown_case
+case_end
+
+case_begin "verify ignores claude_histories_v1 when [claude_code] is absent"
+setup_verify conditional-claude-absent
+write_expect "claude_histories_v1 path_probe_v1" "claude_code"
+export FAKE_CAPABILITIES="path_probe_v1,pilot_v1,session_tools_v1"
+if run_verify; then case_ok "verify PASS without claude_histories_v1"; else case_fail "verify failed"; grep -E 'HARD|FATAL' "${FAKE_ROOT}/verify.log" | head -5; fi
+assert_contains "${FAKE_ROOT}/verify.log" "capability claude_histories_v1 is not required: worker.toml has no [claude_code] table, so the worker does not declare it" "claude_histories_v1 dropped with a reason"
+assert_contains "${FAKE_ROOT}/verify.log" "capabilities present: path_probe_v1 (source: ${FAKE_ROOT}/dist/${SHA_PREV}/EXPECT)" "only the required capabilities are checked"
+unset FAKE_CAPABILITIES
+teardown_case
+case_end
+
+case_begin "verify keeps every other EXPECT capability strictly required"
+setup_verify conditional-other-required
+write_expect "claude_histories_v1 runners_v1 path_probe_v1" "claude_code"
+printf '\n[[runners.ssh]]\nmachine = "runner-a"\nssh = "build-host"\n' >>"${WORKER_CONFIG}"
+export FAKE_CAPABILITIES="claude_histories_v1,runners_v1,pilot_v1"
+if run_verify; then case_fail "verify passed without path_probe_v1"; else case_ok "verify failed"; fi
+assert_contains "${FAKE_ROOT}/verify.log" "capability check: machine lacks path_probe_v1" "unconditional capability still required"
+unset FAKE_CAPABILITIES
+teardown_case
+case_end
+
+case_begin "verify conditional capability list matches the worker filters"
+setup_verify conditional-sync
+if python3 -I "${REPO_ROOT}/scripts/deploy/tests/capability-sync-check.py" \
+        "${REPO_ROOT}/crates/canterlot-worker/src/session.rs" \
+        "${REPO_ROOT}/scripts/deploy/verify.sh" >"${FAKE_ROOT}/state/sync.log" 2>&1; then
+    case_ok "worker and verifier list the same conditional capabilities"
+else
+    case_fail "conditional capability lists are out of sync"; sed -n '1,5p' "${FAKE_ROOT}/state/sync.log"
+fi
+teardown_case
+case_end
+
 case_begin "a release that drops a harness needs no toolkit change"
 setup_verify expect-dropped
 write_expect "claude_histories_v1" "claude_code codex"
@@ -633,7 +689,9 @@ case_begin "verify without EXPECT falls back to the built-in list with a warning
 setup_verify expect-absent
 if run_verify; then case_ok "verify PASS"; else case_fail "verify failed"; fi
 assert_contains "${FAKE_ROOT}/verify.log" "WARNING: no ${FAKE_ROOT}/dist/${SHA_PREV}/EXPECT" "fallback warned"
-assert_contains "${FAKE_ROOT}/verify.log" "capabilities present: claude_histories_v1, path_probe_v1 (source: fallback)" "fallback list used"
+assert_contains "${FAKE_ROOT}/verify.log" "capabilities present: path_probe_v1 (source: fallback)" "fallback list filtered"
+assert_contains "${FAKE_ROOT}/verify.log" "capability claude_histories_v1 is not required: worker.toml has no [claude_code] table, so the worker does not declare it" "fallback capability dropped too"
+assert_contains "${FAKE_ROOT}/verify.log" "harness catalog has claude_code, codex, opencode" "fallback harness list kept"
 teardown_case
 case_end
 
