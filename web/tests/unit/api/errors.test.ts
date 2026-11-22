@@ -92,6 +92,7 @@ const ALL_ERROR_CODES: ErrorCode[] = [
   "message_snippet_limit_reached",
   "message_snippet_invalid",
   "spawn_whitelist_invalid",
+  "stale_revision",
   "limit_settings_invalid",
   "routing_policy_invalid",
   "routing_policy_conflict",
@@ -148,7 +149,7 @@ describe("api/errors", () => {
   });
 
   it("error_actions_cover_every_code_in_the_api_error_table", () => {
-    expect(ALL_ERROR_CODES.length).toBe(95);
+    expect(ALL_ERROR_CODES.length).toBe(96);
 
     for (const code of ALL_ERROR_CODES) {
       const err = new ApiError(
