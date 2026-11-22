@@ -327,6 +327,8 @@ message AttachRunner {
   string root_dir = 5;
   uint32 max_running = 6;
   uint32 lease_slots = 7;
+  // Порт SSH на `host`: публичный порт DNAT роутера облака; 0 — 22.
+  uint32 ssh_port = 8;
 }
 
 // Подготовить исходники: `git push --no-verify` sha `rev` из `repo` в голый репозиторий
