@@ -421,7 +421,7 @@ async fn retry_after_beyond_the_bound_is_not_waited_for() {
 // ---- чтение сервера ----
 
 #[tokio::test]
-async fn get_server_reports_status_and_address_once_booted() {
+async fn get_server_reports_status_once_booted_without_a_public_address() {
     let rig = rig_with(|_| {}).await;
     rig.fake.control().boot_polls = 2;
     let CreateOutcome::Created { server_id } = rig
@@ -439,7 +439,8 @@ async fn get_server_reports_status_and_address_once_booted() {
     assert_eq!(state.status, ServerStatus::Installing);
     assert_eq!(state.ipv4, None);
 
-    // Второй опрос ещё `installing`, третий уже `on` с адресом.
+    // Второй опрос ещё `installing`, третий уже `on`; публичного адреса у сервера нет —
+    // доступ идёт через NAT роутера.
     let ServerLookup::Found(state) = rig.provider.get_server(server_id).await.unwrap() else {
         panic!("not found");
     };
@@ -448,8 +449,7 @@ async fn get_server_reports_status_and_address_once_booted() {
         panic!("not found");
     };
     assert_eq!(state.status, ServerStatus::On);
-    let address = state.ipv4.expect("address after boot");
-    assert!(address.starts_with("203.0.113."), "{address}");
+    assert_eq!(state.ipv4, None);
 }
 
 #[tokio::test]

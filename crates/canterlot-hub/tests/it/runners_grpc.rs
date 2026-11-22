@@ -301,7 +301,7 @@ async fn the_cloud_runner_is_listed_and_gets_its_token_only_while_a_window_serve
     // Окно создано, сервер найден (`identified`), раннера `cloud` ещё нет в базе.
     let config: canterlot_hub::config::CloudConfig = toml::from_str(&format!(
         "provider='timeweb'\ntoken_file='t'\nproject_id=1\n\
-         network_id='network-example'\nrouter_id='018f0000-0000-7000-8000-0000000000aa'\n\
+         network_id='network-example'\nnetwork_cidr='192.0.2.0/24'\nrouter_id='018f0000-0000-7000-8000-0000000000aa'\n\
          router_ip='192.0.2.1'\ngateway='192.0.2.5'\n\
          local_ip_pool='192.0.2.10-192.0.2.60'\ndnat_port_range='22100-22199'\n\
          runner_public_key='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLE'\n\
