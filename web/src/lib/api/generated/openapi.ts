@@ -2801,12 +2801,13 @@ export interface components {
             hard_cap_at?: string | null;
             /** Format: uuid */
             id: string;
-            ipv4?: string | null;
             /**
-             * Format: int64
-             * @description Цена часа публичного IPv4 (входит в резерв и в итог).
+             * Format: int32
+             * @description Публичный порт DNAT-правила роутера для SSH.
              */
-            ipv4_hourly_kopecks: number;
+            dnat_port?: number | null;
+            /** @description Локальный адрес сервера в приватной сети. */
+            local_ip?: string | null;
             last_error?: string | null;
             month: string;
             name: string;
