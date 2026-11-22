@@ -1734,7 +1734,7 @@ async fn secret_value_reaches_only_the_file_and_never_the_stores(pool: PgPool) {
     let p = Pilot::new(
         &pool,
         PilotOptions {
-            secrets: base.config(),
+            secrets: Some(base.config()),
             ..Default::default()
         },
     )
@@ -1934,7 +1934,7 @@ async fn a_declined_request_never_creates_a_file(pool: PgPool) {
     let p = Pilot::new(
         &pool,
         PilotOptions {
-            secrets: base.config(),
+            secrets: Some(base.config()),
             ..Default::default()
         },
     )

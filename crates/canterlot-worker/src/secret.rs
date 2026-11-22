@@ -2902,4 +2902,34 @@ mod tests {
             "bytes stay intact"
         );
     }
+
+    #[test]
+    fn a_second_worker_with_a_fresh_data_dir_does_not_wipe_a_live_secret() {
+        // Второй воркер с чистым `data_dir` и той же базой (тестовый воркер рядом
+        // с боевым): старт обязан сохранить живой файл, а не очистить корень.
+        // На коде до исправления вторая подготовка стирала базу целиком.
+        let prod_data = tempfile::tempdir().unwrap();
+        let test_data = tempfile::tempdir().unwrap();
+        let base = TestBase::new();
+        let (conversation, request_id) = (Uuid::now_v7(), Uuid::now_v7());
+        prepare_storage_with_default(&base.config(), prod_data.path(), None).unwrap();
+        let written = deliver(
+            &base.config(),
+            &request(conversation, request_id, 1, "value\n"),
+            &live_set(conversation),
+        )
+        .unwrap();
+        prepare_storage_with_default(&base.config(), test_data.path(), None)
+            .expect("a second worker starts");
+        let recovered = recover(&base.config());
+        assert_eq!(recovered.values, 0);
+        let swept = sweep(&base.config(), now_ms());
+        assert!(swept.removed.is_empty());
+        assert!(written.path.exists(), "a live file survives a second worker");
+        assert_eq!(
+            std::fs::read(&written.path).unwrap(),
+            b"value\n",
+            "bytes stay intact"
+        );
+    }
 }

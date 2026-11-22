@@ -32,6 +32,7 @@ use uuid::Uuid;
 #[path = "process_guard.rs"]
 mod process_guard;
 use process_guard::ProcessGuard;
+use crate::support::TempSecrets;
 
 pub const WAIT: Duration = Duration::from_secs(20);
 pub async fn until(mut condition: impl AsyncFnMut() -> bool) {
@@ -80,6 +81,7 @@ pub struct Fixture {
     pub probe: SessionProbe,
     pub store_probe: StoreProbe,
     pub worker: Option<RunningWorker>,
+    _secrets: TempSecrets,
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
@@ -131,8 +133,7 @@ impl Fixture {
         fs::write(&ca_cert, &hub.pki.ca_pem).unwrap();
         let work = root.path().join("work");
         fs::create_dir(&work).unwrap();
-        let executable = if hold_gate {
-            let wrapper = root.path().join("supervisor");
+        let executable = if hold_gate {            let wrapper = root.path().join("supervisor");
             fake_exec::write_executable(
                 &wrapper,
                 format!(
@@ -145,8 +146,9 @@ impl Fixture {
         } else {
             env!("CARGO_BIN_EXE_canterlot-worker").into()
         };
+        let secrets_guard = TempSecrets::new();
         let config = WorkerConfig {
-            secrets: Default::default(),
+            secrets: secrets_guard.config(),
             memory: Default::default(),
             jobs: Default::default(),
             hub_url: format!("https://localhost:{}", hub.addr.port()),
@@ -208,6 +210,7 @@ impl Fixture {
             probe: Default::default(),
             store_probe: Default::default(),
             worker: None,
+            _secrets: secrets_guard,
         };
         f.start_worker().await;
         f.execution = executions::start(pool, owner, conversation, Uuid::now_v7())

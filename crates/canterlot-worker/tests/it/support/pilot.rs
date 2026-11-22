@@ -40,6 +40,7 @@ use tokio::{
 use uuid::Uuid;
 
 use super::process_guard::ProcessGuard;
+use crate::support::TempSecrets;
 
 pub const WAIT: Duration = Duration::from_secs(40);
 
@@ -370,8 +371,9 @@ pub struct PilotOptions {
     pub activity: ActivityConfig,
     pub metrics_interval: Duration,
     pub claude_code: Option<ClaudeCodeConfig>,
-    /// Файлы секретов: тесты кладут базу на tmpfs, а не в `$XDG_RUNTIME_DIR`.
-    pub secrets: canterlot_worker::config::SecretConfig,
+    /// Файлы секретов: `None` — временная база на tmpfs, которую создаёт стенд;
+    /// тестовый воркер никогда не трогает `$XDG_RUNTIME_DIR`.
+    pub secrets: Option<canterlot_worker::config::SecretConfig>,
 }
 
 impl Default for PilotOptions {
@@ -391,7 +393,7 @@ impl Default for PilotOptions {
             },
             metrics_interval: Duration::from_secs(30),
             claude_code: None,
-            secrets: Default::default(),
+            secrets: None,
         }
     }
 }
@@ -411,6 +413,7 @@ pub struct Pilot {
     pub worker: Option<RunningWorker>,
     pub guard: ProcessGuard,
     pub _root: TempDir,
+    _secrets: Option<TempSecrets>,
 }
 
 impl Drop for Pilot {
@@ -463,6 +466,15 @@ impl Pilot {
         let work = root.path().join("work");
         fs::create_dir(&work).unwrap();
         let work = fs::canonicalize(work).unwrap();
+        // Тестовый воркер никогда не трогает боевой корень секретов: без явной
+        // базы ему выдаётся временная на tmpfs.
+        let (secrets, secrets_guard) = match options.secrets {
+            Some(explicit) => (explicit, None),
+            None => {
+                let guard = TempSecrets::new();
+                (guard.config(), Some(guard))
+            }
+        };
         let config = WorkerConfig {
             hub_url: format!("https://localhost:{}", hub.addr.port()),
             ca_cert,
@@ -500,7 +512,7 @@ impl Pilot {
             legacy_ignored: None,
             hub_dial: None,
             runners: Default::default(),
-            secrets: options.secrets,
+            secrets,
             memory: Default::default(),
             jobs: Default::default(),
         };
@@ -516,6 +528,7 @@ impl Pilot {
             worker: None,
             guard,
             _root: root,
+            _secrets: secrets_guard,
         };
         pilot.start_worker().await;
         until("machine report applied", async || {
