@@ -9,11 +9,11 @@
 # рабочей копии, с VM не копируется ничего. Скрипт:
 #   1. проверяет, что HEAD равен sha, и находит корень раннера по пути рабочей копии
 #      (без <корень>/worker.toml это не раннер, и скрипт отказывает);
-#   2. собирает образ canterlot-gate:<hash Dockerfile + rust-toolchain.toml + версия
-#      Playwright> или переиспользует готовый;
+#   2. собирает образ canterlot-gate:<hash Dockerfile + rust-toolchain.toml> или
+#      переиспользует готовый;
 #   3. запускает контейнер canterlot-gate-<sha12>-<случайное> с --cpus и --memory от
 #      nproc и free (хосту остаются 2 ядра и 4 ГБ) и кэшами <корень>/cache/{cargo,
-#      target,npm,playwright,tmp}; по TERM и INT контейнер убивается по имени;
+#      target,npm,tmp}; по TERM и INT контейнер убивается по имени;
 #   4. кладёт result.txt, state.tsv и логи в ./.gate-out (его собирает носитель) и
 #      дописывает в state.tsv строку «runner<TAB>имя»: имя из CANTERLOT_RUNNER_NAME,
 #      иначе имя хоста.
@@ -56,30 +56,27 @@ in_container="$wt/scripts/gate/in-container.sh"
 [[ -f "$dockerfile" && -f "$in_container" ]] || die 'в рабочей копии нет docker/gate/Dockerfile или scripts/gate/in-container.sh'
 rust_version=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
 [[ -n "$rust_version" ]] || die 'в rust-toolchain.toml нет channel'
-playwright_version=$(jq -r '.packages["node_modules/playwright-core"].version // empty' web/package-lock.json)
-[[ -n "$playwright_version" ]] || die 'в web/package-lock.json нет playwright-core'
-image_tag=$({ cat "$dockerfile" rust-toolchain.toml; printf '%s\n' "$playwright_version"; } | sha256sum | cut -c1-12)
+image_tag=$({ cat "$dockerfile" rust-toolchain.toml; } | sha256sum | cut -c1-12)
 image="canterlot-gate:$image_tag"
 
 # Ограничения: хосту остаются 2 ядра и 4 ГБ. pids 8192, init, shm и SYS_PTRACE — по тем же
-# причинам, что в scripts/gate-remote.sh (Playwright, супервизоры, strace в тестах).
+# причинам, что в scripts/gate-remote.sh (супервизоры, strace в тестах).
 cpus=$(($(nproc) - 2))
 ((cpus >= 1)) || cpus=1
 mem_mb=$(($(free -m | awk '/^Mem:/{print $2}') - 4096))
 ((mem_mb >= 2048)) || mem_mb=2048
 cache="$root/cache"
-mkdir -p "$cache/cargo" "$cache/target" "$cache/npm" "$cache/playwright" "$cache/tmp"
+mkdir -p "$cache/cargo" "$cache/target" "$cache/npm" "$cache/tmp"
 out="$wt/.gate-out"
 mkdir -p "$out"
 [[ -z "$(ls -A "$out")" ]] || die "каталог $out не пуст"
 
-log "коммит $sha12, раннер $root, образ $image (Rust $rust_version, Playwright $playwright_version)"
+log "коммит $sha12, раннер $root, образ $image (Rust $rust_version)"
 if "$docker_cmd" image inspect "$image" >/dev/null 2>&1; then
     log 'образ уже есть'
 else
     "$docker_cmd" build -t "$image" \
         --build-arg "RUST_VERSION=$rust_version" \
-        --build-arg "PLAYWRIGHT_VERSION=$playwright_version" \
         -f "$dockerfile" "$wt/docker/gate" || die 'не удалось собрать образ'
 fi
 
@@ -116,12 +113,10 @@ run_args=(
     -v "$cache/cargo:/cache/cargo"
     -v "$cache/target:/src/target"
     -v "$cache/npm:/cache/npm"
-    -v "$cache/playwright:/cache/playwright"
     -v "$out:/out"
     -v "$in_container:/build/in-container.sh:ro"
     -e CARGO_HOME=/cache/cargo
     -e npm_config_cache=/cache/npm
-    -e PLAYWRIGHT_BROWSERS_PATH=/cache/playwright
     -w /src
 )
 log "контейнер $name: --cpus $cpus --memory ${mem_mb}m"

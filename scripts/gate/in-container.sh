@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Полный гейт Canterlot внутри контейнера canterlot-gate: тот же scripts/gate.sh, что
-# идёт на VM (npm ci, check.sh --all --no-web, наборы выката, check-web.sh --stack),
+# идёт на VM (npm ci, check.sh --all --no-web, наборы выката, check-web.sh),
 # со своей PostgreSQL на 127.0.0.1:55441.
 #
 #   scripts/gate/in-container.sh --src DIR --out DIR --sha SHA12
@@ -14,12 +14,10 @@
 #                     (npm-ci.log, check.log, deploy.log, web.log) из scripts/gate.sh,
 #                     gate.log с его выводом;
 #   /cache/cargo      CARGO_HOME;
-#   /cache/npm        npm_config_cache;
-#   /cache/playwright PLAYWRIGHT_BROWSERS_PATH, пустой кэш наполняется браузерами
-#                     из образа (/opt/ms-playwright).
+#   /cache/npm        npm_config_cache.
 #
 # Формат result.txt и state.tsv — как у scripts/gate.sh: строка с кодами возврата и
-# временами, затем сводка nextest, сводка Playwright и первые упавшие тесты.
+# временами, затем сводка nextest и первые упавшие тесты.
 set -euo pipefail
 
 # Локаль — C.UTF-8 из образа, как на VM. LC_ALL=C ломает тесты супервизоров:
@@ -48,7 +46,6 @@ port=${CANTERLOT_TEST_PG_PORT:-55441}
 export CANTERLOT_TEST_PG_PORT="$port"
 export CARGO_HOME=${CARGO_HOME:-/usr/local/cargo}
 export npm_config_cache=${npm_config_cache:-$HOME/.npm}
-export PLAYWRIGHT_BROWSERS_PATH=${PLAYWRIGHT_BROWSERS_PATH:-/opt/ms-playwright}
 
 # Короткий TMPDIR: путь сокета исполнения — <runtime>/canterlot/<uuid>.sock, а
 # canterlot-worker::supervisor::ipc отвергает путь длиннее 107 байт. Ровно /tmp,
@@ -74,20 +71,6 @@ if [[ -z "$(getent passwd "$(id -u)" || true)" ]]; then
     export LD_PRELOAD=libnss_wrapper.so
 fi
 
-# Playwright берёт 50% от nproc, но nproc в контейнере — потоки хоста, а не квота
-# --cpus. На 30 CPU квоты 18 воркеров с Chromium и Firefox не успевают довести
-# страницу до [data-ready] за 15 с, и тесты падают по таймауту. Один воркер на
-# ~4 CPU квоты: тот же набор проверок, но без гонки за процессор.
-if [[ -z "${PW_WORKERS:-}" && -r /sys/fs/cgroup/cpu.max ]]; then
-    read -r quota period </sys/fs/cgroup/cpu.max
-    if [[ "$quota" != "max" && -n "${period:-}" ]]; then
-        PW_WORKERS=$((quota / period / 4))
-        ((PW_WORKERS < 4)) && PW_WORKERS=4
-        export PW_WORKERS
-    fi
-fi
-printf 'браузерных воркеров: %s\n' "${PW_WORKERS:-по умолчанию (50%% nproc)}"
-
 started=$SECONDS
 phase() { printf '\n==> %s\n' "$1"; phase_started=$SECONDS; }
 phase_done() { printf '    %s: %ds\n' "$1" $((SECONDS - phase_started)); }
@@ -98,8 +81,8 @@ printf 'гейт %s: src=%s out=%s, pg=127.0.0.1:%s\n' "$sha" "$src" "$out" "$po
 printf 'cargo: %s, node: %s, psql: %s\n' "$(cargo --version)" "$(node --version)" "$(psql --version)"
 
 # --- тестовая PostgreSQL ---
-# scripts/test-db.sh поднимает docker-контейнер и на VM, и в стенде
-# (e2e/stack/global-setup.ts зовёт его напрямую). Внутри контейнера docker нет:
+# scripts/test-db.sh поднимает docker-контейнер и на VM, и в гейте.
+# Внутри контейнера docker нет:
 # база уже поднята здесь же, поэтому подменяем docker заглушкой, которая отвечает
 # «контейнер есть» и проверяет готовность локального pg_isready.
 phase "тестовая PostgreSQL"
@@ -154,19 +137,10 @@ export PATH="$shim:$PATH"
 pg_isready -h 127.0.0.1 -p "$port" -U canterlot -d canterlot >/dev/null || die "pg_isready не видит базу"
 phase_done "PostgreSQL"
 
-# --- браузеры Playwright ---
-phase "браузеры Playwright"
-if [[ -z "$(ls -A "$PLAYWRIGHT_BROWSERS_PATH" 2>/dev/null)" ]]; then
-    mkdir -p "$PLAYWRIGHT_BROWSERS_PATH"
-    cp -a /opt/ms-playwright/. "$PLAYWRIGHT_BROWSERS_PATH/" || die "не удалось наполнить кэш браузеров"
-fi
-printf '    в кэше: %s\n' "$(find "$PLAYWRIGHT_BROWSERS_PATH" -mindepth 1 -maxdepth 1 -printf '%f ')"
-phase_done "браузеры"
-
 # --- сам гейт: scripts/gate.sh ---
 # Шаги не перечисляются здесь заново: контейнер гоняет тот же scripts/gate.sh, что и VM
-# (npm ci, check.sh --all --no-web, наборы scripts/deploy/tests/run.sh, check-web.sh
-# --stack), без аттестации и без аренды (воркера в контейнере нет). Покрытие проверяет
+# (npm ci, check.sh --all --no-web, наборы scripts/deploy/tests/run.sh, check-web.sh),
+# без аттестации и без аренды (воркера в контейнере нет). Покрытие проверяет
 # scripts/gate-coverage.sh. Дерево с чужим HEAD гейт бы не заметил, поэтому sha проверяется.
 [[ "$(git -C "$src" rev-parse --short=12 HEAD)" == "$want_sha" ]] \
     || die "HEAD в $src не $want_sha"
