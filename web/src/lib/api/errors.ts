@@ -112,6 +112,10 @@ const ERROR_TABLE: Record<ErrorCode, ErrorDescriptor> = {
     action: "none",
     message: "Черновик уже изменён с другого устройства",
   },
+  stale_revision: {
+    action: "reload",
+    message: "Настройки облака изменились, обновите их",
+  },
   decision_conflict: {
     action: "none",
     message: "Решение уже принято с другого устройства",
