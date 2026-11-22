@@ -19,6 +19,10 @@ pub struct TestSshd {
     pub dir: TempDir,
     /// `ssh_config` с псевдонимом [`ALIAS`]; передаётся носителю как `-F`.
     pub ssh_config: PathBuf,
+    port: u16,
+    host_key_public: PathBuf,
+    client_key: PathBuf,
+    user: String,
     child: Option<Child>,
 }
 
@@ -123,6 +127,10 @@ impl TestSshd {
         });
         Self {
             ssh_config: base.join("ssh_config"),
+            port,
+            host_key_public: base.join("host_key.pub"),
+            client_key,
+            user,
             dir,
             child: Some(child),
         }
@@ -130,6 +138,26 @@ impl TestSshd {
 
     pub fn path(&self) -> &Path {
         self.dir.path()
+    }
+
+    /// Случайный высокий порт: в тесте облачного подключения он стоит вместо DNAT-порта роутера.
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    /// Открытая строка хостового ключа `ssh-ed25519 <base64>` для pinning'а.
+    pub fn host_key_public(&self) -> String {
+        fs::read_to_string(&self.host_key_public).unwrap().trim().to_owned()
+    }
+
+    /// Путь к закрытому ключу клиента: в тесте заменяет `[runners].ssh_key`.
+    pub fn client_key(&self) -> &Path {
+        &self.client_key
+    }
+
+    /// Имя пользователя, под которым пускает тестовый `sshd`.
+    pub fn user(&self) -> &str {
+        &self.user
     }
 }
 
