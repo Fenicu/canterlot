@@ -265,7 +265,11 @@ impl Runner {
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                return Err(if connected { "ready_timeout" } else { "ssh_unreachable" });
+                return Err(if connected {
+                    "ready_timeout"
+                } else {
+                    "ssh_unreachable"
+                });
             }
             let limit = self.shared.timings.ssh_limit.min(remaining);
             match self.ssh.raw(&["test", "-f", &marker], limit).await {
@@ -276,7 +280,11 @@ impl Runner {
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                return Err(if connected { "ready_timeout" } else { "ssh_unreachable" });
+                return Err(if connected {
+                    "ready_timeout"
+                } else {
+                    "ssh_unreachable"
+                });
             }
             tokio::time::sleep(backoff.min(remaining)).await;
             backoff = (backoff * 2).min(self.shared.timings.backoff_max);

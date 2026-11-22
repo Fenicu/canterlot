@@ -147,7 +147,10 @@ impl TestSshd {
 
     /// Открытая строка хостового ключа `ssh-ed25519 <base64>` для pinning'а.
     pub fn host_key_public(&self) -> String {
-        fs::read_to_string(&self.host_key_public).unwrap().trim().to_owned()
+        fs::read_to_string(&self.host_key_public)
+            .unwrap()
+            .trim()
+            .to_owned()
     }
 
     /// Путь к закрытому ключу клиента: в тесте заменяет `[runners].ssh_key`.

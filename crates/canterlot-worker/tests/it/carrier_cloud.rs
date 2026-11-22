@@ -34,7 +34,7 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::{
-    sshd::{TestSshd},
+    sshd::TestSshd,
     support::{Behavior, Observed, ProtocolHub},
 };
 
@@ -87,7 +87,10 @@ impl RunnerControl for FakeControl {
         machine_id: Uuid,
         reset_local_state: bool,
     ) -> Result<RunnerCredentials, TokenError> {
-        self.requests.lock().unwrap().push((machine_id, reset_local_state));
+        self.requests
+            .lock()
+            .unwrap()
+            .push((machine_id, reset_local_state));
         WAKE.notify_waiters();
         Ok(RunnerCredentials {
             machine_id: self.machine_id,
@@ -229,13 +232,7 @@ impl Fixture {
         });
         let store = Store::open(&data).unwrap();
         let sink = Arc::new(Sink::default());
-        let commands = CarrierCommands::new(
-            stager,
-            store,
-            sink.clone(),
-            cloud.clone(),
-            shutdown,
-        );
+        let commands = CarrierCommands::new(stager, store, sink.clone(), cloud.clone(), shutdown);
         commands.set_enabled(true);
         Self {
             sshd,
@@ -317,7 +314,9 @@ impl Fixture {
 impl Drop for Fixture {
     fn drop(&mut self) {
         if let Some(pid) = self.worker_pid() {
-            let _ = Process::new("kill").args(["-KILL", &pid.to_string()]).status();
+            let _ = Process::new("kill")
+                .args(["-KILL", &pid.to_string()])
+                .status();
         }
         let needle = format!("{}/hub.sock", self.root.display());
         let _ = Process::new("pkill").args(["-f", &needle]).status();
@@ -358,7 +357,13 @@ async fn wait_outcome(fx: &Fixture, code: &str) -> AttachOutcome {
             let notified = fx.cloud.changed().notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            if let Some(found) = fx.cloud.outcomes().iter().find(|o| o.code() == code).cloned() {
+            if let Some(found) = fx
+                .cloud
+                .outcomes()
+                .iter()
+                .find(|o| o.code() == code)
+                .cloned()
+            {
                 return found;
             }
             notified.await;
@@ -388,22 +393,30 @@ async fn attach_waits_for_the_marker_then_starts_the_worker_and_the_tunnel() {
     fx.commands.handle(&command).await.unwrap();
     late.notify_one();
     let started = wait_outcome(&fx, "started").await;
-    assert_eq!(started, AttachOutcome::Started {
-        window_id: "window-1".into(),
-        machine_id: fx.machine_id,
-    });
+    assert_eq!(
+        started,
+        AttachOutcome::Started {
+            window_id: "window-1".into(),
+            machine_id: fx.machine_id,
+        }
+    );
     until("the runner worker to connect", || fx.hello_count() >= 1).await;
     until("the tunnel to be up", || fx.tunnels() >= 1).await;
-    assert!(fx.worker_pid().is_some_and(|pid| Process::new("kill")
-        .args(["-0", &pid.to_string()])
-        .status()
-        .unwrap()
-        .success()));
+    assert!(fx.worker_pid().is_some_and(|pid| {
+        Process::new("kill")
+            .args(["-0", &pid.to_string()])
+            .status()
+            .unwrap()
+            .success()
+    }));
     assert!(fx.installed());
     let (facts, terminal) = fx.sink.written.lock().unwrap().first().cloned().unwrap();
     assert!(facts.is_empty());
     assert_eq!(terminal, [(id, 1)]);
-    until("the token to be requested", || !fx.control.requests.lock().unwrap().is_empty()).await;
+    until("the token to be requested", || {
+        !fx.control.requests.lock().unwrap().is_empty()
+    })
+    .await;
     assert_eq!(
         fx.control.requests.lock().unwrap()[0],
         (fx.machine_id, true)
@@ -420,12 +433,18 @@ async fn a_wrong_host_key_is_rejected_before_anything_is_installed() {
     );
     fx.commands.handle(&command).await.unwrap();
     let failed = wait_outcome(&fx, "host_key_mismatch").await;
-    assert_eq!(failed, AttachOutcome::Failed {
-        window_id: "window-bad-key".into(),
-        machine_id: fx.machine_id,
-        code: "host_key_mismatch",
-    });
-    assert!(!fx.installed(), "nothing may be installed on a key mismatch");
+    assert_eq!(
+        failed,
+        AttachOutcome::Failed {
+            window_id: "window-bad-key".into(),
+            machine_id: fx.machine_id,
+            code: "host_key_mismatch",
+        }
+    );
+    assert!(
+        !fx.installed(),
+        "nothing may be installed on a key mismatch"
+    );
     assert_eq!(fx.hello_count(), 0);
     assert_eq!(fx.tunnels(), 0);
 }
@@ -435,9 +454,12 @@ async fn a_missing_marker_times_out_within_the_deadline() {
     let fx = Fixture::start(Options::default()).await;
     let command = fx.attach_command("window-no-marker", fx.sshd.host_key_public());
     fx.commands.handle(&command).await.unwrap();
-    let failed = tokio::time::timeout(fx.ready_timeout + Duration::from_secs(15), wait_outcome(&fx, "ready_timeout"))
-        .await
-        .expect("ready_timeout is reported within the deadline");
+    let failed = tokio::time::timeout(
+        fx.ready_timeout + Duration::from_secs(15),
+        wait_outcome(&fx, "ready_timeout"),
+    )
+    .await
+    .expect("ready_timeout is reported within the deadline");
     assert_eq!(failed.code(), "ready_timeout");
     assert!(!fx.installed());
     assert_eq!(fx.hello_count(), 0);
@@ -477,7 +499,10 @@ async fn losing_the_assignment_stops_the_tunnel_and_forgets_the_attachment() {
     until("the tunnel before detach", || fx.tunnels() >= 1).await;
     fx.assign.send_replace(Vec::new());
     until("the tunnel to be stopped", || fx.tunnels() == 0).await;
-    until("the attachment to be forgotten", || fx.cloud.attachments().is_empty()).await;
+    until("the attachment to be forgotten", || {
+        fx.cloud.attachments().is_empty()
+    })
+    .await;
     assert!(!fx.root.join("state/worker.pid").exists());
 }
 
@@ -525,7 +550,11 @@ async fn a_restart_resumes_the_attachment_only_while_assigned() {
     assert_eq!(cloud.specs().len(), 1);
     // Пока машина не поручена, раннер не поднимается.
     assert_eq!(
-        cloud.outcomes().iter().filter(|o| o.code() == "started").count(),
+        cloud
+            .outcomes()
+            .iter()
+            .filter(|o| o.code() == "started")
+            .count(),
         0
     );
     let before = fx.hello_count();
@@ -534,7 +563,10 @@ async fn a_restart_resumes_the_attachment_only_while_assigned() {
         name: "cloud".into(),
         root_dir: fx.root.clone(),
     }]);
-    until("the resumed runner to connect", || fx.hello_count() > before).await;
+    until("the resumed runner to connect", || {
+        fx.hello_count() > before
+    })
+    .await;
     assert!(
         cloud
             .outcomes()

@@ -190,7 +190,12 @@ impl CloudState {
 
     /// Забывает одно подключение: машина ушла из `RunnersAssigned`, сервер удалит хаб.
     pub fn forget(&self, machine_id: Uuid) -> bool {
-        let removed = self.attachments.lock().unwrap().remove(&machine_id).is_some();
+        let removed = self
+            .attachments
+            .lock()
+            .unwrap()
+            .remove(&machine_id)
+            .is_some();
         if removed {
             let _ = self.persist();
             self.publish();
@@ -345,7 +350,10 @@ mod tests {
 
     #[tokio::test]
     async fn persistence_and_idempotent_replay() {
-        let dir = tempfile::Builder::new().prefix("cloud-").tempdir_in("/tmp").unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("cloud-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let config = CloudConfig {
             data_dir: dir.path().to_path_buf(),
             ..CloudConfig::default()
@@ -380,16 +388,25 @@ mod tests {
 
     #[test]
     fn unsafe_attachments_are_refused() {
-        let dir = tempfile::Builder::new().prefix("cloud-").tempdir_in("/tmp").unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("cloud-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let state = CloudState::open(CloudConfig {
             data_dir: dir.path().to_path_buf(),
             ..CloudConfig::default()
         });
         let mut bad = attachment("window 1");
-        assert!(matches!(state.apply(bad.clone()), Err(AttachError::Invalid)));
+        assert!(matches!(
+            state.apply(bad.clone()),
+            Err(AttachError::Invalid)
+        ));
         bad = attachment("w");
         bad.root_dir = PathBuf::from("/srv/../etc");
-        assert!(matches!(state.apply(bad.clone()), Err(AttachError::Invalid)));
+        assert!(matches!(
+            state.apply(bad.clone()),
+            Err(AttachError::Invalid)
+        ));
         bad = attachment("w");
         bad.host_key_public = "ssh-ed25519 AAAA\nmore".into();
         assert!(matches!(state.apply(bad), Err(AttachError::Invalid)));

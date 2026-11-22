@@ -9,8 +9,8 @@
 //! отправляются через него, а список раннеров приходит каналом `watch`.
 
 pub mod bridge;
-mod collect;
 pub mod cloud;
+mod collect;
 pub mod commands;
 mod runner;
 pub mod script;
@@ -295,7 +295,10 @@ fn desired(
             });
     }
     for spec in cloud {
-        if !assigned.iter().any(|runner| runner.machine_id == spec.machine_id) {
+        if !assigned
+            .iter()
+            .any(|runner| runner.machine_id == spec.machine_id)
+        {
             continue;
         }
         if !script::valid_root(&spec.root) {
@@ -417,7 +420,10 @@ pub async fn run(
         }
         running.retain(|_, handle| !handle.join.is_finished());
         let assigned_list = assigned.borrow_and_update().clone();
-        let cloud_specs = cloud.as_ref().map(|state| state.specs()).unwrap_or_default();
+        let cloud_specs = cloud
+            .as_ref()
+            .map(|state| state.specs())
+            .unwrap_or_default();
         let wanted = desired(&settings.entries, &assigned_list, &cloud_specs);
         let gone: Vec<String> = running
             .iter()
@@ -428,11 +434,16 @@ pub async fn run(
             if let Some(handle) = running.remove(&name) {
                 let machine = handle.spec.machine_id;
                 let cloud_left = handle.spec.cloud.is_some()
-                    && !assigned_list.iter().any(|runner| runner.machine_id == machine);
+                    && !assigned_list
+                        .iter()
+                        .any(|runner| runner.machine_id == machine);
                 tracing::info!(runner = %machine, "runner leaves the carrier");
                 let _ = handle.stop.send(Stop::Remove);
                 let _ = handle.join.await;
-                if cloud_left && !*shutdown.borrow() && let Some(state) = &cloud {
+                if cloud_left
+                    && !*shutdown.borrow()
+                    && let Some(state) = &cloud
+                {
                     // Сервер окна удалит хаб: локально забываем подключение и больше не
                     // поднимаем его по старой записи.
                     state.forget(machine);

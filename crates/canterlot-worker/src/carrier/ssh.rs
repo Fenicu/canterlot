@@ -101,7 +101,10 @@ impl Ssh {
                     .args(["-o", &format!("User={user}")])
                     .args(["-o", &format!("Port={port}")])
                     .args(["-o", "StrictHostKeyChecking=yes"])
-                    .args(["-o", &format!("UserKnownHostsFile={}", known_hosts.display())])
+                    .args([
+                        "-o",
+                        &format!("UserKnownHostsFile={}", known_hosts.display()),
+                    ])
                     .args(["-o", "GlobalKnownHostsFile=/dev/null"]);
             }
         }
@@ -182,11 +185,7 @@ impl Ssh {
 
     /// Как `run`, но код 255 остаётся в ответе: облачный носитель отличает отказ хостового
     /// ключа от других причин недоступности по тексту `stderr`.
-    pub async fn raw(
-        &self,
-        remote: &[&str],
-        limit: Duration,
-    ) -> Result<Output, Unreachable> {
+    pub async fn raw(&self, remote: &[&str], limit: Duration) -> Result<Output, Unreachable> {
         self.execute(remote, Input::None, limit).await
     }
 
@@ -201,7 +200,9 @@ impl Ssh {
         output.code == 255
             && (output.stderr.contains("Host key verification failed")
                 || output.stderr.contains("Host key verification failed.")
-                || output.stderr.contains("REMOTE HOST IDENTIFICATION HAS CHANGED")
+                || output
+                    .stderr
+                    .contains("REMOTE HOST IDENTIFICATION HAS CHANGED")
                 || output.stderr.contains("NO HOST KEY ALGORITHMS"))
     }
 
