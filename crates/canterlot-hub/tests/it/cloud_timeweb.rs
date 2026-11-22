@@ -833,9 +833,17 @@ async fn create_sends_the_private_network_and_the_fake_rejects_a_request_without
         request.body.as_ref().unwrap()["network"],
         json!({"id": "network-example", "local_ip": "192.0.2.10"})
     );
-    assert_eq!(request.body.as_ref().unwrap()["availability_zone"], json!("msk-1"));
+    assert_eq!(
+        request.body.as_ref().unwrap()["availability_zone"],
+        json!("msk-1")
+    );
     // Публичный IPv4 больше не заказывается никогда.
-    assert!(rig.fake.requests().iter().all(|r| !r.path.ends_with("/ips")));
+    assert!(
+        rig.fake
+            .requests()
+            .iter()
+            .all(|r| !r.path.ends_with("/ips"))
+    );
     let ServerLookup::Found(state) = rig.provider.get_server(server_id).await.unwrap() else {
         panic!("found");
     };
@@ -861,9 +869,7 @@ async fn dnat_create_is_not_retried_and_outcomes_are_classified() {
             error_code: "bad_code <script>".to_owned(),
         };
         assert_eq!(
-            rig.provider
-                .create_dnat_rule(ROUTER, &dnat_request())
-                .await,
+            rig.provider.create_dnat_rule(ROUTER, &dnat_request()).await,
             DnatCreateOutcome::Refused {
                 status,
                 error_code: "bad_codescript".to_owned(),
@@ -919,9 +925,10 @@ async fn dnat_rules_are_listed_with_pages_and_deleted_by_id() {
     let all = rig.provider.list_dnat_rules(ROUTER).await.unwrap();
     assert_eq!(all.len(), 251, "every page is walked");
     assert!(all.iter().any(|rule| rule.id == "dnat-1"));
-    assert!(all
-        .iter()
-        .any(|rule| rule.matches("192.0.2.1", 22100, "192.0.2.10")));
+    assert!(
+        all.iter()
+            .any(|rule| rule.matches("192.0.2.1", 22100, "192.0.2.10"))
+    );
     // Страница отказала: целого списка нет.
     rig.fake.control().list_fail_page = Some(FailPage {
         offset: 100,

@@ -553,7 +553,8 @@ impl CloudConfig {
 
     /// Включающий диапазон портов DNAT; порты вне 1024–65535 не годятся.
     pub fn dnat_port_values(&self) -> Option<(u16, u16)> {
-        let (first, last) = inclusive_range(&self.dnat_port_range, |text| text.trim().parse().ok())?;
+        let (first, last) =
+            inclusive_range(&self.dnat_port_range, |text| text.trim().parse().ok())?;
         (first >= 1024).then_some((first, last))
     }
 

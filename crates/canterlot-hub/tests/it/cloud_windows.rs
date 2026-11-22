@@ -167,19 +167,18 @@ impl Rig {
             at += TimeDelta::minutes(1);
             self.tick(at).await;
         }
-        panic!("window never reached {target}, stuck in {}", self.state(id).await);
+        panic!(
+            "window never reached {target}, stuck in {}",
+            self.state(id).await
+        );
     }
 
     fn dnat_posts(&self) -> usize {
-        self.fake
-            .control()
-            .count("POST", "/api/v1/routers/")
+        self.fake.control().count("POST", "/api/v1/routers/")
     }
 
     fn dnat_deletes(&self) -> usize {
-        self.fake
-            .control()
-            .count("DELETE", "/api/v1/routers/")
+        self.fake.control().count("DELETE", "/api/v1/routers/")
     }
 
     async fn cloud_machine(&self) -> Uuid {
@@ -213,7 +212,10 @@ impl Rig {
         assert_eq!(self.state(id).await, "identified");
         // Первый проход после `On` создаёт правило, второй шлёт команду подключения.
         self.tick(t0 + TimeDelta::seconds(1)).await;
-        assert_eq!(self.window(id).await.dnat_rule_id.as_deref(), Some("dnat-1"));
+        assert_eq!(
+            self.window(id).await.dnat_rule_id.as_deref(),
+            Some("dnat-1")
+        );
         self.tick(t0 + TimeDelta::seconds(2)).await;
         assert!(self.window(id).await.attach_sent_at.is_some());
         let session = self.attach().await;
@@ -361,17 +363,20 @@ async fn only_one_window_is_live_at_a_time(pool: PgPool) -> TestResult {
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn concurrent_creates_make_exactly_one_window(pool: PgPool) -> TestResult {
     let rig = rig(pool).await;
-    let (a, b) = tokio::join!(rig.service.create(CreateRequest {
-        trigger: Trigger::Owner,
-        proposal_id: None,
-        hard_cap_minutes: 60,
-        consent_over_budget_kopecks: Some(rig.reservation(60)),
-    }), rig.service.create(CreateRequest {
-        trigger: Trigger::Owner,
-        proposal_id: None,
-        hard_cap_minutes: 60,
-        consent_over_budget_kopecks: Some(rig.reservation(60)),
-    }));
+    let (a, b) = tokio::join!(
+        rig.service.create(CreateRequest {
+            trigger: Trigger::Owner,
+            proposal_id: None,
+            hard_cap_minutes: 60,
+            consent_over_budget_kopecks: Some(rig.reservation(60)),
+        }),
+        rig.service.create(CreateRequest {
+            trigger: Trigger::Owner,
+            proposal_id: None,
+            hard_cap_minutes: 60,
+            consent_over_budget_kopecks: Some(rig.reservation(60)),
+        })
+    );
     assert_eq!(a.is_ok() as u8 + b.is_ok() as u8, 1);
     let count: i64 = sqlx::query_scalar("select count(*) from cloud_windows")
         .fetch_one(&rig.pool)
@@ -411,7 +416,9 @@ async fn port_exhaustion_refuses_a_second_window(pool: PgPool) -> TestResult {
 // ───────── Полный цикл ─────────
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn full_cycle_uses_network_dnat_and_attach_then_ends_with_the_cost(pool: PgPool) -> TestResult {
+async fn full_cycle_uses_network_dnat_and_attach_then_ends_with_the_cost(
+    pool: PgPool,
+) -> TestResult {
     let rig = rig(pool).await;
     let _carrier = rig.carrier_session();
     let t0 = now_micros();
@@ -421,7 +428,11 @@ async fn full_cycle_uses_network_dnat_and_attach_then_ends_with_the_cost(pool: P
     let rule_id = window.dnat_rule_id.clone().expect("one DNAT rule");
     assert_eq!(rig.fake.control().dnat_rules.len(), 1);
     assert_eq!(rig.dnat_posts(), 1, "exactly one DNAT POST");
-    assert_eq!(rig.fake.control().floating_ips.len(), 0, "no public IP ordered");
+    assert_eq!(
+        rig.fake.control().floating_ips.len(),
+        0,
+        "no public IP ordered"
+    );
 
     // Проверяем команду несущей: адрес роутера и DNAT-порт в payload.
     let payload: serde_json::Value = sqlx::query_scalar(
@@ -433,15 +444,22 @@ async fn full_cycle_uses_network_dnat_and_attach_then_ends_with_the_cost(pool: P
     assert_eq!(payload["ssh_port"], 22100);
 
     // Простой → удаление сервера → удаление правила → конец с итоговой ценой.
-    at = rig.tick_until(id, "deleting", at + TimeDelta::minutes(20)).await;
-    rig.tick_until(id, "ended", at + TimeDelta::seconds(2)).await;
+    at = rig
+        .tick_until(id, "deleting", at + TimeDelta::minutes(20))
+        .await;
+    rig.tick_until(id, "ended", at + TimeDelta::seconds(2))
+        .await;
     let window = rig.window(id).await;
     assert_eq!(window.server_gone_at.is_some(), true);
     assert_eq!(window.dnat_gone_at.is_some(), true);
     assert_eq!(rig.dnat_deletes(), 1);
     assert!(rig.fake.control().dnat_rules.is_empty());
     assert_eq!(window.final_cost_kopecks, Some(HOURLY));
-    assert!(!rig.alert_codes().await.contains(&"dnat_delete_failing".to_owned()));
+    assert!(
+        !rig.alert_codes()
+            .await
+            .contains(&"dnat_delete_failing".to_owned())
+    );
     let _ = rule_id;
     Ok(())
 }
@@ -457,12 +475,20 @@ async fn two_windows_in_sequence_reuse_the_freed_ip_and_port(pool: PgPool) -> Te
     let t0 = now_micros();
     let (first, _runner, at) = rig.drive_to_ready(60, t0).await;
     let w1 = rig.window(first).await;
-    assert_eq!((w1.local_ip.clone(), w1.dnat_port), (Some("192.0.2.10".to_owned()), Some(22100)));
-    let at = rig.tick_until(first, "ended", at + TimeDelta::minutes(20)).await;
+    assert_eq!(
+        (w1.local_ip.clone(), w1.dnat_port),
+        (Some("192.0.2.10".to_owned()), Some(22100))
+    );
+    let at = rig
+        .tick_until(first, "ended", at + TimeDelta::minutes(20))
+        .await;
 
     let second = rig.create(60).await;
     let w2 = rig.window(second).await;
-    assert_eq!((w2.local_ip, w2.dnat_port), (Some("192.0.2.10".to_owned()), Some(22100)));
+    assert_eq!(
+        (w2.local_ip, w2.dnat_port),
+        (Some("192.0.2.10".to_owned()), Some(22100))
+    );
     let _ = at;
     Ok(())
 }
@@ -501,7 +527,9 @@ async fn a_dnat_rule_that_fails_to_delete_three_times_stays_an_open_obligation(
     let t0 = now_micros();
     let (id, _runner, mut at) = rig.drive_to_ready(120, t0).await;
     rig.fake.control().dnat_delete_status = Some(500);
-    at = rig.tick_until(id, "deleting", at + TimeDelta::minutes(20)).await;
+    at = rig
+        .tick_until(id, "deleting", at + TimeDelta::minutes(20))
+        .await;
     // Сервер удалён, но правила ещё висят: три неудачи с пушами и откатом.
     for _ in 0..30 {
         at += TimeDelta::minutes(1);
@@ -519,10 +547,16 @@ async fn a_dnat_rule_that_fails_to_delete_three_times_stays_an_open_obligation(
     assert_eq!(window.state, "deleting");
     assert_eq!(window.dnat_delete_attempts, 3);
     assert!(window.dnat_gone_at.is_none());
-    assert!(rig.alert_codes().await.contains(&"dnat_delete_failing".to_owned()));
+    assert!(
+        rig.alert_codes()
+            .await
+            .contains(&"dnat_delete_failing".to_owned())
+    );
     // Провайдер перестал отказывать: правило уходит, окно заканчивается.
     rig.fake.control().dnat_delete_status = None;
-    let at = rig.tick_until(id, "ended", at + TimeDelta::seconds(2)).await;
+    let at = rig
+        .tick_until(id, "ended", at + TimeDelta::seconds(2))
+        .await;
     assert_eq!(rig.window(id).await.final_cost_kopecks, Some(HOURLY));
     let _ = at;
     Ok(())
@@ -555,7 +589,11 @@ async fn reconcile_deletes_a_stray_rule_in_range_and_leaves_others(pool: PgPool)
     assert!(rules.iter().all(|rule| rule.id != "stray-in-range"));
     assert!(rules.iter().any(|rule| rule.id == "stray-out-of-range"));
     assert_eq!(rig.fake.control().count("DELETE", "/api/v1/routers/"), 1);
-    assert!(rig.alert_codes().await.contains(&"stray_dnat_deleted".to_owned()));
+    assert!(
+        rig.alert_codes()
+            .await
+            .contains(&"stray_dnat_deleted".to_owned())
+    );
     Ok(())
 }
 
@@ -576,7 +614,9 @@ async fn a_partial_dnat_listing_changes_nothing(pool: PgPool) -> TestResult {
 // ───────── Отказ no_paid ─────────
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn no_paid_longer_than_the_grace_deletes_charges_blocks_and_alerts(pool: PgPool) -> TestResult {
+async fn no_paid_longer_than_the_grace_deletes_charges_blocks_and_alerts(
+    pool: PgPool,
+) -> TestResult {
     let rig = rig_with(pool, |config| {
         config.no_paid_grace = Duration::from_secs(60);
     })
@@ -591,7 +631,9 @@ async fn no_paid_longer_than_the_grace_deletes_charges_blocks_and_alerts(pool: P
     rig.tick(t0 + TimeDelta::seconds(30)).await;
     assert_eq!(rig.state(id).await, "identified");
     // После срока — определённый отказ: удаление, итог, блок, пуш.
-    let at = rig.tick_until(id, "ended", t0 + TimeDelta::seconds(70)).await;
+    let at = rig
+        .tick_until(id, "ended", t0 + TimeDelta::seconds(70))
+        .await;
     let window = rig.window(id).await;
     assert_eq!(window.last_error.as_deref(), Some("no_paid"));
     assert_eq!(window.delete_reason.as_deref(), Some("no_paid"));
@@ -668,7 +710,10 @@ async fn neither_the_token_nor_the_host_private_key_reach_the_logs(pool: PgPool)
     rig.tick(t0 + TimeDelta::seconds(1)).await;
     let logs = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
     assert!(!logs.contains(TOKEN), "token leaked into logs");
-    assert!(!logs.contains("OPENSSH"), "host private key leaked into logs");
+    assert!(
+        !logs.contains("OPENSSH"),
+        "host private key leaked into logs"
+    );
     Ok(())
 }
 

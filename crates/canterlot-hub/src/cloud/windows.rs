@@ -316,13 +316,15 @@ fn ip_range(first: Ipv4Addr, last: Ipv4Addr) -> impl Iterator<Item = Ipv4Addr> {
 
 /// Выделить свободный локальный адрес и DNAT-порт: заняты только те, что держит живое окно.
 /// Освобождённые при конце окна значения сразу пригодны для повторного использования.
-async fn allocate(conn: &mut PgConnection, config: &CloudConfig) -> Result<(String, u16), CreateRefusal> {
-    let held: Vec<(Option<String>, Option<i32>)> = sqlx::query_as(
-        "select local_ip, dnat_port from cloud_windows where state = any($1)",
-    )
-    .bind(live_states())
-    .fetch_all(&mut *conn)
-    .await?;
+async fn allocate(
+    conn: &mut PgConnection,
+    config: &CloudConfig,
+) -> Result<(String, u16), CreateRefusal> {
+    let held: Vec<(Option<String>, Option<i32>)> =
+        sqlx::query_as("select local_ip, dnat_port from cloud_windows where state = any($1)")
+            .bind(live_states())
+            .fetch_all(&mut *conn)
+            .await?;
     let used_ips: HashSet<String> = held.iter().filter_map(|(ip, _)| ip.clone()).collect();
     let used_ports: HashSet<u16> = held
         .iter()

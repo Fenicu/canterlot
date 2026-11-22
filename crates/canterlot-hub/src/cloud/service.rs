@@ -598,20 +598,25 @@ impl CloudService {
     }
 
     async fn adopt_dnat(&self, id: Uuid, rule_id: &str) -> Result<(), sqlx::Error> {
-        sqlx::query(
-            "update cloud_windows set dnat_rule_id = $2, last_error = null where id = $1",
-        )
-        .bind(id)
-        .bind(rule_id)
-        .execute(&self.pool)
-        .await?;
+        sqlx::query("update cloud_windows set dnat_rule_id = $2, last_error = null where id = $1")
+            .bind(id)
+            .bind(rule_id)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
     /// Сервер остался `no_paid` дольше срока: definite отказ. Окно уходит на удаление по
     /// обычному пути, блок в `cloud_budget` закрывает новые окна, владельцу пуш.
-    async fn no_paid_refusal(&self, window: &Window, now: DateTime<Utc>) -> Result<(), sqlx::Error> {
-        tracing::warn!(kind = "cloud_no_paid", "provider did not turn the server on: no_paid");
+    async fn no_paid_refusal(
+        &self,
+        window: &Window,
+        now: DateTime<Utc>,
+    ) -> Result<(), sqlx::Error> {
+        tracing::warn!(
+            kind = "cloud_no_paid",
+            "provider did not turn the server on: no_paid"
+        );
         sqlx::query("update cloud_windows set last_error = 'no_paid' where id = $1")
             .bind(window.id)
             .execute(&self.pool)
@@ -632,11 +637,7 @@ impl CloudService {
 
     /// Команда несущей подключить раннер. Только если машина из конфигурации действительно
     /// несущая: иначе окно дождётся `ready_timeout` и уйдёт.
-    async fn send_attach(
-        &self,
-        window: &Window,
-        now: DateTime<Utc>,
-    ) -> Result<(), sqlx::Error> {
+    async fn send_attach(&self, window: &Window, now: DateTime<Utc>) -> Result<(), sqlx::Error> {
         let config = self.config.clone();
         let window = window.clone();
         crate::db::in_tx(&self.pool, move |conn| {
@@ -908,9 +909,10 @@ impl CloudService {
             return Ok(false);
         }
         // Сервер сверх предела тарифицируется; публичного адреса больше нет.
-        let extra = price::final_cost_kopecks(window.price_hourly_kopecks, minutes_between(cap, now))
-            .ok()
-            .map(|cost| cost.min(i64::MAX / 2));
+        let extra =
+            price::final_cost_kopecks(window.price_hourly_kopecks, minutes_between(cap, now))
+                .ok()
+                .map(|cost| cost.min(i64::MAX / 2));
         let code = if runtime.first_tick {
             "outage_extra_cost"
         } else {
@@ -1234,12 +1236,11 @@ impl CloudService {
         let Some((first_port, last_port)) = self.config.dnat_port_values() else {
             return Ok(());
         };
-        let held: Vec<Option<i32>> = sqlx::query_scalar(
-            "select dnat_port from cloud_windows where state = any($1)",
-        )
-        .bind(windows::live_states())
-        .fetch_all(&self.pool)
-        .await?;
+        let held: Vec<Option<i32>> =
+            sqlx::query_scalar("select dnat_port from cloud_windows where state = any($1)")
+                .bind(windows::live_states())
+                .fetch_all(&self.pool)
+                .await?;
         let held: std::collections::HashSet<u16> = held
             .into_iter()
             .filter_map(|port| port.and_then(|port| u16::try_from(port).ok()))
@@ -1256,9 +1257,7 @@ impl CloudService {
                 .parse::<u16>()
                 .is_ok_and(|port| (first_port..=last_port).contains(&port) && !held.contains(&port))
         }) {
-            let payload = |code: &str| {
-                json!({"code": code, "rule_id": rule.id, "public_port": rule.public_port})
-            };
+            let payload = |code: &str| json!({"code": code, "rule_id": rule.id, "public_port": rule.public_port});
             match self
                 .provider
                 .delete_dnat_rule(&self.config.router_id, &rule.id)

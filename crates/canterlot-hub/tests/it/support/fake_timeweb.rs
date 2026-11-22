@@ -796,7 +796,10 @@ fn create_server(st: &mut FakeState, body: Option<Value>, auth: Option<&str>) ->
     let network = &body["network"];
     if network["id"].as_str().unwrap_or_default().is_empty()
         || network["local_ip"].as_str().unwrap_or_default().is_empty()
-        || body["availability_zone"].as_str().unwrap_or_default().is_empty()
+        || body["availability_zone"]
+            .as_str()
+            .unwrap_or_default()
+            .is_empty()
     {
         let mut payload = error_body(400, "network, local_ip and availability_zone are required");
         payload["error_code"] = Value::String("network_required".to_owned());
@@ -840,10 +843,7 @@ fn create_dnat(st: &mut FakeState, body: Option<Value>, auth: Option<&str>) -> A
         DnatCreateMode::Status(status) => {
             return Action::Respond(error_response(st, status, "Injected DNAT failure", auth));
         }
-        DnatCreateMode::Refuse {
-            status,
-            error_code,
-        } => {
+        DnatCreateMode::Refuse { status, error_code } => {
             let mut payload = error_body(status, "Injected DNAT refusal");
             payload["error_code"] = Value::String(error_code);
             return Action::Respond(json_response(status, &payload));
@@ -858,9 +858,15 @@ fn create_dnat(st: &mut FakeState, body: Option<Value>, auth: Option<&str>) -> A
     let rule = FakeDnatRule {
         id: id.clone(),
         local_ip: body["local"]["ip"].as_str().unwrap_or_default().to_owned(),
-        local_port: body["local"]["port"].as_str().unwrap_or_default().to_owned(),
+        local_port: body["local"]["port"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned(),
         public_ip: body["public"]["ip"].as_str().unwrap_or_default().to_owned(),
-        public_port: body["public"]["port"].as_str().unwrap_or_default().to_owned(),
+        public_port: body["public"]["port"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned(),
         protocol: body["protocol"].as_str().unwrap_or_default().to_owned(),
     };
     let rendered = json!({
