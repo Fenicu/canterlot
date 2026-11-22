@@ -359,6 +359,9 @@ pub struct CloudConfig {
     /// Приватная сеть (VPC) провайдера, в которой создаются серверы окон. Идентификатор
     /// Timeweb (`network-…`) создаётся владельцем один раз, хаб его не создаёт.
     pub network_id: String,
+    /// CIDR этой сети, например `10.0.0.0/24`: шлюз и пул локальных адресов должны
+    /// лежать внутри него.
+    pub network_cidr: String,
     /// Роутер той же сети с NAT. Его публичный IP используется для подключения по SSH.
     pub router_id: String,
     /// Публичный IPv4 роутера: адрес подключения носителя к облачному раннеру.
@@ -487,11 +490,18 @@ impl CloudConfig {
             || self.router_id.trim().is_empty()
             || self.router_ip().is_none()
             || self.gateway().is_none()
+            || self.network_cidr().is_none()
         {
             return Err("invalid [runners.cloud] network and router");
         }
-        if self.local_ip_range().is_none() {
-            return Err("invalid [runners.cloud] local_ip_pool");
+        let (first_ip, last_ip) = self
+            .local_ip_range()
+            .ok_or("invalid [runners.cloud] local_ip_pool")?;
+        if !self.in_network(self.gateway().expect("checked above"))
+            || !self.in_network(first_ip)
+            || !self.in_network(last_ip)
+        {
+            return Err("invalid [runners.cloud] addresses outside network_cidr");
         }
         if self.dnat_port_values().is_none() {
             return Err("invalid [runners.cloud] dnat_port_range");
@@ -534,6 +544,36 @@ impl CloudConfig {
             return Err("invalid [runners.cloud] timing");
         }
         Ok(())
+    }
+
+    /// Сеть окна: сетевой адрес и префикс из `network_cidr`.
+    pub fn network_cidr(&self) -> Option<(std::net::Ipv4Addr, u32)> {
+        use std::net::Ipv4Addr;
+        let (address, prefix) = self.network_cidr.trim().split_once('/')?;
+        let address: Ipv4Addr = address.trim().parse().ok()?;
+        let prefix: u32 = prefix.trim().parse().ok()?;
+        if prefix > 32 {
+            return None;
+        }
+        let mask = if prefix == 0 {
+            0
+        } else {
+            u32::MAX << (32 - prefix)
+        };
+        Some((Ipv4Addr::from(u32::from(address) & mask), prefix))
+    }
+
+    /// Адрес внутри сети окна (по `network_cidr`).
+    pub fn in_network(&self, address: std::net::Ipv4Addr) -> bool {
+        let Some((network, prefix)) = self.network_cidr() else {
+            return false;
+        };
+        let mask = if prefix == 0 {
+            0
+        } else {
+            u32::MAX << (32 - prefix)
+        };
+        u32::from(address) & mask == u32::from(network)
     }
 
     /// Публичный адрес роутера как IPv4.

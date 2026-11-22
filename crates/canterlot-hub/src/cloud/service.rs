@@ -1096,7 +1096,7 @@ impl CloudService {
             DeleteOutcome::Deleted { quarantined } => {
                 sqlx::query(
                     "update cloud_windows set delete_accepted_at = $2,
-                            last_error = case when delete_reason in ('no_paid','ipv4_refused') then last_error end,
+                            last_error = case when delete_reason in ('no_paid','dnat_refused','ipv4_refused') then last_error end,
                             delete_attempts = $3,
                             alert_state = alert_state || jsonb_build_object('quarantined', $4::boolean)
                      where id = $1 and state = 'deleting'",
@@ -1111,7 +1111,7 @@ impl CloudService {
             DeleteOutcome::AlreadyGone => {
                 sqlx::query(
                     "update cloud_windows set delete_accepted_at = $2,
-                            last_error = case when delete_reason in ('no_paid','ipv4_refused') then last_error end,
+                            last_error = case when delete_reason in ('no_paid','dnat_refused','ipv4_refused') then last_error end,
                             delete_attempts = $3
                      where id = $1 and state = 'deleting'",
                 )
@@ -1187,7 +1187,7 @@ impl CloudService {
                 sqlx::query(
                     "update cloud_windows set state = $2, final_cost_kopecks = $3,
                             delete_confirmed_at = $4,
-                            last_error = case when delete_reason in ('no_paid','ipv4_refused') then last_error end
+                            last_error = case when delete_reason in ('no_paid','dnat_refused','ipv4_refused') then last_error end
                      where id = $1",
                 )
                 .bind(id)

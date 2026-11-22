@@ -83,24 +83,13 @@ pub struct FakeServer {
     pub ram_mb: u64,
     pub disk_mb: u64,
     /// Сколько ещё запросов `GET /servers/{id}` ответят `installing`, прежде чем сервер
-    /// станет `on` с адресом.
+    /// станет `on`.
     pub boot_polls_left: u32,
     /// Сколько ещё листингов проекта (первых страниц) не покажут сервер.
     pub hidden_polls_left: u32,
-    /// Публичный IPv4. Как у настоящего Timeweb, у нового сервера его нет, пока хаб не
-    /// запросит (`POST /servers/{id}/ips`); `auto_ipv4` возвращает прежнее поведение.
-    pub ipv4: Option<String>,
     /// Подменить статус сервера (например `no_paid`), сколько бы раз его ни опрашивали.
     pub forced_status: Option<String>,
     pub request: Value,
-}
-
-/// Плавающий адрес аккаунта. После удаления сервера адрес остаётся без привязки.
-#[derive(Debug, Clone)]
-pub struct FakeFloatingIp {
-    pub id: String,
-    pub ip: String,
-    pub resource_id: Option<i64>,
 }
 
 /// Правило DNAT на роутере. Создаётся хабом для SSH окна и удаляется после сервера.
@@ -125,24 +114,6 @@ pub enum DnatCreateMode {
     AcceptThenDrop,
     /// Определённый отказ с `error_code`.
     Refuse { status: u16, error_code: String },
-}
-
-/// Что делает запрос IPv4 для сервера.
-#[derive(Debug, Clone, PartialEq)]
-pub enum IpAddMode {
-    /// 201 с `server_ip`, адрес выдан.
-    Ok,
-    /// Ответ с кодом сбоя, адрес не выдан.
-    Status(u16),
-    /// Адрес выдан и записан, соединение закрыто без ответа.
-    AcceptThenDrop,
-    /// Определённый отказ с `error_code` и, если задан, `details.required_balance` (так
-    /// Timeweb отвечает правилом против злоупотреблений: 400 `abuse_prepayment_required`).
-    Refuse {
-        status: u16,
-        error_code: String,
-        required_balance: Option<f64>,
-    },
 }
 
 #[derive(Debug, Clone)]
@@ -184,15 +155,6 @@ pub struct FakeState {
     /// запись, она заменяет `create` (годятся `Status`, `Reject`, `Coded`).
     pub create_by_configurator: BTreeMap<i64, CreateMode>,
     pub delete: DeleteMode,
-    /// Новый сервер сразу получает публичный IPv4 (так было до живой проверки 22.11);
-    /// `false` — как у настоящего Timeweb: адрес появляется только после `POST .../ips`.
-    pub auto_ipv4: bool,
-    pub ip_add: IpAddMode,
-    /// Плавающие адреса аккаунта; выданный серверу адрес попадает сюда привязанным.
-    pub floating_ips: Vec<FakeFloatingIp>,
-    pub next_ip_host: u8,
-    /// Код сбоя для `DELETE /floating-ips/{id}`; `None` — удаляет.
-    pub floating_delete_status: Option<u16>,
     /// Правила DNAT роутера. Идентификатор роутера в путях не проверяется: тест задаёт его
     /// в конфигурации сам.
     pub dnat_rules: Vec<FakeDnatRule>,
@@ -255,11 +217,6 @@ impl FakeState {
             create: CreateMode::Ok,
             create_by_configurator: BTreeMap::new(),
             delete: DeleteMode::Ok,
-            auto_ipv4: true,
-            ip_add: IpAddMode::Ok,
-            floating_ips: Vec::new(),
-            next_ip_host: 200,
-            floating_delete_status: None,
             dnat_rules: Vec::new(),
             next_dnat_id: 1,
             dnat_create: DnatCreateMode::Ok,
@@ -296,7 +253,6 @@ impl FakeState {
                 disk_mb: 10240,
                 boot_polls_left: 0,
                 hidden_polls_left: 0,
-                ipv4: None,
                 forced_status: None,
                 request: Value::Null,
             },
@@ -304,10 +260,9 @@ impl FakeState {
         id
     }
 
-    /// Убрать сервер, как это делает удаление: его адрес остаётся плавающим без привязки.
+    /// Убрать сервер, как это делает удаление.
     pub fn remove_server(&mut self, id: i64) {
         self.servers.remove(&id);
-        unbind_ips(self, id);
     }
 
     pub fn count(&self, method: &str, path_prefix: &str) -> usize {
@@ -450,10 +405,8 @@ fn error_response(state: &FakeState, status: u16, message: &str, auth: Option<&s
 
 fn server_json(server: &FakeServer) -> Value {
     let booted = server.boot_polls_left == 0;
-    let ips = match (&server.ipv4, booted) {
-        (Some(ip), true) => json!([{"type": "ipv4", "ip": ip, "is_main": true}]),
-        _ => json!([]),
-    };
+    // У сервера нет публичного адреса: доступ идёт через NAT роутера.
+    let ips = json!([]);
     json!({
         "id": server.id,
         "name": server.name,
@@ -642,36 +595,6 @@ fn route(
             }
         }
         ("DELETE", ["api", "v1", "servers", id]) => delete_server(st, id, auth),
-        ("POST", ["api", "v1", "servers", id, "ips"]) => add_ip(st, id, body, auth),
-        ("GET", ["api", "v1", "floating-ips"]) => {
-            let items: Vec<Value> = st
-                .floating_ips
-                .iter()
-                .map(|fip| {
-                    json!({
-                        "id": fip.id,
-                        "ip": fip.ip,
-                        "resource_type": fip.resource_id.map(|_| "server"),
-                        "resource_id": fip.resource_id,
-                        "is_ddos_guard": false,
-                    })
-                })
-                .collect();
-            page_response(st, query, items, "ips")
-        }
-        ("DELETE", ["api", "v1", "floating-ips", id]) => {
-            if let Some(status) = st.floating_delete_status {
-                return Action::Respond(error_response(st, status, "Injected IP failure", auth));
-            }
-            let Some(at) = st.floating_ips.iter().position(|fip| fip.id == *id) else {
-                return Action::Respond(error_response(st, 404, "Resource not found", auth));
-            };
-            if st.floating_ips[at].resource_id.is_some() {
-                return Action::Respond(error_response(st, 409, "IP is bound to a resource", auth));
-            }
-            st.floating_ips.remove(at);
-            Action::Respond(empty_response(204))
-        }
         ("POST", ["api", "v1", "routers", _router, "dnat-rules"]) => create_dnat(st, body, auth),
         ("GET", ["api", "v1", "routers", _router, "dnat-rules"]) => {
             let items: Vec<Value> = st
@@ -816,10 +739,6 @@ fn create_server(st: &mut FakeState, body: Option<Value>, auth: Option<&str>) ->
         cpu: configuration["cpu"].as_u64().unwrap_or(0),
         ram_mb: configuration["ram"].as_u64().unwrap_or(0),
         disk_mb: configuration["disk"].as_u64().unwrap_or(0),
-        ipv4: st.auto_ipv4.then(|| {
-            let host = u8::try_from(id % 250).unwrap_or(1).max(1);
-            format!("203.0.113.{host}")
-        }),
         boot_polls_left: st.boot_polls,
         hidden_polls_left: st.listing_hidden_polls,
         forced_status: st.boot_status.clone(),
@@ -895,67 +814,6 @@ fn delete_dnat(st: &mut FakeState, rule_id: &str, auth: Option<&str>) -> Action 
     Action::Respond(empty_response(204))
 }
 
-/// `POST /servers/{id}/ips`: адрес выдаётся серверу и записывается плавающим, привязанным.
-fn add_ip(st: &mut FakeState, id: &str, body: Option<Value>, auth: Option<&str>) -> Action {
-    let Some(id) = id
-        .parse::<i64>()
-        .ok()
-        .filter(|id| st.servers.contains_key(id))
-    else {
-        return Action::Respond(error_response(st, 404, "Resource not found", auth));
-    };
-    if body.as_ref().and_then(|body| body["type"].as_str()) != Some("ipv4") {
-        return Action::Respond(error_response(st, 400, "Only ipv4 is expected", auth));
-    }
-    let mode = st.ip_add.clone();
-    if let IpAddMode::Status(status) = mode {
-        return Action::Respond(error_response(st, status, "Injected IP failure", auth));
-    }
-    if let IpAddMode::Refuse {
-        status,
-        error_code,
-        required_balance,
-    } = mode
-    {
-        let mut payload = error_body(status, "Injected IP refusal");
-        payload["error_code"] = Value::String(error_code);
-        if let Some(balance) = required_balance {
-            payload["details"] = json!({"required_balance": balance});
-        }
-        return Action::Respond(json_response(status, &payload));
-    }
-    let ip = format!("203.0.113.{}", st.next_ip_host);
-    st.next_ip_host = st.next_ip_host.saturating_add(1);
-    st.floating_ips.push(FakeFloatingIp {
-        id: format!(
-            "fip-{}",
-            st.floating_ips.len() as u64 + u64::from(st.next_ip_host)
-        ),
-        ip: ip.clone(),
-        resource_id: Some(id),
-    });
-    if let Some(server) = st.servers.get_mut(&id) {
-        server.ipv4 = Some(ip.clone());
-    }
-    if mode == IpAddMode::AcceptThenDrop {
-        return Action::Drop;
-    }
-    Action::Respond(json_response(
-        201,
-        &json!({"server_ip": {"type": "ipv4", "ip": ip, "ptr": "", "is_main": true},
-                 "response_id": "r"}),
-    ))
-}
-
-/// Сервер убран: его адрес остаётся на аккаунте плавающим, без привязки.
-fn unbind_ips(st: &mut FakeState, server: i64) {
-    for fip in st.floating_ips.iter_mut() {
-        if fip.resource_id == Some(server) {
-            fip.resource_id = None;
-        }
-    }
-}
-
 fn delete_server(st: &mut FakeState, id: &str, auth: Option<&str>) -> Action {
     let Some(id) = id
         .parse::<i64>()
@@ -967,7 +825,6 @@ fn delete_server(st: &mut FakeState, id: &str, auth: Option<&str>) -> Action {
     match st.delete.clone() {
         DeleteMode::Ok => {
             st.servers.remove(&id);
-            unbind_ips(st, id);
             Action::Respond(json_response(
                 200,
                 &json!({"server_delete": {"is_moved_in_quarantine": false}, "response_id": "r"}),
@@ -975,12 +832,10 @@ fn delete_server(st: &mut FakeState, id: &str, auth: Option<&str>) -> Action {
         }
         DeleteMode::NoContent => {
             st.servers.remove(&id);
-            unbind_ips(st, id);
             Action::Respond(empty_response(204))
         }
         DeleteMode::Quarantine => {
             st.servers.remove(&id);
-            unbind_ips(st, id);
             Action::Respond(json_response(
                 200,
                 &json!({"server_delete": {"is_moved_in_quarantine": true}, "response_id": "r"}),
