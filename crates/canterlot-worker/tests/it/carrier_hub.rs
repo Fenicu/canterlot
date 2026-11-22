@@ -19,6 +19,7 @@ use sqlx::PgPool;
 use tokio::{sync::watch, time::timeout};
 
 use crate::sshd::{ALIAS, TestSshd};
+use crate::support::TempSecrets;
 
 const WORKER: &str = env!("CARGO_BIN_EXE_canterlot-worker");
 
@@ -86,8 +87,9 @@ async fn carrier_worker_brings_a_runner_online_through_the_real_hub(pool: PgPool
     fs::write(&ca_cert, &hub.pki.ca_pem).unwrap();
     let data_dir = directory.path().join("store");
     let store = WorkerStore::open(&data_dir).unwrap();
+    let _secrets = TempSecrets::new();
     let config = WorkerConfig {
-        secrets: Default::default(),
+        secrets: _secrets.config(),
         memory: Default::default(),
         jobs: Default::default(),
         machine: Default::default(),
@@ -255,8 +257,9 @@ async fn an_owner_job_with_source_and_outputs_runs_on_the_runner_end_to_end(pool
     fs::write(&ca_cert, &hub.pki.ca_pem).unwrap();
     let data_dir = directory.path().join("store");
     let store = WorkerStore::open(&data_dir).unwrap();
+    let _secrets = TempSecrets::new();
     let config = WorkerConfig {
-        secrets: Default::default(),
+        secrets: _secrets.config(),
         memory: Default::default(),
         jobs: Default::default(),
         machine: Default::default(),

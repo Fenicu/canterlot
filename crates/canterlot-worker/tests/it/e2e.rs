@@ -33,6 +33,7 @@ const WAIT: Duration = Duration::from_secs(20);
 
 #[allow(dead_code)]
 use crate::support;
+use crate::support::TempSecrets;
 use support::data_proxy::DataProxy;
 
 type Pause = oneshot::Receiver<oneshot::Sender<()>>;
@@ -99,6 +100,7 @@ struct Input {
 struct Fixture {
     pool: PgPool,
     _directory: TempDir,
+    _secrets: TempSecrets,
     config: WorkerConfig,
     owner: Uuid,
     inputs: Vec<Input>,
@@ -119,8 +121,9 @@ impl Fixture {
         fs::set_permissions(&token_file, fs::Permissions::from_mode(0o600)).unwrap();
         let ca_cert = directory.path().join("ca.pem");
         fs::write(&ca_cert, &hub.pki.ca_pem).unwrap();
+        let secrets_guard = TempSecrets::new();
         let config = WorkerConfig {
-            secrets: Default::default(),
+            secrets: secrets_guard.config(),
             memory: Default::default(),
             jobs: Default::default(),
             machine: Default::default(),
@@ -152,6 +155,7 @@ impl Fixture {
         let mut fixture = Self {
             pool: pool.clone(),
             _directory: directory,
+            _secrets: secrets_guard,
             config,
             owner: hub.installation.owner_id,
             inputs: vec![],

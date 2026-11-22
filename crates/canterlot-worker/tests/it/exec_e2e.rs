@@ -44,6 +44,7 @@ use tonic::Code;
 use uuid::Uuid;
 
 use crate::opencode;
+use crate::support::TempSecrets;
 #[path = "support/process_guard.rs"]
 mod process_guard;
 use opencode::fake_exec;
@@ -233,6 +234,7 @@ struct Fixture {
     store_probe: StoreProbe,
     session_probe: SessionProbe,
     history: ProcessHistory,
+    _secrets: TempSecrets,
 }
 
 impl Drop for Fixture {
@@ -318,6 +320,7 @@ impl Fixture {
         fs::write(&ca_cert, &hub.pki.ca_pem).unwrap();
         let workdir = root.path().join("work");
         fs::create_dir(&workdir).unwrap();
+        let secrets_guard = TempSecrets::new();
         let wrapper = root.path().join("supervisor");
         let mut script = format!(
             "#!/bin/sh\nexport CANTERLOT_SYNTHETIC_STDIN_LOG='{}'\n",
@@ -332,7 +335,7 @@ impl Fixture {
         script.push_str(&format!("exec '{supervisor}' \"$@\"\n"));
         fake_exec::write_executable(&wrapper, script, 0o700);
         let config = WorkerConfig {
-            secrets: Default::default(),
+            secrets: secrets_guard.config(),
             memory: Default::default(),
             jobs: Default::default(),
             machine: Default::default(),
@@ -393,6 +396,7 @@ impl Fixture {
             store_probe: StoreProbe::default(),
             session_probe: SessionProbe::default(),
             history,
+            _secrets: secrets_guard,
         };
         fixture.start_worker().await;
         if !auto_start {

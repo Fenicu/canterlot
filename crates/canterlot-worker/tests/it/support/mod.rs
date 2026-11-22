@@ -16,7 +16,7 @@ use canterlot_proto::{
     },
 };
 use canterlot_worker::{
-    config::{WorkerConfig, WorkerTimers},
+    config::{SecretConfig, WorkerConfig, WorkerTimers},
     store::WorkerStore,
 };
 use tempfile::TempDir;
@@ -433,9 +433,38 @@ impl WorkerData for Service {
     }
 }
 
+/// Изолированная база секретов на настоящем tmpfs: ни один интеграционный
+/// воркер не трогает боевой `$XDG_RUNTIME_DIR/canterlot-secrets`.
+pub struct TempSecrets {
+    path: std::path::PathBuf,
+}
+
+impl TempSecrets {
+    pub fn new() -> Self {
+        let path = std::path::PathBuf::from("/dev/shm")
+            .join(format!("canterlot-test-secrets-{}", Uuid::now_v7()));
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        Self { path }
+    }
+
+    pub fn config(&self) -> SecretConfig {
+        SecretConfig {
+            base_dir: Some(self.path.clone()),
+        }
+    }
+}
+
+impl Drop for TempSecrets {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
 pub struct ProtocolHub {
     pub events: mpsc::Receiver<Observed>,
     _directory: TempDir,
+    _secrets: TempSecrets,
     pub config: WorkerConfig,
     downstream: Downstream,
     data_downstream: DataDownstream,
@@ -520,8 +549,9 @@ impl ProtocolHub {
                 }
             }
         });
+        let secrets_guard = TempSecrets::new();
         let config = WorkerConfig {
-            secrets: Default::default(),
+            secrets: secrets_guard.config(),
             memory: Default::default(),
             jobs: Default::default(),
             machine: Default::default(),
@@ -555,6 +585,7 @@ impl ProtocolHub {
             Self {
                 events: receiver,
                 _directory: directory,
+                _secrets: secrets_guard,
                 config,
                 downstream,
                 data_downstream,
