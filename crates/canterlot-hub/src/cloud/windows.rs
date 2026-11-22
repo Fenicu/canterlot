@@ -5,7 +5,8 @@
 //! строки `cloud_budget`, а частичный уникальный индекс держит то же правило на уровне базы.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
+    net::Ipv4Addr,
     sync::{LazyLock, Mutex},
 };
 
@@ -68,14 +69,21 @@ pub struct Window {
     pub trigger: String,
     pub proposal_id: Option<Uuid>,
     pub server_id: Option<i64>,
-    pub ipv4: Option<String>,
-    pub ipv4_hourly_kopecks: i64,
-    pub ip_requested_at: Option<DateTime<Utc>>,
-    pub floating_ip_id: Option<String>,
+    /// Локальный адрес сервера в приватной сети; выделяется из пула при создании окна.
+    pub local_ip: Option<String>,
+    /// Публичный порт DNAT-правила роутера для SSH этого сервера.
+    pub dnat_port: Option<i32>,
+    /// Идентификатор созданного правила DNAT; удаляется после сервера.
+    pub dnat_rule_id: Option<String>,
+    /// Вызов создания правила уже был: второго POST для того же порта нет.
+    pub dnat_create_attempted_at: Option<DateTime<Utc>>,
+    /// Сервер подтверждённо пропал из полного списка.
     pub server_gone_at: Option<DateTime<Utc>>,
-    pub ip_delete_accepted_at: Option<DateTime<Utc>>,
-    pub ip_gone_at: Option<DateTime<Utc>>,
-    pub ip_delete_attempts: i32,
+    /// Удаление DNAT-правила принято, но его отсутствие ещё не подтверждено списком.
+    pub dnat_delete_accepted_at: Option<DateTime<Utc>>,
+    pub dnat_gone_at: Option<DateTime<Utc>>,
+    pub dnat_delete_attempts: i32,
+    pub next_dnat_delete_at: Option<DateTime<Utc>>,
     pub host_key_public: String,
     pub profiles: serde_json::Value,
     pub configurator_id: Option<i64>,
@@ -216,6 +224,9 @@ pub enum CreateRefusal {
     /// Цену не удалось получить у провайдера: создавать нельзя, резерв считать не из чего.
     #[error("provider_unavailable")]
     Provider(super::ProviderError),
+    /// Все локальные адреса или DNAT-порты пула заняты живыми окнами.
+    #[error("pool_exhausted")]
+    PoolExhausted(&'static str),
     #[error("db_error")]
     Database(#[from] sqlx::Error),
 }
@@ -226,8 +237,6 @@ pub enum CreateRefusal {
 pub struct Pricing {
     /// Профили в порядке попыток, у каждого цена часа.
     pub profiles: Vec<PricedProfile>,
-    /// Цена часа публичного IPv4: адрес заказывается отдельно и тарифицируется сам.
-    pub ipv4_hourly_kopecks: i64,
 }
 
 /// Профиль с ценой часа у провайдера на момент создания окна.
@@ -238,6 +247,8 @@ pub struct PricedProfile {
     pub ram_gb: u32,
     pub disk_gb: u32,
     pub hourly_kopecks: i64,
+    /// Зона доступности сервера в приватной сети (снимок конфигурации на момент создания).
+    pub availability_zone: String,
 }
 
 impl PricedProfile {
@@ -270,12 +281,11 @@ impl Window {
 
 pub const MAX_HARD_CAP_MINUTES: u32 = 24 * 60;
 
-/// Резерв окна: (час сервера + час адреса) × (ceil((предел + срок на доработку + запас на
-/// снос) / 60) + 1); слагаемые считаются по отдельности и складываются.
+/// Резерв окна: час сервера × (ceil((предел + срок на доработку + запас на снос) / 60) + 1).
+/// Публичный адрес больше не заказывается, поэтому в резерв входит только сервер.
 pub fn reservation_for(
     config: &CloudConfig,
     hourly_kopecks: i64,
-    ipv4_hourly_kopecks: i64,
     hard_cap_minutes: u32,
 ) -> Result<i64, PriceError> {
     let minutes = price::total_minutes(
@@ -283,9 +293,7 @@ pub fn reservation_for(
         config.drain_grace_minutes(),
         config.teardown_margin_minutes(),
     )?;
-    let server = price::reservation_kopecks(hourly_kopecks, minutes)?;
-    let address = price::reservation_kopecks(ipv4_hourly_kopecks, minutes)?;
-    server.checked_add(address).ok_or(PriceError::Overflow)
+    price::reservation_kopecks(hourly_kopecks, minutes)
 }
 
 /// Расход месяца: законченные окна по итоговой цене, живые по резерву.
@@ -299,6 +307,42 @@ pub async fn spent_in_month(conn: &mut PgConnection, month: &str) -> Result<i64,
     .bind(live_states())
     .fetch_one(conn)
     .await
+}
+
+/// Все адреса включающего диапазона, от первого до последнего.
+fn ip_range(first: Ipv4Addr, last: Ipv4Addr) -> impl Iterator<Item = Ipv4Addr> {
+    (u32::from(first)..=u32::from(last)).map(Ipv4Addr::from)
+}
+
+/// Выделить свободный локальный адрес и DNAT-порт: заняты только те, что держит живое окно.
+/// Освобождённые при конце окна значения сразу пригодны для повторного использования.
+async fn allocate(
+    conn: &mut PgConnection,
+    config: &CloudConfig,
+) -> Result<(String, u16), CreateRefusal> {
+    let held: Vec<(Option<String>, Option<i32>)> =
+        sqlx::query_as("select local_ip, dnat_port from cloud_windows where state = any($1)")
+            .bind(live_states())
+            .fetch_all(&mut *conn)
+            .await?;
+    let used_ips: HashSet<String> = held.iter().filter_map(|(ip, _)| ip.clone()).collect();
+    let used_ports: HashSet<u16> = held
+        .iter()
+        .filter_map(|(_, port)| port.and_then(|port| u16::try_from(port).ok()))
+        .collect();
+    let (first_ip, last_ip) = config
+        .local_ip_range()
+        .ok_or(CreateRefusal::Invalid("local_ip_pool"))?;
+    let ip = ip_range(first_ip, last_ip)
+        .find(|ip| !used_ips.contains(&ip.to_string()))
+        .ok_or(CreateRefusal::PoolExhausted("local_ip_pool"))?;
+    let (first_port, last_port) = config
+        .dnat_port_values()
+        .ok_or(CreateRefusal::Invalid("dnat_port_range"))?;
+    let port = (first_port..=last_port)
+        .find(|port| !used_ports.contains(port))
+        .ok_or(CreateRefusal::PoolExhausted("dnat_port_range"))?;
+    Ok((ip.to_string(), port))
 }
 
 /// Создание окна одной транзакцией, для любого входа (карточка, кнопка, автоматика):
@@ -325,6 +369,9 @@ pub async fn create_in_tx(
     if let Some(code) = block {
         return Err(CreateRefusal::ProviderBlocked { code });
     }
+    // Пул проверяется до «одно живое окно»: когда он исчерпан, причина отказа — именно пул,
+    // а не занятость единственного окна. Ничего не резервируется до вставки строки.
+    let (local_ip, dnat_port) = allocate(conn, config).await?;
     let existing: bool =
         sqlx::query_scalar("select exists(select 1 from cloud_windows where state = any($1))")
             .bind(live_states())
@@ -336,12 +383,7 @@ pub async fn create_in_tx(
     let Some(max_hourly) = pricing.max_hourly_kopecks() else {
         return Err(CreateRefusal::Invalid("profiles"));
     };
-    let reservation = reservation_for(
-        config,
-        max_hourly,
-        pricing.ipv4_hourly_kopecks,
-        request.hard_cap_minutes,
-    )?;
+    let reservation = reservation_for(config, max_hourly, request.hard_cap_minutes)?;
     let now = Utc::now();
     let month = month_of(now);
     let spent = spent_in_month(&mut *conn, &month).await?;
@@ -360,8 +402,8 @@ pub async fn create_in_tx(
     sqlx::query(
         "insert into cloud_windows (id, name, state, trigger, proposal_id, host_key_public,
                                     price_hourly_kopecks, reservation_kopecks, month,
-                                    hard_cap_minutes, created_at, profiles, ipv4_hourly_kopecks)
-         values ($1, $2, 'create_intent', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+                                    hard_cap_minutes, created_at, profiles, local_ip, dnat_port)
+         values ($1, $2, 'create_intent', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
     )
     .bind(id)
     .bind(format!("canterlot-runner-{id}"))
@@ -374,7 +416,8 @@ pub async fn create_in_tx(
     .bind(i32::try_from(request.hard_cap_minutes).expect("bounded by MAX_HARD_CAP_MINUTES"))
     .bind(now)
     .bind(serde_json::to_value(&pricing.profiles).expect("profiles serialize"))
-    .bind(pricing.ipv4_hourly_kopecks)
+    .bind(&local_ip)
+    .bind(i32::from(dnat_port))
     .execute(&mut *conn)
     .await?;
     stash_key(id, key);
@@ -421,6 +464,10 @@ pub async fn fail_in_tx(
 /// Код отказа провайдера, после которого новые окна не создаются: у аккаунта правило против
 /// злоупотреблений, требующее предоплаты.
 pub const BLOCK_ABUSE_PREPAYMENT: &str = "abuse_prepayment_required";
+
+/// Сервер остаётся `no_paid` дольше срока: аккаунт требует предоплату, новые окна
+/// бесполезны. Блок снимает только владелец.
+pub const BLOCK_NO_PAID: &str = "no_paid";
 
 /// Блок провайдера: код и момент пишутся в `cloud_budget`, пока блок стоит, `create_in_tx`
 /// отказывает `ProviderBlocked`. Повторный отказ обновляет момент.
@@ -640,13 +687,14 @@ pub struct CloudWindowView {
     pub state: String,
     pub trigger: String,
     pub server_id: Option<i64>,
-    pub ipv4: Option<String>,
+    /// Локальный адрес сервера в приватной сети.
+    pub local_ip: Option<String>,
+    /// Публичный порт DNAT-правила роутера для SSH.
+    pub dnat_port: Option<i32>,
     /// Конфигуратор принятого профиля; пусто, пока сервера нет.
     pub configurator_id: Option<i64>,
     /// Цена часа: до приёма профиля самая дорогая из списка, после действительная.
     pub price_hourly_kopecks: i64,
-    /// Цена часа публичного IPv4 (входит в резерв и в итог).
-    pub ipv4_hourly_kopecks: i64,
     pub reservation_kopecks: i64,
     /// Итог закончившегося окна; у живого пусто.
     pub final_cost_kopecks: Option<i64>,
@@ -667,19 +715,12 @@ pub fn view(window: &Window, now: DateTime<Utc>) -> CloudWindowView {
     let cost_so_far = match (window.final_cost_kopecks, window.create_called_at) {
         (Some(cost), _) => cost,
         (None, Some(called)) => {
-            let minutes = |from: DateTime<Utc>| {
-                u64::try_from((now - from).num_seconds().max(0))
-                    .unwrap_or(0)
-                    .div_ceil(60)
-            };
-            let server = price::final_cost_kopecks(window.price_hourly_kopecks, minutes(called));
-            let address = window.ip_requested_at.map_or(Ok(0), |at| {
-                price::final_cost_kopecks(window.ipv4_hourly_kopecks, minutes(at))
-            });
-            match (server, address) {
-                (Ok(server), Ok(address)) => (server + address).min(window.reservation_kopecks),
-                _ => window.reservation_kopecks,
-            }
+            let minutes = u64::try_from((now - called).num_seconds().max(0))
+                .unwrap_or(0)
+                .div_ceil(60);
+            price::final_cost_kopecks(window.price_hourly_kopecks, minutes)
+                .unwrap_or(window.reservation_kopecks)
+                .min(window.reservation_kopecks)
         }
         (None, None) => 0,
     };
@@ -689,10 +730,10 @@ pub fn view(window: &Window, now: DateTime<Utc>) -> CloudWindowView {
         state: window.state.clone(),
         trigger: window.trigger.clone(),
         server_id: window.server_id,
-        ipv4: window.ipv4.clone(),
+        local_ip: window.local_ip.clone(),
+        dnat_port: window.dnat_port,
         configurator_id: window.configurator_id,
         price_hourly_kopecks: window.price_hourly_kopecks,
-        ipv4_hourly_kopecks: window.ipv4_hourly_kopecks,
         reservation_kopecks: window.reservation_kopecks,
         final_cost_kopecks: window.final_cost_kopecks,
         cost_so_far_kopecks: cost_so_far,

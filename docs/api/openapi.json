@@ -15873,7 +15873,6 @@
           "state",
           "trigger",
           "price_hourly_kopecks",
-          "ipv4_hourly_kopecks",
           "reservation_kopecks",
           "cost_so_far_kopecks",
           "month",
@@ -15917,6 +15916,14 @@
             ],
             "format": "date-time"
           },
+          "dnat_port": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Публичный порт DNAT-правила роутера для SSH."
+          },
           "final_cost_kopecks": {
             "type": [
               "integer",
@@ -15936,22 +15943,18 @@
             "type": "string",
             "format": "uuid"
           },
-          "ipv4": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "ipv4_hourly_kopecks": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Цена часа публичного IPv4 (входит в резерв и в итог)."
-          },
           "last_error": {
             "type": [
               "string",
               "null"
             ]
+          },
+          "local_ip": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Локальный адрес сервера в приватной сети."
           },
           "month": {
             "type": "string"

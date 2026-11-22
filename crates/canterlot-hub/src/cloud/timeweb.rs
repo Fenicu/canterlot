@@ -20,9 +20,9 @@ use serde_json::{Value, json};
 use super::price::{UnitPrices, rubles_to_kopecks};
 use super::rate_limit::{RateLimit, RateLimiter};
 use super::{
-    CloudProvider, Configurator, CreateOutcome, CreateServer, DeleteOutcome, ErrorKind, FloatingIp,
-    Ipv4Outcome, Limits, ListError, ProviderError, ServerLookup, ServerState, ServerStatus,
-    ServerSummary,
+    CloudProvider, Configurator, CreateOutcome, CreateServer, DeleteOutcome, DnatCreateOutcome,
+    DnatRule, DnatRuleRequest, ErrorKind, Limits, ListError, ProviderError, ServerLookup,
+    ServerState, ServerStatus, ServerSummary,
 };
 
 pub const DEFAULT_BASE_URL: &str = "https://api.timeweb.cloud";
@@ -484,6 +484,18 @@ fn key_identity(key: &str) -> (&str, &str) {
     )
 }
 
+/// Идентификаторы идут в путь: только то, что похоже на ID. Так значение из конфигурации
+/// или из ответа провайдера не может изменить путь запроса.
+fn dnat_path(router_id: &str, tail: &str) -> Option<String> {
+    let safe = |value: &str| {
+        !value.is_empty()
+            && value
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+    };
+    safe(router_id).then(|| format!("/api/v1/routers/{router_id}/dnat-rules{tail}"))
+}
+
 #[async_trait]
 impl CloudProvider for TimewebProvider {
     async fn configurator(&self, id: i64) -> Result<Configurator, ProviderError> {
@@ -581,6 +593,10 @@ impl CloudProvider for TimewebProvider {
         if !request.hostname.is_empty() {
             body["hostname"] = json!(request.hostname);
         }
+        // Сервер живёт в приватной сети владельца и выходит в интернет через NAT роутера.
+        // Публичный IPv4 серверу не заказывается: заказ уходил отказом и блокировал аккаунт.
+        body["network"] = json!({"id": request.network_id, "local_ip": request.local_ip});
+        body["availability_zone"] = json!(request.availability_zone);
         let reply = match self
             .call(
                 Method::POST,
@@ -696,15 +712,23 @@ impl CloudProvider for TimewebProvider {
             .map_err(|error| ListError::Page { offset: 0, error })
     }
 
-    /// Способ сейчас один: заказ нового адреса (`POST /servers/{id}/ips`). Привязка
-    /// заранее купленного плавающего (`POST /floating-ips/{id}/bind`) встанет сюда же.
-    async fn ensure_public_ipv4(&self, server_id: i64) -> Ipv4Outcome {
-        let path = format!("/api/v1/servers/{server_id}/ips");
-        let body = json!({"type": "ipv4"});
+    async fn create_dnat_rule(&self, router_id: &str, rule: &DnatRuleRequest) -> DnatCreateOutcome {
+        let Some(path) = dnat_path(router_id, "") else {
+            return DnatCreateOutcome::Refused {
+                status: 0,
+                error_code: "invalid_router_id".to_owned(),
+                message: "invalid router id".to_owned(),
+            };
+        };
+        let body = json!({
+            "protocol": "tcp",
+            "local": {"ip": rule.local_ip, "port": rule.local_port.to_string()},
+            "public": {"ip": rule.public_ip, "port": rule.public_port.to_string()},
+        });
         let reply = match self
             .call(
                 Method::POST,
-                "POST /api/v1/servers/{id}/ips",
+                "POST /api/v1/routers/{router_id}/dnat-rules",
                 &path,
                 &[],
                 Some(&body),
@@ -712,13 +736,8 @@ impl CloudProvider for TimewebProvider {
             .await
         {
             Ok(reply) => reply,
-            Err(Transport::RateLimited) => {
-                return Ipv4Outcome::NotProcessed {
-                    why: "rate limited".to_owned(),
-                };
-            }
             Err(failure) => {
-                return Ipv4Outcome::Ambiguous {
+                return DnatCreateOutcome::Ambiguous {
                     why: failure.describe().to_owned(),
                 };
             }
@@ -726,70 +745,83 @@ impl CloudProvider for TimewebProvider {
         match reply.status {
             200 | 201 => serde_json::from_slice::<Value>(&reply.body)
                 .ok()
-                .and_then(|value| value["server_ip"]["ip"].as_str().map(str::to_owned))
-                .filter(|ip| valid_ip(ip))
+                .and_then(|value| value["dnat_rule"]["id"].as_str().map(str::to_owned))
+                .filter(|id| !id.is_empty())
                 .map_or_else(
-                    || Ipv4Outcome::Ambiguous {
-                        why: "answer has no usable server_ip.ip".to_owned(),
+                    || DnatCreateOutcome::Ambiguous {
+                        why: "answer has no dnat_rule.id".to_owned(),
                     },
-                    Ipv4Outcome::Assigned,
+                    |rule_id| DnatCreateOutcome::Created { rule_id },
                 ),
-            429 => Ipv4Outcome::NotProcessed {
-                why: "rate limited".to_owned(),
-            },
             status @ 400..=499 => {
                 let value: Value = serde_json::from_slice(&reply.body).unwrap_or(Value::Null);
-                let clean = |text: &str, limit: usize, extra: &[char]| -> String {
-                    text.chars()
-                        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || extra.contains(c))
-                        .take(limit)
-                        .collect()
-                };
-                Ipv4Outcome::Refused {
+                DnatCreateOutcome::Refused {
                     status,
-                    code: clean(value["error_code"].as_str().unwrap_or_default(), 64, &[]),
-                    // Только число из `details.required_balance`, рубли; ничего больше.
-                    required_balance: match &value["details"]["required_balance"] {
-                        Value::Number(number) => Some(clean(&number.to_string(), 24, &['.'])),
-                        _ => None,
-                    }
-                    .filter(|text| !text.is_empty()),
+                    error_code: value["error_code"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .chars()
+                        .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+                        .take(64)
+                        .collect(),
+                    message: self.message_of(&reply.body),
                 }
             }
-            status => Ipv4Outcome::Ambiguous {
+            status => DnatCreateOutcome::Ambiguous {
                 why: format!("HTTP {status}"),
             },
         }
     }
 
-    async fn list_floating_ips(&self) -> Result<Vec<FloatingIp>, ListError> {
+    async fn list_dnat_rules(&self, router_id: &str) -> Result<Vec<DnatRule>, ListError> {
+        let Some(path) = dnat_path(router_id, "") else {
+            return Err(ListError::Page {
+                offset: 0,
+                error: malformed("invalid router id"),
+            });
+        };
         let items = self
-            .walk_pages("GET /api/v1/floating-ips", "/api/v1/floating-ips", "ips")
+            .walk_pages(
+                "GET /api/v1/routers/{router_id}/dnat-rules",
+                &path,
+                "dnat_rules",
+            )
             .await?;
-        Ok(items
+        items
             .iter()
-            .map(|item| FloatingIp {
-                id: id_text(&item["id"]).unwrap_or_default(),
-                ip: item["ip"].as_str().map(str::to_owned),
-                bound: !item["resource_id"].is_null() && item["resource_id"].as_str() != Some(""),
+            .map(|item| {
+                Ok(DnatRule {
+                    id: item["id"].as_str().unwrap_or_default().to_owned(),
+                    local_ip: item["local_ip"].as_str().unwrap_or_default().to_owned(),
+                    local_port: item["local_port"].as_str().unwrap_or_default().to_owned(),
+                    public_ip: item["public_ip"].as_str().unwrap_or_default().to_owned(),
+                    public_port: item["public_port"].as_str().unwrap_or_default().to_owned(),
+                    protocol: item["protocol"].as_str().unwrap_or_default().to_owned(),
+                })
             })
-            .collect())
+            .collect()
     }
 
-    async fn delete_floating_ip(&self, id: &str) -> DeleteOutcome {
-        // Номер идёт в путь: только то, что похоже на идентификатор.
-        if id.is_empty()
-            || !id
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-        {
+    async fn delete_dnat_rule(&self, router_id: &str, rule_id: &str) -> DeleteOutcome {
+        let Some(tail) = (|| {
+            if rule_id.is_empty()
+                || !rule_id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+            {
+                return None;
+            }
+            Some(format!("/{rule_id}"))
+        })() else {
             return DeleteOutcome::Failed { retryable: false };
-        }
-        let path = format!("/api/v1/floating-ips/{id}");
+        };
+        let Some(path) = dnat_path(router_id, &tail) else {
+            return DeleteOutcome::Failed { retryable: false };
+        };
         let reply = match self
             .call(
                 Method::DELETE,
-                "DELETE /api/v1/floating-ips/{id}",
+                "DELETE /api/v1/routers/{router_id}/dnat-rules/{dnat_id}",
                 &path,
                 &[],
                 None,
@@ -815,10 +847,6 @@ fn id_text(value: &Value) -> Option<String> {
         Value::String(text) if !text.is_empty() => Some(text.clone()),
         _ => None,
     }
-}
-
-fn valid_ip(text: &str) -> bool {
-    text.parse::<std::net::Ipv4Addr>().is_ok()
 }
 
 #[cfg(test)]

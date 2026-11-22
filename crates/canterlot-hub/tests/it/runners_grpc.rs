@@ -300,9 +300,12 @@ async fn the_cloud_runner_is_listed_and_gets_its_token_only_while_a_window_serve
     );
     // Окно создано, сервер найден (`identified`), раннера `cloud` ещё нет в базе.
     let config: canterlot_hub::config::CloudConfig = toml::from_str(&format!(
-        "provider='timeweb'\ntoken_file='t'\nproject_id=1\nipv4_monthly_rubles=72\n\
+        "provider='timeweb'\ntoken_file='t'\nproject_id=1\n\
+         network_id='network-example'\nnetwork_cidr='192.0.2.0/24'\nrouter_id='018f0000-0000-7000-8000-0000000000aa'\n\
+         router_ip='192.0.2.1'\ngateway='192.0.2.5'\n\
+         local_ip_pool='192.0.2.10-192.0.2.60'\ndnat_port_range='22100-22199'\n\
          runner_public_key='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLE'\n\
-         carrier_machine_id='{}'\n[[profile]]\nconfigurator_id=151\ncpu=1\nram_gb=1\ndisk_gb=10\n",
+         carrier_machine_id='{}'\n[[profile]]\nconfigurator_id=151\ncpu=1\nram_gb=1\ndisk_gb=10\navailability_zone='msk-1'\n",
         host.carrier.machine_id
     ))?;
     let window = Uuid::now_v7();
@@ -312,7 +315,7 @@ async fn the_cloud_runner_is_listed_and_gets_its_token_only_while_a_window_serve
                                     hard_cap_minutes, created_at, create_called_at, profiles)
          values ($1, 'canterlot-runner-' || $1::text, 'identified', 'owner', 5001,
                  'ssh-ed25519 AAAA', 2845, 11380, '2026-11', 60, now(), now(),
-                 '[{\"configurator_id\":151,\"cpu\":32,\"ram_gb\":64,\"disk_gb\":80,\"hourly_kopecks\":2845}]')",
+                 '[{\"configurator_id\":151,\"cpu\":32,\"ram_gb\":64,\"disk_gb\":80,\"hourly_kopecks\":2845,\"availability_zone\":\"msk-1\"}]')",
     )
     .bind(window)
     .execute(&pool)

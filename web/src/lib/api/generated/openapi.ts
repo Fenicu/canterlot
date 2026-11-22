@@ -2793,6 +2793,11 @@ export interface components {
             /** Format: date-time */
             delete_requested_at?: string | null;
             /**
+             * Format: int32
+             * @description Публичный порт DNAT-правила роутера для SSH.
+             */
+            dnat_port?: number | null;
+            /**
              * Format: int64
              * @description Итог закончившегося окна; у живого пусто.
              */
@@ -2801,13 +2806,9 @@ export interface components {
             hard_cap_at?: string | null;
             /** Format: uuid */
             id: string;
-            ipv4?: string | null;
-            /**
-             * Format: int64
-             * @description Цена часа публичного IPv4 (входит в резерв и в итог).
-             */
-            ipv4_hourly_kopecks: number;
             last_error?: string | null;
+            /** @description Локальный адрес сервера в приватной сети. */
+            local_ip?: string | null;
             month: string;
             name: string;
             /**

@@ -21,13 +21,13 @@ use tokio::sync::{Mutex, watch};
 use uuid::Uuid;
 
 use super::{
-    CloudProvider, CreateOutcome, CreateServer, DeleteOutcome, Ipv4Outcome, ServerLookup,
-    ServerStatus, ServerSummary,
+    CloudProvider, CreateOutcome, CreateServer, DeleteOutcome, DnatCreateOutcome, DnatRuleRequest,
+    ServerLookup, ServerStatus, ServerSummary,
     cloud_init::{self, CloudInitParams},
     price,
     windows::{
-        self, CreateRefusal, CreateRequest, Pricing, Window, WindowId, cloud_machine_id,
-        window_id_from_name,
+        self, BLOCK_NO_PAID, CreateRefusal, CreateRequest, Pricing, Window, WindowId,
+        cloud_machine_id, window_id_from_name,
     },
 };
 use crate::{
@@ -73,37 +73,20 @@ fn minutes_between(from: DateTime<Utc>, to: DateTime<Utc>) -> u64 {
         .div_ceil(60)
 }
 
-/// Чем кончилась попытка получить адрес за один проход.
-enum Ordered {
-    Address(String),
-    /// Адреса пока нет (запрос не обработан или ответа нет): окно живёт дальше.
-    Pending,
-    /// Провайдер отказал, окно ушло на удаление.
-    Refused,
-}
+/// Причина удаления окна, у которого сервер остался `no_paid`: аккаунт требует предоплату.
+pub const REASON_NO_PAID: &str = "no_paid";
 
-/// Причина удаления окна, в котором провайдер отказал в публичном адресе.
-pub const REASON_IPV4_REFUSED: &str = "ipv4_refused";
-
-/// Итог окна: сервер от вызова создания до подтверждённого конца и адрес от заказа до
-/// подтверждённого конца, каждый по своей цене часа и не меньше часа. У окна, которому не
-/// звонили, и без заказа адреса слагаемое 0.
-fn ledger_cost(window: &Window, server_end: DateTime<Utc>, ip_end: DateTime<Utc>) -> i64 {
-    let server = window.create_called_at.map_or(0, |called| {
+/// Итог окна: цена часа удалённого профиля за время от вызова создания до подтверждённого
+/// конца, не меньше часа. У окна, которому не звонили, слагаемое 0. Публичный адрес больше
+/// не заказывается, поэтому в итог входит только сервер.
+fn ledger_cost(window: &Window, server_end: DateTime<Utc>) -> i64 {
+    window.create_called_at.map_or(0, |called| {
         price::final_cost_kopecks(
             window.price_hourly_kopecks,
             minutes_between(called, server_end),
         )
         .unwrap_or(window.reservation_kopecks)
-    });
-    let address = window.ip_requested_at.map_or(0, |requested| {
-        price::final_cost_kopecks(
-            window.ipv4_hourly_kopecks,
-            minutes_between(requested, ip_end),
-        )
-        .unwrap_or(window.reservation_kopecks)
-    });
-    server.saturating_add(address)
+    })
 }
 
 fn delete_backoff(attempts: i32) -> TimeDelta {
@@ -169,6 +152,7 @@ impl CloudService {
                 ram_gb: profile.ram_gb,
                 disk_gb: profile.disk_gb,
                 hourly_kopecks: price::hourly_kopecks(monthly)?,
+                availability_zone: profile.availability_zone.clone(),
             });
         }
         if profiles.is_empty() {
@@ -176,13 +160,7 @@ impl CloudService {
                 last_error.map_or(CreateRefusal::Invalid("profiles"), CreateRefusal::Provider)
             );
         }
-        // Публичный адрес заказывается отдельно и тарифицируется сам: цена как у сервера, в
-        // копейках, час с округлением вверх.
-        let ipv4_monthly = price::rubles_to_kopecks(self.config.ipv4_monthly_rubles)?;
-        Ok(Pricing {
-            profiles,
-            ipv4_hourly_kopecks: price::hourly_kopecks(ipv4_monthly)?,
-        })
+        Ok(Pricing { profiles })
     }
 
     /// Создание окна из любого входа: цена у провайдера, затем одна транзакция. Вызов
@@ -354,6 +332,7 @@ impl CloudService {
             host_key_ed25519_public: key.public_line().to_owned(),
             runner_authorized_key: self.config.runner_public_key.clone(),
             root_dir: CLOUD_ROOT_DIR.to_owned(),
+            gateway: self.config.gateway.clone(),
         });
         let Ok(cloud_init) = rendered else {
             return self.fail(window.id, "cloud_init_invalid").await;
@@ -409,6 +388,12 @@ impl CloudService {
                 ssh_key_ids: vec![key_id],
                 cloud_init: cloud_init.clone(),
                 hostname: "canterlot-runner".to_owned(),
+                network_id: self.config.network_id.clone(),
+                local_ip: window
+                    .local_ip
+                    .clone()
+                    .expect("local_ip allocated in create_in_tx"),
+                availability_zone: profile.availability_zone.clone(),
             };
             let outcome = self.provider.create_server(&request).await;
             drop(request);
@@ -496,170 +481,165 @@ impl CloudService {
         let Some(server_id) = window.server_id else {
             return Ok(());
         };
-        let mut ipv4 = window.ipv4.clone();
-        // У нового сервера публичного адреса нет, а без него нет сети: хаб заказывает адрес
-        // сразу, один раз (он тарифицируется сам и переживает сервер).
-        if window.ip_requested_at.is_none() {
-            match self.request_ipv4(&window, server_id, now).await? {
-                Ordered::Address(address) => ipv4 = Some(address),
-                Ordered::Pending => {}
-                // Провайдер отказал: окно уже в `deleting`, подключать нечего.
-                Ordered::Refused => return Ok(()),
+        // Правило уже создано (или усыновлено из списка): подключаться можно сразу, без
+        // повторного опроса сервера. Адрес подключения — публичный IP роутера.
+        if window.dnat_rule_id.is_some() {
+            if window.attach_sent_at.is_none() {
+                self.send_attach(&window, now).await?;
             }
+            return Ok(());
         }
-        if window.attach_sent_at.is_none() {
-            // Подключать можно, когда сервер `On` и адрес известен.
-            let mut on = false;
-            match self.provider.get_server(server_id).await {
-                Ok(ServerLookup::Found(state)) if state.status == ServerStatus::On => {
-                    on = true;
-                    if let Some(address) = state.ipv4
-                        && ipv4.as_deref() != Some(address.as_str())
+        match self.provider.get_server(server_id).await {
+            Ok(ServerLookup::Found(state)) => match state.status {
+                // Сервер не включается, пока аккаунт не переведён на предоплату. Это
+                // определённый отказ: ждём только отведенный срок с момента создания.
+                ServerStatus::NoPaid => {
+                    if window
+                        .create_called_at
+                        .is_some_and(|called| now - called >= grace(self.config.no_paid_grace))
                     {
-                        sqlx::query("update cloud_windows set ipv4 = $2 where id = $1")
-                            .bind(window.id)
-                            .bind(&address)
-                            .execute(&self.pool)
-                            .await?;
-                        ipv4 = Some(address);
+                        self.no_paid_refusal(&window, now).await?;
                     }
                 }
-                Ok(_) => {}
-                Err(error) => {
-                    tracing::warn!(kind = "cloud_poll_server", error_kind = ?error.kind, "server poll failed");
-                }
-            }
-            if let (true, Some(host)) = (on, ipv4) {
-                self.send_attach(&window, &host, now).await?;
+                ServerStatus::On => self.ensure_dnat(&window, now).await?,
+                _ => {}
+            },
+            Ok(ServerLookup::NotFound) => {}
+            Err(error) => {
+                tracing::warn!(kind = "cloud_poll_server", error_kind = ?error.kind, "server poll failed");
             }
         }
         Ok(())
     }
 
-    /// Получение публичного IPv4 одним методом провайдера (`ensure_public_ipv4`): способ
-    /// получения за ним можно сменить, машина состояний окна не изменится. Метка ставится до
-    /// вызова, второго вызова нет: после неопределённого ответа адрес мог выдаться. Не
-    /// обработанный запрос (429) снимает метку, следующий проход повторит; отказ провайдера
-    /// отправляет окно на удаление (`ipv4_refused`).
-    async fn request_ipv4(
-        &self,
-        window: &Window,
-        server_id: i64,
-        now: DateTime<Utc>,
-    ) -> Result<Ordered, sqlx::Error> {
-        let stamped = sqlx::query(
-            "update cloud_windows set ip_requested_at = $2
-             where id = $1 and state = 'identified' and ip_requested_at is null",
-        )
-        .bind(window.id)
-        .bind(now)
-        .execute(&self.pool)
-        .await?
-        .rows_affected();
-        if stamped == 0 {
-            return Ok(Ordered::Pending);
-        }
-        match self.provider.ensure_public_ipv4(server_id).await {
-            Ipv4Outcome::Assigned(address) => {
-                sqlx::query("update cloud_windows set ipv4 = $2, last_error = null where id = $1")
+    /// DNAT-правило создаётся ровно один раз. Неопределённый ответ не повторяется:
+    /// метка вызова остаётся, а следующий проход ищет правило в полном списке роутера и
+    /// усыновляет его. Полный список без правила снимает метку — повтор_CREATE безопасен.
+    async fn ensure_dnat(&self, window: &Window, now: DateTime<Utc>) -> Result<(), sqlx::Error> {
+        let (Some(local_ip), Some(port)) = (window.local_ip.as_deref(), window.dnat_port) else {
+            return Ok(());
+        };
+        let port = match u16::try_from(port) {
+            Ok(port) => port,
+            Err(_) => return Ok(()),
+        };
+        let router_ip = self.config.router_ip.clone();
+        if window.dnat_create_attempted_at.is_none() {
+            let stamped = sqlx::query(
+                "update cloud_windows set dnat_create_attempted_at = $2
+                 where id = $1 and state = 'identified' and dnat_create_attempted_at is null",
+            )
+            .bind(window.id)
+            .bind(now)
+            .execute(&self.pool)
+            .await?
+            .rows_affected();
+            if stamped == 0 {
+                return Ok(());
+            }
+            let request = DnatRuleRequest {
+                local_ip: local_ip.to_owned(),
+                local_port: 22,
+                public_ip: router_ip.clone(),
+                public_port: port,
+            };
+            match self
+                .provider
+                .create_dnat_rule(&self.config.router_id, &request)
+                .await
+            {
+                DnatCreateOutcome::Created { rule_id } => {
+                    self.adopt_dnat(window.id, &rule_id).await?;
+                }
+                DnatCreateOutcome::Refused { .. } => {
+                    sqlx::query(
+                        "update cloud_windows set last_error = 'dnat_refused' where id = $1",
+                    )
                     .bind(window.id)
-                    .bind(&address)
                     .execute(&self.pool)
                     .await?;
-                Ok(Ordered::Address(address))
-            }
-            Ipv4Outcome::Refused {
-                status,
-                code,
-                required_balance,
-            } => {
-                self.ipv4_refused(window, status, &code, required_balance.as_deref(), now)
+                    return self.delete_now(window, "dnat_refused", now).await;
+                }
+                DnatCreateOutcome::Ambiguous { .. } => {
+                    sqlx::query(
+                        "update cloud_windows set last_error = 'dnat_create_unknown' where id = $1",
+                    )
+                    .bind(window.id)
+                    .execute(&self.pool)
                     .await?;
-                Ok(Ordered::Refused)
+                }
             }
-            // Запрос не обработан: адреса нет, метка снимается, следующий проход повторит.
-            Ipv4Outcome::NotProcessed { .. } => {
-                sqlx::query(
-                    "update cloud_windows set last_error = 'ipv4_request_failed',
-                            ip_requested_at = null
-                     where id = $1",
-                )
-                .bind(window.id)
-                .execute(&self.pool)
-                .await?;
-                Ok(Ordered::Pending)
+            return Ok(());
+        }
+        // Вызов был, ответ нечитаем: полный список — единственный источник истины.
+        match self.provider.list_dnat_rules(&self.config.router_id).await {
+            Ok(rules) => {
+                if let Some(rule) = rules
+                    .iter()
+                    .find(|rule| rule.matches(&router_ip, port, local_ip))
+                {
+                    self.adopt_dnat(window.id, &rule.id).await?;
+                } else {
+                    // Полный список подтвердил отсутствие правила: первый вызов точно не
+                    // создал его, поэтому повтор для того же порта безопасен.
+                    sqlx::query(
+                        "update cloud_windows set dnat_create_attempted_at = null where id = $1",
+                    )
+                    .bind(window.id)
+                    .execute(&self.pool)
+                    .await?;
+                }
             }
-            // Адрес мог выдаться: второго заказа нет, сервер перечитывается тем же проходом
-            // (опрос покажет выданный адрес).
-            Ipv4Outcome::Ambiguous { .. } => {
-                sqlx::query(
-                    "update cloud_windows set last_error = 'ipv4_request_unknown' where id = $1",
-                )
-                .bind(window.id)
-                .execute(&self.pool)
-                .await?;
-                Ok(Ordered::Pending)
+            Err(error) => {
+                tracing::warn!(kind = "cloud_dnat_listing", error = %error, "dnat listing failed; nothing changed");
             }
         }
+        Ok(())
     }
 
-    /// Провайдер отказал в публичном IPv4 (любой 4xx кроме 429): повтор не поможет, а сервер
-    /// без сети бесполезен и тарифицируется. Окно уходит на удаление по обычному пути
-    /// (отзыв раннера, удаление, подтверждение отсутствием), заказ адреса снят с метки (адреса
-    /// нет, итог без него), а код ответа остаётся в `last_error`. Правило против злоупотреблений
-    /// (`abuse_prepayment_required`) блокирует и создание новых окон, пока владелец не снимет
-    /// блок. Владельцу пуш сразу: код и требуемый баланс, больше ничего из ответа.
-    async fn ipv4_refused(
+    async fn adopt_dnat(&self, id: Uuid, rule_id: &str) -> Result<(), sqlx::Error> {
+        sqlx::query("update cloud_windows set dnat_rule_id = $2, last_error = null where id = $1")
+            .bind(id)
+            .bind(rule_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Сервер остался `no_paid` дольше срока: definite отказ. Окно уходит на удаление по
+    /// обычному пути, блок в `cloud_budget` закрывает новые окна, владельцу пуш.
+    async fn no_paid_refusal(
         &self,
         window: &Window,
-        status: u16,
-        code: &str,
-        required_balance: Option<&str>,
         now: DateTime<Utc>,
     ) -> Result<(), sqlx::Error> {
         tracing::warn!(
-            kind = "cloud_ipv4_refused",
-            status,
-            code,
-            "provider refused the public ipv4"
+            kind = "cloud_no_paid",
+            "provider did not turn the server on: no_paid"
         );
-        let code = if code.is_empty() { "refused" } else { code };
-        sqlx::query(
-            "update cloud_windows set ip_requested_at = null, last_error = $2 where id = $1",
-        )
-        .bind(window.id)
-        .bind(code)
-        .execute(&self.pool)
-        .await?;
-        if code == windows::BLOCK_ABUSE_PREPAYMENT {
-            windows::set_provider_block(&self.pool, code, now).await?;
-        }
+        sqlx::query("update cloud_windows set last_error = 'no_paid' where id = $1")
+            .bind(window.id)
+            .execute(&self.pool)
+            .await?;
+        windows::set_provider_block(&self.pool, BLOCK_NO_PAID, now).await?;
         crate::notify::enqueue_cloud_alert(
             &self.pool,
-            &format!("cloud:ipv4_refused:{}", window.id),
+            &format!("cloud:no_paid:{}", window.id),
             &json!({
-                "code": "ipv4_refused",
+                "code": "no_paid",
+                "window_id": window.id,
                 "name": window.name,
-                "error_code": code,
-                "required_balance": required_balance,
             }),
         )
         .await?;
-        windows::request_delete(&self.pool, window.id, REASON_IPV4_REFUSED, now).await?;
-        Ok(())
+        self.delete_now(window, REASON_NO_PAID, now).await
     }
 
     /// Команда несущей подключить раннер. Только если машина из конфигурации действительно
     /// несущая: иначе окно дождётся `ready_timeout` и уйдёт.
-    async fn send_attach(
-        &self,
-        window: &Window,
-        host: &str,
-        now: DateTime<Utc>,
-    ) -> Result<(), sqlx::Error> {
+    async fn send_attach(&self, window: &Window, now: DateTime<Utc>) -> Result<(), sqlx::Error> {
         let config = self.config.clone();
         let window = window.clone();
-        let host = host.to_owned();
         crate::db::in_tx(&self.pool, move |conn| {
             Box::pin(async move {
                 let carrier: Option<bool> = sqlx::query_scalar(
@@ -691,7 +671,8 @@ impl CloudService {
                 .bind(json!({
                     "window_id": window.id,
                     "machine_id": machine,
-                    "host": host,
+                    "host": config.router_ip,
+                    "ssh_port": window.dnat_port,
                     "host_key_public": window.host_key_public,
                     "root_dir": CLOUD_ROOT_DIR,
                     "max_running": config.max_running,
@@ -927,15 +908,11 @@ impl CloudService {
         if now < limit + slack {
             return Ok(false);
         }
-        // Сервер и адрес сверх предела: оба тарифицируются.
-        let extra = price::final_cost_kopecks(
-            window
-                .price_hourly_kopecks
-                .saturating_add(window.ipv4_hourly_kopecks),
-            minutes_between(cap, now),
-        )
-        .ok()
-        .map(|cost| cost.min(i64::MAX / 2));
+        // Сервер сверх предела тарифицируется; публичного адреса больше нет.
+        let extra =
+            price::final_cost_kopecks(window.price_hourly_kopecks, minutes_between(cap, now))
+                .ok()
+                .map(|cost| cost.min(i64::MAX / 2));
         let code = if runtime.first_tick {
             "outage_extra_cost"
         } else {
@@ -1000,7 +977,7 @@ impl CloudService {
             }
         }
         if window.server_gone_at.is_some() {
-            self.finish_ip(&window, now).await?;
+            self.finish_dnat(&window, now).await?;
         }
         Ok(())
     }
@@ -1019,72 +996,60 @@ impl CloudService {
         Ok(())
     }
 
-    /// Адрес окна после удаления сервера: он остаётся на аккаунте плавающим без привязки и
-    /// тарифицируется. Окно кончается, когда адреса нет в полном списке плавающих.
-    async fn finish_ip(&self, window: &Window, now: DateTime<Utc>) -> Result<(), sqlx::Error> {
-        if window.ip_requested_at.is_none() || window.ip_gone_at.is_some() {
+    /// DNAT-правило окна после удаления сервера. Открытое правило — обязательство: окно
+    /// остаётся живым, пока полный список правил роутера не подтвердит его отсутствие.
+    async fn finish_dnat(&self, window: &Window, now: DateTime<Utc>) -> Result<(), sqlx::Error> {
+        if window.dnat_rule_id.is_none() || window.dnat_gone_at.is_some() {
             return self.end(&window.id, "ended", now).await;
         }
-        let Some(address) = window.ipv4.as_deref() else {
-            // Заказ адреса остался без ответа, и адреса мы не знаем: чужой плавающий адрес
-            // не трогаем, владелец должен проверить аккаунт. Итог считается с запасом.
-            crate::notify::enqueue_cloud_alert(
-                &self.pool,
-                &format!("cloud:ipv4_unattributed:{}", window.id),
-                &json!({"code": "ipv4_unattributed", "window_id": window.id, "name": window.name}),
-            )
-            .await?;
-            return self.end(&window.id, "ended", now).await;
-        };
-        let list = match self.provider.list_floating_ips().await {
+        let rule_id = window.dnat_rule_id.as_deref().expect("checked above");
+        let router = &self.config.router_id;
+        let list = match self.provider.list_dnat_rules(router).await {
             Ok(list) => list,
             Err(error) => {
-                tracing::warn!(kind = "cloud_floating_listing", error = %error, "floating ip listing failed");
+                tracing::warn!(kind = "cloud_dnat_listing", error = %error, "dnat listing failed; nothing changed");
                 return Ok(());
             }
         };
-        let Some(found) = list.iter().find(|ip| ip.ip.as_deref() == Some(address)) else {
-            // Адреса нет в полном списке: оплата закончилась.
+        if !list.iter().any(|rule| rule.id == rule_id) {
+            // Полный список без правила: обязательство закрыто.
             sqlx::query(
-                "update cloud_windows set ip_gone_at = coalesce(ip_gone_at, $2) where id = $1",
+                "update cloud_windows set dnat_gone_at = coalesce(dnat_gone_at, $2)
+                 where id = $1",
             )
             .bind(window.id)
             .bind(now)
             .execute(&self.pool)
             .await?;
             return self.end(&window.id, "ended", now).await;
-        };
-        // Привязан к серверу, который ещё снимается: ждём.
-        if found.bound {
-            return Ok(());
         }
-        let retry_due = window.next_delete_at.is_none_or(|at| at <= now)
+        let retry_due = window.next_dnat_delete_at.is_none_or(|at| at <= now)
             && window
-                .ip_delete_accepted_at
+                .dnat_delete_accepted_at
                 .is_none_or(|at| now - at >= TimeDelta::minutes(5));
         if !retry_due {
             return Ok(());
         }
-        let attempts = window.ip_delete_attempts.saturating_add(1);
-        match self.provider.delete_floating_ip(&found.id).await {
+        let attempts = window.dnat_delete_attempts.saturating_add(1);
+        match self.provider.delete_dnat_rule(router, rule_id).await {
             DeleteOutcome::Deleted { .. } | DeleteOutcome::AlreadyGone => {
                 sqlx::query(
-                    "update cloud_windows set floating_ip_id = $2, ip_delete_accepted_at = $3,
-                            ip_delete_attempts = $4
+                    "update cloud_windows set dnat_delete_accepted_at = $2,
+                            dnat_delete_attempts = $3
                      where id = $1",
                 )
                 .bind(window.id)
-                .bind(&found.id)
                 .bind(now)
                 .bind(attempts)
                 .execute(&self.pool)
                 .await?;
-                // Подтверждение тем же способом, что у сервера: адреса нет в полном списке.
-                if let Ok(list) = self.provider.list_floating_ips().await
-                    && !list.iter().any(|ip| ip.ip.as_deref() == Some(address))
+                // Подтверждение тем же способом, что у сервера: правила нет в полном списке.
+                if let Ok(list) = self.provider.list_dnat_rules(router).await
+                    && !list.iter().any(|rule| rule.id == rule_id)
                 {
                     sqlx::query(
-                        "update cloud_windows set ip_gone_at = coalesce(ip_gone_at, $2) where id = $1",
+                        "update cloud_windows set dnat_gone_at = coalesce(dnat_gone_at, $2)
+                         where id = $1",
                     )
                     .bind(window.id)
                     .bind(now)
@@ -1095,12 +1060,11 @@ impl CloudService {
             }
             DeleteOutcome::NeedsConfirmation | DeleteOutcome::Failed { .. } => {
                 sqlx::query(
-                    "update cloud_windows set floating_ip_id = $2, last_error = 'ip_delete_failed',
-                            ip_delete_attempts = $3, next_delete_at = $4
+                    "update cloud_windows set last_error = 'dnat_delete_failed',
+                            dnat_delete_attempts = $2, next_dnat_delete_at = $3
                      where id = $1",
                 )
                 .bind(window.id)
-                .bind(&found.id)
                 .bind(attempts)
                 .bind(now + delete_backoff(attempts))
                 .execute(&self.pool)
@@ -1110,8 +1074,8 @@ impl CloudService {
                     let slot = (now - since).num_seconds().max(0) / ALERT_EVERY.num_seconds();
                     crate::notify::enqueue_cloud_alert(
                         &self.pool,
-                        &format!("cloud:ip_delete_failing:{}:{slot}", window.id),
-                        &json!({"code": "ip_delete_failing", "window_id": window.id, "name": window.name}),
+                        &format!("cloud:dnat_delete_failing:{}:{slot}", window.id),
+                        &json!({"code": "dnat_delete_failing", "window_id": window.id, "name": window.name}),
                     )
                     .await?;
                 }
@@ -1132,7 +1096,7 @@ impl CloudService {
             DeleteOutcome::Deleted { quarantined } => {
                 sqlx::query(
                     "update cloud_windows set delete_accepted_at = $2,
-                            last_error = case when delete_reason = 'ipv4_refused' then last_error end,
+                            last_error = case when delete_reason in ('no_paid','dnat_refused','ipv4_refused') then last_error end,
                             delete_attempts = $3,
                             alert_state = alert_state || jsonb_build_object('quarantined', $4::boolean)
                      where id = $1 and state = 'deleting'",
@@ -1147,7 +1111,7 @@ impl CloudService {
             DeleteOutcome::AlreadyGone => {
                 sqlx::query(
                     "update cloud_windows set delete_accepted_at = $2,
-                            last_error = case when delete_reason = 'ipv4_refused' then last_error end,
+                            last_error = case when delete_reason in ('no_paid','dnat_refused','ipv4_refused') then last_error end,
                             delete_attempts = $3
                      where id = $1 and state = 'deleting'",
                 )
@@ -1219,15 +1183,11 @@ impl CloudService {
                 if !window.is_live() {
                     return Ok(());
                 }
-                let cost = ledger_cost(
-                    &window,
-                    window.server_gone_at.unwrap_or(now),
-                    window.ip_gone_at.unwrap_or(now),
-                );
+                let cost = ledger_cost(&window, window.server_gone_at.unwrap_or(now));
                 sqlx::query(
                     "update cloud_windows set state = $2, final_cost_kopecks = $3,
                             delete_confirmed_at = $4,
-                            last_error = case when delete_reason = 'ipv4_refused' then last_error end
+                            last_error = case when delete_reason in ('no_paid','dnat_refused','ipv4_refused') then last_error end
                      where id = $1",
                 )
                 .bind(id)
@@ -1261,58 +1221,53 @@ impl CloudService {
         self.apply_listing(&listing, now).await.map_err(|error| {
             warn_db("cloud_reconcile", &error);
         })?;
-        // Адреса идут отдельно: их список не получен — серверы всё равно сверены.
-        if let Err(error) = self.delete_orphan_ips(now).await {
-            warn_db("cloud_reconcile_ips", &error);
+        // Правила роутера идут отдельно: список не получен целиком — ничего не меняем.
+        if let Err(error) = self.delete_stray_dnat_rules(now).await {
+            warn_db("cloud_reconcile_dnat", &error);
         }
         Ok(())
     }
 
-    /// Плавающие адреса без привязки, которые записаны на закончившемся, неудавшемся или
-    /// исчезнувшем окне: адрес пережил сервер и тарифицируется. Удаляются и сообщаются
-    /// владельцу. Другие плавающие адреса аккаунта, привязанные адреса и адрес, который
-    /// сейчас записан на живом окне, не трогаются никогда.
-    async fn delete_orphan_ips(&self, now: DateTime<Utc>) -> Result<(), sqlx::Error> {
-        let rows: Vec<(Option<String>, String, bool)> = sqlx::query_as(
-            "select ipv4, name, state = any($1) from cloud_windows where ipv4 is not null",
-        )
-        .bind(windows::live_states())
-        .fetch_all(&self.pool)
-        .await?;
-        let live: std::collections::HashSet<String> = rows
-            .iter()
-            .filter(|(_, _, live)| *live)
-            .filter_map(|(ip, _, _)| ip.clone())
-            .collect();
-        let recorded: std::collections::HashMap<String, String> = rows
-            .iter()
-            .filter(|(_, _, live)| !*live)
-            .filter_map(|(ip, name, _)| ip.clone().map(|ip| (ip, name.clone())))
-            .collect();
-        if recorded.is_empty() {
+    /// Лишние DNAT-правила роутера. Удаляются только правила с публичным портом внутри
+    /// настроенного диапазона, которых не держит ни одно живое окно. Правила вне диапазона
+    /// и публичный адрес самого роутера не трогаются никогда. Неполный список не меняет
+    /// ничего: удалять можно только то, что прочитано целиком.
+    async fn delete_stray_dnat_rules(&self, now: DateTime<Utc>) -> Result<(), sqlx::Error> {
+        let Some((first_port, last_port)) = self.config.dnat_port_values() else {
             return Ok(());
-        }
-        let list = match self.provider.list_floating_ips().await {
+        };
+        let held: Vec<Option<i32>> =
+            sqlx::query_scalar("select dnat_port from cloud_windows where state = any($1)")
+                .bind(windows::live_states())
+                .fetch_all(&self.pool)
+                .await?;
+        let held: std::collections::HashSet<u16> = held
+            .into_iter()
+            .filter_map(|port| port.and_then(|port| u16::try_from(port).ok()))
+            .collect();
+        let list = match self.provider.list_dnat_rules(&self.config.router_id).await {
             Ok(list) => list,
             Err(error) => {
-                tracing::warn!(kind = "cloud_floating_listing", error = %error, "floating ip listing failed; nothing changed");
+                tracing::warn!(kind = "cloud_dnat_listing", error = %error, "dnat listing failed; nothing changed");
                 return Ok(());
             }
         };
-        for found in list.iter().filter(|ip| !ip.bound) {
-            let Some(address) = found.ip.as_deref() else {
-                continue;
-            };
-            let (Some(name), false) = (recorded.get(address), live.contains(address)) else {
-                continue;
-            };
-            let payload = |code: &str| json!({"code": code, "name": name, "ip": address});
-            match self.provider.delete_floating_ip(&found.id).await {
+        for rule in list.iter().filter(|rule| {
+            rule.public_port
+                .parse::<u16>()
+                .is_ok_and(|port| (first_port..=last_port).contains(&port) && !held.contains(&port))
+        }) {
+            let payload = |code: &str| json!({"code": code, "rule_id": rule.id, "public_port": rule.public_port});
+            match self
+                .provider
+                .delete_dnat_rule(&self.config.router_id, &rule.id)
+                .await
+            {
                 DeleteOutcome::Deleted { .. } | DeleteOutcome::AlreadyGone => {
                     crate::notify::enqueue_cloud_alert(
                         &self.pool,
-                        &format!("cloud:stray_ip:{}", found.id),
-                        &payload("stray_ip_deleted"),
+                        &format!("cloud:stray_dnat:{}", rule.id),
+                        &payload("stray_dnat_deleted"),
                     )
                     .await?;
                 }
@@ -1320,8 +1275,8 @@ impl CloudService {
                     let slot = now.timestamp() / ALERT_EVERY.num_seconds();
                     crate::notify::enqueue_cloud_alert(
                         &self.pool,
-                        &format!("cloud:stray_ip_stuck:{}:{slot}", found.id),
-                        &payload("stray_ip_stuck"),
+                        &format!("cloud:stray_dnat_stuck:{}:{slot}", rule.id),
+                        &payload("stray_dnat_stuck"),
                     )
                     .await?;
                 }
@@ -1412,9 +1367,7 @@ impl CloudService {
                 if !matches!(window.state.as_str(), "identified" | "ready" | "draining") {
                     return Ok(false);
                 }
-                // Сервера нет, а адрес мог остаться плавающим: считаем его до сих пор,
-                // дальше сверка удалит его (`delete_orphan_ips`).
-                let cost = ledger_cost(&window, now, now);
+                let cost = ledger_cost(&window, now);
                 sqlx::query(
                     "update cloud_windows set state = 'gone', final_cost_kopecks = $2,
                             delete_confirmed_at = $3, last_error = 'server_missing'

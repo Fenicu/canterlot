@@ -8,13 +8,16 @@ use std::time::Duration;
 use canterlot_hub::cloud::price::{Sizing, hourly_kopecks, monthly_kopecks};
 use canterlot_hub::cloud::rate_limit::RateLimit;
 use canterlot_hub::cloud::{
-    CloudProvider as _, CreateOutcome, CreateServer, DeleteOutcome, ErrorKind, Ipv4Outcome,
-    ListError, ServerLookup, ServerStatus, TimewebConfig, TimewebProvider,
+    CloudProvider as _, CreateOutcome, CreateServer, DeleteOutcome, DnatCreateOutcome,
+    DnatRuleRequest, ErrorKind, ListError, ServerLookup, ServerStatus, TimewebConfig,
+    TimewebProvider,
 };
 use serde_json::json;
 use tracing_subscriber::fmt::MakeWriter;
 
-use crate::support::fake_timeweb::{CreateMode, DeleteMode, FailPage, FakeTimeweb, IpAddMode};
+use crate::support::fake_timeweb::{
+    CreateMode, DeleteMode, DnatCreateMode, FailPage, FakeDnatRule, FakeTimeweb,
+};
 
 const TOKEN: &str = "tw-test-token-9f3a7c21";
 const PROJECT: i64 = 4242;
@@ -65,6 +68,20 @@ fn create_request(name: &str) -> CreateServer {
         ssh_key_ids: vec![71],
         cloud_init: "#cloud-config\n".to_owned(),
         hostname: "runner-a".to_owned(),
+        network_id: "network-example".to_owned(),
+        local_ip: "192.0.2.10".to_owned(),
+        availability_zone: "msk-1".to_owned(),
+    }
+}
+
+const ROUTER: &str = "018f0000-0000-7000-8000-0000000000aa";
+
+fn dnat_request() -> DnatRuleRequest {
+    DnatRuleRequest {
+        local_ip: "192.0.2.10".to_owned(),
+        local_port: 22,
+        public_ip: "192.0.2.1".to_owned(),
+        public_port: 22100,
     }
 }
 
@@ -404,7 +421,7 @@ async fn retry_after_beyond_the_bound_is_not_waited_for() {
 // ---- чтение сервера ----
 
 #[tokio::test]
-async fn get_server_reports_status_and_address_once_booted() {
+async fn get_server_reports_status_once_booted_without_a_public_address() {
     let rig = rig_with(|_| {}).await;
     rig.fake.control().boot_polls = 2;
     let CreateOutcome::Created { server_id } = rig
@@ -422,7 +439,8 @@ async fn get_server_reports_status_and_address_once_booted() {
     assert_eq!(state.status, ServerStatus::Installing);
     assert_eq!(state.ipv4, None);
 
-    // Второй опрос ещё `installing`, третий уже `on` с адресом.
+    // Второй опрос ещё `installing`, третий уже `on`; публичного адреса у сервера нет —
+    // доступ идёт через NAT роутера.
     let ServerLookup::Found(state) = rig.provider.get_server(server_id).await.unwrap() else {
         panic!("not found");
     };
@@ -431,8 +449,7 @@ async fn get_server_reports_status_and_address_once_booted() {
         panic!("not found");
     };
     assert_eq!(state.status, ServerStatus::On);
-    let address = state.ipv4.expect("address after boot");
-    assert!(address.starts_with("203.0.113."), "{address}");
+    assert_eq!(state.ipv4, None);
 }
 
 #[tokio::test]
@@ -794,12 +811,11 @@ async fn servers_appear_in_the_listing_only_after_a_few_listings() {
     assert_eq!(listed[0].name, "canterlot-runner-w1");
 }
 
-// ---- публичный IPv4 и плавающие адреса ----
+// ---- сеть, DNAT и плавающие адреса ----
 
 #[tokio::test]
-async fn a_new_server_has_no_address_until_one_is_ordered() {
+async fn create_sends_the_private_network_and_the_fake_rejects_a_request_without_it() {
     let rig = rig().await;
-    rig.fake.control().auto_ipv4 = false;
     let CreateOutcome::Created { server_id } = rig
         .provider
         .create_server(&create_request("canterlot-runner-w1"))
@@ -807,180 +823,142 @@ async fn a_new_server_has_no_address_until_one_is_ordered() {
     else {
         panic!("created");
     };
-    let ServerLookup::Found(state) = rig.provider.get_server(server_id).await.unwrap() else {
-        panic!("found");
-    };
-    assert_eq!((state.status, state.ipv4), (ServerStatus::On, None));
-
-    let Ipv4Outcome::Assigned(address) = rig.provider.ensure_public_ipv4(server_id).await else {
-        panic!("assigned");
-    };
-    assert!(address.starts_with("203.0.113."));
-    let ServerLookup::Found(state) = rig.provider.get_server(server_id).await.unwrap() else {
-        panic!("found");
-    };
-    assert_eq!(state.ipv4.as_deref(), Some(address.as_str()));
-    let order = rig
+    let request = rig
         .fake
         .requests()
         .into_iter()
-        .find(|r| r.method == "POST" && r.path.ends_with("/ips"))
+        .find(|r| r.method == "POST" && r.path == "/api/v1/servers")
         .unwrap();
-    assert_eq!(order.path, format!("/api/v1/servers/{server_id}/ips"));
-    assert_eq!(order.body, Some(json!({"type": "ipv4"})));
-}
-
-#[tokio::test]
-async fn an_ip_order_is_never_retried_and_outcomes_are_classified() {
-    let rig = rig().await;
-    rig.fake.control().auto_ipv4 = false;
-    let id = rig.fake.control().add_server(PROJECT, "s");
-    // Любой 4xx, кроме 429, — определённый отказ с кодом ответа.
-    for (status, code) in [
-        (400, "bad_request"),
-        (403, "forbidden"),
-        (404, "not_found"),
-        (409, "conflict"),
-    ] {
-        rig.fake.control().ip_add = IpAddMode::Status(status);
-        let outcome = rig.provider.ensure_public_ipv4(id).await;
-        assert_eq!(
-            outcome,
-            Ipv4Outcome::Refused {
-                status,
-                code: code.to_owned(),
-                required_balance: None
-            }
-        );
-    }
-    // 5xx неопределён: адрес мог выдаться.
-    rig.fake.control().ip_add = IpAddMode::Status(500);
-    assert!(matches!(
-        rig.provider.ensure_public_ipv4(id).await,
-        Ipv4Outcome::Ambiguous { .. }
-    ));
-    // Один запрос на вызов, повторов внутри клиента нет.
-    let orders = |rig: &Rig| {
+    assert_eq!(
+        request.body.as_ref().unwrap()["network"],
+        json!({"id": "network-example", "local_ip": "192.0.2.10"})
+    );
+    assert_eq!(
+        request.body.as_ref().unwrap()["availability_zone"],
+        json!("msk-1")
+    );
+    // Публичный IPv4 больше не заказывается никогда.
+    assert!(
         rig.fake
             .requests()
             .iter()
-            .filter(|r| r.method == "POST" && r.path.ends_with("/ips"))
-            .count()
+            .all(|r| !r.path.ends_with("/ips"))
+    );
+    let ServerLookup::Found(state) = rig.provider.get_server(server_id).await.unwrap() else {
+        panic!("found");
     };
-    assert_eq!(orders(&rig), 5);
-    // Сервера нет: тоже определённый отказ.
-    rig.fake.control().ip_add = IpAddMode::Ok;
+    assert_eq!(state.status, ServerStatus::On);
+
+    // Регрессия: запрос без `network` отклоняется поддельным провайдером.
+    let mut bare = create_request("canterlot-runner-bare");
+    bare.network_id.clear();
+    bare.availability_zone.clear();
     assert!(matches!(
-        rig.provider.ensure_public_ipv4(999_999).await,
-        Ipv4Outcome::Refused { status: 404, .. }
-    ));
-    // Обрыв после приёма: неопределённо, адрес мог выдаться.
-    rig.fake.control().ip_add = IpAddMode::AcceptThenDrop;
-    assert!(matches!(
-        rig.provider.ensure_public_ipv4(id).await,
-        Ipv4Outcome::Ambiguous { .. }
-    ));
-    assert_eq!(rig.fake.control().floating_ips.len(), 1);
-    // 429 после ожидания клиента: запрос не обработан, адреса нет.
-    rig.fake.control().ip_add = IpAddMode::Status(429);
-    assert!(matches!(
-        rig.provider.ensure_public_ipv4(id).await,
-        Ipv4Outcome::NotProcessed { .. }
+        rig.provider.create_server(&bare).await,
+        CreateOutcome::Rejected { code: 400, .. }
     ));
 }
 
 #[tokio::test]
-async fn the_anti_abuse_refusal_carries_its_code_and_the_required_balance_and_nothing_else() {
+async fn dnat_create_is_not_retried_and_outcomes_are_classified() {
     let rig = rig().await;
-    rig.fake.control().auto_ipv4 = false;
-    let id = rig.fake.control().add_server(PROJECT, "s");
-    rig.fake.control().ip_add = IpAddMode::Refuse {
-        status: 400,
-        error_code: "abuse_prepayment_required".to_owned(),
-        required_balance: Some(28863.9),
-    };
+    // Любой 4xx — определённый отказ с кодом ответа.
+    for status in [400, 403, 404, 409] {
+        rig.fake.control().dnat_create = DnatCreateMode::Refuse {
+            status,
+            error_code: "bad_code <script>".to_owned(),
+        };
+        assert_eq!(
+            rig.provider.create_dnat_rule(ROUTER, &dnat_request()).await,
+            DnatCreateOutcome::Refused {
+                status,
+                error_code: "bad_codescript".to_owned(),
+                message: "Injected DNAT refusal".to_owned(),
+            }
+        );
+    }
+    // 5xx неопределён: правило могло появиться.
+    rig.fake.control().dnat_create = DnatCreateMode::Status(500);
+    assert!(matches!(
+        rig.provider.create_dnat_rule(ROUTER, &dnat_request()).await,
+        DnatCreateOutcome::Ambiguous { .. }
+    ));
+    // Обрыв после приёма: неопределённо, правило записано.
+    rig.fake.control().dnat_create = DnatCreateMode::AcceptThenDrop;
+    assert!(matches!(
+        rig.provider.create_dnat_rule(ROUTER, &dnat_request()).await,
+        DnatCreateOutcome::Ambiguous { .. }
+    ));
+    let posts = rig
+        .fake
+        .requests()
+        .iter()
+        .filter(|r| r.method == "POST" && r.path.ends_with("/dnat-rules"))
+        .count();
+    assert_eq!(posts, 6, "one call per attempt, no client retries");
+    assert_eq!(rig.fake.control().dnat_rules.len(), 1);
+}
+
+#[tokio::test]
+async fn dnat_rules_are_listed_with_pages_and_deleted_by_id() {
+    let rig = rig().await;
+    let request = dnat_request();
     assert_eq!(
-        rig.provider.ensure_public_ipv4(id).await,
-        Ipv4Outcome::Refused {
-            status: 400,
-            code: "abuse_prepayment_required".to_owned(),
-            required_balance: Some("28863.9".to_owned()),
+        rig.provider.create_dnat_rule(ROUTER, &request).await,
+        DnatCreateOutcome::Created {
+            rule_id: "dnat-1".to_owned()
         }
     );
-    // Код и сумма очищаются от всего, что не годится в журнал и пуш.
-    rig.fake.control().ip_add = IpAddMode::Refuse {
-        status: 400,
-        error_code: "bad code <script>".to_owned(),
-        required_balance: None,
-    };
-    let Ipv4Outcome::Refused {
-        code,
-        required_balance,
-        ..
-    } = rig.provider.ensure_public_ipv4(id).await
-    else {
-        panic!("refused");
-    };
-    assert_eq!((code.as_str(), required_balance), ("badcodescript", None));
-}
-
-#[tokio::test]
-async fn floating_ips_are_listed_with_string_ids_pages_and_binding_and_deleted_by_id() {
-    let rig = rig().await;
     {
         let mut state = rig.fake.control();
         for n in 0..250 {
-            state
-                .floating_ips
-                .push(crate::support::fake_timeweb::FakeFloatingIp {
-                    id: format!("4df0e781-cafb-4419-9636-{n:012}"),
-                    ip: format!("198.51.100.{}", n % 250),
-                    resource_id: (n % 2 == 0).then_some(7),
-                });
+            state.dnat_rules.push(FakeDnatRule {
+                id: format!("dnat-more-{n}"),
+                local_ip: "192.0.2.10".to_owned(),
+                local_port: "22".to_owned(),
+                public_ip: "192.0.2.1".to_owned(),
+                public_port: "22300".to_owned(),
+                protocol: "tcp".to_owned(),
+            });
         }
     }
-    let all = rig.provider.list_floating_ips().await.unwrap();
-    assert_eq!(all.len(), 250, "every page is walked");
-    assert_eq!(all.iter().filter(|ip| ip.bound).count(), 125);
-    assert!(all[0].id.starts_with("4df0e781-"));
+    let all = rig.provider.list_dnat_rules(ROUTER).await.unwrap();
+    assert_eq!(all.len(), 251, "every page is walked");
+    assert!(all.iter().any(|rule| rule.id == "dnat-1"));
+    assert!(
+        all.iter()
+            .any(|rule| rule.matches("192.0.2.1", 22100, "192.0.2.10"))
+    );
     // Страница отказала: целого списка нет.
     rig.fake.control().list_fail_page = Some(FailPage {
         offset: 100,
         status: 500,
         times: None,
     });
-    assert!(rig.provider.list_floating_ips().await.is_err());
+    assert!(rig.provider.list_dnat_rules(ROUTER).await.is_err());
     rig.fake.control().list_fail_page = None;
 
-    let unbound = all.iter().find(|ip| !ip.bound).unwrap().clone();
-    let bound = all.iter().find(|ip| ip.bound).unwrap().clone();
-    assert!(matches!(
-        rig.provider.delete_floating_ip(&unbound.id).await,
-        DeleteOutcome::Deleted { quarantined: false }
-    ));
     assert_eq!(
-        rig.provider.delete_floating_ip(&unbound.id).await,
+        rig.provider.delete_dnat_rule(ROUTER, "dnat-1").await,
+        DeleteOutcome::Deleted { quarantined: false }
+    );
+    assert_eq!(
+        rig.provider.delete_dnat_rule(ROUTER, "dnat-1").await,
         DeleteOutcome::AlreadyGone
     );
-    // Привязанный адрес провайдер не отдаёт (409): повторять можно, но ничего не удалено.
+    rig.fake.control().dnat_delete_status = Some(500);
     assert_eq!(
-        rig.provider.delete_floating_ip(&bound.id).await,
-        DeleteOutcome::Failed { retryable: true }
-    );
-    rig.fake.control().floating_delete_status = Some(500);
-    assert_eq!(
-        rig.provider.delete_floating_ip(&bound.id).await,
+        rig.provider.delete_dnat_rule(ROUTER, "dnat-more-0").await,
         DeleteOutcome::Failed { retryable: true }
     );
     // В путь идёт только то, что похоже на идентификатор.
     for bad in ["", "../servers/1", "a/b", "a b", "a?x"] {
         assert_eq!(
-            rig.provider.delete_floating_ip(bad).await,
+            rig.provider.delete_dnat_rule(ROUTER, bad).await,
             DeleteOutcome::Failed { retryable: false },
             "{bad:?}"
         );
     }
-    assert_eq!(rig.fake.control().floating_ips.len(), 249);
 }
 
 // ---- токен ----
