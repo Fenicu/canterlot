@@ -26,13 +26,16 @@ use super::{
     cloud_init::{self, CloudInitParams},
     price,
     windows::{
-        self, BLOCK_NO_PAID, CreateRefusal, CreateRequest, Pricing, Window, WindowId,
+        self, BLOCK_NO_PAID, CreateRefusal, CreateRequest, Pricing, Trigger, Window, WindowId,
         cloud_machine_id, window_id_from_name,
     },
 };
 use crate::{
+    cloud::budget,
     config::{CLOUD_ROOT_DIR, CloudConfig},
+    machines::RunnerAvailability,
     session::{Availability, Registry},
+    session_tools::cloud_propose::{self, Source},
 };
 
 /// Как часто служба проходит по окнам.
@@ -209,6 +212,11 @@ impl CloudService {
                 }
             }
         }
+        if runtime.reconciled {
+            if let Err(error) = self.evaluate(now).await {
+                warn_db("cloud_auto", &error);
+            }
+        }
         let windows = match self.live_windows().await {
             Ok(windows) => windows,
             Err(error) => {
@@ -227,6 +235,162 @@ impl CloudService {
     async fn live_windows(&self) -> Result<Vec<Window>, sqlx::Error> {
         let mut conn = self.pool.acquire().await?;
         windows::live(&mut conn).await
+    }
+
+    /// Один проход автоматического режима, карточки хаба и денежных оповещений. Все условия
+    /// проверяются под обычными чтениями; создание идёт через ту же транзакцию `create_in_tx`.
+    async fn evaluate(&self, now: DateTime<Utc>) -> Result<(), sqlx::Error> {
+        let mut conn = self.pool.acquire().await?;
+        let (budget_kopecks, auto_mode, block) = budget::settings(&mut conn).await?;
+        drop(conn);
+        if let Err(error) = budget::maybe_alert(&self.pool, now, budget_kopecks).await {
+            warn_db("cloud_budget_alert", &error);
+        }
+
+        let mut conn = self.pool.acquire().await?;
+        let waiting = budget::waiting_cloud_minutes(&mut conn, &self.config).await?;
+        if waiting < budget::MIN_WAITING_MINUTES {
+            if budget::episode_active(&mut conn).await? {
+                budget::episode_end(&mut conn).await?;
+            }
+            return Ok(());
+        }
+        if budget::has_live_window(&mut conn).await? || budget::has_open_card(&mut conn).await? {
+            return Ok(());
+        }
+        let pricing = match self.pricing().await {
+            Ok(pricing) => pricing,
+            Err(error) => {
+                tracing::warn!(
+                    kind = "cloud_auto_pricing",
+                    error = %error,
+                    "no price from the provider; automatic start skipped"
+                );
+                return Ok(());
+            }
+        };
+        let Some(max_hourly) = pricing.max_hourly_kopecks() else {
+            return Ok(());
+        };
+        let estimate = u32::try_from(waiting.saturating_add(30)).unwrap_or(u32::MAX);
+        let cap = budget::AUTO_MAX_CAP_MINUTES.min(estimate);
+        let reservation = match windows::reservation_for(&self.config, max_hourly, cap) {
+            Ok(reservation) => reservation,
+            Err(error) => {
+                tracing::warn!(kind = "cloud_auto_price", error = %error, "cannot reserve the window");
+                return Ok(());
+            }
+        };
+        let remaining = budget::remaining_in_month(&mut conn).await?;
+        let fits = reservation <= remaining;
+
+        if auto_mode && budget_kopecks > 0 && block.is_none() && fits {
+            if self.all_static_runners_down(&mut conn, now).await? {
+                drop(conn);
+                let config = self.config.clone();
+                let created = crate::db::in_tx(&self.pool, move |tx| {
+                    Box::pin(async move {
+                        windows::create_in_tx(
+                            tx,
+                            &config,
+                            pricing,
+                            CreateRequest {
+                                trigger: Trigger::Auto,
+                                proposal_id: None,
+                                hard_cap_minutes: cap,
+                                consent_over_budget_kopecks: None,
+                            },
+                        )
+                        .await
+                    })
+                })
+                .await;
+                match created {
+                    Ok(_) => {
+                        if let Err(error) = crate::notify::enqueue_cloud_alert(
+                            &self.pool,
+                            &format!("cloud:auto_started:{}", windows::month_of(now)),
+                            &json!({"code": "auto_started", "reservation_kopecks": reservation}),
+                        )
+                        .await
+                        {
+                            warn_db("cloud_auto_push", &error);
+                        }
+                    }
+                    Err(refusal) => {
+                        tracing::warn!(
+                            kind = "cloud_auto_create",
+                            refusal = %refusal,
+                            "automatic window was not created"
+                        );
+                    }
+                }
+                return Ok(());
+            }
+        }
+
+        // Автоматика выключена или резерв не помещается: карточка хаба один раз за эпизод.
+        if !auto_mode || !fits {
+            if !budget::episode_active(&mut conn).await? {
+                let owner: Uuid =
+                    sqlx::query_scalar("select owner_id from machines where id = $1")
+                        .bind(self.config.carrier_machine_id)
+                        .fetch_one(&mut *conn)
+                        .await?;
+                let mut proposer =
+                    cloud_propose::system_proposer(&mut conn, owner, self.config.carrier_machine_id)
+                        .await?;
+                proposer.source = Source::Hub;
+                let reason = format!(
+                    "Ожидающая облачная работа: {waiting} мин по оценке; автоматический режим {}",
+                    if auto_mode { "включён, но резерв не помещается в бюджет" } else { "выключен" }
+                );
+                let opened = cloud_propose::open_in_tx(
+                    &mut conn,
+                    &self.config,
+                    &pricing,
+                    &proposer,
+                    4,
+                    reason,
+                )
+                .await;
+                match opened {
+                    Ok(opened) => {
+                        budget::episode_start(&mut conn, opened.request_id).await?;
+                    }
+                    Err(error) => {
+                        tracing::warn!(kind = "cloud_hub_card", error = %error, "card not opened");
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Все статичные раннеры, которые могли бы взять ожидающую работу, недоступны или на
+    /// паузе непрерывно десять минут. `unknown` не считается недоступным и сбрасывает период.
+    async fn all_static_runners_down(
+        &self,
+        conn: &mut sqlx::PgConnection,
+        now: DateTime<Utc>,
+    ) -> Result<bool, sqlx::Error> {
+        let candidates = budget::static_candidates(conn, &self.config).await?;
+        let mut all_down = true;
+        for machine in candidates {
+            let (availability, _) =
+                crate::machines::runner_availability_of(conn, &self.registry, machine, now).await?;
+            let paused: bool =
+                sqlx::query_scalar("select not accepts_remote_work from machines where id = $1")
+                    .bind(machine)
+                    .fetch_one(&mut *conn)
+                    .await?;
+            let down = availability == RunnerAvailability::Offline || paused;
+            if !budget::track_unavailable(conn, machine, down, now).await? {
+                all_down = false;
+                break;
+            }
+        }
+        Ok(all_down)
     }
 
     fn connected(&self, machine: Uuid) -> bool {

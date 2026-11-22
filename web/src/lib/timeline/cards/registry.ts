@@ -195,6 +195,7 @@ const REGISTRY: Record<string, AnyCard> = {
   'canterlot.job_log': card({ ...jobs.jobLog, icon: family.jobs, word: (call, data) => (call.state === 'done' ? jobs.logWord(data) : defaultWord(call)) }, JobLogCard),
   'canterlot.jobs_list': card({ ...jobs.jobsList, icon: family.jobs, word: (call) => defaultWord(call) }, JobsListCard),
   'canterlot.runners_list': card({ ...jobs.runnersList, icon: family.jobs, word: (call) => defaultWord(call) }, RunnersListCard),
+  'canterlot.runner_propose': card({ ...jobs.runnersList, icon: family.jobs, word: (call) => defaultWord(call) }, RunnersListCard),
   'todo.write': card(todo, TodoCard),
   'agent.task': card(subagent, SubagentCard),
   'question.ask': card(question, QuestionCard),

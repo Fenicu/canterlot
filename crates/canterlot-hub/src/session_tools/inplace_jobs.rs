@@ -974,5 +974,32 @@ pub async fn runners(
     .bind(carrier)
     .fetch_one(&mut *conn)
     .await?;
-    Ok(json!({"runners": out, "count": out.len(), "waiting_runner_jobs": waiting}))
+    // Облачные окна и остаток бюджета: то же чтение, что у HTTP владельца.
+    let windows: Vec<serde_json::Value> = crate::cloud::windows::live(&mut conn)
+        .await?
+        .iter()
+        .map(|window| {
+            let view = crate::cloud::windows::view(window, now);
+            json!({
+                "id": view.id,
+                "state": view.state,
+                "trigger": view.trigger,
+                "uptime_seconds": (now - view.created_at).num_seconds().max(0),
+                "hard_cap_at": view.hard_cap_at,
+                "reservation_kopecks": view.reservation_kopecks,
+                "cost_so_far_kopecks": view.cost_so_far_kopecks,
+            })
+        })
+        .collect();
+    let (monthly, _, _): (i64, bool, Option<String>) =
+        crate::cloud::budget::settings(&mut conn).await?;
+    let remaining = crate::cloud::budget::remaining_in_month(&mut conn).await?;
+    Ok(json!({
+        "runners": out,
+        "count": out.len(),
+        "waiting_runner_jobs": waiting,
+        "cloud_windows": windows,
+        "budget_monthly_kopecks": monthly,
+        "budget_remaining_kopecks": remaining,
+    }))
 }
