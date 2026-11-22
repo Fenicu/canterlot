@@ -274,13 +274,13 @@ impl CloudState {
             .lock()
             .unwrap()
             .values()
-            .filter_map(|attachment| {
+            .map(|attachment| {
                 let port = if attachment.ssh_port == 0 {
                     22
                 } else {
                     attachment.ssh_port
                 };
-                Some(CloudSpec {
+                CloudSpec {
                     window_id: attachment.window_id.clone(),
                     machine_id: attachment.machine_id,
                     host: attachment.host.clone(),
@@ -293,7 +293,7 @@ impl CloudState {
                     lease_slots: attachment.lease_slots,
                     ready_marker: self.config.ready_marker.clone(),
                     ready_timeout: self.config.ready_timeout,
-                })
+                }
             })
             .collect();
         let _ = self.specs.send_replace(specs);

@@ -205,12 +205,12 @@ pub(super) async fn run(
         halt,
         parked,
     });
-    if let Some(cloud) = &runner.spec.cloud {
-        if let Err(code) = runner.wait_ready(cloud).await {
-            runner.cloud_fail(cloud, code);
-            forward.abort();
-            return;
-        }
+    if let Some(cloud) = &runner.spec.cloud
+        && let Err(code) = runner.wait_ready(cloud).await
+    {
+        runner.cloud_fail(cloud, code);
+        forward.abort();
+        return;
     }
     let tunnel = tokio::spawn({
         let runner = runner.clone();
