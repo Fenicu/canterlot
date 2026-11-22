@@ -291,9 +291,10 @@ runner_probe="${CANTERLOT_GATE_RUNNER_PROBE:-}"
 runner_reachable() {
     local ssh=$1
     if [[ -n "$runner_probe" ]]; then
-        bash -c "$runner_probe" gate-probe "$ssh" >/dev/null 2>&1
+        bash -c "$runner_probe" gate-probe "$ssh" </dev/null >/dev/null 2>&1
     else
-        ssh -o BatchMode=yes -o ConnectTimeout=5 "$ssh" true >/dev/null 2>&1
+        # -n: без него ssh съест stdin цикла, и следующие раннеры из конфига не проверятся.
+        ssh -n -o BatchMode=yes -o ConnectTimeout=5 "$ssh" true >/dev/null 2>&1
     fi
 }
 
