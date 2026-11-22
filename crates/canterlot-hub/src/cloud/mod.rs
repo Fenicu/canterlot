@@ -59,6 +59,11 @@ pub struct CreateServer {
     pub ssh_key_ids: Vec<i64>,
     pub cloud_init: String,
     pub hostname: String,
+    /// Приватная сеть сервера: идентификатор VPC и локальный адрес из пула окна.
+    pub network_id: String,
+    pub local_ip: String,
+    /// Зона доступности сервера (из профиля).
+    pub availability_zone: String,
 }
 
 impl fmt::Debug for CreateServer {
@@ -74,6 +79,9 @@ impl fmt::Debug for CreateServer {
             .field("ssh_key_ids", &self.ssh_key_ids)
             .field("cloud_init_bytes", &self.cloud_init.len())
             .field("hostname", &self.hostname)
+            .field("network_id", &self.network_id)
+            .field("local_ip", &self.local_ip)
+            .field("availability_zone", &self.availability_zone)
             .finish_non_exhaustive()
     }
 }
@@ -294,46 +302,61 @@ pub trait CloudProvider: Send + Sync {
     /// вызов.
     async fn list_project_servers(&self, project_id: i64) -> Result<Vec<ServerSummary>, ListError>;
 
-    /// Публичный IPv4 для сервера: у нового сервера адреса нет, а без него нет сети.
-    /// Единственная точка получения адреса: способ (сейчас заказ нового адреса, позже,
-    /// возможно, привязка заранее купленного плавающего) прячется здесь и не меняет машину
-    /// состояний окна. Один вызов, без повторов: после неопределённого исхода адрес мог
-    /// выдаться и тарифицироваться.
-    async fn ensure_public_ipv4(&self, server_id: i64) -> Ipv4Outcome;
+    /// Создать DNAT-правило роутера: `router_ip:public_port -> local_ip:22`, tcp. Один
+    /// вызов, без повторов: после неопределённого исхода правило могло появиться.
+    async fn create_dnat_rule(&self, router_id: &str, rule: &DnatRuleRequest) -> DnatCreateOutcome;
 
-    /// Все плавающие адреса аккаунта, все страницы. IPv4 сервера после его удаления остаётся
-    /// здесь без привязки (`bound = false`) и продолжает тарифицироваться.
-    async fn list_floating_ips(&self) -> Result<Vec<FloatingIp>, ListError>;
+    /// Все DNAT-правила роутера, все страницы. Частичный список успехом не считается.
+    async fn list_dnat_rules(&self, router_id: &str) -> Result<Vec<DnatRule>, ListError>;
 
-    /// Удаление плавающего адреса. Исходы те же, что у сервера (`AlreadyGone` — 404).
-    async fn delete_floating_ip(&self, id: &str) -> DeleteOutcome;
+    /// Удалить правило DNAT. Исходы те же, что у сервера (`AlreadyGone` — 404).
+    async fn delete_dnat_rule(&self, router_id: &str, rule_id: &str) -> DeleteOutcome;
 }
 
-/// Исход получения публичного IPv4.
+/// Запрос на проброс SSH в приватную сеть.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Ipv4Outcome {
-    /// Адрес выдан серверу.
-    Assigned(String),
-    /// Провайдер отказал определённо (любой 4xx, кроме 429): адреса нет и повтор не поможет.
-    /// `code` — `error_code` ответа, `required_balance` — `details.required_balance`
-    /// (рубли), если он есть.
+pub struct DnatRuleRequest {
+    pub local_ip: String,
+    pub local_port: u16,
+    pub public_ip: String,
+    pub public_port: u16,
+}
+
+/// Правило DNAT, как его возвращает список роутера.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DnatRule {
+    pub id: String,
+    pub local_ip: String,
+    pub local_port: String,
+    pub public_ip: String,
+    pub public_port: String,
+    pub protocol: String,
+}
+
+impl DnatRule {
+    /// Это правило пробрасывает именно `router_ip:port -> local_ip:22` по tcp. Порт в ответе
+    /// может быть диапазоном: тогда он не подходит, мы создаём правило для одного порта.
+    pub fn matches(&self, public_ip: &str, public_port: u16, local_ip: &str) -> bool {
+        self.public_ip == public_ip
+            && self.public_port == public_port.to_string()
+            && self.local_ip == local_ip
+            && (self.local_port == "22" || self.local_port == "1-65535")
+            && self.protocol == "tcp"
+    }
+}
+
+/// Исход создания DNAT-правила.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DnatCreateOutcome {
+    /// Правило создано, у него есть номер.
+    Created { rule_id: String },
+    /// Определённый отказ (4xx, кроме 429): правила нет.
     Refused {
         status: u16,
-        code: String,
-        required_balance: Option<String>,
+        error_code: String,
+        message: String,
     },
-    /// Запрос не обработан (429 после ожидания клиента): адреса нет, можно повторить.
-    NotProcessed { why: String },
-    /// Таймаут, обрыв, 5xx или нечитаемый ответ: адрес мог выдаться. Не заказывать второй,
-    /// перечитать сервер.
+    /// Таймаут, обрыв, 5xx или нечитаемый ответ: правило могло появиться. Не создавать
+    /// второе для того же порта: полный список решит, что сделать.
     Ambiguous { why: String },
-}
-
-/// Плавающий адрес аккаунта.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FloatingIp {
-    pub id: String,
-    pub ip: Option<String>,
-    /// Привязан к ресурсу (`resource_id` не пуст).
-    pub bound: bool,
 }

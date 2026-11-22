@@ -322,6 +322,8 @@ pub struct CloudProfile {
     pub cpu: u32,
     pub ram_gb: u32,
     pub disk_gb: u32,
+    /// Зона доступности сервера в приватной сети (`msk-1` для ru-3 конфигураторов).
+    pub availability_zone: String,
 }
 
 impl CloudProfile {
@@ -354,10 +356,26 @@ pub struct CloudConfig {
     pub os_id: i64,
     /// Открытая половина `[runners].ssh_key` несущей: уходит в cloud-init и в ключи проекта.
     pub runner_public_key: String,
-    /// Цена публичного IPv4 в рублях в месяц (обязательный ключ: у нового сервера адреса нет,
-    /// хаб заказывает его отдельно, и он тарифицируется сам). Считается как цена сервера:
-    /// в копейках, час = `ceil(месяц / 720)`.
-    pub ipv4_monthly_rubles: f64,
+    /// Приватная сеть (VPC) провайдера, в которой создаются серверы окон. Идентификатор
+    /// Timeweb (`network-…`) создаётся владельцем один раз, хаб его не создаёт.
+    pub network_id: String,
+    /// Роутер той же сети с NAT. Его публичный IP используется для подключения по SSH.
+    pub router_id: String,
+    /// Публичный IPv4 роутера: адрес подключения носителя к облачному раннеру.
+    pub router_ip: String,
+    /// Шлюз роутера внутри сети; cloud-init прописывает маршрут по умолчанию через него.
+    pub gateway: String,
+    /// Включающий диапазон локальных адресов внутри сети, например `10.0.0.10-10.0.0.60`.
+    pub local_ip_pool: String,
+    /// Включающий диапазон публичных портов DNAT, например `22100-22199`.
+    pub dnat_port_range: String,
+    /// Сколько сервер может оставаться `no_paid` с момента создания, прежде чем это
+    /// считается определённым отказом провайдера.
+    #[serde(
+        default = "CloudConfig::default_no_paid_grace",
+        with = "humantime_serde"
+    )]
+    pub no_paid_grace: Duration,
     /// Несущая, которая подключает облачный раннер.
     pub carrier_machine_id: uuid::Uuid,
     #[serde(default)]
@@ -398,6 +416,13 @@ pub struct CloudConfig {
         with = "humantime_serde"
     )]
     pub create_unknown_window: Duration,
+}
+
+/// Разбор включающего диапазона `a-b` с одним и тем же правилом для адресов и портов.
+fn inclusive_range<T: PartialOrd>(text: &str, parse: impl Fn(&str) -> Option<T>) -> Option<(T, T)> {
+    let (first, last) = text.trim().split_once('-')?;
+    let (first, last) = (parse(first)?, parse(last)?);
+    (first <= last).then_some((first, last))
 }
 
 impl std::fmt::Debug for CloudConfig {
@@ -443,6 +468,9 @@ impl CloudConfig {
     fn default_create_unknown_window() -> Duration {
         Duration::from_secs(10 * 60)
     }
+    fn default_no_paid_grace() -> Duration {
+        Duration::from_secs(3 * 60)
+    }
 
     /// Всё, что видно по самой конфигурации, без базы и сети. Код отказа не содержит значений.
     pub fn validate(&self) -> Result<(), &'static str> {
@@ -452,10 +480,21 @@ impl CloudConfig {
         if self.project_id <= 0 || self.os_id <= 0 {
             return Err("invalid [runners.cloud] ids");
         }
-        if !self.ipv4_monthly_rubles.is_finite()
-            || !(0.0..=1_000_000.0).contains(&self.ipv4_monthly_rubles)
+        // Сеть и роутер создаются владельцем один раз. Идентификаторы непустые, адреса —
+        // настоящие IPv4, диапазоны непустые и с пересечением портов 1024–65535. Значения в
+        // сообщении об ошибке не попадают: наружу уходит только код.
+        if self.network_id.trim().is_empty()
+            || self.router_id.trim().is_empty()
+            || self.router_ip().is_none()
+            || self.gateway().is_none()
         {
-            return Err("invalid [runners.cloud] ipv4_monthly_rubles");
+            return Err("invalid [runners.cloud] network and router");
+        }
+        if self.local_ip_range().is_none() {
+            return Err("invalid [runners.cloud] local_ip_pool");
+        }
+        if self.dnat_port_values().is_none() {
+            return Err("invalid [runners.cloud] dnat_port_range");
         }
         if self.profile.is_empty() || self.profile.len() > MAX_CLOUD_PROFILES {
             return Err("invalid [runners.cloud] profile list");
@@ -466,6 +505,9 @@ impl CloudConfig {
             }
             if profile.cpu == 0 || profile.ram_gb == 0 || profile.disk_gb == 0 {
                 return Err("invalid [runners.cloud.profile] size");
+            }
+            if profile.availability_zone.trim().is_empty() {
+                return Err("invalid [runners.cloud.profile] availability_zone");
             }
         }
         if !crate::cloud::cloud_init::validate_public_key(&self.runner_public_key) {
@@ -484,6 +526,7 @@ impl CloudConfig {
             self.teardown_margin,
             self.reconcile_interval,
             self.create_unknown_window,
+            self.no_paid_grace,
         ]
         .iter()
         .any(|timing| *timing < minute)
@@ -491,6 +534,27 @@ impl CloudConfig {
             return Err("invalid [runners.cloud] timing");
         }
         Ok(())
+    }
+
+    /// Публичный адрес роутера как IPv4.
+    pub fn router_ip(&self) -> Option<std::net::Ipv4Addr> {
+        self.router_ip.trim().parse().ok()
+    }
+
+    /// Адрес шлюза в сети как IPv4.
+    pub fn gateway(&self) -> Option<std::net::Ipv4Addr> {
+        self.gateway.trim().parse().ok()
+    }
+
+    /// Включающий диапазон локальных адресов из пула окна.
+    pub fn local_ip_range(&self) -> Option<(std::net::Ipv4Addr, std::net::Ipv4Addr)> {
+        inclusive_range(&self.local_ip_pool, |text| text.trim().parse().ok())
+    }
+
+    /// Включающий диапазон портов DNAT; порты вне 1024–65535 не годятся.
+    pub fn dnat_port_values(&self) -> Option<(u16, u16)> {
+        let (first, last) = inclusive_range(&self.dnat_port_range, |text| text.trim().parse().ok())?;
+        (first >= 1024).then_some((first, last))
     }
 
     pub fn drain_grace_minutes(&self) -> u64 {
