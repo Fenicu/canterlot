@@ -20,6 +20,10 @@ mkdir -p /tmp/canterlot-gate-test
 : >/tmp/canterlot-gate-test/.canterlot-gate-test
 trap 'rm -rf /tmp/canterlot-gate-test' EXIT
 
+# --runner prefer — значение по умолчанию: без фикстуры конфига раннеров нет, гейт
+# идёт локально. Тесты не должны читать настоящий конфиг воркера владельца.
+export CANTERLOT_WORKER_CONFIG="$tmp/worker.toml"
+
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 out="$tmp/log"
 run() {
@@ -201,7 +205,9 @@ grep -q 'уже перезапускался' "$out" || { cat "$out" >&2; fail '
 # Перезапуск возможен только для того же коммита и чистого дерева.
 printf 'next\n' >>"$g3/tracked"
 git -C "$g3" add tracked && git -C "$g3" commit -qm next
-run 1 "${rerun_env[@]}" bash "$g3/scripts/gate.sh" --rerun-failed --no-attest
+# С --runner local по-прежнему отказ: перезапуск требует состояние ровно этого HEAD.
+# При prefer без состояния вместо отказа был бы полный гейт, поэтому здесь явно local.
+run 1 "${rerun_env[@]}" bash "$g3/scripts/gate.sh" --runner local --rerun-failed --no-attest
 grep -q 'нет состояния предыдущего' "$out" || { cat "$out" >&2; fail 'нет отказа для другого sha'; }
 g4="$tmp/g4"
 new_gate_repo "$g4"
@@ -322,7 +328,7 @@ new_runner_repo "$r1"
 r1sha=$(git -C "$r1" rev-parse HEAD)
 run 0 "${runner_env[@]}" bash "$r1/scripts/gate.sh" --runner auto
 [[ $(grep -c . "$FAKE_WORKER_CALLS") == 1 ]] || { cat "$FAKE_WORKER_CALLS" >&2; fail 'гейт на раннере сделал не один вызов воркера (аренда на VM не нужна)'; }
-expected="job run --title Гейт ${r1sha:0:8} --machine auto --labels kernel-6.12 --lease gate --timeout-minutes 240 --expected-minutes 45 --source $r1@$r1sha --output .gate-out --wait -- scripts/gate/runner-gate.sh $r1sha"
+expected="job run --title Гейт ${r1sha:0:8} --machine auto --lease gate --timeout-minutes 240 --expected-minutes 45 --source $r1@$r1sha --output .gate-out --wait -- scripts/gate/runner-gate.sh $r1sha"
 [[ $(cat "$FAKE_WORKER_CALLS") == "$expected" ]] || { cat "$FAKE_WORKER_CALLS" >&2; fail 'команда job run не та, что зафиксирована'; }
 att="$r1/.superpowers/gate/$r1sha.ok"
 [[ -s "$att" ]] || { cat "$out" >&2; fail 'успешный гейт на раннере не записал аттестацию'; }
@@ -404,6 +410,65 @@ rl="$tmp/rl"
 new_gate_repo "$rl"
 run 0 env CANTERLOT_LEASE_DRY=1 bash "$rl/scripts/gate.sh" --runner local
 grep -q 'kind=gate' "$out" || { cat "$out" >&2; fail '--runner local не дошёл до аренды'; }
+
+# --- --runner prefer: доступный раннер, иначе эта машина ---
+# Фикстура конфига с нейтральными именами; проба идёт через шов, без сети.
+cat >"$tmp/worker-prefer.toml" <<'EOF'
+[[runners.ssh]]
+machine = "build-host"
+ssh = "build-host-ssh"
+
+[[runners.ssh]]
+machine = "runner-a"
+ssh = "runner-a-ssh"
+EOF
+prefer_env=("${runner_env[@]}" CANTERLOT_WORKER_CONFIG="$tmp/worker-prefer.toml")
+
+# Первая доступная запись уходит на раннер: ровно одна задача, без метки ядра.
+p1="$tmp/p1"
+new_runner_repo "$p1"
+run 0 "${prefer_env[@]}" CANTERLOT_GATE_RUNNER_PROBE=true bash "$p1/scripts/gate.sh" --runner prefer
+[[ $(grep -c . "$FAKE_WORKER_CALLS") == 1 ]] || fail 'prefer: не один вызов воркера'
+grep -qF -- '--machine build-host ' "$FAKE_WORKER_CALLS" \
+    || { cat "$FAKE_WORKER_CALLS" >&2; fail 'prefer: доступный раннер не получил машину'; }
+if grep -q -- '--labels' "$FAKE_WORKER_CALLS"; then fail 'prefer: задача на раннере требует метку ядра'; fi
+grep -q 'раннер build-host доступен' "$out" || { cat "$out" >&2; fail 'prefer: нет сообщения о выборе раннера'; }
+
+# Ни один раннер не доступен: prefer идёт локально, воркера не вызывает.
+p2="$tmp/p2"
+new_gate_repo "$p2"
+: >"$FAKE_WORKER_CALLS"
+run 0 env CANTERLOT_WORKER_CONFIG="$tmp/worker-prefer.toml" CANTERLOT_GATE_RUNNER_PROBE=false \
+    CANTERLOT_LEASE_DRY=1 bash "$p2/scripts/gate.sh"
+grep -q 'раннеров нет или они недоступны' "$out" || { cat "$out" >&2; fail 'prefer: нет сообщения о переходе на эту машину'; }
+grep -q 'kind=gate' "$out" || { cat "$out" >&2; fail 'prefer без доступного раннера не дошёл до аренды'; }
+[[ ! -s "$FAKE_WORKER_CALLS" ]] || fail 'prefer без доступного раннера вызвал воркера'
+
+# prefer + --rerun-failed: без локального состояния — полный гейт через prefer.
+p3="$tmp/p3"
+new_runner_repo "$p3"
+run 0 "${prefer_env[@]}" CANTERLOT_GATE_RUNNER_PROBE=true bash "$p3/scripts/gate.sh" --rerun-failed
+grep -q 'локального состояния этого коммита нет' "$out" \
+    || { cat "$out" >&2; fail 'нет сообщения о полном гейте через prefer'; }
+[[ $(grep -c . "$FAKE_WORKER_CALLS") == 1 ]] || fail 'полный гейт через prefer: не один вызов воркера'
+grep -qF -- '--machine build-host ' "$FAKE_WORKER_CALLS" || fail 'полный гейт через prefer: не на выбранном раннере'
+att="$p3/.superpowers/gate/$(git -C "$p3" rev-parse HEAD).ok"
+if grep -q '^rerun_of=' "$att"; then fail 'полный гейт через prefer записал rerun_of'; fi
+
+# С локальным состоянием — перезапуск только упавших тестов на этой машине, даже
+# если prefer нашёл бы доступный раннер.
+p4="$tmp/p4"
+new_gate_repo "$p4"
+run 1 "${rerun_env[@]}" FAKE_CHECK_FAIL=mod::flaky \
+    CANTERLOT_WORKER_CONFIG="$tmp/worker.toml" bash "$p4/scripts/gate.sh" --no-attest
+: >"$GATE_FAKE_CALLS"
+: >"$FAKE_WORKER_CALLS"
+run 0 "${rerun_env[@]}" FAKE_CHECK_FAIL=none CANTERLOT_WORKER_CONFIG="$tmp/worker-prefer.toml" \
+    CANTERLOT_GATE_RUNNER_PROBE=true bash "$p4/scripts/gate.sh" --rerun-failed --no-attest
+grep -q 'есть локальное состояние этого коммита' "$out" \
+    || { cat "$out" >&2; fail 'prefer: нет сообщения о локальном перезапуске'; }
+grep -qF 'check tests [' "$GATE_FAKE_CALLS" || fail 'prefer: локальный перезапуск не перезапустил упавший тест'
+[[ ! -s "$FAKE_WORKER_CALLS" ]] || fail 'prefer: перезапуск с локальным состоянием ушёл на раннер'
 
 # Прерывание: гейт не оставляет задачу молча, называет её и способ отмены.
 rt="$tmp/rt"

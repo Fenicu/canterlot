@@ -6,12 +6,15 @@
 #   3. scripts/check-web.sh — вся веб-половина (статические проверки, vitest,
 #      сборка PWA и vitest.build). Браузерные тесты удалены 22.11.2026.
 #
-#   scripts/gate.sh                  полный гейт с аттестацией .superpowers/gate/<full sha>.ok
+#   scripts/gate.sh                  полный гейт с аттестацией .superpowers/gate/<full sha>.ok;
+#                                    по умолчанию --runner prefer: первый доступный раннер,
+#                                    иначе эта VM
 #   scripts/gate.sh --rerun-failed   перезапустить только то, что упало на этом же коммите
 #   scripts/gate.sh --no-attest      гейт без аттестации (нужен, если рабочая копия грязная)
-#   scripts/gate.sh --runner local|auto|<машина>
-#                                    где гонять гейт: local (по умолчанию) — на этой VM, как
-#                                    описано ниже; auto или имя машины — на раннере через
+#   scripts/gate.sh --runner prefer|local|auto|<машина>
+#                                    prefer (по умолчанию) — первый доступный статический
+#                                    раннер из конфига воркера, иначе эта VM; local — на этой
+#                                    VM; auto или имя машины — на раннере через
 #                                    canterlot-worker job run (см. «Гейт на раннере»)
 #   scripts/gate.sh --help
 #
@@ -27,12 +30,22 @@
 #   CANTERLOT_GATE_TMPDIR   временный каталог гейта (по умолчанию /tmp: сокет
 #                           исполнения не влезает в SUN_LEN при длинном пути);
 #   CANTERLOT_NO_LEASE=1    идти без аренды (отладка).
+#   CANTERLOT_WORKER_CONFIG конфиг воркера для prefer (по умолчанию
+#                           $HOME/.config/canterlot/worker.toml);
+#   CANTERLOT_GATE_RUNNER_PROBE
+#                           команда пробы доступности раннера: ей передаётся ssh-алиас,
+#                           код 0 означает доступен. Пусто — настоящий ssh; шов только
+#                           для тестов, гейт всё равно идёт через настоящего воркера.
 #
 # Аттестация пишется только при полном успехе, чистой рабочей копии и неизменном HEAD:
 # release.sh ship принимает только аттестацию ровно того коммита, который выкатывает.
 #
-# Гейт на раннере (--runner auto|<машина>). Нужна чистая рабочая копия: на раннер уходит
-# ровно полный sha HEAD. Скрипт зовёт
+# Гейт на раннере (--runner prefer|auto|<машина>). Нужна чистая рабочая копия: на раннер
+# уходит ровно полный sha HEAD. prefer читает [[runners.ssh]] из конфига воркера и идёт
+# на первого доступного статического раннера (проба ssh -o BatchMode=yes -o ConnectTimeout=5
+# <ssh> true, через шов CANTERLOT_GATE_RUNNER_PROBE); облако prefer не выбирает — оно стоит
+# денег. Нет конфига, записей или доступных раннеров — обычный гейт на этой VM. auto и явное
+# имя машины сохраняют прежний смысл. Метка ядра kernel-6.12 больше не требуется. Скрипт зовёт
 #   canterlot-worker job run --machine <значение> --lease gate --source <repo>@<sha> \
 #       --output .gate-out --wait -- scripts/gate/runner-gate.sh <sha>
 # носитель кладёт этот коммит в чистую рабочую копию на раннере, scripts/gate/runner-gate.sh
@@ -44,19 +57,20 @@
 # раннере берёт аренду gate на самом раннере (--lease gate), а не на этой VM.
 # Отмены у `job run` нет: Ctrl-C останавливает только ожидание, задача на раннере
 # продолжает работать. Скрипт называет её идентификатор; отменить её можно в PWA.
-# --rerun-failed с раннером в v1 не поддерживается.
+# --rerun-failed с явным --runner auto|<машина> не поддерживается. С prefer перезапуск идёт
+# локально, если на этом коммите есть локальное состояние; без него — полный гейт через prefer.
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 original_args=("$@")
 
 usage() {
-    echo 'Использование: scripts/gate.sh [--rerun-failed] [--no-attest] [--runner local|auto|<машина>]'
+    echo 'Использование: scripts/gate.sh [--rerun-failed] [--no-attest] [--runner prefer|local|auto|<машина>]'
 }
 
 attest=1
 rerun=0
-runner=local
+runner=prefer
 while (($#)); do
     case "$1" in
         --no-attest) attest=0 ;;
@@ -72,12 +86,12 @@ while (($#)); do
     esac
     shift
 done
-if [[ "$runner" != local && ! "$runner" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
-    printf 'гейт: --runner: ожидается local, auto или имя машины, а не «%s»\n' "$runner" >&2
+if [[ "$runner" != local && "$runner" != prefer && ! "$runner" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+    printf 'гейт: --runner: ожидается prefer, local, auto или имя машины, а не «%s»\n' "$runner" >&2
     exit 2
 fi
-if [[ "$runner" != local ]] && ((rerun)); then
-    printf 'гейт: --rerun-failed не поддерживается вместе с --runner (v1): гейт на раннере идёт целиком; уберите --rerun-failed или --runner\n' >&2
+if [[ "$runner" != local && "$runner" != prefer ]] && ((rerun)); then
+    printf 'гейт: --rerun-failed не поддерживается вместе с --runner auto|<машина> (v1): гейт на раннере идёт целиком; уберите --rerun-failed или --runner\n' >&2
     exit 2
 fi
 
@@ -167,7 +181,7 @@ runner_gate() {
     trap 'runner_interrupted 130' INT
     trap 'runner_interrupted 143' TERM
     "$CANTERLOT_WORKER_BIN" job run --title "Гейт $short" --machine "$requested" \
-        --labels kernel-6.12 --lease gate --timeout-minutes 240 --expected-minutes 45 \
+        --lease gate --timeout-minutes 240 --expected-minutes 45 \
         --source "$PWD@$sha" --output .gate-out --wait \
         -- scripts/gate/runner-gate.sh "$sha" \
         >"$log_dir/runner-job.out" 2>"$rj_fifo" || code=$?
@@ -266,6 +280,75 @@ runner_gate() {
     printf 'гейт: аттестация записана в %s\n' "$attestation"
     exit 0
 }
+
+# --- выбор места для --runner prefer -------------------------------------------------
+# prefer смотрит статических раннеров из конфига воркера в порядке записей и идёт на
+# первого доступного. Облако не рассматривается: оно стоит денег. Проба идёт через шов
+# CANTERLOT_GATE_RUNNER_PROBE, чтобы тесты обходились без сети; в обычном прогоне шов пуст.
+worker_config="${CANTERLOT_WORKER_CONFIG:-$HOME/.config/canterlot/worker.toml}"
+runner_probe="${CANTERLOT_GATE_RUNNER_PROBE:-}"
+
+runner_reachable() {
+    local ssh=$1
+    if [[ -n "$runner_probe" ]]; then
+        bash -c "$runner_probe" gate-probe "$ssh" >/dev/null 2>&1
+    else
+        ssh -o BatchMode=yes -o ConnectTimeout=5 "$ssh" true >/dev/null 2>&1
+    fi
+}
+
+choose_prefer_runner() {
+    local cfg="$worker_config" entries="" machine ssh
+    if [[ -f "$cfg" ]]; then
+        # Как в scripts/deploy/verify.sh: tomllib, только имена machine и ssh, без секретов.
+        if ! entries=$(python3 -I - "$cfg" <<'PY'
+import sys, tomllib
+try:
+    cfg = tomllib.load(open(sys.argv[1], "rb"))
+except (OSError, tomllib.TOMLDecodeError) as exc:
+    print(f"cannot parse worker config: {type(exc).__name__}", file=sys.stderr)
+    sys.exit(1)
+for entry in cfg.get("runners", {}).get("ssh", []) or []:
+    machine, alias = entry.get("machine", ""), entry.get("ssh", "")
+    if machine and alias:
+        print(f"{machine}\t{alias}")
+PY
+        ); then
+            printf 'гейт: не удалось прочитать %s — гейт идёт на этой машине\n' "$cfg" >&2
+            printf '%s\n' local
+            return 0
+        fi
+    fi
+    while IFS=$'\t' read -r machine ssh; do
+        [[ -n "$machine" && -n "$ssh" ]] || continue
+        if runner_reachable "$ssh"; then
+            printf 'гейт: раннер %s доступен — гейт идёт на нём\n' "$machine" >&2
+            printf '%s\n' "$machine"
+            return 0
+        fi
+    done <<<"$entries"
+    printf 'гейт: раннеров нет или они недоступны — гейт идёт на этой машине\n' >&2
+    printf '%s\n' local
+}
+
+if [[ "$runner" == prefer ]]; then
+    # Состояние предыдущего прогона лежит только локально: результаты раннера — в
+    # .superpowers/gate/<short>/runner/. Есть состояние — перезапускаем на этой машине;
+    # нет — повторяем полный гейт через prefer, чтобы обычная пара вызовов работала и
+    # после первого прогона на раннере.
+    prefer_sha=$(git rev-parse HEAD)
+    prefer_short=${prefer_sha:0:8}
+    if ((rerun)) && [[ -f ".superpowers/gate/$prefer_short/state.tsv" ]]; then
+        printf 'гейт: есть локальное состояние этого коммита — --rerun-failed идёт на этой машине\n'
+        runner=local
+    else
+        if ((rerun)); then
+            printf 'гейт: локального состояния этого коммита нет — --rerun-failed запускает полный гейт через prefer\n'
+            rerun=0
+        fi
+        runner=$(choose_prefer_runner)
+    fi
+fi
 
 if [[ "$runner" != local ]]; then
     runner_gate
