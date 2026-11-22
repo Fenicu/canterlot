@@ -90,6 +90,8 @@ pub struct FakeServer {
     /// Публичный IPv4. Как у настоящего Timeweb, у нового сервера его нет, пока хаб не
     /// запросит (`POST /servers/{id}/ips`); `auto_ipv4` возвращает прежнее поведение.
     pub ipv4: Option<String>,
+    /// Подменить статус сервера (например `no_paid`), сколько бы раз его ни опрашивали.
+    pub forced_status: Option<String>,
     pub request: Value,
 }
 
@@ -99,6 +101,30 @@ pub struct FakeFloatingIp {
     pub id: String,
     pub ip: String,
     pub resource_id: Option<i64>,
+}
+
+/// Правило DNAT на роутере. Создаётся хабом для SSH окна и удаляется после сервера.
+#[derive(Debug, Clone)]
+pub struct FakeDnatRule {
+    pub id: String,
+    pub local_ip: String,
+    pub local_port: String,
+    pub public_ip: String,
+    pub public_port: String,
+    pub protocol: String,
+}
+
+/// Что делает создание DNAT-правила.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DnatCreateMode {
+    /// 201 с правилом.
+    Ok,
+    /// 5xx: правило могло появиться, но ответа нет.
+    Status(u16),
+    /// Правило записано, соединение оборвано без ответа.
+    AcceptThenDrop,
+    /// Определённый отказ с `error_code`.
+    Refuse { status: u16, error_code: String },
 }
 
 /// Что делает запрос IPv4 для сервера.
@@ -167,6 +193,15 @@ pub struct FakeState {
     pub next_ip_host: u8,
     /// Код сбоя для `DELETE /floating-ips/{id}`; `None` — удаляет.
     pub floating_delete_status: Option<u16>,
+    /// Правила DNAT роутера. Идентификатор роутера в путях не проверяется: тест задаёт его
+    /// в конфигурации сам.
+    pub dnat_rules: Vec<FakeDnatRule>,
+    pub next_dnat_id: u64,
+    pub dnat_create: DnatCreateMode,
+    /// Код сбоя для `DELETE /.../dnat-rules/{id}`; `None` — удаляет.
+    pub dnat_delete_status: Option<u16>,
+    /// Подменить статус всех новых серверов (например `no_paid`).
+    pub boot_status: Option<String>,
     /// Коды, которыми отвечают подряд на любые следующие запросы (очередь).
     pub fail_next: VecDeque<u16>,
     /// Сколько следующих запросов отвечать 429.
@@ -225,6 +260,11 @@ impl FakeState {
             floating_ips: Vec::new(),
             next_ip_host: 200,
             floating_delete_status: None,
+            dnat_rules: Vec::new(),
+            next_dnat_id: 1,
+            dnat_create: DnatCreateMode::Ok,
+            dnat_delete_status: None,
+            boot_status: None,
             fail_next: VecDeque::new(),
             rate_limit_next: 0,
             retry_after: None,
@@ -257,6 +297,7 @@ impl FakeState {
                 boot_polls_left: 0,
                 hidden_polls_left: 0,
                 ipv4: None,
+                forced_status: None,
                 request: Value::Null,
             },
         );
@@ -424,7 +465,7 @@ fn server_json(server: &FakeServer) -> Value {
         "created_at": "2026-11-21T10:00:00.000Z",
         "location": "ru-3",
         "boot_mode": "std",
-        "status": if booted { "on" } else { "installing" },
+        "status": server.forced_status.as_deref().unwrap_or(if booted { "on" } else { "installing" }),
         "start_at": null,
         "is_ddos_guard": false,
         "cpu": server.cpu,
@@ -631,6 +672,24 @@ fn route(
             st.floating_ips.remove(at);
             Action::Respond(empty_response(204))
         }
+        ("POST", ["api", "v1", "routers", _router, "dnat-rules"]) => create_dnat(st, body, auth),
+        ("GET", ["api", "v1", "routers", _router, "dnat-rules"]) => {
+            let items: Vec<Value> = st
+                .dnat_rules
+                .iter()
+                .map(|rule| {
+                    json!({
+                        "id": rule.id, "local_ip": rule.local_ip, "local_port": rule.local_port,
+                        "public_ip": rule.public_ip, "public_port": rule.public_port,
+                        "protocol": rule.protocol,
+                    })
+                })
+                .collect();
+            page_response(st, query, items, "dnat_rules")
+        }
+        ("DELETE", ["api", "v1", "routers", _router, "dnat-rules", rule_id]) => {
+            delete_dnat(st, rule_id, auth)
+        }
         ("GET", ["api", "v1", "projects", project, "resources", "servers"]) => {
             let Ok(project_id) = project.parse::<i64>() else {
                 return Action::Respond(error_response(st, 400, "Bad project", auth));
@@ -732,6 +791,17 @@ fn create_server(st: &mut FakeState, body: Option<Value>, auth: Option<&str>) ->
         return Action::Respond(error_response(st, 400, "Bad body", auth));
     };
     let configuration = &body["configuration"];
+    // Режим окна без публичного адреса: сервер обязан создаваться в приватной сети с
+    // локальным адресом и зоной доступности. Запрос без `network` — регрессия, её ловим здесь.
+    let network = &body["network"];
+    if network["id"].as_str().unwrap_or_default().is_empty()
+        || network["local_ip"].as_str().unwrap_or_default().is_empty()
+        || body["availability_zone"].as_str().unwrap_or_default().is_empty()
+    {
+        let mut payload = error_body(400, "network, local_ip and availability_zone are required");
+        payload["error_code"] = Value::String("network_required".to_owned());
+        return Action::Respond(json_response(400, &payload));
+    }
     let id = st.next_server_id;
     st.next_server_id += 1;
     let server = FakeServer {
@@ -749,6 +819,7 @@ fn create_server(st: &mut FakeState, body: Option<Value>, auth: Option<&str>) ->
         }),
         boot_polls_left: st.boot_polls,
         hidden_polls_left: st.listing_hidden_polls,
+        forced_status: st.boot_status.clone(),
         request: body,
     };
     let rendered = server_json(&server);
@@ -761,6 +832,61 @@ fn create_server(st: &mut FakeState, body: Option<Value>, auth: Option<&str>) ->
             &json!({"server": rendered, "response_id": "r"}),
         )),
     }
+}
+
+/// `POST /routers/{id}/dnat-rules`: правило проброса SSH в приватную сеть.
+fn create_dnat(st: &mut FakeState, body: Option<Value>, auth: Option<&str>) -> Action {
+    match st.dnat_create.clone() {
+        DnatCreateMode::Status(status) => {
+            return Action::Respond(error_response(st, status, "Injected DNAT failure", auth));
+        }
+        DnatCreateMode::Refuse {
+            status,
+            error_code,
+        } => {
+            let mut payload = error_body(status, "Injected DNAT refusal");
+            payload["error_code"] = Value::String(error_code);
+            return Action::Respond(json_response(status, &payload));
+        }
+        DnatCreateMode::Ok | DnatCreateMode::AcceptThenDrop => {}
+    }
+    let Some(body) = body else {
+        return Action::Respond(error_response(st, 400, "Bad body", auth));
+    };
+    let id = format!("dnat-{}", st.next_dnat_id);
+    st.next_dnat_id += 1;
+    let rule = FakeDnatRule {
+        id: id.clone(),
+        local_ip: body["local"]["ip"].as_str().unwrap_or_default().to_owned(),
+        local_port: body["local"]["port"].as_str().unwrap_or_default().to_owned(),
+        public_ip: body["public"]["ip"].as_str().unwrap_or_default().to_owned(),
+        public_port: body["public"]["port"].as_str().unwrap_or_default().to_owned(),
+        protocol: body["protocol"].as_str().unwrap_or_default().to_owned(),
+    };
+    let rendered = json!({
+        "id": rule.id, "local_ip": rule.local_ip, "local_port": rule.local_port,
+        "public_ip": rule.public_ip, "public_port": rule.public_port, "protocol": rule.protocol,
+    });
+    st.dnat_rules.push(rule);
+    if st.dnat_create == DnatCreateMode::AcceptThenDrop {
+        return Action::Drop;
+    }
+    Action::Respond(json_response(
+        201,
+        &json!({"dnat_rule": rendered, "response_id": "r"}),
+    ))
+}
+
+/// `DELETE /routers/{id}/dnat-rules/{rule_id}`.
+fn delete_dnat(st: &mut FakeState, rule_id: &str, auth: Option<&str>) -> Action {
+    if let Some(status) = st.dnat_delete_status {
+        return Action::Respond(error_response(st, status, "Injected DNAT failure", auth));
+    }
+    let Some(at) = st.dnat_rules.iter().position(|rule| rule.id == rule_id) else {
+        return Action::Respond(error_response(st, 404, "Resource not found", auth));
+    };
+    st.dnat_rules.remove(at);
+    Action::Respond(empty_response(204))
 }
 
 /// `POST /servers/{id}/ips`: адрес выдаётся серверу и записывается плавающим, привязанным.
