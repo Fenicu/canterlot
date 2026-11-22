@@ -145,7 +145,6 @@ impl Action {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 /// Обычный вызов без облачной службы: карточки облака в таком задании не создаются.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_in_tx(

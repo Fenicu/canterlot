@@ -212,10 +212,10 @@ impl CloudService {
                 }
             }
         }
-        if runtime.reconciled {
-            if let Err(error) = self.evaluate(now).await {
-                warn_db("cloud_auto", &error);
-            }
+        if runtime.reconciled
+            && let Err(error) = self.evaluate(now).await
+        {
+            warn_db("cloud_auto", &error);
         }
         let windows = match self.live_windows().await {
             Ok(windows) => windows,
@@ -284,89 +284,81 @@ impl CloudService {
         let remaining = budget::remaining_in_month(&mut conn).await?;
         let fits = reservation <= remaining;
 
-        if auto_mode && budget_kopecks > 0 && block.is_none() && fits {
-            if self.all_static_runners_down(&mut conn, now).await? {
-                drop(conn);
-                let config = self.config.clone();
-                let created = crate::db::in_tx(&self.pool, move |tx| {
-                    Box::pin(async move {
-                        windows::create_in_tx(
-                            tx,
-                            &config,
-                            pricing,
-                            CreateRequest {
-                                trigger: Trigger::Auto,
-                                proposal_id: None,
-                                hard_cap_minutes: cap,
-                                consent_over_budget_kopecks: None,
-                            },
-                        )
-                        .await
-                    })
+        if auto_mode
+            && budget_kopecks > 0
+            && block.is_none()
+            && fits
+            && self.all_static_runners_down(&mut conn, now).await?
+        {
+            drop(conn);
+            let config = self.config.clone();
+            let created = crate::db::in_tx(&self.pool, move |tx| {
+                Box::pin(async move {
+                    windows::create_in_tx(
+                        tx,
+                        &config,
+                        pricing,
+                        CreateRequest {
+                            trigger: Trigger::Auto,
+                            proposal_id: None,
+                            hard_cap_minutes: cap,
+                            consent_over_budget_kopecks: None,
+                        },
+                    )
+                    .await
                 })
-                .await;
-                match created {
-                    Ok(_) => {
-                        if let Err(error) = crate::notify::enqueue_cloud_alert(
-                            &self.pool,
-                            &format!("cloud:auto_started:{}", windows::month_of(now)),
-                            &json!({"code": "auto_started", "reservation_kopecks": reservation}),
-                        )
-                        .await
-                        {
-                            warn_db("cloud_auto_push", &error);
-                        }
-                    }
-                    Err(refusal) => {
-                        tracing::warn!(
-                            kind = "cloud_auto_create",
-                            refusal = %refusal,
-                            "automatic window was not created"
-                        );
+            })
+            .await;
+            match created {
+                Ok(_) => {
+                    if let Err(error) = crate::notify::enqueue_cloud_alert(
+                        &self.pool,
+                        &format!("cloud:auto_started:{}", windows::month_of(now)),
+                        &json!({"code": "auto_started", "reservation_kopecks": reservation}),
+                    )
+                    .await
+                    {
+                        warn_db("cloud_auto_push", &error);
                     }
                 }
-                return Ok(());
+                Err(refusal) => {
+                    tracing::warn!(
+                        kind = "cloud_auto_create",
+                        refusal = %refusal,
+                        "automatic window was not created"
+                    );
+                }
             }
+            return Ok(());
         }
 
         // Автоматика выключена или резерв не помещается: карточка хаба один раз за эпизод.
-        if !auto_mode || !fits {
-            if !budget::episode_active(&mut conn).await? {
-                let owner: Uuid = sqlx::query_scalar("select owner_id from machines where id = $1")
-                    .bind(self.config.carrier_machine_id)
-                    .fetch_one(&mut *conn)
-                    .await?;
-                let mut proposer = cloud_propose::system_proposer(
-                    &mut conn,
-                    owner,
-                    self.config.carrier_machine_id,
-                )
+        if (!auto_mode || !fits) && !budget::episode_active(&mut conn).await? {
+            let owner: Uuid = sqlx::query_scalar("select owner_id from machines where id = $1")
+                .bind(self.config.carrier_machine_id)
+                .fetch_one(&mut *conn)
                 .await?;
-                proposer.source = Source::Hub;
-                let reason = format!(
-                    "Ожидающая облачная работа: {waiting} мин по оценке; автоматический режим {}",
-                    if auto_mode {
-                        "включён, но резерв не помещается в бюджет"
-                    } else {
-                        "выключен"
-                    }
-                );
-                let opened = cloud_propose::open_in_tx(
-                    &mut conn,
-                    &self.config,
-                    &pricing,
-                    &proposer,
-                    4,
-                    reason,
-                )
-                .await;
-                match opened {
-                    Ok(opened) => {
-                        budget::episode_start(&mut conn, opened.request_id).await?;
-                    }
-                    Err(error) => {
-                        tracing::warn!(kind = "cloud_hub_card", error = %error, "card not opened");
-                    }
+            let mut proposer =
+                cloud_propose::system_proposer(&mut conn, owner, self.config.carrier_machine_id)
+                    .await?;
+            proposer.source = Source::Hub;
+            let reason = format!(
+                "Ожидающая облачная работа: {waiting} мин по оценке; автоматический режим {}",
+                if auto_mode {
+                    "включён, но резерв не помещается в бюджет"
+                } else {
+                    "выключен"
+                }
+            );
+            let opened =
+                cloud_propose::open_in_tx(&mut conn, &self.config, &pricing, &proposer, 4, reason)
+                    .await;
+            match opened {
+                Ok(opened) => {
+                    budget::episode_start(&mut conn, opened.request_id).await?;
+                }
+                Err(error) => {
+                    tracing::warn!(kind = "cloud_hub_card", error = %error, "card not opened");
                 }
             }
         }
