@@ -13,6 +13,9 @@ pub const MAX_BYTES: usize = 65_535;
 /// Куда cloud-init кладёт маркер готовности. Носитель ждёт именно этот файл.
 pub const READY_MARKER: &str = "/var/lib/canterlot-runner/ready";
 
+/// Пакеты, без которых раннер не работает.
+const PACKAGES: &str = "docker.io git rsync sudo";
+
 const READY_SCRIPT: &str = "/usr/local/sbin/canterlot-runner-ready.sh";
 
 /// Исходные данные скрипта. Ключи — строки в обычном виде, без ссылок на файлы.
@@ -116,6 +119,11 @@ fn check_public_key<'a>(line: &'a str, which: &'static str) -> Result<&'a str, C
     }
 }
 
+/// Открытый ключ входа для конфигурации хаба: те же требования, что у cloud-init.
+pub fn validate_public_key(line: &str) -> bool {
+    check_public_key(line, "runner_public_key").is_ok()
+}
+
 fn check_root_dir(path: &str) -> Result<(), CloudInitError> {
     let safe = path.len() > 1
         && path.len() <= 200
@@ -162,8 +170,6 @@ pub fn render(params: &CloudInitParams) -> Result<String, CloudInitError> {
     out.push_str(&format!(
         "    ssh_authorized_keys:\n      - '{authorized}'\n"
     ));
-    out.push_str("package_update: true\n");
-    out.push_str("packages:\n  - docker.io\n  - git\n  - rsync\n  - sudo\n");
     out.push_str("write_files:\n");
     out.push_str("  - path: /etc/ssh/sshd_config.d/10-canterlot-hostkey.conf\n");
     out.push_str("    permissions: '0644'\n");
@@ -191,6 +197,13 @@ pub fn render(params: &CloudInitParams) -> Result<String, CloudInitError> {
     out.push_str("runcmd:\n");
     out.push_str("  - [sh, -c, 'rm -f /etc/ssh/ssh_host_rsa_key* /etc/ssh/ssh_host_ecdsa_key* /etc/ssh/ssh_host_dsa_key*']\n");
     out.push_str("  - [systemctl, restart, ssh]\n");
+    // Сети на старте может не быть: публичный адрес сервер получает от хаба уже после
+    // создания. Поэтому пакеты ставятся не модулем `packages` (он падает без сети и не
+    // повторяется), а циклами, которые ждут сеть. Маркер готовности пишется после них.
+    out.push_str("  - [sh, -c, 'until apt-get update; do sleep 10; done']\n");
+    out.push_str(&format!(
+        "  - [sh, -c, 'until DEBIAN_FRONTEND=noninteractive apt-get install -y {PACKAGES}; do sleep 10; apt-get update || true; done']\n"
+    ));
     out.push_str("  - [systemctl, enable, --now, docker]\n");
     out.push_str(&format!("  - [mkdir, -p, {root}]\n"));
     out.push_str(&format!("  - [chown, 'runner:runner', {root}]\n"));
@@ -248,11 +261,25 @@ mod tests {
     }
 
     #[test]
-    fn installs_docker_git_rsync() {
+    fn installs_docker_git_rsync_in_retry_loops_that_wait_for_the_network() {
         let text = render_ok(&params());
         for package in ["docker.io", "git", "rsync"] {
-            assert!(text.contains(&format!("\n  - {package}\n")), "no {package}");
+            assert!(text.contains(package), "no {package}");
         }
+        // Без сети модуль `packages` падает и не повторяется: его нет, ставят циклы.
+        assert!(!text.contains("\npackages:") && !text.contains("package_update"));
+        let runcmd = text.split("\nruncmd:\n").nth(1).unwrap();
+        let update = runcmd
+            .find("until apt-get update; do sleep 10; done")
+            .expect("apt-get update retried until it succeeds");
+        let install = runcmd
+            .find(
+                "until DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io git rsync sudo",
+            )
+            .expect("the install retried until it succeeds");
+        let docker = runcmd.find("enable, --now, docker").unwrap();
+        let ready = runcmd.find(READY_SCRIPT).unwrap();
+        assert!(update < install && install < docker && docker < ready);
     }
 
     #[test]

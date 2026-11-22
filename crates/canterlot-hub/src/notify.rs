@@ -45,6 +45,9 @@ pub const SIGN_IN_PATH: &str = "/settings/sign-in";
 pub const KIND_SCHEDULE_FAILED: &str = "schedule_failed";
 /// Отчёт рутины готов: один пуш на карточку, привязан к родителю.
 pub const KIND_ROUTINE_REPORT: &str = "routine_report";
+/// Деньги и облачные серверы: лишний сервер удалён, сервер не удаляется, окно просрочено,
+/// лишний расход после простоя хаба. Без разговора; повторы разведены ключом с номером слота.
+pub const KIND_CLOUD_ALERT: &str = "cloud_alert";
 /// Сколько отметка отправки считается живой: дольше строка брошена погибшим хабом.
 const SENDING_GRACE_SECS: f64 = 180.0;
 /// Катящееся окно троттлинга пушей о несработавших расписаниях.
@@ -746,6 +749,124 @@ pub async fn cancel_for_conversation_in_tx(
     Ok(())
 }
 
+/// Деньги: важнее обычного предупреждения, как отказ входа.
+pub const PRIORITY_CLOUD_ALERT: u8 = 8;
+
+/// Копейки как «123,45 ₽» для текста пуша.
+pub fn kopecks_text(kopecks: i64) -> String {
+    let sign = if kopecks < 0 { "-" } else { "" };
+    let abs = kopecks.unsigned_abs();
+    format!("{sign}{},{:02} ₽", abs / 100, abs % 100)
+}
+
+fn cloud_alert_text(payload: &Value) -> Option<(String, String)> {
+    let code = payload["code"].as_str()?;
+    let name = clip(payload["name"].as_str().unwrap_or("?"), TITLE_CHARS);
+    let money = |key: &str| payload[key].as_i64().map(kopecks_text);
+    Some(match code {
+        "stray_server_deleted" => (
+            "Облако: удалён лишний сервер".to_owned(),
+            format!("Сервер {name} в проекте раннеров не принадлежал ни одному окну; удалён."),
+        ),
+        "stray_server_stuck" => (
+            "Облако: лишний сервер не удаляется".to_owned(),
+            format!(
+                "Сервер {name} не принадлежит окну и не удаляется: он продолжает тарифицироваться."
+            ),
+        ),
+        "delete_needs_confirmation" => (
+            "Облако: сервер нельзя удалить токеном".to_owned(),
+            format!(
+                "Сервер {name} продолжает тарифицироваться: провайдер просит подтверждение \
+                 удаления, а у токена нет права удалять без него. Удалите сервер в панели."
+            ),
+        ),
+        "delete_failing" => (
+            "Облако: сервер не удаляется".to_owned(),
+            format!(
+                "Сервер {name} не удалился после нескольких попыток и продолжает тарифицироваться."
+            ),
+        ),
+        "window_overrun" => (
+            "Облако: окно просрочено".to_owned(),
+            format!(
+                "Окно {name} живёт дольше жёсткого предела с запасами. Удаляю сервер.{}",
+                money("extra_kopecks")
+                    .map(|extra| format!(" Лишний расход около {extra}."))
+                    .unwrap_or_default()
+            ),
+        ),
+        "outage_extra_cost" => (
+            "Облако: лишний расход после простоя хаба".to_owned(),
+            format!(
+                "Пока хаб не работал, окно {name} прожило дольше предела.{}",
+                money("extra_kopecks")
+                    .map(|extra| format!(" Лишний расход около {extra}."))
+                    .unwrap_or_default()
+            ),
+        ),
+        "ipv4_refused" => (
+            "Облако: Timeweb отказал в публичном IPv4".to_owned(),
+            format!(
+                "Timeweb отказал в публичном IPv4 ({}), сервер удалён.{}",
+                clip(payload["error_code"].as_str().unwrap_or("?"), TITLE_CHARS),
+                payload["required_balance"]
+                    .as_str()
+                    .map(|balance| format!(" Требуется баланс: {} ₽.", clip(balance, TITLE_CHARS)))
+                    .unwrap_or_default()
+            ),
+        ),
+        "stray_ip_deleted" => (
+            "Облако: удалён лишний IP-адрес".to_owned(),
+            format!(
+                "Адрес {} окна {name} остался на аккаунте без сервера и тарифицировался; удалён.",
+                clip(payload["ip"].as_str().unwrap_or("?"), TITLE_CHARS)
+            ),
+        ),
+        "stray_ip_stuck" => (
+            "Облако: лишний IP-адрес не удаляется".to_owned(),
+            format!(
+                "Адрес {} окна {name} остался без сервера и не удаляется: он тарифицируется.",
+                clip(payload["ip"].as_str().unwrap_or("?"), TITLE_CHARS)
+            ),
+        ),
+        "ip_delete_failing" => (
+            "Облако: IP-адрес не удаляется".to_owned(),
+            format!("Адрес окна {name} не удалился после нескольких попыток и тарифицируется."),
+        ),
+        "ipv4_unattributed" => (
+            "Облако: проверьте плавающие IP".to_owned(),
+            format!(
+                "Для окна {name} заказан IPv4, но ответ потерян и адрес неизвестен. Проверьте \
+                 плавающие адреса аккаунта: он мог остаться и тарифицироваться."
+            ),
+        ),
+        "window_gone" => (
+            "Облако: сервер окна исчез".to_owned(),
+            format!("Сервера окна {name} нет в проекте, хотя удаление не запрашивалось."),
+        ),
+        _ => return None,
+    })
+}
+
+/// Денежный пуш владельцу: ставится в очередь, если пуши включены. Ключ уникален: повторный
+/// вызов с тем же ключом пуш не повторяет; для повторов каждые 30 минут вызывающая сторона
+/// кладёт в ключ номер слота.
+pub async fn enqueue_cloud_alert(
+    pool: &PgPool,
+    dedupe_key: &str,
+    payload: &Value,
+) -> Result<bool, sqlx::Error> {
+    // Без Gotify пуша не будет, а деньги идут: запись в журнале остаётся (код и имена, без
+    // значений).
+    tracing::warn!(
+        kind = "cloud_alert",
+        code = payload["code"].as_str().unwrap_or("unknown"),
+        "owner cloud alert"
+    );
+    enqueue_auth(pool, KIND_CLOUD_ALERT, dedupe_key, payload).await
+}
+
 /// Пуш о входе: без разговора, только если пуши включены (`push_settings`).
 /// Адреса и города уходят только в собственный Gotify владельца.
 async fn enqueue_auth(
@@ -1142,11 +1263,17 @@ async fn compose_auth(
                 PRIORITY_FAILURE,
             )
         }
+        KIND_CLOUD_ALERT => {
+            let Some((title, body)) = cloud_alert_text(&row.payload) else {
+                return Ok(None);
+            };
+            (title, body, PRIORITY_CLOUD_ALERT)
+        }
         _ => return Ok(None),
     };
     let click_url = if matches!(
         row.kind.as_str(),
-        KIND_CREDENTIAL_EXPIRY | KIND_CREDENTIAL_AUTH
+        KIND_CREDENTIAL_EXPIRY | KIND_CREDENTIAL_AUTH | KIND_CLOUD_ALERT
     ) {
         format!("{app_url}/machines")
     } else if row.kind == KIND_SCHEDULE_FAILED {

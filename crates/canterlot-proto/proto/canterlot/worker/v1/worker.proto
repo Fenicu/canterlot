@@ -306,7 +306,27 @@ message Command {
     CollectOutputs collect_outputs = 26;
     CleanupSource cleanup_source = 27;
     OwnerJobFinished owner_job_finished = 28;
+    // Только при согласованной возможности runners_v1 и только несущей машине: подключить
+    // облачный раннер (окно этапа C). Команда уровня машины, долговечная, идемпотентная по
+    // `window_id`; хаб считает окно готовым, когда воркер раннера подключился.
+    AttachRunner attach_runner = 29;
   }
+}
+
+// Облачный сервер окна запущен и имеет адрес. Несущая входит на него пользователем `runner`
+// (ключ `[runners].ssh_key`), сверяя хостовый ключ с `host_key_public`, ждёт маркер готовности
+// cloud-init, просит токен раннера `machine_id` (`RunnerTokenRequest`) и запускает воркер с
+// `max_running` и `lease_slots`. Закрытого ключа, токена и бинарников в команде нет.
+message AttachRunner {
+  string window_id = 1;
+  // Строка `machines` раннера `cloud`: ей же приходит `RunnersAssigned`.
+  string machine_id = 2;
+  string host = 3;
+  // Открытая часть хостового ключа окна: `ssh-ed25519 <base64>`.
+  string host_key_public = 4;
+  string root_dir = 5;
+  uint32 max_running = 6;
+  uint32 lease_slots = 7;
 }
 
 // Подготовить исходники: `git push --no-verify` sha `rev` из `repo` в голый репозиторий

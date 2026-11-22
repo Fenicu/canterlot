@@ -2860,6 +2860,142 @@
         }
       }
     },
+    "/api/v1/cloud/windows": {
+      "get": {
+        "tags": [
+          "cloud"
+        ],
+        "operationId": "get__api_v1_cloud_windows",
+        "responses": {
+          "200": {
+            "description": "Окна облачных серверов раннеров: живые и последние 20 законченных, с ценой и расходом в копейках",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WindowList"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/cloud/windows/{id}/delete": {
+      "post": {
+        "tags": [
+          "cloud"
+        ],
+        "operationId": "post__api_v1_cloud_windows__id__delete",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Окно",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "description": "Ключ операции",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Удаление принято: раннер отзывается, сервер удаляет служба окон и подтверждает конец оплаты списком проекта",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeleteWindowResult"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Окна нет",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/config": {
       "get": {
         "tags": [
@@ -15728,6 +15864,132 @@
           }
         }
       },
+      "CloudWindowView": {
+        "type": "object",
+        "description": "Окно для клиентов: деньги в копейках, время RFC 3339.",
+        "required": [
+          "id",
+          "name",
+          "state",
+          "trigger",
+          "price_hourly_kopecks",
+          "ipv4_hourly_kopecks",
+          "reservation_kopecks",
+          "cost_so_far_kopecks",
+          "month",
+          "created_at"
+        ],
+        "properties": {
+          "configurator_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Конфигуратор принятого профиля; пусто, пока сервера нет."
+          },
+          "cost_so_far_kopecks": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Оценка расхода живого окна: часы с вызова создания, округлённые вверх, по цене часа,\nне больше резерва."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "delete_confirmed_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "delete_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "delete_requested_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "final_cost_kopecks": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Итог закончившегося окна; у живого пусто."
+          },
+          "hard_cap_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "ipv4": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ipv4_hourly_kopecks": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Цена часа публичного IPv4 (входит в резерв и в итог)."
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "month": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "price_hourly_kopecks": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Цена часа: до приёма профиля самая дорогая из списка, после действительная."
+          },
+          "ready_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "reservation_kopecks": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "server_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "state": {
+            "type": "string"
+          },
+          "trigger": {
+            "type": "string"
+          }
+        }
+      },
       "CompactOutcome": {
         "oneOf": [
           {
@@ -16863,6 +17125,32 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "DeleteRequested": {
+        "type": "string",
+        "enum": [
+          "not_found",
+          "canceled",
+          "not_yet",
+          "deleting",
+          "already_ended"
+        ]
+      },
+      "DeleteWindowResult": {
+        "type": "object",
+        "required": [
+          "outcome",
+          "window"
+        ],
+        "properties": {
+          "outcome": {
+            "$ref": "#/components/schemas/DeleteRequested",
+            "description": "Что случилось с окном: `deleting` (раннер отозван, сервер удаляется), `canceled`\n(сервер ещё не создавался), `not_yet` (создание вызвано, сервера в списках нет),\n`already_ended`."
+          },
+          "window": {
+            "$ref": "#/components/schemas/CloudWindowView"
           }
         }
       },
@@ -26452,6 +26740,35 @@
           },
           "is_default": {
             "type": "boolean"
+          }
+        }
+      },
+      "WindowList": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CloudWindowView"
+            },
+            "description": "Живые окна и последние 20 законченных, новые первыми."
+          },
+          "provider_block_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "provider_block_code": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Код блока провайдера (`abuse_prepayment_required`), пока он стоит: новые окна не\nсоздаются, пока владелец не снимет блок. Пусто, когда блока нет."
           }
         }
       },

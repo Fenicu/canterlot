@@ -14,7 +14,9 @@ pub mod cloud_init;
 pub mod host_key;
 pub mod price;
 pub mod rate_limit;
+pub mod service;
 pub mod timeweb;
+pub mod windows;
 
 pub use timeweb::{TimewebConfig, TimewebProvider};
 
@@ -81,10 +83,29 @@ pub enum CreateOutcome {
     /// Сервер создан, у него есть номер.
     Created { server_id: i64 },
     /// Определённый отказ (4xx, кроме 429): сервера нет и не будет.
-    Rejected { code: u16, message: String },
+    /// `error_code` — поле `error_code` тела ответа API (`no_free_node`, …), пусто, если тела нет.
+    Rejected {
+        code: u16,
+        error_code: String,
+        message: String,
+    },
     /// Таймаут, обрыв после отправки, 5xx или нечитаемый ответ: сервер мог появиться. Не
     /// повторять, искать по имени в списке проекта.
     Ambiguous { why: String },
+}
+
+/// Отказ создания, после которого окно пробует следующий профиль: сервера нет, а причина в
+/// самой конфигурации или её месте, а не в запросе в целом. Проверено у Timeweb 21.11:
+/// 409 `no_free_node`; `location_not_available` и `preset_not_found`; 400
+/// `configuration_requires_sales_request` (16 vCPU и больше). Любой другой отказ окно не
+/// «обходит»: оно закрывается с его кодом.
+pub fn profile_fallback(status: u16, error_code: &str) -> bool {
+    matches!(
+        (status, error_code),
+        (409, "no_free_node")
+            | (400..=499, "location_not_available" | "preset_not_found")
+            | (400, "configuration_requires_sales_request")
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -272,4 +293,47 @@ pub trait CloudProvider: Send + Sync {
     /// Все серверы проекта, все страницы. Любая неудавшаяся страница делает ошибкой весь
     /// вызов.
     async fn list_project_servers(&self, project_id: i64) -> Result<Vec<ServerSummary>, ListError>;
+
+    /// Публичный IPv4 для сервера: у нового сервера адреса нет, а без него нет сети.
+    /// Единственная точка получения адреса: способ (сейчас заказ нового адреса, позже,
+    /// возможно, привязка заранее купленного плавающего) прячется здесь и не меняет машину
+    /// состояний окна. Один вызов, без повторов: после неопределённого исхода адрес мог
+    /// выдаться и тарифицироваться.
+    async fn ensure_public_ipv4(&self, server_id: i64) -> Ipv4Outcome;
+
+    /// Все плавающие адреса аккаунта, все страницы. IPv4 сервера после его удаления остаётся
+    /// здесь без привязки (`bound = false`) и продолжает тарифицироваться.
+    async fn list_floating_ips(&self) -> Result<Vec<FloatingIp>, ListError>;
+
+    /// Удаление плавающего адреса. Исходы те же, что у сервера (`AlreadyGone` — 404).
+    async fn delete_floating_ip(&self, id: &str) -> DeleteOutcome;
+}
+
+/// Исход получения публичного IPv4.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ipv4Outcome {
+    /// Адрес выдан серверу.
+    Assigned(String),
+    /// Провайдер отказал определённо (любой 4xx, кроме 429): адреса нет и повтор не поможет.
+    /// `code` — `error_code` ответа, `required_balance` — `details.required_balance`
+    /// (рубли), если он есть.
+    Refused {
+        status: u16,
+        code: String,
+        required_balance: Option<String>,
+    },
+    /// Запрос не обработан (429 после ожидания клиента): адреса нет, можно повторить.
+    NotProcessed { why: String },
+    /// Таймаут, обрыв, 5xx или нечитаемый ответ: адрес мог выдаться. Не заказывать второй,
+    /// перечитать сервер.
+    Ambiguous { why: String },
+}
+
+/// Плавающий адрес аккаунта.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FloatingIp {
+    pub id: String,
+    pub ip: Option<String>,
+    /// Привязан к ресурсу (`resource_id` не пуст).
+    pub bound: bool,
 }

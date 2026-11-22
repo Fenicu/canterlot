@@ -243,7 +243,11 @@ fn to_proto_with_capability(
     // Команды несущей: только на соединении с `runners_v1`.
     if matches!(
         row.kind.as_str(),
-        "stage_source" | "collect_outputs" | "cleanup_source" | "owner_job_finished"
+        "stage_source"
+            | "collect_outputs"
+            | "cleanup_source"
+            | "owner_job_finished"
+            | "attach_runner"
     ) && !has(crate::session::CAPABILITY_RUNNERS_V1)
     {
         return Err(OutboxError::CapabilityMissing);
@@ -660,6 +664,25 @@ pub fn to_proto(row: &CommandRow) -> Result<Command, OutboxError> {
                 domain: text(&row.payload, "domain")?,
             })
         }
+        "attach_runner" => command::Kind::AttachRunner(canterlot_proto::worker::v1::AttachRunner {
+            window_id: text(&row.payload, "window_id")?,
+            machine_id: text(&row.payload, "machine_id")?,
+            host: text(&row.payload, "host")?,
+            host_key_public: text(&row.payload, "host_key_public")?,
+            root_dir: text(&row.payload, "root_dir")?,
+            max_running: row
+                .payload
+                .get("max_running")
+                .and_then(Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+                .ok_or(OutboxError::InvalidCommand)?,
+            lease_slots: row
+                .payload
+                .get("lease_slots")
+                .and_then(Value::as_u64)
+                .and_then(|value| u32::try_from(value).ok())
+                .ok_or(OutboxError::InvalidCommand)?,
+        }),
         "owner_job_finished" => {
             let hex = row
                 .payload
@@ -714,6 +737,7 @@ pub fn to_proto(row: &CommandRow) -> Result<Command, OutboxError> {
             | "collect_outputs"
             | "cleanup_source"
             | "owner_job_finished"
+            | "attach_runner"
     ) {
         (String::new(), 0)
     } else {

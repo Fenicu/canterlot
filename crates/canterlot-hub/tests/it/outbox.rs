@@ -643,7 +643,8 @@ fn to_proto_maps_all_command_variants_and_rejects_unknown_kinds() {
             command::Kind::StageSource(_)
             | command::Kind::CollectOutputs(_)
             | command::Kind::CleanupSource(_)
-            | command::Kind::OwnerJobFinished(_) => panic!("unexpected carrier command"),
+            | command::Kind::OwnerJobFinished(_)
+            | command::Kind::AttachRunner(_) => panic!("unexpected carrier command"),
         }
     }
     assert!(matches!(

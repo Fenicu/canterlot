@@ -8,13 +8,13 @@ use std::time::Duration;
 use canterlot_hub::cloud::price::{Sizing, hourly_kopecks, monthly_kopecks};
 use canterlot_hub::cloud::rate_limit::RateLimit;
 use canterlot_hub::cloud::{
-    CloudProvider as _, CreateOutcome, CreateServer, DeleteOutcome, ErrorKind, ListError,
-    ServerLookup, ServerStatus, TimewebConfig, TimewebProvider,
+    CloudProvider as _, CreateOutcome, CreateServer, DeleteOutcome, ErrorKind, Ipv4Outcome,
+    ListError, ServerLookup, ServerStatus, TimewebConfig, TimewebProvider,
 };
 use serde_json::json;
 use tracing_subscriber::fmt::MakeWriter;
 
-use crate::support::fake_timeweb::{CreateMode, DeleteMode, FailPage, FakeTimeweb};
+use crate::support::fake_timeweb::{CreateMode, DeleteMode, FailPage, FakeTimeweb, IpAddMode};
 
 const TOKEN: &str = "tw-test-token-9f3a7c21";
 const PROJECT: i64 = 4242;
@@ -236,10 +236,10 @@ async fn create_sends_the_documented_body_and_returns_the_id() {
 
 #[tokio::test]
 async fn definite_refusals_are_rejected_with_code_and_message() {
-    for (status, message) in [
-        (400, "Bad configuration"),
-        (403, "Forbidden"),
-        (409, "Name busy"),
+    for (status, error_code, message) in [
+        (400, "bad_request", "Bad configuration"),
+        (403, "forbidden", "Forbidden"),
+        (409, "conflict", "Name busy"),
     ] {
         let rig = rig().await;
         rig.fake.control().create = CreateMode::Reject {
@@ -254,6 +254,7 @@ async fn definite_refusals_are_rejected_with_code_and_message() {
             outcome,
             CreateOutcome::Rejected {
                 code: status,
+                error_code: error_code.to_owned(),
                 message: message.to_owned()
             }
         );
@@ -791,6 +792,195 @@ async fn servers_appear_in_the_listing_only_after_a_few_listings() {
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].id, server_id);
     assert_eq!(listed[0].name, "canterlot-runner-w1");
+}
+
+// ---- публичный IPv4 и плавающие адреса ----
+
+#[tokio::test]
+async fn a_new_server_has_no_address_until_one_is_ordered() {
+    let rig = rig().await;
+    rig.fake.control().auto_ipv4 = false;
+    let CreateOutcome::Created { server_id } = rig
+        .provider
+        .create_server(&create_request("canterlot-runner-w1"))
+        .await
+    else {
+        panic!("created");
+    };
+    let ServerLookup::Found(state) = rig.provider.get_server(server_id).await.unwrap() else {
+        panic!("found");
+    };
+    assert_eq!((state.status, state.ipv4), (ServerStatus::On, None));
+
+    let Ipv4Outcome::Assigned(address) = rig.provider.ensure_public_ipv4(server_id).await else {
+        panic!("assigned");
+    };
+    assert!(address.starts_with("203.0.113."));
+    let ServerLookup::Found(state) = rig.provider.get_server(server_id).await.unwrap() else {
+        panic!("found");
+    };
+    assert_eq!(state.ipv4.as_deref(), Some(address.as_str()));
+    let order = rig
+        .fake
+        .requests()
+        .into_iter()
+        .find(|r| r.method == "POST" && r.path.ends_with("/ips"))
+        .unwrap();
+    assert_eq!(order.path, format!("/api/v1/servers/{server_id}/ips"));
+    assert_eq!(order.body, Some(json!({"type": "ipv4"})));
+}
+
+#[tokio::test]
+async fn an_ip_order_is_never_retried_and_outcomes_are_classified() {
+    let rig = rig().await;
+    rig.fake.control().auto_ipv4 = false;
+    let id = rig.fake.control().add_server(PROJECT, "s");
+    // Любой 4xx, кроме 429, — определённый отказ с кодом ответа.
+    for (status, code) in [
+        (400, "bad_request"),
+        (403, "forbidden"),
+        (404, "not_found"),
+        (409, "conflict"),
+    ] {
+        rig.fake.control().ip_add = IpAddMode::Status(status);
+        let outcome = rig.provider.ensure_public_ipv4(id).await;
+        assert_eq!(
+            outcome,
+            Ipv4Outcome::Refused {
+                status,
+                code: code.to_owned(),
+                required_balance: None
+            }
+        );
+    }
+    // 5xx неопределён: адрес мог выдаться.
+    rig.fake.control().ip_add = IpAddMode::Status(500);
+    assert!(matches!(
+        rig.provider.ensure_public_ipv4(id).await,
+        Ipv4Outcome::Ambiguous { .. }
+    ));
+    // Один запрос на вызов, повторов внутри клиента нет.
+    let orders = |rig: &Rig| {
+        rig.fake
+            .requests()
+            .iter()
+            .filter(|r| r.method == "POST" && r.path.ends_with("/ips"))
+            .count()
+    };
+    assert_eq!(orders(&rig), 5);
+    // Сервера нет: тоже определённый отказ.
+    rig.fake.control().ip_add = IpAddMode::Ok;
+    assert!(matches!(
+        rig.provider.ensure_public_ipv4(999_999).await,
+        Ipv4Outcome::Refused { status: 404, .. }
+    ));
+    // Обрыв после приёма: неопределённо, адрес мог выдаться.
+    rig.fake.control().ip_add = IpAddMode::AcceptThenDrop;
+    assert!(matches!(
+        rig.provider.ensure_public_ipv4(id).await,
+        Ipv4Outcome::Ambiguous { .. }
+    ));
+    assert_eq!(rig.fake.control().floating_ips.len(), 1);
+    // 429 после ожидания клиента: запрос не обработан, адреса нет.
+    rig.fake.control().ip_add = IpAddMode::Status(429);
+    assert!(matches!(
+        rig.provider.ensure_public_ipv4(id).await,
+        Ipv4Outcome::NotProcessed { .. }
+    ));
+}
+
+#[tokio::test]
+async fn the_anti_abuse_refusal_carries_its_code_and_the_required_balance_and_nothing_else() {
+    let rig = rig().await;
+    rig.fake.control().auto_ipv4 = false;
+    let id = rig.fake.control().add_server(PROJECT, "s");
+    rig.fake.control().ip_add = IpAddMode::Refuse {
+        status: 400,
+        error_code: "abuse_prepayment_required".to_owned(),
+        required_balance: Some(28863.9),
+    };
+    assert_eq!(
+        rig.provider.ensure_public_ipv4(id).await,
+        Ipv4Outcome::Refused {
+            status: 400,
+            code: "abuse_prepayment_required".to_owned(),
+            required_balance: Some("28863.9".to_owned()),
+        }
+    );
+    // Код и сумма очищаются от всего, что не годится в журнал и пуш.
+    rig.fake.control().ip_add = IpAddMode::Refuse {
+        status: 400,
+        error_code: "bad code <script>".to_owned(),
+        required_balance: None,
+    };
+    let Ipv4Outcome::Refused {
+        code,
+        required_balance,
+        ..
+    } = rig.provider.ensure_public_ipv4(id).await
+    else {
+        panic!("refused");
+    };
+    assert_eq!((code.as_str(), required_balance), ("badcodescript", None));
+}
+
+#[tokio::test]
+async fn floating_ips_are_listed_with_string_ids_pages_and_binding_and_deleted_by_id() {
+    let rig = rig().await;
+    {
+        let mut state = rig.fake.control();
+        for n in 0..250 {
+            state
+                .floating_ips
+                .push(crate::support::fake_timeweb::FakeFloatingIp {
+                    id: format!("4df0e781-cafb-4419-9636-{n:012}"),
+                    ip: format!("198.51.100.{}", n % 250),
+                    resource_id: (n % 2 == 0).then_some(7),
+                });
+        }
+    }
+    let all = rig.provider.list_floating_ips().await.unwrap();
+    assert_eq!(all.len(), 250, "every page is walked");
+    assert_eq!(all.iter().filter(|ip| ip.bound).count(), 125);
+    assert!(all[0].id.starts_with("4df0e781-"));
+    // Страница отказала: целого списка нет.
+    rig.fake.control().list_fail_page = Some(FailPage {
+        offset: 100,
+        status: 500,
+        times: None,
+    });
+    assert!(rig.provider.list_floating_ips().await.is_err());
+    rig.fake.control().list_fail_page = None;
+
+    let unbound = all.iter().find(|ip| !ip.bound).unwrap().clone();
+    let bound = all.iter().find(|ip| ip.bound).unwrap().clone();
+    assert!(matches!(
+        rig.provider.delete_floating_ip(&unbound.id).await,
+        DeleteOutcome::Deleted { quarantined: false }
+    ));
+    assert_eq!(
+        rig.provider.delete_floating_ip(&unbound.id).await,
+        DeleteOutcome::AlreadyGone
+    );
+    // Привязанный адрес провайдер не отдаёт (409): повторять можно, но ничего не удалено.
+    assert_eq!(
+        rig.provider.delete_floating_ip(&bound.id).await,
+        DeleteOutcome::Failed { retryable: true }
+    );
+    rig.fake.control().floating_delete_status = Some(500);
+    assert_eq!(
+        rig.provider.delete_floating_ip(&bound.id).await,
+        DeleteOutcome::Failed { retryable: true }
+    );
+    // В путь идёт только то, что похоже на идентификатор.
+    for bad in ["", "../servers/1", "a/b", "a b", "a?x"] {
+        assert_eq!(
+            rig.provider.delete_floating_ip(bad).await,
+            DeleteOutcome::Failed { retryable: false },
+            "{bad:?}"
+        );
+    }
+    assert_eq!(rig.fake.control().floating_ips.len(), 249);
 }
 
 // ---- токен ----

@@ -448,6 +448,7 @@ pub enum CommandKind {
     CollectOutputs,
     CleanupSource,
     OwnerJobFinished,
+    AttachRunner,
 }
 
 impl CommandKind {
@@ -470,6 +471,7 @@ impl CommandKind {
             Self::CollectOutputs => "collect_outputs",
             Self::CleanupSource => "cleanup_source",
             Self::OwnerJobFinished => "owner_job_finished",
+            Self::AttachRunner => "attach_runner",
         }
     }
 }
@@ -496,6 +498,7 @@ impl FromStr for CommandKind {
             "collect_outputs" => Ok(Self::CollectOutputs),
             "cleanup_source" => Ok(Self::CleanupSource),
             "owner_job_finished" => Ok(Self::OwnerJobFinished),
+            "attach_runner" => Ok(Self::AttachRunner),
             _ => Err(ModelError::UnknownValue {
                 kind: "command kind",
                 value: value.into(),

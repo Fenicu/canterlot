@@ -527,6 +527,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/cloud/windows": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get__api_v1_cloud_windows"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/cloud/windows/{id}/delete": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["post__api_v1_cloud_windows__id__delete"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/config": {
         parameters: {
             query?: never;
@@ -2740,6 +2772,58 @@ export interface components {
             /** Format: int64 */
             size: number;
         };
+        /** @description Окно для клиентов: деньги в копейках, время RFC 3339. */
+        CloudWindowView: {
+            /**
+             * Format: int64
+             * @description Конфигуратор принятого профиля; пусто, пока сервера нет.
+             */
+            configurator_id?: number | null;
+            /**
+             * Format: int64
+             * @description Оценка расхода живого окна: часы с вызова создания, округлённые вверх, по цене часа,
+             *     не больше резерва.
+             */
+            cost_so_far_kopecks: number;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            delete_confirmed_at?: string | null;
+            delete_reason?: string | null;
+            /** Format: date-time */
+            delete_requested_at?: string | null;
+            /**
+             * Format: int64
+             * @description Итог закончившегося окна; у живого пусто.
+             */
+            final_cost_kopecks?: number | null;
+            /** Format: date-time */
+            hard_cap_at?: string | null;
+            /** Format: uuid */
+            id: string;
+            ipv4?: string | null;
+            /**
+             * Format: int64
+             * @description Цена часа публичного IPv4 (входит в резерв и в итог).
+             */
+            ipv4_hourly_kopecks: number;
+            last_error?: string | null;
+            month: string;
+            name: string;
+            /**
+             * Format: int64
+             * @description Цена часа: до приёма профиля самая дорогая из списка, после действительная.
+             */
+            price_hourly_kopecks: number;
+            /** Format: date-time */
+            ready_at?: string | null;
+            /** Format: int64 */
+            reservation_kopecks: number;
+            /** Format: int64 */
+            server_id?: number | null;
+            state: string;
+            trigger: string;
+        };
         CompactOutcome: {
             requested: {
                 /** Format: uuid */
@@ -3044,6 +3128,17 @@ export interface components {
             subagent?: components["schemas"]["SubagentRef"] | null;
             task?: string | null;
             tool_name?: string | null;
+        };
+        /** @enum {string} */
+        DeleteRequested: "not_found" | "canceled" | "not_yet" | "deleting" | "already_ended";
+        DeleteWindowResult: {
+            /**
+             * @description Что случилось с окном: `deleting` (раннер отозван, сервер удаляется), `canceled`
+             *     (сервер ещё не создавался), `not_yet` (создание вызвано, сервера в списках нет),
+             *     `already_ended`.
+             */
+            outcome: components["schemas"]["DeleteRequested"];
+            window: components["schemas"]["CloudWindowView"];
         };
         /** @description Состояние службы распознавания речи для кнопки микрофона. */
         DictationStatus: {
@@ -5891,6 +5986,17 @@ export interface components {
             entries: components["schemas"]["WhitelistEntry"][];
             is_default: boolean;
         };
+        WindowList: {
+            /** @description Живые окна и последние 20 законченных, новые первыми. */
+            items: components["schemas"]["CloudWindowView"][];
+            /** Format: date-time */
+            provider_block_at?: string | null;
+            /**
+             * @description Код блока провайдера (`abuse_prepayment_required`), пока он стоит: новые окна не
+             *     создаются, пока владелец не снимет блок. Пусто, когда блока нет.
+             */
+            provider_block_code?: string | null;
+        };
         WindowView: {
             forecast?: components["schemas"]["ForecastView"] | null;
             observed_at: string;
@@ -7661,6 +7767,89 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ClaudeAutoMemorySettings"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get__api_v1_cloud_windows: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Окна облачных серверов раннеров: живые и последние 20 законченных, с ценой и расходом в копейках */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WindowList"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    post__api_v1_cloud_windows__id__delete: {
+        parameters: {
+            query?: never;
+            header: {
+                /** @description Ключ операции */
+                "Idempotency-Key": string;
+            };
+            path: {
+                /** @description Окно */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Удаление принято: раннер отзывается, сервер удаляет служба окон и подтверждает конец оплаты списком проекта */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeleteWindowResult"];
+                };
+            };
+            /** @description Окна нет */
+            404: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */

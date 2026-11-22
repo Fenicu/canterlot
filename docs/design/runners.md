@@ -213,6 +213,9 @@ canterlot-worker job run --title T [--machine NAME|auto] [--labels a,b] [--expec
 | `get_server(id)` | `Found(ServerState {status, ipv4, …})` или `NotFound` |
 | `delete_server(id)` | `Deleted {quarantined}`, `AlreadyGone` (404), `NeedsConfirmation` (хеш в ответе или 423: у токена нет `is_able_to_delete`), `Failed {retryable}` |
 | `list_project_servers(project_id)` | все серверы проекта или `ListError`; частичный список успехом не бывает |
+| `ensure_public_ipv4(server_id)` | `POST /servers/{id}/ips {"type":"ipv4"}` → `Assigned(ip)`, `Refused {status, code, required_balance}` (4xx, кроме 429), `NotProcessed` (429), `Ambiguous`; один вызов, без повторов (С2, §7.3a) |
+| `list_floating_ips()` | все плавающие адреса аккаунта (`{id: строка, ip, bound}`, идентификаторы строки, как у API) или `ListError` |
+| `delete_floating_ip(id)` | `DELETE /floating-ips/{id}`: `Deleted`, `AlreadyGone` (404), `Failed`; идентификатор в путь проходит только из знаков `A-Za-z0-9_-` |
 
 `Ambiguous` значит «сервер мог появиться»: создание не повторяется, вызывающий ищет имя в списке проекта. `NeedsConfirmation` не повторяется никогда. `CreateServer` в `Debug` не показывает облачный скрипт (в нём закрытый хостовый ключ).
 
@@ -237,3 +240,85 @@ canterlot-worker job run --title T [--machine NAME|auto] [--labels a,b] [--expec
 **Хостовый ключ (`host_key.rs`).** `HostKey::generate()` создаёт пару ed25519 в памяти (`ring`, семя из `getrandom`) и отдаёт закрытый ключ в формате OpenSSH, открытую строку `ssh-ed25519 …` и отпечаток `SHA256:…`. На диск ключ не пишется, в `Debug` закрытая часть скрыта.
 
 **Поддельный Timeweb** (`tests/it/support/fake_timeweb.rs`) повторяет формы ответов из OpenAPI и держит ручки сбоев для следующего слоя: создание «принял и закрыл соединение», зависание, 5xx и произвольный отказ, 429 с `Retry-After`, страницы списка с отказом на заданном смещении, список без пагинации и с подменённым `total`, удаление с хешем, 423, 5xx и с `is_moved_in_quarantine: true`, серверы, видимые в списке только после заданного числа листингов (счёт по листингам, а не по часам), загрузка сервера (`installing` → `on` с адресом после заданного числа опросов), заголовок `Authorization` в текстах ошибок. Тесты клиента лежат в `tests/it/cloud_timeweb.rs`, остальные (цены, cloud-init, ключ, предел частоты) — модульные в `src/cloud/`.
+
+## 7. Облачные окна в хабе (стадия C2, `canterlot-hub/src/cloud/{windows,service}.rs`)
+
+Окно — жизнь одного облачного сервера: от намерения создать до подтверждённого конца оплаты. Таблицы `cloud_windows` и однострочная `cloud_budget` (миграция `0131`), конфигурация `[runners.cloud]` (`docs/configuration.md`), HTTP владельца (`docs/design/api.md`). Токен провайдера и закрытый хостовый ключ нигде, кроме памяти и тела запроса создания, не живут.
+
+### 7.1 Состояния
+
+`create_intent` → (`create_unknown`) → `identified` → `ready` → `draining` → `deleting` → `ended`; тупики без сервера или с исчезнувшим: `failed`, `gone`. Живое окно — одно из первых шести (кроме `ended`, `failed`, `gone`): `create_intent`, `create_unknown`, `identified`, `ready`, `draining`, `deleting`. Живое окно одно: замок строки `cloud_budget` в транзакции создания и частичный уникальный индекс `cloud_windows_one_live`. Окно в `deleting` остаётся живым, пока сервер не пропал из полного списка: оно считается в расходе по резерву и блокирует создание нового.
+
+| Было | Условие | Стало |
+| --- | --- | --- |
+| `create_intent` без метки вызова | первая успешная сверка в этом запуске хаба; метка `create_called_at` и пределы ставятся до вызова | вызов `create_server` |
+| вызов: `Created` | | `identified` (+`server_id`, строка раннера `cloud` готова) |
+| вызов: `Rejected` с кодом из списка перебора (409 `no_free_node`, `location_not_available`, `preset_not_found`, 400 `configuration_requires_sales_request`) | сервера точно нет | вызов следующего профиля списка в том же окне, без новой транзакции; перед каждым вызовом в строке стоят конфигуратор и цена этого профиля |
+| вызов: `Rejected` с другим кодом, либо отказали все профили | сервера точно нет | `failed`, итог 0, резерв снят, коды в `last_error` |
+| вызов: `Ambiguous`, либо метка есть, а ответа нет (упал хаб, оборвали проход) | второго POST нет никогда, и на другом профиле тоже: сервер мог появиться | `create_unknown` |
+| `create_unknown` | полная выборка показала имя | `identified` |
+| `create_unknown` | полная выборка без имени и с `create_called_at` прошло `create_unknown_window` | `failed`, итог 0 |
+| `identified` | сервер `On` с IPv4 | несущей уходит `AttachRunner`; окно ждёт воркер |
+| `identified` | воркер раннера `cloud` на связи | `ready` |
+| `identified` | `ready_timeout` от вызова, либо жёсткий предел | `deleting` |
+| `ready` | простой `idle_minutes` без работы | `deleting` |
+| `ready` | раннер отключён 10 минут при подключённой несущей | `deleting` |
+| `ready` | `hard_cap_at` (от вызова создания) | `draining`: раннер перестаёт брать работу (`accepts_remote_work = false`) |
+| `draining` | работы не осталось | `deleting` |
+| `draining` | `drain_until` | идущие задачи отменяются штатной отменой |
+| `draining` | `teardown_until` | `deleting`; отзыв раннера заканчивает неподтверждённое как `lost` |
+| `identified`/`ready`/`draining` | дольше `teardown_until` (в `draining` ещё 10 минут), например после простоя хаба | `deleting` и пуш владельцу (`outage_extra_cost` на первом проходе после старта, иначе `window_overrun`) |
+| `identified`/`ready`/`draining` | сервера нет в полном списке, прошло `create_unknown_window` от вызова | `gone`, раннер отозван, пуш `window_gone` |
+| `deleting` | `delete_server` принят (в том числе в карантин), затем полный список без сервера | `ended` с `delete_confirmed_at` и итогом |
+| `deleting` | сервер пропал из полного списка без принятого удаления (владелец удалил в панели) | `ended` |
+
+«Удалить сейчас» (`POST /api/v1/cloud/windows/{id}/delete`) переводит `identified`/`ready`/`draining` в `deleting`, а `create_intent` без вызова отменяет (`failed`, итог 0). Для `create_unknown` ответ `not_yet`: сервера в известных ещё нет, решит сверка.
+
+### 7.2 Создание и деньги
+
+`windows::create_in_tx(conn, config, pricing, CreateRequest {trigger, proposal_id, hard_cap_minutes, consent_over_budget_kopecks})` — одна транзакция для всех входов (карточка, кнопка, автоматика): замок `cloud_budget`; отказ `LiveWindowExists`; резерв = `reservation_kopecks(час самого дорогого профиля списка, предел + drain_grace + teardown_margin)` (`Pricing.profiles` — все профили `[[runners.cloud.profile]]` с ценой часа; снимок списка хранится в окне, `cloud_windows.profiles`); бюджет месяца = `cloud_budget.monthly_budget_kopecks` (0 по умолчанию), расход месяца = итог закончившихся окон + резерв живых (`spent_in_month`); не помещается — отказ `OverBudget`, если только `consent_over_budget_kopecks` не равно резерву в точности; вставка `create_intent` с резервом, месяцем (`YYYY-MM` по Москве на момент создания) и хостовым ключом: в базе только открытая половина, закрытая лежит в памяти (`PENDING_KEYS`) до вызова создания и уходит только в cloud-init для провайдера. После перезапуска хаба окну, которому ещё не звонили, генерируется новый ключ. Цену часа вызывающая сторона берёт у провайдера до транзакции (`CloudService::pricing`), чтобы сетевой вызов не держал замок; `CloudService::create` делает это сама. Предложения-карточки, автоматический режим и редактирование бюджета строятся поверх этой функции (задача C2b).
+
+Профили: служба пробует их по порядку снимка окна; определённый отказ из списка (`cloud::profile_fallback`: 409 `no_free_node`, `location_not_available`, `preset_not_found`, 400 `configuration_requires_sales_request`) переходит к следующему, любой другой отказ или отказ всех закрывает окно (`failed`, итог 0, коды в `last_error`), `Ambiguous` останавливает перебор. В строке окна `configurator_id` и `price_hourly_kopecks` ставятся перед каждым вызовом: после приёма это действительные значения принятого профиля.
+
+Итог закончившегося окна = `final_cost_kopecks(действительная цена часа, минуты от create_called_at до delete_confirmed_at)`; у окна, у которого сервера не было, 0; у `gone` — до момента обнаружения.
+
+### 7.3 Служба (`CloudService`)
+
+Проход `tick(now)` каждые 10 с под `singleton::supervise("cloud_windows")`: один хаб за раз. «Сейчас» параметр, поэтому сроки проверяются в тестах без ожидания. Проход: сверка (первым делом при старте и каждые `reconcile_interval`), затем шаг каждого живого окна. Новые серверы создаются только после первой успешной сверки в этом запуске.
+
+**Сверка** читает проект целиком (`list_project_servers`); любая ошибка или неполный список не меняют ничего. По полному списку:
+
+- сервер с именем `canterlot-runner-<канонический uuid>` без живого окна (нет строки, закрытое окно) удаляется, владельцу пуш `stray_server_deleted` (или `stray_server_stuck` раз в 30 минут, если удалить не вышло); серверы с другими именами и других проектов не трогаются никогда;
+- `create_unknown` и `create_intent` с меткой вызова идентифицируются по имени; окна, которым сервера нет в списке дольше `create_unknown_window`, закрываются.
+
+**Удаление.** Раннер `cloud` отзывается (токен гаснет, незаконченные задачи `lost`), затем `delete_server`: `Deleted` (в том числе `quarantined`) и `AlreadyGone` ждут подтверждения полным списком; `NeedsConfirmation` оставляет окно в `deleting` с `last_error = needs_confirmation`, пуш `delete_needs_confirmation` сразу и с каждой повторной попыткой раз в 30 минут (токен не может удалить, сервер тарифицируется); `Failed` повторяется с паузой 30 с, 1 мин, 2 мин… до 10 мин, после трёх неудач пуш `delete_failing` раз в 30 минут. Открытое обязательство удаления не снимается и не вычищается.
+
+### 7.3a Публичный IPv4 (проверено на живом Timeweb 22.11)
+
+- У нового сервера адреса нет. Служба на первом проходе после `identified` ставит метку `ip_requested_at` и вызывает `add_ipv4` (`POST /servers/{id}/ips {"type":"ipv4"}`, ответ `server_ip {ip, type}`); адрес пишется в `cloud_windows.ipv4`. Определённый отказ (`Rejected`, `Conflict`, `NotFound`, `Auth`, 429) снимает метку, и следующий проход повторяет заказ; неопределённый (обрыв, 5xx) оставляет метку: второго заказа нет, а адрес появится в ответе `get_server`. Подключение (`AttachRunner`) уходит, когда сервер `On` и адрес известен.
+- **Единая точка.** Адрес получает один метод провайдера, `ensure_public_ipv4(server_id) -> Ipv4Outcome {Assigned(ip), Refused{status, code, required_balance}, NotProcessed, Ambiguous}`; способ за ним (сейчас заказ нового адреса, позже, возможно, привязка заранее купленного плавающего через `POST /floating-ips/{id}/bind`) можно сменить, не трогая машину состояний окна. Привязку плавающего адреса сейчас не делаем.
+- **Отказ провайдера.** Любой 4xx, кроме 429, — определённый отказ: адреса нет, повтор не поможет (например 400 `abuse_prepayment_required` с `details.required_balance`: правило против злоупотреблений на аккаунте). Окно сразу уходит на удаление по обычному пути (`delete_reason = ipv4_refused`, отзыв раннера, удаление сервера, подтверждение отсутствием в полном списке), метка заказа снимается (адреса нет, итог без него: только сервер от `create_called_at`), в `last_error` остаётся `error_code` ответа. Владельцу пуш `ipv4_refused` сразу: «Timeweb отказал в публичном IPv4 (<код>), сервер удалён» и `required_balance` в рублях, если он был, больше ничего из ответа. 429 — запрос не обработан, метка снимается и заказ повторяется. 5xx, таймаут, обрыв, нечитаемый ответ — неопределённый исход: сервер перечитывается тем же проходом, второго заказа для окна нет.
+- **Блок провайдера.** Отказ `abuse_prepayment_required` пишет `cloud_budget.provider_block_code` и `provider_block_at`; пока блок стоит, `create_in_tx` отказывает `CreateRefusal::ProviderBlocked {code}`, а список окон (`GET /api/v1/cloud/windows`) показывает `provider_block_code` и `provider_block_at`. Снимает блок только владелец: функция `windows::clear_provider_block` оставлена задаче C2b (кнопка в PWA).
+- Цена: `ipv4_hourly_kopecks` в окне (из `ipv4_monthly_rubles`), резерв = резерв сервера + резерв адреса (каждый `час × (ceil(минуты / 60) + 1)`).
+- Конец окна: после принятого удаления сервера и подтверждения его отсутствия в полном списке (`server_gone_at`) служба ищет адрес окна в полном списке плавающих адресов (`list_floating_ips`). Привязан — ждёт; отвязан — `delete_floating_ip(id)` и повторный список; нет в списке — `ip_gone_at`, окно `ended`. Отказ удаления повторяется с паузой, после трёх неудач пуш `ip_delete_failing`. Окно, в котором заказ адреса остался без ответа и адрес неизвестен, кончается пушем `ipv4_unattributed` (чужие плавающие адреса не трогаются, итог считается с запасом до конца окна).
+- Итог = `final_cost(цена сервера, от create_called_at до server_gone_at) + final_cost(цена адреса, от ip_requested_at до ip_gone_at)`.
+- Сверка: отвязанный плавающий адрес, записанный на окне в `ended`/`failed`/`gone` и не записанный ни на одном живом, удаляется (пуш `stray_ip_deleted`, при отказе `stray_ip_stuck` раз в 30 минут). Привязанные и чужие адреса не трогаются никогда.
+- Cloud-init: пакеты ставятся не модулем `packages` (без сети он падает и не повторяется), а `runcmd`-циклами, которые ждут сеть; маркер готовности по-прежнему последний.
+
+### 7.4 Раннер `cloud` и несущая
+
+Одна строка `machines` с именем `cloud`, ролью `runner`, родителем `carrier_machine_id`, корнем `/srv/canterlot-runner`, рангом и метками из конфигурации; создаётся при первом окне и переиспользуется (`cloud_budget.cloud_machine_id`). Несущей в `RunnersAssigned` она попадает, пока окно `identified`, `ready` или `draining`, независимо от токена. Подключение:
+
+1. Сервер `On` с адресом: несущей уходит `AttachRunner {window_id, machine_id, host, host_key_public, root_dir, max_running, lease_slots}` (долговечная команда уровня машины, только на соединении с `runners_v1`, только несущей). Закрытого ключа, токена и бинарников в команде нет. Реализацию на стороне несущей делает C3: войти пользователем `runner` с проверкой `host_key_public`, дождаться маркера готовности, запросить токен, запустить воркер. До C3 несущая отвечает на команду отказом `unsupported_command` (хаб гасит её как отклонённую), и окно уйдёт по `ready_timeout`.
+2. Запрос токена `RunnerTokenRequest` для строки `cloud`: пока окно `identified`, хаб ротирует токен с `reset_local_state = true, reactivate = true`; пока `ready`/`draining` — с флагом несущей и `reactivate = true`; вне окна отказ `revoked`. Статические раннеры ведут себя как прежде.
+3. Окно становится `ready`, когда воркер `cloud` на связи; команда подключения считается выполненной.
+
+Конец окна отзывает строку раннера (`machines::revoke`): токен гаснет, его незаконченные задачи становятся `lost`, из списка несущей он уходит. Закрытие строки `draining` (`accepts_remote_work = false`) использует ту же паузу, что и размещение: новых привязок нет.
+
+### 7.5 Пуши владельцу (`cloud_alert`)
+
+Через `owner_pushes` (вид `cloud_alert`, без разговора, ключ `dedupe_key` с номером попытки или получасового слота): `stray_server_deleted`, `stray_server_stuck`, `delete_needs_confirmation`, `delete_failing`, `window_overrun`, `outage_extra_cost` (с оценкой лишнего расхода), `window_gone`, `stray_ip_deleted`, `stray_ip_stuck`, `ip_delete_failing`, `ipv4_unattributed`, `ipv4_refused` (с `error_code` и `required_balance`). Без `[notify.gotify]` пуша нет, но запись в журнале (`cloud_alert`, код без значений) остаётся.
+
+### 7.6 Тесты
+
+`tests/it/cloud_windows.rs` (против поддельного Timeweb, с ручками сбоев из §6; сроки через `tick(now)`): полный цикл создание → `identified` → `ready` (имитация подключения несущей) → простой → удаление → `ended` с итогом; неопределённое создание (найдено позже → `identified`, нет в полных списках → `failed`, счётчик POST поддельного сервера равен 1); оборванный вызов; плохой или неполный список ничего не меняет; жёсткий предел (`draining` → отмена → граница сноса → `lost` → удаление, предел от вызова создания); исходы удаления (`NeedsConfirmation` с пушами и живым окном, три отказа `DELETE`, карантин подтверждается только отсутствием); сверка (лишний сервер, чужие имена и проекты, до любого создания, перезапуск хаба с окнами во всех состояниях); одно живое окно и две параллельные попытки создания; арифметика резерва из конфигурации; строка `cloud` (оживление при подключении, отзыв и `lost`, список несущей по сети в `runners_grpc.rs`); простой и отключение; секреты в журнале (захват). `tests/it/cloud_http.rs` — HTTP владельца. Конфигурация и включение при старте проверяются там же.
