@@ -12,8 +12,9 @@
 | `(MIT OR CC0-1.0)` | 0 | 0 | 1 | 1 |
 | `(MIT OR GPL-3.0-or-later)` | 0 | 1 | 0 | 1 |
 | `(MPL-2.0 OR Apache-2.0)` | 0 | 1 | 0 | 1 |
+| `-` | 0 | 1 | 0 | 1 |
 | `0BSD OR MIT OR Apache-2.0` | 1 | 0 | 0 | 1 |
-| `Apache-2.0` | 9 | 5 | 20 | 34 |
+| `Apache-2.0` | 9 | 11 | 20 | 40 |
 | `Apache-2.0 / MIT` | 1 | 0 | 0 | 1 |
 | `Apache-2.0 AND ISC` | 1 | 0 | 0 | 1 |
 | `Apache-2.0 OR BSL-1.0` | 1 | 0 | 0 | 1 |
@@ -24,27 +25,30 @@
 | `Apache-2.0/MIT` | 3 | 0 | 0 | 3 |
 | `BSD-2-Clause` | 0 | 6 | 9 | 15 |
 | `BSD-2-Clause OR Apache-2.0 OR MIT` | 2 | 0 | 0 | 2 |
-| `BSD-3-Clause` | 2 | 3 | 3 | 8 |
+| `BSD-3-Clause` | 2 | 9 | 3 | 14 |
+| `BSD-3-Clause OR Apache-2.0` | 2 | 0 | 0 | 2 |
 | `BlueOak-1.0.0` | 0 | 0 | 2 | 2 |
 | `CC0-1.0` | 0 | 0 | 1 | 1 |
-| `ISC` | 3 | 3 | 10 | 16 |
-| `MIT` | 73 | 87 | 156 | 316 |
+| `EPL-2.0 OR GPL-3.0-or-later` | 0 | 1 | 0 | 1 |
+| `ISC` | 3 | 36 | 10 | 49 |
+| `MIT` | 80 | 153 | 155 | 388 |
 | `MIT AND BSD-3-Clause` | 1 | 0 | 0 | 1 |
-| `MIT OR Apache-2.0` | 249 | 0 | 0 | 249 |
+| `MIT OR Apache-2.0` | 256 | 0 | 0 | 256 |
 | `MIT OR Apache-2.0 OR BSD-1-Clause` | 1 | 0 | 0 | 1 |
 | `MIT OR Apache-2.0 OR LGPL-2.1-or-later` | 2 | 0 | 0 | 2 |
-| `MIT OR Apache-2.0 OR Zlib` | 1 | 0 | 0 | 1 |
-| `MIT OR Zlib OR Apache-2.0` | 1 | 0 | 0 | 1 |
+| `MIT OR Apache-2.0 OR Zlib` | 3 | 0 | 0 | 3 |
+| `MIT OR Zlib OR Apache-2.0` | 2 | 0 | 0 | 2 |
 | `MIT-0` | 1 | 0 | 2 | 3 |
 | `MIT/Apache-2.0` | 14 | 0 | 0 | 14 |
-| `MPL-2.0` | 6 | 12 | 2 | 20 |
+| `MPL-2.0` | 6 | 12 | 0 | 18 |
 | `PSF-2.0` | 0 | 1 | 0 | 1 |
 | `Python-2.0` | 0 | 0 | 2 | 2 |
 | `Unicode-3.0` | 18 | 0 | 0 | 18 |
-| `Unlicense OR MIT` | 8 | 0 | 0 | 8 |
+| `Unlicense` | 0 | 1 | 0 | 1 |
+| `Unlicense OR MIT` | 9 | 0 | 0 | 9 |
 | `Zlib` | 3 | 0 | 0 | 3 |
-| `Zlib OR Apache-2.0 OR MIT` | 1 | 0 | 0 | 1 |
-| **ИТОГО** | **470** | **120** | **208** | **798** |
+| `Zlib OR Apache-2.0 OR MIT` | 2 | 0 | 0 | 2 |
+| **ИТОГО** | **491** | **234** | **205** | **930** |
 
 ## Требуют внимания
 
@@ -54,13 +58,15 @@
 
 ### Rust-крейты
 
-Среди Rust-крейтов рабочего пространства пакеты с неразрешёнными лицензиями отсутствуют (все 470 зависимостей удовлетворяют allowlist).
+Среди Rust-крейтов рабочего пространства пакеты с неразрешёнными лицензиями отсутствуют (все 491 зависимость удовлетворяет allowlist).
 
 ### npm (runtime)
 
 | Пакет | Версия | Лицензия | Причина / примечание |
 | --- | --- | --- | --- |
 | `argparse` | 3.0.4 | `PSF-2.0` | Лицензия вне allowlist: PSF-2.0 |
+| `elkjs` | 0.12.1 | `EPL-2.0 OR GPL-3.0-or-later` | Лицензия вне allowlist: EPL-2.0, GPL-3.0-or-later |
+| `khroma` | 2.1.0 | `-` | Лицензия не указана |
 
 ### npm (dev-only, не поставляются)
 
@@ -74,7 +80,7 @@
 
 ## Крейты Rust
 
-Зависимости рабочего пространства Cargo (исключая собственные крейты `canterlot-*` и прототипы `spikes`). Всего: 470.
+Зависимости рабочего пространства Cargo (исключая собственные крейты `canterlot-*` и прототипы `spikes`). Всего: 491.
 
 | Крейт | Версия | Лицензия | Выбрано | Репозиторий |
 | --- | --- | --- | --- | --- |
@@ -125,7 +131,9 @@
 | `bs58` | 0.5.1 | `MIT/Apache-2.0` | `MIT` | [https://github.com/Nullus157/bs58-rs](https://github.com/Nullus157/bs58-rs) |
 | `bumpalo` | 3.20.3 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/fitzgen/bumpalo](https://github.com/fitzgen/bumpalo) |
 | `bytecount` | 0.6.9 | `Apache-2.0/MIT` | `MIT` | [https://github.com/llogiq/bytecount](https://github.com/llogiq/bytecount) |
+| `bytemuck` | 1.25.2 | `Zlib OR Apache-2.0 OR MIT` | `MIT` | [https://github.com/Lokathor/bytemuck](https://github.com/Lokathor/bytemuck) |
 | `byteorder` | 1.5.0 | `Unlicense OR MIT` | `MIT` | [https://github.com/BurntSushi/byteorder](https://github.com/BurntSushi/byteorder) |
+| `byteorder-lite` | 0.1.0 | `Unlicense OR MIT` | `MIT` | [https://github.com/image-rs/byteorder-lite](https://github.com/image-rs/byteorder-lite) |
 | `bytes` | 1.12.1 | `MIT` | `MIT` | [https://github.com/tokio-rs/bytes](https://github.com/tokio-rs/bytes) |
 | `cbc` | 0.2.1 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/RustCrypto/block-modes](https://github.com/RustCrypto/block-modes) |
 | `cc` | 1.10.0 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/rust-lang/cc-rs](https://github.com/rust-lang/cc-rs) |
@@ -133,6 +141,7 @@
 | `cfg_aliases` | 0.2.2 | `MIT` | `MIT` | [https://github.com/katharostech/cfg_aliases](https://github.com/katharostech/cfg_aliases) |
 | `chacha20` | 0.10.2 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/RustCrypto/stream-ciphers](https://github.com/RustCrypto/stream-ciphers) |
 | `chrono` | 0.4.45 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/chronotope/chrono](https://github.com/chronotope/chrono) |
+| `chrono-tz` | 0.10.4 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/chronotope/chrono-tz](https://github.com/chronotope/chrono-tz) |
 | `cipher` | 0.5.2 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/RustCrypto/traits](https://github.com/RustCrypto/traits) |
 | `clap` | 4.6.7 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/clap-rs/clap](https://github.com/clap-rs/clap) |
 | `clap_builder` | 4.6.7 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/clap-rs/clap](https://github.com/clap-rs/clap) |
@@ -151,6 +160,7 @@
 | `crc-catalog` | 2.5.0 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/akhilles/crc-catalog](https://github.com/akhilles/crc-catalog) |
 | `crc32c` | 0.6.8 | `Apache-2.0/MIT` | `MIT` | [https://github.com/zowens/crc32c](https://github.com/zowens/crc32c) |
 | `crc32fast` | 1.5.5 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/srijs/rust-crc32fast](https://github.com/srijs/rust-crc32fast) |
+| `cron` | 0.17.0 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/zslayton/cron](https://github.com/zslayton/cron) |
 | `crossbeam-queue` | 0.3.14 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/crossbeam-rs/crossbeam](https://github.com/crossbeam-rs/crossbeam) |
 | `crossbeam-utils` | 0.8.23 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/crossbeam-rs/crossbeam](https://github.com/crossbeam-rs/crossbeam) |
 | `crunchy` | 0.2.4 | `MIT` | `MIT` | [https://github.com/eira-fransham/crunchy](https://github.com/eira-fransham/crunchy) |
@@ -185,6 +195,7 @@
 | `event-listener` | 5.4.2 | `Apache-2.0 OR MIT` | `MIT` | [https://github.com/smol-rs/event-listener](https://github.com/smol-rs/event-listener) |
 | `fancy-regex` | 0.19.2 | `MIT` | `MIT` | [https://github.com/fancy-regex/fancy-regex](https://github.com/fancy-regex/fancy-regex) |
 | `fastrand` | 2.5.0 | `Apache-2.0 OR MIT` | `MIT` | [https://github.com/smol-rs/fastrand](https://github.com/smol-rs/fastrand) |
+| `fdeflate` | 0.3.7 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/image-rs/fdeflate](https://github.com/image-rs/fdeflate) |
 | `ff` | 0.14.0 | `MIT/Apache-2.0` | `MIT` | [https://github.com/zkcrypto/ff](https://github.com/zkcrypto/ff) |
 | `fiat-crypto` | 0.3.0 | `MIT OR Apache-2.0 OR BSD-1-Clause` | `MIT` | [https://github.com/mit-plv/fiat-crypto](https://github.com/mit-plv/fiat-crypto) |
 | `find-msvc-tools` | 0.1.15 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/rust-lang/cc-rs](https://github.com/rust-lang/cc-rs) |
@@ -250,6 +261,7 @@
 | `ident_case` | 1.0.1 | `MIT/Apache-2.0` | `MIT` | [https://github.com/TedDriggs/ident_case](https://github.com/TedDriggs/ident_case) |
 | `idna` | 1.1.0 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/servo/rust-url/](https://github.com/servo/rust-url/) |
 | `idna_adapter` | 1.2.2 | `Apache-2.0 OR MIT` | `MIT` | [https://github.com/hsivonen/idna_adapter](https://github.com/hsivonen/idna_adapter) |
+| `image` | 0.25.10 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/image-rs/image](https://github.com/image-rs/image) |
 | `indexmap` | 1.9.3 | `Apache-2.0 OR MIT` | `MIT` | [https://github.com/bluss/indexmap](https://github.com/bluss/indexmap) |
 | `indexmap` | 2.14.2 | `Apache-2.0 OR MIT` | `MIT` | [https://github.com/indexmap-rs/indexmap](https://github.com/indexmap-rs/indexmap) |
 | `inout` | 0.2.6 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/RustCrypto/utils](https://github.com/RustCrypto/utils) |
@@ -286,8 +298,10 @@
 | `micromap` | 0.3.0 | `MIT` | `MIT` | [https://github.com/yegor256/micromap](https://github.com/yegor256/micromap) |
 | `mime` | 0.3.17 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/hyperium/mime](https://github.com/hyperium/mime) |
 | `minimal-lexical` | 0.2.1 | `MIT/Apache-2.0` | `MIT` | [https://github.com/Alexhuszagh/minimal-lexical](https://github.com/Alexhuszagh/minimal-lexical) |
+| `miniz_oxide` | 0.8.9 | `MIT OR Zlib OR Apache-2.0` | `MIT` | [https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide](https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide) |
 | `miniz_oxide` | 0.9.1 | `MIT OR Zlib OR Apache-2.0` | `MIT` | [https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide](https://github.com/Frommi/miniz_oxide/tree/master/miniz_oxide) |
 | `mio` | 1.2.4 | `MIT` | `MIT` | [https://github.com/tokio-rs/mio](https://github.com/tokio-rs/mio) |
+| `moxcms` | 0.8.1 | `BSD-3-Clause OR Apache-2.0` | `Apache-2.0` | [https://github.com/awxkee/moxcms](https://github.com/awxkee/moxcms) |
 | `multimap` | 0.10.1 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/havarnov/multimap](https://github.com/havarnov/multimap) |
 | `nom` | 7.1.3 | `MIT` | `MIT` | [https://github.com/Geal/nom](https://github.com/Geal/nom) |
 | `num` | 0.4.3 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/rust-num/num](https://github.com/rust-num/num) |
@@ -320,6 +334,12 @@
 | `percent-encoding` | 2.3.2 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/servo/rust-url/](https://github.com/servo/rust-url/) |
 | `petgraph` | 0.8.3 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/petgraph/petgraph](https://github.com/petgraph/petgraph) |
 | `phc` | 0.6.1 | `Apache-2.0 OR MIT` | `MIT` | [https://github.com/RustCrypto/formats](https://github.com/RustCrypto/formats) |
+| `phf` | 0.11.3 | `MIT` | `MIT` | [https://github.com/rust-phf/rust-phf](https://github.com/rust-phf/rust-phf) |
+| `phf` | 0.12.1 | `MIT` | `MIT` | [https://github.com/rust-phf/rust-phf](https://github.com/rust-phf/rust-phf) |
+| `phf_generator` | 0.11.3 | `MIT` | `MIT` | [https://github.com/rust-phf/rust-phf](https://github.com/rust-phf/rust-phf) |
+| `phf_macros` | 0.11.3 | `MIT` | `MIT` | [https://github.com/rust-phf/rust-phf](https://github.com/rust-phf/rust-phf) |
+| `phf_shared` | 0.11.3 | `MIT` | `MIT` | [https://github.com/rust-phf/rust-phf](https://github.com/rust-phf/rust-phf) |
+| `phf_shared` | 0.12.1 | `MIT` | `MIT` | [https://github.com/rust-phf/rust-phf](https://github.com/rust-phf/rust-phf) |
 | `pin-project` | 1.1.13 | `Apache-2.0 OR MIT` | `MIT` | [https://github.com/taiki-e/pin-project](https://github.com/taiki-e/pin-project) |
 | `pin-project-internal` | 1.1.13 | `Apache-2.0 OR MIT` | `MIT` | [https://github.com/taiki-e/pin-project](https://github.com/taiki-e/pin-project) |
 | `pin-project-lite` | 0.2.17 | `Apache-2.0 OR MIT` | `MIT` | [https://github.com/taiki-e/pin-project-lite](https://github.com/taiki-e/pin-project-lite) |
@@ -327,6 +347,7 @@
 | `pkcs5` | 0.8.1 | `Apache-2.0 OR MIT` | `MIT` | [https://github.com/RustCrypto/formats](https://github.com/RustCrypto/formats) |
 | `pkcs8` | 0.11.0 | `Apache-2.0 OR MIT` | `MIT` | [https://github.com/RustCrypto/formats](https://github.com/RustCrypto/formats) |
 | `pkg-config` | 0.3.34 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/rust-lang/pkg-config-rs](https://github.com/rust-lang/pkg-config-rs) |
+| `png` | 0.18.1 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/image-rs/image-png](https://github.com/image-rs/image-png) |
 | `polyval` | 0.7.3 | `Apache-2.0 OR MIT` | `MIT` | [https://github.com/RustCrypto/universal-hashes](https://github.com/RustCrypto/universal-hashes) |
 | `portable-atomic` | 1.15.0 | `Apache-2.0 OR MIT` | `MIT` | [https://github.com/taiki-e/portable-atomic](https://github.com/taiki-e/portable-atomic) |
 | `portable-atomic-util` | 0.2.8 | `Apache-2.0 OR MIT` | `MIT` | [https://github.com/taiki-e/portable-atomic-util](https://github.com/taiki-e/portable-atomic-util) |
@@ -343,6 +364,7 @@
 | `prost-types` | 0.14.4 | `Apache-2.0` | `Apache-2.0` | [https://github.com/tokio-rs/prost](https://github.com/tokio-rs/prost) |
 | `pulldown-cmark` | 0.13.5 | `MIT` | `MIT` | [https://github.com/raphlinus/pulldown-cmark](https://github.com/raphlinus/pulldown-cmark) |
 | `pulldown-cmark-to-cmark` | 22.0.3 | `Apache-2.0` | `Apache-2.0` | [https://github.com/Byron/pulldown-cmark-to-cmark](https://github.com/Byron/pulldown-cmark-to-cmark) |
+| `pxfm` | 0.1.30 | `BSD-3-Clause OR Apache-2.0` | `Apache-2.0` | [https://github.com/awxkee/pxfm](https://github.com/awxkee/pxfm) |
 | `quinn` | 0.11.12 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/quinn-rs/quinn](https://github.com/quinn-rs/quinn) |
 | `quinn-proto` | 0.11.19 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/quinn-rs/quinn](https://github.com/quinn-rs/quinn) |
 | `quinn-udp` | 0.5.16 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/quinn-rs/quinn](https://github.com/quinn-rs/quinn) |
@@ -350,6 +372,7 @@
 | `r-efi` | 5.3.0 | `MIT OR Apache-2.0 OR LGPL-2.1-or-later` | `MIT` | [https://github.com/r-efi/r-efi](https://github.com/r-efi/r-efi) |
 | `r-efi` | 6.0.0 | `MIT OR Apache-2.0 OR LGPL-2.1-or-later` | `MIT` | [https://github.com/r-efi/r-efi](https://github.com/r-efi/r-efi) |
 | `rand` | 0.10.3 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/rust-random/rand](https://github.com/rust-random/rand) |
+| `rand` | 0.8.8 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/rust-random/rand](https://github.com/rust-random/rand) |
 | `rand` | 0.9.5 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/rust-random/rand](https://github.com/rust-random/rand) |
 | `rand_chacha` | 0.10.0 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/rust-random/rand](https://github.com/rust-random/rand) |
 | `rand_chacha` | 0.9.0 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/rust-random/rand](https://github.com/rust-random/rand) |
@@ -411,6 +434,7 @@
 | `signal-hook-registry` | 1.4.8 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/vorner/signal-hook](https://github.com/vorner/signal-hook) |
 | `signature` | 3.0.0 | `Apache-2.0 OR MIT` | `MIT` | [https://github.com/RustCrypto/traits](https://github.com/RustCrypto/traits) |
 | `simd-adler32` | 0.3.10 | `MIT` | `MIT` | [https://github.com/mcountryman/simd-adler32](https://github.com/mcountryman/simd-adler32) |
+| `siphasher` | 1.0.4 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/jedisct1/rust-siphash](https://github.com/jedisct1/rust-siphash) |
 | `slab` | 0.4.12 | `MIT` | `MIT` | [https://github.com/tokio-rs/slab](https://github.com/tokio-rs/slab) |
 | `smallvec` | 1.16.4 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/servo/rust-smallvec](https://github.com/servo/rust-smallvec) |
 | `socket2` | 0.6.5 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/rust-lang/socket2](https://github.com/rust-lang/socket2) |
@@ -528,6 +552,7 @@
 | `windows_x86_64_gnu` | 0.52.6 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/microsoft/windows-rs](https://github.com/microsoft/windows-rs) |
 | `windows_x86_64_gnullvm` | 0.52.6 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/microsoft/windows-rs](https://github.com/microsoft/windows-rs) |
 | `windows_x86_64_msvc` | 0.52.6 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/microsoft/windows-rs](https://github.com/microsoft/windows-rs) |
+| `winnow` | 0.7.15 | `MIT` | `MIT` | [https://github.com/winnow-rs/winnow](https://github.com/winnow-rs/winnow) |
 | `winnow` | 1.0.4 | `MIT` | `MIT` | [https://github.com/winnow-rs/winnow](https://github.com/winnow-rs/winnow) |
 | `wit-bindgen` | 0.57.1 | `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | `MIT` | [https://github.com/bytecodealliance/wit-bindgen](https://github.com/bytecodealliance/wit-bindgen) |
 | `wnaf` | 0.14.1 | `Apache-2.0 OR MIT` | `MIT` | [https://github.com/RustCrypto/elliptic-curves](https://github.com/RustCrypto/elliptic-curves) |
@@ -548,18 +573,30 @@
 | `zerovec-derive` | 0.11.7 | `Unicode-3.0` | `Unicode-3.0` | [https://github.com/unicode-org/icu4x](https://github.com/unicode-org/icu4x) |
 | `zlib-rs` | 0.6.8 | `Zlib` | `Zlib` | [https://github.com/trifectatechfoundation/zlib-rs](https://github.com/trifectatechfoundation/zlib-rs) |
 | `zmij` | 1.0.23 | `MIT` | `MIT` | [https://github.com/dtolnay/zmij](https://github.com/dtolnay/zmij) |
+| `zune-core` | 0.5.3 | `MIT OR Apache-2.0 OR Zlib` | `MIT` | [https://github.com/etemesi254/zune-image](https://github.com/etemesi254/zune-image) |
+| `zune-jpeg` | 0.5.15 | `MIT OR Apache-2.0 OR Zlib` | `MIT` | [https://github.com/etemesi254/zune-image/tree/dev/crates/zune-jpeg](https://github.com/etemesi254/zune-image/tree/dev/crates/zune-jpeg) |
 
 ## Runtime-пакеты npm
 
-Пакеты веб-интерфейса `web/`, поставляемые в составе клиентского приложения. Всего: 120.
+Пакеты веб-интерфейса `web/`, поставляемые в составе клиентского приложения. Всего: 234.
 
 | Пакет | Версия | Лицензия | Выбрано | Репозиторий |
 | --- | --- | --- | --- | --- |
+| `@antfu/install-pkg` | 2.1.0 | `MIT` | `MIT` | [https://github.com/antfu-collective/install-pkg](https://github.com/antfu-collective/install-pkg) |
+| `@braintree/sanitize-url` | 7.1.2 | `MIT` | `MIT` | [https://github.com/braintree/sanitize-url](https://github.com/braintree/sanitize-url) |
+| `@chevrotain/cst-dts-gen` | 13.2.0 | `Apache-2.0` | `Apache-2.0` | [https://github.com/Chevrotain/chevrotain](https://github.com/Chevrotain/chevrotain) |
+| `@chevrotain/gast` | 13.2.0 | `Apache-2.0` | `Apache-2.0` | [https://github.com/Chevrotain/chevrotain](https://github.com/Chevrotain/chevrotain) |
+| `@chevrotain/regexp-to-ast` | 13.2.0 | `Apache-2.0` | `Apache-2.0` | [https://github.com/Chevrotain/chevrotain](https://github.com/Chevrotain/chevrotain) |
+| `@chevrotain/types` | 13.2.0 | `Apache-2.0` | `Apache-2.0` | [https://github.com/Chevrotain/chevrotain](https://github.com/Chevrotain/chevrotain) |
+| `@chevrotain/utils` | 13.2.0 | `Apache-2.0` | `Apache-2.0` | [https://github.com/Chevrotain/chevrotain](https://github.com/Chevrotain/chevrotain) |
+| `@iconify/types` | 2.0.0 | `MIT` | `MIT` | [https://github.com/iconify/iconify](https://github.com/iconify/iconify) |
+| `@iconify/utils` | 3.1.7 | `MIT` | `MIT` | [https://github.com/iconify/iconify](https://github.com/iconify/iconify) |
 | `@jridgewell/gen-mapping` | 0.3.13 | `MIT` | `MIT` | [https://github.com/jridgewell/sourcemaps](https://github.com/jridgewell/sourcemaps) |
 | `@jridgewell/remapping` | 2.3.5 | `MIT` | `MIT` | [https://github.com/jridgewell/sourcemaps](https://github.com/jridgewell/sourcemaps) |
 | `@jridgewell/resolve-uri` | 3.1.2 | `MIT` | `MIT` | [https://github.com/jridgewell/resolve-uri](https://github.com/jridgewell/resolve-uri) |
 | `@jridgewell/sourcemap-codec` | 1.6.0 | `MIT` | `MIT` | [https://github.com/jridgewell/sourcemaps](https://github.com/jridgewell/sourcemaps) |
 | `@jridgewell/trace-mapping` | 0.3.31 | `MIT` | `MIT` | [https://github.com/jridgewell/sourcemaps](https://github.com/jridgewell/sourcemaps) |
+| `@mermaid-js/parser` | 2.0.1 | `MIT` | `MIT` | [https://github.com/mermaid-js/mermaid](https://github.com/mermaid-js/mermaid) |
 | `@noble/hashes` | 2.4.0 | `MIT` | `MIT` | [https://github.com/paulmillr/noble-hashes](https://github.com/paulmillr/noble-hashes) |
 | `@oxc-project/types` | 0.155.0 | `MIT` | `MIT` | [https://github.com/oxc-project/oxc](https://github.com/oxc-project/oxc) |
 | `@polka/url` | 1.0.0-next.29 | `MIT` | `MIT` | [https://github.com/lukeed/polka](https://github.com/lukeed/polka) |
@@ -583,10 +620,43 @@
 | `@sveltejs/acorn-typescript` | 1.0.13 | `MIT` | `MIT` | [https://github.com/sveltejs/acorn-typescript](https://github.com/sveltejs/acorn-typescript) |
 | `@sveltejs/kit` | 3.1.0 | `MIT` | `MIT` | [https://github.com/sveltejs/kit](https://github.com/sveltejs/kit) |
 | `@sveltejs/vite-plugin-svelte` | 7.3.1 | `MIT` | `MIT` | [https://github.com/sveltejs/vite-plugin-svelte](https://github.com/sveltejs/vite-plugin-svelte) |
+| `@types/d3` | 7.4.3 | `MIT` | `MIT` | [https://github.com/DefinitelyTyped/DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) |
+| `@types/d3-array` | 3.2.2 | `MIT` | `MIT` | [https://github.com/DefinitelyTyped/DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) |
+| `@types/d3-axis` | 3.0.6 | `MIT` | `MIT` | [https://github.com/DefinitelyTyped/DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) |
+| `@types/d3-brush` | 3.0.6 | `MIT` | `MIT` | [https://github.com/DefinitelyTyped/DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) |
+| `@types/d3-chord` | 3.0.6 | `MIT` | `MIT` | [https://github.com/DefinitelyTyped/DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) |
+| `@types/d3-color` | 3.1.3 | `MIT` | `MIT` | [https://github.com/DefinitelyTyped/DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) |
+| `@types/d3-contour` | 3.0.6 | `MIT` | `MIT` | [https://github.com/DefinitelyTyped/DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) |
+| `@types/d3-delaunay` | 6.0.4 | `MIT` | `MIT` | [https://github.com/DefinitelyTyped/DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) |
+| `@types/d3-dispatch` | 3.0.7 | `MIT` | `MIT` | [https://github.com/DefinitelyTyped/DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) |
+| `@types/d3-drag` | 3.0.7 | `MIT` | `MIT` | [https://github.com/DefinitelyTyped/DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) |
+| `@types/d3-dsv` | 3.0.7 | `MIT` | `MIT` | [https://github.com/DefinitelyTyped/DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) |
+| `@types/d3-ease` | 3.0.2 | `MIT` | `MIT` | [https://github.com/DefinitelyTyped/DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) |
+| `@types/d3-fetch` | 3.0.7 | `MIT` | `MIT` | [https://github.com/DefinitelyTyped/DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) |
+| `@types/d3-force` | 3.0.10 | `MIT` | `MIT` | [https://github.com/DefinitelyTyped/DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) |
+| `@types/d3-format` | 3.0.4 | `MIT` | `MIT` | [https://github.com/DefinitelyTyped/DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) |
+| `@types/d3-geo` | 3.1.1 | `MIT` | `MIT` | [https://github.com/DefinitelyTyped/DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) |
+| `@types/d3-hierarchy` | 3.1.7 | `MIT` | `MIT` | [https://github.com/DefinitelyTyped/DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) |
+| `@types/d3-interpolate` | 3.0.4 | `MIT` | `MIT` | [https://github.com/DefinitelyTyped/DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) |
+| `@types/d3-path` | 3.1.1 | `MIT` | `MIT` | [https://github.com/DefinitelyTyped/DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) |
+| `@types/d3-polygon` | 3.0.2 | `MIT` | `MIT` | [https://github.com/DefinitelyTyped/DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) |
+| `@types/d3-quadtree` | 3.0.6 | `MIT` | `MIT` | [https://github.com/DefinitelyTyped/DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) |
+| `@types/d3-random` | 3.0.4 | `MIT` | `MIT` | [https://github.com/DefinitelyTyped/DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) |
+| `@types/d3-scale` | 4.0.9 | `MIT` | `MIT` | [https://github.com/DefinitelyTyped/DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) |
+| `@types/d3-scale-chromatic` | 3.1.0 | `MIT` | `MIT` | [https://github.com/DefinitelyTyped/DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) |
+| `@types/d3-selection` | 3.0.12 | `MIT` | `MIT` | [https://github.com/DefinitelyTyped/DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) |
+| `@types/d3-shape` | 3.2.0 | `MIT` | `MIT` | [https://github.com/DefinitelyTyped/DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) |
+| `@types/d3-time` | 3.0.4 | `MIT` | `MIT` | [https://github.com/DefinitelyTyped/DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) |
+| `@types/d3-time-format` | 4.0.3 | `MIT` | `MIT` | [https://github.com/DefinitelyTyped/DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) |
+| `@types/d3-timer` | 3.0.2 | `MIT` | `MIT` | [https://github.com/DefinitelyTyped/DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) |
+| `@types/d3-transition` | 3.0.9 | `MIT` | `MIT` | [https://github.com/DefinitelyTyped/DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) |
+| `@types/d3-zoom` | 3.0.9 | `MIT` | `MIT` | [https://github.com/DefinitelyTyped/DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) |
 | `@types/estree` | 1.0.10 | `MIT` | `MIT` | [https://github.com/DefinitelyTyped/DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) |
+| `@types/geojson` | 7946.0.16 | `MIT` | `MIT` | [https://github.com/DefinitelyTyped/DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) |
 | `@types/node` | 24.19.2 | `MIT` | `MIT` | [https://github.com/DefinitelyTyped/DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) |
 | `@types/trusted-types` | 2.0.7 | `MIT` | `MIT` | [https://github.com/DefinitelyTyped/DefinitelyTyped](https://github.com/DefinitelyTyped/DefinitelyTyped) |
 | `@typescript-eslint/types` | 8.72.1 | `MIT` | `MIT` | [https://github.com/typescript-eslint/typescript-eslint](https://github.com/typescript-eslint/typescript-eslint) |
+| `@upsetjs/venn.js` | 2.0.0 | `MIT` | `MIT` | [https://github.com/upsetjs/venn.js](https://github.com/upsetjs/venn.js) |
 | `@xmldom/xmldom` | 0.8.15 | `MIT` | `MIT` | [https://github.com/xmldom/xmldom](https://github.com/xmldom/xmldom) |
 | `acorn` | 8.19.0 | `MIT` | `MIT` | [https://github.com/acornjs/acorn](https://github.com/acornjs/acorn) |
 | `argparse` | 1.0.10 | `MIT` | `MIT` | [https://github.com/nodeca/argparse](https://github.com/nodeca/argparse) |
@@ -594,30 +664,87 @@
 | `aria-query` | 5.3.1 | `Apache-2.0` | `Apache-2.0` | [https://github.com/A11yance/aria-query](https://github.com/A11yance/aria-query) |
 | `axobject-query` | 4.1.0 | `Apache-2.0` | `Apache-2.0` | [https://github.com/A11yance/axobject-query](https://github.com/A11yance/axobject-query) |
 | `base64-js` | 1.5.1 | `MIT` | `MIT` | [https://github.com/beatgammit/base64-js](https://github.com/beatgammit/base64-js) |
+| `chevrotain` | 13.2.0 | `Apache-2.0` | `Apache-2.0` | [https://github.com/Chevrotain/chevrotain](https://github.com/Chevrotain/chevrotain) |
 | `clsx` | 2.1.1 | `MIT` | `MIT` | [https://github.com/lukeed/clsx](https://github.com/lukeed/clsx) |
+| `commander` | 15.1.0 | `MIT` | `MIT` | [https://github.com/tj/commander.js](https://github.com/tj/commander.js) |
+| `commander` | 7.2.0 | `MIT` | `MIT` | [https://github.com/tj/commander.js](https://github.com/tj/commander.js) |
 | `cookie` | 2.0.1 | `MIT` | `MIT` | [https://github.com/jshttp/cookie](https://github.com/jshttp/cookie) |
 | `core-util-is` | 1.0.3 | `MIT` | `MIT` | [https://github.com/isaacs/core-util-is](https://github.com/isaacs/core-util-is) |
+| `cose-base` | 1.0.3 | `MIT` | `MIT` | [https://github.com/iVis-at-Bilkent/cose-base](https://github.com/iVis-at-Bilkent/cose-base) |
+| `cose-base` | 2.2.0 | `MIT` | `MIT` | [https://github.com/iVis-at-Bilkent/cose-base](https://github.com/iVis-at-Bilkent/cose-base) |
+| `cytoscape` | 3.35.0 | `MIT` | `MIT` | [https://github.com/cytoscape/cytoscape.js](https://github.com/cytoscape/cytoscape.js) |
+| `cytoscape-cose-bilkent` | 4.1.0 | `MIT` | `MIT` | [https://github.com/cytoscape/cytoscape.js-cose-bilkent](https://github.com/cytoscape/cytoscape.js-cose-bilkent) |
+| `cytoscape-fcose` | 2.2.0 | `MIT` | `MIT` | [https://github.com/iVis-at-Bilkent/cytoscape.js-fcose](https://github.com/iVis-at-Bilkent/cytoscape.js-fcose) |
+| `d3` | 7.9.2 | `ISC` | `ISC` | [https://github.com/d3/d3](https://github.com/d3/d3) |
+| `d3-array` | 2.12.1 | `BSD-3-Clause` | `BSD-3-Clause` | [https://github.com/d3/d3-array](https://github.com/d3/d3-array) |
+| `d3-array` | 3.2.5 | `ISC` | `ISC` | [https://github.com/d3/d3-array](https://github.com/d3/d3-array) |
+| `d3-axis` | 3.0.1 | `ISC` | `ISC` | [https://github.com/d3/d3-axis](https://github.com/d3/d3-axis) |
+| `d3-brush` | 3.0.1 | `ISC` | `ISC` | [https://github.com/d3/d3-brush](https://github.com/d3/d3-brush) |
+| `d3-chord` | 3.0.2 | `ISC` | `ISC` | [https://github.com/d3/d3-chord](https://github.com/d3/d3-chord) |
+| `d3-color` | 3.1.1 | `ISC` | `ISC` | [https://github.com/d3/d3-color](https://github.com/d3/d3-color) |
+| `d3-contour` | 4.0.3 | `ISC` | `ISC` | [https://github.com/d3/d3-contour](https://github.com/d3/d3-contour) |
+| `d3-delaunay` | 6.0.6 | `ISC` | `ISC` | [https://github.com/d3/d3-delaunay](https://github.com/d3/d3-delaunay) |
+| `d3-dispatch` | 3.0.2 | `ISC` | `ISC` | [https://github.com/d3/d3-dispatch](https://github.com/d3/d3-dispatch) |
+| `d3-drag` | 3.0.1 | `ISC` | `ISC` | [https://github.com/d3/d3-drag](https://github.com/d3/d3-drag) |
+| `d3-dsv` | 3.0.2 | `ISC` | `ISC` | [https://github.com/d3/d3-dsv](https://github.com/d3/d3-dsv) |
+| `d3-ease` | 3.0.2 | `BSD-3-Clause` | `BSD-3-Clause` | [https://github.com/d3/d3-ease](https://github.com/d3/d3-ease) |
+| `d3-fetch` | 3.0.2 | `ISC` | `ISC` | [https://github.com/d3/d3-fetch](https://github.com/d3/d3-fetch) |
+| `d3-force` | 3.0.1 | `ISC` | `ISC` | [https://github.com/d3/d3-force](https://github.com/d3/d3-force) |
+| `d3-format` | 3.1.3 | `ISC` | `ISC` | [https://github.com/d3/d3-format](https://github.com/d3/d3-format) |
+| `d3-geo` | 3.1.2 | `ISC` | `ISC` | [https://github.com/d3/d3-geo](https://github.com/d3/d3-geo) |
+| `d3-hierarchy` | 3.1.3 | `ISC` | `ISC` | [https://github.com/d3/d3-hierarchy](https://github.com/d3/d3-hierarchy) |
+| `d3-interpolate` | 3.0.2 | `ISC` | `ISC` | [https://github.com/d3/d3-interpolate](https://github.com/d3/d3-interpolate) |
+| `d3-path` | 1.0.9 | `BSD-3-Clause` | `BSD-3-Clause` | [https://github.com/d3/d3-path](https://github.com/d3/d3-path) |
+| `d3-path` | 3.1.1 | `ISC` | `ISC` | [https://github.com/d3/d3-path](https://github.com/d3/d3-path) |
+| `d3-polygon` | 3.0.2 | `ISC` | `ISC` | [https://github.com/d3/d3-polygon](https://github.com/d3/d3-polygon) |
+| `d3-quadtree` | 3.0.2 | `ISC` | `ISC` | [https://github.com/d3/d3-quadtree](https://github.com/d3/d3-quadtree) |
+| `d3-random` | 3.0.2 | `ISC` | `ISC` | [https://github.com/d3/d3-random](https://github.com/d3/d3-random) |
+| `d3-sankey` | 0.12.3 | `BSD-3-Clause` | `BSD-3-Clause` | [https://github.com/d3/d3-sankey](https://github.com/d3/d3-sankey) |
+| `d3-scale` | 4.0.3 | `ISC` | `ISC` | [https://github.com/d3/d3-scale](https://github.com/d3/d3-scale) |
+| `d3-scale-chromatic` | 3.1.1 | `ISC` | `ISC` | [https://github.com/d3/d3-scale-chromatic](https://github.com/d3/d3-scale-chromatic) |
+| `d3-selection` | 3.0.1 | `ISC` | `ISC` | [https://github.com/d3/d3-selection](https://github.com/d3/d3-selection) |
+| `d3-shape` | 1.3.7 | `BSD-3-Clause` | `BSD-3-Clause` | [https://github.com/d3/d3-shape](https://github.com/d3/d3-shape) |
+| `d3-shape` | 3.2.1 | `ISC` | `ISC` | [https://github.com/d3/d3-shape](https://github.com/d3/d3-shape) |
+| `d3-time` | 3.1.1 | `ISC` | `ISC` | [https://github.com/d3/d3-time](https://github.com/d3/d3-time) |
+| `d3-time-format` | 4.1.1 | `ISC` | `ISC` | [https://github.com/d3/d3-time-format](https://github.com/d3/d3-time-format) |
+| `d3-timer` | 3.0.2 | `ISC` | `ISC` | [https://github.com/d3/d3-timer](https://github.com/d3/d3-timer) |
+| `d3-transition` | 3.0.2 | `ISC` | `ISC` | [https://github.com/d3/d3-transition](https://github.com/d3/d3-transition) |
+| `d3-zoom` | 3.0.1 | `ISC` | `ISC` | [https://github.com/d3/d3-zoom](https://github.com/d3/d3-zoom) |
+| `dagre-d3-es` | 7.0.14 | `MIT` | `MIT` | [https://github.com/tbo47/dagre-es](https://github.com/tbo47/dagre-es) |
+| `dayjs` | 1.11.23 | `MIT` | `MIT` | [https://github.com/iamkun/dayjs](https://github.com/iamkun/dayjs) |
 | `deepmerge` | 4.3.1 | `MIT` | `MIT` | [https://github.com/TehShrike/deepmerge](https://github.com/TehShrike/deepmerge) |
+| `delaunator` | 5.1.0 | `ISC` | `ISC` | [https://github.com/mapbox/delaunator](https://github.com/mapbox/delaunator) |
 | `detect-libc` | 2.1.2 | `Apache-2.0` | `Apache-2.0` | [https://github.com/lovell/detect-libc](https://github.com/lovell/detect-libc) |
 | `devalue` | 5.9.4 | `MIT` | `MIT` | [https://github.com/sveltejs/devalue](https://github.com/sveltejs/devalue) |
 | `dingbat-to-unicode` | 1.0.2 | `BSD-2-Clause` | `BSD-2-Clause` | [https://github.com/mwilliamson/dingbat-to-unicode](https://github.com/mwilliamson/dingbat-to-unicode) |
 | `dompurify` | 3.4.17 | `(MPL-2.0 OR Apache-2.0)` | `Apache-2.0` | [https://github.com/cure53/DOMPurify](https://github.com/cure53/DOMPurify) |
 | `duck` | 0.1.12 | `BSD-2-Clause` | `BSD-2-Clause` | [https://github.com/mwilliamson/duck.js](https://github.com/mwilliamson/duck.js) |
+| `elkjs` | 0.12.1 | `EPL-2.0 OR GPL-3.0-or-later` | — | [https://github.com/kieler/elkjs](https://github.com/kieler/elkjs) |
 | `entities` | 8.1.0 | `BSD-2-Clause` | `BSD-2-Clause` | [https://github.com/fb55/entities](https://github.com/fb55/entities) |
+| `es-toolkit` | 1.53.2 | `MIT` | `MIT` | [https://github.com/toss/es-toolkit](https://github.com/toss/es-toolkit) |
 | `esm-env` | 1.2.2 | `MIT` | `MIT` | [https://github.com/benmccann/esm-env](https://github.com/benmccann/esm-env) |
 | `esrap` | 2.4.0 | `MIT` | `MIT` | [https://github.com/sveltejs/esrap](https://github.com/sveltejs/esrap) |
 | `fdir` | 6.5.0 | `MIT` | `MIT` | [https://github.com/thecodrr/fdir](https://github.com/thecodrr/fdir) |
 | `fflate` | 0.8.3 | `MIT` | `MIT` | [https://github.com/101arrowz/fflate](https://github.com/101arrowz/fflate) |
 | `fsevents` | 2.3.3 | `MIT` | `MIT` | - |
 | `graceful-fs` | 4.2.11 | `ISC` | `ISC` | [https://github.com/isaacs/node-graceful-fs](https://github.com/isaacs/node-graceful-fs) |
+| `hachure-fill` | 0.5.2 | `MIT` | `MIT` | [https://github.com/pshihn/hachure-fill](https://github.com/pshihn/hachure-fill) |
 | `highlight.js` | 11.12.0 | `BSD-3-Clause` | `BSD-3-Clause` | [https://github.com/highlightjs/highlight.js](https://github.com/highlightjs/highlight.js) |
 | `html-to-image` | 1.11.13 | `MIT` | `MIT` | [https://github.com/bubkoo/html-to-image](https://github.com/bubkoo/html-to-image) |
+| `iconv-lite` | 0.6.3 | `MIT` | `MIT` | [https://github.com/ashtuchkin/iconv-lite](https://github.com/ashtuchkin/iconv-lite) |
 | `immediate` | 3.0.6 | `MIT` | `MIT` | [https://github.com/calvinmetcalf/immediate](https://github.com/calvinmetcalf/immediate) |
+| `import-meta-resolve` | 4.2.0 | `MIT` | `MIT` | [https://github.com/wooorm/import-meta-resolve](https://github.com/wooorm/import-meta-resolve) |
 | `inherits` | 2.0.4 | `ISC` | `ISC` | [https://github.com/isaacs/inherits](https://github.com/isaacs/inherits) |
+| `internmap` | 1.0.1 | `ISC` | `ISC` | [https://github.com/mbostock/internmap](https://github.com/mbostock/internmap) |
+| `internmap` | 2.0.3 | `ISC` | `ISC` | [https://github.com/mbostock/internmap](https://github.com/mbostock/internmap) |
 | `is-reference` | 3.0.3 | `MIT` | `MIT` | [https://github.com/Rich-Harris/is-reference](https://github.com/Rich-Harris/is-reference) |
 | `isarray` | 1.0.0 | `MIT` | `MIT` | [https://github.com/juliangruber/isarray](https://github.com/juliangruber/isarray) |
 | `jsqr` | 1.4.0 | `Apache-2.0` | `Apache-2.0` | [https://github.com/cozmo/jsQR](https://github.com/cozmo/jsQR) |
 | `jszip` | 3.10.2 | `(MIT OR GPL-3.0-or-later)` | `MIT` | [https://github.com/Stuk/jszip](https://github.com/Stuk/jszip) |
+| `katex` | 0.18.10 | `MIT` | `MIT` | [https://github.com/KaTeX/KaTeX](https://github.com/KaTeX/KaTeX) |
+| `khroma` | 2.1.0 | `-` | — | [https://github.com/fabiospampinato/khroma](https://github.com/fabiospampinato/khroma) |
+| `layout-base` | 1.0.2 | `MIT` | `MIT` | [https://github.com/iVis-at-Bilkent/layout-base](https://github.com/iVis-at-Bilkent/layout-base) |
+| `layout-base` | 2.0.1 | `MIT` | `MIT` | [https://github.com/iVis-at-Bilkent/layout-base](https://github.com/iVis-at-Bilkent/layout-base) |
 | `lie` | 3.3.0 | `MIT` | `MIT` | [https://github.com/calvinmetcalf/lie](https://github.com/calvinmetcalf/lie) |
 | `lightningcss` | 1.33.0 | `MPL-2.0` | `MPL-2.0` | [https://github.com/parcel-bundler/lightningcss](https://github.com/parcel-bundler/lightningcss) |
 | `lightningcss-android-arm64` | 1.33.0 | `MPL-2.0` | `MPL-2.0` | - |
@@ -633,36 +760,50 @@
 | `lightningcss-win32-x64-msvc` | 1.33.0 | `MPL-2.0` | `MPL-2.0` | - |
 | `linkify-it` | 6.1.0 | `MIT` | `MIT` | [https://github.com/markdown-it/linkify-it](https://github.com/markdown-it/linkify-it) |
 | `locate-character` | 3.0.0 | `MIT` | `MIT` | [https://gitlab.com/Rich-Harris/locate-character](https://gitlab.com/Rich-Harris/locate-character) |
+| `lodash-es` | 4.18.1 | `MIT` | `MIT` | [https://github.com/lodash/lodash](https://github.com/lodash/lodash) |
 | `lop` | 0.4.2 | `BSD-2-Clause` | `BSD-2-Clause` | [https://github.com/mwilliamson/lop](https://github.com/mwilliamson/lop) |
 | `magic-string` | 0.30.21 | `MIT` | `MIT` | [https://github.com/Rich-Harris/magic-string](https://github.com/Rich-Harris/magic-string) |
 | `magic-string` | 1.4.5 | `MIT` | `MIT` | [https://github.com/Rich-Harris/magic-string](https://github.com/Rich-Harris/magic-string) |
 | `mammoth` | 1.13.0 | `BSD-2-Clause` | `BSD-2-Clause` | [https://github.com/mwilliamson/mammoth.js](https://github.com/mwilliamson/mammoth.js) |
 | `markdown-it` | 15.0.3 | `MIT` | `MIT` | [https://github.com/markdown-it/markdown-it](https://github.com/markdown-it/markdown-it) |
+| `marked` | 16.4.2 | `MIT` | `MIT` | [https://github.com/markedjs/marked](https://github.com/markedjs/marked) |
 | `mdurl` | 2.1.0 | `MIT` | `MIT` | [https://github.com/markdown-it/mdurl](https://github.com/markdown-it/mdurl) |
+| `mermaid` | 12.3.0 | `MIT` | `MIT` | [https://github.com/mermaid-js/mermaid](https://github.com/mermaid-js/mermaid) |
 | `mrmime` | 2.0.1 | `MIT` | `MIT` | [https://github.com/lukeed/mrmime](https://github.com/lukeed/mrmime) |
 | `nanoid` | 3.3.20 | `MIT` | `MIT` | [https://github.com/ai/nanoid](https://github.com/ai/nanoid) |
 | `node-int64` | 0.4.0 | `MIT` | `MIT` | [https://github.com/broofa/node-int64](https://github.com/broofa/node-int64) |
 | `obug` | 2.2.1 | `MIT` | `MIT` | [https://github.com/sxzz/obug](https://github.com/sxzz/obug) |
 | `option` | 0.2.4 | `BSD-2-Clause` | `BSD-2-Clause` | [https://github.com/mwilliamson/node-options](https://github.com/mwilliamson/node-options) |
+| `package-manager-detector` | 1.9.0 | `MIT` | `MIT` | [https://github.com/antfu-collective/package-manager-detector](https://github.com/antfu-collective/package-manager-detector) |
 | `pako` | 1.0.11 | `(MIT AND Zlib)` | `MIT AND Zlib` | [https://github.com/nodeca/pako](https://github.com/nodeca/pako) |
+| `path-data-parser` | 0.1.0 | `MIT` | `MIT` | [https://github.com/pshihn/path-data-parser](https://github.com/pshihn/path-data-parser) |
 | `picocolors` | 1.1.1 | `ISC` | `ISC` | [https://github.com/alexeyraspopov/picocolors](https://github.com/alexeyraspopov/picocolors) |
 | `picomatch` | 4.0.7 | `MIT` | `MIT` | [https://github.com/micromatch/picomatch](https://github.com/micromatch/picomatch) |
+| `points-on-curve` | 0.2.0 | `MIT` | `MIT` | [https://github.com/pshihn/bezier-points](https://github.com/pshihn/bezier-points) |
+| `points-on-path` | 0.2.1 | `MIT` | `MIT` | [https://github.com/pshihn/points-on-path](https://github.com/pshihn/points-on-path) |
 | `postcss` | 8.5.32 | `MIT` | `MIT` | [https://github.com/postcss/postcss](https://github.com/postcss/postcss) |
 | `process-nextick-args` | 2.0.1 | `MIT` | `MIT` | [https://github.com/calvinmetcalf/process-nextick-args](https://github.com/calvinmetcalf/process-nextick-args) |
 | `punycode.js` | 2.3.1 | `MIT` | `MIT` | [https://github.com/mathiasbynens/punycode.js](https://github.com/mathiasbynens/punycode.js) |
 | `read-excel-file` | 9.3.14 | `MIT` | `MIT` | [https://gitlab.com/catamphetamine/read-excel-file](https://gitlab.com/catamphetamine/read-excel-file) |
 | `readable-stream` | 2.3.8 | `MIT` | `MIT` | [https://github.com/nodejs/readable-stream](https://github.com/nodejs/readable-stream) |
+| `robust-predicates` | 3.0.3 | `Unlicense` | `Unlicense` | [https://github.com/mourner/robust-predicates](https://github.com/mourner/robust-predicates) |
 | `rolldown` | 1.2.15 | `MIT` | `MIT` | [https://github.com/rolldown/rolldown](https://github.com/rolldown/rolldown) |
+| `roughjs` | 4.6.6 | `MIT` | `MIT` | [https://github.com/pshihn/rough](https://github.com/pshihn/rough) |
+| `rw` | 1.3.3 | `BSD-3-Clause` | `BSD-3-Clause` | [http://github.com/mbostock/rw](http://github.com/mbostock/rw) |
 | `safe-buffer` | 5.1.2 | `MIT` | `MIT` | [https://github.com/feross/safe-buffer](https://github.com/feross/safe-buffer) |
+| `safer-buffer` | 2.1.2 | `MIT` | `MIT` | [https://github.com/ChALkeR/safer-buffer](https://github.com/ChALkeR/safer-buffer) |
 | `saxen` | 11.2.0 | `MIT` | `MIT` | [https://github.com/nikku/saxen](https://github.com/nikku/saxen) |
 | `setimmediate` | 1.0.5 | `MIT` | `MIT` | [https://github.com/YuzuJS/setImmediate](https://github.com/YuzuJS/setImmediate) |
 | `sirv` | 3.0.2 | `MIT` | `MIT` | [https://github.com/lukeed/sirv](https://github.com/lukeed/sirv) |
 | `source-map-js` | 1.2.2 | `BSD-3-Clause` | `BSD-3-Clause` | [https://github.com/7rulnik/source-map-js](https://github.com/7rulnik/source-map-js) |
 | `sprintf-js` | 1.0.3 | `BSD-3-Clause` | `BSD-3-Clause` | [https://github.com/alexei/sprintf.js](https://github.com/alexei/sprintf.js) |
 | `string_decoder` | 1.1.1 | `MIT` | `MIT` | [https://github.com/nodejs/string_decoder](https://github.com/nodejs/string_decoder) |
+| `stylis` | 4.4.0 | `MIT` | `MIT` | [https://github.com/thysultan/stylis.js](https://github.com/thysultan/stylis.js) |
 | `svelte` | 5.57.3 | `MIT` | `MIT` | [https://github.com/sveltejs/svelte](https://github.com/sveltejs/svelte) |
+| `tinyexec` | 1.3.1 | `MIT` | `MIT` | [https://github.com/tinylibs/tinyexec](https://github.com/tinylibs/tinyexec) |
 | `tinyglobby` | 0.2.17 | `MIT` | `MIT` | [https://github.com/SuperchupuDev/tinyglobby](https://github.com/SuperchupuDev/tinyglobby) |
 | `totalist` | 3.0.1 | `MIT` | `MIT` | [https://github.com/lukeed/totalist](https://github.com/lukeed/totalist) |
+| `ts-dedent` | 2.3.0 | `MIT` | `MIT` | [https://github.com/tamino-martinius/node-ts-dedent](https://github.com/tamino-martinius/node-ts-dedent) |
 | `typescript` | 6.0.3 | `Apache-2.0` | `Apache-2.0` | [https://github.com/microsoft/TypeScript](https://github.com/microsoft/TypeScript) |
 | `uc.micro` | 3.0.0 | `MIT` | `MIT` | [https://github.com/markdown-it/uc.micro](https://github.com/markdown-it/uc.micro) |
 | `underscore` | 1.13.8 | `MIT` | `MIT` | [https://github.com/jashkenas/underscore](https://github.com/jashkenas/underscore) |
@@ -678,12 +819,11 @@
 
 ## Пакеты npm для разработки
 
-Пакеты, используемые только на этапе сборки, линтинга и тестирования (`dev: true`); не поставляются конечным пользователям. Всего записей: 208.
+Пакеты, используемые только на этапе сборки, линтинга и тестирования (`dev: true`); не поставляются конечным пользователям. Всего записей: 205.
 
 - `@apidevtools/json-schema-ref-parser` (11.9.3) — `MIT`
 - `@asamuzakjp/css-color` (7.1.9) — `MIT`
 - `@asamuzakjp/dom-selector` (10.0.5) — `MIT`
-- `@axe-core/playwright` (4.14.0) — `MPL-2.0`
 - `@babel/code-frame` (7.29.7) — `MIT`
 - `@babel/helper-validator-identifier` (7.29.7) — `MIT`
 - `@bramus/specificity` (2.4.3) — `MIT`
@@ -744,7 +884,6 @@
 - `ansi-colors` (4.1.3) — `MIT`
 - `argparse` (2.0.1) — `Python-2.0`
 - `assertion-error` (2.0.1) — `MIT`
-- `axe-core` (4.14.0) — `MPL-2.0`
 - `balanced-match` (1.0.2) — `MIT`
 - `balanced-match` (4.0.4) — `MIT`
 - `bidi-js` (1.1.0) — `MIT`
@@ -860,7 +999,6 @@
 - `svelte-check` (4.7.7) — `MIT`
 - `svelte-eslint-parser` (1.10.0) — `MIT`
 - `tinybench` (6.2.2) — `MIT`
-- `tinyexec` (1.3.1) — `MIT`
 - `tldts` (7.4.19) — `MIT`
 - `tldts-core` (7.4.20) — `MIT`
 - `tough-cookie` (6.0.2) — `BSD-3-Clause`

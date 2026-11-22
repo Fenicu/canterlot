@@ -33,7 +33,7 @@ const MACHINE_TIME_MAX_AGE: TimeDelta = TimeDelta::days(7);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum LeaseKind {
-    /// Исключительная: занимает все места (`check.sh --all`, `check-web.sh --stack`).
+    /// Исключительная: занимает все места (`check.sh --all`).
     Gate,
     /// Одно место.
     Build,

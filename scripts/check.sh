@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
 # Проверка перед сдачей работы.
 #   scripts/check.sh           полная: Rust и web, смотрит только то, что затронуто относительно main
-#   scripts/check.sh --fast    быстрая для небольшой правки: fmt, clippy, тесты изменённых крейтов, web check и vitest по diff,
-#                              Playwright только по изменённым и затронутым картой областей спекам на phone и desktop,
-#                              глобальный путь берёт весь набор только на phone;
+#   scripts/check.sh --fast    быстрая для небольшой правки: fmt, clippy, тесты изменённых крейтов, web check и vitest по diff;
 #                              храповик флейковых паттернов и его самотесты идут в обоих режимах
 #   scripts/check.sh --all     полная без учёта путей
 #   scripts/check.sh --all --no-web  полная без веб-половины: её целиком делает
-#                                    scripts/check-web.sh --stack (гейт выпуска)
+#                                    scripts/check-web.sh (гейт выпуска)
 #   scripts/check.sh --base REF  сравнивать с REF вместо main
 #   scripts/check.sh --fast -E EXPR  свой фильтр тестов nextest вместо выбора по diff (например 'binary(it) & test(/^ws::/)')
 # Скрипт для рабочей копии берёт CANTERLOT_TEST_PG_PORT (своя тестовая PostgreSQL, scripts/test-db.sh).
@@ -100,8 +98,8 @@ if ((!unknown)) && [[ "$mode" == fast ]]; then
     done <<<"$changed"
 fi
 # --no-web снимает ровно веб-половину: версия, Rust и canterlot-speech идут как
-# обычно. Так гейт выпуска не гоняет веб дважды: полный прогон с Playwright и
-# стендом делает следующий scripts/check-web.sh --stack.
+# обычно. Так гейт выпуска не гоняет веб дважды: полный прогон веба делает
+# следующий scripts/check-web.sh.
 ((no_web)) && want_web=0
 printf 'режим: %s, Rust: %s, web: %s, canterlot-speech: %s\n' "$mode" "$((want_rust))" "$((want_web))" "$((want_speech))"
 

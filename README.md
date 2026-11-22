@@ -72,6 +72,8 @@ Canterlot — self-hosted хаб для агентов программиров�
 
 Телефон и рабочий стол: темы Аквамарин, Стандартная, VS Code и Норд, тёмные и светлые; остальные темы — в настройках.
 
+Браузерные тесты удалены 22.11.2026 по решению владельца. Веб проверяется сверкой сгенерированных типов API, svelte-check, ESLint, token lint, vitest и проверками собранных артефактов. Обвязка Playwright сохранена для разовых проверок экрана и снимков README; порядок описан в [docs/development.md](docs/development.md).
+
 <table align="center">
   <tr>
     <td align="center" valign="top"><a href="docs/screenshots/sessions-dark.png"><img src="docs/screenshots/sessions-dark.png" width="240" alt="Список сессий с разделом «Ждут вас», лимитами и группами"></a><br><sub>Сессии, «Ждут вас» и лимиты</sub></td>
@@ -181,9 +183,9 @@ scripts/release.sh ship 1.35.0 --full   # то же без быстрого пу
 `canterlot-speech` без веб-половины), наборы `scripts/deploy/tests/run.sh`
 (только если с последнего тега `vX.Y.Z` менялась обвязка выката — `scripts/deploy/**`,
 `release.sh`, `check-proxy.sh`, `check-version.sh` или `lease.sh`) и один
-`scripts/check-web.sh --stack`
-(статические проверки, vitest, две сборки PWA, `vitest.build`, Playwright
-`e2e/ui` + `e2e/parity` и сквозные сценарии на настоящем хабе). Порт тестовой
+`scripts/check-web.sh`
+(сверка типов API, статические проверки, vitest, две сборки PWA и `vitest.build`).
+Порт тестовой
 PostgreSQL по умолчанию 55441, временный каталог — `/tmp` (длинный путь ломает
 сокеты супервизоров), бинарник воркера для аренды — установка в
 `$HOME/.local/opt/canterlot/current/bin/canterlot-worker`; все три (`CANTERLOT_TEST_PG_PORT`,
@@ -201,14 +203,13 @@ PostgreSQL по умолчанию 55441, временный каталог — 
 Каждый прогон — успешный или нет — пишет в `.superpowers/gate/<sha8>/state.tsv`
 машиночитаемое состояние: полный sha, время, признак завершения, коды и
 длительности шагов и идентичности упавших тестов (`rust|binary|test`,
-`pw|project|file:line|title`, `stack|file:line|title`, `deploy|suite`; строка
-из JSON-отчёта Playwright). Падения не по
+`deploy|suite`). Падения не по
 тестам (npm ci, fmt, clippy, сборка, svelte-check, eslint, проверки API,
 токенов и типов) помечаются как `*_failed=other`. После такого прогона
 `scripts/gate.sh --rerun-failed` берёт ту же аренду и перезапускает только то,
 что упало: прошедшие шаги не трогаются, упавшие по тестам шаги получают точный
-фильтр nextest, тот же проект и заголовок Playwright, имена наборов выката или
-путь сквозного сценария, а шаг, упавший не по тестам, идёт целиком. Перезапуск
+фильтр nextest или имена наборов выката, а шаг, упавший не по тестам, идёт
+целиком. Перезапуск
 разрешён только для того же HEAD и чистого дерева; один тест можно перезапустить
 не более одного раза на коммит, второе падение — настоящий провал. После
 успешного перезапуска аттестация сохраняет все прежние ключи и добавляет
@@ -218,9 +219,8 @@ PostgreSQL по умолчанию 55441, временный каталог — 
 им строку в `.superpowers/carry/flaky-tests.md` — сам скрипт файл не меняет.
 `--no-attest` работает с обоими режимами.
 
-Совпадение набора тестов с прежней последовательностью (веб дважды) проверяет
-`scripts/gate-coverage.sh`: он сравнивает идентичности Playwright (проект,
-спека, тест) из `playwright test --list` и шаги Rust, речи, статики и vitest.
+Что гейт состоит из тех же шагов, проверяет `scripts/gate-coverage.sh`: он
+сверяет шаги Rust, речи, статики и vitest и контейнерный путь гейта.
 
 ### Полный гейт на сборочной машине
 
@@ -242,29 +242,26 @@ scripts/gate-remote.sh 4d884712 --local    # то же на местном docke
 2. `scripts/check.sh --all --no-web` — fmt, clippy, nextest;
 3. наборы `scripts/deploy/tests/run.sh` (без тега `vX.Y.Z` в рабочей копии они идут
    всегда; образ несёт для них `shellcheck` и `zstd`);
-4. `scripts/check-web.sh --stack` — проверки web, Playwright и сквозные сценарии
-   на настоящем хабе и воркере.
+4. `scripts/check-web.sh` — проверки web: сверка типов API, статические проверки,
+   vitest, две сборки PWA и `vitest.build`.
 
 Шаги не перечисляются в контейнерном пути заново, поэтому разойтись с `scripts/gate.sh`
 им нечем; `scripts/gate-coverage.sh` это проверяет.
 
 Образ `canterlot-gate:<hash>` (`docker/gate/Dockerfile`) — Debian trixie по digest,
-Rust из `rust-toolchain.toml`, Node 24, PostgreSQL 18 (как у тестовой базы VM),
-браузеры Playwright из `web/package-lock.json` и те же шрифты, что на VM. Тег
-считается из Dockerfile, `rust-toolchain.toml` и версии Playwright. База
+Rust из `rust-toolchain.toml`, Node 24, PostgreSQL 18 (как у тестовой базы VM)
+и те же шрифты, что на VM. Тег считается из Dockerfile и `rust-toolchain.toml`. База
 поднимается внутри контейнера на `127.0.0.1:55441` с выключенным fsync; на host
 `55441` не занимается, поэтому гейт на VM можно запускать одновременно.
 
 Ограничения контейнера — `--cpus 30 --memory 48g --pids-limit 8192 --shm-size=2g`:
-у 7950X 32 потока и 61 ГБ, два потока и ~13 ГБ остаются хосту. Общая память
-браузеров — 2 ГБ вместо 64 МБ по умолчанию: иначе Firefox не доводит страницы до
-`[data-ready]` и тесты падают по таймауту. Число браузерных воркеров Playwright
-считается от квоты CPU (один на ~4 CPU: `PW_WORKERS`), а `strace`-тестам выдаётся
-`SYS_PTRACE`; `--init` пожинает осиротевших потомков. Кэши на сборочной машине —
-`~/gate/cache/{cargo,target,npm,playwright,tmp}`, локально —
+у 7950X 32 потока и 61 ГБ, два потока и ~13 ГБ остаются хосту. Общая память —
+2 ГБ вместо 64 МБ по умолчанию, `strace`-тестам выдаётся `SYS_PTRACE`; `--init`
+пожинает осиротевших потомков. Кэши на сборочной машине —
+`~/gate/cache/{cargo,target,npm,tmp}`, локально —
 `~/.cache/canterlot-gate` (`CANTERLOT_GATE_CACHE`); повторный прогон того же
-коммита их переиспользует. `tmp` — это `/tmp` контейнера (база, временные
-каталоги тестов и профили браузеров): на overlayfs и на tmpfs те же проверки
+коммита их переиспользует. `tmp` — это `/tmp` контейнера (база и временные
+каталоги тестов): на overlayfs и на tmpfs те же проверки
 ловят таймауты, на обычной ФС хоста проходят.
 
 Результат и логи (`gate.log`, `npm-ci.log`, `check.log`, `deploy.log`, `web.log`,
@@ -301,7 +298,7 @@ canterlot-worker job run --title "Гейт <sha8>" --machine <значение> 
 берёт готовый) образ `canterlot-gate:<hash>` из `docker/gate/Dockerfile` **этой рабочей
 копии** (с VM не копируется ничего) и запускает контейнер `canterlot-gate-<sha12>-<случайное>`
 с `--cpus` и `--memory` по `nproc` и `free` (хосту остаются 2 ядра и 4 ГБ). Кэши лежат в
-`<корень раннера>/cache/{cargo,target,npm,playwright,tmp}`; корень находится по пути
+`<корень раннера>/cache/{cargo,target,npm,tmp}`; корень находится по пути
 рабочей копии, а без `<корень>/worker.toml` скрипт отказывает. По TERM и INT контейнер
 убивается по имени. Результат (`result.txt`, `state.tsv`, логи) попадает в `./.gate-out`,
 носитель забирает его в `~/.local/state/canterlot-worker/job-outputs/<job_id>/`, а

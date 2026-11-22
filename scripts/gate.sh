@@ -3,9 +3,8 @@
 # ровно один раз:
 #   1. npm ci в web/ — один раз на весь прогон;
 #   2. scripts/check.sh --all --no-web — версия, fmt, clippy, nextest, речь;
-#   3. scripts/check-web.sh --stack — вся веб-половина (статические проверки,
-#      vitest, две сборки PWA, vitest.build, Playwright e2e/ui и e2e/parity)
-#      и сквозные сценарии на настоящем хабе.
+#   3. scripts/check-web.sh — вся веб-половина (статические проверки, vitest,
+#      сборка PWA и vitest.build). Браузерные тесты удалены 22.11.2026.
 #
 #   scripts/gate.sh                  полный гейт с аттестацией .superpowers/gate/<full sha>.ok
 #   scripts/gate.sh --rerun-failed   перезапустить только то, что упало на этом же коммите
@@ -323,7 +322,7 @@ in_array() {
 
 prev=""
 prev_started=""
-declare -a done_ids=() prev_flaky=() prev_rust=() prev_deploy=() prev_pw=() prev_stack=() to_rerun=()
+declare -a done_ids=() prev_flaky=() prev_rust=() prev_deploy=() to_rerun=()
 if ((rerun)); then
     prev="$log_dir/state.tsv"
     [[ -f "$prev" ]] || die "нет состояния предыдущего завершённого прогона для --rerun-failed на коммите $short"
@@ -338,8 +337,6 @@ if ((rerun)); then
     mapfile -t prev_flaky < <(state_values "$prev" flaky)
     mapfile -t prev_rust < <(state_values "$prev" rust_fail)
     mapfile -t prev_deploy < <(state_values "$prev" deploy_fail)
-    mapfile -t prev_pw < <(state_values "$prev" pw_fail)
-    mapfile -t prev_stack < <(state_values "$prev" stack_fail)
     npm_status=$(state_value "$prev" npm_ci_exit); npm_s=$(state_value "$prev" npm_ci_duration_s)
     check_status=$(state_value "$prev" check_exit); check_s=$(state_value "$prev" check_duration_s)
     deploy_exit=$(state_value "$prev" deploy_exit); deploy_s=$(state_value "$prev" deploy_duration_s)
@@ -349,9 +346,9 @@ else
 fi
 
 # Что перезапускаем: skip — прошедший шаг берём из состояния, full — весь шаг,
-# tests/suites/stack — только упавшие тесты.
+# tests — только упавшие тесты Rust и наборов выката.
 npm_action=full check_action=full deploy_action=full web_action=full
-check_sel="" deploy_sel="" web_sel=""
+check_sel="" deploy_sel=""
 if ((rerun)); then
     [[ "$npm_status" == 0 ]] && npm_action=skip || npm_action=full
     if [[ "$check_status" == 0 ]]; then
@@ -370,15 +367,12 @@ if ((rerun)); then
     fi
     if [[ "$web_status" == 0 ]]; then
         web_action=skip
-    elif [[ "$(state_value "$prev" web_failed)" == tests ]]; then
-        web_action=tests
     else
         web_action=full
     fi
 
     if [[ "$check_action" == tests ]]; then to_rerun+=("${prev_rust[@]}"); fi
     if [[ "$deploy_action" == tests ]]; then to_rerun+=("${prev_deploy[@]}"); fi
-    if [[ "$web_action" == tests ]]; then to_rerun+=("${prev_pw[@]}" "${prev_stack[@]}"); fi
     for id in "${to_rerun[@]}"; do
         if in_array "$id" "${done_ids[@]}"; then
             die "тест $id уже перезапускался на этом коммите: повторный перезапуск запрещён"
@@ -404,23 +398,8 @@ if [[ "$deploy_action" == tests ]]; then
         deploy_sel+="${deploy_sel:+ }${id#deploy|}"
     done
 fi
-if [[ "$web_action" == tests ]]; then
-    web_sel=$(printf '%s\n' "${prev_pw[@]}" "${prev_stack[@]}")
-fi
-
-# Куда шаги кладут machine-readable отчёты. JUnit nextest — фиксированный путь,
-# отчёты Playwright задаются окружением и читаются конфигом web/playwright.config.ts.
-# При перезапуске web отчёты идут в новые файлы, чтобы старые падения не попали в итог.
+# Куда шаги кладут machine-readable отчёты: JUnit nextest — фиксированный путь.
 junit="target/nextest/default/junit.xml"
-pw_report_base="$PWD/$log_dir/pw-report"
-stack_report_base="$PWD/$log_dir/stack-report"
-if [[ "$web_action" == tests ]]; then
-    rerun_stamp=$(date -u +%Y%m%dT%H%M%SZ)
-    pw_report_base="$PWD/$log_dir/pw-rerun-$rerun_stamp"
-    stack_report_base="$PWD/$log_dir/stack-rerun-$rerun_stamp"
-fi
-export CANTERLOT_PW_JSON_REPORT="$pw_report_base"
-export CANTERLOT_STACK_JSON_REPORT="$stack_report_base"
 
 # --- запуск шага ---------------------------------------------------------------
 # В обычном прогоне вызывает настоящий скрипт; в тесте — подменённую команду.
@@ -456,65 +435,14 @@ run_gate_step() {
                     bash scripts/deploy/tests/run.sh
                 fi
                 ;;
-            web)
-                if [[ "$mode" == tests ]]; then
-                    (web_rerun "$1")
-                else
-                    bash scripts/check-web.sh --stack
-                fi
-                ;;
+            web) bash scripts/check-web.sh ;;
         esac
     fi
-}
-
-# Перезапуск только упавших Playwright-тестов и сквозных сценариев. Идентичности
-# приходят строками pw|проект|файл:строка|заголовок и stack|файл:строка|заголовок.
-# --grep здесь не годится: Playwright сверяет его со строкой «проект файл describe
-# заголовок теги», соединённой пробелами, поэтому точный заголовок вроде «A › B» не
-# совпадёт. Выбираем тесты по расположению из JSON-отчёта (file:line) — на том же
-# коммите номера строк стабильны — и группируем все локации одного проекта в один
-# вызов. У каждого вызова свой отчёт <база>-N.json, его читают pw_failures и
-# missing_rerun_ids. После прогона missing_rerun_ids проверяет, что каждая идентичность
-# реально выполнилась и прошла: пропущенная или пропущенная как skipped — провал.
-web_rerun() {
-    local selection=$1 id kind f1 f2 _ status=0 project
-    local -A pw_loc=()
-    local stack_sel=""
-    [[ -f web/package-lock.json ]] || die 'нет web/package-lock.json'
-    export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-${XDG_CACHE_HOME:-$HOME/.cache}/canterlot-playwright}"
-    export TOKIO_WORKER_THREADS="${TOKIO_WORKER_THREADS:-4}" RAYON_NUM_THREADS="${RAYON_NUM_THREADS:-4}"
-    export MOZ_TASKCONTROLLER_THREADCOUNT="${MOZ_TASKCONTROLLER_THREADCOUNT:-4}" GSETTINGS_BACKEND="${GSETTINGS_BACKEND:-memory}"
-    export PORT="${PORT:-$(node -e "const s=require('net').createServer();s.listen(0,'127.0.0.1',()=>{console.log(s.address().port);s.close()})")}"
-    export PATH="${HOME}/.cargo/bin:${PATH}"
-    while IFS= read -r id; do
-        [[ -n "$id" ]] || continue
-        IFS='|' read -r kind f1 f2 _ <<<"$id"
-        case "$kind" in
-            pw) pw_loc[$f1]+="${pw_loc[$f1]:+ }$f2" ;;
-            stack) stack_sel+="${stack_sel:+ }$f1" ;;
-        esac
-    done <<<"$selection"
-    local -a locations=()
-    local slot=0
-    cd web
-    for project in "${!pw_loc[@]}"; do
-        slot=$((slot + 1))
-        read -r -a locations <<<"${pw_loc[$project]}"
-        CANTERLOT_PW_JSON_REPORT="$CANTERLOT_PW_JSON_REPORT-$slot" \
-            npx --no-install playwright test "${locations[@]}" "--project=$project" || status=1
-    done
-    if [[ -n "$stack_sel" ]]; then
-        read -r -a locations <<<"$stack_sel"
-        CANTERLOT_STACK_RUN=1 npx --no-install playwright test "${locations[@]}" || status=1
-    fi
-    return "$status"
 }
 
 # --- разбор отчётов в идентичности упавших тестов ------------------------------
-# Идентичности канонические: rust|binary|test, pw|project|file:line|title,
-# deploy|suite, stack|file:line|title. Те же строки идут в состояние и в flaky=
-# аттестации; файл:строка берётся из JSON-отчёта Playwright и служит селектором
-# при перезапуске.
+# Идентичности канонические: rust|binary|test и deploy|suite. Те же строки идут
+# в состояние и в flaky= аттестации при перезапуске.
 rust_failures() {
     [[ -f "$junit" ]] || return 0
     python3 - "$junit" <<'PY'
@@ -532,116 +460,6 @@ for suite in root.iter('testsuite'):
 PY
 }
 
-report_present() {
-    local prefix=$1 slot
-    [[ -f "$prefix.json" ]] && return 0
-    for slot in 1 2 3 4 5 6 7 8; do
-        [[ -f "$prefix-$slot.json" ]] && return 0
-    done
-    return 1
-}
-
-pw_failures() {
-    local prefix=$1 kind=${2:-pw} f files=() slot
-    [[ -f "$prefix.json" ]] && files+=("$prefix.json")
-    for slot in 1 2 3 4 5 6 7 8; do
-        [[ -f "$prefix-$slot.json" ]] && files+=("$prefix-$slot.json")
-    done
-    ((${#files[@]})) || return 0
-    python3 - "$kind" "${files[@]}" <<'PY'
-import json
-import sys
-
-kind = sys.argv[1]
-
-
-def walk(suites, out):
-    for suite in suites or []:
-        for spec in suite.get('specs', []) or []:
-            path = spec.get('file', '')
-            if spec.get('line'):
-                path = f"{path}:{spec['line']}"
-            spec_title = spec.get('title', '')
-            for test in spec.get('tests', []) or []:
-                results = test.get('results', []) or []
-                if any(r.get('status') in ('failed', 'timedOut', 'crashed') or r.get('error') for r in results):
-                    project = test.get('projectName') or spec.get('projectName') or ''
-                    title = test.get('title', '')
-                    full = f"{spec_title} › {title}" if spec_title and title else (spec_title or title)
-                    if kind == 'pw':
-                        out.append(f"pw|{project}|{path}|{full}")
-                    else:
-                        out.append(f"stack|{path}|{full}")
-        walk(suite.get('suites', []), out)
-
-
-out = []
-for path in sys.argv[2:]:
-    try:
-        with open(path) as handle:
-            data = json.load(handle)
-    except Exception:
-        continue
-    walk(data.get('suites', []), out)
-seen = set()
-for item in out:
-    if item not in seen:
-        seen.add(item)
-        print(item)
-PY
-}
-
-# Проверка перезапуска: печатает ожидаемые идентичности, которых нет среди
-# действительно прошедших в новом JSON-отчёте. Пустой вывод — все прошли.
-missing_rerun_ids() {
-    local kind=$1 prefix=$2 expected=$3 f files=() slot
-    [[ -s "$expected" ]] || return 0
-    [[ -f "$prefix.json" ]] && files+=("$prefix.json")
-    for slot in 1 2 3 4 5 6 7 8; do
-        [[ -f "$prefix-$slot.json" ]] && files+=("$prefix-$slot.json")
-    done
-    python3 - "$kind" "$expected" "${files[@]}" <<'PY'
-import json
-import sys
-
-kind, expected_path = sys.argv[1], sys.argv[2]
-expected = [line.rstrip('\n') for line in open(expected_path) if line.strip()]
-passed = set()
-
-
-def walk(suites):
-    for suite in suites or []:
-        for spec in suite.get('specs', []) or []:
-            path = spec.get('file', '')
-            if spec.get('line'):
-                path = f"{path}:{spec['line']}"
-            spec_title = spec.get('title', '')
-            for test in spec.get('tests', []) or []:
-                statuses = [r.get('status') for r in test.get('results', []) or []]
-                if 'passed' not in statuses or test.get('status') not in ('expected', 'flaky'):
-                    continue
-                title = test.get('title', '')
-                full = f"{spec_title} › {title}" if spec_title and title else (spec_title or title)
-                if kind == 'pw':
-                    project = test.get('projectName') or spec.get('projectName') or ''
-                    passed.add(f"pw|{project}|{path}|{full}")
-                else:
-                    passed.add(f"stack|{path}|{full}")
-        walk(suite.get('suites', []))
-
-
-for path in sys.argv[3:]:
-    try:
-        with open(path) as handle:
-            walk(json.load(handle).get('suites', []))
-    except Exception:
-        continue
-for item in expected:
-    if item not in passed:
-        print(item)
-PY
-}
-
 deploy_failures() {
     local dir=$1 f rc name
     [[ -d "$dir" ]] || return 0
@@ -655,7 +473,7 @@ deploy_failures() {
 }
 
 # --- состояние прогона ---------------------------------------------------------
-declare -a state_lines=() check_ids=() deploy_ids=() pw_ids=() stack_ids=() all_failures=() flaky_ids=()
+declare -a state_lines=() check_ids=() deploy_ids=() all_failures=() flaky_ids=()
 state_add() { state_lines+=("$1"$'\t'"$2"); }
 write_state() {
     local tmp="$log_dir/state.tsv.$$"
@@ -722,44 +540,20 @@ else
     mapfile -t deploy_ids < <(deploy_failures "$log_dir/deploy")
 fi
 
-# --- вся веб-половина и сквозные сценарии: один прогон ---
-web_stack_missing=0
+# --- вся веб-половина: один прогон ---
 if [[ "$web_action" != skip ]]; then
-    printf '\n==> scripts/check-web.sh --stack (%s)\n' "$web_action"
+    printf '\n==> scripts/check-web.sh (%s)\n' "$web_action"
     s=$SECONDS
     web_status=0
-    if [[ "$web_action" == tests ]]; then
-        printf '%s\n' "${prev_pw[@]}" >"$log_dir/pw-expected.txt"
-        printf '%s\n' "${prev_stack[@]}" >"$log_dir/stack-expected.txt"
-    fi
-    run_gate_step web "$step_web" "$web_action" "$web_sel" >"$log_dir/web.log" 2>&1 || web_status=$?
+    run_gate_step web "$step_web" "$web_action" >"$log_dir/web.log" 2>&1 || web_status=$?
     web_s=$((SECONDS - s))
-    printf '    check-web.sh --stack: %ds, код %s\n' "$web_s" "$web_status"
-    mapfile -t pw_ids < <(pw_failures "$CANTERLOT_PW_JSON_REPORT")
-    mapfile -t stack_ids < <(pw_failures "$CANTERLOT_STACK_JSON_REPORT" stack)
-    # Без отчёта стека перезапуск одних упавших UI-тестов дал бы аттестацию без сквозных
-    # сценариев: такое падение не «тесты», и перезапуск повторит весь веб.
-    if [[ "$web_action" == full && "$web_status" != 0 ]] && ! report_present "$CANTERLOT_STACK_JSON_REPORT"; then
-        web_stack_missing=1
-        printf 'гейт: сквозные сценарии не запускались, перезапуск повторит весь веб\n' >&2
-    fi
-    if [[ "$web_action" == tests ]]; then
-        mapfile -t pw_missing < <(missing_rerun_ids pw "$CANTERLOT_PW_JSON_REPORT" "$log_dir/pw-expected.txt")
-        mapfile -t stack_missing < <(missing_rerun_ids stack "$CANTERLOT_STACK_JSON_REPORT" "$log_dir/stack-expected.txt")
-        if ((${#pw_missing[@]} + ${#stack_missing[@]})); then
-            printf 'гейт: перезапуск не подтвердил прохождение тестов (провалены, пропущены или не запущены):\n' >&2
-            printf '  %s\n' "${pw_missing[@]}" "${stack_missing[@]}" >&2
-            for id in "${pw_missing[@]}"; do pw_ids+=("$id"); done
-            for id in "${stack_missing[@]}"; do stack_ids+=("$id"); done
-            web_status=1
-        fi
-    fi
+    printf '    check-web.sh: %ds, код %s\n' "$web_s" "$web_status"
 else
-    printf '\n==> scripts/check-web.sh --stack: переиспользован прошедший шаг\n'
+    printf '\n==> scripts/check-web.sh: переиспользован прошедший шаг\n'
 fi
 
 # --- состояние и отчёт о нестабильных тестах ---
-all_failures=("${check_ids[@]}" "${deploy_ids[@]}" "${pw_ids[@]}" "${stack_ids[@]}")
+all_failures=("${check_ids[@]}" "${deploy_ids[@]}")
 if [[ -n "$prev_started" ]]; then
     state_add started "$prev_started"
     state_add rerun_of "$prev_started"
@@ -787,11 +581,7 @@ state_add deploy_failed "$(step_failure_kind "$deploy_exit" "${deploy_ids[@]}")"
 for id in "${deploy_ids[@]}"; do state_add deploy_fail "$id"; done
 state_add web_exit "$web_status"
 state_add web_duration_s "$web_s"
-web_kind=$(step_failure_kind "$web_status" "${pw_ids[@]}" "${stack_ids[@]}")
-((web_stack_missing)) && [[ "$web_kind" == tests ]] && web_kind=other
-state_add web_failed "$web_kind"
-for id in "${pw_ids[@]}"; do state_add pw_fail "$id"; done
-for id in "${stack_ids[@]}"; do state_add stack_fail "$id"; done
+state_add web_failed "$(step_failure_kind "$web_status")"
 for id in "${done_ids[@]}" "${to_rerun[@]}"; do state_add rerun_done "$id"; done
 for id in "${prev_flaky[@]}"; do
     state_add flaky "$id"
@@ -804,20 +594,16 @@ for id in "${to_rerun[@]}"; do
 done
 write_state
 
-# Сводка в формате прежнего result.txt: коды и времена, затем nextest,
-# Playwright и первые упавшие тесты.
+# Сводка в формате прежнего result.txt: коды и времена, затем nextest
+# и первые упавшие тесты.
 mapfile -t rust_summary < <(grep -E 'Summary \[' "$log_dir/check.log" || true)
-mapfile -t playwright_summary < <(grep -E '^\s+[0-9]+ (passed|failed|flaky|skipped|did not run)' "$log_dir/web.log" || true)
 mapfile -t failed_rust < <(grep -E '^ +FAIL \[' "$log_dir/check.log" | head || true)
-mapfile -t failed_web < <(grep -E '^\s+[0-9]+\) ' "$log_dir/web.log" | sort -u | head || true)
 
 {
     printf '%s npm=%s check=%s %ss deploy=%s %ss web=%s %ss\n' \
         "$short" "$npm_status" "$check_status" "$check_s" "$deploy_exit" "$deploy_s" "$web_status" "$web_s"
     ((${#rust_summary[@]})) && printf '%s\n' "${rust_summary[@]}"
-    ((${#playwright_summary[@]})) && printf '%s\n' "${playwright_summary[@]}"
     ((${#failed_rust[@]})) && printf '%s\n' "${failed_rust[@]}"
-    ((${#failed_web[@]})) && printf '%s\n' "${failed_web[@]}"
     true
 } >"$log_dir/result.txt"
 cat "$log_dir/result.txt"

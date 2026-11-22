@@ -17,15 +17,7 @@
     "gen:api": "node scripts/gen-api.mjs",
     "test:unit": "vitest run",
     "test:build": "vitest run --config vitest.build.config.ts",
-    "test:ui": "playwright test e2e/ui",
-    "test:harness": "PW_HARNESS=1 playwright test e2e/parity/contact-sheet.spec.ts e2e/ui/fake-hub-wire.spec.ts --project=phone --project=desktop",
-    "test:stack": "node scripts/stack-shards.mjs",
-    "test:stack:single": "playwright test e2e/stack",
-    "test:perf": "playwright test e2e/perf --project=phone",
-    "test:budget": "PW_BUDGET=1 playwright test e2e/ui/owner-messages.spec.ts -g owner_messages_jump_long_task --project=budget --no-deps",
-    "test:parity": "playwright test e2e/parity",
-    "screenshots": "PW_SCREENSHOTS=1 playwright test e2e/screenshots/readme.spec.ts --project=phone",
-    "stack:build": "cargo build -p canterlot-hub -p canterlot-worker --features canterlot-worker/synthetic-adapter"
+    "screenshots": "PW_SCREENSHOTS=1 playwright test e2e/screenshots/readme.spec.ts --project=phone"
   },
   "dependencies": {
     "@noble/hashes": "2.4.0",
@@ -43,7 +35,6 @@
     "uqr": "0.1.3"
   },
   "devDependencies": {
-    "@axe-core/playwright": "4.14.0",
     "@playwright/test": "1.64.1",
     "@sveltejs/adapter-static": "4.0.0",
     "@sveltejs/vite-plugin-svelte": "7.3.1",
