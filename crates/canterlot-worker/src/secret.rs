@@ -120,6 +120,17 @@ fn is_removal_pending(request_id: Uuid) -> bool {
         .is_some_and(|pending| pending.contains(&request_id))
 }
 
+/// Подтверждённое удаление файла: одна INFO-строка с разговором и причиной, без
+/// значения и без имени файла за пределами метки секрета.
+fn log_removed(conversation_id: Uuid, reason: &str) {
+    tracing::info!(
+        kind = "secret_removed",
+        conversation_id = %conversation_id,
+        reason = %reason,
+        "secret file removed"
+    );
+}
+
 #[cfg(test)]
 thread_local! {
     /// Тестовый крючок: следующая запись файла падает, не оставляя временного файла.
@@ -716,11 +727,12 @@ fn write_root_identity(data_dir: &PinnedDir, identity: &RootIdentity) -> Result<
 /// Убирает значения, манифесты, временные файлы и заборы прежнего корня теми же
 /// пришпиленными и не идущими по ссылкам операциями. Подкаталог внутри каталога
 /// разговора считается чужим: такой корень не подтверждается.
-fn wipe_root(root: &PinnedDir) -> Result<(), Failure> {
+fn wipe_root(root: &PinnedDir, reason: &str) -> Result<(), Failure> {
     for name in root.entries()? {
         if name == ".lock" {
             continue;
         }
+        let conversation_id = Uuid::parse_str(&name).ok();
         let Some(stat) = entry_stat(root.fd(), &name)? else {
             continue;
         };
@@ -741,6 +753,9 @@ fn wipe_root(root: &PinnedDir) -> Result<(), Failure> {
                 return Err(Failure::Io);
             }
             unlinkat(root.fd(), &name, AtFlags::REMOVEDIR).map_err(|_| Failure::Io)?;
+            if let Some(conversation_id) = conversation_id {
+                log_removed(conversation_id, reason);
+            }
         } else {
             unlinkat(root.fd(), &name, AtFlags::empty()).map_err(|_| Failure::Io)?;
         }
@@ -822,7 +837,7 @@ pub(crate) fn default_root() -> Option<PathBuf> {
 fn prepare_storage_inner(
     config: &SecretConfig,
     data_dir: &Path,
-    default_root: Option<&Path>,
+    _default_root: Option<&Path>,
 ) -> Result<(), Failure> {
     let (base, root) = open_base(config)?;
     let stat = fstat(base.fd()).map_err(|_| Failure::InsecureDirectory)?;
@@ -849,31 +864,26 @@ fn prepare_storage_inner(
                 && previous != configured_identity
                 && let Some(previous) = root_by_identity(&roots, previous)
             {
-                wipe_root(previous)?;
+                wipe_root(previous, "root_changed")?;
             }
             // Настроенный корень тоже может хранить старые значения (например,
             // его вернули после смены).
-            wipe_root(&roots[0].dir)?;
+            wipe_root(&roots[0].dir, "root_changed")?;
             write_root_identity(&data_dir, &identity)
         }
         None => {
-            if let Some(default) = default_root
-                && let Some(default) = add_root(&mut roots, default)?
-                && default != configured_identity
-                && let Some(default) = root_by_identity(&roots, default)
-            {
-                wipe_root(default)?;
-            }
-            wipe_root(&roots[0].dir)?;
+            // Потеря файла идентичности — не смена tmpfs: живые файлы обязаны
+            // пережить перезапуск, их уберут срок или отзыв хаба.
             write_root_identity(&data_dir, &identity)
         }
     }
 }
 
-/// Подготовка хранилища до приёма доставок: если корень сменился (или файл
-/// идентичности потерян), прежний, настроенный и корень по умолчанию очищаются
-/// под замками до записи новой идентичности. Любая неподтверждённая уборка
-/// оставляет корень выключенным до следующего успешного старта.
+/// Подготовка хранилища до приёма доставок: если корень сменился, прежний и
+/// настроенный корни очищаются под замками до записи новой идентичности.
+/// Потеря файла идентичности — не смена tmpfs: живые файлы сохраняются, их
+/// уберут срок или отзыв хаба. Любая неподтверждённая уборка оставляет корень
+/// выключенным до следующего успешного старта.
 pub(crate) fn prepare_storage(config: &SecretConfig, data_dir: &Path) -> Result<(), Failure> {
     prepare_storage_with_default(config, data_dir, default_root().as_deref())
 }
@@ -1070,7 +1080,7 @@ pub fn revoke(
     request_id: Uuid,
     up_to: u64,
     max_expires_at_ms: u64,
-    _reason: &str,
+    reason: &str,
 ) -> Removal {
     let _operations = operations();
     if storage_disabled(config) {
@@ -1123,6 +1133,7 @@ pub fn revoke(
     let removed = revoke_locked(&lock, request_id, conversation_id, up_to);
     if fence_ok && removed {
         clear_removal_pending(request_id);
+        log_removed(conversation_id, reason);
         Removal::Removed
     } else {
         Removal::Failed
@@ -1265,8 +1276,14 @@ pub fn recover(config: &SecretConfig) -> Recovered {
                 Ok(Some(manifest)) => {
                     manifest.generation <= fence.dead || manifest.generation != fence.seen
                 }
-                // Манифеста нет или он испорчен: опознать байты нечем.
-                Ok(None) | Err(_) => true,
+                // Подтверждённого манифеста нет: это прерванная публикация.
+                Ok(None) => true,
+                // Ошибка проверки — не отсутствие: живой файл убирать нельзя,
+                // его уберёт отзыв хаба.
+                Err(_) => {
+                    stats.failed += 1;
+                    continue;
+                }
             };
             if !retire {
                 continue;
@@ -1278,6 +1295,7 @@ pub fn recover(config: &SecretConfig) -> Recovered {
             );
             if unlinked && manifest_unlinked {
                 stats.values += 1;
+                log_removed(conversation_id, "recovery");
             } else {
                 stats.failed += 1;
             }
@@ -1350,19 +1368,9 @@ pub fn sweep(config: &SecretConfig, now: u64) -> Swept {
             };
             let manifest = match read_manifest(dir.fd(), request_id) {
                 Ok(Some(manifest)) => manifest,
-                // Без манифеста байты не опознать: это прерванная публикация.
+                // Без подтверждённого манифеста срок не доказать: живой файл
+                // убирать нельзя, его уберёт отзыв хаба или восстановление.
                 Ok(None) | Err(_) => {
-                    let value_gone = matches!(
-                        unlinkat(dir.fd(), &file, AtFlags::empty()),
-                        Ok(()) | Err(Errno::NOENT)
-                    );
-                    let manifest_gone = matches!(
-                        unlinkat(dir.fd(), manifest_name(request_id), AtFlags::empty()),
-                        Ok(()) | Err(Errno::NOENT)
-                    );
-                    if !(value_gone && manifest_gone) {
-                        failed_here = true;
-                    }
                     continue;
                 }
             };
@@ -1388,6 +1396,7 @@ pub fn sweep(config: &SecretConfig, now: u64) -> Swept {
                     cap: manifest.generation,
                     reason: "expired".into(),
                 });
+                log_removed(conversation_id, "expired");
             } else {
                 swept.failed.push(SecretRemoveFailed {
                     request_id: request_id.to_string(),
@@ -2336,11 +2345,11 @@ mod tests {
             .recv_timeout(Duration::from_secs(5))
             .expect("preparation deadlocked on an alias of the same root");
         assert_eq!(prepared, Ok(()));
-        assert!(!written.path.exists(), "the one directory is wiped once");
+        assert!(written.path.exists(), "identity loss preserves the live file");
     }
 
     #[test]
-    fn losing_the_identity_wipes_the_configured_and_default_roots() {
+    fn losing_the_identity_keeps_live_values_in_both_roots() {
         let data = tempfile::tempdir().unwrap();
         let configured = TestBase::new();
         let default = TestBase::new();
@@ -2364,12 +2373,15 @@ mod tests {
         assert!(in_configured.path.exists());
         assert!(in_default.path.exists());
 
-        // Файл идентичности потерян: оба корня очищаются до записи новой.
+        // Файл идентичности потерян: живые файлы обязаны пережить перезапуск,
+        // их уберут срок или отзыв хаба.
         std::fs::remove_file(data.path().join("secret-root.json")).unwrap();
         prepare_storage_with_default(&configured.config(), data.path(), Some(&default.0))
             .expect("identity loss is recoverable");
-        assert!(!in_configured.path.exists());
-        assert!(!in_default.path.exists());
+        assert!(in_configured.path.exists(), "configured value survives");
+        assert!(
+            std::fs::read(&in_configured.path).unwrap() == b"configured\n"
+        );
         assert!(data.path().join("secret-root.json").exists());
     }
 
@@ -2815,5 +2827,79 @@ mod tests {
         );
         let after = open_fd_count();
         assert!(after <= before + 2, "fd count {before} -> {after}");
+    }
+
+    #[test]
+    fn sweep_keeps_a_live_value_whose_manifest_is_corrupt() {
+        // Проверка, а не вера в отсутствие: нечитаемый или испорченный манифест —
+        // не доказательство прерванной публикации, живой файл убирать нельзя.
+        let base = TestBase::new();
+        let config = base.config();
+        let (conversation, request_id) = (Uuid::now_v7(), Uuid::now_v7());
+        let written = deliver(
+            &config,
+            &request(conversation, request_id, 1, "value\n"),
+            &live_set(conversation),
+        )
+        .unwrap();
+        let manifest_path = written
+            .path
+            .parent()
+            .unwrap()
+            .join(format!("{request_id}.json"));
+        std::fs::write(&manifest_path, b"{not json").unwrap();
+        let swept = sweep(&config, now_ms());
+        assert!(written.path.exists(), "a live file stays on manifest error");
+        assert!(swept.removed.is_empty());
+    }
+
+    #[test]
+    fn recovery_keeps_a_live_value_whose_manifest_is_corrupt() {
+        // Ошибка чтения манифеста — не отсутствие файла: восстановление обязано
+        // посчитать сбой и оставить байты, их уберёт отзыв хаба.
+        let base = TestBase::new();
+        let config = base.config();
+        let (conversation, request_id) = (Uuid::now_v7(), Uuid::now_v7());
+        let written = deliver(
+            &config,
+            &request(conversation, request_id, 1, "value\n"),
+            &live_set(conversation),
+        )
+        .unwrap();
+        let manifest_path = written
+            .path
+            .parent()
+            .unwrap()
+            .join(format!("{request_id}.json"));
+        std::fs::write(&manifest_path, b"{not json").unwrap();
+        let recovered = recover(&config);
+        assert!(written.path.exists(), "a live file stays on manifest error");
+        assert_eq!(recovered.values, 0);
+        assert_eq!(recovered.failed, 1);
+    }
+
+    #[test]
+    fn losing_the_identity_keeps_a_live_value_in_the_configured_root() {
+        // Потеря файла идентичности — не смена tmpfs: живой файл обязан пережить
+        // перезапуск, иначе рестарт воркера молча удаляет действующий секрет.
+        let data = tempfile::tempdir().unwrap();
+        let base = TestBase::new();
+        let (conversation, request_id) = (Uuid::now_v7(), Uuid::now_v7());
+        prepare_storage_with_default(&base.config(), data.path(), None).unwrap();
+        let written = deliver(
+            &base.config(),
+            &request(conversation, request_id, 1, "value\n"),
+            &live_set(conversation),
+        )
+        .unwrap();
+        std::fs::remove_file(data.path().join("secret-root.json")).unwrap();
+        prepare_storage_with_default(&base.config(), data.path(), None)
+            .expect("identity loss is recoverable");
+        assert!(written.path.exists(), "a live file survives identity loss");
+        assert_eq!(
+            std::fs::read(&written.path).unwrap(),
+            b"value\n",
+            "bytes stay intact"
+        );
     }
 }
