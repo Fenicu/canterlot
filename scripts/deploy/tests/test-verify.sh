@@ -691,6 +691,7 @@ if run_verify; then case_ok "verify PASS"; else case_fail "verify failed"; fi
 assert_contains "${FAKE_ROOT}/verify.log" "WARNING: no ${FAKE_ROOT}/dist/${SHA_PREV}/EXPECT" "fallback warned"
 assert_contains "${FAKE_ROOT}/verify.log" "capabilities present: path_probe_v1 (source: fallback)" "fallback list filtered"
 assert_contains "${FAKE_ROOT}/verify.log" "capability claude_histories_v1 is not required: worker.toml has no [claude_code] table, so the worker does not declare it" "fallback capability dropped too"
+assert_contains "${FAKE_ROOT}/verify.log" "harness catalog has claude_code, codex, opencode" "fallback harness list kept"
 teardown_case
 case_end
 
