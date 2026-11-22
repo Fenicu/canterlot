@@ -301,35 +301,39 @@ CONNECT_WAIT="${CONNECT_WAIT:-60}"
 # toolkit. Dist без EXPECT (старые релизы) — прежний список с предупреждением.
 REQUIRED_CAPABILITIES_FALLBACK="${REQUIRED_CAPABILITIES:-claude_histories_v1 path_probe_v1}"
 REQUIRED_HARNESSES_FALLBACK="${REQUIRED_HARNESSES:-claude_code codex opencode}"
+# Возможности, которые воркер объявляет только при выполнении условия в worker.toml
+# (advertised_capabilities в crates/canterlot-worker/src/session.rs). Только имена.
+# Guard-тест scripts/deploy/tests/capability-sync-check.py сверяет список с фильтрами.
+CONDITIONAL_CAPABILITIES="claude_histories_v1 runners_v1"
 EXPECT_FILE="${DIST_BASE:-${REPO_ROOT}/dist}/${WORKER_SHA}/EXPECT"
 EXPECT_SOURCE=""
 REQUIRED_CAPABILITIES=""
 REQUIRED_HARNESSES=""
 load_expectations() {
-    local line key value fmt="" caps="" harnesses="" enabled
+    local line key value fmt="" caps="" harnesses="" enabled filtered
     if [ ! -f "${EXPECT_FILE}" ]; then
-        REQUIRED_CAPABILITIES="${REQUIRED_CAPABILITIES_FALLBACK}"
-        REQUIRED_HARNESSES="${REQUIRED_HARNESSES_FALLBACK}"
+        caps="${REQUIRED_CAPABILITIES_FALLBACK}"
+        harnesses="${REQUIRED_HARNESSES_FALLBACK}"
+        REQUIRED_HARNESSES="${harnesses}"
         EXPECT_SOURCE="fallback"
-        log "WARNING: no ${EXPECT_FILE} (release built before EXPECT existed): falling back to the built-in list (capabilities: ${REQUIRED_CAPABILITIES}; harnesses: ${REQUIRED_HARNESSES})"
-        return 0
-    fi
-    while IFS= read -r line || [ -n "${line}" ]; do
-        key="${line%%=*}"
-        value="${line#*=}"
-        case "${key}" in
-            format) fmt="${value}" ;;
-            capabilities) caps="${value}" ;;
-            harnesses) harnesses="${value}" ;;
-            '') ;;
-            *) die "unknown key in ${EXPECT_FILE}: ${key}" ;;
-        esac
-    done <"${EXPECT_FILE}"
-    [ "${fmt}" = "1" ] || die "unsupported ${EXPECT_FILE} format '${fmt}' (this toolkit knows format=1)"
-    [ -n "${caps}" ] || die "${EXPECT_FILE} declares no capabilities"
-    [[ "${caps} ${harnesses}" =~ ^[a-z0-9_\ ]+$ ]] || die "${EXPECT_FILE} has odd names"
-    # shellcheck disable=SC2086 # harnesses — имена через пробел, проверены выше
-    if ! enabled="$(python3 -I - "${WORKER_CONFIG}" ${harnesses} <<'PY'
+        log "WARNING: no ${EXPECT_FILE} (release built before EXPECT existed): falling back to the built-in list (capabilities: ${caps}; harnesses: ${harnesses})"
+    else
+        while IFS= read -r line || [ -n "${line}" ]; do
+            key="${line%%=*}"
+            value="${line#*=}"
+            case "${key}" in
+                format) fmt="${value}" ;;
+                capabilities) caps="${value}" ;;
+                harnesses) harnesses="${value}" ;;
+                '') ;;
+                *) die "unknown key in ${EXPECT_FILE}: ${key}" ;;
+            esac
+        done <"${EXPECT_FILE}"
+        [ "${fmt}" = "1" ] || die "unsupported ${EXPECT_FILE} format '${fmt}' (this toolkit knows format=1)"
+        [ -n "${caps}" ] || die "${EXPECT_FILE} declares no capabilities"
+        [[ "${caps} ${harnesses}" =~ ^[a-z0-9_\ ]+$ ]] || die "${EXPECT_FILE} has odd names"
+        # shellcheck disable=SC2086 # harnesses — имена через пробел, проверены выше
+        if ! enabled="$(python3 -I - "${WORKER_CONFIG}" ${harnesses} <<'PY'
 import sys, tomllib
 try:
     cfg = tomllib.load(open(sys.argv[1], "rb"))
@@ -343,13 +347,63 @@ for name in sys.argv[2:]:
         on.append(name)
 print(" ".join(on))
 PY
-    )"; then
-        die "cannot read harness tables from ${WORKER_CONFIG}"
+        )"; then
+            die "cannot read harness tables from ${WORKER_CONFIG}"
+        fi
+        REQUIRED_HARNESSES="${enabled}"
+        EXPECT_SOURCE="${EXPECT_FILE}"
+        log "expectations from the release ${EXPECT_FILE}: capabilities ${caps}; harnesses declared ${harnesses}, enabled in ${WORKER_CONFIG##*/}: ${enabled:-none}"
     fi
-    REQUIRED_CAPABILITIES="${caps}"
-    REQUIRED_HARNESSES="${enabled}"
-    EXPECT_SOURCE="${EXPECT_FILE}"
-    log "expectations from the release ${EXPECT_FILE}: capabilities ${caps}; harnesses declared ${harnesses}, enabled in ${WORKER_CONFIG##*/}: ${enabled:-none}"
+
+    # Воркер объявляет часть возможностей только при выполнении условия в worker.toml
+    # (advertised_capabilities). Требуем от машины лишь те из EXPECT, что он объявит:
+    # runners_v1 — с непустым [[runners.ssh]], claude_histories_v1 — с таблицей [claude_code].
+    # Все прочие возможности остаются строго обязательными. В журнал идут только
+    # имена и причина, без значений конфигурации.
+    [[ "${caps}" =~ ^[a-z0-9_\ ]+$ ]] || die "bad capability names in ${EXPECT_SOURCE}"
+    # shellcheck disable=SC2086 # caps — имена через пробел, проверены выше
+    if ! filtered="$(CONDITIONAL_CAPABILITIES="${CONDITIONAL_CAPABILITIES}" python3 -I - "${WORKER_CONFIG}" ${caps} <<'PY'
+import os, sys, tomllib
+
+config_path = sys.argv[1]
+required = sys.argv[2:]
+conditional = set(os.environ.get("CONDITIONAL_CAPABILITIES", "").split())
+try:
+    cfg = tomllib.load(open(config_path, "rb"))
+except (OSError, tomllib.TOMLDecodeError) as exc:
+    print(f"cannot parse worker config: {type(exc).__name__}", file=sys.stderr)
+    sys.exit(1)
+
+def declared(name):
+    if name == "claude_histories_v1":
+        return isinstance(cfg.get("claude_code"), dict)
+    if name == "runners_v1":
+        runners = cfg.get("runners")
+        return isinstance(runners, dict) and bool(runners.get("ssh"))
+    raise SystemExit(f"unknown conditional capability: {name}")
+
+reasons = {
+    "claude_histories_v1": "worker.toml has no [claude_code] table, so the worker does not declare it",
+    "runners_v1": "worker.toml has no [[runners.ssh]] entry, so the worker is not a carrier",
+}
+kept, dropped = [], []
+for cap in required:
+    if cap in conditional and not declared(cap):
+        dropped.append(cap)
+    else:
+        kept.append(cap)
+print(" ".join(kept))
+for cap in dropped:
+    print(f"{cap}|{reasons[cap]}")
+PY
+    )"; then
+        die "cannot derive conditional capabilities from ${WORKER_CONFIG}"
+    fi
+    REQUIRED_CAPABILITIES="$(printf '%s\n' "${filtered}" | sed -n 1p)"
+    while IFS='|' read -r cap why; do
+        [ -n "${cap}" ] || continue
+        log "capability ${cap} is not required: ${why}"
+    done < <(printf '%s\n' "${filtered}" | tail -n +2)
 }
 load_expectations
 # Каталог машины наполняется через секунды после соединения: ждём до CATALOG_WAIT.

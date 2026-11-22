@@ -102,6 +102,51 @@ test('connection_banner_floats_over_a_chat_and_keeps_the_header_free', async ({ 
   expect(await positions([header, composer])).toEqual(before);
 });
 
+test('update_banner_waits_for_a_chat_header_that_mounts_later', async ({ page, context, baseURL }, testInfo) => {
+  const hub = new FakeHub();
+  const api = new FakeHubApi(hub);
+  const ids = seedMockupSessions(api);
+  await installChatRoutes(page, hub, api, ids.pinned);
+  // Держим /me: без рантайма чат не соберётся, и шапка появится только после баннера.
+  let releaseRuntime!: () => void;
+  const runtimeGate = new Promise<void>((resolve) => { releaseRuntime = resolve; });
+  await page.route(/\/api\/v1\/me(\?|$)/, async (route) => {
+    await runtimeGate;
+    await route.fallback();
+  });
+  // Сразу в чат: проверка обновления идёт на старте и по focus, пока заголовок ещё грузится.
+  await page.goto(`/c/${ids.pinned}`);
+  await context.addCookies([{ name: 'pwa-build', value: 'next', url: baseURL! }]);
+  await expect.poll(async () => {
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+    return page.locator('[data-update]').count();
+  }, { timeout: 10_000 }).toBeGreaterThan(0);
+  const card = page.locator('[data-update]');
+  await expect(card).toBeVisible({ timeout: 10_000 });
+  const header = page.locator('.chat-header');
+  expect(await header.count()).toBe(0);
+  releaseRuntime();
+  await expect(header).toBeVisible({ timeout: 15_000 });
+  await card.evaluate((node) => Promise.all(node.getAnimations().map((animation) => animation.finished)).then(() => undefined));
+  const probe = () => page.evaluate(() => {
+    const bannerCard = document.querySelector('[data-update]')!;
+    const head = document.querySelector('.chat-header')!;
+    const buttons = [...head.querySelectorAll<HTMLElement>('.header-actions button')];
+    const button = buttons.at(-1)!;
+    const box = button.getBoundingClientRect();
+    const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+    return {
+      gap: Math.round(bannerCard.getBoundingClientRect().top - head.getBoundingClientRect().bottom),
+      buttonFree: hit === button || button.contains(hit)
+    };
+  });
+  await expect.poll(() => probe().then((value) => value.gap), { timeout: 5_000 }).toBeGreaterThanOrEqual(-1);
+  if (testInfo.project.name === 'desktop') {
+    await page.screenshot({ path: 'test-results/update-banner-below-header-desktop.png' });
+  }
+  expect((await probe()).buttonFree).toBe(true);
+});
+
 test('connection_banner_lets_taps_through_outside_the_card', async ({ page }) => {
   const { hub, api, ids } = await boot(page);
   await openChat(page, api, ids.pinned);

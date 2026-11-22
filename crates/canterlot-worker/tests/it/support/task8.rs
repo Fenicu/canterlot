@@ -356,7 +356,7 @@ mod real {
     async fn data_binding_mismatch_restarts_the_whole_connection(pool: PgPool) {
         let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
         let proxy = DataProxy::start(&hub, false, true).await;
-        let (_directory, mut config, store) = fixture(&pool, &hub).await;
+        let (_directory, _secrets, mut config, store) = fixture(&pool, &hub).await;
         config.hub_url = proxy.url.clone();
         let (stop, mut state, join) = start(config, store);
         wait_state(&mut state, SessionState::Live).await;
@@ -385,7 +385,7 @@ mod real {
     ) {
         let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
         let proxy = DataProxy::start(&hub, false, true).await;
-        let (_directory, mut config, store) = fixture(&pool, &hub).await;
+        let (_directory, _secrets, mut config, store) = fixture(&pool, &hub).await;
         config.hub_url = proxy.url.clone();
         config.timers.backoff_min = Duration::from_millis(350);
         let machine = config.machine_id;
@@ -460,7 +460,7 @@ mod real {
     async fn sj_batches_are_acked_and_compacted(pool: PgPool) {
         let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
         let proxy = DataProxy::start(&hub, false, true).await;
-        let (directory, mut config, store) = fixture(&pool, &hub).await;
+        let (directory, _secrets, mut config, store) = fixture(&pool, &hub).await;
         let _guard = process_guard::ProcessGuard::new(directory.path());
         let (store, execution, _) = seeded(&pool, &hub, &mut config, store).await;
         config.hub_url = proxy.url.clone();
@@ -511,7 +511,7 @@ mod real {
         proxy
             .drop_sj_acks
             .store(100, std::sync::atomic::Ordering::SeqCst);
-        let (directory, mut config, store) = fixture(&pool, &hub).await;
+        let (directory, _secrets, mut config, store) = fixture(&pool, &hub).await;
         let _guard = process_guard::ProcessGuard::new(directory.path());
         let (store, execution, _) = seeded(&pool, &hub, &mut config, store).await;
         config.hub_url = proxy.url.clone();
@@ -553,7 +553,7 @@ mod real {
     async fn dispatch_is_blocked_until_the_report_and_proceeds_after(pool: PgPool) {
         let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
         let proxy = DataProxy::start(&hub, true, true).await;
-        let (directory, mut config, store) = fixture(&pool, &hub).await;
+        let (directory, _secrets, mut config, store) = fixture(&pool, &hub).await;
         let _guard = process_guard::ProcessGuard::new(directory.path());
         let (store, _, conversation) = seeded(&pool, &hub, &mut config, store).await;
         config.hub_url = proxy.url.clone();

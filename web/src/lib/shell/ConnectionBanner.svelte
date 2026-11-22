@@ -102,16 +102,51 @@
     offset = bottom >= 0 ? Math.ceil(bottom) : null;
   }
 
-  $effect(() => {
+  // Меряем до отрисовки: карточка не мелькнёт поверх шапки, которая уже есть в DOM.
+  $effect.pre(() => {
     const node = layer;
     void page.url.pathname;
     if (!node || !view || ownSlot) return;
     place(node);
+  });
+
+  $effect(() => {
+    const node = layer;
+    void page.url.pathname;
+    if (!node || !view || ownSlot) return;
     const region = node.parentElement!;
-    const observer = new ResizeObserver(() => place(node));
-    observer.observe(region);
-    for (const chrome of region.querySelectorAll('[data-top-chrome]')) observer.observe(chrome);
-    return () => observer.disconnect();
+    let chrome = new Set<Element>();
+    let frame = 0;
+    let resize: ResizeObserver | null = null;
+
+    const sync = () => {
+      resize?.disconnect();
+      resize = new ResizeObserver(() => place(node));
+      resize.observe(region);
+      chrome = new Set(region.querySelectorAll('[data-top-chrome]'));
+      for (const item of chrome) resize.observe(item);
+      place(node);
+    };
+
+    sync();
+
+    // Шапка может смонтироваться позже баннера: открытие чата, reconnect или смена сессии.
+    // Пересобираем набор верхних панелей одним кадром и замеряем заново.
+    const mutations = new MutationObserver(() => {
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        const next = new Set(region.querySelectorAll('[data-top-chrome]'));
+        if (next.size !== chrome.size || [...next].some((item) => !chrome.has(item))) sync();
+      });
+    });
+    mutations.observe(region, { childList: true, subtree: true, attributes: true, attributeFilter: ['data-top-chrome'] });
+
+    return () => {
+      mutations.disconnect();
+      resize?.disconnect();
+      if (frame) cancelAnimationFrame(frame);
+    };
   });
 
 </script>

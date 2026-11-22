@@ -130,6 +130,7 @@ mod owner_jobs;
 mod pilot_e2e;
 mod precheck;
 mod prune_target_script;
+mod secrets_guard;
 mod session;
 #[cfg(all(feature = "fault-injection", feature = "synthetic-adapter"))]
 mod session_tools_e2e;

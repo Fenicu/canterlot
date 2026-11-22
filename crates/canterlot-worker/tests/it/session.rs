@@ -20,6 +20,8 @@ use tokio::{
 };
 use uuid::Uuid;
 
+use crate::support::TempSecrets;
+
 fn hub_timers() -> HubTimers {
     HubTimers {
         dispatch_sweep: Duration::from_millis(25),
@@ -27,7 +29,10 @@ fn hub_timers() -> HubTimers {
     }
 }
 
-async fn fixture(pool: &PgPool, hub: &TestHub) -> (TempDir, WorkerConfig, WorkerStore) {
+async fn fixture(
+    pool: &PgPool,
+    hub: &TestHub,
+) -> (TempDir, TempSecrets, WorkerConfig, WorkerStore) {
     use std::os::unix::fs::PermissionsExt;
     let directory = TempDir::new().unwrap();
     let machine = machines::add(pool, hub.installation.owner_id, "session-test")
@@ -40,8 +45,9 @@ async fn fixture(pool: &PgPool, hub: &TestHub) -> (TempDir, WorkerConfig, Worker
     fs::write(&ca_cert, &hub.pki.ca_pem).unwrap();
     let data_dir = directory.path().join("store");
     let store = WorkerStore::open(&data_dir).unwrap();
+    let secrets_guard = TempSecrets::new();
     let config = WorkerConfig {
-        secrets: Default::default(),
+        secrets: secrets_guard.config(),
         memory: Default::default(),
         jobs: Default::default(),
         machine: Default::default(),
@@ -71,7 +77,7 @@ async fn fixture(pool: &PgPool, hub: &TestHub) -> (TempDir, WorkerConfig, Worker
         hub_dial: None,
         runners: Default::default(),
     };
-    (directory, config, store)
+    (directory, secrets_guard, config, store)
 }
 
 async fn wait_state(state: &mut watch::Receiver<SessionState>, expected: SessionState) {
@@ -139,7 +145,7 @@ async fn cj_record_the_hub_cannot_read_stops_the_session_and_stays_on_the_worker
     use canterlot_journal::{Journal, JournalOptions};
     use canterlot_worker::session::ErrorKind;
     let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
-    let (_directory, config, store) = fixture(&pool, &hub).await;
+    let (_directory, _secrets, config, store) = fixture(&pool, &hub).await;
     let machine = config.machine_id;
     let journal = store.cj_journal_id().unwrap();
     drop(store);
@@ -190,7 +196,7 @@ async fn cj_record_the_hub_cannot_read_stops_the_session_and_stays_on_the_worker
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn worker_connects_and_goes_live(pool: PgPool) {
     let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
-    let (_directory, config, store) = fixture(&pool, &hub).await;
+    let (_directory, _secrets, config, store) = fixture(&pool, &hub).await;
     let machine = config.machine_id;
     assert_eq!(store.restore_generation().unwrap(), None);
     let (stop, mut state, join) = start(config, store);
@@ -206,7 +212,7 @@ async fn worker_connects_and_goes_live(pool: PgPool) {
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn worker_rejected_on_installation_mismatch_stops(pool: PgPool) {
     let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
-    let (_directory, mut config, store) = fixture(&pool, &hub).await;
+    let (_directory, _secrets, mut config, store) = fixture(&pool, &hub).await;
     config.installation_id = Uuid::now_v7();
     let (_stop, state, join) = start(config, store);
     assert!(matches!(
@@ -232,7 +238,7 @@ async fn worker_rejected_on_installation_mismatch_stops(pool: PgPool) {
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn worker_reconnects_with_backoff_after_hub_restart(pool: PgPool) {
     let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
-    let (_directory, config, store) = fixture(&pool, &hub).await;
+    let (_directory, _secrets, config, store) = fixture(&pool, &hub).await;
     let machine = config.machine_id;
     let addr = hub.addr;
     let cert = hub.pki.server_cert_pem.clone();
@@ -269,7 +275,7 @@ async fn worker_reconnects_with_backoff_after_hub_restart(pool: PgPool) {
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn received_command_is_stored_and_receipt_shipped(pool: PgPool) {
     let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
-    let (_directory, config, store) = fixture(&pool, &hub).await;
+    let (_directory, _secrets, config, store) = fixture(&pool, &hub).await;
     let machine = config.machine_id;
     let path = config.data_dir.clone();
     let conversation =
@@ -319,7 +325,7 @@ async fn received_command_is_stored_and_receipt_shipped(pool: PgPool) {
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn no_listening_socket_on_worker(pool: PgPool) {
     let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
-    let (directory, config, store) = fixture(&pool, &hub).await;
+    let (directory, _secrets, config, store) = fixture(&pool, &hub).await;
     let path = directory.path().join("worker.toml");
     fs::write(&path, format!("hub_url = {:?}\nca_cert = {:?}\ntoken_file = {:?}\nmachine_id = {:?}\ninstallation_id = {:?}\nrestore_generation = {:?}\ndata_dir = {:?}\n", config.hub_url, config.ca_cert, config.token_file, config.machine_id.to_string(), config.installation_id.to_string(), config.restore_generation.to_string(), config.data_dir)).unwrap();
     drop(store);
@@ -407,7 +413,7 @@ fn segment(path: &Path) -> std::path::PathBuf {
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn poisoned_store_waits_for_storage_then_requests_a_restart(pool: PgPool) {
     let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
-    let (_directory, config, store) = fixture(&pool, &hub).await;
+    let (_directory, _secrets, config, store) = fixture(&pool, &hub).await;
     let machine = config.machine_id;
     let path = config.data_dir.clone();
     let receipt = segment(&path.join("receipts"));
@@ -656,7 +662,7 @@ async fn tls_rejects_untrusted_ca_and_wrong_hostname() {
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn retryable_identity_rejection_backs_off_without_displacing_live_worker(pool: PgPool) {
     let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
-    let (_directory, config, store) = fixture(&pool, &hub).await;
+    let (_directory, _secrets, config, store) = fixture(&pool, &hub).await;
     let machine = config.machine_id;
     use std::os::unix::fs::PermissionsExt;
     let second_dir = tempfile::Builder::new()
@@ -735,7 +741,7 @@ async fn worker_api_refuses_plaintext_urls() {
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn wrong_configured_generation_is_rejected_by_hub(pool: PgPool) {
     let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
-    let (_directory, mut config, store) = fixture(&pool, &hub).await;
+    let (_directory, _secrets, mut config, store) = fixture(&pool, &hub).await;
     config.restore_generation = Uuid::now_v7();
     let machine = config.machine_id;
     let path = config.data_dir.clone();
