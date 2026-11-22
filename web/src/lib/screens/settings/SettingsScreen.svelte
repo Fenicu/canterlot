@@ -93,9 +93,20 @@
     } catch { error = 'Не удалось очистить данные на устройстве. Повторите очистку'; }
     finally { busy = false; }
   }
+  // Итог ручной проверки: без него «новой версии нет» и «кнопка не сработала» выглядят одинаково.
+  let checking = $state(false);
+  let checked = $state<{ result: 'current' | 'failed'; at: number } | null>(null);
   async function updateAction() {
-    try { if (updateState === 'idle') await update?.check(); else { await runtime?.drafts.flush(); await update?.apply(); } }
+    if (checking) return;
+    try {
+      if (updateState === 'idle') {
+        checking = true;
+        const result = await update?.check();
+        checked = result === 'current' || result === 'failed' ? { result, at: Date.now() } : null;
+      } else { await runtime?.drafts.flush(); await update?.apply(); }
+    }
     catch { error = 'Не удалось обновить приложение. Повторите при восстановлении связи'; }
+    finally { checking = false; }
   }
   const href = (id: SettingsCategory) => `${resolve('/settings')}?c=${id}`;
   const hint = (id: SettingsCategory, text: string) => id === 'appearance' ? `${themeLabel}, тема, анимации` : text;
@@ -194,9 +205,10 @@
             </dl>
             {#if versionMismatch}<p class="note">Версии приложения и хаба различаются. Обновите отставшую часть при удобном случае</p>{/if}
             <div class="buttons">
-              {#if update}<Button onclick={updateAction}>{updateState === 'idle' ? 'Проверить обновления' : 'Обновить приложение'}</Button>{/if}
+              {#if update}<Button onclick={updateAction} busy={checking}>{updateState !== 'idle' ? 'Обновить приложение' : checking ? 'Проверяю…' : 'Проверить обновления'}</Button>{/if}
               {#if canInstall}<Button onclick={() => { void installation().prompt().catch(() => error = 'Не удалось установить приложение. Повторите в меню браузера'); }}>Установить приложение</Button>{/if}
             </div>
+            {#if checked && updateState === 'idle'}<p class="note" role="status">{checked.result === 'current' ? `Новой версии нет · проверено в ${fmt.clock(checked.at)}` : 'Не удалось проверить: нет связи с сервером'}</p>{/if}
           </div>
           <a class="link-row" href={resolve('/changes')}><span>История изменений</span><Icon name="chevron" /></a>
           <a class="link-row" href={resolve('/machines')}><span>Машины</span><Icon name="chevron" /></a>
