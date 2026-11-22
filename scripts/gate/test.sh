@@ -235,7 +235,7 @@ grep -qF $'seams\t1' "$state" || fail 'в состоянии нет отметк
 grep -q 'отчёт о нестабильных тестах' "$out" || fail 'нет отчёта о нестабильных тестах'
 grep -q 'flaky-tests.md' "$out" || fail 'нет напоминания про flaky-tests.md'
 
-# --- идентичности наборов выката, Playwright и сквозных сценариев ---
+# --- идентичности наборов выката ---
 # shellcheck disable=SC2016
 fake_check_pass='echo "check $GATE_STEP_MODE" >>"$GATE_FAKE_CALLS"; exit 0'
 # shellcheck disable=SC2016
@@ -250,40 +250,7 @@ done
 # shellcheck disable=SC2016
 fake_web_fail='
 echo "web $GATE_STEP_MODE [$GATE_STEP_SELECTION]" >>"$GATE_FAKE_CALLS"
-pw="${CANTERLOT_PW_JSON_REPORT}.json"
-st="${CANTERLOT_STACK_JSON_REPORT}-1.json"
-mkdir -p "${pw%/*}"
-if [[ "$FAKE_WEB_FAIL" == none ]]; then
-  SELECTION="$GATE_STEP_SELECTION" PW_REPORT="$pw" ST_REPORT="$st" MISSING="${FAKE_WEB_MISSING:-}" python3 - <<PY
-import json, os
-missing = os.environ["MISSING"]
-pw_specs, st_specs = [], []
-for line in os.environ["SELECTION"].splitlines():
-    parts = line.split("|")
-    if not parts:
-        continue
-    if parts[0] == "pw" and missing != "pw":
-        project, loc, full = parts[1], parts[2], parts[3]
-        file, _, lineno = loc.rpartition(":")
-        head, sep, tail = full.partition(" › ")
-        pw_specs.append({"file": file, "line": int(lineno), "title": head, "tests": [{"projectName": project, "title": tail, "status": "expected", "results": [{"status": "passed"}]}]})
-    elif parts[0] == "stack" and missing != "stack":
-        loc, full = parts[1], parts[2]
-        file, _, lineno = loc.rpartition(":")
-        head, sep, tail = full.partition(" › ")
-        st_specs.append({"file": file, "line": int(lineno), "title": head, "tests": [{"title": tail, "status": "expected", "results": [{"status": "passed"}]}]})
-def report(specs):
-    return {"suites": [{"specs": specs}]}
-with open(os.environ["PW_REPORT"], "w") as f:
-    json.dump(report(pw_specs), f)
-with open(os.environ["ST_REPORT"], "w") as f:
-    json.dump(report(st_specs), f)
-PY
-  exit 0
-fi
-printf "%s\n" "{\"suites\":[{\"specs\":[{\"file\":\"e2e/ui/x.spec.ts\",\"line\":42,\"title\":\"x spec\",\"tests\":[{\"projectName\":\"phone\",\"title\":\"flaky title\",\"results\":[{\"status\":\"failed\"}]}]},{\"file\":\"e2e/ui/z.spec.ts\",\"line\":9,\"title\":\"z spec\",\"tests\":[{\"projectName\":\"phone\",\"title\":\"second title\",\"results\":[{\"status\":\"failed\"}]}]}]}]}" >"$pw"
-printf "%s\n" "{\"suites\":[{\"specs\":[{\"file\":\"e2e/stack/y.spec.ts\",\"line\":7,\"title\":\"stack spec\",\"tests\":[{\"title\":\"stack title\",\"results\":[{\"status\":\"timedOut\"}]}]}]}]}" >"$st"
-exit 1
+[[ "$FAKE_WEB_FAIL" == none ]]
 '
 web_env=(
     env CANTERLOT_NO_LEASE=1 CANTERLOT_GATE_DEPLOY_NEEDED=1
@@ -292,99 +259,44 @@ web_env=(
 )
 g6="$tmp/g6"
 new_gate_repo "$g6"
-export FAKE_DEPLOY_FAIL=release FAKE_WEB_FAIL=fail
+export FAKE_DEPLOY_FAIL=release FAKE_WEB_FAIL=none
 run 1 "${web_env[@]}" bash "$g6/scripts/gate.sh" --no-attest
 g6short=$(git -C "$g6" rev-parse --short=8 HEAD)
 state6="$g6/.superpowers/gate/$g6short/state.tsv"
 grep -qF $'deploy_fail\tdeploy|release' "$state6" || fail 'нет идентичности упавшего набора выката'
-grep -qF $'pw_fail\tpw|phone|e2e/ui/x.spec.ts:42|x spec › flaky title' "$state6" || fail 'нет идентичности Playwright из JSON'
-grep -qF $'pw_fail\tpw|phone|e2e/ui/z.spec.ts:9|z spec › second title' "$state6" || fail 'нет второй идентичности Playwright из JSON'
-grep -qF $'stack_fail\tstack|e2e/stack/y.spec.ts:7|stack spec › stack title' "$state6" || fail 'нет идентичности сценария из JSON'
 grep -qF $'deploy_failed\ttests' "$state6" || fail 'падение deploy не отнесено к тестам'
-grep -qF $'web_failed\ttests' "$state6" || fail 'падение web не отнесено к тестам'
-export FAKE_DEPLOY_FAIL=none FAKE_WEB_FAIL=none
+export FAKE_DEPLOY_FAIL=none
 : >"$GATE_FAKE_CALLS"
 run 0 "${web_env[@]}" bash "$g6/scripts/gate.sh" --rerun-failed --no-attest
-if grep -qE '^(npm|check) ' "$GATE_FAKE_CALLS"; then fail 'перезапуск задел прошедшие шаги npm/check'; fi
+if grep -qE '^(npm|check|web) ' "$GATE_FAKE_CALLS"; then fail 'перезапуск задел прошедшие шаги npm/check/web'; fi
 grep -qF 'deploy tests [release]' "$GATE_FAKE_CALLS" || fail 'deploy не перезапустил только упавший набор'
-[[ $(grep -c '^web ' "$GATE_FAKE_CALLS") == 1 ]] || fail 'Playwright одного проекта не сгруппирован в один вызов'
-grep -qF 'pw|phone|e2e/ui/x.spec.ts:42' "$GATE_FAKE_CALLS" || fail 'web не получил селектор file:line'
-grep -qF 'pw|phone|e2e/ui/z.spec.ts:9' "$GATE_FAKE_CALLS" || fail 'второй селектор не попал в ту же группу'
-grep -qF 'stack|e2e/stack/y.spec.ts:7' "$GATE_FAKE_CALLS" || fail 'web не получил идентичность сценария'
-if grep -qF -- '--grep' "$GATE_FAKE_CALLS"; then fail 'перезапуск снова выбрал тесты по заголовку через --grep'; fi
-for id in 'deploy|release' 'pw|phone|e2e/ui/x.spec.ts:42|x spec › flaky title' \
-          'pw|phone|e2e/ui/z.spec.ts:9|z spec › second title' 'stack|e2e/stack/y.spec.ts:7|stack spec › stack title'; do
-    grep -qF "$(printf 'flaky\t%s' "$id")" "$state6" || fail "нет отметки flaky для $id"
-done
+grep -qF "$(printf 'flaky\tdeploy|release')" "$state6" || fail 'нет отметки flaky для deploy|release'
 
-# Если отчёт перезапуска не подтвердил прохождение идентичности, гейт обязан
-# провалиться, а не счесть её нестабильной и прошедшей.
-g7="$tmp/g7"
-new_gate_repo "$g7"
-export FAKE_DEPLOY_FAIL=none FAKE_WEB_FAIL=fail
-run 1 "${web_env[@]}" bash "$g7/scripts/gate.sh" --no-attest
-export FAKE_WEB_FAIL=none FAKE_WEB_MISSING=stack
-run 1 "${web_env[@]}" bash "$g7/scripts/gate.sh" --rerun-failed --no-attest
-grep -q 'не подтвердил прохождение' "$out" || { cat "$out" >&2; fail 'нет отказа из-за неподтверждённой идентичности'; }
-grep -qF 'stack|e2e/stack/y.spec.ts:7' "$out" || fail 'в отказе не названа missing-идентичность'
-grep -qF $'rerun_done\tstack|e2e/stack/y.spec.ts:7|stack spec › stack title' \
-    "$g7/.superpowers/gate/$(git -C "$g7" rev-parse --short=8 HEAD)/state.tsv" \
-    || fail 'неподтверждённая идентичность не попала в rerun_done'
-unset FAKE_WEB_MISSING
-
-# Настоящий web_rerun: упавшие тесты в двух проектах Playwright. Вызовы по проектам
-# не должны писать отчёт в один файл, иначе второй затирает первый (гейт 1.42.0).
+# Падение веба без идентичностей тестов: браузерных тестов больше нет, поэтому
+# такой провал не «тесты» — гейт повторяет весь веб-шаг, а не отдельные тесты.
 g8="$tmp/g8"
 new_gate_repo "$g8"
-mkdir -p "$g8/web" "$tmp/fake-bin"
-: >"$g8/web/package-lock.json"
 cp scripts/gate/fake-check-web.sh "$g8/scripts/check-web.sh"
-cp scripts/gate/fake-npx "$tmp/fake-bin/npx"
-chmod 0755 "$tmp/fake-bin/npx"
-git -C "$g8" add web/package-lock.json scripts/check-web.sh
+git -C "$g8" add scripts/check-web.sh
 git -C "$g8" commit -qm web
 web_real_env=(
-    env CANTERLOT_NO_LEASE=1 CANTERLOT_GATE_DEPLOY_NEEDED=0 PORT=1 PATH="$tmp/fake-bin:$PATH"
+    env CANTERLOT_NO_LEASE=1 CANTERLOT_GATE_DEPLOY_NEEDED=0
     CANTERLOT_GATE_STEP_NPM="$fake_npm" CANTERLOT_GATE_STEP_CHECK="$fake_check_pass"
 )
 : >"$GATE_FAKE_CALLS"
 run 1 "${web_real_env[@]}" bash "$g8/scripts/gate.sh" --no-attest
-run 0 "${web_real_env[@]}" bash "$g8/scripts/gate.sh" --rerun-failed --no-attest
-[[ $(grep -c '^npx ' "$GATE_FAKE_CALLS") == 2 ]] || fail 'web_rerun не вызвал Playwright по разу на проект'
-grep -qF 'npx phone ui/x.spec.ts:42' "$GATE_FAKE_CALLS" || fail 'web_rerun не перезапустил тест телефона'
-grep -qF 'npx desktop ui/w.spec.ts:5' "$GATE_FAKE_CALLS" || fail 'web_rerun не перезапустил тест десктопа'
-
-# Упал UI, а сквозные сценарии не запускались (отчёта стека нет): перезапуск одних
-# упавших UI-тестов дал бы аттестацию без стека, поэтому повторяется весь веб.
-g9="$tmp/g9"
-new_gate_repo "$g9"
-mkdir -p "$g9/web"
-: >"$g9/web/package-lock.json"
-cp scripts/gate/fake-check-web.sh "$g9/scripts/check-web.sh"
-git -C "$g9" add web/package-lock.json scripts/check-web.sh
-git -C "$g9" commit -qm web
+state8="$g8/.superpowers/gate/$(git -C "$g8" rev-parse --short=8 HEAD)/state.tsv"
+grep -qF $'web_failed\tother' "$state8" || fail 'падение веба без идентичностей отнесено к тестам'
 : >"$GATE_FAKE_CALLS"
-run 1 env FAKE_NO_STACK=1 "${web_real_env[@]}" bash "$g9/scripts/gate.sh" --no-attest
-state9="$g9/.superpowers/gate/$(git -C "$g9" rev-parse --short=8 HEAD)/state.tsv"
-grep -qF $'web_failed\tother' "$state9" || fail 'падение UI без отчёта стека отнесено к тестам'
-grep -q 'сквозные сценарии не запускались' "$out" || fail 'нет предупреждения о незапущенном стеке'
-: >"$GATE_FAKE_CALLS"
-run 1 env FAKE_NO_STACK=1 "${web_real_env[@]}" bash "$g9/scripts/gate.sh" --rerun-failed --no-attest
-grep -qF 'check-web --stack' "$GATE_FAKE_CALLS" || fail 'перезапуск без отчёта стека не повторил весь веб'
-if grep -q '^npx ' "$GATE_FAKE_CALLS"; then fail 'перезапуск без отчёта стека перезапустил одни UI-тесты'; fi
+run 1 "${web_real_env[@]}" bash "$g8/scripts/gate.sh" --rerun-failed --no-attest
+grep -qF 'check-web full' "$GATE_FAKE_CALLS" || fail 'перезапуск не повторил весь веб'
+if grep -qE '^(npm|check) ' "$GATE_FAKE_CALLS"; then fail 'перезапуск задел прошедшие шаги npm/check'; fi
 
 # Битый индекс: git status падает, и проверка чистоты обязана провалиться, а не
 # пропустить аттестацию из-за пустого вывода.
 printf 'garbage' >"$scratch/.git/index"
 run 1 env CANTERLOT_LEASE_DRY=1 bash "$scratch/scripts/gate.sh"
 grep -q 'грязная' "$out" || { cat "$out" >&2; fail 'битый индекс не остановил гейт'; }
-
-# Выбор упавших тестов по file:line проверяем на настоящих спеках без браузера.
-if [[ -x web/node_modules/.bin/playwright ]]; then
-    bash scripts/gate/test-pw-selection.sh || fail 'выбор Playwright по file:line'
-else
-    printf 'выбор Playwright по file:line: пропущен, нет web/node_modules\n'
-fi
 
 # --- scripts/gate.sh --runner: гейт на раннере ---
 # Подмена canterlot-worker (CANTERLOT_WORKER_BIN) отвечает на `job run` и кладёт
@@ -527,7 +439,6 @@ new_runner_worktree() {
     cp scripts/gate/runner-gate.sh scripts/gate/in-container.sh "$seed/scripts/gate/"
     printf 'FROM scratch\n' >"$seed/docker/gate/Dockerfile"
     printf '[toolchain]\nchannel = "1.99.1"\n' >"$seed/rust-toolchain.toml"
-    printf '{"packages":{"node_modules/playwright-core":{"version":"1.64.1"}}}\n' >"$seed/web/package-lock.json"
     (
         cd "$seed"
         git init -q
@@ -596,7 +507,7 @@ run_line=$(grep '^run ' "$FAKE_DOCKER_CALLS") || { cat "$FAKE_DOCKER_CALLS" >&2;
 grep -q -- "--name canterlot-gate-${rsha:0:12}-[0-9a-f]\{8\} " <<<"$run_line" || fail "runner-gate: нет имени canterlot-gate-<sha12>-<случайное>: $run_line"
 grep -q -- '--cpus [0-9]' <<<"$run_line" || fail 'runner-gate: нет --cpus'
 grep -q -- '--memory [0-9]\+m' <<<"$run_line" || fail 'runner-gate: нет --memory'
-for cache in cargo target npm playwright; do
+for cache in cargo target npm; do
     grep -qF -- "-v $rr/cache/$cache:" <<<"$run_line" || fail "runner-gate: кэш $cache не под корнем раннера"
 done
 assert_git_mounted "$run_line" "$rwt" 'runner-gate'
@@ -615,7 +526,6 @@ run 0 "${rg_env[@]}" FAKE_DOCKER_IMAGE_RC=1 bash "$rwt/scripts/gate/runner-gate.
 build_line=$(grep '^build ' "$FAKE_DOCKER_CALLS") || fail 'runner-gate: образ не собран'
 grep -qF -- "-f $rwt/docker/gate/Dockerfile" <<<"$build_line" || fail "runner-gate: Dockerfile не из этой рабочей копии: $build_line"
 grep -qF -- 'RUST_VERSION=1.99.1' <<<"$build_line" || fail 'runner-gate: нет версии Rust из rust-toolchain.toml'
-grep -qF -- 'PLAYWRIGHT_VERSION=1.64.1' <<<"$build_line" || fail 'runner-gate: нет версии Playwright из package-lock.json'
 
 # Код гейта проходит наружу; без state.tsv и result.txt — провал даже при коде 0.
 rm -rf "$rwt/.gate-out"
@@ -660,8 +570,8 @@ src_host=$(sed -n 's/.* -v \([^ ]*\):\/src .*/\1/p' <<<"$run_line")
 grep -qF -- " -v $common:$common:ro " <<<"$run_line" || fail "gate-remote --local: общий каталог git не смонтирован только на чтение: $run_line"
 
 if command -v shellcheck >/dev/null 2>&1; then
-    shellcheck scripts/gate.sh scripts/gate-coverage.sh scripts/gate/test-pw-selection.sh scripts/gate-remote.sh \
-        scripts/gate/in-container.sh scripts/gate/runner-gate.sh scripts/gate/test.sh scripts/gate/fake-npx \
+    shellcheck scripts/gate.sh scripts/gate-coverage.sh scripts/gate-remote.sh \
+        scripts/gate/in-container.sh scripts/gate/runner-gate.sh scripts/gate/test.sh \
         scripts/gate/fake-check-web.sh scripts/gate/fake-worker scripts/gate/fake-docker \
         || fail "shellcheck"
 fi

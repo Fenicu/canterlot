@@ -115,7 +115,7 @@ mod tests {
 
     def test_typescript_rules_count_waits_skips_and_retries(self):
         make_tree(self.root, {
-            'web/e2e/ui/foo.spec.ts': '''\
+            'web/tests/ui/foo.spec.ts': '''\
 test.setTimeout(90_000);
 await page.waitForTimeout(100);
 await new Promise(r => setTimeout(r, 20));
@@ -130,11 +130,11 @@ retries: 2,
         result = self.check()
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         out = result.stdout
-        self.assertIn('web/e2e/ui/foo.spec.ts: ts_wait: 1 > 0', out)
-        self.assertIn('web/e2e/ui/foo.spec.ts: ts_setTimeout: 1 > 0', out)
-        self.assertIn('web/e2e/ui/foo.spec.ts: ts_skip: 1 > 0', out)
-        self.assertIn('web/e2e/ui/foo.spec.ts: ts_fixme: 1 > 0', out)
-        self.assertIn('web/e2e/ui/foo.spec.ts: web_retries: 1 > 0', out)
+        self.assertIn('web/tests/ui/foo.spec.ts: ts_wait: 1 > 0', out)
+        self.assertIn('web/tests/ui/foo.spec.ts: ts_setTimeout: 1 > 0', out)
+        self.assertIn('web/tests/ui/foo.spec.ts: ts_skip: 1 > 0', out)
+        self.assertIn('web/tests/ui/foo.spec.ts: ts_fixme: 1 > 0', out)
+        self.assertIn('web/tests/ui/foo.spec.ts: web_retries: 1 > 0', out)
 
     def test_typescript_patterns_in_comments_and_strings_are_not_counted(self):
         make_tree(self.root, {
@@ -152,7 +152,7 @@ const t = `test.skip(cond); retries: 2`;
 
     def test_web_retries_with_quarantine_comment_is_not_counted(self):
         make_tree(self.root, {
-            'web/e2e/ui/foo.spec.ts': '''\
+            'web/tests/ui/foo.spec.ts': '''\
 // QUARANTINE: причина карантина
 retries: 2,
 ''',
@@ -187,30 +187,30 @@ retries = 3
 class TestCheck(RatchetFixtureCase):
     def test_increase_reports_file_rule_counts_and_offending_lines(self):
         make_tree(self.root, {
-            'web/e2e/ui/foo.spec.ts': '''\
-import { test } from '@playwright/test';
+            'web/tests/ui/foo.spec.ts': '''\
+import { test } from 'test-framework';
 test('demo', async ({ page }) => {
   await page.waitForTimeout(100);
   await page.waitForTimeout(200);
 });
 ''',
         })
-        write_baseline(self.baseline, {'web/e2e/ui/foo.spec.ts': {'ts_wait': 1}})
+        write_baseline(self.baseline, {'web/tests/ui/foo.spec.ts': {'ts_wait': 1}})
         result = self.check()
         self.assertEqual(result.returncode, 1)
-        self.assertIn('РОСТ: web/e2e/ui/foo.spec.ts: ts_wait: 2 > 1', result.stdout)
+        self.assertIn('РОСТ: web/tests/ui/foo.spec.ts: ts_wait: 2 > 1', result.stdout)
         self.assertIn('строка 3', result.stdout)
         self.assertIn('строка 4', result.stdout)
         self.assertIn('await page.waitForTimeout(100);', result.stdout)
 
     def test_decrease_hints_update_without_failing(self):
         make_tree(self.root, {
-            'web/e2e/ui/foo.spec.ts': 'await page.waitForTimeout(100);\n',
+            'web/tests/ui/foo.spec.ts': 'await page.waitForTimeout(100);\n',
         })
-        write_baseline(self.baseline, {'web/e2e/ui/foo.spec.ts': {'ts_wait': 5}})
+        write_baseline(self.baseline, {'web/tests/ui/foo.spec.ts': {'ts_wait': 5}})
         result = self.check()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn('МЕНЬШЕ: web/e2e/ui/foo.spec.ts: ts_wait: 1 < 5', result.stdout)
+        self.assertIn('МЕНЬШЕ: web/tests/ui/foo.spec.ts: ts_wait: 1 < 5', result.stdout)
         self.assertIn('обновите базу', result.stdout)
         self.assertIn('update', result.stdout)
 
@@ -218,66 +218,66 @@ test('demo', async ({ page }) => {
 class TestUpdate(RatchetFixtureCase):
     def test_update_only_lowers_counts_and_drops_disappeared_files(self):
         make_tree(self.root, {
-            'web/e2e/ui/a.spec.ts': 'await page.waitForTimeout(100);\n',
+            'web/tests/ui/a.spec.ts': 'await page.waitForTimeout(100);\n',
         })
         write_baseline(self.baseline, {
-            'web/e2e/ui/a.spec.ts': {'ts_wait': 3, 'ts_skip': 2},
-            'web/e2e/ui/gone.spec.ts': {'ts_wait': 4},
+            'web/tests/ui/a.spec.ts': {'ts_wait': 3, 'ts_skip': 2},
+            'web/tests/ui/gone.spec.ts': {'ts_wait': 4},
         })
         result = self.update()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(
             self.read_baseline()['counts'],
-            {'web/e2e/ui/a.spec.ts': {'ts_wait': 1}},
+            {'web/tests/ui/a.spec.ts': {'ts_wait': 1}},
         )
 
     def test_update_rejects_increase_without_allowance(self):
         make_tree(self.root, {
-            'web/e2e/ui/foo.spec.ts': '''\
+            'web/tests/ui/foo.spec.ts': '''\
 await page.waitForTimeout(100);
 await page.waitForTimeout(200);
 ''',
         })
-        write_baseline(self.baseline, {'web/e2e/ui/foo.spec.ts': {'ts_wait': 1}})
+        write_baseline(self.baseline, {'web/tests/ui/foo.spec.ts': {'ts_wait': 1}})
         result = self.update()
         self.assertEqual(result.returncode, 1)
-        self.assertIn('НУЖНО РАЗРЕШЕНИЕ: web/e2e/ui/foo.spec.ts: ts_wait: 2 > 1', result.stdout)
-        self.assertEqual(self.read_baseline()['counts'], {'web/e2e/ui/foo.spec.ts': {'ts_wait': 1}})
+        self.assertIn('НУЖНО РАЗРЕШЕНИЕ: web/tests/ui/foo.spec.ts: ts_wait: 2 > 1', result.stdout)
+        self.assertEqual(self.read_baseline()['counts'], {'web/tests/ui/foo.spec.ts': {'ts_wait': 1}})
 
     def test_update_with_allowance_raises_count_records_reason_and_check_passes(self):
         make_tree(self.root, {
-            'web/e2e/ui/foo.spec.ts': '''\
+            'web/tests/ui/foo.spec.ts': '''\
 await page.waitForTimeout(100);
 await page.waitForTimeout(200);
 ''',
         })
-        write_baseline(self.baseline, {'web/e2e/ui/foo.spec.ts': {'ts_wait': 1}})
+        write_baseline(self.baseline, {'web/tests/ui/foo.spec.ts': {'ts_wait': 1}})
         result = self.update(
-            '--allow-increase', 'web/e2e/ui/foo.spec.ts', 'ts_wait', 'временная мера 19.11'
+            '--allow-increase', 'web/tests/ui/foo.spec.ts', 'ts_wait', 'временная мера 19.11'
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(
-            self.read_baseline()['counts'], {'web/e2e/ui/foo.spec.ts': {'ts_wait': 2}}
+            self.read_baseline()['counts'], {'web/tests/ui/foo.spec.ts': {'ts_wait': 2}}
         )
         self.assertEqual(
-            self.read_baseline()['allowances']['web/e2e/ui/foo.spec.ts']['ts_wait']['reason'],
+            self.read_baseline()['allowances']['web/tests/ui/foo.spec.ts']['ts_wait']['reason'],
             'временная мера 19.11',
         )
         self.assertEqual(self.check().returncode, 0)
 
     def test_further_increase_after_allowance_still_fails(self):
         make_tree(self.root, {
-            'web/e2e/ui/foo.spec.ts': '''\
+            'web/tests/ui/foo.spec.ts': '''\
 await page.waitForTimeout(100);
 await page.waitForTimeout(200);
 ''',
         })
         write_baseline(
             self.baseline,
-            {'web/e2e/ui/foo.spec.ts': {'ts_wait': 2}},
-            {'web/e2e/ui/foo.spec.ts': {'ts_wait': {'count': 2, 'reason': 'мера'}}},
+            {'web/tests/ui/foo.spec.ts': {'ts_wait': 2}},
+            {'web/tests/ui/foo.spec.ts': {'ts_wait': {'count': 2, 'reason': 'мера'}}},
         )
-        Path(self.root, 'web/e2e/ui/foo.spec.ts').write_text(
+        Path(self.root, 'web/tests/ui/foo.spec.ts').write_text(
             'await page.waitForTimeout(100);\n'
             'await page.waitForTimeout(200);\n'
             'await page.waitForTimeout(300);\n',
@@ -285,18 +285,18 @@ await page.waitForTimeout(200);
         )
         result = self.check()
         self.assertEqual(result.returncode, 1)
-        self.assertIn('web/e2e/ui/foo.spec.ts: ts_wait: 3 > 2', result.stdout)
+        self.assertIn('web/tests/ui/foo.spec.ts: ts_wait: 3 > 2', result.stdout)
 
     def test_first_update_creates_baseline(self):
         make_tree(self.root, {
-            'web/e2e/ui/foo.spec.ts': 'await page.waitForTimeout(100);\n',
+            'web/tests/ui/foo.spec.ts': 'await page.waitForTimeout(100);\n',
         })
         self.assertFalse(Path(self.baseline).exists())
         result = self.update()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn('база создана', result.stdout)
         self.assertEqual(
-            self.read_baseline()['counts'], {'web/e2e/ui/foo.spec.ts': {'ts_wait': 1}}
+            self.read_baseline()['counts'], {'web/tests/ui/foo.spec.ts': {'ts_wait': 1}}
         )
         self.assertEqual(self.check().returncode, 0)
 
