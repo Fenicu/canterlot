@@ -1013,6 +1013,17 @@ impl Worker {
             self.config.attachments.clone(),
             runtime_dir,
         );
+        // Облачные подключения переживают соединения и рестарт воркера: состояние лежит в
+        // каталоге данных, а задача носителя поднимает раннеров по тем же записям.
+        let cloud = self.runners.as_ref().map(|_| {
+            std::sync::Arc::new(crate::carrier::cloud::CloudState::open(
+                crate::carrier::cloud::CloudConfig {
+                    data_dir: self.config.data_dir.clone(),
+                    ssh_key: self.config.runners.ssh_key.clone(),
+                    ..crate::carrier::cloud::CloudConfig::default()
+                },
+            ))
+        });
         // Сокет задач владельца отказывает процессам внутри исполнений: сессия агента не
         // должна сама запускать работу на других машинах, да ещё выбирая домен.
         if runtime_allowed && let (Some(link), Some(store)) = (&self.runners, &owner_store) {
@@ -1092,7 +1103,7 @@ impl Worker {
         }
         // Команды несущей: исходники, результаты, уборка и итоги задач владельца. Возможность
         // включается на каждом соединении отдельно.
-        if let (Some(link), Some(store)) = (&self.runners, &owner_store) {
+        if let (Some(link), Some(store), Some(cloud)) = (&self.runners, &owner_store, &cloud) {
             let timings = crate::carrier::Timings::default();
             let stager =
                 crate::carrier::stage::Stager::new(crate::carrier::stage::StagerSettings {
@@ -1106,7 +1117,7 @@ impl Worker {
                     push_limit: timings.upload_limit,
                     allowed_roots: self.config.execution.allowed_workdir_roots.clone(),
                 });
-            manager.set_carrier(stager, store.clone());
+            manager.set_carrier(stager, store.clone(), cloud.clone());
         }
         // Восстановление до приёма любых доставок: брошенные временные файлы,
         // значения без манифеста и неполные публикации убираются раньше, чем
@@ -1180,8 +1191,10 @@ impl Worker {
         // Носитель живёт дольше одного соединения и останавливается вместе с воркером.
         let _carrier = self.runners.as_mut().and_then(|link| {
             let assigned = link.assigned.take()?;
+            let mut settings = crate::carrier::CarrierSettings::from_config(&self.config);
+            settings.cloud = cloud.clone();
             Some(AbortOnDrop(tokio::spawn(crate::carrier::run(
-                crate::carrier::CarrierSettings::from_config(&self.config),
+                settings,
                 link.bridge.clone(),
                 assigned,
                 shutdown.clone(),

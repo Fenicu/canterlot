@@ -199,6 +199,7 @@ impl Fixture {
                 lease_slots: 2,
             }],
             timings: test_timings(),
+            cloud: None,
         };
         let (assign, assigned_rx) = watch::channel(if assigned {
             vec![AssignedRunner {
@@ -475,6 +476,7 @@ async fn updating_the_binary_restarts_the_worker_and_a_running_job_survives() {
             lease_slots: 2,
         }],
         timings: test_timings(),
+        cloud: None,
     };
     let (_assign, assigned) = watch::channel(fixture.assigned());
     let join = tokio::spawn(carrier::run(
@@ -543,6 +545,7 @@ async fn a_cut_binary_upload_keeps_the_old_binary_and_the_next_round_retries() {
             lease_slots: 2,
         }],
         timings: test_timings(),
+        cloud: None,
     };
     let (_assign, assigned) = watch::channel(fixture.assigned());
     let join = tokio::spawn(carrier::run(
@@ -835,6 +838,7 @@ async fn removal_stops_the_worker_and_the_forward_but_shutdown_leaves_them() {
             lease_slots: 2,
         }],
         timings: test_timings(),
+        cloud: None,
     };
     let (assign, assigned) = watch::channel(fixture.assigned());
     let join = tokio::spawn(carrier::run(
@@ -948,6 +952,7 @@ async fn start_dead_runner(
                 lease_slots: 1,
             }],
             timings,
+            cloud: None,
         },
         control.clone(),
         assigned,

@@ -655,6 +655,7 @@ impl ExecutionManager {
         &self,
         stager: crate::carrier::stage::Stager,
         store: Arc<crate::owner_jobs::Store>,
+        cloud: Arc<crate::carrier::cloud::CloudState>,
     ) -> Arc<crate::carrier::commands::CarrierCommands> {
         let sink = Arc::new(JobsSink {
             shared: Arc::downgrade(&self.shared),
@@ -663,6 +664,7 @@ impl ExecutionManager {
             stager,
             store,
             sink,
+            cloud,
             self.shared.shutdown.clone(),
         );
         let _ = self.shared.carrier.set(commands.clone());

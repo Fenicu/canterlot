@@ -57,6 +57,7 @@ mod canterlot_mcp_presets;
 mod canterlot_mcp_sessions;
 mod capabilities_cli;
 mod carrier;
+mod carrier_cloud;
 mod carrier_commands;
 mod carrier_hub;
 mod carrier_stage;

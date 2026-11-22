@@ -17,12 +17,14 @@ use std::{
 
 use async_trait::async_trait;
 use canterlot_proto::worker::v1::{
-    Command, OutputFile, OutputsCollectFailed, OutputsCollected, SourceCleaned, SourceStageFailed,
-    SourceStaged, command::Kind, record_body::Body,
+    AttachRunner, Command, OutputFile, OutputsCollectFailed, OutputsCollected, SourceCleaned,
+    SourceStageFailed, SourceStaged, command::Kind, record_body::Body,
 };
 use tokio::sync::watch;
+use uuid::Uuid;
 
 use super::{
+    cloud::{AttachError, Attachment, CloudState},
     collect::{CollectRequest, Outputs},
     stage::{CleanupRequest, Failure, StageRequest, Stager},
 };
@@ -49,6 +51,7 @@ pub struct CarrierCommands {
     stager: Stager,
     store: Arc<Store>,
     sink: Arc<dyn FactSink>,
+    cloud: Arc<CloudState>,
     enabled: AtomicBool,
     /// `(job_id, вид команды)` исполняемых сейчас: повторная доставка не запускает вторую копию.
     running: Mutex<HashSet<(String, &'static str)>>,
@@ -74,12 +77,14 @@ impl CarrierCommands {
         stager: Stager,
         store: Arc<Store>,
         sink: Arc<dyn FactSink>,
+        cloud: Arc<CloudState>,
         shutdown: watch::Receiver<bool>,
     ) -> Arc<Self> {
         Arc::new(Self {
             stager,
             store,
             sink,
+            cloud,
             enabled: AtomicBool::new(false),
             running: Mutex::default(),
             shutdown,
@@ -216,7 +221,44 @@ impl CarrierCommands {
                     .await
                     .map_err(|()| CommandError::Io)
             }
+            Some(Kind::AttachRunner(attach)) => {
+                let command = attach.clone();
+                self.attach(&command)?;
+                // Хаб считает окно готовым, когда воркер раннера подключился; отдельного факта
+                // протокол не несёт, поэтому команда гасится обычным подтверждением.
+                self.sink
+                    .facts(vec![], terminal)
+                    .await
+                    .map_err(|()| CommandError::Io)
+            }
             _ => Err(CommandError::Invalid),
+        }
+    }
+
+    /// Принимает подключение облачного раннера. Команда долговечна и идемпотентна по
+    /// `window_id`: носитель запоминает её до ответа, а реальное подключение ведёт задача
+    /// раннера, поэтому повтор не поднимает второй воркер или туннель.
+    fn attach(&self, attach: &AttachRunner) -> Result<(), CommandError> {
+        let Ok(machine_id) = Uuid::parse_str(&attach.machine_id) else {
+            return Err(CommandError::Invalid);
+        };
+        let Ok(ssh_port) = u16::try_from(attach.ssh_port) else {
+            return Err(CommandError::Invalid);
+        };
+        let attachment = Attachment {
+            window_id: attach.window_id.clone(),
+            machine_id,
+            host: attach.host.clone(),
+            ssh_port,
+            host_key_public: attach.host_key_public.clone(),
+            root_dir: PathBuf::from(&attach.root_dir),
+            max_running: attach.max_running,
+            lease_slots: attach.lease_slots,
+        };
+        match self.cloud.apply(attachment) {
+            Ok(()) => Ok(()),
+            Err(AttachError::Invalid) => Err(CommandError::Invalid),
+            Err(AttachError::Io) => Err(CommandError::Io),
         }
     }
 
