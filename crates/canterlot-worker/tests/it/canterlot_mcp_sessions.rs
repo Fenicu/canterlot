@@ -97,8 +97,8 @@ fn session_tools_listed_for_all_three_providers() {
         let memory_tools = 5;
         // job_run, job_status, job_log, job_cancel, jobs_list.
         let job_tools = mcp::JOB_TOOLS.len();
-        // runners_list: раннеры несущей, только чтение.
-        let runners_tools = 1;
+        // runners_list и runner_propose: список раннеров и предложение облачного окна.
+        let runners_tools = 2;
         let expected = if tool_set == ToolSet::ApproveAndLimits {
             2 + 3
                 + SESSION_TOOLS.len()
