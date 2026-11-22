@@ -305,20 +305,21 @@ pub async fn approve_in_tx(
     correlation: Uuid,
 ) -> Result<ApproveOutcome, SubmitError> {
     send::lock_queue(conn, parent).await?;
-    let row: Option<(RequestState, Value)> = sqlx::query_as(
-        "select state, request_payload from requests
+    let row: Option<(RequestState, Value, Option<DateTime<Utc>>)> = sqlx::query_as(
+        "select state, request_payload, expires_at from requests
           where id = $1 and kind = 'cloud_window' for update",
     )
     .bind(request_id)
     .fetch_optional(&mut *conn)
     .await?;
-    let Some((RequestState::DecisionSaved, payload)) = row else {
+    let Some((RequestState::DecisionSaved, payload, expires_at)) = row else {
         return Ok(ApproveOutcome::AlreadyDecided);
     };
     let Ok(card) = serde_json::from_value::<CloudCard>(payload) else {
         return Ok(ApproveOutcome::Refused("invalid_card".to_owned()));
     };
-    if card.expires_at <= Utc::now() {
+    // Источник срока — колонка запроса: задание истечения могло изменить именно её.
+    if expires_at.is_some_and(|at| at <= Utc::now()) || card.expires_at <= Utc::now() {
         close_in_tx(
             conn,
             request_id,

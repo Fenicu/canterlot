@@ -70,6 +70,7 @@ impl Fx {
                 spawn_queue: Default::default(),
                 guards: Default::default(),
                 dispatcher: None,
+                cloud: None,
                 shutdown: CancellationToken::new(),
                 registry: canterlot_hub::session::Registry::new(Default::default()),
             },

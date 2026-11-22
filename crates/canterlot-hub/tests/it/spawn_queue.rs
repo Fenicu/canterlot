@@ -140,6 +140,7 @@ impl Fx {
                 spawn_queue: Default::default(),
                 guards: Default::default(),
                 dispatcher: None,
+                cloud: None,
                 registry,
                 shutdown: tokio_util::sync::CancellationToken::new(),
             },

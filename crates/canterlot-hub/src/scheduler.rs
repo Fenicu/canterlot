@@ -1357,7 +1357,7 @@ impl Scheduler {
                     routing_stale: self.routing_stale,
                     routing_queue_horizon: self.routing_queue_horizon,
                 };
-                match crate::session_tools::jobs::run_in_tx(
+                match crate::session_tools::jobs::run_in_tx_with_cloud(
                     &mut tx,
                     &claimed,
                     now,

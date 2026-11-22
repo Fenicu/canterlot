@@ -41,6 +41,7 @@ async fn sender_with_forwarded_attachment_can_be_deleted(pool: PgPool) {
         spawn_queue: Default::default(),
         guards: Default::default(),
         dispatcher: None,
+        cloud: None,
         registry: canterlot_hub::session::Registry::new(Default::default()),
         shutdown: tokio_util::sync::CancellationToken::new(),
     };
@@ -160,6 +161,7 @@ async fn empty_attachment_is_forwarded_by_sessions_send(pool: PgPool) {
         spawn_queue: Default::default(),
         guards: Default::default(),
         dispatcher: None,
+        cloud: None,
         registry: canterlot_hub::session::Registry::new(Default::default()),
         shutdown: tokio_util::sync::CancellationToken::new(),
     };

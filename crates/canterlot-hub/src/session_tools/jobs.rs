@@ -146,7 +146,40 @@ impl Action {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Обычный вызов без облачной службы: карточки облака в таком задании не создаются.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_in_tx(
+    conn: &mut PgConnection,
+    job: &ClaimedJob,
+    now: DateTime<Utc>,
+    correlation_id: Uuid,
+    registry: Option<&Registry>,
+    settle: &crate::session_tools::settle::SettleConfig,
+    thresholds: &crate::activity::Thresholds,
+    spawn_runtime: Option<&crate::session_tools::spawn_queue::Runtime<'_>>,
+    probe: Option<crate::session_tools::probe::PathProbe>,
+    limits: &LimitsConfig,
+    retry_delay: Duration,
+) -> Result<JobOutcome, SubmitError> {
+    run_in_tx_with_cloud(
+        conn,
+        job,
+        now,
+        correlation_id,
+        registry,
+        settle,
+        thresholds,
+        spawn_runtime,
+        None,
+        probe,
+        limits,
+        retry_delay,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn run_in_tx_with_cloud(
     conn: &mut PgConnection,
     job: &ClaimedJob,
     now: DateTime<Utc>,

@@ -348,7 +348,16 @@ pub async fn episode_start(conn: &mut PgConnection, card: Uuid) -> Result<(), sq
 
 pub async fn episode_end(conn: &mut PgConnection) -> Result<(), sqlx::Error> {
     sqlx::query("update cloud_auto_episode set active = false, card_id = null where singleton")
-        .execute(conn)
+        .execute(&mut *conn)
         .await?;
+    // Очередь опустела: карточка хаба больше не актуальна. Иначе она блокировала бы
+    // выдачу новой карточки при следующем наполнении очереди.
+    sqlx::query(
+        "update requests set state = 'closed_without_decision', updated_at = clock_timestamp()
+          where kind = 'cloud_window' and state = 'open'
+            and request_payload->>'source' = 'hub'",
+    )
+    .execute(conn)
+    .await?;
     Ok(())
 }

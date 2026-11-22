@@ -276,6 +276,7 @@ impl Fx {
             spawn_queue: Default::default(),
             guards: Default::default(),
             dispatcher: None,
+            cloud: None,
             registry: self.hub.registry.clone(),
             shutdown: CancellationToken::new(),
         }

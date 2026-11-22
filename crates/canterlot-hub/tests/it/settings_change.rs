@@ -67,6 +67,7 @@ impl Fx {
             spawn_queue: Default::default(),
             guards: Default::default(),
             dispatcher: None,
+            cloud: None,
             registry: canterlot_hub::session::Registry::new(Default::default()),
             shutdown: tokio_util::sync::CancellationToken::new(),
         };
@@ -767,6 +768,7 @@ async fn approval_job_takes_the_queue_before_the_request_row(pool: PgPool) {
             spawn_queue: Default::default(),
             guards: Default::default(),
             dispatcher: None,
+            cloud: None,
             registry: f.context.registry.clone(),
             shutdown: tokio_util::sync::CancellationToken::new(),
         };
