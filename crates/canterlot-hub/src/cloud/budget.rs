@@ -73,7 +73,7 @@ pub enum UpdateError {
     Db(#[from] sqlx::Error),
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Update {
     pub monthly_budget_kopecks: i64,

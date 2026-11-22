@@ -86,7 +86,7 @@ pub struct Proposer {
     pub generation: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct Opened {
     pub request_id: Uuid,
     pub reservation_kopecks: i64,
