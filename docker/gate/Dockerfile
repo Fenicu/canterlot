@@ -19,7 +19,9 @@ ARG DEBIAN_FRONTEND=noninteractive
 # и e2e/stack/global-teardown.ts; openssl — самоподписанные сертификаты стенда;
 # libnss-wrapper — passwd-запись для uid, который приходит снаружи (её требует
 # initdb, а в контейнере пользователя нет); shellcheck и zstd — наборы
-# scripts/deploy/tests, которые гейт гоняет и в контейнере.
+# scripts/deploy/tests, которые гейт гоняет и в контейнере; openssh-client,
+# openssh-server и rsync — тесты носителя поднимают свой sshd на временных ключах
+# и копируют файлы через rsync (все пути и ключи лежат в их temp-каталоге).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         binutils \
@@ -32,11 +34,14 @@ RUN apt-get update \
         jq \
         libnss-wrapper \
         locales \
+        openssh-client \
+        openssh-server \
         openssl \
         pkg-config \
         procps \
         protobuf-compiler \
         python3 \
+        rsync \
         shellcheck \
         strace \
         tar \
