@@ -1,102 +1,19 @@
 import { defineConfig, devices } from '@playwright/test';
-import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { tmpdir } from 'node:os';
-import { fakeAudioFile } from './testing/fake-audio.mjs';
 
-// Гейт выпуска просит machine-readable отчёт о проваленных тестах: он читает
-// идентичности (проект, файл, заголовок) из JSON, а не из текста лога. Без переменных
-// конфиг ведёт себя как раньше — список тестов в stdout и никаких файлов отчёта.
-const pwJsonReport = process.env.CANTERLOT_PW_JSON_REPORT;
-const stackJsonReport = process.env.CANTERLOT_STACK_JSON_REPORT;
-const SLOT_SUFFIX = process.env.CANTERLOT_STACK_SLOT ? `-${process.env.CANTERLOT_STACK_SLOT}` : '';
-const STACK_INFO_FILE = join(tmpdir(), `canterlot-stack-info${SLOT_SUFFIX}.json`);
-// Cookie владельца, которую global-setup стенда получает по ссылке восстановления.
-const STACK_STATE_FILE = join(tmpdir(), `canterlot-stack-state${SLOT_SUFFIX}.json`);
-// Процессы-исполнители перечитывают конфиг без аргументов командной строки: признак стенда идёт им через окружение.
-const isStackOrPerf = process.env.CANTERLOT_STACK_RUN === '1' || process.argv.some(a => a.includes('e2e/stack') || a.includes('e2e/perf'));
-if (isStackOrPerf) process.env.CANTERLOT_STACK_RUN = '1';
-// Скриншоты тем и README снимаются отдельно: в обычный прогон они не входят.
+// Браузерные тесты удалены 22.11.2026 по решению владельца. Обвязка осталась
+// для разовых проверок экрана и снимков: см. «Разовая проверка экрана в браузере»
+// в docs/development.md. Скриншоты README снимаются отдельным режимом.
 const screenshots = process.env.PW_SCREENSHOTS === '1';
-// Самопроверки обвязки — контактный лист макетов и провод fake-hub в Playwright — проверяют
-// инструменты, а не продукт. В обычный прогон они не входят и включаются PW_HARNESS=1
-// (npm run test:harness), когда меняется сама обвязка.
-const harness = process.env.PW_HARNESS === '1';
-const HARNESS_SPEC = /(?:contact-sheet|fake-hub-wire)\.spec\.ts$/;
-// Бюджет прыжка к сообщению меряется настенными часами: под соседними процессами гейта самая
-// длинная задача растягивается с 133 мс до двух секунд, и запас тут не помогает. Замер идёт
-// отдельным прогоном PW_BUDGET=1 (npm run test:budget) в тихом окне, как самопроверки обвязки.
-const budget = process.env.PW_BUDGET === '1';
-const RENDER_BUDGET = /render_budget_during_long_stream/;
-const JUMP_BUDGET = /owner_messages_jump_long_task/;
-
-let origin = `http://127.0.0.1:${Number(process.env.PORT ?? 4173)}`;
-if (isStackOrPerf && existsSync(STACK_INFO_FILE)) {
-  try {
-    origin = JSON.parse(readFileSync(STACK_INFO_FILE, 'utf8')).baseUrl;
-  } catch {}
-}
-
-const jsonReportFile = isStackOrPerf
-  ? stackJsonReport ? `${stackJsonReport}${SLOT_SUFFIX}.json` : undefined
-  : pwJsonReport ? `${pwJsonReport}.json` : undefined;
-
-const requestedWorkers = process.env.PW_WORKERS;
-const workers = requestedWorkers ? (requestedWorkers.endsWith('%') ? requestedWorkers : Number(requestedWorkers)) : '50%';
-
-const phone = { ...devices['Pixel 7'], browserName: 'chromium' as const };
-// Настоящий worklet проверяется отдельным проектом: ему нужны поддельный микрофон и тон из файла.
-const DICTATION_MEDIA_SPEC = /dictation-worklet\.spec\.ts$/;
-const dictationAudio = fakeAudioFile();
-const LAYOUT_SPEC = /desktop-layout\.spec\.ts$/;
-// testIgnore проекта заменяет общий, а не дополняет: проекты phone и desktop повторяют его сами.
-const baseIgnore = isStackOrPerf
-  ? [LAYOUT_SPEC]
-  : ['**/e2e/stack/**', '**/e2e/perf/**', ...(screenshots ? [] : ['**/e2e/screenshots/**']), LAYOUT_SPEC, ...(harness ? [] : [HARNESS_SPEC])];
-const firefoxLayout = (name: string, width: number, height: number) => ({
-  name,
-  workers: 1,
-  testMatch: LAYOUT_SPEC,
-  testIgnore: [],
-  use: { browserName: 'firefox' as const, viewport: { width, height } }
-});
+const origin = `http://127.0.0.1:${Number(process.env.PORT ?? 4173)}`;
 
 export default defineConfig({
-  testDir: './e2e',
-  reporter: jsonReportFile ? [['list'], ['json', { outputFile: jsonReportFile }]] : [['list']],
-  // Проект budget зависит от phone и desktop, поэтому прогон `e2e/ui` тянул бы за собой и сквозные наборы, которым нужен стенд.
-  testIgnore: baseIgnore,
-  // Тесты независимы: пара «проект, тест» занимает воркер сама. Стенд и перф делят одно состояние и идут по одному.
-  fullyParallel: !isStackOrPerf,
-  workers: isStackOrPerf ? 1 : workers,
-  globalSetup: isStackOrPerf ? './e2e/stack/global-setup.ts' : undefined,
-  globalTeardown: isStackOrPerf ? './e2e/stack/global-teardown.ts' : undefined,
-  use: { baseURL: origin, trace: 'retain-on-failure', storageState: isStackOrPerf ? STACK_STATE_FILE : undefined },
-  webServer: isStackOrPerf
-    ? undefined
-    : { command: 'node e2e/edge/serve.mjs', url: origin, reuseExistingServer: false },
-  projects: [
-    { name: 'phone', grepInvert: /render_budget_during_long_stream|owner_messages_jump_long_task/, testIgnore: [...baseIgnore, DICTATION_MEDIA_SPEC], use: phone },
-    { name: 'desktop', workers: isStackOrPerf ? 1 : undefined, testIgnore: [...baseIgnore, DICTATION_MEDIA_SPEC], use: { browserName: 'firefox', viewport: { width: 1440, height: 900 } } },
-    {
-      name: 'dictation-media',
-      testMatch: DICTATION_MEDIA_SPEC,
-      use: {
-        ...phone,
-        launchOptions: {
-          args: [
-            '--use-fake-device-for-media-stream',
-            '--use-fake-ui-for-media-stream',
-            `--use-file-for-fake-audio-capture=${dictationAudio}`
-          ]
-        }
-      }
-    },
-    firefoxLayout('layout-1024', 1024, 768),
-    firefoxLayout('layout-1440', 1440, 900),
-    firefoxLayout('layout-2560', 2560, 1440),
-    firefoxLayout('layout-3840', 3840, 2160),
-    // Дроссель 4× считает время кадра по настенным часам: соседний браузер на этой машине раздувает задачу за 200 мс.
-    { name: 'budget', workers: 1, dependencies: ['phone', 'desktop'], grep: budget ? new RegExp(`${RENDER_BUDGET.source}|${JUMP_BUDGET.source}`) : RENDER_BUDGET, use: phone }
-  ]
+    testDir: './e2e',
+    // Снимки README пишутся в docs/screenshots и в обычный прогон не входят.
+    testIgnore: screenshots ? [] : ['**/e2e/screenshots/**'],
+    use: { baseURL: origin, trace: 'retain-on-failure' },
+    webServer: { command: 'node e2e/edge/serve.mjs', url: origin, reuseExistingServer: false },
+    projects: [
+        { name: 'phone', use: { ...devices['Pixel 7'], browserName: 'chromium' as const } },
+        { name: 'desktop', use: { browserName: 'firefox' as const, viewport: { width: 1440, height: 900 } } }
+    ]
 });
