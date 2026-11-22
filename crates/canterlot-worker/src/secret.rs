@@ -2345,7 +2345,10 @@ mod tests {
             .recv_timeout(Duration::from_secs(5))
             .expect("preparation deadlocked on an alias of the same root");
         assert_eq!(prepared, Ok(()));
-        assert!(written.path.exists(), "identity loss preserves the live file");
+        assert!(
+            written.path.exists(),
+            "identity loss preserves the live file"
+        );
     }
 
     #[test]
@@ -2379,9 +2382,7 @@ mod tests {
         prepare_storage_with_default(&configured.config(), data.path(), Some(&default.0))
             .expect("identity loss is recoverable");
         assert!(in_configured.path.exists(), "configured value survives");
-        assert!(
-            std::fs::read(&in_configured.path).unwrap() == b"configured\n"
-        );
+        assert!(std::fs::read(&in_configured.path).unwrap() == b"configured\n");
         assert!(data.path().join("secret-root.json").exists());
     }
 
@@ -2925,7 +2926,10 @@ mod tests {
         assert_eq!(recovered.values, 0);
         let swept = sweep(&base.config(), now_ms());
         assert!(swept.removed.is_empty());
-        assert!(written.path.exists(), "a live file survives a second worker");
+        assert!(
+            written.path.exists(),
+            "a live file survives a second worker"
+        );
         assert_eq!(
             std::fs::read(&written.path).unwrap(),
             b"value\n",

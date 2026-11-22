@@ -31,8 +31,8 @@ use tokio::{
 use uuid::Uuid;
 #[path = "process_guard.rs"]
 mod process_guard;
-use process_guard::ProcessGuard;
 use crate::support::TempSecrets;
+use process_guard::ProcessGuard;
 
 pub const WAIT: Duration = Duration::from_secs(20);
 pub async fn until(mut condition: impl AsyncFnMut() -> bool) {
@@ -133,7 +133,8 @@ impl Fixture {
         fs::write(&ca_cert, &hub.pki.ca_pem).unwrap();
         let work = root.path().join("work");
         fs::create_dir(&work).unwrap();
-        let executable = if hold_gate {            let wrapper = root.path().join("supervisor");
+        let executable = if hold_gate {
+            let wrapper = root.path().join("supervisor");
             fake_exec::write_executable(
                 &wrapper,
                 format!(

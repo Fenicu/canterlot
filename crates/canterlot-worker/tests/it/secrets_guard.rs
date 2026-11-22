@@ -43,12 +43,7 @@ fn no_default_secret_base_in_worker_tests() {
                     continue;
                 }
                 if needles.iter().any(|needle| line.contains(needle)) {
-                    offenders.push(format!(
-                        "{}:{}: {}",
-                        file.display(),
-                        index + 1,
-                        line.trim()
-                    ));
+                    offenders.push(format!("{}:{}: {}", file.display(), index + 1, line.trim()));
                 }
             }
         }
