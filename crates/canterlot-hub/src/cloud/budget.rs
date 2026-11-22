@@ -142,9 +142,7 @@ pub async fn view(
 }
 
 /// Текущая ревизия и бюджет: для карточек и автоматики, без сетевых вызовов.
-pub async fn settings(
-    conn: &mut PgConnection,
-) -> Result<(i64, bool, Option<String>), sqlx::Error> {
+pub async fn settings(conn: &mut PgConnection) -> Result<(i64, bool, Option<String>), sqlx::Error> {
     sqlx::query_as(
         "select monthly_budget_kopecks, auto_mode, provider_block_code from cloud_budget where singleton",
     )
@@ -172,17 +170,13 @@ pub async fn maybe_alert(
     let month = windows::month_of(now);
     let mut conn = pool.acquire().await?;
     let spent = windows::spent_in_month(&mut conn, &month).await?;
-    let (mark_80, mark_100): (Option<String>, Option<String>) = sqlx::query_as(
-        "select alert_80_month, alert_100_month from cloud_budget where singleton",
-    )
-    .fetch_one(&mut *conn)
-    .await?;
+    let (mark_80, mark_100): (Option<String>, Option<String>) =
+        sqlx::query_as("select alert_80_month, alert_100_month from cloud_budget where singleton")
+            .fetch_one(&mut *conn)
+            .await?;
     let mut sent = 0;
     // Две фиксированные колонки: динамический SQL здесь не нужен и не разрешён sqlx.
-    for (percent, current, is_80) in [
-        (80_i64, mark_80, true),
-        (100_i64, mark_100, false),
-    ] {
+    for (percent, current, is_80) in [(80_i64, mark_80, true), (100_i64, mark_100, false)] {
         if current.as_deref() == Some(month.as_str())
             || spent.saturating_mul(100) < budget_kopecks.saturating_mul(percent)
         {
@@ -268,11 +262,10 @@ pub async fn static_candidates(
     conn: &mut PgConnection,
     config: &CloudConfig,
 ) -> Result<Vec<Uuid>, sqlx::Error> {
-    let cloud: Option<Uuid> = sqlx::query_scalar(
-        "select cloud_machine_id from cloud_budget where singleton",
-    )
-    .fetch_one(&mut *conn)
-    .await?;
+    let cloud: Option<Uuid> =
+        sqlx::query_scalar("select cloud_machine_id from cloud_budget where singleton")
+            .fetch_one(&mut *conn)
+            .await?;
     sqlx::query_scalar(
         "select distinct m.id from machines m
            join jobs j on j.state = 'waiting_runner' and j.labels <@ m.labels

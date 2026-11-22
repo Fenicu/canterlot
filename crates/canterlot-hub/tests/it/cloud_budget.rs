@@ -105,7 +105,8 @@ impl Rig {
         provider_config.max_rate_limit_retries = 1;
         provider_config.default_backoff = Duration::from_millis(5);
         provider_config.max_backoff = Duration::from_millis(20);
-        let provider = Arc::new(canterlot_hub::cloud::TimewebProvider::new(provider_config).unwrap());
+        let provider =
+            Arc::new(canterlot_hub::cloud::TimewebProvider::new(provider_config).unwrap());
         let mut config = cloud_config(carrier.machine_id);
         tweak(&mut config);
         let registry = Registry::new(Default::default());
@@ -262,23 +263,20 @@ impl Rig {
             message: None,
         })
         .unwrap();
-        sqlx::query(
-            "update requests set state='decision_saved', decision_payload=$2 where id=$1",
-        )
-        .bind(request)
-        .bind(payload)
-        .execute(&self.pool)
-        .await
-        .unwrap();
+        sqlx::query("update requests set state='decision_saved', decision_payload=$2 where id=$1")
+            .bind(request)
+            .bind(payload)
+            .execute(&self.pool)
+            .await
+            .unwrap();
     }
 
     async fn approve(&self, request: Uuid) -> cloud_propose::ApproveOutcome {
-        let parent: Uuid =
-            sqlx::query_scalar("select conversation_id from requests where id=$1")
-                .bind(request)
-                .fetch_one(&self.pool)
-                .await
-                .unwrap();
+        let parent: Uuid = sqlx::query_scalar("select conversation_id from requests where id=$1")
+            .bind(request)
+            .fetch_one(&self.pool)
+            .await
+            .unwrap();
         let mut conn = self.pool.acquire().await.unwrap();
         cloud_propose::approve_in_tx(
             &mut conn,
@@ -366,7 +364,8 @@ struct Api {
 
 impl Api {
     async fn new(pool: PgPool, cloud: Option<Arc<CloudService>>) -> Self {
-        let (mut deps, _) = testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
+        let (mut deps, _) =
+            testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
         deps.cloud = cloud;
         let router = http::router(AppState::new(deps));
         Self {
@@ -374,7 +373,13 @@ impl Api {
         }
     }
 
-    async fn send(&self, method: Method, path: &str, body: Option<Value>, key: &str) -> (u16, Value) {
+    async fn send(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<Value>,
+        key: &str,
+    ) -> (u16, Value) {
         let response = self.client.send(method, path, Some(key), body).await;
         let status = response.status.as_u16();
         let value = if response.body.is_empty() {
@@ -399,7 +404,10 @@ async fn budget_http_reads_spent_and_remaining_and_put_checks_revision(pool: PgP
         .await;
     assert_eq!(status, 200, "{view}");
     assert_eq!(view["monthly_budget_kopecks"], 10_000);
-    assert_eq!(view["spent_kopecks"], 3_000, "ended final + live reservation");
+    assert_eq!(
+        view["spent_kopecks"], 3_000,
+        "ended final + live reservation"
+    );
     assert_eq!(view["remaining_kopecks"], 7_000);
     assert_eq!(view["revision"], 0);
     assert_eq!(view["auto_mode"], false);
@@ -407,7 +415,12 @@ async fn budget_http_reads_spent_and_remaining_and_put_checks_revision(pool: PgP
 
     let body = json!({"monthly_budget_kopecks": 20_000, "auto_mode": true, "base_revision": 0});
     let (status, updated) = api
-        .send(Method::PUT, "/api/v1/cloud/budget", Some(body.clone()), "key-1")
+        .send(
+            Method::PUT,
+            "/api/v1/cloud/budget",
+            Some(body.clone()),
+            "key-1",
+        )
         .await;
     assert_eq!(status, 200, "{updated}");
     assert_eq!(updated["revision"], 1);
@@ -469,7 +482,11 @@ async fn owner_form_and_agent_tool_create_cards_not_windows(pool: PgPool) -> Tes
     assert_eq!(kind, "cloud_window");
     assert!(opened["reservation_kopecks"].as_i64().unwrap() > 0);
     assert_eq!(opened["over_budget"], false);
-    assert_eq!(rig.windows_for(request).await, 0, "a card creates no window");
+    assert_eq!(
+        rig.windows_for(request).await,
+        0,
+        "a card creates no window"
+    );
 
     // Второй вызов с тем же ключом идемпотентен; новый ключ упирается в открытую карточку.
     let (_, again) = api
@@ -539,17 +556,23 @@ async fn approving_a_card_creates_exactly_one_window_even_twice(pool: PgPool) ->
         other => panic!("expected a window, got {other:?}"),
     };
     assert_eq!(rig.windows_for(request).await, 1);
-    let (trigger, proposal): (String, Uuid) = sqlx::query_as(
-        "select trigger, proposal_id from cloud_windows where id=$1",
-    )
-    .bind(window)
-    .fetch_one(&rig.pool)
-    .await?;
+    let (trigger, proposal): (String, Uuid) =
+        sqlx::query_as("select trigger, proposal_id from cloud_windows where id=$1")
+            .bind(window)
+            .fetch_one(&rig.pool)
+            .await?;
     assert_eq!(trigger, Trigger::Card.as_str());
     assert_eq!(proposal, request);
     assert_eq!(rig.request_state(request).await, "decision_applied");
-    assert_eq!(rig.approve(request).await, cloud_propose::ApproveOutcome::AlreadyDecided);
-    assert_eq!(rig.windows_for(request).await, 1, "a second approval creates no window");
+    assert_eq!(
+        rig.approve(request).await,
+        cloud_propose::ApproveOutcome::AlreadyDecided
+    );
+    assert_eq!(
+        rig.windows_for(request).await,
+        1,
+        "a second approval creates no window"
+    );
     Ok(())
 }
 
@@ -563,7 +586,10 @@ async fn expired_card_is_closed_without_a_window(pool: PgPool) -> TestResult {
         .execute(&rig.pool)
         .await?;
     rig.decision(request, true).await;
-    assert_eq!(rig.approve(request).await, cloud_propose::ApproveOutcome::Expired);
+    assert_eq!(
+        rig.approve(request).await,
+        cloud_propose::ApproveOutcome::Expired
+    );
     assert_eq!(rig.request_state(request).await, "expired");
     assert_eq!(rig.windows_for(request).await, 0);
     Ok(())
@@ -596,7 +622,11 @@ async fn card_outdated_issues_a_fresh_card_with_the_new_numbers(pool: PgPool) ->
     assert_eq!(payload["reason"], "сборка");
     assert_eq!(payload["source"], "repriced");
     assert_eq!(rig.request_state(request).await, "decision_not_applied");
-    assert_eq!(rig.windows_for(request).await, 0, "no window on an outdated card");
+    assert_eq!(
+        rig.windows_for(request).await,
+        0,
+        "no window on an outdated card"
+    );
     Ok(())
 }
 
@@ -614,11 +644,15 @@ async fn over_budget_card_passes_only_with_its_exact_reservation(pool: PgPool) -
     rig.decision(request, true).await;
     // Согласие ровно на резерв: единственный путь, где бюджет можно превысить.
     let created = rig.approve(request).await;
-    assert!(matches!(created, cloud_propose::ApproveOutcome::Created(_)), "{created:?}");
-    let stored: i64 = sqlx::query_scalar("select reservation_kopecks from cloud_windows where proposal_id=$1")
-        .bind(request)
-        .fetch_one(&rig.pool)
-        .await?;
+    assert!(
+        matches!(created, cloud_propose::ApproveOutcome::Created(_)),
+        "{created:?}"
+    );
+    let stored: i64 =
+        sqlx::query_scalar("select reservation_kopecks from cloud_windows where proposal_id=$1")
+            .bind(request)
+            .fetch_one(&rig.pool)
+            .await?;
     assert_eq!(stored, reservation);
     Ok(())
 }
@@ -679,12 +713,17 @@ async fn declining_a_card_reports_to_the_proposer(pool: PgPool) -> TestResult {
     .bind(parent)
     .fetch_one(&rig.pool)
     .await?;
-    assert!(note.contains("[canterlot]") && note.contains("declined"), "{note}");
+    assert!(
+        note.contains("[canterlot]") && note.contains("declined"),
+        "{note}"
+    );
     Ok(())
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn auto_mode_requires_continuous_unavailability_and_pushes_the_reservation(pool: PgPool) -> TestResult {
+async fn auto_mode_requires_continuous_unavailability_and_pushes_the_reservation(
+    pool: PgPool,
+) -> TestResult {
     let rig = Rig::new(pool).await;
     rig.set_budget(1_000_000, true).await;
     let _carrier = testkit::fake_session(&rig.registry, rig.carrier, &["runners_v1"], true);
@@ -697,9 +736,11 @@ async fn auto_mode_requires_continuous_unavailability_and_pushes_the_reservation
     rig.service.tick(t0).await;
     assert_eq!(rig.windows_for(Uuid::nil()).await, 0);
     assert_eq!(
-        sqlx::query_scalar::<_, String>("select state from cloud_windows order by created_at desc limit 1")
-            .fetch_optional(&rig.pool)
-            .await?,
+        sqlx::query_scalar::<_, String>(
+            "select state from cloud_windows order by created_at desc limit 1"
+        )
+        .fetch_optional(&rig.pool)
+        .await?,
         None,
         "a single fresh offline observation is not enough"
     );
@@ -708,19 +749,26 @@ async fn auto_mode_requires_continuous_unavailability_and_pushes_the_reservation
     rig.observe_at(runner, t0 + TimeDelta::minutes(11) - TimeDelta::seconds(10))
         .await;
     rig.service.tick(t0 + TimeDelta::minutes(11)).await;
-    let (trigger, cap): (String, i32) =
-        sqlx::query_as("select trigger, hard_cap_minutes from cloud_windows order by created_at desc limit 1")
-            .fetch_one(&rig.pool)
-            .await?;
+    let (trigger, cap): (String, i32) = sqlx::query_as(
+        "select trigger, hard_cap_minutes from cloud_windows order by created_at desc limit 1",
+    )
+    .fetch_one(&rig.pool)
+    .await?;
     assert_eq!(trigger, Trigger::Auto.as_str());
     assert_eq!(cap, 90, "min(240, estimate 60 + 30)");
     assert_eq!(rig.push_count("auto_started").await, 1);
-    assert_eq!(rig.push_count("auto_started").await, 1, "the push is not repeated");
+    assert_eq!(
+        rig.push_count("auto_started").await,
+        1,
+        "the push is not repeated"
+    );
     Ok(())
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn auto_mode_does_not_start_when_a_runner_is_online_unknown_or_short_offline(pool: PgPool) -> TestResult {
+async fn auto_mode_does_not_start_when_a_runner_is_online_unknown_or_short_offline(
+    pool: PgPool,
+) -> TestResult {
     let rig = Rig::new(pool).await;
     rig.set_budget(1_000_000, true).await;
     let _carrier = testkit::fake_session(&rig.registry, rig.carrier, &["runners_v1"], true);
@@ -818,28 +866,34 @@ async fn hub_issues_one_card_per_episode_of_waiting_work(pool: PgPool) -> TestRe
     .fetch_one(&rig.pool)
     .await?;
     assert_eq!(payload["source"], "hub");
-    let active: bool =
-        sqlx::query_scalar("select active from cloud_auto_episode where singleton")
-            .fetch_one(&rig.pool)
-            .await?;
+    let active: bool = sqlx::query_scalar("select active from cloud_auto_episode where singleton")
+        .fetch_one(&rig.pool)
+        .await?;
     assert!(active);
 
     rig.service.tick(t0 + TimeDelta::minutes(1)).await;
-    assert_eq!(card_count(&rig.pool).await?, 1, "no second card while the queue persists");
+    assert_eq!(
+        card_count(&rig.pool).await?,
+        1,
+        "no second card while the queue persists"
+    );
 
     sqlx::query("delete from jobs where state='waiting_runner'")
         .execute(&rig.pool)
         .await?;
     rig.service.tick(t0 + TimeDelta::minutes(2)).await;
-    let active: bool =
-        sqlx::query_scalar("select active from cloud_auto_episode where singleton")
-            .fetch_one(&rig.pool)
-            .await?;
+    let active: bool = sqlx::query_scalar("select active from cloud_auto_episode where singleton")
+        .fetch_one(&rig.pool)
+        .await?;
     assert!(!active, "the episode ends when the queue is empty");
 
     rig.seed_waiting(60).await;
     rig.service.tick(t0 + TimeDelta::minutes(3)).await;
-    assert_eq!(card_count(&rig.pool).await?, 2, "a refilled queue starts a new episode");
+    assert_eq!(
+        card_count(&rig.pool).await?,
+        2,
+        "a refilled queue starts a new episode"
+    );
     Ok(())
 }
 
@@ -857,7 +911,11 @@ async fn budget_alerts_fire_once_per_month_and_never_for_zero(pool: PgPool) -> T
     rig.service.tick(t0 + TimeDelta::minutes(1)).await;
     assert_eq!(rig.push_count("budget_100").await, 1);
     rig.service.tick(t0 + TimeDelta::minutes(2)).await;
-    assert_eq!(rig.push_count("budget_80").await, 1, "80 % is not repeated in the same month");
+    assert_eq!(
+        rig.push_count("budget_80").await,
+        1,
+        "80 % is not repeated in the same month"
+    );
     assert_eq!(rig.push_count("budget_100").await, 1);
 
     // Новый месяц: метки сброшены, оповещения уходят снова.
@@ -880,11 +938,19 @@ async fn budget_alerts_fire_once_per_month_and_never_for_zero(pool: PgPool) -> T
     .execute(&rig.pool)
     .await?;
     rig.service.tick(next).await;
-    assert_eq!(rig.push_count("budget_100").await, 2, "a new month alerts again");
+    assert_eq!(
+        rig.push_count("budget_100").await,
+        2,
+        "a new month alerts again"
+    );
 
     rig.set_budget(0, false).await;
     rig.service.tick(next + TimeDelta::minutes(1)).await;
-    assert_eq!(rig.push_count("budget_100").await, 2, "zero budget never alerts");
+    assert_eq!(
+        rig.push_count("budget_100").await,
+        2,
+        "zero budget never alerts"
+    );
     Ok(())
 }
 
@@ -895,13 +961,9 @@ async fn runners_list_shows_live_window_cost_and_budget_remainder(pool: PgPool) 
     rig.insert_window("ready", None, 11_380).await;
     let context = rig.tool_context();
     let caller = rig.caller().await;
-    let answer = canterlot_hub::session_tools::inplace_jobs::runners(
-        &context,
-        &caller,
-        json!({}),
-    )
-    .await
-    .expect("runners_list succeeds");
+    let answer = canterlot_hub::session_tools::inplace_jobs::runners(&context, &caller, json!({}))
+        .await
+        .expect("runners_list succeeds");
     assert_eq!(answer["budget_monthly_kopecks"], 1_000_000);
     assert_eq!(answer["budget_remaining_kopecks"], 988_620);
     let windows = answer["cloud_windows"].as_array().unwrap();

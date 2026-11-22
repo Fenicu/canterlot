@@ -304,7 +304,10 @@ pub async fn save_decision_in_tx(
 
     // Срок предложения проверяется под блокировкой строки: задержанное задание
     // истечения не должно открывать просроченную карточку повторным решением.
-    if matches!(row.kind, RequestKind::SettingsChange | RequestKind::CloudWindow) {
+    if matches!(
+        row.kind,
+        RequestKind::SettingsChange | RequestKind::CloudWindow
+    ) {
         let expires_at: Option<DateTime<Utc>> =
             sqlx::query_scalar("select expires_at from requests where id=$1")
                 .bind(request_id)

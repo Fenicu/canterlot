@@ -22,10 +22,10 @@ use crate::{
         service::CloudService,
         windows::{self, CreateRefusal, CreateRequest, PricedProfile, Pricing, Trigger},
     },
-    events,
     config::CloudConfig,
     crunch::JobOutcome,
     delivery::SubmitError,
+    events,
     requests::{self, RequestKind, RequestState},
     scheduler::ClaimedJob,
 };
@@ -581,8 +581,8 @@ pub async fn run_job(
         }) => {
             let result = match cloud.as_ref() {
                 Some(cloud) => {
-                approve_in_tx(conn, cloud.as_ref(), request_id, parent, correlation).await?
-            }
+                    approve_in_tx(conn, cloud.as_ref(), request_id, parent, correlation).await?
+                }
                 None => ApproveOutcome::Refused("cloud_disabled".to_owned()),
             };
             let (reason, text) = match &result {
@@ -599,7 +599,9 @@ pub async fn run_job(
                     outcome_text(
                         request_id,
                         "not applied",
-                        &format!("The price or budget changed while the card was open; a fresh card {fresh} was issued."),
+                        &format!(
+                            "The price or budget changed while the card was open; a fresh card {fresh} was issued."
+                        ),
                     ),
                 ),
                 ApproveOutcome::Refused(code) => (
@@ -653,7 +655,11 @@ pub async fn expire_job(
     {
         return Ok(JobOutcome::Done(json!({"skipped": true})));
     }
-    let text = outcome_text(request_id, "expired", "The 30-minute deadline passed; no window was started.");
+    let text = outcome_text(
+        request_id,
+        "expired",
+        "The 30-minute deadline passed; no window was started.",
+    );
     subs::insert_job(
         conn,
         job.owner_id,
@@ -689,14 +695,14 @@ pub(crate) async fn abandon_in_tx(
         correlation,
     )
     .await?
-    || close_in_tx(
-        conn,
-        request_id,
-        RequestState::Expired,
-        "expired",
-        correlation,
-    )
-    .await?
+        || close_in_tx(
+            conn,
+            request_id,
+            RequestState::Expired,
+            "expired",
+            correlation,
+        )
+        .await?
     {
         RequestState::DecisionNotApplied
     } else {

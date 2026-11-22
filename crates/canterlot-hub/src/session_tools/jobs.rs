@@ -447,13 +447,8 @@ pub async fn run_in_tx_with_cloud(
             .await
         }
         Action::CloudWindowExpire => {
-            crate::session_tools::cloud_propose::expire_job(
-                conn,
-                job,
-                subscriber,
-                correlation_id,
-            )
-            .await
+            crate::session_tools::cloud_propose::expire_job(conn, job, subscriber, correlation_id)
+                .await
         }
         Action::Cleanup => {
             Ok(accept::cleanup_job(conn, job, subscriber, now, correlation_id).await?)

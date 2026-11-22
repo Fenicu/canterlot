@@ -332,18 +332,24 @@ impl CloudService {
         // Автоматика выключена или резерв не помещается: карточка хаба один раз за эпизод.
         if !auto_mode || !fits {
             if !budget::episode_active(&mut conn).await? {
-                let owner: Uuid =
-                    sqlx::query_scalar("select owner_id from machines where id = $1")
-                        .bind(self.config.carrier_machine_id)
-                        .fetch_one(&mut *conn)
-                        .await?;
-                let mut proposer =
-                    cloud_propose::system_proposer(&mut conn, owner, self.config.carrier_machine_id)
-                        .await?;
+                let owner: Uuid = sqlx::query_scalar("select owner_id from machines where id = $1")
+                    .bind(self.config.carrier_machine_id)
+                    .fetch_one(&mut *conn)
+                    .await?;
+                let mut proposer = cloud_propose::system_proposer(
+                    &mut conn,
+                    owner,
+                    self.config.carrier_machine_id,
+                )
+                .await?;
                 proposer.source = Source::Hub;
                 let reason = format!(
                     "Ожидающая облачная работа: {waiting} мин по оценке; автоматический режим {}",
-                    if auto_mode { "включён, но резерв не помещается в бюджет" } else { "выключен" }
+                    if auto_mode {
+                        "включён, но резерв не помещается в бюджет"
+                    } else {
+                        "выключен"
+                    }
                 );
                 let opened = cloud_propose::open_in_tx(
                     &mut conn,

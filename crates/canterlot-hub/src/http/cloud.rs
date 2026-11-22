@@ -162,15 +162,20 @@ async fn budget_put(
         None,
         move |conn| {
             Box::pin(async move {
-                let revision = budget::update_in_tx(conn, &body).await.map_err(|error| match error {
-                    budget::UpdateError::Stale => ApiError::new(ErrorCode::StaleRevision),
-                    budget::UpdateError::Invalid(reason) => ApiError::new(ErrorCode::InvalidRequest)
-                        .with_details(super::error::ErrorDetails {
-                            reason: Some(reason.to_owned()),
-                            ..Default::default()
-                        }),
-                    budget::UpdateError::Db(error) => error.into(),
-                })?;
+                let revision =
+                    budget::update_in_tx(conn, &body)
+                        .await
+                        .map_err(|error| match error {
+                            budget::UpdateError::Stale => ApiError::new(ErrorCode::StaleRevision),
+                            budget::UpdateError::Invalid(reason) => ApiError::new(
+                                ErrorCode::InvalidRequest,
+                            )
+                            .with_details(super::error::ErrorDetails {
+                                reason: Some(reason.to_owned()),
+                                ..Default::default()
+                            }),
+                            budget::UpdateError::Db(error) => error.into(),
+                        })?;
                 Ok::<_, ApiError>(revision)
             })
         },
