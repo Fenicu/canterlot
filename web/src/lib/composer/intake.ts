@@ -52,8 +52,15 @@ export function readableFileName(file: File, now: Date = new Date()): File {
   });
 }
 
+/**
+ * Две стороны одного файла совпадают именем, размером и типом, но не меткой
+ * времени и не объектом: Chrome создаёт новый File при каждом getAsFile() и
+ * при чтении files, а lastModified у этих обёрток разъезжается на миллисекунды.
+ * Поэтому files и items сверяются без lastModified; счётчик гасит ровно столько
+ * повторов, сколько пришло из items, а лишние однофамильцы дописываются.
+ */
 function signature(file: File): string {
-  return `${file.name}\u0000${file.size}\u0000${file.type}\u0000${file.lastModified}`;
+  return `${file.name}\u0000${file.size}\u0000${file.type}`;
 }
 
 /** Файлы из буфера или перетаскивания: items и files вместе, без повторов. */
