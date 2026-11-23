@@ -411,6 +411,7 @@ fn server_json(server: &FakeServer) -> Value {
         "id": server.id,
         "name": server.name,
         "comment": server.comment,
+        "project_id": server.project_id,
         "os": {"id": 109, "name": "debian", "version": "13"},
         "software": null,
         "preset_id": null,

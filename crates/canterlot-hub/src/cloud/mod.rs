@@ -187,6 +187,8 @@ impl ServerStatus {
 pub struct ServerState {
     pub id: i64,
     pub name: String,
+    /// Проект провайдера: удаление проверяет, что сервер всё ещё в проекте окна.
+    pub project_id: Option<i64>,
     pub status: ServerStatus,
     /// Основной публичный IPv4, когда он уже выдан.
     pub ipv4: Option<String>,

@@ -1303,6 +1303,57 @@ impl CloudService {
             // Отсутствие уже подтверждено: DELETE больше не нужен.
             return Ok(());
         }
+        // Удаление только по номеру опасно: номер мог достаться чужому серверу. Перед
+        // DELETE провайдер должен показать то же имя в том же проекте.
+        let project = window.project_id.unwrap_or(self.config.project_id);
+        match self.provider.get_server(server_id).await {
+            Ok(ServerLookup::Found(state))
+                if state.name != window.name || state.project_id != Some(project) =>
+            {
+                sqlx::query(
+                    "update cloud_windows set last_error = 'ownership_mismatch',
+                            next_delete_at = $2
+                     where id = $1 and state = 'deleting'",
+                )
+                .bind(window.id)
+                .bind(now + ALERT_EVERY)
+                .execute(&self.pool)
+                .await?;
+                crate::notify::enqueue_cloud_alert(
+                    &self.pool,
+                    &format!(
+                        "cloud:ownership_mismatch:{}:{}",
+                        window.id,
+                        alert_slot(window, now)
+                    ),
+                    &json!({
+                        "code": "ownership_mismatch",
+                        "window_id": window.id,
+                        "name": window.name,
+                        "server_id": server_id,
+                    }),
+                )
+                .await?;
+                return Ok(());
+            }
+            Ok(ServerLookup::NotFound) => {
+                self.mark_server_gone(window.id, now).await?;
+                return Ok(());
+            }
+            Ok(ServerLookup::Found(_)) => {}
+            Err(error) => {
+                tracing::warn!(kind = "cloud_delete_lookup", error_kind = ?error.kind, "server lookup before delete failed");
+                sqlx::query(
+                    "update cloud_windows set next_delete_at = $2
+                     where id = $1 and state = 'deleting'",
+                )
+                .bind(window.id)
+                .bind(now + delete_backoff(window.delete_attempts.saturating_add(1)))
+                .execute(&self.pool)
+                .await?;
+                return Ok(());
+            }
+        }
         let repeat = window.delete_accepted_at.is_some();
         let outcome = self.provider.delete_server(server_id).await;
         let attempts = window.delete_attempts.saturating_add(1);

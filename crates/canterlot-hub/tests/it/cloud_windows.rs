@@ -1906,6 +1906,77 @@ async fn needs_confirmation_alerts_at_once_and_every_thirty_minutes_while_the_wi
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_delete_is_refused_when_the_server_id_belongs_to_something_else(
+    pool: PgPool,
+) -> TestResult {
+    for (wrong_name, wrong_project) in [(true, false), (false, true)] {
+        let rig = rig(pool.clone()).await;
+        enable_pushes(&rig.pool).await;
+        let now = now_micros();
+        let project = if wrong_project { PROJECT + 1 } else { PROJECT };
+        let server = rig.fake.control().add_server(project, "someone-else");
+        let id = raw_window(&rig.pool, "deleting", Some(server), Some(now - TimeDelta::minutes(20)))
+            .await;
+        {
+            let mut state = rig.fake.control();
+            let entry = state.servers.get_mut(&server).unwrap();
+            entry.name = if wrong_name {
+                "someone-else".to_owned()
+            } else {
+                windows::server_name(id)
+            };
+            entry.project_id = project;
+        }
+        rig.tick(now).await;
+        assert_eq!(rig.deletes(), 0, "no blind DELETE by id");
+        let window = rig.window(id).await;
+        assert_eq!(window.state, "deleting", "the window stays open");
+        assert_eq!(window.last_error.as_deref(), Some("ownership_mismatch"));
+        assert!(
+            rig.alert_codes()
+                .await
+                .contains(&"ownership_mismatch".to_owned()),
+            "{:?}",
+            rig.alert_codes().await
+        );
+        // Владелец исправил сервер: обычный путь удаляет его.
+        {
+            let mut state = rig.fake.control();
+            let entry = state.servers.get_mut(&server).unwrap();
+            entry.name = windows::server_name(id);
+            entry.project_id = PROJECT;
+        }
+        rig.tick(now + TimeDelta::minutes(31)).await;
+        assert_eq!(rig.window(id).await.server_id, Some(server));
+        assert_eq!(rig.deletes(), 1, "the corrected server is deleted");
+        sqlx::query("update cloud_windows set state = 'ended' where id = $1")
+            .bind(id)
+            .execute(&rig.pool)
+            .await?;
+    }
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_confirmed_absence_skips_the_delete_call(pool: PgPool) -> TestResult {
+    let rig = rig(pool).await;
+    let now = now_micros();
+    let server = rig.fake.control().add_server(PROJECT, "x");
+    let id = raw_window(&rig.pool, "deleting", Some(server), Some(now - TimeDelta::minutes(20)))
+        .await;
+    rig.fake.control().servers.get_mut(&server).unwrap().name = windows::server_name(id);
+    sqlx::query("update cloud_windows set server_gone_at = $2 where id = $1")
+        .bind(id)
+        .bind(now)
+        .execute(&rig.pool)
+        .await?;
+    rig.tick(now).await;
+    assert_eq!(rig.state(id).await, "ended");
+    assert_eq!(rig.deletes(), 0, "no DELETE once absence is confirmed");
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn a_server_deleted_by_hand_while_confirmation_is_pending_ends_the_window(
     pool: PgPool,
 ) -> TestResult {
