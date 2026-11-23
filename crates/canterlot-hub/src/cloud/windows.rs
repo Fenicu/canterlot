@@ -384,15 +384,14 @@ pub async fn create_in_tx(
     // вставка: между чтением настроек службой и этой транзакцией владелец мог выключить
     // режим, очередь могла опустеть, а раннер — вернуться на связь.
     let now = if let Some(guard) = auto.as_ref() {
-        if request.trigger == Trigger::Auto {
-            if !auto_mode
+        if request.trigger == Trigger::Auto
+            && (!auto_mode
                 || super::budget::waiting_cloud_minutes(conn, config).await?
                     < super::budget::MIN_WAITING_MINUTES
                 || !super::budget::static_runners_down(conn, guard.registry, config, guard.now)
-                    .await?
-            {
-                return Err(CreateRefusal::AutoConditionsChanged);
-            }
+                    .await?)
+        {
+            return Err(CreateRefusal::AutoConditionsChanged);
         }
         guard.now
     } else {
