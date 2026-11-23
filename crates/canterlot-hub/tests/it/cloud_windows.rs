@@ -1490,6 +1490,39 @@ async fn an_ambiguous_dnat_keeps_the_mapping_until_the_ambiguity_window(
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_window_with_no_dnat_obligation_ends_during_a_router_outage(pool: PgPool) -> TestResult {
+    let rig = rig(pool).await;
+    let now = now_micros();
+    let id = raw_window(
+        &rig.pool,
+        "deleting",
+        Some(999),
+        Some(now - TimeDelta::minutes(5)),
+    )
+    .await;
+    // Сервер уже подтверждённо пропал, правила DNAT не было и вызова не было.
+    sqlx::query("update cloud_windows set server_gone_at = $2 where id = $1")
+        .bind(id)
+        .bind(now)
+        .execute(&rig.pool)
+        .await?;
+    // Роутер недоступен: списки проекта и правил отвечают ошибкой.
+    rig.fake.control().list_fail_page = Some(FailPage {
+        offset: 0,
+        status: 500,
+        times: None,
+    });
+    rig.tick(now).await;
+    let window = rig.window(id).await;
+    assert_eq!(
+        window.state, "ended",
+        "no DNAT obligation, no provider call needed"
+    );
+    assert_eq!(window.final_cost_kopecks, Some(HOURLY));
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn a_server_gone_by_hand_keeps_the_window_open_until_its_dnat_rule_is_gone(
     pool: PgPool,
 ) -> TestResult {

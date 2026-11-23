@@ -1434,6 +1434,11 @@ impl CloudService {
             .router_ip
             .as_deref()
             .unwrap_or(&self.config.router_ip);
+        // Ни правила, ни попытки его создать: обязательства нет, роутер не нужен. Проверка
+        // стоит до сетевого вызова, иначе недоступность роутера держала бы окно живым.
+        if window.dnat_rule_id.is_none() && window.dnat_create_attempted_at.is_none() {
+            return self.end(&window.id, terminal, now).await;
+        }
         let list = match self.provider.list_dnat_rules(router).await {
             Ok(list) => list,
             Err(error) => {
