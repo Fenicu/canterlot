@@ -132,6 +132,10 @@ const ERROR_TABLE: Record<ErrorCode, ErrorDescriptor> = {
     action: "none",
     message: "Ответ не подходит к вопросу",
   },
+  cloud_hours_out_of_range: {
+    action: "none",
+    message: "Часов окна вне диапазона 1..=4",
+  },
   resource_limit: {
     action: "none",
     message: "Превышен допустимый размер данных",

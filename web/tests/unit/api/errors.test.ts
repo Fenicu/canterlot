@@ -36,6 +36,7 @@ const ALL_ERROR_CODES: ErrorCode[] = [
   "decision_conflict",
   "request_not_open",
   "decision_invalid",
+  "cloud_hours_out_of_range",
   "resource_limit",
   "not_implemented",
   "too_many_requests",
@@ -150,7 +151,7 @@ describe("api/errors", () => {
   });
 
   it("error_actions_cover_every_code_in_the_api_error_table", () => {
-    expect(ALL_ERROR_CODES.length).toBe(97);
+    expect(ALL_ERROR_CODES.length).toBe(98);
 
     for (const code of ALL_ERROR_CODES) {
       const err = new ApiError(
