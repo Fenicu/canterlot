@@ -187,8 +187,8 @@ impl ServerStatus {
 pub struct ServerState {
     pub id: i64,
     pub name: String,
-    /// Проект провайдера: удаление проверяет, что сервер всё ещё в проекте окна.
-    pub project_id: Option<i64>,
+    /// Проекта в схеме сервера (`vds`) нет: принадлежность проекту доказывает только полный
+    /// список проекта, а не точечный ответ.
     pub status: ServerStatus,
     /// Основной публичный IPv4, когда он уже выдан.
     pub ipv4: Option<String>,
@@ -337,13 +337,14 @@ pub struct DnatRule {
 }
 
 impl DnatRule {
-    /// Это правило пробрасывает именно `router_ip:port -> local_ip:22` по tcp. Порт в ответе
-    /// может быть диапазоном: тогда он не подходит, мы создаём правило для одного порта.
+    /// Это правило пробрасывает именно `router_ip:port -> local_ip:22` по tcp. Все поля
+    /// должны совпасть точно: диапазон локальных портов — не наше правило, а неизвестное
+    /// поле не доказывает ничего.
     pub fn matches(&self, public_ip: &str, public_port: u16, local_ip: &str) -> bool {
         self.public_ip == public_ip
             && self.public_port == public_port.to_string()
             && self.local_ip == local_ip
-            && (self.local_port == "22" || self.local_port == "1-65535")
+            && self.local_port == "22"
             && self.protocol == "tcp"
     }
 }
@@ -362,4 +363,48 @@ pub enum DnatCreateOutcome {
     /// Таймаут, обрыв, 5xx или нечитаемый ответ: правило могло появиться. Не создавать
     /// второе для того же порта: полный список решит, что сделать.
     Ambiguous { why: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DnatRule;
+
+    fn rule(public_ip: &str, public_port: &str, local_ip: &str, local_port: &str) -> DnatRule {
+        DnatRule {
+            id: "dnat-1".to_owned(),
+            local_ip: local_ip.to_owned(),
+            local_port: local_port.to_owned(),
+            public_ip: public_ip.to_owned(),
+            public_port: public_port.to_owned(),
+            protocol: "tcp".to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_dnat_rule_matches_only_the_exact_tuple() {
+        let exact = rule("192.0.2.1", "22100", "192.0.2.10", "22");
+        assert!(exact.matches("192.0.2.1", 22100, "192.0.2.10"));
+        // Диапазон локальных портов — не наше правило: мы создаём одноточное.
+        assert!(
+            !rule("192.0.2.1", "22100", "192.0.2.10", "1-65535").matches(
+                "192.0.2.1",
+                22100,
+                "192.0.2.10"
+            )
+        );
+        for wrong in [
+            rule("192.0.2.2", "22100", "192.0.2.10", "22"),
+            rule("192.0.2.1", "22101", "192.0.2.10", "22"),
+            rule("192.0.2.1", "22100", "192.0.2.11", "22"),
+            rule("192.0.2.1", "22100", "192.0.2.10", "2222"),
+        ] {
+            assert!(!wrong.matches("192.0.2.1", 22100, "192.0.2.10"));
+        }
+        let mut udp = exact.clone();
+        udp.protocol = "udp".to_owned();
+        assert!(!udp.matches("192.0.2.1", 22100, "192.0.2.10"));
+        let mut empty = exact;
+        empty.protocol.clear();
+        assert!(!empty.matches("192.0.2.1", 22100, "192.0.2.10"));
+    }
 }

@@ -160,6 +160,9 @@ pub struct FakeState {
     /// Правила DNAT роутера. Идентификатор роутера в путях не проверяется: тест задаёт его
     /// в конфигурации сам.
     pub dnat_rules: Vec<FakeDnatRule>,
+    /// Правила как есть, вместо собранных из `dnat_rules`: для негодных ответов, где поле
+    /// правила отсутствует или пусто.
+    pub dnat_rules_raw: Vec<Value>,
     pub next_dnat_id: u64,
     pub dnat_create: DnatCreateMode,
     /// Код сбоя для `DELETE /.../dnat-rules/{id}`; `None` — удаляет.
@@ -181,6 +184,8 @@ pub struct FakeState {
     pub list_total_override: Option<u64>,
     /// `meta.total` по страницам по порядку: список менялся во время обхода.
     pub list_total_sequence: VecDeque<u64>,
+    /// Проект, список ресурсов которого отвечает ошибкой: сверка проектов независима.
+    pub list_fail_project: Option<i64>,
     /// Сервер, созданный запросом, не виден в первых стольких листингах проекта. Счёт
     /// идёт по листингам, а не по часам: тест не зависит от скорости машины.
     pub listing_hidden_polls: u32,
@@ -189,6 +194,9 @@ pub struct FakeState {
     pub boot_polls: u32,
     /// Подмешивать в тексты ошибок заголовок Authorization, как делает неряшливый сервер.
     pub echo_authorization_in_errors: bool,
+    /// Имя, которое отдаёт только прямой `GET /servers/{id}`: так проверяется, что удаление
+    /// сверяет имя из точечного ответа, а не из списка. В списках имя остаётся настоящим.
+    pub get_name_override: Option<String>,
     pub requests: Vec<RecordedRequest>,
 }
 
@@ -222,6 +230,7 @@ impl FakeState {
             create_by_configurator: BTreeMap::new(),
             delete: DeleteMode::Ok,
             dnat_rules: Vec::new(),
+            dnat_rules_raw: Vec::new(),
             next_dnat_id: 1,
             dnat_create: DnatCreateMode::Ok,
             dnat_delete_status: None,
@@ -234,9 +243,11 @@ impl FakeState {
             list_ignores_paging: false,
             list_total_override: None,
             list_total_sequence: VecDeque::new(),
+            list_fail_project: None,
             listing_hidden_polls: 0,
             boot_polls: 0,
             echo_authorization_in_errors: false,
+            get_name_override: None,
             requests: Vec::new(),
         }
     }
@@ -413,11 +424,12 @@ fn server_json(server: &FakeServer) -> Value {
     let booted = server.boot_polls_left == 0;
     // У сервера нет публичного адреса: доступ идёт через NAT роутера.
     let ips = json!([]);
+    // Форма `vds` из OpenAPI: поля `project_id` в ней нет. Проект сервера виден только через
+    // список проекта, поэтому принадлежность нельзя доказать точечным ответом.
     let mut out = json!({
         "id": server.id,
         "name": server.name,
         "comment": server.comment,
-        "project_id": server.project_id,
         "os": {"id": 109, "name": "debian", "version": "13"},
         "software": null,
         "preset_id": null,
@@ -589,13 +601,17 @@ fn route(
         }
         ("POST", ["api", "v1", "servers"]) => create_server(st, body, auth),
         ("GET", ["api", "v1", "servers", id]) => {
+            let override_name = st.get_name_override.clone();
             let found = id
                 .parse::<i64>()
                 .ok()
                 .and_then(|id| st.servers.get_mut(&id));
             match found {
                 Some(server) => {
-                    let rendered = server_json(server);
+                    let mut rendered = server_json(server);
+                    if let Some(name) = override_name {
+                        rendered["name"] = Value::String(name);
+                    }
                     server.boot_polls_left = server.boot_polls_left.saturating_sub(1);
                     Action::Respond(json_response(
                         200,
@@ -608,17 +624,20 @@ fn route(
         ("DELETE", ["api", "v1", "servers", id]) => delete_server(st, id, auth),
         ("POST", ["api", "v1", "routers", _router, "dnat-rules"]) => create_dnat(st, body, auth),
         ("GET", ["api", "v1", "routers", _router, "dnat-rules"]) => {
-            let items: Vec<Value> = st
-                .dnat_rules
-                .iter()
-                .map(|rule| {
-                    json!({
-                        "id": rule.id, "local_ip": rule.local_ip, "local_port": rule.local_port,
-                        "public_ip": rule.public_ip, "public_port": rule.public_port,
-                        "protocol": rule.protocol,
+            let items: Vec<Value> = if st.dnat_rules_raw.is_empty() {
+                st.dnat_rules
+                    .iter()
+                    .map(|rule| {
+                        json!({
+                            "id": rule.id, "local_ip": rule.local_ip, "local_port": rule.local_port,
+                            "public_ip": rule.public_ip, "public_port": rule.public_port,
+                            "protocol": rule.protocol,
+                        })
                     })
-                })
-                .collect();
+                    .collect()
+            } else {
+                st.dnat_rules_raw.clone()
+            };
             page_response(st, query, items, "dnat_rules")
         }
         ("DELETE", ["api", "v1", "routers", _router, "dnat-rules", rule_id]) => {
@@ -628,6 +647,14 @@ fn route(
             let Ok(project_id) = project.parse::<i64>() else {
                 return Action::Respond(error_response(st, 400, "Bad project", auth));
             };
+            if st.list_fail_project == Some(project_id) {
+                return Action::Respond(error_response(
+                    st,
+                    500,
+                    "Injected project listing failure",
+                    auth,
+                ));
+            }
             // Скрытый сервер «стареет» по листингам: счётчик убывает на первой странице.
             let first_page = query.get("offset").is_none_or(|offset| offset == "0");
             let mut visible: Vec<Value> = Vec::new();

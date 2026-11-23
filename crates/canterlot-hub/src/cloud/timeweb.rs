@@ -395,6 +395,15 @@ fn malformed(what: &str) -> ProviderError {
     ProviderError::new(ErrorKind::Malformed, what.to_owned())
 }
 
+/// Обязательная строка ответа: отсутствие и пустое значение — одинаково негодный ответ.
+fn required_text(value: &Value, field: &str) -> Result<String, ProviderError> {
+    value[field]
+        .as_str()
+        .filter(|text| !text.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| malformed(&format!("dnat rule has no `{field}`")))
+}
+
 fn parse_configurator(value: &Value) -> Result<Configurator, ProviderError> {
     let price = |name: &str| -> Result<i64, ProviderError> {
         let rubles = value["prices"][name]
@@ -481,7 +490,6 @@ fn parse_state(value: &Value) -> Result<ServerState, ProviderError> {
     Ok(ServerState {
         id: summary.id,
         name: summary.name,
-        project_id: value["project_id"].as_i64(),
         status: summary.status,
         ipv4: public_ipv4(value),
         created_at: value["created_at"].as_str().map(str::to_owned),
@@ -800,19 +808,22 @@ impl CloudProvider for TimewebProvider {
                 "dnat_rules",
             )
             .await?;
+        // Правило с отсутствующим или пустым полем делает весь список негодным: по такому
+        // ответу нельзя ни усыновить правило, ни заключить, что его нет.
         items
             .iter()
             .map(|item| {
                 Ok(DnatRule {
-                    id: item["id"].as_str().unwrap_or_default().to_owned(),
-                    local_ip: item["local_ip"].as_str().unwrap_or_default().to_owned(),
-                    local_port: item["local_port"].as_str().unwrap_or_default().to_owned(),
-                    public_ip: item["public_ip"].as_str().unwrap_or_default().to_owned(),
-                    public_port: item["public_port"].as_str().unwrap_or_default().to_owned(),
-                    protocol: item["protocol"].as_str().unwrap_or_default().to_owned(),
+                    id: required_text(item, "id")?,
+                    local_ip: required_text(item, "local_ip")?,
+                    local_port: required_text(item, "local_port")?,
+                    public_ip: required_text(item, "public_ip")?,
+                    public_port: required_text(item, "public_port")?,
+                    protocol: required_text(item, "protocol")?,
                 })
             })
-            .collect()
+            .collect::<Result<Vec<_>, ProviderError>>()
+            .map_err(|error| ListError::Page { offset: 0, error })
     }
 
     async fn delete_dnat_rule(&self, router_id: &str, rule_id: &str) -> DeleteOutcome {

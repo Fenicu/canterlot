@@ -24,7 +24,7 @@ create table cloud_windows (
     name text not null unique,
     state text not null check (state in (
         'create_intent', 'create_unknown', 'identified', 'ready', 'draining',
-        'deleting', 'ended', 'failed', 'gone')),
+        'deleting', 'late_cleanup', 'ended', 'failed', 'gone')),
     trigger text not null check (trigger in ('card', 'owner', 'auto')),
     proposal_id uuid,
     server_id bigint,
@@ -93,7 +93,9 @@ create table cloud_windows (
     constraint cloud_windows_name_check check (name = 'canterlot-runner-' || id::text)
 );
 
--- Живое окно одно: вторая защита рядом с замком строки `cloud_budget`.
+-- Живое окно одно: вторая защита рядом с замком строки `cloud_budget`. Поздний снос
+-- (`late_cleanup`) сюда не входит: у закрытого окна есть свой сервер, который надо убрать, и
+-- он не должен спорить за место с преемником.
 create unique index cloud_windows_one_live on cloud_windows ((true))
     where state in ('create_intent', 'create_unknown', 'identified', 'ready', 'draining', 'deleting');
 create index cloud_windows_month on cloud_windows (month);

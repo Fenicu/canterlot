@@ -1369,6 +1369,71 @@ async fn a_definite_dnat_refusal_closes_the_window_without_a_block(pool: PgPool)
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_dnat_refusal_and_the_move_to_deleting_commit_together(pool: PgPool) -> TestResult {
+    let rig = rig(pool).await;
+    enable_pushes(&rig.pool).await;
+    let _carrier = rig.carrier_session();
+    let t0 = now_micros();
+    let id = rig.create(120).await;
+    rig.tick(t0).await;
+    assert_eq!(rig.state(id).await, "identified");
+    rig.fake.control().dnat_create = crate::support::fake_timeweb::DnatCreateMode::Refuse {
+        status: 400,
+        error_code: "bad_request".to_owned(),
+    };
+    // База падает на переходе в `deleting`: половинчатого отказа быть не должно.
+    sqlx::query(
+        "create function cloud_test_block_transition() returns trigger as $$
+         begin
+             if new.state = 'deleting' and old.state = 'identified' then
+                 raise exception 'injected transition failure';
+             end if;
+             return new;
+         end;
+         $$ language plpgsql",
+    )
+    .execute(&rig.pool)
+    .await?;
+    sqlx::query(
+        "create trigger cloud_test_block_transition before update on cloud_windows
+           for each row execute function cloud_test_block_transition()",
+    )
+    .execute(&rig.pool)
+    .await?;
+
+    rig.tick(t0 + TimeDelta::seconds(1)).await;
+    let window = rig.window(id).await;
+    assert_eq!(window.state, "identified", "the transition did not happen");
+    assert_eq!(window.last_error, None, "the refusal is not half-committed");
+    assert!(
+        window.dnat_create_attempted_at.is_some(),
+        "the attempt marker survives with the refusal"
+    );
+    assert_eq!(window.dnat_gone_at, None);
+    assert_eq!(rig.dnat_posts(), 1);
+    assert!(rig.alert_codes().await.is_empty());
+
+    // Следующий проход не повторяет POST: метка попытки цела.
+    rig.tick(t0 + TimeDelta::seconds(2)).await;
+    assert_eq!(rig.dnat_posts(), 1, "no second DNAT POST");
+    assert_eq!(rig.state(id).await, "identified");
+
+    // Сбой убран: после срока неопределённости отказ проходит вместе с переходом.
+    sqlx::query("drop trigger cloud_test_block_transition on cloud_windows")
+        .execute(&rig.pool)
+        .await?;
+    rig.tick(t0 + TimeDelta::minutes(11)).await;
+    rig.tick(t0 + TimeDelta::minutes(11) + TimeDelta::seconds(10))
+        .await;
+    let window = rig.window(id).await;
+    assert_eq!(window.state, "deleting");
+    assert_eq!(window.last_error.as_deref(), Some("dnat_refused"));
+    assert_eq!(rig.dnat_posts(), 2);
+    assert_eq!(rig.alert_codes().await, vec!["dnat_refused"]);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn an_ambiguous_dnat_answer_is_adopted_from_the_listing_without_a_second_post(
     pool: PgPool,
 ) -> TestResult {
@@ -1421,6 +1486,76 @@ async fn an_ambiguous_dnat_keeps_the_mapping_until_the_ambiguity_window(
         .await;
     assert_eq!(rig.dnat_posts(), 2);
     assert!(rig.window(id).await.dnat_rule_id.is_some());
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_window_with_no_dnat_obligation_ends_during_a_router_outage(pool: PgPool) -> TestResult {
+    let rig = rig(pool).await;
+    let now = now_micros();
+    let id = raw_window(
+        &rig.pool,
+        "deleting",
+        Some(999),
+        Some(now - TimeDelta::minutes(5)),
+    )
+    .await;
+    // Сервер уже подтверждённо пропал, правила DNAT не было и вызова не было.
+    sqlx::query("update cloud_windows set server_gone_at = $2 where id = $1")
+        .bind(id)
+        .bind(now)
+        .execute(&rig.pool)
+        .await?;
+    // Роутер недоступен: списки проекта и правил отвечают ошибкой.
+    rig.fake.control().list_fail_page = Some(FailPage {
+        offset: 0,
+        status: 500,
+        times: None,
+    });
+    rig.tick(now).await;
+    let window = rig.window(id).await;
+    assert_eq!(
+        window.state, "ended",
+        "no DNAT obligation, no provider call needed"
+    );
+    assert_eq!(window.final_cost_kopecks, Some(HOURLY));
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_malformed_dnat_listing_changes_nothing(pool: PgPool) -> TestResult {
+    let rig = rig(pool).await;
+    let _carrier = rig.carrier_session();
+    // Ответ 5xx: правило могло появиться, но его нет в списке.
+    rig.fake.control().dnat_create = crate::support::fake_timeweb::DnatCreateMode::Status(500);
+    let t0 = now_micros();
+    let id = rig.create(120).await;
+    rig.tick(t0).await;
+    rig.tick(t0 + TimeDelta::seconds(1)).await;
+    assert_eq!(rig.dnat_posts(), 1);
+    assert!(rig.window(id).await.dnat_create_attempted_at.is_some());
+    // В списке правило без протокола: список негоден, а не «правила нет».
+    for malformed in [
+        serde_json::json!({"id": "dnat-bad", "local_ip": "192.0.2.10",
+                           "local_port": "22", "public_ip": "192.0.2.1",
+                           "public_port": "22100"}),
+        serde_json::json!({"id": "dnat-bad", "local_ip": "192.0.2.10",
+                           "local_port": "22", "public_ip": "192.0.2.1",
+                           "public_port": "22100", "protocol": ""}),
+    ] {
+        rig.fake.control().dnat_rules_raw = vec![malformed];
+        // Дольше срока неопределённости: маркер попытки снимать нельзя, список не прочитан.
+        rig.tick(t0 + TimeDelta::minutes(11)).await;
+        assert!(
+            rig.window(id).await.dnat_create_attempted_at.is_some(),
+            "a failed listing changed nothing"
+        );
+        assert_eq!(rig.dnat_posts(), 1);
+    }
+    rig.fake.control().dnat_rules_raw.clear();
+    rig.tick(t0 + TimeDelta::minutes(11) + TimeDelta::seconds(10))
+        .await;
+    assert!(rig.window(id).await.dnat_create_attempted_at.is_none());
     Ok(())
 }
 
@@ -2067,15 +2202,15 @@ async fn needs_confirmation_alerts_at_once_and_every_thirty_minutes_while_the_wi
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_delete_is_refused_when_the_server_id_belongs_to_something_else(
+async fn a_delete_requires_the_expected_name_and_membership_in_the_stored_project(
     pool: PgPool,
 ) -> TestResult {
-    for (wrong_name, wrong_project) in [(true, false), (false, true)] {
+    // Прямой GET отдаёт не то имя, что у окна: DELETE нет, окно живо, пуш владельцу.
+    {
         let rig = rig(pool.clone()).await;
         enable_pushes(&rig.pool).await;
         let now = now_micros();
-        let project = if wrong_project { PROJECT + 1 } else { PROJECT };
-        let server = rig.fake.control().add_server(project, "someone-else");
+        let server = rig.fake.control().add_server(PROJECT, "someone-else");
         let id = raw_window(
             &rig.pool,
             "deleting",
@@ -2086,12 +2221,7 @@ async fn a_delete_is_refused_when_the_server_id_belongs_to_something_else(
         {
             let mut state = rig.fake.control();
             let entry = state.servers.get_mut(&server).unwrap();
-            entry.name = if wrong_name {
-                "someone-else".to_owned()
-            } else {
-                windows::server_name(id)
-            };
-            entry.project_id = project;
+            entry.name = "someone-else".to_owned();
         }
         rig.tick(now).await;
         assert_eq!(rig.deletes(), 0, "no blind DELETE by id");
@@ -2105,21 +2235,159 @@ async fn a_delete_is_refused_when_the_server_id_belongs_to_something_else(
             "{:?}",
             rig.alert_codes().await
         );
-        // Владелец исправил сервер: обычный путь удаляет его.
+        // Владелец исправил имя сервера: обычный путь удаляет.
         {
             let mut state = rig.fake.control();
             let entry = state.servers.get_mut(&server).unwrap();
             entry.name = windows::server_name(id);
-            entry.project_id = PROJECT;
         }
         rig.tick(now + TimeDelta::minutes(31)).await;
-        assert_eq!(rig.window(id).await.server_id, Some(server));
         assert_eq!(rig.deletes(), 1, "the corrected server is deleted");
-        sqlx::query("update cloud_windows set state = 'ended' where id = $1")
-            .bind(id)
-            .execute(&rig.pool)
-            .await?;
+        assert_eq!(rig.window(id).await.server_id, Some(server));
+        close_window(&rig.pool, id).await?;
     }
+
+    // Имя верное, но сервер в другом проекте: в полном списке проекта окна его нет.
+    {
+        let rig = rig(pool.clone()).await;
+        enable_pushes(&rig.pool).await;
+        let now = now_micros();
+        let server = rig.fake.control().add_server(PROJECT + 1, "placeholder");
+        let id = raw_window(
+            &rig.pool,
+            "deleting",
+            Some(server),
+            Some(now - TimeDelta::minutes(20)),
+        )
+        .await;
+        // Прямой ответ говорит только имя: проекта в схеме `vds` нет.
+        rig.fake.control().servers.get_mut(&server).unwrap().name = windows::server_name(id);
+        rig.tick(now).await;
+        assert_eq!(
+            rig.deletes(),
+            0,
+            "a server outside the stored project is never deleted"
+        );
+        assert_eq!(rig.state(id).await, "deleting");
+        assert_eq!(
+            rig.window(id).await.last_error.as_deref(),
+            Some("ownership_mismatch")
+        );
+        close_window(&rig.pool, id).await?;
+    }
+
+    // Имя верное и сервер есть в полном списке своего проекта: обычное удаление.
+    {
+        let rig = rig(pool.clone()).await;
+        let now = now_micros();
+        let server = rig.fake.control().add_server(PROJECT, "placeholder");
+        let id = raw_window(
+            &rig.pool,
+            "deleting",
+            Some(server),
+            Some(now - TimeDelta::minutes(20)),
+        )
+        .await;
+        rig.fake.control().servers.get_mut(&server).unwrap().name = windows::server_name(id);
+        rig.tick(now).await;
+        assert_eq!(rig.deletes(), 1, "the owned server is deleted");
+        assert!(!rig.fake.control().servers.contains_key(&server));
+        let window = rig.window(id).await;
+        assert_eq!(window.state, "deleting");
+        assert!(window.delete_accepted_at.is_some());
+    }
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_direct_404_alone_never_confirms_absence(pool: PgPool) -> TestResult {
+    let rig = rig(pool).await;
+    let now = now_micros();
+    let server = rig.fake.control().add_server(PROJECT, "placeholder");
+    let id = raw_window(
+        &rig.pool,
+        "deleting",
+        Some(server),
+        Some(now - TimeDelta::minutes(20)),
+    )
+    .await;
+    rig.fake.control().servers.get_mut(&server).unwrap().name = windows::server_name(id);
+    // Тёплый проход: сверка проходит, а первая попытка удаления ещё не наступила.
+    sqlx::query(
+        "update cloud_windows set delete_accepted_at = null, next_delete_at = $2 where id = $1",
+    )
+    .bind(id)
+    .bind(now + TimeDelta::seconds(30))
+    .execute(&rig.pool)
+    .await?;
+    rig.tick(now).await;
+    assert_eq!(rig.fake.server_count(), 1);
+    // Точечный ответ 404, но полный список проекта всё ещё показывает сервер: отсутствие не
+    // подтверждено, оплата сервера не закончена.
+    rig.fake.control().fail_next.push_back(404);
+    rig.tick(now + TimeDelta::seconds(40)).await;
+    let window = rig.window(id).await;
+    assert_eq!(window.state, "deleting");
+    assert!(window.server_gone_at.is_none());
+    assert_eq!(rig.fake.server_count(), 1);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn repeated_lookup_failures_count_as_delete_failures_and_alert(pool: PgPool) -> TestResult {
+    let rig = rig(pool).await;
+    enable_pushes(&rig.pool).await;
+    let now = now_micros();
+    let server = rig.fake.control().add_server(PROJECT, "placeholder");
+    let id = raw_window(
+        &rig.pool,
+        "deleting",
+        Some(server),
+        Some(now - TimeDelta::minutes(20)),
+    )
+    .await;
+    rig.fake.control().servers.get_mut(&server).unwrap().name = windows::server_name(id);
+    // Тёплый проход: сверка проходит, первая попытка удаления ещё не наступила.
+    sqlx::query(
+        "update cloud_windows set delete_accepted_at = null, next_delete_at = $2 where id = $1",
+    )
+    .bind(id)
+    .bind(now + TimeDelta::seconds(30))
+    .execute(&rig.pool)
+    .await?;
+    rig.tick(now).await;
+    assert_eq!(rig.window(id).await.delete_attempts, 0);
+    assert!(rig.alert_codes().await.is_empty());
+
+    // Точечный ответ не приходит: это неудача удаления, с откатом.
+    for (attempt, at, next) in [
+        (1, now + TimeDelta::seconds(40), TimeDelta::seconds(30)),
+        (2, now + TimeDelta::seconds(130), TimeDelta::seconds(60)),
+    ] {
+        rig.fake.control().fail_next.push_back(500);
+        rig.tick(at).await;
+        let window = rig.window(id).await;
+        assert_eq!(window.delete_attempts, attempt);
+        assert_eq!(window.next_delete_at, Some(at + next));
+        assert_eq!(rig.fake.server_count(), 1, "nothing is deleted blindly");
+        assert!(rig.alert_codes().await.is_empty(), "fewer than three");
+    }
+    // Раньше паузы после второй неудачи прохода нет.
+    rig.tick(now + TimeDelta::seconds(160)).await;
+    assert_eq!(rig.window(id).await.delete_attempts, 2);
+    assert_eq!(rig.fake.server_count(), 1);
+    // Третья неудача: пуш о неудаляемом сервере.
+    rig.fake.control().fail_next.push_back(500);
+    rig.tick(now + TimeDelta::seconds(260)).await;
+    let window = rig.window(id).await;
+    assert_eq!(window.delete_attempts, 3);
+    assert_eq!(window.last_error.as_deref(), Some("delete_lookup_failed"));
+    assert_eq!(rig.alert_codes().await, vec!["delete_failing"]);
+    assert_eq!(rig.state(id).await, "deleting");
+
+    // Провайдер отвечает: обычное удаление и конец окна.
+    rig.tick(now + TimeDelta::minutes(10)).await;
+    assert_eq!(rig.state(id).await, "ended");
     Ok(())
 }
 
@@ -2321,19 +2589,19 @@ async fn servers_of_closed_windows_are_strays_too(pool: PgPool) -> TestResult {
     rig.tick(t0 + TimeDelta::minutes(15)).await;
     let window = rig.window(id).await;
     assert_eq!(
-        window.state, "deleting",
-        "reattached to its original window"
+        window.state, "late_cleanup",
+        "reattached to its original window outside the live slot"
     );
     assert_eq!(window.server_id, Some(late));
     assert_eq!(window.delete_reason.as_deref(), Some("late_create"));
     assert_eq!(rig.deletes(), 1, "deleted through the normal path");
     assert!(matches!(
         rig.try_create(60).await,
-        Err(CreateRefusal::LiveWindowExists)
+        Err(CreateRefusal::LateCleanup)
     ));
-    // Пока удаление не подтверждено, окно остаётся живым, а сверка — не успешной.
+    // Пока удаление не подтверждено, окно остаётся обязательством, а сверка — не успешной.
     rig.tick(t0 + TimeDelta::minutes(16)).await;
-    assert_eq!(rig.state(id).await, "deleting");
+    assert_eq!(rig.state(id).await, "late_cleanup");
     // Владелец удалил сервер в панели: отсутствие подтверждено, итог — от вызова создания.
     rig.fake.control().remove_server(late);
     rig.tick(t0 + TimeDelta::minutes(17)).await;
@@ -2341,6 +2609,87 @@ async fn servers_of_closed_windows_are_strays_too(pool: PgPool) -> TestResult {
     assert_eq!(window.state, "ended");
     assert!(window.server_gone_at.is_some());
     assert_eq!(window.final_cost_kopecks, Some(HOURLY));
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_late_cleanup_leaves_the_live_slot_to_the_successor_and_is_billed(
+    pool: PgPool,
+) -> TestResult {
+    let rig = rig(pool).await;
+    enable_pushes(&rig.pool).await;
+    let now = now_micros();
+    let old = raw_window(
+        &rig.pool,
+        "failed",
+        None,
+        Some(now - TimeDelta::minutes(30)),
+    )
+    .await;
+    let late = rig
+        .fake
+        .control()
+        .add_server(PROJECT, &windows::server_name(old));
+    // Преемник уже занял единственное живое место.
+    let successor = raw_window(&rig.pool, "ready", None, Some(now - TimeDelta::minutes(5))).await;
+    // Удаление принято, но сервер ещё виден в списке: обязательство остаётся открытым.
+    rig.fake.control().delete = DeleteMode::QuarantineListed;
+    rig.tick(now).await;
+    let window = rig.window(old).await;
+    assert_eq!(
+        window.state, "late_cleanup",
+        "the cleanup does not compete for the live slot"
+    );
+    assert!(window.delete_accepted_at.is_some());
+    assert_eq!(rig.deletes(), 1, "deleted through the normal path");
+    assert_eq!(
+        rig.state(successor).await,
+        "ready",
+        "the successor keeps its window"
+    );
+    // Поздний снос считается в расходе по резерву рядом с резервом преемника.
+    let mut conn = rig.pool.acquire().await?;
+    let spent = windows::spent_in_month(&mut conn, &windows::month_of(now)).await?;
+    drop(conn);
+    assert_eq!(spent, 2 * 3 * HOURLY, "both reservations are spent");
+    // Сервер пропал из полного списка: окно заканчивается итогом от вызова создания.
+    rig.fake.control().remove_server(late);
+    rig.fake.control().delete = DeleteMode::Ok;
+    rig.tick(now + TimeDelta::minutes(1)).await;
+    let window = rig.window(old).await;
+    assert_eq!(window.state, "ended");
+    assert!(window.server_gone_at.is_some());
+    assert_eq!(
+        window.final_cost_kopecks,
+        Some(HOURLY),
+        "the cost runs from the create call to the confirmed absence"
+    );
+    assert_eq!(rig.state(successor).await, "ready");
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn an_open_late_cleanup_blocks_new_creates(pool: PgPool) -> TestResult {
+    let rig = rig(pool).await;
+    let now = now_micros();
+    let old = raw_window(
+        &rig.pool,
+        "failed",
+        None,
+        Some(now - TimeDelta::minutes(30)),
+    )
+    .await;
+    rig.fake
+        .control()
+        .add_server(PROJECT, &windows::server_name(old));
+    rig.fake.control().delete = DeleteMode::QuarantineListed;
+    rig.tick(now).await;
+    assert_eq!(rig.state(old).await, "late_cleanup");
+    // Живого окна нет, но сервер старого окна ещё оплачивается: новый не создаётся.
+    assert!(matches!(
+        rig.try_create(60).await,
+        Err(CreateRefusal::LateCleanup)
+    ));
     Ok(())
 }
 
@@ -2366,6 +2715,66 @@ async fn a_stray_that_cannot_be_deleted_alerts_every_half_hour(pool: PgPool) -> 
     // Через 40 минут слот другой: пуш повторяется.
     again.tick(t0 + TimeDelta::minutes(40)).await;
     assert_eq!(rig.alerts().await.len(), 2);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_stray_is_deleted_only_when_the_direct_get_shows_its_own_name(
+    pool: PgPool,
+) -> TestResult {
+    let rig = rig(pool).await;
+    enable_pushes(&rig.pool).await;
+    rig.fake.control().add_server(PROJECT, &stray_name());
+    // Номер в списке, но прямой ответ называет другой сервер: номер мог достаться чужому.
+    rig.fake.control().get_name_override = Some("someone-else".to_owned());
+    let t0 = now_micros();
+    rig.tick(t0).await;
+    assert_eq!(rig.deletes(), 0, "a mismatched name is never deleted");
+    assert_eq!(rig.fake.server_count(), 1);
+    assert!(
+        rig.alert_codes()
+            .await
+            .contains(&"stray_server_stuck".to_owned()),
+        "{:?}",
+        rig.alert_codes().await
+    );
+    // Провайдер отдаёт настоящее имя: лишний сервер удаляется.
+    rig.fake.control().get_name_override = None;
+    rig.tick(t0 + TimeDelta::minutes(40)).await;
+    assert_eq!(rig.fake.server_count(), 0);
+    assert_eq!(rig.deletes(), 1);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_project_listing_failure_does_not_stop_another_project(pool: PgPool) -> TestResult {
+    let rig = rig(pool).await;
+    let now = now_micros();
+    // Окно из старой конфигурации: его проект — не текущий.
+    let id = raw_window(
+        &rig.pool,
+        "create_unknown",
+        None,
+        Some(now - TimeDelta::minutes(1)),
+    )
+    .await;
+    rig.fake
+        .control()
+        .add_server(PROJECT + 1, &windows::server_name(id));
+    sqlx::query("update cloud_windows set project_id = $2 where id = $1")
+        .bind(id)
+        .bind(PROJECT + 1)
+        .execute(&rig.pool)
+        .await?;
+    // Список текущего проекта отвечает ошибкой: это не должно мешать окну другого проекта.
+    rig.fake.control().list_fail_project = Some(PROJECT);
+    rig.tick(now).await;
+    let window = rig.window(id).await;
+    assert_eq!(
+        window.state, "identified",
+        "the other project's window is confirmed by its own full listing"
+    );
+    assert!(window.server_id.is_some());
     Ok(())
 }
 
@@ -2448,6 +2857,43 @@ async fn a_create_call_interrupted_by_a_crash_is_never_repeated(pool: PgPool) ->
     service.tick(now + TimeDelta::minutes(12)).await;
     assert_eq!(rig.state(orphan).await, "failed");
     assert_eq!(rig.posts(), 0);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn the_live_cost_view_stops_at_the_confirmed_server_gone(pool: PgPool) -> TestResult {
+    let rig = rig(pool).await;
+    let now = now_micros();
+    let id = raw_window(
+        &rig.pool,
+        "deleting",
+        Some(999),
+        Some(now - TimeDelta::hours(5)),
+    )
+    .await;
+    // Сервер подтверждённо пропал два часа назад, правило DNAT ещё снимается.
+    sqlx::query("update cloud_windows set server_gone_at = $2 where id = $1")
+        .bind(id)
+        .bind(now - TimeDelta::hours(2))
+        .execute(&rig.pool)
+        .await?;
+    let window = rig.window(id).await;
+    assert_eq!(window.final_cost_kopecks, None, "the window is still live");
+    let view = windows::view(&window, now);
+    assert_eq!(
+        view.cost_so_far_kopecks,
+        3 * HOURLY,
+        "the cost stops when the server is gone, not when the DNAT rule is"
+    );
+    Ok(())
+}
+
+/// Закрыть окно, чтобы следующая строка теста могла занять единственное живое место.
+async fn close_window(pool: &PgPool, id: Uuid) -> Result<(), sqlx::Error> {
+    sqlx::query("update cloud_windows set state = 'ended', final_cost_kopecks = 0 where id = $1")
+        .bind(id)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 

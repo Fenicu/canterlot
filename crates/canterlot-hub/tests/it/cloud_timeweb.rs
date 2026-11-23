@@ -1031,11 +1031,50 @@ async fn dnat_rules_are_listed_with_pages_and_deleted_by_id() {
     }
 }
 
+#[tokio::test]
+async fn a_dnat_rule_with_a_missing_or_empty_field_fails_the_whole_listing() {
+    let rig = rig().await;
+    let full = json!({
+        "id": "dnat-1",
+        "local_ip": "192.0.2.10",
+        "local_port": "22",
+        "public_ip": "192.0.2.1",
+        "public_port": "22100",
+        "protocol": "tcp",
+    });
+    for field in [
+        "id",
+        "local_ip",
+        "local_port",
+        "public_ip",
+        "public_port",
+        "protocol",
+    ] {
+        let mut empty = full.clone();
+        empty[field] = json!("");
+        rig.fake.control().dnat_rules_raw = vec![empty];
+        assert!(
+            rig.provider.list_dnat_rules(ROUTER).await.is_err(),
+            "empty `{field}` must fail the listing"
+        );
+
+        let mut missing = full.clone();
+        missing.as_object_mut().unwrap().remove(field);
+        rig.fake.control().dnat_rules_raw = vec![missing];
+        assert!(
+            rig.provider.list_dnat_rules(ROUTER).await.is_err(),
+            "missing `{field}` must fail the listing"
+        );
+    }
+    // Годный список с теми же полями читается.
+    rig.fake.control().dnat_rules_raw = vec![full];
+    assert_eq!(rig.provider.list_dnat_rules(ROUTER).await.unwrap().len(), 1);
+}
+
 // ---- токен ----
 
 #[derive(Clone, Default)]
 struct Capture(Arc<Mutex<Vec<u8>>>);
-
 impl io::Write for Capture {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.0.lock().unwrap().extend_from_slice(buf);

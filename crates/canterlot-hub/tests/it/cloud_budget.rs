@@ -704,6 +704,59 @@ async fn a_card_that_expires_during_the_price_call_is_not_approved(pool: PgPool)
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_card_that_expires_while_waiting_for_the_budget_lock_is_not_approved(
+    pool: PgPool,
+) -> TestResult {
+    let rig = Rig::new(pool).await;
+    rig.set_budget(1_000_000, false).await;
+    let request = rig.card(2, "сборка", Source::Owner).await;
+    let deadline = now_micros() + TimeDelta::milliseconds(2_500);
+    sqlx::query(
+        "update requests
+            set expires_at = $2,
+                request_payload = jsonb_set(request_payload, '{expires_at}', to_jsonb($3::text))
+          where id = $1",
+    )
+    .bind(request)
+    .bind(deadline)
+    .bind(deadline.to_rfc3339())
+    .execute(&rig.pool)
+    .await?;
+    rig.decision(request, true).await;
+    // Чужая транзакция держит строку `cloud_budget`, пока карточка не истечёт: одобрение
+    // ждёт её на замке, и срок проверяется ещё раз уже под замком, по часам базы.
+    let (ready, wait) = tokio::sync::oneshot::channel::<()>();
+    let holder = {
+        let pool = rig.pool.clone();
+        tokio::spawn(async move {
+            let mut tx = canterlot_hub::db::begin(&pool).await.unwrap();
+            sqlx::query("select 1 from cloud_budget where singleton for update")
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            ready.send(()).unwrap();
+            // Замок держится дольше остатка срока карточки; ждём в базе, не в тесте.
+            sqlx::query("select pg_sleep(4)")
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            tx.rollback().await.unwrap();
+        })
+    };
+    wait.await?;
+    let outcome = rig.approve(request).await;
+    holder.await?;
+    assert_eq!(outcome, cloud_propose::ApproveOutcome::Expired);
+    assert_eq!(rig.request_state(request).await, "expired");
+    assert_eq!(
+        rig.windows_for(request).await,
+        0,
+        "no window after the deadline"
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn over_budget_card_passes_only_with_its_exact_reservation(pool: PgPool) -> TestResult {
     let rig = Rig::new(pool).await;
     rig.set_budget(0, false).await;
@@ -1040,6 +1093,49 @@ async fn automatic_create_rechecks_its_conditions_under_the_budget_lock(
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn automatic_create_reads_the_runner_clock_in_the_database(pool: PgPool) -> TestResult {
+    let rig = Rig::new(pool).await;
+    rig.set_budget(1_000_000, true).await;
+    let _carrier = testkit::fake_session(&rig.registry, rig.carrier, &["runners_v1"], true);
+    let runner = rig.static_runner("runner-a").await;
+    rig.seed_waiting(60).await;
+    let real = now_micros();
+    // Наблюдение и период недоступности — по часам базы: десять минут уже прошли.
+    rig.observe_at(runner, real).await;
+    sqlx::query(
+        "insert into cloud_auto_unavailable (machine_id, since, checked_at)
+         values ($1, $2, $3)",
+    )
+    .bind(runner)
+    .bind(real - TimeDelta::minutes(11))
+    .bind(real)
+    .execute(&rig.pool)
+    .await?;
+    let pricing = rig.service.pricing().await.unwrap();
+    let mut conn = rig.pool.acquire().await?;
+    // Транзакция создания получает время прохода на десять минут раньше настоящего: под
+    // замком бюджета условия проверяются по часам базы, а не по этой метке.
+    let created = windows::create_in_tx(
+        &mut conn,
+        &rig.config,
+        pricing,
+        CreateRequest {
+            trigger: Trigger::Auto,
+            proposal_id: None,
+            hard_cap_minutes: 120,
+            consent_over_budget_kopecks: None,
+        },
+        Some(windows::AutoGuard {
+            registry: &rig.registry,
+            now: real - TimeDelta::minutes(10),
+        }),
+    )
+    .await;
+    assert!(created.is_ok(), "the window is created: {created:?}");
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn cloud_demand_uses_the_placement_predicate(pool: PgPool) -> TestResult {
     let rig = Rig::new(pool).await;
     rig.set_budget(1_000_000, true).await;
@@ -1210,10 +1306,26 @@ async fn automatic_start_alert_is_keyed_by_the_window_not_the_month(pool: PgPool
         rig.service.tick(at).await;
     }
     assert_eq!(rig.push_count("auto_started").await, 1);
-    // Окно заканчивается, очередь и недоступность остаются: второе окно в том же месяце.
-    sqlx::query("update cloud_windows set state = 'failed', final_cost_kopecks = 0")
-        .execute(&rig.pool)
+    // Окно закрывается по-настоящему: удаление сервера и подтверждённое отсутствие. Прямая
+    // запись `failed` при живом сервере закрытым окном не является: сверка возвращает
+    // сервер окну как поздний снос, и он держит бюджет и новые создания.
+    let first: Uuid = sqlx::query_scalar("select id from cloud_windows")
+        .fetch_one(&rig.pool)
         .await?;
+    let deleting_at = t0 + TimeDelta::minutes(11);
+    windows::request_delete(&rig.pool, first, windows::REASON_OWNER, deleting_at).await?;
+    rig.service.tick(deleting_at).await;
+    let settled: (String, Option<DateTime<Utc>>, Option<i64>) = sqlx::query_as(
+        "select state, server_gone_at, final_cost_kopecks from cloud_windows where id = $1",
+    )
+    .bind(first)
+    .fetch_one(&rig.pool)
+    .await?;
+    assert_eq!(settled.0, "ended", "the first window is fully closed");
+    assert!(settled.1.is_some(), "absence of the server is confirmed");
+    assert!(settled.2.is_some(), "the final cost is settled");
+
+    // Очередь и недоступность остаются: второе окно в том же месяце.
     let at = t0 + TimeDelta::minutes(12);
     rig.observe_at(runner, at).await;
     rig.service.tick(at).await;

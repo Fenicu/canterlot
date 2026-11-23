@@ -81,6 +81,20 @@ pub struct CloudService {
 /// Причина удаления окна, у которого сервер остался `no_paid`: аккаунт требует предоплату.
 pub const REASON_NO_PAID: &str = "no_paid";
 
+/// Принадлежность сервера по контракту API: имя доказывает прямой ответ, проект — только
+/// свежий полный список проекта.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ownership {
+    /// Номер с этим именем есть в полном списке проекта.
+    Owned,
+    /// Имя другое или номера с этим именем в проекте нет.
+    Mismatch,
+    /// Полный список проекта без номера: сервер подтверждённо пропал.
+    Absent,
+    /// Ответа нет или он противоречив: ничего не меняем.
+    Unknown,
+}
+
 /// Итог окна: цена часа удалённого профиля за время от вызова создания до подтверждённого
 /// конца, не меньше часа. У окна, которому не звонили, слагаемое 0. Публичный адрес больше
 /// не заказывается, поэтому в итог входит только сервер.
@@ -443,7 +457,8 @@ impl CloudService {
             "identified" => self.step_identified(window, now).await,
             "ready" => self.step_ready(window, now).await,
             "draining" => self.step_draining(window, now).await,
-            "deleting" => self.step_deleting(window, now).await,
+            // Поздний снос сервера закрытого окна идёт тем же шагом удаления.
+            "deleting" | windows::LATE_CLEANUP => self.step_deleting(window, now).await,
             // `create_unknown` разбирает только сверка по полному списку.
             _ => Ok(()),
         }
@@ -852,29 +867,46 @@ impl CloudService {
                 DnatCreateOutcome::Refused {
                     status, error_code, ..
                 } => {
-                    sqlx::query(
-                        "update cloud_windows set last_error = 'dnat_refused',
-                                dnat_create_attempted_at = null,
-                                dnat_gone_at = coalesce(dnat_gone_at, $2)
-                         where id = $1",
-                    )
-                    .bind(window.id)
-                    .bind(now)
-                    .execute(&self.pool)
+                    // Отказ провайдера, пуш владельцу и переход в `deleting` — одна
+                    // транзакция: падение хаба между ними не оставляет окно в `identified`
+                    // без метки попытки, иначе следующий проход сделал бы второй POST.
+                    let id = window.id;
+                    let name = window.name.clone();
+                    crate::db::in_tx(&self.pool, move |conn| {
+                        Box::pin(async move {
+                            sqlx::query(
+                                "update cloud_windows set last_error = 'dnat_refused',
+                                        dnat_create_attempted_at = null,
+                                        dnat_gone_at = coalesce(dnat_gone_at, $2)
+                                 where id = $1",
+                            )
+                            .bind(id)
+                            .bind(now)
+                            .execute(&mut *conn)
+                            .await?;
+                            crate::notify::enqueue_cloud_alert_in_tx(
+                                &mut *conn,
+                                &format!("cloud:dnat_refused:{id}"),
+                                &json!({
+                                    "code": "dnat_refused",
+                                    "window_id": id,
+                                    "name": name,
+                                    "status": status,
+                                    "error_code": error_code,
+                                }),
+                            )
+                            .await?;
+                            crate::cloud::windows::request_delete_in_tx(
+                                &mut *conn,
+                                id,
+                                "dnat_refused",
+                                now,
+                            )
+                            .await?;
+                            Ok::<_, sqlx::Error>(())
+                        })
+                    })
                     .await?;
-                    crate::notify::enqueue_cloud_alert(
-                        &self.pool,
-                        &format!("cloud:dnat_refused:{}", window.id),
-                        &json!({
-                            "code": "dnat_refused",
-                            "window_id": window.id,
-                            "name": window.name,
-                            "status": status,
-                            "error_code": error_code,
-                        }),
-                    )
-                    .await?;
-                    return self.delete_now(window, "dnat_refused", now).await;
                 }
                 DnatCreateOutcome::Ambiguous { .. } => {
                     sqlx::query(
@@ -1281,7 +1313,7 @@ impl CloudService {
         let mut window = {
             let mut conn = self.pool.acquire().await?;
             match windows::load(&mut conn, window.id).await? {
-                Some(fresh) if fresh.state == "deleting" => fresh,
+                Some(fresh) if windows::owns_server(&fresh.state) => fresh,
                 _ => return Ok(()),
             }
         };
@@ -1330,12 +1362,48 @@ impl CloudService {
         }
     }
 
+    /// Принадлежность сервера окну или лишнему серверу по контракту API: прямой
+    /// `GET /servers/{id}` отдаёт номер и имя (проекта в схеме `vds` нет), а проект
+    /// доказывает только свежий полный список: номер должен стоять в нём с тем же именем.
+    async fn ownership(&self, server_id: i64, name: &str, project: i64) -> Ownership {
+        match self.provider.get_server(server_id).await {
+            Ok(ServerLookup::Found(state)) if state.name != name => Ownership::Mismatch,
+            Ok(ServerLookup::Found(_)) => match self.provider.list_project_servers(project).await {
+                Ok(list)
+                    if list
+                        .iter()
+                        .any(|server| server.id == server_id && server.name == name) =>
+                {
+                    Ownership::Owned
+                }
+                Ok(_) => Ownership::Mismatch,
+                Err(error) => {
+                    tracing::warn!(kind = "cloud_ownership_listing", error = %error, "project listing failed; ownership is unknown");
+                    Ownership::Unknown
+                }
+            },
+            // Точечный 404 сам по себе отсутствия не подтверждает: нужен полный список.
+            Ok(ServerLookup::NotFound) => match self.provider.list_project_servers(project).await {
+                Ok(list) if !list.iter().any(|server| server.id == server_id) => Ownership::Absent,
+                Ok(_) => Ownership::Unknown,
+                Err(error) => {
+                    tracing::warn!(kind = "cloud_ownership_listing", error = %error, "project listing failed; absence is unknown");
+                    Ownership::Unknown
+                }
+            },
+            Err(error) => {
+                tracing::warn!(kind = "cloud_delete_lookup", error_kind = ?error.kind, "server lookup before delete failed");
+                Ownership::Unknown
+            }
+        }
+    }
+
     /// Сервер пропал из полного списка (метка ставится один раз).
     async fn mark_server_gone(&self, id: Uuid, now: DateTime<Utc>) -> Result<(), sqlx::Error> {
         sqlx::query(
             "update cloud_windows set server_gone_at = coalesce(server_gone_at, $2),
                     next_delete_at = case when server_gone_at is null then null else next_delete_at end
-             where id = $1 and state = 'deleting'",
+             where id = $1 and state in ('deleting', 'late_cleanup')",
         )
         .bind(id)
         .bind(now)
@@ -1367,6 +1435,11 @@ impl CloudService {
             .router_ip
             .as_deref()
             .unwrap_or(&self.config.router_ip);
+        // Ни правила, ни попытки его создать: обязательства нет, роутер не нужен. Проверка
+        // стоит до сетевого вызова, иначе недоступность роутера держала бы окно живым.
+        if window.dnat_rule_id.is_none() && window.dnat_create_attempted_at.is_none() {
+            return self.end(&window.id, terminal, now).await;
+        }
         let list = match self.provider.list_dnat_rules(router).await {
             Ok(list) => list,
             Err(error) => {
@@ -1488,17 +1561,17 @@ impl CloudService {
             // Отсутствие уже подтверждено: DELETE больше не нужен.
             return Ok(());
         }
-        // Удаление только по номеру опасно: номер мог достаться чужому серверу. Перед
-        // DELETE провайдер должен показать то же имя в том же проекте.
+        // Удаление только по номеру опасно: номер мог достаться чужому серверу. Прямой ответ
+        // даёт имя, а проект — только свежий полный список проекта окна.
         let project = window.project_id.unwrap_or(self.config.project_id);
-        match self.provider.get_server(server_id).await {
-            Ok(ServerLookup::Found(state))
-                if state.name != window.name || state.project_id != Some(project) =>
-            {
+        let expected = windows::server_name(window.id);
+        match self.ownership(server_id, &expected, project).await {
+            Ownership::Owned => {}
+            Ownership::Mismatch => {
                 sqlx::query(
                     "update cloud_windows set last_error = 'ownership_mismatch',
                             next_delete_at = $2
-                     where id = $1 and state = 'deleting'",
+                     where id = $1 and state in ('deleting', 'late_cleanup')",
                 )
                 .bind(window.id)
                 .bind(now + ALERT_EVERY)
@@ -1521,21 +1594,28 @@ impl CloudService {
                 .await?;
                 return Ok(());
             }
-            Ok(ServerLookup::NotFound) => {
+            // Полный список проекта без сервера — единственное доказательство отсутствия.
+            Ownership::Absent => {
                 self.mark_server_gone(window.id, now).await?;
                 return Ok(());
             }
-            Ok(ServerLookup::Found(_)) => {}
-            Err(error) => {
-                tracing::warn!(kind = "cloud_delete_lookup", error_kind = ?error.kind, "server lookup before delete failed");
+            Ownership::Unknown => {
+                // Ответа нет: это неудача удаления, как и отказ провайдера. Повтор идёт с
+                // откатом, а после третьей неудачи владельцу уходит «deletion failing».
+                let attempts = window.delete_attempts.saturating_add(1);
                 sqlx::query(
-                    "update cloud_windows set next_delete_at = $2
-                     where id = $1 and state = 'deleting'",
+                    "update cloud_windows set last_error = 'delete_lookup_failed',
+                            delete_attempts = $2, next_delete_at = $3
+                     where id = $1 and state in ('deleting', 'late_cleanup')",
                 )
                 .bind(window.id)
-                .bind(now + delete_backoff(window.delete_attempts.saturating_add(1)))
+                .bind(attempts)
+                .bind(now + delete_backoff(attempts))
                 .execute(&self.pool)
                 .await?;
+                if attempts >= DELETE_FAILURES_BEFORE_ALERT {
+                    self.alert_delete_failing(window, now).await?;
+                }
                 return Ok(());
             }
         }
@@ -1555,7 +1635,7 @@ impl CloudService {
                             delete_attempts = $3,
                             next_delete_at = $4,
                             alert_state = alert_state || jsonb_build_object('quarantined', $5::boolean)
-                     where id = $1 and state = 'deleting'",
+                     where id = $1 and state in ('deleting', 'late_cleanup')",
                 )
                 .bind(window.id)
                 .bind(now)
@@ -1579,7 +1659,7 @@ impl CloudService {
                             last_error = case when delete_reason in ('no_paid','dnat_refused') then last_error end,
                             delete_attempts = $3,
                             next_delete_at = $4
-                     where id = $1 and state = 'deleting'",
+                     where id = $1 and state in ('deleting', 'late_cleanup')",
                 )
                 .bind(window.id)
                 .bind(now)
@@ -1597,7 +1677,7 @@ impl CloudService {
                 sqlx::query(
                     "update cloud_windows set last_error = 'needs_confirmation', delete_attempts = $2,
                             next_delete_at = $3
-                     where id = $1 and state = 'deleting'",
+                     where id = $1 and state in ('deleting', 'late_cleanup')",
                 )
                 .bind(window.id)
                 .bind(attempts)
@@ -1615,7 +1695,7 @@ impl CloudService {
                 sqlx::query(
                     "update cloud_windows set last_error = 'delete_failed', delete_attempts = $2,
                             next_delete_at = $3
-                     where id = $1 and state = 'deleting'",
+                     where id = $1 and state in ('deleting', 'late_cleanup')",
                 )
                 .bind(window.id)
                 .bind(attempts)
@@ -1714,7 +1794,7 @@ impl CloudService {
             "select distinct project_id from cloud_windows
               where state = any($1) and project_id is not null",
         )
-        .bind(windows::live_states())
+        .bind(windows::billing_states())
         .fetch_all(&self.pool)
         .await
         .map_err(|error| warn_db("cloud_reconcile_projects", &error))?;
@@ -1723,27 +1803,35 @@ impl CloudService {
                 projects.push(project);
             }
         }
+        // Каждый проект разбирается сам: ошибка списка одного проекта не мешает
+        // подтверждению и сносу окон другого. Новых созданий при этом не будет: успешной
+        // такая сверка не считается.
+        let mut complete = true;
         for project in projects {
             let listing = match self.provider.list_project_servers(project).await {
                 Ok(listing) => listing,
                 Err(error) => {
-                    tracing::warn!(kind = "cloud_reconcile_listing", error = %error, "project listing failed; nothing changed");
-                    return Err(());
+                    tracing::warn!(kind = "cloud_reconcile_listing", project, error = %error, "project listing failed; nothing changed for this project");
+                    complete = false;
+                    continue;
                 }
             };
-            self.apply_listing(&listing, project, now)
-                .await
-                .map_err(|error| {
-                    warn_db("cloud_reconcile", &error);
-                })?;
+            if let Err(error) = self.apply_listing(&listing, project, now).await {
+                warn_db("cloud_reconcile", &error);
+                complete = false;
+            }
         }
         // Правила роутера идут отдельно: список не получен целиком — ничего не меняем.
         if let Err(error) = self.delete_stray_dnat_rules(now).await {
             warn_db("cloud_reconcile_dnat", &error);
         }
+        if !complete {
+            return Err(());
+        }
         let pending: bool = sqlx::query_scalar(
             "select exists(select 1 from cloud_windows
-                            where state = 'deleting' and delete_accepted_at is not null
+                            where state in ('deleting', 'late_cleanup')
+                              and delete_accepted_at is not null
                               and server_gone_at is null)",
         )
         .fetch_one(&self.pool)
@@ -1762,7 +1850,7 @@ impl CloudService {
         };
         let held: Vec<Option<i32>> =
             sqlx::query_scalar("select dnat_port from cloud_windows where state = any($1)")
-                .bind(windows::live_states())
+                .bind(windows::billing_states())
                 .fetch_all(&self.pool)
                 .await?;
         let held: std::collections::HashSet<u16> = held
@@ -1826,7 +1914,7 @@ impl CloudService {
         let windows: Vec<Window> = sqlx::query_as(
             "select * from cloud_windows where state = any($1) or id = any($2) order by created_at, id",
         )
-        .bind(windows::live_states())
+        .bind(windows::billing_states())
         .bind(&ids)
         .fetch_all(&self.pool)
         .await?;
@@ -1871,7 +1959,7 @@ impl CloudService {
                 }
                 // Сервера нет без принятого удаления (владелец удалил в панели): оплата
                 // сервера кончилась; окно закончит шаг удаления, когда уйдёт и адрес.
-                ("deleting", None) if window.server_id.is_some() => {
+                ("deleting" | "late_cleanup", None) if window.server_id.is_some() => {
                     if self
                         .confirm_absent(window.server_id.expect("checked"))
                         .await?
@@ -1885,10 +1973,9 @@ impl CloudService {
                 ("failed", Some(server)) if window.create_called_at.is_some() => {
                     self.reattach_late(window, server, now).await?;
                 }
-                (state, Some(server)) if !windows::LIVE.contains(&state) => {
-                    if current {
-                        self.delete_stray(server, now).await?;
-                    }
+                // Лишний сервер ищется только в текущем проекте.
+                (state, Some(server)) if current && !windows::owns_server(state) => {
+                    self.delete_stray(server, project, now).await?;
                 }
                 _ => {}
             }
@@ -1896,15 +1983,16 @@ impl CloudService {
         if current {
             for (id, server) in named {
                 if !known.contains(&id) {
-                    self.delete_stray(server, now).await?;
+                    self.delete_stray(server, project, now).await?;
                 }
             }
         }
         Ok(())
     }
 
-    /// Поздний сервер возвращается своему окну: оно снова живое (`deleting`), держит бюджет
-    /// и место в правиле одного окна, а итог считается от вызова создания до подтверждённого
+    /// Поздний сервер возвращается своему окну как обязательство сноса: `late_cleanup` вне
+    /// правила одного живого окна, поэтому преемник своё место не теряет. Снос считается в
+    /// бюджете и закрывает новые создания, а итог — от вызова создания до подтверждённого
     /// отсутствия.
     async fn reattach_late(
         &self,
@@ -1913,7 +2001,7 @@ impl CloudService {
         now: DateTime<Utc>,
     ) -> Result<(), sqlx::Error> {
         let updated = sqlx::query(
-            "update cloud_windows set state = 'deleting', server_id = $2,
+            "update cloud_windows set state = 'late_cleanup', server_id = $2,
                     final_cost_kopecks = null, delete_confirmed_at = null, server_gone_at = null,
                     delete_requested_at = $3, delete_reason = 'late_create', delete_accepted_at = null,
                     delete_attempts = 0, next_delete_at = $3, last_error = 'late_create'
@@ -1941,7 +2029,7 @@ impl CloudService {
     /// `deleting` и освобождает порт только после подтверждённого отсутствия правила.
     async fn gone(&self, window: &Window, now: DateTime<Utc>) -> Result<(), sqlx::Error> {
         let id = window.id;
-        let ended = crate::db::in_tx(&self.pool, move |mut conn| {
+        let ended = crate::db::in_tx(&self.pool, move |conn| {
             Box::pin(async move {
                 let Some(window) = windows::load_for_update(&mut *conn, id).await? else {
                     return Ok::<_, sqlx::Error>(false);
@@ -1984,7 +2072,7 @@ impl CloudService {
                 .bind(id.to_string())
                 .execute(&mut *conn)
                 .await?;
-                windows::revoke_cloud_machine_in_tx(&mut conn).await?;
+                windows::revoke_cloud_machine_in_tx(conn).await?;
                 Ok(true)
             })
         })
@@ -2000,14 +2088,32 @@ impl CloudService {
         Ok(())
     }
 
-    /// Сервер с нашим именем без живого окна: удаляется и сообщается владельцу.
+    /// Сервер с нашим именем без живого окна: удаляется и сообщается владельцу. Перед
+    /// удалением прямой ответ должен показать тот же номер с тем же именем: номер мог
+    /// достаться чужому серверу.
     async fn delete_stray(
         &self,
         server: &ServerSummary,
+        project: i64,
         now: DateTime<Utc>,
     ) -> Result<(), sqlx::Error> {
         let payload =
             |code: &str| json!({"code": code, "name": server.name, "server_id": server.id});
+        match self.ownership(server.id, &server.name, project).await {
+            Ownership::Owned => {}
+            // Сервера уже нет: удалять нечего.
+            Ownership::Absent => return Ok(()),
+            Ownership::Mismatch | Ownership::Unknown => {
+                let slot = now.timestamp() / ALERT_EVERY.num_seconds();
+                crate::notify::enqueue_cloud_alert(
+                    &self.pool,
+                    &format!("cloud:stray_stuck:{}:{slot}", server.id),
+                    &payload("stray_server_stuck"),
+                )
+                .await?;
+                return Ok(());
+            }
+        }
         match self.provider.delete_server(server.id).await {
             DeleteOutcome::Deleted { .. } | DeleteOutcome::AlreadyGone => {
                 crate::notify::enqueue_cloud_alert(
