@@ -980,7 +980,9 @@ async fn auto_mode_is_blocked_by_zero_budget_a_block_and_a_live_window(pool: PgP
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn automatic_create_rechecks_its_conditions_under_the_budget_lock(pool: PgPool) -> TestResult {
+async fn automatic_create_rechecks_its_conditions_under_the_budget_lock(
+    pool: PgPool,
+) -> TestResult {
     let rig = Rig::new(pool).await;
     let _carrier = testkit::fake_session(&rig.registry, rig.carrier, &["runners_v1"], true);
     let runner = rig.static_runner("runner-a").await;

@@ -289,10 +289,7 @@ impl Rig {
     ) -> Uuid {
         let id = Uuid::now_v7();
         let labels: Vec<String> = labels.iter().map(|label| (*label).to_owned()).collect();
-        let placement: Vec<String> = placement
-            .iter()
-            .map(|kind| (*kind).to_owned())
-            .collect();
+        let placement: Vec<String> = placement.iter().map(|kind| (*kind).to_owned()).collect();
         sqlx::query(
             "insert into jobs (id, owner_id, domain, remote, shell, timeout_seconds, state, labels,
                                placement, requested_machine_id, carrier_id, expected_minutes)
@@ -314,10 +311,7 @@ impl Rig {
     async fn seed_sourced_waiting(&self, labels: &[&str], placement: &[&str]) -> Uuid {
         let id = Uuid::now_v7();
         let labels: Vec<String> = labels.iter().map(|label| (*label).to_owned()).collect();
-        let placement: Vec<String> = placement
-            .iter()
-            .map(|kind| (*kind).to_owned())
-            .collect();
+        let placement: Vec<String> = placement.iter().map(|kind| (*kind).to_owned()).collect();
         sqlx::query(
             "insert into jobs (id, owner_id, domain, remote, shell, timeout_seconds, state, labels,
                                placement, carrier_id, expected_minutes, source_repo, source_rev,

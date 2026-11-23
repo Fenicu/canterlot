@@ -238,12 +238,12 @@ async fn propose(
     // Та же граница, что у инструмента агента, и до умножения: переполнение `u32` не должно
     // доходить до цены и резерва.
     if !(1..=4).contains(&body.hours) {
-        return Err(
-            ApiError::new(ErrorCode::CloudHoursOutOfRange).with_details(super::error::ErrorDetails {
+        return Err(ApiError::new(ErrorCode::CloudHoursOutOfRange).with_details(
+            super::error::ErrorDetails {
                 reason: Some("hours".to_owned()),
                 ..Default::default()
-            }),
-        );
+            },
+        ));
     }
     let carrier = cloud.config().carrier_machine_id;
     let owner_id = owner.owner_id;
