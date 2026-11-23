@@ -1381,19 +1381,21 @@ async fn a_server_gone_by_hand_keeps_the_window_open_until_its_dnat_rule_is_gone
     enable_pushes(&rig.pool).await;
     let now = now_micros();
     use crate::support::fake_timeweb::FakeDnatRule;
-    let id = raw_window(&rig.pool, "ready", Some(888), Some(now - TimeDelta::minutes(20)))
-        .await;
-    rig.fake
-        .control()
-        .dnat_rules
-        .push(FakeDnatRule {
-            id: "dnat-gone".to_owned(),
-            local_ip: "192.0.2.10".to_owned(),
-            local_port: "22".to_owned(),
-            public_ip: ROUTER_IP.to_owned(),
-            public_port: "22100".to_owned(),
-            protocol: "tcp".to_owned(),
-        });
+    let id = raw_window(
+        &rig.pool,
+        "ready",
+        Some(888),
+        Some(now - TimeDelta::minutes(20)),
+    )
+    .await;
+    rig.fake.control().dnat_rules.push(FakeDnatRule {
+        id: "dnat-gone".to_owned(),
+        local_ip: "192.0.2.10".to_owned(),
+        local_port: "22".to_owned(),
+        public_ip: ROUTER_IP.to_owned(),
+        public_port: "22100".to_owned(),
+        protocol: "tcp".to_owned(),
+    });
     sqlx::query("update cloud_windows set dnat_rule_id = 'dnat-gone' where id = $1")
         .bind(id)
         .execute(&rig.pool)
@@ -1401,7 +1403,10 @@ async fn a_server_gone_by_hand_keeps_the_window_open_until_its_dnat_rule_is_gone
     rig.fake.control().dnat_delete_status = Some(500);
     rig.tick(now).await;
     let window = rig.window(id).await;
-    assert_eq!(window.state, "deleting", "the DNAT obligation holds the window");
+    assert_eq!(
+        window.state, "deleting",
+        "the DNAT obligation holds the window"
+    );
     assert_eq!(window.server_gone_at, Some(now));
     assert_eq!(rig.fake.control().dnat_rules.len(), 1);
     assert!(rig.alert_codes().await.contains(&"window_gone".to_owned()));
@@ -1825,8 +1830,6 @@ async fn a_listing_gap_does_not_close_a_server_that_still_answers(pool: PgPool) 
     Ok(())
 }
 
-
-
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn the_hard_cap_drains_cancels_then_bounds_teardown_and_deletes(pool: PgPool) -> TestResult {
     let rig = rig(pool).await;
@@ -2022,8 +2025,13 @@ async fn a_delete_is_refused_when_the_server_id_belongs_to_something_else(
         let now = now_micros();
         let project = if wrong_project { PROJECT + 1 } else { PROJECT };
         let server = rig.fake.control().add_server(project, "someone-else");
-        let id = raw_window(&rig.pool, "deleting", Some(server), Some(now - TimeDelta::minutes(20)))
-            .await;
+        let id = raw_window(
+            &rig.pool,
+            "deleting",
+            Some(server),
+            Some(now - TimeDelta::minutes(20)),
+        )
+        .await;
         {
             let mut state = rig.fake.control();
             let entry = state.servers.get_mut(&server).unwrap();
@@ -2069,8 +2077,13 @@ async fn a_confirmed_absence_skips_the_delete_call(pool: PgPool) -> TestResult {
     let rig = rig(pool).await;
     let now = now_micros();
     let server = rig.fake.control().add_server(PROJECT, "x");
-    let id = raw_window(&rig.pool, "deleting", Some(server), Some(now - TimeDelta::minutes(20)))
-        .await;
+    let id = raw_window(
+        &rig.pool,
+        "deleting",
+        Some(server),
+        Some(now - TimeDelta::minutes(20)),
+    )
+    .await;
     rig.fake.control().servers.get_mut(&server).unwrap().name = windows::server_name(id);
     sqlx::query("update cloud_windows set server_gone_at = $2 where id = $1")
         .bind(id)
@@ -2175,7 +2188,9 @@ async fn quarantine_is_confirmed_only_by_absence_from_a_full_listing(pool: PgPoo
     assert_eq!(rig.state(id).await, "deleting");
     assert_eq!(rig.deletes(), 2, "the accepted delete is retried");
     assert!(
-        rig.alert_codes().await.contains(&"delete_failing".to_owned()),
+        rig.alert_codes()
+            .await
+            .contains(&"delete_failing".to_owned()),
         "{:?}",
         rig.alert_codes().await
     );
@@ -2254,7 +2269,10 @@ async fn servers_of_closed_windows_are_strays_too(pool: PgPool) -> TestResult {
         .add_server(PROJECT, &windows::server_name(id));
     rig.tick(t0 + TimeDelta::minutes(15)).await;
     let window = rig.window(id).await;
-    assert_eq!(window.state, "deleting", "reattached to its original window");
+    assert_eq!(
+        window.state, "deleting",
+        "reattached to its original window"
+    );
     assert_eq!(window.server_id, Some(late));
     assert_eq!(window.delete_reason.as_deref(), Some("late_create"));
     assert_eq!(rig.deletes(), 1, "deleted through the normal path");
@@ -3112,7 +3130,9 @@ async fn startup_enables_the_service_only_with_a_readable_token_and_a_real_carri
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn without_a_carrier_only_new_creates_stop_and_cleanup_still_runs(pool: PgPool) -> TestResult {
+async fn without_a_carrier_only_new_creates_stop_and_cleanup_still_runs(
+    pool: PgPool,
+) -> TestResult {
     let rig = rig(pool).await;
     machines::set_carrier(&rig.pool, rig.carrier, false).await?;
     assert!(matches!(
@@ -3124,13 +3144,22 @@ async fn without_a_carrier_only_new_creates_stop_and_cleanup_still_runs(pool: Pg
     // Незаконченное удаление старого окна идёт до конца без несущей.
     let now = now_micros();
     let server = rig.fake.control().add_server(PROJECT, "x");
-    let id = raw_window(&rig.pool, "deleting", Some(server), Some(now - TimeDelta::minutes(20)))
-        .await;
+    let id = raw_window(
+        &rig.pool,
+        "deleting",
+        Some(server),
+        Some(now - TimeDelta::minutes(20)),
+    )
+    .await;
     rig.fake.control().servers.get_mut(&server).unwrap().name = windows::server_name(id);
     rig.tick(now).await;
     rig.tick(now + TimeDelta::seconds(10)).await;
     assert_eq!(rig.state(id).await, "ended");
-    assert_eq!(rig.fake.server_count(), 0, "the outstanding server is deleted");
+    assert_eq!(
+        rig.fake.server_count(),
+        0,
+        "the outstanding server is deleted"
+    );
     Ok(())
 }
 
@@ -3217,8 +3246,6 @@ async fn a_stale_quote_is_replaced_by_the_new_lower_price(pool: PgPool) -> TestR
     assert!(window.profiles()[0].hourly_kopecks < HOURLY);
     Ok(())
 }
-
-
 
 #[derive(Clone, Default)]
 struct Capture(Arc<Mutex<Vec<u8>>>);

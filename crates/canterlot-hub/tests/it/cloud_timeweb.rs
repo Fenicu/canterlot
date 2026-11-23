@@ -849,7 +849,6 @@ async fn a_server_without_a_name_or_with_an_empty_name_fails_the_listing() {
     );
 }
 
-
 #[tokio::test]
 async fn servers_appear_in_the_listing_only_after_a_few_listings() {
     let rig = rig().await;

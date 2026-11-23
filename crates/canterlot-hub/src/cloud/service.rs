@@ -609,12 +609,10 @@ impl CloudService {
         // Метка вызова ставится до самого вызова: от неё считаются предел и ledger, и по ней
         // упавший после этого хаб поймёт, что сервер мог появиться.
         let hard_cap = TimeDelta::minutes(i64::from(window.hard_cap_minutes));
-        let drain = TimeDelta::minutes(
-            i64::try_from(self.drain_minutes(&window)).unwrap_or(i64::MAX),
-        );
-        let teardown = TimeDelta::minutes(
-            i64::try_from(self.teardown_minutes(&window)).unwrap_or(i64::MAX),
-        );
+        let drain =
+            TimeDelta::minutes(i64::try_from(self.drain_minutes(&window)).unwrap_or(i64::MAX));
+        let teardown =
+            TimeDelta::minutes(i64::try_from(self.teardown_minutes(&window)).unwrap_or(i64::MAX));
         let drain_until = now + hard_cap + drain;
         let stamped = sqlx::query(
             "update cloud_windows set create_called_at = $2, hard_cap_at = $3, drain_until = $4,
@@ -836,9 +834,7 @@ impl CloudService {
                     self.adopt_dnat(window.id, &rule_id).await?;
                 }
                 DnatCreateOutcome::Refused {
-                    status,
-                    error_code,
-                    ..
+                    status, error_code, ..
                 } => {
                     sqlx::query(
                         "update cloud_windows set last_error = 'dnat_refused',
@@ -1346,10 +1342,7 @@ impl CloudService {
             .router_id
             .as_deref()
             .unwrap_or(&self.config.router_id);
-        let Some(port) = window
-            .dnat_port
-            .and_then(|port| u16::try_from(port).ok())
-        else {
+        let Some(port) = window.dnat_port.and_then(|port| u16::try_from(port).ok()) else {
             return self.end(&window.id, terminal, now).await;
         };
         let local_ip = window.local_ip.as_deref().unwrap_or_default();
@@ -1862,7 +1855,10 @@ impl CloudService {
                 // Сервера нет без принятого удаления (владелец удалил в панели): оплата
                 // сервера кончилась; окно закончит шаг удаления, когда уйдёт и адрес.
                 ("deleting", None) if window.server_id.is_some() => {
-                    if self.confirm_absent(window.server_id.expect("checked")).await? {
+                    if self
+                        .confirm_absent(window.server_id.expect("checked"))
+                        .await?
+                    {
                         self.mark_server_gone(window.id, now).await?;
                     }
                 }
