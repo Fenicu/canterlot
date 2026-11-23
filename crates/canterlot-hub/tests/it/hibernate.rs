@@ -1,9 +1,12 @@
 //! Усыпление простаивающих сессий:-blocking условия, пробуждение вводом и skвозной маршрут.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use canterlot_hub::{
+    config::SessionToolsConfig,
     delivery::{
+        control::request_stop_execution,
         dispatch::{DispatchOutcome, GateInputs, dispatch_next},
         submit::{ContentBlock, SubmitInput, submit_input},
     },
@@ -13,6 +16,7 @@ use canterlot_hub::{
     ingest::{Ingest, JournalKind},
     model::ExecutionState,
     presence::Presence,
+    session_tools::{self, Caller, ToolContext, settle::SettleConfig},
     testkit::{self, Seed, TestClient},
 };
 use canterlot_proto::worker::v1::{
@@ -620,5 +624,254 @@ async fn owner_message_through_http_wakes_and_replies(pool: PgPool) -> TestResul
         "the owner's message reaches the resumed execution"
     );
     drop(dir);
+    Ok(())
+}
+
+/// Перезагрузка машины останавливает исполнение исходом `machine_rebooted`; воркер
+/// сообщает об этом при следующем старте, уже после того как владелец написал в сессию.
+/// Отложенный ввод поднимает исполнение с тем же нативным id и доставляется ровно раз.
+#[sqlx::test(migrations = "./migrations")]
+async fn input_queued_before_the_reboot_fact_wakes_the_session(pool: PgPool) -> TestResult {
+    let seed = testkit::seed(&pool).await;
+    let run = start_running(&pool, &seed).await;
+    // Сообщение пришло, пока хаб ещё считает исполнение живым: будить нечего, ввод в очереди.
+    let submitted = owner_input(&pool, seed.conversation_id, "проснись").await?;
+    stop_by_reboot(&pool, &seed, &run).await;
+    let resumed = resumed_execution(&pool, &seed, &run).await;
+    assert_eq!(queued_pauses(&pool, seed.conversation_id).await?, json!([]));
+    deliver_once(&pool, &seed, resumed, submitted.input_id).await
+}
+
+/// Ввод после уже записанной остановки перезагрузкой будит сессию тем же путём, что
+/// и усыплённую: новое исполнение с нативным id, паузы `process_exited` и `owner_lost` сняты.
+#[sqlx::test(migrations = "./migrations")]
+async fn owner_message_after_a_reboot_stop_wakes_the_session(pool: PgPool) -> TestResult {
+    let seed = testkit::seed(&pool).await;
+    let run = start_running(&pool, &seed).await;
+    stop_by_reboot(&pool, &seed, &run).await;
+    assert!(
+        queued_pauses(&pool, seed.conversation_id)
+            .await?
+            .as_array()
+            .is_some_and(|pauses| !pauses.is_empty()),
+        "a reboot stops the queue"
+    );
+    let submitted = owner_input(&pool, seed.conversation_id, "проснись").await?;
+    let resumed = resumed_execution(&pool, &seed, &run).await;
+    assert_eq!(queued_pauses(&pool, seed.conversation_id).await?, json!([]));
+    deliver_once(&pool, &seed, resumed, submitted.input_id).await
+}
+
+/// Сообщение другой сессии будит остановленную перезагрузкой сессию так же, как сообщение
+/// владельца: `session_send` идёт тем же путём приёма ввода.
+#[sqlx::test(migrations = "./migrations")]
+async fn session_send_after_a_reboot_stop_wakes_the_session(pool: PgPool) -> TestResult {
+    let seed = testkit::seed(&pool).await;
+    let run = start_running(&pool, &seed).await;
+    stop_by_reboot(&pool, &seed, &run).await;
+    let sender = testkit::seed_conversation(&pool, seed.owner_id, seed.machine_id).await;
+    let context = ToolContext {
+        memory: Default::default(),
+        pool: pool.clone(),
+        config: Arc::new(SessionToolsConfig::default()),
+        limits: Default::default(),
+        settle: SettleConfig {
+            idle_quiet: Duration::from_secs(5),
+            idle_background_max: Duration::from_secs(15 * 60),
+            nudge_enabled: true,
+        },
+        alarms_enabled: true,
+        nudge_enabled: true,
+        routing_enabled: true,
+        routing_stale: Duration::from_secs(1800),
+        routing_queue_horizon: Duration::from_secs(6 * 3600),
+        spawn_queue: Default::default(),
+        guards: Default::default(),
+        dispatcher: None,
+        registry: canterlot_hub::session::Registry::new(Default::default()),
+        shutdown: tokio_util::sync::CancellationToken::new(),
+    };
+    let caller = Caller {
+        owner_id: seed.owner_id,
+        conversation_id: sender,
+        execution_id: Uuid::now_v7(),
+        machine_id: seed.machine_id,
+        call_id: Uuid::now_v7(),
+    };
+    let answered = session_tools::send::send(
+        &context,
+        &caller,
+        json!({"session_id": seed.conversation_id, "text": "проснись"}),
+    )
+    .await
+    .expect("session_send wakes the target");
+    assert_eq!(answered["deduplicated"], false);
+    let resumed = resumed_execution(&pool, &seed, &run).await;
+    assert_eq!(queued_pauses(&pool, seed.conversation_id).await?, json!([]));
+    let input_id: Uuid = serde_json::from_value(answered["input_id"].clone())?;
+    deliver_once(&pool, &seed, resumed, input_id).await
+}
+
+/// Остановка владельцем не будится вводом: сообщение остаётся в очереди, исполнение не
+/// начинается — как и до этой правки.
+#[sqlx::test(migrations = "./migrations")]
+async fn owner_message_does_not_wake_a_user_stopped_session(pool: PgPool) -> TestResult {
+    let seed = testkit::seed(&pool).await;
+    let run = start_running(&pool, &seed).await;
+    request_stop_execution(
+        &pool,
+        seed.owner_id,
+        seed.conversation_id,
+        false,
+        &Uuid::now_v7().to_string(),
+        Uuid::now_v7(),
+    )
+    .await?;
+    let submitted = owner_input(&pool, seed.conversation_id, "продолжай").await?;
+    let live: i64 = sqlx::query_scalar(
+        "select count(*) from executions where conversation_id=$1 and state not in ('stopped','failed')",
+    )
+    .bind(seed.conversation_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(live, 1, "only the stopped execution exists");
+    let queued: i64 =
+        sqlx::query_scalar("select count(*) from inputs where id=$1 and state='queued'")
+            .bind(submitted.input_id)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(queued, 1, "the message waits for the owner");
+    assert!(
+        queued_pauses(&pool, seed.conversation_id)
+            .await?
+            .as_array()
+            .is_some_and(|pauses| pauses.iter().any(|pause| pause["reason"] == "user_stop")),
+        "the session keeps the owner's stop"
+    );
+    // И конец остановки не будит: исход `user_stop` — не перезагрузка и не усыпление.
+    let ingest = Ingest::new(pool.clone());
+    ingest
+        .apply_batch(
+            seed.machine_id,
+            &seed.credential_digest(),
+            JournalKind::Sj,
+            &batch(
+                Uuid::now_v7(),
+                vec![
+                    execution_fact(&run, "stopping", ""),
+                    execution_fact(&run, "stopped", "user_stop"),
+                ],
+            ),
+        )
+        .await?;
+    let live: i64 = sqlx::query_scalar(
+        "select count(*) from executions where conversation_id=$1 and state not in ('stopped','failed')",
+    )
+    .bind(seed.conversation_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(live, 0, "the owner's stop still needs the owner");
+    Ok(())
+}
+
+async fn owner_input(
+    pool: &PgPool,
+    conversation: Uuid,
+    text: &str,
+) -> Result<canterlot_hub::delivery::SubmittedInput, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(submit_input(
+        pool,
+        SubmitInput {
+            owner_id: sqlx::query_scalar("select owner_id from conversations where id=$1")
+                .bind(conversation)
+                .fetch_one(pool)
+                .await?,
+            conversation_id: conversation,
+            idempotency_key: Uuid::now_v7().to_string(),
+            content: vec![ContentBlock::Text { text: text.into() }],
+            received_at: Utc::now(),
+            correlation_id: Uuid::now_v7(),
+            origin: None,
+        },
+    )
+    .await?)
+}
+
+/// Перезагрузка: воркер сообщает `stopped(machine_rebooted)` при следующем старте.
+async fn stop_by_reboot(pool: &PgPool, seed: &Seed, run: &StartedExecution) {
+    Ingest::new(pool.clone())
+        .apply_batch(
+            seed.machine_id,
+            &seed.credential_digest(),
+            JournalKind::Sj,
+            &batch(
+                Uuid::now_v7(),
+                vec![execution_fact(run, "stopped", "machine_rebooted")],
+            ),
+        )
+        .await
+        .expect("machine reboot fact");
+}
+
+async fn queued_pauses(pool: &PgPool, conversation: Uuid) -> Result<Value, sqlx::Error> {
+    sqlx::query_scalar("select pause_reasons from queue_state where conversation_id=$1")
+        .bind(conversation)
+        .fetch_one(pool)
+        .await
+}
+
+/// Новое исполнение продолжило ту же нативную беседу; возвращает его id и поколение.
+async fn resumed_execution(pool: &PgPool, seed: &Seed, run: &StartedExecution) -> (Uuid, i64) {
+    let live: Vec<(Uuid, i64, String)> = sqlx::query_as(
+        "select id,generation,state from executions where conversation_id=$1 and state not in ('stopped','failed')",
+    )
+    .bind(seed.conversation_id)
+    .fetch_all(pool)
+    .await
+    .expect("executions");
+    assert_eq!(live.len(), 1, "exactly one resumed execution");
+    assert_eq!(live[0].1, run.generation + 1);
+    let native: String =
+        sqlx::query_scalar("select native_conversation_id from executions where id=$1")
+            .bind(live[0].0)
+            .fetch_one(pool)
+            .await
+            .expect("native id");
+    assert_eq!(native, format!("native-{}", run.execution_id));
+    (live[0].0, live[0].1)
+}
+
+/// Сообщение уходит новому исполнению ровно один раз.
+async fn deliver_once(
+    pool: &PgPool,
+    seed: &Seed,
+    resumed: (Uuid, i64),
+    input_id: Uuid,
+) -> TestResult {
+    for next in [ExecutionState::Starting, ExecutionState::Running] {
+        executions::set_state(pool, resumed.0, next, None, Uuid::now_v7()).await?;
+    }
+    let gate = || GateInputs {
+        machine_available: true,
+        machine_reconciled: true,
+        session_capabilities: vec!["pilot_v1".into()],
+    };
+    let delivered = dispatch_next(pool, seed.conversation_id, gate(), Uuid::now_v7()).await?;
+    assert!(
+        matches!(delivered, DispatchOutcome::Dispatched { input_id: id, .. } if id == input_id),
+        "the queued message reaches the resumed execution"
+    );
+    let again = dispatch_next(pool, seed.conversation_id, gate(), Uuid::now_v7()).await?;
+    assert!(
+        !matches!(again, DispatchOutcome::Dispatched { input_id: id, .. } if id == input_id),
+        "the message is delivered once, not again"
+    );
+    let deliveries: i64 = sqlx::query_scalar(
+        "select count(*) from commands where execution_id=$1 and kind='deliver_input'",
+    )
+    .bind(resumed.0)
+    .fetch_one(pool)
+    .await?;
+    assert_eq!(deliveries, 1, "exactly one delivery of the queued message");
     Ok(())
 }

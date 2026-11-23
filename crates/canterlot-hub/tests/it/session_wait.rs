@@ -251,10 +251,12 @@ async fn wait_on_a_stopped_target_with_a_queued_input_keeps_the_subscription(poo
     let execution = executions::start(&f.pool, f.owner, f.target, Uuid::now_v7())
         .await
         .unwrap();
+    // Остановка владельцем вводом не будится: сообщение ждёт продолжения.
     for (state, outcome) in [
         (ExecutionState::Starting, None),
         (ExecutionState::Running, None),
-        (ExecutionState::Stopped, Some("machine_rebooted")),
+        (ExecutionState::Stopping, None),
+        (ExecutionState::Stopped, Some("user_stop")),
     ] {
         executions::set_state(
             &f.pool,

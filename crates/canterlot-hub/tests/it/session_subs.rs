@@ -540,15 +540,22 @@ async fn subscription_survives_subscriber_restart(pool: PgPool) {
     assert_eq!(inputs[0].1["event"]["kind"], "session_result");
     assert_eq!(inputs[0].1["event"]["state"], "idle");
 
-    // Владелец продолжил сессию: новое исполнение забирает ввод, его гибель ввод не теряет.
-    let next = start(&pool, p.owner, p.subscriber).await;
-    sqlx::query(
-        "update queue_state set hold_reasons='[]',pause_reasons='[]' where conversation_id=$1",
+    // Событие подписки разбудило остановленного перезагрузкой подписчика: исполнение
+    // продолжает ту же беседу, а ввод забирает уже оно. Его гибель ввод не теряет.
+    let next: (Uuid, i64) = sqlx::query_as(
+        "select id,generation from executions
+         where conversation_id=$1 and state not in ('stopped','failed')",
     )
     .bind(p.subscriber)
-    .execute(&pool)
+    .fetch_one(&pool)
     .await
     .unwrap();
+    assert_eq!(next.1, subscriber.generation + 1, "the event woke it");
+    for state in [ExecutionState::Starting, ExecutionState::Running] {
+        executions::set_state(&pool, next.0, state, None, Uuid::now_v7())
+            .await
+            .unwrap();
+    }
     let gate = GateInputs {
         machine_available: true,
         machine_reconciled: true,
@@ -563,7 +570,7 @@ async fn subscription_survives_subscriber_restart(pool: PgPool) {
     );
     executions::set_state(
         &pool,
-        next.execution_id,
+        next.0,
         ExecutionState::Stopped,
         Some("machine_rebooted"),
         Uuid::now_v7(),
@@ -991,15 +998,21 @@ async fn stopped_target_with_a_queued_input_keeps_the_subscription(pool: PgPool)
     let p = pair(&pool).await;
     let execution = start(&pool, p.owner, p.target).await;
     subscribe(&pool, &p).await;
-    executions::set_state(
-        &pool,
-        execution.execution_id,
-        ExecutionState::Stopped,
-        Some("machine_rebooted"),
-        Uuid::now_v7(),
-    )
-    .await
-    .unwrap();
+    // Остановка владельцем вводом не будится: сообщение ждёт продолжения.
+    for (state, outcome) in [
+        (ExecutionState::Stopping, None),
+        (ExecutionState::Stopped, Some("user_stop")),
+    ] {
+        executions::set_state(
+            &pool,
+            execution.execution_id,
+            state,
+            outcome,
+            Uuid::now_v7(),
+        )
+        .await
+        .unwrap();
+    }
     submit_input(
         &pool,
         SubmitInput {

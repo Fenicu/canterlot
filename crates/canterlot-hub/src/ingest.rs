@@ -2092,15 +2092,22 @@ async fn apply_execution_fact(
     if state == to.as_str() {
         return Ok(());
     }
-    let hibernated_stop = to == ExecutionState::Stopped
-        && sqlx::query_scalar::<_, bool>("select hibernate_requested from executions where id=$1")
+    let wakes_input = to == ExecutionState::Stopped
+        && match outcome {
+            // Перезагрузка машины, как и усыпление, не ждёт владельца: отложенный ввод
+            // поднимает сессию сам.
+            Some("machine_rebooted") => true,
+            _ => sqlx::query_scalar::<_, bool>(
+                "select hibernate_requested from executions where id=$1",
+            )
             .bind(execution_id)
             .fetch_optional(&mut *conn)
             .await?
-            .unwrap_or(false);
+            .unwrap_or(false),
+        };
     match executions::set_state_in_tx(conn, execution_id, to, outcome, correlation_id).await {
         Ok(()) => {
-            if hibernated_stop {
+            if wakes_input {
                 crate::hibernate::wake_in_tx(conn, conversation_id, correlation_id).await?;
             }
             Ok(())

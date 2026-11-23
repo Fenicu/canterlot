@@ -4,7 +4,9 @@
 //! со свежей телеметрией живого процесса, без фоновых работ и без всех остальных
 //! оснований держать CLI запущенным. Усыпление — обычная остановка с причиной
 //! `hibernated`, а не сбой; следующее сообщение будит сессию новым исполнением с тем же
-//! нативным id. Никаких уведомлений владельцу усыпление не посылает.
+//! нативным id. Так же будит и остановка перезагрузкой машины (`machine_rebooted`):
+//! остальные причины остановки ждут владельца. Никаких уведомлений владельцу усыпление
+//! не посылает.
 
 use std::time::Duration;
 
@@ -331,9 +333,11 @@ pub async fn hibernate_in_tx(
     Ok(true)
 }
 
-/// Будит усыплённую сессию, если для неё есть отложенный ввод. Вызывается и при приёме
-/// сообщения, и при завершении остановки: сообщение, пришедшее во время остановки,
-/// дождётся её конца и будет доставлено ровно один раз новым исполнением.
+/// Будит усыплённую сессию или сессию, остановленную перезагрузкой машины, если для неё
+/// есть отложенный ввод. Вызывается и при приёме сообщения, и при завершении остановки:
+/// сообщение, пришедшее во время остановки, дождётся её конца и будет доставлено ровно
+/// один раз новым исполнением. Прочие остановки — `user_stop`, `force_stopped` и сбои —
+/// ждут владельца и сами не возобновляются.
 pub async fn wake_in_tx(
     conn: &mut PgConnection,
     conversation_id: Uuid,
@@ -344,15 +348,21 @@ pub async fn wake_in_tx(
             .bind(conversation_id)
             .fetch_one(&mut *conn)
             .await?;
-    let hibernated = pauses.0.contains(&PauseReason::Hibernated);
-    let last_hibernate: Option<bool> = sqlx::query_scalar(
-        "select hibernate_requested from executions where conversation_id=$1
-         order by generation desc limit 1",
+    let latest: Option<(String, Option<String>, bool)> = sqlx::query_as(
+        "select state, outcome, hibernate_requested from executions
+         where conversation_id=$1 order by generation desc limit 1",
     )
     .bind(conversation_id)
     .fetch_optional(&mut *conn)
     .await?;
-    if !hibernated && !last_hibernate.unwrap_or(false) {
+    let hibernated = pauses.0.contains(&PauseReason::Hibernated);
+    // Остановку перезагрузкой записывает воркер при следующем старте: разговор, как и
+    // усыплённый, просыпается следующим вводом, а не сам по себе.
+    let rebooted = latest.as_ref().is_some_and(|(state, outcome, _)| {
+        state == "stopped" && outcome.as_deref() == Some("machine_rebooted")
+    });
+    let hibernate_requested = latest.as_ref().is_some_and(|(_, _, requested)| *requested);
+    if !hibernated && !hibernate_requested && !rebooted {
         return Ok(false);
     }
     if executions::live(&mut *conn, conversation_id)
@@ -371,43 +381,66 @@ pub async fn wake_in_tx(
     if queued == 0 {
         return Ok(false);
     }
-    if hibernated {
+    let owner_id: Uuid = sqlx::query_scalar("select owner_id from conversations where id=$1")
+        .bind(conversation_id)
+        .fetch_one(&mut *conn)
+        .await?;
+    match executions::start_in_tx(&mut *conn, owner_id, conversation_id, correlation_id).await {
+        Ok(_) => {}
+        // Остановленную перезагрузкой сессию поднять не всегда можно (раннер, снятая
+        // рабочая копия): тогда ввод остаётся в очереди и ждёт владельца, но не теряется.
+        Err(
+            executions::ExecutionError::MachineIsRunner
+            | executions::ExecutionError::WorktreeRemoved
+            | executions::ExecutionError::ConversationNotFound
+            | executions::ExecutionError::ConversationClosed,
+        ) if rebooted && !hibernated => return Ok(false),
+        Err(executions::ExecutionError::Db(error)) => return Err(error),
+        Err(other) => {
+            return Err(sqlx::Error::InvalidArgument(format!(
+                "hibernate wake failed: {other}"
+            )));
+        }
+    }
+    if hibernated || rebooted {
         let mut queue: LockedQueue =
             sqlx::query_as("select * from queue_state where conversation_id=$1 for update")
                 .bind(conversation_id)
                 .fetch_one(&mut *conn)
                 .await?;
-        queue
-            .pause_reasons
-            .0
-            .retain(|reason| *reason != PauseReason::Hibernated);
-        let slot = queue.slot()?;
-        queue.save(&mut *conn, &slot, None, correlation_id).await?;
-        events::append(
-            &mut *conn,
-            NewEvent {
-                scope: Scope::Conversation {
-                    id: conversation_id,
+        let before = queue.pause_reasons.0.clone();
+        if hibernated {
+            queue
+                .pause_reasons
+                .0
+                .retain(|reason| *reason != PauseReason::Hibernated);
+        }
+        // Перезагрузка объясняет и потерю процесса, и потерю владельца: обе паузы снимает
+        // тот же ввод, что будит сессию. Остальные причины остановки остаются.
+        if rebooted {
+            queue.pause_reasons.0.retain(|reason| {
+                !matches!(reason, PauseReason::ProcessExited | PauseReason::OwnerLost)
+            });
+        }
+        if queue.pause_reasons.0 != before {
+            let slot = queue.slot()?;
+            queue.save(&mut *conn, &slot, None, correlation_id).await?;
+            events::append(
+                &mut *conn,
+                NewEvent {
+                    scope: Scope::Conversation {
+                        id: conversation_id,
+                    },
+                    kind: "queue_resumed",
+                    conversation_id: Some(conversation_id),
+                    execution_id: None,
+                    payload: json!({"pause_reasons": queue.pause_reasons.0}),
+                    correlation_id,
                 },
-                kind: "queue_resumed",
-                conversation_id: Some(conversation_id),
-                execution_id: None,
-                payload: json!({"pause_reasons": queue.pause_reasons.0}),
-                correlation_id,
-            },
-        )
-        .await?;
+            )
+            .await?;
+        }
     }
-    let owner_id: Uuid = sqlx::query_scalar("select owner_id from conversations where id=$1")
-        .bind(conversation_id)
-        .fetch_one(&mut *conn)
-        .await?;
-    executions::start_in_tx(&mut *conn, owner_id, conversation_id, correlation_id)
-        .await
-        .map_err(|error| match error {
-            executions::ExecutionError::Db(error) => error,
-            other => sqlx::Error::InvalidArgument(format!("hibernate wake failed: {other}")),
-        })?;
     Ok(true)
 }
 
