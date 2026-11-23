@@ -200,6 +200,13 @@ pub struct CreateRequest {
     pub consent_over_budget_kopecks: Option<i64>,
 }
 
+/// Условия автоматического режима, перепроверяемые в транзакции создания под замком
+/// `cloud_budget`: реестр нужен правилу доступности раннеров, время — проходу службы.
+pub struct AutoGuard<'a> {
+    pub registry: &'a crate::session::Registry,
+    pub now: DateTime<Utc>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum CreateRefusal {
     /// Живое окно уже есть: окно одно.
@@ -217,6 +224,9 @@ pub enum CreateRefusal {
     },
     #[error("invalid_request")]
     Invalid(&'static str),
+    /// Условия автоматического режима изменились между проверкой и транзакцией создания.
+    #[error("auto_conditions_changed")]
+    AutoConditionsChanged,
     #[error("price_error")]
     Price(#[from] PriceError),
     #[error("host_key_error")]
@@ -354,12 +364,13 @@ pub async fn create_in_tx(
     config: &CloudConfig,
     pricing: Pricing,
     request: CreateRequest,
+    auto: Option<AutoGuard<'_>>,
 ) -> Result<WindowId, CreateRefusal> {
     if request.hard_cap_minutes == 0 || request.hard_cap_minutes > MAX_HARD_CAP_MINUTES {
         return Err(CreateRefusal::Invalid("hard_cap_minutes"));
     }
-    let (budget, block): (i64, Option<String>) = sqlx::query_as(
-        "select monthly_budget_kopecks, provider_block_code from cloud_budget
+    let (budget, block, auto_mode): (i64, Option<String>, bool) = sqlx::query_as(
+        "select monthly_budget_kopecks, provider_block_code, auto_mode from cloud_budget
          where singleton for update",
     )
     .fetch_one(&mut *conn)
@@ -369,6 +380,27 @@ pub async fn create_in_tx(
     if let Some(code) = block {
         return Err(CreateRefusal::ProviderBlocked { code });
     }
+    // Автоматический режим проверяет свои условия ещё раз здесь, под тем же замком, что и
+    // вставка: между чтением настроек службой и этой транзакцией владелец мог выключить
+    // режим, очередь могла опустеть, а раннер — вернуться на связь.
+    let now = if let Some(guard) = auto.as_ref() {
+        if request.trigger == Trigger::Auto {
+            if !auto_mode
+                || super::budget::waiting_cloud_minutes(conn, config).await?
+                    < super::budget::MIN_WAITING_MINUTES
+                || !super::budget::static_runners_down(conn, guard.registry, config, guard.now)
+                    .await?
+            {
+                return Err(CreateRefusal::AutoConditionsChanged);
+            }
+        }
+        guard.now
+    } else {
+        if request.trigger == Trigger::Auto {
+            return Err(CreateRefusal::AutoConditionsChanged);
+        }
+        Utc::now()
+    };
     // Пул проверяется до «одно живое окно»: когда он исчерпан, причина отказа — именно пул,
     // а не занятость единственного окна. Ничего не резервируется до вставки строки.
     let (local_ip, dnat_port) = allocate(conn, config).await?;
@@ -384,7 +416,6 @@ pub async fn create_in_tx(
         return Err(CreateRefusal::Invalid("profiles"));
     };
     let reservation = reservation_for(config, max_hourly, request.hard_cap_minutes)?;
-    let now = Utc::now();
     let month = month_of(now);
     let spent = spent_in_month(&mut *conn, &month).await?;
     let remaining = budget.saturating_sub(spent);

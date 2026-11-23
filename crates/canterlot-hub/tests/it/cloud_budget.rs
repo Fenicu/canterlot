@@ -7,7 +7,7 @@ use std::{sync::Arc, time::Duration};
 use canterlot_hub::{
     cloud::{
         service::CloudService,
-        windows::{self, Trigger},
+        windows::{self, CreateRefusal, CreateRequest, Trigger},
     },
     config::CloudConfig,
     crunch::JobOutcome,
@@ -914,6 +914,58 @@ async fn auto_mode_is_blocked_by_zero_budget_a_block_and_a_live_window(pool: PgP
         1,
         "only the pre-existing live window"
     );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn automatic_create_rechecks_its_conditions_under_the_budget_lock(pool: PgPool) -> TestResult {
+    let rig = Rig::new(pool).await;
+    let _carrier = testkit::fake_session(&rig.registry, rig.carrier, &["runners_v1"], true);
+    let runner = rig.static_runner("runner-a").await;
+    rig.seed_waiting(60).await;
+    let request = || CreateRequest {
+        trigger: Trigger::Auto,
+        proposal_id: None,
+        hard_cap_minutes: 90,
+        consent_over_budget_kopecks: None,
+    };
+
+    // Условия проверены до транзакции, а включить режим успели выключить: окна нет.
+    rig.set_budget(1_000_000, false).await;
+    assert!(
+        matches!(
+            rig.service.create(request()).await,
+            Err(CreateRefusal::AutoConditionsChanged)
+        ),
+        "auto_mode is rechecked under the budget lock"
+    );
+
+    // Режим включён, но ожидающей работы уже нет.
+    rig.set_budget(1_000_000, true).await;
+    sqlx::query("update jobs set state = 'canceled' where state = 'waiting_runner'")
+        .execute(&rig.pool)
+        .await?;
+    assert!(
+        matches!(
+            rig.service.create(request()).await,
+            Err(CreateRefusal::AutoConditionsChanged)
+        ),
+        "demand is rechecked under the budget lock"
+    );
+
+    // Очередь вернулась, но статичный раннер на связи: недоступность не подтверждена.
+    sqlx::query("update jobs set state = 'waiting_runner' where state = 'canceled'")
+        .execute(&rig.pool)
+        .await?;
+    let _online = testkit::fake_session(&rig.registry, runner, &[], true);
+    assert!(
+        matches!(
+            rig.service.create(request()).await,
+            Err(CreateRefusal::AutoConditionsChanged)
+        ),
+        "runner unavailability is rechecked under the budget lock"
+    );
+    assert!(no_windows(&rig.pool).await?);
     Ok(())
 }
 

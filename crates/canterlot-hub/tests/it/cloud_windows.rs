@@ -500,7 +500,7 @@ async fn the_budget_counts_ended_final_cost_and_live_reservations(pool: PgPool) 
     let first = rig
         .service
         .create(CreateRequest {
-            trigger: Trigger::Auto,
+            trigger: Trigger::Owner,
             proposal_id: None,
             hard_cap_minutes: 60,
             consent_over_budget_kopecks: None,
@@ -523,7 +523,7 @@ async fn the_budget_counts_ended_final_cost_and_live_reservations(pool: PgPool) 
     let second = rig
         .service
         .create(CreateRequest {
-            trigger: Trigger::Auto,
+            trigger: Trigger::Owner,
             proposal_id: None,
             hard_cap_minutes: 60,
             consent_over_budget_kopecks: None,
@@ -539,7 +539,7 @@ async fn the_budget_counts_ended_final_cost_and_live_reservations(pool: PgPool) 
     let refused = rig
         .service
         .create(CreateRequest {
-            trigger: Trigger::Auto,
+            trigger: Trigger::Owner,
             proposal_id: None,
             hard_cap_minutes: 60,
             consent_over_budget_kopecks: None,
@@ -557,7 +557,7 @@ async fn the_budget_counts_ended_final_cost_and_live_reservations(pool: PgPool) 
         .await?;
     rig.service
         .create(CreateRequest {
-            trigger: Trigger::Auto,
+            trigger: Trigger::Owner,
             proposal_id: None,
             hard_cap_minutes: 60,
             consent_over_budget_kopecks: None,
@@ -639,7 +639,7 @@ async fn concurrent_creates_make_exactly_one_window(pool: PgPool) -> TestResult 
         .execute(&rig.pool)
         .await?;
     let request = || CreateRequest {
-        trigger: Trigger::Auto,
+        trigger: Trigger::Owner,
         proposal_id: None,
         hard_cap_minutes: 60,
         consent_over_budget_kopecks: None,
@@ -906,7 +906,7 @@ async fn the_reservation_and_the_budget_use_the_most_expensive_profile_of_the_li
         .execute(&rig.pool)
         .await?;
     let request = |consent| CreateRequest {
-        trigger: Trigger::Auto,
+        trigger: Trigger::Owner,
         proposal_id: None,
         hard_cap_minutes: 60,
         consent_over_budget_kopecks: consent,

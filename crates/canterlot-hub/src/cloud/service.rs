@@ -33,7 +33,6 @@ use super::{
 use crate::{
     cloud::budget,
     config::{CLOUD_ROOT_DIR, CloudConfig},
-    machines::RunnerAvailability,
     session::{Availability, Registry},
     session_tools::cloud_propose::{self, Source},
 };
@@ -171,8 +170,21 @@ impl CloudService {
     pub async fn create(&self, request: CreateRequest) -> Result<WindowId, CreateRefusal> {
         let pricing = self.pricing().await?;
         let config = self.config.clone();
+        let registry = self.registry.clone();
         crate::db::in_tx(&self.pool, move |conn| {
-            Box::pin(async move { windows::create_in_tx(conn, &config, pricing, request).await })
+            Box::pin(async move {
+                windows::create_in_tx(
+                    conn,
+                    &config,
+                    pricing,
+                    request,
+                    Some(windows::AutoGuard {
+                        registry: &registry,
+                        now: Utc::now(),
+                    }),
+                )
+                .await
+            })
         })
         .await
     }
@@ -292,6 +304,7 @@ impl CloudService {
         {
             drop(conn);
             let config = self.config.clone();
+            let registry = self.registry.clone();
             let created = crate::db::in_tx(&self.pool, move |tx| {
                 Box::pin(async move {
                     windows::create_in_tx(
@@ -304,6 +317,10 @@ impl CloudService {
                             hard_cap_minutes: cap,
                             consent_over_budget_kopecks: None,
                         },
+                        Some(windows::AutoGuard {
+                            registry: &registry,
+                            now,
+                        }),
                     )
                     .await
                 })
@@ -388,23 +405,7 @@ impl CloudService {
         conn: &mut sqlx::PgConnection,
         now: DateTime<Utc>,
     ) -> Result<bool, sqlx::Error> {
-        let candidates = budget::static_candidates(conn, &self.config).await?;
-        let mut all_down = true;
-        for machine in candidates {
-            let (availability, _) =
-                crate::machines::runner_availability_of(conn, &self.registry, machine, now).await?;
-            let paused: bool =
-                sqlx::query_scalar("select not accepts_remote_work from machines where id = $1")
-                    .bind(machine)
-                    .fetch_one(&mut *conn)
-                    .await?;
-            let down = availability == RunnerAvailability::Offline || paused;
-            if !budget::track_unavailable(conn, machine, down, now).await? {
-                all_down = false;
-                break;
-            }
-        }
-        Ok(all_down)
+        budget::static_runners_down(conn, &self.registry, &self.config, now).await
     }
 
     fn connected(&self, machine: Uuid) -> bool {

@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use super::windows::{self, Pricing};
 use crate::config::CloudConfig;
+use crate::machines::RunnerAvailability;
 
 /// Непрерывная недоступность/пауза раннера, после которой автоматический режим может стартовать.
 pub const UNAVAILABLE_FOR: TimeDelta = TimeDelta::minutes(10);
@@ -273,6 +274,31 @@ pub async fn track_unavailable(
             .fetch_optional(&mut *conn)
             .await?;
     Ok(since.is_some_and(|since| now - since >= UNAVAILABLE_FOR))
+}
+
+/// Все статичные раннеры, которые могли бы взять ожидающую облачную работу, недоступны или на
+/// паузе непрерывно [`UNAVAILABLE_FOR`]. `unknown` не считается недоступным и сбрасывает
+/// период: без свежего наблюдения недоступность не доказана.
+pub async fn static_runners_down(
+    conn: &mut PgConnection,
+    registry: &crate::session::Registry,
+    config: &CloudConfig,
+    now: DateTime<Utc>,
+) -> Result<bool, sqlx::Error> {
+    for machine in static_candidates(conn, config).await? {
+        let (availability, _) =
+            crate::machines::runner_availability_of(conn, registry, machine, now).await?;
+        let paused: bool =
+            sqlx::query_scalar("select not accepts_remote_work from machines where id = $1")
+                .bind(machine)
+                .fetch_one(&mut *conn)
+                .await?;
+        let down = availability == RunnerAvailability::Offline || paused;
+        if !track_unavailable(conn, machine, down, now).await? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Кандидаты статичных раннеров, которые могли бы взять ожидающую облачную работу:
