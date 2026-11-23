@@ -14,6 +14,7 @@ use canterlot_hub::cloud::windows::{
 };
 use canterlot_hub::cloud::{TimewebConfig, TimewebProvider, price};
 use canterlot_hub::config::{CloudConfig, CloudProfile};
+use canterlot_hub::inplace_jobs::place;
 use canterlot_hub::machines::{self, RunnerRefusal};
 use canterlot_hub::session::Registry;
 use canterlot_hub::testkit::{self, FakeSession};
@@ -278,6 +279,56 @@ impl Rig {
             .await
             .unwrap()
     }
+
+    /// Ждущая задача с видами места и, если задан, названной машиной.
+    async fn seed_waiting_job(
+        &self,
+        labels: &[&str],
+        placement: &[&str],
+        requested: Option<Uuid>,
+    ) -> Uuid {
+        let id = Uuid::now_v7();
+        let labels: Vec<String> = labels.iter().map(|label| (*label).to_owned()).collect();
+        let placement: Vec<String> = placement.iter().map(|kind| (*kind).to_owned()).collect();
+        sqlx::query(
+            "insert into jobs (id, owner_id, domain, remote, shell, timeout_seconds, state, labels,
+                               placement, requested_machine_id, carrier_id, expected_minutes)
+             values ($1, $2, 'personal', true, 'true', 600, 'waiting_runner', $3, $4, $5, $6, 30)",
+        )
+        .bind(id)
+        .bind(self.owner)
+        .bind(&labels)
+        .bind(&placement)
+        .bind(requested)
+        .bind(self.carrier)
+        .execute(&self.pool)
+        .await
+        .unwrap();
+        id
+    }
+
+    /// Ждущая задача с исходниками: её можно привязать к раннеру.
+    async fn seed_sourced_waiting(&self, labels: &[&str], placement: &[&str]) -> Uuid {
+        let id = Uuid::now_v7();
+        let labels: Vec<String> = labels.iter().map(|label| (*label).to_owned()).collect();
+        let placement: Vec<String> = placement.iter().map(|kind| (*kind).to_owned()).collect();
+        sqlx::query(
+            "insert into jobs (id, owner_id, domain, remote, shell, timeout_seconds, state, labels,
+                               placement, carrier_id, expected_minutes, source_repo, source_rev,
+                               source_domain)
+             values ($1, $2, 'personal', true, 'true', 600, 'waiting_runner', $3, $4, $5, 30,
+                     '/srv/src/app', '0123456789abcdef0123456789abcdef01234567', 'personal')",
+        )
+        .bind(id)
+        .bind(self.owner)
+        .bind(&labels)
+        .bind(&placement)
+        .bind(self.carrier)
+        .execute(&self.pool)
+        .await
+        .unwrap();
+        id
+    }
 }
 
 async fn enable_pushes(pool: &PgPool) {
@@ -500,7 +551,7 @@ async fn the_budget_counts_ended_final_cost_and_live_reservations(pool: PgPool) 
     let first = rig
         .service
         .create(CreateRequest {
-            trigger: Trigger::Auto,
+            trigger: Trigger::Owner,
             proposal_id: None,
             hard_cap_minutes: 60,
             consent_over_budget_kopecks: None,
@@ -523,7 +574,7 @@ async fn the_budget_counts_ended_final_cost_and_live_reservations(pool: PgPool) 
     let second = rig
         .service
         .create(CreateRequest {
-            trigger: Trigger::Auto,
+            trigger: Trigger::Owner,
             proposal_id: None,
             hard_cap_minutes: 60,
             consent_over_budget_kopecks: None,
@@ -539,7 +590,7 @@ async fn the_budget_counts_ended_final_cost_and_live_reservations(pool: PgPool) 
     let refused = rig
         .service
         .create(CreateRequest {
-            trigger: Trigger::Auto,
+            trigger: Trigger::Owner,
             proposal_id: None,
             hard_cap_minutes: 60,
             consent_over_budget_kopecks: None,
@@ -557,7 +608,7 @@ async fn the_budget_counts_ended_final_cost_and_live_reservations(pool: PgPool) 
         .await?;
     rig.service
         .create(CreateRequest {
-            trigger: Trigger::Auto,
+            trigger: Trigger::Owner,
             proposal_id: None,
             hard_cap_minutes: 60,
             consent_over_budget_kopecks: None,
@@ -639,7 +690,7 @@ async fn concurrent_creates_make_exactly_one_window(pool: PgPool) -> TestResult 
         .execute(&rig.pool)
         .await?;
     let request = || CreateRequest {
-        trigger: Trigger::Auto,
+        trigger: Trigger::Owner,
         proposal_id: None,
         hard_cap_minutes: 60,
         consent_over_budget_kopecks: None,
@@ -906,7 +957,7 @@ async fn the_reservation_and_the_budget_use_the_most_expensive_profile_of_the_li
         .execute(&rig.pool)
         .await?;
     let request = |consent| CreateRequest {
-        trigger: Trigger::Auto,
+        trigger: Trigger::Owner,
         proposal_id: None,
         hard_cap_minutes: 60,
         consent_over_budget_kopecks: consent,
@@ -2611,6 +2662,76 @@ async fn idle_counts_running_queued_and_takeable_waiting_jobs(pool: PgPool) -> T
     assert_eq!(rig.state(id).await, "ready");
     rig.tick(at + TimeDelta::minutes(75)).await;
     assert_eq!(rig.state(id).await, "deleting");
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn idle_ignores_work_the_cloud_runner_cannot_take(pool: PgPool) -> TestResult {
+    let rig = rig(pool).await;
+    let _carrier = rig.carrier_session();
+    let t0 = now_micros();
+    let (id, _session, at) = rig.drive_to_ready(240, t0).await;
+    let waiting = rig
+        .seed_waiting_job(&["cloud", "kernel-6.12"], &["runner"], None)
+        .await;
+
+    // Только `runner`: облачный раннер такой заказ не возьмёт, это простой.
+    rig.tick(at + TimeDelta::minutes(1)).await;
+    assert!(
+        rig.window(id).await.idle_since.is_some(),
+        "runner-only work does not keep the cloud window alive"
+    );
+    // Заказ, названный другой машине, тоже не удерживает окно.
+    rig.tick(at + TimeDelta::minutes(2)).await;
+    sqlx::query(
+        "update jobs set placement = '{local,runner,cloud}', requested_machine_id = $2 where id = $1",
+    )
+    .bind(waiting)
+    .bind(rig.carrier)
+    .execute(&rig.pool)
+    .await?;
+    rig.tick(at + TimeDelta::minutes(3)).await;
+    assert!(rig.window(id).await.idle_since.is_some());
+    // Облачный заказ простой сбрасывает.
+    sqlx::query("update jobs set placement = '{cloud}', requested_machine_id = null where id = $1")
+        .bind(waiting)
+        .execute(&rig.pool)
+        .await?;
+    rig.tick(at + TimeDelta::minutes(4)).await;
+    assert!(rig.window(id).await.idle_since.is_none());
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn the_cloud_row_is_placement_kind_cloud(pool: PgPool) -> TestResult {
+    let rig = rig(pool).await;
+    let _carrier = rig.carrier_session();
+    let t0 = now_micros();
+    let (_id, _session, _at) = rig.drive_to_ready(240, t0).await;
+    let machine = rig.cloud_machine().await;
+    sqlx::query(
+        "update machines set capabilities = array['jobs_inplace_v1'], jobs_max_running = 2
+          where id = $1",
+    )
+    .bind(machine)
+    .execute(&rig.pool)
+    .await?;
+
+    let cloud_job = rig.seed_sourced_waiting(&["cloud"], &["cloud"]).await;
+    let runner_job = rig.seed_sourced_waiting(&["cloud"], &["runner"]).await;
+    let placed = place::place_carrier(&rig.pool, &rig.registry, rig.carrier).await?;
+    assert_eq!(placed, 1);
+    assert_eq!(rig.job_state(cloud_job).await, "staging");
+    assert_eq!(
+        rig.job_state(runner_job).await,
+        "waiting_runner",
+        "a runner-only job must not be bound to the cloud machine"
+    );
+    let bound: Option<Uuid> = sqlx::query_scalar("select machine_id from jobs where id = $1")
+        .bind(cloud_job)
+        .fetch_one(&rig.pool)
+        .await?;
+    assert_eq!(bound, Some(machine));
     Ok(())
 }
 

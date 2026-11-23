@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use super::windows::{self, Pricing};
 use crate::config::CloudConfig;
+use crate::machines::RunnerAvailability;
 
 /// Непрерывная недоступность/пауза раннера, после которой автоматический режим может стартовать.
 pub const UNAVAILABLE_FOR: TimeDelta = TimeDelta::minutes(10);
@@ -154,6 +155,19 @@ pub async fn settings(conn: &mut PgConnection) -> Result<(i64, bool, Option<Stri
     .await
 }
 
+/// Настройки под замком единственной строки бюджета: остаток и признак перерасхода
+/// считаются по тому же снимку, в котором вставляется окно.
+pub async fn lock_settings(
+    conn: &mut PgConnection,
+) -> Result<(i64, bool, Option<String>), sqlx::Error> {
+    sqlx::query_as(
+        "select monthly_budget_kopecks, auto_mode, provider_block_code from cloud_budget
+          where singleton for update",
+    )
+    .fetch_one(conn)
+    .await
+}
+
 /// Остаток бюджета в текущем месяце.
 pub async fn remaining_in_month(conn: &mut PgConnection) -> Result<i64, sqlx::Error> {
     let month = windows::month_of(Utc::now());
@@ -162,7 +176,8 @@ pub async fn remaining_in_month(conn: &mut PgConnection) -> Result<i64, sqlx::Er
 }
 
 /// Оповещения о 80 % и 100 % бюджета: каждое не чаще одного раза в месяц. Нулевой бюджет
-/// не оповещает никогда. Возвращает количество поставленных в очередь пушей.
+/// не оповещает никогда. Метка месяца фиксируется в той же транзакции, что и строка очереди:
+/// сбой пуша не съедает оповещение. Возвращает количество поставленных в очередь пушей.
 pub async fn maybe_alert(
     pool: &PgPool,
     now: DateTime<Utc>,
@@ -172,57 +187,62 @@ pub async fn maybe_alert(
         return Ok(0);
     }
     let month = windows::month_of(now);
-    let mut conn = pool.acquire().await?;
-    let spent = windows::spent_in_month(&mut conn, &month).await?;
-    let (mark_80, mark_100): (Option<String>, Option<String>) =
-        sqlx::query_as("select alert_80_month, alert_100_month from cloud_budget where singleton")
-            .fetch_one(&mut *conn)
-            .await?;
     let mut sent = 0;
     // Две фиксированные колонки: динамический SQL здесь не нужен и не разрешён sqlx.
-    for (percent, current, is_80) in [(80_i64, mark_80, true), (100_i64, mark_100, false)] {
-        if current.as_deref() == Some(month.as_str())
-            || spent.saturating_mul(100) < budget_kopecks.saturating_mul(percent)
-        {
-            continue;
-        }
-        let changed = if is_80 {
-            sqlx::query(
-                "update cloud_budget set alert_80_month = $1
-                  where singleton and coalesce(alert_80_month, '') <> $1",
-            )
-            .bind(&month)
-            .execute(&mut *conn)
-            .await?
-            .rows_affected()
-                > 0
-        } else {
-            sqlx::query(
-                "update cloud_budget set alert_100_month = $1
-                  where singleton and coalesce(alert_100_month, '') <> $1",
-            )
-            .bind(&month)
-            .execute(&mut *conn)
-            .await?
-            .rows_affected()
-                > 0
-        };
-        if changed {
-            drop(conn);
-            crate::notify::enqueue_cloud_alert(
-                pool,
-                &format!("cloud:budget:{percent}:{month}"),
-                &serde_json::json!({
-                    "code": format!("budget_{percent}"),
-                    "month": month,
-                    "percent": percent,
-                    "spent_kopecks": spent,
-                    "budget_kopecks": budget_kopecks,
-                }),
-            )
-            .await?;
+    for (percent, is_80) in [(80_i64, true), (100_i64, false)] {
+        let month = month.clone();
+        let marked = crate::db::in_tx(pool, move |conn| {
+            Box::pin(async move {
+                let (budget, mark_80, mark_100): (i64, Option<String>, Option<String>) =
+                    sqlx::query_as(
+                        "select monthly_budget_kopecks, alert_80_month, alert_100_month
+                           from cloud_budget where singleton for update",
+                    )
+                    .fetch_one(&mut *conn)
+                    .await?;
+                if budget <= 0 {
+                    return Ok::<_, sqlx::Error>(false);
+                }
+                let current = if is_80 { mark_80 } else { mark_100 };
+                if current.as_deref() == Some(month.as_str()) {
+                    return Ok(false);
+                }
+                let spent = windows::spent_in_month(&mut *conn, &month).await?;
+                if spent.saturating_mul(100) < budget.saturating_mul(percent) {
+                    return Ok(false);
+                }
+                let inserted = crate::notify::enqueue_cloud_alert_in_tx(
+                    &mut *conn,
+                    &format!("cloud:budget:{percent}:{month}"),
+                    &serde_json::json!({
+                        "code": format!("budget_{percent}"),
+                        "month": month,
+                        "percent": percent,
+                        "spent_kopecks": spent,
+                        "budget_kopecks": budget,
+                    }),
+                )
+                .await?;
+                if !inserted {
+                    return Ok(false);
+                }
+                if is_80 {
+                    sqlx::query("update cloud_budget set alert_80_month = $1 where singleton")
+                        .bind(&month)
+                        .execute(&mut *conn)
+                        .await?;
+                } else {
+                    sqlx::query("update cloud_budget set alert_100_month = $1 where singleton")
+                        .bind(&month)
+                        .execute(&mut *conn)
+                        .await?;
+                }
+                Ok(true)
+            })
+        })
+        .await?;
+        if marked {
             sent += 1;
-            conn = pool.acquire().await?;
         }
     }
     Ok(sent)
@@ -230,7 +250,8 @@ pub async fn maybe_alert(
 
 /// Отметить или сбросить непрерывную недоступность раннера. `true` значит, что он
 /// недоступен или на паузе уже не меньше [`UNAVAILABLE_FOR`]. Свежая доступность сбрасывает
-/// период одной командой, как требует правило автоматического режима.
+/// период. Пропуск проходов дольше срока свежести наблюдения тоже сбрасывает: время, которое
+/// хаб не наблюдал, не доказывает непрерывность.
 pub async fn track_unavailable(
     conn: &mut PgConnection,
     machine: Uuid,
@@ -244,24 +265,71 @@ pub async fn track_unavailable(
             .await?;
         return Ok(false);
     }
+    let row: Option<(DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(
+        "select since, checked_at from cloud_auto_unavailable where machine_id = $1 for update",
+    )
+    .bind(machine)
+    .fetch_optional(&mut *conn)
+    .await?;
+    if let Some((since, checked_at)) = row
+        && now - checked_at < crate::machines::OBSERVATION_FRESH
+    {
+        sqlx::query("update cloud_auto_unavailable set checked_at = $2 where machine_id = $1")
+            .bind(machine)
+            .bind(now)
+            .execute(&mut *conn)
+            .await?;
+        return Ok(now - since >= UNAVAILABLE_FOR);
+    }
+    // Нет отметки или проход пропустил больше трёх минут: период начинается сейчас.
     sqlx::query(
-        "insert into cloud_auto_unavailable (machine_id, since) values ($1, $2)
-         on conflict (machine_id) do nothing",
+        "insert into cloud_auto_unavailable (machine_id, since, checked_at)
+         values ($1, $2, $2)
+         on conflict (machine_id) do update set since = $2, checked_at = $2",
     )
     .bind(machine)
     .bind(now)
     .execute(&mut *conn)
     .await?;
-    let since: Option<DateTime<Utc>> =
-        sqlx::query_scalar("select since from cloud_auto_unavailable where machine_id = $1")
-            .bind(machine)
-            .fetch_optional(&mut *conn)
-            .await?;
-    Ok(since.is_some_and(|since| now - since >= UNAVAILABLE_FOR))
+    Ok(false)
 }
 
-/// Кандидаты статичных раннеров, которые могли бы взять ожидающую облачную работу:
-/// метки задачи — подмножество меток раннера, сам раннер не облачный.
+/// Старт хаба: периоды недоступности прошлого запуска не продолжаются.
+pub async fn reset_unavailable(pool: &PgPool) -> Result<(), sqlx::Error> {
+    sqlx::query("delete from cloud_auto_unavailable")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Все статичные раннеры, которые могли бы взять ожидающую облачную работу, недоступны или на
+/// паузе непрерывно [`UNAVAILABLE_FOR`]. `unknown` не считается недоступным и сбрасывает
+/// период: без свежего наблюдения недоступность не доказана.
+pub async fn static_runners_down(
+    conn: &mut PgConnection,
+    registry: &crate::session::Registry,
+    config: &CloudConfig,
+    now: DateTime<Utc>,
+) -> Result<bool, sqlx::Error> {
+    for machine in static_candidates(conn, config).await? {
+        let (availability, _) =
+            crate::machines::runner_availability_of(conn, registry, machine, now).await?;
+        let paused: bool =
+            sqlx::query_scalar("select not accepts_remote_work from machines where id = $1")
+                .bind(machine)
+                .fetch_one(&mut *conn)
+                .await?;
+        let down = availability == RunnerAvailability::Offline || paused;
+        if !track_unavailable(conn, machine, down, now).await? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Кандидаты статичных раннеров, которые могли бы взять ожидающую облачную работу: метки
+/// задачи — подмножество меток раннера, место допускает `runner`, а названная машина — сам
+/// раннер (или не названа). Облачная строка исключена: у неё свой вид места.
 pub async fn static_candidates(
     conn: &mut PgConnection,
     config: &CloudConfig,
@@ -276,7 +344,8 @@ pub async fn static_candidates(
           where m.role = 'runner' and m.owner_id = $1
             and ($2::uuid is null or m.id <> $2)
             and j.carrier_id = $3 and j.labels <@ $4
-            and j.placement && array['runner','cloud']::text[]",
+            and 'runner' = any(j.placement)
+            and (j.requested_machine_id is null or j.requested_machine_id = m.id)",
     )
     .bind(owner_of(conn, config.carrier_machine_id).await?)
     .bind(cloud)
@@ -293,8 +362,8 @@ async fn owner_of(conn: &mut PgConnection, carrier: Uuid) -> Result<Uuid, sqlx::
         .await
 }
 
-/// Сумма минут ожидающей облачной работы. Метки и место проверяются так же, как при
-/// размещении; работа других несущих не считается.
+/// Сумма минут ожидающей облачной работы. Метки, вид места и названная машина проверяются
+/// так же, как при размещении; работа других несущих не считается.
 pub async fn waiting_cloud_minutes(
     conn: &mut PgConnection,
     config: &CloudConfig,
@@ -302,7 +371,10 @@ pub async fn waiting_cloud_minutes(
     sqlx::query_scalar(
         "select coalesce(sum(expected_minutes), 0)::bigint from jobs
           where state = 'waiting_runner' and carrier_id = $1 and labels <@ $2
-            and placement && array['runner','cloud']::text[]",
+            and 'cloud' = any(placement)
+            and (requested_machine_id is null
+                 or requested_machine_id = (select cloud_machine_id from cloud_budget
+                                              where singleton))",
     )
     .bind(config.carrier_machine_id)
     .bind(&config.labels)

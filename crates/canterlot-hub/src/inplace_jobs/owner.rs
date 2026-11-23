@@ -86,10 +86,23 @@ fn valid_env_name(name: &str) -> bool {
         && name.len() <= 64
 }
 
-/// Подать задачу владельца от несущей `submitter`. Возвращает идентификатор задачи.
+/// Подать задачу владельца от несущей `submitter` без облачного профиля: поведение до
+/// появления `[runners.cloud]` в этом процессе.
 pub async fn submit(
     pool: &PgPool,
     registry: &Registry,
+    submitter: Uuid,
+    spec_json: &str,
+) -> Result<Uuid, OwnerRefusal> {
+    submit_with_cloud(pool, registry, None, submitter, spec_json).await
+}
+
+/// Подать задачу владельца от несущей `submitter`. Метки настроенного облачного профиля
+/// делают его возможным местом подачи, даже пока строка `cloud` не заведена.
+pub async fn submit_with_cloud(
+    pool: &PgPool,
+    registry: &Registry,
+    cloud_labels: Option<&[String]>,
     submitter: Uuid,
     spec_json: &str,
 ) -> Result<Uuid, OwnerRefusal> {
@@ -151,6 +164,7 @@ pub async fn submit(
     let title = spec.title.clone();
     let machine = spec.machine.clone();
     let lease = spec.lease.clone().unwrap_or_else(|| "none".to_owned());
+    let cloud_labels = cloud_labels.map(|labels| labels.to_vec());
     let timeout_seconds = i32::try_from(spec.timeout_minutes.unwrap_or(30) * 60).unwrap_or(1800);
     crate::db::in_tx(pool, move |conn| {
         Box::pin(async move {
@@ -226,6 +240,7 @@ pub async fn submit(
                 &placement,
                 &source.repo,
                 domain,
+                cloud_labels.as_deref(),
             )
             .await?
             {

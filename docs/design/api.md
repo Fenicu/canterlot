@@ -154,6 +154,7 @@
 | `decision_conflict` | 409 | `browser` | `never` | Решение уже принято с другого устройства |
 | `request_not_open` | 409 | `browser` | `never` | Запрос уже закрыт |
 | `decision_invalid` | 422 | `browser` | `never` | Ответ не подходит к вопросу |
+| `cloud_hours_out_of_range` | 422 | `browser` | `never` | Часов окна вне диапазона 1..=4 |
 | `resource_limit` | 413 | `browser` | `never` | Превышен допустимый размер данных |
 | `not_implemented` | 501 | `hub_db` | `never` | Функция пока не реализована |
 | `too_many_requests` | 429 | `hub_db` | `safe_same_key` | Слишком много запросов, повторите позже |

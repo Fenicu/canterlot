@@ -32,6 +32,8 @@ pub(crate) struct Candidate {
     root_dir: Option<String>,
     accepts_remote_work: bool,
     capabilities: Vec<String>,
+    /// Строка облачного раннера: единственное место с видом `cloud`.
+    is_cloud: bool,
 }
 
 impl Candidate {
@@ -59,7 +61,9 @@ impl Candidate {
     }
 
     fn allowed_by(&self, carrier: Uuid, placement: &[String]) -> bool {
-        let kind = if self.is_carrier(carrier) {
+        let kind = if self.is_cloud {
+            PLACEMENT_CLOUD
+        } else if self.is_carrier(carrier) {
             PLACEMENT_LOCAL
         } else {
             PLACEMENT_RUNNER
@@ -70,7 +74,8 @@ impl Candidate {
 
 async fn candidates(conn: &mut PgConnection, carrier: Uuid) -> Result<Vec<Candidate>, sqlx::Error> {
     sqlx::query_as(
-        "select m.id, m.rank, m.labels, m.root_dir, m.accepts_remote_work, m.capabilities
+        "select m.id, m.rank, m.labels, m.root_dir, m.accepts_remote_work, m.capabilities,
+                exists(select 1 from cloud_budget b where b.cloud_machine_id = m.id) as is_cloud
          from machines m
          where m.id = $1
             or (m.parent_machine_id = $1 and m.role = 'runner'
@@ -100,7 +105,8 @@ pub(crate) async fn lock_candidates(
 
 /// Задача, которую можно когда-нибудь разместить: есть настроенное место с её метками среди
 /// разрешённых видов. Включённость, связь и свободные места не считаются: это отказ при
-/// подаче, а не ожидание. Облако (`cloud`) пока места не даёт: оно относится к этапу C.
+/// подаче, а не ожидание. Настроенный облачный профиль — тоже место (`cloud`): его строка
+/// появляется только с первым окном, поэтому ожидание допустимо и без неё.
 pub async fn satisfiable(
     conn: &mut PgConnection,
     carrier: Uuid,
@@ -108,14 +114,22 @@ pub async fn satisfiable(
     placement: &[String],
     repo: &str,
     domain: &str,
+    cloud_labels: Option<&[String]>,
 ) -> Result<bool, sqlx::Error> {
     // Несущая подходит, только если её рабочий каталог остаётся в домене исходников.
     let local_ok = carrier_workdir_in_domain(conn, carrier, repo, domain).await?;
-    Ok(candidates(conn, carrier).await?.iter().any(|candidate| {
+    let by_machine = candidates(conn, carrier).await?.iter().any(|candidate| {
         candidate.capable()
             && candidate.allowed_by(carrier, placement)
             && candidate.has_labels(labels)
             && (local_ok || !candidate.is_carrier(carrier))
+    });
+    if by_machine {
+        return Ok(true);
+    }
+    Ok(cloud_labels.is_some_and(|cloud| {
+        placement.iter().any(|kind| kind == PLACEMENT_CLOUD)
+            && labels.iter().all(|label| cloud.contains(label))
     }))
 }
 

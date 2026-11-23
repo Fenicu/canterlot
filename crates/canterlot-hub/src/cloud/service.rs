@@ -33,7 +33,6 @@ use super::{
 use crate::{
     cloud::budget,
     config::{CLOUD_ROOT_DIR, CloudConfig},
-    machines::RunnerAvailability,
     session::{Availability, Registry},
     session_tools::cloud_propose::{self, Source},
 };
@@ -171,8 +170,21 @@ impl CloudService {
     pub async fn create(&self, request: CreateRequest) -> Result<WindowId, CreateRefusal> {
         let pricing = self.pricing().await?;
         let config = self.config.clone();
+        let registry = self.registry.clone();
         crate::db::in_tx(&self.pool, move |conn| {
-            Box::pin(async move { windows::create_in_tx(conn, &config, pricing, request).await })
+            Box::pin(async move {
+                windows::create_in_tx(
+                    conn,
+                    &config,
+                    pricing,
+                    request,
+                    Some(windows::AutoGuard {
+                        registry: &registry,
+                        now: Utc::now(),
+                    }),
+                )
+                .await
+            })
         })
         .await
     }
@@ -211,6 +223,11 @@ impl CloudService {
                     runtime.last_reconcile = None;
                 }
             }
+        }
+        if runtime.first_tick
+            && let Err(error) = budget::reset_unavailable(&self.pool).await
+        {
+            warn_db("cloud_auto_reset", &error);
         }
         if runtime.reconciled
             && let Err(error) = self.evaluate(now).await
@@ -292,6 +309,7 @@ impl CloudService {
         {
             drop(conn);
             let config = self.config.clone();
+            let registry = self.registry.clone();
             let created = crate::db::in_tx(&self.pool, move |tx| {
                 Box::pin(async move {
                     windows::create_in_tx(
@@ -304,17 +322,25 @@ impl CloudService {
                             hard_cap_minutes: cap,
                             consent_over_budget_kopecks: None,
                         },
+                        Some(windows::AutoGuard {
+                            registry: &registry,
+                            now,
+                        }),
                     )
                     .await
                 })
             })
             .await;
             match created {
-                Ok(_) => {
+                Ok(window_id) => {
                     if let Err(error) = crate::notify::enqueue_cloud_alert(
                         &self.pool,
-                        &format!("cloud:auto_started:{}", windows::month_of(now)),
-                        &json!({"code": "auto_started", "reservation_kopecks": reservation}),
+                        &format!("cloud:auto_started:{window_id}"),
+                        &json!({
+                            "code": "auto_started",
+                            "window_id": window_id,
+                            "reservation_kopecks": reservation,
+                        }),
                     )
                     .await
                     {
@@ -334,14 +360,6 @@ impl CloudService {
 
         // Автоматика выключена или резерв не помещается: карточка хаба один раз за эпизод.
         if (!auto_mode || !fits) && !budget::episode_active(&mut conn).await? {
-            let owner: Uuid = sqlx::query_scalar("select owner_id from machines where id = $1")
-                .bind(self.config.carrier_machine_id)
-                .fetch_one(&mut *conn)
-                .await?;
-            let mut proposer =
-                cloud_propose::system_proposer(&mut conn, owner, self.config.carrier_machine_id)
-                    .await?;
-            proposer.source = Source::Hub;
             let reason = format!(
                 "Ожидающая облачная работа: {waiting} мин по оценке; автоматический режим {}",
                 if auto_mode {
@@ -350,19 +368,33 @@ impl CloudService {
                     "выключен"
                 }
             );
-            let opened = cloud_propose::open_in_tx(
-                &mut conn,
-                &self.config,
-                &pricing,
-                &proposer,
-                cap,
-                reason,
-            )
-            .await;
+            let config = self.config.clone();
+            let carrier = self.config.carrier_machine_id;
+            drop(conn);
+            // Запрос, задание его срока и признак эпизода — одна транзакция: сбой на любом
+            // шаге не оставляет половину карточки и не теряет эпизод.
+            let opened: Result<cloud_propose::Opened, cloud_propose::CardError> =
+                crate::db::in_tx(&self.pool, move |tx| {
+                    Box::pin(async move {
+                        let owner: Uuid =
+                            sqlx::query_scalar("select owner_id from machines where id = $1")
+                                .bind(carrier)
+                                .fetch_one(&mut *tx)
+                                .await?;
+                        let mut proposer =
+                            cloud_propose::system_proposer(tx, owner, carrier).await?;
+                        proposer.source = Source::Hub;
+                        let opened = cloud_propose::open_in_tx(
+                            tx, &config, &pricing, &proposer, cap, reason,
+                        )
+                        .await?;
+                        budget::episode_start(tx, opened.request_id).await?;
+                        Ok(opened)
+                    })
+                })
+                .await;
             match opened {
-                Ok(opened) => {
-                    budget::episode_start(&mut conn, opened.request_id).await?;
-                }
+                Ok(_) => {}
                 Err(error) => {
                     tracing::warn!(kind = "cloud_hub_card", error = %error, "card not opened");
                 }
@@ -378,23 +410,7 @@ impl CloudService {
         conn: &mut sqlx::PgConnection,
         now: DateTime<Utc>,
     ) -> Result<bool, sqlx::Error> {
-        let candidates = budget::static_candidates(conn, &self.config).await?;
-        let mut all_down = true;
-        for machine in candidates {
-            let (availability, _) =
-                crate::machines::runner_availability_of(conn, &self.registry, machine, now).await?;
-            let paused: bool =
-                sqlx::query_scalar("select not accepts_remote_work from machines where id = $1")
-                    .bind(machine)
-                    .fetch_one(&mut *conn)
-                    .await?;
-            let down = availability == RunnerAvailability::Offline || paused;
-            if !budget::track_unavailable(conn, machine, down, now).await? {
-                all_down = false;
-                break;
-            }
-        }
-        Ok(all_down)
+        budget::static_runners_down(conn, &self.registry, &self.config, now).await
     }
 
     fn connected(&self, machine: Uuid) -> bool {
@@ -887,13 +903,14 @@ impl CloudService {
     // ───────── Работа окна ─────────
 
     /// Есть ли у раннера `cloud` работа: задачи на нём или ждущая задача, которую он взял бы
-    /// (те же метки и допустимое место, что у размещения).
+    /// по тому же правилу размещения: метки, вид места `cloud` и названная машина.
     async fn has_work(&self, machine: Uuid) -> Result<bool, sqlx::Error> {
         sqlx::query_scalar(
             "select exists(select 1 from jobs where machine_id = $1
                            and state in ('staging','queued','dispatched','waiting_lease','running','collecting'))
                  or exists(select 1 from jobs where state = 'waiting_runner' and carrier_id = $2
-                           and labels <@ $3 and placement && array['runner','cloud']::text[])",
+                           and labels <@ $3 and 'cloud' = any(placement)
+                           and (requested_machine_id is null or requested_machine_id = $1))",
         )
         .bind(machine)
         .bind(self.config.carrier_machine_id)

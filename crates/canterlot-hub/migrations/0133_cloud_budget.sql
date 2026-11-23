@@ -27,11 +27,19 @@ alter table requests add constraint requests_kind_check
 create unique index cloud_windows_one_proposal on cloud_windows (proposal_id)
     where proposal_id is not null;
 
+-- Открытая карточка облачного окна одна: проверку `has_open_card` проходят два одновременных
+-- предложения вместе, поэтому то же правило держит база.
+create unique index requests_one_open_cloud_window on requests ((true))
+    where kind = 'cloud_window' and state in ('open', 'decision_saved');
+
 -- Непрерывный период недоступности/паузы статичного раннера для автоматического режима:
 -- одна свежая доступность сбрасывает отметку, десять минут подряд — основание для старта.
+-- `checked_at` — момент последнего прохода, который застал недоступность: пропуск больше
+-- срока свежести наблюдения разрывает период, недоказанное время не считается.
 create table cloud_auto_unavailable (
     machine_id uuid primary key references machines(id) on delete cascade,
-    since timestamptz not null
+    since timestamptz not null,
+    checked_at timestamptz not null default now()
 );
 
 -- Эпизод ожидающей облачной работы: карточка хаба выдаётся один раз, пока очередь не
