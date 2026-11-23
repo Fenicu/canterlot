@@ -107,7 +107,7 @@ impl Stager {
         let workdir = PathBuf::from(&request.workdir);
         let local_dir = self.settings.outputs_root.join(job.to_string());
         match place {
-            Place::Runner { ssh, alias, root } => {
+            Place::Runner { ssh, root } => {
                 let fits = ["personal", "work"]
                     .iter()
                     .any(|domain| workdir == root.join("jobs").join(domain).join(job.to_string()));
@@ -117,7 +117,7 @@ impl Stager {
                         "workdir is not <root>/jobs/<domain>/<job>",
                     ));
                 }
-                self.collect_runner(&ssh, &alias, request, &workdir, local_dir)
+                self.collect_runner(&ssh, request, &workdir, local_dir)
                     .await
             }
             Place::Carrier => {
@@ -139,7 +139,6 @@ impl Stager {
     async fn collect_runner(
         &self,
         ssh: &super::ssh::Ssh,
-        alias: &str,
         request: &CollectRequest,
         workdir: &Path,
         local_dir: PathBuf,
@@ -190,7 +189,7 @@ impl Stager {
         let (chosen, truncated) = select(entries, request.cap_bytes);
         make_local_dir(&local_dir)?;
         if !chosen.is_empty() {
-            self.rsync(alias, workdir, &local_dir, &chosen, request.cap_bytes)
+            self.rsync(ssh, workdir, &local_dir, &chosen, request.cap_bytes)
                 .await?;
         }
         let files = chosen
@@ -217,7 +216,7 @@ impl Stager {
     /// предел: больший файл `rsync` просто пропускает.
     fn rsync_command(
         &self,
-        alias: &str,
+        ssh: &super::ssh::Ssh,
         workdir: &Path,
         local_dir: &Path,
         cap_bytes: u64,
@@ -233,8 +232,8 @@ impl Stager {
             ])
             .arg(format!("--max-size={cap_bytes}"))
             .arg("-e")
-            .arg(self.ssh_command())
-            .arg(format!("{alias}:{}/", workdir.display()))
+            .arg(ssh.command_line())
+            .arg(ssh.destination(&format!("{}/", workdir.display())))
             .arg(format!("{}/", local_dir.display()))
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -245,13 +244,13 @@ impl Stager {
 
     async fn rsync(
         &self,
-        alias: &str,
+        ssh: &super::ssh::Ssh,
         workdir: &Path,
         local_dir: &Path,
         files: &[(String, u64)],
         cap_bytes: u64,
     ) -> Result<(), Failure> {
-        let mut command = self.rsync_command(alias, workdir, local_dir, cap_bytes);
+        let mut command = self.rsync_command(ssh, workdir, local_dir, cap_bytes);
         let list: String = files.iter().map(|(path, _)| format!("{path}\n")).collect();
         let work = async {
             let mut child = command.spawn()?;
@@ -548,7 +547,7 @@ mod tests {
             allowed_roots: Vec::new(),
         });
         let command = stager.rsync_command(
-            "runner-a",
+            &crate::carrier::ssh::Ssh::new("runner-a", None),
             Path::new("/srv/runner/jobs/work/j"),
             Path::new("/tmp/outputs/j"),
             4096,

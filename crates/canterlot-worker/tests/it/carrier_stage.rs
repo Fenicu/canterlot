@@ -12,12 +12,15 @@ use std::{
 };
 
 use canterlot_worker::carrier::{
+    self, AssignedRunner,
+    cloud::{Attachment, CloudConfig, CloudState},
     script,
     stage::{
-        CleanupRequest, CollectRequest, Failure, RunnerTarget, StageRequest, Stager,
+        CleanupRequest, CollectRequest, Failure, OutputFile, RunnerTarget, StageRequest, Stager,
         StagerSettings, sweep_outputs,
     },
 };
+use tokio::sync::watch;
 use uuid::Uuid;
 
 use crate::sshd::{ALIAS, TestSshd};
@@ -82,6 +85,8 @@ struct Fixture {
     root: PathBuf,
     outputs: tempfile::TempDir,
     stager: Stager,
+    /// Каталог данных носителя у облачного подключения: `known_hosts` и записи живут там.
+    _data: Option<tempfile::TempDir>,
 }
 
 fn fixture() -> Fixture {
@@ -95,6 +100,7 @@ fn fixture() -> Fixture {
     let target = RunnerTarget {
         alias: ALIAS.to_owned(),
         root: root.clone(),
+        host: None,
     };
     let stager = Stager::new(StagerSettings {
         ssh_config: Some(sshd.ssh_config.clone()),
@@ -109,7 +115,67 @@ fn fixture() -> Fixture {
         root,
         outputs,
         stager,
+        _data: None,
     }
+}
+
+/// Носитель, ведущий облачный раннер: псевдонима нет, есть адрес и DNAT-порт вместо 22,
+/// ключ `[runners].ssh_key` и закреплённый `known_hosts`. Список целей — тот же, что строит
+/// `session.rs` из состояния облачных подключений.
+fn cloud_fixture() -> (Fixture, Uuid) {
+    let sshd = TestSshd::start();
+    let root = sshd.path().join("runner");
+    fs::create_dir(&root).unwrap();
+    let outputs = tempfile::Builder::new()
+        .prefix("outputs-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let data = tempfile::Builder::new()
+        .prefix("cloud-data-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let machine = Uuid::now_v7();
+    let cloud = Arc::new(CloudState::open(CloudConfig {
+        data_dir: data.path().to_path_buf(),
+        ssh_key: Some(sshd.client_key().to_path_buf()),
+        user: sshd.user().to_owned(),
+        ..CloudConfig::default()
+    }));
+    cloud
+        .apply(Attachment {
+            window_id: "window-1".into(),
+            machine_id: machine,
+            host: "127.0.0.1".into(),
+            ssh_port: sshd.port(),
+            host_key_public: sshd.host_key_public(),
+            root_dir: root.clone(),
+            max_running: 3,
+            lease_slots: 2,
+        })
+        .unwrap();
+    let (_assign, assigned) = watch::channel(vec![AssignedRunner {
+        machine_id: machine,
+        name: "cloud".into(),
+        root_dir: root.clone(),
+    }]);
+    let stager = Stager::new(StagerSettings {
+        ssh_config: None,
+        outputs_root: outputs.path().to_path_buf(),
+        targets: carrier::targets(Vec::new(), assigned, Some(cloud)),
+        ssh_limit: Duration::from_secs(30),
+        push_limit: Duration::from_secs(60),
+        allowed_roots: vec![PathBuf::from("/tmp")],
+    });
+    (
+        Fixture {
+            sshd,
+            root,
+            outputs,
+            stager,
+            _data: Some(data),
+        },
+        machine,
+    )
 }
 
 fn repo_key(repo: &Path) -> String {
@@ -193,6 +259,65 @@ async fn staging_on_a_runner_lands_the_right_sha_in_the_domain_dir_and_repeats_h
         fs::read_to_string(Path::new(&second.workdir).join("file.txt")).unwrap(),
         "two\n"
     );
+}
+
+#[tokio::test]
+async fn a_cloud_target_on_a_nonstandard_port_stages_collects_and_cleans() {
+    let (fx, machine) = cloud_fixture();
+    let src = source_repo();
+    let job = Uuid::now_v7();
+    let request = StageRequest {
+        job_id: job.to_string(),
+        repo: src.repo.clone(),
+        rev: src.first.clone(),
+        domain: "work".into(),
+        target_machine_id: machine.to_string(),
+        target_root_dir: fx.root.display().to_string(),
+        workdir: fx
+            .root
+            .join("jobs/work")
+            .join(job.to_string())
+            .display()
+            .to_string(),
+        repo_key: repo_key(&src.repo),
+    };
+    // Коммит уходит на облачный сервер по адресу и DNAT-порту, не по псевдониму из ssh_config.
+    fx.stager.stage(&request).await.unwrap();
+    let workdir = PathBuf::from(&request.workdir);
+    assert_eq!(
+        fs::read_to_string(workdir.join("file.txt")).unwrap(),
+        "one\n"
+    );
+    assert_eq!(git(&workdir, &["rev-parse", "HEAD"]), src.first);
+    write_outputs(&workdir);
+    let collect = collect_request(
+        &request,
+        job,
+        machine,
+        &fx.root.display().to_string(),
+        &["out/a.txt"],
+        1 << 20,
+    );
+    let outcome = fx.stager.collect(&collect).await.unwrap();
+    assert_eq!(
+        outcome.files,
+        [OutputFile {
+            path: "out/a.txt".into(),
+            bytes: 4
+        }]
+    );
+    let copied = fx.outputs.path().join(job.to_string()).join("out/a.txt");
+    assert_eq!(fs::read_to_string(copied).unwrap(), "aaaa");
+    let cleanup = CleanupRequest {
+        job_id: request.job_id.clone(),
+        target_machine_id: request.target_machine_id.clone(),
+        target_root_dir: request.target_root_dir.clone(),
+        workdir: request.workdir.clone(),
+        repo_key: request.repo_key.clone(),
+        domain: request.domain.clone(),
+    };
+    fx.stager.cleanup(&cleanup).await.unwrap();
+    assert!(!workdir.exists());
 }
 
 #[tokio::test]

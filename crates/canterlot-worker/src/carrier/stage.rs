@@ -48,11 +48,24 @@ impl std::fmt::Display for Failure {
     }
 }
 
-/// Куда ведёт машина раннера: псевдоним ssh и корень, назначенный хабом.
+/// Куда ведёт машина раннера: псевдоним ssh и корень, назначенный хабом. У облачного раннера
+/// псевдонима нет: адрес, DNAT-порт, пользователь, ключ и закреплённый `known_hosts` приходят
+/// из подключения, поэтому подсоединение несёт [`RunnerHost`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RunnerTarget {
     pub alias: String,
     pub root: PathBuf,
+    pub host: Option<RunnerHost>,
+}
+
+/// Подключение к облачному серверу окна: всё, что нужно `ssh`, git и `rsync`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunnerHost {
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    pub identity: Option<PathBuf>,
+    pub known_hosts: PathBuf,
 }
 
 /// Раннер по идентификатору машины; `None` — этот носитель такого раннера не ведёт.
@@ -103,11 +116,7 @@ pub struct Stager {
 
 /// Куда направлена команда после проверок.
 pub(super) enum Place {
-    Runner {
-        ssh: Ssh,
-        alias: String,
-        root: PathBuf,
-    },
+    Runner { ssh: Ssh, root: PathBuf },
     Carrier,
 }
 
@@ -134,7 +143,7 @@ impl Stager {
             ));
         }
         let target = (self.settings.targets)(machine)
-            .filter(|target| valid_alias(&target.alias))
+            .filter(valid_target)
             .ok_or_else(|| {
                 Failure::new("unknown_target", "this carrier does not lead that runner")
             })?;
@@ -144,9 +153,18 @@ impl Stager {
                 "target root differs from the runner root this carrier knows",
             ));
         }
+        let ssh = match &target.host {
+            Some(host) => Ssh::host(
+                host.host.clone(),
+                host.port,
+                host.user.clone(),
+                host.identity.clone(),
+                host.known_hosts.clone(),
+            ),
+            None => Ssh::new(target.alias.clone(), self.settings.ssh_config.clone()),
+        };
         Ok(Place::Runner {
-            ssh: Ssh::new(target.alias.clone(), self.settings.ssh_config.clone()),
-            alias: target.alias,
+            ssh,
             root: root_path,
         })
     }
@@ -194,8 +212,8 @@ impl Stager {
             }
         }
         match place {
-            Place::Runner { ssh, alias, root } => {
-                self.stage_runner(&ssh, &alias, &root, request, job, &rev, domain, &workdir)
+            Place::Runner { ssh, root } => {
+                self.stage_runner(&ssh, &root, request, job, &rev, domain, &workdir)
                     .await
             }
             Place::Carrier => self.stage_local(request, &rev, &workdir).await,
@@ -232,7 +250,6 @@ impl Stager {
     async fn stage_runner(
         &self,
         ssh: &Ssh,
-        alias: &str,
         root: &Path,
         request: &StageRequest,
         job: Uuid,
@@ -268,7 +285,7 @@ impl Stager {
             return Err(script_failure(&answer));
         }
         self.check_local_rev(&request.repo, rev).await?;
-        self.push(&request.repo, alias, &bare, rev, job).await?;
+        self.push(&request.repo, ssh, &bare, rev, job).await?;
         let add = format!(
             "set -u\n\
              git -C {bare} worktree prune >/dev/null 2>&1\n\
@@ -376,7 +393,7 @@ impl Stager {
         let place = self.place(&request.target_machine_id, &request.target_root_dir)?;
         let workdir = PathBuf::from(&request.workdir);
         match place {
-            Place::Runner { ssh, root, .. } => {
+            Place::Runner { ssh, root } => {
                 let want = root.join("jobs").join(domain).join(job.to_string());
                 if workdir != want {
                     return Err(Failure::new(
@@ -493,7 +510,7 @@ impl Stager {
     async fn push(
         &self,
         repo: &Path,
-        alias: &str,
+        ssh: &Ssh,
         bare: &str,
         rev: &str,
         job: Uuid,
@@ -503,9 +520,9 @@ impl Stager {
             .arg("-C")
             .arg(repo)
             .args(["push", "--no-verify", "--quiet"])
-            .arg(format!("{alias}:{bare}"))
+            .arg(ssh.destination(bare))
             .arg(format!("{rev}:refs/canterlot/{job}"))
-            .env("GIT_SSH_COMMAND", self.ssh_command())
+            .env("GIT_SSH_COMMAND", ssh.command_line())
             .env("GIT_TERMINAL_PROMPT", "0")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -524,18 +541,31 @@ impl Stager {
             ))
         }
     }
+}
 
-    /// Команда `ssh` для `GIT_SSH_COMMAND` и `rsync -e`: тот же конфиг и те же опции, что у
-    /// остальных вызовов носителя.
-    pub(super) fn ssh_command(&self) -> String {
-        let mut text = String::from("ssh");
-        if let Some(config) = &self.settings.ssh_config {
-            text.push_str(" -F ");
-            text.push_str(&sh_quote(&config.display().to_string()));
-        }
-        text.push_str(" -o BatchMode=yes -o ConnectTimeout=10");
-        text
+/// Цель годится, только если она даёт `ssh` безопасный адресат: псевдоним из конфигурации
+/// или проверенное облачное подключение. Всё это уже отсекалось при записи, здесь — граница.
+fn valid_target(target: &RunnerTarget) -> bool {
+    match &target.host {
+        Some(host) => valid_host(host),
+        None => valid_alias(&target.alias),
     }
+}
+
+fn valid_host(host: &RunnerHost) -> bool {
+    !host.host.is_empty()
+        && !host.host.starts_with('-')
+        && host
+            .host
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':' | b'[' | b']'))
+        && !host.user.is_empty()
+        && !host.user.starts_with('-')
+        && host
+            .user
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        && !host.known_hosts.as_os_str().is_empty()
 }
 
 fn valid_alias(alias: &str) -> bool {

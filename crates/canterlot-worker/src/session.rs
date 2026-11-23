@@ -1112,6 +1112,7 @@ impl Worker {
                     targets: crate::carrier::targets(
                         self.config.runners.ssh.clone(),
                         link.bridge.assigned_rx(),
+                        Some(cloud.clone()),
                     ),
                     ssh_limit: timings.ssh_limit,
                     push_limit: timings.upload_limit,

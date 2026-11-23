@@ -136,6 +136,7 @@ fn fixture() -> Fixture {
     let target = RunnerTarget {
         alias: ALIAS.to_owned(),
         root: root.clone(),
+        host: None,
     };
     let stager = Stager::new(StagerSettings {
         ssh_config: Some(sshd.ssh_config.clone()),
