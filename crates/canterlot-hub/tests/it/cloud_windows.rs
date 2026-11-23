@@ -1523,6 +1523,43 @@ async fn a_window_with_no_dnat_obligation_ends_during_a_router_outage(pool: PgPo
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_malformed_dnat_listing_changes_nothing(pool: PgPool) -> TestResult {
+    let rig = rig(pool).await;
+    let _carrier = rig.carrier_session();
+    // Ответ 5xx: правило могло появиться, но его нет в списке.
+    rig.fake.control().dnat_create = crate::support::fake_timeweb::DnatCreateMode::Status(500);
+    let t0 = now_micros();
+    let id = rig.create(120).await;
+    rig.tick(t0).await;
+    rig.tick(t0 + TimeDelta::seconds(1)).await;
+    assert_eq!(rig.dnat_posts(), 1);
+    assert!(rig.window(id).await.dnat_create_attempted_at.is_some());
+    // В списке правило без протокола: список негоден, а не «правила нет».
+    for malformed in [
+        serde_json::json!({"id": "dnat-bad", "local_ip": "192.0.2.10",
+                           "local_port": "22", "public_ip": "192.0.2.1",
+                           "public_port": "22100"}),
+        serde_json::json!({"id": "dnat-bad", "local_ip": "192.0.2.10",
+                           "local_port": "22", "public_ip": "192.0.2.1",
+                           "public_port": "22100", "protocol": ""}),
+    ] {
+        rig.fake.control().dnat_rules_raw = vec![malformed];
+        // Дольше срока неопределённости: маркер попытки снимать нельзя, список не прочитан.
+        rig.tick(t0 + TimeDelta::minutes(11)).await;
+        assert!(
+            rig.window(id).await.dnat_create_attempted_at.is_some(),
+            "a failed listing changed nothing"
+        );
+        assert_eq!(rig.dnat_posts(), 1);
+    }
+    rig.fake.control().dnat_rules_raw.clear();
+    rig.tick(t0 + TimeDelta::minutes(11) + TimeDelta::seconds(10))
+        .await;
+    assert!(rig.window(id).await.dnat_create_attempted_at.is_none());
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn a_server_gone_by_hand_keeps_the_window_open_until_its_dnat_rule_is_gone(
     pool: PgPool,
 ) -> TestResult {

@@ -160,6 +160,9 @@ pub struct FakeState {
     /// Правила DNAT роутера. Идентификатор роутера в путях не проверяется: тест задаёт его
     /// в конфигурации сам.
     pub dnat_rules: Vec<FakeDnatRule>,
+    /// Правила как есть, вместо собранных из `dnat_rules`: для негодных ответов, где поле
+    /// правила отсутствует или пусто.
+    pub dnat_rules_raw: Vec<Value>,
     pub next_dnat_id: u64,
     pub dnat_create: DnatCreateMode,
     /// Код сбоя для `DELETE /.../dnat-rules/{id}`; `None` — удаляет.
@@ -225,6 +228,7 @@ impl FakeState {
             create_by_configurator: BTreeMap::new(),
             delete: DeleteMode::Ok,
             dnat_rules: Vec::new(),
+            dnat_rules_raw: Vec::new(),
             next_dnat_id: 1,
             dnat_create: DnatCreateMode::Ok,
             dnat_delete_status: None,
@@ -617,17 +621,20 @@ fn route(
         ("DELETE", ["api", "v1", "servers", id]) => delete_server(st, id, auth),
         ("POST", ["api", "v1", "routers", _router, "dnat-rules"]) => create_dnat(st, body, auth),
         ("GET", ["api", "v1", "routers", _router, "dnat-rules"]) => {
-            let items: Vec<Value> = st
-                .dnat_rules
-                .iter()
-                .map(|rule| {
-                    json!({
-                        "id": rule.id, "local_ip": rule.local_ip, "local_port": rule.local_port,
-                        "public_ip": rule.public_ip, "public_port": rule.public_port,
-                        "protocol": rule.protocol,
+            let items: Vec<Value> = if st.dnat_rules_raw.is_empty() {
+                st.dnat_rules
+                    .iter()
+                    .map(|rule| {
+                        json!({
+                            "id": rule.id, "local_ip": rule.local_ip, "local_port": rule.local_port,
+                            "public_ip": rule.public_ip, "public_port": rule.public_port,
+                            "protocol": rule.protocol,
+                        })
                     })
-                })
-                .collect();
+                    .collect()
+            } else {
+                st.dnat_rules_raw.clone()
+            };
             page_response(st, query, items, "dnat_rules")
         }
         ("DELETE", ["api", "v1", "routers", _router, "dnat-rules", rule_id]) => {
