@@ -2964,10 +2964,11 @@ async fn the_runner_that_never_connects_is_deleted_after_the_ready_timeout(
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn a_machine_that_is_not_a_carrier_gets_no_attach_command(pool: PgPool) -> TestResult {
     let rig = rig(pool).await;
-    machines::set_carrier(&rig.pool, rig.carrier, false).await?;
     let t0 = now_micros();
+    // Окно создаётся при живой несущей, а теряет её до подключения.
     let id = rig.create(120).await;
     rig.tick(t0).await;
+    machines::set_carrier(&rig.pool, rig.carrier, false).await?;
     rig.tick(t0 + TimeDelta::seconds(1)).await;
     rig.tick(t0 + TimeDelta::seconds(2)).await;
     let window = rig.window(id).await;
