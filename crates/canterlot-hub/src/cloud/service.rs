@@ -1140,8 +1140,7 @@ impl CloudService {
             && window.delete_accepted_at.is_none()
             && window.next_delete_at.is_none_or(|at| at <= now)
         {
-            // Раннер отозван при переходе в `deleting`; повтор безвреден.
-            windows::revoke_cloud_machine(&self.pool).await?;
+            // Раннер отозван переходом в `deleting`; повторять отзыв не нужно.
             self.try_delete(&window, server_id, now).await?;
         }
         let mut window = {
@@ -1807,7 +1806,7 @@ impl CloudService {
     /// `deleting` и освобождает порт только после подтверждённого отсутствия правила.
     async fn gone(&self, window: &Window, now: DateTime<Utc>) -> Result<(), sqlx::Error> {
         let id = window.id;
-        let ended = crate::db::in_tx(&self.pool, move |conn| {
+        let ended = crate::db::in_tx(&self.pool, move |mut conn| {
             Box::pin(async move {
                 let Some(window) = windows::load_for_update(&mut *conn, id).await? else {
                     return Ok::<_, sqlx::Error>(false);
@@ -1850,12 +1849,12 @@ impl CloudService {
                 .bind(id.to_string())
                 .execute(&mut *conn)
                 .await?;
+                windows::revoke_cloud_machine_in_tx(&mut conn).await?;
                 Ok(true)
             })
         })
         .await?;
         if ended {
-            windows::revoke_cloud_machine(&self.pool).await?;
             crate::notify::enqueue_cloud_alert(
                 &self.pool,
                 &format!("cloud:window_gone:{}", window.id),

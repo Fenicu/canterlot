@@ -110,17 +110,6 @@ async fn delete_now(
         },
     )
     .await?;
-    if outcome.value.outcome == DeleteRequested::Deleting {
-        // Токен раннера гаснет сразу после фиксации; если не вышло, служба окон отзовёт его
-        // перед первой попыткой удаления.
-        if let Err(error) = windows::revoke_cloud_machine(&state.pool).await {
-            tracing::warn!(
-                kind = "cloud_window_revoke",
-                error = %crate::dberr::describe(&error),
-                "the cloud runner is revoked by the window service instead"
-            );
-        }
-    }
     Ok(Json(outcome.value))
 }
 

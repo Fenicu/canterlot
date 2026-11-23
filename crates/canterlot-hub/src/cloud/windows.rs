@@ -549,8 +549,9 @@ pub async fn provider_block(
 pub const REASON_OWNER: &str = "owner";
 
 /// Удалить окно сейчас: ожидающая создания заявка отменяется, окно с сервером уходит в
-/// `deleting` (раннер отзывается, сервер удалит служба). Возвращает новое состояние или
-/// `None`, если окна нет. `create_unknown` отказывается: сервера ещё нет в известных.
+/// `deleting` (раннер отзывается в той же транзакции, сервер удалит служба). Возвращает новое
+/// состояние или `None`, если окна нет. `create_unknown` отказывается: сервера ещё нет в
+/// известных.
 pub async fn request_delete(
     pool: &PgPool,
     id: Uuid,
@@ -558,21 +559,14 @@ pub async fn request_delete(
     now: DateTime<Utc>,
 ) -> Result<DeleteRequested, sqlx::Error> {
     let reason = reason.to_owned();
-    let outcome = crate::db::in_tx(pool, move |conn| {
+    crate::db::in_tx(pool, move |conn| {
         Box::pin(async move { request_delete_in_tx(conn, id, &reason, now).await })
     })
-    .await?;
-    if outcome == DeleteRequested::Deleting {
-        // Отзыв раннера вне транзакции окна: у него свой порядок замков (машина задач
-        // раньше строки машины).
-        revoke_cloud_machine(pool).await?;
-    }
-    Ok(outcome)
+    .await
 }
 
-/// Переход «удалить сейчас» в чужой транзакции. Раннера не отзывает: это делает вызывающая
-/// после фиксации (`revoke_cloud_machine`), а при её отказе служба повторяет отзыв перед
-/// каждой попыткой удаления.
+/// Переход «удалить сейчас» в чужой транзакции. Переход в `deleting` сам отзывает раннера
+/// `cloud`: только текущее живое окно владеет его строкой.
 pub async fn request_delete_in_tx(
     conn: &mut PgConnection,
     id: Uuid,
@@ -617,7 +611,7 @@ pub async fn mark_deleting_in_tx(
     reason: &str,
     now: DateTime<Utc>,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    let moved = sqlx::query(
         "update cloud_windows set state = 'deleting', delete_requested_at = $2, delete_reason = $3,
                 next_delete_at = $2, idle_since = null, disconnected_since = null
          where id = $1 and state in ('identified', 'ready', 'draining')",
@@ -626,7 +620,13 @@ pub async fn mark_deleting_in_tx(
     .bind(now)
     .bind(reason)
     .execute(&mut *conn)
-    .await?;
+    .await?
+    .rows_affected();
+    if moved > 0 {
+        // Раннер отзывается в той же транзакции, что переводит окно: отзыв вне её мог бы
+        // погасить токен уже следующего окна.
+        revoke_cloud_machine_in_tx(conn).await?;
+    }
     // Команда подключения, которую несущая ещё не исполнила, больше не нужна.
     sqlx::query(
         "update commands set delivery_state = 'completed', completed_at = coalesce(completed_at, now())
@@ -648,10 +648,14 @@ pub async fn cloud_machine_id(conn: &mut PgConnection) -> Result<Option<Uuid>, s
 /// Отзыв раннера `cloud`: токен гаснет, его незаконченные задачи становятся `lost`.
 pub async fn revoke_cloud_machine(pool: &PgPool) -> Result<(), sqlx::Error> {
     let mut conn = pool.acquire().await?;
-    let machine = cloud_machine_id(&mut conn).await?;
-    drop(conn);
+    revoke_cloud_machine_in_tx(&mut conn).await
+}
+
+/// Отзыв в транзакции, которая переводит окно: только текущее живое окно владеет строкой.
+pub async fn revoke_cloud_machine_in_tx(conn: &mut PgConnection) -> Result<(), sqlx::Error> {
+    let machine = cloud_machine_id(&mut *conn).await?;
     if let Some(machine) = machine {
-        crate::machines::revoke(pool, machine).await?;
+        crate::machines::revoke_in_tx(conn, machine).await?;
     }
     Ok(())
 }

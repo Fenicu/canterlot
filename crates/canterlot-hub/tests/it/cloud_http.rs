@@ -242,6 +242,59 @@ async fn delete_now_revokes_the_cloud_runner_and_leaves_the_server_to_the_servic
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_delete_replay_never_revokes_the_next_window(pool: PgPool) {
+    let api = Api::new(pool).await;
+    let config = cloud_config(&api);
+    let machine = {
+        let mut conn = api.pool.acquire().await.unwrap();
+        windows::ensure_cloud_machine(&mut conn, &config, true)
+            .await
+            .unwrap()
+    };
+    let first = api.insert("ready", 5, Some(1)).await;
+    let key = Uuid::now_v7().to_string();
+    let _ = api.delete(first, &key, 200).await;
+    // Первое окно закончилось, началось второе; токен у машины новый.
+    sqlx::query("update cloud_windows set state = 'ended' where id = $1")
+        .bind(first)
+        .execute(&api.pool)
+        .await
+        .unwrap();
+    let second = api.insert("ready", 2, Some(2)).await;
+    let token = machines::rotate_token(&api.pool, machine, true, true)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        machines::verify(&api.pool, &token).await.unwrap(),
+        Some(machine)
+    );
+    // Повтор старой операции и свежий ключ для закончившегося окна не трогают новый токен.
+    api.delete(first, &key, 200).await;
+    let again = api.delete(first, &Uuid::now_v7().to_string(), 200).await;
+    assert_eq!(again["outcome"], "already_ended");
+    assert_eq!(
+        machines::verify(&api.pool, &token).await.unwrap(),
+        Some(machine),
+        "the next window's runner stays active"
+    );
+    assert_eq!(api.list().await["items"][0]["id"], second.to_string());
+}
+
+fn cloud_config(api: &Api) -> CloudConfig {
+    toml::from_str(&format!(
+        "provider='timeweb'\ntoken_file='t'\nproject_id=1\n\
+         network_id='network-example'\nnetwork_cidr='192.0.2.0/24'\nrouter_id='018f0000-0000-7000-8000-0000000000aa'\n\
+         router_ip='192.0.2.1'\ngateway='192.0.2.5'\n\
+         local_ip_pool='192.0.2.10-192.0.2.60'\ndnat_port_range='22100-22199'\n\
+         runner_public_key='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLE'\n\
+         carrier_machine_id='{}'\n[[profile]]\nconfigurator_id=151\ncpu=1\nram_gb=1\ndisk_gb=10\navailability_zone='msk-1'\n",
+        api.carrier
+    ))
+    .unwrap()
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn delete_now_cancels_a_create_that_was_never_sent_and_refuses_unknown_windows(pool: PgPool) {
     let api = Api::new(pool).await;
     let intent = api.insert("create_intent", 0, None).await;
