@@ -108,6 +108,16 @@ export async function clearSnooze(conversationId: string, key?: string) {
   );
 }
 
+export async function setNotificationsMuted(
+  conversationId: string,
+  muted: boolean,
+  key?: string,
+) {
+  return once(`notifications:${conversationId}:${muted}`, key, (used) =>
+    client.setNotificationsMuted(conversationId, { muted }, used),
+  );
+}
+
 export async function resumeAtReset(conversationId: string, key?: string) {
   return once(`auto-resume:${conversationId}`, key, (used) =>
     client.resumeAtReset(conversationId, used),

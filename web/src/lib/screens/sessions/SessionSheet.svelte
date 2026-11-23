@@ -28,6 +28,7 @@
   import { COLOR_KEYS, COLOR_NAMES } from './colors';
   import { groupPinAt } from './grouping';
   import SnoozeMenu from './SnoozeMenu.svelte';
+  import MuteMenu from './MuteMenu.svelte';
   import { isSnoozed, limitResetAt } from './snooze';
   import { menuTop } from './menuPlace';
 
@@ -415,6 +416,13 @@
               resetAt={limitResetAt(item.queue)}
               ondone={onclose}
               onerror={(err) => (saveError = errorText(err, 'Не удалось отложить сессию'))}
+            />
+            <MuteMenu
+              inline
+              conversationId={item.id}
+              muted={Boolean(item.notifications_muted)}
+              ondone={onclose}
+              onerror={(err) => (saveError = errorText(err, 'Не удалось изменить уведомления'))}
             />
           </span>
         </div>

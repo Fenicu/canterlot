@@ -6,7 +6,7 @@ use super::{
 };
 use crate::conversations::{
     self, Attributes, ConversationDetail, Created, CrunchSetting, ListCursor, ListFilter, ListPage,
-    ListQuery, NewConversation, SnoozeBody,
+    ListQuery, NewConversation, NotificationsMuteBody, SnoozeBody,
 };
 use axum::{Json, extract::State, http::StatusCode};
 use chrono::{DateTime, Utc};
@@ -28,6 +28,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(set_crunch))
         .routes(routes!(set_snooze))
         .routes(routes!(clear_snooze))
+        .routes(routes!(set_notifications_muted))
         .routes(routes!(read))
         .routes(routes!(decision))
         .routes(routes!(interrupt))
@@ -1281,6 +1282,21 @@ async fn clear_snooze(
     conversations::clear_snooze(&s.pool, o.owner_id, id, &key, c).await?;
     refresh_derived(&s, id, c).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// «Без уведомлений»: все пуши сессии и её делегатов выключаются или включаются.
+#[utoipa::path(put,path="/api/v1/conversations/{id}/notifications",tag="conversations",params(("id"=Uuid,Path),("Idempotency-Key"=String,Header)),request_body=NotificationsMuteBody,responses((status=200,description="Режим уведомлений изменён",body=ConversationDetail),(status=404,description="not_found",body=super::error::ErrorEnvelope)))]
+async fn set_notifications_muted(
+    State(s): State<AppState>,
+    o: Owner,
+    ApiPath(id): ApiPath<Uuid>,
+    IdempotencyKey(key): IdempotencyKey,
+    Correlation(c): Correlation,
+    ApiJson(b): ApiJson<NotificationsMuteBody>,
+) -> Result<Json<ConversationDetail>, ApiError> {
+    Ok(Json(
+        conversations::set_notifications_muted(&s.pool, o.owner_id, id, &key, b.muted, c).await?,
+    ))
 }
 
 /// Срок «Отложить» живёт в производной строке и её событии: пересчёт делает его

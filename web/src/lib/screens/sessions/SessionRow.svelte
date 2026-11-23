@@ -118,6 +118,9 @@
         {#if snoozedAt !== null}
           <span class="snoozed" data-snoozed><span class="sr-only">Отложена</span>до {fmt.clock(snoozedAt)}</span>
         {/if}
+        {#if item.notifications_muted}
+          <span class="muted" data-notifications-muted><span class="sr-only">Без уведомлений</span><Icon name="bellOff" /></span>
+        {/if}
         {#if queued > 0}
           <span class="queued" data-queued><span class="sr-only">В очереди сообщений: {queued}</span><span aria-hidden="true">+{queued}</span></span>
         {/if}
@@ -171,6 +174,8 @@
   /* Усыплена: спокойный холодный тон вместо серой «Остановлена», без значка. */
   .row[data-state='hibernated'] .activity .text { color: var(--blue); }
   .snoozed { flex: none; color: var(--secondary); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .muted { flex: none; display: inline-flex; color: var(--muted); }
+  .muted :global(svg) { width: var(--icon-small); height: var(--icon-small); }
   .plan, .queued { flex: none; max-width: 50%; padding: var(--s0) var(--s3); overflow: hidden; border-radius: var(--radius-pill); background: var(--chip); color: var(--chip-text); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
   .worked { flex: none; color: var(--muted); font-size: var(--fs-xs); font-variant-numeric: tabular-nums; white-space: nowrap; }
   /* В узком ряду ожидания или сбоя состояние важнее потраченного времени: без «работала …» помещается «Ждёт разрешения» целиком. */

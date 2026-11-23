@@ -187,6 +187,9 @@ pub struct AttributeView {
     pub color: Option<String>,
     pub pinned: bool,
     pub archived: bool,
+    /// Владелец выключил пуши этой сессии и её делегатов.
+    #[serde(default)]
+    pub notifications_muted: bool,
     /// Сессия принята родителем через `session_accept`: живёт в архиве до срока хранения.
     #[serde(default)]
     pub accepted: bool,
@@ -415,6 +418,7 @@ fn item(row: &PgRow) -> Result<ListItem, sqlx::Error> {
             archived: row
                 .try_get::<Option<DateTime<Utc>>, _>("archived_at")?
                 .is_some(),
+            notifications_muted: row.try_get("notifications_muted")?,
             accepted: row
                 .try_get::<Option<DateTime<Utc>>, _>("accepted_at")?
                 .is_some(),
@@ -1763,6 +1767,55 @@ pub async fn clear_snooze(
     )
     .await?;
     Ok(())
+}
+
+#[derive(Clone, Default, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct NotificationsMuteBody {
+    /// `true` — не присылать пуши этой сессии и её делегатам.
+    pub muted: bool,
+}
+
+/// «Без уведомлений»: выключает или включает все пуши сессии и её потомков.
+/// Выключение сразу отменяет ещё не отправленные пуши дерева.
+pub async fn set_notifications_muted(
+    pool: &PgPool,
+    owner_id: Uuid,
+    id: Uuid,
+    key: &str,
+    muted: bool,
+    correlation_id: Uuid,
+) -> Result<ConversationDetail, UpdateError> {
+    let request = json!({"id":id,"muted":muted});
+    let outcome = idempotency::run_in_tx(
+        pool,
+        owner_id,
+        key,
+        "set_notifications_muted",
+        &request,
+        Some(id),
+        move |conn| {
+            Box::pin(async move {
+                lock_conversation(conn, owner_id, id).await?;
+                sqlx::query(
+                    "update conversations set notifications_muted=$2,updated_at=clock_timestamp() where id=$1",
+                )
+                .bind(id)
+                .bind(muted)
+                .execute(&mut *conn)
+                .await?;
+                if muted {
+                    crate::notify::cancel_for_conversation_tree_in_tx(&mut *conn, id).await?;
+                }
+                emit_attributes(&mut *conn, owner_id, id, correlation_id).await?;
+                detail(&mut *conn, owner_id, id)
+                    .await?
+                    .ok_or(UpdateError::NotFound)
+            })
+        },
+    )
+    .await?;
+    Ok(outcome.value)
 }
 
 #[derive(Clone, Default, Serialize, Deserialize, ToSchema)]

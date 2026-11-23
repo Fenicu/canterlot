@@ -33,6 +33,7 @@
 	import { waitFactsFromRequest } from '#lib/requests/waitCopy.js';
 	import { WAITING_SECTION, focusListSection, otherWaitingCount } from '#lib/screens/sessions/waiting.js';
 	import SnoozeMenu from '#lib/screens/sessions/SnoozeMenu.svelte';
+	import MuteMenu from '#lib/screens/sessions/MuteMenu.svelte';
 	import { limitResetAt } from '#lib/screens/sessions/snooze.js';
 
 	interface DetailLike {
@@ -43,6 +44,7 @@
 		model?: string;
 		model_resolved?: string | null;
 		snoozed_until?: string | null;
+		notifications_muted?: boolean;
 	}
 
 	interface SettingsLike {
@@ -403,6 +405,13 @@
 		</p>
 	{/if}
 
+	{#if detail?.notifications_muted}
+		<p class="header-status muted-line" role="status" data-notifications-muted>
+			<Icon name="bellOff" />
+			<span>Без уведомлений</span>
+		</p>
+	{/if}
+
 	{#if stopping}
 		<p class="header-status" role="status">Останавливаю сессию</p>
 	{:else if actionError && !menuOpen}
@@ -474,6 +483,13 @@
 					now={now}
 					ondone={() => { menuOpen = false; }}
 					onerror={(err) => { actionError = errorText(err, 'Не удалось отложить сессию'); }}
+				/>
+
+				<MuteMenu
+					conversationId={chat.id}
+					muted={Boolean(detail?.notifications_muted)}
+					ondone={() => { menuOpen = false; }}
+					onerror={(err) => { actionError = errorText(err, 'Не удалось изменить уведомления'); }}
 				/>
 
 				{#if alarmCount > 0 && onOpenAlarms}
@@ -719,6 +735,8 @@
 	}
 	/* Отложенная сессия говорит тихо: срок и возврат в одной строке. */
 	.snoozed-line { display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap; }
+	.muted-line { display: flex; align-items: center; gap: var(--s3); }
+	.muted-line :global(svg) { width: var(--icon-small); height: var(--icon-small); color: var(--muted); }
 	.unsnooze {
 		min-height: var(--target);
 		padding-inline: var(--s3);

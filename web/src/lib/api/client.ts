@@ -1128,6 +1128,22 @@ export function clearSnooze(
   );
 }
 
+export function setNotificationsMuted(
+  conversationId: string,
+  body: Body<operations["put__api_v1_conversations__id__notifications"]>,
+  key: string,
+  opts?: RequestOptions,
+): Promise<
+  HttpResponse<Ok<operations["put__api_v1_conversations__id__notifications"]>>
+> {
+  return http(
+    "PUT",
+    `/api/v1/conversations/${id(conversationId)}/notifications`,
+    body,
+    keyed(key, opts),
+  );
+}
+
 export function setConversationGroups(
   conversationId: string,
   body: Body<operations["put__api_v1_conversations__id__groups"]>,

@@ -182,13 +182,23 @@ async fn enqueue_in_tx(
     } else {
         "on conflict(dedupe_key) do nothing"
     };
+    // «Без уведомлений» стоит на сессии или на любом её предке: оркестратор
+    // выключает пуши своих делегатов, делегат — только свои.
     let sql = format!(
-        "insert into owner_pushes(id,conversation_id,kind,dedupe_key,payload,run_at)
+        "with recursive lineage(id,parent_conversation_id,notifications_muted) as (
+           select id,parent_conversation_id,notifications_muted
+             from conversations where id=$2
+           union all
+           select p.id,p.parent_conversation_id,p.notifications_muted
+             from conversations p join lineage l on p.id=l.parent_conversation_id
+         )
+         insert into owner_pushes(id,conversation_id,kind,dedupe_key,payload,run_at)
          select $1,c.id,$3,$4,$5,clock_timestamp()
          from push_settings s join conversations c on c.id=$2
          where c.trashed_at is null
            and c.side_of is null
            and (not $6 or c.parent_conversation_id is null)
+           and not exists(select 1 from lineage where notifications_muted)
            and ($3 <> 'turn_finished' or c.snoozed_until is null or c.snoozed_until <= clock_timestamp())
            and case $3 when 'waiting' then s.waiting
                        when 'turn_finished' then s.turn_finished
@@ -739,6 +749,27 @@ pub async fn cancel_for_conversation_in_tx(
     sqlx::query(
         "update owner_pushes set state='cancelled',updated_at=clock_timestamp()
          where conversation_id=$1 and state='pending'",
+    )
+    .bind(conversation_id)
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+/// «Без уведомлений»: ожидающие пуши сессии и всех её потомков отменяются.
+/// Деревья мелкие, рекурсия дешевле отдельного обхода по одному разговору.
+pub async fn cancel_for_conversation_tree_in_tx(
+    conn: &mut PgConnection,
+    conversation_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "with recursive tree(id) as (
+           select id from conversations where id=$1
+           union all
+           select c.id from conversations c join tree t on c.parent_conversation_id=t.id
+         )
+         update owner_pushes set state='cancelled',updated_at=clock_timestamp()
+         where conversation_id in (select id from tree) and state='pending'",
     )
     .bind(conversation_id)
     .execute(conn)

@@ -427,6 +427,9 @@
         "archived": {
           "type": "boolean"
         },
+        "notifications_muted": {
+          "type": "boolean"
+        },
         "accepted": {
           "type": "boolean"
         },
@@ -2665,6 +2668,9 @@
             "archived": {
               "type": "boolean"
             },
+            "notifications_muted": {
+              "type": "boolean"
+            },
             "accepted": {
               "type": "boolean"
             },
@@ -3000,6 +3006,9 @@
               "type": "boolean"
             },
             "archived": {
+              "type": "boolean"
+            },
+            "notifications_muted": {
               "type": "boolean"
             },
             "accepted": {
