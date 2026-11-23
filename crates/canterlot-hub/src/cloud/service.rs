@@ -42,6 +42,9 @@ use crate::{
 const TICK: Duration = Duration::from_secs(10);
 /// Раннер `cloud` отключён столько при подключённой несущей: окно удаляется.
 const DISCONNECTED_AFTER: TimeDelta = TimeDelta::minutes(10);
+/// После принятого DELETE сервер считается удалённым, только когда его нет в полном списке.
+/// Столько ждём подтверждения, прежде чем повторить DELETE.
+const DELETE_CONFIRM_AFTER: TimeDelta = TimeDelta::minutes(10);
 /// Деньги: повтор пуша о неудаляемом сервере.
 const ALERT_EVERY: TimeDelta = TimeDelta::minutes(30);
 /// После стольких неудач удаления идут пуши.
@@ -97,6 +100,12 @@ fn delete_backoff(attempts: i32) -> TimeDelta {
         .unwrap_or(0)
         .min(5);
     TimeDelta::seconds((30_i64 << exponent).min(600))
+}
+
+/// Номер тридцатиминутного окна от запроса удаления: ключ повтора пуша.
+fn alert_slot(window: &Window, now: DateTime<Utc>) -> i64 {
+    let since = window.delete_requested_at.unwrap_or(now);
+    (now - since).num_seconds().max(0) / ALERT_EVERY.num_seconds()
 }
 
 impl CloudService {
@@ -1112,12 +1121,13 @@ impl CloudService {
         let Some(server_id) = window.server_id else {
             return Ok(());
         };
-        if window.delete_accepted_at.is_none() {
-            // Раннер отозван до удаления; повтор безвреден.
+        if window.server_gone_at.is_none()
+            && window.delete_accepted_at.is_none()
+            && window.next_delete_at.is_none_or(|at| at <= now)
+        {
+            // Раннер отозван при переходе в `deleting`; повтор безвреден.
             windows::revoke_cloud_machine(&self.pool).await?;
-            if window.next_delete_at.is_none_or(|at| at <= now) {
-                self.try_delete(&window, server_id, now).await?;
-            }
+            self.try_delete(&window, server_id, now).await?;
         }
         let mut window = {
             let mut conn = self.pool.acquire().await?;
@@ -1127,16 +1137,16 @@ impl CloudService {
             }
         };
         if window.server_gone_at.is_none() && window.delete_accepted_at.is_some() {
-            // Конец оплаты сервера подтверждает только полный список без него.
-            match self
-                .provider
-                .list_project_servers(self.config.project_id)
-                .await
-            {
+            // Конец оплаты сервера подтверждает только полный список без него, и только
+            // после прямого ответа `404`: список мог не дойти до сервера.
+            let project = window.project_id.unwrap_or(self.config.project_id);
+            match self.provider.list_project_servers(project).await {
                 Ok(list) if !list.iter().any(|server| server.id == server_id) => {
-                    self.mark_server_gone(window.id, now).await?;
-                    window.server_gone_at = Some(now);
-                    window.next_delete_at = None;
+                    if self.confirm_absent(server_id).await? {
+                        self.mark_server_gone(window.id, now).await?;
+                        window.server_gone_at = Some(now);
+                        window.next_delete_at = None;
+                    }
                 }
                 Ok(_) => {}
                 Err(error) => {
@@ -1144,10 +1154,31 @@ impl CloudService {
                 }
             }
         }
+        if window.server_gone_at.is_none()
+            && window.delete_accepted_at.is_some()
+            && window.next_delete_at.is_none_or(|at| at <= now)
+        {
+            // Принятое удаление не подтвердилось за срок: DELETE повторяется с откатом, а
+            // владелец получает пуш о неудаляемом сервере раз в 30 минут.
+            self.try_delete(&window, server_id, now).await?;
+        }
         if window.server_gone_at.is_some() {
             self.finish_dnat(&window, now).await?;
         }
         Ok(())
+    }
+
+    /// Прямой ответ провайдера: сервера с этим номером нет. Список без сервера ещё не
+    /// доказательство, пока это не подтверждено запросом по номеру.
+    async fn confirm_absent(&self, server_id: i64) -> Result<bool, sqlx::Error> {
+        match self.provider.get_server(server_id).await {
+            Ok(ServerLookup::NotFound) => Ok(true),
+            Ok(ServerLookup::Found(_)) => Ok(false),
+            Err(error) => {
+                tracing::warn!(kind = "cloud_confirm_server", error_kind = ?error.kind, "server lookup failed");
+                Ok(false)
+            }
+        }
     }
 
     /// Сервер пропал из полного списка (метка ставится один раз).
@@ -1258,36 +1289,61 @@ impl CloudService {
         server_id: i64,
         now: DateTime<Utc>,
     ) -> Result<(), sqlx::Error> {
+        if window.server_gone_at.is_some() {
+            // Отсутствие уже подтверждено: DELETE больше не нужен.
+            return Ok(());
+        }
+        let repeat = window.delete_accepted_at.is_some();
         let outcome = self.provider.delete_server(server_id).await;
         let attempts = window.delete_attempts.saturating_add(1);
         match outcome {
             DeleteOutcome::Deleted { quarantined } => {
+                let next = if repeat {
+                    now + delete_backoff(attempts)
+                } else {
+                    now + DELETE_CONFIRM_AFTER
+                };
                 sqlx::query(
-                    "update cloud_windows set delete_accepted_at = $2,
+                    "update cloud_windows set delete_accepted_at = coalesce(delete_accepted_at, $2),
                             last_error = case when delete_reason in ('no_paid','dnat_refused','ipv4_refused') then last_error end,
                             delete_attempts = $3,
-                            alert_state = alert_state || jsonb_build_object('quarantined', $4::boolean)
+                            next_delete_at = $4,
+                            alert_state = alert_state || jsonb_build_object('quarantined', $5::boolean)
                      where id = $1 and state = 'deleting'",
                 )
                 .bind(window.id)
                 .bind(now)
                 .bind(attempts)
+                .bind(next)
                 .bind(quarantined)
                 .execute(&self.pool)
                 .await?;
+                if repeat {
+                    self.alert_delete_still_listed(window, now).await?;
+                }
             }
             DeleteOutcome::AlreadyGone => {
+                let next = if repeat {
+                    now + delete_backoff(attempts)
+                } else {
+                    now + DELETE_CONFIRM_AFTER
+                };
                 sqlx::query(
-                    "update cloud_windows set delete_accepted_at = $2,
+                    "update cloud_windows set delete_accepted_at = coalesce(delete_accepted_at, $2),
                             last_error = case when delete_reason in ('no_paid','dnat_refused','ipv4_refused') then last_error end,
-                            delete_attempts = $3
+                            delete_attempts = $3,
+                            next_delete_at = $4
                      where id = $1 and state = 'deleting'",
                 )
                 .bind(window.id)
                 .bind(now)
                 .bind(attempts)
+                .bind(next)
                 .execute(&self.pool)
                 .await?;
+                if repeat {
+                    self.alert_delete_still_listed(window, now).await?;
+                }
             }
             DeleteOutcome::NeedsConfirmation => {
                 // Токен не может удалить, сервер тарифицируется. Пуш сразу и с каждой
@@ -1321,17 +1377,46 @@ impl CloudService {
                 .execute(&self.pool)
                 .await?;
                 if attempts >= DELETE_FAILURES_BEFORE_ALERT {
-                    let since = window.delete_requested_at.unwrap_or(now);
-                    let slot = (now - since).num_seconds().max(0) / ALERT_EVERY.num_seconds();
-                    crate::notify::enqueue_cloud_alert(
-                        &self.pool,
-                        &format!("cloud:delete_failing:{}:{slot}", window.id),
-                        &json!({"code": "delete_failing", "window_id": window.id, "name": window.name}),
-                    )
-                    .await?;
+                    self.alert_delete_failing(window, now).await?;
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Пуш о сервере, который не исчезает из списка после принятого удаления. Не чаще раза
+    /// в 30 минут на окно.
+    async fn alert_delete_still_listed(
+        &self,
+        window: &Window,
+        now: DateTime<Utc>,
+    ) -> Result<(), sqlx::Error> {
+        crate::notify::enqueue_cloud_alert(
+            &self.pool,
+            &format!(
+                "cloud:delete_still_listed:{}:{}",
+                window.id,
+                alert_slot(window, now)
+            ),
+            &json!({"code": "delete_failing", "window_id": window.id, "name": window.name}),
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn alert_delete_failing(
+        &self,
+        window: &Window,
+        now: DateTime<Utc>,
+    ) -> Result<(), sqlx::Error> {
+        let since = window.delete_requested_at.unwrap_or(now);
+        let slot = (now - since).num_seconds().max(0) / ALERT_EVERY.num_seconds();
+        crate::notify::enqueue_cloud_alert(
+            &self.pool,
+            &format!("cloud:delete_failing:{}:{slot}", window.id),
+            &json!({"code": "delete_failing", "window_id": window.id, "name": window.name}),
+        )
+        .await?;
         Ok(())
     }
 

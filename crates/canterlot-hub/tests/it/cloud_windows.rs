@@ -1926,6 +1926,7 @@ async fn a_failing_delete_retries_with_backoff_and_alerts_after_three_failures(
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn quarantine_is_confirmed_only_by_absence_from_a_full_listing(pool: PgPool) -> TestResult {
     let rig = rig(pool).await;
+    enable_pushes(&rig.pool).await;
     let _carrier = rig.carrier_session();
     let t0 = now_micros();
     let (id, when) = drive_to_deleting(&rig, t0).await;
@@ -1944,9 +1945,25 @@ async fn quarantine_is_confirmed_only_by_absence_from_a_full_listing(pool: PgPoo
         "deleting",
         "still listed: still billing"
     );
-    assert_eq!(rig.deletes(), 1, "no second DELETE once it was accepted");
+    assert_eq!(
+        rig.deletes(),
+        1,
+        "no second DELETE before the confirmation deadline"
+    );
+    // Сервер всё ещё в списке через срок подтверждения: DELETE повторяется, владельцу пуш.
+    rig.tick(when + TimeDelta::minutes(11)).await;
+    assert_eq!(rig.state(id).await, "deleting");
+    assert_eq!(rig.deletes(), 2, "the accepted delete is retried");
+    assert!(
+        rig.alert_codes().await.contains(&"delete_failing".to_owned()),
+        "{:?}",
+        rig.alert_codes().await
+    );
+    // Дальше повторы идут с откатом, а окно остаётся живым.
+    rig.tick(when + TimeDelta::minutes(23)).await;
+    assert!(rig.deletes() >= 3, "the delete keeps retrying");
     rig.fake.control().remove_server(server_id);
-    rig.tick(when + TimeDelta::seconds(40)).await;
+    rig.tick(when + TimeDelta::minutes(40)).await;
     assert_eq!(rig.state(id).await, "ended");
     Ok(())
 }

@@ -68,11 +68,16 @@ pub struct Window {
     pub state: String,
     pub trigger: String,
     pub proposal_id: Option<Uuid>,
+    /// Проект провайдера на момент создания.
+    pub project_id: Option<i64>,
     pub server_id: Option<i64>,
     /// Локальный адрес сервера в приватной сети; выделяется из пула при создании окна.
     pub local_ip: Option<String>,
     /// Публичный порт DNAT-правила роутера для SSH этого сервера.
     pub dnat_port: Option<i32>,
+    /// Роутер и его публичный адрес на момент создания.
+    pub router_id: Option<String>,
+    pub router_ip: Option<String>,
     /// Идентификатор созданного правила DNAT; удаляется после сервера.
     pub dnat_rule_id: Option<String>,
     /// Вызов создания правила уже был: второго POST для того же порта нет.
@@ -92,6 +97,9 @@ pub struct Window {
     pub final_cost_kopecks: Option<i64>,
     pub month: String,
     pub hard_cap_minutes: i32,
+    /// Утверждённые сроки на момент создания.
+    pub drain_grace_minutes: Option<i32>,
+    pub teardown_margin_minutes: Option<i32>,
     pub created_at: DateTime<Utc>,
     pub create_called_at: Option<DateTime<Utc>>,
     pub ready_at: Option<DateTime<Utc>>,
@@ -399,21 +407,31 @@ pub async fn create_in_tx(
     }
     let id = Uuid::now_v7();
     let key = HostKey::generate()?;
+    let drain_grace = i32::try_from(config.drain_grace_minutes()).unwrap_or(i32::MAX);
+    let teardown_margin = i32::try_from(config.teardown_margin_minutes()).unwrap_or(i32::MAX);
     sqlx::query(
-        "insert into cloud_windows (id, name, state, trigger, proposal_id, host_key_public,
+        "insert into cloud_windows (id, name, state, trigger, proposal_id, project_id,
+                                    router_id, router_ip, host_key_public,
                                     price_hourly_kopecks, reservation_kopecks, month,
-                                    hard_cap_minutes, created_at, profiles, local_ip, dnat_port)
-         values ($1, $2, 'create_intent', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+                                    hard_cap_minutes, drain_grace_minutes, teardown_margin_minutes,
+                                    created_at, profiles, local_ip, dnat_port)
+         values ($1, $2, 'create_intent', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+                 $15, $16, $17, $18)",
     )
     .bind(id)
     .bind(format!("canterlot-runner-{id}"))
     .bind(request.trigger.as_str())
     .bind(request.proposal_id)
+    .bind(config.project_id)
+    .bind(&config.router_id)
+    .bind(&config.router_ip)
     .bind(key.public_line())
     .bind(max_hourly)
     .bind(reservation)
     .bind(&month)
     .bind(i32::try_from(request.hard_cap_minutes).expect("bounded by MAX_HARD_CAP_MINUTES"))
+    .bind(drain_grace)
+    .bind(teardown_margin)
     .bind(now)
     .bind(serde_json::to_value(&pricing.profiles).expect("profiles serialize"))
     .bind(&local_ip)
