@@ -75,6 +75,8 @@ export interface ListRow {
   last_activity_at: string | null;
   /** До этого времени сессия отложена владельцем; срок в прошлом значит «вернулась». */
   snoozed_until?: string | null;
+  /** Владелец выключил пуши сессии и её делегатов. */
+  notifications_muted?: boolean;
   /** Сумма ходов без ожидания владельца; у живой сессии — вместе с текущим ходом. */
   working_ms?: number;
   /** Решение маршрута, выбравшее исполнителя; `null` — запуск без маршрута. */
@@ -131,6 +133,7 @@ const ATTRIBUTES = [
   "accepted",
   "trashed",
   "trashed_at",
+  "notifications_muted",
   "groups",
   "group_pins",
   "parent_id",

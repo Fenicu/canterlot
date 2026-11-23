@@ -618,6 +618,7 @@ export interface ConversationCreated {
     color: string | null;
     pinned: boolean;
     archived: boolean;
+    notifications_muted?: boolean;
     accepted?: boolean;
     trashed?: boolean;
     trashed_at?: Time | null;
@@ -707,6 +708,7 @@ export interface ConversationUpdated {
     color: string | null;
     pinned: boolean;
     archived: boolean;
+    notifications_muted?: boolean;
     accepted?: boolean;
     trashed?: boolean;
     trashed_at?: Time | null;

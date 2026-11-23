@@ -94,6 +94,7 @@ mod memory_settings;
 mod memory_tools;
 mod message_snippets;
 mod model_resolution;
+mod notifications_muted;
 mod nudge;
 mod nudge_http;
 mod outbox;

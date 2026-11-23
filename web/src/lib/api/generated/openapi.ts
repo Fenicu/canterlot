@@ -1068,6 +1068,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/conversations/{id}/notifications": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** «Без уведомлений»: все пуши сессии и её делегатов выключаются или включаются. */
+        put: operations["put__api_v1_conversations__id__notifications"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/conversations/{id}/nudge": {
         parameters: {
             query?: never;
@@ -2611,6 +2628,8 @@ export interface components {
             /** Format: uuid */
             id: string;
             machine: components["schemas"]["MachineRef"];
+            /** @description Владелец выключил пуши этой сессии и её делегатов. */
+            notifications_muted?: boolean;
             /** Format: uuid */
             parent_id?: string | null;
             pinned: boolean;
@@ -4479,6 +4498,10 @@ export interface components {
             target: components["schemas"]["ScheduleTarget"];
             timezone?: string | null;
             title_template?: string | null;
+        };
+        NotificationsMuteBody: {
+            /** @description `true` — не присылать пуши этой сессии и её делегатам. */
+            muted: boolean;
         };
         /** @description Событие автопинка для `session_inspect` и PWA. */
         NudgeEventView: {
@@ -9785,6 +9808,58 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["LanePage"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    put__api_v1_conversations__id__notifications: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NotificationsMuteBody"];
+            };
+        };
+        responses: {
+            /** @description Режим уведомлений изменён */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConversationDetail"];
+                };
+            };
+            /** @description not_found */
+            404: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */

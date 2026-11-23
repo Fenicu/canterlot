@@ -817,6 +817,13 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
             None,
         ),
         case(
+            Method::PUT,
+            "/api/v1/conversations/{id}/notifications",
+            format!("/api/v1/conversations/{id}/notifications"),
+            Some(json!({"muted":true})),
+            Some(json!({"muted":false})),
+        ),
+        case(
             Method::POST,
             "/api/v1/conversations/{id}/auto-resume",
             format!("/api/v1/conversations/{arming}/auto-resume"),

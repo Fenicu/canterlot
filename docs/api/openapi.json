@@ -6318,6 +6318,103 @@
         }
       }
     },
+    "/api/v1/conversations/{id}/notifications": {
+      "put": {
+        "tags": [
+          "conversations"
+        ],
+        "summary": "«Без уведомлений»: все пуши сессии и её делегатов выключаются или включаются.",
+        "operationId": "put__api_v1_conversations__id__notifications",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NotificationsMuteBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Режим уведомлений изменён",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/conversations/{id}/nudge": {
       "get": {
         "tags": [
@@ -15445,6 +15542,10 @@
           "machine": {
             "$ref": "#/components/schemas/MachineRef"
           },
+          "notifications_muted": {
+            "type": "boolean",
+            "description": "Владелец выключил пуши этой сессии и её делегатов."
+          },
           "parent_id": {
             "type": [
               "string",
@@ -21699,6 +21800,19 @@
               "string",
               "null"
             ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "NotificationsMuteBody": {
+        "type": "object",
+        "required": [
+          "muted"
+        ],
+        "properties": {
+          "muted": {
+            "type": "boolean",
+            "description": "`true` — не присылать пуши этой сессии и её делегатам."
           }
         },
         "additionalProperties": false
