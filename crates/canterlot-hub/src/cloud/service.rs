@@ -214,9 +214,13 @@ impl CloudService {
         if due {
             runtime.last_reconcile = Some(now);
             match self.reconcile(now).await {
-                Ok(()) => runtime.reconciled = true,
+                Ok(true) => runtime.reconciled = true,
+                // Удаление ждёт подтверждения: новые создания закрыты, но следующую сверку
+                // ждём обычный срок, а не каждый проход.
+                Ok(false) => runtime.reconciled = false,
                 Err(()) => {
                     // Следующий проход попробует снова: пока сверки нет, новых серверов нет.
+                    runtime.reconciled = false;
                     runtime.last_reconcile = None;
                 }
             }
@@ -1457,28 +1461,53 @@ impl CloudService {
 
     // ───────── Сверка ─────────
 
-    /// Сверка проекта со строками окон. `Err(())` — список не получен целиком: ничего не
-    /// менялось.
-    async fn reconcile(&self, now: DateTime<Utc>) -> Result<(), ()> {
-        let listing = match self
-            .provider
-            .list_project_servers(self.config.project_id)
-            .await
-        {
-            Ok(listing) => listing,
-            Err(error) => {
-                tracing::warn!(kind = "cloud_reconcile_listing", error = %error, "project listing failed; nothing changed");
-                return Err(());
+    /// Сверка проекта со строками окон. `Ok(false)` — сверка прошла, но какое-то удаление
+    /// ещё ждёт подтверждения: успешной она не считается. `Err(())` — список не получен
+    /// целиком, ничего не менялось.
+    async fn reconcile(&self, now: DateTime<Utc>) -> Result<bool, ()> {
+        // Список текущего проекта ищет и лишние серверы. Живые окна другого проекта из
+        // старой конфигурации подтверждаются каждый в своём проекте.
+        let mut projects = vec![self.config.project_id];
+        let others: Vec<i64> = sqlx::query_scalar(
+            "select distinct project_id from cloud_windows
+              where state = any($1) and project_id is not null",
+        )
+        .bind(windows::live_states())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| warn_db("cloud_reconcile_projects", &error))?;
+        for project in others {
+            if !projects.contains(&project) {
+                projects.push(project);
             }
-        };
-        self.apply_listing(&listing, now).await.map_err(|error| {
-            warn_db("cloud_reconcile", &error);
-        })?;
+        }
+        for project in projects {
+            let listing = match self.provider.list_project_servers(project).await {
+                Ok(listing) => listing,
+                Err(error) => {
+                    tracing::warn!(kind = "cloud_reconcile_listing", error = %error, "project listing failed; nothing changed");
+                    return Err(());
+                }
+            };
+            self.apply_listing(&listing, project, now)
+                .await
+                .map_err(|error| {
+                    warn_db("cloud_reconcile", &error);
+                })?;
+        }
         // Правила роутера идут отдельно: список не получен целиком — ничего не меняем.
         if let Err(error) = self.delete_stray_dnat_rules(now).await {
             warn_db("cloud_reconcile_dnat", &error);
         }
-        Ok(())
+        let pending: bool = sqlx::query_scalar(
+            "select exists(select 1 from cloud_windows
+                            where state = 'deleting' and delete_accepted_at is not null
+                              and server_gone_at is null)",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| warn_db("cloud_reconcile_pending", &error))?;
+        Ok(!pending)
     }
 
     /// Лишние DNAT-правила роутера. Удаляются только правила с публичным портом внутри
@@ -1541,6 +1570,7 @@ impl CloudService {
     async fn apply_listing(
         &self,
         listing: &[ServerSummary],
+        project: i64,
         now: DateTime<Utc>,
     ) -> Result<(), sqlx::Error> {
         let mut named: std::collections::HashMap<Uuid, &ServerSummary> =
@@ -1559,9 +1589,13 @@ impl CloudService {
         .fetch_all(&self.pool)
         .await?;
         let unknown_for = grace(self.config.create_unknown_window);
+        let current = project == self.config.project_id;
         let mut known = std::collections::HashSet::new();
         for window in &windows {
             known.insert(window.id);
+            if window.project_id.unwrap_or(self.config.project_id) != project {
+                continue;
+            }
             let listed = named.get(&window.id);
             match (window.state.as_str(), listed) {
                 ("create_unknown", Some(server)) => {
@@ -1582,10 +1616,13 @@ impl CloudService {
                 }
                 ("identified" | "ready" | "draining", None) => {
                     // Только когда сервер уже должен был попасть в список: у провайдера он
-                    // может появиться с задержкой.
+                    // может появиться с задержкой. Отсутствие в списке подтверждается прямым
+                    // ответом `404`, прежде чем окно станет `gone`.
                     if window
                         .create_called_at
                         .is_some_and(|called| now - called >= unknown_for)
+                        && let Some(server_id) = window.server_id
+                        && self.confirm_absent(server_id).await?
                     {
                         self.gone(window, now).await?;
                     }
@@ -1593,18 +1630,63 @@ impl CloudService {
                 // Сервера нет без принятого удаления (владелец удалил в панели): оплата
                 // сервера кончилась; окно закончит шаг удаления, когда уйдёт и адрес.
                 ("deleting", None) if window.server_id.is_some() => {
-                    self.mark_server_gone(window.id, now).await?;
+                    if self.confirm_absent(window.server_id.expect("checked")).await? {
+                        self.mark_server_gone(window.id, now).await?;
+                    }
+                }
+                // Сервер окна, закрытого после неопределённого создания, появился позже:
+                // это не лишний сервер, а обязательство исходного окна. Возвращаем его окну,
+                // чтобы удалить обычным путём и посчитать итог от вызова создания.
+                ("failed", Some(server)) if window.create_called_at.is_some() => {
+                    self.reattach_late(window, server, now).await?;
                 }
                 (state, Some(server)) if !windows::LIVE.contains(&state) => {
-                    self.delete_stray(server, now).await?;
+                    if current {
+                        self.delete_stray(server, now).await?;
+                    }
                 }
                 _ => {}
             }
         }
-        for (id, server) in named {
-            if !known.contains(&id) {
-                self.delete_stray(server, now).await?;
+        if current {
+            for (id, server) in named {
+                if !known.contains(&id) {
+                    self.delete_stray(server, now).await?;
+                }
             }
+        }
+        Ok(())
+    }
+
+    /// Поздний сервер возвращается своему окну: оно снова живое (`deleting`), держит бюджет
+    /// и место в правиле одного окна, а итог считается от вызова создания до подтверждённого
+    /// отсутствия.
+    async fn reattach_late(
+        &self,
+        window: &Window,
+        server: &ServerSummary,
+        now: DateTime<Utc>,
+    ) -> Result<(), sqlx::Error> {
+        let updated = sqlx::query(
+            "update cloud_windows set state = 'deleting', server_id = $2,
+                    final_cost_kopecks = null, delete_confirmed_at = null, server_gone_at = null,
+                    delete_requested_at = $3, delete_reason = 'late_create', delete_accepted_at = null,
+                    delete_attempts = 0, next_delete_at = $3, last_error = 'late_create'
+              where id = $1 and state = 'failed'",
+        )
+        .bind(window.id)
+        .bind(server.id)
+        .bind(now)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        if updated > 0 {
+            crate::notify::enqueue_cloud_alert(
+                &self.pool,
+                &format!("cloud:late_create:{}", window.id),
+                &json!({"code": "late_create", "window_id": window.id, "name": window.name}),
+            )
+            .await?;
         }
         Ok(())
     }

@@ -2021,12 +2021,37 @@ async fn servers_of_closed_windows_are_strays_too(pool: PgPool) -> TestResult {
     rig.tick(t0).await;
     rig.tick(t0 + TimeDelta::minutes(10)).await;
     assert_eq!(rig.state(id).await, "failed");
+    assert_eq!(
+        rig.window(id).await.final_cost_kopecks,
+        Some(0),
+        "no known server, no cost"
+    );
+    // Поздний сервер остаётся видимым в списке и не даёт DELETE подтвердиться.
+    rig.fake.control().delete = DeleteMode::QuarantineListed;
     let late = rig
         .fake
         .control()
         .add_server(PROJECT, &windows::server_name(id));
     rig.tick(t0 + TimeDelta::minutes(15)).await;
-    assert!(!rig.fake.control().servers.contains_key(&late));
+    let window = rig.window(id).await;
+    assert_eq!(window.state, "deleting", "reattached to its original window");
+    assert_eq!(window.server_id, Some(late));
+    assert_eq!(window.delete_reason.as_deref(), Some("late_create"));
+    assert_eq!(rig.deletes(), 1, "deleted through the normal path");
+    assert!(matches!(
+        rig.try_create(60).await,
+        Err(CreateRefusal::LiveWindowExists)
+    ));
+    // Пока удаление не подтверждено, окно остаётся живым, а сверка — не успешной.
+    rig.tick(t0 + TimeDelta::minutes(16)).await;
+    assert_eq!(rig.state(id).await, "deleting");
+    // Владелец удалил сервер в панели: отсутствие подтверждено, итог — от вызова создания.
+    rig.fake.control().remove_server(late);
+    rig.tick(t0 + TimeDelta::minutes(17)).await;
+    let window = rig.window(id).await;
+    assert_eq!(window.state, "ended");
+    assert!(window.server_gone_at.is_some());
+    assert_eq!(window.final_cost_kopecks, Some(HOURLY));
     Ok(())
 }
 
