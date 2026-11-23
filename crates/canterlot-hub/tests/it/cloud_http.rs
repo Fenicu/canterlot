@@ -146,6 +146,23 @@ async fn the_list_has_live_windows_and_the_last_twenty_ended_with_costs(pool: Pg
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn the_displayed_cost_is_not_capped_at_the_reservation(pool: PgPool) {
+    let api = Api::new(pool).await;
+    let id = api.insert("ready", 1_000, Some(778)).await;
+    let list = api.list().await;
+    let item = list["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == id.to_string())
+        .expect("the live window is listed");
+    assert_eq!(item["reservation_kopecks"], 11380);
+    // 1000 минут = 16 ч 40 мин: платных часов 17, хотя резерв меньше.
+    assert_eq!(item["cost_so_far_kopecks"], 2845 * 17);
+    assert!(item["cost_so_far_kopecks"].as_i64().unwrap() > 11380);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn only_the_owner_sees_the_windows(pool: PgPool) {
     let api = Api::new(pool).await;
     let id = api.insert("ready", 5, Some(777)).await;
@@ -243,6 +260,59 @@ async fn delete_now_revokes_the_cloud_runner_and_leaves_the_server_to_the_servic
     assert_eq!(api.delete(id, &key, 200).await, first);
     let again = api.delete(id, &Uuid::now_v7().to_string(), 200).await;
     assert_eq!(again["outcome"], "deleting");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_delete_replay_never_revokes_the_next_window(pool: PgPool) {
+    let api = Api::new(pool).await;
+    let config = cloud_config(&api);
+    let machine = {
+        let mut conn = api.pool.acquire().await.unwrap();
+        windows::ensure_cloud_machine(&mut conn, &config, true)
+            .await
+            .unwrap()
+    };
+    let first = api.insert("ready", 5, Some(1)).await;
+    let key = Uuid::now_v7().to_string();
+    let _ = api.delete(first, &key, 200).await;
+    // Первое окно закончилось, началось второе; токен у машины новый.
+    sqlx::query("update cloud_windows set state = 'ended' where id = $1")
+        .bind(first)
+        .execute(&api.pool)
+        .await
+        .unwrap();
+    let second = api.insert("ready", 2, Some(2)).await;
+    let token = machines::rotate_token(&api.pool, machine, true, true)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        machines::verify(&api.pool, &token).await.unwrap(),
+        Some(machine)
+    );
+    // Повтор старой операции и свежий ключ для закончившегося окна не трогают новый токен.
+    api.delete(first, &key, 200).await;
+    let again = api.delete(first, &Uuid::now_v7().to_string(), 200).await;
+    assert_eq!(again["outcome"], "already_ended");
+    assert_eq!(
+        machines::verify(&api.pool, &token).await.unwrap(),
+        Some(machine),
+        "the next window's runner stays active"
+    );
+    assert_eq!(api.list().await["items"][0]["id"], second.to_string());
+}
+
+fn cloud_config(api: &Api) -> CloudConfig {
+    toml::from_str(&format!(
+        "provider='timeweb'\ntoken_file='t'\nproject_id=1\n\
+         network_id='network-example'\nnetwork_cidr='192.0.2.0/24'\nrouter_id='018f0000-0000-7000-8000-0000000000aa'\n\
+         router_ip='192.0.2.1'\ngateway='192.0.2.5'\n\
+         local_ip_pool='192.0.2.10-192.0.2.60'\ndnat_port_range='22100-22199'\n\
+         runner_public_key='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLE'\n\
+         carrier_machine_id='{}'\n[[profile]]\nconfigurator_id=151\ncpu=1\nram_gb=1\ndisk_gb=10\navailability_zone='msk-1'\n",
+        api.carrier
+    ))
+    .unwrap()
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]

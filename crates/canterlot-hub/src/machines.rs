@@ -71,31 +71,37 @@ fn new_token() -> Result<String, sqlx::Error> {
 /// токена больше нет, и ждать её фактов нечего.
 pub async fn revoke(pool: &PgPool, machine_id: Uuid) -> Result<bool, sqlx::Error> {
     crate::db::in_tx(pool, move |conn| {
-        Box::pin(async move {
-            // Замок машины задач раньше строки машины: тот же порядок, что у службы задач.
-            crate::inplace_jobs::lock_machine(&mut *conn, machine_id).await?;
-            // NO KEY UPDATE сериализует отзыв и ротацию, не блокируя FK нового курсора журнала.
-            sqlx::query("select id from machines where id = $1 for no key update")
-                .bind(machine_id)
-                .fetch_optional(&mut *conn)
-                .await?;
-            let revoked = sqlx::query(
-                "update machine_credentials set revoked_at = clock_timestamp()
-                 where machine_id = $1 and revoked_at is null",
-            )
-            .bind(machine_id)
-            .execute(&mut *conn)
-            .await?
-            .rows_affected()
-                != 0;
-            if revoked {
-                notify_revoke(&mut *conn, machine_id).await?;
-            }
-            lose_jobs_in_tx(&mut *conn, machine_id).await?;
-            Ok(revoked)
-        })
+        Box::pin(async move { revoke_in_tx(&mut *conn, machine_id).await })
     })
     .await
+}
+
+/// Отзыв в чужой транзакции: порядок замков тот же — задачи машины раньше строки машины.
+pub async fn revoke_in_tx(
+    conn: &mut sqlx::PgConnection,
+    machine_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    // Замок машины задач раньше строки машины: тот же порядок, что у службы задач.
+    crate::inplace_jobs::lock_machine(&mut *conn, machine_id).await?;
+    // NO KEY UPDATE сериализует отзыв и ротацию, не блокируя FK нового курсора журнала.
+    sqlx::query("select id from machines where id = $1 for no key update")
+        .bind(machine_id)
+        .fetch_optional(&mut *conn)
+        .await?;
+    let revoked = sqlx::query(
+        "update machine_credentials set revoked_at = clock_timestamp()
+         where machine_id = $1 and revoked_at is null",
+    )
+    .bind(machine_id)
+    .execute(&mut *conn)
+    .await?
+    .rows_affected()
+        != 0;
+    if revoked {
+        notify_revoke(&mut *conn, machine_id).await?;
+    }
+    lose_jobs_in_tx(&mut *conn, machine_id).await?;
+    Ok(revoked)
 }
 
 /// Незаконченные задачи на месте машины становятся `lost`; законченные не трогаются. Так же

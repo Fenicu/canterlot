@@ -58,7 +58,15 @@ create table cloud_windows (
     final_cost_kopecks bigint check (final_cost_kopecks >= 0),
     -- `YYYY-MM` по Москве на момент создания: окно целиком относится к этому месяцу.
     month text not null check (month ~ '^[0-9]{4}-(0[1-9]|1[0-2])$'),
+    -- Проект провайдера на момент создания: удаление и подтверждение идут в нём, даже если
+    -- конфигурация хаба успела смениться.
+    project_id bigint,
     hard_cap_minutes integer not null check (hard_cap_minutes > 0),
+    -- Утверждённые сроки окна на момент создания: доработка и запас на снос. Конфигурация
+    -- хаба после создания на них не влияет.
+    drain_grace_minutes integer check (drain_grace_minutes is null or drain_grace_minutes >= 0),
+    teardown_margin_minutes integer
+        check (teardown_margin_minutes is null or teardown_margin_minutes >= 0),
     created_at timestamptz not null,
     -- Метка ставится до вызова API: упавший после неё хаб знает, что сервер мог появиться.
     create_called_at timestamptz,

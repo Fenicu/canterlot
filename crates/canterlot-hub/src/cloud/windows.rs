@@ -68,11 +68,16 @@ pub struct Window {
     pub state: String,
     pub trigger: String,
     pub proposal_id: Option<Uuid>,
+    /// Проект провайдера на момент создания.
+    pub project_id: Option<i64>,
     pub server_id: Option<i64>,
     /// Локальный адрес сервера в приватной сети; выделяется из пула при создании окна.
     pub local_ip: Option<String>,
     /// Публичный порт DNAT-правила роутера для SSH этого сервера.
     pub dnat_port: Option<i32>,
+    /// Роутер и его публичный адрес на момент создания.
+    pub router_id: Option<String>,
+    pub router_ip: Option<String>,
     /// Идентификатор созданного правила DNAT; удаляется после сервера.
     pub dnat_rule_id: Option<String>,
     /// Вызов создания правила уже был: второго POST для того же порта нет.
@@ -92,6 +97,9 @@ pub struct Window {
     pub final_cost_kopecks: Option<i64>,
     pub month: String,
     pub hard_cap_minutes: i32,
+    /// Утверждённые сроки на момент создания.
+    pub drain_grace_minutes: Option<i32>,
+    pub teardown_margin_minutes: Option<i32>,
     pub created_at: DateTime<Utc>,
     pub create_called_at: Option<DateTime<Utc>>,
     pub ready_at: Option<DateTime<Utc>>,
@@ -235,6 +243,8 @@ pub enum CreateRefusal {
     #[error("provider_unavailable")]
     Provider(super::ProviderError),
     /// Все локальные адреса или DNAT-порты пула заняты живыми окнами.
+    #[error("carrier_unavailable")]
+    CarrierUnavailable,
     #[error("pool_exhausted")]
     PoolExhausted(&'static str),
     #[error("db_error")]
@@ -298,10 +308,25 @@ pub fn reservation_for(
     hourly_kopecks: i64,
     hard_cap_minutes: u32,
 ) -> Result<i64, PriceError> {
-    let minutes = price::total_minutes(
-        u64::from(hard_cap_minutes),
+    reservation_for_terms(
+        hourly_kopecks,
+        hard_cap_minutes,
         config.drain_grace_minutes(),
         config.teardown_margin_minutes(),
+    )
+}
+
+/// Резерв по утверждённым срокам окна, а не по текущей конфигурации.
+pub fn reservation_for_terms(
+    hourly_kopecks: i64,
+    hard_cap_minutes: u32,
+    drain_grace_minutes: u64,
+    teardown_margin_minutes: u64,
+) -> Result<i64, PriceError> {
+    let minutes = price::total_minutes(
+        u64::from(hard_cap_minutes),
+        drain_grace_minutes,
+        teardown_margin_minutes,
     )?;
     price::reservation_kopecks(hourly_kopecks, minutes)
 }
@@ -369,6 +394,17 @@ pub async fn create_in_tx(
     if request.hard_cap_minutes == 0 || request.hard_cap_minutes > MAX_HARD_CAP_MINUTES {
         return Err(CreateRefusal::Invalid("hard_cap_minutes"));
     }
+    // Новое окно имеет смысл только с живой несущей: без неё сервер некому подключить и он
+    // проживёт до `ready_timeout` за деньги. Снос и сверка без неё работают.
+    let carrier: bool = sqlx::query_scalar(
+        "select exists(select 1 from machines where id = $1 and role = 'worker' and is_carrier)",
+    )
+    .bind(config.carrier_machine_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    if !carrier {
+        return Err(CreateRefusal::CarrierUnavailable);
+    }
     let (budget, block, auto_mode): (i64, Option<String>, bool) = sqlx::query_as(
         "select monthly_budget_kopecks, provider_block_code, auto_mode from cloud_budget
          where singleton for update",
@@ -429,21 +465,31 @@ pub async fn create_in_tx(
     }
     let id = Uuid::now_v7();
     let key = HostKey::generate()?;
+    let drain_grace = i32::try_from(config.drain_grace_minutes()).unwrap_or(i32::MAX);
+    let teardown_margin = i32::try_from(config.teardown_margin_minutes()).unwrap_or(i32::MAX);
     sqlx::query(
-        "insert into cloud_windows (id, name, state, trigger, proposal_id, host_key_public,
+        "insert into cloud_windows (id, name, state, trigger, proposal_id, project_id,
+                                    router_id, router_ip, host_key_public,
                                     price_hourly_kopecks, reservation_kopecks, month,
-                                    hard_cap_minutes, created_at, profiles, local_ip, dnat_port)
-         values ($1, $2, 'create_intent', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+                                    hard_cap_minutes, drain_grace_minutes, teardown_margin_minutes,
+                                    created_at, profiles, local_ip, dnat_port)
+         values ($1, $2, 'create_intent', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+                 $15, $16, $17, $18)",
     )
     .bind(id)
     .bind(format!("canterlot-runner-{id}"))
     .bind(request.trigger.as_str())
     .bind(request.proposal_id)
+    .bind(config.project_id)
+    .bind(&config.router_id)
+    .bind(&config.router_ip)
     .bind(key.public_line())
     .bind(max_hourly)
     .bind(reservation)
     .bind(&month)
     .bind(i32::try_from(request.hard_cap_minutes).expect("bounded by MAX_HARD_CAP_MINUTES"))
+    .bind(drain_grace)
+    .bind(teardown_margin)
     .bind(now)
     .bind(serde_json::to_value(&pricing.profiles).expect("profiles serialize"))
     .bind(&local_ip)
@@ -548,8 +594,9 @@ pub async fn provider_block(
 pub const REASON_OWNER: &str = "owner";
 
 /// Удалить окно сейчас: ожидающая создания заявка отменяется, окно с сервером уходит в
-/// `deleting` (раннер отзывается, сервер удалит служба). Возвращает новое состояние или
-/// `None`, если окна нет. `create_unknown` отказывается: сервера ещё нет в известных.
+/// `deleting` (раннер отзывается в той же транзакции, сервер удалит служба). Возвращает новое
+/// состояние или `None`, если окна нет. `create_unknown` отказывается: сервера ещё нет в
+/// известных.
 pub async fn request_delete(
     pool: &PgPool,
     id: Uuid,
@@ -557,21 +604,14 @@ pub async fn request_delete(
     now: DateTime<Utc>,
 ) -> Result<DeleteRequested, sqlx::Error> {
     let reason = reason.to_owned();
-    let outcome = crate::db::in_tx(pool, move |conn| {
+    crate::db::in_tx(pool, move |conn| {
         Box::pin(async move { request_delete_in_tx(conn, id, &reason, now).await })
     })
-    .await?;
-    if outcome == DeleteRequested::Deleting {
-        // Отзыв раннера вне транзакции окна: у него свой порядок замков (машина задач
-        // раньше строки машины).
-        revoke_cloud_machine(pool).await?;
-    }
-    Ok(outcome)
+    .await
 }
 
-/// Переход «удалить сейчас» в чужой транзакции. Раннера не отзывает: это делает вызывающая
-/// после фиксации (`revoke_cloud_machine`), а при её отказе служба повторяет отзыв перед
-/// каждой попыткой удаления.
+/// Переход «удалить сейчас» в чужой транзакции. Переход в `deleting` сам отзывает раннера
+/// `cloud`: только текущее живое окно владеет его строкой.
 pub async fn request_delete_in_tx(
     conn: &mut PgConnection,
     id: Uuid,
@@ -616,7 +656,7 @@ pub async fn mark_deleting_in_tx(
     reason: &str,
     now: DateTime<Utc>,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
+    let moved = sqlx::query(
         "update cloud_windows set state = 'deleting', delete_requested_at = $2, delete_reason = $3,
                 next_delete_at = $2, idle_since = null, disconnected_since = null
          where id = $1 and state in ('identified', 'ready', 'draining')",
@@ -625,7 +665,13 @@ pub async fn mark_deleting_in_tx(
     .bind(now)
     .bind(reason)
     .execute(&mut *conn)
-    .await?;
+    .await?
+    .rows_affected();
+    if moved > 0 {
+        // Раннер отзывается в той же транзакции, что переводит окно: отзыв вне её мог бы
+        // погасить токен уже следующего окна.
+        revoke_cloud_machine_in_tx(conn).await?;
+    }
     // Команда подключения, которую несущая ещё не исполнила, больше не нужна.
     sqlx::query(
         "update commands set delivery_state = 'completed', completed_at = coalesce(completed_at, now())
@@ -647,10 +693,14 @@ pub async fn cloud_machine_id(conn: &mut PgConnection) -> Result<Option<Uuid>, s
 /// Отзыв раннера `cloud`: токен гаснет, его незаконченные задачи становятся `lost`.
 pub async fn revoke_cloud_machine(pool: &PgPool) -> Result<(), sqlx::Error> {
     let mut conn = pool.acquire().await?;
-    let machine = cloud_machine_id(&mut conn).await?;
-    drop(conn);
+    revoke_cloud_machine_in_tx(&mut conn).await
+}
+
+/// Отзыв в транзакции, которая переводит окно: только текущее живое окно владеет строкой.
+pub async fn revoke_cloud_machine_in_tx(conn: &mut PgConnection) -> Result<(), sqlx::Error> {
+    let machine = cloud_machine_id(&mut *conn).await?;
     if let Some(machine) = machine {
-        crate::machines::revoke(pool, machine).await?;
+        crate::machines::revoke_in_tx(conn, machine).await?;
     }
     Ok(())
 }
@@ -745,12 +795,10 @@ pub fn view(window: &Window, now: DateTime<Utc>) -> CloudWindowView {
     let cost_so_far = match (window.final_cost_kopecks, window.create_called_at) {
         (Some(cost), _) => cost,
         (None, Some(called)) => {
-            let minutes = u64::try_from((now - called).num_seconds().max(0))
-                .unwrap_or(0)
-                .div_ceil(60);
-            price::final_cost_kopecks(window.price_hourly_kopecks, minutes)
+            // Показываем настоящий расход, а не резерв: окно могло прожить дольше предела
+            // из-за простоя хаба, и владелец должен видеть цену.
+            price::final_cost_between(window.price_hourly_kopecks, called, now)
                 .unwrap_or(window.reservation_kopecks)
-                .min(window.reservation_kopecks)
         }
         (None, None) => 0,
     };

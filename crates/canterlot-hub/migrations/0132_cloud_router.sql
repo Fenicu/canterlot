@@ -8,6 +8,10 @@ alter table cloud_windows
     add column local_ip text,
     add column dnat_port integer,
     add column dnat_rule_id text,
+    -- Роутер и его публичный адрес на момент создания окна: снос и подтверждение идут с
+    -- ними, даже если конфигурация хаба успела смениться.
+    add column router_id text,
+    add column router_ip text,
     -- Метка вызова создания правила: до неё повтор возможен, после — только усыновление
     -- из полного списка (второго POST для одного и того же порта не бывает).
     add column dnat_create_attempted_at timestamptz,

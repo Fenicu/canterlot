@@ -89,6 +89,8 @@ pub struct FakeServer {
     pub hidden_polls_left: u32,
     /// Подменить статус сервера (например `no_paid`), сколько бы раз его ни опрашивали.
     pub forced_status: Option<String>,
+    /// Убрать имя из ответа списка и `GET /servers/{id}`: сервер без имени.
+    pub hide_name: bool,
     pub request: Value,
 }
 
@@ -177,6 +179,8 @@ pub struct FakeState {
     pub list_ignores_paging: bool,
     /// Подменить `meta.total`.
     pub list_total_override: Option<u64>,
+    /// `meta.total` по страницам по порядку: список менялся во время обхода.
+    pub list_total_sequence: VecDeque<u64>,
     /// Сервер, созданный запросом, не виден в первых стольких листингах проекта. Счёт
     /// идёт по листингам, а не по часам: тест не зависит от скорости машины.
     pub listing_hidden_polls: u32,
@@ -229,6 +233,7 @@ impl FakeState {
             list_fail_page: None,
             list_ignores_paging: false,
             list_total_override: None,
+            list_total_sequence: VecDeque::new(),
             listing_hidden_polls: 0,
             boot_polls: 0,
             echo_authorization_in_errors: false,
@@ -254,6 +259,7 @@ impl FakeState {
                 boot_polls_left: 0,
                 hidden_polls_left: 0,
                 forced_status: None,
+                hide_name: false,
                 request: Value::Null,
             },
         );
@@ -407,10 +413,11 @@ fn server_json(server: &FakeServer) -> Value {
     let booted = server.boot_polls_left == 0;
     // У сервера нет публичного адреса: доступ идёт через NAT роутера.
     let ips = json!([]);
-    json!({
+    let mut out = json!({
         "id": server.id,
         "name": server.name,
         "comment": server.comment,
+        "project_id": server.project_id,
         "os": {"id": 109, "name": "debian", "version": "13"},
         "software": null,
         "preset_id": null,
@@ -437,7 +444,11 @@ fn server_json(server: &FakeServer) -> Value {
         "is_master_ssh": false,
         "is_dedicated_cpu": false,
         "gpu": 0,
-    })
+    });
+    if server.hide_name {
+        out.as_object_mut().expect("object").remove("name");
+    }
+    out
 }
 
 fn parse_query(raw: Option<&str>) -> HashMap<String, String> {
@@ -683,7 +694,11 @@ fn page_response(
     }
 
     let items: Vec<Value> = all.into_iter().skip(offset).take(limit).collect();
-    let reported = st.list_total_override.unwrap_or(total as u64);
+    let reported = st
+        .list_total_sequence
+        .pop_front()
+        .or(st.list_total_override)
+        .unwrap_or(total as u64);
     Action::Respond(json_response(
         200,
         &json!({key: items, "meta": {"total": reported}, "response_id": "r"}),
@@ -742,6 +757,7 @@ fn create_server(st: &mut FakeState, body: Option<Value>, auth: Option<&str>) ->
         boot_polls_left: st.boot_polls,
         hidden_polls_left: st.listing_hidden_polls,
         forced_status: st.boot_status.clone(),
+        hide_name: false,
         request: body,
     };
     let rendered = server_json(&server);

@@ -783,6 +783,11 @@ fn cloud_alert_text(payload: &Value) -> Option<(String, String)> {
                 money("reservation_kopecks").unwrap_or_else(|| "?".to_owned())
             ),
         ),
+        "no_paid" => (
+            "Облако: сервер не включается (no_paid)".to_owned(),
+            "Timeweb не включает сервер (no_paid): аккаунт требует предоплату, окна остановлены"
+                .to_owned(),
+        ),
         "stray_server_deleted" => (
             "Облако: удалён лишний сервер".to_owned(),
             format!("Сервер {name} в проекте раннеров не принадлежал ни одному окну; удалён."),
@@ -824,40 +829,68 @@ fn cloud_alert_text(payload: &Value) -> Option<(String, String)> {
                     .unwrap_or_default()
             ),
         ),
-        "ipv4_refused" => (
-            "Облако: Timeweb отказал в публичном IPv4".to_owned(),
+        "dnat_refused" => (
+            "Облако: роутер не принял проброс".to_owned(),
             format!(
-                "Timeweb отказал в публичном IPv4 ({}), сервер удалён.{}",
-                clip(payload["error_code"].as_str().unwrap_or("?"), TITLE_CHARS),
-                payload["required_balance"]
-                    .as_str()
-                    .map(|balance| format!(" Требуется баланс: {} ₽.", clip(balance, TITLE_CHARS)))
-                    .unwrap_or_default()
+                "Правило DNAT для окна {name} отклонено провайдером ({}); сервер удалён.",
+                clip(payload["error_code"].as_str().unwrap_or("?"), TITLE_CHARS)
             ),
         ),
-        "stray_ip_deleted" => (
-            "Облако: удалён лишний IP-адрес".to_owned(),
+        "dnat_delete_failing" => (
+            "Облако: правило DNAT не удаляется".to_owned(),
             format!(
-                "Адрес {} окна {name} остался на аккаунте без сервера и тарифицировался; удалён.",
-                clip(payload["ip"].as_str().unwrap_or("?"), TITLE_CHARS)
+                "Правило проброса окна {name} не удалилось после нескольких попыток: порт занят, \
+                 окно продолжает жить и ждёт подтверждения."
             ),
         ),
-        "stray_ip_stuck" => (
-            "Облако: лишний IP-адрес не удаляется".to_owned(),
+        "stray_dnat_deleted" => (
+            "Облако: удалено лишнее правило DNAT".to_owned(),
             format!(
-                "Адрес {} окна {name} остался без сервера и не удаляется: он тарифицируется.",
-                clip(payload["ip"].as_str().unwrap_or("?"), TITLE_CHARS)
+                "Правило {} на порту {} не принадлежало живому окну и удалено.",
+                clip(payload["rule_id"].as_str().unwrap_or("?"), TITLE_CHARS),
+                clip(payload["public_port"].as_str().unwrap_or("?"), TITLE_CHARS)
             ),
         ),
-        "ip_delete_failing" => (
-            "Облако: IP-адрес не удаляется".to_owned(),
-            format!("Адрес окна {name} не удалился после нескольких попыток и тарифицируется."),
-        ),
-        "ipv4_unattributed" => (
-            "Облако: проверьте плавающие IP".to_owned(),
+        "stray_dnat_stuck" => (
+            "Облако: лишнее правило DNAT не удаляется".to_owned(),
             format!(
-                "Для окна {name} заказан IPv4, но ответ потерян и адрес неизвестен. Проверьте \
-                 плавающие адреса аккаунта: он мог остаться и тарифицироваться."
+                "Правило {} на порту {} не принадлежит живому окну и не удаляется.",
+                clip(payload["rule_id"].as_str().unwrap_or("?"), TITLE_CHARS),
+                clip(payload["public_port"].as_str().unwrap_or("?"), TITLE_CHARS)
+            ),
+        ),
+        "hard_cap" => (
+            "Облако: предел окна истёк до подключения".to_owned(),
+            format!("Окно {name} не подключилось до жёсткого предела; сервер удаляется."),
+        ),
+        "cloud_window_hard_cap" => (
+            "Облако: жёсткий предел, задачи отменены".to_owned(),
+            format!("Окно {name} дошло до жёсткого предела; незаконченные задачи отменены."),
+        ),
+        "ownership_mismatch" => (
+            "Облако: сервер не принадлежит окну".to_owned(),
+            format!(
+                "Сервер {} не совпал по имени или проекту с окном {name}; удаление остановлено, \
+                 проверьте панель.",
+                payload["server_id"]
+                    .as_i64()
+                    .map_or_else(|| "?".to_owned(), |id| id.to_string())
+            ),
+        ),
+        "late_create" => (
+            "Облако: поздний сервер возвращён окну".to_owned(),
+            format!(
+                "Сервер окна {name} появился после неудавшегося создания; он удаляется обычным \
+                 путём, итог считается с вызова создания."
+            ),
+        ),
+        "reprice_growth" => (
+            "Облако: цена выросла, окно не создано".to_owned(),
+            format!(
+                "Новая цена подняла резерв окна {name} до {} выше одобренных {}; сервер не \
+                 создавался, расход 0.",
+                money("reservation_kopecks").unwrap_or_else(|| "?".to_owned()),
+                money("approved_kopecks").unwrap_or_else(|| "?".to_owned())
             ),
         ),
         "window_gone" => (
@@ -2451,5 +2484,65 @@ mod tests {
             failure_text("hung", &json!({"kind":"hung","second":true}), None),
             "Ход снова завис в генерации и остаётся зависшим"
         );
+    }
+
+    #[test]
+    fn every_emitted_cloud_alert_code_renders_a_title() {
+        let codes = [
+            "auto_started",
+            "budget_80",
+            "budget_100",
+            "no_paid",
+            "stray_server_deleted",
+            "stray_server_stuck",
+            "delete_needs_confirmation",
+            "delete_failing",
+            "window_overrun",
+            "outage_extra_cost",
+            "window_gone",
+            "dnat_refused",
+            "dnat_delete_failing",
+            "stray_dnat_deleted",
+            "stray_dnat_stuck",
+            "hard_cap",
+            "cloud_window_hard_cap",
+            "ownership_mismatch",
+            "late_create",
+            "reprice_growth",
+        ];
+        for code in codes {
+            let payload = json!({
+                "code": code,
+                "name": "canterlot-runner-x",
+                "window_id": "018f0000-0000-7000-8000-000000000001",
+                "percent": 80,
+                "spent_kopecks": 1000,
+                "budget_kopecks": 2000,
+                "reservation_kopecks": 3000,
+                "approved_kopecks": 2000,
+                "extra_kopecks": 100,
+                "server_id": 7,
+                "rule_id": "dnat-1",
+                "public_port": "22100",
+                "error_code": "forbidden",
+            });
+            let (title, body) =
+                cloud_alert_text(&payload).unwrap_or_else(|| panic!("{code} is not rendered"));
+            assert!(!title.trim().is_empty(), "{code} has an empty title");
+            assert!(!body.trim().is_empty(), "{code} has an empty body");
+        }
+        // Остатки публичного IPv4 больше не выпускаются: их коды не должны рендериться.
+        for dead in [
+            "ipv4_refused",
+            "stray_ip_deleted",
+            "stray_ip_stuck",
+            "ip_delete_failing",
+            "ipv4_unattributed",
+        ] {
+            assert!(
+                cloud_alert_text(&json!({"code": dead, "name": "x"})).is_none(),
+                "{dead} is dead"
+            );
+        }
     }
 }

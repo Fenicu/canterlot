@@ -41,10 +41,19 @@ use crate::{
 const TICK: Duration = Duration::from_secs(10);
 /// Раннер `cloud` отключён столько при подключённой несущей: окно удаляется.
 const DISCONNECTED_AFTER: TimeDelta = TimeDelta::minutes(10);
+/// После принятого DELETE сервер считается удалённым, только когда его нет в полном списке.
+/// Столько ждём подтверждения, прежде чем повторить DELETE.
+const DELETE_CONFIRM_AFTER: TimeDelta = TimeDelta::minutes(10);
 /// Деньги: повтор пуша о неудаляемом сервере.
 const ALERT_EVERY: TimeDelta = TimeDelta::minutes(30);
 /// После стольких неудач удаления идут пуши.
 const DELETE_FAILURES_BEFORE_ALERT: i32 = 3;
+/// Неопределённый ответ на создание DNAT: столько порт и адрес остаются занятыми, прежде
+/// чем полный список без правила позволит повторить вызов.
+const DNAT_AMBIGUITY: TimeDelta = TimeDelta::minutes(10);
+/// Цена профилей годна столько с момента создания окна. Перед первым POST более старая
+/// цена перепроверяется у провайдера.
+const PRICE_QUOTE_TTL: TimeDelta = TimeDelta::minutes(10);
 /// Окно в `draining` задерживается сверх предела на доработку: так долго терпим, прежде чем
 /// счесть это просрочкой, а не штатным сносом.
 const OVERRUN_SLACK: TimeDelta = TimeDelta::minutes(10);
@@ -69,12 +78,6 @@ pub struct CloudService {
     runtime: Mutex<Runtime>,
 }
 
-fn minutes_between(from: DateTime<Utc>, to: DateTime<Utc>) -> u64 {
-    u64::try_from((to - from).num_seconds().max(0))
-        .unwrap_or(0)
-        .div_ceil(60)
-}
-
 /// Причина удаления окна, у которого сервер остался `no_paid`: аккаунт требует предоплату.
 pub const REASON_NO_PAID: &str = "no_paid";
 
@@ -83,11 +86,8 @@ pub const REASON_NO_PAID: &str = "no_paid";
 /// не заказывается, поэтому в итог входит только сервер.
 fn ledger_cost(window: &Window, server_end: DateTime<Utc>) -> i64 {
     window.create_called_at.map_or(0, |called| {
-        price::final_cost_kopecks(
-            window.price_hourly_kopecks,
-            minutes_between(called, server_end),
-        )
-        .unwrap_or(window.reservation_kopecks)
+        price::final_cost_between(window.price_hourly_kopecks, called, server_end)
+            .unwrap_or(window.reservation_kopecks)
     })
 }
 
@@ -96,6 +96,12 @@ fn delete_backoff(attempts: i32) -> TimeDelta {
         .unwrap_or(0)
         .min(5);
     TimeDelta::seconds((30_i64 << exponent).min(600))
+}
+
+/// Номер тридцатиминутного окна от запроса удаления: ключ повтора пуша.
+fn alert_slot(window: &Window, now: DateTime<Utc>) -> i64 {
+    let since = window.delete_requested_at.unwrap_or(now);
+    (now - since).num_seconds().max(0) / ALERT_EVERY.num_seconds()
 }
 
 impl CloudService {
@@ -217,9 +223,13 @@ impl CloudService {
         if due {
             runtime.last_reconcile = Some(now);
             match self.reconcile(now).await {
-                Ok(()) => runtime.reconciled = true,
+                Ok(true) => runtime.reconciled = true,
+                // Удаление ждёт подтверждения: новые создания закрыты, но следующую сверку
+                // ждём обычный срок, а не каждый проход.
+                Ok(false) => runtime.reconciled = false,
                 Err(()) => {
                     // Следующий проход попробует снова: пока сверки нет, новых серверов нет.
+                    runtime.reconciled = false;
                     runtime.last_reconcile = None;
                 }
             }
@@ -474,12 +484,103 @@ impl CloudService {
         Ok(())
     }
 
+    /// Сроки окна из его строки, а не из текущей конфигурации.
+    fn drain_minutes(&self, window: &Window) -> u64 {
+        window
+            .drain_grace_minutes
+            .and_then(|minutes| u64::try_from(minutes).ok())
+            .unwrap_or_else(|| self.config.drain_grace_minutes())
+    }
+
+    fn teardown_minutes(&self, window: &Window) -> u64 {
+        window
+            .teardown_margin_minutes
+            .and_then(|minutes| u64::try_from(minutes).ok())
+            .unwrap_or_else(|| self.config.teardown_margin_minutes())
+    }
+
+    /// Перед первым POST: если снимок цен старше срока, спросить провайдера заново. Рост
+    /// резерва выше одобренного закрывает окно без POST и без расхода; снижение заменяет
+    /// снимок и освобождает разницу в бюджете.
+    async fn reprice_if_stale(
+        &self,
+        window: &mut Window,
+        now: DateTime<Utc>,
+    ) -> Result<bool, sqlx::Error> {
+        if now - window.created_at < PRICE_QUOTE_TTL {
+            return Ok(true);
+        }
+        let pricing = match self.pricing().await {
+            Ok(pricing) => pricing,
+            Err(error) => {
+                tracing::warn!(kind = "cloud_reprice", error = %error, "price quote is stale and cannot be refreshed");
+                return Ok(false);
+            }
+        };
+        let Some(max_hourly) = pricing.max_hourly_kopecks() else {
+            return self.fail(window.id, "price_error").await.map(|_| false);
+        };
+        let hard_cap = u32::try_from(window.hard_cap_minutes).unwrap_or(u32::MAX);
+        let reservation = match windows::reservation_for_terms(
+            max_hourly,
+            hard_cap,
+            self.drain_minutes(window),
+            self.teardown_minutes(window),
+        ) {
+            Ok(reservation) => reservation,
+            Err(error) => {
+                return self
+                    .fail(window.id, &format!("price_error:{error}"))
+                    .await
+                    .map(|_| false);
+            }
+        };
+        if reservation > window.reservation_kopecks {
+            crate::notify::enqueue_cloud_alert(
+                &self.pool,
+                &format!("cloud:reprice_growth:{}", window.id),
+                &json!({
+                    "code": "reprice_growth",
+                    "window_id": window.id,
+                    "name": window.name,
+                    "reservation_kopecks": reservation,
+                    "approved_kopecks": window.reservation_kopecks,
+                }),
+            )
+            .await?;
+            return self.fail(window.id, "reprice_growth").await.map(|_| false);
+        }
+        let updated = sqlx::query(
+            "update cloud_windows set profiles = $2, price_hourly_kopecks = $3,
+                    reservation_kopecks = $4
+             where id = $1 and state = 'create_intent' and create_called_at is null
+               and reservation_kopecks >= $4",
+        )
+        .bind(window.id)
+        .bind(serde_json::to_value(&pricing.profiles).expect("profiles serialize"))
+        .bind(max_hourly)
+        .bind(reservation)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        if updated == 0 {
+            return Ok(false);
+        }
+        window.profiles = serde_json::to_value(&pricing.profiles).expect("profiles serialize");
+        window.price_hourly_kopecks = max_hourly;
+        window.reservation_kopecks = reservation;
+        Ok(true)
+    }
+
     async fn start_create(
         &self,
         runtime: &mut Runtime,
-        window: Window,
+        mut window: Window,
         now: DateTime<Utc>,
     ) -> Result<(), sqlx::Error> {
+        if !self.reprice_if_stale(&mut window, now).await? {
+            return Ok(());
+        }
         let key_id = match runtime.ssh_key_id {
             Some(id) => id,
             None => match self
@@ -524,7 +625,11 @@ impl CloudService {
         // Метка вызова ставится до самого вызова: от неё считаются предел и ledger, и по ней
         // упавший после этого хаб поймёт, что сервер мог появиться.
         let hard_cap = TimeDelta::minutes(i64::from(window.hard_cap_minutes));
-        let drain_until = now + hard_cap + grace(self.config.drain_grace);
+        let drain =
+            TimeDelta::minutes(i64::try_from(self.drain_minutes(&window)).unwrap_or(i64::MAX));
+        let teardown =
+            TimeDelta::minutes(i64::try_from(self.teardown_minutes(&window)).unwrap_or(i64::MAX));
+        let drain_until = now + hard_cap + drain;
         let stamped = sqlx::query(
             "update cloud_windows set create_called_at = $2, hard_cap_at = $3, drain_until = $4,
                     teardown_until = $5
@@ -534,7 +639,7 @@ impl CloudService {
         .bind(now)
         .bind(now + hard_cap)
         .bind(drain_until)
-        .bind(drain_until + grace(self.config.teardown_margin))
+        .bind(drain_until + teardown)
         .execute(&self.pool)
         .await?
         .rows_affected();
@@ -563,7 +668,7 @@ impl CloudService {
             let request = CreateServer {
                 name: window.name.clone(),
                 comment: "canterlot runner window".to_owned(),
-                project_id: self.config.project_id,
+                project_id: window.project_id.unwrap_or(self.config.project_id),
                 configurator_id: profile.configurator_id,
                 cpu: profile.cpu,
                 ram_mb: profile.ram_mb(),
@@ -655,6 +760,12 @@ impl CloudService {
         if let Some(cap) = window.hard_cap_at
             && now >= cap
         {
+            crate::notify::enqueue_cloud_alert(
+                &self.pool,
+                &format!("cloud:hard_cap:{}", window.id),
+                &json!({"code": "hard_cap", "window_id": window.id, "name": window.name}),
+            )
+            .await?;
             return self.delete_now(&window, "hard_cap", now).await;
         }
         if let Some(called) = window.create_called_at
@@ -707,7 +818,14 @@ impl CloudService {
             Ok(port) => port,
             Err(_) => return Ok(()),
         };
-        let router_ip = self.config.router_ip.clone();
+        let router_ip = window
+            .router_ip
+            .clone()
+            .unwrap_or_else(|| self.config.router_ip.clone());
+        let router_id = window
+            .router_id
+            .clone()
+            .unwrap_or_else(|| self.config.router_id.clone());
         if window.dnat_create_attempted_at.is_none() {
             let stamped = sqlx::query(
                 "update cloud_windows set dnat_create_attempted_at = $2
@@ -727,20 +845,34 @@ impl CloudService {
                 public_ip: router_ip.clone(),
                 public_port: port,
             };
-            match self
-                .provider
-                .create_dnat_rule(&self.config.router_id, &request)
-                .await
-            {
+            match self.provider.create_dnat_rule(&router_id, &request).await {
                 DnatCreateOutcome::Created { rule_id } => {
                     self.adopt_dnat(window.id, &rule_id).await?;
                 }
-                DnatCreateOutcome::Refused { .. } => {
+                DnatCreateOutcome::Refused {
+                    status, error_code, ..
+                } => {
                     sqlx::query(
-                        "update cloud_windows set last_error = 'dnat_refused' where id = $1",
+                        "update cloud_windows set last_error = 'dnat_refused',
+                                dnat_create_attempted_at = null,
+                                dnat_gone_at = coalesce(dnat_gone_at, $2)
+                         where id = $1",
                     )
                     .bind(window.id)
+                    .bind(now)
                     .execute(&self.pool)
+                    .await?;
+                    crate::notify::enqueue_cloud_alert(
+                        &self.pool,
+                        &format!("cloud:dnat_refused:{}", window.id),
+                        &json!({
+                            "code": "dnat_refused",
+                            "window_id": window.id,
+                            "name": window.name,
+                            "status": status,
+                            "error_code": error_code,
+                        }),
+                    )
                     .await?;
                     return self.delete_now(window, "dnat_refused", now).await;
                 }
@@ -756,7 +888,7 @@ impl CloudService {
             return Ok(());
         }
         // Вызов был, ответ нечитаем: полный список — единственный источник истины.
-        match self.provider.list_dnat_rules(&self.config.router_id).await {
+        match self.provider.list_dnat_rules(&router_id).await {
             Ok(rules) => {
                 if let Some(rule) = rules
                     .iter()
@@ -764,14 +896,19 @@ impl CloudService {
                 {
                     self.adopt_dnat(window.id, &rule.id).await?;
                 } else {
-                    // Полный список подтвердил отсутствие правила: первый вызов точно не
-                    // создал его, поэтому повтор для того же порта безопасен.
-                    sqlx::query(
-                        "update cloud_windows set dnat_create_attempted_at = null where id = $1",
-                    )
-                    .bind(window.id)
-                    .execute(&self.pool)
-                    .await?;
+                    // Полный список подтвердил отсутствие правила, но только по истечении
+                    // срока неопределённости: правило могло появиться с задержкой.
+                    let old_enough = window
+                        .dnat_create_attempted_at
+                        .is_some_and(|at| now - at >= DNAT_AMBIGUITY);
+                    if old_enough {
+                        sqlx::query(
+                            "update cloud_windows set dnat_create_attempted_at = null where id = $1",
+                        )
+                        .bind(window.id)
+                        .execute(&self.pool)
+                        .await?;
+                    }
                 }
             }
             Err(error) => {
@@ -855,7 +992,7 @@ impl CloudService {
                 .bind(json!({
                     "window_id": window.id,
                     "machine_id": machine,
-                    "host": config.router_ip,
+                    "host": window.router_ip.clone().unwrap_or_else(|| config.router_ip.clone()),
                     "ssh_port": window.dnat_port,
                     "host_key_public": window.host_key_public,
                     "root_dir": CLOUD_ROOT_DIR,
@@ -1070,6 +1207,12 @@ impl CloudService {
                 })
             })
             .await?;
+            crate::notify::enqueue_cloud_alert(
+                &self.pool,
+                &format!("cloud:cloud_window_hard_cap:{}", window.id),
+                &json!({"code": "cloud_window_hard_cap", "window_id": window.id, "name": window.name}),
+            )
+            .await?;
         }
         Ok(())
     }
@@ -1094,10 +1237,9 @@ impl CloudService {
             return Ok(false);
         }
         // Сервер сверх предела тарифицируется; публичного адреса больше нет.
-        let extra =
-            price::final_cost_kopecks(window.price_hourly_kopecks, minutes_between(cap, now))
-                .ok()
-                .map(|cost| cost.min(i64::MAX / 2));
+        let extra = price::final_cost_between(window.price_hourly_kopecks, cap, now)
+            .ok()
+            .map(|cost| cost.min(i64::MAX / 2));
         let code = if runtime.first_tick {
             "outage_extra_cost"
         } else {
@@ -1129,12 +1271,12 @@ impl CloudService {
         let Some(server_id) = window.server_id else {
             return Ok(());
         };
-        if window.delete_accepted_at.is_none() {
-            // Раннер отозван до удаления; повтор безвреден.
-            windows::revoke_cloud_machine(&self.pool).await?;
-            if window.next_delete_at.is_none_or(|at| at <= now) {
-                self.try_delete(&window, server_id, now).await?;
-            }
+        if window.server_gone_at.is_none()
+            && window.delete_accepted_at.is_none()
+            && window.next_delete_at.is_none_or(|at| at <= now)
+        {
+            // Раннер отозван переходом в `deleting`; повторять отзыв не нужно.
+            self.try_delete(&window, server_id, now).await?;
         }
         let mut window = {
             let mut conn = self.pool.acquire().await?;
@@ -1144,16 +1286,16 @@ impl CloudService {
             }
         };
         if window.server_gone_at.is_none() && window.delete_accepted_at.is_some() {
-            // Конец оплаты сервера подтверждает только полный список без него.
-            match self
-                .provider
-                .list_project_servers(self.config.project_id)
-                .await
-            {
+            // Конец оплаты сервера подтверждает только полный список без него, и только
+            // после прямого ответа `404`: список мог не дойти до сервера.
+            let project = window.project_id.unwrap_or(self.config.project_id);
+            match self.provider.list_project_servers(project).await {
                 Ok(list) if !list.iter().any(|server| server.id == server_id) => {
-                    self.mark_server_gone(window.id, now).await?;
-                    window.server_gone_at = Some(now);
-                    window.next_delete_at = None;
+                    if self.confirm_absent(server_id).await? {
+                        self.mark_server_gone(window.id, now).await?;
+                        window.server_gone_at = Some(now);
+                        window.next_delete_at = None;
+                    }
                 }
                 Ok(_) => {}
                 Err(error) => {
@@ -1161,10 +1303,31 @@ impl CloudService {
                 }
             }
         }
+        if window.server_gone_at.is_none()
+            && window.delete_accepted_at.is_some()
+            && window.next_delete_at.is_none_or(|at| at <= now)
+        {
+            // Принятое удаление не подтвердилось за срок: DELETE повторяется с откатом, а
+            // владелец получает пуш о неудаляемом сервере раз в 30 минут.
+            self.try_delete(&window, server_id, now).await?;
+        }
         if window.server_gone_at.is_some() {
             self.finish_dnat(&window, now).await?;
         }
         Ok(())
+    }
+
+    /// Прямой ответ провайдера: сервера с этим номером нет. Список без сервера ещё не
+    /// доказательство, пока это не подтверждено запросом по номеру.
+    async fn confirm_absent(&self, server_id: i64) -> Result<bool, sqlx::Error> {
+        match self.provider.get_server(server_id).await {
+            Ok(ServerLookup::NotFound) => Ok(true),
+            Ok(ServerLookup::Found(_)) => Ok(false),
+            Err(error) => {
+                tracing::warn!(kind = "cloud_confirm_server", error_kind = ?error.kind, "server lookup failed");
+                Ok(false)
+            }
+        }
     }
 
     /// Сервер пропал из полного списка (метка ставится один раз).
@@ -1184,11 +1347,26 @@ impl CloudService {
     /// DNAT-правило окна после удаления сервера. Открытое правило — обязательство: окно
     /// остаётся живым, пока полный список правил роутера не подтвердит его отсутствие.
     async fn finish_dnat(&self, window: &Window, now: DateTime<Utc>) -> Result<(), sqlx::Error> {
-        if window.dnat_rule_id.is_none() || window.dnat_gone_at.is_some() {
-            return self.end(&window.id, "ended", now).await;
+        let terminal = if window.delete_reason.as_deref() == Some("gone") {
+            "gone"
+        } else {
+            "ended"
+        };
+        if window.dnat_gone_at.is_some() {
+            return self.end(&window.id, terminal, now).await;
         }
-        let rule_id = window.dnat_rule_id.as_deref().expect("checked above");
-        let router = &self.config.router_id;
+        let router = window
+            .router_id
+            .as_deref()
+            .unwrap_or(&self.config.router_id);
+        let Some(port) = window.dnat_port.and_then(|port| u16::try_from(port).ok()) else {
+            return self.end(&window.id, terminal, now).await;
+        };
+        let local_ip = window.local_ip.as_deref().unwrap_or_default();
+        let public_ip = window
+            .router_ip
+            .as_deref()
+            .unwrap_or(&self.config.router_ip);
         let list = match self.provider.list_dnat_rules(router).await {
             Ok(list) => list,
             Err(error) => {
@@ -1196,6 +1374,37 @@ impl CloudService {
                 return Ok(());
             }
         };
+        // Правило могло быть создано неопределённым ответом: ищем его по полному набору
+        // `router_ip:port -> local_ip:22`, tcp.
+        let mut rule_id = window.dnat_rule_id.clone();
+        if rule_id.is_none() {
+            let Some(attempted) = window.dnat_create_attempted_at else {
+                // Вызова не было: обязательства нет.
+                return self.end(&window.id, terminal, now).await;
+            };
+            match list
+                .iter()
+                .find(|rule| rule.matches(public_ip, port, local_ip))
+            {
+                Some(rule) => {
+                    self.adopt_dnat(window.id, &rule.id).await?;
+                    rule_id = Some(rule.id.clone());
+                }
+                None if now - attempted >= DNAT_AMBIGUITY => {
+                    sqlx::query(
+                        "update cloud_windows set dnat_gone_at = coalesce(dnat_gone_at, $2)
+                         where id = $1",
+                    )
+                    .bind(window.id)
+                    .bind(now)
+                    .execute(&self.pool)
+                    .await?;
+                    return self.end(&window.id, terminal, now).await;
+                }
+                None => return Ok(()),
+            }
+        }
+        let rule_id = rule_id.expect("set above");
         if !list.iter().any(|rule| rule.id == rule_id) {
             // Полный список без правила: обязательство закрыто.
             sqlx::query(
@@ -1206,7 +1415,7 @@ impl CloudService {
             .bind(now)
             .execute(&self.pool)
             .await?;
-            return self.end(&window.id, "ended", now).await;
+            return self.end(&window.id, terminal, now).await;
         }
         let retry_due = window.next_dnat_delete_at.is_none_or(|at| at <= now)
             && window
@@ -1216,7 +1425,7 @@ impl CloudService {
             return Ok(());
         }
         let attempts = window.dnat_delete_attempts.saturating_add(1);
-        match self.provider.delete_dnat_rule(router, rule_id).await {
+        match self.provider.delete_dnat_rule(router, &rule_id).await {
             DeleteOutcome::Deleted { .. } | DeleteOutcome::AlreadyGone => {
                 sqlx::query(
                     "update cloud_windows set dnat_delete_accepted_at = $2,
@@ -1240,7 +1449,7 @@ impl CloudService {
                     .bind(now)
                     .execute(&self.pool)
                     .await?;
-                    return self.end(&window.id, "ended", now).await;
+                    return self.end(&window.id, terminal, now).await;
                 }
             }
             DeleteOutcome::NeedsConfirmation | DeleteOutcome::Failed { .. } => {
@@ -1275,36 +1484,112 @@ impl CloudService {
         server_id: i64,
         now: DateTime<Utc>,
     ) -> Result<(), sqlx::Error> {
+        if window.server_gone_at.is_some() {
+            // Отсутствие уже подтверждено: DELETE больше не нужен.
+            return Ok(());
+        }
+        // Удаление только по номеру опасно: номер мог достаться чужому серверу. Перед
+        // DELETE провайдер должен показать то же имя в том же проекте.
+        let project = window.project_id.unwrap_or(self.config.project_id);
+        match self.provider.get_server(server_id).await {
+            Ok(ServerLookup::Found(state))
+                if state.name != window.name || state.project_id != Some(project) =>
+            {
+                sqlx::query(
+                    "update cloud_windows set last_error = 'ownership_mismatch',
+                            next_delete_at = $2
+                     where id = $1 and state = 'deleting'",
+                )
+                .bind(window.id)
+                .bind(now + ALERT_EVERY)
+                .execute(&self.pool)
+                .await?;
+                crate::notify::enqueue_cloud_alert(
+                    &self.pool,
+                    &format!(
+                        "cloud:ownership_mismatch:{}:{}",
+                        window.id,
+                        alert_slot(window, now)
+                    ),
+                    &json!({
+                        "code": "ownership_mismatch",
+                        "window_id": window.id,
+                        "name": window.name,
+                        "server_id": server_id,
+                    }),
+                )
+                .await?;
+                return Ok(());
+            }
+            Ok(ServerLookup::NotFound) => {
+                self.mark_server_gone(window.id, now).await?;
+                return Ok(());
+            }
+            Ok(ServerLookup::Found(_)) => {}
+            Err(error) => {
+                tracing::warn!(kind = "cloud_delete_lookup", error_kind = ?error.kind, "server lookup before delete failed");
+                sqlx::query(
+                    "update cloud_windows set next_delete_at = $2
+                     where id = $1 and state = 'deleting'",
+                )
+                .bind(window.id)
+                .bind(now + delete_backoff(window.delete_attempts.saturating_add(1)))
+                .execute(&self.pool)
+                .await?;
+                return Ok(());
+            }
+        }
+        let repeat = window.delete_accepted_at.is_some();
         let outcome = self.provider.delete_server(server_id).await;
         let attempts = window.delete_attempts.saturating_add(1);
         match outcome {
             DeleteOutcome::Deleted { quarantined } => {
+                let next = if repeat {
+                    now + delete_backoff(attempts)
+                } else {
+                    now + DELETE_CONFIRM_AFTER
+                };
                 sqlx::query(
-                    "update cloud_windows set delete_accepted_at = $2,
-                            last_error = case when delete_reason in ('no_paid','dnat_refused','ipv4_refused') then last_error end,
+                    "update cloud_windows set delete_accepted_at = coalesce(delete_accepted_at, $2),
+                            last_error = case when delete_reason in ('no_paid','dnat_refused') then last_error end,
                             delete_attempts = $3,
-                            alert_state = alert_state || jsonb_build_object('quarantined', $4::boolean)
+                            next_delete_at = $4,
+                            alert_state = alert_state || jsonb_build_object('quarantined', $5::boolean)
                      where id = $1 and state = 'deleting'",
                 )
                 .bind(window.id)
                 .bind(now)
                 .bind(attempts)
+                .bind(next)
                 .bind(quarantined)
                 .execute(&self.pool)
                 .await?;
+                if repeat {
+                    self.alert_delete_still_listed(window, now).await?;
+                }
             }
             DeleteOutcome::AlreadyGone => {
+                let next = if repeat {
+                    now + delete_backoff(attempts)
+                } else {
+                    now + DELETE_CONFIRM_AFTER
+                };
                 sqlx::query(
-                    "update cloud_windows set delete_accepted_at = $2,
-                            last_error = case when delete_reason in ('no_paid','dnat_refused','ipv4_refused') then last_error end,
-                            delete_attempts = $3
+                    "update cloud_windows set delete_accepted_at = coalesce(delete_accepted_at, $2),
+                            last_error = case when delete_reason in ('no_paid','dnat_refused') then last_error end,
+                            delete_attempts = $3,
+                            next_delete_at = $4
                      where id = $1 and state = 'deleting'",
                 )
                 .bind(window.id)
                 .bind(now)
                 .bind(attempts)
+                .bind(next)
                 .execute(&self.pool)
                 .await?;
+                if repeat {
+                    self.alert_delete_still_listed(window, now).await?;
+                }
             }
             DeleteOutcome::NeedsConfirmation => {
                 // Токен не может удалить, сервер тарифицируется. Пуш сразу и с каждой
@@ -1338,17 +1623,46 @@ impl CloudService {
                 .execute(&self.pool)
                 .await?;
                 if attempts >= DELETE_FAILURES_BEFORE_ALERT {
-                    let since = window.delete_requested_at.unwrap_or(now);
-                    let slot = (now - since).num_seconds().max(0) / ALERT_EVERY.num_seconds();
-                    crate::notify::enqueue_cloud_alert(
-                        &self.pool,
-                        &format!("cloud:delete_failing:{}:{slot}", window.id),
-                        &json!({"code": "delete_failing", "window_id": window.id, "name": window.name}),
-                    )
-                    .await?;
+                    self.alert_delete_failing(window, now).await?;
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Пуш о сервере, который не исчезает из списка после принятого удаления. Не чаще раза
+    /// в 30 минут на окно.
+    async fn alert_delete_still_listed(
+        &self,
+        window: &Window,
+        now: DateTime<Utc>,
+    ) -> Result<(), sqlx::Error> {
+        crate::notify::enqueue_cloud_alert(
+            &self.pool,
+            &format!(
+                "cloud:delete_still_listed:{}:{}",
+                window.id,
+                alert_slot(window, now)
+            ),
+            &json!({"code": "delete_failing", "window_id": window.id, "name": window.name}),
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn alert_delete_failing(
+        &self,
+        window: &Window,
+        now: DateTime<Utc>,
+    ) -> Result<(), sqlx::Error> {
+        let since = window.delete_requested_at.unwrap_or(now);
+        let slot = (now - since).num_seconds().max(0) / ALERT_EVERY.num_seconds();
+        crate::notify::enqueue_cloud_alert(
+            &self.pool,
+            &format!("cloud:delete_failing:{}:{slot}", window.id),
+            &json!({"code": "delete_failing", "window_id": window.id, "name": window.name}),
+        )
+        .await?;
         Ok(())
     }
 
@@ -1372,7 +1686,7 @@ impl CloudService {
                 sqlx::query(
                     "update cloud_windows set state = $2, final_cost_kopecks = $3,
                             delete_confirmed_at = $4,
-                            last_error = case when delete_reason in ('no_paid','dnat_refused','ipv4_refused') then last_error end
+                            last_error = case when delete_reason in ('no_paid','dnat_refused') then last_error end
                      where id = $1",
                 )
                 .bind(id)
@@ -1389,28 +1703,53 @@ impl CloudService {
 
     // ───────── Сверка ─────────
 
-    /// Сверка проекта со строками окон. `Err(())` — список не получен целиком: ничего не
-    /// менялось.
-    async fn reconcile(&self, now: DateTime<Utc>) -> Result<(), ()> {
-        let listing = match self
-            .provider
-            .list_project_servers(self.config.project_id)
-            .await
-        {
-            Ok(listing) => listing,
-            Err(error) => {
-                tracing::warn!(kind = "cloud_reconcile_listing", error = %error, "project listing failed; nothing changed");
-                return Err(());
+    /// Сверка проекта со строками окон. `Ok(false)` — сверка прошла, но какое-то удаление
+    /// ещё ждёт подтверждения: успешной она не считается. `Err(())` — список не получен
+    /// целиком, ничего не менялось.
+    async fn reconcile(&self, now: DateTime<Utc>) -> Result<bool, ()> {
+        // Список текущего проекта ищет и лишние серверы. Живые окна другого проекта из
+        // старой конфигурации подтверждаются каждый в своём проекте.
+        let mut projects = vec![self.config.project_id];
+        let others: Vec<i64> = sqlx::query_scalar(
+            "select distinct project_id from cloud_windows
+              where state = any($1) and project_id is not null",
+        )
+        .bind(windows::live_states())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| warn_db("cloud_reconcile_projects", &error))?;
+        for project in others {
+            if !projects.contains(&project) {
+                projects.push(project);
             }
-        };
-        self.apply_listing(&listing, now).await.map_err(|error| {
-            warn_db("cloud_reconcile", &error);
-        })?;
+        }
+        for project in projects {
+            let listing = match self.provider.list_project_servers(project).await {
+                Ok(listing) => listing,
+                Err(error) => {
+                    tracing::warn!(kind = "cloud_reconcile_listing", error = %error, "project listing failed; nothing changed");
+                    return Err(());
+                }
+            };
+            self.apply_listing(&listing, project, now)
+                .await
+                .map_err(|error| {
+                    warn_db("cloud_reconcile", &error);
+                })?;
+        }
         // Правила роутера идут отдельно: список не получен целиком — ничего не меняем.
         if let Err(error) = self.delete_stray_dnat_rules(now).await {
             warn_db("cloud_reconcile_dnat", &error);
         }
-        Ok(())
+        let pending: bool = sqlx::query_scalar(
+            "select exists(select 1 from cloud_windows
+                            where state = 'deleting' and delete_accepted_at is not null
+                              and server_gone_at is null)",
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| warn_db("cloud_reconcile_pending", &error))?;
+        Ok(!pending)
     }
 
     /// Лишние DNAT-правила роутера. Удаляются только правила с публичным портом внутри
@@ -1473,6 +1812,7 @@ impl CloudService {
     async fn apply_listing(
         &self,
         listing: &[ServerSummary],
+        project: i64,
         now: DateTime<Utc>,
     ) -> Result<(), sqlx::Error> {
         let mut named: std::collections::HashMap<Uuid, &ServerSummary> =
@@ -1491,9 +1831,13 @@ impl CloudService {
         .fetch_all(&self.pool)
         .await?;
         let unknown_for = grace(self.config.create_unknown_window);
+        let current = project == self.config.project_id;
         let mut known = std::collections::HashSet::new();
         for window in &windows {
             known.insert(window.id);
+            if window.project_id.unwrap_or(self.config.project_id) != project {
+                continue;
+            }
             let listed = named.get(&window.id);
             match (window.state.as_str(), listed) {
                 ("create_unknown", Some(server)) => {
@@ -1514,10 +1858,13 @@ impl CloudService {
                 }
                 ("identified" | "ready" | "draining", None) => {
                     // Только когда сервер уже должен был попасть в список: у провайдера он
-                    // может появиться с задержкой.
+                    // может появиться с задержкой. Отсутствие в списке подтверждается прямым
+                    // ответом `404`, прежде чем окно станет `gone`.
                     if window
                         .create_called_at
                         .is_some_and(|called| now - called >= unknown_for)
+                        && let Some(server_id) = window.server_id
+                        && self.confirm_absent(server_id).await?
                     {
                         self.gone(window, now).await?;
                     }
@@ -1525,26 +1872,76 @@ impl CloudService {
                 // Сервера нет без принятого удаления (владелец удалил в панели): оплата
                 // сервера кончилась; окно закончит шаг удаления, когда уйдёт и адрес.
                 ("deleting", None) if window.server_id.is_some() => {
-                    self.mark_server_gone(window.id, now).await?;
+                    if self
+                        .confirm_absent(window.server_id.expect("checked"))
+                        .await?
+                    {
+                        self.mark_server_gone(window.id, now).await?;
+                    }
+                }
+                // Сервер окна, закрытого после неопределённого создания, появился позже:
+                // это не лишний сервер, а обязательство исходного окна. Возвращаем его окну,
+                // чтобы удалить обычным путём и посчитать итог от вызова создания.
+                ("failed", Some(server)) if window.create_called_at.is_some() => {
+                    self.reattach_late(window, server, now).await?;
                 }
                 (state, Some(server)) if !windows::LIVE.contains(&state) => {
-                    self.delete_stray(server, now).await?;
+                    if current {
+                        self.delete_stray(server, now).await?;
+                    }
                 }
                 _ => {}
             }
         }
-        for (id, server) in named {
-            if !known.contains(&id) {
-                self.delete_stray(server, now).await?;
+        if current {
+            for (id, server) in named {
+                if !known.contains(&id) {
+                    self.delete_stray(server, now).await?;
+                }
             }
         }
         Ok(())
     }
 
-    /// Сервер окна пропал из полного списка, хотя удаление не запрашивалось.
+    /// Поздний сервер возвращается своему окну: оно снова живое (`deleting`), держит бюджет
+    /// и место в правиле одного окна, а итог считается от вызова создания до подтверждённого
+    /// отсутствия.
+    async fn reattach_late(
+        &self,
+        window: &Window,
+        server: &ServerSummary,
+        now: DateTime<Utc>,
+    ) -> Result<(), sqlx::Error> {
+        let updated = sqlx::query(
+            "update cloud_windows set state = 'deleting', server_id = $2,
+                    final_cost_kopecks = null, delete_confirmed_at = null, server_gone_at = null,
+                    delete_requested_at = $3, delete_reason = 'late_create', delete_accepted_at = null,
+                    delete_attempts = 0, next_delete_at = $3, last_error = 'late_create'
+              where id = $1 and state = 'failed'",
+        )
+        .bind(window.id)
+        .bind(server.id)
+        .bind(now)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        if updated > 0 {
+            crate::notify::enqueue_cloud_alert(
+                &self.pool,
+                &format!("cloud:late_create:{}", window.id),
+                &json!({"code": "late_create", "window_id": window.id, "name": window.name}),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// Сервер окна пропал из полного списка, хотя удаление не запрашивалось. Если за окном
+    /// осталось DNAT-правило (или его вызов), окно не становится терминальным: оно уходит в
+    /// `deleting` и освобождает порт только после подтверждённого отсутствия правила.
     async fn gone(&self, window: &Window, now: DateTime<Utc>) -> Result<(), sqlx::Error> {
         let id = window.id;
-        let ended = crate::db::in_tx(&self.pool, move |conn| {
+        let ended = crate::db::in_tx(&self.pool, move |mut conn| {
             Box::pin(async move {
                 let Some(window) = windows::load_for_update(&mut *conn, id).await? else {
                     return Ok::<_, sqlx::Error>(false);
@@ -1552,17 +1949,34 @@ impl CloudService {
                 if !matches!(window.state.as_str(), "identified" | "ready" | "draining") {
                     return Ok(false);
                 }
-                let cost = ledger_cost(&window, now);
-                sqlx::query(
-                    "update cloud_windows set state = 'gone', final_cost_kopecks = $2,
-                            delete_confirmed_at = $3, last_error = 'server_missing'
-                     where id = $1",
-                )
-                .bind(id)
-                .bind(cost)
-                .bind(now)
-                .execute(&mut *conn)
-                .await?;
+                let dnat_open = window.dnat_rule_id.is_some()
+                    || window.dnat_create_attempted_at.is_some();
+                if dnat_open {
+                    sqlx::query(
+                        "update cloud_windows set state = 'deleting', server_gone_at = $2,
+                                delete_requested_at = $2, delete_reason = 'gone',
+                                next_delete_at = null, delete_accepted_at = null,
+                                final_cost_kopecks = null, last_error = 'server_missing'
+                         where id = $1",
+                    )
+                    .bind(id)
+                    .bind(now)
+                    .execute(&mut *conn)
+                    .await?;
+                } else {
+                    let cost = ledger_cost(&window, now);
+                    sqlx::query(
+                        "update cloud_windows set state = 'gone', server_gone_at = $2,
+                                final_cost_kopecks = $3, delete_confirmed_at = $2,
+                                last_error = 'server_missing'
+                         where id = $1",
+                    )
+                    .bind(id)
+                    .bind(now)
+                    .bind(cost)
+                    .execute(&mut *conn)
+                    .await?;
+                }
                 sqlx::query(
                     "update commands set delivery_state = 'completed', completed_at = coalesce(completed_at, now())
                      where kind = 'attach_runner' and payload->>'window_id' = $1 and delivery_state <> 'completed'",
@@ -1570,12 +1984,12 @@ impl CloudService {
                 .bind(id.to_string())
                 .execute(&mut *conn)
                 .await?;
+                windows::revoke_cloud_machine_in_tx(&mut conn).await?;
                 Ok(true)
             })
         })
         .await?;
         if ended {
-            windows::revoke_cloud_machine(&self.pool).await?;
             crate::notify::enqueue_cloud_alert(
                 &self.pool,
                 &format!("cloud:window_gone:{}", window.id),
@@ -1619,9 +2033,12 @@ impl CloudService {
 
 /// Служба по конфигурации хаба. Нет таблицы `[runners.cloud]` — облако выключено. Токен
 /// читается из файла и дальше живёт только внутри клиента. Всё, что мешает включению
-/// (негодная конфигурация, нечитаемый токен, несущая не помечена), пишется предупреждением с
-/// кодом причины и без значений, а облако остаётся выключенным: окно без несущей только жгло
-/// бы деньги до `ready_timeout`.
+/// (негодная конфигурация, нечитаемый токен), пишется предупреждением с кодом причины и без
+/// значений, а облако остаётся выключенным.
+///
+/// Несущая здесь не проверяется: снос и сверка обязательств нужны и без неё, а база может
+/// быть временно недоступна на старте. Проверка несущей стоит только на пути нового
+/// создания (`create_in_tx`) и повторяется на каждой попытке.
 pub async fn from_config(
     pool: &PgPool,
     registry: &Registry,
@@ -1648,22 +2065,6 @@ pub async fn from_config(
             return None;
         }
     };
-    let carrier: Result<Option<bool>, sqlx::Error> =
-        sqlx::query_scalar("select role = 'worker' and is_carrier from machines where id = $1")
-            .bind(config.carrier_machine_id)
-            .fetch_optional(pool)
-            .await;
-    match carrier {
-        Ok(Some(true)) => {}
-        Ok(_) => {
-            disabled("carrier_machine_is_not_a_carrier");
-            return None;
-        }
-        Err(error) => {
-            disabled(&format!("database: {}", crate::dberr::describe(&error)));
-            return None;
-        }
-    }
     tracing::info!(
         kind = "cloud_enabled",
         project_id = config.project_id,
