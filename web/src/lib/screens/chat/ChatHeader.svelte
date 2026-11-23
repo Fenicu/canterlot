@@ -38,7 +38,7 @@
 	interface DetailLike {
 		title?: string;
 		color?: string | null;
-		harness?: { title?: string; provider?: string; goals?: boolean };
+		harness?: { id?: string; title?: string; provider?: string; goals?: boolean };
 		machine?: { name?: string };
 		model?: string;
 		model_resolved?: string | null;
@@ -136,6 +136,9 @@
 	const parentId = $derived(((chat.detail as AcceptDetail | null)?.parent_id) ?? null);
 	const accept = $derived(acceptView(chat.detail as AcceptDetail | null));
 	const settings = $derived(chat.settings as SettingsLike | null);
+	// Служебный разговор облачных карточек: хаб запрещает в нём ходы, поэтому действия
+	// запуска и настройки модели здесь только обещают недоступное.
+	const systemChat = $derived(detail?.harness?.id === 'cloud');
 
 	// Другие сессии, которые ждут владельца прямо сейчас: счёт живёт на списке и меняется событиями.
 	const waitingOthers = $derived.by(() => {
@@ -200,9 +203,11 @@
 	const pendingModel = $derived(settings?.pending?.model && modelLabel(settings.pending.model));
 
 	const subtitle = $derived(
-		pendingModel
-			? `${harnessTitle} · ${effectiveModel} → ${pendingModel} со следующего хода · ${machineName}`
-			: `${harnessTitle} · ${effectiveModel} · ${machineName}`
+		systemChat
+			? `${harnessTitle} · ${machineName}`
+			: pendingModel
+				? `${harnessTitle} · ${effectiveModel} → ${pendingModel} со следующего хода · ${machineName}`
+				: `${harnessTitle} · ${effectiveModel} · ${machineName}`
 	);
 
 	// Тихая строка вместо погашенного состояния: сколько машина уже не на связи.
@@ -434,7 +439,7 @@
 					<MenuItem icon="pin" onclick={() => { menuOpen = false; onOpenSheet(); }}>Название, цвет и группы</MenuItem>
 				{/if}
 
-				{#if onOpenSide}
+				{#if onOpenSide && !systemChat}
 					<MenuItem
 						icon="chats"
 						disabled={Boolean(sideHint)}
@@ -447,7 +452,7 @@
 					>
 				{/if}
 
-				{#if onOpenSettings}
+				{#if onOpenSettings && !systemChat}
 					<MenuItem icon="sliders" onclick={() => { menuOpen = false; onOpenSettings(); }}>Настройки сессии</MenuItem>
 				{/if}
 
@@ -491,7 +496,7 @@
 					<MenuItem icon={theme.effective === 'dark' ? 'sun' : 'moon'} onclick={() => { menuOpen = false; theme.toggle(); }}>{theme.effective === 'dark' ? 'Светлая тема' : 'Тёмная тема'}</MenuItem>
 				{/if}
 
-				<div class="menu-divider" role="separator"></div>
+				{#if !systemChat}<div class="menu-divider" role="separator"></div>{/if}
 
 				{#if interrupt}
 					<MenuItem icon="stop" onclick={() => { menuOpen = false; void interrupt.interrupt(); }}>{interrupt.running ? interrupt.label : 'Прервать ход'}</MenuItem>
@@ -501,45 +506,47 @@
 					<MenuItem icon="trash" onclick={() => { menuOpen = false; onAccept(); }}>{ACCEPT_LABEL}</MenuItem>
 				{/if}
 
-				{#if isLive}
-					<MenuItem icon="stop" onclick={() => { if (!stopping) void handleStop(false); }}>{stopping ? 'Останавливаю сессию' : 'Остановить сессию'}</MenuItem>
-					{#if !confirmingForce}
-						<MenuItem icon="warning" danger onclick={() => { confirmingForce = true; }}>Принудительно остановить</MenuItem>
-					{:else}
-						<div class="confirm-box" role="dialog" aria-label="Подтверждение остановки">
-							<p>Принудительно прервать выполнение?</p>
-							<div class="confirm-actions">
-								<button type="button" class="btn-confirm-danger" onclick={() => void handleStop(true)}>
-									Остановить принудительно
-								</button>
-								<button type="button" class="btn-cancel" onclick={() => { confirmingForce = false; }}>
-									Отмена
-								</button>
+				{#if !systemChat}
+					{#if isLive}
+						<MenuItem icon="stop" onclick={() => { if (!stopping) void handleStop(false); }}>{stopping ? 'Останавливаю сессию' : 'Остановить сессию'}</MenuItem>
+						{#if !confirmingForce}
+							<MenuItem icon="warning" danger onclick={() => { confirmingForce = true; }}>Принудительно остановить</MenuItem>
+						{:else}
+							<div class="confirm-box" role="dialog" aria-label="Подтверждение остановки">
+								<p>Принудительно прервать выполнение?</p>
+								<div class="confirm-actions">
+									<button type="button" class="btn-confirm-danger" onclick={() => void handleStop(true)}>
+										Остановить принудительно
+									</button>
+									<button type="button" class="btn-cancel" onclick={() => { confirmingForce = false; }}>
+										Отмена
+									</button>
+								</div>
 							</div>
-						</div>
-					{/if}
-				{:else if ownerLost}
-					{#if !confirmingForce}
-						<MenuItem icon="warning" danger onclick={() => { confirmingForce = true; }}>Завершить исполнение</MenuItem>
-					{:else}
-						<div class="confirm-box" role="dialog" aria-label="Подтверждение завершения">
-							<p>{RESOLVE_WARNING}</p>
-							<div class="confirm-actions">
-								<button type="button" class="btn-confirm-danger" onclick={() => void handleResolve()}>
-									Завершить
-								</button>
-								<button type="button" class="btn-cancel" onclick={() => { confirmingForce = false; }}>
-									Отмена
-								</button>
+						{/if}
+					{:else if ownerLost}
+						{#if !confirmingForce}
+							<MenuItem icon="warning" danger onclick={() => { confirmingForce = true; }}>Завершить исполнение</MenuItem>
+						{:else}
+							<div class="confirm-box" role="dialog" aria-label="Подтверждение завершения">
+								<p>{RESOLVE_WARNING}</p>
+								<div class="confirm-actions">
+									<button type="button" class="btn-confirm-danger" onclick={() => void handleResolve()}>
+										Завершить
+									</button>
+									<button type="button" class="btn-cancel" onclick={() => { confirmingForce = false; }}>
+										Отмена
+									</button>
+								</div>
 							</div>
-						</div>
+						{/if}
+					{:else}
+						<MenuItem icon="play" onclick={() => void handleRun()}>{runLabel(chat.turnRecorded)}</MenuItem>
 					{/if}
-				{:else}
-					<MenuItem icon="play" onclick={() => void handleRun()}>{runLabel(chat.turnRecorded)}</MenuItem>
-				{/if}
 
-				{#if isLive && hasUserStop}
-					<MenuItem icon="retry" onclick={() => void handleContinueQueue()}>Продолжить очередь</MenuItem>
+					{#if isLive && hasUserStop}
+						<MenuItem icon="retry" onclick={() => void handleContinueQueue()}>Продолжить очередь</MenuItem>
+					{/if}
 				{/if}
 			</Menu>
 		</div>

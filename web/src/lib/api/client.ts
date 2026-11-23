@@ -240,6 +240,60 @@ export function putMachineRemoteWork(
   );
 }
 
+// Облачные окна: список с деньгами, «Удалить сейчас», бюджет и карточка запуска.
+export function getCloudWindows(
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["get__api_v1_cloud_windows"]>>> {
+  return http("GET", "/api/v1/cloud/windows", undefined, opts);
+}
+
+export function deleteCloudWindow(
+  windowId: string,
+  key: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["post__api_v1_cloud_windows__id__delete"]>>> {
+  return http(
+    "POST",
+    `/api/v1/cloud/windows/${id(windowId)}/delete`,
+    undefined,
+    keyed(key, opts),
+  );
+}
+
+export function getCloudBudget(
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["get__api_v1_cloud_budget"]>>> {
+  return http("GET", "/api/v1/cloud/budget", undefined, opts);
+}
+
+export function putCloudBudget(
+  body: Body<operations["put__api_v1_cloud_budget"]>,
+  key: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["put__api_v1_cloud_budget"]>>> {
+  return http("PUT", "/api/v1/cloud/budget", body, keyed(key, opts));
+}
+
+export function clearCloudBlock(
+  key: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["post__api_v1_cloud_budget_clear_block"]>>> {
+  return http(
+    "POST",
+    "/api/v1/cloud/budget/clear-block",
+    undefined,
+    keyed(key, opts),
+  );
+}
+
+export function createCloudProposal(
+  body: Body<operations["post__api_v1_cloud_proposals"]>,
+  key: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["post__api_v1_cloud_proposals"]>>> {
+  return http("POST", "/api/v1/cloud/proposals", body, keyed(key, opts));
+}
+
 export function getPromptSuggestionSettings(
   opts?: RequestOptions,
 ): Promise<HttpResponse<Ok<operations["get__api_v1_prompt_suggestion_settings"]>>> {

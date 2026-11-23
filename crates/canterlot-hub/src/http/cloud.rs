@@ -44,6 +44,9 @@ pub struct WindowList {
     /// создаются, пока владелец не снимет блок. Пусто, когда блока нет.
     pub provider_block_code: Option<String>,
     pub provider_block_at: Option<chrono::DateTime<Utc>>,
+    /// Облако настроено на хабе (`[runners.cloud]`): без него окна не создаются и форма
+    /// запуска в PWA не показывается.
+    pub configured: bool,
 }
 
 #[derive(Serialize, Deserialize, ToSchema)]
@@ -71,6 +74,7 @@ async fn list(State(state): State<AppState>, _owner: Owner) -> Result<Json<Windo
         items,
         provider_block_code: block.as_ref().map(|(code, _)| code.clone()),
         provider_block_at: block.map(|(_, at)| at),
+        configured: state.cloud.is_some(),
     }))
 }
 
@@ -137,7 +141,9 @@ async fn budget_get(
         Some(cloud) => cloud.pricing().await.ok(),
         None => None,
     };
-    Ok(Json(budget::view(&mut conn, pricing.as_ref()).await?))
+    Ok(Json(
+        budget::view(&mut conn, pricing.as_ref(), state.cloud.is_some()).await?,
+    ))
 }
 
 /// Изменить бюджет и режим: устаревшая ревизия меняет ничего и даёт 409.

@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { Page } from '@playwright/test';
 import type { HistoryBlock } from '../../src/lib/stores/chat.svelte';
-import { FakeHub, FakeHubApi, leaseEntry, seedLease, seedMachine } from '../../testing/fake-hub';
+import { FakeHub, FakeHubApi, leaseEntry, seedCloud, seedLease, seedMachine } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
 import { seedMockup04, seedMockup05, seedMockup06, seedMockup08, seedMockup11, seedMockupChat } from '../../testing/fixtures/mockup-chat';
 import { seedMockupSessions } from '../../testing/fixtures/mockup-sessions';
@@ -128,7 +128,62 @@ async function schedulesScreen(page: Page, state: 'list' | 'editor' | 'history',
   }
 }
 
-/** Редактор маршрутизации с подсветкой пары вне белого списка и раскрытым кандидатом. */
+/** Экран машин с облачным разделом: живое окно и история, пусто, или облако не настроено. */
+async function cloudMachines(page: Page, state: 'live' | 'empty' | 'off'): Promise<void> {
+  await bootSecondary(page, '/machines', (api) => {
+    seedCloud(api, {
+      configured: state !== 'off',
+      live: state === 'live' ? {} : false,
+      ended: state === 'off' ? 0 : 3,
+      card: false
+    });
+  });
+  await expect(page.locator('[data-cloud-section]')).toBeVisible({ timeout: 15_000 });
+  if (state === 'live') await expect(page.locator('[data-cloud-window-card]')).toBeVisible();
+  if (state === 'empty') await expect(page.locator('[data-cloud-empty]')).toBeVisible();
+  if (state === 'off') await expect(page.locator('[data-cloud-off]')).toBeVisible();
+}
+
+/** Настройки облака: бюджет с профилями или он же с блоком провайдера. */
+async function cloudBudget(page: Page, state: 'plain' | 'block'): Promise<void> {
+  await bootSecondary(page, '/settings?c=cloud', (api) => {
+    seedCloud(api, {
+      live: false,
+      card: false,
+      block: state === 'block' ? 'no_paid' : null,
+      budget: { monthly_budget_kopecks: 300_000, spent_kopecks: 240_000, auto_mode: true }
+    });
+  });
+  await expect(page.locator('[data-cloud-settings]')).toBeVisible({ timeout: 15_000 });
+  if (state === 'block') await expect(page.locator('[data-cloud-block]')).toBeVisible();
+}
+
+/** Карточка запуска облачного окна в чате служебного разговора. */
+async function cloudCard(page: Page, over: boolean): Promise<void> {
+  const { hub, api } = fresh();
+  const seeded = seedCloud(api, {
+    live: false,
+    ended: 0,
+    card: { over_budget: over, remaining_kopecks: over ? 4_000 : 200_000 }
+  });
+  await installChatRoutes(page, hub, api, OWNER);
+  await page.goto(`/c/${seeded.conversation}`);
+  await expect(page.locator('[data-ready]').first()).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('[data-cloud-window]')).toBeVisible();
+}
+
+/** Баннер оболочки над чатом: открытая карточка ждёт решения. */
+async function cloudBanner(page: Page): Promise<void> {
+  const { hub, api } = fresh();
+  const id = seedMockupChat(api);
+  seedCloud(api, { live: false, ended: 0, card: {} });
+  await installChatRoutes(page, hub, api, OWNER);
+  await page.goto(`/c/${id}`);
+  await expect(page.locator('.screen[data-ready]')).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('[data-banner="cloud"]')).toBeVisible();
+}
+
+
 async function routingEditor(page: Page, viewport = PHONE): Promise<{ api: FakeHubApi }> {
   const { hub, api } = fresh();
   seedRoutingCatalog(api);
@@ -450,6 +505,21 @@ export const SCREENS: Screen[] = [
     await expect(page.locator('[data-secondary-ready]')).toBeVisible({ timeout: 15_000 });
     await expect(page.getByRole('region', { name: 'Крупные кэши сборки' })).toBeVisible();
   })),
+  // Облачные окна: живое окно с историей, пустой раздел и выключенное облако.
+  screen('cloud-live', false, PHONE, 'dark', (page) => cloudMachines(page, 'live')),
+  screen('cloud-empty', false, PHONE, 'light', (page) => cloudMachines(page, 'empty')),
+  screen('cloud-off', false, PHONE, 'dark', (page) => cloudMachines(page, 'off')),
+  screen('cloud-live-desktop', false, DESKTOP, 'light', (page) => cloudMachines(page, 'live')),
+  // Бюджет облака: с профилями и с блоком провайдера.
+  screen('cloud-budget', false, PHONE, 'dark', (page) => cloudBudget(page, 'plain')),
+  screen('cloud-budget-block', false, PHONE, 'light', (page) => cloudBudget(page, 'block')),
+  screen('cloud-budget-desktop', false, DESKTOP, 'dark', (page) => cloudBudget(page, 'plain')),
+  // Карточка запуска: обычная и сверх бюджета, плюс баннер оболочки над чатом.
+  screen('cloud-card', false, PHONE, 'dark', (page) => cloudCard(page, false)),
+  screen('cloud-card-over', false, PHONE, 'light', (page) => cloudCard(page, true)),
+  screen('cloud-card-desktop', false, DESKTOP, 'light', (page) => cloudCard(page, false)),
+  screen('cloud-banner', false, PHONE, 'dark', cloudBanner),
+  screen('cloud-banner-desktop', false, DESKTOP, 'light', cloudBanner),
   // Служебные пузыри ленты: будильники, сторож машины, контекст, лимиты и чужая сессия.
   screen('system-bubbles', false, PHONE, 'dark', async (page) => {
     const { hub, api } = fresh();

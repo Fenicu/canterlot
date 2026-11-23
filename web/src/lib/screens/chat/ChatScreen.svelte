@@ -180,6 +180,8 @@
 	});
 	const accept = $derived(acceptView(chat.detail as AcceptDetail | null));
 	const sessionHarnessId = $derived((chat.detail?.harness as { id?: string } | undefined)?.id ?? '');
+	// Служебный разговор облачных карточек: поле ввода обещало бы ход, который хаб запрещает.
+	const systemChat = $derived(sessionHarnessId === 'cloud');
 	const continuedFromAt = $derived(
 		(chat.detail as { continued_from_at?: string | null } | null)?.continued_from_at ?? null
 	);
@@ -378,7 +380,11 @@
 
 	<PendingStrip {chat} />
 
-	<Composer {chat} onside={(question) => openSide(question)} />
+	{#if systemChat}
+		<p class="system-note" data-role="cloud-composer-note">Здесь только карточки облачных окон</p>
+	{:else}
+		<Composer {chat} onside={(question) => openSide(question)} />
+	{/if}
 
 	{#if showSide && SideChat && !sideHidden}
 		<SideChat
@@ -496,6 +502,14 @@
 		padding: 0 var(--s6);
 		color: var(--muted);
 		font-size: var(--fs-sm);
+	}
+	/* Служебный разговор облачных карточек: тихая строка на месте поля ввода. */
+	.system-note {
+		margin: 0;
+		padding: var(--s4) var(--gutter) var(--s6);
+		color: var(--muted);
+		font-size: var(--fs-sm);
+		text-align: center;
 	}
 	.screen {
 		flex: 1;

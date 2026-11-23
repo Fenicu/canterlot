@@ -5,6 +5,7 @@ export const SETTINGS_CATEGORIES = [
   { id: 'appearance', title: 'Внешний вид', hint: 'Режим, тема, анимации' },
   { id: 'input', title: 'Ввод и чтение', hint: 'Enter, подсказки, рассуждения' },
   { id: 'limits', title: 'Лимиты и делегирование', hint: 'Пороги, резерв, запуск без вопроса' },
+  { id: 'cloud', title: 'Облако', hint: 'Бюджет, автоматический режим, профили' },
   { id: 'routing', title: 'Маршрутизация', hint: 'Кого брать для каждого типа задачи' },
   { id: 'schedules', title: 'Расписание', hint: 'Повторяющиеся запуски по cron' },
   { id: 'memory', title: 'Память', hint: 'Общая память агентов, личное и рабочее' },

@@ -21,6 +21,7 @@
     update = 'idle',
     updateMessage = '',
     failure = '',
+    cloud = null,
     onupdate,
     onrefresh
   }: {
@@ -36,6 +37,8 @@
     update?: string;
     updateMessage?: string;
     failure?: string;
+    /** Открытая карточка облачного окна: баннер один, связь важнее. */
+    cloud?: { text: string; label: string; run: () => void } | null;
     onupdate?: () => void;
     onrefresh: () => void;
   } = $props();
@@ -71,6 +74,7 @@
     if (phase === 'reconnecting' && now - since >= 3000) return { kind: 'link', text: 'Нет связи. Переподключаюсь…', tone: 'warning' };
     if (failure) return { kind: 'failure', text: failure, tone: 'danger' };
     if (phase === 'live' && now < until) return { kind: 'link', text: 'Связь восстановлена', tone: 'success' };
+    if (cloud) return { kind: 'cloud', text: cloud.text, tone: 'neutral', action: { label: cloud.label, run: cloud.run } };
     return null;
   });
   // Уходящая карточка дорисовывает последнее состояние, пока гаснет.

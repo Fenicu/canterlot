@@ -9,6 +9,8 @@
   import { spawnApprovalView } from './spawnApprovalView';
   import SettingsChangeCard from './SettingsChangeCard.svelte';
   import { settingsChangeView, settingsOutcome } from './settingsChangeView';
+  import CloudWindowCard from './CloudWindowCard.svelte';
+  import { cloudOutcome, cloudWindowView } from './cloudWindowView';
   import { firstArrival } from './arrival';
   import type { RequestItem } from '#lib/stores/requests.svelte.js';
   import type { DecisionBody } from '#lib/api/client.js';
@@ -108,11 +110,15 @@
   });
 
   const settingsSettled = $derived(
-    request.kind === 'settings_change' &&
+    (request.kind === 'settings_change' || request.kind === 'cloud_window') &&
     (request.state === 'applied' || request.state === 'closed' ||
       request.state === 'not_applied' || request.state === 'unconfirmed')
   );
-  const settingsResult = $derived(settingsSettled ? settingsOutcome(request.closedReason) : undefined);
+  const settingsResult = $derived(
+    !settingsSettled ? undefined
+      : request.kind === 'cloud_window' ? cloudOutcome(request.closedReason)
+        : settingsOutcome(request.closedReason)
+  );
 
   const trackState = $derived.by((): StageState => {
     if (request.state === 'applied') return 'done';
@@ -145,6 +151,7 @@
     if (request.kind === 'permission') return String(payload.tool_name ?? '');
     if (request.kind === 'spawn_approval') return spawnApprovalView(payload).facts.slice(0, 2).map((fact) => fact.value).join(' · ');
     if (request.kind === 'settings_change') return settingsChangeView(payload).title;
+    if (request.kind === 'cloud_window') return cloudWindowView(payload).title;
     const nested = payload.payload as Record<string, unknown> | undefined;
     const first = ((payload.questions ?? nested?.questions) as Array<Record<string, unknown>> | undefined)?.[0];
     return String(first?.text ?? first?.question ?? payload.text ?? payload.question ?? '');
@@ -153,6 +160,7 @@
   const answerText = $derived.by(() => {
     const winner = request.winnerDecision as Record<string, unknown> | undefined;
     if (request.kind === 'settings_change') return settingsOutcome(request.closedReason).word;
+    if (request.kind === 'cloud_window') return cloudOutcome(request.closedReason).word;
     if (request.kind === 'permission' || request.kind === 'spawn_approval') {
       if (winner?.behavior === 'allow') return 'Разрешено';
       if (winner?.behavior === 'deny') return 'Отклонено';
@@ -200,7 +208,7 @@
 
 {#if request.state === 'applied'}
   <div class="applied" data-collapsed={shown ? undefined : 'true'} data-expanded={shown ? 'true' : undefined} data-outcome={request.kind === 'settings_change' ? answerText : undefined} data-tone={settingsResult?.tone}>
-    <StepHead name={request.kind === 'permission' ? 'Разрешение' : request.kind === 'spawn_approval' ? 'Запуск сессии' : request.kind === 'settings_change' ? 'Изменение настройки' : 'Вопрос'} detail={subject} status={answerText} state="answer" open={shown} ontoggle={toggle} />
+    <StepHead name={request.kind === 'permission' ? 'Разрешение' : request.kind === 'spawn_approval' ? 'Запуск сессии' : request.kind === 'settings_change' ? 'Изменение настройки' : request.kind === 'cloud_window' ? 'Облачное окно' : 'Вопрос'} detail={subject} status={answerText} state="answer" open={shown} ontoggle={toggle} />
     {#if shown}
       <div class="applied-body">
         {#if request.kind === 'permission'}
@@ -209,6 +217,8 @@
           <SpawnApprovalCard {request} {onDecision} disabled={true} />
         {:else if request.kind === 'settings_change'}
           <SettingsChangeCard {request} {onDecision} disabled={true} />
+        {:else if request.kind === 'cloud_window'}
+          <CloudWindowCard {request} {onDecision} {now} disabled={true} />
         {:else}
           <QuestionCard {request} {onDecision} {now} disabled={true} readonly />
         {/if}
@@ -247,6 +257,8 @@
       <SpawnApprovalCard {request} {onDecision} disabled={request.state !== 'open'} />
     {:else if request.kind === 'settings_change'}
       <SettingsChangeCard {request} {onDecision} disabled={request.state !== 'open'} />
+    {:else if request.kind === 'cloud_window'}
+      <CloudWindowCard {request} {onDecision} {now} disabled={request.state !== 'open'} />
     {:else}
       <QuestionCard {request} {onDecision} {now} disabled={request.state !== 'open'} />
     {/if}

@@ -15927,11 +15927,16 @@
           "remaining_kopecks",
           "auto_mode",
           "revision",
+          "configured",
           "profiles"
         ],
         "properties": {
           "auto_mode": {
             "type": "boolean"
+          },
+          "configured": {
+            "type": "boolean",
+            "description": "Облако настроено на хабе: без этого настройки бюджета показывать нечего."
           },
           "month": {
             "type": "string",
@@ -27219,9 +27224,14 @@
       "WindowList": {
         "type": "object",
         "required": [
-          "items"
+          "items",
+          "configured"
         ],
         "properties": {
+          "configured": {
+            "type": "boolean",
+            "description": "Облако настроено на хабе (`[runners.cloud]`): без него окна не создаются и форма\nзапуска в PWA не показывается."
+          },
           "items": {
             "type": "array",
             "items": {
