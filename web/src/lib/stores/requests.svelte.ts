@@ -15,11 +15,11 @@ export type RequestClientState =
   | 'not_applied'
   | 'closed';
 
-export type RequestKind = 'permission' | 'question' | 'spawn_approval' | 'settings_change';
+export type RequestKind = 'permission' | 'question' | 'spawn_approval' | 'settings_change' | 'cloud_window';
 
-/** Неизвестный вид запроса остаётся вопросом, одобрение запуска и настройки имеют свои карточки. */
+/** Неизвестный вид запроса остаётся вопросом, одобрение запуска, настройки и облако имеют свои карточки. */
 export function requestKind(raw: unknown): RequestKind {
-  return raw === 'permission' || raw === 'spawn_approval' || raw === 'settings_change' ? raw : 'question';
+  return raw === 'permission' || raw === 'spawn_approval' || raw === 'settings_change' || raw === 'cloud_window' ? raw : 'question';
 }
 
 export interface RequestItem {
@@ -269,6 +269,14 @@ export class RequestsModel {
       if (item.kind === 'settings_change') {
         if (reason === 'allowed' || reason === 'applied') item.state = 'applied';
         else if (reason === 'setting_changed' || reason === 'expired' || reason === 'declined' || reason === 'conversation_trashed') item.state = 'closed';
+        else item.state = 'not_applied';
+        return;
+      }
+      // Облачная карточка: отказ хаба — это итог, а не потеря решения; «сверх бюджета» и
+      // «выпущена новая карточка» показываются словами на самой карточке.
+      if (item.kind === 'cloud_window') {
+        if (reason === 'allowed' || reason === 'applied') item.state = 'applied';
+        else if (reason === 'expired' || reason === 'declined' || reason === 'card_outdated' || reason === 'conversation_trashed' || reason === 'interrupted') item.state = 'closed';
         else item.state = 'not_applied';
         return;
       }

@@ -118,6 +118,8 @@ export interface ListSnapshot {
   presets: PresetSummary[];
   /** Задачи планов оркестраторов: снимок заменяет набор целиком. */
   plan_tasks?: PlanTask[];
+  /** Открытые карточки облачных окон из служебного разговора: сам разговор в списке не показан. */
+  cloud_cards?: components["schemas"]["RequestView"][];
 }
 
 const ATTRIBUTES = [
@@ -151,12 +153,14 @@ export class ListStore {
   /** Последний статус каждого провайдера по событиям, в том числе ещё не попавшего в полосу. */
   providerStatus: Record<string, ProviderStatus> = {};
   presets = $state<PresetSummary[]>([]);
+  /** Открытые карточки облачных окон: у служебного разговора нет своей ленты, баннер берёт их отсюда. */
+  cloudCards = $state<components["schemas"]["RequestView"][]>([]);
   /** Ревизия политики маршрутизации по событию: редактор и подписи маршрута перечитывают её. */
   routingRevision = $state<number | null>(null);
   truncated = $state(false);
   unknownKinds = $state(0);
 
-  #sub: { release(): void; readonly status: ScopeStatus } | null = null;
+  #sub: { release(): void; resync(): void; readonly status: ScopeStatus } | null = null;
   #onDeleted: ((id: string) => void)[] = [];
   #onBookmark: ((change: BookmarkChange) => void)[] = [];
   #onSnippet: ((payload: { snippet: unknown; deleted: boolean }) => void)[] = [];
@@ -229,6 +233,11 @@ export class ListStore {
     this.#sub = null;
   }
 
+  /** Заново взять снимок: карточка облачного окна живёт вне событий списка. */
+  refresh(): void {
+    this.#sub?.resync();
+  }
+
   async search(q: string, filter: ListFilter = "all"): Promise<ListRow[]> {
     const needle = q.trim().toLowerCase();
     return [...this.items.values()].filter((item) => {
@@ -259,6 +268,7 @@ export class ListStore {
       this.limits.flatMap((item) => (item.status ? [[item.provider, item.status]] : [])),
     );
     this.presets = data.presets ?? [];
+    this.cloudCards = data.cloud_cards ?? [];
     this.truncated = Boolean(data.truncated);
     this.plan.replace((data.plan_tasks ?? []).filter((task) => !this.deleted.has(task.orchestrator_id)));
   }

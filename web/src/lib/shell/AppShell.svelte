@@ -1,6 +1,7 @@
 <script lang="ts">
   import { page, updated } from '$app/state';
   import { version as appVersion } from '$app/env';
+  import { resolve } from '$app/paths';
   import { clock } from '#lib/clock.js';
   import { connectionStale } from '#lib/sync/stale.svelte.js';
   import { ticker } from '#lib/ticker.svelte.js';
@@ -27,6 +28,7 @@
   import type { MachineRecord } from '#lib/stores/machines.svelte.js';
   import { goto } from '$app/navigation';
   import { hitHref, type SearchHit } from '#lib/search/model.js';
+  import { cloudBannerText } from '#lib/requests/cloudWindowView.js';
 
   let { children }: { children: Snippet } = $props();
   let runtime = $state<Runtime | null>(null);
@@ -150,6 +152,33 @@
   const wallNow = $derived.by(() => {
     void ticker.second;
     return clock.serverNow();
+  });
+  // Карточки облачных окон живут в скрытом служебном разговоре: баннер один на оболочку.
+  let dismissedCloud = $state<Record<string, true>>({});
+  const cloudCard = $derived(
+    runtime?.list.cloudCards.find(
+      (card) => dismissedCloud[card.id] !== true && card.conversation_id !== chatId
+    ) ?? null
+  );
+  const cloudBanner = $derived(
+    cloudCard
+      ? {
+          text: cloudBannerText(cloudCard.request_payload),
+          label: 'Открыть',
+          run: () => openCloudCard(cloudCard)
+        }
+      : null
+  );
+  function openCloudCard(card: { id: string; conversation_id: string }): void {
+    dismissedCloud = { ...dismissedCloud, [card.id]: true };
+    void goto(resolve('/c/[id]', { id: card.conversation_id }));
+  }
+  // Решение по карточке меняет её состояние вне событий списка: пока она открыта, снимок списка
+  // перечитывается, чтобы баннер не висел над уже решённой карточкой.
+  $effect(() => {
+    if (!runtime || runtime.list.cloudCards.length === 0) return;
+    const timer = window.setInterval(() => runtime?.list.refresh(), 60_000);
+    return () => window.clearInterval(timer);
   });
 
   // Баннер связи уже виден пять секунд — картина замирает, пока связь не вернётся.
@@ -295,6 +324,7 @@
       update={updateState}
       updateMessage={updateMessage}
       failure={updateError}
+      cloud={cloudBanner}
       onupdate={applyUpdate}
       onrefresh={() => { void runtime?.drafts.flush().then(() => window.location.reload()); }}
     />
