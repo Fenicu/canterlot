@@ -688,6 +688,7 @@ async fn session_send_after_a_reboot_stop_wakes_the_session(pool: PgPool) -> Tes
         spawn_queue: Default::default(),
         guards: Default::default(),
         dispatcher: None,
+        cloud: None,
         registry: canterlot_hub::session::Registry::new(Default::default()),
         shutdown: tokio_util::sync::CancellationToken::new(),
     };
