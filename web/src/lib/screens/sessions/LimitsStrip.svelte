@@ -33,9 +33,9 @@
   /** Статус общий у провайдера: подробности один раз на провайдера, а не на каждую учётную запись. */
   const troubled = $derived(view.rows.filter((row, index, all) => row.status && all.findIndex((other) => other.provider === row.provider) === index));
   /** Конец входа провайдера — строкой под полосой: дата одна на провайдера, окна её не заменяют. */
-  const credentials = $derived(view.rows.flatMap((row) => row.credentials.map((line, index) => ({ row, line, key: `${row.key}:${index}` }))));
-  /** Сбросы лимитов — той же тихой строкой: их приносит только Codex. */
-  const credits = $derived(view.rows.flatMap((row) => row.creditLines.map((line, index) => ({ row, line, key: `${row.key}:${index}` }))));
+  const credentials = $derived(shown.flatMap((row) => row.credentials.map((line, index) => ({ row, line, key: `${row.key}:${index}` }))));
+  /** Сбросы лимитов — той же тихой строкой: их приносит только Codex. В шапке чата — только провайдер сессии. */
+  const credits = $derived(shown.flatMap((row) => row.creditLines.map((line, index) => ({ row, line, key: `${row.key}:${index}` }))));
 
   const refresher = new LimitsRefresh();
   // Новое показание приходит событием хаба: оно и закрывает ожидание.
