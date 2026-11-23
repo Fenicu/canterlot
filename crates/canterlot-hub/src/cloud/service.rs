@@ -52,6 +52,9 @@ const DELETE_FAILURES_BEFORE_ALERT: i32 = 3;
 /// Неопределённый ответ на создание DNAT: столько порт и адрес остаются занятыми, прежде
 /// чем полный список без правила позволит повторить вызов.
 const DNAT_AMBIGUITY: TimeDelta = TimeDelta::minutes(10);
+/// Цена профилей годна столько с момента создания окна. Перед первым POST более старая
+/// цена перепроверяется у провайдера.
+const PRICE_QUOTE_TTL: TimeDelta = TimeDelta::minutes(10);
 /// Окно в `draining` задерживается сверх предела на доработку: так долго терпим, прежде чем
 /// счесть это просрочкой, а не штатным сносом.
 const OVERRUN_SLACK: TimeDelta = TimeDelta::minutes(10);
@@ -474,12 +477,103 @@ impl CloudService {
         Ok(())
     }
 
+    /// Сроки окна из его строки, а не из текущей конфигурации.
+    fn drain_minutes(&self, window: &Window) -> u64 {
+        window
+            .drain_grace_minutes
+            .and_then(|minutes| u64::try_from(minutes).ok())
+            .unwrap_or_else(|| self.config.drain_grace_minutes())
+    }
+
+    fn teardown_minutes(&self, window: &Window) -> u64 {
+        window
+            .teardown_margin_minutes
+            .and_then(|minutes| u64::try_from(minutes).ok())
+            .unwrap_or_else(|| self.config.teardown_margin_minutes())
+    }
+
+    /// Перед первым POST: если снимок цен старше срока, спросить провайдера заново. Рост
+    /// резерва выше одобренного закрывает окно без POST и без расхода; снижение заменяет
+    /// снимок и освобождает разницу в бюджете.
+    async fn reprice_if_stale(
+        &self,
+        window: &mut Window,
+        now: DateTime<Utc>,
+    ) -> Result<bool, sqlx::Error> {
+        if now - window.created_at < PRICE_QUOTE_TTL {
+            return Ok(true);
+        }
+        let pricing = match self.pricing().await {
+            Ok(pricing) => pricing,
+            Err(error) => {
+                tracing::warn!(kind = "cloud_reprice", error = %error, "price quote is stale and cannot be refreshed");
+                return Ok(false);
+            }
+        };
+        let Some(max_hourly) = pricing.max_hourly_kopecks() else {
+            return self.fail(window.id, "price_error").await.map(|_| false);
+        };
+        let hard_cap = u32::try_from(window.hard_cap_minutes).unwrap_or(u32::MAX);
+        let reservation = match windows::reservation_for_terms(
+            max_hourly,
+            hard_cap,
+            self.drain_minutes(window),
+            self.teardown_minutes(window),
+        ) {
+            Ok(reservation) => reservation,
+            Err(error) => {
+                return self
+                    .fail(window.id, &format!("price_error:{error}"))
+                    .await
+                    .map(|_| false);
+            }
+        };
+        if reservation > window.reservation_kopecks {
+            crate::notify::enqueue_cloud_alert(
+                &self.pool,
+                &format!("cloud:reprice_growth:{}", window.id),
+                &json!({
+                    "code": "reprice_growth",
+                    "window_id": window.id,
+                    "name": window.name,
+                    "reservation_kopecks": reservation,
+                    "approved_kopecks": window.reservation_kopecks,
+                }),
+            )
+            .await?;
+            return self.fail(window.id, "reprice_growth").await.map(|_| false);
+        }
+        let updated = sqlx::query(
+            "update cloud_windows set profiles = $2, price_hourly_kopecks = $3,
+                    reservation_kopecks = $4
+             where id = $1 and state = 'create_intent' and create_called_at is null
+               and reservation_kopecks >= $4",
+        )
+        .bind(window.id)
+        .bind(serde_json::to_value(&pricing.profiles).expect("profiles serialize"))
+        .bind(max_hourly)
+        .bind(reservation)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        if updated == 0 {
+            return Ok(false);
+        }
+        window.profiles = serde_json::to_value(&pricing.profiles).expect("profiles serialize");
+        window.price_hourly_kopecks = max_hourly;
+        window.reservation_kopecks = reservation;
+        Ok(true)
+    }
+
     async fn start_create(
         &self,
         runtime: &mut Runtime,
-        window: Window,
+        mut window: Window,
         now: DateTime<Utc>,
     ) -> Result<(), sqlx::Error> {
+        if !self.reprice_if_stale(&mut window, now).await? {
+            return Ok(());
+        }
         let key_id = match runtime.ssh_key_id {
             Some(id) => id,
             None => match self
@@ -524,7 +618,13 @@ impl CloudService {
         // Метка вызова ставится до самого вызова: от неё считаются предел и ledger, и по ней
         // упавший после этого хаб поймёт, что сервер мог появиться.
         let hard_cap = TimeDelta::minutes(i64::from(window.hard_cap_minutes));
-        let drain_until = now + hard_cap + grace(self.config.drain_grace);
+        let drain = TimeDelta::minutes(
+            i64::try_from(self.drain_minutes(&window)).unwrap_or(i64::MAX),
+        );
+        let teardown = TimeDelta::minutes(
+            i64::try_from(self.teardown_minutes(&window)).unwrap_or(i64::MAX),
+        );
+        let drain_until = now + hard_cap + drain;
         let stamped = sqlx::query(
             "update cloud_windows set create_called_at = $2, hard_cap_at = $3, drain_until = $4,
                     teardown_until = $5
@@ -534,7 +634,7 @@ impl CloudService {
         .bind(now)
         .bind(now + hard_cap)
         .bind(drain_until)
-        .bind(drain_until + grace(self.config.teardown_margin))
+        .bind(drain_until + teardown)
         .execute(&self.pool)
         .await?
         .rows_affected();

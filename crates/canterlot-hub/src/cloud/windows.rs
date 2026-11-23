@@ -298,10 +298,25 @@ pub fn reservation_for(
     hourly_kopecks: i64,
     hard_cap_minutes: u32,
 ) -> Result<i64, PriceError> {
-    let minutes = price::total_minutes(
-        u64::from(hard_cap_minutes),
+    reservation_for_terms(
+        hourly_kopecks,
+        hard_cap_minutes,
         config.drain_grace_minutes(),
         config.teardown_margin_minutes(),
+    )
+}
+
+/// Резерв по утверждённым срокам окна, а не по текущей конфигурации.
+pub fn reservation_for_terms(
+    hourly_kopecks: i64,
+    hard_cap_minutes: u32,
+    drain_grace_minutes: u64,
+    teardown_margin_minutes: u64,
+) -> Result<i64, PriceError> {
+    let minutes = price::total_minutes(
+        u64::from(hard_cap_minutes),
+        drain_grace_minutes,
+        teardown_margin_minutes,
     )?;
     price::reservation_kopecks(hourly_kopecks, minutes)
 }

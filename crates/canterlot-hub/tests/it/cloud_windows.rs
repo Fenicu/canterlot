@@ -3133,7 +3133,91 @@ async fn without_a_carrier_only_new_creates_stop_and_cleanup_still_runs(pool: Pg
     Ok(())
 }
 
-// ───────── Секреты ─────────
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_restart_keeps_the_terms_approved_at_create(pool: PgPool) -> TestResult {
+    let rig = rig(pool).await;
+    let _carrier = rig.carrier_session();
+    let t0 = now_micros();
+    let id = rig.create(60).await;
+    let mut changed = rig.config.clone();
+    changed.drain_grace = Duration::from_secs(5 * 60);
+    changed.teardown_margin = Duration::from_secs(5 * 60);
+    let restarted = CloudService::new(
+        rig.pool.clone(),
+        rig.registry.clone(),
+        provider_for(&rig),
+        changed,
+    );
+    restarted.tick(t0).await;
+    assert_eq!(rig.state(id).await, "identified");
+    let window = rig.window(id).await;
+    assert_eq!(window.hard_cap_at, Some(t0 + TimeDelta::minutes(60)));
+    assert_eq!(window.drain_until, Some(t0 + TimeDelta::minutes(90)));
+    assert_eq!(window.teardown_until, Some(t0 + TimeDelta::minutes(120)));
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_stale_quote_that_would_grow_the_reservation_cancels_the_create(
+    pool: PgPool,
+) -> TestResult {
+    let rig = rig(pool).await;
+    enable_pushes(&rig.pool).await;
+    let _carrier = rig.carrier_session();
+    let t0 = now_micros();
+    let id = rig.create(60).await;
+    let approved = rig.window(id).await.reservation_kopecks;
+    // Через срок годности цены провайдер подорожал: тратить больше одобренного нельзя.
+    rig.fake.control().configurators[0].price_cpu = 2_100.0;
+    let restarted = CloudService::new(
+        rig.pool.clone(),
+        rig.registry.clone(),
+        provider_for(&rig),
+        rig.config.clone(),
+    );
+    restarted.tick(t0 + TimeDelta::minutes(11)).await;
+    let window = rig.window(id).await;
+    assert_eq!(window.state, "failed");
+    assert_eq!(window.final_cost_kopecks, Some(0));
+    assert_eq!(window.reservation_kopecks, approved);
+    assert_eq!(rig.posts(), 0, "no POST over the approved amount");
+    assert!(
+        rig.alert_codes()
+            .await
+            .contains(&"reprice_growth".to_owned()),
+        "{:?}",
+        rig.alert_codes().await
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_stale_quote_is_replaced_by_the_new_lower_price(pool: PgPool) -> TestResult {
+    let rig = rig(pool).await;
+    let _carrier = rig.carrier_session();
+    let t0 = now_micros();
+    let id = rig.create(60).await;
+    let approved = rig.window(id).await.reservation_kopecks;
+    rig.fake.control().configurators[0].price_cpu = 105.0;
+    let restarted = CloudService::new(
+        rig.pool.clone(),
+        rig.registry.clone(),
+        provider_for(&rig),
+        rig.config.clone(),
+    );
+    restarted.tick(t0 + TimeDelta::minutes(11)).await;
+    let window = rig.window(id).await;
+    assert_eq!(window.state, "identified");
+    assert_eq!(rig.posts(), 1);
+    assert!(
+        window.reservation_kopecks < approved,
+        "the approved ceiling falls with the price"
+    );
+    assert!(window.profiles()[0].hourly_kopecks < HOURLY);
+    Ok(())
+}
+
+
 
 #[derive(Clone, Default)]
 struct Capture(Arc<Mutex<Vec<u8>>>);
