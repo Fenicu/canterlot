@@ -1040,6 +1040,49 @@ async fn automatic_create_rechecks_its_conditions_under_the_budget_lock(
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn automatic_create_reads_the_runner_clock_in_the_database(pool: PgPool) -> TestResult {
+    let rig = Rig::new(pool).await;
+    rig.set_budget(1_000_000, true).await;
+    let _carrier = testkit::fake_session(&rig.registry, rig.carrier, &["runners_v1"], true);
+    let runner = rig.static_runner("runner-a").await;
+    rig.seed_waiting(60).await;
+    let real = now_micros();
+    // Наблюдение и период недоступности — по часам базы: десять минут уже прошли.
+    rig.observe_at(runner, real).await;
+    sqlx::query(
+        "insert into cloud_auto_unavailable (machine_id, since, checked_at)
+         values ($1, $2, $3)",
+    )
+    .bind(runner)
+    .bind(real - TimeDelta::minutes(11))
+    .bind(real)
+    .execute(&rig.pool)
+    .await?;
+    let pricing = rig.service.pricing().await.unwrap();
+    let mut conn = rig.pool.acquire().await?;
+    // Транзакция создания получает время прохода на десять минут раньше настоящего: под
+    // замком бюджета условия проверяются по часам базы, а не по этой метке.
+    let created = windows::create_in_tx(
+        &mut conn,
+        &rig.config,
+        pricing,
+        CreateRequest {
+            trigger: Trigger::Auto,
+            proposal_id: None,
+            hard_cap_minutes: 120,
+            consent_over_budget_kopecks: None,
+        },
+        Some(windows::AutoGuard {
+            registry: &rig.registry,
+            now: real - TimeDelta::minutes(10),
+        }),
+    )
+    .await;
+    assert!(created.is_ok(), "the window is created: {created:?}");
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn cloud_demand_uses_the_placement_predicate(pool: PgPool) -> TestResult {
     let rig = Rig::new(pool).await;
     rig.set_budget(1_000_000, true).await;

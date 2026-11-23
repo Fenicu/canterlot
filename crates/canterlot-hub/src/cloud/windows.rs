@@ -209,7 +209,9 @@ pub struct CreateRequest {
 }
 
 /// Условия автоматического режима, перепроверяемые в транзакции создания под замком
-/// `cloud_budget`: реестр нужен правилу доступности раннеров, время — проходу службы.
+/// `cloud_budget`: реестр нужен правилу доступности раннеров, время — проходу службы. Метка
+/// прохода снята до цены у провайдера, поэтому под замком она дополняется часами базы: для
+/// проверки берётся более позднее из двух времён.
 pub struct AutoGuard<'a> {
     pub registry: &'a crate::session::Registry,
     pub now: DateTime<Utc>,
@@ -418,24 +420,25 @@ pub async fn create_in_tx(
     }
     // Автоматический режим проверяет свои условия ещё раз здесь, под тем же замком, что и
     // вставка: между чтением настроек службой и этой транзакцией владелец мог выключить
-    // режим, очередь могла опустеть, а раннер — вернуться на связь.
-    let now = if let Some(guard) = auto.as_ref() {
-        if request.trigger == Trigger::Auto
-            && (!auto_mode
-                || super::budget::waiting_cloud_minutes(conn, config).await?
-                    < super::budget::MIN_WAITING_MINUTES
-                || !super::budget::static_runners_down(conn, guard.registry, config, guard.now)
-                    .await?)
-        {
-            return Err(CreateRefusal::AutoConditionsChanged);
-        }
-        guard.now
-    } else {
-        if request.trigger == Trigger::Auto {
-            return Err(CreateRefusal::AutoConditionsChanged);
-        }
-        Utc::now()
-    };
+    // режим, очередь могла опустеть, а раннер — вернуться на связь. Время — не метка
+    // прохода: она снята до цены у провайдера и к проверке недоступности устарела, поэтому
+    // берётся более позднее из метки и часов базы внутри этой транзакции.
+    let db_now: DateTime<Utc> = sqlx::query_scalar("select clock_timestamp()")
+        .fetch_one(&mut *conn)
+        .await?;
+    let now = auto.as_ref().map_or(db_now, |guard| guard.now.max(db_now));
+    if let Some(guard) = auto.as_ref()
+        && request.trigger == Trigger::Auto
+        && (!auto_mode
+            || super::budget::waiting_cloud_minutes(conn, config).await?
+                < super::budget::MIN_WAITING_MINUTES
+            || !super::budget::static_runners_down(conn, guard.registry, config, now).await?)
+    {
+        return Err(CreateRefusal::AutoConditionsChanged);
+    }
+    if auto.is_none() && request.trigger == Trigger::Auto {
+        return Err(CreateRefusal::AutoConditionsChanged);
+    }
     // Пул проверяется до «одно живое окно»: когда он исчерпан, причина отказа — именно пул,
     // а не занятость единственного окна. Ничего не резервируется до вставки строки.
     let (local_ip, dnat_port) = allocate(conn, config).await?;
