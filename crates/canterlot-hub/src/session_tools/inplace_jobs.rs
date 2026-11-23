@@ -670,8 +670,20 @@ async fn run_source(
             }
         }
         None => {
-            if !place::satisfiable(&mut tx, carrier, &labels, &placement, &source.repo, domain)
-                .await?
+            let cloud_labels = context
+                .cloud
+                .as_ref()
+                .map(|cloud| cloud.config().labels.as_slice());
+            if !place::satisfiable(
+                &mut tx,
+                carrier,
+                &labels,
+                &placement,
+                &source.repo,
+                domain,
+                cloud_labels,
+            )
+            .await?
             {
                 return Err(ToolError::new(ToolErrorCode::NoRunnerCanSatisfy));
             }

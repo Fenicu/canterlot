@@ -323,8 +323,9 @@ pub async fn static_runners_down(
     Ok(true)
 }
 
-/// Кандидаты статичных раннеров, которые могли бы взять ожидающую облачную работу:
-/// метки задачи — подмножество меток раннера, сам раннер не облачный.
+/// Кандидаты статичных раннеров, которые могли бы взять ожидающую облачную работу: метки
+/// задачи — подмножество меток раннера, место допускает `runner`, а названная машина — сам
+/// раннер (или не названа). Облачная строка исключена: у неё свой вид места.
 pub async fn static_candidates(
     conn: &mut PgConnection,
     config: &CloudConfig,
@@ -339,7 +340,8 @@ pub async fn static_candidates(
           where m.role = 'runner' and m.owner_id = $1
             and ($2::uuid is null or m.id <> $2)
             and j.carrier_id = $3 and j.labels <@ $4
-            and j.placement && array['runner','cloud']::text[]",
+            and 'runner' = any(j.placement)
+            and (j.requested_machine_id is null or j.requested_machine_id = m.id)",
     )
     .bind(owner_of(conn, config.carrier_machine_id).await?)
     .bind(cloud)
@@ -356,8 +358,8 @@ async fn owner_of(conn: &mut PgConnection, carrier: Uuid) -> Result<Uuid, sqlx::
         .await
 }
 
-/// Сумма минут ожидающей облачной работы. Метки и место проверяются так же, как при
-/// размещении; работа других несущих не считается.
+/// Сумма минут ожидающей облачной работы. Метки, вид места и названная машина проверяются
+/// так же, как при размещении; работа других несущих не считается.
 pub async fn waiting_cloud_minutes(
     conn: &mut PgConnection,
     config: &CloudConfig,
@@ -365,7 +367,10 @@ pub async fn waiting_cloud_minutes(
     sqlx::query_scalar(
         "select coalesce(sum(expected_minutes), 0)::bigint from jobs
           where state = 'waiting_runner' and carrier_id = $1 and labels <@ $2
-            and placement && array['runner','cloud']::text[]",
+            and 'cloud' = any(placement)
+            and (requested_machine_id is null
+                 or requested_machine_id = (select cloud_machine_id from cloud_budget
+                                              where singleton))",
     )
     .bind(config.carrier_machine_id)
     .bind(&config.labels)

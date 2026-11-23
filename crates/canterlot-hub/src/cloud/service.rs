@@ -903,13 +903,14 @@ impl CloudService {
     // ───────── Работа окна ─────────
 
     /// Есть ли у раннера `cloud` работа: задачи на нём или ждущая задача, которую он взял бы
-    /// (те же метки и допустимое место, что у размещения).
+    /// по тому же правилу размещения: метки, вид места `cloud` и названная машина.
     async fn has_work(&self, machine: Uuid) -> Result<bool, sqlx::Error> {
         sqlx::query_scalar(
             "select exists(select 1 from jobs where machine_id = $1
                            and state in ('staging','queued','dispatched','waiting_lease','running','collecting'))
                  or exists(select 1 from jobs where state = 'waiting_runner' and carrier_id = $2
-                           and labels <@ $3 and placement && array['runner','cloud']::text[])",
+                           and labels <@ $3 and 'cloud' = any(placement)
+                           and (requested_machine_id is null or requested_machine_id = $1))",
         )
         .bind(machine)
         .bind(self.config.carrier_machine_id)

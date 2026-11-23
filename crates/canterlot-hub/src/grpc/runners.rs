@@ -76,9 +76,12 @@ impl HubGrpc {
         caller: Uuid,
         submit: &OwnerJobSubmit,
     ) -> Result<ControlDown, Status> {
-        let message = match crate::inplace_jobs::owner::submit(
+        let message = match crate::inplace_jobs::owner::submit_with_cloud(
             &self.pool,
             &self.registry,
+            self.cloud
+                .as_ref()
+                .map(|cloud| cloud.config().labels.as_slice()),
             caller,
             &submit.spec_json,
         )

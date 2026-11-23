@@ -6,6 +6,7 @@ use std::{sync::Arc, time::Duration};
 
 use canterlot_hub::{
     cloud::{
+        budget,
         service::CloudService,
         windows::{self, CreateRefusal, CreateRequest, Trigger},
     },
@@ -1027,6 +1028,111 @@ async fn automatic_create_rechecks_its_conditions_under_the_budget_lock(pool: Pg
         "runner unavailability is rechecked under the budget lock"
     );
     assert!(no_windows(&rig.pool).await?);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn cloud_demand_uses_the_placement_predicate(pool: PgPool) -> TestResult {
+    let rig = Rig::new(pool).await;
+    rig.set_budget(1_000_000, true).await;
+    let job = Uuid::now_v7();
+    sqlx::query(
+        "insert into jobs (id, owner_id, domain, remote, shell, timeout_seconds, state, labels,
+                           placement, carrier_id, expected_minutes)
+         values ($1, $2, 'personal', true, 'true', 600, 'waiting_runner',
+                 array['cloud','kernel-6.12'], array['runner'], $3, 60)",
+    )
+    .bind(job)
+    .bind(rig.owner)
+    .bind(rig.carrier)
+    .execute(&rig.pool)
+    .await?;
+    let mut conn = rig.pool.acquire().await?;
+    assert_eq!(
+        budget::waiting_cloud_minutes(&mut conn, &rig.config).await?,
+        0,
+        "a runner-only job is not cloud demand"
+    );
+    sqlx::query(
+        "update jobs set placement = '{local,runner,cloud}', requested_machine_id = $2
+          where id = $1",
+    )
+    .bind(job)
+    .bind(rig.carrier)
+    .execute(&mut *conn)
+    .await?;
+    assert_eq!(
+        budget::waiting_cloud_minutes(&mut conn, &rig.config).await?,
+        0,
+        "a job named for another machine is not cloud demand"
+    );
+    sqlx::query("update jobs set placement = '{cloud}', requested_machine_id = null where id = $1")
+        .bind(job)
+        .execute(&mut *conn)
+        .await?;
+    assert_eq!(
+        budget::waiting_cloud_minutes(&mut conn, &rig.config).await?,
+        60,
+        "the cloud can take this job"
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn cloud_placement_jobs_are_admitted_when_cloud_is_configured(pool: PgPool) -> TestResult {
+    let rig = Rig::new(pool.clone()).await;
+    rig.set_budget(1_000_000, false).await;
+    let _carrier = testkit::fake_session(
+        &rig.registry,
+        rig.carrier,
+        &["runners_v1", "jobs_inplace_v1"],
+        true,
+    );
+    let caller = rig.caller().await;
+    let context = rig.tool_context();
+    sqlx::query(
+        "update conversations set permission_mode = 'bypass', memory_domain = 'personal',
+                workdir = '/srv/w' where id = $1",
+    )
+    .bind(caller.conversation_id)
+    .execute(&rig.pool)
+    .await?;
+    sqlx::query(
+        "update machines set capabilities = array['jobs_inplace_v1','runners_v1'],
+                allowed_roots = '[\"/srv\"]' where id = $1",
+    )
+    .bind(rig.carrier)
+    .execute(&rig.pool)
+    .await?;
+
+    let answer = canterlot_hub::session_tools::call(
+        &context,
+        &caller,
+        "job.run",
+        json!({
+            "machine": "auto", "shell": "true", "wait_seconds": 0,
+            "source": {"repo": "/srv/src/app", "rev": "0123456789abcdef0123456789abcdef01234567"},
+            "placement": ["cloud"], "expected_minutes": 60,
+        }),
+    )
+    .await
+    .expect("cloud-only work waits for the configured profile");
+    assert_eq!(answer["state"], "waiting_runner", "{answer}");
+
+    // Метки, которые есть только у облачного профиля, тоже дают ожидание, а не отказ.
+    let answer = canterlot_hub::session_tools::call(
+        &context,
+        &caller,
+        "job.run",
+        json!({
+            "machine": "auto", "shell": "true", "wait_seconds": 0,
+            "source": {"repo": "/srv/src/app", "rev": "0123456789abcdef0123456789abcdef01234567"},
+            "labels": ["cloud", "kernel-6.12"], "expected_minutes": 30,
+        }),
+    )
+    .await
+    .expect("cloud-profile labels are satisfiable");
+    assert_eq!(answer["state"], "waiting_runner", "{answer}");
     Ok(())
 }
 
