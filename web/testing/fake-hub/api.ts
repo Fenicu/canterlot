@@ -188,6 +188,31 @@ export class FakeHubApi {
 	readonly jobLogs = new Map<string, string>();
 	/** Задачи, чей полный журнал убран по сроку хранения: остался хвост. */
 	readonly jobLogsExpired = new Set<string>();
+	/** Облачные окна: живые и законченные, как их отдаёт `GET /cloud/windows`. */
+	readonly cloudWindows = new Map<string, components['schemas']['CloudWindowView']>();
+	/** Открытые карточки облачных окон: снимок списка отдаёт их оболочке. */
+	readonly cloudCards = new Map<string, components['schemas']['RequestView']>();
+	/** Бюджет облака: настройки владельца и профили. */
+	cloudBudget: components['schemas']['BudgetView'] = {
+		month: new Date().toISOString().slice(0, 7),
+		monthly_budget_kopecks: 300_000,
+		spent_kopecks: 113_800,
+		remaining_kopecks: 186_200,
+		auto_mode: false,
+		revision: 3,
+		provider_block_code: null,
+		provider_block_at: null,
+		configured: true,
+		profiles: [
+			{ configurator_id: 151, cpu: 32, ram_gb: 64, disk_gb: 80, hourly_kopecks: 2845, availability_zone: 'msk-1' },
+			{ configurator_id: 149, cpu: 16, ram_gb: 32, disk_gb: 80, hourly_kopecks: 1_680, availability_zone: 'msk-1' }
+		]
+	};
+	/** Запросы формы запуска, правки бюджета, снятия блока и удаления окон: их сверяют разовые проверки. */
+	readonly cloudProposalCalls: { hours: number; reason: string; key: string }[] = [];
+	readonly cloudDeleteCalls: { id: string; key: string }[] = [];
+	readonly cloudBudgetPuts: { body: components['schemas']['Update']; key: string }[] = [];
+	readonly cloudBlockClears: string[] = [];
 	/** Отмены владельца: задача и ключ идемпотентности. */
 	readonly jobCancelCalls: { id: string; key: string }[] = [];
 	/** Запросы журнала: позиция и предел, как их прислал экран. */
@@ -1491,7 +1516,8 @@ export class FakeHubApi {
 			limits: this.limits,
 			truncated: this.truncated,
 			presets: this.presetList(),
-			plan_tasks: [...this.planTasks.values()].filter((task) => !task.archived)
+			plan_tasks: [...this.planTasks.values()].filter((task) => !task.archived),
+			cloud_cards: [...this.cloudCards.values()]
 		};
 	}
 

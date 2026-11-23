@@ -5,6 +5,7 @@ import { APP_VERSION } from '../version';
 import { answerRange } from './range';
 import { installAuthRoutes } from './auth';
 import { installJobRoutes } from './jobs';
+import { installCloudRoutes } from './cloud';
 
 const PNG = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
@@ -2148,6 +2149,7 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
   });
 
   await installJobRoutes(page, hub, api);
+  await installCloudRoutes(page, api);
 }
 
 function errorBody(code: string, message: string, details?: Record<string, unknown>): unknown {
