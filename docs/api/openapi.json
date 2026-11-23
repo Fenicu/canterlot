@@ -17725,6 +17725,7 @@
           "decision_conflict",
           "request_not_open",
           "decision_invalid",
+          "cloud_hours_out_of_range",
           "resource_limit",
           "not_implemented",
           "too_many_requests",
