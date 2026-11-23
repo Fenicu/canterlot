@@ -746,6 +746,12 @@ impl CloudService {
         if let Some(cap) = window.hard_cap_at
             && now >= cap
         {
+            crate::notify::enqueue_cloud_alert(
+                &self.pool,
+                &format!("cloud:hard_cap:{}", window.id),
+                &json!({"code": "hard_cap", "window_id": window.id, "name": window.name}),
+            )
+            .await?;
             return self.delete_now(&window, "hard_cap", now).await;
         }
         if let Some(called) = window.create_called_at
@@ -829,12 +835,32 @@ impl CloudService {
                 DnatCreateOutcome::Created { rule_id } => {
                     self.adopt_dnat(window.id, &rule_id).await?;
                 }
-                DnatCreateOutcome::Refused { .. } => {
+                DnatCreateOutcome::Refused {
+                    status,
+                    error_code,
+                    ..
+                } => {
                     sqlx::query(
-                        "update cloud_windows set last_error = 'dnat_refused' where id = $1",
+                        "update cloud_windows set last_error = 'dnat_refused',
+                                dnat_create_attempted_at = null,
+                                dnat_gone_at = coalesce(dnat_gone_at, $2)
+                         where id = $1",
                     )
                     .bind(window.id)
+                    .bind(now)
                     .execute(&self.pool)
+                    .await?;
+                    crate::notify::enqueue_cloud_alert(
+                        &self.pool,
+                        &format!("cloud:dnat_refused:{}", window.id),
+                        &json!({
+                            "code": "dnat_refused",
+                            "window_id": window.id,
+                            "name": window.name,
+                            "status": status,
+                            "error_code": error_code,
+                        }),
+                    )
                     .await?;
                     return self.delete_now(window, "dnat_refused", now).await;
                 }
@@ -1167,6 +1193,12 @@ impl CloudService {
                     Ok::<_, sqlx::Error>(())
                 })
             })
+            .await?;
+            crate::notify::enqueue_cloud_alert(
+                &self.pool,
+                &format!("cloud:cloud_window_hard_cap:{}", window.id),
+                &json!({"code": "cloud_window_hard_cap", "window_id": window.id, "name": window.name}),
+            )
             .await?;
         }
         Ok(())
@@ -1509,7 +1541,7 @@ impl CloudService {
                 };
                 sqlx::query(
                     "update cloud_windows set delete_accepted_at = coalesce(delete_accepted_at, $2),
-                            last_error = case when delete_reason in ('no_paid','dnat_refused','ipv4_refused') then last_error end,
+                            last_error = case when delete_reason in ('no_paid','dnat_refused') then last_error end,
                             delete_attempts = $3,
                             next_delete_at = $4,
                             alert_state = alert_state || jsonb_build_object('quarantined', $5::boolean)
@@ -1534,7 +1566,7 @@ impl CloudService {
                 };
                 sqlx::query(
                     "update cloud_windows set delete_accepted_at = coalesce(delete_accepted_at, $2),
-                            last_error = case when delete_reason in ('no_paid','dnat_refused','ipv4_refused') then last_error end,
+                            last_error = case when delete_reason in ('no_paid','dnat_refused') then last_error end,
                             delete_attempts = $3,
                             next_delete_at = $4
                      where id = $1 and state = 'deleting'",
@@ -1644,7 +1676,7 @@ impl CloudService {
                 sqlx::query(
                     "update cloud_windows set state = $2, final_cost_kopecks = $3,
                             delete_confirmed_at = $4,
-                            last_error = case when delete_reason in ('no_paid','dnat_refused','ipv4_refused') then last_error end
+                            last_error = case when delete_reason in ('no_paid','dnat_refused') then last_error end
                      where id = $1",
                 )
                 .bind(id)
