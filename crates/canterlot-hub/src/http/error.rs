@@ -104,6 +104,7 @@ error_codes! {
     DecisionConflict => "decision_conflict", 409, Browser, Never, "Решение уже принято с другого устройства";
     RequestNotOpen => "request_not_open", 409, Browser, Never, "Запрос уже закрыт";
     DecisionInvalid => "decision_invalid", 422, Browser, Never, "Ответ не подходит к вопросу";
+    CloudHoursOutOfRange => "cloud_hours_out_of_range", 422, Browser, Never, "Часов окна вне диапазона 1..=4";
     ResourceLimit => "resource_limit", 413, Browser, Never, "Превышен допустимый размер данных";
     NotImplemented => "not_implemented", 501, HubDb, Never, "Функция пока не реализована";
     TooManyRequests => "too_many_requests", 429, HubDb, SafeSameKey, "Слишком много запросов, повторите позже";

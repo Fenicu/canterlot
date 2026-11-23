@@ -1152,6 +1152,30 @@ async fn hub_card_cap_is_clamped_to_four_hours(pool: PgPool) -> TestResult {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn owner_proposal_hours_are_bounded_before_multiplication(pool: PgPool) -> TestResult {
+    let rig = Rig::new(pool.clone()).await;
+    rig.set_budget(1_000_000, false).await;
+    let api = Api::new(pool, Some(rig.service.clone())).await;
+    for hours in [0u32, 5, u32::MAX] {
+        let (status, answer) = api
+            .send(
+                Method::POST,
+                "/api/v1/cloud/proposals",
+                Some(json!({"hours": hours, "reason": "долго"})),
+                &format!("bounds-{hours}"),
+            )
+            .await;
+        assert_eq!(status, 422, "{hours}: {answer}");
+        assert_eq!(
+            answer["error"]["code"], "cloud_hours_out_of_range",
+            "{hours}: {answer}"
+        );
+    }
+    assert_eq!(card_count(&rig.pool).await?, 0, "no card is created");
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn runners_list_shows_live_window_cost_and_budget_remainder(pool: PgPool) -> TestResult {
     let rig = Rig::new(pool).await;
     rig.set_budget(1_000_000, false).await;
