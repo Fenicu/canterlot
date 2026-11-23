@@ -79,12 +79,6 @@ pub struct CloudService {
     runtime: Mutex<Runtime>,
 }
 
-fn minutes_between(from: DateTime<Utc>, to: DateTime<Utc>) -> u64 {
-    u64::try_from((to - from).num_seconds().max(0))
-        .unwrap_or(0)
-        .div_ceil(60)
-}
-
 /// Причина удаления окна, у которого сервер остался `no_paid`: аккаунт требует предоплату.
 pub const REASON_NO_PAID: &str = "no_paid";
 
@@ -93,11 +87,8 @@ pub const REASON_NO_PAID: &str = "no_paid";
 /// не заказывается, поэтому в итог входит только сервер.
 fn ledger_cost(window: &Window, server_end: DateTime<Utc>) -> i64 {
     window.create_called_at.map_or(0, |called| {
-        price::final_cost_kopecks(
-            window.price_hourly_kopecks,
-            minutes_between(called, server_end),
-        )
-        .unwrap_or(window.reservation_kopecks)
+        price::final_cost_between(window.price_hourly_kopecks, called, server_end)
+            .unwrap_or(window.reservation_kopecks)
     })
 }
 
@@ -1201,10 +1192,9 @@ impl CloudService {
             return Ok(false);
         }
         // Сервер сверх предела тарифицируется; публичного адреса больше нет.
-        let extra =
-            price::final_cost_kopecks(window.price_hourly_kopecks, minutes_between(cap, now))
-                .ok()
-                .map(|cost| cost.min(i64::MAX / 2));
+        let extra = price::final_cost_between(window.price_hourly_kopecks, cap, now)
+            .ok()
+            .map(|cost| cost.min(i64::MAX / 2));
         let code = if runtime.first_tick {
             "outage_extra_cost"
         } else {

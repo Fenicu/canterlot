@@ -6,6 +6,8 @@
 
 use std::fmt;
 
+use chrono::{DateTime, Utc};
+
 /// Часов в расчётном месяце: цена за час — месячная цена, делённая на это число.
 pub const HOURS_PER_MONTH: i64 = 720;
 
@@ -128,9 +130,28 @@ pub fn final_cost_kopecks(hourly_kopecks: i64, billed_minutes: u64) -> Result<i6
     hours_times(hourly_kopecks, ceil_hours(billed_minutes).max(1))
 }
 
+/// Единый расчёт целых оплачиваемых часов по всему прошедшему сроку. Доли секунды
+/// учитываются: 3600,5 с — второй час. Не меньше часа.
+pub fn billed_hours(elapsed_milliseconds: i64) -> u64 {
+    u64::try_from(elapsed_milliseconds.max(0))
+        .unwrap_or(0)
+        .div_ceil(3_600_000)
+        .max(1)
+}
+
+/// Итог за срок между двумя метками: `час × ceil(весь срок / 3600 с)`, не меньше часа.
+pub fn final_cost_between(
+    hourly_kopecks: i64,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Result<i64, PriceError> {
+    hours_times(hourly_kopecks, billed_hours((to - from).num_milliseconds()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeDelta;
 
     fn kopecks(rubles: i64) -> i64 {
         rubles * 100
@@ -314,6 +335,28 @@ mod tests {
         for minutes in [0, 1, 59, 60, 61, 179, 180] {
             assert!(final_cost_kopecks(hourly, minutes).unwrap() <= reserved);
         }
+    }
+
+    #[test]
+    fn final_cost_counts_fractional_seconds_over_the_whole_span() {
+        let from = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+        // 3600.5 секунды — это второй оплачиваемый час, а не первый.
+        let to = from + TimeDelta::milliseconds(3_600_500);
+        assert_eq!(final_cost_between(2845, from, to), Ok(2845 * 2));
+        assert_eq!(final_cost_between(2845, from, from), Ok(2845));
+        assert_eq!(
+            final_cost_between(2845, from, from + TimeDelta::seconds(3600)),
+            Ok(2845)
+        );
+        assert_eq!(
+            final_cost_between(2845, from, from + TimeDelta::milliseconds(3_600_001)),
+            Ok(2845 * 2)
+        );
+        // Обратный порядок считается как ноль: не меньше часа.
+        assert_eq!(
+            final_cost_between(2845, from, from - TimeDelta::minutes(5)),
+            Ok(2845)
+        );
     }
 
     #[test]

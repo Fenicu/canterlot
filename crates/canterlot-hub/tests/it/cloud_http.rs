@@ -142,6 +142,23 @@ async fn the_list_has_live_windows_and_the_last_twenty_ended_with_costs(pool: Pg
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn the_displayed_cost_is_not_capped_at_the_reservation(pool: PgPool) {
+    let api = Api::new(pool).await;
+    let id = api.insert("ready", 1_000, Some(778)).await;
+    let list = api.list().await;
+    let item = list["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == id.to_string())
+        .expect("the live window is listed");
+    assert_eq!(item["reservation_kopecks"], 11380);
+    // 1000 минут = 16 ч 40 мин: платных часов 17, хотя резерв меньше.
+    assert_eq!(item["cost_so_far_kopecks"], 2845 * 17);
+    assert!(item["cost_so_far_kopecks"].as_i64().unwrap() > 11380);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn only_the_owner_sees_the_windows(pool: PgPool) {
     let api = Api::new(pool).await;
     let id = api.insert("ready", 5, Some(777)).await;

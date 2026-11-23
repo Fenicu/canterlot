@@ -765,12 +765,10 @@ pub fn view(window: &Window, now: DateTime<Utc>) -> CloudWindowView {
     let cost_so_far = match (window.final_cost_kopecks, window.create_called_at) {
         (Some(cost), _) => cost,
         (None, Some(called)) => {
-            let minutes = u64::try_from((now - called).num_seconds().max(0))
-                .unwrap_or(0)
-                .div_ceil(60);
-            price::final_cost_kopecks(window.price_hourly_kopecks, minutes)
+            // Показываем настоящий расход, а не резерв: окно могло прожить дольше предела
+            // из-за простоя хаба, и владелец должен видеть цену.
+            price::final_cost_between(window.price_hourly_kopecks, called, now)
                 .unwrap_or(window.reservation_kopecks)
-                .min(window.reservation_kopecks)
         }
         (None, None) => 0,
     };
