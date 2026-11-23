@@ -25,6 +25,7 @@ use crate::config::CloudConfig;
 pub type WindowId = Uuid;
 
 /// Состояния, в которых окно считается живым: сервер может существовать и тарифицироваться.
+/// Живое окно одно, его держит частичный уникальный индекс.
 pub const LIVE: [&str; 6] = [
     "create_intent",
     "create_unknown",
@@ -34,9 +35,26 @@ pub const LIVE: [&str; 6] = [
     "deleting",
 ];
 
+/// Поздний снос сервера закрытого окна: своего места в правиле одного живого окна он не
+/// занимает (у преемника оно своё), но сервер существует и тарифицируется, поэтому снос
+/// входит в расход и закрывает новые создания.
+pub const LATE_CLEANUP: &str = "late_cleanup";
+
 /// То же списком для `= any($n)`.
 pub fn live_states() -> Vec<String> {
     LIVE.iter().map(|state| (*state).to_owned()).collect()
+}
+
+/// Состояния, в которых окно ещё владеет сервером: живые окна и поздний снос.
+pub fn billing_states() -> Vec<String> {
+    let mut states = live_states();
+    states.push(LATE_CLEANUP.to_owned());
+    states
+}
+
+/// Владеет ли окно сервером в этом состоянии.
+pub fn owns_server(state: &str) -> bool {
+    LIVE.contains(&state) || state == LATE_CLEANUP
 }
 
 /// Состояния, в которых раннер `cloud` числится в списке несущей и берёт работу.
@@ -121,8 +139,9 @@ pub struct Window {
 }
 
 impl Window {
+    /// Окно ещё не закончилось: оно живо или держит обязательство позднего сноса.
     pub fn is_live(&self) -> bool {
-        LIVE.contains(&self.state.as_str())
+        owns_server(&self.state)
     }
 }
 
@@ -143,9 +162,10 @@ pub async fn load_for_update(
         .await
 }
 
+/// Живые окна и поздние сносы: служба ведёт и те и другие.
 pub async fn live(conn: &mut PgConnection) -> Result<Vec<Window>, sqlx::Error> {
     sqlx::query_as("select * from cloud_windows where state = any($1) order by created_at, id")
-        .bind(live_states())
+        .bind(billing_states())
         .fetch_all(conn)
         .await
 }
@@ -222,6 +242,9 @@ pub enum CreateRefusal {
     /// Живое окно уже есть: окно одно.
     #[error("live_window_exists")]
     LiveWindowExists,
+    /// Открыт поздний снос сервера закрытого окна: новый не создаётся, пока старый убирают.
+    #[error("late_cleanup_open")]
+    LateCleanup,
     /// Блок провайдера (`cloud_budget.provider_block_code`): создание закрыто, пока владелец
     /// не снимет его (`clear_provider_block`).
     #[error("provider_blocked")]
@@ -333,7 +356,7 @@ pub fn reservation_for_terms(
     price::reservation_kopecks(hourly_kopecks, minutes)
 }
 
-/// Расход месяца: законченные окна по итоговой цене, живые по резерву.
+/// Расход месяца: законченные окна по итоговой цене, живые и поздние сносы по резерву.
 pub async fn spent_in_month(conn: &mut PgConnection, month: &str) -> Result<i64, sqlx::Error> {
     sqlx::query_scalar(
         "select coalesce(sum(case when state = any($2) then reservation_kopecks
@@ -341,7 +364,7 @@ pub async fn spent_in_month(conn: &mut PgConnection, month: &str) -> Result<i64,
          from cloud_windows where month = $1",
     )
     .bind(month)
-    .bind(live_states())
+    .bind(billing_states())
     .fetch_one(conn)
     .await
 }
@@ -351,15 +374,16 @@ fn ip_range(first: Ipv4Addr, last: Ipv4Addr) -> impl Iterator<Item = Ipv4Addr> {
     (u32::from(first)..=u32::from(last)).map(Ipv4Addr::from)
 }
 
-/// Выделить свободный локальный адрес и DNAT-порт: заняты только те, что держит живое окно.
-/// Освобождённые при конце окна значения сразу пригодны для повторного использования.
+/// Выделить свободный локальный адрес и DNAT-порт: заняты только те, что держит живое окно
+/// или поздний снос. Освобождённые при конце окна значения сразу пригодны для повторного
+/// использования.
 async fn allocate(
     conn: &mut PgConnection,
     config: &CloudConfig,
 ) -> Result<(String, u16), CreateRefusal> {
     let held: Vec<(Option<String>, Option<i32>)> =
         sqlx::query_as("select local_ip, dnat_port from cloud_windows where state = any($1)")
-            .bind(live_states())
+            .bind(billing_states())
             .fetch_all(&mut *conn)
             .await?;
     let used_ips: HashSet<String> = held.iter().filter_map(|(ip, _)| ip.clone()).collect();
@@ -449,6 +473,16 @@ pub async fn create_in_tx(
             .await?;
     if existing {
         return Err(CreateRefusal::LiveWindowExists);
+    }
+    // Поздний снос сервера закрытого окна: своего места в правиле одного живого окна он не
+    // занимает, но пока сервер не убран, новый не создаётся — иначе их будет два.
+    let late: bool = sqlx::query_scalar(
+        "select exists(select 1 from cloud_windows where state = 'late_cleanup')",
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+    if late {
+        return Err(CreateRefusal::LateCleanup);
     }
     let Some(max_hourly) = pricing.max_hourly_kopecks() else {
         return Err(CreateRefusal::Invalid("profiles"));
@@ -634,7 +668,8 @@ pub async fn request_delete_in_tx(
             mark_deleting_in_tx(conn, &window, reason, now).await?;
             Ok(DeleteRequested::Deleting)
         }
-        "deleting" => Ok(DeleteRequested::Deleting),
+        // Поздний снос уже идёт: это то же удаление, только без места в правиле одного окна.
+        "deleting" | LATE_CLEANUP => Ok(DeleteRequested::Deleting),
         _ => Ok(DeleteRequested::AlreadyEnded),
     }
 }
@@ -834,7 +869,7 @@ pub fn view(window: &Window, now: DateTime<Utc>) -> CloudWindowView {
     }
 }
 
-/// Живые окна и последние `ended_limit` законченных, новые первыми.
+/// Живые окна, поздние сносы и последние `ended_limit` законченных, новые первыми.
 pub async fn list(conn: &mut PgConnection, ended_limit: i64) -> Result<Vec<Window>, sqlx::Error> {
     sqlx::query_as(
         "(select * from cloud_windows where state = any($1))
@@ -842,7 +877,7 @@ pub async fn list(conn: &mut PgConnection, ended_limit: i64) -> Result<Vec<Windo
          (select * from cloud_windows where state <> all($1) order by created_at desc, id desc limit $2)
          order by created_at desc, id desc",
     )
-    .bind(live_states())
+    .bind(billing_states())
     .bind(ended_limit)
     .fetch_all(conn)
     .await

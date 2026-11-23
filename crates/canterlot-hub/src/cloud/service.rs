@@ -457,7 +457,8 @@ impl CloudService {
             "identified" => self.step_identified(window, now).await,
             "ready" => self.step_ready(window, now).await,
             "draining" => self.step_draining(window, now).await,
-            "deleting" => self.step_deleting(window, now).await,
+            // Поздний снос сервера закрытого окна идёт тем же шагом удаления.
+            "deleting" | windows::LATE_CLEANUP => self.step_deleting(window, now).await,
             // `create_unknown` разбирает только сверка по полному списку.
             _ => Ok(()),
         }
@@ -1312,7 +1313,7 @@ impl CloudService {
         let mut window = {
             let mut conn = self.pool.acquire().await?;
             match windows::load(&mut conn, window.id).await? {
-                Some(fresh) if fresh.state == "deleting" => fresh,
+                Some(fresh) if windows::owns_server(&fresh.state) => fresh,
                 _ => return Ok(()),
             }
         };
@@ -1402,7 +1403,7 @@ impl CloudService {
         sqlx::query(
             "update cloud_windows set server_gone_at = coalesce(server_gone_at, $2),
                     next_delete_at = case when server_gone_at is null then null else next_delete_at end
-             where id = $1 and state = 'deleting'",
+             where id = $1 and state in ('deleting', 'late_cleanup')",
         )
         .bind(id)
         .bind(now)
@@ -1570,7 +1571,7 @@ impl CloudService {
                 sqlx::query(
                     "update cloud_windows set last_error = 'ownership_mismatch',
                             next_delete_at = $2
-                     where id = $1 and state = 'deleting'",
+                     where id = $1 and state in ('deleting', 'late_cleanup')",
                 )
                 .bind(window.id)
                 .bind(now + ALERT_EVERY)
@@ -1605,7 +1606,7 @@ impl CloudService {
                 sqlx::query(
                     "update cloud_windows set last_error = 'delete_lookup_failed',
                             delete_attempts = $2, next_delete_at = $3
-                     where id = $1 and state = 'deleting'",
+                     where id = $1 and state in ('deleting', 'late_cleanup')",
                 )
                 .bind(window.id)
                 .bind(attempts)
@@ -1634,7 +1635,7 @@ impl CloudService {
                             delete_attempts = $3,
                             next_delete_at = $4,
                             alert_state = alert_state || jsonb_build_object('quarantined', $5::boolean)
-                     where id = $1 and state = 'deleting'",
+                     where id = $1 and state in ('deleting', 'late_cleanup')",
                 )
                 .bind(window.id)
                 .bind(now)
@@ -1658,7 +1659,7 @@ impl CloudService {
                             last_error = case when delete_reason in ('no_paid','dnat_refused') then last_error end,
                             delete_attempts = $3,
                             next_delete_at = $4
-                     where id = $1 and state = 'deleting'",
+                     where id = $1 and state in ('deleting', 'late_cleanup')",
                 )
                 .bind(window.id)
                 .bind(now)
@@ -1676,7 +1677,7 @@ impl CloudService {
                 sqlx::query(
                     "update cloud_windows set last_error = 'needs_confirmation', delete_attempts = $2,
                             next_delete_at = $3
-                     where id = $1 and state = 'deleting'",
+                     where id = $1 and state in ('deleting', 'late_cleanup')",
                 )
                 .bind(window.id)
                 .bind(attempts)
@@ -1694,7 +1695,7 @@ impl CloudService {
                 sqlx::query(
                     "update cloud_windows set last_error = 'delete_failed', delete_attempts = $2,
                             next_delete_at = $3
-                     where id = $1 and state = 'deleting'",
+                     where id = $1 and state in ('deleting', 'late_cleanup')",
                 )
                 .bind(window.id)
                 .bind(attempts)
@@ -1793,7 +1794,7 @@ impl CloudService {
             "select distinct project_id from cloud_windows
               where state = any($1) and project_id is not null",
         )
-        .bind(windows::live_states())
+        .bind(windows::billing_states())
         .fetch_all(&self.pool)
         .await
         .map_err(|error| warn_db("cloud_reconcile_projects", &error))?;
@@ -1829,7 +1830,8 @@ impl CloudService {
         }
         let pending: bool = sqlx::query_scalar(
             "select exists(select 1 from cloud_windows
-                            where state = 'deleting' and delete_accepted_at is not null
+                            where state in ('deleting', 'late_cleanup')
+                              and delete_accepted_at is not null
                               and server_gone_at is null)",
         )
         .fetch_one(&self.pool)
@@ -1848,7 +1850,7 @@ impl CloudService {
         };
         let held: Vec<Option<i32>> =
             sqlx::query_scalar("select dnat_port from cloud_windows where state = any($1)")
-                .bind(windows::live_states())
+                .bind(windows::billing_states())
                 .fetch_all(&self.pool)
                 .await?;
         let held: std::collections::HashSet<u16> = held
@@ -1957,7 +1959,7 @@ impl CloudService {
                 }
                 // Сервера нет без принятого удаления (владелец удалил в панели): оплата
                 // сервера кончилась; окно закончит шаг удаления, когда уйдёт и адрес.
-                ("deleting", None) if window.server_id.is_some() => {
+                ("deleting" | "late_cleanup", None) if window.server_id.is_some() => {
                     if self
                         .confirm_absent(window.server_id.expect("checked"))
                         .await?
@@ -1971,7 +1973,7 @@ impl CloudService {
                 ("failed", Some(server)) if window.create_called_at.is_some() => {
                     self.reattach_late(window, server, now).await?;
                 }
-                (state, Some(server)) if !windows::LIVE.contains(&state) => {
+                (state, Some(server)) if !windows::owns_server(&state) => {
                     if current {
                         self.delete_stray(server, project, now).await?;
                     }
@@ -1989,8 +1991,9 @@ impl CloudService {
         Ok(())
     }
 
-    /// Поздний сервер возвращается своему окну: оно снова живое (`deleting`), держит бюджет
-    /// и место в правиле одного окна, а итог считается от вызова создания до подтверждённого
+    /// Поздний сервер возвращается своему окну как обязательство сноса: `late_cleanup` вне
+    /// правила одного живого окна, поэтому преемник своё место не теряет. Снос считается в
+    /// бюджете и закрывает новые создания, а итог — от вызова создания до подтверждённого
     /// отсутствия.
     async fn reattach_late(
         &self,
@@ -1999,7 +2002,7 @@ impl CloudService {
         now: DateTime<Utc>,
     ) -> Result<(), sqlx::Error> {
         let updated = sqlx::query(
-            "update cloud_windows set state = 'deleting', server_id = $2,
+            "update cloud_windows set state = 'late_cleanup', server_id = $2,
                     final_cost_kopecks = null, delete_confirmed_at = null, server_gone_at = null,
                     delete_requested_at = $3, delete_reason = 'late_create', delete_accepted_at = null,
                     delete_attempts = 0, next_delete_at = $3, last_error = 'late_create'

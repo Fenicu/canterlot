@@ -1309,6 +1309,11 @@ async fn automatic_start_alert_is_keyed_by_the_window_not_the_month(pool: PgPool
     let at = t0 + TimeDelta::minutes(12);
     rig.observe_at(runner, at).await;
     rig.service.tick(at).await;
+    // Поздний сервер закрытого окна убран в этом же проходе, но новый создаётся только
+    // следующим: пока поздний снос открыт, создания закрыты.
+    let at = t0 + TimeDelta::minutes(14);
+    rig.observe_at(runner, at).await;
+    rig.service.tick(at).await;
     assert_eq!(
         sqlx::query_scalar::<_, i64>("select count(*) from cloud_windows")
             .fetch_one(&rig.pool)

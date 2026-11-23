@@ -2589,19 +2589,19 @@ async fn servers_of_closed_windows_are_strays_too(pool: PgPool) -> TestResult {
     rig.tick(t0 + TimeDelta::minutes(15)).await;
     let window = rig.window(id).await;
     assert_eq!(
-        window.state, "deleting",
-        "reattached to its original window"
+        window.state, "late_cleanup",
+        "reattached to its original window outside the live slot"
     );
     assert_eq!(window.server_id, Some(late));
     assert_eq!(window.delete_reason.as_deref(), Some("late_create"));
     assert_eq!(rig.deletes(), 1, "deleted through the normal path");
     assert!(matches!(
         rig.try_create(60).await,
-        Err(CreateRefusal::LiveWindowExists)
+        Err(CreateRefusal::LateCleanup)
     ));
-    // Пока удаление не подтверждено, окно остаётся живым, а сверка — не успешной.
+    // Пока удаление не подтверждено, окно остаётся обязательством, а сверка — не успешной.
     rig.tick(t0 + TimeDelta::minutes(16)).await;
-    assert_eq!(rig.state(id).await, "deleting");
+    assert_eq!(rig.state(id).await, "late_cleanup");
     // Владелец удалил сервер в панели: отсутствие подтверждено, итог — от вызова создания.
     rig.fake.control().remove_server(late);
     rig.tick(t0 + TimeDelta::minutes(17)).await;
@@ -2609,6 +2609,87 @@ async fn servers_of_closed_windows_are_strays_too(pool: PgPool) -> TestResult {
     assert_eq!(window.state, "ended");
     assert!(window.server_gone_at.is_some());
     assert_eq!(window.final_cost_kopecks, Some(HOURLY));
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_late_cleanup_leaves_the_live_slot_to_the_successor_and_is_billed(
+    pool: PgPool,
+) -> TestResult {
+    let rig = rig(pool).await;
+    enable_pushes(&rig.pool).await;
+    let now = now_micros();
+    let old = raw_window(
+        &rig.pool,
+        "failed",
+        None,
+        Some(now - TimeDelta::minutes(30)),
+    )
+    .await;
+    let late = rig
+        .fake
+        .control()
+        .add_server(PROJECT, &windows::server_name(old));
+    // Преемник уже занял единственное живое место.
+    let successor = raw_window(&rig.pool, "ready", None, Some(now - TimeDelta::minutes(5))).await;
+    // Удаление принято, но сервер ещё виден в списке: обязательство остаётся открытым.
+    rig.fake.control().delete = DeleteMode::QuarantineListed;
+    rig.tick(now).await;
+    let window = rig.window(old).await;
+    assert_eq!(
+        window.state, "late_cleanup",
+        "the cleanup does not compete for the live slot"
+    );
+    assert!(window.delete_accepted_at.is_some());
+    assert_eq!(rig.deletes(), 1, "deleted through the normal path");
+    assert_eq!(
+        rig.state(successor).await,
+        "ready",
+        "the successor keeps its window"
+    );
+    // Поздний снос считается в расходе по резерву рядом с резервом преемника.
+    let mut conn = rig.pool.acquire().await?;
+    let spent = windows::spent_in_month(&mut conn, &windows::month_of(now)).await?;
+    drop(conn);
+    assert_eq!(spent, 2 * 3 * HOURLY, "both reservations are spent");
+    // Сервер пропал из полного списка: окно заканчивается итогом от вызова создания.
+    rig.fake.control().remove_server(late);
+    rig.fake.control().delete = DeleteMode::Ok;
+    rig.tick(now + TimeDelta::minutes(1)).await;
+    let window = rig.window(old).await;
+    assert_eq!(window.state, "ended");
+    assert!(window.server_gone_at.is_some());
+    assert_eq!(
+        window.final_cost_kopecks,
+        Some(HOURLY),
+        "the cost runs from the create call to the confirmed absence"
+    );
+    assert_eq!(rig.state(successor).await, "ready");
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn an_open_late_cleanup_blocks_new_creates(pool: PgPool) -> TestResult {
+    let rig = rig(pool).await;
+    let now = now_micros();
+    let old = raw_window(
+        &rig.pool,
+        "failed",
+        None,
+        Some(now - TimeDelta::minutes(30)),
+    )
+    .await;
+    rig.fake
+        .control()
+        .add_server(PROJECT, &windows::server_name(old));
+    rig.fake.control().delete = DeleteMode::QuarantineListed;
+    rig.tick(now).await;
+    assert_eq!(rig.state(old).await, "late_cleanup");
+    // Живого окна нет, но сервер старого окна ещё оплачивается: новый не создаётся.
+    assert!(matches!(
+        rig.try_create(60).await,
+        Err(CreateRefusal::LateCleanup)
+    ));
     Ok(())
 }
 
