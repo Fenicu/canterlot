@@ -9,8 +9,8 @@ use canterlot_hub::cloud::price::{Sizing, hourly_kopecks, monthly_kopecks};
 use canterlot_hub::cloud::rate_limit::RateLimit;
 use canterlot_hub::cloud::{
     CloudProvider as _, CreateOutcome, CreateServer, DeleteOutcome, DnatCreateOutcome,
-    DnatRuleRequest, ErrorKind, ListError, ServerLookup, ServerStatus, TimewebConfig,
-    TimewebProvider,
+    DnatRuleRequest, ErrorKind, ListError, ProviderError, ServerLookup, ServerStatus,
+    TimewebConfig, TimewebProvider,
 };
 use serde_json::json;
 use tracing_subscriber::fmt::MakeWriter;
@@ -778,6 +778,77 @@ async fn pages_that_do_not_add_up_to_the_total_are_incomplete() {
         "{error:?}"
     );
 }
+
+#[tokio::test]
+async fn a_total_changing_between_pages_fails_the_listing() {
+    let rig = rig().await;
+    fill_project(&rig, 4);
+    {
+        let mut state = rig.fake.control();
+        state.list_page_cap = Some(2);
+        // Первая страница заявила 5, вторая — 4: список менялся во время обхода.
+        state.list_total_sequence = [5, 4].into_iter().collect();
+    }
+    let error = rig
+        .provider
+        .list_project_servers(PROJECT)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error,
+        ListError::Incomplete {
+            expected: 5,
+            got: 4
+        }
+    );
+}
+
+#[tokio::test]
+async fn a_server_without_a_name_or_with_an_empty_name_fails_the_listing() {
+    let rig = rig().await;
+    rig.fake.control().add_server(PROJECT, "");
+    let error = rig
+        .provider
+        .list_project_servers(PROJECT)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            ListError::Page {
+                error: ProviderError {
+                    kind: ErrorKind::Malformed,
+                    ..
+                },
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+
+    let rig = rig_with(|_| {}).await;
+    let id = rig.fake.control().add_server(PROJECT, "runner");
+    rig.fake.control().servers.get_mut(&id).unwrap().hide_name = true;
+    let error = rig
+        .provider
+        .list_project_servers(PROJECT)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            ListError::Page {
+                error: ProviderError {
+                    kind: ErrorKind::Malformed,
+                    ..
+                },
+                ..
+            }
+        ),
+        "{error:?}"
+    );
+}
+
 
 #[tokio::test]
 async fn servers_appear_in_the_listing_only_after_a_few_listings() {

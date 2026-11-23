@@ -280,6 +280,7 @@ impl TimewebProvider {
         let mut items: Vec<Value> = Vec::new();
         let mut seen: HashSet<String> = HashSet::new();
         let mut offset = 0u64;
+        let mut declared: Option<u64> = None;
         for _ in 0..MAX_PAGES {
             let page_error = |error: ProviderError| ListError::Page { offset, error };
             let query = [
@@ -308,6 +309,9 @@ impl TimewebProvider {
                     "page has no meta.total",
                 ))
             })?;
+            // Заявленное общее число не может меняться между страницами: такой список
+            // собирался в разные моменты и целым не считается.
+            let expected = *declared.get_or_insert(total);
 
             let mut fresh = 0u64;
             for item in page {
@@ -320,6 +324,9 @@ impl TimewebProvider {
                 }
             }
             let got = seen.len() as u64;
+            if expected != total {
+                return Err(ListError::Incomplete { expected, got });
+            }
             if got >= total {
                 // Больше заявленного значит, что список менялся во время обхода: страницы
                 // могли разъехаться, и целым такой список не считается.
@@ -459,7 +466,12 @@ fn parse_summary(value: &Value) -> Result<ServerSummary, ProviderError> {
         id: value["id"]
             .as_i64()
             .ok_or_else(|| malformed("server has no id"))?,
-        name: value["name"].as_str().unwrap_or_default().to_owned(),
+        // Пустое имя — такой же мусор, как отсутствующее: по имени сверка узнаёт окно.
+        name: value["name"]
+            .as_str()
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| malformed("server has no name"))?
+            .to_owned(),
         status: ServerStatus::from_api(value["status"].as_str().unwrap_or_default()),
     })
 }

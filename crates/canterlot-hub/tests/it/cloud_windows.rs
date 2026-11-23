@@ -1718,7 +1718,36 @@ async fn a_failed_or_partial_listing_changes_nothing(pool: PgPool) -> TestResult
     Ok(())
 }
 
-// ───────── Жёсткий предел ─────────
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_listing_gap_does_not_close_a_server_that_still_answers(pool: PgPool) -> TestResult {
+    let rig = rig(pool).await;
+    let _carrier = rig.carrier_session();
+    let t0 = now_micros();
+    let id = rig.create(60).await;
+    rig.tick(t0).await;
+    assert_eq!(rig.state(id).await, "identified");
+    let server = rig.window(id).await.server_id.unwrap();
+    // Список проекта сервер не показывает, а прямой запрос по номеру — показывает.
+    rig.fake
+        .control()
+        .servers
+        .get_mut(&server)
+        .unwrap()
+        .hidden_polls_left = 1_000;
+    rig.tick(t0 + TimeDelta::minutes(11)).await;
+    assert_eq!(
+        rig.state(id).await,
+        "identified",
+        "absence in a listing alone is not proof"
+    );
+    // Сервер действительно исчез: теперь окно закрывается.
+    rig.fake.control().remove_server(server);
+    rig.tick(t0 + TimeDelta::minutes(17)).await;
+    assert_eq!(rig.state(id).await, "gone");
+    Ok(())
+}
+
+
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn the_hard_cap_drains_cancels_then_bounds_teardown_and_deletes(pool: PgPool) -> TestResult {
