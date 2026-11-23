@@ -151,7 +151,9 @@ impl CloudState {
     }
 
     /// Применяет команду `AttachRunner`: тот же `window_id` не меняет ничего, новый заменяет
-    /// прежнее подключение этой машины. Состояние пишется до ответа хабу.
+    /// прежнее подключение этой машины. Запись на диск идёт первой: пока она не удалась, карта
+    /// прежняя, присмотру ничего не видно, а хаб получает повторяемый отказ и повторит команду,
+    /// которая на этот раз действительно запишет подключение.
     pub fn apply(&self, attachment: Attachment) -> Result<(), AttachError> {
         if !valid(&attachment) {
             return Err(AttachError::Invalid);
@@ -181,9 +183,11 @@ impl CloudState {
             if map.get(&attachment.machine_id) == Some(&attachment) {
                 return Ok(());
             }
-            map.insert(attachment.machine_id, attachment);
+            let mut next = map.clone();
+            next.insert(attachment.machine_id, attachment);
+            self.persist_map(&next)?;
+            *map = next;
         }
-        self.persist()?;
         self.publish();
         Ok(())
     }
@@ -300,7 +304,13 @@ impl CloudState {
     }
 
     fn persist(&self) -> Result<(), AttachError> {
-        let list: Vec<Attachment> = self.attachments.lock().unwrap().values().cloned().collect();
+        self.persist_map(&self.attachments.lock().unwrap())
+    }
+
+    /// Записывает данную карту целиком, не трогая память: так `apply` показывает присмотру
+    /// только то, что уже легло на диск.
+    fn persist_map(&self, map: &BTreeMap<Uuid, Attachment>) -> Result<(), AttachError> {
+        let list: Vec<&Attachment> = map.values().collect();
         if let Some(parent) = self.file.parent() {
             std::fs::create_dir_all(parent).map_err(|_| AttachError::Io)?;
         }
@@ -384,6 +394,36 @@ mod tests {
         };
         resumed.apply(second.clone()).unwrap();
         assert_eq!(resumed.attachments(), vec![second]);
+    }
+
+    /// Подключение пишется на диск до того, как попасть в память и стать видимым присмотру.
+    /// Сбой записи оставляет карту прежней, а повтор после починки хранилища действительно
+    /// записывает подключение: иначе хаб получил бы отказ, а рестарт воркера потерял бы окно.
+    #[test]
+    fn a_failed_persist_leaves_the_map_unchanged_and_a_retry_persists() {
+        let dir = tempfile::Builder::new()
+            .prefix("cloud-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let config = CloudConfig {
+            data_dir: dir.path().to_path_buf(),
+            ..CloudConfig::default()
+        };
+        let state = CloudState::open(config.clone());
+        let first = attachment("window-1");
+        // Каталог на месте файла состояния: атомарная замена не удаётся.
+        let blocked = dir.path().join("cloud/attachments.json");
+        std::fs::create_dir_all(&blocked).unwrap();
+        assert!(matches!(state.apply(first.clone()), Err(AttachError::Io)));
+        assert!(state.attachments().is_empty());
+        assert!(state.specs().is_empty());
+        let resumed = CloudState::open(config.clone());
+        assert!(resumed.attachments().is_empty());
+        std::fs::remove_dir(&blocked).unwrap();
+        state.apply(first.clone()).unwrap();
+        assert_eq!(state.attachments(), vec![first.clone()]);
+        let resumed = CloudState::open(config);
+        assert_eq!(resumed.attachments(), vec![first]);
     }
 
     #[test]
