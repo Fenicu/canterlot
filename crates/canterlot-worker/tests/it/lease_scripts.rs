@@ -103,7 +103,7 @@ fn dry(name: &str, args: &[&str], bin: Option<&Path>, env: &[(&str, &str)]) -> S
 }
 
 #[test]
-fn check_scripts_pick_gate_only_for_all_and_stack() {
+fn check_scripts_pick_gate_only_for_all() {
     let dir = tempfile::tempdir().unwrap();
     let bin = fake_worker(dir.path(), true);
     let cases: &[(&str, &[&str], &str)] = &[
@@ -115,7 +115,7 @@ fn check_scripts_pick_gate_only_for_all_and_stack() {
         ("check.sh", &["--fast", "-E", "binary(ws)"], "build"),
         ("check.sh", &["--base", "main"], "build"),
         ("check.sh", &["--fast", "--all"], "gate"),
-        ("check-web.sh", &["--stack"], "gate"),
+        ("check-web.sh", &["--stack"], "build"),
         ("check-web.sh", &[], "build"),
         ("check-web.sh", &["--fast"], "build"),
         ("check-web.sh", &["--fast", "--base", "main"], "build"),
@@ -201,7 +201,7 @@ fn check_sh_reexecs_itself_under_lease_run() {
             "lease",
             "run",
             "--kind",
-            "gate",
+            "build",
             "--label",
             "check-web.sh --stack",
             "--",

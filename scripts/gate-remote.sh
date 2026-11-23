@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Полный гейт Canterlot (scripts/check.sh --all + scripts/check-web.sh --stack)
-# в контейнере Debian 13 на сборочной машине: прежняя трёхшаговая
-# последовательность /tmp/gate/run.sh (scripts/gate.sh на VM гоняет её без повторов).
+# Полный гейт Canterlot (scripts/check.sh --all + scripts/check-web.sh)
+# в контейнере Debian 13 на сборочной машине: прежняя последовательность
+# /tmp/gate/run.sh (scripts/gate.sh на VM гоняет её без повторов).
 #
 #   scripts/gate-remote.sh [REV]            REV на CANTERLOT_BUILD_HOST (по умолчанию canterlot-build)
 #   scripts/gate-remote.sh [REV] --local    то же на местном docker (для проверки)
@@ -10,9 +10,9 @@
 #   1. отправляет коммит в bare-репозиторий ~/canterlot.git как refs/gate/<sha12>
 #      и создаёт там отсоединённую рабочую копию ~/gate/src-<sha12>;
 #   2. собирает (или переиспользует) образ canterlot-gate:<hash Dockerfile +
-#      rust-toolchain.toml + версия Playwright из web/package-lock.json>;
+#      rust-toolchain.toml>;
 #   3. запускает контейнер от uid хоста с кэшами
-#      ~/gate/cache/{cargo,target,npm,playwright};
+#      ~/gate/cache/{cargo,target,npm};
 #   4. переносит result.txt и логи в ${CANTERLOT_GATE_OUT:-/tmp/gate-remote}/<sha12>;
 #   5. убирает рабочую копию (git worktree remove --force) и refs/gate/<sha12>.
 #
@@ -78,13 +78,10 @@ else
 fi
 rust_version=$(git show "$commit:rust-toolchain.toml" | sed -n 's/^channel = "\(.*\)"/\1/p')
 [[ -n "$rust_version" ]] || die "в rust-toolchain.toml коммита $sha12 нет channel"
-playwright_version=$(git show "$commit:web/package-lock.json" \
-    | jq -r '.packages["node_modules/playwright-core"].version // empty')
-[[ -n "$playwright_version" ]] || die "в web/package-lock.json коммита $sha12 нет playwright-core"
-image_tag=$({ cat "$dockerfile"; git show "$commit:rust-toolchain.toml"; printf '%s\n' "$playwright_version"; } \
+image_tag=$({ cat "$dockerfile"; git show "$commit:rust-toolchain.toml"; } \
     | sha256sum | cut -c1-12)
 image="canterlot-gate:$image_tag"
-log "коммит $sha12 ($rev), режим $mode, образ $image (Rust $rust_version, Playwright $playwright_version)"
+log "коммит $sha12 ($rev), режим $mode, образ $image (Rust $rust_version)"
 phase_done "предусловия"
 
 # --- удалённая машина ---
@@ -187,7 +184,7 @@ phase_done "рабочая копия"
 # --- образ ---
 phase "образ гейта"
 if [[ "$mode" == remote ]]; then
-    remote "mkdir -p $(q "$remote_tools") $(q "$cache_root/cargo") $(q "$cache_root/target") $(q "$cache_root/npm") $(q "$cache_root/playwright") $(q "$cache_root/tmp")" \
+    remote "mkdir -p $(q "$remote_tools") $(q "$cache_root/cargo") $(q "$cache_root/target") $(q "$cache_root/npm") $(q "$cache_root/tmp")" \
         || die "не удалось создать $remote_tools и кэши"
     # Dockerfile и in-container.sh берутся из ЭТОЙ рабочей копии: коммит может быть
     # старше самого гейта.
@@ -199,19 +196,18 @@ if [[ "$mode" == remote ]]; then
     if remote "docker image inspect $(q "$image") >/dev/null 2>&1"; then
         log "образ уже есть на $host"
     else
-        cmd=$(printf 'docker build -t %q --build-arg %q --build-arg %q -f %q %q' \
-            "$image" "RUST_VERSION=$rust_version" "PLAYWRIGHT_VERSION=$playwright_version" \
+        cmd=$(printf 'docker build -t %q --build-arg %q -f %q %q' \
+            "$image" "RUST_VERSION=$rust_version" \
             "$remote_tools/Dockerfile" "$remote_tools")
         remote "$cmd" || die "не удалось собрать образ на $host"
     fi
 else
-    mkdir -p "$cache_root/cargo" "$cache_root/target" "$cache_root/npm" "$cache_root/playwright" "$cache_root/tmp"
+    mkdir -p "$cache_root/cargo" "$cache_root/target" "$cache_root/npm" "$cache_root/tmp"
     if "$docker_cmd" image inspect "$image" >/dev/null 2>&1; then
         log "образ уже есть на этой машине"
     else
         "$docker_cmd" build -t "$image" \
             --build-arg "RUST_VERSION=$rust_version" \
-            --build-arg "PLAYWRIGHT_VERSION=$playwright_version" \
             -f "$dockerfile" "$repo/docker/gate" || die "не удалось собрать образ"
     fi
 fi
@@ -220,7 +216,7 @@ phase_done "образ"
 # --- гейт в контейнере ---
 # Ограничения: у 7950X 32 потока и 61 ГБ. --cpus 30 оставляет хосту два потока на
 # ssh, dockerd и повседневную работу; --memory 48g оставляет ~13 ГБ запаса
-# (гейт на VM укладывается в ~10 ГБ); pids 8192 — Playwright, супервизоры
+# (гейт на VM укладывается в ~10 ГБ); pids 8192 — супервизоры
 # исполнений и nextest вместе берут тысячи процессов. --init нужен, потому что
 # PID 1 в контейнере иначе не пожинает осиротевших потомков, а они считаются в
 # pids-limit. --cap-add SYS_PTRACE — тесты долговечности каталогов запускают
@@ -230,15 +226,13 @@ run_args=(
     --rm --init
     --user "${uid}:${gid}"
     --cpus 30 --memory 48g --pids-limit 8192
-    # Браузеры Playwright держат общую память в /dev/shm, а docker по умолчанию
-    # даёт 64 МБ: с ними страницы не доходят до [data-ready], и тесты падают по
-    # таймауту.
+    # Параллельные тесты держат общую память в /dev/shm, а docker по умолчанию
+    # даёт всего 64 МБ.
     --shm-size=2g
     --cap-add SYS_PTRACE
     # /tmp — отдельный каталог кэша, а не overlay контейнера и не tmpfs: на
-    # overlayfs одновременные Firefox-воркеры не успевают отрисовать страницу до
-    # [data-ready], а страницы tmpfs нельзя выбросить без swap и запуск двойников
-    # CLI в Rust-тестах растягивается до таймаута. Обычная ФС хоста держит и то,
+    # tmpfs запуск двойников CLI в Rust-тестах растягивается до таймаута, а
+    # overlayfs мешает параллельным тестам. Обычная ФС хоста держит и то,
     # и другое; каталог чистит in-container.sh в начале прогона.
     -v "$cache_root/tmp:/tmp"
     -v "$src:/src"
@@ -250,12 +244,10 @@ run_args=(
     -v "$cache_root/cargo:/cache/cargo"
     -v "$cache_root/target:/src/target"
     -v "$cache_root/npm:/cache/npm"
-    -v "$cache_root/playwright:/cache/playwright"
     -v "$src/.gate-out:/out"
     -v "$script_path:/build/in-container.sh:ro"
     -e CARGO_HOME=/cache/cargo
     -e npm_config_cache=/cache/npm
-    -e PLAYWRIGHT_BROWSERS_PATH=/cache/playwright
     -w /src
 )
 gate_code=0

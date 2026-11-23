@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Kind {
-    /// Весь станок: `check.sh --all`, `check-web.sh --stack`, гейт оркестратора.
+    /// Весь станок: `check.sh --all` и гейт оркестратора.
     Gate,
     /// Один слот: всё остальное.
     Build,

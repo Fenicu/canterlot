@@ -241,7 +241,7 @@ def scan_tree(root):
     if crates.is_dir():
         files += sorted(crates.glob('*/tests/**/*.rs'))
         files += sorted(crates.glob('*/src/**/*.rs'))
-    for sub in ('tests', 'e2e'):
+    for sub in ('tests',):
         directory = root / 'web' / sub
         if directory.is_dir():
             files += sorted(directory.rglob('*.ts'))
