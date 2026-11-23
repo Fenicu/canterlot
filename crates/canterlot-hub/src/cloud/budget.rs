@@ -58,6 +58,8 @@ pub struct BudgetView {
     pub revision: i64,
     pub provider_block_code: Option<String>,
     pub provider_block_at: Option<DateTime<Utc>>,
+    /// Облако настроено на хабе: без этого настройки бюджета показывать нечего.
+    pub configured: bool,
     /// Профили из конфигурации с текущей ценой часа (только чтение).
     pub profiles: Vec<ProfileView>,
 }
@@ -108,6 +110,7 @@ pub async fn update_in_tx(conn: &mut PgConnection, update: &Update) -> Result<i6
 pub async fn view(
     conn: &mut PgConnection,
     pricing: Option<&Pricing>,
+    configured: bool,
 ) -> Result<BudgetView, sqlx::Error> {
     #[derive(sqlx::FromRow)]
     struct Row {
@@ -137,6 +140,7 @@ pub async fn view(
         revision: row.revision,
         provider_block_code: row.provider_block_code,
         provider_block_at: row.provider_block_at,
+        configured,
         profiles,
     })
 }

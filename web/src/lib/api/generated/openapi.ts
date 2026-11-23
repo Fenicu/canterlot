@@ -2763,6 +2763,8 @@ export interface components {
         /** @description Всё, что показывает экран бюджета владельца и инструмент `runners_list`. */
         BudgetView: {
             auto_mode: boolean;
+            /** @description Облако настроено на хабе: без этого настройки бюджета показывать нечего. */
+            configured: boolean;
             /** @description Месяц, за который посчитан расход (`YYYY-MM`, Европа/Москва). */
             month: string;
             /** Format: int64 */
@@ -6116,6 +6118,11 @@ export interface components {
             is_default: boolean;
         };
         WindowList: {
+            /**
+             * @description Облако настроено на хабе (`[runners.cloud]`): без него окна не создаются и форма
+             *     запуска в PWA не показывается.
+             */
+            configured: boolean;
             /** @description Живые окна и последние 20 законченных, новые первыми. */
             items: components["schemas"]["CloudWindowView"][];
             /** Format: date-time */

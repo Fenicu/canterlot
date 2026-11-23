@@ -116,6 +116,10 @@ async fn the_list_has_live_windows_and_the_last_twenty_ended_with_costs(pool: Pg
     }
     let live = api.insert("ready", 5, Some(777)).await;
     let list = api.list().await;
+    assert_eq!(
+        list["configured"], false,
+        "без [runners.cloud] окна не создаются"
+    );
     let items = list["items"].as_array().unwrap();
     assert_eq!(items.len(), 21, "one live and the last 20 ended");
     assert_eq!(items[0]["id"], live.to_string(), "the newest first");

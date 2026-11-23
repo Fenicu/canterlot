@@ -411,6 +411,7 @@ async fn budget_http_reads_spent_and_remaining_and_put_checks_revision(pool: PgP
     assert_eq!(view["remaining_kopecks"], 7_000);
     assert_eq!(view["revision"], 0);
     assert_eq!(view["auto_mode"], false);
+    assert_eq!(view["configured"], true, "облако настроено на хабе");
     assert_eq!(view["profiles"][0]["hourly_kopecks"], HOURLY);
 
     let body = json!({"monthly_budget_kopecks": 20_000, "auto_mode": true, "base_revision": 0});
