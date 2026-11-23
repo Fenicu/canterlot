@@ -49,6 +49,9 @@ const DELETE_CONFIRM_AFTER: TimeDelta = TimeDelta::minutes(10);
 const ALERT_EVERY: TimeDelta = TimeDelta::minutes(30);
 /// После стольких неудач удаления идут пуши.
 const DELETE_FAILURES_BEFORE_ALERT: i32 = 3;
+/// Неопределённый ответ на создание DNAT: столько порт и адрес остаются занятыми, прежде
+/// чем полный список без правила позволит повторить вызов.
+const DNAT_AMBIGUITY: TimeDelta = TimeDelta::minutes(10);
 /// Окно в `draining` задерживается сверх предела на доработку: так долго терпим, прежде чем
 /// счесть это просрочкой, а не штатным сносом.
 const OVERRUN_SLACK: TimeDelta = TimeDelta::minutes(10);
@@ -764,14 +767,19 @@ impl CloudService {
                 {
                     self.adopt_dnat(window.id, &rule.id).await?;
                 } else {
-                    // Полный список подтвердил отсутствие правила: первый вызов точно не
-                    // создал его, поэтому повтор для того же порта безопасен.
-                    sqlx::query(
-                        "update cloud_windows set dnat_create_attempted_at = null where id = $1",
-                    )
-                    .bind(window.id)
-                    .execute(&self.pool)
-                    .await?;
+                    // Полный список подтвердил отсутствие правила, но только по истечении
+                    // срока неопределённости: правило могло появиться с задержкой.
+                    let old_enough = window
+                        .dnat_create_attempted_at
+                        .is_some_and(|at| now - at >= DNAT_AMBIGUITY);
+                    if old_enough {
+                        sqlx::query(
+                            "update cloud_windows set dnat_create_attempted_at = null where id = $1",
+                        )
+                        .bind(window.id)
+                        .execute(&self.pool)
+                        .await?;
+                    }
                 }
             }
             Err(error) => {
@@ -1205,14 +1213,29 @@ impl CloudService {
     /// DNAT-правило окна после удаления сервера. Открытое правило — обязательство: окно
     /// остаётся живым, пока полный список правил роутера не подтвердит его отсутствие.
     async fn finish_dnat(&self, window: &Window, now: DateTime<Utc>) -> Result<(), sqlx::Error> {
-        if window.dnat_rule_id.is_none() || window.dnat_gone_at.is_some() {
-            return self.end(&window.id, "ended", now).await;
+        let terminal = if window.delete_reason.as_deref() == Some("gone") {
+            "gone"
+        } else {
+            "ended"
+        };
+        if window.dnat_gone_at.is_some() {
+            return self.end(&window.id, terminal, now).await;
         }
-        let rule_id = window.dnat_rule_id.as_deref().expect("checked above");
         let router = window
             .router_id
             .as_deref()
             .unwrap_or(&self.config.router_id);
+        let Some(port) = window
+            .dnat_port
+            .and_then(|port| u16::try_from(port).ok())
+        else {
+            return self.end(&window.id, terminal, now).await;
+        };
+        let local_ip = window.local_ip.as_deref().unwrap_or_default();
+        let public_ip = window
+            .router_ip
+            .as_deref()
+            .unwrap_or(&self.config.router_ip);
         let list = match self.provider.list_dnat_rules(router).await {
             Ok(list) => list,
             Err(error) => {
@@ -1220,6 +1243,37 @@ impl CloudService {
                 return Ok(());
             }
         };
+        // Правило могло быть создано неопределённым ответом: ищем его по полному набору
+        // `router_ip:port -> local_ip:22`, tcp.
+        let mut rule_id = window.dnat_rule_id.clone();
+        if rule_id.is_none() {
+            let Some(attempted) = window.dnat_create_attempted_at else {
+                // Вызова не было: обязательства нет.
+                return self.end(&window.id, terminal, now).await;
+            };
+            match list
+                .iter()
+                .find(|rule| rule.matches(public_ip, port, local_ip))
+            {
+                Some(rule) => {
+                    self.adopt_dnat(window.id, &rule.id).await?;
+                    rule_id = Some(rule.id.clone());
+                }
+                None if now - attempted >= DNAT_AMBIGUITY => {
+                    sqlx::query(
+                        "update cloud_windows set dnat_gone_at = coalesce(dnat_gone_at, $2)
+                         where id = $1",
+                    )
+                    .bind(window.id)
+                    .bind(now)
+                    .execute(&self.pool)
+                    .await?;
+                    return self.end(&window.id, terminal, now).await;
+                }
+                None => return Ok(()),
+            }
+        }
+        let rule_id = rule_id.expect("set above");
         if !list.iter().any(|rule| rule.id == rule_id) {
             // Полный список без правила: обязательство закрыто.
             sqlx::query(
@@ -1230,7 +1284,7 @@ impl CloudService {
             .bind(now)
             .execute(&self.pool)
             .await?;
-            return self.end(&window.id, "ended", now).await;
+            return self.end(&window.id, terminal, now).await;
         }
         let retry_due = window.next_dnat_delete_at.is_none_or(|at| at <= now)
             && window
@@ -1240,7 +1294,7 @@ impl CloudService {
             return Ok(());
         }
         let attempts = window.dnat_delete_attempts.saturating_add(1);
-        match self.provider.delete_dnat_rule(router, rule_id).await {
+        match self.provider.delete_dnat_rule(router, &rule_id).await {
             DeleteOutcome::Deleted { .. } | DeleteOutcome::AlreadyGone => {
                 sqlx::query(
                     "update cloud_windows set dnat_delete_accepted_at = $2,
@@ -1264,7 +1318,7 @@ impl CloudService {
                     .bind(now)
                     .execute(&self.pool)
                     .await?;
-                    return self.end(&window.id, "ended", now).await;
+                    return self.end(&window.id, terminal, now).await;
                 }
             }
             DeleteOutcome::NeedsConfirmation | DeleteOutcome::Failed { .. } => {
@@ -1748,7 +1802,9 @@ impl CloudService {
         Ok(())
     }
 
-    /// Сервер окна пропал из полного списка, хотя удаление не запрашивалось.
+    /// Сервер окна пропал из полного списка, хотя удаление не запрашивалось. Если за окном
+    /// осталось DNAT-правило (или его вызов), окно не становится терминальным: оно уходит в
+    /// `deleting` и освобождает порт только после подтверждённого отсутствия правила.
     async fn gone(&self, window: &Window, now: DateTime<Utc>) -> Result<(), sqlx::Error> {
         let id = window.id;
         let ended = crate::db::in_tx(&self.pool, move |conn| {
@@ -1759,17 +1815,34 @@ impl CloudService {
                 if !matches!(window.state.as_str(), "identified" | "ready" | "draining") {
                     return Ok(false);
                 }
-                let cost = ledger_cost(&window, now);
-                sqlx::query(
-                    "update cloud_windows set state = 'gone', final_cost_kopecks = $2,
-                            delete_confirmed_at = $3, last_error = 'server_missing'
-                     where id = $1",
-                )
-                .bind(id)
-                .bind(cost)
-                .bind(now)
-                .execute(&mut *conn)
-                .await?;
+                let dnat_open = window.dnat_rule_id.is_some()
+                    || window.dnat_create_attempted_at.is_some();
+                if dnat_open {
+                    sqlx::query(
+                        "update cloud_windows set state = 'deleting', server_gone_at = $2,
+                                delete_requested_at = $2, delete_reason = 'gone',
+                                next_delete_at = null, delete_accepted_at = null,
+                                final_cost_kopecks = null, last_error = 'server_missing'
+                         where id = $1",
+                    )
+                    .bind(id)
+                    .bind(now)
+                    .execute(&mut *conn)
+                    .await?;
+                } else {
+                    let cost = ledger_cost(&window, now);
+                    sqlx::query(
+                        "update cloud_windows set state = 'gone', server_gone_at = $2,
+                                final_cost_kopecks = $3, delete_confirmed_at = $2,
+                                last_error = 'server_missing'
+                         where id = $1",
+                    )
+                    .bind(id)
+                    .bind(now)
+                    .bind(cost)
+                    .execute(&mut *conn)
+                    .await?;
+                }
                 sqlx::query(
                     "update commands set delivery_state = 'completed', completed_at = coalesce(completed_at, now())
                      where kind = 'attach_runner' and payload->>'window_id' = $1 and delivery_state <> 'completed'",

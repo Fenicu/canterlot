@@ -1341,6 +1341,86 @@ async fn an_ambiguous_dnat_answer_is_adopted_from_the_listing_without_a_second_p
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn an_ambiguous_dnat_keeps_the_mapping_until_the_ambiguity_window(
+    pool: PgPool,
+) -> TestResult {
+    let rig = rig(pool).await;
+    let _carrier = rig.carrier_session();
+    // Ответ 5xx: правило могло появиться, но его нет в списке.
+    rig.fake.control().dnat_create = crate::support::fake_timeweb::DnatCreateMode::Status(500);
+    let t0 = now_micros();
+    let id = rig.create(120).await;
+    rig.tick(t0).await;
+    rig.tick(t0 + TimeDelta::seconds(1)).await;
+    let window = rig.window(id).await;
+    assert_eq!(window.dnat_rule_id, None);
+    assert!(window.dnat_create_attempted_at.is_some());
+    assert_eq!(rig.dnat_posts(), 1);
+    // Порт и адрес остаются за окном, второго POST нет весь срок неопределённости.
+    for minutes in [1, 5, 9] {
+        rig.tick(t0 + TimeDelta::minutes(minutes)).await;
+        assert_eq!(rig.dnat_posts(), 1, "after {minutes} min");
+        assert_eq!(rig.window(id).await.dnat_port, Some(22100));
+    }
+    // Полный список без правила дольше срока: вызов можно повторить.
+    rig.tick(t0 + TimeDelta::minutes(11)).await;
+    assert!(rig.window(id).await.dnat_create_attempted_at.is_none());
+    rig.fake.control().dnat_create = crate::support::fake_timeweb::DnatCreateMode::Ok;
+    rig.tick(t0 + TimeDelta::minutes(11) + TimeDelta::seconds(1))
+        .await;
+    assert_eq!(rig.dnat_posts(), 2);
+    assert!(rig.window(id).await.dnat_rule_id.is_some());
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_server_gone_by_hand_keeps_the_window_open_until_its_dnat_rule_is_gone(
+    pool: PgPool,
+) -> TestResult {
+    let rig = rig(pool).await;
+    enable_pushes(&rig.pool).await;
+    let now = now_micros();
+    use crate::support::fake_timeweb::FakeDnatRule;
+    let id = raw_window(&rig.pool, "ready", Some(888), Some(now - TimeDelta::minutes(20)))
+        .await;
+    rig.fake
+        .control()
+        .dnat_rules
+        .push(FakeDnatRule {
+            id: "dnat-gone".to_owned(),
+            local_ip: "192.0.2.10".to_owned(),
+            local_port: "22".to_owned(),
+            public_ip: ROUTER_IP.to_owned(),
+            public_port: "22100".to_owned(),
+            protocol: "tcp".to_owned(),
+        });
+    sqlx::query("update cloud_windows set dnat_rule_id = 'dnat-gone' where id = $1")
+        .bind(id)
+        .execute(&rig.pool)
+        .await?;
+    rig.fake.control().dnat_delete_status = Some(500);
+    rig.tick(now).await;
+    let window = rig.window(id).await;
+    assert_eq!(window.state, "deleting", "the DNAT obligation holds the window");
+    assert_eq!(window.server_gone_at, Some(now));
+    assert_eq!(rig.fake.control().dnat_rules.len(), 1);
+    assert!(rig.alert_codes().await.contains(&"window_gone".to_owned()));
+    assert!(matches!(
+        rig.try_create(60).await,
+        Err(CreateRefusal::LiveWindowExists)
+    ));
+    // Проводник ожил: правило удалено и подтверждено, окно закончилось как gone.
+    rig.fake.control().dnat_delete_status = None;
+    rig.tick(now + TimeDelta::minutes(1)).await;
+    let window = rig.window(id).await;
+    assert_eq!(window.state, "gone");
+    assert!(window.dnat_gone_at.is_some());
+    assert!(rig.fake.control().dnat_rules.is_empty());
+    rig.try_create(60).await.expect("the port is free");
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn deleting_a_window_also_deletes_its_dnat_rule_and_confirms_it_by_absence(
     pool: PgPool,
 ) -> TestResult {
@@ -1704,17 +1784,15 @@ async fn a_failed_or_partial_listing_changes_nothing(pool: PgPool) -> TestResult
     rig.tick(t1 + TimeDelta::minutes(11)).await;
     assert_eq!(rig.state(id).await, "identified");
     assert!(rig.alert_codes().await.is_empty());
-    // Целый список без сервера: окно `gone`, владельцу пуш, раннер отозван.
+    // Целый список без сервера: окно `gone`, владельцу пуш, раннер отозван, а правило
+    // удаляется самим окном до того, как порт освободится.
     rig.fake.control().list_fail_page = None;
     rig.tick(t1 + TimeDelta::minutes(12)).await;
     let window = rig.window(id).await;
     assert_eq!(window.state, "gone");
     assert!(window.final_cost_kopecks.is_some());
-    // Правило исчезнувшего окна становится лишним и убирается сверкой.
-    assert_eq!(
-        rig.alert_codes().await,
-        vec!["window_gone", "stray_dnat_deleted"]
-    );
+    assert!(rig.fake.control().dnat_rules.is_empty());
+    assert_eq!(rig.alert_codes().await, vec!["window_gone"]);
     Ok(())
 }
 
