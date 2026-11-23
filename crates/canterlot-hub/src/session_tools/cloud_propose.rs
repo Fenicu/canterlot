@@ -352,6 +352,18 @@ pub async fn approve_in_tx(
             return Ok(ApproveOutcome::Refused(error.to_string()));
         }
     };
+    // Сетевой вызов мог пережить срок карточки: до одобрения срок проверяется ещё раз.
+    if expires_at.is_some_and(|at| at <= Utc::now()) || card.expires_at <= Utc::now() {
+        close_in_tx(
+            conn,
+            request_id,
+            RequestState::Expired,
+            "expired",
+            correlation,
+        )
+        .await?;
+        return Ok(ApproveOutcome::Expired);
+    }
     let config = cloud.config();
     let Some(max_hourly) = pricing.max_hourly_kopecks() else {
         return Ok(ApproveOutcome::Refused("provider_unavailable".to_owned()));
@@ -360,9 +372,17 @@ pub async fn approve_in_tx(
         Ok(reservation) => reservation,
         Err(error) => return Ok(ApproveOutcome::Refused(error.to_string())),
     };
-    let remaining = budget::remaining_in_month(conn).await?;
+    // Остаток и перерасход считаются под замком строки `cloud_budget` — тем же, что берёт
+    // `create_in_tx`: между проверкой и вставкой окна бюджет не может измениться.
+    let (budget_kopecks, _, _) = budget::lock_settings(conn).await?;
+    let month = windows::month_of(Utc::now());
+    let spent = windows::spent_in_month(conn, &month).await?;
+    let remaining = budget_kopecks.saturating_sub(spent);
     let over_budget = reservation > remaining;
-    if reservation != card.reservation_kopecks || over_budget != card.over_budget {
+    if reservation != card.reservation_kopecks
+        || remaining != card.remaining_kopecks
+        || over_budget != card.over_budget
+    {
         close_in_tx(
             conn,
             request_id,

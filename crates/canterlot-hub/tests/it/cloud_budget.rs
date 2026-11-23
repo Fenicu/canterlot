@@ -631,6 +631,72 @@ async fn card_outdated_issues_a_fresh_card_with_the_new_numbers(pool: PgPool) ->
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_changed_remaining_budget_makes_the_card_outdated(pool: PgPool) -> TestResult {
+    let rig = Rig::new(pool).await;
+    rig.set_budget(1_000_000, false).await;
+    let request = rig.card(2, "сборка", Source::Agent).await;
+    let old: Value = sqlx::query_scalar("select request_payload from requests where id=$1")
+        .bind(request)
+        .fetch_one(&rig.pool)
+        .await?;
+    let old_remaining = old["remaining_kopecks"].as_i64().unwrap();
+    assert_eq!(old["over_budget"], false);
+    // Расход месяца вырос на копейки: признак перерасхода не меняется, остаток — да.
+    rig.insert_window("ended", Some(100), 100).await;
+    rig.decision(request, true).await;
+    let fresh = match rig.approve(request).await {
+        cloud_propose::ApproveOutcome::Outdated(fresh) => fresh,
+        other => panic!("expected a fresh card, got {other:?}"),
+    };
+    let payload: Value = sqlx::query_scalar("select request_payload from requests where id=$1")
+        .bind(fresh)
+        .fetch_one(&rig.pool)
+        .await?;
+    assert_eq!(payload["over_budget"], false);
+    assert_eq!(
+        payload["remaining_kopecks"].as_i64(),
+        Some(old_remaining - 100),
+        "the new card shows the current remainder"
+    );
+    assert_eq!(rig.request_state(request).await, "decision_not_applied");
+    assert_eq!(rig.windows_for(request).await, 0);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_card_that_expires_during_the_price_call_is_not_approved(pool: PgPool) -> TestResult {
+    let rig = Rig::new(pool).await;
+    rig.set_budget(1_000_000, false).await;
+    let request = rig.card(2, "сборка", Source::Owner).await;
+    let deadline = now_micros() + TimeDelta::seconds(1);
+    sqlx::query(
+        "update requests
+            set expires_at = $2,
+                request_payload = jsonb_set(request_payload, '{expires_at}', to_jsonb($3::text))
+          where id = $1",
+    )
+    .bind(request)
+    .bind(deadline)
+    .bind(deadline.to_rfc3339())
+    .execute(&rig.pool)
+    .await?;
+    rig.decision(request, true).await;
+    // Переоценка идёт дольше срока карточки: после ответа цены одобрять уже нечего.
+    rig._fake.delay_next(1500);
+    assert_eq!(
+        rig.approve(request).await,
+        cloud_propose::ApproveOutcome::Expired
+    );
+    assert_eq!(rig.request_state(request).await, "expired");
+    assert_eq!(
+        rig.windows_for(request).await,
+        0,
+        "no window after the deadline"
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn over_budget_card_passes_only_with_its_exact_reservation(pool: PgPool) -> TestResult {
     let rig = Rig::new(pool).await;
     rig.set_budget(0, false).await;

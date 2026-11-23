@@ -150,6 +150,19 @@ pub async fn settings(conn: &mut PgConnection) -> Result<(i64, bool, Option<Stri
     .await
 }
 
+/// Настройки под замком единственной строки бюджета: остаток и признак перерасхода
+/// считаются по тому же снимку, в котором вставляется окно.
+pub async fn lock_settings(
+    conn: &mut PgConnection,
+) -> Result<(i64, bool, Option<String>), sqlx::Error> {
+    sqlx::query_as(
+        "select monthly_budget_kopecks, auto_mode, provider_block_code from cloud_budget
+          where singleton for update",
+    )
+    .fetch_one(conn)
+    .await
+}
+
 /// Остаток бюджета в текущем месяце.
 pub async fn remaining_in_month(conn: &mut PgConnection) -> Result<i64, sqlx::Error> {
     let month = windows::month_of(Utc::now());
