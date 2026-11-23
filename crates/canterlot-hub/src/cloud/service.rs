@@ -81,6 +81,20 @@ pub struct CloudService {
 /// Причина удаления окна, у которого сервер остался `no_paid`: аккаунт требует предоплату.
 pub const REASON_NO_PAID: &str = "no_paid";
 
+/// Принадлежность сервера по контракту API: имя доказывает прямой ответ, проект — только
+/// свежий полный список проекта.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ownership {
+    /// Номер с этим именем есть в полном списке проекта.
+    Owned,
+    /// Имя другое или номера с этим именем в проекте нет.
+    Mismatch,
+    /// Полный список проекта без номера: сервер подтверждённо пропал.
+    Absent,
+    /// Ответа нет или он противоречив: ничего не меняем.
+    Unknown,
+}
+
 /// Итог окна: цена часа удалённого профиля за время от вызова создания до подтверждённого
 /// конца, не меньше часа. У окна, которому не звонили, слагаемое 0. Публичный адрес больше
 /// не заказывается, поэтому в итог входит только сервер.
@@ -1330,6 +1344,42 @@ impl CloudService {
         }
     }
 
+    /// Принадлежность сервера окну или лишнему серверу по контракту API: прямой
+    /// `GET /servers/{id}` отдаёт номер и имя (проекта в схеме `vds` нет), а проект
+    /// доказывает только свежий полный список: номер должен стоять в нём с тем же именем.
+    async fn ownership(&self, server_id: i64, name: &str, project: i64) -> Ownership {
+        match self.provider.get_server(server_id).await {
+            Ok(ServerLookup::Found(state)) if state.name != name => Ownership::Mismatch,
+            Ok(ServerLookup::Found(_)) => match self.provider.list_project_servers(project).await {
+                Ok(list)
+                    if list
+                        .iter()
+                        .any(|server| server.id == server_id && server.name == name) =>
+                {
+                    Ownership::Owned
+                }
+                Ok(_) => Ownership::Mismatch,
+                Err(error) => {
+                    tracing::warn!(kind = "cloud_ownership_listing", error = %error, "project listing failed; ownership is unknown");
+                    Ownership::Unknown
+                }
+            },
+            // Точечный 404 сам по себе отсутствия не подтверждает: нужен полный список.
+            Ok(ServerLookup::NotFound) => match self.provider.list_project_servers(project).await {
+                Ok(list) if !list.iter().any(|server| server.id == server_id) => Ownership::Absent,
+                Ok(_) => Ownership::Unknown,
+                Err(error) => {
+                    tracing::warn!(kind = "cloud_ownership_listing", error = %error, "project listing failed; absence is unknown");
+                    Ownership::Unknown
+                }
+            },
+            Err(error) => {
+                tracing::warn!(kind = "cloud_delete_lookup", error_kind = ?error.kind, "server lookup before delete failed");
+                Ownership::Unknown
+            }
+        }
+    }
+
     /// Сервер пропал из полного списка (метка ставится один раз).
     async fn mark_server_gone(&self, id: Uuid, now: DateTime<Utc>) -> Result<(), sqlx::Error> {
         sqlx::query(
@@ -1488,13 +1538,13 @@ impl CloudService {
             // Отсутствие уже подтверждено: DELETE больше не нужен.
             return Ok(());
         }
-        // Удаление только по номеру опасно: номер мог достаться чужому серверу. Перед
-        // DELETE провайдер должен показать то же имя в том же проекте.
+        // Удаление только по номеру опасно: номер мог достаться чужому серверу. Прямой ответ
+        // даёт имя, а проект — только свежий полный список проекта окна.
         let project = window.project_id.unwrap_or(self.config.project_id);
-        match self.provider.get_server(server_id).await {
-            Ok(ServerLookup::Found(state))
-                if state.name != window.name || state.project_id != Some(project) =>
-            {
+        let expected = windows::server_name(window.id);
+        match self.ownership(server_id, &expected, project).await {
+            Ownership::Owned => {}
+            Ownership::Mismatch => {
                 sqlx::query(
                     "update cloud_windows set last_error = 'ownership_mismatch',
                             next_delete_at = $2
@@ -1521,13 +1571,12 @@ impl CloudService {
                 .await?;
                 return Ok(());
             }
-            Ok(ServerLookup::NotFound) => {
+            // Полный список проекта без сервера — единственное доказательство отсутствия.
+            Ownership::Absent => {
                 self.mark_server_gone(window.id, now).await?;
                 return Ok(());
             }
-            Ok(ServerLookup::Found(_)) => {}
-            Err(error) => {
-                tracing::warn!(kind = "cloud_delete_lookup", error_kind = ?error.kind, "server lookup before delete failed");
+            Ownership::Unknown => {
                 sqlx::query(
                     "update cloud_windows set next_delete_at = $2
                      where id = $1 and state = 'deleting'",
@@ -1887,7 +1936,7 @@ impl CloudService {
                 }
                 (state, Some(server)) if !windows::LIVE.contains(&state) => {
                     if current {
-                        self.delete_stray(server, now).await?;
+                        self.delete_stray(server, project, now).await?;
                     }
                 }
                 _ => {}
@@ -1896,7 +1945,7 @@ impl CloudService {
         if current {
             for (id, server) in named {
                 if !known.contains(&id) {
-                    self.delete_stray(server, now).await?;
+                    self.delete_stray(server, project, now).await?;
                 }
             }
         }
@@ -2000,14 +2049,32 @@ impl CloudService {
         Ok(())
     }
 
-    /// Сервер с нашим именем без живого окна: удаляется и сообщается владельцу.
+    /// Сервер с нашим именем без живого окна: удаляется и сообщается владельцу. Перед
+    /// удалением прямой ответ должен показать тот же номер с тем же именем: номер мог
+    /// достаться чужому серверу.
     async fn delete_stray(
         &self,
         server: &ServerSummary,
+        project: i64,
         now: DateTime<Utc>,
     ) -> Result<(), sqlx::Error> {
         let payload =
             |code: &str| json!({"code": code, "name": server.name, "server_id": server.id});
+        match self.ownership(server.id, &server.name, project).await {
+            Ownership::Owned => {}
+            // Сервера уже нет: удалять нечего.
+            Ownership::Absent => return Ok(()),
+            Ownership::Mismatch | Ownership::Unknown => {
+                let slot = now.timestamp() / ALERT_EVERY.num_seconds();
+                crate::notify::enqueue_cloud_alert(
+                    &self.pool,
+                    &format!("cloud:stray_stuck:{}:{slot}", server.id),
+                    &payload("stray_server_stuck"),
+                )
+                .await?;
+                return Ok(());
+            }
+        }
         match self.provider.delete_server(server.id).await {
             DeleteOutcome::Deleted { .. } | DeleteOutcome::AlreadyGone => {
                 crate::notify::enqueue_cloud_alert(

@@ -2067,15 +2067,15 @@ async fn needs_confirmation_alerts_at_once_and_every_thirty_minutes_while_the_wi
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_delete_is_refused_when_the_server_id_belongs_to_something_else(
+async fn a_delete_requires_the_expected_name_and_membership_in_the_stored_project(
     pool: PgPool,
 ) -> TestResult {
-    for (wrong_name, wrong_project) in [(true, false), (false, true)] {
+    // Прямой GET отдаёт не то имя, что у окна: DELETE нет, окно живо, пуш владельцу.
+    {
         let rig = rig(pool.clone()).await;
         enable_pushes(&rig.pool).await;
         let now = now_micros();
-        let project = if wrong_project { PROJECT + 1 } else { PROJECT };
-        let server = rig.fake.control().add_server(project, "someone-else");
+        let server = rig.fake.control().add_server(PROJECT, "someone-else");
         let id = raw_window(
             &rig.pool,
             "deleting",
@@ -2086,12 +2086,7 @@ async fn a_delete_is_refused_when_the_server_id_belongs_to_something_else(
         {
             let mut state = rig.fake.control();
             let entry = state.servers.get_mut(&server).unwrap();
-            entry.name = if wrong_name {
-                "someone-else".to_owned()
-            } else {
-                windows::server_name(id)
-            };
-            entry.project_id = project;
+            entry.name = "someone-else".to_owned();
         }
         rig.tick(now).await;
         assert_eq!(rig.deletes(), 0, "no blind DELETE by id");
@@ -2105,20 +2100,66 @@ async fn a_delete_is_refused_when_the_server_id_belongs_to_something_else(
             "{:?}",
             rig.alert_codes().await
         );
-        // Владелец исправил сервер: обычный путь удаляет его.
+        // Владелец исправил имя сервера: обычный путь удаляет.
         {
             let mut state = rig.fake.control();
             let entry = state.servers.get_mut(&server).unwrap();
             entry.name = windows::server_name(id);
-            entry.project_id = PROJECT;
         }
         rig.tick(now + TimeDelta::minutes(31)).await;
-        assert_eq!(rig.window(id).await.server_id, Some(server));
         assert_eq!(rig.deletes(), 1, "the corrected server is deleted");
-        sqlx::query("update cloud_windows set state = 'ended' where id = $1")
-            .bind(id)
-            .execute(&rig.pool)
-            .await?;
+        assert_eq!(rig.window(id).await.server_id, Some(server));
+        close_window(&rig.pool, id).await?;
+    }
+
+    // Имя верное, но сервер в другом проекте: в полном списке проекта окна его нет.
+    {
+        let rig = rig(pool.clone()).await;
+        enable_pushes(&rig.pool).await;
+        let now = now_micros();
+        let server = rig.fake.control().add_server(PROJECT + 1, "placeholder");
+        let id = raw_window(
+            &rig.pool,
+            "deleting",
+            Some(server),
+            Some(now - TimeDelta::minutes(20)),
+        )
+        .await;
+        // Прямой ответ говорит только имя: проекта в схеме `vds` нет.
+        rig.fake.control().servers.get_mut(&server).unwrap().name = windows::server_name(id);
+        rig.tick(now).await;
+        assert_eq!(
+            rig.deletes(),
+            0,
+            "a server outside the stored project is never deleted"
+        );
+        assert_eq!(rig.state(id).await, "deleting");
+        assert_eq!(
+            rig.window(id).await.last_error.as_deref(),
+            Some("ownership_mismatch")
+        );
+        close_window(&rig.pool, id).await?;
+    }
+
+    // Имя верное и сервер есть в полном списке своего проекта: обычное удаление.
+    {
+        let rig = rig(pool.clone()).await;
+        let now = now_micros();
+        let server = rig.fake.control().add_server(PROJECT, "placeholder");
+        let id = raw_window(
+            &rig.pool,
+            "deleting",
+            Some(server),
+            Some(now - TimeDelta::minutes(20)),
+        )
+        .await;
+        rig.fake.control().servers.get_mut(&server).unwrap().name = windows::server_name(id);
+        rig.tick(now).await;
+        assert_eq!(rig.deletes(), 1, "the owned server is deleted");
+        assert!(!rig.fake.control().servers.contains_key(&server));
+        let window = rig.window(id).await;
+        assert_eq!(window.state, "deleting");
+        assert!(window.delete_accepted_at.is_some());
     }
     Ok(())
 }
@@ -2370,6 +2411,34 @@ async fn a_stray_that_cannot_be_deleted_alerts_every_half_hour(pool: PgPool) -> 
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_stray_is_deleted_only_when_the_direct_get_shows_its_own_name(
+    pool: PgPool,
+) -> TestResult {
+    let rig = rig(pool).await;
+    enable_pushes(&rig.pool).await;
+    rig.fake.control().add_server(PROJECT, &stray_name());
+    // Номер в списке, но прямой ответ называет другой сервер: номер мог достаться чужому.
+    rig.fake.control().get_name_override = Some("someone-else".to_owned());
+    let t0 = now_micros();
+    rig.tick(t0).await;
+    assert_eq!(rig.deletes(), 0, "a mismatched name is never deleted");
+    assert_eq!(rig.fake.server_count(), 1);
+    assert!(
+        rig.alert_codes()
+            .await
+            .contains(&"stray_server_stuck".to_owned()),
+        "{:?}",
+        rig.alert_codes().await
+    );
+    // Провайдер отдаёт настоящее имя: лишний сервер удаляется.
+    rig.fake.control().get_name_override = None;
+    rig.tick(t0 + TimeDelta::minutes(40)).await;
+    assert_eq!(rig.fake.server_count(), 0);
+    assert_eq!(rig.deletes(), 1);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn reconcile_runs_at_start_before_any_create(pool: PgPool) -> TestResult {
     let rig = rig(pool).await;
     rig.fake.control().add_server(PROJECT, &stray_name());
@@ -2448,6 +2517,15 @@ async fn a_create_call_interrupted_by_a_crash_is_never_repeated(pool: PgPool) ->
     service.tick(now + TimeDelta::minutes(12)).await;
     assert_eq!(rig.state(orphan).await, "failed");
     assert_eq!(rig.posts(), 0);
+    Ok(())
+}
+
+/// Закрыть окно, чтобы следующая строка теста могла занять единственное живое место.
+async fn close_window(pool: &PgPool, id: Uuid) -> Result<(), sqlx::Error> {
+    sqlx::query("update cloud_windows set state = 'ended', final_cost_kopecks = 0 where id = $1")
+        .bind(id)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 

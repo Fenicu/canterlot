@@ -189,6 +189,9 @@ pub struct FakeState {
     pub boot_polls: u32,
     /// Подмешивать в тексты ошибок заголовок Authorization, как делает неряшливый сервер.
     pub echo_authorization_in_errors: bool,
+    /// Имя, которое отдаёт только прямой `GET /servers/{id}`: так проверяется, что удаление
+    /// сверяет имя из точечного ответа, а не из списка. В списках имя остаётся настоящим.
+    pub get_name_override: Option<String>,
     pub requests: Vec<RecordedRequest>,
 }
 
@@ -237,6 +240,7 @@ impl FakeState {
             listing_hidden_polls: 0,
             boot_polls: 0,
             echo_authorization_in_errors: false,
+            get_name_override: None,
             requests: Vec::new(),
         }
     }
@@ -413,11 +417,12 @@ fn server_json(server: &FakeServer) -> Value {
     let booted = server.boot_polls_left == 0;
     // У сервера нет публичного адреса: доступ идёт через NAT роутера.
     let ips = json!([]);
+    // Форма `vds` из OpenAPI: поля `project_id` в ней нет. Проект сервера виден только через
+    // список проекта, поэтому принадлежность нельзя доказать точечным ответом.
     let mut out = json!({
         "id": server.id,
         "name": server.name,
         "comment": server.comment,
-        "project_id": server.project_id,
         "os": {"id": 109, "name": "debian", "version": "13"},
         "software": null,
         "preset_id": null,
@@ -589,13 +594,17 @@ fn route(
         }
         ("POST", ["api", "v1", "servers"]) => create_server(st, body, auth),
         ("GET", ["api", "v1", "servers", id]) => {
+            let override_name = st.get_name_override.clone();
             let found = id
                 .parse::<i64>()
                 .ok()
                 .and_then(|id| st.servers.get_mut(&id));
             match found {
                 Some(server) => {
-                    let rendered = server_json(server);
+                    let mut rendered = server_json(server);
+                    if let Some(name) = override_name {
+                        rendered["name"] = Value::String(name);
+                    }
                     server.boot_polls_left = server.boot_polls_left.saturating_sub(1);
                     Action::Respond(json_response(
                         200,

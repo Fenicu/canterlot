@@ -481,7 +481,6 @@ fn parse_state(value: &Value) -> Result<ServerState, ProviderError> {
     Ok(ServerState {
         id: summary.id,
         name: summary.name,
-        project_id: value["project_id"].as_i64(),
         status: summary.status,
         ipv4: public_ipv4(value),
         created_at: value["created_at"].as_str().map(str::to_owned),
