@@ -150,7 +150,7 @@
 | `idempotency_conflict` | 409 | `browser` | `never` | Ключ идемпотентности уже использован с другим запросом |
 | `draft_revision_conflict` | 409 | `browser` | `after_condition` | Черновик уже изменён с другого устройства |
 | `stale_revision` | 409 | `browser` | `after_condition` | Настройки облака изменились, обновите их |
-| `system_conversation` | 409 | `browser` | `never` | Служебный разговор карточек облака не чат |
+| `system_conversation` | 409 | `browser` | `never` | Служебный разговор: сообщения и запуски в нём запрещены |
 | `decision_conflict` | 409 | `browser` | `never` | Решение уже принято с другого устройства |
 | `request_not_open` | 409 | `browser` | `never` | Запрос уже закрыт |
 | `decision_invalid` | 422 | `browser` | `never` | Ответ не подходит к вопросу |
