@@ -1306,16 +1306,27 @@ async fn automatic_start_alert_is_keyed_by_the_window_not_the_month(pool: PgPool
         rig.service.tick(at).await;
     }
     assert_eq!(rig.push_count("auto_started").await, 1);
-    // Окно заканчивается, очередь и недоступность остаются: второе окно в том же месяце.
-    sqlx::query("update cloud_windows set state = 'failed', final_cost_kopecks = 0")
-        .execute(&rig.pool)
+    // Окно закрывается по-настоящему: удаление сервера и подтверждённое отсутствие. Прямая
+    // запись `failed` при живом сервере закрытым окном не является: сверка возвращает
+    // сервер окну как поздний снос, и он держит бюджет и новые создания.
+    let first: Uuid = sqlx::query_scalar("select id from cloud_windows")
+        .fetch_one(&rig.pool)
         .await?;
+    let deleting_at = t0 + TimeDelta::minutes(11);
+    windows::request_delete(&rig.pool, first, windows::REASON_OWNER, deleting_at).await?;
+    rig.service.tick(deleting_at).await;
+    let settled: (String, Option<DateTime<Utc>>, Option<i64>) = sqlx::query_as(
+        "select state, server_gone_at, final_cost_kopecks from cloud_windows where id = $1",
+    )
+    .bind(first)
+    .fetch_one(&rig.pool)
+    .await?;
+    assert_eq!(settled.0, "ended", "the first window is fully closed");
+    assert!(settled.1.is_some(), "absence of the server is confirmed");
+    assert!(settled.2.is_some(), "the final cost is settled");
+
+    // Очередь и недоступность остаются: второе окно в том же месяце.
     let at = t0 + TimeDelta::minutes(12);
-    rig.observe_at(runner, at).await;
-    rig.service.tick(at).await;
-    // Поздний сервер закрытого окна убран в этом же проходе, но новый создаётся только
-    // следующим: пока поздний снос открыт, создания закрыты.
-    let at = t0 + TimeDelta::minutes(14);
     rig.observe_at(runner, at).await;
     rig.service.tick(at).await;
     assert_eq!(
