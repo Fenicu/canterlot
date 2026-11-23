@@ -338,14 +338,6 @@ impl CloudService {
 
         // Автоматика выключена или резерв не помещается: карточка хаба один раз за эпизод.
         if (!auto_mode || !fits) && !budget::episode_active(&mut conn).await? {
-            let owner: Uuid = sqlx::query_scalar("select owner_id from machines where id = $1")
-                .bind(self.config.carrier_machine_id)
-                .fetch_one(&mut *conn)
-                .await?;
-            let mut proposer =
-                cloud_propose::system_proposer(&mut conn, owner, self.config.carrier_machine_id)
-                    .await?;
-            proposer.source = Source::Hub;
             let reason = format!(
                 "Ожидающая облачная работа: {waiting} мин по оценке; автоматический режим {}",
                 if auto_mode {
@@ -354,19 +346,33 @@ impl CloudService {
                     "выключен"
                 }
             );
-            let opened = cloud_propose::open_in_tx(
-                &mut conn,
-                &self.config,
-                &pricing,
-                &proposer,
-                cap,
-                reason,
-            )
-            .await;
+            let config = self.config.clone();
+            let carrier = self.config.carrier_machine_id;
+            drop(conn);
+            // Запрос, задание его срока и признак эпизода — одна транзакция: сбой на любом
+            // шаге не оставляет половину карточки и не теряет эпизод.
+            let opened: Result<cloud_propose::Opened, cloud_propose::CardError> =
+                crate::db::in_tx(&self.pool, move |tx| {
+                    Box::pin(async move {
+                        let owner: Uuid =
+                            sqlx::query_scalar("select owner_id from machines where id = $1")
+                                .bind(carrier)
+                                .fetch_one(&mut *tx)
+                                .await?;
+                        let mut proposer =
+                            cloud_propose::system_proposer(tx, owner, carrier).await?;
+                        proposer.source = Source::Hub;
+                        let opened = cloud_propose::open_in_tx(
+                            tx, &config, &pricing, &proposer, cap, reason,
+                        )
+                        .await?;
+                        budget::episode_start(tx, opened.request_id).await?;
+                        Ok(opened)
+                    })
+                })
+                .await;
             match opened {
-                Ok(opened) => {
-                    budget::episode_start(&mut conn, opened.request_id).await?;
-                }
+                Ok(_) => {}
                 Err(error) => {
                     tracing::warn!(kind = "cloud_hub_card", error = %error, "card not opened");
                 }

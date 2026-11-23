@@ -265,7 +265,17 @@ pub async fn open_in_tx(
             expires_at: Some(expires_at),
         },
     )
-    .await?;
+    .await
+    .map_err(|error| {
+        if error
+            .as_database_error()
+            .is_some_and(|database| database.is_unique_violation())
+        {
+            CardError::OpenCard
+        } else {
+            CardError::Db(error)
+        }
+    })?;
     sqlx::query("update requests set created_seq=$2 where id=$1")
         .bind(id)
         .bind(event.scope_seq)

@@ -985,6 +985,67 @@ async fn budget_marker_rolls_back_with_its_push(pool: PgPool) -> TestResult {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn only_one_open_cloud_card_can_exist(pool: PgPool) -> TestResult {
+    let rig = Rig::new(pool).await;
+    rig.set_budget(1_000_000, false).await;
+    let first = rig.card(1, "первая", Source::Agent).await;
+    // Проверки `has_open_card` мало: два одновременных предложения проходят её вместе.
+    // База держит правило сама.
+    let duplicate = sqlx::query(
+        "insert into requests (id, conversation_id, execution_id, generation, kind,
+                               native_request_id, state, request_payload, expires_at)
+         select $1, conversation_id, execution_id, generation, kind,
+                'cloud_window:' || $1::text, state, request_payload, expires_at
+           from requests where id = $2",
+    )
+    .bind(Uuid::now_v7())
+    .bind(first)
+    .execute(&rig.pool)
+    .await;
+    assert!(
+        duplicate.is_err(),
+        "a second open cloud_window card must be refused by the database"
+    );
+    assert_eq!(card_count(&rig.pool).await?, 1);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_failed_hub_card_leaves_no_request_or_expiry_job(pool: PgPool) -> TestResult {
+    let rig = Rig::new(pool).await;
+    rig.set_budget(0, false).await;
+    rig.seed_waiting(60).await;
+    sqlx::query(
+        "create function cloud_episode_test_fail() returns trigger as $$
+         begin
+             raise exception 'injected episode failure';
+         end;
+         $$ language plpgsql",
+    )
+    .execute(&rig.pool)
+    .await?;
+    sqlx::query(
+        "create trigger cloud_episode_test_fail before update on cloud_auto_episode
+           for each row execute function cloud_episode_test_fail()",
+    )
+    .execute(&rig.pool)
+    .await?;
+    rig.service.tick(now_micros()).await;
+    assert_eq!(
+        card_count(&rig.pool).await?,
+        0,
+        "the card rolls back with the episode marker"
+    );
+    let expiry: i64 = sqlx::query_scalar(
+        "select count(*) from scheduled_jobs where payload->>'action' = 'cloud_window_expire'",
+    )
+    .fetch_one(&rig.pool)
+    .await?;
+    assert_eq!(expiry, 0, "its expiry job rolls back too");
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn budget_alerts_fire_once_per_month_and_never_for_zero(pool: PgPool) -> TestResult {
     let rig = Rig::new(pool).await;
     rig.set_budget(10_000, false).await;
