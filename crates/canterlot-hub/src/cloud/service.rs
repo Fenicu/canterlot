@@ -560,7 +560,7 @@ impl CloudService {
             let request = CreateServer {
                 name: window.name.clone(),
                 comment: "canterlot runner window".to_owned(),
-                project_id: self.config.project_id,
+                project_id: window.project_id.unwrap_or(self.config.project_id),
                 configurator_id: profile.configurator_id,
                 cpu: profile.cpu,
                 ram_mb: profile.ram_mb(),
@@ -704,7 +704,14 @@ impl CloudService {
             Ok(port) => port,
             Err(_) => return Ok(()),
         };
-        let router_ip = self.config.router_ip.clone();
+        let router_ip = window
+            .router_ip
+            .clone()
+            .unwrap_or_else(|| self.config.router_ip.clone());
+        let router_id = window
+            .router_id
+            .clone()
+            .unwrap_or_else(|| self.config.router_id.clone());
         if window.dnat_create_attempted_at.is_none() {
             let stamped = sqlx::query(
                 "update cloud_windows set dnat_create_attempted_at = $2
@@ -724,11 +731,7 @@ impl CloudService {
                 public_ip: router_ip.clone(),
                 public_port: port,
             };
-            match self
-                .provider
-                .create_dnat_rule(&self.config.router_id, &request)
-                .await
-            {
+            match self.provider.create_dnat_rule(&router_id, &request).await {
                 DnatCreateOutcome::Created { rule_id } => {
                     self.adopt_dnat(window.id, &rule_id).await?;
                 }
@@ -753,7 +756,7 @@ impl CloudService {
             return Ok(());
         }
         // Вызов был, ответ нечитаем: полный список — единственный источник истины.
-        match self.provider.list_dnat_rules(&self.config.router_id).await {
+        match self.provider.list_dnat_rules(&router_id).await {
             Ok(rules) => {
                 if let Some(rule) = rules
                     .iter()
@@ -852,7 +855,7 @@ impl CloudService {
                 .bind(json!({
                     "window_id": window.id,
                     "machine_id": machine,
-                    "host": config.router_ip,
+                    "host": window.router_ip.clone().unwrap_or_else(|| config.router_ip.clone()),
                     "ssh_port": window.dnat_port,
                     "host_key_public": window.host_key_public,
                     "root_dir": CLOUD_ROOT_DIR,
@@ -1206,7 +1209,10 @@ impl CloudService {
             return self.end(&window.id, "ended", now).await;
         }
         let rule_id = window.dnat_rule_id.as_deref().expect("checked above");
-        let router = &self.config.router_id;
+        let router = window
+            .router_id
+            .as_deref()
+            .unwrap_or(&self.config.router_id);
         let list = match self.provider.list_dnat_rules(router).await {
             Ok(list) => list,
             Err(error) => {

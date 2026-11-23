@@ -1378,6 +1378,48 @@ async fn deleting_a_window_also_deletes_its_dnat_rule_and_confirms_it_by_absence
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn teardown_uses_the_project_and_router_of_the_window_not_the_current_config(
+    pool: PgPool,
+) -> TestResult {
+    let rig = rig(pool).await;
+    let _carrier = rig.carrier_session();
+    let t0 = now_micros();
+    let (id, _session, at) = rig.drive_to_ready(120, t0).await;
+    assert_eq!(rig.fake.control().dnat_rules.len(), 1);
+    // Конфигурация сменилась, пока окно живо: снос идёт по значениям самого окна.
+    let mut changed = rig.config.clone();
+    changed.project_id = PROJECT + 1;
+    changed.router_id = "018f0000-0000-7000-8000-0000000000bb".to_owned();
+    changed.router_ip = "192.0.2.2".to_owned();
+    let restarted = CloudService::new(
+        rig.pool.clone(),
+        rig.registry.clone(),
+        provider_for(&rig),
+        changed,
+    );
+    windows::request_delete(&rig.pool, id, windows::REASON_OWNER, at).await?;
+    restarted.tick(at + TimeDelta::seconds(1)).await;
+    let window = rig.window(id).await;
+    assert_eq!(window.state, "ended");
+    assert!(rig.fake.control().dnat_rules.is_empty());
+    assert_eq!(rig.fake.server_count(), 0);
+    let requests = rig.fake.requests();
+    assert!(
+        requests
+            .iter()
+            .any(|r| r.path == format!("/api/v1/projects/{PROJECT}/resources/servers")),
+        "the window's own project is listed"
+    );
+    assert!(
+        requests
+            .iter()
+            .any(|r| r.method == "DELETE" && r.path.contains("0000000000aa")),
+        "the window's own router is used"
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn the_window_stays_live_while_the_dnat_rule_cannot_be_deleted(pool: PgPool) -> TestResult {
     let rig = rig(pool).await;
     enable_pushes(&rig.pool).await;
