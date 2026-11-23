@@ -102,4 +102,57 @@ describe("composer/intake", () => {
     expect(hasFileDrag({ types: [], files: [file("a.txt")] })).toBe(true);
     expect(hasFileDrag(null)).toBe(false);
   });
+
+  it("chrome_paste_wrappers_with_different_last_modified_are_deduplicated", () => {
+    // Настоящий Chrome: items и files держат РАЗНЫЕ объекты File с разным
+    // lastModified (материализация идёт в разные миллисекунды), а повторный
+    // getAsFile() каждый раз возвращает новый объект.
+    const itemFile = new File(["0123456789"], "image.png", {
+      type: "image/png",
+      lastModified: 1795428603389,
+    });
+    const filesFile = new File(["0123456789"], "image.png", {
+      type: "image/png",
+      lastModified: 1795428603388,
+    });
+    expect(itemFile).not.toBe(filesFile);
+    const found = filesFromPayload(
+      {
+        items: [{ kind: "file", getAsFile: () => itemFile }],
+        files: [filesFile],
+      },
+      AT,
+    );
+    expect(found).toHaveLength(1);
+  });
+
+  it("chrome_multi_image_paste_does_not_double_every_image", () => {
+    const firstItem = new File(["aaaaaaaaaa"], "image.png", {
+      type: "image/png",
+      lastModified: 101,
+    });
+    const secondItem = new File(["bbbbbbbbbb"], "image.png", {
+      type: "image/png",
+      lastModified: 103,
+    });
+    const firstFile = new File(["aaaaaaaaaa"], "image.png", {
+      type: "image/png",
+      lastModified: 100,
+    });
+    const secondFile = new File(["bbbbbbbbbb"], "image.png", {
+      type: "image/png",
+      lastModified: 102,
+    });
+    const found = filesFromPayload(
+      {
+        items: [
+          { kind: "file", getAsFile: () => firstItem },
+          { kind: "file", getAsFile: () => secondItem },
+        ],
+        files: [firstFile, secondFile],
+      },
+      AT,
+    );
+    expect(found).toHaveLength(2);
+  });
 });
