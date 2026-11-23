@@ -375,7 +375,23 @@ pub async fn approve_in_tx(
     // Остаток и перерасход считаются под замком строки `cloud_budget` — тем же, что берёт
     // `create_in_tx`: между проверкой и вставкой окна бюджет не может измениться.
     let (budget_kopecks, _, _) = budget::lock_settings(conn).await?;
-    let month = windows::month_of(Utc::now());
+    // Ожидание замка могло съесть остаток срока карточки: под замком он проверяется ещё раз
+    // по часам базы, а не по времени до сетевого вызова цены.
+    let db_now: DateTime<Utc> = sqlx::query_scalar("select clock_timestamp()")
+        .fetch_one(&mut *conn)
+        .await?;
+    if expires_at.is_some_and(|at| at <= db_now) || card.expires_at <= db_now {
+        close_in_tx(
+            conn,
+            request_id,
+            RequestState::Expired,
+            "expired",
+            correlation,
+        )
+        .await?;
+        return Ok(ApproveOutcome::Expired);
+    }
+    let month = windows::month_of(db_now);
     let spent = windows::spent_in_month(conn, &month).await?;
     let remaining = budget_kopecks.saturating_sub(spent);
     let over_budget = reservation > remaining;

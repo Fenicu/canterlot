@@ -704,6 +704,55 @@ async fn a_card_that_expires_during_the_price_call_is_not_approved(pool: PgPool)
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_card_that_expires_while_waiting_for_the_budget_lock_is_not_approved(
+    pool: PgPool,
+) -> TestResult {
+    let rig = Rig::new(pool).await;
+    rig.set_budget(1_000_000, false).await;
+    let request = rig.card(2, "сборка", Source::Owner).await;
+    let deadline = now_micros() + TimeDelta::milliseconds(2_500);
+    sqlx::query(
+        "update requests
+            set expires_at = $2,
+                request_payload = jsonb_set(request_payload, '{expires_at}', to_jsonb($3::text))
+          where id = $1",
+    )
+    .bind(request)
+    .bind(deadline)
+    .bind(deadline.to_rfc3339())
+    .execute(&rig.pool)
+    .await?;
+    rig.decision(request, true).await;
+    // Чужая транзакция держит строку `cloud_budget`, пока карточка не истечёт: одобрение
+    // ждёт её на замке, и срок проверяется ещё раз уже под замком, по часам базы.
+    let (ready, wait) = tokio::sync::oneshot::channel::<()>();
+    let holder = {
+        let pool = rig.pool.clone();
+        tokio::spawn(async move {
+            let mut tx = canterlot_hub::db::begin(&pool).await.unwrap();
+            sqlx::query("select 1 from cloud_budget where singleton for update")
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            ready.send(()).unwrap();
+            tokio::time::sleep(Duration::from_secs(4)).await;
+            tx.rollback().await.unwrap();
+        })
+    };
+    wait.await?;
+    let outcome = rig.approve(request).await;
+    holder.await?;
+    assert_eq!(outcome, cloud_propose::ApproveOutcome::Expired);
+    assert_eq!(rig.request_state(request).await, "expired");
+    assert_eq!(
+        rig.windows_for(request).await,
+        0,
+        "no window after the deadline"
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn over_budget_card_passes_only_with_its_exact_reservation(pool: PgPool) -> TestResult {
     let rig = Rig::new(pool).await;
     rig.set_budget(0, false).await;
