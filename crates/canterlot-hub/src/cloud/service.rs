@@ -1973,10 +1973,9 @@ impl CloudService {
                 ("failed", Some(server)) if window.create_called_at.is_some() => {
                     self.reattach_late(window, server, now).await?;
                 }
-                (state, Some(server)) if !windows::owns_server(&state) => {
-                    if current {
-                        self.delete_stray(server, project, now).await?;
-                    }
+                // Лишний сервер ищется только в текущем проекте.
+                (state, Some(server)) if current && !windows::owns_server(state) => {
+                    self.delete_stray(server, project, now).await?;
                 }
                 _ => {}
             }
@@ -2030,7 +2029,7 @@ impl CloudService {
     /// `deleting` и освобождает порт только после подтверждённого отсутствия правила.
     async fn gone(&self, window: &Window, now: DateTime<Utc>) -> Result<(), sqlx::Error> {
         let id = window.id;
-        let ended = crate::db::in_tx(&self.pool, move |mut conn| {
+        let ended = crate::db::in_tx(&self.pool, move |conn| {
             Box::pin(async move {
                 let Some(window) = windows::load_for_update(&mut *conn, id).await? else {
                     return Ok::<_, sqlx::Error>(false);
@@ -2073,7 +2072,7 @@ impl CloudService {
                 .bind(id.to_string())
                 .execute(&mut *conn)
                 .await?;
-                windows::revoke_cloud_machine_in_tx(&mut conn).await?;
+                windows::revoke_cloud_machine_in_tx(conn).await?;
                 Ok(true)
             })
         })
