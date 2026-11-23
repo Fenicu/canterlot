@@ -1369,6 +1369,71 @@ async fn a_definite_dnat_refusal_closes_the_window_without_a_block(pool: PgPool)
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_dnat_refusal_and_the_move_to_deleting_commit_together(pool: PgPool) -> TestResult {
+    let rig = rig(pool).await;
+    enable_pushes(&rig.pool).await;
+    let _carrier = rig.carrier_session();
+    let t0 = now_micros();
+    let id = rig.create(120).await;
+    rig.tick(t0).await;
+    assert_eq!(rig.state(id).await, "identified");
+    rig.fake.control().dnat_create = crate::support::fake_timeweb::DnatCreateMode::Refuse {
+        status: 400,
+        error_code: "bad_request".to_owned(),
+    };
+    // База падает на переходе в `deleting`: половинчатого отказа быть не должно.
+    sqlx::query(
+        "create function cloud_test_block_transition() returns trigger as $$
+         begin
+             if new.state = 'deleting' and old.state = 'identified' then
+                 raise exception 'injected transition failure';
+             end if;
+             return new;
+         end;
+         $$ language plpgsql",
+    )
+    .execute(&rig.pool)
+    .await?;
+    sqlx::query(
+        "create trigger cloud_test_block_transition before update on cloud_windows
+           for each row execute function cloud_test_block_transition()",
+    )
+    .execute(&rig.pool)
+    .await?;
+
+    rig.tick(t0 + TimeDelta::seconds(1)).await;
+    let window = rig.window(id).await;
+    assert_eq!(window.state, "identified", "the transition did not happen");
+    assert_eq!(window.last_error, None, "the refusal is not half-committed");
+    assert!(
+        window.dnat_create_attempted_at.is_some(),
+        "the attempt marker survives with the refusal"
+    );
+    assert_eq!(window.dnat_gone_at, None);
+    assert_eq!(rig.dnat_posts(), 1);
+    assert!(rig.alert_codes().await.is_empty());
+
+    // Следующий проход не повторяет POST: метка попытки цела.
+    rig.tick(t0 + TimeDelta::seconds(2)).await;
+    assert_eq!(rig.dnat_posts(), 1, "no second DNAT POST");
+    assert_eq!(rig.state(id).await, "identified");
+
+    // Сбой убран: после срока неопределённости отказ проходит вместе с переходом.
+    sqlx::query("drop trigger cloud_test_block_transition on cloud_windows")
+        .execute(&rig.pool)
+        .await?;
+    rig.tick(t0 + TimeDelta::minutes(11)).await;
+    rig.tick(t0 + TimeDelta::minutes(11) + TimeDelta::seconds(10))
+        .await;
+    let window = rig.window(id).await;
+    assert_eq!(window.state, "deleting");
+    assert_eq!(window.last_error.as_deref(), Some("dnat_refused"));
+    assert_eq!(rig.dnat_posts(), 2);
+    assert_eq!(rig.alert_codes().await, vec!["dnat_refused"]);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn an_ambiguous_dnat_answer_is_adopted_from_the_listing_without_a_second_post(
     pool: PgPool,
 ) -> TestResult {

@@ -866,29 +866,46 @@ impl CloudService {
                 DnatCreateOutcome::Refused {
                     status, error_code, ..
                 } => {
-                    sqlx::query(
-                        "update cloud_windows set last_error = 'dnat_refused',
-                                dnat_create_attempted_at = null,
-                                dnat_gone_at = coalesce(dnat_gone_at, $2)
-                         where id = $1",
-                    )
-                    .bind(window.id)
-                    .bind(now)
-                    .execute(&self.pool)
+                    // Отказ провайдера, пуш владельцу и переход в `deleting` — одна
+                    // транзакция: падение хаба между ними не оставляет окно в `identified`
+                    // без метки попытки, иначе следующий проход сделал бы второй POST.
+                    let id = window.id;
+                    let name = window.name.clone();
+                    crate::db::in_tx(&self.pool, move |conn| {
+                        Box::pin(async move {
+                            sqlx::query(
+                                "update cloud_windows set last_error = 'dnat_refused',
+                                        dnat_create_attempted_at = null,
+                                        dnat_gone_at = coalesce(dnat_gone_at, $2)
+                                 where id = $1",
+                            )
+                            .bind(id)
+                            .bind(now)
+                            .execute(&mut *conn)
+                            .await?;
+                            crate::notify::enqueue_cloud_alert_in_tx(
+                                &mut *conn,
+                                &format!("cloud:dnat_refused:{id}"),
+                                &json!({
+                                    "code": "dnat_refused",
+                                    "window_id": id,
+                                    "name": name,
+                                    "status": status,
+                                    "error_code": error_code,
+                                }),
+                            )
+                            .await?;
+                            crate::cloud::windows::request_delete_in_tx(
+                                &mut *conn,
+                                id,
+                                "dnat_refused",
+                                now,
+                            )
+                            .await?;
+                            Ok::<_, sqlx::Error>(())
+                        })
+                    })
                     .await?;
-                    crate::notify::enqueue_cloud_alert(
-                        &self.pool,
-                        &format!("cloud:dnat_refused:{}", window.id),
-                        &json!({
-                            "code": "dnat_refused",
-                            "window_id": window.id,
-                            "name": window.name,
-                            "status": status,
-                            "error_code": error_code,
-                        }),
-                    )
-                    .await?;
-                    return self.delete_now(window, "dnat_refused", now).await;
                 }
                 DnatCreateOutcome::Ambiguous { .. } => {
                     sqlx::query(
