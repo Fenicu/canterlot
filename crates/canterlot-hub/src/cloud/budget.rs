@@ -158,7 +158,8 @@ pub async fn remaining_in_month(conn: &mut PgConnection) -> Result<i64, sqlx::Er
 }
 
 /// Оповещения о 80 % и 100 % бюджета: каждое не чаще одного раза в месяц. Нулевой бюджет
-/// не оповещает никогда. Возвращает количество поставленных в очередь пушей.
+/// не оповещает никогда. Метка месяца фиксируется в той же транзакции, что и строка очереди:
+/// сбой пуша не съедает оповещение. Возвращает количество поставленных в очередь пушей.
 pub async fn maybe_alert(
     pool: &PgPool,
     now: DateTime<Utc>,
@@ -168,57 +169,62 @@ pub async fn maybe_alert(
         return Ok(0);
     }
     let month = windows::month_of(now);
-    let mut conn = pool.acquire().await?;
-    let spent = windows::spent_in_month(&mut conn, &month).await?;
-    let (mark_80, mark_100): (Option<String>, Option<String>) =
-        sqlx::query_as("select alert_80_month, alert_100_month from cloud_budget where singleton")
-            .fetch_one(&mut *conn)
-            .await?;
     let mut sent = 0;
     // Две фиксированные колонки: динамический SQL здесь не нужен и не разрешён sqlx.
-    for (percent, current, is_80) in [(80_i64, mark_80, true), (100_i64, mark_100, false)] {
-        if current.as_deref() == Some(month.as_str())
-            || spent.saturating_mul(100) < budget_kopecks.saturating_mul(percent)
-        {
-            continue;
-        }
-        let changed = if is_80 {
-            sqlx::query(
-                "update cloud_budget set alert_80_month = $1
-                  where singleton and coalesce(alert_80_month, '') <> $1",
-            )
-            .bind(&month)
-            .execute(&mut *conn)
-            .await?
-            .rows_affected()
-                > 0
-        } else {
-            sqlx::query(
-                "update cloud_budget set alert_100_month = $1
-                  where singleton and coalesce(alert_100_month, '') <> $1",
-            )
-            .bind(&month)
-            .execute(&mut *conn)
-            .await?
-            .rows_affected()
-                > 0
-        };
-        if changed {
-            drop(conn);
-            crate::notify::enqueue_cloud_alert(
-                pool,
-                &format!("cloud:budget:{percent}:{month}"),
-                &serde_json::json!({
-                    "code": format!("budget_{percent}"),
-                    "month": month,
-                    "percent": percent,
-                    "spent_kopecks": spent,
-                    "budget_kopecks": budget_kopecks,
-                }),
-            )
-            .await?;
+    for (percent, is_80) in [(80_i64, true), (100_i64, false)] {
+        let month = month.clone();
+        let marked = crate::db::in_tx(pool, move |conn| {
+            Box::pin(async move {
+                let (budget, mark_80, mark_100): (i64, Option<String>, Option<String>) =
+                    sqlx::query_as(
+                        "select monthly_budget_kopecks, alert_80_month, alert_100_month
+                           from cloud_budget where singleton for update",
+                    )
+                    .fetch_one(&mut *conn)
+                    .await?;
+                if budget <= 0 {
+                    return Ok::<_, sqlx::Error>(false);
+                }
+                let current = if is_80 { mark_80 } else { mark_100 };
+                if current.as_deref() == Some(month.as_str()) {
+                    return Ok(false);
+                }
+                let spent = windows::spent_in_month(&mut *conn, &month).await?;
+                if spent.saturating_mul(100) < budget.saturating_mul(percent) {
+                    return Ok(false);
+                }
+                let inserted = crate::notify::enqueue_cloud_alert_in_tx(
+                    &mut *conn,
+                    &format!("cloud:budget:{percent}:{month}"),
+                    &serde_json::json!({
+                        "code": format!("budget_{percent}"),
+                        "month": month,
+                        "percent": percent,
+                        "spent_kopecks": spent,
+                        "budget_kopecks": budget,
+                    }),
+                )
+                .await?;
+                if !inserted {
+                    return Ok(false);
+                }
+                if is_80 {
+                    sqlx::query("update cloud_budget set alert_80_month = $1 where singleton")
+                        .bind(&month)
+                        .execute(&mut *conn)
+                        .await?;
+                } else {
+                    sqlx::query("update cloud_budget set alert_100_month = $1 where singleton")
+                        .bind(&month)
+                        .execute(&mut *conn)
+                        .await?;
+                }
+                Ok(true)
+            })
+        })
+        .await?;
+        if marked {
             sent += 1;
-            conn = pool.acquire().await?;
         }
     }
     Ok(sent)

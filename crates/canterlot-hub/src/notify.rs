@@ -886,6 +886,21 @@ pub async fn enqueue_cloud_alert(
     enqueue_auth(pool, KIND_CLOUD_ALERT, dedupe_key, payload).await
 }
 
+/// Тот же денежный пуш, но в транзакции вызывающей стороны: метка месяца и строка очереди
+/// фиксируются вместе, иначе оповещение теряется после сбоя вставки.
+pub(crate) async fn enqueue_cloud_alert_in_tx(
+    conn: &mut PgConnection,
+    dedupe_key: &str,
+    payload: &Value,
+) -> Result<bool, sqlx::Error> {
+    tracing::warn!(
+        kind = "cloud_alert",
+        code = payload["code"].as_str().unwrap_or("unknown"),
+        "owner cloud alert"
+    );
+    enqueue_auth_in_tx(conn, KIND_CLOUD_ALERT, dedupe_key, payload).await
+}
+
 /// Пуш о входе: без разговора, только если пуши включены (`push_settings`).
 /// Адреса и города уходят только в собственный Gotify владельца.
 async fn enqueue_auth(

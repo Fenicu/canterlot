@@ -310,11 +310,15 @@ impl CloudService {
             })
             .await;
             match created {
-                Ok(_) => {
+                Ok(window_id) => {
                     if let Err(error) = crate::notify::enqueue_cloud_alert(
                         &self.pool,
-                        &format!("cloud:auto_started:{}", windows::month_of(now)),
-                        &json!({"code": "auto_started", "reservation_kopecks": reservation}),
+                        &format!("cloud:auto_started:{window_id}"),
+                        &json!({
+                            "code": "auto_started",
+                            "window_id": window_id,
+                            "reservation_kopecks": reservation,
+                        }),
                     )
                     .await
                     {

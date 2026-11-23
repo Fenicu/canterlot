@@ -902,6 +902,89 @@ async fn hub_issues_one_card_per_episode_of_waiting_work(pool: PgPool) -> TestRe
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn automatic_start_alert_is_keyed_by_the_window_not_the_month(pool: PgPool) -> TestResult {
+    let rig = Rig::new(pool).await;
+    rig.set_budget(1_000_000, true).await;
+    let _carrier = testkit::fake_session(&rig.registry, rig.carrier, &["runners_v1"], true);
+    let runner = rig.static_runner("runner-a").await;
+    rig.seed_waiting(60).await;
+    let t0 = now_micros();
+
+    // Непрерывная недоступность: свежее наблюдение на каждом проходе.
+    for step in 0..=5 {
+        let at = t0 + TimeDelta::minutes(2 * step);
+        rig.observe_at(runner, at).await;
+        rig.service.tick(at).await;
+    }
+    assert_eq!(rig.push_count("auto_started").await, 1);
+    // Окно заканчивается, очередь и недоступность остаются: второе окно в том же месяце.
+    sqlx::query("update cloud_windows set state = 'failed', final_cost_kopecks = 0")
+        .execute(&rig.pool)
+        .await?;
+    let at = t0 + TimeDelta::minutes(12);
+    rig.observe_at(runner, at).await;
+    rig.service.tick(at).await;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("select count(*) from cloud_windows")
+            .fetch_one(&rig.pool)
+            .await?,
+        2,
+        "a second automatic window in the same month"
+    );
+    assert_eq!(
+        rig.push_count("auto_started").await,
+        2,
+        "each window gets its own alert"
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn budget_marker_rolls_back_with_its_push(pool: PgPool) -> TestResult {
+    let rig = Rig::new(pool).await;
+    rig.set_budget(10_000, false).await;
+    rig.insert_window("ended", Some(8_000), 8_000).await;
+    sqlx::query(
+        "create function cloud_budget_test_fail_push() returns trigger as $$
+         begin
+             raise exception 'injected push failure';
+         end;
+         $$ language plpgsql",
+    )
+    .execute(&rig.pool)
+    .await?;
+    sqlx::query(
+        "create trigger cloud_budget_test_fail_push before insert on owner_pushes
+           for each row when (new.payload->>'code' = 'budget_80')
+           execute function cloud_budget_test_fail_push()",
+    )
+    .execute(&rig.pool)
+    .await?;
+    let t0 = now_micros();
+    rig.service.tick(t0).await;
+    assert_eq!(rig.push_count("budget_80").await, 0);
+    let mark: Option<String> =
+        sqlx::query_scalar("select alert_80_month from cloud_budget where singleton")
+            .fetch_one(&rig.pool)
+            .await?;
+    assert_eq!(
+        mark, None,
+        "the month marker must not outlive a failed outbox insert"
+    );
+
+    sqlx::query("drop trigger cloud_budget_test_fail_push on owner_pushes")
+        .execute(&rig.pool)
+        .await?;
+    rig.service.tick(t0 + TimeDelta::minutes(1)).await;
+    assert_eq!(
+        rig.push_count("budget_80").await,
+        1,
+        "the alert goes out once the push can be stored"
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn budget_alerts_fire_once_per_month_and_never_for_zero(pool: PgPool) -> TestResult {
     let rig = Rig::new(pool).await;
     rig.set_budget(10_000, false).await;
