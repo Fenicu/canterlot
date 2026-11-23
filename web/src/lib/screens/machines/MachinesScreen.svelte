@@ -112,8 +112,8 @@
     {:else if !runtime || runtime.machines.status === 'idle' || runtime.machines.status === 'loading_snapshot'}<p>Загружаю машины…</p>
     {:else if !machine}<p>Машины ещё не подключены. Подключите воркер к хабу</p>
     {:else}
-      <CloudSection {runtime} {now} />
       {#if machines.length > 1}<Segmented name="machine" label="Машина" options={machines.map(m => ({ value: m.id, label: m.availability === 'degraded' ? `${m.name} · нестабильно` : m.availability === 'unavailable' ? `${m.name} · не в сети` : m.availability === 'offline' && isRunner(m) ? `${m.name} · недоступен` : m.name }))} bind:value={selected} />{/if}
+      <CloudSection {runtime} {now} />
       <div class="heading"><h2>{machine.name}</h2>{#key machine.id}
         {#if runnerState}<span class="availability" data-availability={machine.availability} data-tone={runnerState.tone} data-runner-availability use:swapOn={{ text: runnerState.text, key: machine.availability }}></span>
         {:else}<span class="availability" data-availability={machine.availability} use:swapOn={{ text: machineStatus(machine.availability), key: machine.availability }}></span>{/if}{/key}</div>
