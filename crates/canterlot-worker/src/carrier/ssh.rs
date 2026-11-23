@@ -80,10 +80,19 @@ impl Ssh {
 
     fn base(&self) -> Command {
         let mut command = Command::new("ssh");
+        command.args(self.args()).kill_on_drop(true);
+        command
+    }
+
+    /// Аргументы `ssh` без адресата: одни и те же для прямого вызова и для транспорта git и
+    /// `rsync`.
+    fn args(&self) -> Vec<String> {
+        let mut args: Vec<String> = Vec::new();
         match &self.target {
             Target::Alias(_) => {
                 if let Some(config) = &self.config {
-                    command.arg("-F").arg(config);
+                    args.push("-F".into());
+                    args.push(config.display().to_string());
                 }
             }
             Target::Host {
@@ -94,27 +103,61 @@ impl Ssh {
                 ..
             } => {
                 if let Some(key) = identity {
-                    command.arg("-i").arg(key);
+                    args.push("-i".into());
+                    args.push(key.display().to_string());
                 }
-                command
-                    .args(["-o", "IdentitiesOnly=yes"])
-                    .args(["-o", &format!("User={user}")])
-                    .args(["-o", &format!("Port={port}")])
-                    .args(["-o", "StrictHostKeyChecking=yes"])
-                    .args([
-                        "-o",
-                        &format!("UserKnownHostsFile={}", known_hosts.display()),
-                    ])
-                    .args(["-o", "GlobalKnownHostsFile=/dev/null"]);
+                args.push("-o".into());
+                args.push("IdentitiesOnly=yes".into());
+                args.push("-o".into());
+                args.push(format!("User={user}"));
+                args.push("-o".into());
+                args.push(format!("Port={port}"));
+                args.push("-o".into());
+                args.push("StrictHostKeyChecking=yes".into());
+                args.push("-o".into());
+                args.push(format!("UserKnownHostsFile={}", known_hosts.display()));
+                args.push("-o".into());
+                args.push("GlobalKnownHostsFile=/dev/null".into());
             }
         }
-        command
-            .args(["-o", "BatchMode=yes"])
-            .args(["-o", "ConnectTimeout=10"])
-            .args(["-o", "ServerAliveInterval=15"])
-            .args(["-o", "ServerAliveCountMax=3"])
-            .kill_on_drop(true);
-        command
+        for option in [
+            "BatchMode=yes",
+            "ConnectTimeout=10",
+            "ServerAliveInterval=15",
+            "ServerAliveCountMax=3",
+        ] {
+            args.push("-o".into());
+            args.push(option.into());
+        }
+        args
+    }
+
+    /// Команда `ssh` целиком для `GIT_SSH_COMMAND` и `rsync -e`: тот же адресат и те же опции,
+    /// что у прямого вызова. Облачному раннеру нужны свой ключ, порт и закреплённый
+    /// `known_hosts`; без них транспорт git не достучался бы до него.
+    pub fn command_line(&self) -> String {
+        let mut text = String::from("ssh");
+        for arg in self.args() {
+            text.push(' ');
+            text.push_str(&super::stage::sh_quote(&arg));
+        }
+        text
+    }
+
+    /// Адресат scp-подобной записи для git и `rsync`: псевдоним или `user@host` с путём.
+    /// Порт облачного раннера задан опцией `Port` в [`Self::command_line`].
+    pub fn destination(&self, path: &str) -> String {
+        match &self.target {
+            Target::Alias(alias) => format!("{alias}:{path}"),
+            Target::Host { host, user, .. } => {
+                let host = if host.contains(':') && !host.starts_with('[') {
+                    format!("[{host}]")
+                } else {
+                    host.clone()
+                };
+                format!("{user}@{host}:{path}")
+            }
+        }
     }
 
     fn peer(&self) -> &str {

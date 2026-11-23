@@ -177,18 +177,39 @@ impl CarrierSettings {
 }
 
 /// Раннер по идентификатору машины для команд носителя: пересечение конфигурации и текущего
-/// назначения хаба, как у присмотра (`desired`).
+/// назначения хаба, как у присмотра (`desired`), плюс облачные подключения. Облачный раннер
+/// приходит с адресом и DNAT-портом, а не с псевдонимом `ssh_config`.
 pub fn targets(
     entries: Vec<RunnerSsh>,
     assigned: watch::Receiver<Vec<AssignedRunner>>,
+    cloud: Option<Arc<cloud::CloudState>>,
 ) -> stage::Targets {
     Arc::new(move |machine| {
         let list = assigned.borrow();
         let runner = list.iter().find(|runner| runner.machine_id == machine)?;
+        if let Some(host) = cloud.as_ref().and_then(|state| {
+            state
+                .specs()
+                .into_iter()
+                .find(|spec| spec.machine_id == machine)
+        }) {
+            return script::valid_root(&runner.root_dir).then(|| stage::RunnerTarget {
+                alias: String::new(),
+                root: runner.root_dir.clone(),
+                host: Some(stage::RunnerHost {
+                    host: host.host,
+                    port: host.port,
+                    user: host.user,
+                    identity: host.identity,
+                    known_hosts: host.known_hosts,
+                }),
+            });
+        }
         let entry = entries.iter().find(|entry| entry.machine == runner.name)?;
         script::valid_root(&runner.root_dir).then(|| stage::RunnerTarget {
             alias: entry.ssh.clone(),
             root: runner.root_dir.clone(),
+            host: None,
         })
     })
 }
