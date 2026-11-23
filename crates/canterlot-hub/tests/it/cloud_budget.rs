@@ -735,7 +735,11 @@ async fn a_card_that_expires_while_waiting_for_the_budget_lock_is_not_approved(
                 .await
                 .unwrap();
             ready.send(()).unwrap();
-            tokio::time::sleep(Duration::from_secs(4)).await;
+            // Замок держится дольше остатка срока карточки; ждём в базе, не в тесте.
+            sqlx::query("select pg_sleep(4)")
+                .execute(&mut *tx)
+                .await
+                .unwrap();
             tx.rollback().await.unwrap();
         })
     };
