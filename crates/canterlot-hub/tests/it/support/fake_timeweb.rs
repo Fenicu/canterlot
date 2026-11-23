@@ -184,6 +184,8 @@ pub struct FakeState {
     pub list_total_override: Option<u64>,
     /// `meta.total` по страницам по порядку: список менялся во время обхода.
     pub list_total_sequence: VecDeque<u64>,
+    /// Проект, список ресурсов которого отвечает ошибкой: сверка проектов независима.
+    pub list_fail_project: Option<i64>,
     /// Сервер, созданный запросом, не виден в первых стольких листингах проекта. Счёт
     /// идёт по листингам, а не по часам: тест не зависит от скорости машины.
     pub listing_hidden_polls: u32,
@@ -241,6 +243,7 @@ impl FakeState {
             list_ignores_paging: false,
             list_total_override: None,
             list_total_sequence: VecDeque::new(),
+            list_fail_project: None,
             listing_hidden_polls: 0,
             boot_polls: 0,
             echo_authorization_in_errors: false,
@@ -644,6 +647,14 @@ fn route(
             let Ok(project_id) = project.parse::<i64>() else {
                 return Action::Respond(error_response(st, 400, "Bad project", auth));
             };
+            if st.list_fail_project == Some(project_id) {
+                return Action::Respond(error_response(
+                    st,
+                    500,
+                    "Injected project listing failure",
+                    auth,
+                ));
+            }
             // Скрытый сервер «стареет» по листингам: счётчик убывает на первой странице.
             let first_page = query.get("offset").is_none_or(|offset| offset == "0");
             let mut visible: Vec<Value> = Vec::new();

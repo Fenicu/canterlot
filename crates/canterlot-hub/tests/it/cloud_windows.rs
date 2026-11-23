@@ -2666,6 +2666,38 @@ async fn a_stray_is_deleted_only_when_the_direct_get_shows_its_own_name(
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_project_listing_failure_does_not_stop_another_project(pool: PgPool) -> TestResult {
+    let rig = rig(pool).await;
+    let now = now_micros();
+    // Окно из старой конфигурации: его проект — не текущий.
+    let id = raw_window(
+        &rig.pool,
+        "create_unknown",
+        None,
+        Some(now - TimeDelta::minutes(1)),
+    )
+    .await;
+    rig.fake
+        .control()
+        .add_server(PROJECT + 1, &windows::server_name(id));
+    sqlx::query("update cloud_windows set project_id = $2 where id = $1")
+        .bind(id)
+        .bind(PROJECT + 1)
+        .execute(&rig.pool)
+        .await?;
+    // Список текущего проекта отвечает ошибкой: это не должно мешать окну другого проекта.
+    rig.fake.control().list_fail_project = Some(PROJECT);
+    rig.tick(now).await;
+    let window = rig.window(id).await;
+    assert_eq!(
+        window.state, "identified",
+        "the other project's window is confirmed by its own full listing"
+    );
+    assert!(window.server_id.is_some());
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn reconcile_runs_at_start_before_any_create(pool: PgPool) -> TestResult {
     let rig = rig(pool).await;
     rig.fake.control().add_server(PROJECT, &stray_name());

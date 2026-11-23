@@ -1802,23 +1802,30 @@ impl CloudService {
                 projects.push(project);
             }
         }
+        // Каждый проект разбирается сам: ошибка списка одного проекта не мешает
+        // подтверждению и сносу окон другого. Новых созданий при этом не будет: успешной
+        // такая сверка не считается.
+        let mut complete = true;
         for project in projects {
             let listing = match self.provider.list_project_servers(project).await {
                 Ok(listing) => listing,
                 Err(error) => {
-                    tracing::warn!(kind = "cloud_reconcile_listing", error = %error, "project listing failed; nothing changed");
-                    return Err(());
+                    tracing::warn!(kind = "cloud_reconcile_listing", project, error = %error, "project listing failed; nothing changed for this project");
+                    complete = false;
+                    continue;
                 }
             };
-            self.apply_listing(&listing, project, now)
-                .await
-                .map_err(|error| {
-                    warn_db("cloud_reconcile", &error);
-                })?;
+            if let Err(error) = self.apply_listing(&listing, project, now).await {
+                warn_db("cloud_reconcile", &error);
+                complete = false;
+            }
         }
         // Правила роутера идут отдельно: список не получен целиком — ничего не меняем.
         if let Err(error) = self.delete_stray_dnat_rules(now).await {
             warn_db("cloud_reconcile_dnat", &error);
+        }
+        if !complete {
+            return Err(());
         }
         let pending: bool = sqlx::query_scalar(
             "select exists(select 1 from cloud_windows
