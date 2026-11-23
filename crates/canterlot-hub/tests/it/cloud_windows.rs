@@ -2165,6 +2165,98 @@ async fn a_delete_requires_the_expected_name_and_membership_in_the_stored_projec
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_direct_404_alone_never_confirms_absence(pool: PgPool) -> TestResult {
+    let rig = rig(pool).await;
+    let now = now_micros();
+    let server = rig.fake.control().add_server(PROJECT, "placeholder");
+    let id = raw_window(
+        &rig.pool,
+        "deleting",
+        Some(server),
+        Some(now - TimeDelta::minutes(20)),
+    )
+    .await;
+    rig.fake.control().servers.get_mut(&server).unwrap().name = windows::server_name(id);
+    // Тёплый проход: сверка проходит, а первая попытка удаления ещё не наступила.
+    sqlx::query(
+        "update cloud_windows set delete_accepted_at = null, next_delete_at = $2 where id = $1",
+    )
+    .bind(id)
+    .bind(now + TimeDelta::seconds(30))
+    .execute(&rig.pool)
+    .await?;
+    rig.tick(now).await;
+    assert_eq!(rig.fake.server_count(), 1);
+    // Точечный ответ 404, но полный список проекта всё ещё показывает сервер: отсутствие не
+    // подтверждено, оплата сервера не закончена.
+    rig.fake.control().fail_next.push_back(404);
+    rig.tick(now + TimeDelta::seconds(40)).await;
+    let window = rig.window(id).await;
+    assert_eq!(window.state, "deleting");
+    assert!(window.server_gone_at.is_none());
+    assert_eq!(rig.fake.server_count(), 1);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn repeated_lookup_failures_count_as_delete_failures_and_alert(pool: PgPool) -> TestResult {
+    let rig = rig(pool).await;
+    enable_pushes(&rig.pool).await;
+    let now = now_micros();
+    let server = rig.fake.control().add_server(PROJECT, "placeholder");
+    let id = raw_window(
+        &rig.pool,
+        "deleting",
+        Some(server),
+        Some(now - TimeDelta::minutes(20)),
+    )
+    .await;
+    rig.fake.control().servers.get_mut(&server).unwrap().name = windows::server_name(id);
+    // Тёплый проход: сверка проходит, первая попытка удаления ещё не наступила.
+    sqlx::query(
+        "update cloud_windows set delete_accepted_at = null, next_delete_at = $2 where id = $1",
+    )
+    .bind(id)
+    .bind(now + TimeDelta::seconds(30))
+    .execute(&rig.pool)
+    .await?;
+    rig.tick(now).await;
+    assert_eq!(rig.window(id).await.delete_attempts, 0);
+    assert!(rig.alert_codes().await.is_empty());
+
+    // Точечный ответ не приходит: это неудача удаления, с откатом.
+    for (attempt, at, next) in [
+        (1, now + TimeDelta::seconds(40), TimeDelta::seconds(30)),
+        (2, now + TimeDelta::seconds(130), TimeDelta::seconds(60)),
+    ] {
+        rig.fake.control().fail_next.push_back(500);
+        rig.tick(at).await;
+        let window = rig.window(id).await;
+        assert_eq!(window.delete_attempts, attempt);
+        assert_eq!(window.next_delete_at, Some(at + next));
+        assert_eq!(rig.fake.server_count(), 1, "nothing is deleted blindly");
+        assert!(rig.alert_codes().await.is_empty(), "fewer than three");
+    }
+    // Раньше паузы после второй неудачи прохода нет.
+    rig.tick(now + TimeDelta::seconds(160)).await;
+    assert_eq!(rig.window(id).await.delete_attempts, 2);
+    assert_eq!(rig.fake.server_count(), 1);
+    // Третья неудача: пуш о неудаляемом сервере.
+    rig.fake.control().fail_next.push_back(500);
+    rig.tick(now + TimeDelta::seconds(260)).await;
+    let window = rig.window(id).await;
+    assert_eq!(window.delete_attempts, 3);
+    assert_eq!(window.last_error.as_deref(), Some("delete_lookup_failed"));
+    assert_eq!(rig.alert_codes().await, vec!["delete_failing"]);
+    assert_eq!(rig.state(id).await, "deleting");
+
+    // Провайдер отвечает: обычное удаление и конец окна.
+    rig.tick(now + TimeDelta::minutes(10)).await;
+    assert_eq!(rig.state(id).await, "ended");
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn a_confirmed_absence_skips_the_delete_call(pool: PgPool) -> TestResult {
     let rig = rig(pool).await;
     let now = now_micros();

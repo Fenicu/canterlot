@@ -1577,14 +1577,22 @@ impl CloudService {
                 return Ok(());
             }
             Ownership::Unknown => {
+                // Ответа нет: это неудача удаления, как и отказ провайдера. Повтор идёт с
+                // откатом, а после третьей неудачи владельцу уходит «deletion failing».
+                let attempts = window.delete_attempts.saturating_add(1);
                 sqlx::query(
-                    "update cloud_windows set next_delete_at = $2
+                    "update cloud_windows set last_error = 'delete_lookup_failed',
+                            delete_attempts = $2, next_delete_at = $3
                      where id = $1 and state = 'deleting'",
                 )
                 .bind(window.id)
-                .bind(now + delete_backoff(window.delete_attempts.saturating_add(1)))
+                .bind(attempts)
+                .bind(now + delete_backoff(attempts))
                 .execute(&self.pool)
                 .await?;
+                if attempts >= DELETE_FAILURES_BEFORE_ALERT {
+                    self.alert_delete_failing(window, now).await?;
+                }
                 return Ok(());
             }
         }
