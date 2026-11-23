@@ -53,7 +53,8 @@ const CANTERLOT_TOOLS: Record<string, string> = {
   job_cancel: 'job_cancel',
   jobs_list: 'jobs_list',
   // Раннеры несущей: список с доступностью и местами.
-  runners_list: 'runners_list'
+  runners_list: 'runners_list',
+  runner_propose: 'runner_propose'
 };
 
 /** Все имена инструментов canterlot, как их объявляет воркер. */

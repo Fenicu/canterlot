@@ -100,6 +100,7 @@ error_codes! {
     MethodNotAllowed => "method_not_allowed", 405, Browser, Never, "Метод не поддерживается";
     IdempotencyConflict => "idempotency_conflict", 409, Browser, Never, "Ключ идемпотентности уже использован с другим запросом";
     DraftRevisionConflict => "draft_revision_conflict", 409, Browser, AfterCondition, "Черновик уже изменён с другого устройства";
+    StaleRevision => "stale_revision", 409, Browser, AfterCondition, "Настройки облака изменились, обновите их";
     DecisionConflict => "decision_conflict", 409, Browser, Never, "Решение уже принято с другого устройства";
     RequestNotOpen => "request_not_open", 409, Browser, Never, "Запрос уже закрыт";
     DecisionInvalid => "decision_invalid", 422, Browser, Never, "Ответ не подходит к вопросу";
@@ -120,6 +121,7 @@ error_codes! {
     MachineNotFound => "machine_not_found", 404, Browser, Never, "Машина не найдена";
     MachineUnavailable => "machine_unavailable", 409, Delivery, AfterCondition, "Машина недоступна";
     MachineIsRunner => "machine_is_runner", 409, Browser, Never, "Машина — раннер: сессии на ней не запускаются";
+    SystemConversation => "system_conversation", 409, Browser, Never, "Служебный разговор: сообщения и запуски в нём запрещены";
     MachineOffline => "machine_offline", 409, Delivery, AfterCondition, "Машина не на связи";
     NotOpen => "not_open", 409, Browser, Never, "Запрос секрета уже закрыт";
     NotDelivered => "not_delivered", 409, Browser, Never, "Значение ещё не доставлено";
@@ -604,6 +606,7 @@ impl From<SubmitError> for ApiError {
             SubmitError::QueueFull { .. } => ApiError::new(ErrorCode::QueueFull),
             SubmitError::ResourceLimit { .. } => ApiError::new(ErrorCode::ResourceLimit),
             SubmitError::ConversationNotFound => ApiError::new(ErrorCode::NotFound),
+            SubmitError::SystemConversation => ApiError::new(ErrorCode::SystemConversation),
             SubmitError::ConversationClosed => ApiError::new(ErrorCode::ConversationClosed),
             SubmitError::Db(error) => error.into(),
         }
@@ -647,6 +650,7 @@ impl From<ExecutionError> for ApiError {
             ExecutionError::ConversationNotFound => ApiError::new(ErrorCode::NotFound),
             ExecutionError::ConversationClosed => ApiError::new(ErrorCode::ConversationClosed),
             ExecutionError::MachineIsRunner => ApiError::new(ErrorCode::MachineIsRunner),
+            ExecutionError::SystemConversation => ApiError::new(ErrorCode::SystemConversation),
             ExecutionError::WorktreeRemoved => ApiError::new(ErrorCode::WorktreeRemoved),
             ExecutionError::InvalidTransition { .. } => ApiError::new(ErrorCode::InvalidState),
             ExecutionError::Db(error) => error.into(),

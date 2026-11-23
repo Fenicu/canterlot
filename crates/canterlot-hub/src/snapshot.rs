@@ -32,6 +32,9 @@ pub struct ListSnapshot {
     /// Задачи досок плана корневых оркестраторов вне архива и корзины; готовые и
     /// отменённые — за 7 дней, не больше 50 оркестраторов. Снимок заменяет набор целиком.
     pub plan_tasks: Vec<crate::session_tools::plan::PlanTask>,
+    /// Открытые карточки облачных окон из служебного разговора: приходят через requests,
+    /// хотя сам разговор не чат и в списке сессий не показан.
+    pub cloud_cards: Vec<RequestView>,
 }
 #[derive(Serialize, ToSchema)]
 pub struct ConversationSnapshot {
@@ -146,6 +149,18 @@ pub async fn conversations(
                     .collect(),
                 plan_tasks: crate::session_tools::plan::snapshot_views(&mut *conn, owner_id)
                     .await?,
+                cloud_cards: sqlx::query_as::<_, crate::requests::RequestRow>(
+                    "select r.* from requests r join conversations c on c.id = r.conversation_id
+                      where c.owner_id = $1 and r.kind = 'cloud_window'
+                        and r.state in ('open', 'decision_saved')
+                      order by r.created_at asc, r.id asc",
+                )
+                .bind(owner_id)
+                .fetch_all(&mut *conn)
+                .await?
+                .into_iter()
+                .map(RequestView::from)
+                .collect(),
             };
             Ok(Snapshot {
                 scope: events::wire_scope(&scope),
@@ -231,7 +246,7 @@ pub async fn conversation_with_registry(
     let open_requests_rows: Vec<crate::requests::RequestRow> = sqlx::query_as(
         "select r.* from requests r join executions e on e.id = r.execution_id
          where r.conversation_id = $1 and r.state in ('open', 'decision_saved', 'decision_transmitting')
-           and (e.state not in ('stopped', 'failed', 'owner_lost') or r.kind = 'settings_change')
+           and (e.state not in ('stopped', 'failed', 'owner_lost') or r.kind in ('settings_change', 'cloud_window'))
          order by r.created_at asc, r.id asc",
     )
     .bind(id)

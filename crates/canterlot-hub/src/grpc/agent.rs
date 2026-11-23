@@ -200,6 +200,7 @@ async fn handle(
                 spawn_queue: grpc.spawn_queue.clone(),
                 guards: grpc.guards.clone(),
                 dispatcher: grpc.dispatcher.clone(),
+                cloud: grpc.cloud.clone(),
                 registry: grpc.registry.clone(),
                 shutdown: grpc.shutdown.clone(),
             };

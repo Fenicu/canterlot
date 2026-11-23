@@ -1,7 +1,7 @@
 //! Задание `session_task`: в его транзакции живёт только очередь адресата, поэтому
 //! две очереди вместе никогда не блокируются.
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
@@ -96,12 +96,14 @@ enum Action {
     SpawnAttributes,
     SettingsChange,
     SettingsExpire,
+    CloudWindow,
+    CloudWindowExpire,
     JobResult,
 }
 
 impl Action {
     #[cfg(test)]
-    const ALL: [Self; 14] = [
+    const ALL: [Self; 16] = [
         Self::Event,
         Self::MachineEvent,
         Self::Note,
@@ -115,6 +117,8 @@ impl Action {
         Self::SpawnAttributes,
         Self::SettingsChange,
         Self::SettingsExpire,
+        Self::CloudWindow,
+        Self::CloudWindowExpire,
         Self::JobResult,
     ];
 
@@ -133,12 +137,15 @@ impl Action {
             "spawn_attributes" => Some(Self::SpawnAttributes),
             "settings_change" => Some(Self::SettingsChange),
             "settings_expire" => Some(Self::SettingsExpire),
+            "cloud_window" => Some(Self::CloudWindow),
+            "cloud_window_expire" => Some(Self::CloudWindowExpire),
             "job_result" => Some(Self::JobResult),
             _ => None,
         }
     }
 }
 
+/// Обычный вызов без облачной службы: карточки облака в таком задании не создаются.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_in_tx(
     conn: &mut PgConnection,
@@ -149,6 +156,38 @@ pub async fn run_in_tx(
     settle: &crate::session_tools::settle::SettleConfig,
     thresholds: &crate::activity::Thresholds,
     spawn_runtime: Option<&crate::session_tools::spawn_queue::Runtime<'_>>,
+    probe: Option<crate::session_tools::probe::PathProbe>,
+    limits: &LimitsConfig,
+    retry_delay: Duration,
+) -> Result<JobOutcome, SubmitError> {
+    run_in_tx_with_cloud(
+        conn,
+        job,
+        now,
+        correlation_id,
+        registry,
+        settle,
+        thresholds,
+        spawn_runtime,
+        None,
+        probe,
+        limits,
+        retry_delay,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn run_in_tx_with_cloud(
+    conn: &mut PgConnection,
+    job: &ClaimedJob,
+    now: DateTime<Utc>,
+    correlation_id: Uuid,
+    registry: Option<&Registry>,
+    settle: &crate::session_tools::settle::SettleConfig,
+    thresholds: &crate::activity::Thresholds,
+    spawn_runtime: Option<&crate::session_tools::spawn_queue::Runtime<'_>>,
+    cloud: Option<&Arc<crate::cloud::service::CloudService>>,
     probe: Option<crate::session_tools::probe::PathProbe>,
     limits: &LimitsConfig,
     retry_delay: Duration,
@@ -393,6 +432,21 @@ pub async fn run_in_tx(
         }
         Action::SettingsExpire => {
             crate::session_tools::settings_change::expire_job(conn, job, subscriber, correlation_id)
+                .await
+        }
+        Action::CloudWindow => {
+            crate::session_tools::cloud_propose::run_job(
+                conn,
+                cloud,
+                job,
+                subscriber,
+                now,
+                correlation_id,
+            )
+            .await
+        }
+        Action::CloudWindowExpire => {
+            crate::session_tools::cloud_propose::expire_job(conn, job, subscriber, correlation_id)
                 .await
         }
         Action::Cleanup => {
@@ -854,6 +908,16 @@ pub async fn abandon_in_tx(
             .await
             .map(|_| false)
         }
+        Action::CloudWindow | Action::CloudWindowExpire => {
+            crate::session_tools::cloud_propose::abandon_in_tx(
+                conn,
+                conversation,
+                payload,
+                correlation_id,
+            )
+            .await
+            .map(|_| false)
+        }
     }
 }
 
@@ -906,6 +970,13 @@ mod tests {
                     "action": match action {
                         Action::SettingsChange => "settings_change",
                         _ => "settings_expire",
+                    },
+                    "request_id": Uuid::now_v7(),
+                }),
+                Action::CloudWindow | Action::CloudWindowExpire => json!({
+                    "action": match action {
+                        Action::CloudWindow => "cloud_window",
+                        _ => "cloud_window_expire",
                     },
                     "request_id": Uuid::now_v7(),
                 }),

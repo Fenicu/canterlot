@@ -152,6 +152,8 @@ pub struct HubGrpc {
     pub guards: Arc<crate::config::GuardsConfig>,
     pub settle: crate::session_tools::settle::SettleConfig,
     pub dispatcher: Option<crate::dispatcher::Dispatcher>,
+    /// Служба облачных окон: нужна инструментам цены и карточек; `None` без `[runners.cloud]`.
+    pub cloud: Option<Arc<crate::cloud::service::CloudService>>,
     blobs: Option<Arc<dyn crate::attachments::BlobStore>>,
     /// Общий предел медиа одной машины; `0` выключает проверку.
     pub media_quota_bytes: u64,
@@ -407,6 +409,7 @@ impl HubGrpc {
             guards: Default::default(),
             settle: (&crate::config::ActivityConfig::default()).into(),
             dispatcher: None,
+            cloud: None,
             blobs: None,
             media_quota_bytes: crate::config::AttachmentsConfig::default()
                 .max_media_bytes_per_machine,
@@ -417,6 +420,11 @@ impl HubGrpc {
             faults: Default::default(),
             shutdown: CancellationToken::new(),
         }
+    }
+
+    pub fn with_cloud(mut self, cloud: Option<Arc<crate::cloud::service::CloudService>>) -> Self {
+        self.cloud = cloud;
+        self
     }
 
     pub fn with_session_tools(mut self, config: crate::config::SessionToolsConfig) -> Self {

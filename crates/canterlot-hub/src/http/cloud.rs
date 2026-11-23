@@ -15,14 +15,22 @@ use super::{
     extract::ApiPath,
 };
 use crate::{
-    cloud::windows::{self, CloudWindowView, DeleteRequested},
+    cloud::{
+        budget,
+        windows::{self, CloudWindowView, DeleteRequested},
+    },
     idempotency,
+    session_tools::cloud_propose::{self, Opened},
 };
 
 pub fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(list))
         .routes(routes!(delete_now))
+        .routes(routes!(budget_get))
+        .routes(routes!(budget_put))
+        .routes(routes!(budget_clear_block))
+        .routes(routes!(propose))
 }
 
 /// Столько законченных окон показывает список вместе с живыми.
@@ -113,5 +121,160 @@ async fn delete_now(
             );
         }
     }
+    Ok(Json(outcome.value))
+}
+
+/// Бюджет облака: настройки владельца, расход текущего месяца и цены профилей.
+#[utoipa::path(get,path="/api/v1/cloud/budget",tag="cloud",responses(
+    (status=200,description="Бюджет облака: месяц, расход, остаток, режим, ревизия, блок и профили с ценой часа",body=budget::BudgetView)
+))]
+async fn budget_get(
+    State(state): State<AppState>,
+    _owner: Owner,
+) -> Result<Json<budget::BudgetView>, ApiError> {
+    let mut conn = state.pool.acquire().await?;
+    let pricing = match state.cloud.as_ref() {
+        Some(cloud) => cloud.pricing().await.ok(),
+        None => None,
+    };
+    Ok(Json(budget::view(&mut conn, pricing.as_ref()).await?))
+}
+
+/// Изменить бюджет и режим: устаревшая ревизия меняет ничего и даёт 409.
+#[utoipa::path(put,path="/api/v1/cloud/budget",tag="cloud",params(("Idempotency-Key"=String,Header,description="Ключ операции")),request_body=budget::Update,responses(
+    (status=200,description="Новая ревизия настроек",body=budget::BudgetView),
+    (status=409,description="Настройки изменились с другого устройства",body=super::error::ErrorEnvelope)
+))]
+async fn budget_put(
+    State(state): State<AppState>,
+    owner: Owner,
+    IdempotencyKey(key): IdempotencyKey,
+    Json(body): Json<budget::Update>,
+) -> Result<Json<budget::BudgetView>, ApiError> {
+    let owner_id = owner.owner_id;
+    let fingerprint = body.clone();
+    let result = idempotency::run_in_tx(
+        &state.pool,
+        owner_id,
+        &key,
+        "cloud_budget_put",
+        &fingerprint,
+        None,
+        move |conn| {
+            Box::pin(async move {
+                let revision =
+                    budget::update_in_tx(conn, &body)
+                        .await
+                        .map_err(|error| match error {
+                            budget::UpdateError::Stale => ApiError::new(ErrorCode::StaleRevision),
+                            budget::UpdateError::Invalid(reason) => ApiError::new(
+                                ErrorCode::InvalidRequest,
+                            )
+                            .with_details(super::error::ErrorDetails {
+                                reason: Some(reason.to_owned()),
+                                ..Default::default()
+                            }),
+                            budget::UpdateError::Db(error) => error.into(),
+                        })?;
+                Ok::<_, ApiError>(revision)
+            })
+        },
+    )
+    .await?;
+    let _ = result;
+    budget_get(State(state), owner).await
+}
+
+/// Снять блок провайдера: снова разрешить создание окон.
+#[utoipa::path(post,path="/api/v1/cloud/budget/clear-block",tag="cloud",params(("Idempotency-Key"=String,Header,description="Ключ операции")),responses(
+    (status=200,description="Блок снят (или его не было)")
+))]
+async fn budget_clear_block(
+    State(state): State<AppState>,
+    owner: Owner,
+    IdempotencyKey(key): IdempotencyKey,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let outcome = idempotency::run_in_tx(
+        &state.pool,
+        owner.owner_id,
+        &key,
+        "cloud_budget_clear_block",
+        &(),
+        None,
+        move |conn| {
+            Box::pin(async move {
+                let cleared = windows::clear_provider_block(conn).await?;
+                Ok::<_, ApiError>(serde_json::json!({"cleared": cleared}))
+            })
+        },
+    )
+    .await?;
+    Ok(Json(outcome.value))
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+struct ProposeBody {
+    /// Сколько часов: 1..=4.
+    hours: u32,
+    /// Причина, которую увидит владелец на карточке.
+    reason: String,
+}
+
+/// Форма владельца «Запустить облачный раннер»: создаёт карточку, не окно.
+#[utoipa::path(post,path="/api/v1/cloud/proposals",tag="cloud",params(("Idempotency-Key"=String,Header,description="Ключ операции")),request_body=ProposeBody,responses(
+    (status=200,description="Карточка создана: владелец решает отдельно",body=Opened),
+    (status=409,description="Облако выключено, есть живое окно или открытая карточка",body=super::error::ErrorEnvelope)
+))]
+async fn propose(
+    State(state): State<AppState>,
+    owner: Owner,
+    IdempotencyKey(key): IdempotencyKey,
+    Json(body): Json<ProposeBody>,
+) -> Result<Json<Opened>, ApiError> {
+    let Some(cloud) = state.cloud.clone() else {
+        return Err(ApiError::new(ErrorCode::InvalidState));
+    };
+    let carrier = cloud.config().carrier_machine_id;
+    let owner_id = owner.owner_id;
+    let fingerprint = body.clone();
+    let outcome = idempotency::run_in_tx(
+        &state.pool,
+        owner_id,
+        &key,
+        "cloud_proposal",
+        &fingerprint,
+        None,
+        move |conn| {
+            let body = body.clone();
+            let cloud = cloud.clone();
+            Box::pin(async move {
+                let proposer = cloud_propose::system_proposer(conn, owner_id, carrier).await?;
+                let pricing = cloud
+                    .pricing()
+                    .await
+                    .map_err(|_| ApiError::new(ErrorCode::InvalidState))?;
+                cloud_propose::open_in_tx(
+                    conn,
+                    cloud.config(),
+                    &pricing,
+                    &proposer,
+                    body.hours * 60,
+                    body.reason.clone(),
+                )
+                .await
+                .map_err(|error| match error {
+                    cloud_propose::CardError::Db(error) => ApiError::from(error),
+                    other => ApiError::new(ErrorCode::InvalidState).with_details(
+                        super::error::ErrorDetails {
+                            reason: Some(other.to_string()),
+                            ..Default::default()
+                        },
+                    ),
+                })
+            })
+        },
+    )
+    .await?;
     Ok(Json(outcome.value))
 }

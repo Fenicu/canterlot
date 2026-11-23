@@ -599,7 +599,8 @@ async fn serve(
         ..(&activity).into()
     })
     .with_thresholds(canterlot_hub::activity::Thresholds::from(&activity))
-    .with_blobs(blobs.clone());
+    .with_blobs(blobs.clone())
+    .with_cloud(cloud.clone());
     let mut state =
         grpc::HubGrpc::new(pool.clone(), registry.clone(), installation, timers.clone())
             .with_blob_store(blobs.clone())
@@ -609,7 +610,8 @@ async fn serve(
             .with_limits(limits.clone())
             .with_orchestrator(&orchestrator)
             .with_activity(&activity)
-            .with_dispatcher(dispatcher.clone());
+            .with_dispatcher(dispatcher.clone())
+            .with_cloud(cloud.clone());
     state.ingest = std::sync::Arc::new(
         ingest::Ingest::new(pool.clone())
             .with_dispatcher(dispatcher.clone())
@@ -637,7 +639,7 @@ async fn serve(
         attachments: Some((blobs.clone(), attachments.clone())),
         owner_push,
         provider_status: Some(provider_status),
-        cloud,
+        cloud: cloud.clone(),
         secrets_ready: None,
     });
     let root = tokio_util::sync::CancellationToken::new();
@@ -674,6 +676,7 @@ async fn serve(
             installation,
             dispatcher,
             scheduler,
+            cloud,
             http: http_config,
             proxy_secret,
             limits,

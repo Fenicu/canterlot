@@ -553,7 +553,7 @@ pub(crate) async fn on_conversation_trashed_in_tx(
 ) -> Result<(), sqlx::Error> {
     let rows: Vec<(Uuid, Uuid)> = sqlx::query_as(
         "select id,execution_id from requests where conversation_id=$1
-          and kind='settings_change' and state in ('open','decision_saved') for update",
+          and kind in ('settings_change','cloud_window') and state in ('open','decision_saved') for update",
     )
     .bind(conversation)
     .fetch_all(&mut *conn)

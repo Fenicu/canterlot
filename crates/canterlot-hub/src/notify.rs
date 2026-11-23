@@ -764,6 +764,25 @@ fn cloud_alert_text(payload: &Value) -> Option<(String, String)> {
     let name = clip(payload["name"].as_str().unwrap_or("?"), TITLE_CHARS);
     let money = |key: &str| payload[key].as_i64().map(kopecks_text);
     Some(match code {
+        "budget_80" | "budget_100" => {
+            let percent = payload["percent"].as_i64().unwrap_or(80);
+            let spent = money("spent_kopecks").unwrap_or_else(|| "?".to_owned());
+            let budget = money("budget_kopecks").unwrap_or_else(|| "?".to_owned());
+            (
+                format!("Облако: достигнуто {percent}% бюджета"),
+                format!(
+                    "Расход за месяц {} из {} — {percent}% месячного бюджета облака.",
+                    spent, budget
+                ),
+            )
+        }
+        "auto_started" => (
+            "Облачный раннер запущен автоматически".to_owned(),
+            format!(
+                "Зарезервировано {} на ожидающую работу. Окно живёт до жёсткого предела.",
+                money("reservation_kopecks").unwrap_or_else(|| "?".to_owned())
+            ),
+        ),
         "stray_server_deleted" => (
             "Облако: удалён лишний сервер".to_owned(),
             format!("Сервер {name} в проекте раннеров не принадлежал ни одному окну; удалён."),

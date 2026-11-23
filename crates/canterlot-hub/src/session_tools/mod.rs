@@ -9,6 +9,7 @@ pub mod accept;
 pub mod access;
 pub mod alarms;
 pub mod catalog;
+pub mod cloud_propose;
 pub mod completion;
 pub mod control;
 pub mod disk;
@@ -95,6 +96,7 @@ pub const TOOLS: &[&str] = &[
     "job.cancel",
     "jobs.list",
     "runners.list",
+    "runners.propose",
 ];
 
 pub fn is_tool(name: &str) -> bool {
@@ -119,6 +121,8 @@ pub enum ToolErrorCode {
     RemoteWorkDisabled,
     /// Машина — раннер: сессий на ней нет, задачи (`job_run`) идут.
     MachineIsRunner,
+    /// Служебный разговор облачных карточек не чат: в него нельзя писать.
+    SystemConversation,
     /// `machine: "auto"` без `source`: хаб размещает только задачи с исходниками.
     SourceRequired,
     /// Ни один раннер несущей и ни одно разрешённое место не подходит по меткам.
@@ -164,7 +168,7 @@ pub enum ToolErrorCode {
 }
 
 impl ToolErrorCode {
-    pub const ALL: [Self; 50] = [
+    pub const ALL: [Self; 51] = [
         Self::UnknownTool,
         Self::SessionNotFound,
         Self::ReadOnlySession,
@@ -178,6 +182,7 @@ impl ToolErrorCode {
         Self::DomainMismatch,
         Self::RemoteWorkDisabled,
         Self::MachineIsRunner,
+        Self::SystemConversation,
         Self::SourceRequired,
         Self::NoRunnerCanSatisfy,
         Self::PermissionModeTooWide,
@@ -232,6 +237,7 @@ impl ToolErrorCode {
             Self::DomainMismatch => "domain_mismatch",
             Self::RemoteWorkDisabled => "remote_work_disabled",
             Self::MachineIsRunner => "machine_is_runner",
+            Self::SystemConversation => "system_conversation",
             Self::SourceRequired => "source_required",
             Self::NoRunnerCanSatisfy => "no_runner_can_satisfy",
             Self::PermissionModeTooWide => "permission_mode_too_wide",
@@ -289,6 +295,9 @@ impl ToolErrorCode {
                 "The owner has not allowed other machines to start work on this machine"
             }
             Self::MachineIsRunner => "This machine is a runner: sessions do not start on it",
+            Self::SystemConversation => {
+                "This is a system conversation: messages and starts are refused"
+            }
             Self::SourceRequired => "Automatic placement needs a source",
             Self::NoRunnerCanSatisfy => "No runner can ever satisfy the labels and placement",
             Self::PermissionModeTooWide => "The mode is wider than the parent session's",
@@ -362,6 +371,9 @@ impl ToolErrorCode {
             }
             Self::MachineIsRunner => {
                 "Start the session on a worker machine, or run the command there with job_run and machine set to the runner."
+            }
+            Self::SystemConversation => {
+                "Wait for the owner's decision on the proposal card; do not send messages into the cloud conversation."
             }
             Self::SourceRequired => {
                 "Pass source {repo, rev} (absolute repo path, full 40-hex commit), or name the machine and workdir."
@@ -515,6 +527,8 @@ pub struct ToolContext {
     /// Пороги стража машины перед запуском.
     pub guards: Arc<crate::config::GuardsConfig>,
     pub dispatcher: Option<Dispatcher>,
+    /// Служба облачных окон: цена профилей и карточки предложений; `None`, когда облако выключено.
+    pub cloud: Option<std::sync::Arc<crate::cloud::service::CloudService>>,
     pub registry: Registry,
     /// Останов хаба: долгие вызовы (`sessions.wait`) возвращаются, не дожидаясь срока.
     pub shutdown: CancellationToken,
@@ -586,6 +600,7 @@ pub async fn call(
         "job.cancel" => inplace_jobs::cancel(context, caller, arguments).await,
         "jobs.list" => inplace_jobs::list(context, caller, arguments).await,
         "runners.list" => inplace_jobs::runners(context, caller, arguments).await,
+        "runners.propose" => cloud_propose::propose(context, caller, arguments).await,
         _ => Err(ToolError::new(ToolErrorCode::UnknownTool)),
     }
 }

@@ -1786,6 +1786,7 @@ async fn the_session_tool_returns_a_request_id_and_holds_the_limit(pool: PgPool)
         spawn_queue: Default::default(),
         guards: Default::default(),
         dispatcher: None,
+        cloud: None,
         registry: fx.registry.clone(),
         shutdown: tokio_util::sync::CancellationToken::new(),
     };

@@ -71,6 +71,7 @@ impl Fx {
                 spawn_queue: Default::default(),
                 guards: Default::default(),
                 dispatcher: None,
+                cloud: None,
                 registry: canterlot_hub::session::Registry::new(Default::default()),
                 shutdown: tokio_util::sync::CancellationToken::new(),
             },

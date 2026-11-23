@@ -128,6 +128,8 @@ pub enum SubmitError {
     },
     ConversationNotFound,
     ConversationClosed,
+    /// Служебный разговор облачных карточек не принимает сообщений.
+    SystemConversation,
     Attachment(AttachmentError),
     Db(sqlx::Error),
 }
@@ -190,6 +192,7 @@ impl fmt::Debug for SubmitError {
                 .finish(),
             Self::ConversationNotFound => f.write_str("ConversationNotFound"),
             Self::ConversationClosed => f.write_str("ConversationClosed"),
+            Self::SystemConversation => f.write_str("SystemConversation"),
             Self::Attachment(error) => f.debug_tuple("Attachment").field(error).finish(),
             Self::Db(error) => {
                 f.write_str("Db(")?;
@@ -218,6 +221,7 @@ impl fmt::Display for SubmitError {
             ),
             Self::ConversationNotFound => f.write_str("conversation not found"),
             Self::ConversationClosed => f.write_str("conversation closed"),
+            Self::SystemConversation => f.write_str("system conversation"),
             Self::Attachment(error) => write!(f, "attachment: {error}"),
             Self::Db(error) => {
                 f.write_str("database error: ")?;

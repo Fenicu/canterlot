@@ -2,10 +2,15 @@
 //! `docs/api/openapi.json` и `docs/api/events.schema.json`, каждый изменяющий маршрут
 //! документа OpenAPI записывает ключ идемпотентности ровно один раз.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use axum::http::Method;
 use canterlot_hub::{
+    cloud::{TimewebConfig, TimewebProvider, service::CloudService},
+    config::CloudConfig,
     events::CLIENT_KINDS,
     http::{self, AppState, error::ErrorCode, openapi},
     testkit::{self, TestClient, TestResponse},
@@ -225,7 +230,7 @@ fn coverage_table_matches_openapi_and_event_schema() {
             kinds.insert(span.to_owned());
         }
     }
-    assert_eq!(rows, 40, "screen coverage rows");
+    assert_eq!(rows, 41, "screen coverage rows");
     let in_document = operations(&document);
     let missing: Vec<_> = in_document.difference(&routes).collect();
     let unknown: Vec<_> = routes.difference(&in_document).collect();
@@ -332,10 +337,37 @@ fn exempt(method: &str, path: &str) -> bool {
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool: PgPool) {
-    let (deps, _dir) =
+    let (mut deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
     let owner = deps.installation.owner_id;
     let machine = Uuid::now_v7();
+    // Маршруты бюджета и карточки облака требуют включённой службы с ценами провайдера.
+    const TW_TOKEN: &str = "tw-coverage-token-5d1c0e9a";
+    let cloud_dir = tempfile::tempdir().unwrap();
+    let token_file = cloud_dir.path().join("token");
+    std::fs::write(&token_file, format!("{TW_TOKEN}\n")).unwrap();
+    let fake = crate::support::fake_timeweb::FakeTimeweb::start(TW_TOKEN).await;
+    let mut provider_config = TimewebConfig::new(&token_file);
+    provider_config.base_url = fake.base_url.clone();
+    let provider = Arc::new(TimewebProvider::new(provider_config).unwrap());
+    let config: CloudConfig = toml::from_str(&format!(
+        "provider='timeweb'\ntoken_file='token'\nproject_id=1\n\
+         network_id='network-example'\nnetwork_cidr='192.0.2.0/24'\n\
+         router_id='018f0000-0000-7000-8000-0000000000aa'\nrouter_ip='192.0.2.1'\n\
+         gateway='192.0.2.5'\nlocal_ip_pool='192.0.2.10-192.0.2.60'\n\
+         dnat_port_range='22100-22199'\n\
+         runner_public_key='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLE'\n\
+         carrier_machine_id='{machine}'\n[[profile]]\nconfigurator_id=151\ncpu=1\n\
+         ram_gb=1\ndisk_gb=10\navailability_zone='msk-1'\n"
+    ))
+    .unwrap();
+    deps.cloud = Some(CloudService::new(
+        pool.clone(),
+        deps.registry.clone(),
+        provider,
+        config,
+    ));
+    let _cloud_dir = cloud_dir;
     let send_now_registry = deps.registry.clone();
     sqlx::query("insert into machines(id,owner_id,name) values($1,$2,'test')")
         .bind(machine)
@@ -850,6 +882,27 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
             format!("/api/v1/cloud/windows/{window}/delete"),
             None,
             None,
+        ),
+        case(
+            Method::PUT,
+            "/api/v1/cloud/budget",
+            "/api/v1/cloud/budget".into(),
+            Some(json!({"monthly_budget_kopecks":100000,"auto_mode":false,"base_revision":0})),
+            Some(json!({"monthly_budget_kopecks":200000,"auto_mode":true,"base_revision":0})),
+        ),
+        case(
+            Method::POST,
+            "/api/v1/cloud/budget/clear-block",
+            "/api/v1/cloud/budget/clear-block".into(),
+            None,
+            None,
+        ),
+        case(
+            Method::POST,
+            "/api/v1/cloud/proposals",
+            "/api/v1/cloud/proposals".into(),
+            Some(json!({"hours":2,"reason":"первая"})),
+            Some(json!({"hours":3,"reason":"вторая"})),
         ),
         case(
             Method::PUT,

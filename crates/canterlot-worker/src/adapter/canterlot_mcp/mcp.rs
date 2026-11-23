@@ -163,7 +163,7 @@ pub enum ToolKind {
 }
 
 /// Агентские инструменты: имя MCP → имя инструмента хаба.
-pub const AGENT_TOOLS: [(&str, &str); 43] = [
+pub const AGENT_TOOLS: [(&str, &str); 44] = [
     ("canterlot_presets_list", "presets.list"),
     ("canterlot_preset_save", "presets.save"),
     ("canterlot_preset_apply", "presets.apply"),
@@ -207,6 +207,7 @@ pub const AGENT_TOOLS: [(&str, &str); 43] = [
     ("job_cancel", "job.cancel"),
     ("jobs_list", "jobs.list"),
     ("runners_list", "runners.list"),
+    ("runner_propose", "runners.propose"),
 ];
 
 /// Инструменты команд на месте: оболочка на машине с воркером. Это самый сильный класс:
@@ -297,6 +298,7 @@ fn is_session_tool(mcp_name: &str) -> bool {
             | "job_cancel"
             | "jobs_list"
             | "runners_list"
+            | "runner_propose"
     )
 }
 
@@ -448,7 +450,10 @@ fn session_tool_description(mcp_name: &str) -> &'static str {
             "List the jobs of this session, newest first, with state and machine; filter by `machine` or `state`, at most 50. Use it to recover a job id after a lost reply. Do not call it in a loop to wait: the result arrives as a message."
         }
         "runners_list" => {
-            "List the runners of this machine's carrier and this machine itself as `local`: name, role, availability with the age of the last observation, rank, labels, slots used and max, queued and running counts. Read-only. Use it to see which labels `job_run` with machine \"auto\" can place; do not call it in a loop to wait for a job."
+            "List the runners of this machine's carrier and this machine itself as `local`: name, role, availability with the age of the last observation, rank, labels, slots used and max, queued and running counts, live cloud windows with their cost so far and the monthly budget remainder. Read-only. Use it to see which labels `job_run` with machine \"auto\" can place; do not call it in a loop to wait for a job."
+        }
+        "runner_propose" => {
+            "Propose to the owner that a cloud runner window be started for queued work: `hours` (1..=4) and a short `reason`. It creates an approval card, not a window; the owner decides in the app and the outcome arrives later as a [canterlot] message. Returns the request id, the exact reservation in kopecks, whether the card is over budget, and when it expires. Do not call it in a loop; one open card at a time."
         }
         _ => "Session tool.",
     }
@@ -877,6 +882,15 @@ fn session_input_schema(mcp_name: &str) -> Value {
         "runners_list" => json!({
             "type": "object",
             "properties": {},
+            "additionalProperties": false,
+        }),
+        "runner_propose" => json!({
+            "type": "object",
+            "properties": {
+                "hours": {"type": "integer", "minimum": 1, "maximum": 4, "description": "Hard cap in hours: 1..=4."},
+                "reason": {"type": "string", "description": "Short reason the owner sees on the proposal card."},
+            },
+            "required": ["hours", "reason"],
             "additionalProperties": false,
         }),
         _ => json!({

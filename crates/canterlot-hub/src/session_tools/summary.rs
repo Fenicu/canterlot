@@ -607,7 +607,7 @@ async fn open_question(
 ) -> Result<Option<String>, sqlx::Error> {
     let rows: Vec<(String, Value)> = sqlx::query_as(
         "select r.kind,r.request_payload from requests r join executions e on e.id=r.execution_id
-         where r.conversation_id=$1 and r.state='open' and r.kind not in ('spawn_approval', 'settings_change')
+         where r.conversation_id=$1 and r.state='open' and r.kind not in ('spawn_approval', 'settings_change', 'cloud_window')
            and e.state not in ('stopped','failed','owner_lost')
          order by r.created_at asc limit 1",
     )

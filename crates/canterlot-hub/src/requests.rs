@@ -84,6 +84,7 @@ pub enum RequestKind {
     Question,
     SpawnApproval,
     SettingsChange,
+    CloudWindow,
 }
 
 impl RequestKind {
@@ -93,6 +94,7 @@ impl RequestKind {
             Self::Question => "question",
             Self::SpawnApproval => "spawn_approval",
             Self::SettingsChange => "settings_change",
+            Self::CloudWindow => "cloud_window",
         }
     }
 }
@@ -106,6 +108,7 @@ impl FromStr for RequestKind {
             "question" => Ok(Self::Question),
             "spawn_approval" => Ok(Self::SpawnApproval),
             "settings_change" => Ok(Self::SettingsChange),
+            "cloud_window" => Ok(Self::CloudWindow),
             other => Err(format!("unknown request kind: {other}")),
         }
     }
@@ -268,7 +271,10 @@ pub async fn save_decision_in_tx(
 
     // Предложение настройки живёт в разговоре сутки, а не в одном ходе:
     // поколение исполнения его не отменяет.
-    let conversation_scoped = row.kind == RequestKind::SettingsChange;
+    let conversation_scoped = matches!(
+        row.kind,
+        RequestKind::SettingsChange | RequestKind::CloudWindow
+    );
 
     // 3. Проверка поколения выполнения
     if !conversation_scoped && generation != row.generation {
@@ -298,7 +304,10 @@ pub async fn save_decision_in_tx(
 
     // Срок предложения проверяется под блокировкой строки: задержанное задание
     // истечения не должно открывать просроченную карточку повторным решением.
-    if row.kind == RequestKind::SettingsChange {
+    if matches!(
+        row.kind,
+        RequestKind::SettingsChange | RequestKind::CloudWindow
+    ) {
         let expires_at: Option<DateTime<Utc>> =
             sqlx::query_scalar("select expires_at from requests where id=$1")
                 .bind(request_id)
@@ -359,6 +368,14 @@ pub async fn save_decision_in_tx(
                 .await?
         } else if row.kind == RequestKind::SettingsChange {
             crate::session_tools::settings_change::queue_decision_in_tx(
+                tx,
+                owner_id,
+                conversation_id,
+                row.id,
+            )
+            .await?
+        } else if row.kind == RequestKind::CloudWindow {
+            crate::session_tools::cloud_propose::queue_decision_in_tx(
                 tx,
                 owner_id,
                 conversation_id,
@@ -591,7 +608,7 @@ pub(crate) async fn close_for_ended_execution_in_tx(
     let rows: Vec<(Uuid, String, Option<Uuid>, RequestKind, serde_json::Value)> = sqlx::query_as(
         "select id, state, winner_decision_id, kind, request_payload from requests
          where execution_id = $1 and state in ('open', 'decision_saved', 'decision_transmitting')
-           and kind <> 'settings_change'
+           and kind not in ('settings_change', 'cloud_window')
            and not (kind = 'spawn_approval' and state = 'decision_saved')
          order by id for update",
     )
@@ -667,5 +684,5 @@ pub(crate) async fn close_for_ended_execution_in_tx(
 pub(crate) const LIVE_OPEN_REQUESTS: &str = "select count(*) from requests r
      join executions e on e.id = r.execution_id
      where r.conversation_id = $1 and r.state = 'open'
-       and r.kind not in ('spawn_approval', 'settings_change')
+       and r.kind not in ('spawn_approval', 'settings_change', 'cloud_window')
        and e.state not in ('stopped', 'failed', 'owner_lost')";
