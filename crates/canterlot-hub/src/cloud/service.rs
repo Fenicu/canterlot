@@ -1914,7 +1914,7 @@ impl CloudService {
         let windows: Vec<Window> = sqlx::query_as(
             "select * from cloud_windows where state = any($1) or id = any($2) order by created_at, id",
         )
-        .bind(windows::live_states())
+        .bind(windows::billing_states())
         .bind(&ids)
         .fetch_all(&self.pool)
         .await?;
