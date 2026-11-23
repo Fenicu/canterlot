@@ -34,9 +34,12 @@ create unique index requests_one_open_cloud_window on requests ((true))
 
 -- Непрерывный период недоступности/паузы статичного раннера для автоматического режима:
 -- одна свежая доступность сбрасывает отметку, десять минут подряд — основание для старта.
+-- `checked_at` — момент последнего прохода, который застал недоступность: пропуск больше
+-- срока свежести наблюдения разрывает период, недоказанное время не считается.
 create table cloud_auto_unavailable (
     machine_id uuid primary key references machines(id) on delete cascade,
-    since timestamptz not null
+    since timestamptz not null,
+    checked_at timestamptz not null default now()
 );
 
 -- Эпизод ожидающей облачной работы: карточка хаба выдаётся один раз, пока очередь не

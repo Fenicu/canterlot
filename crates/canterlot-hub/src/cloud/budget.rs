@@ -246,7 +246,8 @@ pub async fn maybe_alert(
 
 /// Отметить или сбросить непрерывную недоступность раннера. `true` значит, что он
 /// недоступен или на паузе уже не меньше [`UNAVAILABLE_FOR`]. Свежая доступность сбрасывает
-/// период одной командой, как требует правило автоматического режима.
+/// период. Пропуск проходов дольше срока свежести наблюдения тоже сбрасывает: время, которое
+/// хаб не наблюдал, не доказывает непрерывность.
 pub async fn track_unavailable(
     conn: &mut PgConnection,
     machine: Uuid,
@@ -260,20 +261,41 @@ pub async fn track_unavailable(
             .await?;
         return Ok(false);
     }
+    let row: Option<(DateTime<Utc>, DateTime<Utc>)> = sqlx::query_as(
+        "select since, checked_at from cloud_auto_unavailable where machine_id = $1 for update",
+    )
+    .bind(machine)
+    .fetch_optional(&mut *conn)
+    .await?;
+    if let Some((since, checked_at)) = row
+        && now - checked_at < crate::machines::OBSERVATION_FRESH
+    {
+        sqlx::query("update cloud_auto_unavailable set checked_at = $2 where machine_id = $1")
+            .bind(machine)
+            .bind(now)
+            .execute(&mut *conn)
+            .await?;
+        return Ok(now - since >= UNAVAILABLE_FOR);
+    }
+    // Нет отметки или проход пропустил больше трёх минут: период начинается сейчас.
     sqlx::query(
-        "insert into cloud_auto_unavailable (machine_id, since) values ($1, $2)
-         on conflict (machine_id) do nothing",
+        "insert into cloud_auto_unavailable (machine_id, since, checked_at)
+         values ($1, $2, $2)
+         on conflict (machine_id) do update set since = $2, checked_at = $2",
     )
     .bind(machine)
     .bind(now)
     .execute(&mut *conn)
     .await?;
-    let since: Option<DateTime<Utc>> =
-        sqlx::query_scalar("select since from cloud_auto_unavailable where machine_id = $1")
-            .bind(machine)
-            .fetch_optional(&mut *conn)
-            .await?;
-    Ok(since.is_some_and(|since| now - since >= UNAVAILABLE_FOR))
+    Ok(false)
+}
+
+/// Старт хаба: периоды недоступности прошлого запуска не продолжаются.
+pub async fn reset_unavailable(pool: &PgPool) -> Result<(), sqlx::Error> {
+    sqlx::query("delete from cloud_auto_unavailable")
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 /// Все статичные раннеры, которые могли бы взять ожидающую облачную работу, недоступны или на

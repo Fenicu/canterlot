@@ -811,10 +811,30 @@ async fn auto_mode_requires_continuous_unavailability_and_pushes_the_reservation
         "a single fresh offline observation is not enough"
     );
 
-    // Через одиннадцать минут непрерывной недоступности окно стартует автоматически.
+    // Наблюдения врозь одиннадцать минут: непрерывность не доказана, период начинается заново.
     rig.observe_at(runner, t0 + TimeDelta::minutes(11) - TimeDelta::seconds(10))
         .await;
     rig.service.tick(t0 + TimeDelta::minutes(11)).await;
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "select state from cloud_windows order by created_at desc limit 1"
+        )
+        .fetch_optional(&rig.pool)
+        .await?,
+        None,
+        "a gap in observations breaks the continuous period"
+    );
+
+    // Свежие наблюдения каждые две минуты: десять минут подряд дают окно.
+    for minutes in [13, 15, 17, 19] {
+        let at = t0 + TimeDelta::minutes(minutes);
+        rig.observe_at(runner, at).await;
+        rig.service.tick(at).await;
+        assert!(no_windows(&rig.pool).await?, "still early at {minutes} min");
+    }
+    let at = t0 + TimeDelta::minutes(21);
+    rig.observe_at(runner, at).await;
+    rig.service.tick(at).await;
     let (trigger, cap): (String, i32) = sqlx::query_as(
         "select trigger, hard_cap_minutes from cloud_windows order by created_at desc limit 1",
     )
@@ -827,6 +847,47 @@ async fn auto_mode_requires_continuous_unavailability_and_pushes_the_reservation
         rig.push_count("auto_started").await,
         1,
         "the push is not repeated"
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn hub_start_restarts_the_unavailability_clock(pool: PgPool) -> TestResult {
+    let rig = Rig::new(pool).await;
+    rig.set_budget(1_000_000, true).await;
+    let _carrier = testkit::fake_session(&rig.registry, rig.carrier, &["runners_v1"], true);
+    let runner = rig.static_runner("runner-a").await;
+    rig.seed_waiting(60).await;
+    let t0 = now_micros();
+    // Период «висит» с прошлого запуска хаба: после перезапуска его не продолжают.
+    sqlx::query("insert into cloud_auto_unavailable (machine_id, since) values ($1, $2)")
+        .bind(runner)
+        .bind(t0 - TimeDelta::minutes(20))
+        .execute(&rig.pool)
+        .await?;
+
+    rig.observe_at(runner, t0).await;
+    rig.service.tick(t0).await;
+    assert!(
+        no_windows(&rig.pool).await?,
+        "the first tick of a hub start clears the old period"
+    );
+    for minutes in [2, 4, 6, 8] {
+        let at = t0 + TimeDelta::minutes(minutes);
+        rig.observe_at(runner, at).await;
+        rig.service.tick(at).await;
+        assert!(no_windows(&rig.pool).await?, "still early at {minutes} min");
+    }
+    let at = t0 + TimeDelta::minutes(10);
+    rig.observe_at(runner, at).await;
+    rig.service.tick(at).await;
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "select trigger from cloud_windows order by created_at desc limit 1"
+        )
+        .fetch_one(&rig.pool)
+        .await?,
+        Trigger::Auto.as_str()
     );
     Ok(())
 }

@@ -224,6 +224,11 @@ impl CloudService {
                 }
             }
         }
+        if runtime.first_tick
+            && let Err(error) = budget::reset_unavailable(&self.pool).await
+        {
+            warn_db("cloud_auto_reset", &error);
+        }
         if runtime.reconciled
             && let Err(error) = self.evaluate(now).await
         {
