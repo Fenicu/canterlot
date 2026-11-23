@@ -105,7 +105,8 @@ impl Rig {
         provider_config.request_timeout = Duration::from_secs(3);
         provider_config.max_rate_limit_retries = 1;
         provider_config.default_backoff = Duration::from_millis(5);
-        provider_config.max_backoff = Duration::from_millis(20);
+        // Один тест растягивает переоценку штатной паузой на 429; остальные её не ждут.
+        provider_config.max_backoff = Duration::from_secs(5);
         let provider =
             Arc::new(canterlot_hub::cloud::TimewebProvider::new(provider_config).unwrap());
         let mut config = cloud_config(carrier.machine_id);
@@ -682,8 +683,12 @@ async fn a_card_that_expires_during_the_price_call_is_not_approved(pool: PgPool)
     .execute(&rig.pool)
     .await?;
     rig.decision(request, true).await;
-    // Переоценка идёт дольше срока карточки: после ответа цены одобрять уже нечего.
-    rig._fake.delay_next(1500);
+    // Переоценка ждёт ответа провайдера дольше срока карточки: пауза на 429 — штатный путь.
+    {
+        let mut state = rig._fake.control();
+        state.rate_limit_next = 1;
+        state.retry_after = Some("2".to_owned());
+    }
     assert_eq!(
         rig.approve(request).await,
         cloud_propose::ApproveOutcome::Expired

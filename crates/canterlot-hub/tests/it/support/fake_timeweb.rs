@@ -185,8 +185,6 @@ pub struct FakeState {
     pub boot_polls: u32,
     /// Подмешивать в тексты ошибок заголовок Authorization, как делает неряшливый сервер.
     pub echo_authorization_in_errors: bool,
-    /// Задержки ответов (мс) в порядке поступления: первая — следующему запросу.
-    pub delay_next_ms: VecDeque<u64>,
     pub requests: Vec<RecordedRequest>,
 }
 
@@ -234,7 +232,6 @@ impl FakeState {
             listing_hidden_polls: 0,
             boot_polls: 0,
             echo_authorization_in_errors: false,
-            delay_next_ms: VecDeque::new(),
             requests: Vec::new(),
         }
     }
@@ -360,11 +357,6 @@ impl FakeTimeweb {
         self.control().requests.clone()
     }
 
-    /// Задержать ответы следующих запросов: цена успевает устареть, пока карточка решается.
-    pub fn delay_next(&self, milliseconds: u64) {
-        self.control().delay_next_ms.push_back(milliseconds);
-    }
-
     pub fn server_count(&self) -> usize {
         self.control().servers.len()
     }
@@ -472,11 +464,6 @@ async fn dispatch(state: Arc<Mutex<FakeState>>, kill: Kill, request: Request) ->
         .await
         .unwrap_or_default();
     let body: Option<Value> = serde_json::from_slice(&bytes).ok();
-
-    let delay = state.lock().unwrap().delay_next_ms.pop_front();
-    if let Some(milliseconds) = delay {
-        tokio::time::sleep(std::time::Duration::from_millis(milliseconds)).await;
-    }
 
     let action = {
         let mut st = state.lock().unwrap();
