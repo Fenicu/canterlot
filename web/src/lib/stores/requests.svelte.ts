@@ -276,6 +276,7 @@ export class RequestsModel {
       // «выпущена новая карточка» показываются словами на самой карточке.
       if (item.kind === 'cloud_window') {
         if (reason === 'allowed' || reason === 'applied') item.state = 'applied';
+        else if (reason === 'unconfirmed') item.state = 'unconfirmed';
         else if (reason === 'expired' || reason === 'declined' || reason === 'card_outdated' || reason === 'conversation_trashed' || reason === 'interrupted') item.state = 'closed';
         else item.state = 'not_applied';
         return;
