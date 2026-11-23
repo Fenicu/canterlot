@@ -233,6 +233,8 @@ pub enum CreateRefusal {
     #[error("provider_unavailable")]
     Provider(super::ProviderError),
     /// Все локальные адреса или DNAT-порты пула заняты живыми окнами.
+    #[error("carrier_unavailable")]
+    CarrierUnavailable,
     #[error("pool_exhausted")]
     PoolExhausted(&'static str),
     #[error("db_error")]
@@ -365,6 +367,17 @@ pub async fn create_in_tx(
 ) -> Result<WindowId, CreateRefusal> {
     if request.hard_cap_minutes == 0 || request.hard_cap_minutes > MAX_HARD_CAP_MINUTES {
         return Err(CreateRefusal::Invalid("hard_cap_minutes"));
+    }
+    // Новое окно имеет смысл только с живой несущей: без неё сервер некому подключить и он
+    // проживёт до `ready_timeout` за деньги. Снос и сверка без неё работают.
+    let carrier: bool = sqlx::query_scalar(
+        "select exists(select 1 from machines where id = $1 and role = 'worker' and is_carrier)",
+    )
+    .bind(config.carrier_machine_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    if !carrier {
+        return Err(CreateRefusal::CarrierUnavailable);
     }
     let (budget, block): (i64, Option<String>) = sqlx::query_as(
         "select monthly_budget_kopecks, provider_block_code from cloud_budget

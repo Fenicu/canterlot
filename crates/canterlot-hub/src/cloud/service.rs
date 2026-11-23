@@ -1769,9 +1769,12 @@ impl CloudService {
 
 /// Служба по конфигурации хаба. Нет таблицы `[runners.cloud]` — облако выключено. Токен
 /// читается из файла и дальше живёт только внутри клиента. Всё, что мешает включению
-/// (негодная конфигурация, нечитаемый токен, несущая не помечена), пишется предупреждением с
-/// кодом причины и без значений, а облако остаётся выключенным: окно без несущей только жгло
-/// бы деньги до `ready_timeout`.
+/// (негодная конфигурация, нечитаемый токен), пишется предупреждением с кодом причины и без
+/// значений, а облако остаётся выключенным.
+///
+/// Несущая здесь не проверяется: снос и сверка обязательств нужны и без неё, а база может
+/// быть временно недоступна на старте. Проверка несущей стоит только на пути нового
+/// создания (`create_in_tx`) и повторяется на каждой попытке.
 pub async fn from_config(
     pool: &PgPool,
     registry: &Registry,
@@ -1798,22 +1801,6 @@ pub async fn from_config(
             return None;
         }
     };
-    let carrier: Result<Option<bool>, sqlx::Error> =
-        sqlx::query_scalar("select role = 'worker' and is_carrier from machines where id = $1")
-            .bind(config.carrier_machine_id)
-            .fetch_optional(pool)
-            .await;
-    match carrier {
-        Ok(Some(true)) => {}
-        Ok(_) => {
-            disabled("carrier_machine_is_not_a_carrier");
-            return None;
-        }
-        Err(error) => {
-            disabled(&format!("database: {}", crate::dberr::describe(&error)));
-            return None;
-        }
-    }
     tracing::info!(
         kind = "cloud_enabled",
         project_id = config.project_id,

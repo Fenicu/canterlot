@@ -2854,19 +2854,20 @@ async fn startup_enables_the_service_only_with_a_readable_token_and_a_real_carri
             .is_none()
     );
 
-    // Машина из конфигурации не несущая: окно без несущей только жгло бы деньги.
+    // Машина из конфигурации не несущая: служба всё равно нужна для сноса и сверки,
+    // несущая проверяется только при создании нового окна.
     machines::set_carrier(&rig.pool, rig.carrier, false).await?;
     assert!(
         from_config(&rig.pool, &registry, Some(config.clone()))
             .await
-            .is_none()
+            .is_some()
     );
     let mut stranger = config.clone();
     stranger.carrier_machine_id = Uuid::now_v7();
     assert!(
         from_config(&rig.pool, &registry, Some(stranger))
             .await
-            .is_none()
+            .is_some()
     );
     // Негодная конфигурация.
     let mut invalid = config;
@@ -2878,7 +2879,7 @@ async fn startup_enables_the_service_only_with_a_readable_token_and_a_real_carri
     );
 
     let logs = String::from_utf8(capture.0.lock().unwrap().clone())?;
-    assert_eq!(logs.matches("cloud_disabled").count(), 5, "{logs}");
+    assert_eq!(logs.matches("cloud_disabled").count(), 3, "{logs}");
     assert!(logs.contains("cloud_enabled") || logs.contains("cloud runner windows enabled"));
     for secret in [TOKEN, "secret-token-file", KEY] {
         assert!(
@@ -2886,6 +2887,29 @@ async fn startup_enables_the_service_only_with_a_readable_token_and_a_real_carri
             "{secret} leaked into the startup log"
         );
     }
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn without_a_carrier_only_new_creates_stop_and_cleanup_still_runs(pool: PgPool) -> TestResult {
+    let rig = rig(pool).await;
+    machines::set_carrier(&rig.pool, rig.carrier, false).await?;
+    assert!(matches!(
+        rig.try_create(60).await,
+        Err(CreateRefusal::CarrierUnavailable)
+    ));
+    assert_eq!(rig.posts(), 0, "no server for a window without a carrier");
+
+    // Незаконченное удаление старого окна идёт до конца без несущей.
+    let now = now_micros();
+    let server = rig.fake.control().add_server(PROJECT, "x");
+    let id = raw_window(&rig.pool, "deleting", Some(server), Some(now - TimeDelta::minutes(20)))
+        .await;
+    rig.fake.control().servers.get_mut(&server).unwrap().name = windows::server_name(id);
+    rig.tick(now).await;
+    rig.tick(now + TimeDelta::seconds(10)).await;
+    assert_eq!(rig.state(id).await, "ended");
+    assert_eq!(rig.fake.server_count(), 0, "the outstanding server is deleted");
     Ok(())
 }
 
