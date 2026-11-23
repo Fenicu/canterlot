@@ -130,22 +130,25 @@ pub fn final_cost_kopecks(hourly_kopecks: i64, billed_minutes: u64) -> Result<i6
     hours_times(hourly_kopecks, ceil_hours(billed_minutes).max(1))
 }
 
-/// Единый расчёт целых оплачиваемых часов по всему прошедшему сроку. Доли секунды
-/// учитываются: 3600,5 с — второй час. Не меньше часа.
-pub fn billed_hours(elapsed_milliseconds: i64) -> u64 {
-    u64::try_from(elapsed_milliseconds.max(0))
+/// Единый расчёт целых оплачиваемых часов по всему прошедшему сроку в микросекундах:
+/// 3600 с + 1 µs — это второй час. Не меньше часа.
+pub fn billed_hours(elapsed_microseconds: i64) -> u64 {
+    u64::try_from(elapsed_microseconds.max(0))
         .unwrap_or(0)
-        .div_ceil(3_600_000)
+        .div_ceil(3_600_000_000)
         .max(1)
 }
 
 /// Итог за срок между двумя метками: `час × ceil(весь срок / 3600 с)`, не меньше часа.
+/// Срок считается с точностью до микросекунды; переполнение `TimeDelta` — сутки на границе
+/// `i64`, что даёт заведомо больше любого счёта и упрётся в `PriceError::Overflow`.
 pub fn final_cost_between(
     hourly_kopecks: i64,
     from: DateTime<Utc>,
     to: DateTime<Utc>,
 ) -> Result<i64, PriceError> {
-    hours_times(hourly_kopecks, billed_hours((to - from).num_milliseconds()))
+    let elapsed = (to - from).num_microseconds().unwrap_or(i64::MAX);
+    hours_times(hourly_kopecks, billed_hours(elapsed))
 }
 
 #[cfg(test)]
@@ -351,6 +354,15 @@ mod tests {
         assert_eq!(
             final_cost_between(2845, from, from + TimeDelta::milliseconds(3_600_001)),
             Ok(2845 * 2)
+        );
+        // Одна микросекунда сверх часа — тоже второй час: округление идёт по всему сроку.
+        assert_eq!(
+            final_cost_between(2845, from, from + TimeDelta::microseconds(3_600_000_001)),
+            Ok(2845 * 2)
+        );
+        assert_eq!(
+            final_cost_between(2845, from, from + TimeDelta::microseconds(3_600_000_000)),
+            Ok(2845)
         );
         // Обратный порядок считается как ноль: не меньше часа.
         assert_eq!(

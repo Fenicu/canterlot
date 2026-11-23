@@ -796,9 +796,14 @@ pub fn view(window: &Window, now: DateTime<Utc>) -> CloudWindowView {
         (Some(cost), _) => cost,
         (None, Some(called)) => {
             // Показываем настоящий расход, а не резерв: окно могло прожить дольше предела
-            // из-за простоя хаба, и владелец должен видеть цену.
-            price::final_cost_between(window.price_hourly_kopecks, called, now)
-                .unwrap_or(window.reservation_kopecks)
+            // из-за простоя хаба, и владелец должен видеть цену. Оплата сервера кончается
+            // моментом подтверждённого исчезновения: ожидание сноса DNAT её не продлевает.
+            price::final_cost_between(
+                window.price_hourly_kopecks,
+                called,
+                window.server_gone_at.unwrap_or(now),
+            )
+            .unwrap_or(window.reservation_kopecks)
         }
         (None, None) => 0,
     };

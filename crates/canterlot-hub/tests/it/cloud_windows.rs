@@ -2747,6 +2747,34 @@ async fn a_create_call_interrupted_by_a_crash_is_never_repeated(pool: PgPool) ->
     Ok(())
 }
 
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn the_live_cost_view_stops_at_the_confirmed_server_gone(pool: PgPool) -> TestResult {
+    let rig = rig(pool).await;
+    let now = now_micros();
+    let id = raw_window(
+        &rig.pool,
+        "deleting",
+        Some(999),
+        Some(now - TimeDelta::hours(5)),
+    )
+    .await;
+    // Сервер подтверждённо пропал два часа назад, правило DNAT ещё снимается.
+    sqlx::query("update cloud_windows set server_gone_at = $2 where id = $1")
+        .bind(id)
+        .bind(now - TimeDelta::hours(2))
+        .execute(&rig.pool)
+        .await?;
+    let window = rig.window(id).await;
+    assert_eq!(window.final_cost_kopecks, None, "the window is still live");
+    let view = windows::view(&window, now);
+    assert_eq!(
+        view.cost_so_far_kopecks,
+        3 * HOURLY,
+        "the cost stops when the server is gone, not when the DNAT rule is"
+    );
+    Ok(())
+}
+
 /// Закрыть окно, чтобы следующая строка теста могла занять единственное живое место.
 async fn close_window(pool: &PgPool, id: Uuid) -> Result<(), sqlx::Error> {
     sqlx::query("update cloud_windows set state = 'ended', final_cost_kopecks = 0 where id = $1")
