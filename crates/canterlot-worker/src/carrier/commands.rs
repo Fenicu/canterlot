@@ -4,7 +4,8 @@
 //! непогашенные, поэтому каждая идемпотентна (`Stager`). Ответ — факт журнала, который
 //! погашает команду вместе с записью; пока факт не записан, команда остаётся непогашенной.
 //! Долгие команды идут отдельной задачей, чтобы не держать очередь маршрутизации, а повторная
-//! доставка той же команды, пока она идёт, второй раз не запускается.
+//! доставка той же команды, пока она идёт, второй раз не запускается. Факт возвращает хабу
+//! попытку из команды: по ней хаб отличает ответ прежней попытки от ответа повтора.
 
 use std::{
     collections::HashSet,
@@ -53,13 +54,16 @@ pub struct CarrierCommands {
     sink: Arc<dyn FactSink>,
     cloud: Arc<CloudState>,
     enabled: AtomicBool,
-    /// `(job_id, вид команды)` исполняемых сейчас: повторная доставка не запускает вторую копию.
-    running: Mutex<HashSet<(String, &'static str)>>,
+    /// `(job_id, попытка, вид команды)` исполняемых сейчас: повторная доставка не запускает
+    /// вторую копию, а команда повтора не ждёт команду прежней попытки.
+    running: Mutex<HashSet<RunningKey>>,
     shutdown: watch::Receiver<bool>,
 }
 
+type RunningKey = (String, u32, &'static str);
+
 /// Убирает запись `running`, когда задача команды кончилась любым способом.
-struct Running(Arc<CarrierCommands>, (String, &'static str));
+struct Running(Arc<CarrierCommands>, RunningKey);
 
 impl Drop for Running {
     fn drop(&mut self) {
@@ -111,6 +115,7 @@ impl CarrierCommands {
             Some(Kind::StageSource(stage)) => {
                 let request = StageRequest {
                     job_id: stage.job_id.clone(),
+                    attempt: stage.attempt,
                     repo: PathBuf::from(&stage.repo),
                     rev: stage.rev.clone(),
                     domain: stage.domain.clone(),
@@ -119,17 +124,18 @@ impl CarrierCommands {
                     workdir: stage.workdir.clone(),
                     repo_key: stage.repo_key.clone(),
                 };
-                let job = stage.job_id.clone();
+                let (job, attempt) = (stage.job_id.clone(), stage.attempt);
                 {
                     let me = self.clone();
-                    self.spawn("stage", job.clone(), terminal, async move {
+                    self.spawn("stage", job.clone(), attempt, terminal, async move {
                     Some(match me.stager.stage(&request).await {
-                        Ok(()) => Body::SourceStaged(SourceStaged { job_id: job }),
+                        Ok(()) => Body::SourceStaged(SourceStaged { job_id: job, attempt }),
                         Err(failure) => {
                             tracing::warn!(kind = "stage_failed", reason = %failure.reason, "source staging failed");
                             Body::SourceStageFailed(SourceStageFailed {
                                 job_id: job,
                                 reason: reason(&failure),
+                                attempt,
                             })
                         }
                     })
@@ -140,26 +146,28 @@ impl CarrierCommands {
             Some(Kind::CollectOutputs(collect)) => {
                 let request = CollectRequest {
                     job_id: collect.job_id.clone(),
+                    attempt: collect.attempt,
                     target_machine_id: collect.target_machine_id.clone(),
                     target_root_dir: collect.target_root_dir.clone(),
                     workdir: collect.workdir.clone(),
                     paths: collect.paths.clone(),
                     cap_bytes: collect.cap_bytes,
                 };
-                let job = collect.job_id.clone();
+                let (job, attempt) = (collect.job_id.clone(), collect.attempt);
                 {
                     let me = self.clone();
-                    self.spawn("collect", job.clone(), terminal, async move {
+                    self.spawn("collect", job.clone(), attempt, terminal, async move {
                     Some(match me.stager.collect(&request).await {
                         Ok(outputs) => {
                             write_notes(&outputs);
-                            Body::OutputsCollected(collected(job, &outputs))
+                            Body::OutputsCollected(collected(job, attempt, &outputs))
                         }
                         Err(failure) => {
                             tracing::warn!(kind = "collect_failed", reason = %failure.reason, "output collection failed");
                             Body::OutputsCollectFailed(OutputsCollectFailed {
                                 job_id: job,
                                 reason: reason(&failure),
+                                attempt,
                             })
                         }
                     })
@@ -170,18 +178,19 @@ impl CarrierCommands {
             Some(Kind::CleanupSource(cleanup)) => {
                 let request = CleanupRequest {
                     job_id: cleanup.job_id.clone(),
+                    attempt: cleanup.attempt,
                     target_machine_id: cleanup.target_machine_id.clone(),
                     target_root_dir: cleanup.target_root_dir.clone(),
                     workdir: cleanup.workdir.clone(),
                     repo_key: cleanup.repo_key.clone(),
                     domain: cleanup.domain.clone(),
                 };
-                let job = cleanup.job_id.clone();
+                let (job, attempt) = (cleanup.job_id.clone(), cleanup.attempt);
                 {
                     let me = self.clone();
-                    self.spawn("cleanup", job.clone(), terminal, async move {
+                    self.spawn("cleanup", job.clone(), attempt, terminal, async move {
                     match me.stager.cleanup(&request).await {
-                        Ok(()) => Some(Body::SourceCleaned(SourceCleaned { job_id: job })),
+                        Ok(()) => Some(Body::SourceCleaned(SourceCleaned { job_id: job, attempt })),
                         Err(failure) => {
                             // Хаб повторит уборку до предела; факта «убрано» не будет.
                             tracing::warn!(kind = "cleanup_failed", reason = %failure.reason, "source cleanup failed");
@@ -268,10 +277,11 @@ impl CarrierCommands {
         self: &Arc<Self>,
         kind: &'static str,
         job: String,
+        attempt: u32,
         terminal: Vec<(String, u32)>,
         work: impl std::future::Future<Output = Option<Body>> + Send + 'static,
     ) {
-        let key = (job, kind);
+        let key = (job, attempt, kind);
         if !self.running.lock().unwrap().insert(key.clone()) {
             return;
         }
@@ -294,9 +304,10 @@ impl CarrierCommands {
     }
 }
 
-fn collected(job_id: String, outputs: &Outputs) -> OutputsCollected {
+fn collected(job_id: String, attempt: u32, outputs: &Outputs) -> OutputsCollected {
     OutputsCollected {
         job_id,
+        attempt,
         local_dir: outputs.local_dir.display().to_string(),
         files: outputs
             .files

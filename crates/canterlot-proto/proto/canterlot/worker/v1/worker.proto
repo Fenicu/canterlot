@@ -344,6 +344,8 @@ message StageSource {
   string target_root_dir = 6;
   string workdir = 7;
   string repo_key = 8;
+  // Попытка задачи (`jobs.attempt`). 0 шлёт сторона до повторов и означает первую попытку.
+  uint32 attempt = 9;
 }
 
 // Забрать результаты `paths` (относительные пути в `workdir`) на несущую; суммарный предел
@@ -355,6 +357,8 @@ message CollectOutputs {
   string workdir = 4;
   repeated string paths = 5;
   uint64 cap_bytes = 6;
+  // Попытка задачи (`jobs.attempt`). 0 шлёт сторона до повторов и означает первую попытку.
+  uint32 attempt = 7;
 }
 
 // Убрать рабочее дерево и ссылку задачи. Ответ: `SourceCleaned`.
@@ -365,6 +369,8 @@ message CleanupSource {
   string workdir = 4;
   string repo_key = 5;
   string domain = 6;
+  // Попытка задачи (`jobs.attempt`). 0 шлёт сторона до повторов и означает первую попытку.
+  uint32 attempt = 7;
 }
 
 // Итог задачи владельца для терминала, который её подал.
@@ -622,11 +628,15 @@ message RecordBody {
 
 message SourceStaged {
   string job_id = 1;
+  // Попытка из команды, на которую отвечает факт; хаб не принимает факт чужой попытки.
+  uint32 attempt = 2;
 }
 
 message SourceStageFailed {
   string job_id = 1;
   string reason = 2;
+  // Попытка из команды, на которую отвечает факт; хаб не принимает факт чужой попытки.
+  uint32 attempt = 3;
 }
 
 message OutputFile {
@@ -640,15 +650,21 @@ message OutputsCollected {
   string local_dir = 2;
   repeated OutputFile files = 3;
   bool truncated = 4;
+  // Попытка из команды, на которую отвечает факт; хаб не принимает факт чужой попытки.
+  uint32 attempt = 5;
 }
 
 message OutputsCollectFailed {
   string job_id = 1;
   string reason = 2;
+  // Попытка из команды, на которую отвечает факт; хаб не принимает факт чужой попытки.
+  uint32 attempt = 3;
 }
 
 message SourceCleaned {
   string job_id = 1;
+  // Попытка из команды, на которую отвечает факт; хаб не принимает факт чужой попытки.
+  uint32 attempt = 2;
 }
 
 // Команда запуска сохранена на воркере и попытка занята (каталог состояния создан).

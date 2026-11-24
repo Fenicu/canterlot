@@ -188,6 +188,7 @@ fn repo_key(repo: &Path) -> String {
 fn runner_stage(fx: &Fixture, src: &Source, rev: &str, job: Uuid) -> StageRequest {
     StageRequest {
         job_id: job.to_string(),
+        attempt: 1,
         repo: src.repo.clone(),
         rev: rev.to_owned(),
         domain: "work".into(),
@@ -207,6 +208,7 @@ fn carrier_stage(src: &Source, rev: &str, job: Uuid) -> StageRequest {
     let parent = src.repo.parent().unwrap();
     StageRequest {
         job_id: job.to_string(),
+        attempt: 1,
         repo: src.repo.clone(),
         rev: rev.to_owned(),
         domain: "personal".into(),
@@ -268,6 +270,7 @@ async fn a_cloud_target_on_a_nonstandard_port_stages_collects_and_cleans() {
     let job = Uuid::now_v7();
     let request = StageRequest {
         job_id: job.to_string(),
+        attempt: 1,
         repo: src.repo.clone(),
         rev: src.first.clone(),
         domain: "work".into(),
@@ -310,6 +313,7 @@ async fn a_cloud_target_on_a_nonstandard_port_stages_collects_and_cleans() {
     assert_eq!(fs::read_to_string(copied).unwrap(), "aaaa");
     let cleanup = CleanupRequest {
         job_id: request.job_id.clone(),
+        attempt: 1,
         target_machine_id: request.target_machine_id.clone(),
         target_root_dir: request.target_root_dir.clone(),
         workdir: request.workdir.clone(),
@@ -646,6 +650,7 @@ fn collect_request(
 ) -> CollectRequest {
     CollectRequest {
         job_id: job.to_string(),
+        attempt: 1,
         target_machine_id: machine.to_string(),
         target_root_dir: root.to_owned(),
         workdir: request.workdir.clone(),
@@ -862,6 +867,7 @@ async fn cleanup_removes_only_that_worktree_and_ref_and_repeats() {
         fs::write(Path::new(&a.workdir).join("untracked.bin"), "x").unwrap();
         let cleanup = CleanupRequest {
             job_id: a.job_id.clone(),
+            attempt: 1,
             target_machine_id: a.target_machine_id.clone(),
             target_root_dir: a.target_root_dir.clone(),
             workdir: a.workdir.clone(),
@@ -915,6 +921,7 @@ async fn cleanup_prunes_the_sources_of_finished_jobs_from_the_runner_repo() {
     fx.stager.stage(&finished).await.unwrap();
     let cleanup = |request: &StageRequest| CleanupRequest {
         job_id: request.job_id.clone(),
+        attempt: 1,
         target_machine_id: request.target_machine_id.clone(),
         target_root_dir: request.target_root_dir.clone(),
         workdir: request.workdir.clone(),
@@ -953,6 +960,7 @@ async fn cleanup_rejects_a_workdir_outside_the_job_tree_and_removes_no_files() {
     fs::write(victim.join("file"), "x").unwrap();
     let cleanup = CleanupRequest {
         job_id: job.to_string(),
+        attempt: 1,
         target_machine_id: RUNNER_ID.to_string(),
         target_root_dir: fx.root.display().to_string(),
         workdir: victim.display().to_string(),

@@ -242,6 +242,7 @@ impl Fx {
     async fn staged(&self, from: Uuid, id: Uuid) {
         let fact = SourceStaged {
             job_id: id.to_string(),
+            attempt: 1,
         };
         self.apply(move |conn| {
             Box::pin(async move {
@@ -257,6 +258,7 @@ impl Fx {
             SourceStageFailed {
                 job_id: id.to_string(),
                 reason: reason.to_owned(),
+                attempt: 1,
             },
         );
         self.apply(move |conn| {
@@ -278,6 +280,7 @@ impl Fx {
                     bytes: 42,
                 }],
                 truncated,
+                attempt: 1,
             },
         );
         self.apply(move |conn| {
@@ -294,6 +297,7 @@ impl Fx {
             OutputsCollectFailed {
                 job_id: id.to_string(),
                 reason: reason.to_owned(),
+                attempt: 1,
             },
         );
         self.apply(move |conn| {
@@ -309,6 +313,7 @@ impl Fx {
             self.carrier,
             SourceCleaned {
                 job_id: id.to_string(),
+                attempt: 1,
             },
         );
         self.apply(move |conn| {
@@ -1369,6 +1374,7 @@ async fn facts_from_anything_but_the_jobs_carrier_change_nothing(pool: PgPool) {
         local_dir: "/var/outputs/foreign".into(),
         files: vec![],
         truncated: false,
+        attempt: 0,
     };
     let from = other.machine_id;
     fx.apply(move |conn| {
@@ -2161,4 +2167,422 @@ async fn a_job_waiting_for_a_runner_past_the_timeout_is_canceled_no_runner(pool:
         0
     );
     assert_eq!(fx.messages(id).await, 1);
+}
+
+// ───────── Один повтор после прерывания машины ─────────
+
+use canterlot_hub::inplace_jobs::retry;
+use canterlot_hub::machines::RevokeJobs;
+use canterlot_proto::worker::v1::{JobPhase, JobSnapshot, JobsReport};
+
+impl Fx {
+    /// Отзыв прерванной машины: задачам, которым положен повтор, он остаётся.
+    async fn preempt(&self, machine: Uuid) {
+        self.apply(move |conn| {
+            Box::pin(async move {
+                machines::revoke_jobs_in_tx(conn, machine, RevokeJobs::RetryOnce)
+                    .await
+                    .map(|_| ())
+            })
+        })
+        .await;
+    }
+
+    /// Прежняя машина подтверждена остановленной: ждущие повтора задачи выпускаются.
+    async fn release(&self, machine: Uuid) -> Vec<Uuid> {
+        canterlot_hub::db::in_tx(&self.pool, move |conn| {
+            Box::pin(async move { retry::release_retry_pending_in_tx(conn, machine).await })
+        })
+        .await
+        .unwrap()
+    }
+
+    /// Машина с тем же идентификатором снова в строю: новый токен вместо отозванного.
+    async fn reissue(&self, machine: Uuid) {
+        machines::rotate_token(&self.pool, machine, false, true)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    async fn staged_attempt(&self, id: Uuid, attempt: u32) {
+        let (from, fact) = (
+            self.carrier,
+            SourceStaged {
+                job_id: id.to_string(),
+                attempt,
+            },
+        );
+        self.apply(move |conn| {
+            Box::pin(async move {
+                carrier::apply_source_staged(conn, from, &fact, Uuid::now_v7()).await
+            })
+        })
+        .await;
+    }
+
+    async fn finished_attempt(&self, machine: Uuid, id: Uuid, attempt: u32) {
+        let fact = JobFinished {
+            job_id: id.to_string(),
+            attempt,
+            outcome: JobOutcome::Succeeded as i32,
+            exit_code: Some(0),
+            duration_ms: 1500,
+            log_bytes: 12,
+            tail: b"hello\nworld\n".to_vec(),
+            truncated: false,
+        };
+        self.apply(move |conn| {
+            Box::pin(
+                async move { facts::apply_finished(conn, machine, &fact, Uuid::now_v7()).await },
+            )
+        })
+        .await;
+    }
+
+    async fn open_commands(&self, id: Uuid) -> i64 {
+        sqlx::query_scalar(
+            "select count(*) from commands
+              where payload->>'job_id'=$1 and delivery_state<>'completed'",
+        )
+        .bind(id.to_string())
+        .fetch_one(&self.pool)
+        .await
+        .unwrap()
+    }
+
+    /// Задача на раннере (только `runner`) доведена до `running`.
+    async fn running_on(&self, runner: Uuid) -> Uuid {
+        let id = job_id(&self.auto(json!({"placement": ["runner"]})).await.unwrap());
+        self.run_to_running(runner, id).await;
+        id
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_preempted_machine_holds_its_staged_source_jobs_for_one_retry(pool: PgPool) {
+    let mut fx = Fx::new(pool).await;
+    let runner = fx.runner("runner-a", 20, &[], 3, true).await;
+    let running = fx.running_on(runner).await;
+    let staging = job_id(&fx.auto(json!({"placement": ["runner"]})).await.unwrap());
+    assert_eq!(fx.state(staging).await, "staging");
+    fx.preempt(runner).await;
+    for id in [running, staging] {
+        let job = fx.job(id).await;
+        assert_eq!(job.state, "retry_pending", "{id}");
+        // Задача не закончена: ни итога, ни сообщения, ни очистки; попытка прежняя.
+        assert_eq!((job.attempt, job.preemption_retries), (1, 0));
+        assert!(job.finished_at.is_none() && job.end_reason.is_none());
+        assert_eq!(job.machine_id, Some(runner));
+        assert_eq!(fx.messages(id).await, 0);
+        // Команды прежней попытки не дойдут до машины с тем же идентификатором.
+        assert_eq!(fx.open_commands(id).await, 0);
+    }
+    assert_eq!(fx.commands(fx.carrier, "cleanup_source").await, 0);
+    // Ждущая повтора не размещается и не теряется по сроку.
+    assert_eq!(fx.place().await, 0);
+    let later = Utc::now() + chrono::TimeDelta::days(3);
+    assert_eq!(
+        sweep::lost_sweep(&fx.pool, &fx.registry, Duration::ZERO, later)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        carrier::stage_timeout_sweep(&fx.pool, Duration::from_secs(60), later)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        sweep::waiting_timeout_sweep(&fx.pool, Duration::from_secs(60), later)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(fx.state(running).await, "retry_pending");
+    // Событие о задаче несёт новое состояние, и схема событий его знает.
+    let state: String = sqlx::query_scalar(
+        "select payload->'job'->>'state' from events
+          where kind='job_changed' and payload->'job'->>'id'=$1 order by scope_seq desc limit 1",
+    )
+    .bind(running.to_string())
+    .fetch_one(&fx.pool)
+    .await
+    .unwrap();
+    assert_eq!(state, "retry_pending");
+    let mut schema: Value =
+        serde_json::from_str(include_str!("../../../../docs/api/events.schema.json")).unwrap();
+    schema["$ref"] = json!("#/$defs/JobView/properties/state");
+    schema.as_object_mut().unwrap().remove("oneOf");
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    assert!(validator.is_valid(&json!(state)));
+    assert!(!validator.is_valid(&json!("no_such_state")));
+    // Обычный повторный отзыв (уборка окна) повтора не отнимает.
+    machines::revoke(&fx.pool, runner).await.unwrap();
+    assert_eq!(fx.state(running).await, "retry_pending");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_preempted_job_with_a_cancel_requested_is_lost(pool: PgPool) {
+    let mut fx = Fx::new(pool).await;
+    let runner = fx.runner("runner-a", 20, &[], 2, true).await;
+    let id = fx.running_on(runner).await;
+    fx.call("job.cancel", json!({"job_id": id})).await.unwrap();
+    assert_eq!(fx.state(id).await, "running");
+    fx.preempt(runner).await;
+    assert_eq!(fx.state(id).await, "lost");
+    assert_eq!(fx.messages(id).await, 1);
+    assert!(fx.release(runner).await.is_empty());
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_preempted_job_with_a_finish_fact_is_lost(pool: PgPool) {
+    let mut fx = Fx::new(pool).await;
+    let runner = fx.runner("runner-a", 20, &[], 2, true).await;
+    let id = fx.running_on(runner).await;
+    // Снимок «закончена» с выводом: задача ещё не закрыта, но команда уже отработала.
+    fx.apply(move |conn| {
+        Box::pin(async move {
+            let report = JobsReport {
+                jobs: vec![JobSnapshot {
+                    job_id: id.to_string(),
+                    attempt: 1,
+                    phase: JobPhase::Finished as i32,
+                    outcome: JobOutcome::Succeeded as i32,
+                    exit_code: Some(0),
+                    duration_ms: 10,
+                    log_bytes: 3,
+                    ..Default::default()
+                }],
+                observed_at_ms: 0,
+            };
+            facts::apply_report(conn, runner, &report, Uuid::now_v7()).await
+        })
+    })
+    .await;
+    assert_eq!(fx.state(id).await, "running");
+    fx.preempt(runner).await;
+    assert_eq!(fx.state(id).await, "lost");
+    // Итог раннера принят и идёт сбор: такую задачу отзыв не трогает вовсе.
+    fx.reissue(runner).await;
+    let collecting = job_id(
+        &fx.auto(json!({"placement": ["runner"], "outputs": ["out"]}))
+            .await
+            .unwrap(),
+    );
+    fx.run_to_running(runner, collecting).await;
+    fx.finished(runner, collecting, JobOutcome::Succeeded, Some(0))
+        .await;
+    assert_eq!(fx.state(collecting).await, "collecting");
+    fx.preempt(runner).await;
+    assert_eq!(fx.state(collecting).await, "collecting");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_job_without_a_staged_source_is_lost_with_its_preempted_machine(pool: PgPool) {
+    let mut fx = Fx::new(pool).await;
+    let runner = fx.runner("runner-a", 20, &[], 2, true).await;
+    let id = fx.running_on(runner).await;
+    // Команда в каталоге машины без checkout коммита: заново её подготовить нечем.
+    sqlx::query(
+        "update jobs set source_repo=null, source_rev=null, source_domain=null where id=$1",
+    )
+    .bind(id)
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+    fx.preempt(runner).await;
+    assert_eq!(fx.state(id).await, "lost");
+    assert_eq!(fx.messages(id).await, 1);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn release_returns_the_job_to_waiting_as_the_next_attempt(pool: PgPool) {
+    let mut fx = Fx::new(pool).await;
+    let runner = fx.runner("runner-a", 20, &[], 2, true).await;
+    let id = fx.running_on(runner).await;
+    let chunk = canterlot_proto::worker::v1::JobLogChunk {
+        job_id: id.to_string(),
+        attempt: 1,
+        offset: 0,
+        data: b"first attempt output".to_vec(),
+    };
+    fx.apply(move |conn| Box::pin(async move { facts::apply_chunk(conn, runner, &chunk).await }))
+        .await;
+    assert!(!fx.job(id).await.live_tail.is_empty());
+    fx.preempt(runner).await;
+    let before = Utc::now();
+    assert_eq!(fx.release(runner).await, vec![id]);
+    let job = fx.job(id).await;
+    assert_eq!(job.state, "waiting_runner");
+    assert_eq!((job.attempt, job.preemption_retries), (2, 1));
+    assert!(
+        job.placement_waiting_since
+            .is_some_and(|since| since >= before)
+    );
+    // Место, факты и вывод прежней попытки сброшены.
+    assert!(job.machine_id.is_none() && job.workdir.is_none());
+    assert!(job.pid.is_none() && job.started_at.is_none() && job.dispatched_at.is_none());
+    assert!(job.live_tail.is_empty() && job.live_offset == 0 && job.output_bytes == 0);
+    assert!(job.finished_at.is_none() && fx.messages(id).await == 0);
+    assert_eq!(fx.open_commands(id).await, 0);
+    // Повторный выпуск ничего не делает.
+    assert!(fx.release(runner).await.is_empty());
+    assert_eq!(fx.job(id).await.attempt, 2);
+    // Вторая потеря той же задачи: повтор уже был, она `lost`.
+    fx.reissue(runner).await;
+    assert_eq!(fx.place().await, 1);
+    let job = fx.job(id).await;
+    assert_eq!(job.state, "staging");
+    assert_eq!(
+        job.workdir.as_deref(),
+        Some(&*format!("/srv/runner-a/jobs/personal/{id}-2"))
+    );
+    fx.preempt(runner).await;
+    let job = fx.job(id).await;
+    assert_eq!((job.state.as_str(), job.attempt), ("lost", 2));
+    assert_eq!(fx.messages(id).await, 1);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn late_facts_of_the_first_attempt_change_nothing_for_the_second(pool: PgPool) {
+    let mut fx = Fx::new(pool).await;
+    let runner = fx.runner("runner-a", 20, &[], 1, true).await;
+    let id = job_id(&fx.auto(json!({"placement": ["runner"]})).await.unwrap());
+    // Машину прервали, пока несущая ещё готовила исходники первой попытки.
+    assert_eq!(fx.state(id).await, "staging");
+    fx.preempt(runner).await;
+    // Пока задача ждёт повтора, факты прежней попытки её не двигают.
+    fx.staged_attempt(id, 1).await;
+    fx.finished_attempt(runner, id, 1).await;
+    fx.stage_failed(id, "ssh: connection lost").await;
+    assert_eq!(fx.state(id).await, "retry_pending");
+    assert_eq!(fx.release(runner).await, vec![id]);
+    // Вторая попытка размещена на машине с тем же идентификатором и готовится.
+    fx.reissue(runner).await;
+    assert_eq!(fx.place().await, 1);
+    let job = fx.job(id).await;
+    assert_eq!((job.state.as_str(), job.attempt), ("staging", 2));
+    assert_eq!(job.machine_id, Some(runner));
+    let stage = fx.command(fx.carrier, "stage_source").await;
+    let Some(Kind::StageSource(stage)) = outbox::to_proto(&stage).unwrap().kind else {
+        panic!("stage_source expected");
+    };
+    assert_eq!(stage.attempt, 2);
+    assert!(
+        stage.workdir.ends_with(&format!("/{id}-2")),
+        "{}",
+        stage.workdir
+    );
+    // Поздний успех подготовки первой попытки (и от несущей до повторов, с попыткой 0) не
+    // отпускает вторую раньше, чем готова её рабочая копия.
+    fx.staged_attempt(id, 1).await;
+    fx.staged_attempt(id, 0).await;
+    assert_eq!(fx.state(id).await, "staging");
+    assert_eq!(fx.commands(runner, "start_inplace_job").await, 0);
+    // Поздний сбой подготовки и поздний итог первой попытки её не заканчивают.
+    fx.stage_failed(id, "ssh: connection lost").await;
+    fx.finished_attempt(runner, id, 1).await;
+    let job = fx.job(id).await;
+    assert_eq!(job.state, "staging");
+    assert!(job.exit_code.is_none() && job.finished_at.is_none());
+    assert_eq!(fx.messages(id).await, 0);
+    // Очистка, подтверждённая для первой попытки, не считается очисткой второй.
+    let (from, fact) = (
+        fx.carrier,
+        SourceCleaned {
+            job_id: id.to_string(),
+            attempt: 1,
+        },
+    );
+    fx.apply(move |conn| {
+        Box::pin(
+            async move { carrier::apply_source_cleaned(conn, from, &fact, Uuid::now_v7()).await },
+        )
+    })
+    .await;
+    assert!(fx.job(id).await.cleaned_at.is_none());
+    // Свои факты второй попытки ведут её до конца.
+    fx.staged_attempt(id, 2).await;
+    assert_eq!(fx.state(id).await, "dispatched");
+    let start = fx.command(runner, "start_inplace_job").await;
+    assert_eq!(start.payload["attempt"], 2);
+    fx.finished_attempt(runner, id, 1).await;
+    assert_eq!(fx.state(id).await, "dispatched");
+    fx.finished_attempt(runner, id, 2).await;
+    let job = fx.job(id).await;
+    assert_eq!((job.state.as_str(), job.exit_code), ("succeeded", Some(0)));
+    assert_eq!(fx.messages(id).await, 1);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn a_released_job_waits_its_timeout_from_the_release(pool: PgPool) {
+    let mut fx = Fx::new(pool).await;
+    let runner = fx.runner("runner-a", 20, &[], 1, true).await;
+    let id = fx.running_on(runner).await;
+    // Подана двое суток назад и всё это время шла.
+    sqlx::query("update jobs set created_at = created_at - interval '2 days' where id=$1")
+        .bind(id)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    fx.preempt(runner).await;
+    assert_eq!(fx.release(runner).await, vec![id]);
+    let day = Duration::from_secs(24 * 3600);
+    // Ближайший проход её не закрывает: срок идёт от возврата в очередь.
+    assert_eq!(
+        sweep::waiting_timeout_sweep(&fx.pool, day, Utc::now() + chrono::TimeDelta::minutes(1))
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(fx.state(id).await, "waiting_runner");
+    assert_eq!(
+        sweep::waiting_timeout_sweep(&fx.pool, day, Utc::now() + chrono::TimeDelta::hours(25))
+            .await
+            .unwrap(),
+        1
+    );
+    let job = fx.job(id).await;
+    assert_eq!(
+        (job.state.as_str(), job.end_reason.as_deref()),
+        ("canceled", Some("no_runner"))
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn pending_jobs_end_lost_when_there_is_no_retry_and_canceled_on_cancel(pool: PgPool) {
+    let mut fx = Fx::new(pool).await;
+    let runner = fx.runner("runner-a", 20, &[], 3, true).await;
+    let lost = fx.running_on(runner).await;
+    let canceled = fx.running_on(runner).await;
+    fx.preempt(runner).await;
+    // Отмена закрывает ждущую повтора сразу: повтора у неё не будет.
+    let reply = fx
+        .call("job.cancel", json!({"job_id": canceled}))
+        .await
+        .unwrap();
+    assert_eq!(reply["state"], "canceled", "{reply}");
+    let ended = canterlot_hub::db::in_tx(&fx.pool, move |conn| {
+        Box::pin(async move { retry::lose_retry_pending_in_tx(conn, runner).await })
+    })
+    .await
+    .unwrap();
+    assert_eq!(ended, vec![lost]);
+    let job = fx.job(lost).await;
+    assert_eq!(
+        (job.state.as_str(), job.end_reason.as_deref(), job.attempt),
+        ("lost", Some("lost"), 1)
+    );
+    assert_eq!(fx.messages(lost).await, 1);
+    assert_eq!(fx.state(canceled).await, "canceled");
+    assert!(fx.release(runner).await.is_empty());
+    // Несущая отозвана, пока задача ждала повтора: готовить исходники некому, задача `lost`.
+    fx.reissue(runner).await;
+    let orphan = fx.running_on(runner).await;
+    fx.preempt(runner).await;
+    assert_eq!(fx.state(orphan).await, "retry_pending");
+    machines::revoke(&fx.pool, fx.carrier).await.unwrap();
+    assert_eq!(fx.state(orphan).await, "lost");
 }

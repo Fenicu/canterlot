@@ -149,6 +149,16 @@ fn text(payload: &Value, key: &str) -> Result<String, OutboxError> {
         .ok_or(OutboxError::InvalidCommand)
 }
 
+/// Попытка задачи в команде несущей. Строка, записанная до повторов, поля не несёт: 0, что
+/// воркер читает как первую попытку.
+fn carrier_attempt(payload: &Value) -> u32 {
+    payload
+        .get("attempt")
+        .and_then(Value::as_u64)
+        .and_then(|attempt| u32::try_from(attempt).ok())
+        .unwrap_or(0)
+}
+
 fn target(payload: &Value) -> Result<(String, u32), OutboxError> {
     let id = text(payload, "target_command_id")?;
     Uuid::parse_str(&id).map_err(|_| OutboxError::InvalidCommand)?;
@@ -628,6 +638,7 @@ pub fn to_proto(row: &CommandRow) -> Result<Command, OutboxError> {
             target_root_dir: text(&row.payload, "target_root_dir")?,
             workdir: text(&row.payload, "workdir")?,
             repo_key: text(&row.payload, "repo_key")?,
+            attempt: carrier_attempt(&row.payload),
         }),
         "collect_outputs" => {
             command::Kind::CollectOutputs(canterlot_proto::worker::v1::CollectOutputs {
@@ -652,6 +663,7 @@ pub fn to_proto(row: &CommandRow) -> Result<Command, OutboxError> {
                     .get("cap_bytes")
                     .and_then(Value::as_u64)
                     .ok_or(OutboxError::InvalidCommand)?,
+                attempt: carrier_attempt(&row.payload),
             })
         }
         "cleanup_source" => {
@@ -662,6 +674,7 @@ pub fn to_proto(row: &CommandRow) -> Result<Command, OutboxError> {
                 workdir: text(&row.payload, "workdir")?,
                 repo_key: text(&row.payload, "repo_key")?,
                 domain: text(&row.payload, "domain")?,
+                attempt: carrier_attempt(&row.payload),
             })
         }
         "attach_runner" => command::Kind::AttachRunner(canterlot_proto::worker::v1::AttachRunner {

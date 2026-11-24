@@ -89,6 +89,8 @@ pub struct StagerSettings {
 #[derive(Clone, Debug)]
 pub struct StageRequest {
     pub job_id: String,
+    /// Попытка задачи; 0 от хаба до повторов — первая.
+    pub attempt: u32,
     pub repo: PathBuf,
     pub rev: String,
     pub domain: String,
@@ -102,6 +104,7 @@ pub struct StageRequest {
 #[derive(Clone, Debug)]
 pub struct CleanupRequest {
     pub job_id: String,
+    pub attempt: u32,
     pub target_machine_id: String,
     pub target_root_dir: String,
     pub workdir: String,
@@ -183,7 +186,10 @@ impl Stager {
         let workdir = PathBuf::from(&request.workdir);
         match &place {
             Place::Runner { root, .. } => {
-                let want = root.join("jobs").join(domain).join(job.to_string());
+                let want = root
+                    .join("jobs")
+                    .join(domain)
+                    .join(job_dir(job, request.attempt));
                 if workdir != want {
                     return Err(Failure::new(
                         "bad_workdir",
@@ -202,7 +208,7 @@ impl Stager {
                     .unwrap_or(Path::new("/"))
                     .join(WORKDIRS)
                     .join(name)
-                    .join(job.to_string());
+                    .join(job_dir(job, request.attempt));
                 if workdir != want {
                     return Err(Failure::new(
                         "bad_workdir",
@@ -394,7 +400,10 @@ impl Stager {
         let workdir = PathBuf::from(&request.workdir);
         match place {
             Place::Runner { ssh, root } => {
-                let want = root.join("jobs").join(domain).join(job.to_string());
+                let want = root
+                    .join("jobs")
+                    .join(domain)
+                    .join(job_dir(job, request.attempt));
                 if workdir != want {
                     return Err(Failure::new(
                         "bad_workdir",
@@ -429,7 +438,7 @@ impl Stager {
                 }
             }
             Place::Carrier => {
-                if !carrier_workdir_shape(&workdir, job) {
+                if !carrier_workdir_shape(&workdir, job, request.attempt) {
                     return Err(Failure::new(
                         "bad_workdir",
                         "workdir is not under .canterlot-jobs",
@@ -629,8 +638,18 @@ fn has_dot_dot(path: &Path) -> bool {
     })
 }
 
-/// `<что-то>/.canterlot-jobs/<репозиторий>/<job>`, без `.` и `..`.
-pub(super) fn carrier_workdir_shape(workdir: &Path, job: Uuid) -> bool {
+/// Имя каталога попытки, как его строит хаб: `<job>` у первой попытки (и у хаба до повторов,
+/// который шлёт 0) и `<job>-<попытка>` у повтора. Повтор не делит каталог с прежней попыткой.
+pub fn job_dir(job: Uuid, attempt: u32) -> String {
+    if attempt <= 1 {
+        job.to_string()
+    } else {
+        format!("{job}-{attempt}")
+    }
+}
+
+/// `<что-то>/.canterlot-jobs/<репозиторий>/<каталог попытки>`, без `.` и `..`.
+pub(super) fn carrier_workdir_shape(workdir: &Path, job: Uuid, attempt: u32) -> bool {
     if !workdir.is_absolute() || has_dot_dot(workdir) || workdir.to_str().is_none() {
         return false;
     }
@@ -640,7 +659,7 @@ pub(super) fn carrier_workdir_shape(workdir: &Path, job: Uuid) -> bool {
         .and_then(|part| part.as_os_str().to_str().map(str::to_owned));
     let name = parts.next();
     let marker = parts.next();
-    last.as_deref() == Some(job.to_string().as_str())
+    last.as_deref() == Some(job_dir(job, attempt).as_str())
         && name.is_some()
         && marker.is_some_and(|part| part.as_os_str() == WORKDIRS)
 }

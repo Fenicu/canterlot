@@ -11,6 +11,7 @@ pub mod facts;
 pub mod logs;
 pub mod owner;
 pub mod place;
+pub mod retry;
 pub mod spec;
 pub mod sweep;
 
@@ -57,6 +58,9 @@ pub enum State {
     Running,
     /// Раннер закончил, итог сохранён; несущая собирает результаты и убирает исходники.
     Collecting,
+    /// Машину задачи прервали: задача ждёт, пока прежняя машина не подтверждена остановленной,
+    /// и до того не размещается, не теряется и не принимает фактов (`retry`).
+    RetryPending,
     Succeeded,
     Failed,
     TimedOut,
@@ -74,6 +78,7 @@ impl State {
             Self::WaitingLease => "waiting_lease",
             Self::Running => "running",
             Self::Collecting => "collecting",
+            Self::RetryPending => "retry_pending",
             Self::Succeeded => "succeeded",
             Self::Failed => "failed",
             Self::TimedOut => "timed_out",
@@ -91,6 +96,7 @@ impl State {
             "waiting_lease" => Self::WaitingLease,
             "running" => Self::Running,
             "collecting" => Self::Collecting,
+            "retry_pending" => Self::RetryPending,
             "succeeded" => Self::Succeeded,
             "failed" => Self::Failed,
             "timed_out" => Self::TimedOut,
@@ -107,7 +113,8 @@ impl State {
         )
     }
 
-    /// Порядок «вперёд»: итог выше любого хода.
+    /// Порядок «вперёд»: итог выше любого хода. Ожидание повтора стоит наравне с итогом: факт
+    /// прежней попытки его не сдвигает, выводит из него только `retry`.
     fn rank(self) -> u8 {
         match self {
             Self::WaitingRunner => 0,
@@ -184,6 +191,10 @@ pub struct Job {
     pub cleanup_attempts: i32,
     pub cleanup_sent_at: Option<DateTime<Utc>>,
     pub cleaned_at: Option<DateTime<Utc>>,
+    /// Сколько раз задачу вернули в очередь после прерывания машины (0 или 1).
+    pub preemption_retries: i32,
+    /// Начало отсчёта срока ожидания раннера у возвращённой задачи; пусто — от подачи.
+    pub placement_waiting_since: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub dispatched_at: Option<DateTime<Utc>>,
     pub started_at: Option<DateTime<Utc>>,
@@ -1039,7 +1050,8 @@ pub async fn cancel_in_tx(
     match job.state() {
         // Ожидание, подготовка и очередь закрываются сразу; подготовленное убирает очистка,
         // которую `finish_in_tx` ставит для любой задачи с исходниками и выбранной целью.
-        State::WaitingRunner | State::Staging | State::Queued => {
+        // Ждущая повтора нигде не идёт (её машину прервали): отмена закрывает и её, повтора нет.
+        State::WaitingRunner | State::Staging | State::Queued | State::RetryPending => {
             finish_in_tx(
                 conn,
                 &job,

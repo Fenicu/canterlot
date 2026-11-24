@@ -184,6 +184,8 @@ struct Place {
     root: String,
     workdir: String,
     domain: &'static str,
+    /// Попытка в командах; 0 шлёт хаб до повторов.
+    attempt: u32,
 }
 
 fn runner_place(fx: &Fixture, job: Uuid) -> Place {
@@ -197,6 +199,7 @@ fn runner_place(fx: &Fixture, job: Uuid) -> Place {
             .display()
             .to_string(),
         domain: "work",
+        attempt: 0,
     }
 }
 
@@ -213,6 +216,7 @@ fn local_place(fx: &Fixture, job: Uuid) -> Place {
             .display()
             .to_string(),
         domain: "personal",
+        attempt: 0,
     }
 }
 
@@ -228,6 +232,7 @@ fn stage(fx: &Fixture, job: Uuid, place: &Place, rev: &str) -> Command {
             target_root_dir: place.root.clone(),
             workdir: place.workdir.clone(),
             repo_key: "project-0123456789ab".into(),
+            attempt: place.attempt,
         }),
     )
 }
@@ -242,6 +247,7 @@ fn cleanup(job: Uuid, place: &Place) -> Command {
             workdir: place.workdir.clone(),
             repo_key: "project-0123456789ab".into(),
             domain: place.domain.to_owned(),
+            attempt: place.attempt,
         }),
     )
 }
@@ -256,6 +262,7 @@ fn collect(job: Uuid, place: &Place, paths: &[&str], cap: u64) -> Command {
             workdir: place.workdir.clone(),
             paths: paths.iter().map(|path| (*path).to_owned()).collect(),
             cap_bytes: cap,
+            attempt: place.attempt,
         }),
     )
 }
@@ -324,6 +331,113 @@ async fn stage_collect_cleanup_write_their_facts_and_settle_the_command() {
             matches!(&facts[..], [Body::SourceCleaned(fact)] if fact.job_id == job.to_string())
         );
         assert!(!Path::new(&place.workdir).exists());
+    }
+}
+
+/// Повтор задачи (попытка 2) идёт в своём каталоге `<job>-2`, и каждый факт возвращает хабу
+/// попытку из команды. Каталог первой попытки под командой второй не принимается.
+#[tokio::test]
+async fn the_attempt_round_trips_through_commands_and_facts() {
+    for on_runner in [true, false] {
+        let fx = fixture();
+        let job = Uuid::now_v7();
+        let first = if on_runner {
+            runner_place(&fx, job)
+        } else {
+            local_place(&fx, job)
+        };
+        let retry = Place {
+            workdir: format!("{}-2", first.workdir),
+            attempt: 2,
+            ..if on_runner {
+                runner_place(&fx, job)
+            } else {
+                local_place(&fx, job)
+            }
+        };
+        // Хаб до повторов шлёт 0: факт несёт 0, каталог — `<job>`.
+        fx.commands
+            .handle(&stage(&fx, job, &first, &fx.sha))
+            .await
+            .unwrap();
+        let (facts, _) = fx.sink.next(0).await;
+        assert!(
+            matches!(&facts[..], [Body::SourceStaged(fact)] if fact.attempt == 0),
+            "runner={on_runner}: {facts:?}"
+        );
+        // Вторая попытка в каталоге первой: отказ, и он тоже помечен попыткой.
+        let stale_dir = Place {
+            attempt: 2,
+            ..if on_runner {
+                runner_place(&fx, job)
+            } else {
+                local_place(&fx, job)
+            }
+        };
+        fx.commands
+            .handle(&stage(&fx, job, &stale_dir, &fx.sha))
+            .await
+            .unwrap();
+        let (facts, _) = fx.sink.next(1).await;
+        let [Body::SourceStageFailed(failed)] = &facts[..] else {
+            panic!("runner={on_runner}: {facts:?}");
+        };
+        assert_eq!(failed.attempt, 2);
+        assert!(
+            failed.reason.starts_with("bad_workdir"),
+            "{}",
+            failed.reason
+        );
+        // Вторая попытка в своём каталоге.
+        fx.commands
+            .handle(&stage(&fx, job, &retry, &fx.sha))
+            .await
+            .unwrap();
+        let (facts, _) = fx.sink.next(2).await;
+        assert!(
+            matches!(&facts[..], [Body::SourceStaged(fact)]
+                if fact.job_id == job.to_string() && fact.attempt == 2),
+            "runner={on_runner}: {facts:?}"
+        );
+        assert!(Path::new(&retry.workdir).join("file.txt").exists());
+        fs::create_dir_all(Path::new(&retry.workdir).join("out")).unwrap();
+        fs::write(Path::new(&retry.workdir).join("out/a.txt"), "aaaa").unwrap();
+        fx.commands
+            .handle(&collect(job, &retry, &["out"], 1 << 20))
+            .await
+            .unwrap();
+        let (facts, _) = fx.sink.next(3).await;
+        assert!(
+            matches!(&facts[..], [Body::OutputsCollected(fact)]
+                if fact.attempt == 2 && fact.files.len() == 1),
+            "runner={on_runner}: {facts:?}"
+        );
+        // Сбор из каталога, которого нет у третьей попытки: отказ с её номером.
+        let third = Place {
+            workdir: format!("{}-3", first.workdir),
+            attempt: 3,
+            ..if on_runner {
+                runner_place(&fx, job)
+            } else {
+                local_place(&fx, job)
+            }
+        };
+        fx.commands
+            .handle(&collect(job, &third, &["out"], 1 << 20))
+            .await
+            .unwrap();
+        let (facts, _) = fx.sink.next(4).await;
+        assert!(
+            matches!(&facts[..], [Body::OutputsCollectFailed(fact)] if fact.attempt == 3),
+            "runner={on_runner}: {facts:?}"
+        );
+        fx.commands.handle(&cleanup(job, &retry)).await.unwrap();
+        let (facts, _) = fx.sink.next(5).await;
+        assert!(
+            matches!(&facts[..], [Body::SourceCleaned(fact)] if fact.attempt == 2),
+            "runner={on_runner}: {facts:?}"
+        );
+        assert!(!Path::new(&retry.workdir).exists());
     }
 }
 
