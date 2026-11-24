@@ -815,3 +815,32 @@ async fn a_restart_after_failure_starts_nothing() {
     let _ = stop.send(true);
     let _ = join.await;
 }
+
+/// Остался ли на хосте фоновый сон из подготовочного скрипта: у него своя строка команды,
+/// поэтому чужие `sleep` не считаются.
+fn hung_prepare_sleep() -> bool {
+    Process::new("pgrep")
+        .args(["-f", "^sleep 987"])
+        .output()
+        .map(|out| !out.stdout.is_empty())
+        .unwrap_or(false)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hung_prepare_script_is_killed_with_its_children() {
+    let fx = Fixture::start(Options::default()).await;
+    write_marker(&fx);
+    // Фоновый сон игнорирует HUP: после обрыва сеанса sshd он пережил бы смерть оболочки,
+    // и снять его можно только вместе со всей группой процессов скрипта.
+    let command = fx.attach_scripted(
+        "window-prepare-children",
+        fx.sshd.host_key_public(),
+        "bash -c 'trap \"\" HUP; exec sleep 987' & wait\n",
+    );
+    fx.commands.handle(&command).await.unwrap();
+    wait_outcome(&fx, "prepare_failed").await;
+    until("the hung child of the preparation to be gone", || {
+        !hung_prepare_sleep()
+    })
+    .await;
+}

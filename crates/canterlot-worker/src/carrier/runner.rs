@@ -459,7 +459,7 @@ impl Runner {
             let _ = self.kill_prepare(cloud).await;
             return self.prepare_failed(cloud, -1, "").await;
         }
-        let command = script::prepare_run(&cloud.sudo, &cloud.egress_env, &cloud.prepare_pid);
+        let command = script::prepare_run(&cloud.sudo, &cloud.egress_env, &cloud.prepare_group);
         let remote = [command.as_str()];
         let attempt = self.ssh.until(
             &remote,
@@ -540,12 +540,12 @@ impl Runner {
     }
 
     async fn kill_prepare(&self, cloud: &CloudRunner) -> Result<Output, Unreachable> {
-        let command = script::prepare_kill(&cloud.sudo, &cloud.prepare_pid);
+        let command = script::prepare_kill(&cloud.sudo, &cloud.prepare_group);
         self.call(&[&command], Input::None).await
     }
 
     async fn clean_pid(&self, cloud: &CloudRunner) -> Result<Output, Unreachable> {
-        let command = script::prepare_clean(&cloud.sudo, &cloud.prepare_pid);
+        let command = script::prepare_clean(&cloud.sudo, &cloud.prepare_group);
         self.call(&[&command], Input::None).await
     }
 

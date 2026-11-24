@@ -284,7 +284,7 @@ pub(crate) struct CloudRunner {
     /// Маркеры, которые носитель оставляет на сервере окна.
     pub prepared_marker: PathBuf,
     pub prepare_failed_marker: PathBuf,
-    pub prepare_pid: PathBuf,
+    pub prepare_group: PathBuf,
 }
 
 /// Что нужно знать задаче одного раннера.
@@ -367,7 +367,7 @@ fn desired(
                     egress_env: spec.egress_env.clone(),
                     prepared_marker: spec.ready_marker.with_file_name("prepared"),
                     prepare_failed_marker: spec.ready_marker.with_file_name("prepare-failed"),
-                    prepare_pid: spec.ready_marker.with_file_name("prepare.pid"),
+                    prepare_group: spec.ready_marker.with_file_name("prepare.pgid"),
                 }),
             },
         );

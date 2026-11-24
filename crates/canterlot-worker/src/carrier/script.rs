@@ -208,13 +208,17 @@ pub fn remove_fatal(root: &Path) -> String {
 }
 
 /// Команда подготовки облачного окна: от root, с окружением выхода в сеть, тело скрипта —
-/// на stdin. `pid` пишется до `exec`, чтобы по нему можно было снять зависший скрипт:
-/// `exec` сохраняет идентификатор процесса. Из-за `exec` и `2>&1` весь вывод скрипта — это
-/// stdout удалённой команды, и хвост для факта берётся из одного места.
-pub fn prepare_run(sudo: &str, egress_env: &Path, pid: &Path) -> String {
+/// на stdin. Перед `exec` пишется группа процессов: по ней снимается зависшая подготовка
+/// вместе со всеми потомками (`docker pull`, фоновые команды), а не только оболочка. К
+/// моменту снятия сам процесс может уже исчезнуть — sshd гасит сеанс, — а группа живёт,
+/// пока в ней есть хоть один потомок, поэтому хранится именно pgid.
+pub fn prepare_run(sudo: &str, egress_env: &Path, group: &Path) -> String {
     let env = super::stage::sh_quote(&egress_env.display().to_string());
-    let pid = super::stage::sh_quote(&pid.display().to_string());
-    let inner = format!("set -a; . {env}; set +a; echo $$ > {pid}; exec bash -s 2>&1");
+    let group = super::stage::sh_quote(&group.display().to_string());
+    let inner = format!(
+        "set -a; . {env}; set +a; \
+         echo $(ps -o pgid= -p $$ | tr -d ' ') > {group}; exec bash -s 2>&1"
+    );
     format!("{sudo} bash -c {} 2>&1", super::stage::sh_quote(&inner))
 }
 
@@ -232,10 +236,16 @@ pub fn prepare_marker_write(sudo: &str, path: &Path) -> String {
     )
 }
 
-/// Снимает зависшую подготовку по pid-файлу и убирает сам файл.
-pub fn prepare_kill(sudo: &str, pid: &Path) -> String {
-    let pid = quoted_path(pid);
-    let inner = format!("kill -KILL -- $(cat {pid}) 2>/dev/null; rm -f {pid}");
+/// Снимает зависшую подготовку вместе со всей её группой процессов и убирает файл группы.
+/// Оболочка могла уже умереть вместе с сеансом sshd, а потомки (`docker pull`, фоновые
+/// процессы) — остаться; поэтому убивается группа, а не один процесс.
+pub fn prepare_kill(sudo: &str, group: &Path) -> String {
+    let group = quoted_path(group);
+    let inner = format!(
+        "pgid=$(cat {group} 2>/dev/null); \
+         if [ -n \"$pgid\" ] && [ \"$pgid\" -gt 1 ]; then /bin/kill -KILL -- -\"$pgid\" 2>/dev/null; fi; \
+         rm -f {group}"
+    );
     format!(
         "{sudo} sh -c {} 2>/dev/null",
         super::stage::sh_quote(&inner)
@@ -444,13 +454,14 @@ mod tests {
     }
 
     /// Подготовка идёт через `bash -c` от root: окружение выхода в сеть подключается, тело
-    /// скрипта читается из stdin, pid пишется до `exec`, чтобы зависший скрипт можно было снять.
+    /// скрипта читается из stdin, группа процессов пишется до `exec`, чтобы зависшую
+    /// подготовку можно было снять вместе с потомками.
     #[test]
     fn the_prepare_command_sources_the_egress_env_and_execs_stdin() {
         let command = prepare_run(
             "sudo -n",
             Path::new("/etc/canterlot/egress.env"),
-            Path::new("/var/lib/canterlot-runner/prepare.pid"),
+            Path::new("/var/lib/canterlot-runner/prepare.pgid"),
         );
         assert!(command.starts_with("sudo -n bash -c '"), "{command}");
         assert!(
@@ -458,7 +469,8 @@ mod tests {
             "{command}"
         );
         assert!(
-            command.contains("echo $$ > /var/lib/canterlot-runner/prepare.pid;"),
+            command.contains("ps -o pgid= -p $$")
+                && command.contains("> /var/lib/canterlot-runner/prepare.pgid;"),
             "{command}"
         );
         assert!(command.contains("exec bash -s 2>&1"), "{command}");
@@ -478,10 +490,21 @@ mod tests {
             failed.contains("cat > /var/lib/canterlot-runner/prepare-failed"),
             "{failed}"
         );
-        let kill = prepare_kill("", Path::new("/var/lib/canterlot-runner/prepare.pid"));
+    }
+
+    /// Зависшая подготовка снимается по группе процессов: оболочка могла умереть вместе с
+    /// сеансом sshd, а её потомки — остаться.
+    #[test]
+    fn the_kill_command_takes_down_the_whole_process_group() {
+        let kill = prepare_kill("", Path::new("/var/lib/canterlot-runner/prepare.pgid"));
         assert!(
-            kill.contains("kill -KILL -- $(cat /var/lib/canterlot-runner/prepare.pid)"),
+            kill.contains("pgid=$(cat /var/lib/canterlot-runner/prepare.pgid"),
             "{kill}"
+        );
+        assert!(kill.contains("/bin/kill -KILL -- -\"$pgid\""), "{kill}");
+        assert!(
+            !kill.contains("-- $(cat"),
+            "a lone pid is not enough: {kill}"
         );
     }
 
