@@ -1872,12 +1872,13 @@ async fn apply_body(
         }
         // Сбой скрипта подготовки: окно ещё не `ready`, воркер не запустится. Строка
         // получает хвост вывода, окно уходит на снос причиной `prepare_failed`, владельцу
-        // идёт пуш, а предлагавшему агенту — заметка с кодом и хвостом. Повтор факта
-        // ничего не меняет: окно уже `deleting`.
+        // идёт пуш, а предлагавшему агенту — заметка с кодом и хвостом. Факт принимается
+        // только от несущей этого окна. Повтор факта ничего не меняет: окно уже `deleting`.
         Body::RunnerPrepareFailed(fact) => {
             crate::cloud::windows::apply_prepare_failed_in_tx(
                 conn,
                 parse_id(&fact.window_id)?,
+                machine_id,
                 parse_id(&fact.machine_id)?,
                 fact.exit_code,
                 &fact.output_tail,

@@ -864,9 +864,14 @@ pub async fn begin_cleanup_in_tx(
 /// запустится. В строку ложится хвост вывода, окно уходит на снос обычным путём, владельцу
 /// идёт пуш, а предлагавшему агенту — заметка с кодом и хвостом. Повтор факта ничего не
 /// меняет: после перехода окно уже `deleting`.
+///
+/// Факт принимается только от несущей, которая подключает это окно: отправитель журнала
+/// (`sender_machine_id`) должен быть родителем строки раннера `cloud`, а сама строка — той,
+/// которой владеет хаб. Иначе любой подключённый воркер с номером окна гасил бы чужие окна.
 pub async fn apply_prepare_failed_in_tx(
     conn: &mut PgConnection,
     id: Uuid,
+    sender_machine_id: Uuid,
     machine_id: Uuid,
     exit_code: i32,
     output_tail: &str,
@@ -882,6 +887,24 @@ pub async fn apply_prepare_failed_in_tx(
     }
     // Факт принимается только от строки раннера, которой владеет хаб.
     if cloud_machine_id(&mut *conn).await? != Some(machine_id) {
+        return Ok(false);
+    }
+    // И только когда прислала несущая этого окна: родитель строки раннера `cloud`.
+    let parent: Option<Uuid> = sqlx::query_scalar(
+        "select parent_machine_id from machines where id = $1 and role = 'runner'",
+    )
+    .bind(machine_id)
+    .fetch_optional(&mut *conn)
+    .await?
+    .flatten();
+    if parent != Some(sender_machine_id) {
+        tracing::warn!(
+            kind = "prepare_fact_foreign",
+            window_id = %id,
+            sender_machine_id = %sender_machine_id,
+            machine_id = %machine_id,
+            "prepare failure from a machine that is not the carrier"
+        );
         return Ok(false);
     }
     let tail = clip_tail(output_tail);

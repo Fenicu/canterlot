@@ -1018,6 +1018,7 @@ async fn prepare_failure_closes_the_window_and_tells_the_owner_and_the_agent(
         !windows::apply_prepare_failed_in_tx(
             &mut conn,
             window,
+            rig.carrier,
             Uuid::now_v7(),
             9,
             "someone else",
@@ -1025,9 +1026,28 @@ async fn prepare_failure_closes_the_window_and_tells_the_owner_and_the_agent(
         )
         .await?
     );
+    // Чужой отправитель: номер окна и строки раннера известны, но журнал прислала не
+    // несущая — окно остаётся `identified`, пуша и заметки нет.
+    assert!(
+        !windows::apply_prepare_failed_in_tx(
+            &mut conn,
+            window,
+            Uuid::now_v7(),
+            machine,
+            8,
+            "foreign carrier",
+            Utc::now()
+        )
+        .await?
+    );
+    assert_eq!(
+        windows::load(&mut conn, window).await?.unwrap().state,
+        "identified"
+    );
     let applied = windows::apply_prepare_failed_in_tx(
         &mut conn,
         window,
+        rig.carrier,
         machine,
         3,
         "line\nboom",
@@ -1082,16 +1102,32 @@ async fn prepare_failure_closes_the_window_and_tells_the_owner_and_the_agent(
     // Повтор факта и факт для законченного окна ничего не меняют.
     let mut conn = rig.pool.acquire().await?;
     assert!(
-        !windows::apply_prepare_failed_in_tx(&mut conn, window, machine, 3, "again", Utc::now())
-            .await?
+        !windows::apply_prepare_failed_in_tx(
+            &mut conn,
+            window,
+            rig.carrier,
+            machine,
+            3,
+            "again",
+            Utc::now()
+        )
+        .await?
     );
     sqlx::query("update cloud_windows set state = 'ended' where id = $1")
         .bind(window)
         .execute(&mut *conn)
         .await?;
     assert!(
-        !windows::apply_prepare_failed_in_tx(&mut conn, window, machine, 4, "late", Utc::now())
-            .await?
+        !windows::apply_prepare_failed_in_tx(
+            &mut conn,
+            window,
+            rig.carrier,
+            machine,
+            4,
+            "late",
+            Utc::now()
+        )
+        .await?
     );
     let pushes: i64 = sqlx::query_scalar(
         "select count(*) from owner_pushes where payload->>'code' = 'prepare_failed'",
