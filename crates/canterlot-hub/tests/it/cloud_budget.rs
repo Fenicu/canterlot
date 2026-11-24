@@ -1743,6 +1743,31 @@ async fn hub_card_cap_is_clamped_to_four_hours(pool: PgPool) -> TestResult {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn the_card_carries_the_profiles_with_their_two_rates(pool: PgPool) -> TestResult {
+    let rig = Rig::new(pool).await;
+    rig.set_budget(1_000_000, false).await;
+    let request = rig.card(2, "сборка", Source::Owner).await;
+    let payload: Value = sqlx::query_scalar("select request_payload from requests where id = $1")
+        .bind(request)
+        .fetch_one(&rig.pool)
+        .await?;
+    assert_eq!(
+        payload["profiles"],
+        json!([{
+            "cores": 32,
+            "memory_gb": 64,
+            "disk_gb": 80,
+            "compute_kopecks_per_hour": COMPUTE,
+            "disk_kopecks_per_hour": DISK,
+        }])
+    );
+    // Цена часа карточки — обе ставки вместе, по ней и резерв: 2 ч + 30 + 30 мин и час запаса.
+    assert_eq!(payload["hourly_kopecks"], HOURLY);
+    assert_eq!(payload["reservation_kopecks"], 4 * HOURLY);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn owner_proposal_hours_are_bounded_before_multiplication(pool: PgPool) -> TestResult {
     let rig = Rig::new(pool.clone()).await;
     rig.set_budget(1_000_000, false).await;

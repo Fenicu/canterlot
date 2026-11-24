@@ -1639,8 +1639,33 @@ impl CloudService {
             .await?;
             return Ok(false);
         }
-        // Диск ещё подключён или уже удаляется: ждём.
-        if !disk.instance_ids.is_empty() || disk.status == "DELETING" {
+        if !disk.instance_ids.is_empty() {
+            // Диск подключён к машине, хотя машина окна считается пропавшей. Если в каталоге
+            // есть машина с именем окна, список в прошлый раз до неё не дошёл: снос
+            // возвращается к машине. Иначе диск отключается, ждём.
+            if let Ok(listing) = self.provider.list_instances(&window.folder_id).await
+                && let Some(found) = listing.iter().find(|instance| instance.name == window.name)
+            {
+                tracing::warn!(
+                    kind = "cloud_instance_reappeared",
+                    "the instance of a window is listed again; cleanup returns to it"
+                );
+                sqlx::query(
+                    "update cloud_windows set instance_id = $2, server_gone_at = null,
+                            delete_accepted_at = null, delete_operation_id = null,
+                            next_delete_at = $3
+                     where id = $1 and state in ('deleting', 'late_cleanup')",
+                )
+                .bind(window.id)
+                .bind(&found.id)
+                .bind(now)
+                .execute(&self.pool)
+                .await?;
+            }
+            return Ok(false);
+        }
+        // Диск уже удаляется: ждём.
+        if disk.status == "DELETING" {
             return Ok(false);
         }
         if !due(window.next_delete_at, now) {

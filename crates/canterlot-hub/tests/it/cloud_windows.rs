@@ -1898,6 +1898,48 @@ async fn an_ambiguous_create_absent_from_full_listings_fails_after_the_window(
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn an_instance_a_listing_missed_is_still_deleted_because_its_disk_is_attached(
+    pool: PgPool,
+) -> TestResult {
+    let rig = rig(pool).await;
+    rig.fake.control().create = CreateMode::AcceptThenDrop;
+    let t0 = now_micros();
+    let id = rig.create(60).await;
+    rig.tick(t0).await;
+    assert_eq!(rig.state(id).await, "create_unknown");
+    assert_eq!(rig.fake.instance_count(), 1, "the instance was created");
+    // Списки машин до неё не доходят: ни сверка, ни первый шаг сноса её не видят.
+    rig.fake.control().listing_hidden_polls = 2;
+    let failed = t0 + TimeDelta::minutes(10);
+    rig.tick(failed).await;
+    let window = rig.window(id).await;
+    assert_eq!(
+        window.state, "deleting",
+        "the attached disk keeps the window open"
+    );
+    assert_eq!(window.delete_reason.as_deref(), Some("create_failed"));
+    // Диск с именем окна подключён к машине, и машина с этим именем нашлась в списке: снос
+    // вернулся к ней.
+    assert!(window.instance_id.is_some());
+    assert_eq!(window.server_gone_at, None);
+    assert!(window.boot_disk_id.is_some());
+    assert_eq!(rig.deletes(), 0);
+
+    let end = failed + TimeDelta::seconds(1);
+    rig.tick(end).await;
+    let window = rig.window(id).await;
+    assert_eq!(window.state, "failed");
+    assert_eq!(rig.deletes(), 1);
+    assert_eq!(rig.fake.instance_count(), 0);
+    assert!(rig.fake.control().disks.is_empty());
+    assert_eq!(window.last_error.as_deref(), Some("not_found_in_listing"));
+    // Машина и диск существовали всё это время: итог не нулевой.
+    assert_eq!(window.final_cost_kopecks, Some(cost(t0, end)));
+    assert_eq!(rig.posts(), 1);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn a_failed_or_partial_listing_changes_nothing(pool: PgPool) -> TestResult {
     let rig = rig(pool).await;
     enable_pushes(&rig.pool).await;
