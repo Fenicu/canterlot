@@ -1870,6 +1870,74 @@ async fn the_log_is_the_hub_tail_while_running_and_the_attachment_after_the_end(
     assert_eq!(rest.total_bytes, Some(full.len() as u64));
 }
 
+#[sqlx::test(migrations = "./migrations")]
+async fn a_stale_log_upload_does_not_attach_to_the_next_attempt(pool: PgPool) {
+    use canterlot_proto::worker::v1::MediaHeader;
+    use flate2::{Compression, write::GzEncoder};
+    use sha2::{Digest, Sha256};
+    use std::io::Write;
+    let fx = Fx::new(pool).await;
+    let id = job_id(&fx.run("make").await);
+    fx.started(fx.a, id).await;
+    // Машину прервали: задача ждёт повтора, а журнал прежней попытки ещё течёт на хаб.
+    sqlx::query("update jobs set state='retry_pending' where id=$1")
+        .bind(id)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(b"first attempt\n").unwrap();
+    let gz = encoder.finish().unwrap();
+    let media = Uuid::now_v7();
+    let header = logs::parse_header(&MediaHeader {
+        media_id: media.to_string(),
+        mime: "application/gzip".into(),
+        size: gz.len() as u64,
+        sha256: hex(&Sha256::digest(&gz)),
+        job_id: id.to_string(),
+        job_attempt: 1,
+        ..Default::default()
+    })
+    .map_err(|_| ())
+    .unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let (_, store) = testkit::test_blob_store(directory.path());
+    // Пока тело доходит, прежняя машина подтверждена остановленной: попытка выросла.
+    let pool = fx.pool.clone();
+    let machine = fx.a;
+    let body = futures_util::stream::once(async move {
+        canterlot_hub::db::in_tx(&pool, move |conn| {
+            Box::pin(async move {
+                inplace_jobs::retry::release_retry_pending_in_tx(conn, machine)
+                    .await
+                    .map(|_| ())
+            })
+        })
+        .await
+        .unwrap();
+        Ok(bytes::Bytes::from(gz))
+    });
+    let attached = logs::put(&fx.pool, &*store, fx.a, &header, Box::pin(body)).await;
+    assert!(
+        matches!(attached, Err(canterlot_hub::media::MediaError::Conflict)),
+        "a stale upload attaches nothing: {attached:?}"
+    );
+    let job = fx.job(id).await;
+    assert_eq!(job.state, "waiting_runner");
+    assert_eq!(job.attempt, 2);
+    assert!(job.log_media_id.is_none(), "the new attempt has no log yet");
+    // Блоб остался ничьим: его убирает сбор неиспользованных файлов.
+    let gc = canterlot_hub::attachments::gc::run_once(
+        &fx.pool,
+        &*store,
+        Utc::now() + chrono::TimeDelta::minutes(1),
+        Duration::ZERO,
+    )
+    .await
+    .unwrap();
+    assert!(gc.orphan_blobs >= 1, "{gc:?}");
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }

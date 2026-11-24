@@ -298,6 +298,22 @@ pub struct RecordedRequest {
     pub authorization: Option<String>,
 }
 
+/// Ворота одного ответа поддельного провайдера: сначала `waiting`, затем тест шлёт `release`.
+/// Так тест знает, что проход дошёл до запроса, и отпускает ответ после своего отсчёта времени.
+pub struct ResponseGate {
+    pub waiting: Notify,
+    pub release: Notify,
+}
+
+impl ResponseGate {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            waiting: Notify::new(),
+            release: Notify::new(),
+        })
+    }
+}
+
 pub struct FakeState {
     /// Каталог облака. Запрос с другим каталогом в создании отвергается, а список другого
     /// каталога пуст.
@@ -354,6 +370,8 @@ pub struct FakeState {
     pub retry_after: Option<String>,
     /// Не больше стольких записей на странице списка машин и дисков, как бы ни просили.
     pub list_page_cap: Option<usize>,
+    /// Ворота одного ответа: медленный провайдер, которого отпускает тест.
+    pub gate: Option<Arc<ResponseGate>>,
     /// То же для каталога SKU.
     pub sku_page_cap: Option<usize>,
     pub list_fail_page: Option<FailPage>,
@@ -396,6 +414,7 @@ impl FakeState {
             rate_limit_next: 0,
             retry_after: None,
             list_page_cap: None,
+            gate: None,
             sku_page_cap: None,
             list_fail_page: None,
             repeat_page_token: false,
@@ -917,10 +936,21 @@ async fn dispatch(state: Arc<Mutex<FakeState>>, kill: Kill, request: Request) ->
             body: body.clone(),
             authorization: auth.clone(),
         });
-        route(&mut st, &method, &path, &query, body, auth.as_deref())
+        let action = route(&mut st, &method, &path, &query, body, auth.as_deref());
+        // Ворота снимаются первым же запросом: тест отпускает ответ, когда сам решит.
+        (action, st.gate.clone())
     };
 
-    match action {
+    if let Some(gate) = action.1 {
+        {
+            let mut st = state.lock().unwrap();
+            st.gate = None;
+        }
+        gate.waiting.notify_one();
+        gate.release.notified().await;
+    }
+
+    match action.0 {
         Action::Respond(response) => response,
         Action::Drop => {
             kill.0.notify_one();

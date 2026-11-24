@@ -26,8 +26,8 @@ use tracing_subscriber::fmt::MakeWriter;
 use uuid::Uuid;
 
 use crate::support::fake_yandex::{
-    CreateMode, FOLDER, FailPage, FakeYandex, SKU_PREEMPTIBLE_VCPU, SUBNET, ZONE, street_price,
-    test_key, write_key_file,
+    CreateMode, FOLDER, FailPage, FakeYandex, ResponseGate, SKU_PREEMPTIBLE_VCPU, SUBNET, ZONE,
+    street_price, test_key, write_key_file,
 };
 
 const KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE0000";
@@ -2080,6 +2080,119 @@ async fn too_little_time_to_the_parent_deadline_skips_the_replacement(pool: PgPo
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_replacement_keeps_the_parent_quote_age_and_is_repriced_before_its_first_post(
+    pool: PgPool,
+) -> TestResult {
+    let rig = rig(pool).await;
+    enable_pushes(&rig.pool).await;
+    rig.set_budget(10_000_000).await;
+    let _carrier = rig.carrier_session();
+    let t0 = now_micros();
+    let (id, session, _at) = rig.drive_to_ready(120, t0).await;
+    let machine = rig.cloud_machine().await;
+    let _job = rig.seed_running_sourced(machine, 0).await;
+    // Провайдер подорожал уже после того, как родитель получил снимок цен.
+    set_vcpu_price(&rig, "0.9");
+    let stopped = rig.window(id).await.instance_id.unwrap();
+    rig.fake.control().preempt(&stopped);
+    // Прерывание через одиннадцать минут: снимок цен родителя старше срока годности.
+    let seen = t0 + TimeDelta::minutes(11);
+    let restarted = rig.restarted();
+    restarted.tick(seen).await;
+    drop(session);
+    let end = seen + TimeDelta::seconds(10);
+    restarted.tick(end).await;
+    assert_eq!(rig.state(id).await, "ended");
+    let replacements = rig.replacements_of(id).await;
+    assert_eq!(replacements.len(), 1);
+    let replacement = &replacements[0];
+    assert_eq!(
+        replacement.created_at,
+        rig.window(id).await.created_at,
+        "the replacement carries the parent's quote timestamp"
+    );
+    // Первый POST замены спрашивает цену заново: рост резерва закрывает окно без вызова.
+    restarted.tick(end + TimeDelta::seconds(1)).await;
+    let replacement = rig.window(replacement.id).await;
+    assert_eq!(replacement.state, "failed");
+    assert_eq!(replacement.final_cost_kopecks, Some(0));
+    assert_eq!(replacement.last_error.as_deref(), Some("reprice_growth"));
+    assert_eq!(
+        rig.posts(),
+        1,
+        "only the parent was created at the old rate"
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_window_past_its_deadline_fails_before_any_provider_call(pool: PgPool) -> TestResult {
+    let rig = rig(pool).await;
+    let _carrier = rig.carrier_session();
+    let now = now_micros();
+    let id = raw_window(&rig.pool, "create_intent", None, None).await;
+    sqlx::query("update cloud_windows set hard_cap_at = $2 where id = $1")
+        .bind(id)
+        .bind(now - TimeDelta::minutes(1))
+        .execute(&rig.pool)
+        .await?;
+    rig.tick(now).await;
+    let window = rig.window(id).await;
+    assert_eq!(window.state, "failed");
+    assert_eq!(window.final_cost_kopecks, Some(0));
+    assert_eq!(window.create_called_at, None, "nothing was called");
+    assert_eq!(window.hard_cap_at, Some(now - TimeDelta::minutes(1)));
+    assert_eq!(window.last_error.as_deref(), Some("deadline_passed"));
+    assert_eq!(rig.posts(), 0);
+    assert_eq!(
+        rig.fake
+            .control()
+            .count("GET", "/compute/v1/images:latestByFamily"),
+        0,
+        "no provider call at all"
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_replacement_with_less_than_the_lead_left_fails_before_any_provider_call(
+    pool: PgPool,
+) -> TestResult {
+    let rig = rig(pool).await;
+    let _carrier = rig.carrier_session();
+    let now = now_micros();
+    let parent = raw_window(
+        &rig.pool,
+        "ended",
+        Some("fhmfakeinstance9999"),
+        Some(now - TimeDelta::minutes(20)),
+    )
+    .await;
+    let replacement = raw_window(&rig.pool, "create_intent", None, None).await;
+    sqlx::query("update cloud_windows set replaces_window_id = $2, hard_cap_at = $3 where id = $1")
+        .bind(replacement)
+        .bind(parent)
+        .bind(now + TimeDelta::minutes(10))
+        .execute(&rig.pool)
+        .await?;
+    rig.tick(now).await;
+    let window = rig.window(replacement).await;
+    assert_eq!(window.state, "failed");
+    assert_eq!(window.final_cost_kopecks, Some(0));
+    assert_eq!(window.create_called_at, None, "nothing was called");
+    assert_eq!(window.last_error.as_deref(), Some("replacement_too_late"));
+    assert_eq!(rig.posts(), 0);
+    assert_eq!(
+        rig.fake
+            .control()
+            .count("GET", "/compute/v1/images:latestByFamily"),
+        0,
+        "no provider call at all"
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn a_retry_pending_job_without_a_preempted_window_is_lost_on_reconcile(
     pool: PgPool,
 ) -> TestResult {
@@ -2294,6 +2407,89 @@ async fn an_ambiguous_create_absent_from_full_listings_fails_after_the_window(
     assert_eq!(rig.posts(), 1, "there is never a second POST");
     // После закрытия можно создать новое окно.
     rig.try_create(60).await.expect("the slot is free");
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn an_absence_timestamp_is_taken_after_the_listing_not_at_the_tick_start(
+    pool: PgPool,
+) -> TestResult {
+    let rig = rig(pool).await;
+    // Провайдер отвечает только после того, как тест отпустит запрос: проход уже давно начался.
+    let t0 = now_micros();
+    let id = raw_window(
+        &rig.pool,
+        "deleting",
+        None,
+        Some(t0 - TimeDelta::minutes(20)),
+    )
+    .await;
+    let gate = ResponseGate::new();
+    rig.fake.control().gate = Some(gate.clone());
+    let waiting = gate.waiting.notified();
+    let service = Arc::clone(&rig.service);
+    let tick = tokio::spawn(async move { service.tick(t0).await });
+    waiting.await;
+    let _ = rig.window(id).await;
+    let released = now_micros();
+    assert!(released > t0, "the tick began before the provider answered");
+    gate.release.notify_one();
+    tick.await.unwrap();
+    let window = rig.window(id).await;
+    assert_eq!(window.state, "ended");
+    assert!(
+        window.server_gone_at.is_some_and(|at| at >= released),
+        "the machine end is not backdated to the tick start: {:?}",
+        window.server_gone_at
+    );
+    assert!(
+        window.disk_gone_at.is_some_and(|at| at >= released),
+        "the disk end is not backdated to the tick start: {:?}",
+        window.disk_gone_at
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_vanished_instance_is_marked_gone_after_the_listing_that_confirmed_it(
+    pool: PgPool,
+) -> TestResult {
+    let rig = rig(pool).await;
+    let _carrier = rig.carrier_session();
+    let t0 = now_micros();
+    let instance = rig.add_instance("placeholder");
+    let id = raw_window(
+        &rig.pool,
+        "ready",
+        Some(&instance),
+        Some(t0 - TimeDelta::minutes(20)),
+    )
+    .await;
+    {
+        let mut state = rig.fake.control();
+        state.instances.get_mut(&instance).unwrap().name = windows::server_name(id);
+        let disk = state.instances[&instance].disk_id.clone();
+        state.disks.get_mut(&disk).unwrap().name = windows::server_name(id);
+        // Машина пропала, пока хаба не было: полный список подтверждает это только сейчас.
+        state.remove_instance(&instance);
+    }
+    let gate = ResponseGate::new();
+    rig.fake.control().gate = Some(gate.clone());
+    let waiting = gate.waiting.notified();
+    let service = Arc::clone(&rig.service);
+    let tick = tokio::spawn(async move { service.tick(t0).await });
+    waiting.await;
+    let _ = rig.window(id).await;
+    let released = now_micros();
+    assert!(released > t0, "the tick began before the provider answered");
+    gate.release.notify_one();
+    tick.await.unwrap();
+    let window = rig.window(id).await;
+    assert!(
+        window.server_gone_at.is_some_and(|at| at >= released),
+        "the machine end is not backdated to the tick start: {:?}",
+        window.server_gone_at
+    );
     Ok(())
 }
 
@@ -2802,7 +2998,11 @@ async fn a_confirmed_absence_skips_the_delete_call(pool: PgPool) -> TestResult {
     rig.tick(now).await;
     let window = rig.window(id).await;
     assert_eq!(window.state, "ended");
-    assert_eq!(window.disk_gone_at, Some(now), "the disk is confirmed too");
+    assert!(
+        window.disk_gone_at.is_some_and(|at| at >= now),
+        "the disk is confirmed too: {:?}",
+        window.disk_gone_at
+    );
     assert_eq!(rig.deletes(), 0, "no DELETE once absence is confirmed");
     assert_eq!(
         rig.fake.control().count("GET", "/compute/v1/instances/"),
@@ -3080,6 +3280,159 @@ async fn a_disk_is_deleted_only_under_the_window_name_and_only_when_detached(
     rig.tick(now + TimeDelta::minutes(32)).await;
     assert_eq!(rig.disk_deletes(), 1);
     assert_eq!(rig.state(id).await, "ended");
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_disk_is_adopted_by_its_name_only_when_exactly_one_matches(pool: PgPool) -> TestResult {
+    // Без сохранённого номера диск ищется по имени, а имя не доказывает принадлежность: два
+    // диска с именем окна — неоднозначность, и удалять первый из них нельзя.
+    {
+        let rig = rig(pool.clone()).await;
+        let now = now_micros();
+        let id = raw_window(
+            &rig.pool,
+            "deleting",
+            Some("fhmfakeinstance9999"),
+            Some(now - TimeDelta::minutes(20)),
+        )
+        .await;
+        sqlx::query("update cloud_windows set server_gone_at = $2 where id = $1")
+            .bind(id)
+            .bind(now)
+            .execute(&rig.pool)
+            .await?;
+        let first = rig.fake.control().add_stray_disk(&windows::server_name(id));
+        let second = rig.fake.control().add_stray_disk(&windows::server_name(id));
+        rig.tick(now).await;
+        assert_eq!(rig.disk_deletes(), 0, "two same-name disks are not a match");
+        let window = rig.window(id).await;
+        assert_eq!(window.state, "deleting");
+        assert_eq!(window.boot_disk_id, None);
+        assert_eq!(window.last_error.as_deref(), Some("ambiguous_disk"));
+        assert!(rig.fake.control().disks.contains_key(&first));
+        assert!(rig.fake.control().disks.contains_key(&second));
+        // Один из дисков пропал: оставшийся единственный, его номер и запоминается.
+        rig.fake.control().disks.remove(&second);
+        rig.tick(now + TimeDelta::seconds(10)).await;
+        assert_eq!(rig.disk_deletes(), 1);
+        assert!(!rig.fake.control().disks.contains_key(&first));
+        assert_eq!(rig.state(id).await, "ended");
+    }
+
+    // Сохранённый номер главнее имени: диск с другим номером под тем же именем не наш.
+    {
+        let rig = rig(pool.clone()).await;
+        let now = now_micros();
+        let other = rig.fake.control().add_stray_disk("placeholder");
+        let id = raw_window(
+            &rig.pool,
+            "deleting",
+            Some("fhmfakeinstance9999"),
+            Some(now - TimeDelta::minutes(20)),
+        )
+        .await;
+        sqlx::query(
+            "update cloud_windows set server_gone_at = $2, boot_disk_id = 'fhmfakedisknotours' where id = $1",
+        )
+        .bind(id)
+        .bind(now)
+        .execute(&rig.pool)
+        .await?;
+        rig.fake.control().disks.get_mut(&other).unwrap().name = windows::server_name(id);
+        rig.tick(now).await;
+        assert_eq!(
+            rig.disk_deletes(),
+            0,
+            "a name-only disk is not deleted under a stored different id"
+        );
+        assert!(rig.fake.control().disks.contains_key(&other));
+        let window = rig.window(id).await;
+        assert_eq!(window.state, "ended");
+        assert!(window.disk_gone_at.is_some(), "the stored disk is gone");
+        assert_eq!(window.boot_disk_id.as_deref(), Some("fhmfakedisknotours"));
+    }
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_name_only_instance_recovery_requires_exactly_one_match(pool: PgPool) -> TestResult {
+    // Номера машины нет: снос ищет её по имени. Две машины с именем окна — неоднозначность.
+    {
+        let rig = rig(pool.clone()).await;
+        let now = now_micros();
+        let id = raw_window(
+            &rig.pool,
+            "deleting",
+            None,
+            Some(now - TimeDelta::minutes(20)),
+        )
+        .await;
+        let first = rig.add_instance(&windows::server_name(id));
+        let second = rig.add_instance(&windows::server_name(id));
+        rig.tick(now).await;
+        assert_eq!(rig.deletes(), 0, "two same-name instances are not a match");
+        let window = rig.window(id).await;
+        assert_eq!(window.state, "deleting");
+        assert_eq!(window.instance_id, None);
+        assert_eq!(window.last_error.as_deref(), Some("ambiguous_instance"));
+        assert_eq!(rig.fake.instance_count(), 2);
+        // Одна машина пропала: оставшаяся — единственная, её номер запоминается и она удаляется.
+        rig.fake.control().remove_instance(&second);
+        rig.tick(now + TimeDelta::seconds(10)).await;
+        assert_eq!(
+            rig.window(id).await.instance_id.as_deref(),
+            Some(first.as_str())
+        );
+        rig.tick(now + TimeDelta::seconds(11)).await;
+        assert_eq!(rig.deletes(), 1);
+        rig.tick(now + TimeDelta::seconds(12)).await;
+        assert!(!rig.fake.control().instances.contains_key(&first));
+        assert_eq!(rig.state(id).await, "ended");
+    }
+
+    // Диск подключён, а машина окна ищется по имени: две машины с этим именем — не повод
+    // вернуть снос к любой из них.
+    {
+        let rig = rig(pool.clone()).await;
+        let now = now_micros();
+        let id = raw_window(
+            &rig.pool,
+            "deleting",
+            None,
+            Some(now - TimeDelta::minutes(20)),
+        )
+        .await;
+        let first = rig.add_instance(&windows::server_name(id));
+        let second = rig.add_instance(&windows::server_name(id));
+        let second_disk = rig.fake.control().instances[&second].disk_id.clone();
+        rig.fake.control().disks.get_mut(&second_disk).unwrap().name = "other-volume".to_owned();
+        sqlx::query("update cloud_windows set server_gone_at = $2 where id = $1")
+            .bind(id)
+            .bind(now)
+            .execute(&rig.pool)
+            .await?;
+        rig.tick(now).await;
+        assert_eq!(rig.deletes(), 0);
+        let window = rig.window(id).await;
+        assert_eq!(window.state, "deleting");
+        assert_eq!(
+            window.instance_id, None,
+            "no same-name instance is chosen while the name is ambiguous"
+        );
+        assert_eq!(window.last_error.as_deref(), Some("ambiguous_instance"));
+        // Осталась одна машина: снос возвращается к ней и убирает её вместе с диском.
+        rig.fake.control().remove_instance(&second);
+        rig.tick(now + TimeDelta::seconds(10)).await;
+        assert_eq!(
+            rig.window(id).await.instance_id.as_deref(),
+            Some(first.as_str())
+        );
+        rig.tick(now + TimeDelta::seconds(11)).await;
+        assert_eq!(rig.deletes(), 1);
+        assert!(!rig.fake.control().instances.contains_key(&first));
+        assert_eq!(rig.state(id).await, "ended");
+    }
     Ok(())
 }
 
@@ -3405,6 +3758,41 @@ async fn a_folder_change_keeps_cleaning_the_old_folder(pool: PgPool) -> TestResu
     let window = rig.window(orphan).await;
     assert_eq!(window.state, "identified");
     assert_eq!(window.instance_id.as_deref(), Some(late.as_str()));
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_late_disk_in_a_historical_folder_is_found_after_a_folder_change(
+    pool: PgPool,
+) -> TestResult {
+    let rig = rig(pool).await;
+    enable_pushes(&rig.pool).await;
+    let _carrier = rig.carrier_session();
+    let t0 = now_micros();
+    // Обычное окно прежнего каталога, законченное до смены конфигурации.
+    let (id, session, at) = rig.drive_to_ready(60, t0).await;
+    windows::request_delete(&rig.pool, id, windows::REASON_OWNER, at).await?;
+    drop(session);
+    let ended = at + TimeDelta::seconds(1);
+    rig.tick(ended).await;
+    assert_eq!(rig.state(id).await, "ended");
+
+    // Каталог в конфигурации сменился, хаб перезапущен, а в прежнем каталоге появился диск
+    // с именем законченного окна. Его окно уже `ended`, но вызов создания был.
+    let mut changed = rig.config.clone();
+    changed.folder_id = OTHER_FOLDER.to_owned();
+    let moved = rig.restarted_with(changed);
+    let disk = rig.fake.control().add_stray_disk(&windows::server_name(id));
+    let found = ended + TimeDelta::minutes(5);
+    moved.tick(found).await;
+    let window = rig.window(id).await;
+    assert_eq!(
+        window.state, "ended",
+        "the historical folder is visited and the disk is cleaned in the same pass"
+    );
+    assert_eq!(window.delete_reason.as_deref(), Some("late_disk"));
+    assert!(!rig.fake.control().disks.contains_key(&disk));
+    assert_eq!(rig.alert_codes().await, vec!["late_disk"]);
     Ok(())
 }
 

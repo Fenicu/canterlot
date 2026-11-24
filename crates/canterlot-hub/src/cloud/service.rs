@@ -130,6 +130,13 @@ fn due(at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
     at.is_none_or(|at| at <= now)
 }
 
+/// Момент подтверждённого отсутствия: после ответа провайдера, а не в начале прохода. В тестах
+/// время прохода задано вперёд, и оно остаётся точкой отсчёта; в бою часы процесса идут за
+/// началом прохода, пока список читается.
+fn absence_at(now: DateTime<Utc>) -> DateTime<Utc> {
+    Utc::now().max(now)
+}
+
 /// Машина окна в списке каталога: по номеру или по точному имени.
 fn listed<'a>(listing: &'a [InstanceSummary], window: &Window) -> Option<&'a InstanceSummary> {
     listing.iter().find(|instance| {
@@ -683,6 +690,17 @@ impl CloudService {
         mut window: Window,
         now: DateTime<Utc>,
     ) -> Result<(), sqlx::Error> {
+        // Абсолютный предел проверяется до первого POST и до любого вызова провайдера: за ним
+        // машина только тратит деньги. Замене нужен запас, чтобы она успела принести пользу.
+        let deadline = window
+            .hard_cap_at
+            .unwrap_or_else(|| now + TimeDelta::minutes(i64::from(window.hard_cap_minutes)));
+        if now >= deadline {
+            return self.fail(window.id, "deadline_passed").await;
+        }
+        if window.replaces_window_id.is_some() && deadline - now < windows::REPLACEMENT_MIN_LEAD {
+            return self.fail(window.id, "replacement_too_late").await;
+        }
         if !self.reprice_if_stale(&mut window, now).await? {
             return Ok(());
         }
@@ -1444,8 +1462,13 @@ impl CloudService {
                     return Ok(false);
                 }
             };
-            return match listing.iter().find(|instance| instance.name == window.name) {
-                Some(found) => {
+            return match listing
+                .iter()
+                .filter(|instance| instance.name == window.name)
+                .collect::<Vec<_>>()
+                .as_slice()
+            {
+                [found] => {
                     // Машина всё-таки появилась: дальше она удаляется по номеру.
                     sqlx::query(
                         "update cloud_windows set instance_id = $2
@@ -1458,9 +1481,15 @@ impl CloudService {
                     .await?;
                     Ok(false)
                 }
-                None => {
+                [] => {
                     self.mark_server_gone(window, now).await?;
                     Ok(true)
+                }
+                // Имя не доказывает принадлежность: у нескольких машин одно имя — какую
+                // удалять, не решить. Ничего не трогаем и повторим на следующем проходе.
+                _ => {
+                    self.note_ambiguity(window, "ambiguous_instance").await?;
+                    Ok(false)
                 }
             };
         };
@@ -1600,8 +1629,9 @@ impl CloudService {
         now: DateTime<Utc>,
     ) -> Result<(), sqlx::Error> {
         let id = window.id;
+        let at = absence_at(now);
         let released = crate::db::in_tx(&self.pool, move |conn| {
-            Box::pin(async move { windows::confirm_server_gone_in_tx(conn, id, now).await })
+            Box::pin(async move { windows::confirm_server_gone_in_tx(conn, id, at).await })
         })
         .await?;
         if !released.is_empty() {
@@ -1613,9 +1643,23 @@ impl CloudService {
             );
         }
         if window.server_gone_at.is_none() {
-            window.server_gone_at = Some(now);
+            window.server_gone_at = Some(at);
             window.next_delete_at = None;
         }
+        Ok(())
+    }
+
+    /// Имя совпало у нескольких ресурсов: какой из них наш, не решить. Ничего не трогаем,
+    /// записываем причину и повторяем на следующем проходе.
+    async fn note_ambiguity(&self, window: &Window, error: &str) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "update cloud_windows set last_error = $2
+             where id = $1 and state in ('deleting', 'late_cleanup')",
+        )
+        .bind(window.id)
+        .bind(error)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -1634,13 +1678,35 @@ impl CloudService {
                 return Ok(false);
             }
         };
-        let by_id = disks
-            .iter()
-            .find(|disk| window.boot_disk_id.as_deref() == Some(disk.id.as_str()));
-        let Some(disk) = by_id.or_else(|| disks.iter().find(|disk| disk.name == window.name))
-        else {
-            self.mark_disk_gone(window, now).await?;
-            return Ok(true);
+        // Сохранённый номер главнее имени: чужой диск под тем же именем — не наш. Без номера
+        // диск ищется по точному имени окна, и имя должно быть единственным.
+        let disk = if let Some(boot_disk_id) = window.boot_disk_id.as_deref() {
+            match disks.iter().find(|disk| disk.id == boot_disk_id) {
+                Some(disk) => disk,
+                // Диска с нашим номером в полном списке нет: он пропал. Диск с тем же
+                // именем, но другим номером, удалять нельзя.
+                None => {
+                    self.mark_disk_gone(window, now).await?;
+                    return Ok(true);
+                }
+            }
+        } else {
+            match disks
+                .iter()
+                .filter(|disk| disk.name == window.name)
+                .collect::<Vec<_>>()
+                .as_slice()
+            {
+                [disk] => *disk,
+                [] => {
+                    self.mark_disk_gone(window, now).await?;
+                    return Ok(true);
+                }
+                _ => {
+                    self.note_ambiguity(window, "ambiguous_disk").await?;
+                    return Ok(false);
+                }
+            }
         };
         if window.boot_disk_id.is_none() {
             // С этого момента окну было за что платить: итог считается по ledger.
@@ -1686,25 +1752,38 @@ impl CloudService {
         if !disk.instance_ids.is_empty() {
             // Диск подключён к машине, хотя машина окна считается пропавшей. Если в каталоге
             // есть машина с именем окна, список в прошлый раз до неё не дошёл: снос
-            // возвращается к машине. Иначе диск отключается, ждём.
-            if let Ok(listing) = self.provider.list_instances(&window.folder_id).await
-                && let Some(found) = listing.iter().find(|instance| instance.name == window.name)
-            {
-                tracing::warn!(
-                    kind = "cloud_instance_reappeared",
-                    "the instance of a window is listed again; cleanup returns to it"
-                );
-                sqlx::query(
-                    "update cloud_windows set instance_id = $2, server_gone_at = null,
-                            delete_accepted_at = null, delete_operation_id = null,
-                            next_delete_at = $3
-                     where id = $1 and state in ('deleting', 'late_cleanup')",
-                )
-                .bind(window.id)
-                .bind(&found.id)
-                .bind(now)
-                .execute(&self.pool)
-                .await?;
+            // возвращается к машине. Имя должно быть единственным: иначе какую машину
+            // возвращать, не решить.
+            if let Ok(listing) = self.provider.list_instances(&window.folder_id).await {
+                match listing
+                    .iter()
+                    .filter(|instance| instance.name == window.name)
+                    .collect::<Vec<_>>()
+                    .as_slice()
+                {
+                    [found] => {
+                        tracing::warn!(
+                            kind = "cloud_instance_reappeared",
+                            "the instance of a window is listed again; cleanup returns to it"
+                        );
+                        sqlx::query(
+                            "update cloud_windows set instance_id = $2, server_gone_at = null,
+                                    delete_accepted_at = null, delete_operation_id = null,
+                                    next_delete_at = $3
+                             where id = $1 and state in ('deleting', 'late_cleanup')",
+                        )
+                        .bind(window.id)
+                        .bind(&found.id)
+                        .bind(now)
+                        .execute(&self.pool)
+                        .await?;
+                    }
+                    [] => {}
+                    _ => {
+                        self.note_ambiguity(window, "ambiguous_instance").await?;
+                        return Ok(false);
+                    }
+                }
             }
             return Ok(false);
         }
@@ -1775,15 +1854,16 @@ impl CloudService {
         window: &mut Window,
         now: DateTime<Utc>,
     ) -> Result<(), sqlx::Error> {
+        let at = absence_at(now);
         sqlx::query(
             "update cloud_windows set disk_gone_at = coalesce(disk_gone_at, $2), next_delete_at = null
              where id = $1 and state in ('deleting', 'late_cleanup')",
         )
         .bind(window.id)
-        .bind(now)
+        .bind(at)
         .execute(&self.pool)
         .await?;
-        window.disk_gone_at.get_or_insert(now);
+        window.disk_gone_at.get_or_insert(at);
         Ok(())
     }
 
@@ -1834,8 +1914,9 @@ impl CloudService {
             // Полный список каталога без машины — единственное доказательство отсутствия.
             Ownership::Absent => {
                 let id = window.id;
+                let at = absence_at(now);
                 let released = crate::db::in_tx(&self.pool, move |conn| {
-                    Box::pin(async move { windows::confirm_server_gone_in_tx(conn, id, now).await })
+                    Box::pin(async move { windows::confirm_server_gone_in_tx(conn, id, at).await })
                 })
                 .await?;
                 if !released.is_empty() {
@@ -2010,13 +2091,14 @@ impl CloudService {
     /// каталога не получен целиком; для этого каталога ничего не менялось.
     ///
     /// Каталоги: тот, что в конфигурации (только в нём ищутся лишние машины и диски), и
-    /// каталоги всех окон, которые ещё владеют ресурсом или закончились `failed`. Так окно
-    /// из прежнего каталога доубирается и после смены конфигурации.
+    /// каталоги всех окон, которые ещё владеют ресурсом, закончились `failed` или у которых
+    /// вообще был вызов создания. Так окно из прежнего каталога доубирается и после смены
+    /// конфигурации, и поздний ресурс в историческом каталоге не остаётся брошенным.
     async fn reconcile(&self, runtime: &mut Runtime, now: DateTime<Utc>) -> Result<bool, ()> {
         let mut folders = vec![self.config.folder_id.clone()];
         let others: Vec<String> = sqlx::query_scalar(
             "select distinct folder_id from cloud_windows
-              where state = any($1) or state = 'failed'",
+              where state = any($1) or state = 'failed' or create_called_at is not null",
         )
         .bind(windows::billing_states())
         .fetch_all(&self.pool)
@@ -2272,6 +2354,8 @@ impl CloudService {
     /// тому остаётся диск. Закончится оно `gone`.
     async fn gone(&self, window: &Window, now: DateTime<Utc>) -> Result<(), sqlx::Error> {
         let id = window.id;
+        // Отсутствие подтверждено только что: конец оплаты — этот момент, а не начало прохода.
+        let at = absence_at(now);
         let moved = crate::db::in_tx(&self.pool, move |conn| {
             Box::pin(async move {
                 let Some(window) = windows::load_for_update(&mut *conn, id).await? else {
@@ -2288,7 +2372,7 @@ impl CloudService {
                         server_gone: true,
                         ..Cleanup::because(windows::REASON_GONE)
                     },
-                    now,
+                    at,
                 )
                 .await
             })
