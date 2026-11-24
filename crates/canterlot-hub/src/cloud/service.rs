@@ -296,6 +296,41 @@ impl CloudService {
         windows::live(&mut conn).await
     }
 
+    /// Страховка сверки: ждущая повтора задача облачной машины без окна в расчётном
+    /// состоянии с причиной `preempted` повтора уже не дождётся. Пока такое окно есть, её
+    /// выпустит снос; если нет — здесь она честно заканчивается `lost` с предупреждением.
+    async fn sweep_retry_pending(&self) -> Result<(), sqlx::Error> {
+        let mut conn = self.pool.acquire().await?;
+        let preempted: bool = sqlx::query_scalar(
+            "select exists(select 1 from cloud_windows
+                            where state = any($1) and delete_reason = 'preempted')",
+        )
+        .bind(windows::billing_states())
+        .fetch_one(&mut *conn)
+        .await?;
+        if preempted {
+            return Ok(());
+        }
+        let Some(machine) = windows::cloud_machine_id(&mut conn).await? else {
+            return Ok(());
+        };
+        drop(conn);
+        let ended = crate::db::in_tx(&self.pool, move |conn| {
+            Box::pin(async move {
+                crate::inplace_jobs::retry::lose_retry_pending_in_tx(conn, machine).await
+            })
+        })
+        .await?;
+        if !ended.is_empty() {
+            tracing::warn!(
+                kind = "cloud_retry_orphans",
+                jobs = ended.len(),
+                "retry-pending jobs had no preempted window; ended lost"
+            );
+        }
+        Ok(())
+    }
+
     /// Один проход автоматического режима, карточки хаба и денежных оповещений. Все условия
     /// проверяются под обычными чтениями; создание идёт через ту же транзакцию `create_in_tx`.
     async fn evaluate(&self, now: DateTime<Utc>) -> Result<(), sqlx::Error> {
@@ -361,6 +396,7 @@ impl CloudService {
                         CreateRequest {
                             trigger: Trigger::Auto,
                             proposal_id: None,
+                            replaces_window_id: None,
                             hard_cap_minutes: cap,
                             consent_over_budget_kopecks: None,
                         },
@@ -682,13 +718,15 @@ impl CloudService {
             return self.fail(window.id, "cloud_init_invalid").await;
         };
         // Метка вызова ставится до самого вызова: от неё считаются предел и ledger, и по ней
-        // упавший после этого хаб поймёт, что машина могла появиться.
+        // упавший после этого хаб поймёт, что машина могла появиться. У замены предел уже
+        // задан абсолютным пределом родителя и вызовом не пересчитывается.
         let hard_cap = TimeDelta::minutes(i64::from(window.hard_cap_minutes));
+        let hard_cap_at = window.hard_cap_at.unwrap_or(now + hard_cap);
         let drain =
             TimeDelta::minutes(i64::try_from(self.drain_minutes(&window)).unwrap_or(i64::MAX));
         let teardown =
             TimeDelta::minutes(i64::try_from(self.teardown_minutes(&window)).unwrap_or(i64::MAX));
-        let drain_until = now + hard_cap + drain;
+        let drain_until = hard_cap_at + drain;
         let stamped = sqlx::query(
             "update cloud_windows set create_called_at = $2, hard_cap_at = $3, drain_until = $4,
                     teardown_until = $5
@@ -696,7 +734,7 @@ impl CloudService {
         )
         .bind(window.id)
         .bind(now)
-        .bind(now + hard_cap)
+        .bind(hard_cap_at)
         .bind(drain_until)
         .bind(drain_until + teardown)
         .execute(&self.pool)
@@ -1027,7 +1065,8 @@ impl CloudService {
     /// Машина остановилась не по нашей воле. Прерываемую остановил Яндекс (`preempted`);
     /// обычная так не останавливается, а `ERROR` и `CRASHED` — поломка в любом случае
     /// (`vm_broken`). Окно уходит на снос, раннер отзывается в той же транзакции, владельцу
-    /// пуш. Задачи раннера при этом становятся `lost`.
+    /// пуш. При `preempted` задачи с исходниками ждут одного повтора, при `vm_broken`
+    /// становятся `lost`.
     async fn stopped(
         &self,
         window: &Window,
@@ -1553,21 +1592,26 @@ impl CloudService {
     }
 
     /// Машины нет в полном списке каталога (метка ставится один раз). Срок следующей попытки
-    /// сбрасывается: дальше идёт диск.
+    /// сбрасывается: дальше идёт диск. Для прерванного окна в той же транзакции выпускаются
+    /// ждущие повтора задачи: прежний процесс идти уже не может.
     async fn mark_server_gone(
         &self,
         window: &mut Window,
         now: DateTime<Utc>,
     ) -> Result<(), sqlx::Error> {
-        sqlx::query(
-            "update cloud_windows set server_gone_at = coalesce(server_gone_at, $2),
-                    next_delete_at = case when server_gone_at is null then null else next_delete_at end
-             where id = $1 and state in ('deleting', 'late_cleanup')",
-        )
-        .bind(window.id)
-        .bind(now)
-        .execute(&self.pool)
+        let id = window.id;
+        let released = crate::db::in_tx(&self.pool, move |conn| {
+            Box::pin(async move { windows::confirm_server_gone_in_tx(conn, id, now).await })
+        })
         .await?;
+        if !released.is_empty() {
+            tracing::debug!(
+                kind = "cloud_retry_released",
+                window_id = %window.id,
+                jobs = released.len(),
+                "confirmed absence; retry-pending jobs released"
+            );
+        }
         if window.server_gone_at.is_none() {
             window.server_gone_at = Some(now);
             window.next_delete_at = None;
@@ -1789,15 +1833,19 @@ impl CloudService {
             }
             // Полный список каталога без машины — единственное доказательство отсутствия.
             Ownership::Absent => {
-                sqlx::query(
-                    "update cloud_windows set server_gone_at = coalesce(server_gone_at, $2),
-                            next_delete_at = null
-                     where id = $1 and state in ('deleting', 'late_cleanup')",
-                )
-                .bind(window.id)
-                .bind(now)
-                .execute(&self.pool)
+                let id = window.id;
+                let released = crate::db::in_tx(&self.pool, move |conn| {
+                    Box::pin(async move { windows::confirm_server_gone_in_tx(conn, id, now).await })
+                })
                 .await?;
+                if !released.is_empty() {
+                    tracing::debug!(
+                        kind = "cloud_retry_released",
+                        window_id = %window.id,
+                        jobs = released.len(),
+                        "confirmed absence; retry-pending jobs released"
+                    );
+                }
                 return Ok(());
             }
             Ownership::Unknown => {
@@ -1918,6 +1966,7 @@ impl CloudService {
     /// частей, каждая до своего подтверждённого конца. Конечное состояние зависит от причины
     /// сноса (`windows::terminal_state`).
     async fn end(&self, id: Uuid, now: DateTime<Utc>) -> Result<(), sqlx::Error> {
+        let config = self.config.clone();
         crate::db::in_tx(&self.pool, move |conn| {
             Box::pin(async move {
                 let Some(window) = windows::load_for_update(&mut *conn, id).await? else {
@@ -1943,8 +1992,10 @@ impl CloudService {
                 .execute(&mut *conn)
                 .await?;
                 windows::forget_key(id);
+                // Место единственного живого окна уже свободно: замена встаёт после перевода
+                // родителя в конечное состояние.
                 if window.delete_reason.as_deref() == Some(windows::REASON_PREEMPTED) {
-                    windows::on_preempted_cleanup_done_in_tx(conn, &window, now).await?;
+                    windows::on_preempted_cleanup_done_in_tx(conn, &config, &window, now).await?;
                 }
                 Ok(())
             })
@@ -2004,6 +2055,12 @@ impl CloudService {
                 warn_db("cloud_reconcile", &error);
                 complete = false;
             }
+        }
+        // Задачи, ждущие повтора, без прерванного окна: строка осталась после сбоя между
+        // отзывом и подтверждённой остановкой, или окно убрали руками. Пока такое окно есть,
+        // ждать можно: его снос выпустит задачи. Если нет — повтора не будет, задачи `lost`.
+        if let Err(error) = self.sweep_retry_pending().await {
+            warn_db("cloud_reconcile_retry", &error);
         }
         if !complete {
             return Err(());

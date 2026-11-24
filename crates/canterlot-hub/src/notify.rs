@@ -12,7 +12,7 @@ use std::{
     time::Duration,
 };
 
-use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
+use chrono::{DateTime, FixedOffset, SecondsFormat, TimeDelta, Utc};
 use serde_json::{Value, json};
 use sqlx::{PgConnection, PgPool};
 use tokio::{sync::watch, time::Instant};
@@ -769,6 +769,33 @@ pub fn kopecks_text(kopecks: i64) -> String {
     format!("{sign}{},{:02} ₽", abs / 100, abs % 100)
 }
 
+/// Момент по Москве для текста пуша: «24.11 18:40 МСК». Москва без перевода часов.
+fn moscow_moment(at: Option<&str>) -> String {
+    let Some(text) = at else {
+        return "?".to_owned();
+    };
+    let Ok(parsed) = DateTime::parse_from_rfc3339(text) else {
+        return clip(text, TITLE_CHARS);
+    };
+    let moscow = FixedOffset::east_opt(3 * 3600).expect("a valid fixed offset");
+    parsed
+        .with_timezone(&moscow)
+        .format("%d.%m %H:%M МСК")
+        .to_string()
+}
+
+/// Причина, по которой замены нет, по-русски.
+fn replacement_reason(reason: &str) -> &'static str {
+    match reason {
+        "budget" => "бюджет",
+        "no_time" => "мало времени до предела",
+        "no_waiting_job" => "нет задач в очереди",
+        "window_exists" => "окно уже есть",
+        "auto_off" => "автоматический режим выключен",
+        _ => "цена у провайдера недоступна",
+    }
+}
+
 fn cloud_alert_text(payload: &Value) -> Option<(String, String)> {
     let code = payload["code"].as_str()?;
     let name = clip(payload["name"].as_str().unwrap_or("?"), TITLE_CHARS);
@@ -829,9 +856,20 @@ fn cloud_alert_text(payload: &Value) -> Option<(String, String)> {
         ),
         "preempted" => (
             "Облако: Яндекс прервал окно".to_owned(),
+            format!("Яндекс остановил прерываемую машину окна {name}; задачи вернутся в очередь."),
+        ),
+        "replacement_started" => (
+            "Облако: поднимаю замену окна".to_owned(),
             format!(
-                "Яндекс остановил прерываемую машину окна {name}. Машина и диск удаляются, \
-                 незаконченные задачи раннера потеряны."
+                "Облако: поднимаю замену окна {name} до {}; задачи из очереди перейдут на неё.",
+                moscow_moment(payload["deadline"].as_str())
+            ),
+        ),
+        "replacement_skipped" => (
+            "Облако: замена окна не создана".to_owned(),
+            format!(
+                "Замена окна {name} не создана: {}.",
+                replacement_reason(payload["reason"].as_str().unwrap_or_default())
             ),
         ),
         "vm_broken" => (
@@ -2530,6 +2568,8 @@ mod tests {
             "disk_delete_failing",
             "preempted",
             "vm_broken",
+            "replacement_started",
+            "replacement_skipped",
             "window_overrun",
             "outage_extra_cost",
             "window_gone",
@@ -2552,6 +2592,8 @@ mod tests {
                 "approved_kopecks": 2000,
                 "extra_kopecks": 100,
                 "instance_id": "fhmfakeinstance0001",
+                "reason": "budget",
+                "deadline": "2026-11-24T15:40:00Z",
             });
             let (title, body) =
                 cloud_alert_text(&payload).unwrap_or_else(|| panic!("{code} is not rendered"));
