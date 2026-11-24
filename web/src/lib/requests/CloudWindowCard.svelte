@@ -176,11 +176,12 @@
   .script {
     margin: var(--s0);
     padding: var(--s3);
-    max-height: 18rem;
+    max-height: calc(var(--fs-sm) * var(--lh-code) * 12);
     overflow: auto;
     border-radius: var(--radius-sm);
     background: var(--code);
-    font-size: var(--fs-meta);
+    font-size: var(--fs-sm);
+    line-height: var(--lh-code);
     white-space: pre-wrap;
     overflow-wrap: anywhere;
   }
