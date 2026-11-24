@@ -879,6 +879,16 @@ fn cloud_alert_text(payload: &Value) -> Option<(String, String)> {
                  незаконченные задачи раннера потеряны."
             ),
         ),
+        "prepare_failed" => {
+            let code = payload["exit_code"].as_i64().unwrap_or(-1);
+            (
+                format!("Облако: подготовка окна {name} не удалась (код {code}), окно удаляется"),
+                format!(
+                    "Скрипт подготовки завершился с кодом {code}; машина и диск окна удаляются \
+                     обычным сносом."
+                ),
+            )
+        }
         "window_overrun" => (
             "Облако: окно просрочено".to_owned(),
             format!(
@@ -2568,6 +2578,7 @@ mod tests {
             "disk_delete_failing",
             "preempted",
             "vm_broken",
+            "prepare_failed",
             "replacement_started",
             "replacement_skipped",
             "window_overrun",

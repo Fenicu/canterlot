@@ -453,7 +453,7 @@ fn session_tool_description(mcp_name: &str) -> &'static str {
             "List the runners of this machine's carrier and this machine itself as `local`: name, role, availability with the age of the last observation, rank, labels, slots used and max, queued and running counts, live cloud windows with their cost so far and the monthly budget remainder. Read-only. Use it to see which labels `job_run` with machine \"auto\" can place; do not call it in a loop to wait for a job."
         }
         "runner_propose" => {
-            "Propose to the owner that a cloud runner window be started for queued work: `hours` (1..=4) and a short `reason`. It creates an approval card, not a window; the owner decides in the app and the outcome arrives later as a [canterlot] message. Returns the request id, the exact reservation in kopecks, whether the card is over budget, and when it expires. Do not call it in a loop; one open card at a time."
+            "Propose to the owner that a cloud runner window be started for queued work: `hours` (1..=4) and a short `reason`. It creates an approval card, not a window; the owner decides in the app and the outcome arrives later as a [canterlot] message. Returns the request id, the exact reservation in kopecks, whether the card is over budget, and when it expires. An optional `prepare` adds apt `packages`, installed with direct network before the carrier arrives, and a root `script` that runs after the egress proxy is up and before the runner starts, within the window's ready timeout; if the script fails the window closes and you get the exit code and the output tail. Do not call it in a loop; one open card at a time."
         }
         _ => "Session tool.",
     }
@@ -889,6 +889,24 @@ fn session_input_schema(mcp_name: &str) -> Value {
             "properties": {
                 "hours": {"type": "integer", "minimum": 1, "maximum": 4, "description": "Hard cap in hours: 1..=4."},
                 "reason": {"type": "string", "description": "Short reason the owner sees on the proposal card."},
+                "prepare": {
+                    "type": "object",
+                    "description": "Optional preparation of the machine; the owner approves it in full with the card.",
+                    "properties": {
+                        "packages": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "maxItems": 40,
+                            "description": "Extra apt packages installed by cloud-init with direct network before the carrier arrives."
+                        },
+                        "script": {
+                            "type": "string",
+                            "maxLength": 16384,
+                            "description": "Shell script run as root after the egress proxy is up and before the runner starts, within the window's ready timeout. A failure closes the window and returns the exit code and the output tail."
+                        }
+                    },
+                    "additionalProperties": false
+                }
             },
             "required": ["hours", "reason"],
             "additionalProperties": false,

@@ -2913,6 +2913,9 @@ export interface components {
             name: string;
             /** @description Прерываемая машина: Яндекс может остановить её в любой момент. */
             preemptible: boolean;
+            prepare?: components["schemas"]["Prepare"] | null;
+            /** @description Хвост вывода скрипта подготовки после сбоя. */
+            prepare_output?: string | null;
             /**
              * Format: int64
              * @description Обе ставки вместе: до вызова создания у самого дорогого профиля, после — у того,
@@ -4900,6 +4903,14 @@ export interface components {
             unknown_limits: components["schemas"]["UnknownLimits"];
             /** @default [] */
             unlimited_models: string[];
+        };
+        /**
+         * @description Подготовка машины: пакеты ставит cloud-init до прихода несущей, скрипт несущая выполняет
+         *     от root после подъёма выхода в сеть и до запуска воркера. Владелец одобряет оба целиком.
+         */
+        Prepare: {
+            packages?: string[];
+            script?: string | null;
         };
         PresenceBody: {
             /** Format: uuid */

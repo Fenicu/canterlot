@@ -264,6 +264,7 @@ impl Rig {
             &proposer,
             hours * 60,
             reason.to_owned(),
+            None,
         )
         .await
         .unwrap()
@@ -886,6 +887,264 @@ async fn declining_a_card_reports_to_the_proposer(pool: PgPool) -> TestResult {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn prepare_is_validated_before_the_card_opens(pool: PgPool) -> TestResult {
+    let rig = Rig::new(pool).await;
+    rig.set_budget(1_000_000, false).await;
+    let context = rig.tool_context();
+    let caller = rig.caller().await;
+    let too_many: Vec<String> = (0..41).map(|i| format!("pkg{i}")).collect();
+    for (prepare, needle) in [
+        (json!({"packages": too_many}), "40"),
+        (json!({"packages": ["Bad_Name"]}), "Bad_Name"),
+        (json!({"script": "a".repeat(16_385)}), "16384"),
+        (json!({"script": "echo\0"}), "NUL"),
+    ] {
+        let error = canterlot_hub::session_tools::call(
+            &context,
+            &caller,
+            "runners.propose",
+            json!({"hours": 1, "reason": "проверка", "prepare": prepare}),
+        )
+        .await
+        .expect_err("an invalid preparation is refused");
+        assert_eq!(error.code, ToolErrorCode::InvalidArguments);
+        assert!(
+            error.message.starts_with("invalid_prepare:"),
+            "{}",
+            error.message
+        );
+        assert!(error.message.contains(needle), "{}", error.message);
+    }
+    // Неверный аргумент отказывает до окна: карточки нет.
+    let cards: i64 =
+        sqlx::query_scalar("select count(*) from requests where kind = 'cloud_window'")
+            .fetch_one(&rig.pool)
+            .await?;
+    assert_eq!(cards, 0);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn empty_prepare_opens_the_card_without_it(pool: PgPool) -> TestResult {
+    let rig = Rig::new(pool).await;
+    rig.set_budget(1_000_000, false).await;
+    let context = rig.tool_context();
+    let caller = rig.caller().await;
+    let answer = canterlot_hub::session_tools::call(
+        &context,
+        &caller,
+        "runners.propose",
+        json!({"hours": 1, "reason": "проверка", "prepare": {"packages": [], "script": ""}}),
+    )
+    .await
+    .expect("an empty preparation is no preparation");
+    let request = Uuid::parse_str(answer["request_id"].as_str().unwrap())?;
+    let payload: Value = sqlx::query_scalar("select request_payload from requests where id=$1")
+        .bind(request)
+        .fetch_one(&rig.pool)
+        .await?;
+    assert!(payload.get("prepare").is_none(), "{payload}");
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn an_approved_card_stores_its_prepare(pool: PgPool) -> TestResult {
+    let rig = Rig::new(pool).await;
+    rig.set_budget(1_000_000, false).await;
+    let context = rig.tool_context();
+    let caller = rig.caller().await;
+    let answer = canterlot_hub::session_tools::call(
+        &context,
+        &caller,
+        "runners.propose",
+        json!({
+            "hours": 1,
+            "reason": "сборка",
+            "prepare": {"packages": ["git", "git", "jq"], "script": "echo hi\n"},
+        }),
+    )
+    .await
+    .expect("the card with preparation opens");
+    let request = Uuid::parse_str(answer["request_id"].as_str().unwrap())?;
+    let payload: Value = sqlx::query_scalar("select request_payload from requests where id=$1")
+        .bind(request)
+        .fetch_one(&rig.pool)
+        .await?;
+    assert_eq!(
+        payload["prepare"],
+        json!({"packages": ["git", "jq"], "script": "echo hi\n"}),
+        "the card shows the approved preparation, packages deduplicated in order"
+    );
+    rig.decision(request, true).await;
+    let window = match rig.approve(request).await {
+        cloud_propose::ApproveOutcome::Created(window) => window,
+        other => panic!("expected a window, got {other:?}"),
+    };
+    let stored: Option<Value> = sqlx::query_scalar("select prepare from cloud_windows where id=$1")
+        .bind(window)
+        .fetch_one(&rig.pool)
+        .await?;
+    assert_eq!(
+        stored,
+        Some(json!({"packages": ["git", "jq"], "script": "echo hi\n"}))
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn prepare_failure_closes_the_window_and_tells_the_owner_and_the_agent(
+    pool: PgPool,
+) -> TestResult {
+    let rig = Rig::new(pool).await;
+    rig.set_budget(1_000_000, false).await;
+    let request = rig.card(1, "сборка", Source::Agent).await;
+    rig.decision(request, true).await;
+    let window = match rig.approve(request).await {
+        cloud_propose::ApproveOutcome::Created(window) => window,
+        other => panic!("expected a window, got {other:?}"),
+    };
+    let mut conn = rig.pool.acquire().await?;
+    let machine = windows::ensure_cloud_machine(&mut conn, &rig.config, true).await?;
+    sqlx::query(
+        "update cloud_windows set state = 'identified', instance_id = 'fhmfakeinstance0001',
+                attach_sent_at = now()
+          where id = $1",
+    )
+    .bind(window)
+    .execute(&mut *conn)
+    .await?;
+    // Чужая машина: факт не про это окно.
+    assert!(
+        !windows::apply_prepare_failed_in_tx(
+            &mut conn,
+            window,
+            rig.carrier,
+            Uuid::now_v7(),
+            9,
+            "someone else",
+            Utc::now()
+        )
+        .await?
+    );
+    // Чужой отправитель: номер окна и строки раннера известны, но журнал прислала не
+    // несущая — окно остаётся `identified`, пуша и заметки нет.
+    assert!(
+        !windows::apply_prepare_failed_in_tx(
+            &mut conn,
+            window,
+            Uuid::now_v7(),
+            machine,
+            8,
+            "foreign carrier",
+            Utc::now()
+        )
+        .await?
+    );
+    assert_eq!(
+        windows::load(&mut conn, window).await?.unwrap().state,
+        "identified"
+    );
+    let applied = windows::apply_prepare_failed_in_tx(
+        &mut conn,
+        window,
+        rig.carrier,
+        machine,
+        3,
+        "line\nboom",
+        Utc::now(),
+    )
+    .await?;
+    assert!(applied);
+    drop(conn);
+
+    let row: (String, Option<String>, Option<String>, Option<String>) = sqlx::query_as(
+        "select state, delete_reason, last_error, prepare_output from cloud_windows where id=$1",
+    )
+    .bind(window)
+    .fetch_one(&rig.pool)
+    .await?;
+    assert_eq!(
+        row,
+        (
+            "deleting".to_owned(),
+            Some("prepare_failed".to_owned()),
+            Some("prepare_failed:3".to_owned()),
+            Some("line\nboom".to_owned()),
+        )
+    );
+    let push: Value = sqlx::query_scalar(
+        "select payload from owner_pushes where kind = 'cloud_alert' and payload->>'code' = 'prepare_failed'",
+    )
+    .fetch_one(&rig.pool)
+    .await?;
+    assert_eq!(push["window_id"], window.to_string());
+    assert_eq!(push["exit_code"], 3);
+    let parent: Uuid = sqlx::query_scalar("select conversation_id from requests where id=$1")
+        .bind(request)
+        .fetch_one(&rig.pool)
+        .await?;
+    let note: String = sqlx::query_scalar(
+        "select payload->>'text' from scheduled_jobs
+          where conversation_id=$1 and payload->>'action'='note'
+            and payload->>'dedupe_key' like '%prepare_failed'",
+    )
+    .bind(parent)
+    .fetch_one(&rig.pool)
+    .await?;
+    assert!(
+        note.contains(&format!(
+            "Cloud window {window} preparation failed (exit 3); the window is being deleted."
+        )),
+        "{note}"
+    );
+    assert!(note.ends_with("line\nboom"), "{note}");
+
+    // Повтор факта и факт для законченного окна ничего не меняют.
+    let mut conn = rig.pool.acquire().await?;
+    assert!(
+        !windows::apply_prepare_failed_in_tx(
+            &mut conn,
+            window,
+            rig.carrier,
+            machine,
+            3,
+            "again",
+            Utc::now()
+        )
+        .await?
+    );
+    sqlx::query("update cloud_windows set state = 'ended' where id = $1")
+        .bind(window)
+        .execute(&mut *conn)
+        .await?;
+    assert!(
+        !windows::apply_prepare_failed_in_tx(
+            &mut conn,
+            window,
+            rig.carrier,
+            machine,
+            4,
+            "late",
+            Utc::now()
+        )
+        .await?
+    );
+    let pushes: i64 = sqlx::query_scalar(
+        "select count(*) from owner_pushes where payload->>'code' = 'prepare_failed'",
+    )
+    .fetch_one(&rig.pool)
+    .await?;
+    assert_eq!(pushes, 1);
+    let notes: i64 = sqlx::query_scalar(
+        "select count(*) from scheduled_jobs where payload->>'dedupe_key' like '%prepare_failed'",
+    )
+    .fetch_one(&rig.pool)
+    .await?;
+    assert_eq!(notes, 1);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn auto_mode_requires_continuous_unavailability_and_pushes_the_reservation(
     pool: PgPool,
 ) -> TestResult {
@@ -1091,6 +1350,7 @@ async fn automatic_create_rechecks_its_conditions_under_the_budget_lock(
         replaces_window_id: None,
         hard_cap_minutes: 90,
         consent_over_budget_kopecks: None,
+        prepare: None,
     };
 
     // Условия проверены до транзакции, а включить режим успели выключить: окна нет.
@@ -1165,6 +1425,7 @@ async fn automatic_create_reads_the_runner_clock_in_the_database(pool: PgPool) -
             replaces_window_id: None,
             hard_cap_minutes: 120,
             consent_over_budget_kopecks: None,
+            prepare: None,
         },
         Some(windows::AutoGuard {
             registry: &rig.registry,

@@ -16414,6 +16414,24 @@
             "type": "boolean",
             "description": "Прерываемая машина: Яндекс может остановить её в любой момент."
           },
+          "prepare": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Prepare",
+                "description": "Подготовка машины из карточки; пусто — подготовки нет."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "prepare_output": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Хвост вывода скрипта подготовки после сбоя."
+          },
           "price_hourly_kopecks": {
             "type": "integer",
             "format": "int64",
@@ -23142,6 +23160,24 @@
           }
         },
         "additionalProperties": false
+      },
+      "Prepare": {
+        "type": "object",
+        "description": "Подготовка машины: пакеты ставит cloud-init до прихода несущей, скрипт несущая выполняет\nот root после подъёма выхода в сеть и до запуска воркера. Владелец одобряет оба целиком.",
+        "properties": {
+          "packages": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "script": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
       },
       "PresenceBody": {
         "type": "object",

@@ -16,6 +16,27 @@ pub const READY_MARKER: &str = "/var/lib/canterlot-runner/ready";
 /// Пакеты, без которых раннер не работает.
 const PACKAGES: &str = "docker.io git rsync sudo";
 
+/// Сколько дополнительных пакетов принимает карточка.
+pub const MAX_PREPARE_PACKAGES: usize = 40;
+
+/// Предел размера скрипта подготовки из карточки, в байтах UTF-8.
+pub const MAX_PREPARE_SCRIPT_BYTES: usize = 16_384;
+
+/// Имя пакета apt: первый символ — строчная латинская буква или цифра, дальше те же, `+`,
+/// `.` и `-`; не длиннее 63 символов. Набор взят из аргумента карточки и проверяется ещё раз
+/// здесь: строка попадает в команду установки без кавычек.
+pub fn valid_package(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    match bytes.next() {
+        Some(b) if b.is_ascii_lowercase() || b.is_ascii_digit() => {}
+        _ => return false,
+    }
+    name.len() <= 63
+        && bytes.all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'+' | b'.' | b'-')
+        })
+}
+
 /// Порт обратного SOCKS5 на облачном раннере. Должен совпадать с `EGRESS_SOCKS_PORT`
 /// воркера (`crates/canterlot-worker/src/carrier/ssh.rs`).
 pub const EGRESS_SOCKS_PORT: u16 = 1080;
@@ -39,6 +60,8 @@ pub struct CloudInitParams {
     pub runner_authorized_key: String,
     /// Корневой каталог раннера: абсолютный путь, его владелец `runner`.
     pub root_dir: String,
+    /// Дополнительные пакеты из одобренной карточки: ставятся тем же циклом, что и базовые.
+    pub packages: Vec<String>,
 }
 
 impl fmt::Debug for CloudInitParams {
@@ -60,6 +83,8 @@ pub enum CloudInitError {
     InvalidPublicKey(&'static str),
     /// Путь не абсолютный или содержит символы вне безопасного набора.
     InvalidRootDir,
+    /// Дополнительный пакет карточки — не имя пакета apt или их слишком много.
+    InvalidPackages(&'static str),
     /// Результат длиннее предела провайдера.
     TooLarge { bytes: usize },
 }
@@ -70,6 +95,7 @@ impl fmt::Display for CloudInitError {
             Self::InvalidPrivateKey => f.write_str("host private key is not an OpenSSH key file"),
             Self::InvalidPublicKey(which) => write!(f, "{which} is not a single-line public key"),
             Self::InvalidRootDir => f.write_str("root_dir must be a safe absolute path"),
+            Self::InvalidPackages(why) => write!(f, "prepare packages are not safe: {why}"),
             Self::TooLarge { bytes } => {
                 write!(f, "cloud-init is {bytes} bytes, the limit is {MAX_BYTES}")
             }
@@ -155,6 +181,19 @@ pub fn render(params: &CloudInitParams) -> Result<String, CloudInitError> {
     let host_public = check_public_key(&params.host_key_ed25519_public, "host_key_ed25519_public")?;
     let authorized = check_public_key(&params.runner_authorized_key, "runner_authorized_key")?;
     check_root_dir(&params.root_dir)?;
+    // Пакеты карточки проверяются ещё раз: строка идёт в команду установки без кавычек, а
+    // между карточкой и рендером могла пройти замена окна или правка строки в базе.
+    if params.packages.len() > MAX_PREPARE_PACKAGES {
+        return Err(CloudInitError::InvalidPackages("too many packages"));
+    }
+    let mut install = String::from(PACKAGES);
+    for package in &params.packages {
+        if !valid_package(package) {
+            return Err(CloudInitError::InvalidPackages("bad package name"));
+        }
+        install.push(' ');
+        install.push_str(package);
+    }
     let root = &params.root_dir;
 
     let mut out = String::new();
@@ -239,7 +278,7 @@ pub fn render(params: &CloudInitParams) -> Result<String, CloudInitError> {
     // циклами, которые ждут сеть и зеркало. Маркер готовности пишется после них.
     out.push_str("  - [sh, -c, 'until apt-get update; do sleep 10; done']\n");
     out.push_str(&format!(
-        "  - [sh, -c, 'until DEBIAN_FRONTEND=noninteractive apt-get install -y {PACKAGES}; do sleep 10; apt-get update || true; done']\n"
+        "  - [sh, -c, 'until DEBIAN_FRONTEND=noninteractive apt-get install -y {install}; do sleep 10; apt-get update || true; done']\n"
     ));
     out.push_str("  - [systemctl, enable, --now, docker]\n");
     out.push_str(&format!("  - [mkdir, -p, {root}]\n"));
@@ -265,6 +304,7 @@ mod tests {
             runner_authorized_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE0000 carrier"
                 .to_owned(),
             root_dir: "/srv/runner".to_owned(),
+            packages: Vec::new(),
         }
     }
 
@@ -317,6 +357,59 @@ mod tests {
         let docker = runcmd.find("enable, --now, docker").unwrap();
         let ready = runcmd.find(READY_SCRIPT).unwrap();
         assert!(update < install && install < docker && docker < ready);
+    }
+
+    #[test]
+    fn installs_the_card_packages_in_the_same_retry_loop_as_the_base_ones() {
+        let mut p = params();
+        p.packages = vec!["build-essential".to_owned(), "libssl-dev".to_owned()];
+        let text = render_ok(&p);
+        let install = "until DEBIAN_FRONTEND=noninteractive apt-get install -y \
+                       docker.io git rsync sudo build-essential libssl-dev; do sleep 10; \
+                       apt-get update || true; done";
+        assert!(
+            text.contains(install),
+            "extra packages are not in the install loop"
+        );
+    }
+
+    #[test]
+    fn rejects_packages_that_are_not_apt_names() {
+        for bad in [
+            "",
+            "openssl libssl-dev",
+            "$(id)",
+            "-x",
+            "OpenSSL",
+            "a/b",
+            &"a".repeat(64),
+        ] {
+            let mut p = params();
+            p.packages = vec![bad.to_owned()];
+            assert_eq!(
+                render(&p),
+                Err(CloudInitError::InvalidPackages("bad package name")),
+                "{bad:?}"
+            );
+        }
+        let mut p = params();
+        p.packages = (0..=MAX_PREPARE_PACKAGES)
+            .map(|i| format!("p{i}"))
+            .collect();
+        assert_eq!(
+            render(&p),
+            Err(CloudInitError::InvalidPackages("too many packages"))
+        );
+    }
+
+    #[test]
+    fn the_package_name_rule_is_exact() {
+        for good in ["a", "docker.io", "gcc-12", "libc++", "python3.12", "7zip"] {
+            assert!(valid_package(good), "{good}");
+        }
+        for bad in ["", "A", "a b", "a;b", "a_b", "a\nb", "-a", ".a"] {
+            assert!(!valid_package(bad), "{bad:?}");
+        }
     }
 
     #[test]

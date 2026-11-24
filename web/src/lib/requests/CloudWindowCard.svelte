@@ -65,6 +65,18 @@
     <dt>Остаток бюджета</dt><dd>{view.remainingText}</dd>
   </dl>
 
+  {#if view.prepare}
+    <div class="prepare" data-cloud-prepare>
+      <p class="meta">Подготовка машины</p>
+      {#if view.prepare.packages.length}
+        <p class="note" data-cloud-prepare-packages>Пакеты: {view.prepare.packages.join(", ")}</p>
+      {/if}
+      {#if view.prepare.script}
+        <pre class="script" data-cloud-prepare-script>{view.prepare.script}</pre>
+      {/if}
+    </div>
+  {/if}
+
   {#if view.overBudget}
     <p class="over" data-over-budget-mark>Сверх бюджета</p>
     <p class="note">Резерв больше остатка месяца. Одобрение разрешит ровно эту сумму сверх бюджета.</p>
@@ -152,6 +164,26 @@
     margin: var(--s0);
     color: var(--muted);
     font-size: var(--fs-meta);
+  }
+
+  .prepare {
+    display: flex;
+    flex-direction: column;
+    gap: var(--s2);
+    min-width: 0;
+  }
+
+  .script {
+    margin: var(--s0);
+    padding: var(--s3);
+    max-height: calc(var(--fs-sm) * var(--lh-code) * 12);
+    overflow: auto;
+    border-radius: var(--radius-sm);
+    background: var(--code);
+    font-size: var(--fs-sm);
+    line-height: var(--lh-code);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
   }
 
   .outcome {
