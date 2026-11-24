@@ -1894,9 +1894,8 @@ async fn a_replacement_is_never_replaced_and_its_retried_job_is_lost(pool: PgPoo
     let (id, parent_session, at) = rig.drive_to_ready(120, t0).await;
     let machine = rig.cloud_machine().await;
     let job = rig.seed_running_sourced(machine, 0).await;
-    rig.fake
-        .control()
-        .preempt(&rig.window(id).await.instance_id.unwrap());
+    let stopped = rig.window(id).await.instance_id.unwrap();
+    rig.fake.control().preempt(&stopped);
     let seen = at + TimeDelta::seconds(30);
     rig.tick(seen).await;
     drop(parent_session);
@@ -1918,9 +1917,8 @@ async fn a_replacement_is_never_replaced_and_its_retried_job_is_lost(pool: PgPoo
     assert_eq!(rig.window(replacement.id).await.state, "ready");
     // На замене идёт та же задача второй попытки: её второе прерывание повтора уже не даёт.
     let on_replacement = rig.seed_running_sourced(rig.cloud_machine().await, 1).await;
-    rig.fake
-        .control()
-        .preempt(&rig.window(replacement.id).await.instance_id.unwrap());
+    let stopped = rig.window(replacement.id).await.instance_id.unwrap();
+    rig.fake.control().preempt(&stopped);
     let second = ready + TimeDelta::seconds(30);
     rig.tick(second).await;
     assert_eq!(
@@ -1959,9 +1957,8 @@ async fn a_canceled_job_is_not_retried_after_preemption(pool: PgPool) -> TestRes
         .bind(job)
         .execute(&rig.pool)
         .await?;
-    rig.fake
-        .control()
-        .preempt(&rig.window(id).await.instance_id.unwrap());
+    let stopped = rig.window(id).await.instance_id.unwrap();
+    rig.fake.control().preempt(&stopped);
     let seen = at + TimeDelta::seconds(30);
     rig.tick(seen).await;
     drop(session);
@@ -2027,9 +2024,8 @@ async fn the_budget_refuses_the_replacement_without_over_budget_consent(
     let (id, session, at) = rig.drive_to_ready(120, t0).await;
     let machine = rig.cloud_machine().await;
     let job = rig.seed_running_sourced(machine, 0).await;
-    rig.fake
-        .control()
-        .preempt(&rig.window(id).await.instance_id.unwrap());
+    let stopped = rig.window(id).await.instance_id.unwrap();
+    rig.fake.control().preempt(&stopped);
     let seen = at + TimeDelta::seconds(30);
     rig.tick(seen).await;
     drop(session);
@@ -2062,9 +2058,8 @@ async fn too_little_time_to_the_parent_deadline_skips_the_replacement(pool: PgPo
     let job = rig.seed_running_sourced(machine, 0).await;
     // Прерывание за десять минут до абсолютного предела: поднимать замену поздно.
     let seen = t0 + TimeDelta::minutes(50);
-    rig.fake
-        .control()
-        .preempt(&rig.window(id).await.instance_id.unwrap());
+    let stopped = rig.window(id).await.instance_id.unwrap();
+    rig.fake.control().preempt(&stopped);
     rig.tick(seen).await;
     drop(session);
     rig.tick(seen + TimeDelta::seconds(10)).await;
@@ -2122,9 +2117,8 @@ async fn a_restart_between_revocation_and_absence_releases_the_job_once(
     let (id, session, at) = rig.drive_to_ready(120, t0).await;
     let machine = rig.cloud_machine().await;
     let job = rig.seed_running_sourced(machine, 0).await;
-    rig.fake
-        .control()
-        .preempt(&rig.window(id).await.instance_id.unwrap());
+    let stopped = rig.window(id).await.instance_id.unwrap();
+    rig.fake.control().preempt(&stopped);
     let seen = at + TimeDelta::seconds(30);
     rig.tick(seen).await;
     drop(session);
