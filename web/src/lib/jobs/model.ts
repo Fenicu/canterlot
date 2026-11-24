@@ -93,7 +93,8 @@ export function outputsLine(job: Pick<JobFacts, 'state' | 'outputsDir' | 'output
 }
 
 const TERMINAL = new Set(['succeeded', 'failed', 'timed_out', 'canceled', 'lost']);
-// `waiting_runner`, `staging` и `collecting` — ещё не конец: итог придёт после сбора результатов.
+// `waiting_runner`, `staging`, `collecting` и `retry_pending` — ещё не конец: итог придёт после
+// сбора результатов, а у ждущей повтора — после новой попытки.
 
 export function isTerminal(state: string): boolean {
   return TERMINAL.has(state);
@@ -108,6 +109,8 @@ export function jobWord(job: Pick<JobFacts, 'state' | 'exitCode' | 'cancelReques
       return { word: 'подвозит код', tone: 'accent', live: true };
     case 'collecting':
       return { word: 'собирает результаты', tone: 'accent', live: true };
+    case 'retry_pending':
+      return { word: 'ждёт повтора', tone: 'warning' };
     case 'queued':
       return { word: 'в очереди', tone: 'muted' };
     case 'dispatched':
