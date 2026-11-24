@@ -116,6 +116,10 @@ pub struct Window {
     pub disk_gone_at: Option<DateTime<Utc>>,
     pub host_key_public: String,
     pub profiles: serde_json::Value,
+    /// Подготовка машины из карточки; пусто — подготовки нет.
+    pub prepare: Option<serde_json::Value>,
+    /// Хвост вывода скрипта подготовки после сбоя.
+    pub prepare_output: Option<String>,
     /// Сумма двух ставок: по ней резерв.
     pub price_hourly_kopecks: i64,
     pub reservation_kopecks: i64,
@@ -237,6 +241,64 @@ pub struct CreateRequest {
     /// Согласие владельца на перерасход: ровно резерв этого окна. Работает только как
     /// явное разрешение выйти за бюджет.
     pub consent_over_budget_kopecks: Option<i64>,
+    /// Подготовка машины из одобренной карточки; замена наследует её у родителя.
+    pub prepare: Option<Prepare>,
+}
+
+/// Подготовка машины: пакеты ставит cloud-init до прихода несущей, скрипт несущая выполняет
+/// от root после подъёма выхода в сеть и до запуска воркера. Владелец одобряет оба целиком.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize, ToSchema)]
+pub struct Prepare {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub packages: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub script: Option<String>,
+}
+
+impl Prepare {
+    /// Разбор необязательного аргумента карточки. Любое нарушение — отказ с понятным
+    /// текстом; пустые пакеты и пустой скрипт вместе означают «подготовки нет».
+    pub fn validated(
+        packages: Option<Vec<String>>,
+        script: Option<String>,
+    ) -> Result<Option<Self>, String> {
+        let packages = packages.unwrap_or_default();
+        if packages.len() > super::cloud_init::MAX_PREPARE_PACKAGES {
+            return Err(format!(
+                "at most {} packages are allowed",
+                super::cloud_init::MAX_PREPARE_PACKAGES
+            ));
+        }
+        let mut unique: Vec<String> = Vec::with_capacity(packages.len());
+        for name in packages {
+            if !super::cloud_init::valid_package(&name) {
+                return Err(format!("{name:?} is not a valid apt package name"));
+            }
+            if !unique.contains(&name) {
+                unique.push(name);
+            }
+        }
+        let script = script.filter(|text| !text.is_empty());
+        if let Some(text) = &script {
+            if text.len() > super::cloud_init::MAX_PREPARE_SCRIPT_BYTES {
+                return Err(format!(
+                    "the script is {} bytes, the limit is {}",
+                    text.len(),
+                    super::cloud_init::MAX_PREPARE_SCRIPT_BYTES
+                ));
+            }
+            if text.contains('\0') {
+                return Err("the script contains a NUL byte".to_owned());
+            }
+        }
+        if unique.is_empty() && script.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(Self {
+            packages: unique,
+            script,
+        }))
+    }
 }
 
 /// Условия автоматического режима, перепроверяемые в транзакции создания под замком
@@ -334,6 +396,13 @@ impl Window {
     /// Профили окна в порядке попыток (снимок на момент создания).
     pub fn profiles(&self) -> Vec<PricedProfile> {
         serde_json::from_value(self.profiles.clone()).unwrap_or_default()
+    }
+
+    /// Подготовка окна из карточки; у окна без подготовки пусто.
+    pub fn prepare(&self) -> Option<Prepare> {
+        self.prepare
+            .as_ref()
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
     }
 }
 
@@ -496,9 +565,9 @@ pub async fn create_in_tx(
                                     compute_kopecks_per_hour, disk_kopecks_per_hour,
                                     price_hourly_kopecks, reservation_kopecks, month,
                                     hard_cap_minutes, drain_grace_minutes, teardown_margin_minutes,
-                                    created_at, profiles)
+                                    created_at, profiles, prepare)
          values ($1, $2, 'create_intent', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
-                 $15, $16, $17, $18)",
+                 $15, $16, $17, $18, $19)",
     )
     .bind(id)
     .bind(server_name(id))
@@ -518,6 +587,12 @@ pub async fn create_in_tx(
     .bind(teardown_margin)
     .bind(now)
     .bind(serde_json::to_value(&pricing.profiles).expect("profiles serialize"))
+    .bind(
+        request
+            .prepare
+            .as_ref()
+            .map(|prepare| serde_json::to_value(prepare).expect("prepare serializes")),
+    )
     .execute(&mut *conn)
     .await?;
     stash_key(id, key);
@@ -624,6 +699,8 @@ pub const REASON_GONE: &str = "gone";
 pub const REASON_LATE_CREATE: &str = "late_create";
 /// Диск закрытого окна нашёлся позже.
 pub const REASON_LATE_DISK: &str = "late_disk";
+/// Скрипт подготовки окна завершился сбоем: машина и диск убираются обычным сносом.
+pub const REASON_PREPARE_FAILED: &str = "prepare_failed";
 
 /// Чем заканчивается окно после сноса: зависит только от причины.
 pub fn terminal_state(delete_reason: Option<&str>) -> &'static str {
@@ -783,6 +860,85 @@ pub async fn begin_cleanup_in_tx(
     Ok(true)
 }
 
+/// Скрипт подготовки не отработал: окно ещё не прошло `ready`, и воркер раннера не
+/// запустится. В строку ложится хвост вывода, окно уходит на снос обычным путём, владельцу
+/// идёт пуш, а предлагавшему агенту — заметка с кодом и хвостом. Повтор факта ничего не
+/// меняет: после перехода окно уже `deleting`.
+pub async fn apply_prepare_failed_in_tx(
+    conn: &mut PgConnection,
+    id: Uuid,
+    machine_id: Uuid,
+    exit_code: i32,
+    output_tail: &str,
+    now: DateTime<Utc>,
+) -> Result<bool, sqlx::Error> {
+    let Some(window) = load_for_update(conn, id).await? else {
+        return Ok(false);
+    };
+    // Скрипт идёт до запуска воркера, поэтому окно ещё `identified`. `ready` и дальше
+    // значат, что раннер уже поднялся: такой факт устарел и ничего не меняет.
+    if window.state != "identified" {
+        return Ok(false);
+    }
+    // Факт принимается только от строки раннера, которой владеет хаб.
+    if cloud_machine_id(&mut *conn).await? != Some(machine_id) {
+        return Ok(false);
+    }
+    let tail = clip_tail(output_tail);
+    let last_error = format!("{REASON_PREPARE_FAILED}:{exit_code}");
+    if !begin_cleanup_in_tx(
+        conn,
+        id,
+        Cleanup {
+            reason: REASON_PREPARE_FAILED,
+            last_error: Some(&last_error),
+            stopped: false,
+            server_gone: false,
+        },
+        now,
+    )
+    .await?
+    {
+        return Ok(false);
+    }
+    sqlx::query("update cloud_windows set prepare_output = $2 where id = $1")
+        .bind(id)
+        .bind(&tail)
+        .execute(&mut *conn)
+        .await?;
+    crate::notify::enqueue_cloud_alert_in_tx(
+        conn,
+        &format!("cloud:prepare_failed:{id}"),
+        &serde_json::json!({
+            "code": "prepare_failed",
+            "window_id": id,
+            "name": window.name,
+            "exit_code": exit_code,
+        }),
+    )
+    .await?;
+    if let Some(proposal) = window.proposal_id {
+        crate::session_tools::cloud_propose::prepare_failed_note_in_tx(
+            conn, proposal, id, exit_code, &tail,
+        )
+        .await?;
+    }
+    Ok(true)
+}
+
+/// Хвост общего вывода: последние 2048 байт по границе символа.
+fn clip_tail(text: &str) -> String {
+    const LIMIT: usize = 2048;
+    if text.len() <= LIMIT {
+        return text.to_owned();
+    }
+    let mut start = text.len() - LIMIT;
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    text[start..].to_owned()
+}
+
 /// Полный список каталога подтвердил отсутствие машины прерванного окна: метка
 /// `server_gone_at` и, в той же транзакции, выпуск ждущих повтора задач облачной машины.
 /// Отсутствие в полном списке доказывает, что прежний процесс идти не может, — это и есть
@@ -890,6 +1046,8 @@ pub async fn on_preempted_cleanup_done_in_tx(
         hard_cap_minutes: minutes,
         // Замена не наследует согласие на перерасход: допуск спрашивается заново.
         consent_over_budget_kopecks: None,
+        // Подготовка родителя одобрена владельцем вместе с карточкой: замена берёт её как есть.
+        prepare: window.prepare(),
     };
     // Вставка идёт под точкой сохранения: нарушение уникальности замены — не ошибка, а
     // «замена уже есть». Без неё транзакция конца окна стала бы непригодной.
@@ -1146,6 +1304,10 @@ pub struct CloudWindowView {
     pub delete_confirmed_at: Option<DateTime<Utc>>,
     pub delete_reason: Option<String>,
     pub last_error: Option<String>,
+    /// Подготовка машины из карточки; пусто — подготовки нет.
+    pub prepare: Option<Prepare>,
+    /// Хвост вывода скрипта подготовки после сбоя.
+    pub prepare_output: Option<String>,
 }
 
 pub fn view(window: &Window, now: DateTime<Utc>) -> CloudWindowView {
@@ -1179,6 +1341,8 @@ pub fn view(window: &Window, now: DateTime<Utc>) -> CloudWindowView {
         delete_confirmed_at: window.delete_confirmed_at,
         delete_reason: window.delete_reason.clone(),
         last_error: window.last_error.clone(),
+        prepare: window.prepare(),
+        prepare_output: window.prepare_output.clone(),
     }
 }
 

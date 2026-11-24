@@ -20,7 +20,7 @@ use crate::{
         budget,
         price::PriceError,
         service::CloudService,
-        windows::{self, CreateRefusal, CreateRequest, PricedProfile, Pricing, Trigger},
+        windows::{self, CreateRefusal, CreateRequest, Prepare, PricedProfile, Pricing, Trigger},
     },
     config::CloudConfig,
     crunch::JobOutcome,
@@ -76,6 +76,9 @@ pub struct CloudCard {
     /// Только согласие на точный резерв позволяет выйти за бюджет.
     pub over_budget: bool,
     pub expires_at: DateTime<Utc>,
+    /// Подготовка машины; владелец одобряет её вместе с карточкой как есть.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prepare: Option<Prepare>,
 }
 
 /// Кто предложил: агент — из своего исполнения, владелец и хаб — из служебного разговора.
@@ -123,6 +126,18 @@ fn invalid(message: impl Into<String>) -> ToolError {
 struct ProposeArgs {
     hours: u32,
     reason: String,
+    /// Подготовка машины: пакеты ставит cloud-init, скрипт выполняет несущая.
+    #[serde(default)]
+    prepare: Option<RawPrepare>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawPrepare {
+    #[serde(default)]
+    packages: Option<Vec<String>>,
+    #[serde(default)]
+    script: Option<String>,
 }
 
 /// `runner_propose`: предложение агента. Возвращает id карточки и деньги; решение придёт
@@ -133,6 +148,11 @@ pub async fn propose(
     arguments: Value,
 ) -> Result<Value, ToolError> {
     let args: ProposeArgs = super::parse_arguments("runner_propose", arguments)?;
+    let prepare = Prepare::validated(
+        args.prepare.as_ref().and_then(|raw| raw.packages.clone()),
+        args.prepare.as_ref().and_then(|raw| raw.script.clone()),
+    )
+    .map_err(|message| invalid(format!("invalid_prepare: {message}")))?;
     let Some(cloud) = context.cloud.as_ref() else {
         return Err(invalid("cloud_disabled"));
     };
@@ -160,6 +180,7 @@ pub async fn propose(
         },
         args.hours,
         args.reason,
+        prepare,
     )
     .await
     .map_err(|error| invalid(error.to_string()))?;
@@ -180,6 +201,7 @@ pub async fn open(
     proposer: Proposer,
     hours: u32,
     reason: String,
+    prepare: Option<Prepare>,
 ) -> Result<Opened, CardError> {
     if !(1..=4).contains(&hours) {
         return Err(CardError::InvalidHours);
@@ -187,7 +209,16 @@ pub async fn open(
     let pricing = cloud.pricing().await.map_err(|_| CardError::Provider)?;
     let config = cloud.config().clone();
     let mut tx = crate::db::begin(pool).await?;
-    let opened = open_in_tx(&mut tx, &config, &pricing, &proposer, hours * 60, reason).await?;
+    let opened = open_in_tx(
+        &mut tx,
+        &config,
+        &pricing,
+        &proposer,
+        hours * 60,
+        reason,
+        prepare,
+    )
+    .await?;
     tx.commit().await?;
     Ok(opened)
 }
@@ -202,6 +233,7 @@ pub async fn open_in_tx(
     proposer: &Proposer,
     hard_cap: u32,
     reason: String,
+    prepare: Option<Prepare>,
 ) -> Result<Opened, CardError> {
     if hard_cap == 0 || hard_cap > windows::MAX_HARD_CAP_MINUTES {
         return Err(CardError::InvalidHours);
@@ -231,6 +263,7 @@ pub async fn open_in_tx(
         remaining_kopecks: remaining,
         over_budget,
         expires_at,
+        prepare,
     };
     let id = Uuid::now_v7();
     let payload = serde_json::to_value(&card).expect("cloud card serializes");
@@ -415,6 +448,7 @@ pub async fn approve_in_tx(
             &proposer,
             card.hard_cap_minutes,
             card.reason.clone(),
+            card.prepare.clone(),
         )
         .await
         {
@@ -435,6 +469,7 @@ pub async fn approve_in_tx(
             replaces_window_id: None,
             hard_cap_minutes: card.hard_cap_minutes,
             consent_over_budget_kopecks: consent,
+            prepare: card.prepare.clone(),
         },
         None,
     )
@@ -564,6 +599,50 @@ fn note_job(request: Uuid, reason: &str, text: String) -> Value {
         ),
         "dedupe_key": format!("cloud_window:{request}"),
     })
+}
+
+/// Заметка предлагавшему агенту о сбое подготовки: код выхода и хвост вывода. Ключ
+/// дедупликации отличается от ключа решения карточки, чтобы сбой не потерялся за уже
+/// доставленной заметкой об одобрении.
+pub(crate) async fn prepare_failed_note_in_tx(
+    conn: &mut PgConnection,
+    request: Uuid,
+    window: Uuid,
+    exit_code: i32,
+    tail: &str,
+) -> Result<(), sqlx::Error> {
+    let row: Option<(Uuid, Uuid)> = sqlx::query_as(
+        "select c.owner_id, r.conversation_id from requests r
+           join conversations c on c.id = r.conversation_id
+          where r.id = $1",
+    )
+    .bind(request)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some((owner_id, conversation_id)) = row else {
+        return Ok(());
+    };
+    let text = format!(
+        "[canterlot] Cloud window {window} preparation failed (exit {exit_code}); \
+         the window is being deleted. Output tail:\n{tail}"
+    );
+    subs::insert_job(
+        conn,
+        owner_id,
+        conversation_id,
+        Utc::now(),
+        &json!({
+            "action": "note",
+            "text": text,
+            "origin": origin::with_event(
+                origin::note_origin(0),
+                origin::HubEvent::approval("prepare_failed", request, None, None),
+            ),
+            "dedupe_key": format!("cloud_window:{request}:prepare_failed"),
+        }),
+    )
+    .await?;
+    Ok(())
 }
 
 #[derive(Deserialize)]
