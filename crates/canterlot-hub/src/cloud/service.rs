@@ -1,18 +1,24 @@
-//! Служба облачных окон: ведёт каждое живое окно по его состояниям и сверяет проект с базой.
+//! Служба облачных окон: ведёт каждое живое окно по его состояниям и сверяет каталоги с базой.
 //!
 //! Один проход (`tick`) принимает «сейчас» параметром, поэтому сроки проверяются в тестах без
 //! ожидания. Проходы идут строго по очереди (замок `runtime`), а в бою службу выполняет один
 //! хаб за раз (`singleton::supervise`). Порядок прохода:
-//! 1. сверка проекта (первым делом при старте, до любого создания, и раз в
+//! 1. сверка каталогов (первым делом при старте, до любого создания, и раз в
 //!    `reconcile_interval`);
 //! 2. шаг каждого живого окна по его состоянию.
 //!
 //! Правила денег, которые держит этот файл:
-//! - вызов создания один, без повторов; неопределённый исход разбирается по списку проекта;
+//! - вызов создания один, без повторов; неопределённый исход разбирается по списку каталога;
 //! - список, не прочитанный целиком, ничего не меняет;
-//! - открытое обязательство удаления не снимается, пока сервер не пропал из полного списка.
+//! - после вызова создания окно заканчивается только через снос: сначала машина, потом её
+//!   диск, и оба подтверждаются полными списками каталога окна;
+//! - перед каждым удалением проверяется, что удаляется своё: номер, точное имя и каталог.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 
 use chrono::{DateTime, TimeDelta, Utc};
 use serde_json::json;
@@ -21,13 +27,13 @@ use tokio::sync::{Mutex, watch};
 use uuid::Uuid;
 
 use super::{
-    CloudProvider, CreateOutcome, CreateServer, DeleteOutcome, DnatCreateOutcome, DnatRuleRequest,
-    ServerLookup, ServerStatus, ServerSummary,
+    CloudProvider, CreateInstance, CreateOutcome, DeleteOutcome, Disk, InstanceLookup,
+    InstanceStatus, InstanceSummary, OperationState, YandexClient,
     cloud_init::{self, CloudInitParams},
     price,
     windows::{
-        self, BLOCK_NO_PAID, CreateRefusal, CreateRequest, Pricing, Trigger, Window, WindowId,
-        cloud_machine_id, window_id_from_name,
+        self, Cleanup, CreateRefusal, CreateRequest, PricedProfile, Pricing, Trigger, Window,
+        WindowId, cloud_machine_id, window_id_from_name,
     },
 };
 use crate::{
@@ -41,23 +47,34 @@ use crate::{
 const TICK: Duration = Duration::from_secs(10);
 /// Раннер `cloud` отключён столько при подключённой несущей: окно удаляется.
 const DISCONNECTED_AFTER: TimeDelta = TimeDelta::minutes(10);
-/// После принятого DELETE сервер считается удалённым, только когда его нет в полном списке.
+/// Машину работающего окна служба опрашивает не чаще: так замечается прерывание.
+const STATUS_POLL_EVERY: TimeDelta = TimeDelta::seconds(30);
+/// После принятого DELETE машина считается удалённой, только когда её нет в полном списке.
 /// Столько ждём подтверждения, прежде чем повторить DELETE.
 const DELETE_CONFIRM_AFTER: TimeDelta = TimeDelta::minutes(10);
-/// Деньги: повтор пуша о неудаляемом сервере.
+/// Деньги: повтор пуша о неудаляемой машине.
 const ALERT_EVERY: TimeDelta = TimeDelta::minutes(30);
 /// После стольких неудач удаления идут пуши.
 const DELETE_FAILURES_BEFORE_ALERT: i32 = 3;
-/// Неопределённый ответ на создание DNAT: столько порт и адрес остаются занятыми, прежде
-/// чем полный список без правила позволит повторить вызов.
-const DNAT_AMBIGUITY: TimeDelta = TimeDelta::minutes(10);
 /// Цена профилей годна столько с момента создания окна. Перед первым POST более старая
 /// цена перепроверяется у провайдера.
 const PRICE_QUOTE_TTL: TimeDelta = TimeDelta::minutes(10);
 /// Окно в `draining` задерживается сверх предела на доработку: так долго терпим, прежде чем
 /// счесть это просрочкой, а не штатным сносом.
 const OVERRUN_SLACK: TimeDelta = TimeDelta::minutes(10);
-const SSH_KEY_NAME: &str = "canterlot-runner";
+/// Сколько заявка без вызова создания ждёт образ у провайдера.
+const IMAGE_WAIT: TimeDelta = TimeDelta::minutes(15);
+/// Метка машины раннера у провайдера.
+const LABEL_KEY: &str = "canterlot";
+const LABEL_VALUE: &str = "runner";
+const GIB: u64 = 1 << 30;
+
+/// Лишний ресурс каталога, удаление которого принято, а отсутствие ещё не подтверждено.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Stray {
+    Instance { name: String },
+    Disk { name: String },
+}
 
 /// Состояние службы между проходами; живёт только в памяти.
 #[derive(Default)]
@@ -65,9 +82,12 @@ struct Runtime {
     /// Хотя бы одна сверка прошла по полному списку: до этого создавать нельзя.
     reconciled: bool,
     last_reconcile: Option<DateTime<Utc>>,
-    ssh_key_id: Option<i64>,
     /// Первый проход после старта хаба: найденная просрочка — это простой хаба.
     first_tick: bool,
+    /// Когда машину окна опрашивали последний раз.
+    status_polled: HashMap<Uuid, DateTime<Utc>>,
+    /// Лишние машины и диски, которые удаляются: по номеру у провайдера.
+    stray_pending: BTreeMap<String, Stray>,
 }
 
 pub struct CloudService {
@@ -78,31 +98,18 @@ pub struct CloudService {
     runtime: Mutex<Runtime>,
 }
 
-/// Причина удаления окна, у которого сервер остался `no_paid`: аккаунт требует предоплату.
-pub const REASON_NO_PAID: &str = "no_paid";
-
-/// Принадлежность сервера по контракту API: имя доказывает прямой ответ, проект — только
-/// свежий полный список проекта.
+/// Принадлежность машины окну по прямому ответу провайдера: в нём есть номер, имя и каталог.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Ownership {
-    /// Номер с этим именем есть в полном списке проекта.
+    /// Машина с этим номером носит имя окна и лежит в его каталоге.
     Owned,
-    /// Имя другое или номера с этим именем в проекте нет.
+    /// Имя или каталог другие: номер достался чужой машине.
     Mismatch,
-    /// Полный список проекта без номера: сервер подтверждённо пропал.
+    /// Прямой ответ «нет такой», и полный список каталога без номера и без имени: машина
+    /// подтверждённо пропала.
     Absent,
     /// Ответа нет или он противоречив: ничего не меняем.
     Unknown,
-}
-
-/// Итог окна: цена часа удалённого профиля за время от вызова создания до подтверждённого
-/// конца, не меньше часа. У окна, которому не звонили, слагаемое 0. Публичный адрес больше
-/// не заказывается, поэтому в итог входит только сервер.
-fn ledger_cost(window: &Window, server_end: DateTime<Utc>) -> i64 {
-    window.create_called_at.map_or(0, |called| {
-        price::final_cost_between(window.price_hourly_kopecks, called, server_end)
-            .unwrap_or(window.reservation_kopecks)
-    })
 }
 
 fn delete_backoff(attempts: i32) -> TimeDelta {
@@ -116,6 +123,18 @@ fn delete_backoff(attempts: i32) -> TimeDelta {
 fn alert_slot(window: &Window, now: DateTime<Utc>) -> i64 {
     let since = window.delete_requested_at.unwrap_or(now);
     (now - since).num_seconds().max(0) / ALERT_EVERY.num_seconds()
+}
+
+/// Срок наступил: пустая метка значит «сейчас».
+fn due(at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
+    at.is_none_or(|at| at <= now)
+}
+
+/// Машина окна в списке каталога: по номеру или по точному имени.
+fn listed<'a>(listing: &'a [InstanceSummary], window: &Window) -> Option<&'a InstanceSummary> {
+    listing.iter().find(|instance| {
+        window.instance_id.as_deref() == Some(instance.id.as_str()) || instance.name == window.name
+    })
 }
 
 impl CloudService {
@@ -141,52 +160,49 @@ impl CloudService {
         &self.config
     }
 
-    /// Цена часа каждого профиля списка по ценам провайдера, в порядке списка. Профиль, цену
-    /// которого получить нельзя (конфигуратора нет у провайдера), в список окна не попадает:
-    /// резерв под него не посчитать, а вызывать его без резерва нельзя. Нет ни одного
-    /// профиля с ценой — отказ.
+    /// Две ставки часа каждого профиля списка по ценам провайдера, в порядке списка, для
+    /// вида машины из конфигурации. Цену любого профиля получить нельзя — отказ целиком:
+    /// резерв без цены не посчитать, а вызывать создание без резерва нельзя.
     pub async fn pricing(&self) -> Result<Pricing, CreateRefusal> {
+        self.pricing_for(self.config.preemptible).await
+    }
+
+    async fn pricing_for(&self, preemptible: bool) -> Result<Pricing, CreateRefusal> {
         let mut profiles = Vec::new();
-        let mut last_error = None;
         for profile in &self.config.profile {
-            let configurator = match self.provider.configurator(profile.configurator_id).await {
-                Ok(configurator) => configurator,
-                Err(error) => {
+            let price = self
+                .provider
+                .price(profile, preemptible)
+                .await
+                .map_err(|error| {
                     tracing::warn!(
                         kind = "cloud_profile_unpriced",
-                        configurator_id = profile.configurator_id,
-                        error_kind = ?error.kind,
-                        "profile skipped: no price from the provider"
+                        cores = profile.cores,
+                        memory_gb = profile.memory_gb,
+                        error = %error,
+                        "no price from the provider"
                     );
-                    last_error = Some(error);
-                    continue;
-                }
-            };
-            let sizing = price::Sizing {
-                cpu: profile.cpu,
-                ram_mb: profile.ram_mb(),
-                disk_mb: profile.disk_mb(),
-            };
-            let monthly = price::monthly_kopecks(&configurator.prices, &sizing)?;
-            profiles.push(windows::PricedProfile {
-                configurator_id: profile.configurator_id,
-                cpu: profile.cpu,
-                ram_gb: profile.ram_gb,
+                    CreateRefusal::Provider(error)
+                })?;
+            profiles.push(PricedProfile {
+                cores: profile.cores,
+                memory_gb: profile.memory_gb,
                 disk_gb: profile.disk_gb,
-                hourly_kopecks: price::hourly_kopecks(monthly)?,
-                availability_zone: profile.availability_zone.clone(),
+                compute_kopecks_per_hour: price.compute_kopecks_per_hour,
+                disk_kopecks_per_hour: price.disk_kopecks_per_hour,
             });
         }
         if profiles.is_empty() {
-            return Err(
-                last_error.map_or(CreateRefusal::Invalid("profiles"), CreateRefusal::Provider)
-            );
+            return Err(CreateRefusal::Invalid("profiles"));
         }
-        Ok(Pricing { profiles })
+        Ok(Pricing {
+            preemptible,
+            profiles,
+        })
     }
 
     /// Создание окна из любого входа: цена у провайдера, затем одна транзакция. Вызов
-    /// провайдера для самого сервера делает служба на ближайшем проходе.
+    /// провайдера для самой машины делает служба на ближайшем проходе.
     pub async fn create(&self, request: CreateRequest) -> Result<WindowId, CreateRefusal> {
         let pricing = self.pricing().await?;
         let config = self.config.clone();
@@ -236,13 +252,13 @@ impl CloudService {
         });
         if due {
             runtime.last_reconcile = Some(now);
-            match self.reconcile(now).await {
+            match self.reconcile(&mut runtime, now).await {
                 Ok(true) => runtime.reconciled = true,
                 // Удаление ждёт подтверждения: новые создания закрыты, но следующую сверку
                 // ждём обычный срок, а не каждый проход.
                 Ok(false) => runtime.reconciled = false,
                 Err(()) => {
-                    // Следующий проход попробует снова: пока сверки нет, новых серверов нет.
+                    // Следующий проход попробует снова: пока сверки нет, новых машин нет.
                     runtime.reconciled = false;
                     runtime.last_reconcile = None;
                 }
@@ -265,6 +281,8 @@ impl CloudService {
                 return;
             }
         };
+        let live: HashSet<Uuid> = windows.iter().map(|window| window.id).collect();
+        runtime.status_polled.retain(|id, _| live.contains(id));
         for window in windows {
             if let Err(error) = self.step(&mut runtime, window, now).await {
                 warn_db("cloud_window_step", &error);
@@ -455,9 +473,9 @@ impl CloudService {
         match window.state.as_str() {
             "create_intent" => self.step_create_intent(runtime, window, now).await,
             "identified" => self.step_identified(window, now).await,
-            "ready" => self.step_ready(window, now).await,
-            "draining" => self.step_draining(window, now).await,
-            // Поздний снос сервера закрытого окна идёт тем же шагом удаления.
+            "ready" => self.step_ready(runtime, window, now).await,
+            "draining" => self.step_draining(runtime, window, now).await,
+            // Поздний снос машины или диска закрытого окна идёт тем же шагом.
             "deleting" | windows::LATE_CLEANUP => self.step_deleting(window, now).await,
             // `create_unknown` разбирает только сверка по полному списку.
             _ => Ok(()),
@@ -473,8 +491,8 @@ impl CloudService {
         now: DateTime<Utc>,
     ) -> Result<(), sqlx::Error> {
         if window.create_called_at.is_some() {
-            // Вызов создания начат, а ответ не записан (хаб упал или проход оборвали): сервер
-            // мог появиться. Второго вызова не будет, имя найдёт сверка.
+            // Вызов создания начат, а ответ не записан (хаб упал или проход оборвали): машина
+            // могла появиться. Второго вызова не будет, имя найдёт сверка.
             sqlx::query(
                 "update cloud_windows set state = 'create_unknown', last_error = 'interrupted'
                  where id = $1 and state = 'create_intent'",
@@ -487,9 +505,10 @@ impl CloudService {
         if !runtime.reconciled {
             return Ok(());
         }
-        self.start_create(runtime, window, now).await
+        self.start_create(window, now).await
     }
 
+    /// Заявка заканчивается до вызова создания: машины нет и быть не могло.
     async fn fail(&self, id: Uuid, reason: &str) -> Result<(), sqlx::Error> {
         let reason = reason.to_owned();
         crate::db::in_tx(&self.pool, move |conn| {
@@ -514,6 +533,34 @@ impl CloudService {
             .unwrap_or_else(|| self.config.teardown_margin_minutes())
     }
 
+    /// Создание не дало рабочей машины. Вызов уже был, поэтому окно уходит на снос: машину и
+    /// диск с его именем надо найти или подтвердить их отсутствие, и только потом окно
+    /// закончится `failed`.
+    async fn fail_after_call(
+        &self,
+        id: Uuid,
+        detail: &str,
+        now: DateTime<Utc>,
+    ) -> Result<(), sqlx::Error> {
+        let detail = detail.to_owned();
+        crate::db::in_tx(&self.pool, move |conn| {
+            Box::pin(async move {
+                windows::begin_cleanup_in_tx(
+                    conn,
+                    id,
+                    Cleanup {
+                        last_error: Some(&detail),
+                        ..Cleanup::because(windows::REASON_CREATE_FAILED)
+                    },
+                    now,
+                )
+                .await
+            })
+        })
+        .await?;
+        Ok(())
+    }
+
     /// Перед первым POST: если снимок цен старше срока, спросить провайдера заново. Рост
     /// резерва выше одобренного закрывает окно без POST и без расхода; снижение заменяет
     /// снимок и освобождает разницу в бюджете.
@@ -525,16 +572,18 @@ impl CloudService {
         if now - window.created_at < PRICE_QUOTE_TTL {
             return Ok(true);
         }
-        let pricing = match self.pricing().await {
+        // Вид машины окна уже решён при его создании: цена спрашивается под него.
+        let pricing = match self.pricing_for(window.preemptible).await {
             Ok(pricing) => pricing,
             Err(error) => {
                 tracing::warn!(kind = "cloud_reprice", error = %error, "price quote is stale and cannot be refreshed");
                 return Ok(false);
             }
         };
-        let Some(max_hourly) = pricing.max_hourly_kopecks() else {
+        let Some(top) = pricing.most_expensive().cloned() else {
             return self.fail(window.id, "price_error").await.map(|_| false);
         };
+        let max_hourly = top.hourly_kopecks();
         let hard_cap = u32::try_from(window.hard_cap_minutes).unwrap_or(u32::MAX);
         let reservation = match windows::reservation_for_terms(
             max_hourly,
@@ -565,57 +614,53 @@ impl CloudService {
             .await?;
             return self.fail(window.id, "reprice_growth").await.map(|_| false);
         }
+        let profiles = serde_json::to_value(&pricing.profiles).expect("profiles serialize");
         let updated = sqlx::query(
             "update cloud_windows set profiles = $2, price_hourly_kopecks = $3,
-                    reservation_kopecks = $4
+                    reservation_kopecks = $4, compute_kopecks_per_hour = $5,
+                    disk_kopecks_per_hour = $6
              where id = $1 and state = 'create_intent' and create_called_at is null
                and reservation_kopecks >= $4",
         )
         .bind(window.id)
-        .bind(serde_json::to_value(&pricing.profiles).expect("profiles serialize"))
+        .bind(&profiles)
         .bind(max_hourly)
         .bind(reservation)
+        .bind(top.compute_kopecks_per_hour)
+        .bind(top.disk_kopecks_per_hour)
         .execute(&self.pool)
         .await?
         .rows_affected();
         if updated == 0 {
             return Ok(false);
         }
-        window.profiles = serde_json::to_value(&pricing.profiles).expect("profiles serialize");
+        window.profiles = profiles;
         window.price_hourly_kopecks = max_hourly;
+        window.compute_kopecks_per_hour = top.compute_kopecks_per_hour;
+        window.disk_kopecks_per_hour = top.disk_kopecks_per_hour;
         window.reservation_kopecks = reservation;
         Ok(true)
     }
 
     async fn start_create(
         &self,
-        runtime: &mut Runtime,
         mut window: Window,
         now: DateTime<Utc>,
     ) -> Result<(), sqlx::Error> {
         if !self.reprice_if_stale(&mut window, now).await? {
             return Ok(());
         }
-        let key_id = match runtime.ssh_key_id {
-            Some(id) => id,
-            None => match self
-                .provider
-                .ensure_ssh_key(SSH_KEY_NAME, &self.config.runner_public_key)
-                .await
-            {
-                Ok(id) => {
-                    runtime.ssh_key_id = Some(id);
-                    id
+        // Образ спрашивается до метки вызова: пока его нет, машины тоже нет, и окно может
+        // подождать или закончиться без расхода.
+        let image_id = match self.provider.latest_image(&self.config.image_family).await {
+            Ok(image_id) => image_id,
+            Err(error) => {
+                tracing::warn!(kind = "cloud_image", error_kind = ?error.kind, "boot image unavailable");
+                if !error.retryable() || now - window.created_at > IMAGE_WAIT {
+                    self.fail(window.id, "image_unavailable").await?;
                 }
-                Err(error) => {
-                    tracing::warn!(kind = "cloud_ssh_key", error_kind = ?error.kind, "ssh key unavailable");
-                    // Сервера ещё нет: пока ждём, окно не страдает; слишком долго нельзя.
-                    if !error.retryable() || now - window.created_at > TimeDelta::minutes(15) {
-                        self.fail(window.id, "ssh_key_unavailable").await?;
-                    }
-                    return Ok(());
-                }
-            },
+                return Ok(());
+            }
         };
         let Ok((key, regenerated)) = windows::take_or_generate(window.id) else {
             return self.fail(window.id, "host_key_unavailable").await;
@@ -632,13 +677,12 @@ impl CloudService {
             host_key_ed25519_public: key.public_line().to_owned(),
             runner_authorized_key: self.config.runner_public_key.clone(),
             root_dir: CLOUD_ROOT_DIR.to_owned(),
-            gateway: self.config.gateway.clone(),
         });
-        let Ok(cloud_init) = rendered else {
+        let Ok(user_data) = rendered else {
             return self.fail(window.id, "cloud_init_invalid").await;
         };
         // Метка вызова ставится до самого вызова: от неё считаются предел и ledger, и по ней
-        // упавший после этого хаб поймёт, что сервер мог появиться.
+        // упавший после этого хаб поймёт, что машина могла появиться.
         let hard_cap = TimeDelta::minutes(i64::from(window.hard_cap_minutes));
         let drain =
             TimeDelta::minutes(i64::try_from(self.drain_minutes(&window)).unwrap_or(i64::MAX));
@@ -662,60 +706,77 @@ impl CloudService {
             return Ok(());
         }
         // Профили пробуются по очереди внутри одной заявки. Перед каждым вызовом в строке
-        // стоят конфигуратор и цена именно этого профиля: если ответ потеряется, сервер мог
-        // появиться только у него, и ledger считает его цену.
+        // стоят размеры и обе ставки именно этого профиля: если ответ потеряется, машина
+        // могла появиться только у него, и ledger считает его цену.
         let profiles = window.profiles();
         let mut refusals: Vec<String> = Vec::new();
         for profile in &profiles {
             let marked = sqlx::query(
-                "update cloud_windows set configurator_id = $2, price_hourly_kopecks = $3
+                "update cloud_windows set cores = $2, memory_gb = $3, disk_gb = $4,
+                        compute_kopecks_per_hour = $5, disk_kopecks_per_hour = $6,
+                        price_hourly_kopecks = $7
                  where id = $1 and state = 'create_intent'",
             )
             .bind(window.id)
-            .bind(profile.configurator_id)
-            .bind(profile.hourly_kopecks)
+            .bind(i32::try_from(profile.cores).unwrap_or(i32::MAX))
+            .bind(i32::try_from(profile.memory_gb).unwrap_or(i32::MAX))
+            .bind(i32::try_from(profile.disk_gb).unwrap_or(i32::MAX))
+            .bind(profile.compute_kopecks_per_hour)
+            .bind(profile.disk_kopecks_per_hour)
+            .bind(profile.hourly_kopecks())
             .execute(&self.pool)
             .await?
             .rows_affected();
             if marked == 0 {
                 return Ok(());
             }
-            let request = CreateServer {
+            let request = CreateInstance {
                 name: window.name.clone(),
-                comment: "canterlot runner window".to_owned(),
-                project_id: window.project_id.unwrap_or(self.config.project_id),
-                configurator_id: profile.configurator_id,
-                cpu: profile.cpu,
-                ram_mb: profile.ram_mb(),
-                disk_mb: profile.disk_mb(),
-                os_id: self.config.os_id,
-                ssh_key_ids: vec![key_id],
-                cloud_init: cloud_init.clone(),
-                hostname: "canterlot-runner".to_owned(),
-                network_id: self.config.network_id.clone(),
-                local_ip: window
-                    .local_ip
-                    .clone()
-                    .expect("local_ip allocated in create_in_tx"),
-                availability_zone: profile.availability_zone.clone(),
+                labels: BTreeMap::from([(LABEL_KEY.to_owned(), LABEL_VALUE.to_owned())]),
+                cores: profile.cores,
+                memory_bytes: u64::from(profile.memory_gb) * GIB,
+                disk_bytes: u64::from(profile.disk_gb) * GIB,
+                // Вид машины — из снимка окна, а не из конфигурации на момент вызова.
+                preemptible: window.preemptible,
+                image_id: image_id.clone(),
+                user_data: user_data.clone(),
             };
-            let outcome = self.provider.create_server(&request).await;
+            let outcome = self.provider.create(&window.folder_id, &request).await;
             drop(request);
             match outcome {
-                CreateOutcome::Created { server_id } => {
-                    return self.identify(window.id, server_id, "create_intent").await;
+                CreateOutcome::Accepted {
+                    instance_id,
+                    operation_id,
+                } => {
+                    return self
+                        .identify(
+                            window.id,
+                            &instance_id,
+                            Some(&operation_id),
+                            "create_intent",
+                        )
+                        .await;
                 }
                 CreateOutcome::Rejected {
-                    code, error_code, ..
+                    http,
+                    grpc_code,
+                    next_profile,
+                    ..
                 } => {
-                    refusals.push(format!("{}:{code}/{error_code}", profile.configurator_id));
-                    // Сервера точно нет. Отказ из списка «обходится» следующим профилем,
-                    // любой другой закрывает окно.
-                    if !super::profile_fallback(code, &error_code) {
-                        return self.fail(window.id, &refusals.join(",")).await;
+                    let grpc = grpc_code.map_or_else(|| "-".to_owned(), |code| code.to_string());
+                    refusals.push(format!(
+                        "{}x{}:{http}/{grpc}",
+                        profile.cores, profile.memory_gb
+                    ));
+                    // Машины точно нет. Отказ по квоте или месту «обходится» следующим
+                    // профилем, любой другой закрывает окно.
+                    if !next_profile {
+                        return self
+                            .fail_after_call(window.id, &refusals.join(","), now)
+                            .await;
                     }
                 }
-                // Сервер мог появиться: второго вызова, на другом профиле тоже, не будет.
+                // Машина могла появиться: второго вызова, на другом профиле тоже, не будет.
                 CreateOutcome::Ambiguous { .. } => {
                     sqlx::query(
                         "update cloud_windows set state = 'create_unknown', last_error = 'ambiguous'
@@ -728,32 +789,38 @@ impl CloudService {
                 }
             }
         }
-        // Все профили отказали определённо: сервера нет, резерв снят.
+        // Все профили отказали определённо.
         let reason = if refusals.is_empty() {
             "no_profiles".to_owned()
         } else {
             format!("all_profiles_rejected: {}", refusals.join(","))
         };
-        self.fail(window.id, &reason).await
+        self.fail_after_call(window.id, &reason, now).await
     }
 
-    /// Сервер найден: окно становится `identified`, строка раннера `cloud` готова.
+    /// Машина найдена: окно становится `identified`, строка раннера `cloud` готова. Операции
+    /// создания нет, когда машину нашли по имени в списке.
     async fn identify(
         &self,
         id: Uuid,
-        server_id: i64,
+        instance_id: &str,
+        operation_id: Option<&str>,
         from: &'static str,
     ) -> Result<(), sqlx::Error> {
         let config = self.config.clone();
+        let instance_id = instance_id.to_owned();
+        let operation_id = operation_id.map(str::to_owned);
         crate::db::in_tx(&self.pool, move |conn| {
             Box::pin(async move {
                 windows::ensure_cloud_machine(conn, &config, true).await?;
                 sqlx::query(
-                    "update cloud_windows set state = 'identified', server_id = $2, last_error = null
-                     where id = $1 and state = $3",
+                    "update cloud_windows set state = 'identified', instance_id = $2,
+                            create_operation_id = $3, last_error = null
+                     where id = $1 and state = $4",
                 )
                 .bind(id)
-                .bind(server_id)
+                .bind(&instance_id)
+                .bind(&operation_id)
                 .bind(from)
                 .execute(&mut *conn)
                 .await?;
@@ -788,213 +855,99 @@ impl CloudService {
         {
             return self.delete_now(&window, "ready_timeout", now).await;
         }
-        let Some(server_id) = window.server_id else {
+        let Some(instance_id) = window.instance_id.as_deref() else {
             return Ok(());
         };
-        // Правило уже создано (или усыновлено из списка): подключаться можно сразу, без
-        // повторного опроса сервера. Адрес подключения — публичный IP роутера.
-        if window.dnat_rule_id.is_some() {
-            if window.attach_sent_at.is_none() {
-                self.send_attach(&window, now).await?;
-            }
+        // Команда подключения уже ушла: дальше ждём раннера.
+        if window.attach_sent_at.is_some() {
             return Ok(());
         }
-        match self.provider.get_server(server_id).await {
-            Ok(ServerLookup::Found(state)) => match state.status {
-                // Сервер не включается, пока аккаунт не переведён на предоплату. Это
-                // определённый отказ: ждём только отведенный срок с момента создания.
-                ServerStatus::NoPaid => {
-                    if window
-                        .create_called_at
-                        .is_some_and(|called| now - called >= grace(self.config.no_paid_grace))
-                    {
-                        self.no_paid_refusal(&window, now).await?;
-                    }
+        // Пока операция создания идёт, машину не трогаем. Её ошибка окончательна: Яндекс
+        // откатил создание, но машину и диск всё равно подтверждает снос. Операции нет или
+        // провайдер её не знает — машина проверяется прямым ответом.
+        if let Some(operation_id) = window.create_operation_id.as_deref() {
+            match self.provider.operation(operation_id).await {
+                Ok(OperationState::Pending) => return Ok(()),
+                Ok(OperationState::Failed { grpc_code, .. }) => {
+                    tracing::warn!(
+                        kind = "cloud_create_failed",
+                        grpc_code,
+                        "create operation failed"
+                    );
+                    return self
+                        .fail_after_call(window.id, &format!("create_failed:{grpc_code}"), now)
+                        .await;
                 }
-                ServerStatus::On => self.ensure_dnat(&window, now).await?,
-                _ => {}
-            },
-            Ok(ServerLookup::NotFound) => {}
-            Err(error) => {
-                tracing::warn!(kind = "cloud_poll_server", error_kind = ?error.kind, "server poll failed");
+                Ok(OperationState::Done | OperationState::Unknown) => {}
+                Err(error) => {
+                    tracing::warn!(kind = "cloud_poll_operation", error_kind = ?error.kind, "create operation poll failed");
+                    return Ok(());
+                }
             }
         }
-        Ok(())
-    }
-
-    /// DNAT-правило создаётся ровно один раз. Неопределённый ответ не повторяется:
-    /// метка вызова остаётся, а следующий проход ищет правило в полном списке роутера и
-    /// усыновляет его. Полный список без правила снимает метку — повтор_CREATE безопасен.
-    async fn ensure_dnat(&self, window: &Window, now: DateTime<Utc>) -> Result<(), sqlx::Error> {
-        let (Some(local_ip), Some(port)) = (window.local_ip.as_deref(), window.dnat_port) else {
-            return Ok(());
-        };
-        let port = match u16::try_from(port) {
-            Ok(port) => port,
-            Err(_) => return Ok(()),
-        };
-        let router_ip = window
-            .router_ip
-            .clone()
-            .unwrap_or_else(|| self.config.router_ip.clone());
-        let router_id = window
-            .router_id
-            .clone()
-            .unwrap_or_else(|| self.config.router_id.clone());
-        if window.dnat_create_attempted_at.is_none() {
-            let stamped = sqlx::query(
-                "update cloud_windows set dnat_create_attempted_at = $2
-                 where id = $1 and state = 'identified' and dnat_create_attempted_at is null",
-            )
-            .bind(window.id)
-            .bind(now)
-            .execute(&self.pool)
-            .await?
-            .rows_affected();
-            if stamped == 0 {
+        let instance = match self.provider.get(instance_id).await {
+            Ok(InstanceLookup::Found(instance)) => instance,
+            // Точечное «нет такой» отсутствия не доказывает: его разберёт сверка по списку.
+            Ok(InstanceLookup::NotFound) => return Ok(()),
+            Err(error) => {
+                tracing::warn!(kind = "cloud_poll_instance", error_kind = ?error.kind, "instance poll failed");
                 return Ok(());
             }
-            let request = DnatRuleRequest {
-                local_ip: local_ip.to_owned(),
-                local_port: 22,
-                public_ip: router_ip.clone(),
-                public_port: port,
-            };
-            match self.provider.create_dnat_rule(&router_id, &request).await {
-                DnatCreateOutcome::Created { rule_id } => {
-                    self.adopt_dnat(window.id, &rule_id).await?;
-                }
-                DnatCreateOutcome::Refused {
-                    status, error_code, ..
-                } => {
-                    // Отказ провайдера, пуш владельцу и переход в `deleting` — одна
-                    // транзакция: падение хаба между ними не оставляет окно в `identified`
-                    // без метки попытки, иначе следующий проход сделал бы второй POST.
-                    let id = window.id;
-                    let name = window.name.clone();
-                    crate::db::in_tx(&self.pool, move |conn| {
-                        Box::pin(async move {
-                            sqlx::query(
-                                "update cloud_windows set last_error = 'dnat_refused',
-                                        dnat_create_attempted_at = null,
-                                        dnat_gone_at = coalesce(dnat_gone_at, $2)
-                                 where id = $1",
-                            )
-                            .bind(id)
-                            .bind(now)
-                            .execute(&mut *conn)
-                            .await?;
-                            crate::notify::enqueue_cloud_alert_in_tx(
-                                &mut *conn,
-                                &format!("cloud:dnat_refused:{id}"),
-                                &json!({
-                                    "code": "dnat_refused",
-                                    "window_id": id,
-                                    "name": name,
-                                    "status": status,
-                                    "error_code": error_code,
-                                }),
-                            )
-                            .await?;
-                            crate::cloud::windows::request_delete_in_tx(
-                                &mut *conn,
-                                id,
-                                "dnat_refused",
-                                now,
-                            )
-                            .await?;
-                            Ok::<_, sqlx::Error>(())
-                        })
-                    })
-                    .await?;
-                }
-                DnatCreateOutcome::Ambiguous { .. } => {
-                    sqlx::query(
-                        "update cloud_windows set last_error = 'dnat_create_unknown' where id = $1",
-                    )
-                    .bind(window.id)
-                    .execute(&self.pool)
-                    .await?;
-                }
-            }
-            return Ok(());
-        }
-        // Вызов был, ответ нечитаем: полный список — единственный источник истины.
-        match self.provider.list_dnat_rules(&router_id).await {
-            Ok(rules) => {
-                if let Some(rule) = rules
-                    .iter()
-                    .find(|rule| rule.matches(&router_ip, port, local_ip))
-                {
-                    self.adopt_dnat(window.id, &rule.id).await?;
-                } else {
-                    // Полный список подтвердил отсутствие правила, но только по истечении
-                    // срока неопределённости: правило могло появиться с задержкой.
-                    let old_enough = window
-                        .dnat_create_attempted_at
-                        .is_some_and(|at| now - at >= DNAT_AMBIGUITY);
-                    if old_enough {
-                        sqlx::query(
-                            "update cloud_windows set dnat_create_attempted_at = null where id = $1",
-                        )
-                        .bind(window.id)
-                        .execute(&self.pool)
-                        .await?;
-                    }
-                }
-            }
-            Err(error) => {
-                tracing::warn!(kind = "cloud_dnat_listing", error = %error, "dnat listing failed; nothing changed");
-            }
-        }
-        Ok(())
-    }
-
-    async fn adopt_dnat(&self, id: Uuid, rule_id: &str) -> Result<(), sqlx::Error> {
-        sqlx::query("update cloud_windows set dnat_rule_id = $2, last_error = null where id = $1")
-            .bind(id)
-            .bind(rule_id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    /// Сервер остался `no_paid` дольше срока: definite отказ. Окно уходит на удаление по
-    /// обычному пути, блок в `cloud_budget` закрывает новые окна, владельцу пуш.
-    async fn no_paid_refusal(
-        &self,
-        window: &Window,
-        now: DateTime<Utc>,
-    ) -> Result<(), sqlx::Error> {
-        tracing::warn!(
-            kind = "cloud_no_paid",
-            "provider did not turn the server on: no_paid"
-        );
-        sqlx::query("update cloud_windows set last_error = 'no_paid' where id = $1")
+        };
+        if instance.name != window.name || instance.folder_id != window.folder_id {
+            // Номер достался чужой машине: подключаться к ней нельзя. Окно дождётся срока
+            // готовности, а удаление остановится на той же проверке и сообщит владельцу.
+            sqlx::query(
+                "update cloud_windows set last_error = 'ownership_mismatch'
+                 where id = $1 and state = 'identified'",
+            )
             .bind(window.id)
             .execute(&self.pool)
             .await?;
-        windows::set_provider_block(&self.pool, BLOCK_NO_PAID, now).await?;
-        crate::notify::enqueue_cloud_alert(
-            &self.pool,
-            &format!("cloud:no_paid:{}", window.id),
-            &json!({
-                "code": "no_paid",
-                "window_id": window.id,
-                "name": window.name,
-            }),
-        )
-        .await?;
-        self.delete_now(window, REASON_NO_PAID, now).await
+            return Ok(());
+        }
+        match instance.status {
+            InstanceStatus::Running => {
+                if let Some(public_ip) = instance.public_ip.as_deref() {
+                    self.send_attach(&window, public_ip, instance.boot_disk_id.as_deref(), now)
+                        .await?;
+                }
+            }
+            InstanceStatus::Stopping | InstanceStatus::Stopped => {
+                self.stopped(&window, false, now).await?;
+            }
+            InstanceStatus::Broken => self.stopped(&window, true, now).await?,
+            InstanceStatus::Provisioning | InstanceStatus::Deleting | InstanceStatus::Other(_) => {}
+        }
+        Ok(())
     }
 
-    /// Команда несущей подключить раннер. Только если машина из конфигурации действительно
-    /// несущая: иначе окно дождётся `ready_timeout` и уйдёт.
-    async fn send_attach(&self, window: &Window, now: DateTime<Utc>) -> Result<(), sqlx::Error> {
+    /// Команда несущей подключить раннер по публичному адресу машины, порт 22. В той же
+    /// транзакции окно запоминает адрес и загрузочный диск. Только если машина из
+    /// конфигурации действительно несущая: иначе окно дождётся `ready_timeout` и уйдёт.
+    async fn send_attach(
+        &self,
+        window: &Window,
+        public_ip: &str,
+        boot_disk_id: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<(), sqlx::Error> {
         let config = self.config.clone();
         let window = window.clone();
+        let public_ip = public_ip.to_owned();
+        let boot_disk_id = boot_disk_id.map(str::to_owned);
         crate::db::in_tx(&self.pool, move |conn| {
             Box::pin(async move {
+                sqlx::query(
+                    "update cloud_windows set public_ip = $2,
+                            boot_disk_id = coalesce($3, boot_disk_id)
+                     where id = $1 and state = 'identified'",
+                )
+                .bind(window.id)
+                .bind(&public_ip)
+                .bind(&boot_disk_id)
+                .execute(&mut *conn)
+                .await?;
                 let carrier: Option<bool> = sqlx::query_scalar(
                     "select role = 'worker' and is_carrier from machines where id = $1 for share",
                 )
@@ -1024,8 +977,8 @@ impl CloudService {
                 .bind(json!({
                     "window_id": window.id,
                     "machine_id": machine,
-                    "host": window.router_ip.clone().unwrap_or_else(|| config.router_ip.clone()),
-                    "ssh_port": window.dnat_port,
+                    "host": public_ip,
+                    "ssh_port": 22,
                     "host_key_public": window.host_key_public,
                     "root_dir": CLOUD_ROOT_DIR,
                     "max_running": config.max_running,
@@ -1069,6 +1022,104 @@ impl CloudService {
         Ok(())
     }
 
+    // ───────── Остановка машины ─────────
+
+    /// Машина остановилась не по нашей воле. Прерываемую остановил Яндекс (`preempted`);
+    /// обычная так не останавливается, а `ERROR` и `CRASHED` — поломка в любом случае
+    /// (`vm_broken`). Окно уходит на снос, раннер отзывается в той же транзакции, владельцу
+    /// пуш. Задачи раннера при этом становятся `lost`.
+    async fn stopped(
+        &self,
+        window: &Window,
+        broken: bool,
+        now: DateTime<Utc>,
+    ) -> Result<(), sqlx::Error> {
+        let reason = if window.preemptible && !broken {
+            windows::REASON_PREEMPTED
+        } else {
+            windows::REASON_VM_BROKEN
+        };
+        let id = window.id;
+        let name = window.name.clone();
+        crate::db::in_tx(&self.pool, move |conn| {
+            Box::pin(async move {
+                let moved = windows::begin_cleanup_in_tx(
+                    conn,
+                    id,
+                    Cleanup {
+                        stopped: !broken,
+                        ..Cleanup::because(reason)
+                    },
+                    now,
+                )
+                .await?;
+                if moved {
+                    crate::notify::enqueue_cloud_alert_in_tx(
+                        conn,
+                        &format!("cloud:{reason}:{id}"),
+                        &json!({"code": reason, "window_id": id, "name": name}),
+                    )
+                    .await?;
+                }
+                Ok::<_, sqlx::Error>(())
+            })
+        })
+        .await
+    }
+
+    /// Опрос машины работающего окна, не чаще раза в `STATUS_POLL_EVERY`. `true`: окно ушло
+    /// на снос, шаг закончен.
+    async fn poll_instance(
+        &self,
+        runtime: &mut Runtime,
+        window: &Window,
+        now: DateTime<Utc>,
+    ) -> Result<bool, sqlx::Error> {
+        let Some(instance_id) = window.instance_id.as_deref() else {
+            return Ok(false);
+        };
+        if runtime
+            .status_polled
+            .get(&window.id)
+            .is_some_and(|at| now - *at < STATUS_POLL_EVERY)
+        {
+            return Ok(false);
+        }
+        runtime.status_polled.insert(window.id, now);
+        match self.provider.get(instance_id).await {
+            Ok(InstanceLookup::Found(instance)) => match instance.status {
+                InstanceStatus::Stopping | InstanceStatus::Stopped => {
+                    self.stopped(window, false, now).await?;
+                    Ok(true)
+                }
+                InstanceStatus::Broken => {
+                    self.stopped(window, true, now).await?;
+                    Ok(true)
+                }
+                _ => Ok(false),
+            },
+            // Машины нет: это подтверждает только полный список каталога окна. Окно не
+            // заканчивается сразу: сносу остаётся подтвердить диск.
+            Ok(InstanceLookup::NotFound) => {
+                match self.provider.list_instances(&window.folder_id).await {
+                    Ok(listing) if listed(&listing, window).is_none() => {
+                        self.gone(window, now).await?;
+                        Ok(true)
+                    }
+                    Ok(_) => Ok(false),
+                    Err(error) => {
+                        tracing::warn!(kind = "cloud_poll_listing", error = %error, "listing failed; nothing changed");
+                        Ok(false)
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(kind = "cloud_poll_instance", error_kind = ?error.kind, "instance poll failed");
+                Ok(false)
+            }
+        }
+    }
+
     // ───────── Работа окна ─────────
 
     /// Есть ли у раннера `cloud` работа: задачи на нём или ждущая задача, которую он взял бы
@@ -1088,7 +1139,15 @@ impl CloudService {
         .await
     }
 
-    async fn step_ready(&self, window: Window, now: DateTime<Utc>) -> Result<(), sqlx::Error> {
+    async fn step_ready(
+        &self,
+        runtime: &mut Runtime,
+        window: Window,
+        now: DateTime<Utc>,
+    ) -> Result<(), sqlx::Error> {
+        if self.poll_instance(runtime, &window, now).await? {
+            return Ok(());
+        }
         if let Some(cap) = window.hard_cap_at
             && now >= cap
         {
@@ -1187,7 +1246,15 @@ impl CloudService {
         .await
     }
 
-    async fn step_draining(&self, window: Window, now: DateTime<Utc>) -> Result<(), sqlx::Error> {
+    async fn step_draining(
+        &self,
+        runtime: &mut Runtime,
+        window: Window,
+        now: DateTime<Utc>,
+    ) -> Result<(), sqlx::Error> {
+        if self.poll_instance(runtime, &window, now).await? {
+            return Ok(());
+        }
         let mut conn = self.pool.acquire().await?;
         let machine = cloud_machine_id(&mut conn).await?;
         drop(conn);
@@ -1249,7 +1316,7 @@ impl CloudService {
         Ok(())
     }
 
-    /// Окно, которое живёт дольше предела с запасами: сервер удаляется, владельцу пуш.
+    /// Окно, которое живёт дольше предела с запасами: машина удаляется, владельцу пуш.
     /// Найденное на первом проходе после старта — простой хаба с лишним расходом.
     async fn overrun(
         &self,
@@ -1268,10 +1335,16 @@ impl CloudService {
         if now < limit + slack {
             return Ok(false);
         }
-        // Сервер сверх предела тарифицируется; публичного адреса больше нет.
-        let extra = price::final_cost_between(window.price_hourly_kopecks, cap, now)
-            .ok()
-            .map(|cost| cost.min(i64::MAX / 2));
+        // Сверх предела тарифицируются и машина, и диск: тот же счёт по секундам.
+        let extra = price::ledger_kopecks(
+            window.compute_kopecks_per_hour,
+            window.disk_kopecks_per_hour,
+            cap,
+            now,
+            now,
+        )
+        .ok()
+        .map(|cost| cost.min(i64::MAX / 2));
         let code = if runtime.first_tick {
             "outage_extra_cost"
         } else {
@@ -1297,239 +1370,291 @@ impl CloudService {
         Ok(())
     }
 
-    // ───────── Удаление ─────────
+    // ───────── Снос: машина, затем диск ─────────
 
-    async fn step_deleting(&self, window: Window, now: DateTime<Utc>) -> Result<(), sqlx::Error> {
-        let Some(server_id) = window.server_id else {
+    /// Шаг сноса. Порядок жёсткий: сначала машина, потом её загрузочный диск, и только когда
+    /// полные списки каталога окна подтвердили отсутствие обоих, окно заканчивается.
+    async fn step_deleting(
+        &self,
+        mut window: Window,
+        now: DateTime<Utc>,
+    ) -> Result<(), sqlx::Error> {
+        if window.server_gone_at.is_none() && !self.remove_instance(&mut window, now).await? {
             return Ok(());
-        };
-        if window.server_gone_at.is_none()
-            && window.delete_accepted_at.is_none()
-            && window.next_delete_at.is_none_or(|at| at <= now)
-        {
-            // Раннер отозван переходом в `deleting`; повторять отзыв не нужно.
-            self.try_delete(&window, server_id, now).await?;
         }
-        let mut window = {
-            let mut conn = self.pool.acquire().await?;
-            match windows::load(&mut conn, window.id).await? {
-                Some(fresh) if windows::owns_server(&fresh.state) => fresh,
-                _ => return Ok(()),
-            }
-        };
-        if window.server_gone_at.is_none() && window.delete_accepted_at.is_some() {
-            // Конец оплаты сервера подтверждает только полный список без него, и только
-            // после прямого ответа `404`: список мог не дойти до сервера.
-            let project = window.project_id.unwrap_or(self.config.project_id);
-            match self.provider.list_project_servers(project).await {
-                Ok(list) if !list.iter().any(|server| server.id == server_id) => {
-                    if self.confirm_absent(server_id).await? {
-                        self.mark_server_gone(window.id, now).await?;
-                        window.server_gone_at = Some(now);
-                        window.next_delete_at = None;
-                    }
-                }
-                Ok(_) => {}
+        if window.disk_gone_at.is_none() && !self.remove_disk(&mut window, now).await? {
+            return Ok(());
+        }
+        self.end(window.id, now).await
+    }
+
+    /// Машина окна: удалить и подтвердить отсутствие. `true`: полный список каталога окна
+    /// без её номера и без имени окна, `server_gone_at` стоит.
+    async fn remove_instance(
+        &self,
+        window: &mut Window,
+        now: DateTime<Utc>,
+    ) -> Result<bool, sqlx::Error> {
+        let Some(instance_id) = window.instance_id.clone() else {
+            // Номера нет: создание не дало ответа или отказало. Машину ищет имя окна в
+            // полном списке его каталога.
+            let listing = match self.provider.list_instances(&window.folder_id).await {
+                Ok(listing) => listing,
                 Err(error) => {
-                    tracing::warn!(kind = "cloud_confirm_listing", error = %error, "listing failed");
+                    tracing::warn!(kind = "cloud_confirm_listing", error = %error, "listing failed; nothing changed");
+                    return Ok(false);
                 }
+            };
+            return match listing.iter().find(|instance| instance.name == window.name) {
+                Some(found) => {
+                    // Машина всё-таки появилась: дальше она удаляется по номеру.
+                    sqlx::query(
+                        "update cloud_windows set instance_id = $2
+                         where id = $1 and state in ('deleting', 'late_cleanup')
+                           and instance_id is null",
+                    )
+                    .bind(window.id)
+                    .bind(&found.id)
+                    .execute(&self.pool)
+                    .await?;
+                    Ok(false)
+                }
+                None => {
+                    self.mark_server_gone(window, now).await?;
+                    Ok(true)
+                }
+            };
+        };
+        if window.delete_accepted_at.is_none() {
+            if !due(window.next_delete_at, now) {
+                return Ok(false);
             }
-        }
-        if window.server_gone_at.is_none()
-            && window.delete_accepted_at.is_some()
-            && window.next_delete_at.is_none_or(|at| at <= now)
-        {
-            // Принятое удаление не подтвердилось за срок: DELETE повторяется с откатом, а
-            // владелец получает пуш о неудаляемом сервере раз в 30 минут.
-            self.try_delete(&window, server_id, now).await?;
+            // Раннер отозван переходом в `deleting`; повторять отзыв не нужно.
+            self.try_delete(window, &instance_id, now).await?;
+            if !self.refresh(window).await? {
+                return Ok(false);
+            }
         }
         if window.server_gone_at.is_some() {
-            self.finish_dnat(&window, now).await?;
+            return Ok(true);
         }
-        Ok(())
-    }
-
-    /// Прямой ответ провайдера: сервера с этим номером нет. Список без сервера ещё не
-    /// доказательство, пока это не подтверждено запросом по номеру.
-    async fn confirm_absent(&self, server_id: i64) -> Result<bool, sqlx::Error> {
-        match self.provider.get_server(server_id).await {
-            Ok(ServerLookup::NotFound) => Ok(true),
-            Ok(ServerLookup::Found(_)) => Ok(false),
+        if window.delete_accepted_at.is_none() {
+            return Ok(false);
+        }
+        // Удаление принято. Ошибка его операции значит, что машина осталась: удаление
+        // повторяется с откатом и новой проверкой принадлежности.
+        if let Some(operation_id) = window.delete_operation_id.as_deref()
+            && let Ok(OperationState::Failed { grpc_code, .. }) =
+                self.provider.operation(operation_id).await
+        {
+            tracing::warn!(
+                kind = "cloud_delete_failed",
+                grpc_code,
+                "delete operation failed"
+            );
+            let attempts = window.delete_attempts.saturating_add(1);
+            sqlx::query(
+                "update cloud_windows set delete_accepted_at = null, delete_operation_id = null,
+                        last_error = 'delete_failed', delete_attempts = $2, next_delete_at = $3
+                 where id = $1 and state in ('deleting', 'late_cleanup')",
+            )
+            .bind(window.id)
+            .bind(attempts)
+            .bind(now + delete_backoff(attempts))
+            .execute(&self.pool)
+            .await?;
+            if attempts >= DELETE_FAILURES_BEFORE_ALERT {
+                self.alert_delete_failing(window, now).await?;
+            }
+            return Ok(false);
+        }
+        // Конец оплаты машины подтверждает только полный список каталога окна без неё.
+        match self.provider.list_instances(&window.folder_id).await {
+            Ok(listing) if listed(&listing, window).is_none() => {
+                self.mark_server_gone(window, now).await?;
+                return Ok(true);
+            }
+            Ok(_) => {}
             Err(error) => {
-                tracing::warn!(kind = "cloud_confirm_server", error_kind = ?error.kind, "server lookup failed");
-                Ok(false)
+                tracing::warn!(kind = "cloud_confirm_listing", error = %error, "listing failed; nothing changed");
             }
         }
+        if due(window.next_delete_at, now) {
+            // Принятое удаление не подтвердилось за срок: DELETE повторяется с откатом, а
+            // владелец получает пуш о неудаляемой машине раз в 30 минут.
+            self.try_delete(window, &instance_id, now).await?;
+        }
+        Ok(false)
     }
 
-    /// Принадлежность сервера окну или лишнему серверу по контракту API: прямой
-    /// `GET /servers/{id}` отдаёт номер и имя (проекта в схеме `vds` нет), а проект
-    /// доказывает только свежий полный список: номер должен стоять в нём с тем же именем.
-    async fn ownership(&self, server_id: i64, name: &str, project: i64) -> Ownership {
-        match self.provider.get_server(server_id).await {
-            Ok(ServerLookup::Found(state)) if state.name != name => Ownership::Mismatch,
-            Ok(ServerLookup::Found(_)) => match self.provider.list_project_servers(project).await {
-                Ok(list)
-                    if list
-                        .iter()
-                        .any(|server| server.id == server_id && server.name == name) =>
+    /// Свежая строка окна после шага, который мог её изменить. `false`: окно уже не на сносе.
+    async fn refresh(&self, window: &mut Window) -> Result<bool, sqlx::Error> {
+        let mut conn = self.pool.acquire().await?;
+        match windows::load(&mut conn, window.id).await? {
+            Some(fresh) if matches!(fresh.state.as_str(), "deleting" | windows::LATE_CLEANUP) => {
+                *window = fresh;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    /// Принадлежность машины перед удалением. Прямой ответ провайдера несёт номер, имя и
+    /// каталог: всё должно совпасть с окном. «Нет такой» отсутствия не доказывает: его
+    /// подтверждает полный список каталога без номера и без имени.
+    async fn ownership(&self, instance_id: &str, name: &str, folder_id: &str) -> Ownership {
+        match self.provider.get(instance_id).await {
+            Ok(InstanceLookup::Found(instance)) => {
+                if instance.id == instance_id
+                    && instance.name == name
+                    && instance.folder_id == folder_id
                 {
                     Ownership::Owned
+                } else {
+                    Ownership::Mismatch
                 }
-                Ok(_) => Ownership::Mismatch,
-                Err(error) => {
-                    tracing::warn!(kind = "cloud_ownership_listing", error = %error, "project listing failed; ownership is unknown");
-                    Ownership::Unknown
+            }
+            Ok(InstanceLookup::NotFound) => match self.provider.list_instances(folder_id).await {
+                Ok(listing)
+                    if !listing
+                        .iter()
+                        .any(|instance| instance.id == instance_id || instance.name == name) =>
+                {
+                    Ownership::Absent
                 }
-            },
-            // Точечный 404 сам по себе отсутствия не подтверждает: нужен полный список.
-            Ok(ServerLookup::NotFound) => match self.provider.list_project_servers(project).await {
-                Ok(list) if !list.iter().any(|server| server.id == server_id) => Ownership::Absent,
                 Ok(_) => Ownership::Unknown,
                 Err(error) => {
-                    tracing::warn!(kind = "cloud_ownership_listing", error = %error, "project listing failed; absence is unknown");
+                    tracing::warn!(kind = "cloud_ownership_listing", error = %error, "listing failed; absence is unknown");
                     Ownership::Unknown
                 }
             },
             Err(error) => {
-                tracing::warn!(kind = "cloud_delete_lookup", error_kind = ?error.kind, "server lookup before delete failed");
+                tracing::warn!(kind = "cloud_delete_lookup", error_kind = ?error.kind, "instance lookup before delete failed");
                 Ownership::Unknown
             }
         }
     }
 
-    /// Сервер пропал из полного списка (метка ставится один раз).
-    async fn mark_server_gone(&self, id: Uuid, now: DateTime<Utc>) -> Result<(), sqlx::Error> {
+    /// Машины нет в полном списке каталога (метка ставится один раз). Срок следующей попытки
+    /// сбрасывается: дальше идёт диск.
+    async fn mark_server_gone(
+        &self,
+        window: &mut Window,
+        now: DateTime<Utc>,
+    ) -> Result<(), sqlx::Error> {
         sqlx::query(
             "update cloud_windows set server_gone_at = coalesce(server_gone_at, $2),
                     next_delete_at = case when server_gone_at is null then null else next_delete_at end
              where id = $1 and state in ('deleting', 'late_cleanup')",
         )
-        .bind(id)
+        .bind(window.id)
         .bind(now)
         .execute(&self.pool)
         .await?;
+        if window.server_gone_at.is_none() {
+            window.server_gone_at = Some(now);
+            window.next_delete_at = None;
+        }
         Ok(())
     }
 
-    /// DNAT-правило окна после удаления сервера. Открытое правило — обязательство: окно
-    /// остаётся живым, пока полный список правил роутера не подтвердит его отсутствие.
-    async fn finish_dnat(&self, window: &Window, now: DateTime<Utc>) -> Result<(), sqlx::Error> {
-        let terminal = if window.delete_reason.as_deref() == Some("gone") {
-            "gone"
-        } else {
-            "ended"
-        };
-        if window.dnat_gone_at.is_some() {
-            return self.end(&window.id, terminal, now).await;
-        }
-        let router = window
-            .router_id
-            .as_deref()
-            .unwrap_or(&self.config.router_id);
-        let Some(port) = window.dnat_port.and_then(|port| u16::try_from(port).ok()) else {
-            return self.end(&window.id, terminal, now).await;
-        };
-        let local_ip = window.local_ip.as_deref().unwrap_or_default();
-        let public_ip = window
-            .router_ip
-            .as_deref()
-            .unwrap_or(&self.config.router_ip);
-        // Ни правила, ни попытки его создать: обязательства нет, роутер не нужен. Проверка
-        // стоит до сетевого вызова, иначе недоступность роутера держала бы окно живым.
-        if window.dnat_rule_id.is_none() && window.dnat_create_attempted_at.is_none() {
-            return self.end(&window.id, terminal, now).await;
-        }
-        let list = match self.provider.list_dnat_rules(router).await {
-            Ok(list) => list,
+    /// Загрузочный диск окна: удалить, если он пережил машину, и подтвердить отсутствие.
+    /// Диск ищется по номеру, а без номера — по точному имени окна в полном списке дисков
+    /// его каталога. `true`: диска в списке нет, `disk_gone_at` стоит.
+    async fn remove_disk(
+        &self,
+        window: &mut Window,
+        now: DateTime<Utc>,
+    ) -> Result<bool, sqlx::Error> {
+        let disks = match self.provider.list_disks(&window.folder_id).await {
+            Ok(disks) => disks,
             Err(error) => {
-                tracing::warn!(kind = "cloud_dnat_listing", error = %error, "dnat listing failed; nothing changed");
-                return Ok(());
+                tracing::warn!(kind = "cloud_disk_listing", error = %error, "disk listing failed; nothing changed");
+                return Ok(false);
             }
         };
-        // Правило могло быть создано неопределённым ответом: ищем его по полному набору
-        // `router_ip:port -> local_ip:22`, tcp.
-        let mut rule_id = window.dnat_rule_id.clone();
-        if rule_id.is_none() {
-            let Some(attempted) = window.dnat_create_attempted_at else {
-                // Вызова не было: обязательства нет.
-                return self.end(&window.id, terminal, now).await;
-            };
-            match list
-                .iter()
-                .find(|rule| rule.matches(public_ip, port, local_ip))
-            {
-                Some(rule) => {
-                    self.adopt_dnat(window.id, &rule.id).await?;
-                    rule_id = Some(rule.id.clone());
-                }
-                None if now - attempted >= DNAT_AMBIGUITY => {
-                    sqlx::query(
-                        "update cloud_windows set dnat_gone_at = coalesce(dnat_gone_at, $2)
-                         where id = $1",
-                    )
-                    .bind(window.id)
-                    .bind(now)
-                    .execute(&self.pool)
-                    .await?;
-                    return self.end(&window.id, terminal, now).await;
-                }
-                None => return Ok(()),
-            }
-        }
-        let rule_id = rule_id.expect("set above");
-        if !list.iter().any(|rule| rule.id == rule_id) {
-            // Полный список без правила: обязательство закрыто.
+        let by_id = disks
+            .iter()
+            .find(|disk| window.boot_disk_id.as_deref() == Some(disk.id.as_str()));
+        let Some(disk) = by_id.or_else(|| disks.iter().find(|disk| disk.name == window.name))
+        else {
+            self.mark_disk_gone(window, now).await?;
+            return Ok(true);
+        };
+        if window.boot_disk_id.is_none() {
+            // С этого момента окну было за что платить: итог считается по ledger.
             sqlx::query(
-                "update cloud_windows set dnat_gone_at = coalesce(dnat_gone_at, $2)
-                 where id = $1",
+                "update cloud_windows set boot_disk_id = $2
+                 where id = $1 and state in ('deleting', 'late_cleanup') and boot_disk_id is null",
             )
             .bind(window.id)
-            .bind(now)
+            .bind(&disk.id)
             .execute(&self.pool)
             .await?;
-            return self.end(&window.id, terminal, now).await;
+            window.boot_disk_id = Some(disk.id.clone());
         }
-        let retry_due = window.next_dnat_delete_at.is_none_or(|at| at <= now)
-            && window
-                .dnat_delete_accepted_at
-                .is_none_or(|at| now - at >= TimeDelta::minutes(5));
-        if !retry_due {
-            return Ok(());
+        // Список только что прочитан из каталога окна: номер и каталог доказаны им. Имя
+        // должно быть именем окна: диск с нашим номером и чужим именем не удаляется.
+        if disk.name != window.name {
+            sqlx::query(
+                "update cloud_windows set last_error = 'ownership_mismatch', next_delete_at = $2
+                 where id = $1 and state in ('deleting', 'late_cleanup')",
+            )
+            .bind(window.id)
+            .bind(now + ALERT_EVERY)
+            .execute(&self.pool)
+            .await?;
+            crate::notify::enqueue_cloud_alert(
+                &self.pool,
+                &format!(
+                    "cloud:ownership_mismatch:{}:{}",
+                    window.id,
+                    alert_slot(window, now)
+                ),
+                &json!({
+                    "code": "ownership_mismatch",
+                    "window_id": window.id,
+                    "name": window.name,
+                    "disk_id": disk.id,
+                }),
+            )
+            .await?;
+            return Ok(false);
         }
-        let attempts = window.dnat_delete_attempts.saturating_add(1);
-        match self.provider.delete_dnat_rule(router, &rule_id).await {
-            DeleteOutcome::Deleted { .. } | DeleteOutcome::AlreadyGone => {
+        // Диск ещё подключён или уже удаляется: ждём.
+        if !disk.instance_ids.is_empty() || disk.status == "DELETING" {
+            return Ok(false);
+        }
+        if !due(window.next_delete_at, now) {
+            return Ok(false);
+        }
+        let attempts = window.delete_attempts.saturating_add(1);
+        match self.provider.delete_disk(&disk.id).await {
+            DeleteOutcome::Accepted { .. } | DeleteOutcome::AlreadyGone => {
+                // Подтверждение тем же способом, что у машины: диска нет в полном списке.
+                if let Ok(after) = self.provider.list_disks(&window.folder_id).await
+                    && !after
+                        .iter()
+                        .any(|other| other.id == disk.id || other.name == window.name)
+                {
+                    self.mark_disk_gone(window, now).await?;
+                    return Ok(true);
+                }
                 sqlx::query(
-                    "update cloud_windows set dnat_delete_accepted_at = $2,
-                            dnat_delete_attempts = $3
-                     where id = $1",
+                    "update cloud_windows set delete_attempts = $2, next_delete_at = $3
+                     where id = $1 and state in ('deleting', 'late_cleanup')",
                 )
                 .bind(window.id)
-                .bind(now)
                 .bind(attempts)
+                .bind(now + delete_backoff(attempts))
                 .execute(&self.pool)
                 .await?;
-                // Подтверждение тем же способом, что у сервера: правила нет в полном списке.
-                if let Ok(list) = self.provider.list_dnat_rules(router).await
-                    && !list.iter().any(|rule| rule.id == rule_id)
-                {
-                    sqlx::query(
-                        "update cloud_windows set dnat_gone_at = coalesce(dnat_gone_at, $2)
-                         where id = $1",
-                    )
-                    .bind(window.id)
-                    .bind(now)
-                    .execute(&self.pool)
-                    .await?;
-                    return self.end(&window.id, terminal, now).await;
-                }
             }
-            DeleteOutcome::NeedsConfirmation | DeleteOutcome::Failed { .. } => {
+            DeleteOutcome::Failed { .. } => {
                 sqlx::query(
-                    "update cloud_windows set last_error = 'dnat_delete_failed',
-                            dnat_delete_attempts = $2, next_dnat_delete_at = $3
-                     where id = $1",
+                    "update cloud_windows set last_error = 'disk_delete_failed',
+                            delete_attempts = $2, next_delete_at = $3
+                     where id = $1 and state in ('deleting', 'late_cleanup')",
                 )
                 .bind(window.id)
                 .bind(attempts)
@@ -1537,35 +1662,58 @@ impl CloudService {
                 .execute(&self.pool)
                 .await?;
                 if attempts >= DELETE_FAILURES_BEFORE_ALERT {
-                    let since = window.delete_requested_at.unwrap_or(now);
-                    let slot = (now - since).num_seconds().max(0) / ALERT_EVERY.num_seconds();
                     crate::notify::enqueue_cloud_alert(
                         &self.pool,
-                        &format!("cloud:dnat_delete_failing:{}:{slot}", window.id),
-                        &json!({"code": "dnat_delete_failing", "window_id": window.id, "name": window.name}),
+                        &format!(
+                            "cloud:disk_delete_failing:{}:{}",
+                            window.id,
+                            alert_slot(window, now)
+                        ),
+                        &json!({
+                            "code": "disk_delete_failing",
+                            "window_id": window.id,
+                            "name": window.name,
+                        }),
                     )
                     .await?;
                 }
             }
         }
+        Ok(false)
+    }
+
+    async fn mark_disk_gone(
+        &self,
+        window: &mut Window,
+        now: DateTime<Utc>,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "update cloud_windows set disk_gone_at = coalesce(disk_gone_at, $2), next_delete_at = null
+             where id = $1 and state in ('deleting', 'late_cleanup')",
+        )
+        .bind(window.id)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        window.disk_gone_at.get_or_insert(now);
         Ok(())
     }
 
     async fn try_delete(
         &self,
         window: &Window,
-        server_id: i64,
+        instance_id: &str,
         now: DateTime<Utc>,
     ) -> Result<(), sqlx::Error> {
         if window.server_gone_at.is_some() {
             // Отсутствие уже подтверждено: DELETE больше не нужен.
             return Ok(());
         }
-        // Удаление только по номеру опасно: номер мог достаться чужому серверу. Прямой ответ
-        // даёт имя, а проект — только свежий полный список проекта окна.
-        let project = window.project_id.unwrap_or(self.config.project_id);
-        let expected = windows::server_name(window.id);
-        match self.ownership(server_id, &expected, project).await {
+        // Удаление только по номеру опасно: номер мог достаться чужой машине.
+        match self
+            .ownership(instance_id, &window.name, &window.folder_id)
+            .await
+        {
             Ownership::Owned => {}
             Ownership::Mismatch => {
                 sqlx::query(
@@ -1588,15 +1736,23 @@ impl CloudService {
                         "code": "ownership_mismatch",
                         "window_id": window.id,
                         "name": window.name,
-                        "server_id": server_id,
+                        "instance_id": instance_id,
                     }),
                 )
                 .await?;
                 return Ok(());
             }
-            // Полный список проекта без сервера — единственное доказательство отсутствия.
+            // Полный список каталога без машины — единственное доказательство отсутствия.
             Ownership::Absent => {
-                self.mark_server_gone(window.id, now).await?;
+                sqlx::query(
+                    "update cloud_windows set server_gone_at = coalesce(server_gone_at, $2),
+                            next_delete_at = null
+                     where id = $1 and state in ('deleting', 'late_cleanup')",
+                )
+                .bind(window.id)
+                .bind(now)
+                .execute(&self.pool)
+                .await?;
                 return Ok(());
             }
             Ownership::Unknown => {
@@ -1620,43 +1776,27 @@ impl CloudService {
             }
         }
         let repeat = window.delete_accepted_at.is_some();
-        let outcome = self.provider.delete_server(server_id).await;
+        let outcome = self.provider.delete(instance_id).await;
         let attempts = window.delete_attempts.saturating_add(1);
         match outcome {
-            DeleteOutcome::Deleted { quarantined } => {
+            // Повтор, пока удаление идёт, возвращает ту же операцию. «Уже нет» тоже ждёт
+            // подтверждения списком.
+            DeleteOutcome::Accepted { .. } | DeleteOutcome::AlreadyGone => {
+                let operation_id = match outcome {
+                    DeleteOutcome::Accepted { operation_id } => Some(operation_id),
+                    _ => None,
+                };
                 let next = if repeat {
                     now + delete_backoff(attempts)
                 } else {
                     now + DELETE_CONFIRM_AFTER
                 };
+                // Подробность неудавшегося создания остаётся: по ней владелец поймёт,
+                // почему окно закончилось `failed`.
                 sqlx::query(
                     "update cloud_windows set delete_accepted_at = coalesce(delete_accepted_at, $2),
-                            last_error = case when delete_reason in ('no_paid','dnat_refused') then last_error end,
-                            delete_attempts = $3,
-                            next_delete_at = $4,
-                            alert_state = alert_state || jsonb_build_object('quarantined', $5::boolean)
-                     where id = $1 and state in ('deleting', 'late_cleanup')",
-                )
-                .bind(window.id)
-                .bind(now)
-                .bind(attempts)
-                .bind(next)
-                .bind(quarantined)
-                .execute(&self.pool)
-                .await?;
-                if repeat {
-                    self.alert_delete_still_listed(window, now).await?;
-                }
-            }
-            DeleteOutcome::AlreadyGone => {
-                let next = if repeat {
-                    now + delete_backoff(attempts)
-                } else {
-                    now + DELETE_CONFIRM_AFTER
-                };
-                sqlx::query(
-                    "update cloud_windows set delete_accepted_at = coalesce(delete_accepted_at, $2),
-                            last_error = case when delete_reason in ('no_paid','dnat_refused') then last_error end,
+                            delete_operation_id = coalesce($5, delete_operation_id),
+                            last_error = case when delete_reason = 'create_failed' then last_error end,
                             delete_attempts = $3,
                             next_delete_at = $4
                      where id = $1 and state in ('deleting', 'late_cleanup')",
@@ -1665,31 +1805,12 @@ impl CloudService {
                 .bind(now)
                 .bind(attempts)
                 .bind(next)
+                .bind(operation_id)
                 .execute(&self.pool)
                 .await?;
                 if repeat {
                     self.alert_delete_still_listed(window, now).await?;
                 }
-            }
-            DeleteOutcome::NeedsConfirmation => {
-                // Токен не может удалить, сервер тарифицируется. Пуш сразу и с каждой
-                // повторной попыткой раз в 30 минут.
-                sqlx::query(
-                    "update cloud_windows set last_error = 'needs_confirmation', delete_attempts = $2,
-                            next_delete_at = $3
-                     where id = $1 and state in ('deleting', 'late_cleanup')",
-                )
-                .bind(window.id)
-                .bind(attempts)
-                .bind(now + ALERT_EVERY)
-                .execute(&self.pool)
-                .await?;
-                crate::notify::enqueue_cloud_alert(
-                    &self.pool,
-                    &format!("cloud:delete_needs_confirmation:{}:{attempts}", window.id),
-                    &json!({"code": "delete_needs_confirmation", "window_id": window.id, "name": window.name}),
-                )
-                .await?;
             }
             DeleteOutcome::Failed { .. } => {
                 sqlx::query(
@@ -1710,7 +1831,7 @@ impl CloudService {
         Ok(())
     }
 
-    /// Пуш о сервере, который не исчезает из списка после принятого удаления. Не чаще раза
+    /// Пуш о машине, которая не исчезает из списка после принятого удаления. Не чаще раза
     /// в 30 минут на окно.
     async fn alert_delete_still_listed(
         &self,
@@ -1746,27 +1867,26 @@ impl CloudService {
         Ok(())
     }
 
-    /// Конец окна: итоговая цена от вызова создания до подтверждённого конца.
-    async fn end(
-        &self,
-        id: &Uuid,
-        to: &'static str,
-        now: DateTime<Utc>,
-    ) -> Result<(), sqlx::Error> {
-        let id = *id;
+    /// Конец окна после сноса: машины и диска нет в полных списках. Итог — ledger из двух
+    /// частей, каждая до своего подтверждённого конца. Конечное состояние зависит от причины
+    /// сноса (`windows::terminal_state`).
+    async fn end(&self, id: Uuid, now: DateTime<Utc>) -> Result<(), sqlx::Error> {
         crate::db::in_tx(&self.pool, move |conn| {
             Box::pin(async move {
                 let Some(window) = windows::load_for_update(&mut *conn, id).await? else {
                     return Ok::<_, sqlx::Error>(());
                 };
-                if !window.is_live() {
+                let cleaning = matches!(window.state.as_str(), "deleting" | windows::LATE_CLEANUP);
+                if !cleaning || window.server_gone_at.is_none() || window.disk_gone_at.is_none() {
                     return Ok(());
                 }
-                let cost = ledger_cost(&window, window.server_gone_at.unwrap_or(now));
+                let to = windows::terminal_state(window.delete_reason.as_deref());
+                let cost = windows::final_cost(&window, now);
                 sqlx::query(
                     "update cloud_windows set state = $2, final_cost_kopecks = $3,
                             delete_confirmed_at = $4,
-                            last_error = case when delete_reason in ('no_paid','dnat_refused') then last_error end
+                            last_error = case when delete_reason in ('create_failed', 'gone')
+                                              then last_error end
                      where id = $1",
                 )
                 .bind(id)
@@ -1775,6 +1895,10 @@ impl CloudService {
                 .bind(now)
                 .execute(&mut *conn)
                 .await?;
+                windows::forget_key(id);
+                if window.delete_reason.as_deref() == Some(windows::REASON_PREEMPTED) {
+                    windows::on_preempted_cleanup_done_in_tx(conn, &window, now).await?;
+                }
                 Ok(())
             })
         })
@@ -1783,47 +1907,56 @@ impl CloudService {
 
     // ───────── Сверка ─────────
 
-    /// Сверка проекта со строками окон. `Ok(false)` — сверка прошла, но какое-то удаление
-    /// ещё ждёт подтверждения: успешной она не считается. `Err(())` — список не получен
-    /// целиком, ничего не менялось.
-    async fn reconcile(&self, now: DateTime<Utc>) -> Result<bool, ()> {
-        // Список текущего проекта ищет и лишние серверы. Живые окна другого проекта из
-        // старой конфигурации подтверждаются каждый в своём проекте.
-        let mut projects = vec![self.config.project_id];
-        let others: Vec<i64> = sqlx::query_scalar(
-            "select distinct project_id from cloud_windows
-              where state = any($1) and project_id is not null",
+    /// Сверка каталогов со строками окон. `Ok(false)` — сверка прошла, но какое-то удаление
+    /// ещё ждёт подтверждения: успешной она не считается. `Err(())` — список какого-то
+    /// каталога не получен целиком; для этого каталога ничего не менялось.
+    ///
+    /// Каталоги: тот, что в конфигурации (только в нём ищутся лишние машины и диски), и
+    /// каталоги всех окон, которые ещё владеют ресурсом или закончились `failed`. Так окно
+    /// из прежнего каталога доубирается и после смены конфигурации.
+    async fn reconcile(&self, runtime: &mut Runtime, now: DateTime<Utc>) -> Result<bool, ()> {
+        let mut folders = vec![self.config.folder_id.clone()];
+        let others: Vec<String> = sqlx::query_scalar(
+            "select distinct folder_id from cloud_windows
+              where state = any($1) or state = 'failed'",
         )
         .bind(windows::billing_states())
         .fetch_all(&self.pool)
         .await
-        .map_err(|error| warn_db("cloud_reconcile_projects", &error))?;
-        for project in others {
-            if !projects.contains(&project) {
-                projects.push(project);
+        .map_err(|error| warn_db("cloud_reconcile_folders", &error))?;
+        for folder in others {
+            if !folder.is_empty() && !folders.contains(&folder) {
+                folders.push(folder);
             }
         }
-        // Каждый проект разбирается сам: ошибка списка одного проекта не мешает
-        // подтверждению и сносу окон другого. Новых созданий при этом не будет: успешной
-        // такая сверка не считается.
+        // Каждый каталог разбирается сам: ошибка списка одного не мешает подтверждению и
+        // сносу окон другого. Новых созданий при этом не будет: успешной такая сверка не
+        // считается.
         let mut complete = true;
-        for project in projects {
-            let listing = match self.provider.list_project_servers(project).await {
-                Ok(listing) => listing,
+        for folder in folders {
+            let instances = match self.provider.list_instances(&folder).await {
+                Ok(instances) => instances,
                 Err(error) => {
-                    tracing::warn!(kind = "cloud_reconcile_listing", project, error = %error, "project listing failed; nothing changed for this project");
+                    tracing::warn!(kind = "cloud_reconcile_listing", error = %error, "instance listing failed; nothing changed for this folder");
                     complete = false;
                     continue;
                 }
             };
-            if let Err(error) = self.apply_listing(&listing, project, now).await {
+            let disks = match self.provider.list_disks(&folder).await {
+                Ok(disks) => disks,
+                Err(error) => {
+                    tracing::warn!(kind = "cloud_reconcile_listing", error = %error, "disk listing failed; nothing changed for this folder");
+                    complete = false;
+                    continue;
+                }
+            };
+            if let Err(error) = self
+                .apply_listing(runtime, &folder, &instances, &disks, now)
+                .await
+            {
                 warn_db("cloud_reconcile", &error);
                 complete = false;
             }
-        }
-        // Правила роутера идут отдельно: список не получен целиком — ничего не меняем.
-        if let Err(error) = self.delete_stray_dnat_rules(now).await {
-            warn_db("cloud_reconcile_dnat", &error);
         }
         if !complete {
             return Err(());
@@ -1840,77 +1973,32 @@ impl CloudService {
         Ok(!pending)
     }
 
-    /// Лишние DNAT-правила роутера. Удаляются только правила с публичным портом внутри
-    /// настроенного диапазона, которых не держит ни одно живое окно. Правила вне диапазона
-    /// и публичный адрес самого роутера не трогаются никогда. Неполный список не меняет
-    /// ничего: удалять можно только то, что прочитано целиком.
-    async fn delete_stray_dnat_rules(&self, now: DateTime<Utc>) -> Result<(), sqlx::Error> {
-        let Some((first_port, last_port)) = self.config.dnat_port_values() else {
-            return Ok(());
-        };
-        let held: Vec<Option<i32>> =
-            sqlx::query_scalar("select dnat_port from cloud_windows where state = any($1)")
-                .bind(windows::billing_states())
-                .fetch_all(&self.pool)
-                .await?;
-        let held: std::collections::HashSet<u16> = held
-            .into_iter()
-            .filter_map(|port| port.and_then(|port| u16::try_from(port).ok()))
-            .collect();
-        let list = match self.provider.list_dnat_rules(&self.config.router_id).await {
-            Ok(list) => list,
-            Err(error) => {
-                tracing::warn!(kind = "cloud_dnat_listing", error = %error, "dnat listing failed; nothing changed");
-                return Ok(());
-            }
-        };
-        for rule in list.iter().filter(|rule| {
-            rule.public_port
-                .parse::<u16>()
-                .is_ok_and(|port| (first_port..=last_port).contains(&port) && !held.contains(&port))
-        }) {
-            let payload = |code: &str| json!({"code": code, "rule_id": rule.id, "public_port": rule.public_port});
-            match self
-                .provider
-                .delete_dnat_rule(&self.config.router_id, &rule.id)
-                .await
-            {
-                DeleteOutcome::Deleted { .. } | DeleteOutcome::AlreadyGone => {
-                    crate::notify::enqueue_cloud_alert(
-                        &self.pool,
-                        &format!("cloud:stray_dnat:{}", rule.id),
-                        &payload("stray_dnat_deleted"),
-                    )
-                    .await?;
-                }
-                DeleteOutcome::NeedsConfirmation | DeleteOutcome::Failed { .. } => {
-                    let slot = now.timestamp() / ALERT_EVERY.num_seconds();
-                    crate::notify::enqueue_cloud_alert(
-                        &self.pool,
-                        &format!("cloud:stray_dnat_stuck:{}:{slot}", rule.id),
-                        &payload("stray_dnat_stuck"),
-                    )
-                    .await?;
-                }
-            }
-        }
-        Ok(())
-    }
-
     async fn apply_listing(
         &self,
-        listing: &[ServerSummary],
-        project: i64,
+        runtime: &mut Runtime,
+        folder: &str,
+        instances: &[InstanceSummary],
+        disks: &[Disk],
         now: DateTime<Utc>,
     ) -> Result<(), sqlx::Error> {
-        let mut named: std::collections::HashMap<Uuid, &ServerSummary> =
-            std::collections::HashMap::new();
-        for server in listing {
-            if let Some(id) = window_id_from_name(&server.name) {
-                named.insert(id, server);
+        // Только точные имена окон: `canterlot-runner-<канонический uuid>`.
+        let mut named_instances: HashMap<Uuid, Vec<&InstanceSummary>> = HashMap::new();
+        for instance in instances {
+            if let Some(id) = window_id_from_name(&instance.name) {
+                named_instances.entry(id).or_default().push(instance);
             }
         }
-        let ids: Vec<Uuid> = named.keys().copied().collect();
+        let mut named_disks: HashMap<Uuid, Vec<&Disk>> = HashMap::new();
+        for disk in disks {
+            if let Some(id) = window_id_from_name(&disk.name) {
+                named_disks.entry(id).or_default().push(disk);
+            }
+        }
+        let ids: Vec<Uuid> = named_instances
+            .keys()
+            .chain(named_disks.keys())
+            .copied()
+            .collect();
         let windows: Vec<Window> = sqlx::query_as(
             "select * from cloud_windows where state = any($1) or id = any($2) order by created_at, id",
         )
@@ -1919,96 +2007,109 @@ impl CloudService {
         .fetch_all(&self.pool)
         .await?;
         let unknown_for = grace(self.config.create_unknown_window);
-        let current = project == self.config.project_id;
-        let mut known = std::collections::HashSet::new();
+        let mut known = HashSet::new();
         for window in &windows {
             known.insert(window.id);
-            if window.project_id.unwrap_or(self.config.project_id) != project {
+            if window.folder_id != folder {
                 continue;
             }
-            let listed = named.get(&window.id);
-            match (window.state.as_str(), listed) {
-                ("create_unknown", Some(server)) => {
-                    self.identify(window.id, server.id, "create_unknown")
-                        .await?;
+            // Два ресурса с одним именем окна: по имени не решить, какой из них наш.
+            let instance = match named_instances.get(&window.id).map(Vec::as_slice) {
+                None => None,
+                Some([instance]) => Some(*instance),
+                Some(_) => {
+                    tracing::warn!(
+                        kind = "cloud_reconcile_ambiguous",
+                        "several instances share a window name; skipped"
+                    );
+                    continue;
                 }
-                // Вызов создания начат, а хаб упал до ответа: сервер уже виден по имени.
-                ("create_intent", Some(server)) if window.create_called_at.is_some() => {
-                    self.identify(window.id, server.id, "create_intent").await?;
-                }
-                ("create_unknown", None) => {
-                    if window
-                        .create_called_at
-                        .is_some_and(|called| now - called >= unknown_for)
-                    {
-                        self.fail(window.id, "not_found_in_listing").await?;
+            };
+            let old_enough = window
+                .create_called_at
+                .is_some_and(|called| now - called >= unknown_for);
+            match window.state.as_str() {
+                "create_unknown" => match instance {
+                    Some(instance) => {
+                        self.identify(window.id, &instance.id, None, "create_unknown")
+                            .await?;
+                    }
+                    // Машина так и не появилась в списках. Вызов был, поэтому окно уходит
+                    // на снос: тот подтвердит ещё и диск.
+                    None if old_enough => {
+                        self.fail_after_call(window.id, "not_found_in_listing", now)
+                            .await?;
+                    }
+                    None => {}
+                },
+                // Вызов создания начат, а хаб упал до ответа: машина уже видна по имени.
+                "create_intent" if window.create_called_at.is_some() => {
+                    if let Some(instance) = instance {
+                        self.identify(window.id, &instance.id, None, "create_intent")
+                            .await?;
                     }
                 }
-                ("identified" | "ready" | "draining", None) => {
-                    // Только когда сервер уже должен был попасть в список: у провайдера он
-                    // может появиться с задержкой. Отсутствие в списке подтверждается прямым
-                    // ответом `404`, прежде чем окно станет `gone`.
-                    if window
-                        .create_called_at
-                        .is_some_and(|called| now - called >= unknown_for)
-                        && let Some(server_id) = window.server_id
-                        && self.confirm_absent(server_id).await?
-                    {
+                // Только когда машина уже должна была попасть в список: у провайдера она
+                // может появиться с задержкой.
+                "identified" | "ready" | "draining" => {
+                    if old_enough && listed(instances, window).is_none() {
                         self.gone(window, now).await?;
                     }
                 }
-                // Сервера нет без принятого удаления (владелец удалил в панели): оплата
-                // сервера кончилась; окно закончит шаг удаления, когда уйдёт и адрес.
-                ("deleting" | "late_cleanup", None) if window.server_id.is_some() => {
-                    if self
-                        .confirm_absent(window.server_id.expect("checked"))
-                        .await?
-                    {
-                        self.mark_server_gone(window.id, now).await?;
+                "failed" | "ended" | "gone" if window.create_called_at.is_some() => {
+                    if let Some(instance) = instance {
+                        // Машина закрытого окна появилась позже: это не лишняя машина, а
+                        // обязательство исходного окна. Возвращаем её окну, чтобы удалить
+                        // обычным путём и посчитать итог от вызова создания.
+                        self.reattach_late(window, instance, now).await?;
+                    } else if let Some(disks) = named_disks.get(&window.id) {
+                        match disks.as_slice() {
+                            // Диск закрытого окна остался без машины: он тарифицируется.
+                            [disk] if disk.instance_ids.is_empty() && disk.status != "DELETING" => {
+                                self.reopen_for_disk(window, disk, now).await?;
+                            }
+                            [_] => {}
+                            _ => {
+                                tracing::warn!(
+                                    kind = "cloud_reconcile_ambiguous",
+                                    "several disks share a window name; skipped"
+                                );
+                            }
+                        }
                     }
-                }
-                // Сервер окна, закрытого после неопределённого создания, появился позже:
-                // это не лишний сервер, а обязательство исходного окна. Возвращаем его окну,
-                // чтобы удалить обычным путём и посчитать итог от вызова создания.
-                ("failed", Some(server)) if window.create_called_at.is_some() => {
-                    self.reattach_late(window, server, now).await?;
-                }
-                // Лишний сервер ищется только в текущем проекте.
-                (state, Some(server)) if current && !windows::owns_server(state) => {
-                    self.delete_stray(server, project, now).await?;
                 }
                 _ => {}
             }
         }
-        if current {
-            for (id, server) in named {
-                if !known.contains(&id) {
-                    self.delete_stray(server, project, now).await?;
-                }
-            }
+        // Лишние машины и диски ищутся только в каталоге из конфигурации: он отведён под
+        // раннеры целиком.
+        if folder == self.config.folder_id {
+            self.delete_strays(runtime, &named_instances, &named_disks, &known, now)
+                .await?;
         }
         Ok(())
     }
 
-    /// Поздний сервер возвращается своему окну как обязательство сноса: `late_cleanup` вне
+    /// Поздняя машина возвращается своему окну как обязательство сноса: `late_cleanup` вне
     /// правила одного живого окна, поэтому преемник своё место не теряет. Снос считается в
     /// бюджете и закрывает новые создания, а итог — от вызова создания до подтверждённого
     /// отсутствия.
     async fn reattach_late(
         &self,
         window: &Window,
-        server: &ServerSummary,
+        instance: &InstanceSummary,
         now: DateTime<Utc>,
     ) -> Result<(), sqlx::Error> {
         let updated = sqlx::query(
-            "update cloud_windows set state = 'late_cleanup', server_id = $2,
+            "update cloud_windows set state = 'late_cleanup', instance_id = $2,
                     final_cost_kopecks = null, delete_confirmed_at = null, server_gone_at = null,
-                    delete_requested_at = $3, delete_reason = 'late_create', delete_accepted_at = null,
+                    disk_gone_at = null, delete_requested_at = $3, delete_reason = 'late_create',
+                    delete_accepted_at = null, delete_operation_id = null,
                     delete_attempts = 0, next_delete_at = $3, last_error = 'late_create'
-              where id = $1 and state = 'failed'",
+              where id = $1 and state in ('failed', 'ended', 'gone')",
         )
         .bind(window.id)
-        .bind(server.id)
+        .bind(&instance.id)
         .bind(now)
         .execute(&self.pool)
         .await?
@@ -2024,60 +2125,67 @@ impl CloudService {
         Ok(())
     }
 
-    /// Сервер окна пропал из полного списка, хотя удаление не запрашивалось. Если за окном
-    /// осталось DNAT-правило (или его вызов), окно не становится терминальным: оно уходит в
-    /// `deleting` и освобождает порт только после подтверждённого отсутствия правила.
+    /// Диск закрытого окна нашёлся в каталоге без машины: окно открывается заново как
+    /// `late_cleanup` и убирает его обычным шагом сноса. Ledger остаётся тот же: машина
+    /// посчитана до своего прежнего конца, диск — до нового.
+    async fn reopen_for_disk(
+        &self,
+        window: &Window,
+        disk: &Disk,
+        now: DateTime<Utc>,
+    ) -> Result<(), sqlx::Error> {
+        let updated = sqlx::query(
+            "update cloud_windows set state = 'late_cleanup', boot_disk_id = $2,
+                    final_cost_kopecks = null, delete_confirmed_at = null, disk_gone_at = null,
+                    delete_requested_at = $3, delete_reason = 'late_disk',
+                    delete_attempts = 0, next_delete_at = $3, last_error = 'late_disk'
+              where id = $1 and state in ('failed', 'ended', 'gone')",
+        )
+        .bind(window.id)
+        .bind(&disk.id)
+        .bind(now)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        if updated > 0 {
+            crate::notify::enqueue_cloud_alert(
+                &self.pool,
+                &format!("cloud:late_disk:{}:{}", window.id, disk.id),
+                &json!({"code": "late_disk", "window_id": window.id, "name": window.name}),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    /// Машина окна пропала из полного списка каталога, хотя удаление не запрашивалось. Окно
+    /// не заканчивается сразу: оно уходит на снос с уже подтверждённым отсутствием машины, и
+    /// тому остаётся диск. Закончится оно `gone`.
     async fn gone(&self, window: &Window, now: DateTime<Utc>) -> Result<(), sqlx::Error> {
         let id = window.id;
-        let ended = crate::db::in_tx(&self.pool, move |conn| {
+        let moved = crate::db::in_tx(&self.pool, move |conn| {
             Box::pin(async move {
                 let Some(window) = windows::load_for_update(&mut *conn, id).await? else {
                     return Ok::<_, sqlx::Error>(false);
                 };
-                if !matches!(window.state.as_str(), "identified" | "ready" | "draining") {
+                if !windows::SERVING.contains(&window.state.as_str()) {
                     return Ok(false);
                 }
-                let dnat_open = window.dnat_rule_id.is_some()
-                    || window.dnat_create_attempted_at.is_some();
-                if dnat_open {
-                    sqlx::query(
-                        "update cloud_windows set state = 'deleting', server_gone_at = $2,
-                                delete_requested_at = $2, delete_reason = 'gone',
-                                next_delete_at = null, delete_accepted_at = null,
-                                final_cost_kopecks = null, last_error = 'server_missing'
-                         where id = $1",
-                    )
-                    .bind(id)
-                    .bind(now)
-                    .execute(&mut *conn)
-                    .await?;
-                } else {
-                    let cost = ledger_cost(&window, now);
-                    sqlx::query(
-                        "update cloud_windows set state = 'gone', server_gone_at = $2,
-                                final_cost_kopecks = $3, delete_confirmed_at = $2,
-                                last_error = 'server_missing'
-                         where id = $1",
-                    )
-                    .bind(id)
-                    .bind(now)
-                    .bind(cost)
-                    .execute(&mut *conn)
-                    .await?;
-                }
-                sqlx::query(
-                    "update commands set delivery_state = 'completed', completed_at = coalesce(completed_at, now())
-                     where kind = 'attach_runner' and payload->>'window_id' = $1 and delivery_state <> 'completed'",
+                windows::begin_cleanup_in_tx(
+                    conn,
+                    id,
+                    Cleanup {
+                        last_error: Some("server_missing"),
+                        server_gone: true,
+                        ..Cleanup::because(windows::REASON_GONE)
+                    },
+                    now,
                 )
-                .bind(id.to_string())
-                .execute(&mut *conn)
-                .await?;
-                windows::revoke_cloud_machine_in_tx(conn).await?;
-                Ok(true)
+                .await
             })
         })
         .await?;
-        if ended {
+        if moved {
             crate::notify::enqueue_cloud_alert(
                 &self.pool,
                 &format!("cloud:window_gone:{}", window.id),
@@ -2088,59 +2196,187 @@ impl CloudService {
         Ok(())
     }
 
-    /// Сервер с нашим именем без живого окна: удаляется и сообщается владельцу. Перед
-    /// удалением прямой ответ должен показать тот же номер с тем же именем: номер мог
-    /// достаться чужому серверу.
-    async fn delete_stray(
+    /// Лишние машины и диски каталога из конфигурации: имя точно как у окна, а строки окна
+    /// нет вовсе. Каждое удаление идёт после свежей проверки этого же номера, а сообщение
+    /// владельцу — когда полный список подтвердил отсутствие. Неоднозначное пропускается.
+    async fn delete_strays(
         &self,
-        server: &ServerSummary,
-        project: i64,
+        runtime: &mut Runtime,
+        named_instances: &HashMap<Uuid, Vec<&InstanceSummary>>,
+        named_disks: &HashMap<Uuid, Vec<&Disk>>,
+        known: &HashSet<Uuid>,
         now: DateTime<Utc>,
     ) -> Result<(), sqlx::Error> {
-        let payload =
-            |code: &str| json!({"code": code, "name": server.name, "server_id": server.id});
-        match self.ownership(server.id, &server.name, project).await {
-            Ownership::Owned => {}
-            // Сервера уже нет: удалять нечего.
-            Ownership::Absent => return Ok(()),
-            Ownership::Mismatch | Ownership::Unknown => {
-                let slot = now.timestamp() / ALERT_EVERY.num_seconds();
-                crate::notify::enqueue_cloud_alert(
-                    &self.pool,
-                    &format!("cloud:stray_stuck:{}:{slot}", server.id),
-                    &payload("stray_server_stuck"),
-                )
-                .await?;
-                return Ok(());
+        let folder = self.config.folder_id.as_str();
+        let slot = now.timestamp() / ALERT_EVERY.num_seconds();
+        let stray_instances: Vec<&InstanceSummary> = named_instances
+            .iter()
+            .filter(|(id, _)| !known.contains(id))
+            .filter_map(|(_, found)| match found.as_slice() {
+                [instance] => Some(*instance),
+                _ => None,
+            })
+            .collect();
+        let stray_disks: Vec<&Disk> = named_disks
+            .iter()
+            .filter(|(id, _)| !known.contains(id))
+            .filter_map(|(_, found)| match found.as_slice() {
+                // Диск при машине уйдёт вместе с ней; подключённый не удалить.
+                [disk] if disk.instance_ids.is_empty() => Some(*disk),
+                _ => None,
+            })
+            .collect();
+        for instance in stray_instances {
+            let stuck = json!({
+                "code": "stray_server_stuck",
+                "name": instance.name,
+                "instance_id": instance.id,
+            });
+            let stuck_key = format!("cloud:stray_stuck:{}:{slot}", instance.id);
+            if instance.status == InstanceStatus::Deleting {
+                runtime.stray_pending.insert(
+                    instance.id.clone(),
+                    Stray::Instance {
+                        name: instance.name.clone(),
+                    },
+                );
+                continue;
+            }
+            // Перед удалением прямой ответ должен показать тот же номер с тем же именем в
+            // том же каталоге: номер мог достаться чужой машине.
+            match self.ownership(&instance.id, &instance.name, folder).await {
+                Ownership::Owned => {}
+                // Машины уже нет: удалять нечего.
+                Ownership::Absent => continue,
+                Ownership::Mismatch | Ownership::Unknown => {
+                    crate::notify::enqueue_cloud_alert(&self.pool, &stuck_key, &stuck).await?;
+                    continue;
+                }
+            }
+            match self.provider.delete(&instance.id).await {
+                DeleteOutcome::Accepted { .. } | DeleteOutcome::AlreadyGone => {
+                    runtime.stray_pending.insert(
+                        instance.id.clone(),
+                        Stray::Instance {
+                            name: instance.name.clone(),
+                        },
+                    );
+                }
+                DeleteOutcome::Failed { .. } => {
+                    crate::notify::enqueue_cloud_alert(&self.pool, &stuck_key, &stuck).await?;
+                }
             }
         }
-        match self.provider.delete_server(server.id).await {
-            DeleteOutcome::Deleted { .. } | DeleteOutcome::AlreadyGone => {
-                crate::notify::enqueue_cloud_alert(
-                    &self.pool,
-                    &format!("cloud:stray:{}:{}", server.id, server.name),
-                    &payload("stray_server_deleted"),
-                )
-                .await?;
+        if !stray_disks.is_empty() {
+            // Свежий список дисков перед удалением: диск должен стоять в нём с тем же
+            // номером, тем же именем и без машины.
+            match self.provider.list_disks(folder).await {
+                Ok(fresh) => {
+                    for disk in stray_disks {
+                        let still_stray = fresh.iter().any(|other| {
+                            other.id == disk.id
+                                && other.name == disk.name
+                                && other.instance_ids.is_empty()
+                        });
+                        if !still_stray {
+                            continue;
+                        }
+                        match self.provider.delete_disk(&disk.id).await {
+                            DeleteOutcome::Accepted { .. } | DeleteOutcome::AlreadyGone => {
+                                runtime.stray_pending.insert(
+                                    disk.id.clone(),
+                                    Stray::Disk {
+                                        name: disk.name.clone(),
+                                    },
+                                );
+                            }
+                            DeleteOutcome::Failed { .. } => {
+                                crate::notify::enqueue_cloud_alert(
+                                    &self.pool,
+                                    &format!("cloud:stray_disk_stuck:{}:{slot}", disk.id),
+                                    &json!({
+                                        "code": "stray_disk_stuck",
+                                        "name": disk.name,
+                                        "disk_id": disk.id,
+                                    }),
+                                )
+                                .await?;
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(kind = "cloud_stray_listing", error = %error, "disk listing failed; no stray disk deleted");
+                }
             }
-            DeleteOutcome::NeedsConfirmation | DeleteOutcome::Failed { .. } => {
-                let slot = now.timestamp() / ALERT_EVERY.num_seconds();
-                crate::notify::enqueue_cloud_alert(
-                    &self.pool,
-                    &format!("cloud:stray_stuck:{}:{slot}", server.id),
-                    &payload("stray_server_stuck"),
-                )
-                .await?;
+        }
+        self.confirm_strays(runtime).await
+    }
+
+    /// Удалённое лишнее сообщается владельцу, когда его нет в свежем полном списке.
+    async fn confirm_strays(&self, runtime: &mut Runtime) -> Result<(), sqlx::Error> {
+        if runtime.stray_pending.is_empty() {
+            return Ok(());
+        }
+        let folder = self.config.folder_id.as_str();
+        let any = |instance: bool| {
+            runtime
+                .stray_pending
+                .values()
+                .any(|stray| matches!(stray, Stray::Instance { .. }) == instance)
+        };
+        let instances = if any(true) {
+            self.provider.list_instances(folder).await.ok()
+        } else {
+            None
+        };
+        let disks = if any(false) {
+            self.provider.list_disks(folder).await.ok()
+        } else {
+            None
+        };
+        let mut confirmed = Vec::new();
+        for (id, stray) in &runtime.stray_pending {
+            let (code, name, id_key, absent) = match stray {
+                Stray::Instance { name } => (
+                    "stray_server_deleted",
+                    name,
+                    "instance_id",
+                    instances
+                        .as_ref()
+                        .is_some_and(|list| !list.iter().any(|instance| &instance.id == id)),
+                ),
+                Stray::Disk { name } => (
+                    "stray_disk_deleted",
+                    name,
+                    "disk_id",
+                    disks
+                        .as_ref()
+                        .is_some_and(|list| !list.iter().any(|disk| &disk.id == id)),
+                ),
+            };
+            if !absent {
+                continue;
             }
+            crate::notify::enqueue_cloud_alert(
+                &self.pool,
+                &format!("cloud:stray:{id}:{name}"),
+                &json!({"code": code, "name": name, id_key: id}),
+            )
+            .await?;
+            confirmed.push(id.clone());
+        }
+        for id in confirmed {
+            runtime.stray_pending.remove(&id);
         }
         Ok(())
     }
 }
 
-/// Служба по конфигурации хаба. Нет таблицы `[runners.cloud]` — облако выключено. Токен
-/// читается из файла и дальше живёт только внутри клиента. Всё, что мешает включению
-/// (негодная конфигурация, нечитаемый токен), пишется предупреждением с кодом причины и без
-/// значений, а облако остаётся выключенным.
+/// Служба по конфигурации хаба. Нет таблицы `[runners.cloud]` — облако выключено. Ключ
+/// сервисного аккаунта читается из файла и дальше живёт только внутри клиента. Всё, что
+/// мешает включению (негодная конфигурация, нечитаемый ключ), пишется предупреждением с
+/// причиной и без значений, а облако остаётся выключенным.
 ///
 /// Несущая здесь не проверяется: снос и сверка обязательств нужны и без неё, а база может
 /// быть временно недоступна на старте. Проверка несущей стоит только на пути нового
@@ -2162,19 +2398,19 @@ pub async fn from_config(
         disabled(code);
         return None;
     }
-    let provider = match super::TimewebProvider::new(super::TimewebConfig::new(&config.token_file))
-    {
+    let provider = match YandexClient::new(config.yandex()) {
         Ok(provider) => provider,
         Err(error) => {
-            // Текст ошибки — только вид сбоя ввода-вывода, без содержимого файла.
+            // Текст ошибки — только вид сбоя, без содержимого файла ключа.
             disabled(&error.to_string());
             return None;
         }
     };
     tracing::info!(
         kind = "cloud_enabled",
-        project_id = config.project_id,
+        folder_id = %config.folder_id,
         profiles = config.profile.len(),
+        preemptible = config.preemptible,
         carrier = %config.carrier_machine_id,
         "cloud runner windows enabled"
     );
