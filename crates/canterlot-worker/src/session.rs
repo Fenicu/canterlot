@@ -1194,6 +1194,11 @@ impl Worker {
             let assigned = link.assigned.take()?;
             let mut settings = crate::carrier::CarrierSettings::from_config(&self.config);
             settings.cloud = cloud.clone();
+            settings.facts = self
+                .manager
+                .as_ref()
+                .and_then(|manager| manager.carrier())
+                .map(|commands| commands.sink());
             Some(AbortOnDrop(tokio::spawn(crate::carrier::run(
                 settings,
                 link.bridge.clone(),

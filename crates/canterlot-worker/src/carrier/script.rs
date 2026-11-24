@@ -207,6 +207,70 @@ pub fn remove_fatal(root: &Path) -> String {
     format!("rm -f -- {}/state/fatal", root.display())
 }
 
+/// Команда подготовки облачного окна: от root, с окружением выхода в сеть, тело скрипта —
+/// на stdin. Перед `exec` пишется группа процессов: по ней снимается зависшая подготовка
+/// вместе со всеми потомками (`docker pull`, фоновые команды), а не только оболочка. К
+/// моменту снятия сам процесс может уже исчезнуть — sshd гасит сеанс, — а группа живёт,
+/// пока в ней есть хоть один потомок, поэтому хранится именно pgid.
+pub fn prepare_run(sudo: &str, egress_env: &Path, group: &Path) -> String {
+    let env = super::stage::sh_quote(&egress_env.display().to_string());
+    let group = super::stage::sh_quote(&group.display().to_string());
+    let inner = format!(
+        "set -a; . {env}; set +a; \
+         echo $(ps -o pgid= -p $$ | tr -d ' ') > {group}; exec bash -s 2>&1"
+    );
+    format!("{sudo} bash -c {} 2>&1", super::stage::sh_quote(&inner))
+}
+
+/// Маркер подготовки: создаёт каталог и пустой файл. `sudo` — тот же префикс, что у скрипта.
+pub fn prepare_marker(sudo: &str, path: &Path) -> String {
+    marker_command(sudo, path, &format!(": > {path}", path = quoted_path(path)))
+}
+
+/// Файл с итогом неудачной подготовки: каталог и `cat` со stdin.
+pub fn prepare_marker_write(sudo: &str, path: &Path) -> String {
+    marker_command(
+        sudo,
+        path,
+        &format!("cat > {path}", path = quoted_path(path)),
+    )
+}
+
+/// Снимает зависшую подготовку вместе со всей её группой процессов и убирает файл группы.
+/// Оболочка могла уже умереть вместе с сеансом sshd, а потомки (`docker pull`, фоновые
+/// процессы) — остаться; поэтому убивается группа, а не один процесс.
+pub fn prepare_kill(sudo: &str, group: &Path) -> String {
+    let group = quoted_path(group);
+    let inner = format!(
+        "pgid=$(cat {group} 2>/dev/null); \
+         if [ -n \"$pgid\" ] && [ \"$pgid\" -gt 1 ]; then /bin/kill -KILL -- -\"$pgid\" 2>/dev/null; fi; \
+         rm -f {group}"
+    );
+    format!(
+        "{sudo} sh -c {} 2>/dev/null",
+        super::stage::sh_quote(&inner)
+    )
+}
+
+/// Убирает pid-файл подготовки, не трогая никого: скрипт уже кончился.
+pub fn prepare_clean(sudo: &str, pid: &Path) -> String {
+    let pid = quoted_path(pid);
+    format!(
+        "{sudo} sh -c {}",
+        super::stage::sh_quote(&format!("rm -f {pid}"))
+    )
+}
+
+fn marker_command(sudo: &str, path: &Path, body: &str) -> String {
+    let dir = path.parent().map(quoted_path).unwrap_or_else(|| ".".into());
+    let inner = format!("mkdir -p {dir} && {body}");
+    format!("{sudo} sh -c {}", super::stage::sh_quote(&inner))
+}
+
+fn quoted_path(path: &Path) -> String {
+    super::stage::sh_quote(&path.display().to_string())
+}
+
 /// Идентификаторы машины, которые носитель получил вместе с токеном.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ids {
@@ -387,6 +451,61 @@ mod tests {
             0o755
         );
         assert!(!root.join("bin/canterlot-worker.new").exists());
+    }
+
+    /// Подготовка идёт через `bash -c` от root: окружение выхода в сеть подключается, тело
+    /// скрипта читается из stdin, группа процессов пишется до `exec`, чтобы зависшую
+    /// подготовку можно было снять вместе с потомками.
+    #[test]
+    fn the_prepare_command_sources_the_egress_env_and_execs_stdin() {
+        let command = prepare_run(
+            "sudo -n",
+            Path::new("/etc/canterlot/egress.env"),
+            Path::new("/var/lib/canterlot-runner/prepare.pgid"),
+        );
+        assert!(command.starts_with("sudo -n bash -c '"), "{command}");
+        assert!(
+            command.contains(". /etc/canterlot/egress.env;"),
+            "{command}"
+        );
+        assert!(
+            command.contains("ps -o pgid= -p $$")
+                && command.contains("> /var/lib/canterlot-runner/prepare.pgid;"),
+            "{command}"
+        );
+        assert!(command.contains("exec bash -s 2>&1"), "{command}");
+        assert!(command.trim_end().ends_with(" 2>&1"), "{command}");
+    }
+
+    #[test]
+    fn the_marker_commands_create_the_directory_and_write_the_file() {
+        let marker = prepare_marker("", Path::new("/var/lib/canterlot-runner/prepared"));
+        assert_eq!(
+            marker,
+            " sh -c 'mkdir -p /var/lib/canterlot-runner && : > /var/lib/canterlot-runner/prepared'"
+        );
+        let failed =
+            prepare_marker_write("", Path::new("/var/lib/canterlot-runner/prepare-failed"));
+        assert!(
+            failed.contains("cat > /var/lib/canterlot-runner/prepare-failed"),
+            "{failed}"
+        );
+    }
+
+    /// Зависшая подготовка снимается по группе процессов: оболочка могла умереть вместе с
+    /// сеансом sshd, а её потомки — остаться.
+    #[test]
+    fn the_kill_command_takes_down_the_whole_process_group() {
+        let kill = prepare_kill("", Path::new("/var/lib/canterlot-runner/prepare.pgid"));
+        assert!(
+            kill.contains("pgid=$(cat /var/lib/canterlot-runner/prepare.pgid"),
+            "{kill}"
+        );
+        assert!(kill.contains("/bin/kill -KILL -- -\"$pgid\""), "{kill}");
+        assert!(
+            !kill.contains("-- $(cat"),
+            "a lone pid is not enough: {kill}"
+        );
     }
 
     #[test]

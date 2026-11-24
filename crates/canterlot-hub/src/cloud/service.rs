@@ -406,6 +406,7 @@ impl CloudService {
                             replaces_window_id: None,
                             hard_cap_minutes: cap,
                             consent_over_budget_kopecks: None,
+                            prepare: None,
                         },
                         Some(windows::AutoGuard {
                             registry: &registry,
@@ -470,7 +471,7 @@ impl CloudService {
                             cloud_propose::system_proposer(tx, owner, carrier).await?;
                         proposer.source = Source::Hub;
                         let opened = cloud_propose::open_in_tx(
-                            tx, &config, &pricing, &proposer, cap, reason,
+                            tx, &config, &pricing, &proposer, cap, reason, None,
                         )
                         .await?;
                         budget::episode_start(tx, opened.request_id).await?;
@@ -732,6 +733,10 @@ impl CloudService {
             host_key_ed25519_public: key.public_line().to_owned(),
             runner_authorized_key: self.config.runner_public_key.clone(),
             root_dir: CLOUD_ROOT_DIR.to_owned(),
+            packages: window
+                .prepare()
+                .map(|prepare| prepare.packages)
+                .unwrap_or_default(),
         });
         let Ok(user_data) = rendered else {
             return self.fail(window.id, "cloud_init_invalid").await;
@@ -1024,14 +1029,7 @@ impl CloudService {
                 let Some(machine) = machine else {
                     return Ok(());
                 };
-                sqlx::query(
-                    "insert into commands (id, machine_id, conversation_id, execution_id,
-                                           execution_generation, kind, payload, delivery_state)
-                     values ($1, $2, null, null, null, 'attach_runner', $3, 'pending')",
-                )
-                .bind(Uuid::now_v7())
-                .bind(config.carrier_machine_id)
-                .bind(json!({
+                let mut payload = json!({
                     "window_id": window.id,
                     "machine_id": machine,
                     "host": public_ip,
@@ -1040,7 +1038,20 @@ impl CloudService {
                     "root_dir": CLOUD_ROOT_DIR,
                     "max_running": config.max_running,
                     "lease_slots": config.lease_slots,
-                }))
+                });
+                // Скрипт подготовки одобрен вместе с карточкой: несущая выполнит его от root
+                // после выхода в сеть и до запуска воркера. Без скрипта ключа нет вовсе.
+                if let Some(script) = window.prepare().and_then(|prepare| prepare.script) {
+                    payload["prepare_script"] = json!(script);
+                }
+                sqlx::query(
+                    "insert into commands (id, machine_id, conversation_id, execution_id,
+                                           execution_generation, kind, payload, delivery_state)
+                     values ($1, $2, null, null, null, 'attach_runner', $3, 'pending')",
+                )
+                .bind(Uuid::now_v7())
+                .bind(config.carrier_machine_id)
+                .bind(payload)
                 .execute(&mut *conn)
                 .await?;
                 sqlx::query(

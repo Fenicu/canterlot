@@ -146,7 +146,7 @@ impl Default for Timings {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct CarrierSettings {
     pub hub_url: String,
     pub ca_cert: PathBuf,
@@ -162,6 +162,8 @@ pub struct CarrierSettings {
     pub egress_port: u16,
     /// Долговечные облачные подключения; без них носитель ведёт только статические раннеры.
     pub cloud: Option<Arc<cloud::CloudState>>,
+    /// Куда уходят факты подготовки облачного окна; без приёмника факт только в журнале.
+    pub facts: Option<Arc<dyn commands::FactSink>>,
 }
 
 impl CarrierSettings {
@@ -176,6 +178,7 @@ impl CarrierSettings {
             timings: Timings::default(),
             egress_port: ssh::EGRESS_SOCKS_PORT,
             cloud: None,
+            facts: None,
         }
     }
 }
@@ -274,6 +277,16 @@ pub(crate) struct CloudRunner {
     pub known_hosts: PathBuf,
     pub ready_marker: PathBuf,
     pub ready_timeout: Duration,
+    /// Скрипт подготовки окна; пустой — подготовки нет.
+    pub prepare_script: String,
+    pub sudo: String,
+    pub egress_env: PathBuf,
+    /// Маркеры, которые носитель оставляет на сервере окна.
+    pub prepared_marker: PathBuf,
+    pub prepare_failed_marker: PathBuf,
+    pub prepare_group: PathBuf,
+    /// Тестовый шов: сколько первых проверок отметок изобразить недоступными.
+    pub marker_probe_failures: Option<cloud::MarkerProbeFailures>,
 }
 
 /// Что нужно знать задаче одного раннера.
@@ -351,6 +364,13 @@ fn desired(
                     known_hosts: spec.known_hosts.clone(),
                     ready_marker: spec.ready_marker.clone(),
                     ready_timeout: spec.ready_timeout,
+                    prepare_script: spec.prepare_script.clone(),
+                    sudo: spec.sudo.clone(),
+                    egress_env: spec.egress_env.clone(),
+                    prepared_marker: spec.ready_marker.with_file_name("prepared"),
+                    prepare_failed_marker: spec.ready_marker.with_file_name("prepare-failed"),
+                    prepare_group: spec.ready_marker.with_file_name("prepare.pgid"),
+                    marker_probe_failures: spec.marker_probe_failures.clone(),
                 }),
             },
         );
@@ -430,6 +450,7 @@ pub async fn run(
         local,
         control,
         cloud: cloud.clone(),
+        facts: settings.facts.clone(),
     });
     let mut running: BTreeMap<String, Handle> = BTreeMap::new();
     while !*shutdown.borrow() {

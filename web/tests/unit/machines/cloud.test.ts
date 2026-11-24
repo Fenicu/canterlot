@@ -153,6 +153,19 @@ describe('cloud proposal card', () => {
 		expect(cloudBannerText({ ...payload, over_budget: true })).toContain('сверх бюджета');
 	});
 
+	it('shows the preparation the owner approves in full', () => {
+		const view = cloudWindowView({
+			...payload,
+			prepare: { packages: ['jq', 'build-essential'], script: 'apt-get install -y jq\n' }
+		});
+		expect(view.prepare).toEqual({
+			packages: ['jq', 'build-essential'],
+			script: 'apt-get install -y jq\n'
+		});
+		expect(cloudWindowView(payload).prepare).toBeNull();
+		expect(cloudWindowView({ ...payload, prepare: { packages: [] } }).prepare).toBeNull();
+	});
+
 	it('counts down the half hour the card lives', () => {
 		expect(cloudCardLifetime(payload.expires_at, NOW)).toBe('Карточка живёт ещё 10 минут');
 		expect(cloudCardLifetime(new Date(NOW + 60_000).toISOString(), NOW)).toBe(

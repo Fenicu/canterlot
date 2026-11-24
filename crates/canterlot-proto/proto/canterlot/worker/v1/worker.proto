@@ -329,6 +329,10 @@ message AttachRunner {
   uint32 lease_slots = 7;
   // Порт SSH на `host`: публичный порт DNAT роутера облака; 0 — 22.
   uint32 ssh_port = 8;
+  // Скрипт подготовки из одобренной карточки (до 16 КиБ); пустой — подготовки нет. Несущая
+  // выполняет его от root один раз, когда туннель с выходом в сеть уже поднят, и до запуска
+  // воркера раннера. Сбой — факт `RunnerPrepareFailed`, воркер не запускается.
+  string prepare_script = 9;
 }
 
 // Подготовить исходники: `git push --no-verify` sha `rev` из `repo` в голый репозиторий
@@ -623,7 +627,20 @@ message RecordBody {
     OutputsCollected outputs_collected = 55;
     OutputsCollectFailed outputs_collect_failed = 56;
     SourceCleaned source_cleaned = 57;
+    // Только при согласованной возможности runners_v1, только от несущей: скрипт подготовки
+    // облачного окна вышел не с 0 или не уложился в срок готовности.
+    RunnerPrepareFailed runner_prepare_failed = 58;
   }
+}
+
+message RunnerPrepareFailed {
+  string window_id = 1;
+  // Строка `machines` раннера `cloud` из `AttachRunner`.
+  string machine_id = 2;
+  // Код выхода скрипта; -1 — срок вышел или процесс убит сигналом.
+  int32 exit_code = 3;
+  // Хвост общего вывода stdout и stderr, не больше 2048 байт, UTF-8 с заменой битых байтов.
+  string output_tail = 4;
 }
 
 message SourceStaged {

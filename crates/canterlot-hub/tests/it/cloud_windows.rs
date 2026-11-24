@@ -11,7 +11,7 @@ use std::time::Duration;
 use canterlot_hub::cloud::rate_limit::RateLimit;
 use canterlot_hub::cloud::service::CloudService;
 use canterlot_hub::cloud::windows::{
-    self, CreateRefusal, CreateRequest, Trigger, Window, WindowId,
+    self, CreateRefusal, CreateRequest, Prepare, Trigger, Window, WindowId,
 };
 use canterlot_hub::cloud::{YandexClient, YandexConfig, price};
 use canterlot_hub::config::{CloudConfig, CloudProfile};
@@ -165,6 +165,14 @@ impl Rig {
     }
 
     async fn try_create(&self, cap: u32) -> Result<WindowId, CreateRefusal> {
+        self.try_create_with(cap, None).await
+    }
+
+    async fn try_create_with(
+        &self,
+        cap: u32,
+        prepare: Option<windows::Prepare>,
+    ) -> Result<WindowId, CreateRefusal> {
         self.service
             .create(CreateRequest {
                 trigger: Trigger::Owner,
@@ -172,6 +180,7 @@ impl Rig {
                 replaces_window_id: None,
                 hard_cap_minutes: cap,
                 consent_over_budget_kopecks: Some(self.reservation(cap)),
+                prepare,
             })
             .await
     }
@@ -711,6 +720,7 @@ async fn with_a_zero_budget_only_the_exact_consent_passes(pool: PgPool) -> TestR
                     replaces_window_id: None,
                     hard_cap_minutes: 60,
                     consent_over_budget_kopecks: consent,
+                    prepare: None,
                 })
                 .await
         }
@@ -758,6 +768,7 @@ async fn the_budget_counts_ended_final_cost_and_live_reservations(pool: PgPool) 
             replaces_window_id: None,
             hard_cap_minutes: 60,
             consent_over_budget_kopecks: None,
+            prepare: None,
         })
         .await?;
     // Окно закончилось дешевле резерва: расход месяца — итоговая цена.
@@ -782,6 +793,7 @@ async fn the_budget_counts_ended_final_cost_and_live_reservations(pool: PgPool) 
             replaces_window_id: None,
             hard_cap_minutes: 60,
             consent_over_budget_kopecks: None,
+            prepare: None,
         })
         .await?;
     // Живое окно считается по резерву; в месяц попадает целиком.
@@ -799,6 +811,7 @@ async fn the_budget_counts_ended_final_cost_and_live_reservations(pool: PgPool) 
             replaces_window_id: None,
             hard_cap_minutes: 60,
             consent_over_budget_kopecks: None,
+            prepare: None,
         })
         .await;
     match refused {
@@ -818,6 +831,7 @@ async fn the_budget_counts_ended_final_cost_and_live_reservations(pool: PgPool) 
             replaces_window_id: None,
             hard_cap_minutes: 60,
             consent_over_budget_kopecks: None,
+            prepare: None,
         })
         .await?;
     Ok(())
@@ -897,6 +911,7 @@ async fn concurrent_creates_make_exactly_one_window(pool: PgPool) -> TestResult 
         replaces_window_id: None,
         hard_cap_minutes: 60,
         consent_over_budget_kopecks: None,
+        prepare: None,
     };
     let results = tokio::join!(
         rig.service.create(request()),
@@ -1213,6 +1228,7 @@ async fn the_reservation_and_the_budget_use_the_most_expensive_profile_of_the_li
         replaces_window_id: None,
         hard_cap_minutes: 60,
         consent_over_budget_kopecks: consent,
+        prepare: None,
     };
     // Бюджет не хватает на самый дорогой профиль, хотя на первый хватило бы.
     match rig.service.create(request(None)).await {
@@ -1271,6 +1287,7 @@ async fn a_price_that_cannot_be_read_refuses_the_window(pool: PgPool) -> TestRes
             replaces_window_id: None,
             hard_cap_minutes: 60,
             consent_over_budget_kopecks: Some(rig.reservation(60)),
+            prepare: None,
         })
         .await;
     assert!(matches!(refused, Err(CreateRefusal::Provider(_))));
@@ -1529,6 +1546,10 @@ async fn attach_goes_to_the_public_address_of_the_instance_on_port_22(pool: PgPo
     let attach = rig.attach_command().await;
     assert_eq!(attach["host"], address);
     assert_eq!(attach["ssh_port"], 22);
+    assert!(
+        attach.get("prepare_script").is_none(),
+        "a window without preparation carries no script"
+    );
     let view = windows::view(&window, t0 + TimeDelta::seconds(1));
     assert_eq!(view.public_ip.as_deref(), Some(address.as_str()));
     assert_eq!(view.instance_id.as_deref(), Some(instance_id.as_str()));
@@ -1542,6 +1563,30 @@ async fn attach_goes_to_the_public_address_of_the_instance_on_port_22(pool: PgPo
             .fetch_one(&rig.pool)
             .await?;
     assert_eq!(sent, 1);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn attach_carries_the_prepare_script(pool: PgPool) -> TestResult {
+    let rig = rig(pool).await;
+    let _carrier = rig.carrier_session();
+    let t0 = now_micros();
+    let script = "apt-get install -y jq\njq --version\n";
+    let id = rig
+        .try_create_with(
+            120,
+            Some(Prepare {
+                packages: Vec::new(),
+                script: Some(script.to_owned()),
+            }),
+        )
+        .await
+        .expect("window created");
+    rig.tick(t0).await;
+    rig.tick(t0 + TimeDelta::seconds(1)).await;
+    assert_eq!(rig.state(id).await, "identified");
+    let attach = rig.attach_command().await;
+    assert_eq!(attach["prepare_script"], script);
     Ok(())
 }
 
@@ -1880,6 +1925,46 @@ async fn a_preempted_window_retries_its_sourced_job_and_gets_a_replacement(
     assert_eq!(
         rig.alert_codes().await,
         vec!["preempted", "replacement_started"]
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_replacement_inherits_the_prepare_of_its_parent(pool: PgPool) -> TestResult {
+    let rig = rig(pool).await;
+    enable_pushes(&rig.pool).await;
+    rig.set_budget(10_000_000).await;
+    let _carrier = rig.carrier_session();
+    let prepare = Prepare {
+        packages: vec!["jq".to_owned()],
+        script: Some("echo prepared\n".to_owned()),
+    };
+    let t0 = now_micros();
+    let id = rig
+        .try_create_with(120, Some(prepare.clone()))
+        .await
+        .expect("window created");
+    rig.tick(t0).await;
+    rig.tick(t0 + TimeDelta::seconds(1)).await;
+    let session = rig.attach().await;
+    let at = t0 + TimeDelta::seconds(2);
+    rig.tick(at).await;
+    assert_eq!(rig.state(id).await, "ready");
+    let machine = rig.cloud_machine().await;
+    rig.seed_running_sourced(machine, 0).await;
+    let stopped = rig.window(id).await.instance_id.unwrap();
+    rig.fake.control().preempt(&stopped);
+    let seen = at + TimeDelta::seconds(30);
+    rig.tick(seen).await;
+    drop(session);
+    rig.tick(seen + TimeDelta::seconds(10)).await;
+    assert_eq!(rig.state(id).await, "ended");
+    let replacements = rig.replacements_of(id).await;
+    assert_eq!(replacements.len(), 1);
+    assert_eq!(
+        replacements[0].prepare(),
+        Some(prepare),
+        "the replacement takes the parent's approved preparation as is"
     );
     Ok(())
 }

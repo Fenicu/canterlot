@@ -151,6 +151,7 @@ fn cloud_fixture() -> (Fixture, Uuid) {
             root_dir: root.clone(),
             max_running: 3,
             lease_slots: 2,
+            prepare_script: String::new(),
         })
         .unwrap();
     let (_assign, assigned) = watch::channel(vec![AssignedRunner {

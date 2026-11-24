@@ -266,6 +266,7 @@ async fn propose(
                     &proposer,
                     body.hours * 60,
                     body.reason.clone(),
+                    None,
                 )
                 .await
                 .map_err(|error| match error {
