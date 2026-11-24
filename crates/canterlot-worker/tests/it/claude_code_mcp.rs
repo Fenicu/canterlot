@@ -18,11 +18,7 @@ use tokio::{
 };
 
 fn worker_binary() -> PathBuf {
-    let test = std::env::current_exe().expect("test binary path");
-    test.parent()
-        .and_then(|dir| dir.parent())
-        .expect("target dir")
-        .join("canterlot-worker")
+    PathBuf::from(env!("CARGO_BIN_EXE_canterlot-worker"))
 }
 
 async fn write_line(writer: &mut (impl AsyncWriteExt + Unpin), value: &Value) {
