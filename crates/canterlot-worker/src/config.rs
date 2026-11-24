@@ -117,6 +117,9 @@ pub struct JobsConfig {
     /// итога задачи владельца живут до уборки.
     #[serde(with = "humantime_serde")]
     pub output_retention: Duration,
+    /// Абсолютный путь к файлу `NAME=value` с переменными прокси для задач; сам воркер
+    /// этих переменных не получает. Носитель кладёт его только облачному раннеру.
+    pub env_file: Option<PathBuf>,
 }
 
 impl JobsConfig {
@@ -139,6 +142,7 @@ impl Default for JobsConfig {
             log_max_mib: 16,
             state_retention: Duration::from_secs(3 * 24 * 3600),
             output_retention: Duration::from_secs(7 * 24 * 3600),
+            env_file: None,
         }
     }
 }
@@ -338,6 +342,8 @@ pub enum ConfigErrorCategory {
     Account {
         harness: &'static str,
     },
+    /// `[jobs].env_file` не абсолютный путь.
+    JobsEnvFile,
 }
 
 impl ConfigError {
@@ -427,6 +433,11 @@ impl fmt::Display for ConfigError {
                 "{}: {harness}.account must be 1 to 40 characters of a-z, 0-9 and '-'",
                 self.path.display()
             ),
+            ConfigErrorCategory::JobsEnvFile => write!(
+                f,
+                "{}: jobs.env_file must be an absolute path",
+                self.path.display()
+            ),
         }
     }
 }
@@ -486,6 +497,14 @@ pub fn load(path: &Path) -> Result<WorkerConfig, ConfigError> {
     config
         .hub_dial_path()
         .map_err(|category| ConfigError::new(path, category))?;
+    if config
+        .jobs
+        .env_file
+        .as_ref()
+        .is_some_and(|path| !path.is_absolute())
+    {
+        return Err(ConfigError::new(path, ConfigErrorCategory::JobsEnvFile));
+    }
     if config
         .runners
         .ssh
@@ -897,6 +916,41 @@ data_dir = "/tmp/store"
         assert_eq!(wild.jobs.log_max_bytes(), 64 * 1024 * 1024);
         assert!(
             toml::from_str::<WorkerConfig>(&format!("{base}\n[jobs]\nlost_grace = 1\n")).is_err()
+        );
+    }
+
+    #[test]
+    fn jobs_env_file_must_be_absolute() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("worker.toml");
+        let base = r#"
+hub_url = "https://localhost:1"
+ca_cert = "/tmp/ca.pem"
+token_file = "/tmp/token"
+machine_id = "00000000-0000-0000-0000-000000000001"
+installation_id = "00000000-0000-0000-0000-000000000002"
+restore_generation = "00000000-0000-0000-0000-000000000003"
+data_dir = "/tmp/store"
+"#;
+        std::fs::write(
+            &path,
+            format!("{base}\n[jobs]\nenv_file = \"/etc/canterlot/egress.env\"\n"),
+        )
+        .unwrap();
+        let config = load(&path).unwrap();
+        assert_eq!(
+            config.jobs.env_file.as_deref(),
+            Some(Path::new("/etc/canterlot/egress.env"))
+        );
+        std::fs::write(
+            &path,
+            format!("{base}\n[jobs]\nenv_file = \"egress.env\"\n"),
+        )
+        .unwrap();
+        let error = load(&path).unwrap_err();
+        assert!(
+            matches!(error.category, ConfigErrorCategory::JobsEnvFile),
+            "{error:?}"
         );
     }
 

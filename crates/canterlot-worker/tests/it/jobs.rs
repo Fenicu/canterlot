@@ -479,6 +479,98 @@ async fn command_runs_in_the_workdir_with_a_minimal_environment_plus_env() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn env_file_gives_a_job_only_the_proxy_variables() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("egress.env");
+    fs::write(
+        &file,
+        "# прокси облачного раннера\n\n\
+         HTTP_PROXY=socks5h://127.0.0.1:1080\n\
+         no_proxy=localhost,127.0.0.1\n\
+         SECRET_TOKEN=nope\n\
+         PATH=/file/bin\n",
+    )
+    .unwrap();
+    let config = JobsConfig {
+        env_file: Some(file),
+        ..JobsConfig::default()
+    };
+    let harness = Harness::with(config, None, WORKER).await;
+    let id = Uuid::now_v7().to_string();
+    harness
+        .start(harness.start_command(
+            &id,
+            "printf '%s|%s|%s|%s|%s\\n' \"$HTTP_PROXY\" \"$no_proxy\" \
+             \"${SECRET_TOKEN-unset}\" \"${HTTPS_PROXY-unset}\" \"$PATH\"",
+        ))
+        .await;
+    let finished = harness.finished(&id).await;
+    let text = String::from_utf8(finished.tail).unwrap();
+    let line = text.lines().next().expect("command output");
+    let fields: Vec<&str> = line.split('|').collect();
+    assert_eq!(
+        &fields[..4],
+        [
+            "socks5h://127.0.0.1:1080",
+            "localhost,127.0.0.1",
+            "unset",
+            "unset"
+        ],
+        "only the allowlisted proxy names reach the job"
+    );
+    assert!(
+        !fields[4].starts_with("/file/bin"),
+        "PATH from the file must not reach the job: {}",
+        fields[4]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_missing_env_file_adds_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = JobsConfig {
+        env_file: Some(dir.path().join("absent.env")),
+        ..JobsConfig::default()
+    };
+    let harness = Harness::with(config, None, WORKER).await;
+    let id = Uuid::now_v7().to_string();
+    harness
+        .start(harness.start_command(
+            &id,
+            "printf '%s|%s\\n' \"${HTTP_PROXY-unset}\" \"${no_proxy-unset}\"",
+        ))
+        .await;
+    let finished = harness.finished(&id).await;
+    let text = String::from_utf8(finished.tail).unwrap();
+    assert_eq!(text.lines().next(), Some("unset|unset"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn env_file_does_not_touch_the_worker_environment() {
+    let before = std::env::var_os("HTTPS_PROXY");
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("egress.env");
+    fs::write(&file, "HTTPS_PROXY=socks5h://127.0.0.1:1080\n").unwrap();
+    let config = JobsConfig {
+        env_file: Some(file),
+        ..JobsConfig::default()
+    };
+    let harness = Harness::with(config, None, WORKER).await;
+    let id = Uuid::now_v7().to_string();
+    harness
+        .start(harness.start_command(&id, "printf '%s\\n' \"$HTTPS_PROXY\""))
+        .await;
+    let finished = harness.finished(&id).await;
+    let text = String::from_utf8(finished.tail).unwrap();
+    assert_eq!(text.lines().next(), Some("socks5h://127.0.0.1:1080"));
+    assert_eq!(
+        std::env::var_os("HTTPS_PROXY"),
+        before,
+        "the worker process keeps its own environment"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn lease_variables_cannot_be_smuggled_through_env() {
     let harness = Harness::new().await;
     let id = Uuid::now_v7().to_string();

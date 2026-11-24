@@ -16,6 +16,16 @@ pub const READY_MARKER: &str = "/var/lib/canterlot-runner/ready";
 /// Пакеты, без которых раннер не работает.
 const PACKAGES: &str = "docker.io git rsync sudo";
 
+/// Порт обратного SOCKS5 на облачном раннере. Должен совпадать с `EGRESS_SOCKS_PORT`
+/// воркера (`crates/canterlot-worker/src/carrier/ssh.rs`).
+pub const EGRESS_SOCKS_PORT: u16 = 1080;
+
+/// Файл с переменными прокси для задач; воркер читает его как `[jobs] env_file`.
+pub const EGRESS_ENV_FILE: &str = "/etc/canterlot/egress.env";
+
+/// Drop-in демона docker: он тянет образы и слои через тот же SOCKS5.
+const DOCKER_PROXY_DROPIN: &str = "/etc/systemd/system/docker.service.d/canterlot-proxy.conf";
+
 const READY_SCRIPT: &str = "/usr/local/sbin/canterlot-runner-ready.sh";
 
 /// Исходные данные скрипта. Ключи — строки в обычном виде, без ссылок на файлы.
@@ -175,6 +185,34 @@ pub fn render(params: &CloudInitParams) -> Result<String, CloudInitError> {
     out.push_str("    permissions: '0644'\n");
     out.push_str("    content: |\n");
     out.push_str("      HostKey /etc/ssh/ssh_host_ed25519_key\n");
+    // Из облака заблокированы static.crates.io, github.com, CDN Docker Hub и зеркала apt.
+    // Обратный SOCKS5 поднимает носитель в своём ssh-пробросе, поэтому обе записи должны
+    // лежать на диске до установки docker.io и первого выхода задач в сеть.
+    out.push_str(&format!("  - path: {DOCKER_PROXY_DROPIN}\n"));
+    out.push_str("    permissions: '0644'\n");
+    out.push_str("    content: |\n");
+    out.push_str("      [Service]\n");
+    out.push_str(&format!(
+        "      Environment=\"HTTP_PROXY=socks5://127.0.0.1:{EGRESS_SOCKS_PORT}\" \"HTTPS_PROXY=socks5://127.0.0.1:{EGRESS_SOCKS_PORT}\" \"NO_PROXY=localhost,127.0.0.1,::1\"\n"
+    ));
+    out.push_str(&format!("  - path: {EGRESS_ENV_FILE}\n"));
+    out.push_str("    permissions: '0644'\n");
+    out.push_str("    content: |\n");
+    for name in [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    ] {
+        out.push_str(&format!(
+            "      {name}=socks5h://127.0.0.1:{EGRESS_SOCKS_PORT}\n"
+        ));
+    }
+    for name in ["NO_PROXY", "no_proxy"] {
+        out.push_str(&format!("      {name}=localhost,127.0.0.1,::1\n"));
+    }
     out.push_str(&format!("  - path: {READY_SCRIPT}\n"));
     out.push_str("    permissions: '0755'\n");
     out.push_str("    content: |\n");
@@ -282,6 +320,35 @@ mod tests {
     }
 
     #[test]
+    fn proxies_docker_and_the_jobs_before_docker_starts() {
+        let text = render_ok(&params());
+        let dropin = "  - path: /etc/systemd/system/docker.service.d/canterlot-proxy.conf\n    permissions: '0644'\n    content: |\n      [Service]\n      Environment=\"HTTP_PROXY=socks5://127.0.0.1:1080\" \"HTTPS_PROXY=socks5://127.0.0.1:1080\" \"NO_PROXY=localhost,127.0.0.1,::1\"\n";
+        assert!(text.contains(dropin), "docker drop-in missing or wrong");
+        let mut env = String::from(
+            "  - path: /etc/canterlot/egress.env\n    permissions: '0644'\n    content: |\n",
+        );
+        for name in [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+        ] {
+            env.push_str(&format!("      {name}=socks5h://127.0.0.1:1080\n"));
+        }
+        for name in ["NO_PROXY", "no_proxy"] {
+            env.push_str(&format!("      {name}=localhost,127.0.0.1,::1\n"));
+        }
+        assert!(text.contains(&env), "egress.env missing or wrong");
+        // Оба файла лежат на диске до установки docker.io: демон стартует уже с прокси.
+        let install = text.find("apt-get install -y docker.io").unwrap();
+        let dropin_at = text.find(DOCKER_PROXY_DROPIN).unwrap();
+        let env_at = text.find(EGRESS_ENV_FILE).unwrap();
+        assert!(dropin_at < install && env_at < install);
+    }
+
+    #[test]
     fn creates_the_runner_user_in_docker_with_sudo_and_the_key() {
         let p = params();
         let text = render_ok(&p);
@@ -337,7 +404,16 @@ mod tests {
     #[test]
     fn carries_no_token_and_no_binary() {
         let text = render_ok(&params()).to_lowercase();
-        for forbidden in ["token", "bearer", "curl", "wget", "http", "\u{7f}elf", "\0"] {
+        for forbidden in [
+            "token",
+            "bearer",
+            "curl",
+            "wget",
+            "http://",
+            "https://",
+            "\u{7f}elf",
+            "\0",
+        ] {
             assert!(!text.contains(forbidden), "found {forbidden}");
         }
         assert!(text.is_ascii());

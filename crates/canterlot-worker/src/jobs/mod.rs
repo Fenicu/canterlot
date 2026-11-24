@@ -56,6 +56,18 @@ const SWEEP_EVERY: Duration = Duration::from_secs(3600);
 /// Сколько попыток помещается в отчёт при подключении (сообщение не больше 1 МиБ).
 const MAX_REPORT_JOBS: usize = 1000;
 const MAX_ENV_VARS: usize = 64;
+/// Единственные имена, которые задача берёт из `[jobs] env_file`: прокси для выхода в сеть.
+/// Остальные строки файла не доходят до задачи.
+const PROXY_ENV_NAMES: [&str; 8] = [
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+];
 
 #[derive(Debug, thiserror::Error)]
 pub enum JobError {
@@ -96,6 +108,9 @@ pub struct JobsRuntime {
     pub lease_socket: Option<PathBuf>,
     /// Окружение воркера, из которого берутся `PATH`, `HOME`, `USER`, `LANG`, `TERM`, `XDG_*`.
     pub env: Vec<(String, String)>,
+    /// Прокси из `[jobs] env_file`, прочитанные один раз при старте воркера: только они
+    /// добавляются к окружению задачи, само окружение воркера не меняется.
+    env_file_vars: Vec<(String, String)>,
     pub poll_interval: Duration,
     /// Сколько после TERM ждём, прежде чем убить группу.
     pub cancel_grace: Duration,
@@ -110,6 +125,21 @@ impl JobsRuntime {
         shim_exe: PathBuf,
         lease_socket: Option<PathBuf>,
     ) -> Self {
+        // Файл читается один раз на старте воркера: предупреждение тоже одно, а не на задачу.
+        let env_file_vars = match &config.env_file {
+            Some(path) => match read_env_file(path) {
+                Ok(vars) => vars,
+                Err(error) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        kind = ?error.kind(),
+                        "jobs env_file is unreadable; jobs start without it"
+                    );
+                    Vec::new()
+                }
+            },
+            None => Vec::new(),
+        };
         Self {
             data_dir,
             allowed_roots,
@@ -117,13 +147,15 @@ impl JobsRuntime {
             shim_exe,
             lease_socket,
             env: std::env::vars().collect(),
+            env_file_vars,
             poll_interval: Duration::from_millis(250),
             cancel_grace: Duration::from_secs(3),
             chunk_interval: Duration::from_secs(1),
         }
     }
 
-    /// Минимальное окружение команды: только названное воркером, без остального его окружения.
+    /// Минимальное окружение команды: только названное воркером, без остального его окружения,
+    /// плюс прокси из `[jobs] env_file`.
     fn base_env(&self) -> Vec<(String, String)> {
         let mut env: Vec<(String, String)> = self
             .env
@@ -137,8 +169,31 @@ impl JobsRuntime {
         if !env.iter().any(|(name, _)| name == "PATH") {
             env.push(("PATH".into(), "/usr/local/bin:/usr/bin:/bin".into()));
         }
+        env.extend(self.env_file_vars.iter().cloned());
         env
     }
+}
+
+/// Переменные прокси из файла `NAME=value`: пустые строки и комментарии пропускаются, всё,
+/// чего нет в [`PROXY_ENV_NAMES`], отбрасывается.
+fn read_env_file(path: &Path) -> io::Result<Vec<(String, String)>> {
+    let text = fs::read_to_string(path)?;
+    let mut vars: Vec<(String, String)> = Vec::new();
+    for line in text.lines() {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((name, value)) = line.split_once('=') else {
+            continue;
+        };
+        if !PROXY_ENV_NAMES.contains(&name) {
+            continue;
+        }
+        vars.retain(|(existing, _)| existing != name);
+        vars.push((name.to_owned(), value.to_owned()));
+    }
+    Ok(vars)
 }
 
 pub struct JobManager {
