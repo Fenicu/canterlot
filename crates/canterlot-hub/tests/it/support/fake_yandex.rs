@@ -354,6 +354,8 @@ pub struct FakeState {
     pub retry_after: Option<String>,
     /// Не больше стольких записей на странице списка машин и дисков, как бы ни просили.
     pub list_page_cap: Option<usize>,
+    /// Задержка ответа на каждый запрос к API: медленный провайдер.
+    pub response_delay_ms: u64,
     /// То же для каталога SKU.
     pub sku_page_cap: Option<usize>,
     pub list_fail_page: Option<FailPage>,
@@ -396,6 +398,7 @@ impl FakeState {
             rate_limit_next: 0,
             retry_after: None,
             list_page_cap: None,
+            response_delay_ms: 0,
             sku_page_cap: None,
             list_fail_page: None,
             repeat_page_token: false,
@@ -919,6 +922,12 @@ async fn dispatch(state: Arc<Mutex<FakeState>>, kill: Kill, request: Request) ->
         });
         route(&mut st, &method, &path, &query, body, auth.as_deref())
     };
+
+    // Медленный провайдер: ответ приходит позже, чем запрос ушёл.
+    let delay_ms = state.lock().unwrap().response_delay_ms;
+    if delay_ms > 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+    }
 
     match action {
         Action::Respond(response) => response,

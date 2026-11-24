@@ -130,6 +130,13 @@ fn due(at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
     at.is_none_or(|at| at <= now)
 }
 
+/// Момент подтверждённого отсутствия: после ответа провайдера, а не в начале прохода. В тестах
+/// время прохода задано вперёд, и оно остаётся точкой отсчёта; в бою часы процесса идут за
+/// началом прохода, пока список читается.
+fn absence_at(now: DateTime<Utc>) -> DateTime<Utc> {
+    Utc::now().max(now)
+}
+
 /// Машина окна в списке каталога: по номеру или по точному имени.
 fn listed<'a>(listing: &'a [InstanceSummary], window: &Window) -> Option<&'a InstanceSummary> {
     listing.iter().find(|instance| {
@@ -1622,8 +1629,9 @@ impl CloudService {
         now: DateTime<Utc>,
     ) -> Result<(), sqlx::Error> {
         let id = window.id;
+        let at = absence_at(now);
         let released = crate::db::in_tx(&self.pool, move |conn| {
-            Box::pin(async move { windows::confirm_server_gone_in_tx(conn, id, now).await })
+            Box::pin(async move { windows::confirm_server_gone_in_tx(conn, id, at).await })
         })
         .await?;
         if !released.is_empty() {
@@ -1635,7 +1643,7 @@ impl CloudService {
             );
         }
         if window.server_gone_at.is_none() {
-            window.server_gone_at = Some(now);
+            window.server_gone_at = Some(at);
             window.next_delete_at = None;
         }
         Ok(())
@@ -1846,15 +1854,16 @@ impl CloudService {
         window: &mut Window,
         now: DateTime<Utc>,
     ) -> Result<(), sqlx::Error> {
+        let at = absence_at(now);
         sqlx::query(
             "update cloud_windows set disk_gone_at = coalesce(disk_gone_at, $2), next_delete_at = null
              where id = $1 and state in ('deleting', 'late_cleanup')",
         )
         .bind(window.id)
-        .bind(now)
+        .bind(at)
         .execute(&self.pool)
         .await?;
-        window.disk_gone_at.get_or_insert(now);
+        window.disk_gone_at.get_or_insert(at);
         Ok(())
     }
 
@@ -1905,8 +1914,9 @@ impl CloudService {
             // Полный список каталога без машины — единственное доказательство отсутствия.
             Ownership::Absent => {
                 let id = window.id;
+                let at = absence_at(now);
                 let released = crate::db::in_tx(&self.pool, move |conn| {
-                    Box::pin(async move { windows::confirm_server_gone_in_tx(conn, id, now).await })
+                    Box::pin(async move { windows::confirm_server_gone_in_tx(conn, id, at).await })
                 })
                 .await?;
                 if !released.is_empty() {
@@ -2344,6 +2354,8 @@ impl CloudService {
     /// тому остаётся диск. Закончится оно `gone`.
     async fn gone(&self, window: &Window, now: DateTime<Utc>) -> Result<(), sqlx::Error> {
         let id = window.id;
+        // Отсутствие подтверждено только что: конец оплаты — этот момент, а не начало прохода.
+        let at = absence_at(now);
         let moved = crate::db::in_tx(&self.pool, move |conn| {
             Box::pin(async move {
                 let Some(window) = windows::load_for_update(&mut *conn, id).await? else {
@@ -2360,7 +2372,7 @@ impl CloudService {
                         server_gone: true,
                         ..Cleanup::because(windows::REASON_GONE)
                     },
-                    now,
+                    at,
                 )
                 .await
             })

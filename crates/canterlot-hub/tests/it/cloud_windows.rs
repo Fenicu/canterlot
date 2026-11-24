@@ -2409,6 +2409,74 @@ async fn an_ambiguous_create_absent_from_full_listings_fails_after_the_window(
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn an_absence_timestamp_is_taken_after_the_listing_not_at_the_tick_start(
+    pool: PgPool,
+) -> TestResult {
+    let rig = rig(pool).await;
+    // Медленный провайдер: списки возвращаются заметно позже начала прохода.
+    rig.fake.control().response_delay_ms = 300;
+    let t0 = now_micros();
+    let id = raw_window(
+        &rig.pool,
+        "deleting",
+        None,
+        Some(t0 - TimeDelta::minutes(20)),
+    )
+    .await;
+    rig.tick(t0).await;
+    let window = rig.window(id).await;
+    assert_eq!(window.state, "ended");
+    let after_listing = t0 + TimeDelta::milliseconds(250);
+    assert!(
+        window.server_gone_at.is_some_and(|at| at >= after_listing),
+        "the machine end is not backdated to the tick start: {:?}",
+        window.server_gone_at
+    );
+    assert!(
+        window.disk_gone_at.is_some_and(|at| at >= after_listing),
+        "the disk end is not backdated to the tick start: {:?}",
+        window.disk_gone_at
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_vanished_instance_is_marked_gone_after_the_listing_that_confirmed_it(
+    pool: PgPool,
+) -> TestResult {
+    let rig = rig(pool).await;
+    let _carrier = rig.carrier_session();
+    rig.fake.control().response_delay_ms = 300;
+    let t0 = now_micros();
+    let instance = rig.add_instance("placeholder");
+    let id = raw_window(
+        &rig.pool,
+        "ready",
+        Some(&instance),
+        Some(t0 - TimeDelta::minutes(20)),
+    )
+    .await;
+    {
+        let mut state = rig.fake.control();
+        state.instances.get_mut(&instance).unwrap().name = windows::server_name(id);
+        let disk = state.instances[&instance].disk_id.clone();
+        state.disks.get_mut(&disk).unwrap().name = windows::server_name(id);
+        // Машина пропала, пока хаба не было: полный список подтверждает это только сейчас.
+        state.remove_instance(&instance);
+    }
+    rig.tick(t0).await;
+    let window = rig.window(id).await;
+    assert!(
+        window
+            .server_gone_at
+            .is_some_and(|at| at >= t0 + TimeDelta::milliseconds(250)),
+        "the machine end is not backdated to the tick start: {:?}",
+        window.server_gone_at
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn an_instance_a_listing_missed_is_still_deleted_because_its_disk_is_attached(
     pool: PgPool,
 ) -> TestResult {
@@ -2913,7 +2981,11 @@ async fn a_confirmed_absence_skips_the_delete_call(pool: PgPool) -> TestResult {
     rig.tick(now).await;
     let window = rig.window(id).await;
     assert_eq!(window.state, "ended");
-    assert_eq!(window.disk_gone_at, Some(now), "the disk is confirmed too");
+    assert!(
+        window.disk_gone_at.is_some_and(|at| at >= now),
+        "the disk is confirmed too: {:?}",
+        window.disk_gone_at
+    );
     assert_eq!(rig.deletes(), 0, "no DELETE once absence is confirmed");
     assert_eq!(
         rig.fake.control().count("GET", "/compute/v1/instances/"),
