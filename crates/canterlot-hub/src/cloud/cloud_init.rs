@@ -1,4 +1,4 @@
-//! Скрипт `#cloud-config` для нового облачного сервера раннера.
+//! Скрипт `#cloud-config` для новой облачной машины раннера.
 //!
 //! Он ставит хостовый ключ, который создал хаб (первое подключение сверяет отпечаток), docker,
 //! git и rsync, заводит пользователя `runner` и каталог раннера и в самом конце пишет маркер
@@ -7,7 +7,7 @@
 
 use std::fmt;
 
-/// Предел размера пользовательских данных у Timeweb, в байтах UTF-8.
+/// Предел размера пользовательских данных, в байтах UTF-8: скрипт заведомо меньше.
 pub const MAX_BYTES: usize = 65_535;
 
 /// Куда cloud-init кладёт маркер готовности. Носитель ждёт именно этот файл.
@@ -29,8 +29,6 @@ pub struct CloudInitParams {
     pub runner_authorized_key: String,
     /// Корневой каталог раннера: абсолютный путь, его владелец `runner`.
     pub root_dir: String,
-    /// Шлюз роутера внутри приватной сети: маршрут по умолчанию, если его нет при загрузке.
-    pub gateway: String,
 }
 
 impl fmt::Debug for CloudInitParams {
@@ -40,7 +38,6 @@ impl fmt::Debug for CloudInitParams {
             .field("host_key_ed25519_public", &self.host_key_ed25519_public)
             .field("runner_authorized_key", &self.runner_authorized_key)
             .field("root_dir", &self.root_dir)
-            .field("gateway", &self.gateway)
             .finish()
     }
 }
@@ -53,8 +50,6 @@ pub enum CloudInitError {
     InvalidPublicKey(&'static str),
     /// Путь не абсолютный или содержит символы вне безопасного набора.
     InvalidRootDir,
-    /// Шлюз не является IPv4-адресом.
-    InvalidGateway,
     /// Результат длиннее предела провайдера.
     TooLarge { bytes: usize },
 }
@@ -65,7 +60,6 @@ impl fmt::Display for CloudInitError {
             Self::InvalidPrivateKey => f.write_str("host private key is not an OpenSSH key file"),
             Self::InvalidPublicKey(which) => write!(f, "{which} is not a single-line public key"),
             Self::InvalidRootDir => f.write_str("root_dir must be a safe absolute path"),
-            Self::InvalidGateway => f.write_str("gateway must be an IPv4 address"),
             Self::TooLarge { bytes } => {
                 write!(f, "cloud-init is {bytes} bytes, the limit is {MAX_BYTES}")
             }
@@ -151,11 +145,6 @@ pub fn render(params: &CloudInitParams) -> Result<String, CloudInitError> {
     let host_public = check_public_key(&params.host_key_ed25519_public, "host_key_ed25519_public")?;
     let authorized = check_public_key(&params.runner_authorized_key, "runner_authorized_key")?;
     check_root_dir(&params.root_dir)?;
-    let gateway: std::net::Ipv4Addr = params
-        .gateway
-        .trim()
-        .parse()
-        .map_err(|_| CloudInitError::InvalidGateway)?;
     let root = &params.root_dir;
 
     let mut out = String::new();
@@ -208,19 +197,8 @@ pub fn render(params: &CloudInitParams) -> Result<String, CloudInitError> {
     out.push_str("runcmd:\n");
     out.push_str("  - [sh, -c, 'rm -f /etc/ssh/ssh_host_rsa_key* /etc/ssh/ssh_host_ecdsa_key* /etc/ssh/ssh_host_dsa_key*']\n");
     out.push_str("  - [systemctl, restart, ssh]\n");
-    // Маршрут по умолчанию в сети может не проставиться при загрузке. Ставим его через
-    // шлюз роутера, только если его нет; до циклов apt, чтобы у них была сеть. Резолвер
-    // дописываем только если провайдер не выдал ни одного nameserver.
-    out.push_str(&format!(
-        "  - [sh, -c, 'ip route show default | grep -q . || ip route replace default via {gateway}']\n"
-    ));
-    out.push_str(
-        "  - [sh, -c, 'grep -q \"^nameserver\" /etc/resolv.conf || printf \"nameserver 1.1.1.1\\nnameserver 8.8.8.8\\n\" > /etc/resolv.conf']\n",
-    );
-    // Сети на старте может не быть: сервер выходит в интернет через роутер, и маршрут с
-    // резолвером могли не проставиться. Поэтому пакеты ставятся не модулем `packages` (он
-    // падает без сети и не повторяется), а циклами, которые ждут сеть. Маркер готовности
-    // пишется после них.
+    // Пакеты ставятся не модулем `packages` (он падает при сбое зеркала и не повторяется), а
+    // циклами, которые ждут сеть и зеркало. Маркер готовности пишется после них.
     out.push_str("  - [sh, -c, 'until apt-get update; do sleep 10; done']\n");
     out.push_str(&format!(
         "  - [sh, -c, 'until DEBIAN_FRONTEND=noninteractive apt-get install -y {PACKAGES}; do sleep 10; apt-get update || true; done']\n"
@@ -249,7 +227,6 @@ mod tests {
             runner_authorized_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE0000 carrier"
                 .to_owned(),
             root_dir: "/srv/runner".to_owned(),
-            gateway: "192.0.2.1".to_owned(),
         }
     }
 
@@ -418,27 +395,14 @@ mod tests {
     }
 
     #[test]
-    fn adds_the_default_route_and_a_resolver_before_waiting_for_the_network() {
+    fn leaves_the_route_and_the_resolver_to_the_provider() {
+        // У машины свой публичный адрес и сеть провайдера: маршрут и резолвер не трогаются.
         let text = render_ok(&params());
-        let runcmd = text.split("\nruncmd:\n").nth(1).unwrap();
-        let route = runcmd
-            .find("ip route show default | grep -q . || ip route replace default via 192.0.2.1")
-            .expect("the default route is added only when absent");
-        let dns = runcmd
-            .find("grep -q \"^nameserver\" /etc/resolv.conf")
-            .expect("the resolver is written only when absent");
-        assert!(text.contains("nameserver 1.1.1.1") && text.contains("nameserver 8.8.8.8"));
-        let update = runcmd.find("until apt-get update").unwrap();
-        assert!(route < dns && dns < update, "network comes before apt");
-    }
-
-    #[test]
-    fn rejects_a_gateway_that_is_not_an_ipv4_address() {
-        for bad in ["", "not-an-ip", "192.0.2.1; rm -rf /", "2001:db8::1"] {
-            let mut p = params();
-            p.gateway = bad.to_owned();
-            assert_eq!(render(&p), Err(CloudInitError::InvalidGateway), "{bad:?}");
+        for gone in ["ip route", "resolv.conf", "nameserver"] {
+            assert!(!text.contains(gone), "{gone} is still in the script");
         }
+        let runcmd = text.split("\nruncmd:\n").nth(1).unwrap();
+        assert!(runcmd.contains("until apt-get update"));
     }
 
     #[test]

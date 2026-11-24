@@ -2788,7 +2788,7 @@ export interface components {
             month: string;
             /** Format: int64 */
             monthly_budget_kopecks: number;
-            /** @description Профили из конфигурации с текущей ценой часа (только чтение). */
+            /** @description Профили из конфигурации с текущими ставками часа (только чтение). */
             profiles: components["schemas"]["ProfileView"][];
             /** Format: date-time */
             provider_block_at?: string | null;
@@ -2871,13 +2871,13 @@ export interface components {
         CloudWindowView: {
             /**
              * Format: int64
-             * @description Конфигуратор принятого профиля; пусто, пока сервера нет.
+             * @description Ставка часа машины с публичным адресом: платится, пока машина есть в каталоге.
              */
-            configurator_id?: number | null;
+            compute_kopecks_per_hour: number;
             /**
              * Format: int64
-             * @description Оценка расхода живого окна: часы с вызова создания, округлённые вверх, по цене часа,
-             *     не больше резерва.
+             * @description Оценка расхода живого окна по секундам с вызова создания, по каждой ставке отдельно.
+             *     Оценка осторожная: остановленная машина считается по полной ставке.
              */
             cost_so_far_kopecks: number;
             /** Format: date-time */
@@ -2888,10 +2888,15 @@ export interface components {
             /** Format: date-time */
             delete_requested_at?: string | null;
             /**
-             * Format: int32
-             * @description Публичный порт DNAT-правила роутера для SSH.
+             * Format: date-time
+             * @description Диска машины больше нет в каталоге.
              */
-            dnat_port?: number | null;
+            disk_gone_at?: string | null;
+            /**
+             * Format: int64
+             * @description Ставка часа диска: платится, пока есть диск.
+             */
+            disk_kopecks_per_hour: number;
             /**
              * Format: int64
              * @description Итог закончившегося окна; у живого пусто.
@@ -2901,23 +2906,36 @@ export interface components {
             hard_cap_at?: string | null;
             /** Format: uuid */
             id: string;
+            /** @description Номер машины у провайдера; пусто, пока машина не найдена. */
+            instance_id?: string | null;
             last_error?: string | null;
-            /** @description Локальный адрес сервера в приватной сети. */
-            local_ip?: string | null;
             month: string;
             name: string;
+            /** @description Прерываемая машина: Яндекс может остановить её в любой момент. */
+            preemptible: boolean;
             /**
              * Format: int64
-             * @description Цена часа: до приёма профиля самая дорогая из списка, после действительная.
+             * @description Обе ставки вместе: до вызова создания у самого дорогого профиля, после — у того,
+             *     которому звонили.
              */
             price_hourly_kopecks: number;
+            /** @description Публичный адрес машины; пусто, пока он не выдан. */
+            public_ip?: string | null;
             /** Format: date-time */
             ready_at?: string | null;
+            /**
+             * Format: uuid
+             * @description Окно, которое это окно заменяет после прерывания.
+             */
+            replaces_window_id?: string | null;
             /** Format: int64 */
             reservation_kopecks: number;
-            /** Format: int64 */
-            server_id?: number | null;
             state: string;
+            /**
+             * Format: date-time
+             * @description Машина замечена останавливающейся или остановленной.
+             */
+            stopped_at?: string | null;
             trigger: string;
         };
         CompactOutcome: {
@@ -3229,8 +3247,8 @@ export interface components {
         DeleteRequested: "not_found" | "canceled" | "not_yet" | "deleting" | "already_ended";
         DeleteWindowResult: {
             /**
-             * @description Что случилось с окном: `deleting` (раннер отозван, сервер удаляется), `canceled`
-             *     (сервер ещё не создавался), `not_yet` (создание вызвано, сервера в списках нет),
+             * @description Что случилось с окном: `deleting` (раннер отозван, машина удаляется), `canceled`
+             *     (машина ещё не создавалась), `not_yet` (создание вызвано, машины в списках нет),
              *     `already_ended`.
              */
             outcome: components["schemas"]["DeleteRequested"];
@@ -4966,19 +4984,27 @@ export interface components {
             /** Format: int64 */
             rss_bytes: number;
         };
-        /** @description Профиль в настройках бюджета: цена часа из провайдера на момент чтения. */
+        /**
+         * @description Профиль в настройках бюджета: размеры машины и две ставки часа у провайдера на момент
+         *     чтения. Цена часа работающей машины — их сумма.
+         */
         ProfileView: {
-            availability_zone: string;
-            /** Format: int64 */
-            configurator_id: number;
+            /**
+             * Format: int64
+             * @description Машина с публичным адресом: платится, пока машина есть в каталоге.
+             */
+            compute_kopecks_per_hour: number;
             /** Format: int32 */
-            cpu: number;
+            cores: number;
             /** Format: int32 */
             disk_gb: number;
-            /** Format: int64 */
-            hourly_kopecks: number;
+            /**
+             * Format: int64
+             * @description Диск: платится, пока есть диск.
+             */
+            disk_kopecks_per_hour: number;
             /** Format: int32 */
-            ram_gb: number;
+            memory_gb: number;
         };
         PromptSuggestionSettings: {
             /** @description Подсказки следующего сообщения в пустом поле ввода сессий Claude Code. */
@@ -6151,8 +6177,8 @@ export interface components {
             /** Format: date-time */
             provider_block_at?: string | null;
             /**
-             * @description Код блока провайдера (`abuse_prepayment_required`), пока он стоит: новые окна не
-             *     создаются, пока владелец не снимет блок. Пусто, когда блока нет.
+             * @description Код блока провайдера, пока он стоит: новые окна не создаются, пока владелец не снимет
+             *     блок. Пусто, когда блока нет.
              */
             provider_block_code?: string | null;
         };
@@ -7950,7 +7976,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Бюджет облака: месяц, расход, остаток, режим, ревизия, блок и профили с ценой часа */
+            /** @description Бюджет облака: месяц, расход, остаток, режим, ревизия, блок и профили со ставками часа */
             200: {
                 headers: {
                     /** @description Часы хаба: целые миллисекунды Unix */
@@ -8119,7 +8145,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Окна облачных серверов раннеров: живые и последние 20 законченных, с ценой и расходом в копейках */
+            /** @description Окна облачных машин раннеров: живые и последние 20 законченных, со ставками и расходом в копейках */
             200: {
                 headers: {
                     /** @description Часы хаба: целые миллисекунды Unix */
@@ -8158,7 +8184,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Удаление принято: раннер отзывается, сервер удаляет служба окон и подтверждает конец оплаты списком проекта */
+            /** @description Удаление принято: раннер отзывается, машину и её диск удаляет служба окон и подтверждает конец оплаты полными списками каталога */
             200: {
                 headers: {
                     /** @description Часы хаба: целые миллисекунды Unix */

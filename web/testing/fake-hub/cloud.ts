@@ -40,10 +40,12 @@ export function seedCloudWindow(api: FakeHubApi, patch: Partial<FakeCloudWindow>
 		name: patch.name ?? `canterlot-runner-${id}`,
 		state: 'ready',
 		trigger: 'card',
-		server_id: 777,
-		local_ip: '192.0.2.15',
-		dnat_port: 22100,
-		configurator_id: 151,
+		instance_id: 'fhmfakeinstance0777',
+		public_ip: '203.0.113.7',
+		preemptible: true,
+		replaces_window_id: null,
+		compute_kopecks_per_hour: DEFAULT_HOURLY - 160,
+		disk_kopecks_per_hour: 160,
 		price_hourly_kopecks: DEFAULT_HOURLY,
 		reservation_kopecks: 11_380,
 		final_cost_kopecks: null,
@@ -52,6 +54,8 @@ export function seedCloudWindow(api: FakeHubApi, patch: Partial<FakeCloudWindow>
 		created_at: iso(created),
 		ready_at: iso(created + 4 * 60_000),
 		hard_cap_at: iso(created + 120 * 60_000),
+		stopped_at: null,
+		disk_gone_at: null,
 		delete_requested_at: null,
 		delete_confirmed_at: null,
 		delete_reason: null,
@@ -305,7 +309,7 @@ export async function installCloudRoutes(
 			await route.fulfill({ status: 409, headers: headers(), json: errorBody('invalid_state', 'Карточка уже открыта', { reason: 'open_card_exists' }) });
 			return;
 		}
-		const maxHourly = Math.max(0, ...api.cloudBudget.profiles.map((profile) => profile.hourly_kopecks));
+		const maxHourly = Math.max(0, ...api.cloudBudget.profiles.map((profile) => profile.compute_kopecks_per_hour + profile.disk_kopecks_per_hour));
 		const reservation = (hours + 2) * maxHourly;
 		const over = reservation > api.cloudBudget.remaining_kopecks;
 		const { request } = seedCloudCard(api, {

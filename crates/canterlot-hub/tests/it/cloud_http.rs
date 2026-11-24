@@ -1,4 +1,4 @@
-//! Окна облачных серверов в HTTP владельца: список с деньгами и «Удалить сейчас».
+//! Окна облачных машин в HTTP владельца: список с деньгами и «Удалить сейчас».
 
 use canterlot_hub::{
     cloud::windows,
@@ -43,24 +43,28 @@ impl Api {
         }
     }
 
-    async fn insert(&self, state: &str, minutes_ago: i64, server_id: Option<i64>) -> Uuid {
+    async fn insert(&self, state: &str, minutes_ago: i64, instance_id: Option<&str>) -> Uuid {
         let id = Uuid::now_v7();
         sqlx::query(
-            "insert into cloud_windows (id, name, state, trigger, server_id, host_key_public,
+            "insert into cloud_windows (id, name, state, trigger, folder_id, preemptible,
+                                        instance_id, public_ip, host_key_public,
+                                        compute_kopecks_per_hour, disk_kopecks_per_hour,
                                         price_hourly_kopecks, reservation_kopecks, final_cost_kopecks,
                                         month, hard_cap_minutes, created_at, create_called_at,
-                                        profiles, configurator_id)
-             values ($1, 'canterlot-runner-' || $1::text, $2, 'owner', $3, 'ssh-ed25519 AAAA', 2845,
-                     11380, case when $2 in ('ended', 'failed', 'gone') then 2845 end, '2026-11', 60,
+                                        profiles, cores, memory_gb, disk_gb)
+             values ($1, 'canterlot-runner-' || $1::text, $2, 'owner', 'b1gfakefolder000000', true,
+                     $3, case when $3 is null then null else '203.0.113.7' end,
+                     'ssh-ed25519 AAAA', 1646, 160, 1806,
+                     7224, case when $2 in ('ended', 'failed', 'gone') then 1806 end, '2026-11', 60,
                      now() - make_interval(mins => $4::int),
                      case when $2 = 'create_intent' then null
                           else now() - make_interval(mins => $4::int) end,
-                     '[{\"configurator_id\":151,\"cpu\":32,\"ram_gb\":64,\"disk_gb\":80,\"hourly_kopecks\":2845}]',
-                     151)",
+                     '[{\"cores\":32,\"memory_gb\":64,\"disk_gb\":80,\"compute_kopecks_per_hour\":1646,\"disk_kopecks_per_hour\":160}]',
+                     32, 64, 80)",
         )
         .bind(id)
         .bind(state)
-        .bind(server_id)
+        .bind(instance_id)
         .bind(i32::try_from(minutes_ago).unwrap())
         .execute(&self.pool)
         .await
@@ -112,9 +116,14 @@ async fn the_list_has_live_windows_and_the_last_twenty_ended_with_costs(pool: Pg
     assert_eq!(api.list().await["items"], json!([]));
 
     for age in 0..23 {
-        api.insert("ended", 1000 - age, Some(5000 + age)).await;
+        api.insert(
+            "ended",
+            1000 - age,
+            Some(&format!("fhmfakeinstance{age:04}")),
+        )
+        .await;
     }
-    let live = api.insert("ready", 5, Some(777)).await;
+    let live = api.insert("ready", 60, Some("fhmfakeinstance0777")).await;
     let list = api.list().await;
     assert_eq!(
         list["configured"], false,
@@ -124,15 +133,29 @@ async fn the_list_has_live_windows_and_the_last_twenty_ended_with_costs(pool: Pg
     assert_eq!(items.len(), 21, "one live and the last 20 ended");
     assert_eq!(items[0]["id"], live.to_string(), "the newest first");
     assert_eq!(items[0]["state"], "ready");
-    assert_eq!(items[0]["price_hourly_kopecks"], 2845);
-    assert_eq!(items[0]["reservation_kopecks"], 11380);
+    // Окно в новом виде: номер машины строкой, её адрес, вид и две ставки часа.
+    assert_eq!(items[0]["instance_id"], "fhmfakeinstance0777");
+    assert_eq!(items[0]["public_ip"], "203.0.113.7");
+    assert_eq!(items[0]["preemptible"], true);
+    assert_eq!(items[0]["replaces_window_id"], Value::Null);
+    assert_eq!(items[0]["compute_kopecks_per_hour"], 1646);
+    assert_eq!(items[0]["disk_kopecks_per_hour"], 160);
+    assert_eq!(items[0]["price_hourly_kopecks"], 1806);
+    assert_eq!(items[0]["stopped_at"], Value::Null);
+    assert_eq!(items[0]["disk_gone_at"], Value::Null);
+    for gone in ["server_id", "local_ip", "dnat_port", "configurator_id"] {
+        assert!(items[0].get(gone).is_none(), "{gone} is not in the view");
+    }
+    assert_eq!(items[0]["reservation_kopecks"], 7224);
     assert_eq!(items[0]["final_cost_kopecks"], Value::Null);
-    // Живое окно: расход пока — оплаченные часы с вызова создания, не больше резерва.
-    assert_eq!(items[0]["cost_so_far_kopecks"], 2845);
+    // Живое окно: расход пока — секунды с вызова создания по обеим ставкам. Час назад:
+    // чуть больше цены часа.
+    let cost = items[0]["cost_so_far_kopecks"].as_i64().unwrap();
+    assert!((1806..1816).contains(&cost), "{cost}");
     assert_eq!(items[0]["month"], "2026-11");
     assert_eq!(items[1]["state"], "ended");
-    assert_eq!(items[1]["final_cost_kopecks"], 2845);
-    assert_eq!(items[1]["cost_so_far_kopecks"], 2845);
+    assert_eq!(items[1]["final_cost_kopecks"], 1806);
+    assert_eq!(items[1]["cost_so_far_kopecks"], 1806);
     let ids: Vec<&str> = items
         .iter()
         .map(|item| item["id"].as_str().unwrap())
@@ -148,7 +171,9 @@ async fn the_list_has_live_windows_and_the_last_twenty_ended_with_costs(pool: Pg
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn the_displayed_cost_is_not_capped_at_the_reservation(pool: PgPool) {
     let api = Api::new(pool).await;
-    let id = api.insert("ready", 1_000, Some(778)).await;
+    let id = api
+        .insert("ready", 1_000, Some("fhmfakeinstance0778"))
+        .await;
     let list = api.list().await;
     let item = list["items"]
         .as_array()
@@ -156,16 +181,17 @@ async fn the_displayed_cost_is_not_capped_at_the_reservation(pool: PgPool) {
         .iter()
         .find(|item| item["id"] == id.to_string())
         .expect("the live window is listed");
-    assert_eq!(item["reservation_kopecks"], 11380);
-    // 1000 минут = 16 ч 40 мин: платных часов 17, хотя резерв меньше.
-    assert_eq!(item["cost_so_far_kopecks"], 2845 * 17);
-    assert!(item["cost_so_far_kopecks"].as_i64().unwrap() > 11380);
+    assert_eq!(item["reservation_kopecks"], 7224);
+    // 1000 минут по 1806 копеек в час: 30 100 копеек и секунды сверху, хотя резерв меньше.
+    let cost = item["cost_so_far_kopecks"].as_i64().unwrap();
+    assert!((30_100..30_110).contains(&cost), "{cost}");
+    assert!(cost > 7224);
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn only_the_owner_sees_the_windows(pool: PgPool) {
     let api = Api::new(pool).await;
-    let id = api.insert("ready", 5, Some(777)).await;
+    let id = api.insert("ready", 5, Some("fhmfakeinstance0777")).await;
     let list = api
         .anonymous
         .send(Method::GET, "/api/v1/cloud/windows", None, None)
@@ -190,17 +216,15 @@ async fn only_the_owner_sees_the_windows(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn delete_now_revokes_the_cloud_runner_and_leaves_the_server_to_the_service(pool: PgPool) {
+async fn delete_now_revokes_the_cloud_runner_and_leaves_the_instance_to_the_service(pool: PgPool) {
     let api = Api::new(pool).await;
-    let id = api.insert("ready", 5, Some(777)).await;
+    let id = api.insert("ready", 5, Some("fhmfakeinstance0777")).await;
     // Строка раннера `cloud` с токеном и задачей на ней.
     let config: CloudConfig = toml::from_str(&format!(
-        "provider='timeweb'\ntoken_file='t'\nproject_id=1\n\
-         network_id='network-example'\nnetwork_cidr='192.0.2.0/24'\nrouter_id='018f0000-0000-7000-8000-0000000000aa'\n\
-         router_ip='192.0.2.1'\ngateway='192.0.2.5'\n\
-         local_ip_pool='192.0.2.10-192.0.2.60'\ndnat_port_range='22100-22199'\n\
+        "provider='yandex'\nkey_file='k.json'\nfolder_id='b1gfakefolder000000'\n\
+         zone='ru-central1-a'\nsubnet_id='e9bfakesubnet000000'\n\
          runner_public_key='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLE'\n\
-         carrier_machine_id='{}'\n[[profile]]\nconfigurator_id=151\ncpu=1\nram_gb=1\ndisk_gb=10\navailability_zone='msk-1'\n",
+         carrier_machine_id='{}'\n[[profile]]\ncores=2\nmemory_gb=2\ndisk_gb=10\n",
         api.carrier
     ))
     .unwrap();
@@ -272,7 +296,7 @@ async fn a_delete_replay_never_revokes_the_next_window(pool: PgPool) {
             .await
             .unwrap()
     };
-    let first = api.insert("ready", 5, Some(1)).await;
+    let first = api.insert("ready", 5, Some("fhmfakeinstance0001")).await;
     let key = Uuid::now_v7().to_string();
     let _ = api.delete(first, &key, 200).await;
     // Первое окно закончилось, началось второе; токен у машины новый.
@@ -281,7 +305,7 @@ async fn a_delete_replay_never_revokes_the_next_window(pool: PgPool) {
         .execute(&api.pool)
         .await
         .unwrap();
-    let second = api.insert("ready", 2, Some(2)).await;
+    let second = api.insert("ready", 2, Some("fhmfakeinstance0002")).await;
     let token = machines::rotate_token(&api.pool, machine, true, true)
         .await
         .unwrap()
@@ -304,12 +328,10 @@ async fn a_delete_replay_never_revokes_the_next_window(pool: PgPool) {
 
 fn cloud_config(api: &Api) -> CloudConfig {
     toml::from_str(&format!(
-        "provider='timeweb'\ntoken_file='t'\nproject_id=1\n\
-         network_id='network-example'\nnetwork_cidr='192.0.2.0/24'\nrouter_id='018f0000-0000-7000-8000-0000000000aa'\n\
-         router_ip='192.0.2.1'\ngateway='192.0.2.5'\n\
-         local_ip_pool='192.0.2.10-192.0.2.60'\ndnat_port_range='22100-22199'\n\
+        "provider='yandex'\nkey_file='k.json'\nfolder_id='b1gfakefolder000000'\n\
+         zone='ru-central1-a'\nsubnet_id='e9bfakesubnet000000'\n\
          runner_public_key='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLE'\n\
-         carrier_machine_id='{}'\n[[profile]]\nconfigurator_id=151\ncpu=1\nram_gb=1\ndisk_gb=10\navailability_zone='msk-1'\n",
+         carrier_machine_id='{}'\n[[profile]]\ncores=2\nmemory_gb=2\ndisk_gb=10\n",
         api.carrier
     ))
     .unwrap()
@@ -324,7 +346,7 @@ async fn delete_now_cancels_a_create_that_was_never_sent_and_refuses_unknown_win
     assert_eq!(result["window"]["state"], "failed");
     assert_eq!(result["window"]["final_cost_kopecks"], 0);
 
-    let ended = api.insert("ended", 90, Some(1)).await;
+    let ended = api.insert("ended", 90, Some("fhmfakeinstance0001")).await;
     let result = api.delete(ended, &Uuid::now_v7().to_string(), 200).await;
     assert_eq!(result["outcome"], "already_ended");
 

@@ -196,6 +196,8 @@ pub struct FakeInstance {
     pub delete_polls_left: u32,
     /// Не удалять загрузочный диск вместе с машиной: останется брошенный диск.
     pub leave_disk: bool,
+    /// Список каталога машину не показывает, а прямой запрос по номеру показывает.
+    pub hidden_in_listing: bool,
     /// Тело запроса создания.
     pub request: Value,
 }
@@ -312,6 +314,21 @@ pub struct FakeState {
     pub operations: BTreeMap<String, FakeOperation>,
     pub next_serial: u32,
     pub create: CreateMode,
+    /// Исход создания по числу ядер запроса (`resourcesSpec.cores`): сильнее `create`.
+    pub create_by_cores: HashMap<String, CreateMode>,
+    /// Удаление машины отвечает этим кодом и ничего не удаляет.
+    pub delete_status: Option<u16>,
+    /// Операция следующего принятого удаления машины завершится этой ошибкой, а машина
+    /// останется.
+    pub fail_next_delete_operation: Option<(i32, String)>,
+    /// Удаление диска отвечает этим кодом и ничего не удаляет.
+    pub disk_delete_status: Option<u16>,
+    /// Столько следующих списков машин (по первой странице) приходят пустыми.
+    pub listing_hidden_polls: u32,
+    /// Списки машин и дисков этого каталога отвечают 500.
+    pub list_fail_folder: Option<String>,
+    /// Прямой запрос машины называет это имя вместо настоящего.
+    pub get_name_override: Option<String>,
     /// Операция следующего принятого создания завершится этой ошибкой.
     pub fail_next_create_operation: Option<(i32, String)>,
     /// Машина неудавшегося создания остаётся в каталоге (откат не случился).
@@ -360,6 +377,13 @@ impl FakeState {
             operations: BTreeMap::new(),
             next_serial: 1,
             create: CreateMode::Accept,
+            create_by_cores: HashMap::new(),
+            delete_status: None,
+            fail_next_delete_operation: None,
+            disk_delete_status: None,
+            listing_hidden_polls: 0,
+            list_fail_folder: None,
+            get_name_override: None,
             fail_next_create_operation: None,
             failed_create_keeps_instance: false,
             failed_create_rollback_polls: 0,
@@ -456,6 +480,7 @@ impl FakeState {
                 delete_operation: None,
                 delete_polls_left: 0,
                 leave_disk: false,
+                hidden_in_listing: false,
                 request: request.clone(),
             },
         );
@@ -1069,7 +1094,11 @@ fn check_create(st: &FakeState, body: &Value) -> Result<(), String> {
 
 fn create_instance(st: &mut FakeState, body: Option<Value>, auth: Option<&str>) -> Action {
     let body = body.unwrap_or(Value::Null);
-    let mode = st.create.clone();
+    let mode = body["resourcesSpec"]["cores"]
+        .as_str()
+        .and_then(|cores| st.create_by_cores.get(cores))
+        .unwrap_or(&st.create)
+        .clone();
     if let CreateMode::Error {
         http,
         code,
@@ -1183,6 +1212,13 @@ fn route(
                     auth,
                 ));
             };
+            if st.list_fail_folder.as_ref() == Some(folder) {
+                return Action::Respond(error_response(st, 500, 13, "Injected failure", auth));
+            }
+            if !query.contains_key("pageToken") && st.listing_hidden_polls > 0 {
+                st.listing_hidden_polls -= 1;
+                return Action::Respond(json_response(200, &json!({})));
+            }
             // Листинг (его первая страница) — наблюдение за удаляемыми машинами.
             if !query.contains_key("pageToken") {
                 let deleting: Vec<String> = st
@@ -1198,7 +1234,7 @@ fn route(
             let items: Vec<Value> = st
                 .instances
                 .values()
-                .filter(|instance| &instance.folder_id == folder)
+                .filter(|instance| &instance.folder_id == folder && !instance.hidden_in_listing)
                 .map(instance_json)
                 .collect();
             page(st, "instances", items, query, auth)
@@ -1208,7 +1244,13 @@ fn route(
             st.observe_boot(id);
             st.observe_deletion(id);
             match st.instances.get(*id) {
-                Some(instance) => Action::Respond(json_response(200, &instance_json(instance))),
+                Some(instance) => {
+                    let mut body = instance_json(instance);
+                    if let Some(name) = &st.get_name_override {
+                        body["name"] = json!(name);
+                    }
+                    Action::Respond(json_response(200, &body))
+                }
                 None => {
                     let message = format!("The instance \"{id}\" not found");
                     Action::Respond(error_response(st, 404, 5, &message, auth))
@@ -1221,6 +1263,23 @@ fn route(
                 let message = format!("The instance \"{id}\" not found");
                 return Action::Respond(error_response(st, 404, 5, &message, auth));
             };
+            if let Some(status) = st.delete_status {
+                return Action::Respond(error_response(
+                    st,
+                    status,
+                    grpc_for(status),
+                    "Injected delete failure",
+                    auth,
+                ));
+            }
+            if let Some(error) = st.fail_next_delete_operation.take() {
+                let operation_id = st.new_operation(OperationKind::DeleteInstance, id);
+                let answer = operation_json(st, &st.operations[&operation_id]);
+                let operation = st.operations.get_mut(&operation_id).expect("just made");
+                operation.error = Some(error);
+                operation.done = true;
+                return Action::Respond(json_response(200, &answer));
+            }
             // Повтор, пока удаление идёт, возвращает ту же операцию.
             let operation_id = match instance.delete_operation.clone() {
                 Some(existing) => existing,
@@ -1281,6 +1340,9 @@ fn route(
                     auth,
                 ));
             };
+            if st.list_fail_folder.as_ref() == Some(folder) {
+                return Action::Respond(error_response(st, 500, 13, "Injected failure", auth));
+            }
             let items: Vec<Value> = st
                 .disks
                 .values()
@@ -1298,6 +1360,15 @@ fn route(
             if !disk.instance_ids.is_empty() {
                 let message = format!("Disk {id} is attached to an instance");
                 return Action::Respond(error_response(st, 400, 9, &message, auth));
+            }
+            if let Some(status) = st.disk_delete_status {
+                return Action::Respond(error_response(
+                    st,
+                    status,
+                    grpc_for(status),
+                    "Injected delete failure",
+                    auth,
+                ));
             }
             st.disks.remove(*id);
             let operation_id = st.new_operation(OperationKind::DeleteDisk, id);

@@ -22,26 +22,27 @@ pub const MIN_WAITING_MINUTES: i64 = 60;
 /// Жёсткий предел автоматического окна.
 pub const AUTO_MAX_CAP_MINUTES: u32 = 240;
 
-/// Профиль в настройках бюджета: цена часа из провайдера на момент чтения.
+/// Профиль в настройках бюджета: размеры машины и две ставки часа у провайдера на момент
+/// чтения. Цена часа работающей машины — их сумма.
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ProfileView {
-    pub configurator_id: i64,
-    pub cpu: u32,
-    pub ram_gb: u32,
+    pub cores: u32,
+    pub memory_gb: u32,
     pub disk_gb: u32,
-    pub hourly_kopecks: i64,
-    pub availability_zone: String,
+    /// Машина с публичным адресом: платится, пока машина есть в каталоге.
+    pub compute_kopecks_per_hour: i64,
+    /// Диск: платится, пока есть диск.
+    pub disk_kopecks_per_hour: i64,
 }
 
 impl From<&windows::PricedProfile> for ProfileView {
     fn from(profile: &windows::PricedProfile) -> Self {
         Self {
-            configurator_id: profile.configurator_id,
-            cpu: profile.cpu,
-            ram_gb: profile.ram_gb,
+            cores: profile.cores,
+            memory_gb: profile.memory_gb,
             disk_gb: profile.disk_gb,
-            hourly_kopecks: profile.hourly_kopecks,
-            availability_zone: profile.availability_zone.clone(),
+            compute_kopecks_per_hour: profile.compute_kopecks_per_hour,
+            disk_kopecks_per_hour: profile.disk_kopecks_per_hour,
         }
     }
 }
@@ -61,7 +62,7 @@ pub struct BudgetView {
     pub provider_block_at: Option<DateTime<Utc>>,
     /// Облако настроено на хабе: без этого настройки бюджета показывать нечего.
     pub configured: bool,
-    /// Профили из конфигурации с текущей ценой часа (только чтение).
+    /// Профили из конфигурации с текущими ставками часа (только чтение).
     pub profiles: Vec<ProfileView>,
 }
 

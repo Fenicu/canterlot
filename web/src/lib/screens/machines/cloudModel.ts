@@ -159,7 +159,7 @@ export function profileLines(
   profiles: readonly CloudBudget["profiles"][number][]
 ): ProfileLine[] {
   return profiles.map((profile) => ({
-    key: String(profile.configurator_id),
-    text: `${profile.cpu} vCPU · ${profile.ram_gb} ГБ RAM · ${profile.disk_gb} ГБ диска · ${rubles(profile.hourly_kopecks)}/ч · ${profile.availability_zone}`
+    key: `${profile.cores}-${profile.memory_gb}-${profile.disk_gb}`,
+    text: `${profile.cores} vCPU · ${profile.memory_gb} ГБ RAM · ${profile.disk_gb} ГБ диска · ${rubles(profile.compute_kopecks_per_hour + profile.disk_kopecks_per_hour)}/ч`
   }));
 }
