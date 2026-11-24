@@ -22,10 +22,8 @@ fault-injection = []
 
 [dev-dependencies]
 canterlot-hub = { path = ".", features = ["testkit"] }
-image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 sha1_smol = "1.0.1"
 jsonschema = { version = "0.60.2", default-features = false }
-rcgen = { version = "0.14.10", default-features = false, features = ["ring", "pem", "crypto"] }
 rustix = { version = "1.1.6", features = ["process"] }
 webauthn-authenticator-rs = { version = "0.6.2", default-features = false, features = ["softpasskey"] }
 tokio = { version = "1.54.1", features = ["process", "sync", "test-util", "time"] }
