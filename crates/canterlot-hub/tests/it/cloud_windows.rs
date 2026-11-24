@@ -3570,6 +3570,41 @@ async fn a_folder_change_keeps_cleaning_the_old_folder(pool: PgPool) -> TestResu
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_late_disk_in_a_historical_folder_is_found_after_a_folder_change(
+    pool: PgPool,
+) -> TestResult {
+    let rig = rig(pool).await;
+    enable_pushes(&rig.pool).await;
+    let _carrier = rig.carrier_session();
+    let t0 = now_micros();
+    // Обычное окно прежнего каталога, законченное до смены конфигурации.
+    let (id, session, at) = rig.drive_to_ready(60, t0).await;
+    windows::request_delete(&rig.pool, id, windows::REASON_OWNER, at).await?;
+    drop(session);
+    let ended = at + TimeDelta::seconds(1);
+    rig.tick(ended).await;
+    assert_eq!(rig.state(id).await, "ended");
+
+    // Каталог в конфигурации сменился, хаб перезапущен, а в прежнем каталоге появился диск
+    // с именем законченного окна. Его окно уже `ended`, но вызов создания был.
+    let mut changed = rig.config.clone();
+    changed.folder_id = OTHER_FOLDER.to_owned();
+    let moved = rig.restarted_with(changed);
+    let disk = rig.fake.control().add_stray_disk(&windows::server_name(id));
+    let found = ended + TimeDelta::minutes(5);
+    moved.tick(found).await;
+    let window = rig.window(id).await;
+    assert_eq!(
+        window.state, "ended",
+        "the historical folder is visited and the disk is cleaned in the same pass"
+    );
+    assert_eq!(window.delete_reason.as_deref(), Some("late_disk"));
+    assert!(!rig.fake.control().disks.contains_key(&disk));
+    assert_eq!(rig.alert_codes().await, vec!["late_disk"]);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn a_late_cleanup_leaves_the_live_slot_to_the_successor_and_is_billed(
     pool: PgPool,
 ) -> TestResult {

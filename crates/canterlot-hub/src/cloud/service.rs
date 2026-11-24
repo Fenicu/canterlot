@@ -2070,13 +2070,14 @@ impl CloudService {
     /// каталога не получен целиком; для этого каталога ничего не менялось.
     ///
     /// Каталоги: тот, что в конфигурации (только в нём ищутся лишние машины и диски), и
-    /// каталоги всех окон, которые ещё владеют ресурсом или закончились `failed`. Так окно
-    /// из прежнего каталога доубирается и после смены конфигурации.
+    /// каталоги всех окон, которые ещё владеют ресурсом, закончились `failed` или у которых
+    /// вообще был вызов создания. Так окно из прежнего каталога доубирается и после смены
+    /// конфигурации, и поздний ресурс в историческом каталоге не остаётся брошенным.
     async fn reconcile(&self, runtime: &mut Runtime, now: DateTime<Utc>) -> Result<bool, ()> {
         let mut folders = vec![self.config.folder_id.clone()];
         let others: Vec<String> = sqlx::query_scalar(
             "select distinct folder_id from cloud_windows
-              where state = any($1) or state = 'failed'",
+              where state = any($1) or state = 'failed' or create_called_at is not null",
         )
         .bind(windows::billing_states())
         .fetch_all(&self.pool)
