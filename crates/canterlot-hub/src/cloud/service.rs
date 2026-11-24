@@ -683,6 +683,17 @@ impl CloudService {
         mut window: Window,
         now: DateTime<Utc>,
     ) -> Result<(), sqlx::Error> {
+        // Абсолютный предел проверяется до первого POST и до любого вызова провайдера: за ним
+        // машина только тратит деньги. Замене нужен запас, чтобы она успела принести пользу.
+        let deadline = window
+            .hard_cap_at
+            .unwrap_or_else(|| now + TimeDelta::minutes(i64::from(window.hard_cap_minutes)));
+        if now >= deadline {
+            return self.fail(window.id, "deadline_passed").await;
+        }
+        if window.replaces_window_id.is_some() && deadline - now < windows::REPLACEMENT_MIN_LEAD {
+            return self.fail(window.id, "replacement_too_late").await;
+        }
         if !self.reprice_if_stale(&mut window, now).await? {
             return Ok(());
         }

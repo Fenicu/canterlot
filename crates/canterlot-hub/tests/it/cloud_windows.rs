@@ -2122,6 +2122,75 @@ async fn a_replacement_keeps_the_parent_quote_age_and_is_repriced_before_its_fir
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_window_past_its_deadline_fails_before_any_provider_call(pool: PgPool) -> TestResult {
+    let rig = rig(pool).await;
+    let _carrier = rig.carrier_session();
+    let now = now_micros();
+    let id = raw_window(&rig.pool, "create_intent", None, None).await;
+    sqlx::query("update cloud_windows set hard_cap_at = $2 where id = $1")
+        .bind(id)
+        .bind(now - TimeDelta::minutes(1))
+        .execute(&rig.pool)
+        .await?;
+    rig.tick(now).await;
+    let window = rig.window(id).await;
+    assert_eq!(window.state, "failed");
+    assert_eq!(window.final_cost_kopecks, Some(0));
+    assert_eq!(window.create_called_at, None, "nothing was called");
+    assert_eq!(window.hard_cap_at, Some(now - TimeDelta::minutes(1)));
+    assert_eq!(window.last_error.as_deref(), Some("deadline_passed"));
+    assert_eq!(rig.posts(), 0);
+    assert_eq!(
+        rig.fake
+            .control()
+            .count("GET", "/compute/v1/images:latestByFamily"),
+        0,
+        "no provider call at all"
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_replacement_with_less_than_the_lead_left_fails_before_any_provider_call(
+    pool: PgPool,
+) -> TestResult {
+    let rig = rig(pool).await;
+    let _carrier = rig.carrier_session();
+    let now = now_micros();
+    let parent = raw_window(
+        &rig.pool,
+        "ended",
+        Some("fhmfakeinstance9999"),
+        Some(now - TimeDelta::minutes(20)),
+    )
+    .await;
+    let replacement = raw_window(&rig.pool, "create_intent", None, None).await;
+    sqlx::query(
+        "update cloud_windows set replaces_window_id = $2, hard_cap_at = $3 where id = $1",
+    )
+    .bind(replacement)
+    .bind(parent)
+    .bind(now + TimeDelta::minutes(10))
+    .execute(&rig.pool)
+    .await?;
+    rig.tick(now).await;
+    let window = rig.window(replacement).await;
+    assert_eq!(window.state, "failed");
+    assert_eq!(window.final_cost_kopecks, Some(0));
+    assert_eq!(window.create_called_at, None, "nothing was called");
+    assert_eq!(window.last_error.as_deref(), Some("replacement_too_late"));
+    assert_eq!(rig.posts(), 0);
+    assert_eq!(
+        rig.fake
+            .control()
+            .count("GET", "/compute/v1/images:latestByFamily"),
+        0,
+        "no provider call at all"
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn a_retry_pending_job_without_a_preempted_window_is_lost_on_reconcile(
     pool: PgPool,
 ) -> TestResult {
