@@ -123,6 +123,8 @@ struct Fixture {
     drain: JoinHandle<()>,
     data: PathBuf,
     marker: PathBuf,
+    egress: PathBuf,
+    egress_port: u16,
     root: PathBuf,
     machine_id: Uuid,
     sink: Arc<Sink>,
@@ -165,6 +167,11 @@ impl Fixture {
         let data = data.path().to_path_buf();
         let root = sshd.path().join("runner");
         let marker = sshd.path().join("ready");
+        // Скрипт подготовки получает окружение выхода в сеть и проверяет, что проброс с
+        // SOCKS уже поднят: файл указывает на порт обратного проброса.
+        let egress_port = crate::support::free_port();
+        let egress = sshd.path().join("egress.env");
+        fs::write(&egress, format!("EGRESS_PORT={egress_port}\n")).unwrap();
         let machine_id = Uuid::now_v7();
         let control = Arc::new(FakeControl {
             machine_id,
@@ -194,8 +201,12 @@ impl Fixture {
             user: sshd.user().to_owned(),
             ready_marker: marker.clone(),
             ready_timeout: options.ready_timeout,
+            egress_env: egress.clone(),
+            // `sshd` пускает обычным пользователем: боевой `sudo -n` в тесте не нужен.
+            sudo: Some(String::new()),
         };
         let cloud = Arc::new(CloudState::open(cloud_config.clone()));
+        let sink = Arc::new(Sink::default());
         let settings = CarrierSettings {
             hub_url: hub.config.hub_url.clone(),
             ca_cert: hub.config.ca_cert.clone(),
@@ -204,8 +215,9 @@ impl Fixture {
             worker_sha256: None,
             entries: vec![],
             timings: test_timings(),
-            egress_port: crate::support::free_port(),
+            egress_port,
             cloud: Some(cloud.clone()),
+            facts: Some(sink.clone()),
         };
         let (assign, assigned_rx) = watch::channel(if options.assigned {
             vec![AssignedRunner {
@@ -232,7 +244,6 @@ impl Fixture {
             allowed_roots: vec![PathBuf::from("/tmp")],
         });
         let store = Store::open(&data).unwrap();
-        let sink = Arc::new(Sink::default());
         let commands = CarrierCommands::new(stager, store, sink.clone(), cloud.clone(), shutdown);
         commands.set_enabled(true);
         Self {
@@ -248,6 +259,8 @@ impl Fixture {
             drain,
             data,
             marker,
+            egress,
+            egress_port,
             root,
             machine_id,
             sink,
@@ -256,6 +269,10 @@ impl Fixture {
     }
 
     fn attach_command(&self, window: &str, key: String) -> HubCommand {
+        self.attach_scripted(window, key, "")
+    }
+
+    fn attach_scripted(&self, window: &str, key: String, script: &str) -> HubCommand {
         HubCommand {
             command_id: window.to_owned(),
             dispatch_attempt: 1,
@@ -268,10 +285,88 @@ impl Fixture {
                 max_running: 3,
                 lease_slots: 2,
                 ssh_port: self.sshd.port() as u32,
-                prepare_script: String::new(),
+                prepare_script: script.to_owned(),
             })),
             ..HubCommand::default()
         }
+    }
+
+    fn cloud_config(&self) -> CloudConfig {
+        CloudConfig {
+            data_dir: self.data.clone(),
+            ssh_key: Some(self.sshd.client_key().to_path_buf()),
+            user: self.sshd.user().to_owned(),
+            ready_marker: self.marker.clone(),
+            ready_timeout: self.ready_timeout,
+            egress_env: self.egress.clone(),
+            sudo: Some(String::new()),
+        }
+    }
+
+    fn settings(&self, cloud: Arc<CloudState>) -> CarrierSettings {
+        CarrierSettings {
+            hub_url: self.hub.config.hub_url.clone(),
+            ca_cert: self.hub.config.ca_cert.clone(),
+            ssh_config: None,
+            worker_binary: Some(PathBuf::from(WORKER)),
+            worker_sha256: None,
+            entries: vec![],
+            timings: test_timings(),
+            egress_port: self.egress_port,
+            cloud: Some(cloud),
+            facts: Some(self.sink.clone()),
+        }
+    }
+
+    /// Новый носитель поверх того же каталога данных и того же сервера окна: так проверяется,
+    /// что подготовка переживает рестарт.
+    async fn restart(
+        &mut self,
+    ) -> (
+        Arc<CloudState>,
+        watch::Sender<Vec<AssignedRunner>>,
+        watch::Sender<bool>,
+        JoinHandle<()>,
+    ) {
+        self.shutdown_carrier().await;
+        let cloud = Arc::new(CloudState::open(self.cloud_config()));
+        let (assign, assigned) = watch::channel(Vec::new());
+        let (stop, shutdown) = watch::channel(false);
+        let join = tokio::spawn(carrier::run(
+            self.settings(cloud.clone()),
+            self.control.clone(),
+            assigned,
+            shutdown,
+        ));
+        (cloud, assign, stop, join)
+    }
+
+    fn assign_runner(&self) -> Vec<AssignedRunner> {
+        vec![AssignedRunner {
+            machine_id: self.machine_id,
+            name: "cloud".into(),
+            root_dir: self.root.clone(),
+        }]
+    }
+
+    /// Факты подготовки, которые носитель записал в приёмник.
+    fn prepare_facts(&self) -> Vec<(String, String, i32, String)> {
+        self.sink
+            .written
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(|(facts, _)| facts.clone())
+            .filter_map(|body| match body {
+                Body::RunnerPrepareFailed(fact) => Some((
+                    fact.window_id,
+                    fact.machine_id,
+                    fact.exit_code,
+                    fact.output_tail,
+                )),
+                _ => None,
+            })
+            .collect()
     }
 
     fn hello_count(&self) -> u32 {
@@ -523,29 +618,12 @@ async fn a_restart_resumes_the_attachment_only_while_assigned() {
     fx.shutdown_carrier().await;
 
     // Полностью новый носитель читает состояние с диска.
-    let cloud = Arc::new(CloudState::open(CloudConfig {
-        data_dir: fx.data.clone(),
-        ssh_key: Some(fx.sshd.client_key().to_path_buf()),
-        user: fx.sshd.user().to_owned(),
-        ready_marker: fx.marker.clone(),
-        ready_timeout: fx.ready_timeout,
-    }));
+    let cloud = Arc::new(CloudState::open(fx.cloud_config()));
     assert_eq!(cloud.attachments().len(), 1);
-    let settings = CarrierSettings {
-        hub_url: fx.hub.config.hub_url.clone(),
-        ca_cert: fx.hub.config.ca_cert.clone(),
-        ssh_config: None,
-        worker_binary: Some(PathBuf::from(WORKER)),
-        worker_sha256: None,
-        entries: vec![],
-        timings: test_timings(),
-        egress_port: crate::support::free_port(),
-        cloud: Some(cloud.clone()),
-    };
     let (assign, assigned_rx) = watch::channel(Vec::new());
     let (stop, shutdown) = watch::channel(false);
     let join = tokio::spawn(carrier::run(
-        settings,
+        fx.settings(cloud.clone()),
         fx.control.clone(),
         assigned_rx,
         shutdown,
@@ -561,11 +639,7 @@ async fn a_restart_resumes_the_attachment_only_while_assigned() {
         0
     );
     let before = fx.hello_count();
-    assign.send_replace(vec![AssignedRunner {
-        machine_id: fx.machine_id,
-        name: "cloud".into(),
-        root_dir: fx.root.clone(),
-    }]);
+    assign.send_replace(fx.assign_runner());
     until("the resumed runner to connect", || {
         fx.hello_count() > before
     })
@@ -594,4 +668,150 @@ async fn without_the_negotiated_capability_the_command_is_not_applied() {
     fx.commands.set_enabled(true);
     fx.commands.handle(&command).await.unwrap();
     wait_outcome(&fx, "started").await;
+}
+
+/// Скрипт, который срабатывает только при живом обратном SOCKS: соединение на порт из
+/// `egress.env` не пройдёт, если проброс ещё не поднят. След — файл на сервере окна.
+fn tunnel_proof_script(effect: &std::path::Path) -> String {
+    format!(
+        "set -e\nexec 3<>/dev/tcp/127.0.0.1/$EGRESS_PORT\nexec 3>&-\necho prepared > {}\n",
+        effect.display()
+    )
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_prepare_script_runs_after_the_tunnel_and_before_the_worker() {
+    let fx = Fixture::start(Options::default()).await;
+    write_marker(&fx);
+    let effect = fx.sshd.path().join("prepared-by-script");
+    let script = tunnel_proof_script(&effect);
+    let command = fx.attach_scripted("window-prepare", fx.sshd.host_key_public(), &script);
+    fx.commands.handle(&command).await.unwrap();
+    // Успех подготовки — условие готовности окна и запуска воркера.
+    wait_outcome(&fx, "started").await;
+    until("the runner worker to connect", || fx.hello_count() >= 1).await;
+    assert_eq!(fs::read_to_string(&effect).unwrap().trim(), "prepared");
+    assert!(
+        fx.worker_pid().is_some(),
+        "the worker starts after the preparation"
+    );
+    assert!(fx.prepare_facts().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failing_prepare_script_reports_the_code_and_stops_the_worker() {
+    let fx = Fixture::start(Options::default()).await;
+    write_marker(&fx);
+    let command = fx.attach_scripted(
+        "window-prepare-fails",
+        fx.sshd.host_key_public(),
+        "echo boom; exit 3\n",
+    );
+    fx.commands.handle(&command).await.unwrap();
+    let failed = wait_outcome(&fx, "prepare_failed").await;
+    assert_eq!(failed.code(), "prepare_failed");
+    until("the failure marker", || {
+        fx.sshd.path().join("prepare-failed").exists()
+    })
+    .await;
+    assert_eq!(fx.hello_count(), 0, "the worker never connects");
+    assert!(fx.worker_pid().is_none(), "the worker never starts");
+    assert!(!fx.installed(), "nothing is even installed");
+    let facts = fx.prepare_facts();
+    assert_eq!(facts.len(), 1, "{facts:?}");
+    let (window, machine, code, tail) = &facts[0];
+    assert_eq!(window, "window-prepare-fails");
+    assert_eq!(machine, &fx.machine_id.to_string());
+    assert_eq!(*code, 3);
+    assert!(tail.contains("boom"), "{tail:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_prepare_script_that_outlives_the_deadline_is_killed() {
+    let fx = Fixture::start(Options::default()).await;
+    write_marker(&fx);
+    let command = fx.attach_scripted(
+        "window-prepare-slow",
+        fx.sshd.host_key_public(),
+        "echo starting; sleep 60\n",
+    );
+    fx.commands.handle(&command).await.unwrap();
+    let failed = tokio::time::timeout(
+        fx.ready_timeout + Duration::from_secs(20),
+        wait_outcome(&fx, "prepare_failed"),
+    )
+    .await
+    .expect("the deadline ends the preparation");
+    assert_eq!(failed.code(), "prepare_failed");
+    assert_eq!(fx.hello_count(), 0, "the worker never connects");
+    assert!(fx.worker_pid().is_none(), "the worker never starts");
+    let facts = fx.prepare_facts();
+    assert_eq!(facts.len(), 1, "{facts:?}");
+    assert_eq!(facts[0].2, -1, "the deadline is reported as -1");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restart_after_success_does_not_rerun_the_script() {
+    let mut fx = Fixture::start(Options::default()).await;
+    write_marker(&fx);
+    let counter = fx.sshd.path().join("prepare-runs");
+    let script = format!("echo run >> {}\n", counter.display());
+    let command = fx.attach_scripted("window-prepared", fx.sshd.host_key_public(), &script);
+    fx.commands.handle(&command).await.unwrap();
+    wait_outcome(&fx, "started").await;
+    until("the worker after the first attach", || {
+        fx.hello_count() >= 1
+    })
+    .await;
+    assert_eq!(fs::read_to_string(&counter).unwrap().lines().count(), 1);
+
+    let before = fx.hello_count();
+    let (cloud, assign, stop, join) = fx.restart().await;
+    assign.send_replace(fx.assign_runner());
+    until("the resumed runner to report ready", || {
+        cloud
+            .outcomes()
+            .iter()
+            .any(|outcome| outcome.code() == "started")
+    })
+    .await;
+    until("the worker to reconnect", || fx.hello_count() > before).await;
+    assert_eq!(
+        fs::read_to_string(&counter).unwrap().lines().count(),
+        1,
+        "the script runs once per window"
+    );
+    let _ = stop.send(true);
+    let _ = join.await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restart_after_failure_starts_nothing() {
+    let mut fx = Fixture::start(Options::default()).await;
+    write_marker(&fx);
+    let counter = fx.sshd.path().join("prepare-runs-again");
+    let script = format!("echo run >> {}\nexit 4\n", counter.display());
+    let command = fx.attach_scripted("window-failed", fx.sshd.host_key_public(), &script);
+    fx.commands.handle(&command).await.unwrap();
+    wait_outcome(&fx, "prepare_failed").await;
+    assert_eq!(fs::read_to_string(&counter).unwrap().lines().count(), 1);
+
+    let (cloud, assign, stop, join) = fx.restart().await;
+    assign.send_replace(fx.assign_runner());
+    until("the restarted carrier to refuse the window", || {
+        cloud
+            .outcomes()
+            .iter()
+            .any(|outcome| outcome.code() == "prepare_failed")
+    })
+    .await;
+    assert_eq!(
+        fs::read_to_string(&counter).unwrap().lines().count(),
+        1,
+        "the failed script never runs twice"
+    );
+    assert_eq!(fx.hello_count(), 0, "the worker never connects");
+    assert!(fx.worker_pid().is_none(), "the worker never starts");
+    let _ = stop.send(true);
+    let _ = join.await;
 }

@@ -207,6 +207,60 @@ pub fn remove_fatal(root: &Path) -> String {
     format!("rm -f -- {}/state/fatal", root.display())
 }
 
+/// Команда подготовки облачного окна: от root, с окружением выхода в сеть, тело скрипта —
+/// на stdin. `pid` пишется до `exec`, чтобы по нему можно было снять зависший скрипт:
+/// `exec` сохраняет идентификатор процесса. Из-за `exec` и `2>&1` весь вывод скрипта — это
+/// stdout удалённой команды, и хвост для факта берётся из одного места.
+pub fn prepare_run(sudo: &str, egress_env: &Path, pid: &Path) -> String {
+    let env = super::stage::sh_quote(&egress_env.display().to_string());
+    let pid = super::stage::sh_quote(&pid.display().to_string());
+    let inner = format!("set -a; . {env}; set +a; echo $$ > {pid}; exec bash -s 2>&1");
+    format!("{sudo} bash -c {} 2>&1", super::stage::sh_quote(&inner))
+}
+
+/// Маркер подготовки: создаёт каталог и пустой файл. `sudo` — тот же префикс, что у скрипта.
+pub fn prepare_marker(sudo: &str, path: &Path) -> String {
+    marker_command(sudo, path, &format!(": > {path}", path = quoted_path(path)))
+}
+
+/// Файл с итогом неудачной подготовки: каталог и `cat` со stdin.
+pub fn prepare_marker_write(sudo: &str, path: &Path) -> String {
+    marker_command(
+        sudo,
+        path,
+        &format!("cat > {path}", path = quoted_path(path)),
+    )
+}
+
+/// Снимает зависшую подготовку по pid-файлу и убирает сам файл.
+pub fn prepare_kill(sudo: &str, pid: &Path) -> String {
+    let pid = quoted_path(pid);
+    let inner = format!("kill -KILL -- $(cat {pid}) 2>/dev/null; rm -f {pid}");
+    format!(
+        "{sudo} sh -c {} 2>/dev/null",
+        super::stage::sh_quote(&inner)
+    )
+}
+
+/// Убирает pid-файл подготовки, не трогая никого: скрипт уже кончился.
+pub fn prepare_clean(sudo: &str, pid: &Path) -> String {
+    let pid = quoted_path(pid);
+    format!(
+        "{sudo} sh -c {}",
+        super::stage::sh_quote(&format!("rm -f {pid}"))
+    )
+}
+
+fn marker_command(sudo: &str, path: &Path, body: &str) -> String {
+    let dir = path.parent().map(quoted_path).unwrap_or_else(|| ".".into());
+    let inner = format!("mkdir -p {dir} && {body}");
+    format!("{sudo} sh -c {}", super::stage::sh_quote(&inner))
+}
+
+fn quoted_path(path: &Path) -> String {
+    super::stage::sh_quote(&path.display().to_string())
+}
+
 /// Идентификаторы машины, которые носитель получил вместе с токеном.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Ids {
@@ -387,6 +441,48 @@ mod tests {
             0o755
         );
         assert!(!root.join("bin/canterlot-worker.new").exists());
+    }
+
+    /// Подготовка идёт через `bash -c` от root: окружение выхода в сеть подключается, тело
+    /// скрипта читается из stdin, pid пишется до `exec`, чтобы зависший скрипт можно было снять.
+    #[test]
+    fn the_prepare_command_sources_the_egress_env_and_execs_stdin() {
+        let command = prepare_run(
+            "sudo -n",
+            Path::new("/etc/canterlot/egress.env"),
+            Path::new("/var/lib/canterlot-runner/prepare.pid"),
+        );
+        assert!(command.starts_with("sudo -n bash -c '"), "{command}");
+        assert!(
+            command.contains(". /etc/canterlot/egress.env;"),
+            "{command}"
+        );
+        assert!(
+            command.contains("echo $$ > /var/lib/canterlot-runner/prepare.pid;"),
+            "{command}"
+        );
+        assert!(command.contains("exec bash -s 2>&1"), "{command}");
+        assert!(command.trim_end().ends_with(" 2>&1"), "{command}");
+    }
+
+    #[test]
+    fn the_marker_commands_create_the_directory_and_write_the_file() {
+        let marker = prepare_marker("", Path::new("/var/lib/canterlot-runner/prepared"));
+        assert_eq!(
+            marker,
+            " sh -c 'mkdir -p /var/lib/canterlot-runner && : > /var/lib/canterlot-runner/prepared'"
+        );
+        let failed =
+            prepare_marker_write("", Path::new("/var/lib/canterlot-runner/prepare-failed"));
+        assert!(
+            failed.contains("cat > /var/lib/canterlot-runner/prepare-failed"),
+            "{failed}"
+        );
+        let kill = prepare_kill("", Path::new("/var/lib/canterlot-runner/prepare.pid"));
+        assert!(
+            kill.contains("kill -KILL -- $(cat /var/lib/canterlot-runner/prepare.pid)"),
+            "{kill}"
+        );
     }
 
     #[test]

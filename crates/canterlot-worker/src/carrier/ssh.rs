@@ -177,6 +177,22 @@ impl Ssh {
         input: Input<'_>,
         limit: Duration,
     ) -> Result<Output, Unreachable> {
+        match self.execute_until(remote, input, limit).await? {
+            Some(output) => Ok(output),
+            // Срок вышел: локальный `ssh` снят вместе с будущим, `Unreachable` прежних
+            // вызовов означал и это, и любую другую осечку.
+            None => Err(Unreachable),
+        }
+    }
+
+    /// Как `execute`, но истёкший срок — это `Ok(None)`, а не потеря связи: подготовке окна
+    /// нужно отличить одно от другого, чтобы записать код -1.
+    async fn execute_until(
+        &self,
+        remote: &[&str],
+        input: Input<'_>,
+        limit: Duration,
+    ) -> Result<Option<Output>, Unreachable> {
         let mut command = self.base();
         command.arg("-T").arg(self.peer()).args(remote);
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -205,14 +221,15 @@ impl Ssh {
             }
             child.wait_with_output().await.map_err(|_| Unreachable)
         };
-        let output = tokio::time::timeout(limit, work)
-            .await
-            .map_err(|_| Unreachable)??;
-        Ok(Output {
+        let output = match tokio::time::timeout(limit, work).await {
+            Ok(output) => output?,
+            Err(_) => return Ok(None),
+        };
+        Ok(Some(Output {
             code: output.status.code().unwrap_or(255),
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        })
+        }))
     }
 
     /// Выполняет `remote` на раннере. Нулевой код не требуется: отказ команды — это
@@ -240,6 +257,17 @@ impl Ssh {
     pub async fn script(&self, script: &str, limit: Duration) -> Result<Output, Unreachable> {
         self.run(&["sh", "-s"], Input::Bytes(script.as_bytes()), limit)
             .await
+    }
+
+    /// Команда со stdin, срок которой проверяет вызывающий: `Ok(None)` — срок вышел, вывод
+    /// скрипта не собран, а локальный `ssh` снят.
+    pub async fn until(
+        &self,
+        remote: &[&str],
+        input: Input<'_>,
+        limit: Duration,
+    ) -> Result<Option<Output>, Unreachable> {
+        self.execute_until(remote, input, limit).await
     }
 
     /// Причина отказа ключа хоста: `StrictHostKeyChecking=yes` не предлагает принять новый.
