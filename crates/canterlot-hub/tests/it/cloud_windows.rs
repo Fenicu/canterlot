@@ -2080,6 +2080,48 @@ async fn too_little_time_to_the_parent_deadline_skips_the_replacement(pool: PgPo
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_replacement_keeps_the_parent_quote_age_and_is_repriced_before_its_first_post(
+    pool: PgPool,
+) -> TestResult {
+    let rig = rig(pool).await;
+    enable_pushes(&rig.pool).await;
+    rig.set_budget(10_000_000).await;
+    let _carrier = rig.carrier_session();
+    let t0 = now_micros();
+    let (id, session, _at) = rig.drive_to_ready(120, t0).await;
+    let machine = rig.cloud_machine().await;
+    let _job = rig.seed_running_sourced(machine, 0).await;
+    // Провайдер подорожал уже после того, как родитель получил снимок цен.
+    set_vcpu_price(&rig, "0.9");
+    let stopped = rig.window(id).await.instance_id.unwrap();
+    rig.fake.control().preempt(&stopped);
+    // Прерывание через одиннадцать минут: снимок цен родителя старше срока годности.
+    let seen = t0 + TimeDelta::minutes(11);
+    let restarted = rig.restarted();
+    restarted.tick(seen).await;
+    drop(session);
+    let end = seen + TimeDelta::seconds(10);
+    restarted.tick(end).await;
+    assert_eq!(rig.state(id).await, "ended");
+    let replacements = rig.replacements_of(id).await;
+    assert_eq!(replacements.len(), 1);
+    let replacement = &replacements[0];
+    assert_eq!(
+        replacement.created_at,
+        rig.window(id).await.created_at,
+        "the replacement carries the parent's quote timestamp"
+    );
+    // Первый POST замены спрашивает цену заново: рост резерва закрывает окно без вызова.
+    restarted.tick(end + TimeDelta::seconds(1)).await;
+    let replacement = rig.window(replacement.id).await;
+    assert_eq!(replacement.state, "failed");
+    assert_eq!(replacement.final_cost_kopecks, Some(0));
+    assert_eq!(replacement.last_error.as_deref(), Some("reprice_growth"));
+    assert_eq!(rig.posts(), 1, "only the parent was created at the old rate");
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn a_retry_pending_job_without_a_preempted_window_is_lost_on_reconcile(
     pool: PgPool,
 ) -> TestResult {
