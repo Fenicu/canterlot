@@ -8,7 +8,7 @@
 use std::{
     collections::{BTreeMap, HashSet},
     path::PathBuf,
-    sync::Mutex,
+    sync::{Arc, Mutex, atomic::AtomicU32},
     time::Duration,
 };
 
@@ -41,6 +41,19 @@ impl AttachOutcome {
     }
 }
 
+/// Только для тестов: сколько первых проверок отметок подготовки изобразить недоступными,
+/// как будто SSH пропадал ненадолго. В сравнении подключений шов не участвует.
+#[derive(Clone, Debug, Default)]
+pub struct MarkerProbeFailures(pub Arc<AtomicU32>);
+
+impl PartialEq for MarkerProbeFailures {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for MarkerProbeFailures {}
+
 /// Всё, что нужно носителю для облачного раннера, кроме обмена с хабом.
 #[derive(Clone, Debug)]
 pub struct CloudConfig {
@@ -51,6 +64,15 @@ pub struct CloudConfig {
     /// Маркер готовности cloud-init; тот же путь, что в `cloud_init.rs` хаба.
     pub ready_marker: PathBuf,
     pub ready_timeout: Duration,
+    /// Файл `NAME=value` с прокси, который скрипт подготовки получает в окружении. Путь
+    /// совпадает с `EGRESS_ENV_FILE` в cloud-init хаба.
+    pub egress_env: PathBuf,
+    /// Префикс повышения прав для подготовки; `None` — боевой `sudo -n`. Тесты подменяют его,
+    /// когда `sshd` пускает обычным пользователем.
+    pub sudo: Option<String>,
+    /// Только для тестов: сколько первых проверок отметок подготовки изобразить недоступными,
+    /// как будто SSH пропадал ненадолго. `None` — боевое поведение.
+    pub marker_probe_failures: Option<MarkerProbeFailures>,
 }
 
 impl Default for CloudConfig {
@@ -61,7 +83,17 @@ impl Default for CloudConfig {
             user: "runner".into(),
             ready_marker: PathBuf::from("/var/lib/canterlot-runner/ready"),
             ready_timeout: Duration::from_secs(15 * 60),
+            egress_env: PathBuf::from("/etc/canterlot/egress.env"),
+            sudo: None,
+            marker_probe_failures: None,
         }
+    }
+}
+
+impl CloudConfig {
+    /// Префикс повышения прав для подготовки окна.
+    pub fn sudo(&self) -> String {
+        self.sudo.clone().unwrap_or_else(|| "sudo -n".into())
     }
 }
 
@@ -77,6 +109,9 @@ pub struct Attachment {
     pub root_dir: PathBuf,
     pub max_running: u32,
     pub lease_slots: u32,
+    /// Скрипт подготовки из одобренной карточки; пустой — подготовки нет.
+    #[serde(default)]
+    pub prepare_script: String,
 }
 
 /// Что присмотр раннеров знает об облачном подключении.
@@ -94,6 +129,11 @@ pub struct CloudSpec {
     pub lease_slots: u32,
     pub ready_marker: PathBuf,
     pub ready_timeout: Duration,
+    pub prepare_script: String,
+    pub sudo: String,
+    pub egress_env: PathBuf,
+    /// Тестовый шов: см. [`CloudConfig::marker_probe_failures`].
+    pub marker_probe_failures: Option<MarkerProbeFailures>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -301,6 +341,10 @@ impl CloudState {
                     lease_slots: attachment.lease_slots,
                     ready_marker: self.config.ready_marker.clone(),
                     ready_timeout: self.config.ready_timeout,
+                    prepare_script: attachment.prepare_script.clone(),
+                    sudo: self.config.sudo(),
+                    egress_env: self.config.egress_env.clone(),
+                    marker_probe_failures: self.config.marker_probe_failures.clone(),
                 }
             })
             .collect();
@@ -343,6 +387,7 @@ fn valid(attachment: &Attachment) -> bool {
         && script::valid_root(&attachment.root_dir)
         && attachment.max_running > 0
         && attachment.lease_slots > 0
+        && attachment.prepare_script.len() <= 16 * 1024
 }
 
 #[cfg(test)]
@@ -359,6 +404,7 @@ mod tests {
             root_dir: PathBuf::from("/srv/runner"),
             max_running: 3,
             lease_slots: 2,
+            prepare_script: String::new(),
         }
     }
 
@@ -465,6 +511,35 @@ mod tests {
         assert_eq!(state.attachments(), vec![first.clone()]);
         let resumed = CloudState::open(config);
         assert_eq!(resumed.attachments(), vec![first]);
+    }
+
+    /// Файл состояния прежней версии не знает о скрипте подготовки: он читается как пустой,
+    /// а не ломает подключение.
+    #[test]
+    fn an_old_attachment_file_reads_an_empty_prepare_script() {
+        let dir = tempfile::Builder::new()
+            .prefix("cloud-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let machine = Uuid::now_v7();
+        let file = dir.path().join("cloud/attachments.json");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(
+            &file,
+            format!(
+                r#"[{{"window_id":"window-1","machine_id":"{machine}","host":"192.0.2.10",
+                    "ssh_port":2222,"host_key_public":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITEST",
+                    "root_dir":"/srv/runner","max_running":3,"lease_slots":2}}]"#
+            ),
+        )
+        .unwrap();
+        let state = CloudState::open(CloudConfig {
+            data_dir: dir.path().to_path_buf(),
+            ..CloudConfig::default()
+        });
+        let attachments = state.attachments();
+        assert_eq!(attachments.len(), 1);
+        assert!(attachments[0].prepare_script.is_empty());
     }
 
     #[test]

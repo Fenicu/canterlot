@@ -104,6 +104,12 @@ impl CarrierCommands {
         self.enabled.load(Ordering::SeqCst)
     }
 
+    /// Приёмник фактов: им же носитель пишет факты, которые не закрывают команду
+    /// (например, сбой подготовки облачного окна).
+    pub fn sink(&self) -> Arc<dyn FactSink> {
+        self.sink.clone()
+    }
+
     /// Принимает команду. Долгие идут фоном и возвращаются сразу; `Err(Io)` оставляет команду
     /// непогашенной, чтобы её доиграл следующий сеанс.
     pub async fn handle(self: &Arc<Self>, command: &Command) -> Result<(), CommandError> {
@@ -263,6 +269,7 @@ impl CarrierCommands {
             root_dir: PathBuf::from(&attach.root_dir),
             max_running: attach.max_running,
             lease_slots: attach.lease_slots,
+            prepare_script: attach.prepare_script.clone(),
         };
         match self.cloud.apply(attachment) {
             Ok(()) => Ok(()),
