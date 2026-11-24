@@ -46,7 +46,9 @@ pub fn accepts_fact(job: &Job, attempt: u32, fact: &'static str) -> bool {
 
 /// Задаче положен повтор после прерывания машины `machine`: повтора ещё не было, у неё есть
 /// исходники (чистый checkout коммита, который несущая подготовит заново), отмены не просили и
-/// нет свидетельства, что команда закончилась. Несущая сама должна остаться.
+/// нет свидетельства, что команда закончилась. Итоговый журнал, привязанный к текущей попытке,
+/// — тоже свидетельство: воркер загружает его отдельным путём после факта о конце. Несущая сама
+/// должна остаться.
 fn retryable(job: &Job, machine: Uuid) -> bool {
     job.preemption_retries == 0
         && job.has_source()
@@ -55,6 +57,7 @@ fn retryable(job: &Job, machine: Uuid) -> bool {
         && job.finish_report.is_none()
         && job.outcome_state.is_none()
         && job.exit_code.is_none()
+        && job.log_media_id.is_none()
         && !matches!(job.state(), State::Collecting | State::RetryPending)
 }
 

@@ -2380,6 +2380,26 @@ async fn a_preempted_job_with_a_finish_fact_is_lost(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "./migrations")]
+async fn a_preempted_job_with_an_uploaded_log_is_lost(pool: PgPool) {
+    let mut fx = Fx::new(pool).await;
+    let runner = fx.runner("runner-a", 20, &[], 2, true).await;
+    let id = fx.running_on(runner).await;
+    // Итоговый журнал пришёл отдельным путём и привязался к попытке: команда отработала,
+    // даже если факт `JobFinished` ещё не записан.
+    let media = Uuid::now_v7();
+    sqlx::query("update jobs set log_media_id=$2, log_size=3 where id=$1")
+        .bind(id)
+        .bind(media)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    fx.preempt(runner).await;
+    assert_eq!(fx.state(id).await, "lost", "a finished job is never replayed");
+    assert_eq!(fx.messages(id).await, 1);
+    assert!(fx.release(runner).await.is_empty());
+}
+
+#[sqlx::test(migrations = "./migrations")]
 async fn a_job_without_a_staged_source_is_lost_with_its_preempted_machine(pool: PgPool) {
     let mut fx = Fx::new(pool).await;
     let runner = fx.runner("runner-a", 20, &[], 2, true).await;
