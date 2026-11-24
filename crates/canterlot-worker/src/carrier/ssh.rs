@@ -12,6 +12,10 @@ use std::{
 
 use tokio::{io::AsyncWriteExt, process::Command};
 
+/// Порт обратного SOCKS5 на облачном раннере: весь его исходящий трафик идёт с аплинка
+/// носителя. Должен совпадать с `EGRESS_SOCKS_PORT` хаба (`cloud_init.rs`).
+pub const EGRESS_SOCKS_PORT: u16 = 1080;
+
 /// Что подать на stdin удалённой команды.
 pub enum Input<'a> {
     None,
@@ -250,18 +254,101 @@ impl Ssh {
     }
 
     /// Долгоживущий процесс обратного проброса: сокет `socket` на раннере ведёт к `target`
-    /// на стороне носителя. Убивается вместе с владельцем.
-    pub fn forward(&self, socket: &Path, target: &str) -> std::io::Result<tokio::process::Child> {
+    /// на стороне носителя. Убивается вместе с владельцем. У облачного раннера тем же
+    /// процессом поднимается обратный SOCKS5 на его loopback: без него фильтрация в облаке
+    /// не пускает ни apt, ни cargo, ни docker. `ExitOnForwardFailure` покрывает оба проброса.
+    pub fn forward(
+        &self,
+        socket: &Path,
+        target: &str,
+        egress: bool,
+    ) -> std::io::Result<tokio::process::Child> {
         let mut command = self.base();
         command
-            .arg("-N")
-            .args(["-o", "ExitOnForwardFailure=yes"])
-            .arg("-R")
-            .arg(format!("{}:{target}", socket.display()))
+            .args(self.forward_args(socket, target, egress))
             .arg(self.peer())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
         command.spawn()
+    }
+
+    /// Аргументы проброса без адресата. Статическому раннеру — только сокет хаба; облачному
+    /// ещё и SOCKS5 на loopback, потому что из облака заблокированные хосты недостижимы.
+    fn forward_args(&self, socket: &Path, target: &str, egress: bool) -> Vec<String> {
+        let mut args = vec![
+            "-N".to_owned(),
+            "-o".to_owned(),
+            "ExitOnForwardFailure=yes".to_owned(),
+            "-R".to_owned(),
+            format!("{}:{target}", socket.display()),
+        ];
+        if egress {
+            args.push("-R".to_owned());
+            args.push(format!("127.0.0.1:{EGRESS_SOCKS_PORT}"));
+        }
+        args
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ssh(target: Target) -> Ssh {
+        Ssh {
+            target,
+            config: None,
+        }
+    }
+
+    fn cloud() -> Ssh {
+        ssh(Target::Host {
+            host: "203.0.113.10".into(),
+            port: 22,
+            user: "runner".into(),
+            identity: None,
+            known_hosts: PathBuf::from("/tmp/known_hosts"),
+        })
+    }
+
+    fn static_runner() -> Ssh {
+        ssh(Target::Alias("build-host".into()))
+    }
+
+    #[test]
+    fn a_cloud_tunnel_also_forwards_the_egress_socks_port() {
+        let args =
+            cloud().forward_args(Path::new("/srv/runner/hub.sock"), "hub.example:8443", true);
+        assert!(
+            args.windows(2).any(|pair| pair == ["-R", "127.0.0.1:1080"]),
+            "{args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-R", "/srv/runner/hub.sock:hub.example:8443"]),
+            "{args:?}"
+        );
+        assert!(args.iter().any(|arg| arg == "ExitOnForwardFailure=yes"));
+    }
+
+    #[test]
+    fn a_static_tunnel_keeps_its_arguments() {
+        let args = static_runner().forward_args(
+            Path::new("/srv/runner/hub.sock"),
+            "hub.example:8443",
+            false,
+        );
+        assert_eq!(
+            args,
+            [
+                "-N",
+                "-o",
+                "ExitOnForwardFailure=yes",
+                "-R",
+                "/srv/runner/hub.sock:hub.example:8443",
+            ]
+        );
+        assert!(!args.iter().any(|arg| arg.contains("1080")));
     }
 }

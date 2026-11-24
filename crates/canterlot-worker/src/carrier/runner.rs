@@ -356,7 +356,11 @@ impl Runner {
                 Err(Unreachable) => return Duration::ZERO,
             }
         }
-        let mut child = match self.ssh.forward(socket, &self.shared.target) {
+        let mut child = match self.ssh.forward(
+            socket,
+            &self.shared.target,
+            self.spec.cloud.is_some(),
+        ) {
             Ok(child) => child,
             Err(error) => {
                 tracing::warn!(runner = %self.spec.machine_id, kind = ?error.kind(), "ssh could not be started");
