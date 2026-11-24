@@ -874,7 +874,7 @@ fn session_input_schema(mcp_name: &str) -> Value {
             "type": "object",
             "properties": {
                 "machine": {"type": "string"},
-                "state": {"type": "string", "enum": ["waiting_runner", "staging", "queued", "dispatched", "waiting_lease", "running", "collecting", "succeeded", "failed", "timed_out", "canceled", "lost"]},
+                "state": {"type": "string", "enum": ["waiting_runner", "staging", "queued", "dispatched", "waiting_lease", "running", "collecting", "retry_pending", "succeeded", "failed", "timed_out", "canceled", "lost"]},
                 "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 20},
             },
             "additionalProperties": false,

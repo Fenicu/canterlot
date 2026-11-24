@@ -16,7 +16,8 @@ use std::{
 };
 
 use super::stage::{
-    Failure, Place, Stager, carrier_workdir_shape, first_line, kv, parse_job, script_failure,
+    Failure, Place, Stager, carrier_workdir_shape, first_line, job_dir, kv, parse_job,
+    script_failure,
 };
 use tokio::{io::AsyncWriteExt, process::Command};
 
@@ -27,6 +28,7 @@ const MAX_PATHS: usize = 64;
 #[derive(Clone, Debug)]
 pub struct CollectRequest {
     pub job_id: String,
+    pub attempt: u32,
     pub target_machine_id: String,
     pub target_root_dir: String,
     pub workdir: String,
@@ -108,9 +110,13 @@ impl Stager {
         let local_dir = self.settings.outputs_root.join(job.to_string());
         match place {
             Place::Runner { ssh, root } => {
-                let fits = ["personal", "work"]
-                    .iter()
-                    .any(|domain| workdir == root.join("jobs").join(domain).join(job.to_string()));
+                let fits = ["personal", "work"].iter().any(|domain| {
+                    workdir
+                        == root
+                            .join("jobs")
+                            .join(domain)
+                            .join(job_dir(job, request.attempt))
+                });
                 if !fits {
                     return Err(Failure::new(
                         "bad_workdir",
@@ -121,7 +127,7 @@ impl Stager {
                     .await
             }
             Place::Carrier => {
-                if !carrier_workdir_shape(&workdir, job) {
+                if !carrier_workdir_shape(&workdir, job, request.attempt) {
                     return Err(Failure::new(
                         "bad_workdir",
                         "workdir is not under .canterlot-jobs",

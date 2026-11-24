@@ -165,12 +165,26 @@ pub fn repo_key(repo: &str) -> String {
     format!("{name}-{hash}")
 }
 
+/// Имя каталога попытки: `<id>` у первой и `<id>-<попытка>` у повтора. Повтор не делит каталог
+/// с прежней попыткой, а несущая сверяет имя с попыткой из команды.
+pub fn job_dir_name(job: Uuid, attempt: i32) -> String {
+    if attempt <= 1 {
+        job.to_string()
+    } else {
+        format!("{job}-{attempt}")
+    }
+}
+
 /// Рабочий каталог задачи на самой несущей:
-/// `<каталог над репозиторием>/.canterlot-jobs/<имя репозитория>/<id>`.
-pub fn carrier_workdir(repo: &str, job: Uuid) -> String {
+/// `<каталог над репозиторием>/.canterlot-jobs/<имя репозитория>/<каталог попытки>`.
+pub fn carrier_workdir(repo: &str, job: Uuid, attempt: i32) -> String {
     let trimmed = repo.trim_end_matches('/');
     let parent = trimmed.rsplit_once('/').map_or("", |(parent, _)| parent);
-    format!("{parent}/.canterlot-jobs/{}/{job}", repo_dir_name(repo))
+    format!(
+        "{parent}/.canterlot-jobs/{}/{}",
+        repo_dir_name(repo),
+        job_dir_name(job, attempt)
+    )
 }
 
 /// Рабочий каталог на несущей остаётся в домене исходников? Он лежит над репозиторием, и если
@@ -183,23 +197,23 @@ pub async fn carrier_workdir_in_domain(
     repo: &str,
     domain: &str,
 ) -> Result<bool, sqlx::Error> {
-    let workdir = carrier_workdir(repo, Uuid::nil());
+    let workdir = carrier_workdir(repo, Uuid::nil(), 1);
     let found = crate::memory::path_domain(conn, carrier, &workdir).await?;
     Ok(found.map(crate::memory::MemoryDomain::as_str) == Some(domain))
 }
 
-/// Рабочий каталог задачи: на раннере `<root>/jobs/<домен>/<id>`, на самой несущей
-/// `carrier_workdir`.
+/// Рабочий каталог задачи: на раннере `<root>/jobs/<домен>/<каталог попытки>`, на самой
+/// несущей `carrier_workdir`.
 pub fn workdir_for(job: &Job, root_dir: Option<&str>, on_carrier: bool) -> Option<String> {
     let repo = job.source_repo.as_deref()?;
     let domain = job.source_domain.as_deref()?;
     if on_carrier {
-        Some(carrier_workdir(repo, job.id))
+        Some(carrier_workdir(repo, job.id, job.attempt))
     } else {
         Some(format!(
             "{}/jobs/{domain}/{}",
             root_dir?.trim_end_matches('/'),
-            job.id
+            job_dir_name(job.id, job.attempt)
         ))
     }
 }
