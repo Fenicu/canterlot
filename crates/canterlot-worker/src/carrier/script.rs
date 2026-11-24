@@ -235,7 +235,12 @@ pub struct ConfigInputs<'a> {
     pub root: &'a Path,
     pub max_running: u32,
     pub lease_slots: u32,
+    /// Облачному раннеру — файл прокси из cloud-init; статический его не знает.
+    pub cloud: bool,
 }
+
+/// Файл `NAME=value` с прокси; путь совпадает с `EGRESS_ENV_FILE` в cloud-init хаба.
+const EGRESS_ENV_FILE: &str = "/etc/canterlot/egress.env";
 
 fn quoted(text: &str) -> String {
     toml::Value::String(text.to_owned()).to_string()
@@ -244,6 +249,12 @@ fn quoted(text: &str) -> String {
 /// Конфигурация раннера: без таблиц харнессов, с рабочими корнями только под `jobs/`.
 pub fn render_config(inputs: &ConfigInputs<'_>, ids: &Ids) -> String {
     let root = inputs.root.display().to_string();
+    // Только облачному раннеру: его трафик выходит через SOCKS5 носителя (cloud-init кладёт файл).
+    let env_file = if inputs.cloud {
+        format!("env_file = {}\n", quoted(EGRESS_ENV_FILE))
+    } else {
+        String::new()
+    };
     format!(
         "# Сгенерировано носителем; правки теряются.\n\
          hub_url = {hub_url}\n\
@@ -263,6 +274,7 @@ pub fn render_config(inputs: &ConfigInputs<'_>, ids: &Ids) -> String {
          \n\
          [jobs]\n\
          max_running = {max_running}\n\
+         {env_file}\
          \n\
          [machine]\n\
          lease_slots = {lease_slots}\n",
@@ -385,15 +397,14 @@ mod tests {
             restore_generation: Uuid::now_v7(),
         };
         let root = Path::new("/srv/runner");
-        let text = render_config(
-            &ConfigInputs {
-                hub_url: "https://hub.example:8443",
-                root,
-                max_running: 3,
-                lease_slots: 2,
-            },
-            &ids,
-        );
+        let inputs = |cloud: bool| ConfigInputs {
+            hub_url: "https://hub.example:8443",
+            root,
+            max_running: 3,
+            lease_slots: 2,
+            cloud,
+        };
+        let text = render_config(&inputs(false), &ids);
         let config: crate::config::WorkerConfig = toml::from_str(&text).unwrap();
         assert_eq!(
             config.hub_dial.as_deref(),
@@ -409,9 +420,48 @@ mod tests {
         assert_eq!(config.memory.work_roots, ["/srv/runner/jobs/work"]);
         assert_eq!(config.jobs.max_running, 3);
         assert_eq!(config.machine.lease_slots, 2);
+        assert_eq!(config.jobs.env_file, None, "a static runner has no proxy");
         assert!(
             config.claude_code.is_none() && config.codex.is_none() && config.opencode.is_none()
         );
         assert_eq!(Ids::from_config(&text), Some(ids));
+    }
+
+    #[test]
+    fn only_a_cloud_runner_gets_the_egress_env_file() {
+        let ids = Ids {
+            machine_id: Uuid::now_v7(),
+            installation_id: Uuid::now_v7(),
+            restore_generation: Uuid::now_v7(),
+        };
+        let root = Path::new("/srv/runner");
+        let cloud = render_config(
+            &ConfigInputs {
+                hub_url: "https://hub.example:8443",
+                root,
+                max_running: 3,
+                lease_slots: 2,
+                cloud: true,
+            },
+            &ids,
+        );
+        let config: crate::config::WorkerConfig = toml::from_str(&cloud).unwrap();
+        assert_eq!(
+            config.jobs.env_file.as_deref(),
+            Some(Path::new("/etc/canterlot/egress.env"))
+        );
+        assert!(
+            !render_config(
+                &ConfigInputs {
+                    hub_url: "https://hub.example:8443",
+                    root,
+                    max_running: 3,
+                    lease_slots: 2,
+                    cloud: false,
+                },
+                &ids,
+            )
+            .contains("env_file")
+        );
     }
 }

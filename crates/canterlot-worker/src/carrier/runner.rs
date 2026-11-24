@@ -625,6 +625,7 @@ impl Runner {
                 root: self.root(),
                 max_running: self.spec.max_running,
                 lease_slots: self.spec.lease_slots,
+                cloud: self.spec.cloud.is_some(),
             },
             ids,
         );
@@ -653,6 +654,7 @@ impl Runner {
                 root: self.root(),
                 max_running: self.spec.max_running,
                 lease_slots: self.spec.lease_slots,
+                cloud: self.spec.cloud.is_some(),
             },
             &ids,
         );
