@@ -59,6 +59,23 @@ rust_version=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
 image_tag=$({ cat "$dockerfile" rust-toolchain.toml; } | sha256sum | cut -c1-12)
 image="canterlot-gate:$image_tag"
 
+# Выход в сеть облачного раннера идёт через SOCKS5 на loopback машины (его поднимает
+# носитель), а контейнер без хостовой сети до loopback не достанет. Без прокси аргументы
+# остаются прежними: статические раннеры ходят в сеть напрямую.
+proxy_build=()
+proxy_run=()
+if [[ -n "${HTTPS_PROXY:-}" || -n "${https_proxy:-}" ]]; then
+    proxy_build=(--network host)
+    proxy_run=(--network host)
+    for name in HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY \
+        http_proxy https_proxy all_proxy no_proxy; do
+        value=${!name:-}
+        [[ -n "$value" ]] || continue
+        proxy_build+=(--build-arg "$name=$value")
+        proxy_run+=(-e "$name=$value")
+    done
+fi
+
 # Ограничения: хосту остаются 2 ядра и 4 ГБ. pids 8192, init, shm и SYS_PTRACE — по тем же
 # причинам, что в scripts/gate-remote.sh (супервизоры, strace в тестах).
 cpus=$(($(nproc) - 2))
@@ -77,6 +94,7 @@ if "$docker_cmd" image inspect "$image" >/dev/null 2>&1; then
 else
     "$docker_cmd" build -t "$image" \
         --build-arg "RUST_VERSION=$rust_version" \
+        "${proxy_build[@]}" \
         -f "$dockerfile" "$wt/docker/gate" || die 'не удалось собрать образ'
 fi
 
@@ -118,6 +136,7 @@ run_args=(
     -e CARGO_HOME=/cache/cargo
     -e npm_config_cache=/cache/npm
     -w /src
+    "${proxy_run[@]}"
 )
 log "контейнер $name: --cpus $cpus --memory ${mem_mb}m"
 gate_code=0

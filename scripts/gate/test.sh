@@ -539,7 +539,8 @@ assert_git_mounted() {
         ((ok)) || fail "$what: каталог git $dir не смонтирован в контейнер по своему пути: $line"
     done
 }
-rg_env=(env CANTERLOT_DOCKER="$fake_docker")
+rg_env=(env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u NO_PROXY \
+    -u http_proxy -u https_proxy -u all_proxy -u no_proxy CANTERLOT_DOCKER="$fake_docker")
 
 # Без worker.toml в корне раннера скрипт отказывает до docker.
 rr="$tmp/runner-root"
@@ -591,6 +592,34 @@ run 0 "${rg_env[@]}" FAKE_DOCKER_IMAGE_RC=1 bash "$rwt/scripts/gate/runner-gate.
 build_line=$(grep '^build ' "$FAKE_DOCKER_CALLS") || fail 'runner-gate: образ не собран'
 grep -qF -- "-f $rwt/docker/gate/Dockerfile" <<<"$build_line" || fail "runner-gate: Dockerfile не из этой рабочей копии: $build_line"
 grep -qF -- 'RUST_VERSION=1.99.1' <<<"$build_line" || fail 'runner-gate: нет версии Rust из rust-toolchain.toml'
+# Без прокси сетевые аргументы docker не меняются.
+if grep -q -- '--network host' <<<"$build_line"; then fail 'runner-gate: без прокси сборка получила хостовую сеть'; fi
+run_line=$(grep '^run ' "$FAKE_DOCKER_CALLS") || fail 'runner-gate: нет docker run'
+if grep -q -- '--network host' <<<"$run_line"; then fail 'runner-gate: без прокси контейнер получил хостовую сеть'; fi
+if grep -qE -- '(^| )-e [A-Za-z_]*PROXY=' <<<"$run_line"; then fail 'runner-gate: без прокси контейнер получил переменные прокси'; fi
+if grep -q -- '--build-arg [A-Za-z_]*PROXY=' <<<"$build_line"; then fail 'runner-gate: без прокси сборка получила переменные прокси'; fi
+
+# Прокси облачного раннера: cloud-init кладёт SOCKS5 на loopback машины, поэтому и сборка,
+# и контейнер идут в хостовой сети и получают те же переменные. Сборка заодно проверяет
+# каждый set-вариант восьми имён.
+rm -rf "$rwt/.gate-out"
+: >"$FAKE_DOCKER_CALLS"
+proxy_env=(env CANTERLOT_DOCKER="$fake_docker"
+    "HTTP_PROXY=socks5h://127.0.0.1:1080" "HTTPS_PROXY=socks5h://127.0.0.1:1080"
+    "ALL_PROXY=socks5h://127.0.0.1:1080" "NO_PROXY=localhost,127.0.0.1"
+    "http_proxy=socks5h://127.0.0.1:1080" "https_proxy=socks5h://127.0.0.1:1080"
+    "all_proxy=socks5h://127.0.0.1:1080" "no_proxy=localhost,127.0.0.1")
+run 0 "${proxy_env[@]}" FAKE_DOCKER_IMAGE_RC=1 bash "$rwt/scripts/gate/runner-gate.sh" "$rsha"
+build_line=$(grep '^build ' "$FAKE_DOCKER_CALLS") || fail 'runner-gate: с прокси образ не собран'
+grep -q -- '--network host' <<<"$build_line" || fail 'runner-gate: с прокси сборка без хостовой сети'
+run_line=$(grep '^run ' "$FAKE_DOCKER_CALLS") || fail 'runner-gate: с прокси нет docker run'
+grep -q -- '--network host' <<<"$run_line" || fail 'runner-gate: с прокси контейнер без хостовой сети'
+for name in HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY http_proxy https_proxy all_proxy no_proxy; do
+    grep -qE -- "(^| )--build-arg $name=[^ ]+" <<<"$build_line" \
+        || fail "runner-gate: с прокси сборка без --build-arg $name"
+    grep -qE -- "(^| )-e $name=[^ ]+" <<<"$run_line" \
+        || fail "runner-gate: с прокси контейнер без -e $name"
+done
 
 # Код гейта проходит наружу; без state.tsv и result.txt — провал даже при коде 0.
 rm -rf "$rwt/.gate-out"
