@@ -12,7 +12,7 @@ export type FakeCloudCard = components['schemas']['RequestView'];
 const now = (): number => Date.now();
 const iso = (ms: number): string => new Date(ms).toISOString();
 
-const DEFAULT_HOURLY = 2_845;
+const DEFAULT_HOURLY = 1_806;
 
 function errorBody(code: string, message: string, details?: Record<string, unknown>): unknown {
 	return {
@@ -47,7 +47,7 @@ export function seedCloudWindow(api: FakeHubApi, patch: Partial<FakeCloudWindow>
 		compute_kopecks_per_hour: DEFAULT_HOURLY - 160,
 		disk_kopecks_per_hour: 160,
 		price_hourly_kopecks: DEFAULT_HOURLY,
-		reservation_kopecks: 11_380,
+		reservation_kopecks: 7_224,
 		final_cost_kopecks: null,
 		cost_so_far_kopecks: DEFAULT_HOURLY,
 		month: new Date().toISOString().slice(0, 7),
@@ -76,10 +76,41 @@ export function seedEndedWindow(api: FakeHubApi, patch: Partial<FakeCloudWindow>
 		hard_cap_at: iso(at + 120 * 60_000),
 		delete_requested_at: iso(at + 118 * 60_000),
 		delete_confirmed_at: iso(at + 119 * 60_000),
-		final_cost_kopecks: 5_690,
-		cost_so_far_kopecks: 5_690,
+		final_cost_kopecks: 3_612,
+		cost_so_far_kopecks: 3_612,
 		...patch
 	});
+}
+
+/**
+ * Прерванное окно и его замена: экран показывает причину «прервана Яндексом», метку
+ * «прерываемая» и связь окон. Возвращает оба окна, чтобы их можно было дополнить.
+ */
+export function seedPreemptedPair(
+	api: FakeHubApi,
+	patch: Partial<FakeCloudWindow> = {}
+): { parent: FakeCloudWindow; replacement: FakeCloudWindow } {
+	const stopped = now() - 18 * 60_000;
+	const parent = seedEndedWindow(api, {
+		created_at: iso(stopped - 95 * 60_000),
+		ready_at: iso(stopped - 90 * 60_000),
+		hard_cap_at: iso(stopped + 25 * 60_000),
+		stopped_at: iso(stopped),
+		delete_requested_at: iso(stopped + 60_000),
+		delete_confirmed_at: iso(stopped + 3 * 60_000),
+		delete_reason: 'preempted',
+		final_cost_kopecks: 2_900,
+		cost_so_far_kopecks: 2_900
+	});
+	const replacement = seedCloudWindow(api, {
+		created_at: iso(stopped + 4 * 60_000),
+		ready_at: iso(stopped + 8 * 60_000),
+		hard_cap_at: iso(stopped + 60 * 60_000),
+		reservation_kopecks: 5_418,
+		replaces_window_id: parent.id,
+		...patch
+	});
+	return { parent, replacement };
 }
 
 export interface CloudCardSeed {
@@ -153,10 +184,12 @@ export interface CloudSeed {
 	/** `false` — хаба без `[runners.cloud]`: списки пусты, форма скрыта. */
 	configured?: boolean;
 	budget?: Partial<FakeCloudBudget>;
-	/** Код блока провайдера, например `no_paid`. */
+	/** Код блока провайдера, например `billing_blocked`. */
 	block?: string | null;
 	/** Живое окно: `false` — его нет. */
 	live?: false | Partial<FakeCloudWindow>;
+	/** Прерванное окно и замена вместо обычного живого: `false` — обычное живое. */
+	preemption?: boolean;
 	/** Сколько законченных окон положить в список. */
 	ended?: number;
 	/** Карточка запуска: `false` — её нет. */
@@ -179,7 +212,10 @@ export function seedCloud(
 	};
 	api.cloudBudget.remaining_kopecks =
 		api.cloudBudget.monthly_budget_kopecks - api.cloudBudget.spent_kopecks;
-	if (opts.live !== false) seedCloudWindow(api, opts.live ?? {});
+	if (opts.live !== false) {
+		if (opts.preemption === false) seedCloudWindow(api, opts.live ?? {});
+		else seedPreemptedPair(api, opts.live ?? {});
+	}
 	for (let index = 0; index < (opts.ended ?? 0); index += 1) {
 		seedEndedWindow(api, { created_at: iso(now() - (26 + index * 30) * 3_600_000) });
 	}

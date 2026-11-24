@@ -3,11 +3,15 @@ import type { components } from '#lib/api/generated/openapi.js';
 import {
 	blockText,
 	deleteOutcomeText,
+	profileLines,
 	proposalRefusalText,
 	splitWindows,
 	windowCost,
 	windowCostLine,
 	windowDeadline,
+	windowEndReason,
+	windowReplacement,
+	windowStateText,
 	windowStateWord
 } from '#lib/screens/machines/cloudModel.js';
 import {
@@ -83,11 +87,39 @@ describe('cloud windows on the machines screen', () => {
 	});
 
 	it('explains the provider block and the delete outcome without codes', () => {
-		expect(blockText('no_paid')).toBe('Timeweb требует предоплату: новые окна не создаются');
+		expect(blockText('billing_blocked')).toBe(
+			'Провайдер остановил создание окон (код billing_blocked)'
+		);
 		expect(blockText(null)).toBeNull();
-		expect(deleteOutcomeText('deleting')).toBe('Удаляю сервер. Оплата идёт до подтверждения удаления');
+		expect(deleteOutcomeText('deleting')).toBe('Удаляю машину. Оплата идёт до подтверждения удаления');
 		expect(deleteOutcomeText('not_yet')).toContain('Удаление повторится');
 		expect(proposalRefusalText('live_window_exists')).toContain('одно');
+		expect(proposalRefusalText('provider_unavailable')).toContain('Yandex Cloud');
+	});
+
+	it('names a preemption and a broken machine in owner words', () => {
+		expect(windowEndReason('preempted')).toBe('прервана Яндексом');
+		expect(windowEndReason('vm_broken')).toBe('машина сломалась');
+		expect(windowEndReason('owner')).toBeNull();
+		expect(windowStateText(window({ state: 'ended', delete_reason: 'preempted' }))).toBe(
+			'Завершено · прервана Яндексом'
+		);
+		expect(windowStateText(window({ state: 'deleting', delete_reason: 'vm_broken' }))).toBe(
+			'Удаляется · машина сломалась'
+		);
+	});
+
+	it('ties a replacement window to the parent it replaces', () => {
+		const parent = window({ id: 'parent', state: 'ended', delete_reason: 'preempted' });
+		const replacement = window({ id: 'child', replaces_window_id: parent.id });
+		const line = windowReplacement(replacement, [parent, replacement], NOW);
+		expect(line?.parentId).toBe(parent.id);
+		expect(line?.text.startsWith('замена окна')).toBe(true);
+		expect(windowReplacement(window(), [parent], NOW)).toBeNull();
+		expect(windowReplacement(replacement, [replacement], NOW)).toEqual({
+			text: 'замена окна',
+			parentId: null
+		});
 	});
 });
 
@@ -133,7 +165,22 @@ describe('cloud proposal card', () => {
 		expect(cloudOutcome('card_outdated').word).toBe('Выпущена новая карточка');
 		expect(cloudOutcome('expired').tone).toBe('quiet');
 		expect(cloudOutcome('provider_blocked').word).toBe('Провайдер заблокирован');
+		expect(cloudOutcome('provider_blocked').note).toContain('Провайдер остановил');
 		expect(cloudOutcome('over_budget').word).toBe('Не хватает бюджета');
 		expect(cloudOutcome('whatever').word).toBe('Не применено');
+	});
+
+	it('reads a profile as size, disk and an approximate hour', () => {
+		expect(
+			profileLines([
+				{
+					cores: 32,
+					memory_gb: 64,
+					disk_gb: 80,
+					compute_kopecks_per_hour: 1_646,
+					disk_kopecks_per_hour: 160
+				}
+			])
+		).toEqual([{ key: '32-64-80', text: '32 vCPU · 64 ГБ · SSD 80 ГБ · ≈18,06 ₽/ч' }]);
 	});
 });
