@@ -1455,7 +1455,8 @@ impl CloudService {
             let attempts = window.delete_attempts.saturating_add(1);
             sqlx::query(
                 "update cloud_windows set delete_accepted_at = null, delete_operation_id = null,
-                        last_error = 'delete_failed', delete_attempts = $2, next_delete_at = $3
+                        last_error = case when delete_reason = 'create_failed' then last_error
+                                      else 'delete_failed' end, delete_attempts = $2, next_delete_at = $3
                  where id = $1 and state in ('deleting', 'late_cleanup')",
             )
             .bind(window.id)
@@ -1468,11 +1469,14 @@ impl CloudService {
             }
             return Ok(false);
         }
-        // Конец оплаты машины подтверждает только полный список каталога окна без неё.
+        // Конец оплаты машины подтверждает только полный список каталога окна без неё, и
+        // только вместе с прямым ответом «нет такой»: список мог до машины не дойти.
         match self.provider.list_instances(&window.folder_id).await {
             Ok(listing) if listed(&listing, window).is_none() => {
-                self.mark_server_gone(window, now).await?;
-                return Ok(true);
+                if self.confirm_absent(&instance_id).await {
+                    self.mark_server_gone(window, now).await?;
+                    return Ok(true);
+                }
             }
             Ok(_) => {}
             Err(error) => {
@@ -1485,6 +1489,19 @@ impl CloudService {
             self.try_delete(window, &instance_id, now).await?;
         }
         Ok(false)
+    }
+
+    /// Прямой ответ провайдера: машины с этим номером нет. Список без машины ещё не
+    /// доказательство, пока это не подтверждено запросом по номеру.
+    async fn confirm_absent(&self, instance_id: &str) -> bool {
+        match self.provider.get(instance_id).await {
+            Ok(InstanceLookup::NotFound) => true,
+            Ok(InstanceLookup::Found(_)) => false,
+            Err(error) => {
+                tracing::warn!(kind = "cloud_confirm_instance", error_kind = ?error.kind, "instance lookup failed");
+                false
+            }
+        }
     }
 
     /// Свежая строка окна после шага, который мог её изменить. `false`: окно уже не на сносе.
@@ -1597,7 +1614,8 @@ impl CloudService {
         // должно быть именем окна: диск с нашим номером и чужим именем не удаляется.
         if disk.name != window.name {
             sqlx::query(
-                "update cloud_windows set last_error = 'ownership_mismatch', next_delete_at = $2
+                "update cloud_windows set last_error = case when delete_reason = 'create_failed' then last_error
+                                           else 'ownership_mismatch' end, next_delete_at = $2
                  where id = $1 and state in ('deleting', 'late_cleanup')",
             )
             .bind(window.id)
@@ -1652,7 +1670,8 @@ impl CloudService {
             }
             DeleteOutcome::Failed { .. } => {
                 sqlx::query(
-                    "update cloud_windows set last_error = 'disk_delete_failed',
+                    "update cloud_windows set last_error = case when delete_reason = 'create_failed' then last_error
+                                      else 'disk_delete_failed' end,
                             delete_attempts = $2, next_delete_at = $3
                      where id = $1 and state in ('deleting', 'late_cleanup')",
                 )
@@ -1717,7 +1736,8 @@ impl CloudService {
             Ownership::Owned => {}
             Ownership::Mismatch => {
                 sqlx::query(
-                    "update cloud_windows set last_error = 'ownership_mismatch',
+                    "update cloud_windows set last_error = case when delete_reason = 'create_failed' then last_error
+                                           else 'ownership_mismatch' end,
                             next_delete_at = $2
                      where id = $1 and state in ('deleting', 'late_cleanup')",
                 )
@@ -1760,7 +1780,8 @@ impl CloudService {
                 // откатом, а после третьей неудачи владельцу уходит «deletion failing».
                 let attempts = window.delete_attempts.saturating_add(1);
                 sqlx::query(
-                    "update cloud_windows set last_error = 'delete_lookup_failed',
+                    "update cloud_windows set last_error = case when delete_reason = 'create_failed' then last_error
+                                      else 'delete_lookup_failed' end,
                             delete_attempts = $2, next_delete_at = $3
                      where id = $1 and state in ('deleting', 'late_cleanup')",
                 )
@@ -1814,7 +1835,8 @@ impl CloudService {
             }
             DeleteOutcome::Failed { .. } => {
                 sqlx::query(
-                    "update cloud_windows set last_error = 'delete_failed', delete_attempts = $2,
+                    "update cloud_windows set last_error = case when delete_reason = 'create_failed' then last_error
+                                      else 'delete_failed' end, delete_attempts = $2,
                             next_delete_at = $3
                      where id = $1 and state in ('deleting', 'late_cleanup')",
                 )
@@ -2050,9 +2072,14 @@ impl CloudService {
                     }
                 }
                 // Только когда машина уже должна была попасть в список: у провайдера она
-                // может появиться с задержкой.
+                // может появиться с задержкой. Отсутствие в списке подтверждается прямым
+                // ответом «нет такой», прежде чем окно уйдёт на снос без машины.
                 "identified" | "ready" | "draining" => {
-                    if old_enough && listed(instances, window).is_none() {
+                    if old_enough
+                        && listed(instances, window).is_none()
+                        && let Some(instance_id) = window.instance_id.as_deref()
+                        && self.confirm_absent(instance_id).await
+                    {
                         self.gone(window, now).await?;
                     }
                 }

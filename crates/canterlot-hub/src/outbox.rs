@@ -682,7 +682,7 @@ pub fn to_proto(row: &CommandRow) -> Result<Command, OutboxError> {
                 .and_then(Value::as_u64)
                 .and_then(|value| u32::try_from(value).ok())
                 .ok_or(OutboxError::InvalidCommand)?,
-            // Старые записи без порта — 22: до DNAT окна ходили на публичный адрес сервера.
+            // Запись без порта — 22: окна ходят на публичный адрес самой машины.
             ssh_port: row
                 .payload
                 .get("ssh_port")

@@ -15,7 +15,7 @@ pub struct RateLimit {
 }
 
 impl Default for RateLimit {
-    /// Предел Timeweb: 20 запросов в секунду на точку.
+    /// Осторожный предел: 20 запросов в секунду на точку.
     fn default() -> Self {
         Self {
             max: 20,
