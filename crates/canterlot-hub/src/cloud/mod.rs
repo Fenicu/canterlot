@@ -18,6 +18,7 @@ pub mod rate_limit;
 pub mod service;
 pub mod timeweb;
 pub mod windows;
+pub mod yandex;
 
 pub use timeweb::{TimewebConfig, TimewebProvider};
 
