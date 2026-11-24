@@ -31,6 +31,7 @@ pub(super) struct Shared {
     pub hub_url: String,
     pub ssh_config: Option<PathBuf>,
     pub timings: Timings,
+    pub egress_port: u16,
     /// `host:port` gRPC хаба для `-R`.
     pub target: String,
     pub ca_pem: Vec<u8>,
@@ -359,7 +360,7 @@ impl Runner {
         let mut child = match self.ssh.forward(
             socket,
             &self.shared.target,
-            self.spec.cloud.is_some(),
+            self.spec.cloud.is_some().then_some(self.shared.egress_port),
         ) {
             Ok(child) => child,
             Err(error) => {

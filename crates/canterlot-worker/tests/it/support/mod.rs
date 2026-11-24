@@ -658,3 +658,12 @@ impl Drop for ProtocolHub {
         self.task.abort();
     }
 }
+
+/// Свободный порт loopback: слушатель закрывается сразу, порт достаётся тому, кто займёт его
+/// первым.
+pub fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|listener| listener.local_addr())
+        .map(|addr| addr.port())
+        .expect("a free loopback port")
+}

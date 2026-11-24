@@ -204,6 +204,7 @@ impl Fixture {
             worker_sha256: None,
             entries: vec![],
             timings: test_timings(),
+            egress_port: crate::support::free_port(),
             cloud: Some(cloud.clone()),
         };
         let (assign, assigned_rx) = watch::channel(if options.assigned {
@@ -537,6 +538,7 @@ async fn a_restart_resumes_the_attachment_only_while_assigned() {
         worker_sha256: None,
         entries: vec![],
         timings: test_timings(),
+        egress_port: crate::support::free_port(),
         cloud: Some(cloud.clone()),
     };
     let (assign, assigned_rx) = watch::channel(Vec::new());

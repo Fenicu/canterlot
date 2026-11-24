@@ -157,6 +157,9 @@ pub struct CarrierSettings {
     pub worker_sha256: Option<String>,
     pub entries: Vec<RunnerSsh>,
     pub timings: Timings,
+    /// Порт обратного SOCKS5 на loopback облачного раннера. Тесты берут свободный: на машине
+    /// с настоящим туннелем 1080 уже занят.
+    pub egress_port: u16,
     /// Долговечные облачные подключения; без них носитель ведёт только статические раннеры.
     pub cloud: Option<Arc<cloud::CloudState>>,
 }
@@ -171,6 +174,7 @@ impl CarrierSettings {
             worker_sha256: None,
             entries: config.runners.ssh.clone(),
             timings: Timings::default(),
+            egress_port: ssh::EGRESS_SOCKS_PORT,
             cloud: None,
         }
     }
@@ -419,6 +423,7 @@ pub async fn run(
         hub_url: settings.hub_url.clone(),
         ssh_config: settings.ssh_config.clone(),
         timings: settings.timings.clone(),
+        egress_port: settings.egress_port,
         target,
         ca_sha: hex(&Sha256::digest(&ca_pem)),
         ca_pem,

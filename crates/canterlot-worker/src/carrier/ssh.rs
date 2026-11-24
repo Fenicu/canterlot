@@ -261,7 +261,7 @@ impl Ssh {
         &self,
         socket: &Path,
         target: &str,
-        egress: bool,
+        egress: Option<u16>,
     ) -> std::io::Result<tokio::process::Child> {
         let mut command = self.base();
         command
@@ -275,7 +275,7 @@ impl Ssh {
 
     /// Аргументы проброса без адресата. Статическому раннеру — только сокет хаба; облачному
     /// ещё и SOCKS5 на loopback, потому что из облака заблокированные хосты недостижимы.
-    fn forward_args(&self, socket: &Path, target: &str, egress: bool) -> Vec<String> {
+    fn forward_args(&self, socket: &Path, target: &str, egress: Option<u16>) -> Vec<String> {
         let mut args = vec![
             "-N".to_owned(),
             "-o".to_owned(),
@@ -283,9 +283,9 @@ impl Ssh {
             "-R".to_owned(),
             format!("{}:{target}", socket.display()),
         ];
-        if egress {
+        if let Some(port) = egress {
             args.push("-R".to_owned());
-            args.push(format!("127.0.0.1:{EGRESS_SOCKS_PORT}"));
+            args.push(format!("127.0.0.1:{port}"));
         }
         args
     }
@@ -318,8 +318,11 @@ mod tests {
 
     #[test]
     fn a_cloud_tunnel_also_forwards_the_egress_socks_port() {
-        let args =
-            cloud().forward_args(Path::new("/srv/runner/hub.sock"), "hub.example:8443", true);
+        let args = cloud().forward_args(
+            Path::new("/srv/runner/hub.sock"),
+            "hub.example:8443",
+            Some(EGRESS_SOCKS_PORT),
+        );
         assert!(
             args.windows(2).any(|pair| pair == ["-R", "127.0.0.1:1080"]),
             "{args:?}"
@@ -337,7 +340,7 @@ mod tests {
         let args = static_runner().forward_args(
             Path::new("/srv/runner/hub.sock"),
             "hub.example:8443",
-            false,
+            None,
         );
         assert_eq!(
             args,
