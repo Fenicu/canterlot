@@ -6,6 +6,9 @@ rust-version.workspace = true
 publish.workspace = true
 license.workspace = true
 
+[lints]
+workspace = true
+
 [features]
 synthetic-adapter = []
 # Настоящий `opencode` с локальной заглушкой провайдера (L2). Тесты помечены `ignore`:

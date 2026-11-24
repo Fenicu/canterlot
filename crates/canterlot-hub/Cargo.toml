@@ -13,6 +13,9 @@ path = "src/lib.rs"
 name = "canterlot-hub"
 path = "src/main.rs"
 
+[lints]
+workspace = true
+
 [features]
 testkit = ["dep:rcgen", "dep:tower", "dep:http-body-util", "hyper-util/client-legacy", "dep:tokio-tungstenite"]
 fault-injection = []
