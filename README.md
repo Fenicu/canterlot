@@ -7,7 +7,7 @@
 [![история](https://img.shields.io/badge/%D0%B8%D1%81%D1%82%D0%BE%D1%80%D0%B8%D1%8F-CHANGES.rst-6c757d)](CHANGES.rst)
 [![лицензия](https://img.shields.io/badge/%D0%BB%D0%B8%D1%86%D0%B5%D0%BD%D0%B7%D0%B8%D1%8F-MIT-blue)](LICENSE)
 ![агенты](https://img.shields.io/badge/%D0%B0%D0%B3%D0%B5%D0%BD%D1%82%D1%8B-Claude%20Code%20%C2%B7%20Codex%20%C2%B7%20OpenCode-1f5457)
-![Rust](https://img.shields.io/badge/rust-1.99.1-orange?logo=rust)
+![Rust](https://img.shields.io/badge/rust-1.100.0-orange?logo=rust)
 ![SvelteKit](https://img.shields.io/badge/SvelteKit-3-FF3E00?logo=svelte&logoColor=white)
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18-4169E1?logo=postgresql&logoColor=white)
 ![Node](https://img.shields.io/badge/node-24-339933?logo=node.js&logoColor=white)

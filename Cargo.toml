@@ -6,7 +6,7 @@ exclude = ["spikes"]
 [workspace.package]
 version = "1.49.1"
 edition = "2024"
-rust-version = "1.99"
+rust-version = "1.100"
 publish = false
 license = "MIT"
 
