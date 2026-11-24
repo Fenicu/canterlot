@@ -30,7 +30,7 @@ fail-fast = true
 
 # Первое совпавшее правило задаёт параметр: сначала узкие правила, потом общие.
 [[profile.default.overrides]]
-filter = 'package(canterlot-worker) & binary(it) & (test(=exec_attachments::large_attachment_does_not_starve_control_session) | test(=exec_media::media_upload_does_not_starve_control_or_sj) | test(=exec_e2e::large_answer_backlog_does_not_starve_control_session))'
+filter = 'package(canterlot-worker) & binary(it) & (test(=exec_attachments::large_attachment_does_not_starve_control_session) | test(=exec_media::media_upload_does_not_starve_control_or_sj) | test(=exec_e2e::large_answer_backlog_does_not_starve_control_session) | test(=session::large_command_burst_during_large_replay_keeps_heartbeat_acks_timely))'
 test-group = "starvation"
 threads-required = 12
 slow-timeout = { period = "30s", terminate-after = 8 }
