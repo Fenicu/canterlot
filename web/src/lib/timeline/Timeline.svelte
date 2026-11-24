@@ -856,6 +856,10 @@
   .feed-wrap { position: relative; flex: 1; min-height: 0; display: flex; container-type: inline-size; }
   .feed { overflow: auto; overflow-anchor: none; scrollbar-gutter: stable; flex: 1; min-width: 0; padding-inline: max(var(--gutter), calc((100% - var(--reading-max)) / 2 + var(--gutter))); padding-block: var(--s6); mask-image: linear-gradient(to bottom, var(--transparent), var(--text) var(--s6), var(--text) calc(100% - var(--s6)), var(--transparent)); }
   .feed :global(*) { overflow-anchor: none; }
+  /* Карточка запроса в ленте не ограничена по высоте, но остаётся скроллером с contain для
+     случая у поля ввода. Chrome держит касание в таком скроллере, даже когда прокручивать
+     нечего: карточка во весь экран запирала ленту. В ленте жест уходит в саму ленту. */
+  .feed :global(.card-root), .feed :global(.secret-request-card) { overscroll-behavior: auto; }
   .row { padding-top: var(--s3); }
   .row[data-kind='input'] { padding-top: var(--s8); }
   /* Карточка ответа, к которой привела ссылка «Отчёт», вспыхивает и гаснет, как своё сообщение после прыжка. */

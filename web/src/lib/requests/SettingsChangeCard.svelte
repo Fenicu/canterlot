@@ -128,7 +128,6 @@
     background: var(--code);
     max-height: calc(var(--fs-sm) * var(--lh-body) * 12);
     overflow: auto;
-    overscroll-behavior: contain;
   }
 
   .diff:focus-visible {
