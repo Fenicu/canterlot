@@ -1088,6 +1088,7 @@ async fn automatic_create_rechecks_its_conditions_under_the_budget_lock(
     let request = || CreateRequest {
         trigger: Trigger::Auto,
         proposal_id: None,
+        replaces_window_id: None,
         hard_cap_minutes: 90,
         consent_over_budget_kopecks: None,
     };
@@ -1161,6 +1162,7 @@ async fn automatic_create_reads_the_runner_clock_in_the_database(pool: PgPool) -
         CreateRequest {
             trigger: Trigger::Auto,
             proposal_id: None,
+            replaces_window_id: None,
             hard_cap_minutes: 120,
             consent_over_budget_kopecks: None,
         },

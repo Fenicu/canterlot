@@ -169,6 +169,7 @@ impl Rig {
             .create(CreateRequest {
                 trigger: Trigger::Owner,
                 proposal_id: None,
+                replaces_window_id: None,
                 hard_cap_minutes: cap,
                 consent_over_budget_kopecks: Some(self.reservation(cap)),
             })
@@ -390,6 +391,67 @@ impl Rig {
         .await
         .unwrap();
         id
+    }
+
+    /// Идущая на облачной машине задача с готовым исходником: после прерывания ей положен
+    /// повтор. `retries` — сколько повторов она уже пережила (0 или 1).
+    async fn seed_running_sourced(&self, machine: Uuid, retries: i32) -> Uuid {
+        let id = Uuid::now_v7();
+        sqlx::query(
+            "insert into jobs (id, owner_id, domain, machine_id, remote, workdir, shell,
+                               timeout_seconds, state, labels, carrier_id, preemption_retries,
+                               source_repo, source_rev, source_domain)
+             values ($1, $2, 'personal', $3, true, '/srv/canterlot-runner/jobs/personal/x',
+                     'true', 600, 'running', '{cloud}', $4, $5, '/srv/src/app',
+                     '0123456789abcdef0123456789abcdef01234567', 'personal')",
+        )
+        .bind(id)
+        .bind(self.owner)
+        .bind(machine)
+        .bind(self.carrier)
+        .bind(retries)
+        .execute(&self.pool)
+        .await
+        .unwrap();
+        id
+    }
+
+    /// Состояние, попытка и число уже пережитых прерываний задачи.
+    async fn job_triple(&self, id: Uuid) -> (String, i32, i32) {
+        sqlx::query_as("select state, attempt, preemption_retries from jobs where id = $1")
+            .bind(id)
+            .fetch_one(&self.pool)
+            .await
+            .unwrap()
+    }
+
+    /// Окна, которые заменили это окно (их не больше одного).
+    async fn replacements_of(&self, parent: Uuid) -> Vec<Window> {
+        sqlx::query_as(
+            "select * from cloud_windows where replaces_window_id = $1 order by created_at, id",
+        )
+        .bind(parent)
+        .fetch_all(&self.pool)
+        .await
+        .unwrap()
+    }
+
+    /// Причина последнего пуша о пропущенной замене.
+    async fn last_skip_reason(&self) -> String {
+        self.alerts()
+            .await
+            .last()
+            .and_then(|payload| payload["reason"].as_str().map(str::to_owned))
+            .expect("a replacement_skipped push")
+    }
+
+    /// Месячный бюджет: без него замена не проходит допуск, а создание идёт по согласию.
+    async fn set_budget(&self, kopecks: i64) {
+        sqlx::query("update cloud_budget set monthly_budget_kopecks = $1")
+            .bind(kopecks)
+            .execute(&self.pool)
+            .await
+            .unwrap();
     }
 }
 
@@ -646,6 +708,7 @@ async fn with_a_zero_budget_only_the_exact_consent_passes(pool: PgPool) -> TestR
                 .create(CreateRequest {
                     trigger: Trigger::Card,
                     proposal_id: Some(Uuid::now_v7()),
+                    replaces_window_id: None,
                     hard_cap_minutes: 60,
                     consent_over_budget_kopecks: consent,
                 })
@@ -692,6 +755,7 @@ async fn the_budget_counts_ended_final_cost_and_live_reservations(pool: PgPool) 
         .create(CreateRequest {
             trigger: Trigger::Owner,
             proposal_id: None,
+            replaces_window_id: None,
             hard_cap_minutes: 60,
             consent_over_budget_kopecks: None,
         })
@@ -715,6 +779,7 @@ async fn the_budget_counts_ended_final_cost_and_live_reservations(pool: PgPool) 
         .create(CreateRequest {
             trigger: Trigger::Owner,
             proposal_id: None,
+            replaces_window_id: None,
             hard_cap_minutes: 60,
             consent_over_budget_kopecks: None,
         })
@@ -731,6 +796,7 @@ async fn the_budget_counts_ended_final_cost_and_live_reservations(pool: PgPool) 
         .create(CreateRequest {
             trigger: Trigger::Owner,
             proposal_id: None,
+            replaces_window_id: None,
             hard_cap_minutes: 60,
             consent_over_budget_kopecks: None,
         })
@@ -749,6 +815,7 @@ async fn the_budget_counts_ended_final_cost_and_live_reservations(pool: PgPool) 
         .create(CreateRequest {
             trigger: Trigger::Owner,
             proposal_id: None,
+            replaces_window_id: None,
             hard_cap_minutes: 60,
             consent_over_budget_kopecks: None,
         })
@@ -827,6 +894,7 @@ async fn concurrent_creates_make_exactly_one_window(pool: PgPool) -> TestResult 
     let request = || CreateRequest {
         trigger: Trigger::Owner,
         proposal_id: None,
+        replaces_window_id: None,
         hard_cap_minutes: 60,
         consent_over_budget_kopecks: None,
     };
@@ -1142,6 +1210,7 @@ async fn the_reservation_and_the_budget_use_the_most_expensive_profile_of_the_li
     let request = |consent| CreateRequest {
         trigger: Trigger::Owner,
         proposal_id: None,
+        replaces_window_id: None,
         hard_cap_minutes: 60,
         consent_over_budget_kopecks: consent,
     };
@@ -1199,6 +1268,7 @@ async fn a_price_that_cannot_be_read_refuses_the_window(pool: PgPool) -> TestRes
         .create(CreateRequest {
             trigger: Trigger::Owner,
             proposal_id: None,
+            replaces_window_id: None,
             hard_cap_minutes: 60,
             consent_over_budget_kopecks: Some(rig.reservation(60)),
         })
@@ -1687,7 +1757,12 @@ async fn a_stopped_preemptible_instance_is_cleaned_up_as_preempted(pool: PgPool)
     let view = windows::view(&window, end);
     assert_eq!(view.stopped_at, Some(seen));
     assert!(view.preemptible);
-    assert_eq!(rig.alerts().await.len(), 1, "one push for one preemption");
+    // Второй пуш — отказ от замены: задач в очереди нет.
+    assert_eq!(
+        rig.alert_codes().await,
+        vec!["preempted", "replacement_skipped"]
+    );
+    assert_eq!(rig.last_skip_reason().await, "no_waiting_job");
     Ok(())
 }
 
@@ -1747,6 +1822,337 @@ async fn a_crashed_instance_is_vm_broken_even_when_preemptible(pool: PgPool) -> 
     assert_eq!(window.delete_reason.as_deref(), Some("vm_broken"));
     assert_eq!(window.stopped_at, None, "a crash is not a stop");
     assert_eq!(rig.alert_codes().await, vec!["vm_broken"]);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_preempted_window_retries_its_sourced_job_and_gets_a_replacement(
+    pool: PgPool,
+) -> TestResult {
+    let rig = rig(pool).await;
+    enable_pushes(&rig.pool).await;
+    rig.set_budget(10_000_000).await;
+    let _carrier = rig.carrier_session();
+    let t0 = now_micros();
+    let (id, session, at) = rig.drive_to_ready(120, t0).await;
+    let parent = rig.window(id).await;
+    let instance_id = parent.instance_id.clone().unwrap();
+    let machine = rig.cloud_machine().await;
+    let job = rig.seed_running_sourced(machine, 0).await;
+
+    // Яндекс остановил машину: отзыв держит задачу с исходником до подтверждённой остановки.
+    rig.fake.control().preempt(&instance_id);
+    let seen = at + TimeDelta::seconds(30);
+    rig.tick(seen).await;
+    let held = rig.job_triple(job).await;
+    assert_eq!(held, ("retry_pending".to_owned(), 1, 0));
+    drop(session);
+    // Ждущая повтора не размещается даже на том же раннере.
+    assert_eq!(
+        place::place_carrier(&rig.pool, &rig.registry, rig.carrier)
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(rig.job_triple(job).await.0, "retry_pending");
+    assert_eq!(rig.alert_codes().await, vec!["preempted"]);
+
+    // Снос убирает машину и диск; их отсутствие доказывает, что прежний процесс не идёт.
+    let end = seen + TimeDelta::seconds(10);
+    rig.tick(end).await;
+    let parent = rig.window(id).await;
+    assert_eq!(parent.state, "ended");
+    assert_eq!(
+        rig.job_triple(job).await,
+        ("waiting_runner".to_owned(), 2, 1)
+    );
+
+    // Ровно одна замена: то же предложение и повод, предел родителя абсолютный.
+    let replacements = rig.replacements_of(id).await;
+    assert_eq!(replacements.len(), 1);
+    let replacement = &replacements[0];
+    assert_eq!(replacement.replaces_window_id, Some(id));
+    assert_eq!(replacement.state, "create_intent");
+    assert_eq!(replacement.proposal_id, parent.proposal_id);
+    assert_eq!(replacement.trigger, parent.trigger);
+    assert!(replacement.preemptible);
+    assert_eq!(replacement.hard_cap_at, parent.hard_cap_at);
+    assert_eq!(
+        rig.alert_codes().await,
+        vec!["preempted", "replacement_started"]
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_replacement_is_never_replaced_and_its_retried_job_is_lost(pool: PgPool) -> TestResult {
+    let rig = rig(pool).await;
+    enable_pushes(&rig.pool).await;
+    rig.set_budget(10_000_000).await;
+    let _carrier = rig.carrier_session();
+    let t0 = now_micros();
+    let (id, parent_session, at) = rig.drive_to_ready(120, t0).await;
+    let machine = rig.cloud_machine().await;
+    let job = rig.seed_running_sourced(machine, 0).await;
+    rig.fake
+        .control()
+        .preempt(&rig.window(id).await.instance_id.unwrap());
+    let seen = at + TimeDelta::seconds(30);
+    rig.tick(seen).await;
+    drop(parent_session);
+    let end = seen + TimeDelta::seconds(10);
+    rig.tick(end).await;
+    let replacement = rig.replacements_of(id).await.remove(0);
+    assert_eq!(
+        rig.job_triple(job).await,
+        ("waiting_runner".to_owned(), 2, 1)
+    );
+
+    // Замена поднимается штатно.
+    rig.tick(end + TimeDelta::seconds(1)).await;
+    assert_eq!(rig.window(replacement.id).await.state, "identified");
+    rig.tick(end + TimeDelta::seconds(2)).await;
+    let _session = rig.attach().await;
+    let ready = end + TimeDelta::seconds(3);
+    rig.tick(ready).await;
+    assert_eq!(rig.window(replacement.id).await.state, "ready");
+    // На замене идёт та же задача второй попытки: её второе прерывание повтора уже не даёт.
+    let on_replacement = rig.seed_running_sourced(rig.cloud_machine().await, 1).await;
+    rig.fake
+        .control()
+        .preempt(&rig.window(replacement.id).await.instance_id.unwrap());
+    let second = ready + TimeDelta::seconds(30);
+    rig.tick(second).await;
+    assert_eq!(
+        rig.job_triple(on_replacement).await,
+        ("lost".to_owned(), 1, 1)
+    );
+    rig.tick(second + TimeDelta::seconds(10)).await;
+    assert_eq!(rig.window(replacement.id).await.state, "ended");
+    // Замену не заменяют: третьего окна нет.
+    assert!(rig.replacements_of(replacement.id).await.is_empty());
+    assert_eq!(
+        rig.alert_codes().await,
+        vec![
+            "preempted",
+            "replacement_started",
+            "preempted",
+            "replacement_skipped"
+        ]
+    );
+    assert_eq!(rig.last_skip_reason().await, "window_exists");
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_canceled_job_is_not_retried_after_preemption(pool: PgPool) -> TestResult {
+    let rig = rig(pool).await;
+    enable_pushes(&rig.pool).await;
+    rig.set_budget(10_000_000).await;
+    let _carrier = rig.carrier_session();
+    let t0 = now_micros();
+    let (id, session, at) = rig.drive_to_ready(120, t0).await;
+    let machine = rig.cloud_machine().await;
+    let job = rig.seed_running_sourced(machine, 0).await;
+    // Отмену просили: повтору не бывать.
+    sqlx::query("update jobs set cancel_requested_at = clock_timestamp() where id = $1")
+        .bind(job)
+        .execute(&rig.pool)
+        .await?;
+    rig.fake
+        .control()
+        .preempt(&rig.window(id).await.instance_id.unwrap());
+    let seen = at + TimeDelta::seconds(30);
+    rig.tick(seen).await;
+    drop(session);
+    assert_eq!(rig.job_triple(job).await, ("lost".to_owned(), 1, 0));
+    let end = seen + TimeDelta::seconds(10);
+    rig.tick(end).await;
+    assert_eq!(rig.window(id).await.state, "ended");
+    // Ждущих задач нет: замены тоже.
+    assert!(rig.replacements_of(id).await.is_empty());
+    assert_eq!(
+        rig.alert_codes().await,
+        vec!["preempted", "replacement_skipped"]
+    );
+    assert_eq!(rig.last_skip_reason().await, "no_waiting_job");
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_broken_vm_gets_no_retry_and_no_replacement(pool: PgPool) -> TestResult {
+    let rig = rig_with(pool, |config| config.preemptible = false).await;
+    enable_pushes(&rig.pool).await;
+    let _carrier = rig.carrier_session();
+    let t0 = now_micros();
+    let (id, session, at) = rig.drive_to_ready(120, t0).await;
+    let machine = rig.cloud_machine().await;
+    let job = rig.seed_running_sourced(machine, 0).await;
+    // Обычная машина остановилась сама: это поломка, а не прерывание.
+    let instance_id = rig.window(id).await.instance_id.unwrap();
+    rig.fake
+        .control()
+        .instances
+        .get_mut(&instance_id)
+        .unwrap()
+        .forced_status = Some("STOPPING".to_owned());
+    let seen = at + TimeDelta::seconds(30);
+    rig.tick(seen).await;
+    drop(session);
+    let parent = rig.window(id).await;
+    assert_eq!(parent.delete_reason.as_deref(), Some("vm_broken"));
+    assert_eq!(rig.job_triple(job).await, ("lost".to_owned(), 1, 0));
+    assert_eq!(rig.alert_codes().await, vec!["vm_broken"]);
+    rig.tick(seen + TimeDelta::seconds(10)).await;
+    assert_eq!(rig.window(id).await.state, "ended");
+    assert!(rig.replacements_of(id).await.is_empty());
+    assert_eq!(rig.alert_codes().await, vec!["vm_broken"]);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn the_budget_refuses_the_replacement_without_over_budget_consent(
+    pool: PgPool,
+) -> TestResult {
+    let rig = rig(pool).await;
+    enable_pushes(&rig.pool).await;
+    let _carrier = rig.carrier_session();
+    // Бюджета хватает ровно на резерв родителя: после его конца на замену уже нет.
+    let reservation = rig.reservation(120);
+    sqlx::query("update cloud_budget set monthly_budget_kopecks = $1")
+        .bind(reservation)
+        .execute(&rig.pool)
+        .await?;
+    let t0 = now_micros();
+    let (id, session, at) = rig.drive_to_ready(120, t0).await;
+    let machine = rig.cloud_machine().await;
+    let job = rig.seed_running_sourced(machine, 0).await;
+    rig.fake
+        .control()
+        .preempt(&rig.window(id).await.instance_id.unwrap());
+    let seen = at + TimeDelta::seconds(30);
+    rig.tick(seen).await;
+    drop(session);
+    rig.tick(seen + TimeDelta::seconds(10)).await;
+    assert_eq!(rig.window(id).await.state, "ended");
+    assert_eq!(
+        rig.job_triple(job).await,
+        ("waiting_runner".to_owned(), 2, 1)
+    );
+    assert!(rig.replacements_of(id).await.is_empty());
+    // Бюджетные пуши могли прийти раньше: важно, что отказ замены — последний и про бюджет.
+    let codes = rig.alert_codes().await;
+    assert!(
+        codes.contains(&"replacement_skipped".to_owned()),
+        "{codes:?}"
+    );
+    assert_eq!(rig.last_skip_reason().await, "budget");
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn too_little_time_to_the_parent_deadline_skips_the_replacement(pool: PgPool) -> TestResult {
+    let rig = rig(pool).await;
+    enable_pushes(&rig.pool).await;
+    rig.set_budget(10_000_000).await;
+    let _carrier = rig.carrier_session();
+    let t0 = now_micros();
+    let (id, session, _at) = rig.drive_to_ready(60, t0).await;
+    let machine = rig.cloud_machine().await;
+    let job = rig.seed_running_sourced(machine, 0).await;
+    // Прерывание за десять минут до абсолютного предела: поднимать замену поздно.
+    let seen = t0 + TimeDelta::minutes(50);
+    rig.fake
+        .control()
+        .preempt(&rig.window(id).await.instance_id.unwrap());
+    rig.tick(seen).await;
+    drop(session);
+    rig.tick(seen + TimeDelta::seconds(10)).await;
+    let parent = rig.window(id).await;
+    assert_eq!(parent.state, "ended");
+    // Задача всё равно выпущена: снос подтвердил отсутствие прежней машины.
+    assert_eq!(
+        rig.job_triple(job).await,
+        ("waiting_runner".to_owned(), 2, 1)
+    );
+    assert!(rig.replacements_of(id).await.is_empty());
+    assert_eq!(
+        rig.alert_codes().await,
+        vec!["preempted", "replacement_skipped"]
+    );
+    assert_eq!(rig.last_skip_reason().await, "no_time");
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_retry_pending_job_without_a_preempted_window_is_lost_on_reconcile(
+    pool: PgPool,
+) -> TestResult {
+    let rig = rig(pool).await;
+    let _carrier = rig.carrier_session();
+    let t0 = now_micros();
+    // Живое окно без прерывания: строка облачной машины уже есть.
+    let id = rig.create(60).await;
+    rig.tick(t0).await;
+    assert_eq!(rig.state(id).await, "identified");
+    let machine = rig.cloud_machine().await;
+    let orphan = rig
+        .seed_job(Some(machine), "retry_pending", &["cloud"])
+        .await;
+    // Следующая сверка: прерванного окна нет, значит, повтора не будет.
+    rig.tick(t0 + TimeDelta::minutes(5)).await;
+    assert_eq!(rig.job_triple(orphan).await.0, "lost");
+    assert_eq!(
+        rig.state(id).await,
+        "identified",
+        "the live window is untouched"
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_restart_between_revocation_and_absence_releases_the_job_once(
+    pool: PgPool,
+) -> TestResult {
+    let rig = rig(pool).await;
+    enable_pushes(&rig.pool).await;
+    rig.set_budget(10_000_000).await;
+    let _carrier = rig.carrier_session();
+    let t0 = now_micros();
+    let (id, session, at) = rig.drive_to_ready(120, t0).await;
+    let machine = rig.cloud_machine().await;
+    let job = rig.seed_running_sourced(machine, 0).await;
+    rig.fake
+        .control()
+        .preempt(&rig.window(id).await.instance_id.unwrap());
+    let seen = at + TimeDelta::seconds(30);
+    rig.tick(seen).await;
+    drop(session);
+    assert_eq!(rig.job_triple(job).await.0, "retry_pending");
+
+    // Хаб перезапустился между отзывом и подтверждённым отсутствием: память пуста, база та же.
+    let restarted = rig.restarted();
+    let end = seen + TimeDelta::seconds(10);
+    restarted.tick(end).await;
+    assert_eq!(rig.window(id).await.state, "ended");
+    assert_eq!(
+        rig.job_triple(job).await,
+        ("waiting_runner".to_owned(), 2, 1)
+    );
+    let replacements = rig.replacements_of(id).await;
+    assert_eq!(replacements.len(), 1);
+    assert_eq!(
+        replacements[0].hard_cap_at,
+        rig.window(id).await.hard_cap_at
+    );
+
+    // Повторный проход ничего не выпускает второй раз.
+    restarted.tick(end + TimeDelta::seconds(10)).await;
+    assert_eq!(
+        rig.job_triple(job).await,
+        ("waiting_runner".to_owned(), 2, 1)
+    );
+    assert_eq!(rig.replacements_of(id).await.len(), 1);
     Ok(())
 }
 
