@@ -2394,7 +2394,11 @@ async fn a_preempted_job_with_an_uploaded_log_is_lost(pool: PgPool) {
         .await
         .unwrap();
     fx.preempt(runner).await;
-    assert_eq!(fx.state(id).await, "lost", "a finished job is never replayed");
+    assert_eq!(
+        fx.state(id).await,
+        "lost",
+        "a finished job is never replayed"
+    );
     assert_eq!(fx.messages(id).await, 1);
     assert!(fx.release(runner).await.is_empty());
 }

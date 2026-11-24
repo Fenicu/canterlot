@@ -2117,7 +2117,11 @@ async fn a_replacement_keeps_the_parent_quote_age_and_is_repriced_before_its_fir
     assert_eq!(replacement.state, "failed");
     assert_eq!(replacement.final_cost_kopecks, Some(0));
     assert_eq!(replacement.last_error.as_deref(), Some("reprice_growth"));
-    assert_eq!(rig.posts(), 1, "only the parent was created at the old rate");
+    assert_eq!(
+        rig.posts(),
+        1,
+        "only the parent was created at the old rate"
+    );
     Ok(())
 }
 
@@ -2165,14 +2169,12 @@ async fn a_replacement_with_less_than_the_lead_left_fails_before_any_provider_ca
     )
     .await;
     let replacement = raw_window(&rig.pool, "create_intent", None, None).await;
-    sqlx::query(
-        "update cloud_windows set replaces_window_id = $2, hard_cap_at = $3 where id = $1",
-    )
-    .bind(replacement)
-    .bind(parent)
-    .bind(now + TimeDelta::minutes(10))
-    .execute(&rig.pool)
-    .await?;
+    sqlx::query("update cloud_windows set replaces_window_id = $2, hard_cap_at = $3 where id = $1")
+        .bind(replacement)
+        .bind(parent)
+        .bind(now + TimeDelta::minutes(10))
+        .execute(&rig.pool)
+        .await?;
     rig.tick(now).await;
     let window = rig.window(replacement).await;
     assert_eq!(window.state, "failed");
@@ -3288,11 +3290,7 @@ async fn a_disk_is_adopted_by_its_name_only_when_exactly_one_matches(pool: PgPoo
         let first = rig.fake.control().add_stray_disk(&windows::server_name(id));
         let second = rig.fake.control().add_stray_disk(&windows::server_name(id));
         rig.tick(now).await;
-        assert_eq!(
-            rig.disk_deletes(),
-            0,
-            "two same-name disks are not a match"
-        );
+        assert_eq!(rig.disk_deletes(), 0, "two same-name disks are not a match");
         let window = rig.window(id).await;
         assert_eq!(window.state, "deleting");
         assert_eq!(window.boot_disk_id, None);
@@ -3326,12 +3324,7 @@ async fn a_disk_is_adopted_by_its_name_only_when_exactly_one_matches(pool: PgPoo
         .bind(now)
         .execute(&rig.pool)
         .await?;
-        rig.fake
-            .control()
-            .disks
-            .get_mut(&other)
-            .unwrap()
-            .name = windows::server_name(id);
+        rig.fake.control().disks.get_mut(&other).unwrap().name = windows::server_name(id);
         rig.tick(now).await;
         assert_eq!(
             rig.disk_deletes(),
@@ -3372,7 +3365,10 @@ async fn a_name_only_instance_recovery_requires_exactly_one_match(pool: PgPool) 
         // Одна машина пропала: оставшаяся — единственная, её номер запоминается и она удаляется.
         rig.fake.control().remove_instance(&second);
         rig.tick(now + TimeDelta::seconds(10)).await;
-        assert_eq!(rig.window(id).await.instance_id.as_deref(), Some(first.as_str()));
+        assert_eq!(
+            rig.window(id).await.instance_id.as_deref(),
+            Some(first.as_str())
+        );
         rig.tick(now + TimeDelta::seconds(11)).await;
         assert_eq!(rig.deletes(), 1);
         rig.tick(now + TimeDelta::seconds(12)).await;
@@ -3395,12 +3391,7 @@ async fn a_name_only_instance_recovery_requires_exactly_one_match(pool: PgPool) 
         let first = rig.add_instance(&windows::server_name(id));
         let second = rig.add_instance(&windows::server_name(id));
         let second_disk = rig.fake.control().instances[&second].disk_id.clone();
-        rig.fake
-            .control()
-            .disks
-            .get_mut(&second_disk)
-            .unwrap()
-            .name = "other-volume".to_owned();
+        rig.fake.control().disks.get_mut(&second_disk).unwrap().name = "other-volume".to_owned();
         sqlx::query("update cloud_windows set server_gone_at = $2 where id = $1")
             .bind(id)
             .bind(now)
@@ -3418,7 +3409,10 @@ async fn a_name_only_instance_recovery_requires_exactly_one_match(pool: PgPool) 
         // Осталась одна машина: снос возвращается к ней и убирает её вместе с диском.
         rig.fake.control().remove_instance(&second);
         rig.tick(now + TimeDelta::seconds(10)).await;
-        assert_eq!(rig.window(id).await.instance_id.as_deref(), Some(first.as_str()));
+        assert_eq!(
+            rig.window(id).await.instance_id.as_deref(),
+            Some(first.as_str())
+        );
         rig.tick(now + TimeDelta::seconds(11)).await;
         assert_eq!(rig.deletes(), 1);
         assert!(!rig.fake.control().instances.contains_key(&first));

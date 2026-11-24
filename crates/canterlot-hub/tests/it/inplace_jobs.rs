@@ -1919,10 +1919,7 @@ async fn a_stale_log_upload_does_not_attach_to_the_next_attempt(pool: PgPool) {
     });
     let attached = logs::put(&fx.pool, &*store, fx.a, &header, Box::pin(body)).await;
     assert!(
-        matches!(
-            attached,
-            Err(canterlot_hub::media::MediaError::Conflict)
-        ),
+        matches!(attached, Err(canterlot_hub::media::MediaError::Conflict)),
         "a stale upload attaches nothing: {attached:?}"
     );
     let job = fx.job(id).await;
