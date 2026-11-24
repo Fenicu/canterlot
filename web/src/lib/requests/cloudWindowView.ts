@@ -14,6 +14,16 @@ export interface CloudCardPayload {
   over_budget?: boolean;
   expires_at?: string;
   profiles?: Parameters<typeof profileLines>[0];
+  prepare?: {
+    packages?: string[];
+    script?: string;
+  } | null;
+}
+
+/** Подготовка машины из карточки: владелец одобряет её целиком. */
+export interface PrepareView {
+  packages: string[];
+  script: string | null;
 }
 
 export interface CloudCardView {
@@ -27,6 +37,7 @@ export interface CloudCardView {
   overBudget: boolean;
   expiresAt: string | null;
   profiles: ProfileLine[];
+  prepare: PrepareView | null;
 }
 
 function sourceWord(source: string | undefined): string {
@@ -50,6 +61,7 @@ export function cloudWindowView(payload: unknown): CloudCardView {
   const validHours = Number.isFinite(hours) && hours > 0;
   const money = (value: unknown): string =>
     typeof value === "number" && Number.isFinite(value) ? rubles(value) : "—";
+  const prepare = prepareView(raw.prepare);
   return {
     title: validHours ? `Облачное окно на ${hours} ч` : "Облачное окно",
     sourceText: sourceWord(raw.source),
@@ -60,8 +72,19 @@ export function cloudWindowView(payload: unknown): CloudCardView {
     remainingText: money(raw.remaining_kopecks),
     overBudget: raw.over_budget === true,
     expiresAt: typeof raw.expires_at === "string" ? raw.expires_at : null,
-    profiles: profileLines(Array.isArray(raw.profiles) ? raw.profiles : [])
+    profiles: profileLines(Array.isArray(raw.profiles) ? raw.profiles : []),
+    prepare
   };
+}
+
+function prepareView(raw: CloudCardPayload["prepare"]): PrepareView | null {
+  if (!raw || typeof raw !== "object") return null;
+  const packages = Array.isArray(raw.packages)
+    ? raw.packages.filter((name): name is string => typeof name === "string" && name.length > 0)
+    : [];
+  const script = typeof raw.script === "string" && raw.script.length > 0 ? raw.script : null;
+  if (packages.length === 0 && script === null) return null;
+  return { packages, script };
 }
 
 export type OutcomeTone = "done" | "warning" | "danger" | "quiet";
