@@ -702,6 +702,12 @@ pub fn to_proto(row: &CommandRow) -> Result<Command, OutboxError> {
                 .and_then(Value::as_u64)
                 .and_then(|value| u32::try_from(value).ok())
                 .unwrap_or(0),
+            prepare_script: row
+                .payload
+                .get("prepare_script")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
         }),
         "owner_job_finished" => {
             let hex = row

@@ -1870,6 +1870,8 @@ async fn apply_body(
             )
             .await?;
         }
+        // Окно с подготовкой ещё не создаётся: факт принимается и пока ничего не меняет.
+        Body::RunnerPrepareFailed(_) => {}
     }
     Ok(false)
 }

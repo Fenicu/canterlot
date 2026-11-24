@@ -268,6 +268,7 @@ impl Fixture {
                 max_running: 3,
                 lease_slots: 2,
                 ssh_port: self.sshd.port() as u32,
+                prepare_script: String::new(),
             })),
             ..HubCommand::default()
         }
