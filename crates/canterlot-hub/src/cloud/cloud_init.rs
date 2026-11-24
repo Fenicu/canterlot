@@ -322,10 +322,8 @@ mod tests {
     #[test]
     fn proxies_docker_and_the_jobs_before_docker_starts() {
         let text = render_ok(&params());
-        let dropin = format!(
-            "  - path: /etc/systemd/system/docker.service.d/canterlot-proxy.conf\n    permissions: '0644'\n    content: |\n      [Service]\n      Environment=\"HTTP_PROXY=socks5://127.0.0.1:1080\" \"HTTPS_PROXY=socks5://127.0.0.1:1080\" \"NO_PROXY=localhost,127.0.0.1,::1\"\n"
-        );
-        assert!(text.contains(&dropin), "docker drop-in missing or wrong");
+        let dropin = "  - path: /etc/systemd/system/docker.service.d/canterlot-proxy.conf\n    permissions: '0644'\n    content: |\n      [Service]\n      Environment=\"HTTP_PROXY=socks5://127.0.0.1:1080\" \"HTTPS_PROXY=socks5://127.0.0.1:1080\" \"NO_PROXY=localhost,127.0.0.1,::1\"\n";
+        assert!(text.contains(dropin), "docker drop-in missing or wrong");
         let mut env = String::from(
             "  - path: /etc/canterlot/egress.env\n    permissions: '0644'\n    content: |\n",
         );
@@ -406,7 +404,16 @@ mod tests {
     #[test]
     fn carries_no_token_and_no_binary() {
         let text = render_ok(&params()).to_lowercase();
-        for forbidden in ["token", "bearer", "curl", "wget", "http://", "https://"] {
+        for forbidden in [
+            "token",
+            "bearer",
+            "curl",
+            "wget",
+            "http://",
+            "https://",
+            "\u{7f}elf",
+            "\0",
+        ] {
             assert!(!text.contains(forbidden), "found {forbidden}");
         }
         assert!(text.is_ascii());

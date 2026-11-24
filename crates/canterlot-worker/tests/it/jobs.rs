@@ -491,8 +491,10 @@ async fn env_file_gives_a_job_only_the_proxy_variables() {
          PATH=/file/bin\n",
     )
     .unwrap();
-    let mut config = JobsConfig::default();
-    config.env_file = Some(file);
+    let config = JobsConfig {
+        env_file: Some(file),
+        ..JobsConfig::default()
+    };
     let harness = Harness::with(config, None, WORKER).await;
     let id = Uuid::now_v7().to_string();
     harness
@@ -526,8 +528,10 @@ async fn env_file_gives_a_job_only_the_proxy_variables() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_missing_env_file_adds_nothing() {
     let dir = tempfile::tempdir().unwrap();
-    let mut config = JobsConfig::default();
-    config.env_file = Some(dir.path().join("absent.env"));
+    let config = JobsConfig {
+        env_file: Some(dir.path().join("absent.env")),
+        ..JobsConfig::default()
+    };
     let harness = Harness::with(config, None, WORKER).await;
     let id = Uuid::now_v7().to_string();
     harness
@@ -547,8 +551,10 @@ async fn env_file_does_not_touch_the_worker_environment() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("egress.env");
     fs::write(&file, "HTTPS_PROXY=socks5h://127.0.0.1:1080\n").unwrap();
-    let mut config = JobsConfig::default();
-    config.env_file = Some(file);
+    let config = JobsConfig {
+        env_file: Some(file),
+        ..JobsConfig::default()
+    };
     let harness = Harness::with(config, None, WORKER).await;
     let id = Uuid::now_v7().to_string();
     harness
