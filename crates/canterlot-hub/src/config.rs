@@ -68,6 +68,8 @@ pub struct HubConfig {
 pub enum StartupWarning {
     /// `[activity].hung_rescue = "auto"` принято как `alert`.
     HungRescueAutoUnavailable,
+    /// `[runners.cloud]` описывает Timeweb: облако выключено.
+    CloudTimewebConfig,
 }
 
 /// `[pricing."<id>"]` в `hub.toml`: доллары за 1 млн токенов.
@@ -204,6 +206,11 @@ impl HubConfig {
                     effective = "alert",
                     "[activity].hung_rescue = \"auto\" is not available in this release; behaving as \"alert\""
                 ),
+                StartupWarning::CloudTimewebConfig => tracing::error!(
+                    kind = "cloud_disabled",
+                    reason = "timeweb_config",
+                    "[runners.cloud] is written for Timeweb, which is no longer supported; cloud windows are off until the table is rewritten for provider = \"yandex\""
+                ),
             }
         }
     }
@@ -230,6 +237,11 @@ impl HubConfig {
                 .startup_warnings
                 .push(StartupWarning::HungRescueAutoUnavailable);
             config.activity.hung_rescue = HungRescue::Alert;
+        }
+        if config.runners.cloud_timeweb {
+            config
+                .startup_warnings
+                .push(StartupWarning::CloudTimewebConfig);
         }
         let base = path.parent().unwrap_or_else(|| Path::new("."));
         for path in [
@@ -279,8 +291,8 @@ impl HubConfig {
             error
         })?;
         if let Some(cloud) = &mut config.runners.cloud {
-            if cloud.token_file.is_relative() {
-                cloud.token_file = base.join(&cloud.token_file);
+            if cloud.key_file.is_relative() {
+                cloud.key_file = base.join(&cloud.key_file);
             }
             cloud.validate().map_err(|category| ConfigError {
                 path: path.to_owned(),
@@ -305,80 +317,127 @@ impl HubConfig {
 
 /// `[runners]` в `hub.toml`. Сейчас здесь только облако; статические раннеры живут строками
 /// `machines` и `worker.toml` несущей.
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[derive(Debug, Clone, Default)]
 pub struct RunnersConfig {
     pub cloud: Option<CloudConfig>,
+    /// Таблица `[runners.cloud]` есть, но описывает прежнего провайдера Timeweb: облако
+    /// выключено, хаб стартует, а `log_startup_warnings` пишет одну ошибку.
+    pub cloud_timeweb: bool,
+}
+
+/// Ключи `[runners.cloud]`, которые были только у Timeweb. Любой из них значит, что таблицу
+/// не перевели на Yandex Cloud.
+const TIMEWEB_CLOUD_KEYS: [&str; 11] = [
+    "token_file",
+    "project_id",
+    "os_id",
+    "network_id",
+    "network_cidr",
+    "router_id",
+    "router_ip",
+    "gateway",
+    "local_ip_pool",
+    "dnat_port_range",
+    "no_paid_grace",
+];
+
+/// Ключи профиля, которые были только у Timeweb.
+const TIMEWEB_PROFILE_KEYS: [&str; 4] = ["configurator_id", "cpu", "ram_gb", "availability_zone"];
+
+/// Таблица `[runners.cloud]` написана для Timeweb: провайдер назван прямо или в ней есть
+/// хотя бы один его ключ.
+fn is_timeweb_cloud(table: &toml::Table) -> bool {
+    table.get("provider").and_then(toml::Value::as_str) == Some("timeweb")
+        || TIMEWEB_CLOUD_KEYS
+            .iter()
+            .any(|key| table.contains_key(*key))
+        || table
+            .get("profile")
+            .and_then(toml::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(toml::Value::as_table)
+            .any(|profile| {
+                TIMEWEB_PROFILE_KEYS
+                    .iter()
+                    .any(|key| profile.contains_key(*key))
+            })
+}
+
+impl<'de> Deserialize<'de> for RunnersConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Raw {
+            cloud: Option<toml::Table>,
+        }
+        let Some(table) = Raw::deserialize(deserializer)?.cloud else {
+            return Ok(Self::default());
+        };
+        if is_timeweb_cloud(&table) {
+            return Ok(Self {
+                cloud: None,
+                cloud_timeweb: true,
+            });
+        }
+        // Текст ошибки разбора наружу не уходит: загрузка показывает только место в файле.
+        let cloud = table
+            .try_into::<CloudConfig>()
+            .map_err(|_| serde::de::Error::custom("invalid [runners.cloud]"))?;
+        Ok(Self {
+            cloud: Some(cloud),
+            cloud_timeweb: false,
+        })
+    }
 }
 
 /// Столько профилей допускает список: каждый цена и, возможно, вызов создания.
 pub const MAX_CLOUD_PROFILES: usize = 8;
 
-/// Один профиль сервера: конфигуратор провайдера и размеры.
+/// Один профиль машины: размеры. Платформа и тип диска общие на всю таблицу.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CloudProfile {
-    pub configurator_id: i64,
-    pub cpu: u32,
-    pub ram_gb: u32,
+    /// vCPU: чётное число от 2 до 80, доля ядра всегда 100 %.
+    pub cores: u32,
+    pub memory_gb: u32,
     pub disk_gb: u32,
-    /// Зона доступности сервера в приватной сети (`msk-1` для ru-3 конфигураторов).
-    pub availability_zone: String,
 }
 
-impl CloudProfile {
-    pub fn ram_mb(&self) -> u64 {
-        u64::from(self.ram_gb) * 1024
-    }
-
-    pub fn disk_mb(&self) -> u64 {
-        u64::from(self.disk_gb) * 1024
-    }
-}
-
-/// Корень облачного раннера на сервере: его создаёт cloud-init, владелец `runner`.
+/// Корень облачного раннера на машине: его создаёт cloud-init, владелец `runner`.
 pub const CLOUD_ROOT_DIR: &str = "/srv/canterlot-runner";
 
-/// `[runners.cloud]`: облачные окна раннеров. Токен провайдера лежит только в файле
-/// `token_file` и нигде не показывается: ни в `Debug`, ни в журнале, ни в API.
+/// `[runners.cloud]`: облачные окна раннеров на Yandex Cloud. Ключ сервисного аккаунта лежит
+/// только в файле `key_file` и нигде не показывается: ни в `Debug`, ни в журнале, ни в API.
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CloudConfig {
-    /// Провайдер; сейчас только `timeweb`.
+    /// Провайдер: только `yandex`.
     pub provider: String,
-    pub token_file: PathBuf,
-    /// Проект провайдера, в котором живут серверы раннеров. Сверка не трогает чужие проекты.
-    pub project_id: i64,
-    /// Упорядоченный список профилей сервера `[[runners.cloud.profile]]`: создание пробует их по
-    /// очереди, пока Timeweb не примет один. Резерв считается по самому дорогому.
+    /// Файл авторизованного ключа сервисного аккаунта (JSON, права 0600).
+    pub key_file: PathBuf,
+    /// Каталог, отведённый под машины раннеров целиком: сверка удаляет в нём всё, что
+    /// названо как окно и не принадлежит ни одному окну.
+    pub folder_id: String,
+    pub zone: String,
+    pub subnet_id: String,
+    /// Платформа: только `standard-v3`, для других нет цен.
+    #[serde(default = "CloudConfig::default_platform")]
+    pub platform: String,
+    /// Семейство образа из общих образов Яндекса.
+    #[serde(default = "CloudConfig::default_image_family")]
+    pub image_family: String,
+    /// Новые окна создают прерываемую машину.
+    #[serde(default = "CloudConfig::default_preemptible")]
+    pub preemptible: bool,
+    /// Тип диска: только `network-ssd`, для других нет цен.
+    #[serde(default = "CloudConfig::default_disk_type")]
+    pub disk_type: String,
+    /// Упорядоченный список профилей машины `[[runners.cloud.profile]]`: создание пробует их
+    /// по очереди, пока Яндекс не примет один. Резерв считается по самому дорогому.
     pub profile: Vec<CloudProfile>,
-    #[serde(default = "CloudConfig::default_os_id")]
-    pub os_id: i64,
-    /// Открытая половина `[runners].ssh_key` несущей: уходит в cloud-init и в ключи проекта.
+    /// Открытая половина `[runners].ssh_key` несущей: уходит в cloud-init.
     pub runner_public_key: String,
-    /// Приватная сеть (VPC) провайдера, в которой создаются серверы окон. Идентификатор
-    /// Timeweb (`network-…`) создаётся владельцем один раз, хаб его не создаёт.
-    pub network_id: String,
-    /// CIDR этой сети, например `10.0.0.0/24`: шлюз и пул локальных адресов должны
-    /// лежать внутри него.
-    pub network_cidr: String,
-    /// Роутер той же сети с NAT. Его публичный IP используется для подключения по SSH.
-    pub router_id: String,
-    /// Публичный IPv4 роутера: адрес подключения носителя к облачному раннеру.
-    pub router_ip: String,
-    /// Шлюз роутера внутри сети; cloud-init прописывает маршрут по умолчанию через него.
-    pub gateway: String,
-    /// Включающий диапазон локальных адресов внутри сети, например `10.0.0.10-10.0.0.60`.
-    pub local_ip_pool: String,
-    /// Включающий диапазон публичных портов DNAT, например `22100-22199`.
-    pub dnat_port_range: String,
-    /// Сколько сервер может оставаться `no_paid` с момента создания, прежде чем это
-    /// считается определённым отказом провайдера.
-    #[serde(
-        default = "CloudConfig::default_no_paid_grace",
-        with = "humantime_serde"
-    )]
-    pub no_paid_grace: Duration,
     /// Несущая, которая подключает облачный раннер.
     pub carrier_machine_id: uuid::Uuid,
     #[serde(default)]
@@ -389,7 +448,7 @@ pub struct CloudConfig {
     pub max_running: u32,
     #[serde(default = "CloudConfig::default_lease_slots")]
     pub lease_slots: u32,
-    /// От вызова создания до подключения воркера; позже сервер удаляется.
+    /// От вызова создания до подключения воркера; позже машина удаляется.
     #[serde(
         default = "CloudConfig::default_ready_timeout",
         with = "humantime_serde"
@@ -412,7 +471,7 @@ pub struct CloudConfig {
         with = "humantime_serde"
     )]
     pub reconcile_interval: Duration,
-    /// Сколько ждать появления сервера в полных списках, прежде чем счесть создание
+    /// Сколько ждать появления машины в полных списках, прежде чем счесть создание
     /// неудавшимся.
     #[serde(
         default = "CloudConfig::default_create_unknown_window",
@@ -421,18 +480,13 @@ pub struct CloudConfig {
     pub create_unknown_window: Duration,
 }
 
-/// Разбор включающего диапазона `a-b` с одним и тем же правилом для адресов и портов.
-fn inclusive_range<T: PartialOrd>(text: &str, parse: impl Fn(&str) -> Option<T>) -> Option<(T, T)> {
-    let (first, last) = text.trim().split_once('-')?;
-    let (first, last) = (parse(first)?, parse(last)?);
-    (first <= last).then_some((first, last))
-}
-
 impl std::fmt::Debug for CloudConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CloudConfig")
             .field("provider", &self.provider)
-            .field("project_id", &self.project_id)
+            .field("folder_id", &self.folder_id)
+            .field("zone", &self.zone)
+            .field("preemptible", &self.preemptible)
             .field("profile", &self.profile)
             .field("carrier_machine_id", &self.carrier_machine_id)
             .field("labels", &self.labels)
@@ -441,8 +495,17 @@ impl std::fmt::Debug for CloudConfig {
 }
 
 impl CloudConfig {
-    fn default_os_id() -> i64 {
-        109
+    fn default_platform() -> String {
+        crate::cloud::yandex::PLATFORM_STANDARD_V3.to_owned()
+    }
+    fn default_image_family() -> String {
+        "debian-13".to_owned()
+    }
+    fn default_preemptible() -> bool {
+        true
+    }
+    fn default_disk_type() -> String {
+        crate::cloud::yandex::DISK_NETWORK_SSD.to_owned()
     }
     fn default_labels() -> Vec<String> {
         vec!["cloud".to_owned(), "kernel-6.12".to_owned()]
@@ -471,53 +534,45 @@ impl CloudConfig {
     fn default_create_unknown_window() -> Duration {
         Duration::from_secs(10 * 60)
     }
-    fn default_no_paid_grace() -> Duration {
-        Duration::from_secs(3 * 60)
-    }
 
     /// Всё, что видно по самой конфигурации, без базы и сети. Код отказа не содержит значений.
     pub fn validate(&self) -> Result<(), &'static str> {
-        if self.provider != "timeweb" {
+        if self.provider != "yandex" {
             return Err("invalid [runners.cloud] provider");
         }
-        if self.project_id <= 0 || self.os_id <= 0 {
-            return Err("invalid [runners.cloud] ids");
+        if self.key_file.as_os_str().is_empty() {
+            return Err("invalid [runners.cloud] key_file");
         }
-        // Сеть и роутер создаются владельцем один раз. Идентификаторы непустые, адреса —
-        // настоящие IPv4, диапазоны непустые и с пересечением портов 1024–65535. Значения в
-        // сообщении об ошибке не попадают: наружу уходит только код.
-        if self.network_id.trim().is_empty()
-            || self.router_id.trim().is_empty()
-            || self.router_ip().is_none()
-            || self.gateway().is_none()
-            || self.network_cidr().is_none()
-        {
-            return Err("invalid [runners.cloud] network and router");
+        // Идентификаторы идут в запросы как есть: только то, что похоже на идентификатор.
+        let id_like = |value: &str| {
+            !value.is_empty()
+                && value.len() <= 64
+                && value
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+        };
+        if !id_like(&self.folder_id) || !id_like(&self.zone) || !id_like(&self.subnet_id) {
+            return Err("invalid [runners.cloud] folder, zone or subnet");
         }
-        let (first_ip, last_ip) = self
-            .local_ip_range()
-            .ok_or("invalid [runners.cloud] local_ip_pool")?;
-        if !self.in_network(self.gateway().expect("checked above"))
-            || !self.in_network(first_ip)
-            || !self.in_network(last_ip)
-        {
-            return Err("invalid [runners.cloud] addresses outside network_cidr");
+        if self.platform != crate::cloud::yandex::PLATFORM_STANDARD_V3 {
+            return Err("invalid [runners.cloud] platform");
         }
-        if self.dnat_port_values().is_none() {
-            return Err("invalid [runners.cloud] dnat_port_range");
+        if self.disk_type != crate::cloud::yandex::DISK_NETWORK_SSD {
+            return Err("invalid [runners.cloud] disk_type");
+        }
+        if !id_like(&self.image_family) {
+            return Err("invalid [runners.cloud] image_family");
         }
         if self.profile.is_empty() || self.profile.len() > MAX_CLOUD_PROFILES {
             return Err("invalid [runners.cloud] profile list");
         }
         for profile in &self.profile {
-            if profile.configurator_id <= 0 {
-                return Err("invalid [runners.cloud.profile] ids");
+            // Правило Яндекса для 100 % ядра: чётное число от 2 до 80.
+            if !(2..=80).contains(&profile.cores) || !profile.cores.is_multiple_of(2) {
+                return Err("invalid [runners.cloud.profile] cores");
             }
-            if profile.cpu == 0 || profile.ram_gb == 0 || profile.disk_gb == 0 {
+            if profile.memory_gb == 0 || profile.disk_gb == 0 {
                 return Err("invalid [runners.cloud.profile] size");
-            }
-            if profile.availability_zone.trim().is_empty() {
-                return Err("invalid [runners.cloud.profile] availability_zone");
             }
         }
         if !crate::cloud::cloud_init::validate_public_key(&self.runner_public_key) {
@@ -536,7 +591,6 @@ impl CloudConfig {
             self.teardown_margin,
             self.reconcile_interval,
             self.create_unknown_window,
-            self.no_paid_grace,
         ]
         .iter()
         .any(|timing| *timing < minute)
@@ -546,56 +600,19 @@ impl CloudConfig {
         Ok(())
     }
 
-    /// Сеть окна: сетевой адрес и префикс из `network_cidr`.
-    pub fn network_cidr(&self) -> Option<(std::net::Ipv4Addr, u32)> {
-        use std::net::Ipv4Addr;
-        let (address, prefix) = self.network_cidr.trim().split_once('/')?;
-        let address: Ipv4Addr = address.trim().parse().ok()?;
-        let prefix: u32 = prefix.trim().parse().ok()?;
-        if prefix > 32 {
-            return None;
-        }
-        let mask = if prefix == 0 {
-            0
-        } else {
-            u32::MAX << (32 - prefix)
-        };
-        Some((Ipv4Addr::from(u32::from(address) & mask), prefix))
-    }
-
-    /// Адрес внутри сети окна (по `network_cidr`).
-    pub fn in_network(&self, address: std::net::Ipv4Addr) -> bool {
-        let Some((network, prefix)) = self.network_cidr() else {
-            return false;
-        };
-        let mask = if prefix == 0 {
-            0
-        } else {
-            u32::MAX << (32 - prefix)
-        };
-        u32::from(address) & mask == u32::from(network)
-    }
-
-    /// Публичный адрес роутера как IPv4.
-    pub fn router_ip(&self) -> Option<std::net::Ipv4Addr> {
-        self.router_ip.trim().parse().ok()
-    }
-
-    /// Адрес шлюза в сети как IPv4.
-    pub fn gateway(&self) -> Option<std::net::Ipv4Addr> {
-        self.gateway.trim().parse().ok()
-    }
-
-    /// Включающий диапазон локальных адресов из пула окна.
-    pub fn local_ip_range(&self) -> Option<(std::net::Ipv4Addr, std::net::Ipv4Addr)> {
-        inclusive_range(&self.local_ip_pool, |text| text.trim().parse().ok())
-    }
-
-    /// Включающий диапазон портов DNAT; порты вне 1024–65535 не годятся.
-    pub fn dnat_port_values(&self) -> Option<(u16, u16)> {
-        let (first, last) =
-            inclusive_range(&self.dnat_port_range, |text| text.trim().parse().ok())?;
-        (first >= 1024).then_some((first, last))
+    /// Настройки клиента Яндекса из этой таблицы: адреса API остаются настоящими.
+    pub fn yandex(&self) -> crate::cloud::YandexConfig {
+        let mut config = crate::cloud::YandexConfig::new(
+            &self.key_file,
+            &self.folder_id,
+            &self.zone,
+            &self.subnet_id,
+        );
+        config.platform = self.platform.clone();
+        config.image_family = self.image_family.clone();
+        config.preemptible = self.preemptible;
+        config.disk_type = self.disk_type.clone();
+        config
     }
 
     pub fn drain_grace_minutes(&self) -> u64 {

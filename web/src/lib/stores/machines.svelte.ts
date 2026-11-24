@@ -54,6 +54,8 @@ const JOB_RANK: Record<string, number> = { waiting_runner: 0, staging: 1, queued
 /** Состояние задачи ведёт только вперёд: опоздавшая копия, список или событие, прежнее не затирает. */
 function jobMayReplace(old: JobRecord | undefined, next: JobRecord): boolean {
 	if (!old) return true;
+	// Ждущая повтора задача начинает путь заново новой попыткой: после неё годится любое состояние.
+	if (old.state === 'retry_pending') return true;
 	const was = JOB_RANK[old.state];
 	if (was === undefined) return next.state === old.state;
 	const now = JOB_RANK[next.state];

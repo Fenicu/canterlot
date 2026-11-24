@@ -1,40 +1,24 @@
-//! Арифметика цен облачного сервера: только целые копейки, без дробей и без `f64`.
+//! Деньги облачного окна: резерв и расход, только целые копейки, без дробей и без `f64`.
 //!
-//! Правило тарификации рабочее, до живой проверки: час стоит `месяц / 720` с округлением
-//! вверх, окно оплачивается целыми часами, резерв берётся с запасом в один час. Все функции
-//! чистые; переполнение даёт `PriceError::Overflow`, а не обрезанное число.
+//! Ставки часа приходят от провайдера двумя числами (`yandex::Price`): машина с публичным
+//! адресом и диск. Резерв берётся целыми часами с запасом в один час по сумме ставок. Расход
+//! считается по секундам и по каждой ставке отдельно: машина платится, пока она есть в
+//! каталоге, диск — пока есть диск. Оценка осторожная и расход не занижает: остановленная
+//! машина считается по полной ставке до подтверждённого исчезновения.
+//!
+//! Все функции чистые; переполнение даёт `PriceError::Overflow`, а не обрезанное число.
 
 use std::fmt;
 
 use chrono::{DateTime, Utc};
 
-/// Часов в расчётном месяце: цена за час — месячная цена, делённая на это число.
-pub const HOURS_PER_MONTH: i64 = 720;
-
-/// Мегабайт в гигабайте для цен за ГБ: размеры в API называются в МБ.
-const MB_PER_GB: i128 = 1024;
-
-/// Цена единицы ресурса в копейках в месяц: за vCPU, за ГБ памяти, за ГБ диска.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct UnitPrices {
-    pub cpu: i64,
-    pub ram_gb: i64,
-    pub disk_gb: i64,
-}
-
-/// Конфигурация сервера: размеры в тех же единицах, что в запросе создания.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Sizing {
-    pub cpu: u32,
-    pub ram_mb: u64,
-    pub disk_mb: u64,
-}
+use super::yandex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PriceError {
     /// Результат не помещается в `i64` копеек.
     Overflow,
-    /// Цена или размер отрицательны или не конечны: считать нечего.
+    /// Цена отрицательна: считать нечего.
     Invalid,
 }
 
@@ -42,56 +26,15 @@ impl fmt::Display for PriceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Overflow => f.write_str("price overflows i64 kopecks"),
-            Self::Invalid => f.write_str("price or size is negative"),
+            Self::Invalid => f.write_str("price is negative"),
         }
     }
 }
 
 impl std::error::Error for PriceError {}
 
-/// Рубли из ответа API в копейки. Дробные рубли округляются до ближайшей копейки.
-pub fn rubles_to_kopecks(rubles: f64) -> Result<i64, PriceError> {
-    if !rubles.is_finite() || rubles < 0.0 {
-        return Err(PriceError::Invalid);
-    }
-    let kopecks = (rubles * 100.0).round();
-    // 2^63 точно представим в f64: всё, что не меньше, в i64 не поместится.
-    if kopecks >= 9_223_372_036_854_775_808.0 {
-        return Err(PriceError::Overflow);
-    }
-    Ok(kopecks as i64)
-}
-
 fn to_i64(value: i128) -> Result<i64, PriceError> {
     i64::try_from(value).map_err(|_| PriceError::Overflow)
-}
-
-/// Стоимость `size_mb` мегабайт при цене `per_gb` за гигабайт, округление вверх.
-fn per_gb_ceil(size_mb: u64, per_gb: i64) -> i128 {
-    let product = i128::from(size_mb) * i128::from(per_gb);
-    (product + MB_PER_GB - 1) / MB_PER_GB
-}
-
-/// Цена конфигурации в копейках в месяц. Доли гигабайта округляются вверх: оценка не
-/// занижает расход.
-pub fn monthly_kopecks(prices: &UnitPrices, sizing: &Sizing) -> Result<i64, PriceError> {
-    if prices.cpu < 0 || prices.ram_gb < 0 || prices.disk_gb < 0 {
-        return Err(PriceError::Invalid);
-    }
-    // Каждое слагаемое помещается в i128 (u64 × i64), сумма трёх тоже.
-    let total = i128::from(sizing.cpu) * i128::from(prices.cpu)
-        + per_gb_ceil(sizing.ram_mb, prices.ram_gb)
-        + per_gb_ceil(sizing.disk_mb, prices.disk_gb);
-    to_i64(total)
-}
-
-/// Цена часа: `ceil(месяц / 720)`.
-pub fn hourly_kopecks(monthly_kopecks: i64) -> Result<i64, PriceError> {
-    if monthly_kopecks < 0 {
-        return Err(PriceError::Invalid);
-    }
-    let hours = i128::from(HOURS_PER_MONTH);
-    to_i64((i128::from(monthly_kopecks) + hours - 1) / hours)
 }
 
 /// Целые оплачиваемые часы для заданных минут: `ceil(minutes / 60)`.
@@ -111,164 +54,45 @@ pub fn total_minutes(
         .ok_or(PriceError::Overflow)
 }
 
-fn hours_times(hourly_kopecks: i64, hours: u64) -> Result<i64, PriceError> {
+/// Резерв под окно: `час × (ceil(минуты / 60) + 1)`, где час — сумма обеих ставок.
+pub fn reservation_kopecks(hourly_kopecks: i64, total_minutes: u64) -> Result<i64, PriceError> {
     if hourly_kopecks < 0 {
         return Err(PriceError::Invalid);
     }
+    // `ceil_hours` не больше u64::MAX / 60 + 1, прибавка единицы не переполняет.
+    let hours = ceil_hours(total_minutes) + 1;
     to_i64(i128::from(hourly_kopecks) * i128::from(hours))
 }
 
-/// Резерв под окно: `час × (ceil(минуты / 60) + 1)`.
-pub fn reservation_kopecks(hourly_kopecks: i64, total_minutes: u64) -> Result<i64, PriceError> {
-    // `ceil_hours` не больше u64::MAX / 60 + 1, прибавка единицы не переполняет.
-    hours_times(hourly_kopecks, ceil_hours(total_minutes) + 1)
+fn part(hourly_kopecks: i64, from: DateTime<Utc>, to: DateTime<Utc>) -> Result<i64, PriceError> {
+    yandex::cost_kopecks(hourly_kopecks, from, to).map_err(|error| match error {
+        yandex::PriceError::Invalid => PriceError::Invalid,
+        _ => PriceError::Overflow,
+    })
 }
 
-/// Итоговая цена закончившегося окна: `час × ceil(минуты / 60)`, не меньше одного часа.
-/// Минуты идут от вызова создания до подтверждённого удаления.
-pub fn final_cost_kopecks(hourly_kopecks: i64, billed_minutes: u64) -> Result<i64, PriceError> {
-    hours_times(hourly_kopecks, ceil_hours(billed_minutes).max(1))
-}
-
-/// Единый расчёт целых оплачиваемых часов по всему прошедшему сроку в микросекундах:
-/// 3600 с + 1 µs — это второй час. Не меньше часа.
-pub fn billed_hours(elapsed_microseconds: i64) -> u64 {
-    u64::try_from(elapsed_microseconds.max(0))
-        .unwrap_or(0)
-        .div_ceil(3_600_000_000)
-        .max(1)
-}
-
-/// Итог за срок между двумя метками: `час × ceil(весь срок / 3600 с)`, не меньше часа.
-/// Срок считается с точностью до микросекунды; переполнение `TimeDelta` — сутки на границе
-/// `i64`, что даёт заведомо больше любого счёта и упрётся в `PriceError::Overflow`.
-pub fn final_cost_between(
-    hourly_kopecks: i64,
-    from: DateTime<Utc>,
-    to: DateTime<Utc>,
+/// Расход окна из двух частей, каждая по секундам и без минимума:
+/// - машина с адресом: `ceil(compute × (compute_end − called) / час)`;
+/// - диск: `ceil(disk × (disk_end − called) / час)`.
+///
+/// `called` — метка вызова создания. Концы — подтверждённое исчезновение машины и диска, а
+/// у ещё живых — «сейчас».
+pub fn ledger_kopecks(
+    compute_kopecks_per_hour: i64,
+    disk_kopecks_per_hour: i64,
+    called: DateTime<Utc>,
+    compute_end: DateTime<Utc>,
+    disk_end: DateTime<Utc>,
 ) -> Result<i64, PriceError> {
-    let elapsed = (to - from).num_microseconds().unwrap_or(i64::MAX);
-    hours_times(hourly_kopecks, billed_hours(elapsed))
+    part(compute_kopecks_per_hour, called, compute_end)?
+        .checked_add(part(disk_kopecks_per_hour, called, disk_end)?)
+        .ok_or(PriceError::Overflow)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeDelta;
-
-    fn kopecks(rubles: i64) -> i64 {
-        rubles * 100
-    }
-
-    /// Проверка пресета из спеки: конфигуратор 133, 28 vCPU, 112 ГБ, 160 ГБ = 133 600 ₽.
-    #[test]
-    fn preset_high_160_costs_133600_rubles() {
-        let prices = UnitPrices {
-            cpu: kopecks(1800),
-            ram_gb: kopecks(700),
-            disk_gb: kopecks(30),
-        };
-        let sizing = Sizing {
-            cpu: 28,
-            ram_mb: 112 * 1024,
-            disk_mb: 160 * 1024,
-        };
-        assert_eq!(monthly_kopecks(&prices, &sizing), Ok(kopecks(133_600)));
-    }
-
-    /// Дефолтный профиль 151: 32 vCPU, 64 ГБ, 80 ГБ = 20 480 ₽ в месяц.
-    #[test]
-    fn default_profile_costs_20480_rubles() {
-        let prices = UnitPrices {
-            cpu: kopecks(210),
-            ram_gb: kopecks(200),
-            disk_gb: kopecks(12),
-        };
-        let sizing = Sizing {
-            cpu: 32,
-            ram_mb: 64 * 1024,
-            disk_mb: 80 * 1024,
-        };
-        let monthly = monthly_kopecks(&prices, &sizing).unwrap();
-        assert_eq!(monthly, kopecks(20_480));
-        // 20 480 / 720 = 28,44 ₽ → 2845 копеек вверх.
-        assert_eq!(hourly_kopecks(monthly), Ok(2845));
-    }
-
-    #[test]
-    fn fractional_gigabytes_round_up() {
-        let prices = UnitPrices {
-            cpu: 0,
-            ram_gb: 1000,
-            disk_gb: 1000,
-        };
-        // 1 МБ памяти = 1000/1024 копейки → 1; 1 МБ диска → 1.
-        let sizing = Sizing {
-            cpu: 0,
-            ram_mb: 1,
-            disk_mb: 1,
-        };
-        assert_eq!(monthly_kopecks(&prices, &sizing), Ok(2));
-        let zero = Sizing {
-            cpu: 0,
-            ram_mb: 0,
-            disk_mb: 0,
-        };
-        assert_eq!(monthly_kopecks(&prices, &zero), Ok(0));
-    }
-
-    #[test]
-    fn monthly_overflow_is_an_error() {
-        let prices = UnitPrices {
-            cpu: i64::MAX,
-            ram_gb: 0,
-            disk_gb: 0,
-        };
-        let sizing = Sizing {
-            cpu: 2,
-            ram_mb: 0,
-            disk_mb: 0,
-        };
-        assert_eq!(monthly_kopecks(&prices, &sizing), Err(PriceError::Overflow));
-        let huge = Sizing {
-            cpu: 0,
-            ram_mb: u64::MAX,
-            disk_mb: 0,
-        };
-        let prices = UnitPrices {
-            cpu: 0,
-            ram_gb: i64::MAX,
-            disk_gb: 0,
-        };
-        assert_eq!(monthly_kopecks(&prices, &huge), Err(PriceError::Overflow));
-    }
-
-    #[test]
-    fn negative_unit_prices_are_invalid() {
-        let prices = UnitPrices {
-            cpu: -1,
-            ram_gb: 0,
-            disk_gb: 0,
-        };
-        let sizing = Sizing {
-            cpu: 1,
-            ram_mb: 0,
-            disk_mb: 0,
-        };
-        assert_eq!(monthly_kopecks(&prices, &sizing), Err(PriceError::Invalid));
-    }
-
-    #[test]
-    fn hourly_rounds_up_at_boundaries() {
-        assert_eq!(hourly_kopecks(0), Ok(0));
-        assert_eq!(hourly_kopecks(1), Ok(1));
-        assert_eq!(hourly_kopecks(720), Ok(1));
-        assert_eq!(hourly_kopecks(721), Ok(2));
-        assert_eq!(hourly_kopecks(1440), Ok(2));
-        assert_eq!(hourly_kopecks(1441), Ok(3));
-        assert_eq!(hourly_kopecks(i64::MAX), Ok(i64::MAX / 720 + 1));
-        assert_eq!(hourly_kopecks(-1), Err(PriceError::Invalid));
-    }
+    use chrono::{TimeDelta, TimeZone as _};
 
     #[test]
     fn ceil_hours_boundaries() {
@@ -290,9 +114,9 @@ mod tests {
 
     #[test]
     fn reservation_adds_one_hour_to_the_rounded_up_window() {
-        // 2 ч + 30 + 30 мин = 3 ч, плюс час запаса = 4 часа по 2845.
+        // 2 ч + 30 + 30 мин = 3 ч, плюс час запаса = 4 часа по 1806.
         let total = total_minutes(120, 30, 30).unwrap();
-        assert_eq!(reservation_kopecks(2845, total), Ok(2845 * 4));
+        assert_eq!(reservation_kopecks(1806, total), Ok(1806 * 4));
         // Ровно час: ceil = 1, плюс 1 = 2 часа.
         assert_eq!(reservation_kopecks(100, 60), Ok(200));
         // Час и минута: ceil = 2, плюс 1 = 3 часа.
@@ -313,74 +137,64 @@ mod tests {
         );
     }
 
-    #[test]
-    fn final_cost_is_at_least_one_hour() {
-        assert_eq!(final_cost_kopecks(2845, 0), Ok(2845));
-        assert_eq!(final_cost_kopecks(2845, 1), Ok(2845));
-        assert_eq!(final_cost_kopecks(2845, 60), Ok(2845));
-        assert_eq!(final_cost_kopecks(2845, 61), Ok(2845 * 2));
-        assert_eq!(final_cost_kopecks(2845, 120), Ok(2845 * 2));
-        assert_eq!(final_cost_kopecks(2845, 121), Ok(2845 * 3));
-        assert_eq!(final_cost_kopecks(0, 500), Ok(0));
+    fn at(seconds: i64) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 11, 24, 10, 0, 0).unwrap() + TimeDelta::seconds(seconds)
     }
 
     #[test]
-    fn final_cost_guards_overflow() {
-        assert_eq!(final_cost_kopecks(i64::MAX, 61), Err(PriceError::Overflow));
-        assert_eq!(final_cost_kopecks(-5, 61), Err(PriceError::Invalid));
+    fn the_ledger_charges_each_part_until_its_own_end() {
+        // Машина 1646 коп/ч жила 30 минут, диск 160 коп/ч — 45 минут: 823 + 120.
+        assert_eq!(
+            ledger_kopecks(1646, 160, at(0), at(1800), at(2700)),
+            Ok(943)
+        );
+        // Диск пропал вместе с машиной: обе части за одно время.
+        assert_eq!(
+            ledger_kopecks(1646, 160, at(0), at(3600), at(3600)),
+            Ok(1806)
+        );
     }
 
     #[test]
-    fn final_cost_never_exceeds_the_reservation_for_the_same_window() {
-        let hourly = 2845;
-        let total = total_minutes(120, 30, 30).unwrap();
-        let reserved = reservation_kopecks(hourly, total).unwrap();
-        for minutes in [0, 1, 59, 60, 61, 179, 180] {
-            assert!(final_cost_kopecks(hourly, minutes).unwrap() <= reserved);
+    fn the_ledger_is_per_second_without_a_minimum_and_rounds_each_part_up() {
+        assert_eq!(ledger_kopecks(1646, 160, at(0), at(0), at(0)), Ok(0));
+        // Одна секунда: 1646/3600 = 0.457 → 1, 160/3600 = 0.044 → 1.
+        assert_eq!(ledger_kopecks(1646, 160, at(0), at(1), at(1)), Ok(2));
+        // 90 секунд: 41.15 → 42 и 4 ровно.
+        assert_eq!(ledger_kopecks(1646, 160, at(0), at(90), at(90)), Ok(46));
+        // Конец раньше начала: времени не прошло.
+        assert_eq!(ledger_kopecks(1646, 160, at(10), at(0), at(0)), Ok(0));
+    }
+
+    #[test]
+    fn the_ledger_never_exceeds_the_reservation_inside_the_reserved_time() {
+        for (cap, drain, teardown) in [(1u64, 0u64, 0u64), (60, 30, 30), (61, 0, 0), (240, 30, 30)]
+        {
+            let total = total_minutes(cap, drain, teardown).unwrap();
+            let reserved = reservation_kopecks(1806, total).unwrap();
+            let end = at(i64::try_from(total).unwrap() * 60);
+            assert!(ledger_kopecks(1646, 160, at(0), end, end).unwrap() <= reserved);
         }
     }
 
     #[test]
-    fn final_cost_counts_fractional_seconds_over_the_whole_span() {
-        let from = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
-        // 3600.5 секунды — это второй оплачиваемый час, а не первый.
-        let to = from + TimeDelta::milliseconds(3_600_500);
-        assert_eq!(final_cost_between(2845, from, to), Ok(2845 * 2));
-        assert_eq!(final_cost_between(2845, from, from), Ok(2845));
+    fn the_ledger_guards_negative_rates_and_overflow() {
         assert_eq!(
-            final_cost_between(2845, from, from + TimeDelta::seconds(3600)),
-            Ok(2845)
+            ledger_kopecks(-1, 0, at(0), at(1), at(1)),
+            Err(PriceError::Invalid)
         );
         assert_eq!(
-            final_cost_between(2845, from, from + TimeDelta::milliseconds(3_600_001)),
-            Ok(2845 * 2)
+            ledger_kopecks(0, -1, at(0), at(1), at(1)),
+            Err(PriceError::Invalid)
         );
-        // Одна микросекунда сверх часа — тоже второй час: округление идёт по всему сроку.
+        let year = at(365 * 24 * 3600);
         assert_eq!(
-            final_cost_between(2845, from, from + TimeDelta::microseconds(3_600_000_001)),
-            Ok(2845 * 2)
+            ledger_kopecks(i64::MAX, 0, at(0), year, year),
+            Err(PriceError::Overflow)
         );
         assert_eq!(
-            final_cost_between(2845, from, from + TimeDelta::microseconds(3_600_000_000)),
-            Ok(2845)
+            ledger_kopecks(i64::MAX / 2, i64::MAX / 2, at(0), at(7200), at(7200)),
+            Err(PriceError::Overflow)
         );
-        // Обратный порядок считается как ноль: не меньше часа.
-        assert_eq!(
-            final_cost_between(2845, from, from - TimeDelta::minutes(5)),
-            Ok(2845)
-        );
-    }
-
-    #[test]
-    fn rubles_convert_to_kopecks() {
-        assert_eq!(rubles_to_kopecks(0.0), Ok(0));
-        assert_eq!(rubles_to_kopecks(210.0), Ok(21_000));
-        assert_eq!(rubles_to_kopecks(12.5), Ok(1250));
-        // 0,1 + 0,2 в двоичной дроби не ровно 0,3: округление до копейки.
-        assert_eq!(rubles_to_kopecks(0.1 + 0.2), Ok(30));
-        assert_eq!(rubles_to_kopecks(-1.0), Err(PriceError::Invalid));
-        assert_eq!(rubles_to_kopecks(f64::NAN), Err(PriceError::Invalid));
-        assert_eq!(rubles_to_kopecks(f64::INFINITY), Err(PriceError::Invalid));
-        assert_eq!(rubles_to_kopecks(1e300), Err(PriceError::Overflow));
     }
 }

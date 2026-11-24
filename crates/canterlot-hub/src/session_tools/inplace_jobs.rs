@@ -314,7 +314,7 @@ fn machine_offline(registry: &Registry, job: &Job) -> bool {
     !job.is_terminal()
         && !matches!(
             job.state(),
-            State::WaitingRunner | State::Staging | State::Queued
+            State::WaitingRunner | State::Staging | State::Queued | State::RetryPending
         )
         && job
             .machine_id

@@ -12,7 +12,7 @@ use std::{
     time::Duration,
 };
 
-use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
+use chrono::{DateTime, FixedOffset, SecondsFormat, TimeDelta, Utc};
 use serde_json::{Value, json};
 use sqlx::{PgConnection, PgPool};
 use tokio::{sync::watch, time::Instant};
@@ -769,6 +769,33 @@ pub fn kopecks_text(kopecks: i64) -> String {
     format!("{sign}{},{:02} ₽", abs / 100, abs % 100)
 }
 
+/// Момент по Москве для текста пуша: «24.11 18:40 МСК». Москва без перевода часов.
+fn moscow_moment(at: Option<&str>) -> String {
+    let Some(text) = at else {
+        return "?".to_owned();
+    };
+    let Ok(parsed) = DateTime::parse_from_rfc3339(text) else {
+        return clip(text, TITLE_CHARS);
+    };
+    let moscow = FixedOffset::east_opt(3 * 3600).expect("a valid fixed offset");
+    parsed
+        .with_timezone(&moscow)
+        .format("%d.%m %H:%M МСК")
+        .to_string()
+}
+
+/// Причина, по которой замены нет, по-русски.
+fn replacement_reason(reason: &str) -> &'static str {
+    match reason {
+        "budget" => "бюджет",
+        "no_time" => "мало времени до предела",
+        "no_waiting_job" => "нет задач в очереди",
+        "window_exists" => "окно уже есть",
+        "auto_off" => "автоматический режим выключен",
+        _ => "цена у провайдера недоступна",
+    }
+}
+
 fn cloud_alert_text(payload: &Value) -> Option<(String, String)> {
     let code = payload["code"].as_str()?;
     let name = clip(payload["name"].as_str().unwrap_or("?"), TITLE_CHARS);
@@ -793,38 +820,69 @@ fn cloud_alert_text(payload: &Value) -> Option<(String, String)> {
                 money("reservation_kopecks").unwrap_or_else(|| "?".to_owned())
             ),
         ),
-        "no_paid" => (
-            "Облако: сервер не включается (no_paid)".to_owned(),
-            "Timeweb не включает сервер (no_paid): аккаунт требует предоплату, окна остановлены"
-                .to_owned(),
-        ),
         "stray_server_deleted" => (
-            "Облако: удалён лишний сервер".to_owned(),
-            format!("Сервер {name} в проекте раннеров не принадлежал ни одному окну; удалён."),
+            "Облако: удалена лишняя машина".to_owned(),
+            format!("Машина {name} в каталоге раннеров не принадлежала ни одному окну; удалена."),
         ),
         "stray_server_stuck" => (
-            "Облако: лишний сервер не удаляется".to_owned(),
+            "Облако: лишняя машина не удаляется".to_owned(),
             format!(
-                "Сервер {name} не принадлежит окну и не удаляется: он продолжает тарифицироваться."
+                "Машина {name} не принадлежит окну и не удаляется: она продолжает тарифицироваться."
             ),
         ),
-        "delete_needs_confirmation" => (
-            "Облако: сервер нельзя удалить токеном".to_owned(),
+        "stray_disk_deleted" => (
+            "Облако: удалён лишний диск".to_owned(),
+            format!("Диск {name} в каталоге раннеров остался без машины и окна; удалён."),
+        ),
+        "stray_disk_stuck" => (
+            "Облако: лишний диск не удаляется".to_owned(),
             format!(
-                "Сервер {name} продолжает тарифицироваться: провайдер просит подтверждение \
-                 удаления, а у токена нет права удалять без него. Удалите сервер в панели."
+                "Диск {name} остался без машины и окна и не удаляется: он продолжает \
+                 тарифицироваться."
             ),
         ),
         "delete_failing" => (
-            "Облако: сервер не удаляется".to_owned(),
+            "Облако: машина не удаляется".to_owned(),
             format!(
-                "Сервер {name} не удалился после нескольких попыток и продолжает тарифицироваться."
+                "Машина {name} не удалилась после нескольких попыток и продолжает тарифицироваться."
+            ),
+        ),
+        "disk_delete_failing" => (
+            "Облако: диск не удаляется".to_owned(),
+            format!(
+                "Диск окна {name} не удалился после нескольких попыток и продолжает \
+                 тарифицироваться."
+            ),
+        ),
+        "preempted" => (
+            "Облако: Яндекс прервал окно".to_owned(),
+            format!("Яндекс остановил прерываемую машину окна {name}; задачи вернутся в очередь."),
+        ),
+        "replacement_started" => (
+            "Облако: поднимаю замену окна".to_owned(),
+            format!(
+                "Облако: поднимаю замену окна {name} до {}; задачи из очереди перейдут на неё.",
+                moscow_moment(payload["deadline"].as_str())
+            ),
+        ),
+        "replacement_skipped" => (
+            "Облако: замена окна не создана".to_owned(),
+            format!(
+                "Замена окна {name} не создана: {}.",
+                replacement_reason(payload["reason"].as_str().unwrap_or_default())
+            ),
+        ),
+        "vm_broken" => (
+            "Облако: машина окна остановилась".to_owned(),
+            format!(
+                "Машина окна {name} остановилась или сломалась сама. Машина и диск удаляются, \
+                 незаконченные задачи раннера потеряны."
             ),
         ),
         "window_overrun" => (
             "Облако: окно просрочено".to_owned(),
             format!(
-                "Окно {name} живёт дольше жёсткого предела с запасами. Удаляю сервер.{}",
+                "Окно {name} живёт дольше жёсткого предела с запасами. Удаляю машину.{}",
                 money("extra_kopecks")
                     .map(|extra| format!(" Лишний расход около {extra}."))
                     .unwrap_or_default()
@@ -839,73 +897,52 @@ fn cloud_alert_text(payload: &Value) -> Option<(String, String)> {
                     .unwrap_or_default()
             ),
         ),
-        "dnat_refused" => (
-            "Облако: роутер не принял проброс".to_owned(),
-            format!(
-                "Правило DNAT для окна {name} отклонено провайдером ({}); сервер удалён.",
-                clip(payload["error_code"].as_str().unwrap_or("?"), TITLE_CHARS)
-            ),
-        ),
-        "dnat_delete_failing" => (
-            "Облако: правило DNAT не удаляется".to_owned(),
-            format!(
-                "Правило проброса окна {name} не удалилось после нескольких попыток: порт занят, \
-                 окно продолжает жить и ждёт подтверждения."
-            ),
-        ),
-        "stray_dnat_deleted" => (
-            "Облако: удалено лишнее правило DNAT".to_owned(),
-            format!(
-                "Правило {} на порту {} не принадлежало живому окну и удалено.",
-                clip(payload["rule_id"].as_str().unwrap_or("?"), TITLE_CHARS),
-                clip(payload["public_port"].as_str().unwrap_or("?"), TITLE_CHARS)
-            ),
-        ),
-        "stray_dnat_stuck" => (
-            "Облако: лишнее правило DNAT не удаляется".to_owned(),
-            format!(
-                "Правило {} на порту {} не принадлежит живому окну и не удаляется.",
-                clip(payload["rule_id"].as_str().unwrap_or("?"), TITLE_CHARS),
-                clip(payload["public_port"].as_str().unwrap_or("?"), TITLE_CHARS)
-            ),
-        ),
         "hard_cap" => (
             "Облако: предел окна истёк до подключения".to_owned(),
-            format!("Окно {name} не подключилось до жёсткого предела; сервер удаляется."),
+            format!("Окно {name} не подключилось до жёсткого предела; машина удаляется."),
         ),
         "cloud_window_hard_cap" => (
             "Облако: жёсткий предел, задачи отменены".to_owned(),
             format!("Окно {name} дошло до жёсткого предела; незаконченные задачи отменены."),
         ),
         "ownership_mismatch" => (
-            "Облако: сервер не принадлежит окну".to_owned(),
+            "Облако: ресурс не принадлежит окну".to_owned(),
             format!(
-                "Сервер {} не совпал по имени или проекту с окном {name}; удаление остановлено, \
-                 проверьте панель.",
-                payload["server_id"]
-                    .as_i64()
-                    .map_or_else(|| "?".to_owned(), |id| id.to_string())
+                "{} не совпал по имени или каталогу с окном {name}; удаление остановлено, \
+                 проверьте консоль Yandex Cloud.",
+                match (payload["instance_id"].as_str(), payload["disk_id"].as_str()) {
+                    (Some(id), _) => format!("Машина {}", clip(id, TITLE_CHARS)),
+                    (None, Some(id)) => format!("Диск {}", clip(id, TITLE_CHARS)),
+                    (None, None) => "Ресурс".to_owned(),
+                }
             ),
         ),
         "late_create" => (
-            "Облако: поздний сервер возвращён окну".to_owned(),
+            "Облако: поздняя машина возвращена окну".to_owned(),
             format!(
-                "Сервер окна {name} появился после неудавшегося создания; он удаляется обычным \
-                 путём, итог считается с вызова создания."
+                "Машина окна {name} появилась после неудавшегося создания; она удаляется \
+                 обычным путём, итог считается с вызова создания."
+            ),
+        ),
+        "late_disk" => (
+            "Облако: диск закрытого окна возвращён окну".to_owned(),
+            format!(
+                "Диск окна {name} остался в каталоге без машины; он удаляется, а его время \
+                 входит в итог окна."
             ),
         ),
         "reprice_growth" => (
             "Облако: цена выросла, окно не создано".to_owned(),
             format!(
-                "Новая цена подняла резерв окна {name} до {} выше одобренных {}; сервер не \
-                 создавался, расход 0.",
+                "Новая цена подняла резерв окна {name} до {} выше одобренных {}; машина не \
+                 создавалась, расход 0.",
                 money("reservation_kopecks").unwrap_or_else(|| "?".to_owned()),
                 money("approved_kopecks").unwrap_or_else(|| "?".to_owned())
             ),
         ),
         "window_gone" => (
-            "Облако: сервер окна исчез".to_owned(),
-            format!("Сервера окна {name} нет в проекте, хотя удаление не запрашивалось."),
+            "Облако: машина окна исчезла".to_owned(),
+            format!("Машины окна {name} нет в каталоге, хотя удаление не запрашивалось."),
         ),
         _ => return None,
     })
@@ -2523,22 +2560,24 @@ mod tests {
             "auto_started",
             "budget_80",
             "budget_100",
-            "no_paid",
             "stray_server_deleted",
             "stray_server_stuck",
-            "delete_needs_confirmation",
+            "stray_disk_deleted",
+            "stray_disk_stuck",
             "delete_failing",
+            "disk_delete_failing",
+            "preempted",
+            "vm_broken",
+            "replacement_started",
+            "replacement_skipped",
             "window_overrun",
             "outage_extra_cost",
             "window_gone",
-            "dnat_refused",
-            "dnat_delete_failing",
-            "stray_dnat_deleted",
-            "stray_dnat_stuck",
             "hard_cap",
             "cloud_window_hard_cap",
             "ownership_mismatch",
             "late_create",
+            "late_disk",
             "reprice_growth",
         ];
         for code in codes {
@@ -2552,18 +2591,23 @@ mod tests {
                 "reservation_kopecks": 3000,
                 "approved_kopecks": 2000,
                 "extra_kopecks": 100,
-                "server_id": 7,
-                "rule_id": "dnat-1",
-                "public_port": "22100",
-                "error_code": "forbidden",
+                "instance_id": "fhmfakeinstance0001",
+                "reason": "budget",
+                "deadline": "2026-11-24T15:40:00Z",
             });
             let (title, body) =
                 cloud_alert_text(&payload).unwrap_or_else(|| panic!("{code} is not rendered"));
             assert!(!title.trim().is_empty(), "{code} has an empty title");
             assert!(!body.trim().is_empty(), "{code} has an empty body");
         }
-        // Остатки публичного IPv4 больше не выпускаются: их коды не должны рендериться.
+        // Коды прежнего провайдера больше не выпускаются и не должны рендериться.
         for dead in [
+            "no_paid",
+            "delete_needs_confirmation",
+            "dnat_refused",
+            "dnat_delete_failing",
+            "stray_dnat_deleted",
+            "stray_dnat_stuck",
             "ipv4_refused",
             "stray_ip_deleted",
             "stray_ip_stuck",

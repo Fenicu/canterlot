@@ -117,6 +117,7 @@ pub async fn send_stage_in_tx(
         "stage_source",
         json!({
             "job_id": job.id,
+            "attempt": job.attempt,
             "repo": repo,
             "rev": rev,
             "domain": domain,
@@ -140,6 +141,7 @@ async fn send_collect_in_tx(conn: &mut PgConnection, job: &Job) -> Result<(), sq
         "collect_outputs",
         json!({
             "job_id": job.id,
+            "attempt": job.attempt,
             "target_machine_id": machine,
             "target_root_dir": root,
             "workdir": workdir,
@@ -166,6 +168,7 @@ async fn send_cleanup_in_tx(conn: &mut PgConnection, job: &Job) -> Result<(), sq
         "cleanup_source",
         json!({
             "job_id": job.id,
+            "attempt": job.attempt,
             "target_machine_id": machine,
             "target_root_dir": root,
             "workdir": workdir,
@@ -350,12 +353,22 @@ pub async fn finish_collecting_in_tx(
 
 // ───────── Факты несущей ─────────
 
-/// Строка задачи под замками для факта несущей `reporter`; `None` — факт чужой или задачи нет.
-/// Чужой факт пишет предупреждение и ничего не меняет.
+/// Попытка из факта несущей: несущая до повторов шлёт 0, это первая попытка (повтор начинается
+/// со второй, и команду с попыткой 2 старая несущая не исполнит: имя каталога ей чужое).
+pub fn fact_attempt(attempt: u32) -> u32 {
+    attempt.max(1)
+}
+
+/// Строка задачи под замками для факта несущей `reporter`; `None` — факт чужой, не той попытки
+/// или задачи нет. Чужой факт пишет предупреждение и ничего не меняет. Факт прежней попытки
+/// (подготовка, которая шла, когда машину прервали) и любой факт, пока задача ждёт повтора,
+/// тоже ничего не меняют: иначе поздний успех подготовки первой попытки отпустил бы вторую
+/// раньше, чем готова её рабочая копия.
 async fn locked_for_carrier(
     conn: &mut PgConnection,
     reporter: Uuid,
     job_id: &str,
+    attempt: u32,
     fact: &'static str,
 ) -> Result<Option<Job>, sqlx::Error> {
     let Ok(id) = Uuid::parse_str(job_id) else {
@@ -388,7 +401,13 @@ async fn locked_for_carrier(
     if let Some(machine) = machine {
         lock_machine(conn, machine).await?;
     }
-    lock_row(conn, id).await
+    let Some(job) = lock_row(conn, id).await? else {
+        return Ok(None);
+    };
+    if !super::retry::accepts_fact(&job, fact_attempt(attempt), fact) {
+        return Ok(None);
+    }
+    Ok(Some(job))
 }
 
 async fn complete_commands(
@@ -431,14 +450,29 @@ pub async fn apply_command_rejected(
     else {
         return Ok(());
     };
+    // Отказ относится к попытке, которой команду выдали.
+    let attempt = payload
+        .as_ref()
+        .and_then(|payload| payload.get("attempt"))
+        .and_then(Value::as_u64)
+        .and_then(|attempt| u32::try_from(attempt).ok())
+        .unwrap_or(0);
     let reason = format!("rejected: {}", clean_reason(reason));
     match kind {
         "stage_source" => {
-            let fact = SourceStageFailed { job_id, reason };
+            let fact = SourceStageFailed {
+                job_id,
+                reason,
+                attempt,
+            };
             apply_stage_failed(conn, machine_id, &fact, correlation_id).await
         }
         "collect_outputs" => {
-            let fact = OutputsCollectFailed { job_id, reason };
+            let fact = OutputsCollectFailed {
+                job_id,
+                reason,
+                attempt,
+            };
             apply_collect_failed(conn, machine_id, &fact, correlation_id).await
         }
         _ => Ok(()),
@@ -452,7 +486,9 @@ pub async fn apply_source_staged(
     fact: &SourceStaged,
     correlation_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    let Some(job) = locked_for_carrier(conn, reporter, &fact.job_id, "source_staged").await? else {
+    let Some(job) =
+        locked_for_carrier(conn, reporter, &fact.job_id, fact.attempt, "source_staged").await?
+    else {
         return Ok(());
     };
     complete_commands(conn, reporter, job.id, "stage_source").await?;
@@ -499,7 +535,14 @@ pub async fn apply_stage_failed(
     fact: &SourceStageFailed,
     correlation_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    let Some(job) = locked_for_carrier(conn, reporter, &fact.job_id, "source_stage_failed").await?
+    let Some(job) = locked_for_carrier(
+        conn,
+        reporter,
+        &fact.job_id,
+        fact.attempt,
+        "source_stage_failed",
+    )
+    .await?
     else {
         return Ok(());
     };
@@ -528,7 +571,14 @@ pub async fn apply_outputs_collected(
     fact: &OutputsCollected,
     correlation_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    let Some(job) = locked_for_carrier(conn, reporter, &fact.job_id, "outputs_collected").await?
+    let Some(job) = locked_for_carrier(
+        conn,
+        reporter,
+        &fact.job_id,
+        fact.attempt,
+        "outputs_collected",
+    )
+    .await?
     else {
         return Ok(());
     };
@@ -567,8 +617,14 @@ pub async fn apply_collect_failed(
     fact: &OutputsCollectFailed,
     correlation_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    let Some(job) =
-        locked_for_carrier(conn, reporter, &fact.job_id, "outputs_collect_failed").await?
+    let Some(job) = locked_for_carrier(
+        conn,
+        reporter,
+        &fact.job_id,
+        fact.attempt,
+        "outputs_collect_failed",
+    )
+    .await?
     else {
         return Ok(());
     };
@@ -589,7 +645,8 @@ pub async fn apply_source_cleaned(
     fact: &SourceCleaned,
     _correlation_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    let Some(job) = locked_for_carrier(conn, reporter, &fact.job_id, "source_cleaned").await?
+    let Some(job) =
+        locked_for_carrier(conn, reporter, &fact.job_id, fact.attempt, "source_cleaned").await?
     else {
         return Ok(());
     };

@@ -36,7 +36,7 @@ async fn locked(
     let Some(job) = lock_row(conn, id).await? else {
         return Ok(None);
     };
-    if u32::try_from(job.attempt).ok() != Some(attempt) {
+    if !super::retry::accepts_fact(&job, attempt, "runner_fact") {
         return Ok(None);
     }
     Ok(Some(job))
@@ -84,6 +84,16 @@ pub async fn apply_command_rejected(
         return Ok(());
     };
     if job.machine_id != Some(machine_id) || job.is_terminal() {
+        return Ok(());
+    }
+    // Отказ команды прежней попытки не закрывает повтор.
+    let attempt = payload
+        .as_ref()
+        .and_then(|payload| payload.get("attempt"))
+        .and_then(Value::as_u64)
+        .and_then(|attempt| u32::try_from(attempt).ok())
+        .unwrap_or(0);
+    if !super::retry::accepts_fact(&job, attempt.max(1), "start_rejected") {
         return Ok(());
     }
     let reason: String = reason
@@ -455,7 +465,8 @@ pub async fn apply_chunk(
         return Ok(());
     };
     if u32::try_from(attempt).ok() != Some(chunk.attempt)
-        || State::parse(&state).is_none_or(State::is_terminal)
+        || State::parse(&state)
+            .is_none_or(|state| state.is_terminal() || state == State::RetryPending)
         || chunk.data.is_empty()
     {
         return Ok(());

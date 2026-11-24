@@ -125,14 +125,20 @@ pub async fn put(
         Err(error) => return Err(error.into()),
     }
     let (id, job_id, size, sha) = (header.id, header.job_id, header.size, header.sha256.clone());
+    // Пока тело текло, задачу могли вернуть в очередь следующей попыткой или отправить в
+    // `retry_pending`: журнал прежней попытки не привязывается. Условия проверяются в самом
+    // обновлении, а не только до загрузки.
     let attached = sqlx::query(
         "update jobs set log_media_id=$2, log_size=$3, log_sha256=$4, updated_at=clock_timestamp()
-         where id=$1 and (log_media_id is null or log_media_id=$2)",
+         where id=$1 and machine_id=$5 and attempt=$6 and state <> 'retry_pending'
+           and (log_media_id is null or log_media_id=$2)",
     )
     .bind(job_id)
     .bind(id)
     .bind(i64::try_from(size).unwrap_or(i64::MAX))
     .bind(sha)
+    .bind(machine_id)
+    .bind(header.attempt)
     .execute(pool)
     .await?
     .rows_affected();

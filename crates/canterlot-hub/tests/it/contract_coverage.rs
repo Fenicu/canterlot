@@ -9,7 +9,7 @@ use std::{
 
 use axum::http::Method;
 use canterlot_hub::{
-    cloud::{TimewebConfig, TimewebProvider, service::CloudService},
+    cloud::{YandexClient, YandexConfig, service::CloudService},
     config::CloudConfig,
     events::CLIENT_KINDS,
     http::{self, AppState, error::ErrorCode, openapi},
@@ -342,23 +342,21 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
     let owner = deps.installation.owner_id;
     let machine = Uuid::now_v7();
     // Маршруты бюджета и карточки облака требуют включённой службы с ценами провайдера.
-    const TW_TOKEN: &str = "tw-coverage-token-5d1c0e9a";
+    use crate::support::fake_yandex::{FOLDER, FakeYandex, SUBNET, ZONE, write_key_file};
     let cloud_dir = tempfile::tempdir().unwrap();
-    let token_file = cloud_dir.path().join("token");
-    std::fs::write(&token_file, format!("{TW_TOKEN}\n")).unwrap();
-    let fake = crate::support::fake_timeweb::FakeTimeweb::start(TW_TOKEN).await;
-    let mut provider_config = TimewebConfig::new(&token_file);
-    provider_config.base_url = fake.base_url.clone();
-    let provider = Arc::new(TimewebProvider::new(provider_config).unwrap());
+    let key_file = write_key_file(cloud_dir.path());
+    let fake = FakeYandex::start().await;
+    let mut provider_config = YandexConfig::new(key_file, FOLDER, ZONE, SUBNET);
+    provider_config.iam_url = fake.base_url.clone();
+    provider_config.compute_url = fake.base_url.clone();
+    provider_config.operation_url = fake.base_url.clone();
+    provider_config.billing_url = fake.base_url.clone();
+    let provider = Arc::new(YandexClient::new(provider_config).unwrap());
     let config: CloudConfig = toml::from_str(&format!(
-        "provider='timeweb'\ntoken_file='token'\nproject_id=1\n\
-         network_id='network-example'\nnetwork_cidr='192.0.2.0/24'\n\
-         router_id='018f0000-0000-7000-8000-0000000000aa'\nrouter_ip='192.0.2.1'\n\
-         gateway='192.0.2.5'\nlocal_ip_pool='192.0.2.10-192.0.2.60'\n\
-         dnat_port_range='22100-22199'\n\
+        "provider='yandex'\nkey_file='key.json'\nfolder_id='{FOLDER}'\nzone='{ZONE}'\n\
+         subnet_id='{SUBNET}'\n\
          runner_public_key='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLE'\n\
-         carrier_machine_id='{machine}'\n[[profile]]\nconfigurator_id=151\ncpu=1\n\
-         ram_gb=1\ndisk_gb=10\navailability_zone='msk-1'\n"
+         carrier_machine_id='{machine}'\n[[profile]]\ncores=2\nmemory_gb=2\ndisk_gb=10\n"
     ))
     .unwrap();
     deps.cloud = Some(CloudService::new(
@@ -392,11 +390,12 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
     // «удалить» отменяет её, не трогая провайдера.
     let window = Uuid::now_v7();
     sqlx::query(
-        "insert into cloud_windows(id,name,state,trigger,host_key_public,price_hourly_kopecks,
-                                   reservation_kopecks,month,hard_cap_minutes,created_at,profiles)
-         values($1,'canterlot-runner-'||$1::text,'create_intent','owner','ssh-ed25519 AAAA',2845,
-                11380,'2026-11',60,now(),
-                '[{\"configurator_id\":151,\"cpu\":32,\"ram_gb\":64,\"disk_gb\":80,\"hourly_kopecks\":2845}]')",
+        "insert into cloud_windows(id,name,state,trigger,folder_id,preemptible,host_key_public,
+                                   price_hourly_kopecks,reservation_kopecks,month,hard_cap_minutes,
+                                   created_at,profiles)
+         values($1,'canterlot-runner-'||$1::text,'create_intent','owner','b1gfakefolder000000',true,
+                'ssh-ed25519 AAAA',1806,7224,'2026-11',60,now(),
+                '[{\"cores\":32,\"memory_gb\":64,\"disk_gb\":80,\"compute_kopecks_per_hour\":1646,\"disk_kopecks_per_hour\":160}]')",
     )
     .bind(window)
     .execute(&pool)

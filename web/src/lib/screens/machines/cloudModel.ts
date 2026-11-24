@@ -39,7 +39,7 @@ export function windowStateWord(state: string): string {
     case "create_unknown":
       return "Создание без ответа";
     case "identified":
-      return "Сервер создан";
+      return "Машина создана";
     case "ready":
       return "Готов";
     case "draining":
@@ -94,32 +94,65 @@ export function windowPriceLine(window: Pick<CloudWindow, "price_hourly_kopecks"
   return `${rubles(window.price_hourly_kopecks)}/ч`;
 }
 
-/** Что владельцу делать с ошибкой службы окон: `needs_confirmation` требует панели провайдера. */
+/** Что владельцу делать с ошибкой службы окон. */
 export function windowErrorText(code: string | null | undefined): string | null {
   if (!code) return null;
-  if (code === "needs_confirmation") {
-    return "Токен не может удалить сервер: он продолжает оплачиваться. Удалите его в панели Timeweb, затем снимите блок";
-  }
   return `Служба окон сообщила об ошибке: ${code}`;
 }
 
 /** Блок провайдера: почему новые окна не создаются. */
 export function blockText(code: string | null | undefined): string | null {
   if (!code) return null;
-  if (code === "no_paid" || code === "abuse_prepayment_required") {
-    return "Timeweb требует предоплату: новые окна не создаются";
-  }
   return `Провайдер остановил создание окон (код ${code})`;
+}
+
+/** Почему окно закончилось не по воле владельца: коды Яндекса словами. */
+export function windowEndReason(reason: string | null | undefined): string | null {
+  switch (reason) {
+    case "preempted":
+      return "прервана Яндексом";
+    case "vm_broken":
+      return "машина сломалась";
+    default:
+      return null;
+  }
+}
+
+/** Состояние окна словами владельца и, если известно, чем оно кончилось. */
+export function windowStateText(window: Pick<CloudWindow, "state" | "delete_reason">): string {
+  const reason = windowEndReason(window.delete_reason);
+  const word = windowStateWord(window.state);
+  return reason ? `${word} · ${reason}` : word;
+}
+
+export interface WindowReplacement {
+  text: string;
+  parentId: string | null;
+}
+
+/** Замена прерванного окна: своё начало словами и родитель, если он есть в списке. */
+export function windowReplacement(
+  window: Pick<CloudWindow, "replaces_window_id">,
+  items: readonly CloudWindow[],
+  now: number
+): WindowReplacement | null {
+  if (!window.replaces_window_id) return null;
+  const parent = items.find((item) => item.id === window.replaces_window_id);
+  if (!parent) return { text: "замена окна", parentId: null };
+  const started = Date.parse(parent.created_at);
+  return Number.isFinite(started)
+    ? { text: `замена окна ${fmt.stamp(started, now)}`, parentId: parent.id }
+    : { text: "замена окна", parentId: parent.id };
 }
 
 export function deleteOutcomeText(outcome: CloudDeleteOutcome): string {
   switch (outcome) {
     case "deleting":
-      return "Удаляю сервер. Оплата идёт до подтверждения удаления";
+      return "Удаляю машину. Оплата идёт до подтверждения удаления";
     case "canceled":
-      return "Окно отменено: сервер ещё не создавался";
+      return "Окно отменено: машина ещё не создавалась";
     case "not_yet":
-      return "Сервера ещё нет в списке провайдера. Удаление повторится, когда он появится";
+      return "Машины ещё нет в списке провайдера. Удаление повторится, когда она появится";
     case "already_ended":
       return "Окно уже закончилось";
     default:
@@ -139,7 +172,7 @@ export function proposalRefusalText(reason: string): string {
     case "cloud_disabled":
       return "Облако не настроено на хабе";
     case "provider_unavailable":
-      return "Timeweb не отвечает: цену получить не удалось";
+      return "Yandex Cloud не отвечает: цену получить не удалось";
     case "provider_blocked":
       return "Провайдер остановил создание окон: снимите блок в настройках";
     case "price_error":
@@ -159,7 +192,7 @@ export function profileLines(
   profiles: readonly CloudBudget["profiles"][number][]
 ): ProfileLine[] {
   return profiles.map((profile) => ({
-    key: String(profile.configurator_id),
-    text: `${profile.cpu} vCPU · ${profile.ram_gb} ГБ RAM · ${profile.disk_gb} ГБ диска · ${rubles(profile.hourly_kopecks)}/ч · ${profile.availability_zone}`
+    key: `${profile.cores}-${profile.memory_gb}-${profile.disk_gb}`,
+    text: `${profile.cores} vCPU · ${profile.memory_gb} ГБ · SSD ${profile.disk_gb} ГБ · ≈${rubles(profile.compute_kopecks_per_hour + profile.disk_kopecks_per_hour)}/ч`
   }));
 }

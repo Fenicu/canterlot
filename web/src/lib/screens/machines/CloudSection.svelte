@@ -24,13 +24,15 @@
     windowDeadline,
     windowErrorText,
     windowPriceLine,
-    windowStateWord,
+    windowReplacement,
+    windowStateText,
     type CloudWindow,
     type CloudWindows
   } from './cloudModel.js';
   import Button from '#lib/ui/Button.svelte';
   import ConfirmDialog from '#lib/ui/ConfirmDialog.svelte';
   import Icon from '#lib/ui/Icon.svelte';
+  import Pill from '#lib/ui/Pill.svelte';
   import Segmented from '#lib/ui/Segmented.svelte';
 
   let { runtime, now }: { runtime: Runtime; now: number } = $props();
@@ -49,6 +51,7 @@
   let notice = $state<{ text: string; tone: 'ok' | 'warning' | 'error' } | null>(null);
   let pendingDelete = $state<CloudWindow | null>(null);
   let deleting = $state(false);
+  let historyOpen = $state(false);
   let hours = $state('2');
   let reason = $state('');
   let proposing = $state(false);
@@ -148,11 +151,24 @@
         {@const window = split.live}
         {@const problem = windowErrorText(window.last_error)}
         {@const deadline = windowDeadline(window, now)}
-        <div class="window" data-cloud-window-card data-state={window.state}>
+        {@const replacement = windowReplacement(window, list.items, now)}
+        <div class="window" id={`cloud-window-${window.id}`} data-cloud-window-card data-state={window.state}>
           <div class="window-head">
-            <strong>{windowStateWord(window.state)}</strong>
-            <span class="muted">{windowPriceLine(window)}</span>
+            <strong>{windowStateText(window)}</strong>
+            <span class="marks">
+              {#if window.preemptible}<Pill>прерываемая</Pill>{/if}
+              <span class="muted">{windowPriceLine(window)}</span>
+            </span>
           </div>
+          {#if replacement}
+            <p class="muted" data-cloud-replacement>
+              {#if replacement.parentId}
+                <a href={`#cloud-window-${replacement.parentId}`} onclick={() => (historyOpen = true)}>{replacement.text}</a>
+              {:else}
+                {replacement.text}
+              {/if}
+            </p>
+          {/if}
           <p class="muted">Окно живёт {windowAge(window, now)}</p>
           <p class="money">{windowCostLine(window)}</p>
           {#if deadline}<p class="muted">{deadline}</p>{/if}
@@ -177,15 +193,15 @@
       {/each}
 
       {#if split.ended.length > 0}
-        <details class="history" data-cloud-history>
+        <details class="history" data-cloud-history bind:open={historyOpen}>
           <summary>
             <span>Законченные окна · {split.ended.length}</span>
             <span class="chevron" aria-hidden="true"><Icon name="chevron" /></span>
           </summary>
           <ul>
             {#each split.ended as window (window.id)}
-              <li data-cloud-ended data-state={window.state}>
-                <span class="ended-word">{windowStateWord(window.state)}</span>
+              <li id={`cloud-window-${window.id}`} data-cloud-ended data-state={window.state}>
+                <span class="ended-word">{windowStateText(window)}</span>
                 <span class="muted">{fmt.stamp(Date.parse(window.created_at), now)}</span>
                 <strong>{rubles(windowCost(window))}</strong>
               </li>
@@ -228,7 +244,7 @@
 {#if pendingDelete}
   <ConfirmDialog
     title="Удалить облачное окно?"
-    body={`Сервер удалится, окно закроется по фактической цене. Уже израсходовано ${rubles(windowCost(pendingDelete))}. Отменить нельзя.`}
+    body={`Машина удалится, окно закроется по фактической цене. Уже израсходовано ${rubles(windowCost(pendingDelete))}. Отменить нельзя.`}
     confirmLabel="Удалить сейчас"
     danger
     onconfirm={confirmDelete}
@@ -254,6 +270,7 @@
     justify-content: space-between;
   }
   .window-head strong { font-size: var(--fs-body); }
+  .marks { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: var(--s2) var(--s4); }
   .money { margin-block: var(--s2) var(--s0); font-variant-numeric: tabular-nums; }
   .muted { margin-block: var(--s1); color: var(--muted); font-size: var(--fs-meta); }
   .warning { color: var(--warning); font-size: var(--fs-meta); }

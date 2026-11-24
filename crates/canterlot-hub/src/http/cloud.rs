@@ -40,8 +40,8 @@ const ENDED_LIMIT: i64 = 20;
 pub struct WindowList {
     /// Живые окна и последние 20 законченных, новые первыми.
     pub items: Vec<CloudWindowView>,
-    /// Код блока провайдера (`abuse_prepayment_required`), пока он стоит: новые окна не
-    /// создаются, пока владелец не снимет блок. Пусто, когда блока нет.
+    /// Код блока провайдера, пока он стоит: новые окна не создаются, пока владелец не снимет
+    /// блок. Пусто, когда блока нет.
     pub provider_block_code: Option<String>,
     pub provider_block_at: Option<chrono::DateTime<Utc>>,
     /// Облако настроено на хабе (`[runners.cloud]`): без него окна не создаются и форма
@@ -51,15 +51,15 @@ pub struct WindowList {
 
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct DeleteWindowResult {
-    /// Что случилось с окном: `deleting` (раннер отозван, сервер удаляется), `canceled`
-    /// (сервер ещё не создавался), `not_yet` (создание вызвано, сервера в списках нет),
+    /// Что случилось с окном: `deleting` (раннер отозван, машина удаляется), `canceled`
+    /// (машина ещё не создавалась), `not_yet` (создание вызвано, машины в списках нет),
     /// `already_ended`.
     pub outcome: DeleteRequested,
     pub window: CloudWindowView,
 }
 
 #[utoipa::path(get,path="/api/v1/cloud/windows",tag="cloud",responses(
-    (status=200,description="Окна облачных серверов раннеров: живые и последние 20 законченных, с ценой и расходом в копейках",body=WindowList)
+    (status=200,description="Окна облачных машин раннеров: живые и последние 20 законченных, со ставками и расходом в копейках",body=WindowList)
 ))]
 async fn list(State(state): State<AppState>, _owner: Owner) -> Result<Json<WindowList>, ApiError> {
     let mut conn = state.pool.acquire().await?;
@@ -79,7 +79,7 @@ async fn list(State(state): State<AppState>, _owner: Owner) -> Result<Json<Windo
 }
 
 #[utoipa::path(post,path="/api/v1/cloud/windows/{id}/delete",tag="cloud",params(("id"=Uuid,Path,description="Окно"),("Idempotency-Key"=String,Header,description="Ключ операции")),responses(
-    (status=200,description="Удаление принято: раннер отзывается, сервер удаляет служба окон и подтверждает конец оплаты списком проекта",body=DeleteWindowResult),
+    (status=200,description="Удаление принято: раннер отзывается, машину и её диск удаляет служба окон и подтверждает конец оплаты полными списками каталога",body=DeleteWindowResult),
     (status=404,description="Окна нет",body=super::error::ErrorEnvelope)
 ))]
 async fn delete_now(
@@ -119,7 +119,7 @@ async fn delete_now(
 
 /// Бюджет облака: настройки владельца, расход текущего месяца и цены профилей.
 #[utoipa::path(get,path="/api/v1/cloud/budget",tag="cloud",responses(
-    (status=200,description="Бюджет облака: месяц, расход, остаток, режим, ревизия, блок и профили с ценой часа",body=budget::BudgetView)
+    (status=200,description="Бюджет облака: месяц, расход, остаток, режим, ревизия, блок и профили со ставками часа",body=budget::BudgetView)
 ))]
 async fn budget_get(
     State(state): State<AppState>,

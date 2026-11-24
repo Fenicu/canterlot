@@ -76,10 +76,32 @@ pub async fn revoke(pool: &PgPool, machine_id: Uuid) -> Result<bool, sqlx::Error
     .await
 }
 
+/// Что отзыв делает с незаконченными задачами машины.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RevokeJobs {
+    /// Все заканчиваются `lost`.
+    Lose,
+    /// Облачную машину прервали: задача, которой положен повтор, уходит в `retry_pending` и
+    /// ждёт `inplace_jobs::retry::release_retry_pending_in_tx`; остальные заканчиваются `lost`.
+    RetryOnce,
+}
+
 /// Отзыв в чужой транзакции: порядок замков тот же — задачи машины раньше строки машины.
+/// Задачи заканчиваются `lost`.
 pub async fn revoke_in_tx(
     conn: &mut sqlx::PgConnection,
     machine_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    revoke_jobs_in_tx(conn, machine_id, RevokeJobs::Lose).await
+}
+
+/// Отзыв с выбором судьбы задач. `Lose` не трогает задачи, уже ждущие повтора на этой машине:
+/// их выпускает или закрывает тот, кто отзывал с `RetryOnce`, так что повторный отзыв при уборке
+/// окна повтора не отнимает.
+pub async fn revoke_jobs_in_tx(
+    conn: &mut sqlx::PgConnection,
+    machine_id: Uuid,
+    jobs: RevokeJobs,
 ) -> Result<bool, sqlx::Error> {
     // Замок машины задач раньше строки машины: тот же порядок, что у службы задач.
     crate::inplace_jobs::lock_machine(&mut *conn, machine_id).await?;
@@ -100,38 +122,48 @@ pub async fn revoke_in_tx(
     if revoked {
         notify_revoke(&mut *conn, machine_id).await?;
     }
-    lose_jobs_in_tx(&mut *conn, machine_id).await?;
+    lose_jobs_in_tx(&mut *conn, machine_id, jobs).await?;
     Ok(revoked)
 }
 
 /// Незаконченные задачи на месте машины становятся `lost`; законченные не трогаются. Так же
 /// заканчиваются ждущие раннер задачи этой машины как несущей (`carrier_id`) и задачи,
-/// названные на неё и ждущие места: машины больше нет, ждать некого.
+/// названные на неё и ждущие места: машины больше нет, ждать некого. Задача, ждущая повтора,
+/// теряется вместе со своей несущей: без неё готовить исходники некому. При `RetryOnce` задача,
+/// которой положен повтор, вместо `lost` уходит в `retry_pending`.
 async fn lose_jobs_in_tx(
     conn: &mut sqlx::PgConnection,
     machine_id: Uuid,
+    jobs: RevokeJobs,
 ) -> Result<(), sqlx::Error> {
     let ids: Vec<Uuid> = sqlx::query_scalar(
         "select id from jobs where
            (machine_id = $1
               and state in ('staging','queued','dispatched','waiting_lease','running'))
            or (state = 'waiting_runner' and (carrier_id = $1 or requested_machine_id = $1))
+           or (state = 'retry_pending' and carrier_id = $1)
          order by created_at, id",
     )
     .bind(machine_id)
     .fetch_all(&mut *conn)
     .await?;
-    finish_lost_in_tx(conn, ids).await
+    match jobs {
+        RevokeJobs::Lose => finish_lost_in_tx(conn, ids).await,
+        RevokeJobs::RetryOnce => {
+            crate::inplace_jobs::retry::hold_or_lose_in_tx(conn, machine_id, ids).await
+        }
+    }
 }
 
-/// Снятие пометки несущей: её ждущие раннер задачи (`carrier_id`) кончаются `lost`. Задачи,
-/// уже идущие на её раннерах или на ней самой, остаются: им нужна только живая связь.
+/// Снятие пометки несущей: её задачи (`carrier_id`), ждущие раннер или повтора, кончаются
+/// `lost`. Задачи, уже идущие на её раннерах или на ней самой, остаются: им нужна только живая
+/// связь.
 async fn lose_waiting_of_carrier_in_tx(
     conn: &mut sqlx::PgConnection,
     carrier: Uuid,
 ) -> Result<(), sqlx::Error> {
     let ids: Vec<Uuid> = sqlx::query_scalar(
-        "select id from jobs where state = 'waiting_runner' and carrier_id = $1
+        "select id from jobs where state in ('waiting_runner','retry_pending') and carrier_id = $1
          order by created_at, id",
     )
     .bind(carrier)
@@ -141,7 +173,7 @@ async fn lose_waiting_of_carrier_in_tx(
 }
 
 /// Каждая задача кончается `lost` ровно один раз и с одним сообщением: законченная пропускается.
-async fn finish_lost_in_tx(
+pub(crate) async fn finish_lost_in_tx(
     conn: &mut sqlx::PgConnection,
     ids: Vec<Uuid>,
 ) -> Result<(), sqlx::Error> {

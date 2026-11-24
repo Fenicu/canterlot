@@ -1,5 +1,5 @@
 //! Бюджет облака, карточки предложений, автоматический режим и оповещения (этап C2b).
-//! Всё против поддельного Timeweb: деньги и состояния проверяются в базе, а время — аргументом
+//! Всё против поддельного Яндекса: деньги и состояния проверяются в базе, а время — аргументом
 //! прохода службы, без ожидания.
 
 use std::{sync::Arc, time::Duration};
@@ -28,15 +28,16 @@ use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::support::fake_timeweb::FakeTimeweb;
+use crate::support::fake_yandex::{FOLDER, FakeYandex, SUBNET, ZONE, write_key_file};
 
-const TOKEN: &str = "tw-budget-token-5d1c0e9a";
-const PROJECT: i64 = 4242;
 const KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE0000";
-const HOURLY: i64 = 2845;
-const ROUTER: &str = "018f0000-0000-7000-8000-0000000000aa";
-const ROUTER_IP: &str = "192.0.2.1";
-const GATEWAY: &str = "192.0.2.5";
+/// Прерываемая машина 32 vCPU, 64 ГБ с диском 80 ГБ по ценам поддельного каталога: 1646
+/// копеек в час за машину с адресом и 160 за диск.
+const COMPUTE: i64 = 1646;
+const DISK: i64 = 160;
+const HOURLY: i64 = COMPUTE + DISK;
+/// Профили окна в строке базы: тот же вид, что пишет служба.
+const PROFILES: &str = r#"[{"cores":32,"memory_gb":64,"disk_gb":80,"compute_kopecks_per_hour":1646,"disk_kopecks_per_hour":160}]"#;
 
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
@@ -49,33 +50,51 @@ fn now_micros() -> DateTime<Utc> {
 fn cloud_config(carrier: Uuid) -> CloudConfig {
     toml::from_str(&format!(
         r#"
-provider = "timeweb"
-token_file = "token"
-project_id = {PROJECT}
+provider = "yandex"
+key_file = "key.json"
+folder_id = "{FOLDER}"
+zone = "{ZONE}"
+subnet_id = "{SUBNET}"
 runner_public_key = "{KEY}"
 carrier_machine_id = "{carrier}"
-network_id = "network-example"
-network_cidr = "192.0.2.0/24"
-router_id = "{ROUTER}"
-router_ip = "{ROUTER_IP}"
-gateway = "{GATEWAY}"
-local_ip_pool = "192.0.2.10-192.0.2.60"
-dnat_port_range = "22100-22199"
 
 [[profile]]
-configurator_id = 151
-cpu = 32
-ram_gb = 64
+cores = 32
+memory_gb = 64
 disk_gb = 80
-availability_zone = "msk-1"
 "#
     ))
     .unwrap()
 }
 
+/// Клиент Яндекса, который смотрит на поддельный сервер. Каждый вызов даёт новый клиент со
+/// своим кэшем цен, как после перезапуска хаба.
+fn provider(fake: &FakeYandex, dir: &tempfile::TempDir) -> Arc<canterlot_hub::cloud::YandexClient> {
+    let mut config = canterlot_hub::cloud::YandexConfig::new(
+        dir.path().join("yandex-key.json"),
+        FOLDER,
+        ZONE,
+        SUBNET,
+    );
+    config.iam_url = fake.base_url.clone();
+    config.compute_url = fake.base_url.clone();
+    config.operation_url = fake.base_url.clone();
+    config.billing_url = fake.base_url.clone();
+    config.request_timeout = Duration::from_secs(3);
+    config.rate_limit = canterlot_hub::cloud::rate_limit::RateLimit {
+        max: 10_000,
+        per: Duration::from_secs(1),
+    };
+    config.max_rate_limit_retries = 1;
+    config.default_backoff = Duration::from_millis(5);
+    // Один тест растягивает переоценку штатной паузой на 429; остальные её не ждут.
+    config.max_backoff = Duration::from_secs(5);
+    Arc::new(canterlot_hub::cloud::YandexClient::new(config).unwrap())
+}
+
 struct Rig {
     pool: PgPool,
-    _fake: FakeTimeweb,
+    _fake: FakeYandex,
     service: Arc<CloudService>,
     registry: Registry,
     owner: Uuid,
@@ -95,20 +114,11 @@ impl Rig {
         machines::set_carrier(&pool, carrier.machine_id, true)
             .await
             .unwrap();
-        let fake = FakeTimeweb::start(TOKEN).await;
+        let fake = FakeYandex::start().await;
         crate::auth_pushes::enable(&pool).await;
         let dir = tempfile::tempdir().unwrap();
-        let token_file = dir.path().join("token");
-        std::fs::write(&token_file, format!("{TOKEN}\n")).unwrap();
-        let mut provider_config = canterlot_hub::cloud::TimewebConfig::new(&token_file);
-        provider_config.base_url = fake.base_url.clone();
-        provider_config.request_timeout = Duration::from_secs(3);
-        provider_config.max_rate_limit_retries = 1;
-        provider_config.default_backoff = Duration::from_millis(5);
-        // Один тест растягивает переоценку штатной паузой на 429; остальные её не ждут.
-        provider_config.max_backoff = Duration::from_secs(5);
-        let provider =
-            Arc::new(canterlot_hub::cloud::TimewebProvider::new(provider_config).unwrap());
+        write_key_file(dir.path());
+        let provider = provider(&fake, &dir);
         let mut config = cloud_config(carrier.machine_id);
         tweak(&mut config);
         let registry = Registry::new(Default::default());
@@ -151,12 +161,13 @@ impl Rig {
         let id = Uuid::now_v7();
         let month = windows::month_of(Utc::now());
         sqlx::query(
-            "insert into cloud_windows (id, name, state, trigger, host_key_public, price_hourly_kopecks,
+            "insert into cloud_windows (id, name, state, trigger, folder_id, preemptible,
+                                         host_key_public, compute_kopecks_per_hour,
+                                         disk_kopecks_per_hour, price_hourly_kopecks,
                                          reservation_kopecks, final_cost_kopecks, month,
                                          hard_cap_minutes, created_at, profiles, create_called_at)
-             values ($1, 'canterlot-runner-' || $1::text, $2, 'owner', 'ssh-ed25519 AAAA', $3,
-                     $4, $5, $6, 60, now(), '[{\"configurator_id\":151,\"cpu\":32,\"ram_gb\":64,\"disk_gb\":80,\"hourly_kopecks\":2845}]',
-                     now())",
+             values ($1, 'canterlot-runner-' || $1::text, $2, 'owner', $7, true,
+                     'ssh-ed25519 AAAA', $8, $9, $3, $4, $5, $6, 60, now(), $10::jsonb, now())",
         )
         .bind(id)
         .bind(state)
@@ -164,6 +175,10 @@ impl Rig {
         .bind(reservation)
         .bind(final_cost)
         .bind(&month)
+        .bind(FOLDER)
+        .bind(COMPUTE)
+        .bind(DISK)
+        .bind(PROFILES)
         .execute(&self.pool)
         .await
         .unwrap();
@@ -274,21 +289,33 @@ impl Rig {
     }
 
     async fn approve(&self, request: Uuid) -> cloud_propose::ApproveOutcome {
+        self.approve_with(self.service.as_ref(), request).await
+    }
+
+    /// Служба с новым клиентом: цены ещё не прочитаны, первый же расчёт идёт к провайдеру.
+    fn cold_service(&self) -> Arc<CloudService> {
+        CloudService::new(
+            self.pool.clone(),
+            self.registry.clone(),
+            provider(&self._fake, &self._dir),
+            self.config.clone(),
+        )
+    }
+
+    async fn approve_with(
+        &self,
+        service: &CloudService,
+        request: Uuid,
+    ) -> cloud_propose::ApproveOutcome {
         let parent: Uuid = sqlx::query_scalar("select conversation_id from requests where id=$1")
             .bind(request)
             .fetch_one(&self.pool)
             .await
             .unwrap();
         let mut conn = self.pool.acquire().await.unwrap();
-        cloud_propose::approve_in_tx(
-            &mut conn,
-            self.service.as_ref(),
-            request,
-            parent,
-            Uuid::now_v7(),
-        )
-        .await
-        .unwrap()
+        cloud_propose::approve_in_tx(&mut conn, service, request, parent, Uuid::now_v7())
+            .await
+            .unwrap()
     }
 
     async fn request_state(&self, request: Uuid) -> String {
@@ -414,7 +441,17 @@ async fn budget_http_reads_spent_and_remaining_and_put_checks_revision(pool: PgP
     assert_eq!(view["revision"], 0);
     assert_eq!(view["auto_mode"], false);
     assert_eq!(view["configured"], true, "облако настроено на хабе");
-    assert_eq!(view["profiles"][0]["hourly_kopecks"], HOURLY);
+    // Профиль в новом виде: размеры машины и две ставки часа.
+    assert_eq!(
+        view["profiles"][0],
+        json!({
+            "cores": 32,
+            "memory_gb": 64,
+            "disk_gb": 80,
+            "compute_kopecks_per_hour": COMPUTE,
+            "disk_kopecks_per_hour": DISK,
+        })
+    );
 
     let body = json!({"monthly_budget_kopecks": 20_000, "auto_mode": true, "base_revision": 0});
     let (status, updated) = api
@@ -441,11 +478,11 @@ async fn budget_http_reads_spent_and_remaining_and_put_checks_revision(pool: PgP
     assert_eq!(check["revision"], 1, "a stale put changes nothing");
     assert_eq!(check["auto_mode"], true);
 
-    rig.set_block(Some("no_paid")).await;
+    rig.set_block(Some("account_blocked")).await;
     let (_, blocked) = api
         .send(Method::GET, "/api/v1/cloud/budget", None, "")
         .await;
-    assert_eq!(blocked["provider_block_code"], "no_paid");
+    assert_eq!(blocked["provider_block_code"], "account_blocked");
     let (status, _) = api
         .send(
             Method::POST,
@@ -685,13 +722,15 @@ async fn a_card_that_expires_during_the_price_call_is_not_approved(pool: PgPool)
     .await?;
     rig.decision(request, true).await;
     // Переоценка ждёт ответа провайдера дольше срока карточки: пауза на 429 — штатный путь.
+    // Кэш цен пуст (хаб перезапустился), поэтому расчёт действительно идёт в каталог SKU.
     {
         let mut state = rig._fake.control();
         state.rate_limit_next = 1;
         state.retry_after = Some("2".to_owned());
     }
+    let cold = rig.cold_service();
     assert_eq!(
-        rig.approve(request).await,
+        rig.approve_with(&cold, request).await,
         cloud_propose::ApproveOutcome::Expired
     );
     assert_eq!(rig.request_state(request).await, "expired");
@@ -1021,7 +1060,7 @@ async fn auto_mode_is_blocked_by_zero_budget_a_block_and_a_live_window(pool: PgP
     assert!(no_windows(&rig.pool).await?);
 
     rig.set_budget(1_000_000, true).await;
-    rig.set_block(Some("no_paid")).await;
+    rig.set_block(Some("account_blocked")).await;
     rig.service.tick(t0 + TimeDelta::minutes(2)).await;
     assert!(no_windows(&rig.pool).await?);
     rig.set_block(None).await;
@@ -1049,6 +1088,7 @@ async fn automatic_create_rechecks_its_conditions_under_the_budget_lock(
     let request = || CreateRequest {
         trigger: Trigger::Auto,
         proposal_id: None,
+        replaces_window_id: None,
         hard_cap_minutes: 90,
         consent_over_budget_kopecks: None,
     };
@@ -1122,6 +1162,7 @@ async fn automatic_create_reads_the_runner_clock_in_the_database(pool: PgPool) -
         CreateRequest {
             trigger: Trigger::Auto,
             proposal_id: None,
+            replaces_window_id: None,
             hard_cap_minutes: 120,
             consent_over_budget_kopecks: None,
         },
@@ -1478,16 +1519,19 @@ async fn budget_alerts_fire_once_per_month_and_never_for_zero(pool: PgPool) -> T
     let mon: u32 = month[5..].parse()?;
     let _ = (year, mon);
     sqlx::query(
-        "insert into cloud_windows (id, name, state, trigger, host_key_public, price_hourly_kopecks,
+        "insert into cloud_windows (id, name, state, trigger, folder_id, preemptible,
+                                     host_key_public, price_hourly_kopecks,
                                      reservation_kopecks, final_cost_kopecks, month, hard_cap_minutes, created_at, profiles)
-         values ($1, 'canterlot-runner-' || $1::text, 'ended', 'owner', 'ssh-ed25519 AAAA', $2,
-                 $3, $3, $4, 60, $5, '[{\"configurator_id\":151,\"cpu\":1,\"ram_gb\":1,\"disk_gb\":1,\"hourly_kopecks\":2845}]')",
+         values ($1, 'canterlot-runner-' || $1::text, 'ended', 'owner', $6, true,
+                 'ssh-ed25519 AAAA', $2, $3, $3, $4, 60, $5, $7::jsonb)",
     )
     .bind(Uuid::now_v7())
     .bind(HOURLY)
     .bind(10_000_i64)
     .bind(&month)
     .bind(next)
+    .bind(FOLDER)
+    .bind(PROFILES)
     .execute(&rig.pool)
     .await?;
     rig.service.tick(next).await;
@@ -1701,6 +1745,31 @@ async fn hub_card_cap_is_clamped_to_four_hours(pool: PgPool) -> TestResult {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn the_card_carries_the_profiles_with_their_two_rates(pool: PgPool) -> TestResult {
+    let rig = Rig::new(pool).await;
+    rig.set_budget(1_000_000, false).await;
+    let request = rig.card(2, "сборка", Source::Owner).await;
+    let payload: Value = sqlx::query_scalar("select request_payload from requests where id = $1")
+        .bind(request)
+        .fetch_one(&rig.pool)
+        .await?;
+    assert_eq!(
+        payload["profiles"],
+        json!([{
+            "cores": 32,
+            "memory_gb": 64,
+            "disk_gb": 80,
+            "compute_kopecks_per_hour": COMPUTE,
+            "disk_kopecks_per_hour": DISK,
+        }])
+    );
+    // Цена часа карточки — обе ставки вместе, по ней и резерв: 2 ч + 30 + 30 мин и час запаса.
+    assert_eq!(payload["hourly_kopecks"], HOURLY);
+    assert_eq!(payload["reservation_kopecks"], 4 * HOURLY);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn owner_proposal_hours_are_bounded_before_multiplication(pool: PgPool) -> TestResult {
     let rig = Rig::new(pool.clone()).await;
     rig.set_budget(1_000_000, false).await;
@@ -1728,7 +1797,14 @@ async fn owner_proposal_hours_are_bounded_before_multiplication(pool: PgPool) ->
 async fn runners_list_shows_live_window_cost_and_budget_remainder(pool: PgPool) -> TestResult {
     let rig = Rig::new(pool).await;
     rig.set_budget(1_000_000, false).await;
-    rig.insert_window("ready", None, 11_380).await;
+    let window = rig.insert_window("ready", None, 11_380).await;
+    // Создание вызвано час назад: оценка расхода идёт по секундам с этого момента.
+    sqlx::query(
+        "update cloud_windows set create_called_at = now() - interval '1 hour' where id = $1",
+    )
+    .bind(window)
+    .execute(&rig.pool)
+    .await?;
     let context = rig.tool_context();
     let caller = rig.caller().await;
     let answer = canterlot_hub::session_tools::inplace_jobs::runners(&context, &caller, json!({}))
@@ -1740,7 +1816,11 @@ async fn runners_list_shows_live_window_cost_and_budget_remainder(pool: PgPool) 
     assert_eq!(windows.len(), 1);
     assert_eq!(windows[0]["state"], "ready");
     assert_eq!(windows[0]["reservation_kopecks"], 11_380);
-    assert_eq!(windows[0]["cost_so_far_kopecks"], HOURLY);
+    let cost = windows[0]["cost_so_far_kopecks"].as_i64().unwrap();
+    assert!(
+        (HOURLY..HOURLY + 10).contains(&cost),
+        "an hour at both rates, per second: {cost}"
+    );
     assert!(windows[0]["hard_cap_at"].is_null());
     assert!(windows[0]["uptime_seconds"].as_i64().unwrap() >= 0);
     Ok(())

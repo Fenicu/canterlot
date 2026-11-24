@@ -102,19 +102,13 @@ export function cloudOutcome(reason: string | undefined): CloudOutcome {
       return {
         word: "Провайдер заблокирован",
         tone: "danger",
-        note: "Timeweb требует предоплату: новые окна не создаются, пока блок не снят в настройках."
+        note: "Провайдер остановил создание окон: новые окна не создаются, пока блок не снят в настройках."
       };
     case "over_budget":
       return {
         word: "Не хватает бюджета",
         tone: "warning",
         note: "Резерв больше остатка месяца, а согласия сверх бюджета у этой карточки нет."
-      };
-    case "pool_exhausted":
-      return {
-        word: "Нет свободных адресов",
-        tone: "danger",
-        note: "Все локальные адреса или порты роутера заняты окнами."
       };
     case "provider_unavailable":
       return { word: "Провайдер недоступен", tone: "danger", note: "Окно не создавалось." };

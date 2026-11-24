@@ -1830,6 +1830,7 @@ export interface JobView {
     | "waiting_lease"
     | "running"
     | "collecting"
+    | "retry_pending"
     | "succeeded"
     | "failed"
     | "timed_out"

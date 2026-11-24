@@ -191,8 +191,10 @@ pub async fn lost_sweep(
     Ok(lost)
 }
 
-/// Задача ждёт раннер дольше `timeout` (от подачи): кончается `canceled` с причиной
-/// `no_runner`, сообщение и итог терминалу уходят как при любом конце. `0` срок отключает.
+/// Задача ждёт раннер дольше `timeout`: кончается `canceled` с причиной `no_runner`, сообщение
+/// и итог терминалу уходят как при любом конце. Срок идёт от подачи, а у задачи, возвращённой в
+/// очередь после прерывания машины, — от возврата (`placement_waiting_since`): иначе давно
+/// поданная задача закрылась бы первым же проходом. `0` срок отключает.
 pub async fn waiting_timeout_sweep(
     pool: &PgPool,
     timeout: Duration,
@@ -203,7 +205,8 @@ pub async fn waiting_timeout_sweep(
     }
     let ids: Vec<Uuid> = sqlx::query_scalar(
         "select id from jobs
-         where state='waiting_runner' and created_at + make_interval(secs => $1) < $2
+         where state='waiting_runner'
+           and coalesce(placement_waiting_since, created_at) + make_interval(secs => $1) < $2
          order by created_at, id limit 200",
     )
     .bind(timeout.as_secs_f64())
@@ -217,7 +220,9 @@ pub async fn waiting_timeout_sweep(
                 let Some(job) = lock_row(conn, id).await? else {
                     return Ok::<_, sqlx::Error>(false);
                 };
-                if job.state() != State::WaitingRunner {
+                if job.state() != State::WaitingRunner
+                    || job.placement_waiting_since.unwrap_or(job.created_at) + timeout >= now
+                {
                     return Ok(false);
                 }
                 finish_in_tx(

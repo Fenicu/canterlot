@@ -29,6 +29,7 @@ describe('job words', () => {
     expect(word('waiting_runner')).toEqual({ word: 'ждёт раннер', tone: 'warning' });
     expect(word('staging')).toEqual({ word: 'подвозит код', tone: 'accent', live: true });
     expect(word('collecting')).toEqual({ word: 'собирает результаты', tone: 'accent', live: true });
+    expect(word('retry_pending')).toEqual({ word: 'ждёт повтора', tone: 'warning' });
     expect(isTerminal('collecting')).toBe(false);
     expect(refusalText('source_required')).toBe('Для автоматического размещения нужны исходники');
     expect(word('queued')).toEqual({ word: 'в очереди', tone: 'muted' });

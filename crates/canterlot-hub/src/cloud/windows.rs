@@ -1,16 +1,15 @@
-//! Окна облачных серверов: строка `cloud_windows`, транзакция создания с резервом и общие
+//! Окна облачных машин: строка `cloud_windows`, транзакция создания с резервом и общие
 //! переходы состояний. Вызовы провайдера и циклы живут в `service`.
 //!
 //! Все деньги в целых копейках. Живое окно одно; создание сериализует замок единственной
 //! строки `cloud_budget`, а частичный уникальный индекс держит то же правило на уровне базы.
 
 use std::{
-    collections::{HashMap, HashSet},
-    net::Ipv4Addr,
+    collections::HashMap,
     sync::{LazyLock, Mutex},
 };
 
-use chrono::{DateTime, Datelike, FixedOffset, Utc};
+use chrono::{DateTime, Datelike, FixedOffset, TimeDelta, Utc};
 use serde::Serialize;
 use sqlx::{PgConnection, PgPool};
 use utoipa::ToSchema;
@@ -19,6 +18,7 @@ use uuid::Uuid;
 use super::{
     host_key::HostKey,
     price::{self, PriceError},
+    yandex,
 };
 use crate::config::CloudConfig;
 
@@ -82,34 +82,41 @@ impl Trigger {
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct Window {
     pub id: Uuid,
+    /// Имя машины и её загрузочного диска у провайдера.
     pub name: String,
     pub state: String,
     pub trigger: String,
     pub proposal_id: Option<Uuid>,
-    /// Проект провайдера на момент создания.
-    pub project_id: Option<i64>,
-    pub server_id: Option<i64>,
-    /// Локальный адрес сервера в приватной сети; выделяется из пула при создании окна.
-    pub local_ip: Option<String>,
-    /// Публичный порт DNAT-правила роутера для SSH этого сервера.
-    pub dnat_port: Option<i32>,
-    /// Роутер и его публичный адрес на момент создания.
-    pub router_id: Option<String>,
-    pub router_ip: Option<String>,
-    /// Идентификатор созданного правила DNAT; удаляется после сервера.
-    pub dnat_rule_id: Option<String>,
-    /// Вызов создания правила уже был: второго POST для того же порта нет.
-    pub dnat_create_attempted_at: Option<DateTime<Utc>>,
-    /// Сервер подтверждённо пропал из полного списка.
+    /// Окно, которое это окно заменяет после прерывания.
+    pub replaces_window_id: Option<Uuid>,
+    /// Каталог провайдера на момент создания: снос и сверка окна идут в нём.
+    pub folder_id: String,
+    pub instance_id: Option<String>,
+    /// Операция создания; пусто, если машину нашли по имени в списке.
+    pub create_operation_id: Option<String>,
+    /// Операция последнего принятого удаления машины.
+    pub delete_operation_id: Option<String>,
+    /// Публичный адрес машины: по нему подключается несущая.
+    pub public_ip: Option<String>,
+    pub boot_disk_id: Option<String>,
+    /// Прерываемая машина: снимок на момент создания окна.
+    pub preemptible: bool,
+    /// Профиль, которому звонили последним.
+    pub cores: Option<i32>,
+    pub memory_gb: Option<i32>,
+    pub disk_gb: Option<i32>,
+    /// Ставки часа этого профиля: машина с адресом и диск.
+    pub compute_kopecks_per_hour: i64,
+    pub disk_kopecks_per_hour: i64,
+    /// Машина замечена останавливающейся или остановленной.
+    pub stopped_at: Option<DateTime<Utc>>,
+    /// Машины нет в полном списке каталога.
     pub server_gone_at: Option<DateTime<Utc>>,
-    /// Удаление DNAT-правила принято, но его отсутствие ещё не подтверждено списком.
-    pub dnat_delete_accepted_at: Option<DateTime<Utc>>,
-    pub dnat_gone_at: Option<DateTime<Utc>>,
-    pub dnat_delete_attempts: i32,
-    pub next_dnat_delete_at: Option<DateTime<Utc>>,
+    /// Диска нет в полном списке дисков каталога.
+    pub disk_gone_at: Option<DateTime<Utc>>,
     pub host_key_public: String,
     pub profiles: serde_json::Value,
-    pub configurator_id: Option<i64>,
+    /// Сумма двух ставок: по ней резерв.
     pub price_hourly_kopecks: i64,
     pub reservation_kopecks: i64,
     pub final_cost_kopecks: Option<i64>,
@@ -222,6 +229,10 @@ pub fn forget_key(id: Uuid) {
 pub struct CreateRequest {
     pub trigger: Trigger,
     pub proposal_id: Option<Uuid>,
+    /// Окно, которое это окно заменяет после прерывания. Замена не спрашивает согласия на
+    /// перерасход и не проходит условия автоматического режима: их заменили предусловия
+    /// вызывающего (`on_preempted_cleanup_done_in_tx`).
+    pub replaces_window_id: Option<Uuid>,
     pub hard_cap_minutes: u32,
     /// Согласие владельца на перерасход: ровно резерв этого окна. Работает только как
     /// явное разрешение выйти за бюджет.
@@ -266,12 +277,10 @@ pub enum CreateRefusal {
     HostKey(#[from] super::host_key::HostKeyError),
     /// Цену не удалось получить у провайдера: создавать нельзя, резерв считать не из чего.
     #[error("provider_unavailable")]
-    Provider(super::ProviderError),
-    /// Все локальные адреса или DNAT-порты пула заняты живыми окнами.
+    Provider(yandex::PriceError),
+    /// Машина из конфигурации не несущая: подключить раннер некому.
     #[error("carrier_unavailable")]
     CarrierUnavailable,
-    #[error("pool_exhausted")]
-    PoolExhausted(&'static str),
     #[error("db_error")]
     Database(#[from] sqlx::Error),
 }
@@ -280,40 +289,44 @@ pub enum CreateRefusal {
 /// чтобы сетевой вызов не держал замок.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pricing {
-    /// Профили в порядке попыток, у каждого цена часа.
+    /// Цены посчитаны для прерываемой машины: окно запоминает это вместе с ними.
+    pub preemptible: bool,
+    /// Профили в порядке попыток, у каждого две ставки часа.
     pub profiles: Vec<PricedProfile>,
 }
 
-/// Профиль с ценой часа у провайдера на момент создания окна.
+/// Профиль с двумя ставками часа у провайдера на момент создания окна.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct PricedProfile {
-    pub configurator_id: i64,
-    pub cpu: u32,
-    pub ram_gb: u32,
+    pub cores: u32,
+    pub memory_gb: u32,
     pub disk_gb: u32,
-    pub hourly_kopecks: i64,
-    /// Зона доступности сервера в приватной сети (снимок конфигурации на момент создания).
-    pub availability_zone: String,
+    /// Машина с публичным адресом: платится, пока машина есть в каталоге.
+    pub compute_kopecks_per_hour: i64,
+    /// Диск: платится, пока есть диск.
+    pub disk_kopecks_per_hour: i64,
 }
 
 impl PricedProfile {
-    pub fn ram_mb(&self) -> u64 {
-        u64::from(self.ram_gb) * 1024
-    }
-
-    pub fn disk_mb(&self) -> u64 {
-        u64::from(self.disk_gb) * 1024
+    /// Обе ставки вместе: цена часа работающей машины.
+    pub fn hourly_kopecks(&self) -> i64 {
+        self.compute_kopecks_per_hour
+            .saturating_add(self.disk_kopecks_per_hour)
     }
 }
 
 impl Pricing {
-    /// Самая дорогая цена часа в списке: по ней резерв и проверка бюджета, чтобы любой
+    /// Самый дорогой профиль списка: по нему резерв и проверка бюджета, чтобы любой
     /// принятый профиль уложился в резерв.
-    pub fn max_hourly_kopecks(&self) -> Option<i64> {
+    pub fn most_expensive(&self) -> Option<&PricedProfile> {
         self.profiles
             .iter()
-            .map(|profile| profile.hourly_kopecks)
-            .max()
+            .max_by_key(|profile| profile.hourly_kopecks())
+    }
+
+    /// Цена часа самого дорогого профиля, обе ставки вместе.
+    pub fn max_hourly_kopecks(&self) -> Option<i64> {
+        self.most_expensive().map(PricedProfile::hourly_kopecks)
     }
 }
 
@@ -326,8 +339,8 @@ impl Window {
 
 pub const MAX_HARD_CAP_MINUTES: u32 = 24 * 60;
 
-/// Резерв окна: час сервера × (ceil((предел + срок на доработку + запас на снос) / 60) + 1).
-/// Публичный адрес больше не заказывается, поэтому в резерв входит только сервер.
+/// Резерв окна: час × (ceil((предел + срок на доработку + запас на снос) / 60) + 1), где час —
+/// обе ставки вместе: машина с публичным адресом и диск.
 pub fn reservation_for(
     config: &CloudConfig,
     hourly_kopecks: i64,
@@ -369,43 +382,6 @@ pub async fn spent_in_month(conn: &mut PgConnection, month: &str) -> Result<i64,
     .await
 }
 
-/// Все адреса включающего диапазона, от первого до последнего.
-fn ip_range(first: Ipv4Addr, last: Ipv4Addr) -> impl Iterator<Item = Ipv4Addr> {
-    (u32::from(first)..=u32::from(last)).map(Ipv4Addr::from)
-}
-
-/// Выделить свободный локальный адрес и DNAT-порт: заняты только те, что держит живое окно
-/// или поздний снос. Освобождённые при конце окна значения сразу пригодны для повторного
-/// использования.
-async fn allocate(
-    conn: &mut PgConnection,
-    config: &CloudConfig,
-) -> Result<(String, u16), CreateRefusal> {
-    let held: Vec<(Option<String>, Option<i32>)> =
-        sqlx::query_as("select local_ip, dnat_port from cloud_windows where state = any($1)")
-            .bind(billing_states())
-            .fetch_all(&mut *conn)
-            .await?;
-    let used_ips: HashSet<String> = held.iter().filter_map(|(ip, _)| ip.clone()).collect();
-    let used_ports: HashSet<u16> = held
-        .iter()
-        .filter_map(|(_, port)| port.and_then(|port| u16::try_from(port).ok()))
-        .collect();
-    let (first_ip, last_ip) = config
-        .local_ip_range()
-        .ok_or(CreateRefusal::Invalid("local_ip_pool"))?;
-    let ip = ip_range(first_ip, last_ip)
-        .find(|ip| !used_ips.contains(&ip.to_string()))
-        .ok_or(CreateRefusal::PoolExhausted("local_ip_pool"))?;
-    let (first_port, last_port) = config
-        .dnat_port_values()
-        .ok_or(CreateRefusal::Invalid("dnat_port_range"))?;
-    let port = (first_port..=last_port)
-        .find(|port| !used_ports.contains(port))
-        .ok_or(CreateRefusal::PoolExhausted("dnat_port_range"))?;
-    Ok((ip.to_string(), port))
-}
-
 /// Создание окна одной транзакцией, для любого входа (карточка, кнопка, автоматика):
 /// замок `cloud_budget`, отказ при живом окне, резерв, проверка бюджета, вставка
 /// `create_intent` с хостовым ключом (в базе только открытая часть). Вызов провайдера идёт
@@ -442,30 +418,38 @@ pub async fn create_in_tx(
     if let Some(code) = block {
         return Err(CreateRefusal::ProviderBlocked { code });
     }
-    // Автоматический режим проверяет свои условия ещё раз здесь, под тем же замком, что и
-    // вставка: между чтением настроек службой и этой транзакцией владелец мог выключить
-    // режим, очередь могла опустеть, а раннер — вернуться на связь. Время — не метка
-    // прохода: она снята до цены у провайдера и к проверке недоступности устарела, поэтому
-    // берётся более позднее из метки и часов базы внутри этой транзакции.
+    // Время — не метка прохода: она снята до цены у провайдера и к проверке недоступности
+    // устарела, поэтому для условий автоматического режима берётся более позднее из метки и
+    // часов базы внутри этой транзакции.
     let db_now: DateTime<Utc> = sqlx::query_scalar("select clock_timestamp()")
         .fetch_one(&mut *conn)
         .await?;
     let now = auto.as_ref().map_or(db_now, |guard| guard.now.max(db_now));
-    if let Some(guard) = auto.as_ref()
-        && request.trigger == Trigger::Auto
-        && (!auto_mode
-            || super::budget::waiting_cloud_minutes(conn, config).await?
-                < super::budget::MIN_WAITING_MINUTES
-            || !super::budget::static_runners_down(conn, guard.registry, config, now).await?)
-    {
-        return Err(CreateRefusal::AutoConditionsChanged);
+    // Замена прерванного окна не проходит условия автоматического режима: их заменили
+    // предусловия `on_preempted_cleanup_done_in_tx` под тем же замком бюджета. Единственное,
+    // что проверяется здесь, — автоматический режим не выключили между прерыванием и концом.
+    let replacement = request.replaces_window_id.is_some();
+    if replacement {
+        if request.trigger == Trigger::Auto && !auto_mode {
+            return Err(CreateRefusal::AutoConditionsChanged);
+        }
+    } else {
+        // Автоматический режим проверяет свои условия ещё раз здесь, под тем же замком, что и
+        // вставка: между чтением настроек службой и этой транзакцией владелец мог выключить
+        // режим, очередь могла опустеть, а раннер — вернуться на связь.
+        if let Some(guard) = auto.as_ref()
+            && request.trigger == Trigger::Auto
+            && (!auto_mode
+                || super::budget::waiting_cloud_minutes(conn, config).await?
+                    < super::budget::MIN_WAITING_MINUTES
+                || !super::budget::static_runners_down(conn, guard.registry, config, now).await?)
+        {
+            return Err(CreateRefusal::AutoConditionsChanged);
+        }
+        if auto.is_none() && request.trigger == Trigger::Auto {
+            return Err(CreateRefusal::AutoConditionsChanged);
+        }
     }
-    if auto.is_none() && request.trigger == Trigger::Auto {
-        return Err(CreateRefusal::AutoConditionsChanged);
-    }
-    // Пул проверяется до «одно живое окно»: когда он исчерпан, причина отказа — именно пул,
-    // а не занятость единственного окна. Ничего не резервируется до вставки строки.
-    let (local_ip, dnat_port) = allocate(conn, config).await?;
     let existing: bool =
         sqlx::query_scalar("select exists(select 1 from cloud_windows where state = any($1))")
             .bind(live_states())
@@ -474,8 +458,8 @@ pub async fn create_in_tx(
     if existing {
         return Err(CreateRefusal::LiveWindowExists);
     }
-    // Поздний снос сервера закрытого окна: своего места в правиле одного живого окна он не
-    // занимает, но пока сервер не убран, новый не создаётся — иначе их будет два.
+    // Поздний снос машины закрытого окна: своего места в правиле одного живого окна он не
+    // занимает, но пока машина не убрана, новая не создаётся — иначе их будет две.
     let late: bool = sqlx::query_scalar(
         "select exists(select 1 from cloud_windows where state = 'late_cleanup')",
     )
@@ -484,9 +468,10 @@ pub async fn create_in_tx(
     if late {
         return Err(CreateRefusal::LateCleanup);
     }
-    let Some(max_hourly) = pricing.max_hourly_kopecks() else {
+    let Some(top) = pricing.most_expensive().cloned() else {
         return Err(CreateRefusal::Invalid("profiles"));
     };
+    let max_hourly = top.hourly_kopecks();
     let reservation = reservation_for(config, max_hourly, request.hard_cap_minutes)?;
     let month = month_of(now);
     let spent = spent_in_month(&mut *conn, &month).await?;
@@ -504,23 +489,27 @@ pub async fn create_in_tx(
     let key = HostKey::generate()?;
     let drain_grace = i32::try_from(config.drain_grace_minutes()).unwrap_or(i32::MAX);
     let teardown_margin = i32::try_from(config.teardown_margin_minutes()).unwrap_or(i32::MAX);
+    // До вызова создания в строке стоят ставки самого дорогого профиля: по ним резерв.
     sqlx::query(
-        "insert into cloud_windows (id, name, state, trigger, proposal_id, project_id,
-                                    router_id, router_ip, host_key_public,
+        "insert into cloud_windows (id, name, state, trigger, proposal_id, replaces_window_id,
+                                    folder_id, preemptible, host_key_public,
+                                    compute_kopecks_per_hour, disk_kopecks_per_hour,
                                     price_hourly_kopecks, reservation_kopecks, month,
                                     hard_cap_minutes, drain_grace_minutes, teardown_margin_minutes,
-                                    created_at, profiles, local_ip, dnat_port)
+                                    created_at, profiles)
          values ($1, $2, 'create_intent', $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
                  $15, $16, $17, $18)",
     )
     .bind(id)
-    .bind(format!("canterlot-runner-{id}"))
+    .bind(server_name(id))
     .bind(request.trigger.as_str())
     .bind(request.proposal_id)
-    .bind(config.project_id)
-    .bind(&config.router_id)
-    .bind(&config.router_ip)
+    .bind(request.replaces_window_id)
+    .bind(&config.folder_id)
+    .bind(pricing.preemptible)
     .bind(key.public_line())
+    .bind(top.compute_kopecks_per_hour)
+    .bind(top.disk_kopecks_per_hour)
     .bind(max_hourly)
     .bind(reservation)
     .bind(&month)
@@ -529,21 +518,19 @@ pub async fn create_in_tx(
     .bind(teardown_margin)
     .bind(now)
     .bind(serde_json::to_value(&pricing.profiles).expect("profiles serialize"))
-    .bind(&local_ip)
-    .bind(i32::from(dnat_port))
     .execute(&mut *conn)
     .await?;
     stash_key(id, key);
     Ok(id)
 }
 
-/// Имя сервера окна и обратный разбор: `canterlot-runner-<uuid>`.
+/// Имя машины окна и её загрузочного диска: `canterlot-runner-<uuid>`.
 pub fn server_name(id: Uuid) -> String {
     format!("canterlot-runner-{id}")
 }
 
-/// Окно по имени сервера у провайдера. Принимается только строгий вид с каноническим UUID:
-/// чужие имена сверка не трогает.
+/// Окно по имени машины или диска у провайдера. Принимается только строгий вид с
+/// каноническим UUID: чужие имена сверка не трогает.
 pub fn window_id_from_name(name: &str) -> Option<Uuid> {
     let tail = name.strip_prefix("canterlot-runner-")?;
     let id = Uuid::parse_str(tail).ok()?;
@@ -552,7 +539,8 @@ pub fn window_id_from_name(name: &str) -> Option<Uuid> {
 
 // ───────── Переходы, общие для службы и HTTP ─────────
 
-/// Окно закончилось без сервера: резерв снят, итог 0.
+/// Заявка закончилась до вызова создания: машины не было и быть не могло, резерв снят,
+/// итог 0. После вызова создания окно заканчивается только через снос (`begin_cleanup_in_tx`).
 pub async fn fail_in_tx(
     conn: &mut PgConnection,
     id: Uuid,
@@ -560,7 +548,7 @@ pub async fn fail_in_tx(
 ) -> Result<bool, sqlx::Error> {
     let changed = sqlx::query(
         "update cloud_windows set state = 'failed', final_cost_kopecks = 0, last_error = $2
-         where id = $1 and state in ('create_intent', 'create_unknown')",
+         where id = $1 and state = 'create_intent' and create_called_at is null",
     )
     .bind(id)
     .bind(reason)
@@ -574,16 +562,9 @@ pub async fn fail_in_tx(
     Ok(changed)
 }
 
-/// Код отказа провайдера, после которого новые окна не создаются: у аккаунта правило против
-/// злоупотреблений, требующее предоплаты.
-pub const BLOCK_ABUSE_PREPAYMENT: &str = "abuse_prepayment_required";
-
-/// Сервер остаётся `no_paid` дольше срока: аккаунт требует предоплату, новые окна
-/// бесполезны. Блок снимает только владелец.
-pub const BLOCK_NO_PAID: &str = "no_paid";
-
 /// Блок провайдера: код и момент пишутся в `cloud_budget`, пока блок стоит, `create_in_tx`
-/// отказывает `ProviderBlocked`. Повторный отказ обновляет момент.
+/// отказывает `ProviderBlocked`. Повторный отказ обновляет момент. Сейчас блок никто не
+/// ставит сам: это ручка на случай, когда провайдер закрывает аккаунту создание машин.
 pub async fn set_provider_block(
     pool: &PgPool,
     code: &str,
@@ -599,8 +580,8 @@ pub async fn set_provider_block(
     Ok(())
 }
 
-/// Снять блок провайдера. Только для владельца: вызывает её его действие (задача C2b), не
-/// служба и не автоматика. Возвращает, стоял ли блок.
+/// Снять блок провайдера. Только для владельца: вызывает её его действие, не служба и не
+/// автоматика. Возвращает, стоял ли блок.
 pub async fn clear_provider_block(conn: &mut PgConnection) -> Result<bool, sqlx::Error> {
     Ok(sqlx::query(
         "update cloud_budget set provider_block_code = null, provider_block_at = null
@@ -627,12 +608,35 @@ pub async fn provider_block(
     })
 }
 
-/// Причина удаления окна, которое было запрошено.
+/// Причины удаления (`delete_reason`), по которым служба и следующие слои принимают решения.
+/// Остальные причины (`idle`, `drained`, `hard_cap`, …) — только текст для владельца.
 pub const REASON_OWNER: &str = "owner";
+/// Прерываемую машину остановил Яндекс.
+pub const REASON_PREEMPTED: &str = "preempted";
+/// Обычная машина остановилась сама или машина сломалась (`ERROR`, `CRASHED`).
+pub const REASON_VM_BROKEN: &str = "vm_broken";
+/// Создание не дало рабочей машины: отказ, ошибка операции или пустые списки. Окно после
+/// сноса заканчивается `failed`.
+pub const REASON_CREATE_FAILED: &str = "create_failed";
+/// Машина пропала из каталога без нашего удаления. Окно после сноса заканчивается `gone`.
+pub const REASON_GONE: &str = "gone";
+/// Машина закрытого окна нашлась позже.
+pub const REASON_LATE_CREATE: &str = "late_create";
+/// Диск закрытого окна нашёлся позже.
+pub const REASON_LATE_DISK: &str = "late_disk";
 
-/// Удалить окно сейчас: ожидающая создания заявка отменяется, окно с сервером уходит в
-/// `deleting` (раннер отзывается в той же транзакции, сервер удалит служба). Возвращает новое
-/// состояние или `None`, если окна нет. `create_unknown` отказывается: сервера ещё нет в
+/// Чем заканчивается окно после сноса: зависит только от причины.
+pub fn terminal_state(delete_reason: Option<&str>) -> &'static str {
+    match delete_reason {
+        Some(REASON_GONE) => "gone",
+        Some(REASON_CREATE_FAILED) => "failed",
+        _ => "ended",
+    }
+}
+
+/// Удалить окно сейчас: ожидающая создания заявка отменяется, окно с машиной уходит в
+/// `deleting` (раннер отзывается в той же транзакции, машину удалит служба). Возвращает новое
+/// состояние или `NotFound`, если окна нет. `create_unknown` отказывается: машины ещё нет в
 /// известных.
 pub async fn request_delete(
     pool: &PgPool,
@@ -665,7 +669,7 @@ pub async fn request_delete_in_tx(
         }
         "create_intent" | "create_unknown" => Ok(DeleteRequested::NotYet),
         "identified" | "ready" | "draining" => {
-            mark_deleting_in_tx(conn, &window, reason, now).await?;
+            begin_cleanup_in_tx(conn, id, Cleanup::because(reason), now).await?;
             Ok(DeleteRequested::Deleting)
         }
         // Поздний снос уже идёт: это то же удаление, только без места в правиле одного окна.
@@ -678,45 +682,319 @@ pub async fn request_delete_in_tx(
 #[serde(rename_all = "snake_case")]
 pub enum DeleteRequested {
     NotFound,
-    /// Заявка на создание отменена, сервера не было.
+    /// Заявка на создание отменена, машины не было.
     Canceled,
-    /// Создание вызвано, сервер ещё не найден: удалять нечего, сверка разберётся.
+    /// Создание вызвано, машина ещё не найдена: удалять нечего, сверка разберётся.
     NotYet,
     Deleting,
     AlreadyEnded,
 }
 
-/// Окно в `deleting`: срок первой попытки — сейчас. Раннер отзывается отдельным вызовом
-/// после фиксации (`revoke_cloud_machine`).
-pub async fn mark_deleting_in_tx(
+/// С чем окно уходит на снос.
+#[derive(Debug, Clone, Copy)]
+pub struct Cleanup<'a> {
+    /// `delete_reason`: от неё зависит и конечное состояние (`terminal_state`).
+    pub reason: &'a str,
+    /// Подробность для владельца; пусто — прежний текст остаётся.
+    pub last_error: Option<&'a str>,
+    /// Машина замечена останавливающейся или остановленной: ставится `stopped_at`.
+    pub stopped: bool,
+    /// Полный список каталога уже подтвердил, что машины нет: снос начнёт с диска.
+    pub server_gone: bool,
+}
+
+impl<'a> Cleanup<'a> {
+    pub fn because(reason: &'a str) -> Self {
+        Self {
+            reason,
+            last_error: None,
+            stopped: false,
+            server_gone: false,
+        }
+    }
+}
+
+/// Окно уходит на снос (`deleting`): единственный путь к концу после вызова создания. Дальше
+/// служба убирает машину, затем диск, и только потом заканчивает окно.
+///
+/// Принимаются окна, которые обслуживают раннер (`identified`, `ready`, `draining`), и окна,
+/// у которых создание вызвано, а машина не найдена (`create_intent`, `create_unknown`).
+/// Причина, выставленная раньше, не перезаписывается: окно в `deleting` сюда не попадает.
+///
+/// Здесь же **отзывается раннер `cloud`**, в той же транзакции, что переводит окно: отзыв
+/// вне её мог бы погасить токен уже следующего окна. Его незаконченные задачи при этом
+/// становятся `lost`; причина сноса (`cleanup.reason`) в этот момент известна.
+pub async fn begin_cleanup_in_tx(
     conn: &mut PgConnection,
-    window: &Window,
-    reason: &str,
+    id: Uuid,
+    cleanup: Cleanup<'_>,
     now: DateTime<Utc>,
-) -> Result<(), sqlx::Error> {
-    let moved = sqlx::query(
+) -> Result<bool, sqlx::Error> {
+    let Some(window) = load_for_update(conn, id).await? else {
+        return Ok(false);
+    };
+    let serving = SERVING.contains(&window.state.as_str());
+    let called = matches!(window.state.as_str(), "create_intent" | "create_unknown")
+        && window.create_called_at.is_some();
+    if !serving && !called {
+        return Ok(false);
+    }
+    sqlx::query(
         "update cloud_windows set state = 'deleting', delete_requested_at = $2, delete_reason = $3,
-                next_delete_at = $2, idle_since = null, disconnected_since = null
-         where id = $1 and state in ('identified', 'ready', 'draining')",
+                next_delete_at = case when $6 then null else $2 end,
+                idle_since = null, disconnected_since = null,
+                last_error = coalesce($4, last_error),
+                stopped_at = case when $5 then coalesce(stopped_at, $2) else stopped_at end,
+                server_gone_at = case when $6 then coalesce(server_gone_at, $2)
+                                      else server_gone_at end
+         where id = $1",
     )
-    .bind(window.id)
+    .bind(id)
     .bind(now)
-    .bind(reason)
+    .bind(cleanup.reason)
+    .bind(cleanup.last_error)
+    .bind(cleanup.stopped)
+    .bind(cleanup.server_gone)
     .execute(&mut *conn)
-    .await?
-    .rows_affected();
-    if moved > 0 {
-        // Раннер отзывается в той же транзакции, что переводит окно: отзыв вне её мог бы
-        // погасить токен уже следующего окна.
-        revoke_cloud_machine_in_tx(conn).await?;
+    .await?;
+    if serving {
+        // Прерывание — единственный отзыв, после которого задача может получить один повтор:
+        // её выпустит тот, кто подтвердит остановку или отсутствие машины.
+        let jobs = if cleanup.reason == REASON_PREEMPTED {
+            crate::machines::RevokeJobs::RetryOnce
+        } else {
+            crate::machines::RevokeJobs::Lose
+        };
+        revoke_cloud_machine_in_tx(conn, jobs).await?;
     }
     // Команда подключения, которую несущая ещё не исполнила, больше не нужна.
     sqlx::query(
         "update commands set delivery_state = 'completed', completed_at = coalesce(completed_at, now())
          where kind = 'attach_runner' and payload->>'window_id' = $1 and delivery_state <> 'completed'",
     )
-    .bind(window.id.to_string())
-    .execute(conn)
+    .bind(id.to_string())
+    .execute(&mut *conn)
+    .await?;
+    // Отсутствие машины уже подтверждено полным списком каталога: прежний процесс идти не
+    // может, и ждущие повтора задачи можно выпускать сразу.
+    if cleanup.server_gone && cleanup.reason == REASON_PREEMPTED {
+        release_cloud_retry_pending_in_tx(conn).await?;
+    }
+    Ok(true)
+}
+
+/// Полный список каталога подтвердил отсутствие машины прерванного окна: метка
+/// `server_gone_at` и, в той же транзакции, выпуск ждущих повтора задач облачной машины.
+/// Отсутствие в полном списке доказывает, что прежний процесс идти не может, — это и есть
+/// «подтверждённая остановка или отсутствие».
+///
+/// Возвращает выпущенные задачи. Повторный вызов ничего не меняет: метка уже стоит, а выпуск
+/// берёт только ждущие повтора строки.
+pub async fn confirm_server_gone_in_tx(
+    conn: &mut PgConnection,
+    id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<Vec<Uuid>, sqlx::Error> {
+    let Some(window) = load_for_update(conn, id).await? else {
+        return Ok(Vec::new());
+    };
+    if window.server_gone_at.is_some() {
+        return Ok(Vec::new());
+    }
+    let marked = sqlx::query(
+        "update cloud_windows set server_gone_at = $2, next_delete_at = null
+         where id = $1 and state in ('deleting', 'late_cleanup') and server_gone_at is null",
+    )
+    .bind(id)
+    .bind(now)
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
+    if marked == 0 || window.delete_reason.as_deref() != Some(REASON_PREEMPTED) {
+        return Ok(Vec::new());
+    }
+    release_cloud_retry_pending_in_tx(conn).await
+}
+
+/// Выпуск ждущих повтора задач облачной машины. Вызывается только там, где прежний процесс
+/// уже не может идти: отсутствие машины подтверждено или окно сносится с той же мыслью.
+pub async fn release_cloud_retry_pending_in_tx(
+    conn: &mut PgConnection,
+) -> Result<Vec<Uuid>, sqlx::Error> {
+    let Some(machine) = cloud_machine_id(&mut *conn).await? else {
+        return Ok(Vec::new());
+    };
+    crate::inplace_jobs::retry::release_retry_pending_in_tx(conn, machine).await
+}
+
+/// Минимум до абсолютного предела родителя, при котором замена ещё успеет принести пользу.
+pub const REPLACEMENT_MIN_LEAD: TimeDelta = TimeDelta::minutes(15);
+
+/// Снос окна с причиной `preempted` закончен: машины и диска нет, окно в конечном состоянии.
+/// Вызывается в транзакции, которая заканчивает окно (`CloudService::end`), под замком его
+/// строки, уже после перевода в конечное состояние: место единственного живого окна свободно.
+/// `window` — строка до перехода: в ней причина, сроки, предложение и вид машины.
+///
+/// Здесь окно-замена: то же предложение и повод, предел — абсолютный предел родителя,
+/// свежий допуск по бюджету без согласия на перерасход. Отказ (бюджет, мало времени, нет
+/// задач, место занято) — не ошибка: родитель всё равно заканчивается, владельцу уходит пуш.
+/// Замену не заменяют: у окна с `replaces_window_id` второй замены не будет.
+pub async fn on_preempted_cleanup_done_in_tx(
+    conn: &mut PgConnection,
+    config: &CloudConfig,
+    window: &Window,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    // Снос машины мог подтвердиться раньше, чем окно закончилось, и тогда задачи уже
+    // выпущены. Если же хаб упал между отзывом и отметкой, pending остались: выпускаем их
+    // здесь, в транзакции конца. Выпуск идемпотентен.
+    release_cloud_retry_pending_in_tx(conn).await?;
+    if window.replaces_window_id.is_some() {
+        enqueue_replacement_skipped(conn, window, "window_exists").await?;
+        return Ok(());
+    }
+    let Some(deadline) = window.hard_cap_at else {
+        enqueue_replacement_skipped(conn, window, "no_time").await?;
+        return Ok(());
+    };
+    if deadline - now < REPLACEMENT_MIN_LEAD {
+        enqueue_replacement_skipped(conn, window, "no_time").await?;
+        return Ok(());
+    }
+    if !has_released_waiting(conn, window).await? {
+        enqueue_replacement_skipped(conn, window, "no_waiting_job").await?;
+        return Ok(());
+    }
+    // Минуты нужны только для резерва: сам предел замены пишется абсолютным ниже.
+    let minutes = u32::try_from(((deadline - now).num_seconds() + 59) / 60)
+        .unwrap_or(MAX_HARD_CAP_MINUTES)
+        .min(MAX_HARD_CAP_MINUTES);
+    if minutes == 0 {
+        enqueue_replacement_skipped(conn, window, "no_time").await?;
+        return Ok(());
+    }
+    let trigger = match window.trigger.as_str() {
+        "card" => Trigger::Card,
+        "owner" => Trigger::Owner,
+        // Колонка под проверкой `trigger in ('card', 'owner', 'auto')`.
+        _ => Trigger::Auto,
+    };
+    let pricing = Pricing {
+        preemptible: window.preemptible,
+        profiles: window.profiles(),
+    };
+    let request = CreateRequest {
+        trigger,
+        proposal_id: window.proposal_id,
+        replaces_window_id: Some(window.id),
+        hard_cap_minutes: minutes,
+        // Замена не наследует согласие на перерасход: допуск спрашивается заново.
+        consent_over_budget_kopecks: None,
+    };
+    // Вставка идёт под точкой сохранения: нарушение уникальности замены — не ошибка, а
+    // «замена уже есть». Без неё транзакция конца окна стала бы непригодной.
+    sqlx::query("savepoint cloud_replacement")
+        .execute(&mut *conn)
+        .await?;
+    match create_in_tx(&mut *conn, config, pricing, request, None).await {
+        Ok(id) => {
+            sqlx::query("release savepoint cloud_replacement")
+                .execute(&mut *conn)
+                .await?;
+            // Предел замены — абсолютный предел родителя, а не минуты от вызова создания.
+            sqlx::query(
+                "update cloud_windows set hard_cap_at = $2
+                 where id = $1 and hard_cap_at is null",
+            )
+            .bind(id)
+            .bind(deadline)
+            .execute(&mut *conn)
+            .await?;
+            crate::notify::enqueue_cloud_alert_in_tx(
+                conn,
+                &format!("cloud:replacement_started:{id}"),
+                &serde_json::json!({
+                    "code": "replacement_started",
+                    "window_id": id,
+                    "parent_id": window.id,
+                    "name": window.name,
+                    "deadline": deadline.to_rfc3339(),
+                }),
+            )
+            .await?;
+        }
+        Err(CreateRefusal::Database(error)) if unique_violation(&error) => {
+            sqlx::query("rollback to savepoint cloud_replacement")
+                .execute(&mut *conn)
+                .await?;
+            enqueue_replacement_skipped(conn, window, "window_exists").await?;
+        }
+        // Настоящая ошибка базы: транзакция конца окна не должна притворяться успешной.
+        Err(CreateRefusal::Database(error)) => return Err(error),
+        Err(refusal) => {
+            sqlx::query("rollback to savepoint cloud_replacement")
+                .execute(&mut *conn)
+                .await?;
+            enqueue_replacement_skipped(conn, window, replacement_skip_reason(&refusal)).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Есть ли ещё ждущая раннера задача, выпущенная из этого окна. Выпуск ставит
+/// `placement_waiting_since`; окно создано раньше своего прерывания, поэтому задача,
+/// выпущенная из него, ждёт позже его создания, а задача прежнего окна — раньше: новое окно
+/// не создаётся, пока прежнее живое.
+async fn has_released_waiting(
+    conn: &mut PgConnection,
+    window: &Window,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "select exists(select 1 from jobs
+                        where state = 'waiting_runner' and preemption_retries > 0
+                          and placement_waiting_since >= $1)",
+    )
+    .bind(window.created_at)
+    .fetch_one(conn)
+    .await
+}
+
+/// Уникальность замены: у окна не больше одной.
+fn unique_violation(error: &sqlx::Error) -> bool {
+    matches!(error, sqlx::Error::Database(database) if database.code().as_deref() == Some("23505"))
+}
+
+/// Код причины отказа от замены для пуша. Русский текст — в `notify::cloud_alert_text`.
+fn replacement_skip_reason(refusal: &CreateRefusal) -> &'static str {
+    match refusal {
+        CreateRefusal::OverBudget { .. } => "budget",
+        CreateRefusal::LiveWindowExists | CreateRefusal::LateCleanup => "window_exists",
+        CreateRefusal::AutoConditionsChanged => "auto_off",
+        CreateRefusal::Database(_)
+        | CreateRefusal::ProviderBlocked { .. }
+        | CreateRefusal::CarrierUnavailable
+        | CreateRefusal::Price(_)
+        | CreateRefusal::Provider(_)
+        | CreateRefusal::HostKey(_)
+        | CreateRefusal::Invalid(_) => "unavailable",
+    }
+}
+
+async fn enqueue_replacement_skipped(
+    conn: &mut PgConnection,
+    window: &Window,
+    reason: &str,
+) -> Result<(), sqlx::Error> {
+    crate::notify::enqueue_cloud_alert_in_tx(
+        conn,
+        &format!("cloud:replacement_skipped:{}", window.id),
+        &serde_json::json!({
+            "code": "replacement_skipped",
+            "window_id": window.id,
+            "name": window.name,
+            "reason": reason,
+        }),
+    )
     .await?;
     Ok(())
 }
@@ -728,17 +1006,23 @@ pub async fn cloud_machine_id(conn: &mut PgConnection) -> Result<Option<Uuid>, s
         .await
 }
 
-/// Отзыв раннера `cloud`: токен гаснет, его незаконченные задачи становятся `lost`.
-pub async fn revoke_cloud_machine(pool: &PgPool) -> Result<(), sqlx::Error> {
+/// Отзыв раннера `cloud`: токен гаснет, его незаконченные задачи заканчиваются по `jobs`.
+pub async fn revoke_cloud_machine(
+    pool: &PgPool,
+    jobs: crate::machines::RevokeJobs,
+) -> Result<(), sqlx::Error> {
     let mut conn = pool.acquire().await?;
-    revoke_cloud_machine_in_tx(&mut conn).await
+    revoke_cloud_machine_in_tx(&mut conn, jobs).await
 }
 
 /// Отзыв в транзакции, которая переводит окно: только текущее живое окно владеет строкой.
-pub async fn revoke_cloud_machine_in_tx(conn: &mut PgConnection) -> Result<(), sqlx::Error> {
+pub async fn revoke_cloud_machine_in_tx(
+    conn: &mut PgConnection,
+    jobs: crate::machines::RevokeJobs,
+) -> Result<(), sqlx::Error> {
     let machine = cloud_machine_id(&mut *conn).await?;
     if let Some(machine) = machine {
-        crate::machines::revoke_in_tx(conn, machine).await?;
+        crate::machines::revoke_jobs_in_tx(conn, machine, jobs).await?;
     }
     Ok(())
 }
@@ -797,6 +1081,31 @@ pub async fn ensure_cloud_machine(
 
 // ───────── Чтение для HTTP ─────────
 
+/// Расход окна на момент `now`: машина до подтверждённого исчезновения, диск до своего, у
+/// ещё живых концом служит `now`. У окна, которому не звонили, 0. Ошибка счёта даёт резерв.
+pub fn ledger_cost(window: &Window, now: DateTime<Utc>) -> i64 {
+    window.create_called_at.map_or(0, |called| {
+        price::ledger_kopecks(
+            window.compute_kopecks_per_hour,
+            window.disk_kopecks_per_hour,
+            called,
+            window.server_gone_at.unwrap_or(now),
+            window.disk_gone_at.unwrap_or(now),
+        )
+        .unwrap_or(window.reservation_kopecks)
+    })
+}
+
+/// Итог окна после сноса. Если за всё время не нашлось ни машины, ни диска, платить было не
+/// за что: итог 0.
+pub fn final_cost(window: &Window, now: DateTime<Utc>) -> i64 {
+    if window.instance_id.is_none() && window.boot_disk_id.is_none() {
+        0
+    } else {
+        ledger_cost(window, now)
+    }
+}
+
 /// Окно для клиентов: деньги в копейках, время RFC 3339.
 #[derive(Debug, Clone, Serialize, serde::Deserialize, ToSchema)]
 pub struct CloudWindowView {
@@ -804,25 +1113,35 @@ pub struct CloudWindowView {
     pub name: String,
     pub state: String,
     pub trigger: String,
-    pub server_id: Option<i64>,
-    /// Локальный адрес сервера в приватной сети.
-    pub local_ip: Option<String>,
-    /// Публичный порт DNAT-правила роутера для SSH.
-    pub dnat_port: Option<i32>,
-    /// Конфигуратор принятого профиля; пусто, пока сервера нет.
-    pub configurator_id: Option<i64>,
-    /// Цена часа: до приёма профиля самая дорогая из списка, после действительная.
+    /// Номер машины у провайдера; пусто, пока машина не найдена.
+    pub instance_id: Option<String>,
+    /// Публичный адрес машины; пусто, пока он не выдан.
+    pub public_ip: Option<String>,
+    /// Прерываемая машина: Яндекс может остановить её в любой момент.
+    pub preemptible: bool,
+    /// Окно, которое это окно заменяет после прерывания.
+    pub replaces_window_id: Option<Uuid>,
+    /// Ставка часа машины с публичным адресом: платится, пока машина есть в каталоге.
+    pub compute_kopecks_per_hour: i64,
+    /// Ставка часа диска: платится, пока есть диск.
+    pub disk_kopecks_per_hour: i64,
+    /// Обе ставки вместе: до вызова создания у самого дорогого профиля, после — у того,
+    /// которому звонили.
     pub price_hourly_kopecks: i64,
     pub reservation_kopecks: i64,
     /// Итог закончившегося окна; у живого пусто.
     pub final_cost_kopecks: Option<i64>,
-    /// Оценка расхода живого окна: часы с вызова создания, округлённые вверх, по цене часа,
-    /// не больше резерва.
+    /// Оценка расхода живого окна по секундам с вызова создания, по каждой ставке отдельно.
+    /// Оценка осторожная: остановленная машина считается по полной ставке.
     pub cost_so_far_kopecks: i64,
     pub month: String,
     pub created_at: DateTime<Utc>,
     pub ready_at: Option<DateTime<Utc>>,
     pub hard_cap_at: Option<DateTime<Utc>>,
+    /// Машина замечена останавливающейся или остановленной.
+    pub stopped_at: Option<DateTime<Utc>>,
+    /// Диска машины больше нет в каталоге.
+    pub disk_gone_at: Option<DateTime<Utc>>,
     pub delete_requested_at: Option<DateTime<Utc>>,
     pub delete_confirmed_at: Option<DateTime<Utc>>,
     pub delete_reason: Option<String>,
@@ -830,30 +1149,22 @@ pub struct CloudWindowView {
 }
 
 pub fn view(window: &Window, now: DateTime<Utc>) -> CloudWindowView {
-    let cost_so_far = match (window.final_cost_kopecks, window.create_called_at) {
-        (Some(cost), _) => cost,
-        (None, Some(called)) => {
-            // Показываем настоящий расход, а не резерв: окно могло прожить дольше предела
-            // из-за простоя хаба, и владелец должен видеть цену. Оплата сервера кончается
-            // моментом подтверждённого исчезновения: ожидание сноса DNAT её не продлевает.
-            price::final_cost_between(
-                window.price_hourly_kopecks,
-                called,
-                window.server_gone_at.unwrap_or(now),
-            )
-            .unwrap_or(window.reservation_kopecks)
-        }
-        (None, None) => 0,
-    };
+    // Показываем настоящий расход, а не резерв: окно могло прожить дольше предела из-за
+    // простоя хаба, и владелец должен видеть цену.
+    let cost_so_far = window
+        .final_cost_kopecks
+        .unwrap_or_else(|| ledger_cost(window, now));
     CloudWindowView {
         id: window.id,
         name: window.name.clone(),
         state: window.state.clone(),
         trigger: window.trigger.clone(),
-        server_id: window.server_id,
-        local_ip: window.local_ip.clone(),
-        dnat_port: window.dnat_port,
-        configurator_id: window.configurator_id,
+        instance_id: window.instance_id.clone(),
+        public_ip: window.public_ip.clone(),
+        preemptible: window.preemptible,
+        replaces_window_id: window.replaces_window_id,
+        compute_kopecks_per_hour: window.compute_kopecks_per_hour,
+        disk_kopecks_per_hour: window.disk_kopecks_per_hour,
         price_hourly_kopecks: window.price_hourly_kopecks,
         reservation_kopecks: window.reservation_kopecks,
         final_cost_kopecks: window.final_cost_kopecks,
@@ -862,6 +1173,8 @@ pub fn view(window: &Window, now: DateTime<Utc>) -> CloudWindowView {
         created_at: window.created_at,
         ready_at: window.ready_at,
         hard_cap_at: window.hard_cap_at,
+        stopped_at: window.stopped_at,
+        disk_gone_at: window.disk_gone_at,
         delete_requested_at: window.delete_requested_at,
         delete_confirmed_at: window.delete_confirmed_at,
         delete_reason: window.delete_reason.clone(),

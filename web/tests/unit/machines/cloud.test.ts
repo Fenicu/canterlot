@@ -3,11 +3,15 @@ import type { components } from '#lib/api/generated/openapi.js';
 import {
 	blockText,
 	deleteOutcomeText,
+	profileLines,
 	proposalRefusalText,
 	splitWindows,
 	windowCost,
 	windowCostLine,
 	windowDeadline,
+	windowEndReason,
+	windowReplacement,
+	windowStateText,
 	windowStateWord
 } from '#lib/screens/machines/cloudModel.js';
 import {
@@ -27,10 +31,12 @@ function window(patch: Partial<Window> = {}): Window {
 		name: 'canterlot-runner-1',
 		state: 'ready',
 		trigger: 'card',
-		server_id: 777,
-		local_ip: '192.0.2.15',
-		dnat_port: 22100,
-		configurator_id: 151,
+		instance_id: 'fhmfakeinstance0777',
+		public_ip: '203.0.113.7',
+		preemptible: true,
+		replaces_window_id: null,
+		compute_kopecks_per_hour: 2_685,
+		disk_kopecks_per_hour: 160,
 		price_hourly_kopecks: 2_845,
 		reservation_kopecks: 11_380,
 		final_cost_kopecks: null,
@@ -39,6 +45,8 @@ function window(patch: Partial<Window> = {}): Window {
 		created_at: new Date(NOW - 40 * 60_000).toISOString(),
 		ready_at: new Date(NOW - 35 * 60_000).toISOString(),
 		hard_cap_at: new Date(NOW + 80 * 60_000).toISOString(),
+		stopped_at: null,
+		disk_gone_at: null,
 		delete_requested_at: null,
 		delete_confirmed_at: null,
 		delete_reason: null,
@@ -79,11 +87,39 @@ describe('cloud windows on the machines screen', () => {
 	});
 
 	it('explains the provider block and the delete outcome without codes', () => {
-		expect(blockText('no_paid')).toBe('Timeweb требует предоплату: новые окна не создаются');
+		expect(blockText('billing_blocked')).toBe(
+			'Провайдер остановил создание окон (код billing_blocked)'
+		);
 		expect(blockText(null)).toBeNull();
-		expect(deleteOutcomeText('deleting')).toBe('Удаляю сервер. Оплата идёт до подтверждения удаления');
+		expect(deleteOutcomeText('deleting')).toBe('Удаляю машину. Оплата идёт до подтверждения удаления');
 		expect(deleteOutcomeText('not_yet')).toContain('Удаление повторится');
 		expect(proposalRefusalText('live_window_exists')).toContain('одно');
+		expect(proposalRefusalText('provider_unavailable')).toContain('Yandex Cloud');
+	});
+
+	it('names a preemption and a broken machine in owner words', () => {
+		expect(windowEndReason('preempted')).toBe('прервана Яндексом');
+		expect(windowEndReason('vm_broken')).toBe('машина сломалась');
+		expect(windowEndReason('owner')).toBeNull();
+		expect(windowStateText(window({ state: 'ended', delete_reason: 'preempted' }))).toBe(
+			'Завершено · прервана Яндексом'
+		);
+		expect(windowStateText(window({ state: 'deleting', delete_reason: 'vm_broken' }))).toBe(
+			'Удаляется · машина сломалась'
+		);
+	});
+
+	it('ties a replacement window to the parent it replaces', () => {
+		const parent = window({ id: 'parent', state: 'ended', delete_reason: 'preempted' });
+		const replacement = window({ id: 'child', replaces_window_id: parent.id });
+		const line = windowReplacement(replacement, [parent, replacement], NOW);
+		expect(line?.parentId).toBe(parent.id);
+		expect(line?.text.startsWith('замена окна')).toBe(true);
+		expect(windowReplacement(window(), [parent], NOW)).toBeNull();
+		expect(windowReplacement(replacement, [replacement], NOW)).toEqual({
+			text: 'замена окна',
+			parentId: null
+		});
 	});
 });
 
@@ -129,7 +165,22 @@ describe('cloud proposal card', () => {
 		expect(cloudOutcome('card_outdated').word).toBe('Выпущена новая карточка');
 		expect(cloudOutcome('expired').tone).toBe('quiet');
 		expect(cloudOutcome('provider_blocked').word).toBe('Провайдер заблокирован');
+		expect(cloudOutcome('provider_blocked').note).toContain('Провайдер остановил');
 		expect(cloudOutcome('over_budget').word).toBe('Не хватает бюджета');
 		expect(cloudOutcome('whatever').word).toBe('Не применено');
+	});
+
+	it('reads a profile as size, disk and an approximate hour', () => {
+		expect(
+			profileLines([
+				{
+					cores: 32,
+					memory_gb: 64,
+					disk_gb: 80,
+					compute_kopecks_per_hour: 1_646,
+					disk_kopecks_per_hour: 160
+				}
+			])
+		).toEqual([{ key: '32-64-80', text: '32 vCPU · 64 ГБ · SSD 80 ГБ · ≈18,06 ₽/ч' }]);
 	});
 });

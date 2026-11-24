@@ -432,6 +432,7 @@ pub async fn approve_in_tx(
         CreateRequest {
             trigger: Trigger::Card,
             proposal_id: Some(request_id),
+            replaces_window_id: None,
             hard_cap_minutes: card.hard_cap_minutes,
             consent_over_budget_kopecks: consent,
         },

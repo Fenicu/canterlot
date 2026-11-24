@@ -169,10 +169,14 @@ impl CloudState {
         } else {
             attachment.ssh_port
         };
-        let line = format!(
-            "[{}]:{} {}\n",
-            attachment.host, port, attachment.host_key_public
-        );
+        // OpenSSH хранит и ищет хост порта 22 без порта, а всякий другой порт — как `[host]:port`:
+        // строка `[host]:22` не совпала бы с искомым именем, и ключ был бы отвергнут.
+        let name = if port == 22 {
+            attachment.host.clone()
+        } else {
+            format!("[{}]:{}", attachment.host, port)
+        };
+        let line = format!("{name} {}\n", attachment.host_key_public);
         // Атомарная замена: оборванная запись не оставит половинку ключа.
         let temp = known_hosts.with_extension("new");
         if std::fs::write(&temp, line).is_err() || std::fs::rename(&temp, &known_hosts).is_err() {
@@ -394,6 +398,43 @@ mod tests {
         };
         resumed.apply(second.clone()).unwrap();
         assert_eq!(resumed.attachments(), vec![second]);
+    }
+
+    /// OpenSSH ищет хост порта 22 по голому имени, а всякий другой порт — по `[host]:port`.
+    /// Строка `[host]:22` не совпала бы ни с чем, и закреплённый ключ был бы отвергнут как
+    /// неизвестный хост, поэтому имя в `known_hosts` пишется так же, как его ищет ssh.
+    #[test]
+    fn known_hosts_name_matches_the_lookup_of_openssh() {
+        let dir = tempfile::Builder::new()
+            .prefix("cloud-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let state = CloudState::open(CloudConfig {
+            data_dir: dir.path().to_path_buf(),
+            ..CloudConfig::default()
+        });
+        for (port, lookup) in [
+            (22, "192.0.2.10"),
+            (0, "192.0.2.10"),
+            (2222, "[192.0.2.10]:2222"),
+        ] {
+            let mut attached = attachment(&format!("window-{port}"));
+            attached.ssh_port = port;
+            state.apply(attached).unwrap();
+            let known = dir.path().join(format!("cloud/window-{port}.known_hosts"));
+            let found = std::process::Command::new("ssh-keygen")
+                .arg("-F")
+                .arg(lookup)
+                .arg("-f")
+                .arg(&known)
+                .output()
+                .unwrap();
+            assert!(
+                found.status.success() && !found.stdout.is_empty(),
+                "порт {port}: ssh-keygen не нашёл {lookup} в {:?}",
+                std::fs::read_to_string(&known).unwrap()
+            );
+        }
     }
 
     /// Подключение пишется на диск до того, как попасть в память и стать видимым присмотру.

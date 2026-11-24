@@ -129,7 +129,7 @@ run_pid=""
 log "гейт завершился с кодом $gate_code"
 
 if [[ -f "$out/state.tsv" ]]; then
-    printf 'runner\t%s\n' "${CANTERLOT_RUNNER_NAME:-$(hostname -s 2>/dev/null || hostname)}" >>"$out/state.tsv"
+    printf 'runner\t%s\n' "${CANTERLOT_RUNNER_NAME:-${HOSTNAME%%.*}}" >>"$out/state.tsv"
 fi
 ((gate_code == 0)) || exit "$gate_code"
 [[ -f "$out/result.txt" && -f "$out/state.tsv" ]] || die 'гейт вышел с 0, но не оставил result.txt и state.tsv в .gate-out'

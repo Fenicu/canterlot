@@ -150,7 +150,7 @@ async function cloudBudget(page: Page, state: 'plain' | 'block'): Promise<void> 
     seedCloud(api, {
       live: false,
       card: false,
-      block: state === 'block' ? 'no_paid' : null,
+      block: state === 'block' ? 'billing_blocked' : null,
       budget: { monthly_budget_kopecks: 300_000, spent_kopecks: 240_000, auto_mode: true }
     });
   });
