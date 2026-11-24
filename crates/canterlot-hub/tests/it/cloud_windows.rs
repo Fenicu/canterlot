@@ -26,8 +26,8 @@ use tracing_subscriber::fmt::MakeWriter;
 use uuid::Uuid;
 
 use crate::support::fake_yandex::{
-    CreateMode, FOLDER, FailPage, FakeYandex, SKU_PREEMPTIBLE_VCPU, SUBNET, ZONE, street_price,
-    test_key, write_key_file,
+    CreateMode, FOLDER, FailPage, FakeYandex, ResponseGate, SKU_PREEMPTIBLE_VCPU, SUBNET, ZONE,
+    street_price, test_key, write_key_file,
 };
 
 const KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLEEXAMPLEEXAMPLEEXAMPLE0000";
@@ -2415,8 +2415,7 @@ async fn an_absence_timestamp_is_taken_after_the_listing_not_at_the_tick_start(
     pool: PgPool,
 ) -> TestResult {
     let rig = rig(pool).await;
-    // Медленный провайдер: списки возвращаются заметно позже начала прохода.
-    rig.fake.control().response_delay_ms = 300;
+    // Провайдер отвечает только после того, как тест отпустит запрос: проход уже давно начался.
     let t0 = now_micros();
     let id = raw_window(
         &rig.pool,
@@ -2425,17 +2424,26 @@ async fn an_absence_timestamp_is_taken_after_the_listing_not_at_the_tick_start(
         Some(t0 - TimeDelta::minutes(20)),
     )
     .await;
-    rig.tick(t0).await;
+    let gate = ResponseGate::new();
+    rig.fake.control().gate = Some(gate.clone());
+    let waiting = gate.waiting.notified();
+    let service = Arc::clone(&rig.service);
+    let tick = tokio::spawn(async move { service.tick(t0).await });
+    waiting.await;
+    let _ = rig.window(id).await;
+    let released = now_micros();
+    assert!(released > t0, "the tick began before the provider answered");
+    gate.release.notify_one();
+    tick.await.unwrap();
     let window = rig.window(id).await;
     assert_eq!(window.state, "ended");
-    let after_listing = t0 + TimeDelta::milliseconds(250);
     assert!(
-        window.server_gone_at.is_some_and(|at| at >= after_listing),
+        window.server_gone_at.is_some_and(|at| at >= released),
         "the machine end is not backdated to the tick start: {:?}",
         window.server_gone_at
     );
     assert!(
-        window.disk_gone_at.is_some_and(|at| at >= after_listing),
+        window.disk_gone_at.is_some_and(|at| at >= released),
         "the disk end is not backdated to the tick start: {:?}",
         window.disk_gone_at
     );
@@ -2448,7 +2456,6 @@ async fn a_vanished_instance_is_marked_gone_after_the_listing_that_confirmed_it(
 ) -> TestResult {
     let rig = rig(pool).await;
     let _carrier = rig.carrier_session();
-    rig.fake.control().response_delay_ms = 300;
     let t0 = now_micros();
     let instance = rig.add_instance("placeholder");
     let id = raw_window(
@@ -2466,12 +2473,20 @@ async fn a_vanished_instance_is_marked_gone_after_the_listing_that_confirmed_it(
         // Машина пропала, пока хаба не было: полный список подтверждает это только сейчас.
         state.remove_instance(&instance);
     }
-    rig.tick(t0).await;
+    let gate = ResponseGate::new();
+    rig.fake.control().gate = Some(gate.clone());
+    let waiting = gate.waiting.notified();
+    let service = Arc::clone(&rig.service);
+    let tick = tokio::spawn(async move { service.tick(t0).await });
+    waiting.await;
+    let _ = rig.window(id).await;
+    let released = now_micros();
+    assert!(released > t0, "the tick began before the provider answered");
+    gate.release.notify_one();
+    tick.await.unwrap();
     let window = rig.window(id).await;
     assert!(
-        window
-            .server_gone_at
-            .is_some_and(|at| at >= t0 + TimeDelta::milliseconds(250)),
+        window.server_gone_at.is_some_and(|at| at >= released),
         "the machine end is not backdated to the tick start: {:?}",
         window.server_gone_at
     );
