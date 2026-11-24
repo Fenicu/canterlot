@@ -204,8 +204,8 @@ export class FakeHubApi {
 		provider_block_at: null,
 		configured: true,
 		profiles: [
-			{ cores: 32, memory_gb: 64, disk_gb: 80, compute_kopecks_per_hour: 2685, disk_kopecks_per_hour: 160 },
-			{ cores: 16, memory_gb: 32, disk_gb: 80, compute_kopecks_per_hour: 1_520, disk_kopecks_per_hour: 160 }
+			{ cores: 32, memory_gb: 64, disk_gb: 80, compute_kopecks_per_hour: 1646, disk_kopecks_per_hour: 160 },
+			{ cores: 16, memory_gb: 32, disk_gb: 80, compute_kopecks_per_hour: 837, disk_kopecks_per_hour: 160 }
 		]
 	};
 	/** Запросы формы запуска, правки бюджета, снятия блока и удаления окон: их сверяют разовые проверки. */
