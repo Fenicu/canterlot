@@ -6,6 +6,9 @@ rust-version.workspace = true
 publish.workspace = true
 license.workspace = true
 
+[lints]
+workspace = true
+
 [features]
 # Сборка выпуска: CUDA 12.x, sm_70 (см. scripts/release-build/in-container.sh).
 cuda = ["transcribe-cpp/cuda"]
@@ -29,4 +32,3 @@ transcribe-cpp = { version = "=0.4.2", default-features = false }
 
 [dev-dependencies]
 tempfile = "3.27.0"
-tokio = { version = "1.54.1", features = ["test-util"] }

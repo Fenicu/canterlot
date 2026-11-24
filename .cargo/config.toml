@@ -1,2 +1,8 @@
 [env]
 DATABASE_URL = "postgres://canterlot:canterlot@127.0.0.1:55440/canterlot"
+
+# Резолвер не берёт версии, опубликованные меньше недели назад: свежий выпуск
+# зависимости успевает полежать, а Cargo.lock — нет. Уже запертые в Cargo.lock
+# версии правило не трогает.
+[registry]
+global-min-publish-age = "7 days"

@@ -32,7 +32,7 @@ RUN apt-get update \
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     CARGO_TERM_COLOR=never
-ARG RUST_VERSION=1.99.1
+ARG RUST_VERSION=1.100.0
 RUN export PATH="/usr/local/cargo/bin:${PATH}" \
     && curl -fsSL https://sh.rustup.rs | sh -s -- -y --no-modify-path \
         --profile minimal --default-toolchain "${RUST_VERSION}" \

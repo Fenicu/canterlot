@@ -372,14 +372,18 @@ fn unit_keys(fingerprint: &Path) -> std::collections::HashMap<String, String> {
         else {
             continue;
         };
-        let fields = ["features", "target", "profile", "compile_kind", "rustflags"]
-            .map(|field| json.get(field).map(ToString::to_string).unwrap_or_default());
-        keys.insert(
-            hash.to_owned(),
-            format!("{package}\0{unit}\0{}", fields.join("\0")),
-        );
+        keys.insert(hash.to_owned(), unit_key(package, unit, &json));
     }
     keys
+}
+
+/// Ключ единицы сборки: пакет, вид с целью и поля отпечатка без версии rustc и
+/// зависимостей. Копии одного ключа отличаются только устаревшими входами, разные
+/// ключи — разные текущие единицы с общим стеблем имени.
+fn unit_key(package: &str, unit: &str, json: &serde_json::Value) -> String {
+    let fields = ["features", "target", "profile", "compile_kind", "rustflags"]
+        .map(|field| json.get(field).map(ToString::to_string).unwrap_or_default());
+    format!("{package}\0{unit}\0{}", fields.join("\0"))
 }
 
 /// Старые копии тестовых бинарников в `deps/` (та же логика в `scripts/prune-target.sh`):
@@ -443,6 +447,97 @@ fn stale_test_binaries(deps: &Path) -> Vec<PathBuf> {
     stale
 }
 
+/// Старые каталоги единиц нового расклада cargo 1.100 (та же логика в
+/// `scripts/prune-target.sh`): `build/<пакет>/<хэш>/{fingerprint,out}`. Пересборка
+/// переписывает `out/`, не трогая `build/` и каталог профиля, поэтому свежесть копии —
+/// время записи `out`. У каждой единицы остаётся самый свежий каталог. Трогаются только
+/// бинарники и тесты с исполняемым файлом больше 1 МиБ в `out` — библиотеки и скрипты
+/// сборки кладут туда свои готовые файлы, но не в счёт; каталог без ровно одного
+/// отпечатка не трогается.
+fn stale_build_units(build: &Path) -> Vec<PathBuf> {
+    use std::collections::HashMap;
+    let Ok(packages) = fs::read_dir(build) else {
+        return Vec::new();
+    };
+    let mut groups: HashMap<String, Vec<(SystemTime, PathBuf)>> = HashMap::new();
+    for entry in packages.flatten() {
+        if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(package) = name.to_str() else {
+            continue;
+        };
+        let Ok(units) = fs::read_dir(entry.path()) else {
+            continue;
+        };
+        for entry in units.flatten() {
+            if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            let dir = entry.path();
+            let fingerprint = dir.join("fingerprint");
+            let Ok(files) = fs::read_dir(&fingerprint) else {
+                continue;
+            };
+            let units: Vec<String> = files
+                .flatten()
+                .filter_map(|file| {
+                    file.file_name()
+                        .to_str()?
+                        .strip_suffix(".json")
+                        .map(str::to_owned)
+                })
+                .collect();
+            // Одна единица на каталог; иначе свежесть копии не определить.
+            let [unit] = units.as_slice() else {
+                continue;
+            };
+            if !(unit.starts_with("bin-") || unit.starts_with("test-")) {
+                continue;
+            }
+            let Some(json) = fs::read(fingerprint.join(format!("{unit}.json")))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            else {
+                continue;
+            };
+            let out = dir.join("out");
+            if !has_heavy_executable(&out) {
+                continue;
+            }
+            let Ok(modified) = out.metadata().and_then(|meta| meta.modified()) else {
+                continue;
+            };
+            groups
+                .entry(unit_key(package, unit, &json))
+                .or_default()
+                .push((modified, dir));
+        }
+    }
+    let mut stale = Vec::new();
+    for mut units in groups.into_values() {
+        units.sort();
+        units.pop();
+        stale.extend(units.into_iter().map(|(_, path)| path));
+    }
+    stale.sort();
+    stale
+}
+
+/// Исполняемый файл больше 1 МиБ среди готовых файлов единицы: тест или бинарник.
+fn has_heavy_executable(out: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(entries) = fs::read_dir(out) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        entry.metadata().is_ok_and(|meta| {
+            meta.is_file() && meta.permissions().mode() & 0o111 != 0 && meta.len() > 1 << 20
+        })
+    })
+}
+
 /// Переименовывает убираемое в новый каталог корзины и возвращает его. Переименование
 /// мгновенно, долгое удаление идёт потом, вне потока хранилища. Пустой результат —
 /// убирать нечего.
@@ -481,6 +576,7 @@ pub(crate) fn stage_build(
                     doomed.push(incremental);
                 }
                 doomed.extend(stale_test_binaries(&profile.join("deps")));
+                doomed.extend(stale_build_units(&profile.join("build")));
             }
         }
     }
@@ -547,13 +643,18 @@ mod tests {
 
     use super::{
         Grade, TRASH_DIR, build_candidates, ensure_test_runtime_allowed, lock_build, purge_trash,
-        remove_stale_execution, remove_stale_socket, stage_build, stale_executions, stale_sockets,
-        target_in_use, trash_root,
+        remove_stale_execution, remove_stale_socket, stage_build, stale_build_units,
+        stale_executions, stale_sockets, target_in_use, trash_root,
     };
 
     fn old(path: &Path) {
-        let old = SystemTime::now() - Duration::from_secs(8 * 3600);
-        fs::File::open(path).unwrap().set_modified(old).unwrap();
+        age(path, 8);
+    }
+
+    /// Возраст записи каталога или файла: свежесть копий сборки и их `out/`.
+    fn age(path: &Path, age_hours: u64) {
+        let at = SystemTime::now() - Duration::from_secs(age_hours * 3600);
+        fs::File::open(path).unwrap().set_modified(at).unwrap();
     }
 
     /// Подпись настоящего кэша cargo: без неё `target` — обычный каталог.
@@ -837,8 +938,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         fs::write(path, vec![0u8; (1 << 20) + 1]).unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
-        let at = SystemTime::now() - Duration::from_secs(age_hours * 3600);
-        fs::File::open(path).unwrap().set_modified(at).unwrap();
+        age(path, age_hours);
     }
 
     #[test]
@@ -1006,6 +1106,244 @@ mod tests {
 
         let stale = super::stale_test_binaries(&deps);
         assert_eq!(stale, vec![deps.join("lease-8888888888888888")]);
+    }
+
+    /// Каталог единицы нового расклада cargo 1.100: `build/<пакет>/<хэш>` с отпечатком,
+    /// готовым файлом в `out/` и возрастом каталога `out/` (пересборка двигает его).
+    fn new_unit(
+        profile: &Path,
+        package: &str,
+        hash: &str,
+        name: &str,
+        features: &str,
+        age_hours: u64,
+    ) -> PathBuf {
+        let dir = profile.join(format!("build/{package}/{hash}"));
+        let fingerprint = dir.join("fingerprint");
+        fs::create_dir_all(&fingerprint).unwrap();
+        fs::create_dir_all(dir.join("out")).unwrap();
+        fs::write(fingerprint.join(name), "0011223344556677").unwrap();
+        fs::write(fingerprint.join(format!("dep-{name}")), "").unwrap();
+        fs::write(fingerprint.join("invoked.timestamp"), "").unwrap();
+        let json = serde_json::json!({
+            "rustc": 1, "features": features, "declared_features": "[]",
+            "target": name.len(), "profile": 7, "path": 3, "deps": [], "local": [],
+            "rustflags": [], "config": 9, "compile_kind": 0,
+        });
+        fs::write(fingerprint.join(format!("{name}.json")), json.to_string()).unwrap();
+        binary(&dir.join("out").join(format!("artifact-{hash}")), age_hours);
+        age_out(&dir, age_hours);
+        dir
+    }
+
+    fn age_out(unit: &Path, age_hours: u64) {
+        age(&unit.join("out"), age_hours);
+    }
+
+    #[test]
+    fn stale_build_units_keep_the_newest_copy_and_leave_non_binary_units() {
+        let root = tempfile::Builder::new()
+            .prefix("cl-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let profile = root.path().join("debug");
+        let build = profile.join("build");
+        // Две копии одной единицы: старая уходит целым каталогом.
+        let old = new_unit(
+            &profile,
+            "canterlot-worker",
+            "8888888888888888",
+            "test-integration-test-lease",
+            "[]",
+            9,
+        );
+        let fresh = new_unit(
+            &profile,
+            "canterlot-worker",
+            "9999999999999999",
+            "test-integration-test-lease",
+            "[]",
+            1,
+        );
+        // Бинарник — тоже единица: у него своя пара копий.
+        let bin_old = new_unit(
+            &profile,
+            "canterlot-hub",
+            "1111111111111111",
+            "bin-canterlot-hub",
+            "[]",
+            8,
+        );
+        let bin_fresh = new_unit(
+            &profile,
+            "canterlot-hub",
+            "2222222222222222",
+            "bin-canterlot-hub",
+            "[]",
+            2,
+        );
+        // Другой набор возможностей — другая текущая единица.
+        let feature_old = new_unit(
+            &profile,
+            "canterlot-worker",
+            "3333333333333333",
+            "test-integration-test-exec",
+            "[]",
+            30,
+        );
+        let feature_fresh = new_unit(
+            &profile,
+            "canterlot-worker",
+            "4444444444444444",
+            "test-integration-test-exec",
+            "[\"fault-injection\"]",
+            1,
+        );
+        // Библиотека и скрипт сборки с большими файлами в out не трогаются.
+        let lib_old = new_unit(
+            &profile,
+            "canterlot-worker",
+            "5555555555555555",
+            "lib-canterlot_worker",
+            "[]",
+            30,
+        );
+        let lib_fresh = new_unit(
+            &profile,
+            "canterlot-worker",
+            "6666666666666666",
+            "lib-canterlot_worker",
+            "[]",
+            1,
+        );
+        let script_old = new_unit(
+            &profile,
+            "canterlot-worker",
+            "7777777777777777",
+            "build-script-build-script-build",
+            "[]",
+            30,
+        );
+        let script_fresh = new_unit(
+            &profile,
+            "canterlot-worker",
+            "aaaaaaaaaaaaaaaa",
+            "build-script-build-script-build",
+            "[]",
+            1,
+        );
+        // Каталог без ровно одного отпечатка не трогается.
+        let ambiguous = new_unit(
+            &profile,
+            "canterlot-worker",
+            "bbbbbbbbbbbbbbbb",
+            "test-integration-test-lease",
+            "[]",
+            40,
+        );
+        fs::write(
+            ambiguous.join("fingerprint/test-lib-canterlot_worker.json"),
+            "{}",
+        )
+        .unwrap();
+        // Единица без исполняемого файла больше 1 МиБ не трогается.
+        let small_old = new_unit(
+            &profile,
+            "canterlot-hub",
+            "cccccccccccccccc",
+            "bin-small",
+            "[]",
+            40,
+        );
+        fs::write(small_old.join("out/artifact-cccccccccccccccc"), "small").unwrap();
+        age_out(&small_old, 40);
+        let small_fresh = new_unit(
+            &profile,
+            "canterlot-hub",
+            "dddddddddddddddd",
+            "bin-small",
+            "[]",
+            1,
+        );
+        fs::write(small_fresh.join("out/artifact-dddddddddddddddd"), "small").unwrap();
+        age_out(&small_fresh, 1);
+
+        let mut stale = stale_build_units(&build);
+        stale.sort();
+        let mut want = vec![old.clone(), bin_old.clone()];
+        want.sort();
+        assert_eq!(stale, want);
+        for kept in [
+            &fresh,
+            &bin_fresh,
+            &feature_old,
+            &feature_fresh,
+            &lib_old,
+            &lib_fresh,
+            &script_old,
+            &script_fresh,
+            &ambiguous,
+            &small_old,
+            &small_fresh,
+        ] {
+            assert!(kept.exists(), "{} must stay", kept.display());
+        }
+    }
+
+    #[test]
+    fn idle_grade_prunes_whole_stale_build_unit_dirs_in_the_new_layout() {
+        let root = tempfile::Builder::new()
+            .prefix("cl-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let worktree = root.path().join("wt");
+        let target = worktree.join("target");
+        fs::create_dir_all(&target).unwrap();
+        cargo_tag(&target);
+        let profile = target.join("debug");
+        fs::create_dir_all(profile.join("incremental/crate-abc")).unwrap();
+        let old = new_unit(
+            &profile,
+            "canterlot-worker",
+            "8888888888888888",
+            "test-integration-test-lease",
+            "[]",
+            9,
+        );
+        let fresh = new_unit(
+            &profile,
+            "canterlot-worker",
+            "9999999999999999",
+            "test-integration-test-lease",
+            "[]",
+            1,
+        );
+        let script = new_unit(
+            &profile,
+            "canterlot-worker",
+            "7777777777777777",
+            "build-script-build-script-build",
+            "[]",
+            30,
+        );
+
+        let trash = root.path().join("trash");
+        let batch = stage_build(&worktree, Grade::Idle, &trash)
+            .unwrap()
+            .unwrap();
+        assert!(!old.exists(), "the older copy goes as a whole directory");
+        assert!(fresh.exists(), "the newest copy stays");
+        assert!(script.exists(), "build scripts are not touched");
+        assert!(!profile.join("incremental").exists());
+        assert_eq!(fs::read_dir(&batch).unwrap().count(), 2);
+        purge_trash(&trash).unwrap();
+        assert!(!batch.exists());
+        // Повтор: убирать уже нечего.
+        assert!(
+            stage_build(&worktree, Grade::Idle, &trash)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

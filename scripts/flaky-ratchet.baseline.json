@@ -201,7 +201,7 @@
       "rust_clock": 2
     },
     "crates/canterlot-worker/src/exec/maintenance.rs": {
-      "rust_clock": 8
+      "rust_clock": 7
     },
     "crates/canterlot-worker/src/exec/manager.rs": {
       "rust_clock": 1,

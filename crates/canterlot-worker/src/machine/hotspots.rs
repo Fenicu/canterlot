@@ -278,7 +278,8 @@ fn direct_dirs(path: &Path) -> Vec<PathBuf> {
 
 /// Последняя запись сборки в `target` без полного обхода: каталоги, куда rustc и
 /// cargo кладут новые файлы при каждой сборке (`<профиль>/{deps,.fingerprint,build,
-/// incremental}`, то же под `lint/<профиль>`) и `nextest`.
+/// incremental}`, то же под `lint/<профиль>`, и в раскладе cargo 1.100 —
+/// `build/<пакет>/<хэш>/{out,fingerprint}`) и `nextest`.
 pub fn target_newest(target: &Path) -> Option<SystemTime> {
     let mut profiles = Vec::new();
     for dir in direct_dirs(target) {
@@ -289,9 +290,17 @@ pub fn target_newest(target: &Path) -> Option<SystemTime> {
         }
     }
     let mut candidates = vec![target.join("nextest")];
-    for profile in profiles {
+    for profile in &profiles {
         for leaf in ["deps", ".fingerprint", "build", "incremental"] {
             candidates.push(profile.join(leaf));
+        }
+        // cargo 1.100 переписывает при пересборке только out/ единицы (и отпечаток),
+        // не трогая build/<пакет>/<хэш> и каталог профиля.
+        for package in direct_dirs(&profile.join("build")) {
+            for unit in direct_dirs(&package) {
+                candidates.push(unit.join("out"));
+                candidates.push(unit.join("fingerprint"));
+            }
         }
     }
     candidates.iter().filter_map(|path| mtime(path)).max()
@@ -594,6 +603,53 @@ mod tests {
         let newest = target_newest(&target).unwrap();
         let age = SystemTime::now().duration_since(newest).unwrap();
         assert!(age > Duration::from_secs(9 * 3600) && age < Duration::from_secs(11 * 3600));
+    }
+
+    #[test]
+    fn target_newest_sees_a_rebuild_in_the_new_layout() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("target");
+        tag(&target);
+        let debug = target.join("debug/build/canterlot-worker/0123456789abcdef");
+        let lint = target.join("lint/debug/build/canterlot-hub/fedcba9876543210");
+        for dir in [
+            debug.join("out"),
+            debug.join("fingerprint"),
+            lint.join("out"),
+            lint.join("fingerprint"),
+        ] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        fs::create_dir_all(target.join("debug/examples/deep")).unwrap();
+        // Времена фиксированы: кандидаты сравниваются между собой, а не с часами.
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let old = base - Duration::from_secs(10 * 3600);
+        let fresh = base - Duration::from_secs(60);
+        let set = |path: &Path, at: SystemTime| {
+            fs::File::open(path).unwrap().set_modified(at).unwrap();
+        };
+        for dir in [
+            debug.join("out"),
+            debug.join("fingerprint"),
+            lint.join("out"),
+            lint.join("fingerprint"),
+            debug.parent().and_then(Path::parent).unwrap().to_owned(),
+            lint.parent().and_then(Path::parent).unwrap().to_owned(),
+        ] {
+            set(&dir, old);
+        }
+        // Свежая запись глубоко в дереве вне каталогов сборки не делает target живым.
+        fs::write(target.join("debug/examples/deep/new"), "x").unwrap();
+        assert_eq!(target_newest(&target), Some(old));
+
+        // Пересборка переписывает out/ единицы, не трогая build/ и каталог профиля.
+        set(&debug.join("out"), fresh);
+        assert_eq!(target_newest(&target), Some(fresh));
+
+        // То же под target/lint/<профиль>: переписанный отпечаток тоже виден.
+        set(&debug.join("out"), old);
+        set(&lint.join("fingerprint"), base);
+        assert_eq!(target_newest(&target), Some(base));
     }
 
     #[test]

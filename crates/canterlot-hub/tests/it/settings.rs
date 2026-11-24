@@ -705,20 +705,43 @@ async fn settings_survive_worker_restart_between_dispatch_and_accept(pool: PgPoo
     };
     let exe = std::env::current_exe().unwrap();
     let deps = exe.parent().unwrap();
-    let mut candidates = vec![deps.parent().unwrap().join("canterlot-worker")];
-    let mut artifacts: Vec<_> = std::fs::read_dir(deps)
-        .unwrap()
-        .flatten()
-        .filter_map(|entry| {
-            let path = entry.path();
-            let name = path.file_name()?.to_str()?;
-            if !name.starts_with("canterlot_worker-") || name.ends_with(".d") {
-                return None;
-            }
-            let modified = entry.metadata().ok()?.modified().ok()?;
-            Some((modified, path))
-        })
-        .collect();
+    // cargo 1.100 держит готовые файлы единицы в build/<пакет>/<хэш>/out, а не в
+    // <профиль>/deps: профиль вычисляется по обоим раскладам.
+    let profile = if deps.file_name().is_some_and(|name| name == "deps") {
+        deps.parent()
+    } else {
+        deps.parent()
+            .and_then(|hash| hash.parent())
+            .and_then(|package| package.parent())
+            .filter(|build| build.file_name().is_some_and(|name| name == "build"))
+            .and_then(|build| build.parent())
+    };
+    let mut candidates = Vec::new();
+    let mut artifacts: Vec<_> = Vec::new();
+    if let Some(profile) = profile {
+        candidates.push(profile.join("canterlot-worker"));
+        let units = std::fs::read_dir(profile.join("build/canterlot-worker"));
+        for dir in std::iter::once(profile.join("deps")).chain(
+            units
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|unit| unit.path().join("out")),
+        ) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                continue;
+            };
+            artifacts.extend(entries.flatten().filter_map(|entry| {
+                let path = entry.path();
+                let name = path.file_name()?.to_str()?;
+                if !name.starts_with("canterlot_worker") || name.ends_with(".d") {
+                    return None;
+                }
+                let modified = entry.metadata().ok()?.modified().ok()?;
+                Some((modified, path))
+            }));
+        }
+    }
     artifacts.sort_by_key(|a| std::cmp::Reverse(a.0));
     candidates.extend(artifacts.into_iter().map(|(_, path)| path));
     let binary = candidates

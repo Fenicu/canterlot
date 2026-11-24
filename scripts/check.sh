@@ -259,6 +259,14 @@ if ((want_rust)); then
     run_speech_tests || run_status=$?
     lint_status=0
     wait "$lint_pid" || lint_status=$?
+    # `cargo::unused_dependencies` — линт cargo, а не rustc: `-D warnings` его не
+    # поднимает. В обычной сборке он только предупреждает, а проверка делает его
+    # ошибкой, чтобы неиспользуемая зависимость не копилась незамеченной.
+    if grep -q '^warning: unused dependenc' "$lint_log"; then
+        echo "--- неиспользуемые зависимости ---"
+        grep -A3 '^warning: unused dependenc' "$lint_log"
+        lint_status=1
+    fi
     if ((lint_status)); then
         echo "--- линт упал ---"
         tail -n 80 "$lint_log"
