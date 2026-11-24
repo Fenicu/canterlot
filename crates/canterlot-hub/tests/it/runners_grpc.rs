@@ -298,24 +298,23 @@ async fn the_cloud_runner_is_listed_and_gets_its_token_only_while_a_window_serve
         carrier.assigned().await,
         vec![("runner-a".to_owned(), "/srv/runner".to_owned())]
     );
-    // Окно создано, сервер найден (`identified`), раннера `cloud` ещё нет в базе.
+    // Окно создано, машина найдена (`identified`), раннера `cloud` ещё нет в базе.
     let config: canterlot_hub::config::CloudConfig = toml::from_str(&format!(
-        "provider='timeweb'\ntoken_file='t'\nproject_id=1\n\
-         network_id='network-example'\nnetwork_cidr='192.0.2.0/24'\nrouter_id='018f0000-0000-7000-8000-0000000000aa'\n\
-         router_ip='192.0.2.1'\ngateway='192.0.2.5'\n\
-         local_ip_pool='192.0.2.10-192.0.2.60'\ndnat_port_range='22100-22199'\n\
+        "provider='yandex'\nkey_file='k.json'\nfolder_id='b1gfakefolder000000'\n\
+         zone='ru-central1-a'\nsubnet_id='e9bfakesubnet000000'\n\
          runner_public_key='ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEXAMPLEEXAMPLE'\n\
-         carrier_machine_id='{}'\n[[profile]]\nconfigurator_id=151\ncpu=1\nram_gb=1\ndisk_gb=10\navailability_zone='msk-1'\n",
+         carrier_machine_id='{}'\n[[profile]]\ncores=2\nmemory_gb=2\ndisk_gb=10\n",
         host.carrier.machine_id
     ))?;
     let window = Uuid::now_v7();
     sqlx::query(
-        "insert into cloud_windows (id, name, state, trigger, server_id, host_key_public,
-                                    price_hourly_kopecks, reservation_kopecks, month,
-                                    hard_cap_minutes, created_at, create_called_at, profiles)
-         values ($1, 'canterlot-runner-' || $1::text, 'identified', 'owner', 5001,
-                 'ssh-ed25519 AAAA', 2845, 11380, '2026-11', 60, now(), now(),
-                 '[{\"configurator_id\":151,\"cpu\":32,\"ram_gb\":64,\"disk_gb\":80,\"hourly_kopecks\":2845,\"availability_zone\":\"msk-1\"}]')",
+        "insert into cloud_windows (id, name, state, trigger, folder_id, preemptible, instance_id,
+                                    host_key_public, price_hourly_kopecks, reservation_kopecks,
+                                    month, hard_cap_minutes, created_at, create_called_at, profiles)
+         values ($1, 'canterlot-runner-' || $1::text, 'identified', 'owner', 'b1gfakefolder000000',
+                 true, 'fhmfakeinstance5001', 'ssh-ed25519 AAAA', 1806, 7224, '2026-11', 60,
+                 now(), now(),
+                 '[{\"cores\":32,\"memory_gb\":64,\"disk_gb\":80,\"compute_kopecks_per_hour\":1646,\"disk_kopecks_per_hour\":160}]')",
     )
     .bind(window)
     .execute(&pool)
