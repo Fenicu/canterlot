@@ -204,8 +204,8 @@ export class FakeHubApi {
 		provider_block_at: null,
 		configured: true,
 		profiles: [
-			{ configurator_id: 151, cpu: 32, ram_gb: 64, disk_gb: 80, hourly_kopecks: 2845, availability_zone: 'msk-1' },
-			{ configurator_id: 149, cpu: 16, ram_gb: 32, disk_gb: 80, hourly_kopecks: 1_680, availability_zone: 'msk-1' }
+			{ cores: 32, memory_gb: 64, disk_gb: 80, compute_kopecks_per_hour: 2685, disk_kopecks_per_hour: 160 },
+			{ cores: 16, memory_gb: 32, disk_gb: 80, compute_kopecks_per_hour: 1_520, disk_kopecks_per_hour: 160 }
 		]
 	};
 	/** Запросы формы запуска, правки бюджета, снятия блока и удаления окон: их сверяют разовые проверки. */

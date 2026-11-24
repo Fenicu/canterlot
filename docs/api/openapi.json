@@ -2869,7 +2869,7 @@
         "operationId": "get__api_v1_cloud_budget",
         "responses": {
           "200": {
-            "description": "Бюджет облака: месяц, расход, остаток, режим, ревизия, блок и профили с ценой часа",
+            "description": "Бюджет облака: месяц, расход, остаток, режим, ревизия, блок и профили со ставками часа",
             "headers": {
               "X-Server-Time-Ms": {
                 "schema": {
@@ -3146,7 +3146,7 @@
         "operationId": "get__api_v1_cloud_windows",
         "responses": {
           "200": {
-            "description": "Окна облачных серверов раннеров: живые и последние 20 законченных, с ценой и расходом в копейках",
+            "description": "Окна облачных машин раннеров: живые и последние 20 законченных, со ставками и расходом в копейках",
             "headers": {
               "X-Server-Time-Ms": {
                 "schema": {
@@ -3215,7 +3215,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Удаление принято: раннер отзывается, сервер удаляет служба окон и подтверждает конец оплаты списком проекта",
+            "description": "Удаление принято: раннер отзывается, машину и её диск удаляет служба окон и подтверждает конец оплаты полными списками каталога",
             "headers": {
               "X-Server-Time-Ms": {
                 "schema": {
@@ -16052,7 +16052,7 @@
             "items": {
               "$ref": "#/components/schemas/ProfileView"
             },
-            "description": "Профили из конфигурации с текущей ценой часа (только чтение)."
+            "description": "Профили из конфигурации с текущими ставками часа (только чтение)."
           },
           "provider_block_at": {
             "type": [
@@ -16315,6 +16315,9 @@
           "name",
           "state",
           "trigger",
+          "preemptible",
+          "compute_kopecks_per_hour",
+          "disk_kopecks_per_hour",
           "price_hourly_kopecks",
           "reservation_kopecks",
           "cost_so_far_kopecks",
@@ -16322,18 +16325,15 @@
           "created_at"
         ],
         "properties": {
-          "configurator_id": {
-            "type": [
-              "integer",
-              "null"
-            ],
+          "compute_kopecks_per_hour": {
+            "type": "integer",
             "format": "int64",
-            "description": "Конфигуратор принятого профиля; пусто, пока сервера нет."
+            "description": "Ставка часа машины с публичным адресом: платится, пока машина есть в каталоге."
           },
           "cost_so_far_kopecks": {
             "type": "integer",
             "format": "int64",
-            "description": "Оценка расхода живого окна: часы с вызова создания, округлённые вверх, по цене часа,\nне больше резерва."
+            "description": "Оценка расхода живого окна по секундам с вызова создания, по каждой ставке отдельно.\nОценка осторожная: остановленная машина считается по полной ставке."
           },
           "created_at": {
             "type": "string",
@@ -16359,13 +16359,18 @@
             ],
             "format": "date-time"
           },
-          "dnat_port": {
+          "disk_gone_at": {
             "type": [
-              "integer",
+              "string",
               "null"
             ],
-            "format": "int32",
-            "description": "Публичный порт DNAT-правила роутера для SSH."
+            "format": "date-time",
+            "description": "Диска машины больше нет в каталоге."
+          },
+          "disk_kopecks_per_hour": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Ставка часа диска: платится, пока есть диск."
           },
           "final_cost_kopecks": {
             "type": [
@@ -16386,18 +16391,18 @@
             "type": "string",
             "format": "uuid"
           },
+          "instance_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Номер машины у провайдера; пусто, пока машина не найдена."
+          },
           "last_error": {
             "type": [
               "string",
               "null"
             ]
-          },
-          "local_ip": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Локальный адрес сервера в приватной сети."
           },
           "month": {
             "type": "string"
@@ -16405,10 +16410,21 @@
           "name": {
             "type": "string"
           },
+          "preemptible": {
+            "type": "boolean",
+            "description": "Прерываемая машина: Яндекс может остановить её в любой момент."
+          },
           "price_hourly_kopecks": {
             "type": "integer",
             "format": "int64",
-            "description": "Цена часа: до приёма профиля самая дорогая из списка, после действительная."
+            "description": "Обе ставки вместе: до вызова создания у самого дорогого профиля, после — у того,\nкоторому звонили."
+          },
+          "public_ip": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Публичный адрес машины; пусто, пока он не выдан."
           },
           "ready_at": {
             "type": [
@@ -16417,19 +16433,28 @@
             ],
             "format": "date-time"
           },
+          "replaces_window_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Окно, которое это окно заменяет после прерывания."
+          },
           "reservation_kopecks": {
             "type": "integer",
             "format": "int64"
           },
-          "server_id": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64"
-          },
           "state": {
             "type": "string"
+          },
+          "stopped_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Машина замечена останавливающейся или остановленной."
           },
           "trigger": {
             "type": "string"
@@ -17593,7 +17618,7 @@
         "properties": {
           "outcome": {
             "$ref": "#/components/schemas/DeleteRequested",
-            "description": "Что случилось с окном: `deleting` (раннер отозван, сервер удаляется), `canceled`\n(сервер ещё не создавался), `not_yet` (создание вызвано, сервера в списках нет),\n`already_ended`."
+            "description": "Что случилось с окном: `deleting` (раннер отозван, машина удаляется), `canceled`\n(машина ещё не создавалась), `not_yet` (создание вызвано, машины в списках нет),\n`already_ended`."
           },
           "window": {
             "$ref": "#/components/schemas/CloudWindowView"
@@ -23410,24 +23435,21 @@
       },
       "ProfileView": {
         "type": "object",
-        "description": "Профиль в настройках бюджета: цена часа из провайдера на момент чтения.",
+        "description": "Профиль в настройках бюджета: размеры машины и две ставки часа у провайдера на момент\nчтения. Цена часа работающей машины — их сумма.",
         "required": [
-          "configurator_id",
-          "cpu",
-          "ram_gb",
+          "cores",
+          "memory_gb",
           "disk_gb",
-          "hourly_kopecks",
-          "availability_zone"
+          "compute_kopecks_per_hour",
+          "disk_kopecks_per_hour"
         ],
         "properties": {
-          "availability_zone": {
-            "type": "string"
-          },
-          "configurator_id": {
+          "compute_kopecks_per_hour": {
             "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "description": "Машина с публичным адресом: платится, пока машина есть в каталоге."
           },
-          "cpu": {
+          "cores": {
             "type": "integer",
             "format": "int32",
             "minimum": 0
@@ -23437,11 +23459,12 @@
             "format": "int32",
             "minimum": 0
           },
-          "hourly_kopecks": {
+          "disk_kopecks_per_hour": {
             "type": "integer",
-            "format": "int64"
+            "format": "int64",
+            "description": "Диск: платится, пока есть диск."
           },
-          "ram_gb": {
+          "memory_gb": {
             "type": "integer",
             "format": "int32",
             "minimum": 0
@@ -27366,7 +27389,7 @@
               "string",
               "null"
             ],
-            "description": "Код блока провайдера (`abuse_prepayment_required`), пока он стоит: новые окна не\nсоздаются, пока владелец не снимет блок. Пусто, когда блока нет."
+            "description": "Код блока провайдера, пока он стоит: новые окна не создаются, пока владелец не снимет\nблок. Пусто, когда блока нет."
           }
         }
       },
