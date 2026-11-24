@@ -3083,6 +3083,167 @@ async fn a_disk_is_deleted_only_under_the_window_name_and_only_when_detached(
     Ok(())
 }
 
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_disk_is_adopted_by_its_name_only_when_exactly_one_matches(pool: PgPool) -> TestResult {
+    // Без сохранённого номера диск ищется по имени, а имя не доказывает принадлежность: два
+    // диска с именем окна — неоднозначность, и удалять первый из них нельзя.
+    {
+        let rig = rig(pool.clone()).await;
+        let now = now_micros();
+        let id = raw_window(
+            &rig.pool,
+            "deleting",
+            Some("fhmfakeinstance9999"),
+            Some(now - TimeDelta::minutes(20)),
+        )
+        .await;
+        sqlx::query("update cloud_windows set server_gone_at = $2 where id = $1")
+            .bind(id)
+            .bind(now)
+            .execute(&rig.pool)
+            .await?;
+        let first = rig.fake.control().add_stray_disk(&windows::server_name(id));
+        let second = rig.fake.control().add_stray_disk(&windows::server_name(id));
+        rig.tick(now).await;
+        assert_eq!(
+            rig.disk_deletes(),
+            0,
+            "two same-name disks are not a match"
+        );
+        let window = rig.window(id).await;
+        assert_eq!(window.state, "deleting");
+        assert_eq!(window.boot_disk_id, None);
+        assert_eq!(window.last_error.as_deref(), Some("ambiguous_disk"));
+        assert!(rig.fake.control().disks.contains_key(&first));
+        assert!(rig.fake.control().disks.contains_key(&second));
+        // Один из дисков пропал: оставшийся единственный, его номер и запоминается.
+        rig.fake.control().disks.remove(&second);
+        rig.tick(now + TimeDelta::seconds(10)).await;
+        assert_eq!(rig.disk_deletes(), 1);
+        assert!(!rig.fake.control().disks.contains_key(&first));
+        assert_eq!(rig.state(id).await, "ended");
+    }
+
+    // Сохранённый номер главнее имени: диск с другим номером под тем же именем не наш.
+    {
+        let rig = rig(pool.clone()).await;
+        let now = now_micros();
+        let other = rig.fake.control().add_stray_disk("placeholder");
+        let id = raw_window(
+            &rig.pool,
+            "deleting",
+            Some("fhmfakeinstance9999"),
+            Some(now - TimeDelta::minutes(20)),
+        )
+        .await;
+        sqlx::query(
+            "update cloud_windows set server_gone_at = $2, boot_disk_id = 'fhmfakedisknotours' where id = $1",
+        )
+        .bind(id)
+        .bind(now)
+        .execute(&rig.pool)
+        .await?;
+        rig.fake
+            .control()
+            .disks
+            .get_mut(&other)
+            .unwrap()
+            .name = windows::server_name(id);
+        rig.tick(now).await;
+        assert_eq!(
+            rig.disk_deletes(),
+            0,
+            "a name-only disk is not deleted under a stored different id"
+        );
+        assert!(rig.fake.control().disks.contains_key(&other));
+        let window = rig.window(id).await;
+        assert_eq!(window.state, "ended");
+        assert!(window.disk_gone_at.is_some(), "the stored disk is gone");
+        assert_eq!(window.boot_disk_id.as_deref(), Some("fhmfakedisknotours"));
+    }
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_name_only_instance_recovery_requires_exactly_one_match(pool: PgPool) -> TestResult {
+    // Номера машины нет: снос ищет её по имени. Две машины с именем окна — неоднозначность.
+    {
+        let rig = rig(pool.clone()).await;
+        let now = now_micros();
+        let id = raw_window(
+            &rig.pool,
+            "deleting",
+            None,
+            Some(now - TimeDelta::minutes(20)),
+        )
+        .await;
+        let first = rig.add_instance(&windows::server_name(id));
+        let second = rig.add_instance(&windows::server_name(id));
+        rig.tick(now).await;
+        assert_eq!(rig.deletes(), 0, "two same-name instances are not a match");
+        let window = rig.window(id).await;
+        assert_eq!(window.state, "deleting");
+        assert_eq!(window.instance_id, None);
+        assert_eq!(window.last_error.as_deref(), Some("ambiguous_instance"));
+        assert_eq!(rig.fake.instance_count(), 2);
+        // Одна машина пропала: оставшаяся — единственная, её номер запоминается и она удаляется.
+        rig.fake.control().remove_instance(&second);
+        rig.tick(now + TimeDelta::seconds(10)).await;
+        assert_eq!(rig.window(id).await.instance_id.as_deref(), Some(first.as_str()));
+        rig.tick(now + TimeDelta::seconds(11)).await;
+        assert_eq!(rig.deletes(), 1);
+        rig.tick(now + TimeDelta::seconds(12)).await;
+        assert!(!rig.fake.control().instances.contains_key(&first));
+        assert_eq!(rig.state(id).await, "ended");
+    }
+
+    // Диск подключён, а машина окна ищется по имени: две машины с этим именем — не повод
+    // вернуть снос к любой из них.
+    {
+        let rig = rig(pool.clone()).await;
+        let now = now_micros();
+        let id = raw_window(
+            &rig.pool,
+            "deleting",
+            None,
+            Some(now - TimeDelta::minutes(20)),
+        )
+        .await;
+        let first = rig.add_instance(&windows::server_name(id));
+        let second = rig.add_instance(&windows::server_name(id));
+        let second_disk = rig.fake.control().instances[&second].disk_id.clone();
+        rig.fake
+            .control()
+            .disks
+            .get_mut(&second_disk)
+            .unwrap()
+            .name = "other-volume".to_owned();
+        sqlx::query("update cloud_windows set server_gone_at = $2 where id = $1")
+            .bind(id)
+            .bind(now)
+            .execute(&rig.pool)
+            .await?;
+        rig.tick(now).await;
+        assert_eq!(rig.deletes(), 0);
+        let window = rig.window(id).await;
+        assert_eq!(window.state, "deleting");
+        assert_eq!(
+            window.instance_id, None,
+            "no same-name instance is chosen while the name is ambiguous"
+        );
+        assert_eq!(window.last_error.as_deref(), Some("ambiguous_instance"));
+        // Осталась одна машина: снос возвращается к ней и убирает её вместе с диском.
+        rig.fake.control().remove_instance(&second);
+        rig.tick(now + TimeDelta::seconds(10)).await;
+        assert_eq!(rig.window(id).await.instance_id.as_deref(), Some(first.as_str()));
+        rig.tick(now + TimeDelta::seconds(11)).await;
+        assert_eq!(rig.deletes(), 1);
+        assert!(!rig.fake.control().instances.contains_key(&first));
+        assert_eq!(rig.state(id).await, "ended");
+    }
+    Ok(())
+}
+
 // ───────── Сверка ─────────
 
 fn stray_name() -> String {

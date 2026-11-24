@@ -1444,8 +1444,13 @@ impl CloudService {
                     return Ok(false);
                 }
             };
-            return match listing.iter().find(|instance| instance.name == window.name) {
-                Some(found) => {
+            return match listing
+                .iter()
+                .filter(|instance| instance.name == window.name)
+                .collect::<Vec<_>>()
+                .as_slice()
+            {
+                [found] => {
                     // Машина всё-таки появилась: дальше она удаляется по номеру.
                     sqlx::query(
                         "update cloud_windows set instance_id = $2
@@ -1458,9 +1463,15 @@ impl CloudService {
                     .await?;
                     Ok(false)
                 }
-                None => {
+                [] => {
                     self.mark_server_gone(window, now).await?;
                     Ok(true)
+                }
+                // Имя не доказывает принадлежность: у нескольких машин одно имя — какую
+                // удалять, не решить. Ничего не трогаем и повторим на следующем проходе.
+                _ => {
+                    self.note_ambiguity(window, "ambiguous_instance").await?;
+                    Ok(false)
                 }
             };
         };
@@ -1619,6 +1630,20 @@ impl CloudService {
         Ok(())
     }
 
+    /// Имя совпало у нескольких ресурсов: какой из них наш, не решить. Ничего не трогаем,
+    /// записываем причину и повторяем на следующем проходе.
+    async fn note_ambiguity(&self, window: &Window, error: &str) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "update cloud_windows set last_error = $2
+             where id = $1 and state in ('deleting', 'late_cleanup')",
+        )
+        .bind(window.id)
+        .bind(error)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Загрузочный диск окна: удалить, если он пережил машину, и подтвердить отсутствие.
     /// Диск ищется по номеру, а без номера — по точному имени окна в полном списке дисков
     /// его каталога. `true`: диска в списке нет, `disk_gone_at` стоит.
@@ -1634,13 +1659,35 @@ impl CloudService {
                 return Ok(false);
             }
         };
-        let by_id = disks
-            .iter()
-            .find(|disk| window.boot_disk_id.as_deref() == Some(disk.id.as_str()));
-        let Some(disk) = by_id.or_else(|| disks.iter().find(|disk| disk.name == window.name))
-        else {
-            self.mark_disk_gone(window, now).await?;
-            return Ok(true);
+        // Сохранённый номер главнее имени: чужой диск под тем же именем — не наш. Без номера
+        // диск ищется по точному имени окна, и имя должно быть единственным.
+        let disk = if let Some(boot_disk_id) = window.boot_disk_id.as_deref() {
+            match disks.iter().find(|disk| disk.id == boot_disk_id) {
+                Some(disk) => disk,
+                // Диска с нашим номером в полном списке нет: он пропал. Диск с тем же
+                // именем, но другим номером, удалять нельзя.
+                None => {
+                    self.mark_disk_gone(window, now).await?;
+                    return Ok(true);
+                }
+            }
+        } else {
+            match disks
+                .iter()
+                .filter(|disk| disk.name == window.name)
+                .collect::<Vec<_>>()
+                .as_slice()
+            {
+                [disk] => *disk,
+                [] => {
+                    self.mark_disk_gone(window, now).await?;
+                    return Ok(true);
+                }
+                _ => {
+                    self.note_ambiguity(window, "ambiguous_disk").await?;
+                    return Ok(false);
+                }
+            }
         };
         if window.boot_disk_id.is_none() {
             // С этого момента окну было за что платить: итог считается по ledger.
@@ -1686,25 +1733,38 @@ impl CloudService {
         if !disk.instance_ids.is_empty() {
             // Диск подключён к машине, хотя машина окна считается пропавшей. Если в каталоге
             // есть машина с именем окна, список в прошлый раз до неё не дошёл: снос
-            // возвращается к машине. Иначе диск отключается, ждём.
-            if let Ok(listing) = self.provider.list_instances(&window.folder_id).await
-                && let Some(found) = listing.iter().find(|instance| instance.name == window.name)
-            {
-                tracing::warn!(
-                    kind = "cloud_instance_reappeared",
-                    "the instance of a window is listed again; cleanup returns to it"
-                );
-                sqlx::query(
-                    "update cloud_windows set instance_id = $2, server_gone_at = null,
-                            delete_accepted_at = null, delete_operation_id = null,
-                            next_delete_at = $3
-                     where id = $1 and state in ('deleting', 'late_cleanup')",
-                )
-                .bind(window.id)
-                .bind(&found.id)
-                .bind(now)
-                .execute(&self.pool)
-                .await?;
+            // возвращается к машине. Имя должно быть единственным: иначе какую машину
+            // возвращать, не решить.
+            if let Ok(listing) = self.provider.list_instances(&window.folder_id).await {
+                match listing
+                    .iter()
+                    .filter(|instance| instance.name == window.name)
+                    .collect::<Vec<_>>()
+                    .as_slice()
+                {
+                    [found] => {
+                        tracing::warn!(
+                            kind = "cloud_instance_reappeared",
+                            "the instance of a window is listed again; cleanup returns to it"
+                        );
+                        sqlx::query(
+                            "update cloud_windows set instance_id = $2, server_gone_at = null,
+                                    delete_accepted_at = null, delete_operation_id = null,
+                                    next_delete_at = $3
+                             where id = $1 and state in ('deleting', 'late_cleanup')",
+                        )
+                        .bind(window.id)
+                        .bind(&found.id)
+                        .bind(now)
+                        .execute(&self.pool)
+                        .await?;
+                    }
+                    [] => {}
+                    _ => {
+                        self.note_ambiguity(window, "ambiguous_instance").await?;
+                        return Ok(false);
+                    }
+                }
             }
             return Ok(false);
         }
