@@ -285,6 +285,8 @@ pub(crate) struct CloudRunner {
     pub prepared_marker: PathBuf,
     pub prepare_failed_marker: PathBuf,
     pub prepare_group: PathBuf,
+    /// Тестовый шов: сколько первых проверок отметок изобразить недоступными.
+    pub marker_probe_failures: Option<cloud::MarkerProbeFailures>,
 }
 
 /// Что нужно знать задаче одного раннера.
@@ -368,6 +370,7 @@ fn desired(
                     prepared_marker: spec.ready_marker.with_file_name("prepared"),
                     prepare_failed_marker: spec.ready_marker.with_file_name("prepare-failed"),
                     prepare_group: spec.ready_marker.with_file_name("prepare.pgid"),
+                    marker_probe_failures: spec.marker_probe_failures.clone(),
                 }),
             },
         );

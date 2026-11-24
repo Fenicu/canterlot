@@ -429,8 +429,8 @@ impl Runner {
             Prepared::Pending => {}
         }
         let failed = cloud.prepare_failed_marker.display().to_string();
-        match self.call(&["test", "-f", &failed], Input::None).await {
-            Ok(output) if output.code == 0 => {
+        match self.wait_marker(cloud, &failed, stop).await {
+            Marker::Exists => {
                 // Прошлый запуск не досказал факт: отметка хранит код и хвост.
                 let read = self.call(&["cat", &failed], Input::None).await;
                 let (code, tail) = match read {
@@ -439,17 +439,25 @@ impl Runner {
                 };
                 return self.prepare_failed(cloud, code, &tail).await;
             }
-            Ok(_) => {}
-            Err(Unreachable) => return self.prepare_failed(cloud, 255, "").await,
+            Marker::Missing => {}
+            Marker::Deadline => {
+                let _ = self.kill_prepare(cloud).await;
+                return self.prepare_failed(cloud, -1, "").await;
+            }
+            Marker::Stopped => return false,
         }
         let prepared = cloud.prepared_marker.display().to_string();
-        match self.call(&["test", "-f", &prepared], Input::None).await {
-            Ok(output) if output.code == 0 => {
+        match self.wait_marker(cloud, &prepared, stop).await {
+            Marker::Exists => {
                 self.prepare.set(Prepared::Ready);
                 return true;
             }
-            Ok(_) => {}
-            Err(Unreachable) => return self.prepare_failed(cloud, 255, "").await,
+            Marker::Missing => {}
+            Marker::Deadline => {
+                let _ = self.kill_prepare(cloud).await;
+                return self.prepare_failed(cloud, -1, "").await;
+            }
+            Marker::Stopped => return false,
         }
         let remaining = self
             .deadline
@@ -488,6 +496,49 @@ impl Runner {
                 self.prepare_failed(cloud, -1, "").await
             }
             Err(Unreachable) => self.prepare_failed(cloud, 255, "").await,
+        }
+    }
+
+    /// Проверка отметки с повтором: обрыв SSH до запуска скрипта ещё ничего не решает, окно
+    /// может успеть. Решает только срок; до него проба повторяется с паузой носителя.
+    async fn wait_marker(
+        &self,
+        cloud: &CloudRunner,
+        path: &str,
+        stop: &mut watch::Receiver<Stop>,
+    ) -> Marker {
+        let mut backoff = self.shared.timings.backoff_min;
+        loop {
+            let simulated = cloud.marker_probe_failures.as_ref().is_some_and(|left| {
+                left.0
+                    .try_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+                        value.checked_sub(1)
+                    })
+                    .is_ok()
+            });
+            if !simulated {
+                match self.call(&["test", "-f", path], Input::None).await {
+                    Ok(output) if output.code == 0 => return Marker::Exists,
+                    Ok(_) => return Marker::Missing,
+                    Err(Unreachable) => {}
+                }
+            }
+            let remaining = self
+                .deadline
+                .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+                .unwrap_or_default();
+            if remaining.is_zero() {
+                return Marker::Deadline;
+            }
+            tokio::select! {
+                _ = sleep(backoff.min(remaining)) => {}
+                _ = stop.changed() => {
+                    if *stop.borrow() != Stop::Run {
+                        return Marker::Stopped;
+                    }
+                }
+            }
+            backoff = (backoff * 2).min(self.shared.timings.backoff_max);
         }
     }
 
@@ -865,6 +916,16 @@ impl PrepareGate {
             Ordering::SeqCst,
         );
     }
+}
+
+/// Итог одной проверки отметки подготовки.
+enum Marker {
+    Exists,
+    Missing,
+    /// Срок подключения вышел, так и не дав ответа.
+    Deadline,
+    /// Носитель останавливают: ничего не решено и ничего не отмечено.
+    Stopped,
 }
 
 /// Хвост общего вывода для факта: последние 2048 байт, срез по границе UTF-8.

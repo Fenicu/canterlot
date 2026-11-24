@@ -8,7 +8,7 @@
 use std::{
     collections::{BTreeMap, HashSet},
     path::PathBuf,
-    sync::Mutex,
+    sync::{Arc, Mutex, atomic::AtomicU32},
     time::Duration,
 };
 
@@ -41,6 +41,19 @@ impl AttachOutcome {
     }
 }
 
+/// Только для тестов: сколько первых проверок отметок подготовки изобразить недоступными,
+/// как будто SSH пропадал ненадолго. В сравнении подключений шов не участвует.
+#[derive(Clone, Debug, Default)]
+pub struct MarkerProbeFailures(pub Arc<AtomicU32>);
+
+impl PartialEq for MarkerProbeFailures {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for MarkerProbeFailures {}
+
 /// Всё, что нужно носителю для облачного раннера, кроме обмена с хабом.
 #[derive(Clone, Debug)]
 pub struct CloudConfig {
@@ -57,6 +70,9 @@ pub struct CloudConfig {
     /// Префикс повышения прав для подготовки; `None` — боевой `sudo -n`. Тесты подменяют его,
     /// когда `sshd` пускает обычным пользователем.
     pub sudo: Option<String>,
+    /// Только для тестов: сколько первых проверок отметок подготовки изобразить недоступными,
+    /// как будто SSH пропадал ненадолго. `None` — боевое поведение.
+    pub marker_probe_failures: Option<MarkerProbeFailures>,
 }
 
 impl Default for CloudConfig {
@@ -69,6 +85,7 @@ impl Default for CloudConfig {
             ready_timeout: Duration::from_secs(15 * 60),
             egress_env: PathBuf::from("/etc/canterlot/egress.env"),
             sudo: None,
+            marker_probe_failures: None,
         }
     }
 }
@@ -115,6 +132,8 @@ pub struct CloudSpec {
     pub prepare_script: String,
     pub sudo: String,
     pub egress_env: PathBuf,
+    /// Тестовый шов: см. [`CloudConfig::marker_probe_failures`].
+    pub marker_probe_failures: Option<MarkerProbeFailures>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -325,6 +344,7 @@ impl CloudState {
                     prepare_script: attachment.prepare_script.clone(),
                     sudo: self.config.sudo(),
                     egress_env: self.config.egress_env.clone(),
+                    marker_probe_failures: self.config.marker_probe_failures.clone(),
                 }
             })
             .collect();

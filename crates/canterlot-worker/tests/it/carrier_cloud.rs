@@ -21,7 +21,7 @@ use canterlot_worker::{
     carrier::{
         self, AssignedRunner, CarrierSettings, Observation, RunnerControl, RunnerCredentials,
         SecretToken, Timings, TokenError,
-        cloud::{AttachOutcome, CloudConfig, CloudState},
+        cloud::{AttachOutcome, CloudConfig, CloudState, MarkerProbeFailures},
         commands::{CarrierCommands, CommandError, FactSink},
         stage::{RunnerTarget, Stager, StagerSettings},
     },
@@ -134,6 +134,8 @@ struct Fixture {
 struct Options {
     assigned: bool,
     ready_timeout: Duration,
+    /// Сколько первых проверок отметок подготовки изобразить недоступными.
+    marker_probe_failures: Option<MarkerProbeFailures>,
 }
 
 impl Default for Options {
@@ -141,6 +143,7 @@ impl Default for Options {
         Self {
             assigned: true,
             ready_timeout: Duration::from_secs(4),
+            marker_probe_failures: None,
         }
     }
 }
@@ -204,6 +207,7 @@ impl Fixture {
             egress_env: egress.clone(),
             // `sshd` пускает обычным пользователем: боевой `sudo -n` в тесте не нужен.
             sudo: Some(String::new()),
+            marker_probe_failures: options.marker_probe_failures.clone(),
         };
         let cloud = Arc::new(CloudState::open(cloud_config.clone()));
         let sink = Arc::new(Sink::default());
@@ -300,6 +304,7 @@ impl Fixture {
             ready_timeout: self.ready_timeout,
             egress_env: self.egress.clone(),
             sudo: Some(String::new()),
+            marker_probe_failures: None,
         }
     }
 
@@ -843,4 +848,32 @@ async fn a_hung_prepare_script_is_killed_with_its_children() {
         !hung_prepare_sleep()
     })
     .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_transient_ssh_failure_before_the_script_does_not_fail_the_window() {
+    let failures = MarkerProbeFailures(Arc::new(AtomicU32::new(1)));
+    let fx = Fixture::start(Options {
+        marker_probe_failures: Some(failures.clone()),
+        ..Options::default()
+    })
+    .await;
+    write_marker(&fx);
+    let counter = fx.sshd.path().join("prepare-runs-once");
+    let script = format!("echo run >> {}\n", counter.display());
+    let command = fx.attach_scripted("window-transient", fx.sshd.host_key_public(), &script);
+    fx.commands.handle(&command).await.unwrap();
+    // Первая проверка отметки «недоступна», но срок ещё не вышел: окно готовится как обычно.
+    wait_outcome(&fx, "started").await;
+    until("the worker after the transient failure", || {
+        fx.hello_count() >= 1
+    })
+    .await;
+    assert_eq!(fs::read_to_string(&counter).unwrap().lines().count(), 1);
+    assert_eq!(
+        failures.0.load(Ordering::SeqCst),
+        0,
+        "the transient failure seam was used"
+    );
+    assert!(fx.prepare_facts().is_empty());
 }
