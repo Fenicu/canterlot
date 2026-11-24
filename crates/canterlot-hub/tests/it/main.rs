@@ -30,6 +30,7 @@ mod cloud_http;
 mod cloud_router;
 mod cloud_timeweb;
 mod cloud_windows;
+mod cloud_yandex;
 mod compaction;
 mod composer_drafts;
 mod config;

@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod fake_timeweb;
+pub mod fake_yandex;
 pub mod mmdb;
 #[cfg(feature = "fault-injection")]
 pub mod settings_process_guard;
