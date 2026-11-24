@@ -406,6 +406,10 @@ harness_cleanup() {
     if [ "${CASE_FAILED:-0}" != "0" ] || { [ "${mode}" = "trap" ] && [ "${IN_CASE:-0}" = "1" ]; }; then
         if [ -n "${FAKE_ROOT:-}" ]; then
             harness_log "keeping failed case dir ${FAKE_ROOT}"
+            if [ -f "${FAKE_ROOT}/cutover.log" ]; then
+                harness_log "tail of ${FAKE_ROOT}/cutover.log:"
+                tail -n 40 "${FAKE_ROOT}/cutover.log" | sed 's/^/    | /' || true
+            fi
             FAKE_ROOT=""
         fi
         return 0
