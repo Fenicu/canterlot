@@ -2080,9 +2080,7 @@ async fn too_little_time_to_the_parent_deadline_skips_the_replacement(pool: PgPo
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_replacement_keeps_the_parent_quote_age_and_is_repriced_before_its_first_post(
-    pool: PgPool,
-) -> TestResult {
+async fn a_replacement_is_repriced_before_its_first_post(pool: PgPool) -> TestResult {
     let rig = rig(pool).await;
     enable_pushes(&rig.pool).await;
     rig.set_budget(10_000_000).await;
@@ -2106,11 +2104,6 @@ async fn a_replacement_keeps_the_parent_quote_age_and_is_repriced_before_its_fir
     let replacements = rig.replacements_of(id).await;
     assert_eq!(replacements.len(), 1);
     let replacement = &replacements[0];
-    assert_eq!(
-        replacement.created_at,
-        rig.window(id).await.created_at,
-        "the replacement carries the parent's quote timestamp"
-    );
     // Первый POST замены спрашивает цену заново: рост резерва закрывает окно без вызова.
     restarted.tick(end + TimeDelta::seconds(1)).await;
     let replacement = rig.window(replacement.id).await;

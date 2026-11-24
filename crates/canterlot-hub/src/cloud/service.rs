@@ -612,7 +612,8 @@ impl CloudService {
         window: &mut Window,
         now: DateTime<Utc>,
     ) -> Result<bool, sqlx::Error> {
-        if now - window.created_at < PRICE_QUOTE_TTL {
+        // Замена несёт снимок цен родителя, а он мог устареть: её цена спрашивается всегда.
+        if window.replaces_window_id.is_none() && now - window.created_at < PRICE_QUOTE_TTL {
             return Ok(true);
         }
         // Вид машины окна уже решён при его создании: цена спрашивается под него.

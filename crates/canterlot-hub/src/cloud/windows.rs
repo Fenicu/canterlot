@@ -902,15 +902,12 @@ pub async fn on_preempted_cleanup_done_in_tx(
                 .execute(&mut *conn)
                 .await?;
             // Предел замены — абсолютный предел родителя, а не минуты от вызова создания.
-            // Снимок цен замены — снимок родителя: его метка времени едет вместе с ним, чтобы
-            // перед первым POST старая цена была перепроверена, а не принята за свежую.
             sqlx::query(
-                "update cloud_windows set hard_cap_at = $2, created_at = $3
+                "update cloud_windows set hard_cap_at = $2
                  where id = $1 and hard_cap_at is null",
             )
             .bind(id)
             .bind(deadline)
-            .bind(window.created_at)
             .execute(&mut *conn)
             .await?;
             crate::notify::enqueue_cloud_alert_in_tx(
