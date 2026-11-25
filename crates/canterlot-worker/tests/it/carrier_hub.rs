@@ -15,7 +15,6 @@ use canterlot_worker::{
     session::{SessionState, Worker},
     store::WorkerStore,
 };
-use sqlx::PgPool;
 use tokio::{sync::watch, time::timeout};
 
 use crate::sshd::{ALIAS, TestSshd};
@@ -46,8 +45,9 @@ fn runners_v1_is_advertised_only_by_a_worker_that_carries_runners() {
     assert!(canterlot_worker::session::OPTIONAL_CAPABILITIES.contains(&"runners_v1"));
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn carrier_worker_brings_a_runner_online_through_the_real_hub(pool: PgPool) {
+#[tokio::test]
+async fn carrier_worker_brings_a_runner_online_through_the_real_hub() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = spawn_test_hub(
         pool.clone(),
         HubTimers {
@@ -216,8 +216,9 @@ fn git_in(dir: &std::path::Path, args: &[&str]) -> String {
 /// Задача владельца с `source` и `outputs` от `job run` до `OwnerJobFinished` через настоящий
 /// хаб: размещение на раннере, подготовка коммита, запуск воркером раннера, сбор результатов,
 /// уборка и итог в команде, которая ждала.
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn an_owner_job_with_source_and_outputs_runs_on_the_runner_end_to_end(pool: PgPool) {
+#[tokio::test]
+async fn an_owner_job_with_source_and_outputs_runs_on_the_runner_end_to_end() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_worker::owner_jobs::client::{RunArgs, execute};
     let hub = spawn_test_hub(
         pool.clone(),

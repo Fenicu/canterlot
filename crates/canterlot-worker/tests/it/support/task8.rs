@@ -352,8 +352,9 @@ mod real {
         .unwrap();
     }
 
-    #[sqlx::test(migrations = "../canterlot-hub/migrations")]
-    async fn data_binding_mismatch_restarts_the_whole_connection(pool: PgPool) {
+    #[tokio::test]
+    async fn data_binding_mismatch_restarts_the_whole_connection() {
+        let pool = canterlot_hub::testkit::db().await;
         let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
         let proxy = DataProxy::start(&hub, false, true).await;
         let (_directory, _secrets, mut config, store) = fixture(&pool, &hub).await;
@@ -379,10 +380,9 @@ mod real {
         stop_hub(hub).await;
     }
 
-    #[sqlx::test(migrations = "../canterlot-hub/migrations")]
-    async fn data_stream_failure_reattaches_under_same_connection_id_without_restarting_control(
-        pool: PgPool,
-    ) {
+    #[tokio::test]
+    async fn data_stream_failure_reattaches_under_same_connection_id_without_restarting_control() {
+        let pool = canterlot_hub::testkit::db().await;
         let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
         let proxy = DataProxy::start(&hub, false, true).await;
         let (_directory, _secrets, mut config, store) = fixture(&pool, &hub).await;
@@ -456,8 +456,9 @@ mod real {
         )
     }
 
-    #[sqlx::test(migrations = "../canterlot-hub/migrations")]
-    async fn sj_batches_are_acked_and_compacted(pool: PgPool) {
+    #[tokio::test]
+    async fn sj_batches_are_acked_and_compacted() {
+        let pool = canterlot_hub::testkit::db().await;
         let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
         let proxy = DataProxy::start(&hub, false, true).await;
         let (directory, _secrets, mut config, store) = fixture(&pool, &hub).await;
@@ -504,8 +505,9 @@ mod real {
         stop_hub(hub).await;
     }
 
-    #[sqlx::test(migrations = "../canterlot-hub/migrations")]
-    async fn lost_sj_ack_resends_once_then_restarts_data_stream_only(pool: PgPool) {
+    #[tokio::test]
+    async fn lost_sj_ack_resends_once_then_restarts_data_stream_only() {
+        let pool = canterlot_hub::testkit::db().await;
         let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
         let proxy = DataProxy::start(&hub, false, true).await;
         proxy
@@ -549,8 +551,9 @@ mod real {
         stop_hub(hub).await;
     }
 
-    #[sqlx::test(migrations = "../canterlot-hub/migrations")]
-    async fn dispatch_is_blocked_until_the_report_and_proceeds_after(pool: PgPool) {
+    #[tokio::test]
+    async fn dispatch_is_blocked_until_the_report_and_proceeds_after() {
+        let pool = canterlot_hub::testkit::db().await;
         let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
         let proxy = DataProxy::start(&hub, true, true).await;
         let (directory, _secrets, mut config, store) = fixture(&pool, &hub).await;

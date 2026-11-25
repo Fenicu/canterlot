@@ -491,8 +491,9 @@ async fn restart(pool: &PgPool, hub: TestHub, faults: Faults) -> TestHub {
     restarted
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn stream_break_before_ack_replays_same_range(pool: PgPool) {
+#[tokio::test]
+async fn stream_break_before_ack_replays_same_range() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
     let fixture = Fixture::new(&pool, &hub).await;
     let first = hub.faults.pause_next(Point::BeforeCjCommit);
@@ -542,8 +543,9 @@ async fn stream_break_before_ack_replays_same_range(pool: PgPool) {
     stop_hub(hub).await;
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn hub_restart_redelivers_without_duplicates(pool: PgPool) {
+#[tokio::test]
+async fn hub_restart_redelivers_without_duplicates() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
     let fixture = Fixture::new(&pool, &hub).await;
     let before_send = hub.faults.pause_next(Point::BeforeCommandSend);
@@ -604,8 +606,9 @@ async fn hub_restart_redelivers_without_duplicates(pool: PgPool) {
     stop_hub(hub).await;
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn transport_errors_do_not_repeat_commands(pool: PgPool) {
+#[tokio::test]
+async fn transport_errors_do_not_repeat_commands() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut hub = spawn_test_hub(pool.clone(), hub_timers()).await;
     let fixture = Fixture::new(&pool, &hub).await;
     let pause = hub.faults.pause_next(Point::BeforeCjCommit);
@@ -661,8 +664,9 @@ async fn transport_errors_do_not_repeat_commands(pool: PgPool) {
     stop_hub(hub).await;
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn lost_acks_do_not_duplicate_facts(pool: PgPool) {
+#[tokio::test]
+async fn lost_acks_do_not_duplicate_facts() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
     let mut fixture = Fixture::new(&pool, &hub).await;
     hub.faults.drop_next_acks(usize::MAX);
@@ -701,8 +705,9 @@ async fn lost_acks_do_not_duplicate_facts(pool: PgPool) {
     stop_hub(hub).await;
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn revoked_machine_cannot_reconnect(pool: PgPool) {
+#[tokio::test]
+async fn revoked_machine_cannot_reconnect() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
     let mut fixture = Fixture::new(&pool, &hub).await;
     let mut worker = fixture.start();
@@ -763,8 +768,9 @@ async fn revoked_machine_cannot_reconnect(pool: PgPool) {
     stop_hub(hub).await;
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn invalid_command_id_does_not_wedge_real_hub_cj_cursor(pool: PgPool) {
+#[tokio::test]
+async fn invalid_command_id_does_not_wedge_real_hub_cj_cursor() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_proto::{
         limits::MAX_MESSAGE_BYTES,
         worker::v1::{Command, ControlDown, control_down},
@@ -822,8 +828,9 @@ async fn invalid_command_id_does_not_wedge_real_hub_cj_cursor(pool: PgPool) {
     stop_hub(hub).await;
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn rotated_token_reconnects_same_data_dir_without_cursor_divergence(pool: PgPool) {
+#[tokio::test]
+async fn rotated_token_reconnects_same_data_dir_without_cursor_divergence() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
     let mut fixture = Fixture::new(&pool, &hub).await;
     let mut worker = fixture.start();

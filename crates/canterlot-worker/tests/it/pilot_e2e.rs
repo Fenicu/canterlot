@@ -22,15 +22,15 @@ use canterlot_worker::config::SecretConfig;
 use pilot::*;
 use serde_json::{Value, json};
 use sha2::Digest as _;
-use sqlx::PgPool;
 use std::sync::{Mutex, OnceLock};
 use tokio::time::{sleep, timeout};
 use uuid::Uuid;
 
 // ---------------------------------------------------------------- сценарии
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn pilot_flow_over_http_and_wss(pool: PgPool) {
+#[tokio::test]
+async fn pilot_flow_over_http_and_wss() {
+    let pool = canterlot_hub::testkit::db().await;
     let p = Pilot::new(&pool, PilotOptions::default()).await;
 
     let machines = p.get("/api/v1/machines").await;
@@ -316,8 +316,9 @@ async fn pilot_flow_over_http_and_wss(pool: PgPool) {
     assert_eq!(ws.connections, 2);
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn crunch_five_hour_end_to_end(pool: PgPool) {
+#[tokio::test]
+async fn crunch_five_hour_end_to_end() {
+    let pool = canterlot_hub::testkit::db().await;
     let p = Pilot::new(&pool, PilotOptions::default()).await;
     let mut ws = p.ws().await;
     ws.subscribe("list", "conversations").await;
@@ -448,8 +449,9 @@ async fn crunch_five_hour_end_to_end(pool: PgPool) {
     check_streams(&pool, p.owner, &ws).await;
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn weekly_reserve_end_to_end(pool: PgPool) {
+#[tokio::test]
+async fn weekly_reserve_end_to_end() {
+    let pool = canterlot_hub::testkit::db().await;
     let p = Pilot::new(&pool, PilotOptions::default()).await;
     let mut ws = p.ws().await;
     ws.subscribe("list", "conversations").await;
@@ -638,8 +640,9 @@ async fn weekly_reserve_end_to_end(pool: PgPool) {
     check_streams(&pool, p.owner, &ws).await;
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn machine_metrics_and_stalled_activity_over_wss(pool: PgPool) {
+#[tokio::test]
+async fn machine_metrics_and_stalled_activity_over_wss() {
+    let pool = canterlot_hub::testkit::db().await;
     let interval = ms(500);
     let p = Pilot::new(
         &pool,
@@ -827,8 +830,9 @@ async fn machine_metrics_and_stalled_activity_over_wss(pool: PgPool) {
     check_streams(&pool, p.owner, &ws).await;
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn scheduled_message_end_to_end(pool: PgPool) {
+#[tokio::test]
+async fn scheduled_message_end_to_end() {
+    let pool = canterlot_hub::testkit::db().await;
     let p = Pilot::new(&pool, PilotOptions::default()).await;
     let mut ws = p.ws().await;
     ws.subscribe("list", "conversations").await;
@@ -925,8 +929,9 @@ async fn scheduled_message_end_to_end(pool: PgPool) {
     check_streams(&pool, p.owner, &ws).await;
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn internal_kinds_never_leave_the_hub_over_wss_in_the_full_flow(pool: PgPool) {
+#[tokio::test]
+async fn internal_kinds_never_leave_the_hub_over_wss_in_the_full_flow() {
+    let pool = canterlot_hub::testkit::db().await;
     let p = Pilot::new(&pool, PilotOptions::default()).await;
     let mut ws = p.ws().await;
     ws.subscribe("list", "conversations").await;
@@ -1085,8 +1090,9 @@ fn png(width: u32, height: u32, tail: usize) -> Vec<u8> {
     bytes
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn view_image_step_shows_media_on_the_tool_block_end_to_end(pool: PgPool) {
+#[tokio::test]
+async fn view_image_step_shows_media_on_the_tool_block_end_to_end() {
+    let pool = canterlot_hub::testkit::db().await;
     let p = Pilot::new(&pool, PilotOptions::default()).await;
     let mut ws = p.ws().await;
     let id = p.create("synthetic", false).await;
@@ -1259,8 +1265,9 @@ async fn echo_turn(pilot: &Pilot, conversation: Uuid, text: &str) -> (Uuid, Stri
     (command, out)
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn preset_change_reaches_the_adapter_from_the_next_turn(pool: PgPool) {
+#[tokio::test]
+async fn preset_change_reaches_the_adapter_from_the_next_turn() {
+    let pool = canterlot_hub::testkit::db().await;
     let p = Pilot::new(&pool, PilotOptions::default()).await;
     let preset = p
         .post(
@@ -1340,8 +1347,9 @@ async fn preset_change_reaches_the_adapter_from_the_next_turn(pool: PgPool) {
     assert!(echo4.contains("mode=clean"), "{echo4}");
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn permission_decision_reaches_the_agent_and_is_applied(pool: PgPool) {
+#[tokio::test]
+async fn permission_decision_reaches_the_agent_and_is_applied() {
+    let pool = canterlot_hub::testkit::db().await;
     let p = Pilot::new(&pool, PilotOptions::default()).await;
     let id = p.create("synthetic", false).await;
     let submitted = p
@@ -1430,8 +1438,9 @@ async fn permission_decision_reaches_the_agent_and_is_applied(pool: PgPool) {
 
 /// Агент через синтетический вызов применяет пресет к своей сессии:
 /// вызов `presets.apply` ставит подвешенную смену, следующий ход видит ревизию.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn synthetic_agent_call_applies_a_preset_end_to_end(pool: PgPool) {
+#[tokio::test]
+async fn synthetic_agent_call_applies_a_preset_end_to_end() {
+    let pool = canterlot_hub::testkit::db().await;
     let p = Pilot::new(&pool, PilotOptions::default()).await;
     let preset = p
         .post(
@@ -1496,8 +1505,9 @@ async fn synthetic_agent_call_applies_a_preset_end_to_end(pool: PgPool) {
 
 /// Настоящий воркер ведёт очередь, настоящий хаб её отражает: держатель и
 /// ожидающий видны в чтении машины, освобождение двигает очередь.
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn lease_queue_of_a_real_worker_reaches_the_machine_view(pool: PgPool) {
+#[tokio::test]
+async fn lease_queue_of_a_real_worker_reaches_the_machine_view() {
+    let pool = canterlot_hub::testkit::db().await;
     let p = Pilot::new(&pool, PilotOptions::default()).await;
     let socket = p.config.data_dir.join("runtime/canterlot/lease.sock");
     let wrap = |kind: &str, release: &std::path::Path| {
@@ -1727,8 +1737,9 @@ fn assert_secrets_clean(
     }
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn secret_value_reaches_only_the_file_and_never_the_stores(pool: PgPool) {
+#[tokio::test]
+async fn secret_value_reaches_only_the_file_and_never_the_stores() {
+    let pool = canterlot_hub::testkit::db().await;
     let capture = LogCapture::install();
     let base = SecretBase::new();
     let p = Pilot::new(
@@ -1928,8 +1939,9 @@ async fn secret_value_reaches_only_the_file_and_never_the_stores(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn a_declined_request_never_creates_a_file(pool: PgPool) {
+#[tokio::test]
+async fn a_declined_request_never_creates_a_file() {
+    let pool = canterlot_hub::testkit::db().await;
     let base = SecretBase::new();
     let p = Pilot::new(
         &pool,

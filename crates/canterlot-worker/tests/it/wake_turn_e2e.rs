@@ -166,8 +166,9 @@ impl Bench {
     }
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn wake_turn_of_cli_2_1_326_leaves_the_session_idle(pool: PgPool) {
+#[tokio::test]
+async fn wake_turn_of_cli_2_1_326_leaves_the_session_idle() {
+    let pool = canterlot_hub::testkit::db().await;
     let b = Bench::new(&pool, vec![first_turn_then_wake(600)]).await;
     let id = b.session().await;
     let submitted = b.p.submit(id, "Запусти фоновую задачу", &[]).await;
@@ -237,8 +238,9 @@ fn streamed(wakes: usize, pause_ms: u64) -> Vec<Value> {
     frames
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn streamed_wake_turn_leaves_the_session_idle(pool: PgPool) {
+#[tokio::test]
+async fn streamed_wake_turn_leaves_the_session_idle() {
+    let pool = canterlot_hub::testkit::db().await;
     let b = Bench::new(&pool, vec![streamed(1, 400)]).await;
     let id = b.session().await;
     let submitted = b.p.submit(id, "Запусти фоновую задачу", &[]).await;
@@ -246,8 +248,9 @@ async fn streamed_wake_turn_leaves_the_session_idle(pool: PgPool) {
     b.settles_idle(id, 15, "after the streamed wake turn").await;
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn several_wake_turns_in_a_row_leave_the_session_idle(pool: PgPool) {
+#[tokio::test]
+async fn several_wake_turns_in_a_row_leave_the_session_idle() {
+    let pool = canterlot_hub::testkit::db().await;
     let b = Bench::new(&pool, vec![streamed(3, 300)]).await;
     let id = b.session().await;
     let submitted = b.p.submit(id, "Запусти фоновую задачу", &[]).await;
@@ -255,8 +258,9 @@ async fn several_wake_turns_in_a_row_leave_the_session_idle(pool: PgPool) {
     b.settles_idle(id, 25, "after three wake turns").await;
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn input_queued_during_a_wake_turn_is_delivered_after_it(pool: PgPool) {
+#[tokio::test]
+async fn input_queued_during_a_wake_turn_is_delivered_after_it() {
+    let pool = canterlot_hub::testkit::db().await;
     let second = vec![
         init(),
         message_start("m2"),
@@ -300,8 +304,9 @@ fn merged() -> Vec<Value> {
     ]
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn message_taken_into_a_wake_turn_ends_with_it(pool: PgPool) {
+#[tokio::test]
+async fn message_taken_into_a_wake_turn_ends_with_it() {
+    let pool = canterlot_hub::testkit::db().await;
     let b = Bench::new(&pool, vec![notified(), merged()]).await;
     let id = b.session().await;
     let first = b.p.submit(id, "Запусти фоновую задачу", &[]).await;
@@ -313,8 +318,9 @@ async fn message_taken_into_a_wake_turn_ends_with_it(pool: PgPool) {
 }
 
 /// Следом за поглощённым сообщением уходит ещё одно: очередь не заперта.
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn queue_keeps_moving_after_a_merged_wake_turn(pool: PgPool) {
+#[tokio::test]
+async fn queue_keeps_moving_after_a_merged_wake_turn() {
+    let pool = canterlot_hub::testkit::db().await;
     let third = vec![
         init(),
         message_start("m3"),

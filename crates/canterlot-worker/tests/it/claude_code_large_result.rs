@@ -208,8 +208,9 @@ fn sha_hex(text: &str) -> String {
         .collect()
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn large_tool_result_without_deltas_reaches_the_owner(pool: PgPool) {
+#[tokio::test]
+async fn large_tool_result_without_deltas_reaches_the_owner() {
+    let pool = canterlot_hub::testkit::db().await;
     let timers = HubTimers {
         dispatch_sweep: Duration::from_millis(20),
         ..Default::default()

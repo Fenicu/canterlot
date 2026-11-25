@@ -369,8 +369,9 @@ impl Bench {
     }
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn spawn_isolated_commit_summary_accept_cleanup(pool: PgPool) {
+#[tokio::test]
+async fn spawn_isolated_commit_summary_accept_cleanup() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut b = Bench::new(&pool).await;
     let repo = b.repo("repo");
     let orchestrator = b.session("synthetic", &repo).await;
@@ -469,8 +470,9 @@ async fn spawn_isolated_commit_summary_accept_cleanup(pool: PgPool) {
     b.finish().await;
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn dirty_worktree_waits_for_force_and_keeps_unmerged_commits(pool: PgPool) {
+#[tokio::test]
+async fn dirty_worktree_waits_for_force_and_keeps_unmerged_commits() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut b = Bench::new(&pool).await;
     let repo = b.repo("repo");
     let orchestrator = b.session("synthetic", &repo).await;
@@ -526,8 +528,9 @@ async fn dirty_worktree_waits_for_force_and_keeps_unmerged_commits(pool: PgPool)
     b.finish().await;
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn accept_of_a_working_child_stops_it_and_reports_only_the_removal(pool: PgPool) {
+#[tokio::test]
+async fn accept_of_a_working_child_stops_it_and_reports_only_the_removal() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut b = Bench::new(&pool).await;
     let repo = b.repo("repo");
     let orchestrator = b.session("synthetic", &repo).await;
@@ -570,8 +573,9 @@ async fn accept_of_a_working_child_stops_it_and_reports_only_the_removal(pool: P
 }
 
 /// Потомок сам запускает потомка: тот строится от ветки родителя, в той же группе видимости.
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn nested_isolated_spawn_builds_on_the_parents_branch(pool: PgPool) {
+#[tokio::test]
+async fn nested_isolated_spawn_builds_on_the_parents_branch() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut b = Bench::new(&pool).await;
     let repo = b.repo("repo");
     let root = b.session("synthetic", &repo).await;
@@ -615,8 +619,9 @@ async fn nested_isolated_spawn_builds_on_the_parents_branch(pool: PgPool) {
     b.finish().await;
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn failed_worktree_reaches_the_parent(pool: PgPool) {
+#[tokio::test]
+async fn failed_worktree_reaches_the_parent() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut b = Bench::new(&pool).await;
     let work = b.p.work.clone();
     let parent = b.session("synthetic", &work).await;
@@ -673,8 +678,9 @@ async fn result_waits_for_orchestrator(b: &Bench, orchestrator: Uuid, gate: &Pat
     assert_eq!(b.reports(orchestrator).await.len(), 1);
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn subscription_survives_orchestrator_restart(pool: PgPool) {
+#[tokio::test]
+async fn subscription_survives_orchestrator_restart() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut b = Bench::new(&pool).await;
     let work = b.p.work.clone();
     let orchestrator = b.session("synthetic", &work).await;
@@ -685,8 +691,9 @@ async fn subscription_survives_orchestrator_restart(pool: PgPool) {
     b.finish().await;
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn subscription_survives_killed_orchestrator(pool: PgPool) {
+#[tokio::test]
+async fn subscription_survives_killed_orchestrator() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut b = Bench::new(&pool).await;
     let work = b.p.work.clone();
     let orchestrator = b.session("synthetic", &work).await;
@@ -705,8 +712,9 @@ async fn subscription_survives_killed_orchestrator(pool: PgPool) {
 
 /// Двойник Claude Code зовёт `session_spawn` через настоящий MCP: процесс-ретранслятор, брокер
 /// адаптера и сопровождение. Владелец решает по HTTP, итог приходит родителю обычным вводом.
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn approval_end_to_end_over_http_and_mcp(pool: PgPool) {
+#[tokio::test]
+async fn approval_end_to_end_over_http_and_mcp() {
+    let pool = canterlot_hub::testkit::db().await;
     let cli = tempfile::tempdir().unwrap();
     let executable = cli.path().join("fake-cli");
     fake_exec::write_executable(&executable, include_str!("support/fake_claude.py"), 0o700);
@@ -800,8 +808,9 @@ async fn approval_end_to_end_over_http_and_mcp(pool: PgPool) {
 
 /// Настройку предлагает MCP-инструмент, карточку решает владелец по HTTP, применение и
 /// сообщение агенту идут через те же задания и события, что и у настоящего хаба.
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn settings_proposal_end_to_end_over_http_and_mcp(pool: PgPool) {
+#[tokio::test]
+async fn settings_proposal_end_to_end_over_http_and_mcp() {
+    let pool = canterlot_hub::testkit::db().await;
     let cli = tempfile::tempdir().unwrap();
     let executable = cli.path().join("fake-cli");
     fake_exec::write_executable(&executable, include_str!("support/fake_claude.py"), 0o700);
@@ -907,8 +916,9 @@ async fn settings_proposal_end_to_end_over_http_and_mcp(pool: PgPool) {
     b.finish().await;
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn approval_card_holds_nothing_and_a_refusal_starts_nothing(pool: PgPool) {
+#[tokio::test]
+async fn approval_card_holds_nothing_and_a_refusal_starts_nothing() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut b = Bench::new(&pool).await;
     b.whitelist(json!([])).await;
     let work = b.p.work.clone();
@@ -1099,13 +1109,15 @@ async fn harness_reaches_the_tools(pool: PgPool, harness: &str) {
     b.finish().await;
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn synthetic_harness_name_reaches_the_tools(pool: PgPool) {
+#[tokio::test]
+async fn synthetic_harness_name_reaches_the_tools() {
+    let pool = canterlot_hub::testkit::db().await;
     harness_reaches_the_tools(pool, "synthetic").await;
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn stop_of_child_notifies_parent(pool: PgPool) {
+#[tokio::test]
+async fn stop_of_child_notifies_parent() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut b = Bench::new(&pool).await;
     let work = b.p.work.clone();
     let parent = b.session("synthetic", &work).await;
@@ -1129,8 +1141,9 @@ async fn stop_of_child_notifies_parent(pool: PgPool) {
     b.finish().await;
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn loop_is_stopped_end_to_end(pool: PgPool) {
+#[tokio::test]
+async fn loop_is_stopped_end_to_end() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut b = Bench::new(&pool).await;
     let work = b.p.work.clone();
     let first = b.session("synthetic", &work).await;
@@ -1175,8 +1188,9 @@ async fn loop_is_stopped_end_to_end(pool: PgPool) {
 
 /// D16: событие несёт глубину подписки, поэтому после него цепочка считается заново. Цикл через
 /// события глубиной не ловится, его держит предел частоты пары.
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn event_after_message_lowers_depth_and_the_rate_limit_stops_the_loop(pool: PgPool) {
+#[tokio::test]
+async fn event_after_message_lowers_depth_and_the_rate_limit_stops_the_loop() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut b = Bench::new(&pool).await;
     let work = b.p.work.clone();
     let first = b.session("synthetic", &work).await;
@@ -1225,8 +1239,9 @@ async fn event_after_message_lowers_depth_and_the_rate_limit_stops_the_loop(pool
     b.finish().await;
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn send_to_a_stopped_target_is_heard_after_the_owner_resumes_it(pool: PgPool) {
+#[tokio::test]
+async fn send_to_a_stopped_target_is_heard_after_the_owner_resumes_it() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut b = Bench::new(&pool).await;
     let work = b.p.work.clone();
     let sender = b.session("synthetic", &work).await;
@@ -1261,8 +1276,9 @@ async fn send_to_a_stopped_target_is_heard_after_the_owner_resumes_it(pool: PgPo
 
 /// Фон кончился намного позже хода, ход пробуждения начался сразу за ним: окно тишины должно
 /// отсчитываться от конца фона, иначе родитель получит итог первого хода и оглохнет.
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn wake_turn_right_after_background_is_the_reported_result(pool: PgPool) {
+#[tokio::test]
+async fn wake_turn_right_after_background_is_the_reported_result() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut b = Bench::new(&pool).await;
     let work = b.p.work.clone();
     let parent = b.session("synthetic", &work).await;
@@ -1292,8 +1308,9 @@ async fn wake_turn_right_after_background_is_the_reported_result(pool: PgPool) {
 }
 
 /// Ход пробуждения начался уже после окна тишины: первый итог ушёл, и второй не должен пропасть.
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn wake_turn_after_the_quiet_window_is_still_heard(pool: PgPool) {
+#[tokio::test]
+async fn wake_turn_after_the_quiet_window_is_still_heard() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut b = Bench::new(&pool).await;
     let work = b.p.work.clone();
     let parent = b.session("synthetic", &work).await;
@@ -1326,8 +1343,9 @@ async fn wake_turn_after_the_quiet_window_is_still_heard(pool: PgPool) {
 
 /// Отложенная смена инструкций перезапускает CLI после фона, без ввода. Сессия остаётся той же:
 /// итог один, следующее сообщение доходит до нового процесса.
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn deferred_restart_keeps_the_session_and_its_subscription(pool: PgPool) {
+#[tokio::test]
+async fn deferred_restart_keeps_the_session_and_its_subscription() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut b = Bench::new(&pool).await;
     let work = b.p.work.clone();
     let parent = b.session("synthetic", &work).await;

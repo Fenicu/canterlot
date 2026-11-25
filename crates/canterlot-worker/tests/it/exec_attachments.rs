@@ -16,16 +16,18 @@ use std::{
 use tokio::time::{sleep, timeout};
 use uuid::Uuid;
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn input_is_not_transmitted_until_all_attachments_published(pool: PgPool) {
+#[tokio::test]
+async fn input_is_not_transmitted_until_all_attachments_published() {
+    let pool = canterlot_hub::testkit::db().await;
     transmission_waits_for_attachments(pool).await;
 }
 
 // sqlx называет базу теста по его пути и перед созданием удаляет одноимённую:
 // дочерний процесс под strace с тем же именем теста сносил базу родителя.
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
+#[tokio::test]
 #[ignore = "запускается под strace из execution_directory_parents_are_synced_before_ownership_and_readiness"]
-async fn transmission_waits_for_attachments_under_strace(pool: PgPool) {
+async fn transmission_waits_for_attachments_under_strace() {
+    let pool = canterlot_hub::testkit::db().await;
     transmission_waits_for_attachments(pool).await;
 }
 
@@ -45,8 +47,9 @@ async fn transmission_waits_for_attachments(pool: PgPool) {
     assert!(f.published(first).exists() && f.published(second).exists());
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn hub_restart_during_fetch_resumes_after_reconnect_without_rejecting(pool: PgPool) {
+#[tokio::test]
+async fn hub_restart_during_fetch_resumes_after_reconnect_without_rejecting() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut f = Fixture::new(&pool).await;
     let bytes = vec![11; 4 * 1024 * 1024];
     let id = f.ready(&bytes).await;
@@ -130,8 +133,9 @@ async fn hub_restart_during_fetch_resumes_after_reconnect_without_rejecting(pool
     assert_eq!(shipped(Body::CommandRejected(Default::default())), 0);
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn stop_execution_is_handled_while_a_fetch_is_in_progress(pool: PgPool) {
+#[tokio::test]
+async fn stop_execution_is_handled_while_a_fetch_is_in_progress() {
+    let pool = canterlot_hub::testkit::db().await;
     for force in [false, true] {
         let f = Fixture::new(&pool).await;
         let id = f.ready(&vec![1; 1024 * 1024]).await;
@@ -158,8 +162,9 @@ async fn stop_execution_is_handled_while_a_fetch_is_in_progress(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn cancel_while_waiting_for_attachments_wins_and_nothing_is_transmitted(pool: PgPool) {
+#[tokio::test]
+async fn cancel_while_waiting_for_attachments_wins_and_nothing_is_transmitted() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(&pool).await;
     let id = f.ready(&vec![1; 1024 * 1024]).await;
     let pause = f.hub().faults.pause_next(Point::BeforeFetchChunk);
@@ -187,8 +192,9 @@ async fn cancel_while_waiting_for_attachments_wins_and_nothing_is_transmitted(po
     );
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn redelivered_attempt_does_not_refetch_published_files(pool: PgPool) {
+#[tokio::test]
+async fn redelivered_attempt_does_not_refetch_published_files() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut steps = trace::Steps::new();
     let mut f = Fixture::new_with_gate(&pool, true).await;
     let _dump = SupervisorLogOnPanic(f.exec_dir());
@@ -248,8 +254,9 @@ impl Drop for SupervisorLogOnPanic {
     }
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn large_attachment_does_not_starve_control_session(pool: PgPool) {
+#[tokio::test]
+async fn large_attachment_does_not_starve_control_session() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(&pool).await;
     let id = f.ready(&vec![37; 48 * 1024 * 1024]).await;
     let first = f.hub().faults.pause_next(Point::BeforeFetchChunk);
@@ -309,8 +316,9 @@ async fn large_attachment_does_not_starve_control_session(pool: PgPool) {
     assert_eq!(f.transmissions(input.command_id), 1);
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn agent_reads_the_published_file_checksum(pool: PgPool) {
+#[tokio::test]
+async fn agent_reads_the_published_file_checksum() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(&pool).await;
     let bytes = b"agent verifies attachment";
     let id = f.ready(bytes).await;
@@ -321,8 +329,9 @@ async fn agent_reads_the_published_file_checksum(pool: PgPool) {
     until(async ||sqlx::query_scalar::<_,bool>("select exists(select 1 from blocks where execution_id=$1 and state='final' and content=$2)").bind(f.execution).bind(format!("sha256:{}",fixture::sha(bytes))).fetch_one(&pool).await.unwrap()).await;
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn attachment_dir_is_under_execution_dir_not_workdir(pool: PgPool) {
+#[tokio::test]
+async fn attachment_dir_is_under_execution_dir_not_workdir() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(&pool).await;
     let id = f.ready(b"private").await;
     let input = f.submit(&[id], "hello").await;
@@ -347,8 +356,9 @@ async fn attachment_dir_is_under_execution_dir_not_workdir(pool: PgPool) {
     until(async || !f.exec_dir().join("attachments").exists()).await;
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn attachment_failure_is_reported_and_input_rejected_without_transmission(pool: PgPool) {
+#[tokio::test]
+async fn attachment_failure_is_reported_and_input_rejected_without_transmission() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(&pool).await;
     let id = f.ready(&vec![1; 1024 * 1024]).await;
     let pause = f.hub().faults.pause_next(Point::BeforeFetchChunk);
@@ -477,8 +487,9 @@ async fn attachment_records_are_not_written_for_a_session_without_pilot_v1() {
     task.await.unwrap().unwrap();
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn withdraw_while_fetching_removes_temp_and_never_transmits(pool: PgPool) {
+#[tokio::test]
+async fn withdraw_while_fetching_removes_temp_and_never_transmits() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(&pool).await;
     let id = f.ready(&vec![1; 1024 * 1024]).await;
     let first = f.hub().faults.pause_next(Point::BeforeFetchChunk);
@@ -515,8 +526,9 @@ async fn withdraw_while_fetching_removes_temp_and_never_transmits(pool: PgPool) 
     assert!(f.sj_transmissions(input.command_id).is_empty());
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn worker_restart_mid_fetch_preserves_temp_and_resumes(pool: PgPool) {
+#[tokio::test]
+async fn worker_restart_mid_fetch_preserves_temp_and_resumes() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut f = Fixture::new(&pool).await;
     let bytes = vec![91; 4 * 1024 * 1024];
     let id = f.ready(&bytes).await;
