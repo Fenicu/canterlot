@@ -181,6 +181,101 @@ async fn prepare_is_idempotent() {
     assert_eq!(list.matches("worktree ").count(), 2);
 }
 
+/// Состояние, которое оставляет `git worktree add`, убитый посреди распаковки: замок
+/// `initializing` в метаданных копии, часть файлов и брошенный `index.lock`.
+fn interrupt_the_add(fixture: &Fixture, target: &Path) {
+    let meta = fixture
+        .source
+        .join(".git/worktrees")
+        .join(target.file_name().unwrap());
+    fs::write(meta.join("locked"), "initializing\n").unwrap();
+    fs::write(meta.join("index.lock"), "").unwrap();
+    fs::remove_file(target.join("b.txt")).unwrap();
+}
+
+#[tokio::test]
+async fn prepare_rebuilds_a_copy_whose_add_was_interrupted() {
+    let fixture = Fixture::new();
+    let target = fixture.target("c2i");
+    let spec = fixture.spec("canterlot/0190abc1");
+    prepare(&target, &fixture.source, &spec).await.unwrap();
+    interrupt_the_add(&fixture, &target);
+
+    prepare(&target, &fixture.source, &spec).await.unwrap();
+    assert_eq!(
+        fs::read_to_string(target.join("b.txt")).unwrap(),
+        "beta\n",
+        "the half-unpacked copy must not be taken for a finished one"
+    );
+    let meta = fixture.source.join(".git/worktrees/c2i");
+    assert!(!meta.join("locked").exists());
+    assert!(!meta.join("index.lock").exists());
+    let list = git(&fixture.source, &["worktree", "list", "--porcelain"]);
+    assert_eq!(list.matches("worktree ").count(), 2, "{list}");
+    assert!(!list.contains("locked"), "{list}");
+    assert_eq!(git(&target, &["status", "--porcelain"]), "");
+    assert_eq!(
+        git(&target, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        spec.branch
+    );
+}
+
+/// Копия, которую владелец запер сам, готова к работе: её замок запуску не мешает.
+#[tokio::test]
+async fn prepare_keeps_a_finished_copy_locked_by_the_owner() {
+    let fixture = Fixture::new();
+    let target = fixture.target("c2o");
+    let spec = fixture.spec("canterlot/0190abc2");
+    prepare(&target, &fixture.source, &spec).await.unwrap();
+    fs::write(target.join("work.txt"), "in progress\n").unwrap();
+    git(
+        &fixture.source,
+        &[
+            "worktree",
+            "lock",
+            "--reason",
+            "kept by the owner",
+            target.to_str().unwrap(),
+        ],
+    );
+    prepare(&target, &fixture.source, &spec).await.unwrap();
+    assert_eq!(
+        fs::read_to_string(target.join("work.txt")).unwrap(),
+        "in progress\n"
+    );
+}
+
+/// Каталог недоделанной копии уже удалён, а её запертые метаданные и ветка остались в
+/// репозитории владельца: уборка обязана снять и их.
+#[tokio::test]
+async fn removing_a_lost_interrupted_copy_clears_its_locked_entry_and_branch() {
+    let fixture = Fixture::new();
+    let target = fixture.target("r10i");
+    let spec = fixture.spec("canterlot/0190abc3");
+    prepare(&target, &fixture.source, &spec).await.unwrap();
+    interrupt_the_add(&fixture, &target);
+    fs::remove_dir_all(&target).unwrap();
+    let done = remove(
+        &fixture.root,
+        &fixture.source,
+        &fixture.removal(&target, &spec.branch, false),
+    )
+    .await;
+    assert_eq!(done.outcome, "removed");
+    assert!(!done.branch_kept);
+    let listed = git(&fixture.source, &["worktree", "list", "--porcelain"]);
+    assert!(!listed.contains("r10i"), "{listed}");
+    assert!(!git_ok(
+        &fixture.source,
+        &[
+            "show-ref",
+            "--verify",
+            "--quiet",
+            "refs/heads/canterlot/0190abc3"
+        ]
+    ));
+}
+
 #[tokio::test]
 async fn prepare_refuses_a_foreign_existing_directory() {
     let fixture = Fixture::new();

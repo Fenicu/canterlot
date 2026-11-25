@@ -64,7 +64,12 @@ async fn git(dir: &Path, args: &[&OsStr]) -> Option<Output> {
 
 /// `overrides` идут перед командой как `-c`; дочерние git получают их через окружение.
 async fn git_with(dir: &Path, overrides: &[OsString], args: &[&OsStr]) -> Option<Output> {
-    Command::new("git")
+    git_command(dir, overrides, args).output().await.ok()
+}
+
+fn git_command(dir: &Path, overrides: &[OsString], args: &[&OsStr]) -> Command {
+    let mut command = Command::new("git");
+    command
         .args([
             "-c",
             "core.hooksPath=/dev/null",
@@ -89,10 +94,34 @@ async fn git_with(dir: &Path, overrides: &[OsString], args: &[&OsStr]) -> Option
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .output()
-        .await
-        .ok()
+        .kill_on_drop(true);
+    command
+}
+
+/// Запускает команду лидером своей группы процессов и ждёт её. Если ожидание брошено (вышел
+/// срок), убита будет вся группа: `git worktree add` распаковывает файлы дочерним
+/// `git reset --hard`, и `kill_on_drop` оставил бы его писать в каталог, пока откат его удаляет.
+async fn run_group(mut command: Command) -> Option<std::process::ExitStatus> {
+    let mut child = command.process_group(0).spawn().ok()?;
+    let mut group = GroupKill(child.id());
+    let status = child.wait().await.ok();
+    group.0 = None;
+    status
+}
+
+/// Пока лидер не дождан, его PID и номер группы не переиспользуются: сигнал уходит только своим.
+struct GroupKill(Option<u32>);
+
+impl Drop for GroupKill {
+    fn drop(&mut self) {
+        let leader = self
+            .0
+            .and_then(|pid| i32::try_from(pid).ok())
+            .and_then(rustix::process::Pid::from_raw);
+        if let Some(leader) = leader {
+            let _ = rustix::process::kill_process_group(leader, rustix::process::Signal::KILL);
+        }
+    }
 }
 
 macro_rules! args {
@@ -222,11 +251,25 @@ async fn prepare_inner(
 ) -> Result<(), &'static str> {
     let common = common_dir(source).await.ok_or("worktree_not_git")?;
     if fs::symlink_metadata(target).is_ok() {
-        return if is_worktree_of(target, &common).await {
-            Ok(())
-        } else {
-            Err("worktree_failed")
-        };
+        if !is_worktree_of(target, &common).await {
+            return Err("worktree_failed");
+        }
+        if !add_interrupted(target).await {
+            return Ok(());
+        }
+        // Прошлый `git worktree add` не дошёл до конца (перезагрузка, убитый git): в копии
+        // часть файлов. Она наша и пустая по смыслу, поэтому убирается и создаётся заново.
+        if !valid_branch(&spec.branch).await {
+            return Err("worktree_failed");
+        }
+        tracing::warn!(
+            kind = "worktree_add_interrupted",
+            "unfinished worktree is rebuilt"
+        );
+        rollback(target, source, &spec.branch).await;
+        if fs::symlink_metadata(target).is_ok() {
+            return Err("worktree_failed");
+        }
     }
     if !valid_branch(&spec.branch).await {
         return Err("worktree_failed");
@@ -258,8 +301,9 @@ async fn prepare_inner(
         return Err("worktree_failed");
     }
     created.store(true, Ordering::Relaxed);
-    let added = git_ok(
+    let mut add = git_command(
         source,
+        &[],
         args![
             "worktree",
             "add",
@@ -270,18 +314,40 @@ async fn prepare_inner(
             target,
             commit
         ],
-    )
-    .await;
-    if added {
+    );
+    add.stdout(Stdio::null());
+    if run_group(add).await.is_some_and(|status| status.success()) {
         Ok(())
     } else {
         Err("worktree_failed")
     }
 }
 
-/// Откат недоделанной копии: каталога и ветки до начала не было, они наши.
+/// `git worktree add` держит в метаданных копии замок `initializing` и снимает его последним
+/// шагом. Замок с этой причиной значит, что распаковка не закончилась. Замок владельца
+/// (`git worktree lock`) несёт другую причину и готовой копии не мешает.
+async fn add_interrupted(target: &Path) -> bool {
+    let Some(git_dir) = git_text(
+        target,
+        args!["rev-parse", "--path-format=absolute", "--git-dir"],
+    )
+    .await
+    else {
+        return false;
+    };
+    fs::read_to_string(Path::new(&git_dir).join("locked"))
+        .is_ok_and(|reason| reason.trim() == "initializing")
+}
+
+/// Откат недоделанной копии: каталога и ветки до начала не было, они наши. Двойной `--force`
+/// снимает и запертую копию: прерванный `add` оставляет замок `initializing`.
 async fn rollback(target: &Path, source: &Path, branch: &str) {
-    if !git_ok(source, args!["worktree", "remove", "--force", "--", target]).await {
+    if !git_ok(
+        source,
+        args!["worktree", "remove", "--force", "--force", "--", target],
+    )
+    .await
+    {
         let _ = fs::remove_dir_all(target);
     }
     forget_missing(source, target).await;
@@ -290,8 +356,13 @@ async fn rollback(target: &Path, source: &Path, branch: &str) {
 
 /// Метаданные пропавшей копии убирает только её собственная запись: `prune` чистил бы
 /// и чужие записи репозитория, например рабочие копии владельца с удалёнными каталогами.
+/// Запертую запись `prune` не тронул бы вовсе, поэтому здесь двойной `--force`.
 async fn forget_missing(source: &Path, target: &Path) {
-    let _ = git_ok(source, args!["worktree", "remove", "--force", "--", target]).await;
+    let _ = git_ok(
+        source,
+        args!["worktree", "remove", "--force", "--force", "--", target],
+    )
+    .await;
 }
 
 /// Убирает копию, а ветку только если в ней нет коммитов, которых нет больше нигде.
@@ -432,4 +503,48 @@ async fn settle_branch(source: &Path, branch: &str) -> bool {
         return true;
     }
     !git_ok(source, args!["branch", "-D", "--", branch]).await
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{BufRead, BufReader, Read};
+
+    use super::*;
+
+    /// Срок вышел посреди `git worktree add`: вместе с верхним процессом уходит и его
+    /// потомок, который распаковывает файлы. Канал закрывается, только когда мертвы оба.
+    #[tokio::test]
+    async fn a_dropped_run_kills_the_whole_process_group() {
+        let (reader, writer) = std::io::pipe().unwrap();
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "sleep 60 & echo ready; wait"])
+            .stdin(Stdio::null())
+            .stdout(writer)
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        let mut run = Box::pin(run_group(command));
+        let mut ready = tokio::task::spawn_blocking(move || {
+            let mut reader = BufReader::new(reader);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            (reader, line)
+        });
+        let (mut reader, line) = tokio::select! {
+            status = &mut run => panic!("the command ended by itself: {status:?}"),
+            ready = &mut ready => ready.unwrap(),
+        };
+        assert_eq!(line, "ready\n");
+        drop(run);
+        let rest = tokio::task::spawn_blocking(move || {
+            let mut rest = Vec::new();
+            reader.read_to_end(&mut rest).map(|_| rest)
+        });
+        let rest = timeout(Duration::from_secs(30), rest)
+            .await
+            .expect("a descendant outlived the dropped run and still holds the pipe")
+            .unwrap()
+            .unwrap();
+        assert!(rest.is_empty());
+    }
 }
