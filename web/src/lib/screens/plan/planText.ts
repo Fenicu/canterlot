@@ -92,13 +92,32 @@ export function planSummary(tasks: readonly Pick<PlanTask, 'state'>[]): string {
  * Полоса в чате оркестратора: только когда есть задачи на проверке или заблокированные.
  * Заблокированные идут первыми и красят полосу тоном предупреждения.
  */
-export function planStrip(tasks: readonly PlanTask[]): { text: string; tone: 'warning' | 'default' } | null {
+export interface PlanStripView {
+	/** Полная сводка для подсказки и чтения вслух: «План: 1 заблокирована · 2 на проверке». */
+	text: string;
+	tone: 'warning' | 'default';
+	/** Готово из всех, кроме отменённых: полоска и счёт «1/4». */
+	done: number;
+	total: number;
+	/** Задача, ради которой полоса появилась: первая заблокированная, иначе первая на проверке. */
+	current: { number: number; title: string; word: string };
+}
+
+export function planStrip(tasks: readonly PlanTask[]): PlanStripView | null {
 	const counts = countByState(tasks);
 	if (counts.blocked === 0 && counts.in_review === 0) return null;
 	const parts: string[] = [];
 	if (counts.blocked > 0) parts.push(countText('blocked', counts.blocked));
 	if (counts.in_review > 0) parts.push(countText('in_review', counts.in_review));
-	return { text: `План: ${parts.join(' · ')}`, tone: counts.blocked > 0 ? 'warning' : 'default' };
+	const state: PlanTaskState = counts.blocked > 0 ? 'blocked' : 'in_review';
+	const task = tasks.filter((item) => item.state === state).sort((a, b) => a.number - b.number)[0]!;
+	return {
+		text: `План: ${parts.join(' · ')}`,
+		tone: counts.blocked > 0 ? 'warning' : 'default',
+		done: counts.done,
+		total: tasks.length - counts.cancelled,
+		current: { number: task.number, title: task.title, word: STATE_WORD[state] }
+	};
 }
 
 /** Метка строки сессии: готово из всех, кроме отменённых. */
