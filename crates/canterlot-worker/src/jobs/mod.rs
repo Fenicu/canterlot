@@ -693,7 +693,25 @@ impl Watcher {
         let Some(leader) = read_leader(&self.dir) else {
             return self.before_pid(&spec).await;
         };
+        if state::of_previous_boot(&self.dir) {
+            return self.after_reboot(&spec, leader).await;
+        }
         self.with_pid(&spec, leader).await
+    }
+
+    /// Попытка прошлой загрузки: её процессов нет, а номер лидера мог занять лидер чужой
+    /// сессии. Сессию не ищем и сигналов не шлём, попытка закрывается сразу.
+    async fn after_reboot(&mut self, spec: &Spec, leader: Leader) -> Step {
+        self.reap_child();
+        if self.manager.enabled() {
+            self.emit_progress(spec, leader).await;
+        }
+        match read_exit(&self.dir) {
+            Some((code, at)) => self.finish_by_exit(spec, code, at).await,
+            None if self.cancel_requested() => self.finish(JobOutcome::Canceled, None, None).await,
+            None => self.finish(JobOutcome::Failed, None, None).await,
+        }
+        Step::Continue
     }
 
     /// Оболочка ещё не записала `pid`: команда заведомо не запускалась.

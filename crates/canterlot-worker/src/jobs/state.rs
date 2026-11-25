@@ -173,11 +173,32 @@ pub struct Leader {
     pub start_ticks: u64,
 }
 
+/// Третьим полем идёт `boot_id` загрузки: после перезагрузки номер и даже время старта
+/// лидера могут совпасть с чужим процессом, а загрузка уже другая.
 pub fn write_leader(dir: &Path, leader: Leader) -> io::Result<()> {
+    let boot = current_boot().unwrap_or_default();
     write_atomic(
         &dir.join(PID),
-        format!("{} {}\n", leader.pid, leader.start_ticks).as_bytes(),
+        format!("{} {} {boot}\n", leader.pid, leader.start_ticks).as_bytes(),
     )
+}
+
+fn current_boot() -> Option<String> {
+    let text = fs::read_to_string("/proc/sys/kernel/random/boot_id").ok()?;
+    Some(text.trim().to_owned()).filter(|boot| !boot.is_empty())
+}
+
+/// Файл `pid` записан в другой загрузке машины: ни одного процесса попытки уже нет, а её
+/// номера могли достаться чужим. Файл без `boot_id` (оболочка старого выпуска) считается
+/// текущей загрузкой, как раньше.
+pub fn of_previous_boot(dir: &Path) -> bool {
+    let Ok(text) = fs::read_to_string(dir.join(PID)) else {
+        return false;
+    };
+    match (text.split_whitespace().nth(2), current_boot()) {
+        (Some(recorded), Some(current)) => recorded != current,
+        _ => false,
+    }
 }
 
 pub fn read_leader(dir: &Path) -> Option<Leader> {
@@ -365,6 +386,14 @@ mod tests {
         };
         write_leader(dir.path(), leader).unwrap();
         assert_eq!(read_leader(dir.path()), Some(leader));
+        assert!(!of_previous_boot(dir.path()), "written in this boot");
+        // Оболочка старого выпуска писала два поля: такая попытка считается текущей загрузкой.
+        fs::write(dir.path().join(PID), "7 99\n").unwrap();
+        assert_eq!(read_leader(dir.path()), Some(leader));
+        assert!(!of_previous_boot(dir.path()));
+        fs::write(dir.path().join(PID), format!("7 99 {}\n", Uuid::now_v7())).unwrap();
+        assert_eq!(read_leader(dir.path()), Some(leader));
+        assert!(of_previous_boot(dir.path()));
         fs::write(dir.path().join(EXIT_CODE), "3 1234\n").unwrap();
         assert_eq!(read_exit(dir.path()), Some((3, 1234)));
         assert_eq!(read_exit(&dir.path().join("none")), None);

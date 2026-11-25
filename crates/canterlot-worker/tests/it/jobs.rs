@@ -689,6 +689,49 @@ async fn crash_between_claim_and_pid_becomes_launch_interrupted_and_never_runs()
     assert!(!marker.exists());
 }
 
+/// Машина перезагрузилась во время задачи: в каталоге попытки остался `pid` лидера прошлой
+/// загрузки, а в новой загрузке этот номер занял лидер чужой сессии. Попытка закрывается
+/// сразу, и чужая сессия не получает ни одного сигнала.
+#[tokio::test(flavor = "multi_thread")]
+async fn attempt_of_a_previous_boot_never_signals_the_new_owner_of_its_pid() {
+    for cancel in [true, false] {
+        let harness = Harness::new().await;
+        let mut foreign = spawn_session_leader();
+        let pid = foreign.0.id();
+        let ticks = canterlot_worker::containment::start_ticks(pid).unwrap();
+        let id = Uuid::now_v7().to_string();
+        let dir = harness.attempt_dir(&id);
+        fs::create_dir_all(&dir).unwrap();
+        let spec = serde_json::json!({
+            "job_id": id, "attempt": 1, "command_id": "", "dispatch_attempt": 0,
+            "workdir": harness.work().display().to_string(),
+            "shell": "true",
+            "env": [], "timeout_seconds": 60, "lease": "none", "lease_socket": null,
+            "log_max_bytes": 1_048_576, "label": "job",
+        });
+        fs::write(dir.join("spec.json"), spec.to_string()).unwrap();
+        // Третье поле — загрузка, в которой оболочка записала файл: здесь она не текущая.
+        let previous_boot = Uuid::now_v7();
+        fs::write(dir.join("pid"), format!("{pid} {ticks} {previous_boot}\n")).unwrap();
+        if cancel {
+            fs::write(dir.join("cancel"), "").unwrap();
+        }
+        harness.manager.recover().await;
+        let finished = harness.finished(&id).await;
+        let expected = if cancel {
+            JobOutcome::Canceled
+        } else {
+            JobOutcome::Failed
+        };
+        assert_eq!(finished.outcome, expected as i32, "cancel={cancel}");
+        assert_eq!(finished.exit_code, None);
+        assert!(
+            foreign.0.try_wait().unwrap().is_none(),
+            "a session of the current boot was signalled (cancel={cancel})"
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn restart_after_pid_reattaches_without_relaunching() {
     let mut harness = Harness::new().await;
