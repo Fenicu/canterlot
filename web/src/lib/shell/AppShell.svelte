@@ -81,7 +81,7 @@
   }
   const chatId = $derived(onChat ? path.split('/')[2] : null);
   let currentChat = $state<ChatStore | null>(null);
-  let DelegationPanelComponent = $state<Component<{ chat: ChatStore; onclose?: () => void }> | null>(null);
+  let DelegationPanelComponent = $state<Component<{ chat: ChatStore; stacked?: boolean; onclose?: () => void }> | null>(null);
   let MessagesPanelComponent = $state<Component<{ chat: ChatStore; onclose?: () => void }> | null>(null);
   let AlarmsPanelComponent = $state<Component<{ chat: ChatStore; onclose?: () => void }> | null>(null);
   let SearchPanelComponent = $state<Component<{ onpick: (hit: SearchHit) => void; onclose?: () => void }> | null>(null);
@@ -93,31 +93,33 @@
 
   $effect(() => {
     pane.mode = mode;
+    pane.width = width;
   });
 
   $effect(() => {
     if (mode !== 'desktop') return;
-    if (pane.view === 'delegation' && !DelegationPanelComponent) {
+    const shown = pane.shown;
+    if (shown === 'delegation' && !DelegationPanelComponent) {
       import('#lib/screens/chat/DelegationPanel.svelte').then((m) => {
         DelegationPanelComponent = m.default;
       });
     }
-    if (pane.view === 'settings' && !SettingsPanelComponent) {
+    if (shown === 'settings' && !SettingsPanelComponent) {
       import('#lib/screens/chat/SessionSettings.svelte').then((m) => {
         SettingsPanelComponent = m.default;
       });
     }
-    if (pane.view === 'messages' && !MessagesPanelComponent) {
+    if (shown === 'messages' && !MessagesPanelComponent) {
       import('#lib/screens/chat/OwnerMessagesPanel.svelte').then((m) => {
         MessagesPanelComponent = m.default;
       });
     }
-    if (pane.view === 'search' && !SearchPanelComponent) {
+    if (shown === 'search' && !SearchPanelComponent) {
       import('#lib/search/SearchPanel.svelte').then((m) => {
         SearchPanelComponent = m.default;
       });
     }
-    if (pane.view === 'alarms' && !AlarmsPanelComponent) {
+    if (shown === 'alarms' && !AlarmsPanelComponent) {
       import('#lib/screens/chat/AlarmsPanel.svelte').then((m) => {
         AlarmsPanelComponent = m.default;
       });
@@ -359,17 +361,17 @@
         {@render banner()}
         {@render children()}
       </div>
-      {#if mode === 'desktop' && pane.view && (onChat || pane.view === 'search')}
+      {#if mode === 'desktop' && pane.shown && (onChat || pane.shown === 'search')}
         <aside data-pane="lane">
-          {#if pane.view === 'search' && SearchPanelComponent}
+          {#if pane.shown === 'search' && SearchPanelComponent}
             <SearchPanelComponent onpick={pickHit} onclose={() => pane.close()} />
-          {:else if currentChat && pane.view === 'delegation' && DelegationPanelComponent}
-            <DelegationPanelComponent chat={currentChat} onclose={() => pane.close()} />
-          {:else if currentChat && pane.view === 'settings' && SettingsPanelComponent}
+          {:else if currentChat && pane.shown === 'delegation' && DelegationPanelComponent}
+            <DelegationPanelComponent chat={currentChat} stacked={pane.stacked} onclose={() => pane.closeDelegation()} />
+          {:else if currentChat && pane.shown === 'settings' && SettingsPanelComponent}
             <SettingsPanelComponent chat={currentChat} machine={paneMachine} desktop onclose={() => pane.close()} />
-          {:else if currentChat && pane.view === 'messages' && MessagesPanelComponent}
+          {:else if currentChat && pane.shown === 'messages' && MessagesPanelComponent}
             <MessagesPanelComponent chat={currentChat} onclose={() => pane.close()} />
-          {:else if currentChat && pane.view === 'alarms' && AlarmsPanelComponent}
+          {:else if currentChat && pane.shown === 'alarms' && AlarmsPanelComponent}
             <AlarmsPanelComponent chat={currentChat} onclose={() => pane.close()} />
           {/if}
         </aside>

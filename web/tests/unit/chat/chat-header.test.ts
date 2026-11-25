@@ -1,6 +1,7 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { flushSync, mount, unmount } from "svelte";
 import ChatHeader from "#lib/screens/chat/ChatHeader.svelte";
+import { LANE_CLOSED_KEY, pane } from "#lib/shell/pane.svelte.js";
 import { criticalLimit } from "#lib/screens/chat/criticalLimit.js";
 import { DEFAULT_LIMIT_THRESHOLDS, type ProviderLimits } from "#lib/stores/limits.js";
 import type { ChatStore } from "#lib/stores/chat.svelte.js";
@@ -171,6 +172,75 @@ describe("chat/ChatHeader", () => {
     const target = show(chatWith(), { providers: [limits("claude", 1000), limits("codex", 900)] });
     expect(target.querySelector('[data-role="limit-alert"]')).toBeNull();
     expect(target.textContent).not.toContain("Лимит");
+  });
+
+  describe("панель плана и делегатов на столе", () => {
+    const button = (target: HTMLElement) =>
+      [...target.querySelectorAll<HTMLButtonElement>(".pane-action")].find((node) => node.textContent?.startsWith("Делегирование"));
+
+    beforeEach(() => {
+      localStorage.removeItem(LANE_CLOSED_KEY);
+      pane.closed = false;
+      pane.close();
+      pane.mode = "desktop";
+    });
+
+    afterEach(() => {
+      pane.close();
+      pane.closed = false;
+      pane.mode = "phone";
+      pane.width = 0;
+      localStorage.removeItem(LANE_CLOSED_KEY);
+    });
+
+    it("header_reports_plan_or_delegates_and_shows_the_auto_opened_pane_as_pressed", () => {
+      pane.width = 1920;
+      const target = show(chatWith({ blocks: new Map(), backgroundFacts: [] }), { hasChildren: true });
+      expect(pane.delegated).toBe(true);
+      expect(pane.shown).toBe("delegation");
+      const toggle = button(target)!;
+      expect(toggle.getAttribute("aria-pressed")).toBe("true");
+      toggle.click();
+      flushSync();
+      expect(pane.shown).toBeNull();
+      expect(localStorage.getItem(LANE_CLOSED_KEY)).toBe("closed");
+      expect(toggle.getAttribute("aria-pressed")).toBe("false");
+      toggle.click();
+      flushSync();
+      expect(pane.shown).toBe("delegation");
+      expect(localStorage.getItem(LANE_CLOSED_KEY)).toBeNull();
+      expect(toggle.getAttribute("aria-pressed")).toBe("true");
+    });
+
+    it("session_without_plan_or_delegates_does_not_open_the_pane", () => {
+      pane.width = 1920;
+      const target = show(chatWith());
+      expect(pane.delegated).toBe(false);
+      expect(pane.shown).toBeNull();
+      expect(button(target)).toBeUndefined();
+    });
+
+    it("below_the_threshold_the_button_opens_the_pane_as_today", () => {
+      pane.width = 1440;
+      const target = show(chatWith({ blocks: new Map(), backgroundFacts: [] }), { hasChildren: true });
+      const toggle = button(target)!;
+      expect(toggle.getAttribute("aria-pressed")).toBe("false");
+      toggle.click();
+      flushSync();
+      expect(pane.view).toBe("delegation");
+      expect(toggle.getAttribute("aria-pressed")).toBe("true");
+    });
+
+    it("leaving_the_chat_clears_the_report", () => {
+      pane.width = 1920;
+      show(chatWith({ blocks: new Map(), backgroundFacts: [] }), { hasChildren: true });
+      expect(pane.delegated).toBe(true);
+      void unmount(instance!);
+      instance = undefined;
+      flushSync();
+      expect(pane.delegated).toBe(false);
+      expect(pane.shown).toBeNull();
+    });
   });
 });
 

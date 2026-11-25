@@ -376,7 +376,8 @@
 
 	<SpawnQueueStrip {chat} />
 
-	{#if hasPlan}<PlanStrip orchestratorId={chat.id} onopen={openPlan} />{/if}
+	<!-- Пока план стоит в панели стола, полоса плана из колонки уходит. -->
+	{#if hasPlan && !pane.planDocked}<PlanStrip orchestratorId={chat.id} onopen={openPlan} />{/if}
 
 	<PendingStrip {chat} />
 
