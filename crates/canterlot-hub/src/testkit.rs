@@ -551,11 +551,6 @@ pub fn fake_session(
     }
 }
 
-/// Монотонные часы для тестовых отметок присутствия, без сонда в самих тестах.
-pub fn clock_now() -> tokio::time::Instant {
-    tokio::time::Instant::now()
-}
-
 pub struct Seed {
     pub owner_id: Uuid,
     pub machine_id: Uuid,

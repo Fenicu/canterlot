@@ -312,13 +312,13 @@ fn exempt(method: &str, path: &str) -> bool {
         || (method == "POST" && path == "/api/v1/schedules/preview")
         // Отметка присутствия — идемпотентный образец: ключ повтора ничего не добавит.
         || (method == "POST" && path == "/api/v1/presence")
-        // Действия карточки «Ход завис» нужен открытый эпизод зависания: ключ повтора и
-        // привязка к эпизоду проверены в hung_rescue.rs (`card_actions_are_bound_to_their_episode`).
+        // Действиям карточки «Ход завис» нужен открытый эпизод зависания: кнопка привязана
+        // к эпизоду, и закрытая карточка отвечает отказом, ничего не прерывая.
         || (method == "POST" && path.contains("/hung-episodes/"))
         || (method == "PUT" && path.ends_with("/draft"))
         || (matches!(method, "POST" | "DELETE") && path.ends_with("/side"))
         // «Завершить» карточки рутины идемпотентно само: повтор ничего не меняет и событий
-        // не плодит (routine_reports.rs, `dismiss_is_idempotent_evented_and_keeps_the_text_in_history`).
+        // не плодит.
         || (method == "POST"
             && path.contains("/routine-reports/")
             && path.ends_with("/dismiss"))
