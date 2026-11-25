@@ -1637,6 +1637,58 @@ async fn stray_supervisor_of_a_spawning_record_is_stopped() {
     env.assert_released("supervisor_died").await;
 }
 
+/// Сопровождение записи `Spawning` живо, но на сокете из записи не отвечает (сокет пропал,
+/// attach задержался). Неудачный IPC не доказывает, что процесса нет: каталог живого
+/// сопровождения не удаляется, пока процесс по сохранённой личности (pid, время старта,
+/// загрузка) не остановлен. `with_pid` — личность успела лечь в запись после запуска.
+async fn spawning_supervisor_unreachable_over_ipc(with_pid: bool) {
+    let mut env = Env::new().await;
+    env.hub_session();
+    env.start(1).await;
+    env.wait_running().await;
+    let mut record = env.ownership(env.execution).await.unwrap();
+    let supervisor = record.supervisor_pid;
+    env.close_manager().await;
+    env.reopen();
+    record.phase = OwnershipPhase::Spawning as i32;
+    if !with_pid {
+        record.supervisor_pid = 0;
+        record.supervisor_start_ticks = 0;
+    }
+    record.sj_journal_id = String::new();
+    record.cli_pid = 0;
+    record.cli_start_ticks = 0;
+    record.ipc_socket = env
+        .exec_dir()
+        .join("gone.sock")
+        .to_string_lossy()
+        .into_owned();
+    env.thread()
+        .call(move |store| {
+            store.as_mut().unwrap().ownership_mut()?.append(record)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert!(alive(supervisor));
+    assert!(env.manager().startup_verify().await.unwrap().is_empty());
+    assert!(
+        !alive(supervisor),
+        "a live supervisor is stopped before its directory goes"
+    );
+    assert!(supervisors_of(env.root.path()).is_empty());
+}
+
+#[tokio::test]
+async fn a_spawning_supervisor_unreachable_over_ipc_is_found_by_its_stored_identity() {
+    spawning_supervisor_unreachable_over_ipc(true).await;
+}
+
+#[tokio::test]
+async fn a_spawning_supervisor_unreachable_over_ipc_is_found_without_a_stored_pid() {
+    spawning_supervisor_unreachable_over_ipc(false).await;
+}
+
 #[tokio::test]
 async fn unverifiable_ownership_is_reported_owner_lost_never_restarted() {
     let mut env = Env::new().await;

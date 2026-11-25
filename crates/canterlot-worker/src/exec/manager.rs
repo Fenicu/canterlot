@@ -616,7 +616,12 @@ pub(super) async fn close_never_started(
     start: Option<Command>,
 ) -> Result<(), ExecError> {
     let id = Uuid::parse_str(&record.execution_id).map_err(|_| ExecError::Verify("id"))?;
-    if let Some(stray) = stray_supervisor(&record).await {
+    let stray = match stray_supervisor(&record).await {
+        Some(stray) => Some(stray),
+        // Сокет пропал или attach задержался: это ещё не доказывает, что процесса нет.
+        None => spawned_supervisor_alive(&record),
+    };
+    if let Some(stray) = stray {
         tracing::warn!(
             execution_id = %id,
             supervisor_pid = stray.supervisor_pid,
@@ -624,7 +629,13 @@ pub(super) async fn close_never_started(
             "supervisor of an unfinished start is stopped"
         );
         let grace = shared.config.supervisor.stop_grace;
-        if super::group::terminate(&stray, grace).await != super::group::Group::Empty {
+        let group = super::group::terminate(&stray, grace).await;
+        // CLI при записи `Spawning` не запускался: без снимка группы остановку доказывает
+        // уход самого сопровождения.
+        let stopped = group == super::group::Group::Empty
+            || (group == super::group::Group::Unverifiable
+                && !procfs::is_same_process(stray.supervisor_pid, stray.supervisor_start_ticks));
+        if !stopped {
             // Остановить не вышло: дальше как с любым потерянным исполнением.
             if !reported {
                 report_owner_lost(shared, id, record.generation).await?;
@@ -681,6 +692,23 @@ async fn stray_supervisor(record: &Ownership) -> Option<Ownership> {
     found.supervisor_pid = linked.attached.pid;
     found.supervisor_start_ticks = linked.attached.start_ticks;
     Some(found)
+}
+
+/// Живое сопровождение записи `Spawning`, которое не ответило по IPC: по личности из записи
+/// (pid и время старта; загрузку сверил вызывающий), а если запись не успела её получить,
+/// по командной строке `supervise --exec-dir <каталог записи>`.
+fn spawned_supervisor_alive(record: &Ownership) -> Option<Ownership> {
+    let (pid, ticks) = if record.supervisor_pid != 0 {
+        (record.supervisor_pid, record.supervisor_start_ticks)
+    } else {
+        procfs::find_supervisor(Path::new(&record.exec_dir))?
+    };
+    procfs::is_same_process(pid, ticks).then(|| {
+        let mut found = record.clone();
+        found.supervisor_pid = pid;
+        found.supervisor_start_ticks = ticks;
+        found
+    })
 }
 
 /// Неудачный запуск не оставляет каталог и сокет до следующего старта воркера: уборка
@@ -1843,6 +1871,14 @@ impl Actor {
             }
         };
         let pid = child.id().ok_or(ExecError::Verify("child_pid"))?;
+        // Личность процесса ложится в запись до подключения: сбой IPC при рестарте
+        // не выдаст живое сопровождение за пропавшее. Загрузку запись уже несёт.
+        let ticks = procfs::stat(pid).map_or(0, |stat| stat.start_ticks);
+        ownership_update(&self.shared, id, move |record| {
+            record.supervisor_pid = pid;
+            record.supervisor_start_ticks = ticks;
+        })
+        .await?;
         let linked = match spawn::connect_attach(
             &prepared.socket,
             &prepared.secret,

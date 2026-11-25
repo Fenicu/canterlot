@@ -1,4 +1,4 @@
-use std::{fs, io};
+use std::{fs, io, os::unix::fs::MetadataExt, path::Path};
 
 pub(super) struct ProcStat {
     pub start_ticks: u64,
@@ -43,4 +43,38 @@ pub(super) fn describe(pid: u32) -> String {
         }
         Err(error) => format!("absent({:?})", error.kind()),
     }
+}
+
+/// Процесс сопровождения этого пользователя, запущенный для каталога `exec_dir`
+/// (`<exe> supervise --exec-dir <exec_dir>`): pid и время старта.
+pub(super) fn find_supervisor(exec_dir: &Path) -> Option<(u32, u64)> {
+    if exec_dir.as_os_str().is_empty() {
+        return None;
+    }
+    let uid = rustix::process::getuid().as_raw();
+    let wanted = exec_dir.as_os_str().as_encoded_bytes();
+    for entry in fs::read_dir("/proc").ok()?.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if entry.metadata().map_or(true, |meta| meta.uid() != uid) {
+            continue;
+        }
+        let Ok(cmdline) = fs::read(format!("/proc/{pid}/cmdline")) else {
+            continue;
+        };
+        let args: Vec<&[u8]> = cmdline.split(|byte| *byte == 0).collect();
+        let ours = args.contains(&b"supervise".as_slice())
+            && args
+                .windows(2)
+                .any(|pair| pair[0] == b"--exec-dir" && pair[1] == wanted);
+        if ours && let Some(stat) = stat(pid).filter(|stat| !stat.zombie) {
+            return Some((pid, stat.start_ticks));
+        }
+    }
+    None
 }
