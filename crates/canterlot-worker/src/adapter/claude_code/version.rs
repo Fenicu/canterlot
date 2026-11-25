@@ -13,7 +13,7 @@ use crate::adapter::{reaped, spawn_with_retry_io};
 const OUTPUT_CAP: u64 = 64 * 1024;
 
 pub const MIN_SUPPORTED_VERSION: (u32, u32, u32) = (2, 1, 311);
-pub const VERIFIED_VERSIONS: &[(u32, u32, u32)] = &[(2, 1, 311)];
+pub const VERIFIED_VERSIONS: &[(u32, u32, u32)] = &[(2, 1, 311), (2, 1, 332)];
 
 /// Первая версия, на которой `--prompt-suggestions` проверен вживую; старее флаг не передаётся.
 pub const PROMPT_SUGGESTIONS_MIN_VERSION: (u32, u32, u32) = (2, 1, 317);

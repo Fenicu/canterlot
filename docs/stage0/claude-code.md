@@ -231,3 +231,14 @@ cargo run -- all                            # все подряд (≈30 ход�
 - `--model` с суффиксом одинаково уходит при запуске и `--resume`, `set_model` получает строку без изменений. Адаптер её не разбирает.
 - Уровни усилий у всех четырёх одни (`effort_cost_index` и возможности `max_effort`, `xhigh_effort`), умолчания разные: Fable `high`, остальные `medium`.
 - Живая проверка не делалась: код CLI отвечает на вопрос о суффиксе. Доступность Fable на тарифе он не решает: в CLI есть строка `Fable 5 requires usage credits`, поэтому на части планов Fable может расходовать кредиты использования.
+
+
+## 10. Сверка 2.1.332 (25.11.2026)
+
+Схемы у Claude Code нет, поэтому офлайн сверялась только поверхность CLI: флаги, которые адаптер передаёт (`process.rs`), и переменные окружения, которые он ставит. Использовался CLI из изолированного префикса npm (`/tmp/cli-claude/node_modules/.bin/claude`), живых запросов к модели не было. Живой смоук `CANTERLOT_CLAUDE_CODE_SMOKE` запускает владелец отдельно: он и есть вторая половина проверки.
+
+Флаги: `claude --help` содержит `--effort`, `--fork-session`, `--include-partial-messages`, `--input-format`, `--mcp-config`, `--model`, `--output-format`, `--permission-mode`, `--prompt-suggestions`, `--replay-user-messages`, `--resume`, `--session-id`, `--settings`, `--strict-mcp-config`, `--system-prompt-snapshot`, `--verbose` с прежним смыслом. Два флага скрыты из `--help`, но есть в бинарнике с теми же именами и описанием: `--append-system-prompt-file <file>` («Read system prompt from a file and append to the default system prompt») и `--permission-prompt-tool <tool>` (проверка `must be an MCP tool` и `not found`). `--socket` в адаптере принадлежит не CLI, а `mcp-relay` canterlot, его сверять не с чем.
+
+Переменные: `CLAUDE_CODE_ENABLE_TODO_TOOLS` и `CLAUDE_CODE_ENABLE_TASKS` в бинарнике есть. Прежнее поведение сохранилось: `=true` у первой включает список задач, `=false` у второй оставляет `TodoWrite` вместо `Task*`; других значений адаптер не шлёт.
+
+Правок адаптера не понадобилось, минимум остаётся 2.1.311, проверенные версии — 2.1.311 и 2.1.332.
