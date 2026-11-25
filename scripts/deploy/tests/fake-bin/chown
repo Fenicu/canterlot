@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Подмена chown: тесты идут не от root, владельцы не меняются (как у подменного install); вызов —
+# в журнал, чтобы сценарий видел, что дерево передано root и когда.
+set -euo pipefail
+[ -n "${FAKE_ROOT:-}" ] || { echo "fake-chown: FAKE_ROOT unset" >&2; exit 99; }
+echo "chown $*" >>"${FAKE_ROOT}/state/calls.log"

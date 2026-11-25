@@ -87,8 +87,13 @@ stage_hub() {
     # предсказуемо, каталог туда может подложить любой локальный пользователь CT, и файл между
     # сверкой и запуском можно было бы подменить. Каталог релизов принадлежит root, а mv -T
     # внутри одной файловой системы атомарен. Остаток .stage-* ищет проверка обслуживания.
-    tar -C "${DIST}/hub" -cf - bin | run_write_pipe "stage hub binaries" recv_to "${HUB_SSH}" "mkdir -p '${HUB_RELEASES}' && rm -rf '${HUB_STAGE}' && mkdir '${HUB_STAGE}' && tar -C '${HUB_STAGE}' -xf -"
-    tar -C "${DIST}" -cf - RELEASE SHA256SUMS | run_write_pipe "stage hub RELEASE" recv_to "${HUB_SSH}" "tar -C '${HUB_STAGE}' -xf -"
+    # Root распаковывает tar с владельцами и режимами сборочной машины: bin и бинарь получили бы
+    # её UID (на хосте — какой-то локальный пользователь с правом записи), а mkdir под umask 077 —
+    # каталог 0700, через который служба не пройдёт. Поэтому каталог создаётся явно 0755 от root,
+    # tar не переносит владельцев, а всё дерево до сверки хэшей и запуска приводится к root:root
+    # без записи для группы и всех (каталоги и исполняемые — 0755, остальное — 0644).
+    tar -C "${DIST}/hub" -cf - bin | run_write_pipe "stage hub binaries" recv_to "${HUB_SSH}" "mkdir -p '${HUB_RELEASES}' && rm -rf '${HUB_STAGE}' && install -d -m 0755 -o root -g root '${HUB_STAGE}' && tar --no-same-owner -C '${HUB_STAGE}' -xf -"
+    tar -C "${DIST}" -cf - RELEASE SHA256SUMS | run_write_pipe "stage hub RELEASE" recv_to "${HUB_SSH}" "tar --no-same-owner -C '${HUB_STAGE}' -xf - && chown -R root:root '${HUB_STAGE}' && chmod -R u=rwX,go=rX '${HUB_STAGE}'"
     # Полный состав stagedir проверяется ДО публикации, а не только бинарь.
     verify_remote_tree "${HUB_SSH}" "${HUB_STAGE}" "$(hub_expected_sums)" "hub ${SHA}"
     # Хэш staged binary равен dist; staged binary запускается на CT и отдаёт openapi из репо.

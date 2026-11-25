@@ -77,6 +77,32 @@ fi
 teardown_case
 case_end
 
+# S1c: дерево сборочной машины с её владельцами и режимами (каталог 0700, бинарь с записью для
+# группы и всех) и umask 077 у заливки. Stage-каталог создаётся явно 0755 от root, а распакованное
+# дерево приводится к root:root без записи для группы и всех ДО сверки и запуска от службы.
+case_begin "stage normalises owners and modes of the unpacked hub tree"
+setup_stage modes
+chmod 0777 "${DIST}/hub/bin/canterlot-hub"
+chmod 0700 "${DIST}/hub/bin"
+chmod 0666 "${DIST}/RELEASE"
+if (umask 077 && bash "${DEPLOY_DIR}/stage.sh" "${SHA_NEW}" --dist "${FAKE_ROOT}/dist") >"${FAKE_ROOT}/stage.log" 2>&1; then
+    case_ok "exit 0 under umask 077"
+else
+    case_fail "exit nonzero under umask 077"; tail -5 "${FAKE_ROOT}/stage.log"
+fi
+REL="${HUB_RELEASES}/${SHA_NEW}"
+assert_eq "$(stat -c %a "${REL}" 2>/dev/null)" "755" "the release directory is 0755 (passable for the service user)"
+assert_eq "$(stat -c %a "${REL}/bin" 2>/dev/null)" "755" "bin is 0755"
+assert_eq "$(stat -c %a "${REL}/bin/canterlot-hub" 2>/dev/null)" "755" "the binary has no group or other write"
+assert_eq "$(stat -c %a "${REL}/RELEASE" 2>/dev/null)" "644" "RELEASE has no group or other write"
+assert_contains "${FAKE_ROOT}/state/calls.log" "chown -R root:root ${HUB_RELEASES}/.stage-${SHA_NEW}" "the unpacked tree is handed to root"
+NORM_LINE="$(grep -n "chown -R root:root" "${FAKE_ROOT}/state/calls.log" | head -1 | cut -d: -f1)"
+RUN_LINE="$(grep -n "hub-openapi user=" "${FAKE_ROOT}/state/calls.log" | head -1 | cut -d: -f1)"
+[ -n "${NORM_LINE}" ] && [ -n "${RUN_LINE}" ] && [ "${NORM_LINE}" -lt "${RUN_LINE}" ] \
+    && case_ok "owners are normalised before the binary runs" || case_fail "normalise ${NORM_LINE:-none} vs run ${RUN_LINE:-none}"
+teardown_case
+case_end
+
 # S1b: бинарь цели завис на openapi — заливка отказывает на пределе времени, ничего не
 # опубликовано, stage-каталог убран.
 case_begin "stage refuses a hub binary that hangs on openapi"
