@@ -31,8 +31,8 @@ function versioned(src) {
 }
 
 export function manifest(css) {
-  // Заставка установленного приложения совпадает с фоном палитры по умолчанию.
-  const tokens = darkTokens(css);
+  // Заставка установленного приложения совпадает с фоном палитры владельца: приложение у него одно.
+  const tokens = darkTokens(css, 'nord');
   return {
     id: '/', start_url: '/', scope: '/', name: 'Canterlot', short_name: 'Canterlot', lang: 'ru', display: 'standalone',
     theme_color: tokens.bg, background_color: tokens.bg,
