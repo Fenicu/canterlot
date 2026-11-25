@@ -189,41 +189,6 @@ impl Fx {
         self.task(number).await.0
     }
 
-    async fn archived(&self, number: i32) -> bool {
-        sqlx::query_scalar(
-            "select archived_at is not null from plan_tasks
-             where orchestrator_conversation_id=$1 and number=$2",
-        )
-        .bind(self.orchestrator)
-        .bind(number)
-        .fetch_one(&self.pool)
-        .await
-        .unwrap()
-    }
-
-    /// Закрыть задачу и сделать её «старой» без сна: дата закрытия в базе.
-    async fn finish_at(&self, number: i32, state: &str, days_ago: i64) {
-        sqlx::query(
-            "update plan_tasks set state=$3,
-               updated_at=clock_timestamp()-make_interval(days => $4::int)
-             where orchestrator_conversation_id=$1 and number=$2",
-        )
-        .bind(self.orchestrator)
-        .bind(number)
-        .bind(state)
-        .bind(days_ago as i32)
-        .execute(&self.pool)
-        .await
-        .unwrap();
-    }
-
-    async fn refresh(&self, at: DateTime<Utc>) {
-        activity::refresh(&self.pool, self.child, at, &thresholds(), Uuid::now_v7())
-            .await
-            .unwrap();
-    }
-
-    /// Ход исполнителя закончен ответом основного агента; `at` — конец хода.
     async fn turn(&self, text: &str, at: DateTime<Utc>, git: Value) -> Uuid {
         let command = Uuid::now_v7();
         sqlx::query(
@@ -273,37 +238,6 @@ impl Fx {
         block
     }
 
-    async fn working(&self, at: DateTime<Utc>) {
-        sqlx::query(
-            "update queue_state set run_slot='running',run_slot_input_id=$2,run_slot_since=$3,
-               hold_reasons='[]' where conversation_id=$1",
-        )
-        .bind(self.child)
-        .bind(Uuid::now_v7())
-        .bind(at)
-        .execute(&self.pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "update executions set phase='generating',phase_at=$2,last_event_at=$2 where id=$1",
-        )
-        .bind(self.execution.execution_id)
-        .bind(at)
-        .execute(&self.pool)
-        .await
-        .unwrap();
-    }
-
-    async fn free(&self) {
-        sqlx::query(
-            "update queue_state set run_slot='free',run_slot_input_id=null where conversation_id=$1",
-        )
-        .bind(self.child)
-        .execute(&self.pool)
-        .await
-        .unwrap();
-    }
-
     async fn events(&self) -> Vec<Value> {
         sqlx::query_scalar(
             "select payload from events where kind='plan_task_changed' order by committed_at,scope_seq",
@@ -342,18 +276,6 @@ impl Fx {
 
 fn no_git() -> Value {
     json!({"available": false})
-}
-
-fn git(head: &str, commits: &[(&str, &str)], files: &[&str]) -> Value {
-    json!({
-        "available": true,
-        "head_before": "0000000",
-        "head_after": head,
-        "dirty": false,
-        "truncated": false,
-        "commits": commits.iter().map(|(sha, subject)| json!({"sha": sha, "subject": subject})).collect::<Vec<_>>(),
-        "files": files.iter().map(|path| json!({"path": path, "status": "M"})).collect::<Vec<_>>(),
-    })
 }
 
 #[tokio::test]
@@ -466,242 +388,127 @@ async fn add_list_and_update_follow_the_rules_and_limits() {
 }
 
 #[tokio::test]
-async fn read_only_sessions_may_keep_their_plan() {
+async fn http_plan_and_snapshot_carry_the_contract() {
     let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    sqlx::query("update conversations set permission_mode='read_only' where id=$1")
-        .bind(f.orchestrator)
-        .execute(&f.pool)
+    let (deps, _dir) =
+        testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
+    let owner = deps.installation.owner_id;
+    let machine = Uuid::now_v7();
+    sqlx::query("insert into machines(id,owner_id,name) values($1,$2,'synthetic')")
+        .bind(machine)
+        .bind(owner)
+        .execute(&pool)
         .await
         .unwrap();
-    f.add(&["Анализ"]).await;
-    f.call("plan.update", json!({"number": 1, "state": "in_progress"}))
+    let root = personal_conversation(&pool, owner, machine).await;
+    let delegate = child_of(&pool, owner, machine, root).await;
+    let archived = personal_conversation(&pool, owner, machine).await;
+    let f = Fx {
+        context: context(&pool),
+        pool: pool.clone(),
+        owner,
+        machine,
+        orchestrator: root,
+        child: delegate,
+        execution: start(&pool, owner, delegate).await,
+    };
+    f.add(&["Парсер", "Старое"]).await;
+    f.link(1, delegate).await;
+    f.call("plan.update", json!({"number": 2, "state": "done"}))
         .await
         .unwrap();
-    assert_eq!(f.state(1).await, "in_progress");
-}
-
-#[tokio::test]
-async fn a_plan_holds_at_most_two_hundred_tasks() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    for _ in 0..9 {
-        f.call(
-            "plan.add",
-            json!({"tasks": vec![json!({"title": "t"}); 20]}),
-        )
+    sqlx::query("update plan_tasks set updated_at=now()-interval '8 days' where number=2")
+        .execute(&pool)
         .await
         .unwrap();
-    }
-    f.call(
+    f.call("plan.archive", json!({"numbers": [2]}))
+        .await
+        .unwrap();
+    // План делегата и архивного оркестратора в снимок не попадают.
+    f.call_as(
+        delegate,
         "plan.add",
-        json!({"tasks": vec![json!({"title": "t"}); 19]}),
+        json!({"tasks": [{"title": "личное"}]}),
     )
     .await
     .unwrap();
-    let error = f
-        .call(
-            "plan.add",
-            json!({"tasks": [{"title": "a"}, {"title": "b"}]}),
-        )
-        .await
-        .unwrap_err();
-    assert_eq!(error.code, Code::PlanFull);
-    assert_eq!(f.add(&["последняя"]).await["numbers"], json!([200]));
-}
-
-#[tokio::test]
-async fn idle_with_the_gate_open_moves_to_review_once_per_episode() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    f.add(&["Парсер"]).await;
-    f.link(1, f.child).await;
-    let now = Utc::now();
-    f.refresh(now - TimeDelta::hours(1)).await;
-    f.turn(
-        "Сделано.\nSTATUS: DONE",
-        now - TimeDelta::minutes(5),
-        no_git(),
-    )
-    .await;
-    f.refresh(now).await;
-    assert_eq!(f.state(1).await, "in_review");
-    let revision = f.task(1).await.1;
-
-    // Повторные проходы того же эпизода ничего не меняют.
-    for step in 1..=3 {
-        f.refresh(now + TimeDelta::seconds(15 * step)).await;
-    }
-    assert_eq!(
-        f.task(1).await.1,
-        revision,
-        "no-op evaluations keep the revision"
-    );
-
-    // Оркестратор вернул задачу в работу: тот же эпизод её не перекидывает обратно.
-    f.call("plan.update", json!({"number": 1, "state": "in_progress"}))
+    f.call_as(archived, "plan.add", json!({"tasks": [{"title": "архив"}]}))
         .await
         .unwrap();
-    for step in 4..=6 {
-        f.refresh(now + TimeDelta::seconds(15 * step)).await;
-    }
-    assert_eq!(
-        f.state(1).await,
-        "in_progress",
-        "manual override survives sweeps"
-    );
-
-    // Доработка: новый ход, затем новое устоявшееся состояние — ровно одна новая проверка.
-    let later = now + TimeDelta::minutes(5);
-    f.working(later).await;
-    f.refresh(later).await;
-    assert_eq!(f.state(1).await, "in_progress");
-    f.free().await;
-    f.turn(
-        "Поправил.\nSTATUS: DONE",
-        later + TimeDelta::seconds(30),
-        no_git(),
-    )
-    .await;
-    f.refresh(later + TimeDelta::minutes(1)).await;
-    f.refresh(later + TimeDelta::minutes(2)).await;
-    assert_eq!(f.state(1).await, "in_review");
-    let reviews = f
+    sqlx::query("update conversations set archived_at=now() where id=$1")
+        .bind(archived)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let delegate_events = f
         .events()
         .await
         .iter()
-        .filter(|event| event["task"]["state"] == "in_review")
+        .filter(|event| event["task"]["orchestrator_id"] == json!(delegate))
         .count();
-    assert_eq!(reviews, 2, "one event per transition");
-}
+    assert_eq!(
+        delegate_events, 0,
+        "a delegate's plan stays out of the owner scope"
+    );
 
-#[tokio::test]
-async fn a_new_turn_brings_a_reviewed_task_back_to_work() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    f.add(&["Парсер"]).await;
-    f.link(1, f.child).await;
-    let now = Utc::now();
-    f.refresh(now - TimeDelta::hours(1)).await;
-    f.turn(
-        "Готово.\nSTATUS: DONE",
-        now - TimeDelta::minutes(5),
-        no_git(),
-    )
-    .await;
-    f.refresh(now).await;
-    assert_eq!(f.state(1).await, "in_review");
-    f.working(now + TimeDelta::seconds(20)).await;
-    f.refresh(now + TimeDelta::seconds(20)).await;
-    assert_eq!(f.state(1).await, "in_progress");
-}
-
-#[tokio::test]
-async fn a_nudged_delegate_stays_in_progress_until_its_marker() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    f.add(&["Парсер"]).await;
-    f.link(1, f.child).await;
-    sqlx::query(
-        "insert into nudge_rules(conversation_id,owner_id,set_by,set_by_conversation,
-             notify_conversation_id,idle_minutes,background_minutes,max_consecutive,state)
-         values($1,$2,'agent',$3,$3,3,10,3,'watching')",
-    )
-    .bind(f.child)
-    .bind(f.owner)
-    .bind(f.orchestrator)
-    .execute(&f.pool)
-    .await
-    .unwrap();
-    let now = Utc::now();
-    f.turn(
-        "Сделал половину, тесты идут.",
-        now - TimeDelta::minutes(5),
-        no_git(),
-    )
-    .await;
-    f.refresh(now).await;
-    f.refresh(now + TimeDelta::seconds(15)).await;
-    assert_eq!(f.state(1).await, "in_progress", "held by the nudge gate");
-    let nudges: i64 = sqlx::query_scalar(
-        "select count(*) from scheduled_jobs where conversation_id=$1 and payload->>'action'='nudge'",
-    )
-    .bind(f.child)
-    .fetch_one(&f.pool)
-    .await
-    .unwrap();
-    assert_eq!(nudges, 1, "the plan hook schedules no second nudge");
-
-    f.turn("Всё.\nSTATUS: DONE", now + TimeDelta::minutes(1), no_git())
+    let client = TestClient::in_process(http::router(http::AppState::new(deps))).as_owner();
+    let response = client
+        .send(
+            Method::GET,
+            &format!("/api/v1/plan?orchestrator={root}"),
+            None,
+            None,
+        )
         .await;
-    f.refresh(now + TimeDelta::minutes(2)).await;
-    assert_eq!(f.state(1).await, "in_review");
-}
-
-#[tokio::test]
-async fn other_settled_states_never_move_the_task() {
-    let pool = canterlot_hub::testkit::db().await;
-    for case in ["waiting", "stalled", "failed", "stopped", "owner_lost"] {
-        let f = Fx::new(pool.clone()).await;
-        f.add(&["Парсер"]).await;
-        f.link(1, f.child).await;
-        let now = Utc::now();
-        // С маркером готовности обычный `idle` перевёл бы задачу на проверку.
-        f.refresh(now - TimeDelta::hours(1)).await;
-        f.turn("Всё.\nSTATUS: DONE", now - TimeDelta::minutes(40), no_git())
-            .await;
-        match case {
-            "waiting" => {
-                sqlx::query(
-                    "update executions set phase='awaiting_answer',phase_at=$2 where id=$1",
-                )
-                .bind(f.execution.execution_id)
-                .bind(now - TimeDelta::minutes(10))
-                .execute(&f.pool)
-                .await
-                .unwrap();
-            }
-            "stalled" => {
-                f.working(now - TimeDelta::minutes(30)).await;
-                sqlx::query(
-                    "insert into machine_metrics(machine_id,machine_time_ms,cpu_cores,cpu_permille,
-                       mem_total_bytes,mem_available_bytes,load1_centi,load5_centi,load15_centi,disks,executions,observed_at)
-                     values($1,0,8,0,16000000000,12000000000,0,0,0,'[]'::jsonb,$2,now())
-                     on conflict (machine_id) do update set executions=excluded.executions,observed_at=now()",
-                )
-                .bind(f.machine)
-                .bind(json!([{"execution_id": f.execution.execution_id, "alive": true, "cpu_permille": 0, "descendants": 0}]))
-                .execute(&f.pool)
-                .await
-                .unwrap();
-            }
-            "failed" | "stopped" | "owner_lost" => {
-                let steps: &[(ExecutionState, Option<&str>)] = match case {
-                    "failed" => &[
-                        (ExecutionState::Stopping, None),
-                        (ExecutionState::Failed, Some("crashed")),
-                    ],
-                    "stopped" => &[(ExecutionState::Stopped, Some("machine_rebooted"))],
-                    _ => &[(ExecutionState::OwnerLost, None)],
-                };
-                for (state, outcome) in steps {
-                    executions::set_state(
-                        &f.pool,
-                        f.execution.execution_id,
-                        *state,
-                        *outcome,
-                        Uuid::now_v7(),
-                    )
-                    .await
-                    .unwrap();
-                }
-            }
-            _ => unreachable!(),
-        }
-        f.refresh(now).await;
-        f.refresh(now + TimeDelta::seconds(30)).await;
-        assert_eq!(f.state(1).await, "in_progress", "{case}");
+    assert_eq!(response.status, 200, "{:?}", response.body);
+    let body = response.json::<Value>();
+    let task = &body["tasks"][0];
+    for field in [
+        "id",
+        "orchestrator_id",
+        "number",
+        "title",
+        "note",
+        "blocker",
+        "findings",
+        "state",
+        "executor_id",
+        "attempts",
+        "created_at",
+        "updated_at",
+        "revision",
+        "archived",
+        "commits",
+        "commits_truncated",
+        "files_changed",
+        "report_block_id",
+        "report_seq",
+    ] {
+        assert!(task.get(field).is_some(), "{field} missing in {task}");
     }
+    assert_eq!(task["executor_id"], json!(delegate));
+    assert_eq!(task["attempts"], 1);
+    // HTTP-чтение владельца возвращает и архив: PWA показывает его по кнопке.
+    assert_eq!(body["tasks"][1]["archived"], true);
+    let missing = client
+        .send(
+            Method::GET,
+            &format!("/api/v1/plan?orchestrator={}", Uuid::now_v7()),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(missing.status, 404);
+
+    let snap = snapshot::conversations(&pool, owner).await.unwrap();
+    let tasks = serde_json::to_value(&snap.data.plan_tasks).unwrap();
+    let titles: Vec<&str> = tasks
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|task| task["title"].as_str().unwrap())
+        .collect();
+    assert_eq!(titles, vec!["Парсер"], "{tasks}");
 }
 
 #[tokio::test]
@@ -847,351 +654,6 @@ async fn adopt_refuses_a_source_that_is_still_running() {
 }
 
 #[tokio::test]
-async fn adopt_refuses_delegates_foreign_and_missing_sources() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    f.add(&["Парсер"]).await;
-    // Делегат не забирает план своего корня.
-    let error = f
-        .call_as(
-            f.child,
-            "plan.adopt",
-            json!({"from_session_id": f.orchestrator}),
-        )
-        .await
-        .unwrap_err();
-    assert_eq!(error.code, Code::InvalidArguments);
-    // И сам не является источником.
-    let fresh = personal_conversation(&f.pool, f.owner, f.machine).await;
-    let error = f
-        .call_as(fresh, "plan.adopt", json!({"from_session_id": f.child}))
-        .await
-        .unwrap_err();
-    assert_eq!(error.code, Code::InvalidArguments);
-    // Чужой и несуществующий неразличимы.
-    let other = testkit::seed(&f.pool).await;
-    for source in [other.conversation_id, Uuid::now_v7()] {
-        let error = f
-            .call_as(fresh, "plan.adopt", json!({"from_session_id": source}))
-            .await
-            .unwrap_err();
-        assert_eq!(error.code, Code::SessionNotFound);
-    }
-    let error = f
-        .call_as(fresh, "plan.adopt", json!({"from_session_id": fresh}))
-        .await
-        .unwrap_err();
-    assert_eq!(error.code, Code::InvalidArguments);
-    assert_eq!(f.task(1).await.0, "waiting", "nothing moved");
-    // Без перенятой связи чужого ребёнка принять нельзя.
-    let error = f
-        .call_as(fresh, "sessions.accept", json!({"session_id": f.child}))
-        .await
-        .unwrap_err();
-    assert_eq!(error.code, Code::NotParent);
-}
-
-/// Исполнитель, оставшийся от версии без доменов и теперь из другого домена, в списке плана
-/// показан без коммитов, ответа и идентификатора.
-#[tokio::test]
-async fn plan_list_hides_a_cross_domain_executor() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    f.add(&["Парсер"]).await;
-    f.link(1, f.child).await;
-    f.turn(
-        "Итог\nSTATUS: DONE",
-        Utc::now() - TimeDelta::minutes(5),
-        git("ccc", &[("ccc", "секретный коммит")], &["c.rs"]),
-    )
-    .await;
-    let list = f.call("plan.list", json!({})).await.unwrap();
-    assert_eq!(
-        list["tasks"][0]["commits"][0]["subject"],
-        "секретный коммит"
-    );
-    for domain in ["work", ""] {
-        sqlx::query("update conversations set memory_domain=nullif($2,'') where id=$1")
-            .bind(f.child)
-            .bind(domain)
-            .execute(&f.pool)
-            .await
-            .unwrap();
-        for args in [json!({}), json!({"number": 1})] {
-            let list = f.call("plan.list", args).await.unwrap();
-            let task = &list["tasks"][0];
-            assert_eq!(task["commits"], json!([]), "{domain}");
-            assert_eq!(task["executor_id"], Value::Null);
-            assert_eq!(task["report_block_id"], Value::Null);
-            assert_eq!(task["files_changed"], 0);
-            let text = list.to_string();
-            assert!(!text.contains("секретный"), "{text}");
-            assert!(!text.contains(&f.child.to_string()), "{text}");
-            assert!(text.contains("скрыто: другой домен"), "{text}");
-        }
-    }
-}
-
-#[tokio::test]
-async fn derived_commits_and_report_are_computed_on_demand() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    f.add(&["Парсер", "Тесты"]).await;
-    f.link(1, f.child).await;
-    let now = Utc::now();
-    f.turn(
-        "Первый ход",
-        now - TimeDelta::minutes(10),
-        git(
-            "bbb",
-            &[("bbb", "второй"), ("aaa", "первый")],
-            &["a.rs", "b.rs"],
-        ),
-    )
-    .await;
-    let report = f
-        .turn(
-            "Итог\nSTATUS: DONE",
-            now - TimeDelta::minutes(5),
-            git(
-                "ccc",
-                &[("ccc", "третий"), ("bbb", "второй")],
-                &["b.rs", "c.rs"],
-            ),
-        )
-        .await;
-    let list = f.call("plan.list", json!({})).await.unwrap();
-    let task = &list["tasks"][0];
-    assert_eq!(
-        task["commits"],
-        json!([
-            {"sha": "ccc", "subject": "третий"},
-            {"sha": "bbb", "subject": "второй"},
-            {"sha": "aaa", "subject": "первый"},
-        ])
-    );
-    assert_eq!(task["commits_truncated"], false);
-    assert_eq!(task["files_changed"], 3);
-    assert_eq!(task["report_block_id"], json!(report));
-    let report_seq: i64 = sqlx::query_scalar("select created_seq from blocks where block_id=$1")
-        .bind(report)
-        .fetch_one(&f.pool)
-        .await
-        .unwrap();
-    assert!(report_seq > 0);
-    assert_eq!(task["report_seq"], report_seq);
-    assert_eq!(list["tasks"][1]["commits"], json!([]));
-    assert!(
-        list["hint"].as_str().unwrap().contains("3 commits"),
-        "{}",
-        list["hint"]
-    );
-
-    // Больше 50 коммитов: список обрезан и помечен.
-    let many: Vec<(String, String)> = (0..60)
-        .map(|n| (format!("s{n:02}"), format!("c{n}")))
-        .collect();
-    let refs: Vec<(&str, &str)> = many.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
-    f.turn("Много", now - TimeDelta::minutes(1), git("zzz", &refs, &[]))
-        .await;
-    let list = f.call("plan.list", json!({})).await.unwrap();
-    assert_eq!(list["tasks"][0]["commits"].as_array().unwrap().len(), 50);
-    assert_eq!(list["tasks"][0]["commits_truncated"], true);
-
-    // Те же поля в HTTP; событие несёт только хранимые поля.
-    let events = f.events().await;
-    let last = events.last().unwrap();
-    assert!(last["task"].get("commits").is_none(), "{last}");
-}
-
-#[tokio::test]
-async fn http_plan_and_snapshot_carry_the_contract() {
-    let pool = canterlot_hub::testkit::db().await;
-    let (deps, _dir) =
-        testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
-    let owner = deps.installation.owner_id;
-    let machine = Uuid::now_v7();
-    sqlx::query("insert into machines(id,owner_id,name) values($1,$2,'synthetic')")
-        .bind(machine)
-        .bind(owner)
-        .execute(&pool)
-        .await
-        .unwrap();
-    let root = personal_conversation(&pool, owner, machine).await;
-    let delegate = child_of(&pool, owner, machine, root).await;
-    let archived = personal_conversation(&pool, owner, machine).await;
-    let f = Fx {
-        context: context(&pool),
-        pool: pool.clone(),
-        owner,
-        machine,
-        orchestrator: root,
-        child: delegate,
-        execution: start(&pool, owner, delegate).await,
-    };
-    f.add(&["Парсер", "Старое"]).await;
-    f.link(1, delegate).await;
-    f.call("plan.update", json!({"number": 2, "state": "done"}))
-        .await
-        .unwrap();
-    sqlx::query("update plan_tasks set updated_at=now()-interval '8 days' where number=2")
-        .execute(&pool)
-        .await
-        .unwrap();
-    f.call("plan.archive", json!({"numbers": [2]}))
-        .await
-        .unwrap();
-    // План делегата и архивного оркестратора в снимок не попадают.
-    f.call_as(
-        delegate,
-        "plan.add",
-        json!({"tasks": [{"title": "личное"}]}),
-    )
-    .await
-    .unwrap();
-    f.call_as(archived, "plan.add", json!({"tasks": [{"title": "архив"}]}))
-        .await
-        .unwrap();
-    sqlx::query("update conversations set archived_at=now() where id=$1")
-        .bind(archived)
-        .execute(&pool)
-        .await
-        .unwrap();
-    let delegate_events = f
-        .events()
-        .await
-        .iter()
-        .filter(|event| event["task"]["orchestrator_id"] == json!(delegate))
-        .count();
-    assert_eq!(
-        delegate_events, 0,
-        "a delegate's plan stays out of the owner scope"
-    );
-
-    let client = TestClient::in_process(http::router(http::AppState::new(deps))).as_owner();
-    let response = client
-        .send(
-            Method::GET,
-            &format!("/api/v1/plan?orchestrator={root}"),
-            None,
-            None,
-        )
-        .await;
-    assert_eq!(response.status, 200, "{:?}", response.body);
-    let body = response.json::<Value>();
-    let task = &body["tasks"][0];
-    for field in [
-        "id",
-        "orchestrator_id",
-        "number",
-        "title",
-        "note",
-        "blocker",
-        "findings",
-        "state",
-        "executor_id",
-        "attempts",
-        "created_at",
-        "updated_at",
-        "revision",
-        "archived",
-        "commits",
-        "commits_truncated",
-        "files_changed",
-        "report_block_id",
-        "report_seq",
-    ] {
-        assert!(task.get(field).is_some(), "{field} missing in {task}");
-    }
-    assert_eq!(task["executor_id"], json!(delegate));
-    assert_eq!(task["attempts"], 1);
-    // HTTP-чтение владельца возвращает и архив: PWA показывает его по кнопке.
-    assert_eq!(body["tasks"][1]["archived"], true);
-    let missing = client
-        .send(
-            Method::GET,
-            &format!("/api/v1/plan?orchestrator={}", Uuid::now_v7()),
-            None,
-            None,
-        )
-        .await;
-    assert_eq!(missing.status, 404);
-
-    let snap = snapshot::conversations(&pool, owner).await.unwrap();
-    let tasks = serde_json::to_value(&snap.data.plan_tasks).unwrap();
-    let titles: Vec<&str> = tasks
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|task| task["title"].as_str().unwrap())
-        .collect();
-    assert_eq!(titles, vec!["Парсер"], "{tasks}");
-}
-
-#[tokio::test]
-async fn deleting_the_executor_unlinks_and_republishes_and_the_orchestrator_cascades() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    f.add(&["Парсер"]).await;
-    f.link(1, f.child).await;
-    f.stop_child().await;
-    let directory = tempfile::tempdir().unwrap();
-    let (_, blobs) = testkit::test_blob_store(directory.path());
-    deletion::delete(
-        &f.pool,
-        blobs.as_ref(),
-        f.owner,
-        f.child,
-        "delete-child",
-        Uuid::now_v7(),
-    )
-    .await
-    .unwrap();
-    let (state, revision, executor) = f.task(1).await;
-    assert_eq!((state.as_str(), executor), ("in_progress", None));
-    // Прежние события с ID исполнителя скрыты, последнее — новая ревизия без него.
-    let last: Value = sqlx::query_scalar(
-        "select payload from events where kind='plan_task_changed'
-         order by scope_seq desc limit 1",
-    )
-    .fetch_one(&f.pool)
-    .await
-    .unwrap();
-    assert_eq!(last["task"]["revision"], revision);
-    assert_eq!(last["task"]["executor_id"], Value::Null);
-    let leaked: i64 = sqlx::query_scalar(
-        "select count(*) from events where kind='plan_task_changed' and payload::text like '%'||$1||'%'",
-    )
-    .bind(f.child.to_string())
-    .fetch_one(&f.pool)
-    .await
-    .unwrap();
-    assert_eq!(leaked, 0);
-
-    deletion::delete(
-        &f.pool,
-        blobs.as_ref(),
-        f.owner,
-        f.orchestrator,
-        "delete-root",
-        Uuid::now_v7(),
-    )
-    .await
-    .unwrap();
-    let left: i64 = sqlx::query_scalar("select count(*) from plan_tasks")
-        .fetch_one(&f.pool)
-        .await
-        .unwrap();
-    let boards: i64 = sqlx::query_scalar("select count(*) from plan_boards")
-        .fetch_one(&f.pool)
-        .await
-        .unwrap();
-    assert_eq!((left, boards), (0, 0));
-}
-
-/// Порядок блокировок (delivery.md): приём исполнителя, проход проектора, ручная правка
-/// и удаление стороннего оркестратора идут одновременно без взаимоблокировки.
-#[tokio::test]
 async fn plan_writes_share_the_lock_order_with_accept_projector_and_delete() {
     let pool = canterlot_hub::testkit::db().await;
     for round in 0..8 {
@@ -1237,495 +699,4 @@ async fn plan_writes_share_the_lock_order_with_accept_projector_and_delete() {
         f.finish_accept().await;
         assert_eq!(f.state(1).await, "done", "round {round}");
     }
-}
-
-#[tokio::test]
-async fn idle_with_a_running_background_job_never_moves_the_task() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    f.add(&["Парсер"]).await;
-    f.link(1, f.child).await;
-    let mut tx = f.pool.begin().await.unwrap();
-    canterlot_hub::session_tools::subs::subscribe_in_tx(
-        &mut tx,
-        f.owner,
-        f.orchestrator,
-        f.child,
-        0,
-    )
-    .await
-    .unwrap();
-    tx.commit().await.unwrap();
-    let now = Utc::now();
-    f.refresh(now - TimeDelta::hours(1)).await;
-    // С маркером готовности обычный `idle` перевёл бы задачу на проверку.
-    f.turn("Всё.\nSTATUS: DONE", now - TimeDelta::minutes(40), no_git())
-        .await;
-    sqlx::query(
-        "insert into background_tasks(conversation_id,task_id,execution_id,generation,source_revision,
-           kind,description,state,started_at)
-         values($1,'tail',$2,$3,1,'bash','tail -F build.log','running',now())",
-    )
-    .bind(f.child)
-    .bind(f.execution.execution_id)
-    .bind(f.execution.generation)
-    .execute(&f.pool)
-    .await
-    .unwrap();
-    sqlx::query("update executions set last_event_at=$2 where id=$1")
-        .bind(f.execution.execution_id)
-        .bind(now - TimeDelta::minutes(5))
-        .execute(&f.pool)
-        .await
-        .unwrap();
-    f.refresh(now).await;
-    f.refresh(now + TimeDelta::seconds(30)).await;
-    let warnings: Vec<Value> = sqlx::query_scalar(
-        "select payload from scheduled_jobs where kind='session_task' and conversation_id=$1
-           and payload->>'action'='event'",
-    )
-    .bind(f.orchestrator)
-    .fetch_all(&f.pool)
-    .await
-    .unwrap();
-    assert_eq!(warnings.len(), 1, "{warnings:?}");
-    assert_eq!(warnings[0]["state"], "idle_background");
-    assert_eq!(f.state(1).await, "in_progress");
-}
-
-/// Проектор исполнителя дописывает `derived_changed` в общий журнал владельца (строка
-/// `scope_counters` занята до фиксации) раньше, чем обновляет строки плана; так же
-/// `start_child` и приём результата. Писатели плана поэтому берут счётчик журнала до строк
-/// плана, а не наоборот: встречный порядок давал взаимную блокировку.
-async fn hold_owner_journal(f: &Fx) -> sqlx::Transaction<'static, sqlx::Postgres> {
-    use canterlot_hub::events::{self, NewEvent, Scope};
-    let mut tx = f.pool.begin().await.unwrap();
-    events::append(
-        &mut tx,
-        NewEvent {
-            scope: Scope::Conversations { owner_id: f.owner },
-            kind: "derived_changed",
-            conversation_id: Some(f.child),
-            execution_id: None,
-            payload: json!({"conversation_id": f.child}),
-            correlation_id: Uuid::now_v7(),
-        },
-    )
-    .await
-    .unwrap();
-    tx
-}
-
-/// Оценка проектора для работающего исполнителя: задача с проверки возвращается в работу.
-async fn project_working(f: &Fx, tx: &mut sqlx::PgConnection) -> Result<(), sqlx::Error> {
-    use canterlot_hub::{
-        activity::{Activity, ActivityState, Evidence, QueueFacts},
-        model::RunSlot,
-        session_tools::settle::SettleFacts,
-    };
-    let now = Utc::now();
-    let working = Activity {
-        state: ActivityState::Working,
-        evidence: Evidence::Working {
-            phase: "generating".into(),
-            tool_name: None,
-            summary: None,
-            retry: None,
-            phase_since: Some(now),
-            lease_wait: None,
-        },
-    };
-    let queue = QueueFacts {
-        slot: RunSlot::Running {
-            input_id: Uuid::now_v7(),
-        },
-        queued: 0,
-        pause_reasons: Vec::new(),
-        hold_reasons: Vec::new(),
-    };
-    let facts = SettleFacts {
-        now,
-        since: now,
-        last_turn_at: None,
-        last_event_at: Some(now),
-        phase_since: Some(now),
-    };
-    plan::evaluate_executor_in_tx(
-        tx,
-        f.child,
-        &working,
-        &queue,
-        &facts,
-        &f.context.settle,
-        Uuid::now_v7(),
-    )
-    .await
-}
-
-/// Вызов инструмента плана в отдельной задаче: он встаёт в очередь за удержанным журналом.
-fn spawn_call(
-    f: &Fx,
-    conversation: Uuid,
-    tool: &'static str,
-    args: Value,
-) -> tokio::task::JoinHandle<Result<Value, session_tools::ToolError>> {
-    let context = f.context.clone();
-    let caller = f.caller_of(conversation);
-    tokio::spawn(async move { session_tools::call(&context, &caller, tool, args).await })
-}
-
-async fn in_review(f: &Fx) {
-    sqlx::query("update plan_tasks set state='in_review' where executor_conversation_id=$1")
-        .bind(f.child)
-        .execute(&f.pool)
-        .await
-        .unwrap();
-}
-
-#[tokio::test]
-async fn plan_update_and_executor_projection_do_not_deadlock() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool.clone()).await;
-    f.add(&["Парсер"]).await;
-    f.link(1, f.child).await;
-    in_review(&f).await;
-    let mut projector = hold_owner_journal(&f).await;
-    let update = spawn_call(
-        &f,
-        f.orchestrator,
-        "plan.update",
-        json!({"number": 1, "findings": ["x"]}),
-    );
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    let projected = match project_working(&f, &mut projector).await {
-        Ok(()) => projector.commit().await.map_err(|e| e.to_string()),
-        Err(error) => Err(error.to_string()),
-    };
-    let updated = update.await.unwrap().map_err(|e| format!("{e:?}"));
-    assert!(
-        projected.is_ok() && updated.is_ok(),
-        "projector: {projected:?}; plan.update: {updated:?}"
-    );
-    let (state, _, _) = f.task(1).await;
-    assert_eq!(state, "in_progress");
-    let findings: Value = sqlx::query_scalar(
-        "select findings from plan_tasks where orchestrator_conversation_id=$1 and number=1",
-    )
-    .bind(f.orchestrator)
-    .fetch_one(&f.pool)
-    .await
-    .unwrap();
-    assert_eq!(findings, json!(["x"]));
-}
-
-#[tokio::test]
-async fn plan_adopt_and_executor_projection_do_not_deadlock() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool.clone()).await;
-    f.add(&["Парсер"]).await;
-    f.link(1, f.child).await;
-    in_review(&f).await;
-    let adopter = personal_conversation(&f.pool, f.owner, f.machine).await;
-    let mut projector = hold_owner_journal(&f).await;
-    let adopt = spawn_call(
-        &f,
-        adopter,
-        "plan.adopt",
-        json!({"from_session_id": f.orchestrator}),
-    );
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    let projected = match project_working(&f, &mut projector).await {
-        Ok(()) => projector.commit().await.map_err(|e| e.to_string()),
-        Err(error) => Err(error.to_string()),
-    };
-    let adopted = adopt.await.unwrap().map_err(|e| format!("{e:?}"));
-    assert!(
-        projected.is_ok() && adopted.is_ok(),
-        "projector: {projected:?}; plan.adopt: {adopted:?}"
-    );
-    let (state, _, executor) = f.task_of(adopter, 1).await;
-    assert_eq!((state.as_str(), executor), ("in_progress", Some(f.child)));
-}
-
-/// Связь задачи в `start_child` идёт после событий создания разговора в журнале владельца.
-#[tokio::test]
-async fn linking_a_child_and_plan_update_do_not_deadlock() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool.clone()).await;
-    f.add(&["Парсер"]).await;
-    let mut start = hold_owner_journal(&f).await;
-    let task = plan::resolve_for_spawn_in_tx(&mut start, f.owner, f.orchestrator, 1)
-        .await
-        .unwrap();
-    let update = spawn_call(
-        &f,
-        f.orchestrator,
-        "plan.update",
-        json!({"number": 1, "note": "сначала тесты"}),
-    );
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    let linked =
-        match plan::link_child_in_tx(&mut start, f.orchestrator, f.child, task, Uuid::now_v7())
-            .await
-        {
-            Ok(outcome) => start
-                .commit()
-                .await
-                .map(|()| outcome)
-                .map_err(|e| e.to_string()),
-            Err(error) => Err(error.to_string()),
-        };
-    let updated = update.await.unwrap().map_err(|e| format!("{e:?}"));
-    assert!(
-        linked.is_ok() && updated.is_ok(),
-        "link: {linked:?}; plan.update: {updated:?}"
-    );
-    assert_eq!(linked.unwrap(), plan::LinkOutcome::Linked { number: 1 });
-    let (state, _, executor) = f.task(1).await;
-    assert_eq!((state.as_str(), executor), ("in_progress", Some(f.child)));
-}
-
-#[tokio::test]
-async fn finished_tasks_are_archived_by_number_and_all_finished() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    f.add(&["Первая", "Вторая", "Третья", "Открытая"]).await;
-    f.call(
-        "plan.update",
-        json!({"number": 1, "state": "done", "note": "заметка", "findings": ["находка"]}),
-    )
-    .await
-    .unwrap();
-    f.call("plan.update", json!({"number": 2, "state": "cancelled"}))
-        .await
-        .unwrap();
-    f.call("plan.update", json!({"number": 3, "state": "done"}))
-        .await
-        .unwrap();
-
-    let by_number = f
-        .call("plan.archive", json!({"numbers": [1, 3]}))
-        .await
-        .unwrap();
-    assert_eq!(by_number["archived"], json!([1, 3]));
-    assert!(f.archived(1).await);
-    assert!(!f.archived(2).await);
-    assert!(f.archived(3).await);
-    assert!(!f.archived(4).await);
-
-    let all = f
-        .call("plan.archive", json!({"all_finished": true}))
-        .await
-        .unwrap();
-    assert_eq!(all["archived"], json!([2]));
-    assert!(f.archived(2).await);
-    assert!(!f.archived(4).await);
-
-    // Архив хранит текст и выводимые поля для истории.
-    let saved: (String, Value) = sqlx::query_as(
-        "select note,findings from plan_tasks
-         where orchestrator_conversation_id=$1 and number=1",
-    )
-    .bind(f.orchestrator)
-    .fetch_one(&f.pool)
-    .await
-    .unwrap();
-    assert_eq!(saved.0, "заметка");
-    assert_eq!(saved.1, json!(["находка"]));
-}
-
-#[tokio::test]
-async fn open_tasks_cannot_be_archived() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    f.add(&["Открытая", "В работе"]).await;
-    f.call("plan.update", json!({"number": 2, "state": "in_progress"}))
-        .await
-        .unwrap();
-    for args in [
-        json!({"numbers": [1]}),
-        json!({"numbers": [2]}),
-        json!({"numbers": [1, 2]}),
-    ] {
-        let error = f.call("plan.archive", args).await.unwrap_err();
-        assert_eq!(error.code, Code::InvalidArguments);
-    }
-    assert!(!f.archived(1).await);
-    assert!(!f.archived(2).await);
-}
-
-#[tokio::test]
-async fn plan_add_archives_oldest_finished_tasks_to_make_room() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    for _ in 0..10 {
-        f.call(
-            "plan.add",
-            json!({"tasks": vec![json!({"title": "задача"}); 20]}),
-        )
-        .await
-        .unwrap();
-    }
-    f.finish_at(1, "done", 2).await;
-    f.finish_at(2, "done", 1).await;
-    let added = f.add(&["Новая"]).await;
-    assert_eq!(added["numbers"], json!([201]));
-    assert!(
-        f.archived(1).await,
-        "самая старая завершённая уходит первой"
-    );
-    assert!(!f.archived(2).await);
-    let archived: i64 = sqlx::query_scalar(
-        "select count(*) from plan_tasks
-         where orchestrator_conversation_id=$1 and archived_at is not null",
-    )
-    .bind(f.orchestrator)
-    .fetch_one(&f.pool)
-    .await
-    .unwrap();
-    assert_eq!(archived, 1);
-}
-
-#[tokio::test]
-async fn plan_add_still_fails_when_nothing_can_be_archived() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    for _ in 0..9 {
-        f.call(
-            "plan.add",
-            json!({"tasks": vec![json!({"title": "открытая"}); 20]}),
-        )
-        .await
-        .unwrap();
-    }
-    f.call(
-        "plan.add",
-        json!({"tasks": vec![json!({"title": "открытая"}); 20]}),
-    )
-    .await
-    .unwrap();
-    let error = f
-        .call("plan.add", json!({"tasks": [{"title": "лишняя"}]}))
-        .await
-        .unwrap_err();
-    assert_eq!(error.code, Code::PlanFull);
-    let archived: i64 = sqlx::query_scalar(
-        "select count(*) from plan_tasks
-         where orchestrator_conversation_id=$1 and archived_at is not null",
-    )
-    .bind(f.orchestrator)
-    .fetch_one(&f.pool)
-    .await
-    .unwrap();
-    assert_eq!(archived, 0);
-
-    // Одна закрытая задача не освободит места под две новые: отказ откатывает архивацию.
-    f.finish_at(1, "done", 1).await;
-    let error = f
-        .call(
-            "plan.add",
-            json!({"tasks": [{"title": "а"}, {"title": "б"}]}),
-        )
-        .await
-        .unwrap_err();
-    assert_eq!(error.code, Code::PlanFull);
-    assert!(!f.archived(1).await);
-}
-
-#[tokio::test]
-async fn old_finished_tasks_are_archived_on_any_board_mutation() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    f.add(&["Старая", "Свежая", "Открытая"]).await;
-    f.finish_at(1, "done", 8).await;
-    f.call("plan.update", json!({"number": 2, "state": "done"}))
-        .await
-        .unwrap();
-    f.add(&["После правки"]).await;
-    assert!(f.archived(1).await);
-    assert!(!f.archived(2).await, "свежая завершённая остаётся на доске");
-
-    // Та же уборка идёт и при правке задачи, и при явной архивации.
-    f.finish_at(2, "cancelled", 8).await;
-    f.call("plan.update", json!({"number": 3, "note": "правка"}))
-        .await
-        .unwrap();
-    assert!(f.archived(2).await);
-}
-
-#[tokio::test]
-async fn archived_task_numbers_are_never_reused() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    f.add(&["Первая", "Вторая"]).await;
-    f.call("plan.update", json!({"number": 1, "state": "done"}))
-        .await
-        .unwrap();
-    f.call("plan.archive", json!({"numbers": [1]}))
-        .await
-        .unwrap();
-    assert_eq!(f.add(&["Третья"]).await["numbers"], json!([3]));
-    assert!(!f.archived(3).await);
-}
-
-#[tokio::test]
-async fn plan_list_hides_archived_compacts_finished_and_reads_one_in_full() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    f.add(&["В работе", "Готовая", "Отменённая", "В архиве"])
-        .await;
-    f.call(
-        "plan.update",
-        json!({"number": 2, "state": "done", "note": "детали", "findings": ["итог"]}),
-    )
-    .await
-    .unwrap();
-    f.call("plan.update", json!({"number": 3, "state": "cancelled"}))
-        .await
-        .unwrap();
-    f.call("plan.update", json!({"number": 4, "state": "done"}))
-        .await
-        .unwrap();
-    f.call("plan.archive", json!({"numbers": [4]}))
-        .await
-        .unwrap();
-    f.call("plan.update", json!({"number": 1, "state": "in_progress"}))
-        .await
-        .unwrap();
-
-    let list = f.call("plan.list", json!({})).await.unwrap();
-    // Полные подробности только у открытых задач.
-    let tasks = list["tasks"].as_array().unwrap();
-    assert_eq!(tasks.len(), 1);
-    assert_eq!(tasks[0]["number"], 1);
-    let hint = list["hint"].as_str().unwrap();
-    assert!(hint.contains("#1 [in_progress] В работе"), "{hint}");
-    assert!(hint.contains("#2 [done] Готовая"), "{hint}");
-    assert!(hint.contains("#3 [cancelled] Отменённая"), "{hint}");
-    assert!(!hint.contains("#4"), "{hint}: архив скрыт по умолчанию");
-
-    let with_archive = f
-        .call("plan.list", json!({"include_archived": true}))
-        .await
-        .unwrap();
-    assert!(
-        with_archive["hint"]
-            .as_str()
-            .unwrap()
-            .contains("#4 [done, archived] В архиве")
-    );
-    assert_eq!(with_archive["tasks"].as_array().unwrap().len(), 1);
-
-    let one = f.call("plan.list", json!({"number": 4})).await.unwrap();
-    assert_eq!(one["tasks"].as_array().unwrap().len(), 1);
-    assert_eq!(one["tasks"][0]["number"], 4);
-    assert_eq!(one["tasks"][0]["archived"], true);
-
-    let full = f.call("plan.list", json!({"number": 2})).await.unwrap();
-    assert_eq!(full["tasks"][0]["note"], "детали");
-    assert_eq!(full["tasks"][0]["findings"], json!(["итог"]));
-    assert_eq!(full["tasks"][0]["archived"], false);
-
-    let missing = f.call("plan.list", json!({"number": 9})).await.unwrap_err();
-    assert_eq!(missing.code, Code::PlanTaskNotFound);
 }

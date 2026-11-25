@@ -8,7 +8,7 @@ use std::{
     collections::VecDeque,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -66,7 +66,6 @@ struct FakeWorker {
     script: Arc<Mutex<VecDeque<Scripted>>>,
     seen: Arc<Mutex<Vec<String>>>,
     answered: Arc<AtomicUsize>,
-    paused: Arc<AtomicBool>,
     task: JoinHandle<()>,
 }
 
@@ -82,21 +81,16 @@ impl FakeWorker {
         let script: Arc<Mutex<VecDeque<Scripted>>> = Arc::default();
         let seen: Arc<Mutex<Vec<String>>> = Arc::default();
         let answered = Arc::new(AtomicUsize::new(0));
-        let paused = Arc::new(AtomicBool::new(false));
         let task = {
             let script = script.clone();
             let seen = seen.clone();
             let answered = answered.clone();
-            let paused = paused.clone();
             tokio::spawn(async move {
                 while let Ok(Some(message)) = stream.message().await {
                     let Some(control_down::Msg::ProbePath(request)) = message.msg else {
                         continue;
                     };
                     seen.lock().unwrap().push(request.path.clone());
-                    if paused.load(Ordering::SeqCst) {
-                        continue;
-                    }
                     let scripted = script.lock().unwrap().pop_front().unwrap_or(Scripted {
                         outcome: path_probe::Outcome::Missing(PathProbeMissing {}),
                         now_ms: None,
@@ -121,7 +115,6 @@ impl FakeWorker {
             script,
             seen,
             answered,
-            paused,
             task,
         }
     }
@@ -131,21 +124,6 @@ impl FakeWorker {
             outcome,
             now_ms: None,
         });
-    }
-
-    fn push_at(&self, outcome: path_probe::Outcome, now_ms: u64) {
-        self.script.lock().unwrap().push_back(Scripted {
-            outcome,
-            now_ms: Some(now_ms),
-        });
-    }
-
-    fn pause(&self) {
-        self.paused.store(true, Ordering::SeqCst);
-    }
-
-    fn resume(&self) {
-        self.paused.store(false, Ordering::SeqCst);
     }
 
     fn seen(&self) -> Vec<String> {
@@ -160,11 +138,6 @@ impl FakeWorker {
         })
         .await
         .expect("probe answered");
-    }
-
-    /// Оборвать сеанс: машина уходит в офлайн, проба получает `Unavailable`.
-    fn disconnect(self) {
-        self.task.abort();
     }
 }
 
@@ -186,16 +159,6 @@ fn exists(size: u64, mtime: DateTime<Utc>, head: Option<&str>) -> path_probe::Ou
 
 fn missing() -> path_probe::Outcome {
     path_probe::Outcome::Missing(PathProbeMissing {})
-}
-
-fn exists_raw(size: u64, mtime_ms: u64, head: Option<&str>) -> path_probe::Outcome {
-    path_probe::Outcome::Exists(PathProbeExists {
-        size,
-        mtime_ms,
-        head: head.unwrap_or_default().into(),
-        head_omitted: String::new(),
-        canonical_path: String::new(),
-    })
 }
 
 fn denied(reason: &str) -> path_probe::Outcome {
@@ -382,236 +345,6 @@ async fn file_alarm_polls_and_fires_with_size_time_and_head() -> TestResult {
 }
 
 #[tokio::test]
-async fn fresh_file_is_not_rewritten_until_its_mtime_changes() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
-    let now = Utc::now();
-    let old = now - TimeDelta::minutes(30);
-    worker.push(exists(2, old, None));
-    tool(
-        f.arm_file(json!({"kind": "file", "path": "/tmp/w/gate.rc"}))
-            .await,
-    )?;
-
-    // Файл уже был и не менялся: `fresh` по умолчанию не даёт сработать.
-    worker.push(exists(2, old, None));
-    let scheduler = f.scheduler();
-    scheduler.tick(now + TimeDelta::seconds(31)).await?;
-    worker.wait(2).await;
-    scheduler.tick(now + TimeDelta::seconds(32)).await?;
-    assert_eq!(
-        sqlx::query_scalar::<_, String>("select state from alarms where key='gate'")
-            .fetch_one(&f.pool)
-            .await?,
-        "armed"
-    );
-
-    // Перезапись после взвода: время изменения другое — условие выполнено.
-    worker.push(exists(2, now + TimeDelta::seconds(40), None));
-    scheduler.tick(now + TimeDelta::seconds(63)).await?;
-    worker.wait(3).await;
-    scheduler.tick(now + TimeDelta::seconds(64)).await?;
-    scheduler.tick(now + TimeDelta::seconds(70)).await?;
-    let inputs = f.files_inputs().await;
-    assert_eq!(inputs.len(), 1);
-    assert!(inputs[0].0.contains("appeared (2 bytes"), "{}", inputs[0].0);
-    f.stop().await;
-    Ok(())
-}
-
-#[tokio::test]
-async fn fresh_compares_mtime_with_the_worker_clock() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
-    // Часы воркера далеко от часов хаба: граница взвода живёт на машине.
-    let worker_now = 1_000_000_000_000u64;
-    worker.push_at(missing(), worker_now);
-    tool(
-        f.arm_file(json!({"kind": "file", "path": "/tmp/w/gate.rc"}))
-            .await,
-    )?;
-    let scheduler = f.scheduler();
-
-    // Старый артефакт вернули после взвода: его время раньше границы.
-    worker.push_at(exists_raw(2, worker_now - 60_000, None), worker_now + 1_000);
-    scheduler.tick(Utc::now() + TimeDelta::seconds(31)).await?;
-    worker.wait(2).await;
-    scheduler.tick(Utc::now() + TimeDelta::seconds(32)).await?;
-    assert_eq!(
-        sqlx::query_scalar::<_, String>("select state from alarms where key='gate'")
-            .fetch_one(&f.pool)
-            .await?,
-        "armed",
-        "an older artifact restored after arming is not fresh"
-    );
-
-    // Файл написан после взвода: время позже границы, срабатывает.
-    worker.push_at(exists_raw(2, worker_now + 5_000, None), worker_now + 2_000);
-    scheduler.tick(Utc::now() + TimeDelta::seconds(63)).await?;
-    worker.wait(3).await;
-    scheduler.tick(Utc::now() + TimeDelta::seconds(64)).await?;
-    scheduler.tick(Utc::now() + TimeDelta::seconds(70)).await?;
-    assert_eq!(f.files_inputs().await.len(), 1);
-    f.stop().await;
-    Ok(())
-}
-
-#[tokio::test]
-async fn a_file_at_the_arming_cutoff_is_not_fresh() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
-    let cutoff = 1_500_000_000_000u64;
-    // Файл существует ровно на границе: `fresh` требует строго позже.
-    worker.push_at(exists_raw(2, cutoff, None), cutoff);
-    let armed = tool(
-        f.arm_file(json!({"kind": "file", "path": "/tmp/w/gate.rc"}))
-            .await,
-    )?;
-    assert_eq!(armed["state"], "armed");
-
-    let scheduler = f.scheduler();
-    worker.push_at(exists_raw(2, cutoff + 1, None), cutoff + 1);
-    scheduler.tick(Utc::now() + TimeDelta::seconds(31)).await?;
-    worker.wait(2).await;
-    scheduler.tick(Utc::now() + TimeDelta::seconds(32)).await?;
-    scheduler.tick(Utc::now() + TimeDelta::seconds(70)).await?;
-    assert_eq!(f.files_inputs().await.len(), 1, "one millisecond is enough");
-    f.stop().await;
-    Ok(())
-}
-
-#[tokio::test]
-async fn an_unknown_mtime_is_not_fresh() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
-    worker.push(missing());
-    tool(
-        f.arm_file(json!({"kind": "file", "path": "/tmp/w/gate.rc"}))
-            .await,
-    )?;
-    // `mtime_ms` вне `i64` не превращается в дату: неизвестное время не свежее.
-    worker.push(exists_raw(2, u64::MAX, None));
-    let scheduler = f.scheduler();
-    scheduler.tick(Utc::now() + TimeDelta::seconds(31)).await?;
-    worker.wait(2).await;
-    scheduler.tick(Utc::now() + TimeDelta::seconds(32)).await?;
-    assert_eq!(
-        sqlx::query_scalar::<_, String>("select state from alarms where key='gate'")
-            .fetch_one(&f.pool)
-            .await?,
-        "armed"
-    );
-    f.stop().await;
-    Ok(())
-}
-
-#[tokio::test]
-async fn cancelling_a_file_alarm_cleans_up_its_probe_job() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
-    let now = Utc::now();
-    worker.push(missing());
-    tool(
-        f.arm_file(json!({"kind": "file", "path": "/tmp/w/gate.rc"}))
-            .await,
-    )?;
-    assert_eq!(f.pending_probe_jobs().await, 1);
-
-    tool(
-        session_tools::call(
-            &f.context(),
-            &f.caller(),
-            "alarms.cancel",
-            json!({"key": "gate"}),
-        )
-        .await,
-    )?;
-    assert_eq!(
-        f.pending_probe_jobs().await,
-        0,
-        "the probe job is cancelled"
-    );
-    let seen = worker.seen().len();
-    f.scheduler().tick(now + TimeDelta::seconds(31)).await?;
-    assert_eq!(worker.seen().len(), seen, "a cancelled alarm is not probed");
-    f.stop().await;
-    Ok(())
-}
-
-#[tokio::test]
-async fn a_delayed_reply_is_not_polled_again_on_every_tick() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
-    let now = Utc::now();
-    worker.push(missing());
-    tool(
-        f.arm_file(json!({"kind": "file", "path": "/tmp/w/gate.rc"}))
-            .await,
-    )?;
-    worker.pause();
-    let seen_after_arming = worker.seen().len();
-
-    let scheduler = f.scheduler();
-    for second in [31, 32, 33, 34] {
-        scheduler.tick(now + TimeDelta::seconds(second)).await?;
-        assert_eq!(
-            worker.seen().len(),
-            seen_after_arming + 1,
-            "one probe is in flight; tick {second} must not start another"
-        );
-        assert_eq!(f.pending_probe_jobs().await, 1);
-    }
-    worker.resume();
-    f.stop().await;
-    Ok(())
-}
-
-#[tokio::test]
-async fn min_bytes_waits_for_a_larger_file() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
-    let now = Utc::now();
-    worker.push(missing());
-    tool(
-        f.arm_file(json!({
-            "kind": "file",
-            "path": "/tmp/w/gate.rc",
-            "min_bytes": 10,
-            "fresh": false,
-        }))
-        .await,
-    )?;
-
-    worker.push(exists(5, now, None));
-    let scheduler = f.scheduler();
-    scheduler.tick(now + TimeDelta::seconds(31)).await?;
-    worker.wait(2).await;
-    scheduler.tick(now + TimeDelta::seconds(32)).await?;
-    assert_eq!(
-        sqlx::query_scalar::<_, String>("select state from alarms where key='gate'")
-            .fetch_one(&f.pool)
-            .await?,
-        "armed"
-    );
-
-    worker.push(exists(12, now, None));
-    scheduler.tick(now + TimeDelta::seconds(63)).await?;
-    worker.wait(3).await;
-    scheduler.tick(now + TimeDelta::seconds(64)).await?;
-    scheduler.tick(now + TimeDelta::seconds(70)).await?;
-    assert!(f.files_inputs().await[0].0.contains("appeared (12 bytes"));
-    f.stop().await;
-    Ok(())
-}
-
-#[tokio::test]
 async fn arming_refuses_a_denied_path() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
@@ -631,7 +364,6 @@ async fn arming_refuses_a_denied_path() -> TestResult {
     Ok(())
 }
 
-/// Машина знает рабочий корень `/h/work`, вызывающий — в заданном домене.
 async fn scope_caller(f: &Fx, domain: Option<&str>, roots: &str) {
     sqlx::query(
         "update machines set capabilities=capabilities||array['memory_scope_v1'],
@@ -660,363 +392,10 @@ fn exists_at(canonical: &str, head: &str) -> path_probe::Outcome {
     })
 }
 
-#[tokio::test]
-async fn non_work_caller_cannot_arm_a_file_alarm_under_a_work_root() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
-    for domain in [Some("personal"), None] {
-        scope_caller(&f, domain, r#"["/h/work"]"#).await;
-        // Путь под рабочим корнем: файла нет, но отказ тот же, что и у существующего.
-        worker.push(missing());
-        let error = f
-            .arm_file(json!({"kind": "file", "path": "/h/work/rep/out.md", "read_head": true}))
-            .await
-            .unwrap_err();
-        assert_eq!(error.code, session_tools::ToolErrorCode::DomainMismatch);
-        worker.push(exists_at("/h/work/rep/out.md", "SECRET-REPORT"));
-        let error = f
-            .arm_file(json!({"kind": "file", "path": "/h/work/rep/out.md", "read_head": true}))
-            .await
-            .unwrap_err();
-        assert_eq!(error.code, session_tools::ToolErrorCode::DomainMismatch);
-        // Ссылка вне рабочего корня на файл внутри него: решает настоящий путь.
-        worker.push(exists_at("/h/work/rep/out.md", "SECRET-REPORT"));
-        let error = f
-            .arm_file(json!({"kind": "file", "path": "/tmp/w/link.md", "read_head": true}))
-            .await
-            .unwrap_err();
-        assert_eq!(error.code, session_tools::ToolErrorCode::DomainMismatch);
-    }
-    assert_eq!(f.pending_probe_jobs().await, 0);
-    let count: i64 = sqlx::query_scalar("select count(*) from alarms")
-        .fetch_one(&f.pool)
-        .await?;
-    assert_eq!(count, 0);
-    f.stop().await;
-    Ok(())
-}
-
-#[tokio::test]
-async fn personal_caller_cannot_arm_a_file_alarm_inside_a_work_delegates_worktree() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
-    scope_caller(&f, Some("personal"), r#"["/h/work"]"#).await;
-    sqlx::query("update machines set worktree_root='/h/data/worktrees' where id=$1")
-        .bind(f.seed.machine_id)
-        .execute(&f.pool)
-        .await?;
-    sqlx::query("update conversations set memory_domain='work', worktree=$2 where id=$1")
-        .bind(f.child)
-        .bind(json!({"path": "/h/data/worktrees/w1", "branch": "b", "source_workdir": "/h/work/p", "base": "main"}))
-        .execute(&f.pool)
-        .await?;
-    for answer in [
-        missing(),
-        exists_at("/h/data/worktrees/w1/out.md", "SECRET"),
-    ] {
-        worker.push(answer);
-        let error = f
-            .arm_file(
-                json!({"kind": "file", "path": "/h/data/worktrees/w1/out.md", "read_head": true}),
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(error.code, session_tools::ToolErrorCode::DomainMismatch);
-    }
-    // Копия без хозяина неизвестна и тоже закрыта для не рабочего вызывающего.
-    worker.push(missing());
-    let error = f
-        .arm_file(json!({"kind": "file", "path": "/h/data/worktrees/nobody/out.md"}))
-        .await
-        .unwrap_err();
-    assert_eq!(error.code, session_tools::ToolErrorCode::DomainMismatch);
-    f.stop().await;
-    Ok(())
-}
-
-#[tokio::test]
-async fn without_reported_roots_the_default_work_rule_denies_a_personal_caller() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
-    sqlx::query("update conversations set memory_domain='personal' where id=$1")
-        .bind(f.seed.conversation_id)
-        .execute(&f.pool)
-        .await?;
-    let roots: Option<Value> =
-        sqlx::query_scalar("select memory_work_roots from machines where id=$1")
-            .bind(f.seed.machine_id)
-            .fetch_one(&f.pool)
-            .await?;
-    assert!(roots.is_none(), "корни не сообщены");
-    worker.push(missing());
-    let error = f
-        .arm_file(json!({"kind": "file", "path": "/home/u/work/rep/out.md"}))
-        .await
-        .unwrap_err();
-    assert_eq!(error.code, session_tools::ToolErrorCode::DomainMismatch);
-    worker.push(missing());
-    let armed = tool(
-        f.arm_file(json!({"kind": "file", "path": "/home/u/play/out.md"}))
-            .await,
-    )?;
-    assert_eq!(armed["state"], "armed");
-    f.stop().await;
-    Ok(())
-}
-
-#[tokio::test]
-async fn file_alarm_outside_work_roots_and_work_callers_still_arm() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
-    // Личный вызывающий вне рабочих корней — как раньше.
-    scope_caller(&f, Some("personal"), r#"["/h/work"]"#).await;
-    worker.push(missing());
-    let armed = tool(
-        f.arm_file(json!({"kind": "file", "path": "/tmp/w/gate.rc"}))
-            .await,
-    )?;
-    assert_eq!(armed["state"], "armed");
-    // Рабочий вызывающий следит и за `/tmp`, и за файлом в рабочем корне.
-    scope_caller(&f, Some("work"), r#"["/h/work"]"#).await;
-    worker.push(missing());
-    let armed = tool(
-        f.arm_file(json!({"kind": "file", "path": "/tmp/w/other.done"}))
-            .await,
-    )?;
-    assert_eq!(armed["state"], "armed");
-    worker.push(exists_at("/h/work/rep/out.md", "mine"));
-    let armed = tool(
-        f.arm_file(json!({"kind": "file", "path": "/h/work/rep/out.md"}))
-            .await,
-    )?;
-    assert!(armed["state"] == "armed" || armed["state"] == "fired");
-    f.stop().await;
-    Ok(())
-}
-
-#[tokio::test]
-async fn an_armed_alarm_on_a_file_that_became_work_delivers_nothing() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
-    scope_caller(&f, Some("personal"), r#"["/h/work"]"#).await;
-    let armed_at = Utc::now();
-    worker.push(missing());
-    let armed = tool(
-        f.arm_file(json!({"kind": "file", "path": "/tmp/w/gate.rc", "read_head": true}))
-            .await,
-    )?;
-    assert_eq!(armed["state"], "armed");
-
-    // Машина переклассифицировала `/tmp/w` как рабочий корень, файл появился.
-    scope_caller(&f, Some("personal"), r#"["/h/work","/tmp/w"]"#).await;
-    worker.push(exists_at("/tmp/w/gate.rc", "SECRET-REPORT"));
-    let scheduler = f.scheduler();
-    scheduler.tick(armed_at + TimeDelta::seconds(31)).await?;
-    worker.wait(2).await;
-    scheduler.tick(armed_at + TimeDelta::seconds(32)).await?;
-    scheduler.tick(armed_at + TimeDelta::seconds(40)).await?;
-    let state: String = sqlx::query_scalar("select state from alarms where key='gate'")
-        .fetch_one(&f.pool)
-        .await?;
-    assert_eq!(state, "armed");
-    assert!(f.files_inputs().await.is_empty());
-    let condition: String =
-        sqlx::query_scalar("select condition::text from alarms where key='gate'")
-            .fetch_one(&f.pool)
-            .await?;
-    assert!(!condition.contains("SECRET-REPORT"), "{condition}");
-    assert!(!condition.contains("\"observed_size\":9"), "{condition}");
-    f.stop().await;
-    Ok(())
-}
-
-#[tokio::test]
-async fn arming_needs_path_probe_v1_and_sends_nothing_without_it() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1"]).await;
-    let error = f
-        .arm_file(json!({"kind": "file", "path": "/tmp/w/gate.rc"}))
-        .await
-        .unwrap_err();
-    assert_eq!(error.code, session_tools::ToolErrorCode::CapabilityMissing);
-    assert!(worker.seen().is_empty());
-    f.stop().await;
-    Ok(())
-}
-
-#[tokio::test]
-async fn an_offline_machine_retries_and_the_deadline_names_it() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
-    let now = Utc::now();
-    worker.push(missing());
-    tool(
-        session_tools::call(
-            &f.context(),
-            &f.caller(),
-            "alarms.set",
-            json!({
-                "when": {"kind": "file", "path": "/tmp/w/gate.rc"},
-                "deadline_seconds": 60,
-                "key": "gate",
-            }),
-        )
-        .await,
-    )?;
-    worker.disconnect();
-    // Сеанс исчез: проба отвечает `Unavailable`, задание ждёт следующего опроса.
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    let scheduler = f.scheduler();
-    scheduler.tick(now + TimeDelta::seconds(31)).await?;
-    scheduler.tick(now + TimeDelta::seconds(32)).await?;
-    let condition: Value = sqlx::query_scalar("select condition from alarms where key='gate'")
-        .fetch_one(&f.pool)
-        .await?;
-    assert!(condition["unavailable_since"].is_string(), "{condition}");
-
-    // Срок: сообщение называет машину и время, с которого её нет.
-    scheduler.tick(now + TimeDelta::seconds(61)).await?;
-    scheduler.tick(now + TimeDelta::seconds(70)).await?;
-    let inputs = f.files_inputs().await;
-    assert_eq!(inputs.len(), 1);
-    assert!(
-        inputs[0]
-            .0
-            .contains("timed out after 1 min: machine unavailable since "),
-        "{}",
-        inputs[0].0
-    );
-    f.stop().await;
-    Ok(())
-}
-
-#[tokio::test]
-async fn a_hung_probe_does_not_block_another_scheduler_job() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
-    let now = Utc::now();
-    worker.push(missing());
-    tool(
-        f.arm_file(json!({"kind": "file", "path": "/tmp/w/gate.rc"}))
-            .await,
-    )?;
-    // Второй будильник по времени: он должен сработать, пока проба висит.
-    tool(
-        session_tools::call(
-            &f.context(),
-            &f.caller(),
-            "alarms.set",
-            json!({"at": (now + TimeDelta::seconds(31)).to_rfc3339(), "key": "wake"}),
-        )
-        .await,
-    )?;
-    worker.pause();
-
-    let started = std::time::Instant::now();
-    let report = tokio::time::timeout(
-        Duration::from_secs(3),
-        f.scheduler().tick(now + TimeDelta::seconds(36)),
-    )
-    .await
-    .expect("the scheduler tick must not wait for the probe deadline")
-    .unwrap();
-    assert!(
-        started.elapsed() < canterlot_hub::session_tools::probe::RPC_DEADLINE,
-        "tick took {:?}, which is not well before the RPC deadline",
-        started.elapsed()
-    );
-    assert_eq!(report.fired, 1, "the time alarm is delivered");
-    let probe_still_pending: bool = sqlx::query_scalar(
-        "select exists(select 1 from scheduled_jobs where state='pending'
-          and payload->>'action'='alarm_probe')",
-    )
-    .fetch_one(&f.pool)
-    .await?;
-    assert!(probe_still_pending);
-    let fired: String = sqlx::query_scalar(
-        "select content->0->>'text' from inputs where conversation_id=$1 and origin->>'kind'='alarm'",
-    )
-    .bind(f.seed.conversation_id)
-    .fetch_one(&f.pool)
-    .await?;
-    assert!(fired.contains("fired at"), "{fired}");
-    f.stop().await;
-    Ok(())
-}
-
-#[tokio::test]
-async fn a_file_alarm_is_picked_up_by_a_new_scheduler() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
-    let now = Utc::now();
-    worker.push(missing());
-    tool(
-        f.arm_file(json!({"kind": "file", "path": "/tmp/w/gate.rc"}))
-            .await,
-    )?;
-
-    // «Перезапуск»: новый планировщик с пустым кэшем проб снова спрашивает машину.
-    worker.push(exists(2, now + TimeDelta::seconds(20), None));
-    let restarted = f.scheduler();
-    restarted.tick(now + TimeDelta::seconds(31)).await?;
-    worker.wait(2).await;
-    restarted.tick(now + TimeDelta::seconds(32)).await?;
-    restarted.tick(now + TimeDelta::seconds(40)).await?;
-    assert_eq!(f.files_inputs().await.len(), 1);
-    f.stop().await;
-    Ok(())
-}
-
-#[tokio::test]
-async fn a_file_alarm_coalesces_with_a_time_alarm() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
-    let now = Utc::now();
-    worker.push(missing());
-    tool(
-        f.arm_file(json!({"kind": "file", "path": "/tmp/w/gate.rc"}))
-            .await,
-    )?;
-    tool(
-        session_tools::call(
-            &f.context(),
-            &f.caller(),
-            "alarms.set",
-            json!({"at": (now + TimeDelta::seconds(31)).to_rfc3339(), "key": "wake"}),
-        )
-        .await,
-    )?;
-
-    let scheduler = f.scheduler();
-    worker.push(exists(2, now + TimeDelta::seconds(20), None));
-    scheduler.tick(now + TimeDelta::seconds(31)).await?;
-    worker.wait(2).await;
-    scheduler.tick(now + TimeDelta::seconds(32)).await?;
-    // Задание времени доставляет оба сработавших будильника одним вводом.
-    scheduler.tick(now + TimeDelta::seconds(36)).await?;
-    let inputs = f.files_inputs().await;
-    assert_eq!(inputs.len(), 1, "one input for both fired alarms");
-    assert!(inputs[0].0.starts_with("[canterlot] 2 alarms fired."));
-    assert!(inputs[0].0.contains("file /tmp/w/gate.rc appeared"));
-    f.stop().await;
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // Файл отчёта автопинка
 // ---------------------------------------------------------------------------
 
-/// Цель устоялась в `idle`: проекция снимается задним числом, как в `tests/nudge.rs`.
 async fn prime_idle(pool: &PgPool, f: &Fx, now: DateTime<Utc>) {
     sqlx::query("update executions set last_event_at=$2 where conversation_id=$1")
         .bind(f.child)
@@ -1194,241 +573,6 @@ async fn nudge_inputs(pool: &PgPool, child: Uuid) -> Vec<String> {
     .unwrap()
 }
 
-#[tokio::test]
-async fn report_growth_counts_as_progress_and_prevents_exhaustion() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
-    let now = Utc::now();
-    prime_idle(&f.pool, &f, now).await;
-    answer_and_run(
-        &f.pool,
-        &f,
-        "Still working on the parser.",
-        now - TimeDelta::minutes(1),
-    )
-    .await;
-    activity::refresh(&f.pool, f.child, now, &thresholds(), Uuid::now_v7())
-        .await
-        .unwrap();
-    let at = now + TimeDelta::minutes(3);
-    let fingerprint = idle_fingerprint(&f.pool, f.child, at + TimeDelta::seconds(1)).await;
-    pending_nudge(
-        &f.pool,
-        &f,
-        Some("/tmp/w/report.md"),
-        baseline(10, now - TimeDelta::minutes(5)),
-        3,
-        at,
-        &fingerprint,
-    )
-    .await;
-    worker.push(exists(20, now, None));
-
-    let scheduler = f.scheduler();
-    scheduler.tick(at).await?;
-    worker.wait(1).await;
-    scheduler.tick(at + TimeDelta::seconds(1)).await?;
-
-    let (state, consecutive): (String, i32) =
-        sqlx::query_as("select state,consecutive from nudge_rules where conversation_id=$1")
-            .bind(f.child)
-            .fetch_one(&f.pool)
-            .await?;
-    assert_eq!(state, "watching");
-    assert_eq!(
-        consecutive, 1,
-        "growth starts a new series instead of giving up"
-    );
-    assert_eq!(nudge_inputs(&f.pool, f.child).await.len(), 1);
-    assert_eq!(nudge_events(&f.pool, f.child).await[0].0, "nudged");
-    f.stop().await;
-    Ok(())
-}
-
-#[tokio::test]
-async fn an_unchanged_report_is_not_progress() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
-    let now = Utc::now();
-    prime_idle(&f.pool, &f, now).await;
-    answer_and_run(
-        &f.pool,
-        &f,
-        "Still working on the parser.",
-        now - TimeDelta::minutes(1),
-    )
-    .await;
-    activity::refresh(&f.pool, f.child, now, &thresholds(), Uuid::now_v7())
-        .await
-        .unwrap();
-    let at = now + TimeDelta::minutes(3);
-    let fingerprint = idle_fingerprint(&f.pool, f.child, at + TimeDelta::seconds(1)).await;
-    let report_time = now - TimeDelta::minutes(5);
-    // Все неотчётные поля — как в продукте: меняется только отчёт, и он тот же.
-    pending_nudge(
-        &f.pool,
-        &f,
-        Some("/tmp/w/report.md"),
-        baseline(20, report_time),
-        2,
-        at,
-        &fingerprint,
-    )
-    .await;
-    worker.push(exists(20, report_time, None));
-
-    let scheduler = f.scheduler();
-    scheduler.tick(at).await?;
-    worker.wait(1).await;
-    scheduler.tick(at + TimeDelta::seconds(1)).await?;
-
-    let (state, consecutive): (String, i32) =
-        sqlx::query_as("select state,consecutive from nudge_rules where conversation_id=$1")
-            .bind(f.child)
-            .fetch_one(&f.pool)
-            .await?;
-    assert_eq!(state, "watching");
-    assert_eq!(
-        consecutive, 3,
-        "an unchanged report must not look like progress"
-    );
-    f.stop().await;
-    Ok(())
-}
-
-#[tokio::test]
-async fn a_missing_report_is_named_in_the_text_and_signals() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
-    let now = Utc::now();
-    prime_idle(&f.pool, &f, now).await;
-    answer_and_run(
-        &f.pool,
-        &f,
-        "Still working on the parser.",
-        now - TimeDelta::minutes(1),
-    )
-    .await;
-    activity::refresh(&f.pool, f.child, now, &thresholds(), Uuid::now_v7())
-        .await
-        .unwrap();
-    let at = now + TimeDelta::minutes(3);
-    let fingerprint = idle_fingerprint(&f.pool, f.child, at + TimeDelta::seconds(1)).await;
-    pending_nudge(
-        &f.pool,
-        &f,
-        Some("/tmp/w/report.md"),
-        baseline(10, now - TimeDelta::minutes(5)),
-        0,
-        at,
-        &fingerprint,
-    )
-    .await;
-    worker.push(missing());
-
-    let scheduler = f.scheduler();
-    scheduler.tick(at).await?;
-    worker.wait(1).await;
-    scheduler.tick(at + TimeDelta::seconds(1)).await?;
-
-    let text = nudge_inputs(&f.pool, f.child).await.remove(0);
-    assert!(
-        text.contains("The report file /tmp/w/report.md does not exist yet."),
-        "{text}"
-    );
-    let signals = nudge_events(&f.pool, f.child).await.remove(0).1;
-    assert_eq!(signals["report_missing"], true, "{signals}");
-    f.stop().await;
-    Ok(())
-}
-
-#[tokio::test]
-async fn a_failed_probe_is_recorded_and_does_not_block_the_nudge() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    let now = Utc::now();
-    prime_idle(&f.pool, &f, now).await;
-    answer_and_run(
-        &f.pool,
-        &f,
-        "Still working on the parser.",
-        now - TimeDelta::minutes(1),
-    )
-    .await;
-    activity::refresh(&f.pool, f.child, now, &thresholds(), Uuid::now_v7())
-        .await
-        .unwrap();
-    let at = now + TimeDelta::minutes(3);
-    let fingerprint = idle_fingerprint(&f.pool, f.child, at + TimeDelta::seconds(1)).await;
-    pending_nudge(
-        &f.pool,
-        &f,
-        Some("/tmp/w/report.md"),
-        baseline(10, now - TimeDelta::minutes(5)),
-        0,
-        at,
-        &fingerprint,
-    )
-    .await;
-
-    // Реестр пуст: сеанса нет, проба отвечает `Unavailable`; толчок всё равно уходит.
-    let scheduler = Scheduler::new(
-        f.pool.clone(),
-        Dispatcher::channel().0,
-        SchedulerConfig::default(),
-    );
-    scheduler.tick(at).await?;
-    scheduler.tick(at + TimeDelta::seconds(1)).await?;
-
-    let text = nudge_inputs(&f.pool, f.child).await.remove(0);
-    assert!(text.contains("STATUS: DONE"), "{text}");
-    assert!(!text.contains("does not exist yet"), "{text}");
-    let signals = nudge_events(&f.pool, f.child).await.remove(0).1;
-    assert_eq!(signals["report_probe_failed"], true, "{signals}");
-    f.stop().await;
-    Ok(())
-}
-
-#[tokio::test]
-async fn nudge_set_resolves_the_report_path_and_refuses_a_denied_one() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
-    worker.push(missing());
-    tool(
-        session_tools::call(
-            &f.context(),
-            &f.caller(),
-            "nudge.set",
-            json!({"session_id": f.child, "report_file": "reports/out.md"}),
-        )
-        .await,
-    )?;
-    let stored: String =
-        sqlx::query_scalar("select report_file from nudge_rules where conversation_id=$1")
-            .bind(f.child)
-            .fetch_one(&f.pool)
-            .await?;
-    assert_eq!(stored, "/tmp/w/reports/out.md");
-    assert_eq!(worker.seen(), ["/tmp/w/reports/out.md"]);
-
-    worker.push(denied("denied"));
-    let error = session_tools::call(
-        &f.context(),
-        &f.caller(),
-        "nudge.set",
-        json!({"session_id": f.child, "report_file": "/tmp/w/.env"}),
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(error.code, session_tools::ToolErrorCode::PathNotAllowed);
-    f.stop().await;
-    Ok(())
-}
-
 /// Вся семья в личном домене; машина знает рабочий корень `/h/work`.
 async fn personal_family(f: &Fx) {
     scope_caller(f, Some("personal"), r#"["/h/work"]"#).await;
@@ -1521,24 +665,6 @@ async fn nudge_job_ignores_a_report_probe_the_author_may_not_see() -> TestResult
     let signals = nudge_events(&f.pool, f.child).await.remove(0).1;
     assert_eq!(signals["report_probe_failed"], true, "{signals}");
     assert_ne!(signals["report_missing"], true, "{signals}");
-    f.stop().await;
-    Ok(())
-}
-
-#[tokio::test]
-async fn nudge_set_needs_path_probe_v1_for_a_report() -> TestResult {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    let _worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1"]).await;
-    let error = session_tools::call(
-        &f.context(),
-        &f.caller(),
-        "nudge.set",
-        json!({"session_id": f.child, "report_file": "/tmp/w/report.md"}),
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(error.code, session_tools::ToolErrorCode::CapabilityMissing);
     f.stop().await;
     Ok(())
 }

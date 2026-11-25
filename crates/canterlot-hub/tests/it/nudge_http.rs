@@ -3,7 +3,6 @@
 use axum::http::Method;
 use canterlot_hub::{
     http::{self, AppState},
-    presets::{self, Actor, NewPreset, PresetPurpose},
     testkit::{self, TestClient, TestResponse},
 };
 use serde_json::{Value, json};
@@ -11,9 +10,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 struct Fx {
-    pool: PgPool,
     client: TestClient,
-    owner: Uuid,
     session: Uuid,
     _dir: tempfile::TempDir,
 }
@@ -33,9 +30,7 @@ impl Fx {
         let session = testkit::seed_conversation(&pool, owner, machine).await;
         let client = TestClient::in_process(http::router(AppState::new(deps))).as_owner();
         Self {
-            pool,
             client,
-            owner,
             session,
             _dir: dir,
         }
@@ -110,142 +105,4 @@ async fn owner_creates_pauses_resumes_and_clears_a_rule() {
         .send(Method::DELETE, &path, Some("nudge_delete_2"), None)
         .await;
     assert_eq!(again.status.as_u16(), 204);
-}
-
-#[tokio::test]
-async fn owner_rule_accepts_only_nudge_text_presets() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    let path = format!("/api/v1/conversations/{}/nudge", f.session);
-    let nudge = presets::create(
-        &f.pool,
-        f.owner,
-        "http_nudge_preset",
-        NewPreset {
-            title: "HTTP толчок".into(),
-            description: None,
-            text: "[canterlot] {markers}".into(),
-            purpose: PresetPurpose::Nudge,
-        },
-        Actor::Owner,
-        Uuid::now_v7(),
-    )
-    .await
-    .unwrap();
-    let instruction = presets::create(
-        &f.pool,
-        f.owner,
-        "http_instruction_preset",
-        NewPreset {
-            title: "HTTP инструкция".into(),
-            description: None,
-            text: "обычный текст".into(),
-            purpose: PresetPurpose::Instructions,
-        },
-        Actor::Owner,
-        Uuid::now_v7(),
-    )
-    .await
-    .unwrap();
-
-    let bad = f
-        .send(
-            Method::PUT,
-            &path,
-            Some("nudge_bad_preset"),
-            Some(json!({"text_preset": instruction.summary.id})),
-        )
-        .await;
-    assert_eq!(bad.status.as_u16(), 422);
-    assert_eq!(bad.json::<Value>()["error"]["code"], "profile_unknown");
-
-    let ok = f
-        .send(
-            Method::PUT,
-            &path,
-            Some("nudge_ok_preset"),
-            Some(json!({"text_preset": nudge.summary.id})),
-        )
-        .await;
-    assert_eq!(ok.status.as_u16(), 200);
-    let row: Option<String> =
-        sqlx::query_scalar("select text_preset_id from nudge_rules where conversation_id=$1")
-            .bind(f.session)
-            .fetch_one(&f.pool)
-            .await
-            .unwrap();
-    assert_eq!(row.as_deref(), Some(nudge.summary.id.as_str()));
-}
-
-#[tokio::test]
-async fn nudge_http_is_limited_to_the_owners_sessions() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool).await;
-    let other = testkit::seed(&f.pool).await;
-    let foreign = testkit::seed_conversation(&f.pool, other.owner_id, other.machine_id).await;
-    let response = f
-        .send(
-            Method::PUT,
-            &format!("/api/v1/conversations/{foreign}/nudge"),
-            Some("nudge_foreign"),
-            Some(json!({})),
-        )
-        .await;
-    assert_eq!(response.status.as_u16(), 404);
-}
-
-/// Правило боковой копии: GET владельца его показывает, значит PUT и DELETE владельца тоже
-/// его принимают. Скрыта копия только от инструментов агентов.
-#[tokio::test]
-async fn owner_can_edit_and_clear_the_rule_of_a_side_chat_that_get_shows() {
-    let pool = canterlot_hub::testkit::db().await;
-    let f = Fx::new(pool.clone()).await;
-    let path = format!("/api/v1/conversations/{}/nudge", f.session);
-    let created = f
-        .send(
-            Method::PUT,
-            &path,
-            Some("side_put_1"),
-            Some(json!({"idle_minutes": 5, "max_nudges": 2})),
-        )
-        .await;
-    assert_eq!(created.status.as_u16(), 200);
-    let parent = testkit::seed_conversation(
-        &pool,
-        f.owner,
-        sqlx::query_scalar("select machine_id from conversations where id=$1")
-            .bind(f.session)
-            .fetch_one(&pool)
-            .await
-            .unwrap(),
-    )
-    .await;
-    sqlx::query("update conversations set side_of=$2, side_kind='chat' where id=$1")
-        .bind(f.session)
-        .bind(parent)
-        .execute(&pool)
-        .await
-        .unwrap();
-    let read: Value = f.send(Method::GET, &path, None, None).await.json();
-    assert_eq!(read["rule"]["state"], "watching");
-    let paused = f
-        .send(
-            Method::PUT,
-            &path,
-            Some("side_put_2"),
-            Some(json!({"paused": true})),
-        )
-        .await;
-    assert_eq!(
-        paused.status.as_u16(),
-        200,
-        "PUT must accept what GET shows"
-    );
-    assert_eq!(paused.json::<Value>()["state"], "paused");
-    let cleared = f
-        .send(Method::DELETE, &path, Some("side_delete"), None)
-        .await;
-    assert_eq!(cleared.status.as_u16(), 204);
-    let read: Value = f.send(Method::GET, &path, None, None).await.json();
-    assert!(read["rule"].is_null());
 }

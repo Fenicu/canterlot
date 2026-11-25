@@ -53,13 +53,3 @@ slow-timeout = { period = "30s", terminate-after = 8 }
 [[profile.default.overrides]]
 filter = 'test(=exec_e2e::transport_errors_never_stop_an_execution)'
 retries = 2
-
-# QUARANTINE: 19.11 упал в check.sh --fast на main c5dcbe61 (hung_rescue.rs:1026, episode_id NULL
-# после two_ticks_after_projector_start: эпизод не открылся за две выборки), отдельно 30/30
-# зелёный. Вероятно, фоновый пересчёт хаба под нагрузкой сдвигает окно наблюдения между
-# выборками теста; разобрать по порядку тиков проектора, а не по таймингам.
-[[profile.default.overrides]]
-filter = 'package(canterlot-hub) & binary(/^it_/) & test(=hung_rescue::an_old_card_cannot_stop_a_later_turn)'
-retries = 2
-
-
