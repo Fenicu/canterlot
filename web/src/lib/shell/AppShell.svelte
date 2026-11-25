@@ -44,6 +44,7 @@
   let updateError = $state('');
   const viewport = $derived({ width: width || 412, height, mouse });
   const mode: LayoutMode = $derived(layoutMode(viewport));
+  const phone = $derived(mode === 'phone');
   // Стол стоя: правой панели нет, список чуть уже, чтобы колонке ленты осталось 600 px.
   const dock = $derived(dockForm(viewport));
   const path = $derived(page.url.pathname);
@@ -354,32 +355,34 @@
   {:else if harness || authRoute}
     {@render banner()}
     <div class="page">{@render children()}</div>
-  {:else if laidOut && mode === 'phone'}
-    {#if onSessions || onNew}
-      {@render banner(true)}
-      <SessionList main={onSessions} />
-    {:else}
-      {@render banner()}
-    {/if}
-
-    {#if !onSessions}
-      <div class="page">{@render children()}</div>
-    {/if}
-    {#if !onChat && !standalonePage}
-      <Nav current={nav} create={onSessions || onNew} {createHref} />
-    {/if}
   {:else if laidOut}
-    <div class="panes" data-dock={dock ? '' : undefined}>
+    <!--
+      Экран маршрута стоит в шаблоне один раз: телефон и панели меняют только обёртку вокруг него.
+      В разных ветках поворот телефона через порог планшета пересоздавал экран, и пропадало всё,
+      что живёт в его состоянии: правка пузыря, диктовка, открытые листы.
+    -->
+    {#if phone}
+      {#if onSessions || onNew}
+        {@render banner(true)}
+        <SessionList main={onSessions} />
+      {:else}
+        {@render banner()}
+      {/if}
+    {/if}
+    {#if !(phone && onSessions)}
+    <div class:panes={!phone} class:page-frame={phone} data-dock={!phone && dock ? '' : undefined}>
+      {#if !phone}
       <!-- Стол: группы и разделы в полосе слева, нижней навигации в панели списка нет. -->
       <aside data-pane="list" data-railed={mode === 'desktop' ? '' : undefined}>
         <SessionList create rail={mode === 'desktop'} section={nav} />
         {#if mode !== 'desktop'}<Nav current={nav} create={false} />{/if}
       </aside>
-      <div data-pane="chat">
-        {@render banner()}
+      {/if}
+      <div class:page={phone} data-pane={phone ? undefined : 'chat'}>
+        {#if !phone}{@render banner()}{/if}
         {@render children()}
       </div>
-      {#if pane.lane && pane.shown && (onChat || pane.shown === 'search')}
+      {#if !phone && pane.lane && pane.shown && (onChat || pane.shown === 'search')}
         <aside data-pane="lane">
           {#if pane.shown === 'search' && SearchPanelComponent}
             <SearchPanelComponent onpick={pickHit} onclose={() => pane.close()} />
@@ -395,6 +398,10 @@
         </aside>
       {/if}
     </div>
+    {/if}
+    {#if phone && !onChat && !standalonePage}
+      <Nav current={nav} create={onSessions || onNew} {createHref} />
+    {/if}
   {:else}
     {@render banner()}
   {/if}
@@ -421,6 +428,11 @@
     min-height: 0;
     display: flex;
     flex-direction: column;
+  }
+
+  /* На телефоне обёртка панелей в раскладке не участвует: страница остаётся ребёнком оболочки. */
+  .page-frame {
+    display: contents;
   }
 
   .page :global(main),

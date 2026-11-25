@@ -19,7 +19,8 @@ export default defineConfig({
       '$app/paths': new URL('./tests/unit/stubs/app-paths.ts', import.meta.url).pathname,
       // Листы кладут запись в историю и читают состояние страницы; роутера в юнит-тестах нет.
       '$app/state': new URL('./tests/unit/stubs/app-state.svelte.ts', import.meta.url).pathname,
-      '$app/navigation': new URL('./tests/unit/stubs/app-navigation.ts', import.meta.url).pathname
+      '$app/navigation': new URL('./tests/unit/stubs/app-navigation.ts', import.meta.url).pathname,
+      '$app/env': new URL('./tests/unit/stubs/app-env.ts', import.meta.url).pathname
     }
   },
   test: {
