@@ -175,7 +175,7 @@ lease_self_wrap gate gate bash "$(realpath "$0")" "$@"
 
 1. один `npm ci` в `web/`;
 2. `scripts/check.sh --all --no-web` — версия, fmt, clippy, nextest и `canterlot-speech`; флаг `--no-web` снимает только веб-этап, остальные шаги не меняются;
-3. `scripts/deploy/tests/run.sh` — только если с последнего тега `vX.Y.Z` менялась обвязка выката; идёт отдельным шагом, чтобы тайминговые наборы не пересекались с тяжёлыми проверками, в аттестацию пишется `deploy_exit=0` или `deploy_exit=skipped`;
+3. `scripts/deploy/tests/run.sh` — только если с последнего тега `vX.Y.Z` менялась обвязка выката (на коммите, который сам уже помечен тегом, база — предыдущий тег, иначе diff был бы пуст; тега раньше нет — наборы идут); идёт отдельным шагом, чтобы тайминговые наборы не пересекались с тяжёлыми проверками, в аттестацию пишется `deploy_exit=0` или `deploy_exit=skipped`;
 4. `scripts/check-web.sh` — сверка типов API, svelte-check, eslint, token lint, vitest, две сборки PWA и `vitest.build`.
 
 Гейт гоняет веб ровно один раз и не собирает web отдельным шагом — `check-web.sh` собирает сам.
