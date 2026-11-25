@@ -464,14 +464,19 @@ mod tests {
                     .fetch_one(&pool)
                     .await
                     .unwrap();
-                // Пул жив в фоновой задаче, как у теста, отдавшего его хабу.
+                // Пул жив в фоновой задаче, как у теста, отдавшего его хабу: тело кончается,
+                // пока задача держит соединения и ходит в базу.
+                let (busy, is_busy) = tokio::sync::oneshot::channel();
                 tokio::spawn(async move {
+                    let mut busy = Some(busy);
                     loop {
                         let _ = sqlx::query("select 1").execute(&pool).await;
-                        tokio::time::sleep(Duration::from_millis(5)).await;
+                        if let Some(busy) = busy.take() {
+                            let _ = busy.send(());
+                        }
                     }
                 });
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                is_busy.await.unwrap();
                 sender.send(name).unwrap();
                 assert!(!panic, "test body panics");
             })
