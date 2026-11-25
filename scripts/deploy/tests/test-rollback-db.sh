@@ -588,5 +588,92 @@ diff "${FAKE_ROOT}/hub/backups/can-pre.dump" "${FAKE_ROOT}/state/db.txt" >/dev/n
 teardown_case
 case_end
 
+# R26–R28: повтор той же команды после сбоя посреди восстановления. Идентичность задана явно,
+# как в команде, которую печатает cutover: без неё сверка oid не работает вовсе.
+rollback_expect() {
+    RC=0
+    bash "${DEPLOY_DIR}/rollback-db.sh" "${FAKE_ROOT}/hub/backups/can-pre.dump" --to "${SHA_PREV}" \
+        --expect-system-id 7000000000000000001 --expect-db-oid 16384 >"${FAKE_ROOT}/rb.log" 2>&1 || RC=$?
+}
+phase_now() { cut -d' ' -f1 "${FAKE_ROOT}/hub/backups/can-pre.dump.restore-phase" 2>/dev/null || true; }
+assert_restored() {
+    assert_eq "${RC}" "0" "$1: the same command finishes the restore"
+    [ "${RC}" = "0" ] || tail -4 "${FAKE_ROOT}/rb.log"
+    grep -q 'payload-predump' "${FAKE_ROOT}/state/db.txt" 2>/dev/null \
+        && case_ok "$1: the data is restored from the dump" || case_fail "$1: the data was not restored"
+    assert_eq "$(phase_now)" "restored" "$1: the phase ends as restored"
+    FAKE_HOST=fakehub "${FAKE_ROOT}/fake-bin/systemctl" is-active --quiet canterlot-hub \
+        && case_ok "$1: the hub is started" || case_fail "$1: the hub is not running"
+}
+
+# R26: createdb падает два раза подряд. Второй запуск не должен затирать фазу dropped: иначе третий
+# отказывает навсегда («cannot read the cluster identity») при снесённой базе и остановленном хабе.
+case_begin "rollback resumes after createdb failed twice"
+setup_rollback resumetwice
+FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" stop canterlot-worker >/dev/null
+export FAKE_FAIL_CREATEDB=1
+rollback_expect
+assert_eq "${RC}/$(phase_now)" "1/dropped" "run 1 fails at createdb, phase dropped"
+rollback_expect
+assert_eq "${RC}/$(phase_now)" "1/dropped" "run 2 fails at createdb, the phase is still dropped"
+unset FAKE_FAIL_CREATEDB
+rollback_expect
+assert_restored "run 3"
+teardown_case
+case_end
+
+# R27: createdb прошёл, а чтение идентичности новой базы сразу после него оборвалось: фаза dropped,
+# база уже существует с незаписанным oid. Повтор обязан снести её и создать заново (настоящий
+# createdb на существующей базе падает), а не отказывать по oid.
+case_begin "rollback resumes when the identity read after createdb failed"
+setup_rollback resumeidentity
+FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" stop canterlot-worker >/dev/null
+export FAKE_FAIL_CREATEDB=1
+rollback_expect
+unset FAKE_FAIL_CREATEDB
+assert_eq "${RC}/$(phase_now)" "1/dropped" "run 1 fails at createdb, phase dropped"
+export FAKE_PSQL_FAIL_MATCH="oid::text from pg_database"
+rollback_expect
+unset FAKE_PSQL_FAIL_MATCH
+assert_eq "${RC}/$(phase_now)" "1/dropped" "run 2 fails at the identity read, the phase is still dropped"
+[ -f "${FAKE_ROOT}/state/db.txt" ] && case_ok "the recreated database exists with an unrecorded oid" || case_fail "the database is missing"
+: >"${FAKE_ROOT}/state/calls.log"
+rollback_expect
+assert_restored "run 3"
+grep -q '^dropdb ' "${FAKE_ROOT}/state/calls.log" && case_ok "run 3 dropped the half-made database first" || case_fail "run 3 did not drop the existing database"
+rollback_expect
+assert_restored "run 4"
+teardown_case
+case_end
+
+# R28: dropdb прошёл, а запись фазы dropped оборвалась: в файле verified, базы нет. Повтор обязан
+# понять это по ответу кластера, а не отказывать на чтении идентичности снесённой базы.
+case_begin "rollback resumes when the phase write after dropdb failed"
+setup_rollback resumephasewrite
+FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" stop canterlot-worker >/dev/null
+export FAKE_FAIL_CMD="'dropped' >"
+rollback_expect
+unset FAKE_FAIL_CMD
+assert_eq "${RC}/$(phase_now)" "1/verified" "run 1 fails at the phase write, the file says verified"
+[ ! -f "${FAKE_ROOT}/state/db.txt" ] && case_ok "the database is really missing" || case_fail "the database exists"
+rollback_expect
+assert_restored "run 2"
+assert_contains "${FAKE_ROOT}/rb.log" "is missing" "the missing database is reported"
+teardown_case
+case_end
+
+# R28b: без записи фазы отсутствующая база — не «продолжение», а отказ до остановки хаба.
+case_begin "rollback refuses a missing database without a phase record"
+setup_rollback nophasenodb
+FAKE_HOST=local "${FAKE_ROOT}/fake-bin/systemctl" stop canterlot-worker >/dev/null
+rm -f "${FAKE_ROOT}/state/db.txt"  # lint: local-temp
+: >"${FAKE_ROOT}/state/calls.log"
+rollback_expect
+assert_eq "${RC}" "1" "exit nonzero"
+assert_contains "${FAKE_ROOT}/rb.log" "cannot read the cluster identity" "refused on the identity read"
+grep -q 'stop canterlot-hub' "${FAKE_ROOT}/state/calls.log" && case_fail "hub stopped" || case_ok "hub untouched"
+teardown_case
+case_end
+
 printf 'rollback harness: %s passed, %s failed\n' "${PASS_COUNT}" "${FAIL_COUNT}"
 [ "${FAIL_COUNT}" = "0" ]

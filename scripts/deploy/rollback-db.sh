@@ -161,13 +161,29 @@ if PH_RAW="$(ssh_hub "cat '${PHASE_FILE}'" 2>/dev/null)"; then
     esac
     log "an earlier restore of this dump left the phase '${RESTORE_PHASE}${RESTORE_OID:+ ${RESTORE_OID}}': continuing from it"
 fi
+# База отсутствует по ответу самого кластера (а не «не удалось спросить»): запрос прошёл и строк нет.
+db_exists_raw() {
+    ssh_hub "runuser -u postgres -- psql -h '${HUB_PG_SOCKET}' -d postgres -tAc \"select 1 from pg_database where datname = '${HUB_PG_DB}'\""
+}
+db_is_missing() {
+    local out
+    out="$(db_exists_raw 2>/dev/null)" || return 1
+    [ -z "${out}" ]
+}
 if [ -z "${EXPECT_SYS}" ] || [ -z "${EXPECT_OID}" ]; then
     log "WARNING: no recorded cluster identity for ${DUMP} (no --expect-system-id/--expect-db-oid, no ${DUMP}.identity): the cluster is NOT verified; read the target before going on"
-elif [ "${RESTORE_PHASE}" = "dropped" ]; then
-    # База снесена: соединиться можно только с обслуживающей postgres. Кластер всё равно сверяется.
+elif [ "${RESTORE_PHASE}" = "dropped" ] || { [ -n "${RESTORE_PHASE}" ] && db_is_missing; }; then
+    # Прежняя база снесена этим восстановлением: соединиться можно только с обслуживающей postgres.
+    # Кластер всё равно сверяется. Сюда же попадает сбой между dropdb и записью фазы dropped
+    # (в файле прежняя фаза, базы нет): фаза пишется только после сверки идентичности, поэтому
+    # отсутствующая база при записанной фазе — след нашего же dropdb.
     CUR_SYS="$(ssh_hub "runuser -u postgres -- psql -h '${HUB_PG_SOCKET}' -d postgres -tAc \"select system_identifier::text from pg_control_system()\"")" || die "cannot read the cluster identity through the postgres database: refusing to touch the database"
     [ "${CUR_SYS}" = "${EXPECT_SYS}" ] || die "the cluster at ${HUB_PG_SOCKET} has system identifier ${CUR_SYS}, the dump was taken from ${EXPECT_SYS}: refusing before the hub stops (wrong cluster)"
-    log "cluster identity verified through the postgres database: system identifier ${EXPECT_SYS}; ${HUB_PG_DB} is missing (phase dropped)"
+    if [ "${RESTORE_PHASE}" = "dropped" ]; then
+        log "cluster identity verified through the postgres database: system identifier ${EXPECT_SYS}; the earlier restore dropped ${HUB_PG_DB} (phase dropped), whatever carries that name now is dropped again before createdb"
+    else
+        log "cluster identity verified through the postgres database: system identifier ${EXPECT_SYS}; ${HUB_PG_DB} is missing (the earlier restore stopped between dropdb and the phase record, phase ${RESTORE_PHASE})"
+    fi
 else
     CUR_ID="$(pg_identity)" || die "cannot read the cluster identity of ${HUB_PG_DB} on ${HUB_PG_SOCKET}: refusing to touch the database"
     [ "${CUR_ID% *}" = "${EXPECT_SYS}" ] || die "the cluster at ${HUB_PG_SOCKET} has system identifier ${CUR_ID% *}, the dump was taken from ${EXPECT_SYS}: refusing before the hub stops (wrong cluster)"
@@ -252,18 +268,20 @@ assert_worker_stopped "immediately before dropdb"
 # Шаги по отдельности, фаза записывается после каждого: сбой посреди восстановления не теряет, где мы.
 # Фаза created (база создана, но частично залита) продолжается с dropdb: --exit-on-error не
 # восстанавливает поверх частичных данных.
-write_phase "verified"
+# Записанную фазу повтор не затирает: verified поверх dropped или created <oid> при снесённой либо
+# пересозданной базе заставлял следующий запуск отказывать на ранней сверке идентичности навсегда.
+[ -n "${RESTORE_PHASE}" ] || write_phase "verified"
 restore_fail() {
     log "$1: refusing to start anything on a partial database. The phase is '$(ssh_hub "cat '${PHASE_FILE}'" 2>/dev/null || echo unknown)' in ${PHASE_FILE}: run the same command again to continue. Needs the owner loudly"
     exit 1
 }
-if [ "${RESTORE_PHASE}" != "dropped" ]; then
-    DB_EXISTS="$(ssh_hub "runuser -u postgres -- psql -h '${HUB_PG_SOCKET}' -d postgres -tAc \"select 1 from pg_database where datname = '${HUB_PG_DB}'\"")" || restore_fail "cannot ask the cluster whether ${HUB_PG_DB} exists"
-    if [ "${DB_EXISTS}" = "1" ]; then
-        run_write "dropdb" ssh_hub "runuser -u postgres -- dropdb -h '${HUB_PG_SOCKET}' '${HUB_PG_DB}'" || restore_fail "dropdb FAILED"
-    fi
-    write_phase "dropped"
+# Вопрос «есть ли база» задаётся в любой фазе, в том числе dropped: createdb мог пройти, а чтение
+# идентичности после него — оборваться. Тогда база уже есть, и createdb на ней упал бы.
+DB_EXISTS="$(db_exists_raw)" || restore_fail "cannot ask the cluster whether ${HUB_PG_DB} exists"
+if [ "${DB_EXISTS}" = "1" ]; then
+    run_write "dropdb" ssh_hub "runuser -u postgres -- dropdb -h '${HUB_PG_SOCKET}' '${HUB_PG_DB}'" || restore_fail "dropdb FAILED"
 fi
+write_phase "dropped"
 run_write "createdb" ssh_hub "runuser -u postgres -- createdb -h '${HUB_PG_SOCKET}' -O '${HUB_PG_USER}' '${HUB_PG_DB}'" || restore_fail "createdb FAILED"
 NEW_ID="$(pg_identity)" || restore_fail "cannot read the identity of the recreated database"
 write_phase "created ${NEW_ID#* }"
