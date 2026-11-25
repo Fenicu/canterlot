@@ -139,8 +139,9 @@ async fn activity_evidence(pool: &PgPool, seed: &Seed) -> (String, Value) {
     .unwrap()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn ingest_background_work_updates_tasks_and_emits_event(pool: PgPool) {
+#[tokio::test]
+async fn ingest_background_work_updates_tasks_and_emits_event() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let run = running(&pool, &seed).await;
     let journal = Uuid::now_v7();
@@ -195,8 +196,9 @@ async fn ingest_background_work_updates_tasks_and_emits_event(pool: PgPool) {
     assert_eq!(events(&pool, seed.conversation_id).await.len(), 2);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn emitted_event_matches_the_published_schema(pool: PgPool) {
+#[tokio::test]
+async fn emitted_event_matches_the_published_schema() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let run = running(&pool, &seed).await;
     let block = Uuid::now_v7();
@@ -234,8 +236,9 @@ async fn emitted_event_matches_the_published_schema(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn same_task_id_runs_again_after_it_ended(pool: PgPool) {
+#[tokio::test]
+async fn same_task_id_runs_again_after_it_ended() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let run = running(&pool, &seed).await;
     let journal = Uuid::now_v7();
@@ -274,8 +277,9 @@ async fn same_task_id_runs_again_after_it_ended(pool: PgPool) {
     assert_eq!(tasks[0].ended_at, None);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn task_missing_from_the_full_list_is_stopped_unless_the_list_was_cut(pool: PgPool) {
+#[tokio::test]
+async fn task_missing_from_the_full_list_is_stopped_unless_the_list_was_cut() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let run = running(&pool, &seed).await;
     let journal = Uuid::now_v7();
@@ -337,8 +341,9 @@ async fn task_missing_from_the_full_list_is_stopped_unless_the_list_was_cut(pool
     assert_eq!(state(&tasks, "b1"), "running");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn idle_session_reports_how_many_tasks_run(pool: PgPool) {
+#[tokio::test]
+async fn idle_session_reports_how_many_tasks_run() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let run = running(&pool, &seed).await;
     let journal = Uuid::now_v7();
@@ -378,8 +383,9 @@ async fn idle_session_reports_how_many_tasks_run(pool: PgPool) {
     assert!(evidence["background_work"].is_null(), "{evidence}");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn wake_turn_flag_makes_the_session_working_and_clears(pool: PgPool) {
+#[tokio::test]
+async fn wake_turn_flag_makes_the_session_working_and_clears() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let run = running(&pool, &seed).await;
     let journal = Uuid::now_v7();
@@ -404,8 +410,9 @@ async fn wake_turn_flag_makes_the_session_working_and_clears(pool: PgPool) {
     assert_eq!(activity_evidence(&pool, &seed).await.0, "idle");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn tasks_of_a_finished_execution_are_stopped_for_readers(pool: PgPool) {
+#[tokio::test]
+async fn tasks_of_a_finished_execution_are_stopped_for_readers() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let run = running(&pool, &seed).await;
     let journal = Uuid::now_v7();
@@ -443,8 +450,9 @@ async fn tasks_of_a_finished_execution_are_stopped_for_readers(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn deleted_conversation_takes_its_tasks(pool: PgPool) {
+#[tokio::test]
+async fn deleted_conversation_takes_its_tasks() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let run = running(&pool, &seed).await;
     apply(
@@ -517,8 +525,9 @@ async fn node(pool: &PgPool, seed: &Seed, id: Uuid) -> (String, bool) {
     (node.state.clone(), node.finished_at.is_some())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn delegation_state_is_running_for_launched_background_agent(pool: PgPool) {
+#[tokio::test]
+async fn delegation_state_is_running_for_launched_background_agent() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     claude_session(&pool, &seed).await;
     let run = running(&pool, &seed).await;
@@ -542,8 +551,9 @@ async fn delegation_state_is_running_for_launched_background_agent(pool: PgPool)
     assert_eq!(node(&pool, &seed, call).await, ("running".into(), false));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn delegation_state_done_after_task_notification(pool: PgPool) {
+#[tokio::test]
+async fn delegation_state_done_after_task_notification() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     claude_session(&pool, &seed).await;
     let run = running(&pool, &seed).await;
@@ -573,8 +583,9 @@ async fn delegation_state_done_after_task_notification(pool: PgPool) {
     assert_eq!(node(&pool, &seed, call).await, ("done".into(), true));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn delegation_shows_failed_and_stopped_background_agents(pool: PgPool) {
+#[tokio::test]
+async fn delegation_shows_failed_and_stopped_background_agents() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     claude_session(&pool, &seed).await;
     let run = running(&pool, &seed).await;
@@ -604,8 +615,9 @@ async fn delegation_shows_failed_and_stopped_background_agents(pool: PgPool) {
     assert_eq!(node(&pool, &seed, second).await.0, "stopped");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn delegation_sync_agent_running_until_tool_result(pool: PgPool) {
+#[tokio::test]
+async fn delegation_sync_agent_running_until_tool_result() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     claude_session(&pool, &seed).await;
     let run = running(&pool, &seed).await;
@@ -635,8 +647,9 @@ async fn codex_session(pool: &PgPool, seed: &Seed) {
         .unwrap();
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn delegation_of_codex_follows_the_result_of_the_spawn(pool: PgPool) {
+#[tokio::test]
+async fn delegation_of_codex_follows_the_result_of_the_spawn() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     codex_session(&pool, &seed).await;
     let run = running(&pool, &seed).await;
@@ -659,8 +672,9 @@ async fn delegation_of_codex_follows_the_result_of_the_spawn(pool: PgPool) {
     assert_eq!(node(&pool, &seed, call).await, ("done".into(), true));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn delegation_of_codex_shows_failed_and_interrupted_children(pool: PgPool) {
+#[tokio::test]
+async fn delegation_of_codex_shows_failed_and_interrupted_children() {
+    let pool = canterlot_hub::testkit::db().await;
     for (summary, state) in [("error", "failed"), ("interrupted", "stopped")] {
         let seed = testkit::seed(&pool).await;
         codex_session(&pool, &seed).await;
@@ -680,8 +694,9 @@ async fn delegation_of_codex_shows_failed_and_interrupted_children(pool: PgPool)
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn delegation_of_other_harnesses_keeps_the_call_state(pool: PgPool) {
+#[tokio::test]
+async fn delegation_of_other_harnesses_keeps_the_call_state() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let run = running(&pool, &seed).await;
     let call = Uuid::now_v7();
@@ -692,8 +707,9 @@ async fn delegation_of_other_harnesses_keeps_the_call_state(pool: PgPool) {
 }
 
 // Снимок несёт работающие задачи и последние законченные, а не всю историю сессии.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn snapshot_carries_running_and_recent_tasks_only(pool: PgPool) {
+#[tokio::test]
+async fn snapshot_carries_running_and_recent_tasks_only() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let execution = running(&pool, &seed).await;
     for (n, state) in (0..70).map(|n| (n, if n == 3 { "running" } else { "completed" })) {

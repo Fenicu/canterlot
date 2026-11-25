@@ -99,8 +99,9 @@ async fn resolved_detail(pool: &PgPool, seed: &Seed) -> Option<String> {
         .model_resolved
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn alias_resolution_is_stored_and_tracks_new_version(pool: PgPool) {
+#[tokio::test]
+async fn alias_resolution_is_stored_and_tracks_new_version() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     set_model(&pool, &seed, "fable[1m]").await;
     assert_eq!(resolved_detail(&pool, &seed).await, None);
@@ -155,8 +156,9 @@ async fn alias_resolution_is_stored_and_tracks_new_version(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn switched_alias_falls_back_to_machine_resolution(pool: PgPool) {
+#[tokio::test]
+async fn switched_alias_falls_back_to_machine_resolution() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     set_model(&pool, &seed, "opus[1m]").await;
     run_execution(&pool, &seed, &[("", "claude-opus-5-5")]).await;

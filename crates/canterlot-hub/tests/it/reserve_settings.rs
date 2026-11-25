@@ -82,8 +82,9 @@ async fn held(f: &Fixture) -> bool {
     )
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_fresh_weekly_reading_uses_the_saved_reserve(pool: PgPool) {
+#[tokio::test]
+async fn a_fresh_weekly_reading_uses_the_saved_reserve() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let now = start();
     let weekly_reset = now + TimeDelta::days(2);
@@ -95,8 +96,9 @@ async fn a_fresh_weekly_reading_uses_the_saved_reserve(pool: PgPool) {
     assert!(held(&f).await);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn changing_the_reserve_releases_and_holds_immediately(pool: PgPool) {
+#[tokio::test]
+async fn changing_the_reserve_releases_and_holds_immediately() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let now = start();
     let weekly_reset = now + TimeDelta::days(2);
@@ -123,8 +125,9 @@ async fn low_count(pool: &PgPool) -> i16 {
         .unwrap()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn stale_exit_confirmations_do_not_release_a_raised_reserve(pool: PgPool) {
+#[tokio::test]
+async fn stale_exit_confirmations_do_not_release_a_raised_reserve() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let now = start();
     let weekly_reset = now + TimeDelta::days(2);
@@ -144,8 +147,9 @@ async fn stale_exit_confirmations_do_not_release_a_raised_reserve(pool: PgPool) 
     assert_eq!(low_count(&pool).await, 0);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn colors_only_save_keeps_an_active_reserve_inside_the_hysteresis_band(pool: PgPool) {
+#[tokio::test]
+async fn colors_only_save_keeps_an_active_reserve_inside_the_hysteresis_band() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let now = start();
     let weekly_reset = now + TimeDelta::days(2);
@@ -169,8 +173,9 @@ async fn colors_only_save_keeps_an_active_reserve_inside_the_hysteresis_band(poo
     assert!(held(&f).await);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn lowering_the_reserve_below_the_hysteresis_exit_releases(pool: PgPool) {
+#[tokio::test]
+async fn lowering_the_reserve_below_the_hysteresis_exit_releases() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let now = start();
     let weekly_reset = now + TimeDelta::days(2);
@@ -185,8 +190,9 @@ async fn lowering_the_reserve_below_the_hysteresis_exit_releases(pool: PgPool) {
     assert!(!held(&f).await);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_provider_that_left_the_catalog_is_still_released(pool: PgPool) {
+#[tokio::test]
+async fn a_provider_that_left_the_catalog_is_still_released() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let now = start();
     let weekly_reset = now + TimeDelta::days(2);
@@ -205,8 +211,9 @@ async fn a_provider_that_left_the_catalog_is_still_released(pool: PgPool) {
     assert!(!held(&f).await);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn reserve_change_and_ingest_lock_providers_in_one_order(pool: PgPool) {
+#[tokio::test]
+async fn reserve_change_and_ingest_lock_providers_in_one_order() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let now = start();
     let weekly_reset = now + TimeDelta::days(2);

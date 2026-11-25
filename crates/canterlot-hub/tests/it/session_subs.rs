@@ -451,18 +451,21 @@ async fn event_dropped_after_target_domain_change(pool: PgPool, domain: Option<&
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn subscription_event_is_dropped_when_the_target_moves_to_work(pool: PgPool) {
+#[tokio::test]
+async fn subscription_event_is_dropped_when_the_target_moves_to_work() {
+    let pool = canterlot_hub::testkit::db().await;
     event_dropped_after_target_domain_change(pool, Some("work")).await;
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn subscription_event_is_dropped_when_the_target_domain_becomes_null(pool: PgPool) {
+#[tokio::test]
+async fn subscription_event_is_dropped_when_the_target_domain_becomes_null() {
+    let pool = canterlot_hub::testkit::db().await;
     event_dropped_after_target_domain_change(pool, None).await;
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn turn_shorter_than_debounce_still_fires(pool: PgPool) {
+#[tokio::test]
+async fn turn_shorter_than_debounce_still_fires() {
+    let pool = canterlot_hub::testkit::db().await;
     let p = pair(&pool).await;
     let execution = start(&pool, p.owner, p.target).await;
     let now = Utc::now();
@@ -483,8 +486,9 @@ async fn turn_shorter_than_debounce_still_fires(pool: PgPool) {
     assert_eq!(fired[0]["chain_depth"], 0);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn refresh_results_do_not_depend_on_subscriptions(pool: PgPool) {
+#[tokio::test]
+async fn refresh_results_do_not_depend_on_subscriptions() {
+    let pool = canterlot_hub::testkit::db().await;
     let p = pair(&pool).await;
     let now = Utc::now();
     long_idle(&pool, p.target, now).await;
@@ -505,8 +509,9 @@ async fn refresh_results_do_not_depend_on_subscriptions(pool: PgPool) {
     assert_eq!(events, 2, "one per scope: the job adds no event");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn subscription_survives_subscriber_restart(pool: PgPool) {
+#[tokio::test]
+async fn subscription_survives_subscriber_restart() {
+    let pool = canterlot_hub::testkit::db().await;
     let p = pair(&pool).await;
     let subscriber = start(&pool, p.owner, p.subscriber).await;
     let target = start(&pool, p.owner, p.target).await;
@@ -580,8 +585,9 @@ async fn subscription_survives_subscriber_restart(pool: PgPool) {
     assert_eq!(delivered(&pool, p.subscriber).await.len(), 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn stalled_fires_once_per_episode(pool: PgPool) {
+#[tokio::test]
+async fn stalled_fires_once_per_episode() {
+    let pool = canterlot_hub::testkit::db().await;
     let p = pair(&pool).await;
     let execution = start(&pool, p.owner, p.target).await;
     let now = Utc::now();
@@ -632,8 +638,9 @@ async fn stalled_fires_once_per_episode(pool: PgPool) {
     assert_eq!(jobs(&pool, p.subscriber).await.len(), 2, "a new episode");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn unknown_liveness_never_fires_a_stall(pool: PgPool) {
+#[tokio::test]
+async fn unknown_liveness_never_fires_a_stall() {
+    let pool = canterlot_hub::testkit::db().await;
     let p = pair(&pool).await;
     let execution = start(&pool, p.owner, p.target).await;
     let now = Utc::now();
@@ -664,8 +671,9 @@ async fn unknown_liveness_never_fires_a_stall(pool: PgPool) {
     assert!(jobs(&pool, p.subscriber).await.is_empty());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn cpu_busy_generation_never_fires_a_stall(pool: PgPool) {
+#[tokio::test]
+async fn cpu_busy_generation_never_fires_a_stall() {
+    let pool = canterlot_hub::testkit::db().await;
     let p = pair(&pool).await;
     let execution = start(&pool, p.owner, p.target).await;
     let now = Utc::now();
@@ -711,8 +719,9 @@ async fn cpu_busy_generation_never_fires_a_stall(pool: PgPool) {
     assert_eq!(state, "working");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn live_tool_descendants_never_fire_a_stall(pool: PgPool) {
+#[tokio::test]
+async fn live_tool_descendants_never_fire_a_stall() {
+    let pool = canterlot_hub::testkit::db().await;
     let p = pair(&pool).await;
     let execution = start(&pool, p.owner, p.target).await;
     let now = Utc::now();
@@ -751,8 +760,9 @@ async fn live_tool_descendants_never_fire_a_stall(pool: PgPool) {
     assert_eq!(state, "working");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn stale_metrics_never_fire_a_stall(pool: PgPool) {
+#[tokio::test]
+async fn stale_metrics_never_fire_a_stall() {
+    let pool = canterlot_hub::testkit::db().await;
     let p = pair(&pool).await;
     let execution = start(&pool, p.owner, p.target).await;
     let now = Utc::now();
@@ -799,8 +809,9 @@ async fn stale_metrics_never_fire_a_stall(pool: PgPool) {
     assert_eq!(state, "working");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn execution_cpu_above_one_core_is_accepted_and_busy(pool: PgPool) {
+#[tokio::test]
+async fn execution_cpu_above_one_core_is_accepted_and_busy() {
+    let pool = canterlot_hub::testkit::db().await;
     let p = pair(&pool).await;
     let execution = start(&pool, p.owner, p.target).await;
     let now = Utc::now();
@@ -842,8 +853,9 @@ async fn execution_cpu_above_one_core_is_accepted_and_busy(pool: PgPool) {
     assert!(jobs(&pool, p.subscriber).await.is_empty());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn stalled_is_not_repeated_when_the_state_flaps_in_the_same_phase(pool: PgPool) {
+#[tokio::test]
+async fn stalled_is_not_repeated_when_the_state_flaps_in_the_same_phase() {
+    let pool = canterlot_hub::testkit::db().await;
     let p = pair(&pool).await;
     let execution = start(&pool, p.owner, p.target).await;
     let now = Utc::now();
@@ -890,8 +902,9 @@ async fn stalled_is_not_repeated_when_the_state_flaps_in_the_same_phase(pool: Pg
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn idle_closes_and_send_rearms(pool: PgPool) {
+#[tokio::test]
+async fn idle_closes_and_send_rearms() {
+    let pool = canterlot_hub::testkit::db().await;
     let p = pair(&pool).await;
     let execution = start(&pool, p.owner, p.target).await;
     let now = Utc::now();
@@ -943,8 +956,9 @@ async fn idle_closes_and_send_rearms(pool: PgPool) {
     assert_eq!(jobs(&pool, p.subscriber).await.len(), 2);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn explicit_subscribe_skips_the_state_already_settled(pool: PgPool) {
+#[tokio::test]
+async fn explicit_subscribe_skips_the_state_already_settled() {
+    let pool = canterlot_hub::testkit::db().await;
     let p = pair(&pool).await;
     let execution = start(&pool, p.owner, p.target).await;
     let now = Utc::now();
@@ -969,8 +983,9 @@ async fn explicit_subscribe_skips_the_state_already_settled(pool: PgPool) {
     assert_eq!(jobs(&pool, p.subscriber).await.len(), 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn stopped_target_fires(pool: PgPool) {
+#[tokio::test]
+async fn stopped_target_fires() {
+    let pool = canterlot_hub::testkit::db().await;
     let p = pair(&pool).await;
     let execution = start(&pool, p.owner, p.target).await;
     subscribe(&pool, &p).await;
@@ -993,8 +1008,9 @@ async fn stopped_target_fires(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn stopped_target_with_a_queued_input_keeps_the_subscription(pool: PgPool) {
+#[tokio::test]
+async fn stopped_target_with_a_queued_input_keeps_the_subscription() {
+    let pool = canterlot_hub::testkit::db().await;
     let p = pair(&pool).await;
     let execution = start(&pool, p.owner, p.target).await;
     subscribe(&pool, &p).await;
@@ -1059,8 +1075,9 @@ async fn lost(pool: &PgPool, p: &Pair, execution: Uuid) {
     refresh_at(pool, p.target, Utc::now()).await;
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn owner_lost_keeps_the_subscription_for_the_result_after_a_reclaim(pool: PgPool) {
+#[tokio::test]
+async fn owner_lost_keeps_the_subscription_for_the_result_after_a_reclaim() {
+    let pool = canterlot_hub::testkit::db().await;
     let p = pair(&pool).await;
     let execution = start(&pool, p.owner, p.target).await;
     subscribe(&pool, &p).await;
@@ -1103,8 +1120,9 @@ async fn owner_lost_keeps_the_subscription_for_the_result_after_a_reclaim(pool: 
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn owner_exit_of_a_lost_session_gets_its_own_report(pool: PgPool) {
+#[tokio::test]
+async fn owner_exit_of_a_lost_session_gets_its_own_report() {
+    let pool = canterlot_hub::testkit::db().await;
     let p = pair(&pool).await;
     let execution = start(&pool, p.owner, p.target).await;
     subscribe(&pool, &p).await;
@@ -1133,8 +1151,9 @@ async fn owner_exit_of_a_lost_session_gets_its_own_report(pool: PgPool) {
 }
 
 /// Ввод вышел из счётных состояний, а пересчёт проекции ещё не случился: она всё говорит `idle`.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn poll_of_a_stale_idle_does_not_settle_a_turn_in_progress(pool: PgPool) {
+#[tokio::test]
+async fn poll_of_a_stale_idle_does_not_settle_a_turn_in_progress() {
+    let pool = canterlot_hub::testkit::db().await;
     let p = pair(&pool).await;
     let now = Utc::now();
     start(&pool, p.owner, p.target).await;
@@ -1198,8 +1217,9 @@ async fn wake_turn(pool: &PgPool, id: Uuid, running: bool) {
     .unwrap();
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn wake_turn_after_the_report_reopens_the_subscription(pool: PgPool) {
+#[tokio::test]
+async fn wake_turn_after_the_report_reopens_the_subscription() {
+    let pool = canterlot_hub::testkit::db().await;
     let p = pair(&pool).await;
     let now = Utc::now();
     reported_idle(&pool, &p, now).await;
@@ -1221,8 +1241,9 @@ async fn wake_turn_after_the_report_reopens_the_subscription(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn wake_turn_does_not_reopen_what_the_subscriber_gave_up(pool: PgPool) {
+#[tokio::test]
+async fn wake_turn_does_not_reopen_what_the_subscriber_gave_up() {
+    let pool = canterlot_hub::testkit::db().await;
     let p = pair(&pool).await;
     let now = Utc::now();
     reported_idle(&pool, &p, now).await;
@@ -1266,8 +1287,9 @@ async fn pending_jobs(pool: &PgPool, subscriber: Uuid) -> i64 {
     .unwrap()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn child_event_after_the_idle_report_reopens_the_subscription(pool: PgPool) {
+#[tokio::test]
+async fn child_event_after_the_idle_report_reopens_the_subscription() {
+    let pool = canterlot_hub::testkit::db().await;
     let p = pair(&pool).await;
     let child = testkit::seed_conversation(&pool, p.owner, p.machine).await;
     let now = Utc::now();
@@ -1327,8 +1349,9 @@ async fn child_event_after_the_idle_report_reopens_the_subscription(pool: PgPool
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_message_from_the_subscriber_does_not_use_the_automation_reopen(pool: PgPool) {
+#[tokio::test]
+async fn a_message_from_the_subscriber_does_not_use_the_automation_reopen() {
+    let pool = canterlot_hub::testkit::db().await;
     let p = pair(&pool).await;
     let now = Utc::now();
     reported_idle(&pool, &p, now).await;
@@ -1370,8 +1393,9 @@ async fn a_message_from_the_subscriber_does_not_use_the_automation_reopen(pool: 
     assert_ne!(armed["armed_at"], closed["armed_at"]);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn automation_input_does_not_reopen_unsubscribed_or_accepted(pool: PgPool) {
+#[tokio::test]
+async fn automation_input_does_not_reopen_unsubscribed_or_accepted() {
+    let pool = canterlot_hub::testkit::db().await;
     let a = pair(&pool).await;
     let b = pair(&pool).await;
     let now = Utc::now();
@@ -1420,8 +1444,9 @@ async fn automation_input_does_not_reopen_unsubscribed_or_accepted(pool: PgPool)
     assert_eq!(pending_jobs(&pool, b.subscriber).await, 0);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn idle_summary_names_armed_alarms_without_their_notes(pool: PgPool) {
+#[tokio::test]
+async fn idle_summary_names_armed_alarms_without_their_notes() {
+    let pool = canterlot_hub::testkit::db().await;
     let p = pair(&pool).await;
     let now = Utc::now();
     let first = now + TimeDelta::hours(2);
@@ -1475,8 +1500,9 @@ async fn delete(pool: &PgPool, p: &Pair, id: Uuid, key: &str) -> Result<(), dele
     deletion::delete(pool, blobs.as_ref(), p.owner, id, key, Uuid::now_v7()).await
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn deleted_target_fires_and_delete_is_not_blocked(pool: PgPool) {
+#[tokio::test]
+async fn deleted_target_fires_and_delete_is_not_blocked() {
+    let pool = canterlot_hub::testkit::db().await;
     let p = pair(&pool).await;
     let closed = testkit::seed_conversation(&pool, p.owner, p.machine).await;
     sqlx::query("update conversations set title='private title' where id=$1")
@@ -1524,8 +1550,9 @@ async fn deleted_target_fires_and_delete_is_not_blocked(pool: PgPool) {
     assert_eq!(inputs[0].1["event"]["session_id"], json!(p.target));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn event_pending_when_the_target_is_deleted_says_so(pool: PgPool) {
+#[tokio::test]
+async fn event_pending_when_the_target_is_deleted_says_so() {
+    let pool = canterlot_hub::testkit::db().await;
     let p = pair(&pool).await;
     let now = Utc::now();
     long_idle(&pool, p.target, now).await;
@@ -1570,8 +1597,9 @@ async fn job_row(pool: &PgPool) -> (String, i32, i32, DateTime<Utc>, Option<Valu
     .unwrap()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn queue_full_retries(pool: PgPool) {
+#[tokio::test]
+async fn queue_full_retries() {
+    let pool = canterlot_hub::testkit::db().await;
     let p = pair(&pool).await;
     let now = Utc::now();
     long_idle(&pool, p.target, now).await;
@@ -1610,8 +1638,9 @@ async fn queue_full_retries(pool: PgPool) {
     assert_eq!(job_row(&pool).await.0, "fired");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn queue_full_keeps_the_event_for_a_day(pool: PgPool) {
+#[tokio::test]
+async fn queue_full_keeps_the_event_for_a_day() {
+    let pool = canterlot_hub::testkit::db().await;
     let p = pair(&pool).await;
     let now = Utc::now();
     long_idle(&pool, p.target, now).await;
@@ -1651,8 +1680,9 @@ async fn queue_full_keeps_the_event_for_a_day(pool: PgPool) {
     assert_eq!(result, Some(json!({"error":"queue_full"})));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn replayed_job_does_not_duplicate_the_input(pool: PgPool) {
+#[tokio::test]
+async fn replayed_job_does_not_duplicate_the_input() {
+    let pool = canterlot_hub::testkit::db().await;
     let p = pair(&pool).await;
     let now = Utc::now();
     long_idle(&pool, p.target, now).await;
@@ -1670,8 +1700,9 @@ async fn replayed_job_does_not_duplicate_the_input(pool: PgPool) {
     assert_eq!(delivered(&pool, p.subscriber).await.len(), 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn note_job_queues_its_text(pool: PgPool) {
+#[tokio::test]
+async fn note_job_queues_its_text() {
+    let pool = canterlot_hub::testkit::db().await;
     let p = pair(&pool).await;
     sqlx::query(
         "insert into scheduled_jobs(id,kind,owner_id,conversation_id,run_at,payload)
@@ -1698,8 +1729,9 @@ async fn note_job_queues_its_text(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn malformed_job_fails_without_retries(pool: PgPool) {
+#[tokio::test]
+async fn malformed_job_fails_without_retries() {
+    let pool = canterlot_hub::testkit::db().await;
     let p = pair(&pool).await;
     sqlx::query(
         "insert into scheduled_jobs(id,kind,owner_id,conversation_id,run_at,payload)
@@ -1720,8 +1752,9 @@ async fn malformed_job_fails_without_retries(pool: PgPool) {
     assert_eq!(job_row(&pool).await.0, "failed");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn mutual_subscriptions_do_not_deadlock(pool: PgPool) {
+#[tokio::test]
+async fn mutual_subscriptions_do_not_deadlock() {
+    let pool = canterlot_hub::testkit::db().await;
     let p = pair(&pool).await;
     let now = Utc::now();
     long_idle(&pool, p.target, now).await;
@@ -1751,8 +1784,9 @@ async fn mutual_subscriptions_do_not_deadlock(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn deleting_a_subscriber_during_refresh_does_not_deadlock(pool: PgPool) {
+#[tokio::test]
+async fn deleting_a_subscriber_during_refresh_does_not_deadlock() {
+    let pool = canterlot_hub::testkit::db().await;
     let p = pair(&pool).await;
     let now = Utc::now();
     long_idle(&pool, p.target, now).await;
@@ -1785,8 +1819,9 @@ async fn deleting_a_subscriber_during_refresh_does_not_deadlock(pool: PgPool) {
     assert_eq!(left, 0, "a job never outlives its subscriber");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn spawn_approval_does_not_hold_the_queue_or_activity(pool: PgPool) {
+#[tokio::test]
+async fn spawn_approval_does_not_hold_the_queue_or_activity() {
+    let pool = canterlot_hub::testkit::db().await;
     let p = pair(&pool).await;
     let execution = start(&pool, p.owner, p.target).await;
     let mut tx = pool.begin().await.unwrap();
@@ -1855,8 +1890,9 @@ async fn spawn_approval_does_not_hold_the_queue_or_activity(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn projector_sweep_fires_after_the_quiet_window(pool: PgPool) {
+#[tokio::test]
+async fn projector_sweep_fires_after_the_quiet_window() {
+    let pool = canterlot_hub::testkit::db().await;
     // Без исполнения: обход берёт такую цель только из-за открытой подписки.
     let p = pair(&pool).await;
     let config = ActivityConfig {
@@ -2034,8 +2070,9 @@ async fn idle_with_background(
     (p, execution)
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn idle_with_background_warns_once_past_the_threshold(pool: PgPool) {
+#[tokio::test]
+async fn idle_with_background_warns_once_past_the_threshold() {
+    let pool = canterlot_hub::testkit::db().await;
     let t0 = Utc::now() - TimeDelta::minutes(20);
     let (p, _) = idle_with_background(&pool, t0).await;
     for minutes in [1, 5, 10, 14] {
@@ -2085,8 +2122,9 @@ async fn idle_with_background_warns_once_past_the_threshold(pool: PgPool) {
     assert_eq!(origin["event"]["session_id"], json!(p.target));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_new_turn_starts_a_new_idle_background_episode(pool: PgPool) {
+#[tokio::test]
+async fn a_new_turn_starts_a_new_idle_background_episode() {
+    let pool = canterlot_hub::testkit::db().await;
     let t0 = Utc::now() - TimeDelta::minutes(50);
     let (p, execution) = idle_with_background(&pool, t0).await;
     refresh_at(&pool, p.target, t0 + TimeDelta::minutes(16)).await;
@@ -2110,8 +2148,9 @@ async fn a_new_turn_starts_a_new_idle_background_episode(pool: PgPool) {
     assert_ne!(queued[0]["fingerprint"], queued[1]["fingerprint"]);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn finished_background_still_reports_the_normal_idle_once(pool: PgPool) {
+#[tokio::test]
+async fn finished_background_still_reports_the_normal_idle_once() {
+    let pool = canterlot_hub::testkit::db().await;
     let t0 = Utc::now() - TimeDelta::minutes(30);
     let (p, execution) = idle_with_background(&pool, t0).await;
     refresh_at(&pool, p.target, t0 + TimeDelta::minutes(16)).await;
@@ -2145,8 +2184,9 @@ async fn finished_background_still_reports_the_normal_idle_once(pool: PgPool) {
     assert!(delivered[1].0.contains("is now idle"), "{}", delivered[1].0);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_stale_idle_background_warning_is_not_delivered(pool: PgPool) {
+#[tokio::test]
+async fn a_stale_idle_background_warning_is_not_delivered() {
+    let pool = canterlot_hub::testkit::db().await;
     let t0 = Utc::now() - TimeDelta::minutes(30);
     let (p, execution) = idle_with_background(&pool, t0).await;
     refresh_at(&pool, p.target, t0 + TimeDelta::minutes(16)).await;
@@ -2298,8 +2338,9 @@ async fn scheduled_tasks(pool: &PgPool, subscriber: Uuid) -> Vec<ScheduledTask> 
     .unwrap()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn notifications_wait_for_a_limit_held_subscriber(pool: PgPool) {
+#[tokio::test]
+async fn notifications_wait_for_a_limit_held_subscriber() {
+    let pool = canterlot_hub::testkit::db().await;
     let p = pair(&pool).await;
     let now = Utc::now();
     let wake_at = now + TimeDelta::hours(1);
@@ -2354,8 +2395,9 @@ async fn notifications_wait_for_a_limit_held_subscriber(pool: PgPool) {
     assert_eq!(scheduled_tasks(&pool, p.subscriber).await[0].state, "fired");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_hold_removed_early_delivers_postponed_notifications_right_away(pool: PgPool) {
+#[tokio::test]
+async fn a_hold_removed_early_delivers_postponed_notifications_right_away() {
+    let pool = canterlot_hub::testkit::db().await;
     let p = pair(&pool).await;
     let now = Utc::now();
     let wake_at = now + TimeDelta::hours(1);
@@ -2411,8 +2453,9 @@ async fn a_hold_removed_early_delivers_postponed_notifications_right_away(pool: 
     assert_eq!(scheduled_tasks(&pool, p.subscriber).await[0].state, "fired");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_postponed_event_never_arrives_after_a_newer_one(pool: PgPool) {
+#[tokio::test]
+async fn a_postponed_event_never_arrives_after_a_newer_one() {
+    let pool = canterlot_hub::testkit::db().await;
     let p = pair(&pool).await;
     let now = Utc::now();
     let wake_at = now + TimeDelta::hours(1);
@@ -2489,8 +2532,9 @@ async fn a_postponed_event_never_arrives_after_a_newer_one(pool: PgPool) {
     assert_eq!(last, Some("failed"), "{delivered:?}");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn notifications_are_delivered_immediately_without_a_hold(pool: PgPool) {
+#[tokio::test]
+async fn notifications_are_delivered_immediately_without_a_hold() {
+    let pool = canterlot_hub::testkit::db().await;
     let p = pair(&pool).await;
     let now = Utc::now();
     subscribe(&pool, &p).await;
@@ -2502,8 +2546,9 @@ async fn notifications_are_delivered_immediately_without_a_hold(pool: PgPool) {
     assert_eq!(scheduled_tasks(&pool, p.subscriber).await[0].state, "fired");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_deleted_event_reaches_a_limit_held_subscriber(pool: PgPool) {
+#[tokio::test]
+async fn a_deleted_event_reaches_a_limit_held_subscriber() {
+    let pool = canterlot_hub::testkit::db().await;
     let p = pair(&pool).await;
     subscribe(&pool, &p).await;
     let now = Utc::now();

@@ -927,10 +927,10 @@ mod tests {
 
     /// Разбор действия исчерпывающий в `abandon_in_tx`: новое действие без обработчика
     /// не собирается. Тест перечисляет те же варианты без `_`, чтобы это заметить.
-    #[sqlx::test(migrations = "./migrations")]
-    async fn every_action_kind_has_an_abandon_handler(
-        pool: sqlx::PgPool,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    #[tokio::test]
+    async fn every_action_kind_has_an_abandon_handler()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let pool = crate::testkit::db().await;
         let seed = crate::testkit::seed(&pool).await;
         let mut conn = pool.acquire().await?;
         for action in Action::ALL {

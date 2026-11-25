@@ -179,8 +179,9 @@ impl Fixture {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn create_validates_against_machine_catalog_with_distinct_codes(pool: PgPool) {
+#[tokio::test]
+async fn create_validates_against_machine_catalog_with_distinct_codes() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     for (field, value, code) in [
         ("machine_id", json!(Uuid::now_v7()), "machine_not_found"),
@@ -243,8 +244,9 @@ async fn create_validates_against_machine_catalog_with_distinct_codes(pool: PgPo
         0
     );
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn create_is_idempotent_by_key(pool: PgPool) {
+#[tokio::test]
+async fn create_is_idempotent_by_key() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let a = f
         .client
@@ -282,8 +284,9 @@ async fn create_is_idempotent_by_key(pool: PgPool) {
     assert_eq!(f.list("").await["items"].as_array().unwrap().len(), 1);
     assert_eq!(f.events("conversation_created").await.len(), 1);
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn create_with_start_queues_start_execution_with_settings(pool: PgPool) {
+#[tokio::test]
+async fn create_with_start_queues_start_execution_with_settings() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let id = f
         .create(json!({"start":true,"permission_mode":"bypass"}))
@@ -310,8 +313,9 @@ async fn create_with_start_queues_start_execution_with_settings(pool: PgPool) {
     assert_eq!(created[0]["model"], "synthetic-small");
     assert_eq!(created[0]["counts"]["all"], 1);
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn new_conversation_has_queue_state_and_no_live_execution_hold(pool: PgPool) {
+#[tokio::test]
+async fn new_conversation_has_queue_state_and_no_live_execution_hold() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let id = f.create(json!({})).await;
     let hold: Value =
@@ -326,8 +330,9 @@ async fn new_conversation_has_queue_state_and_no_live_execution_hold(pool: PgPoo
     assert!(d["execution"].is_null());
     assert_eq!(d["settings"]["effective"]["permission_mode"], "bypass");
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn new_conversation_defaults_to_bypass_and_keeps_an_explicit_choice(pool: PgPool) {
+#[tokio::test]
+async fn new_conversation_defaults_to_bypass_and_keeps_an_explicit_choice() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let default = f.create(json!({})).await;
     assert_eq!(f.get(default).await["permission_mode"], "bypass");
@@ -338,8 +343,9 @@ async fn new_conversation_defaults_to_bypass_and_keeps_an_explicit_choice(pool: 
     let chosen = f.create(json!({"permission_mode":"owner"})).await;
     assert_eq!(f.get(chosen).await["permission_mode"], "owner");
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn session_without_a_chosen_mode_starts_as_owner_and_keeps_its_stored_value(pool: PgPool) {
+#[tokio::test]
+async fn session_without_a_chosen_mode_starts_as_owner_and_keeps_its_stored_value() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let id = f.create(json!({})).await;
     sqlx::query("update conversations set permission_mode='' where id=$1")
@@ -370,8 +376,9 @@ async fn session_without_a_chosen_mode_starts_as_owner_and_keeps_its_stored_valu
             .unwrap();
     assert_eq!(stored, "");
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn pin_color_archive_title_roundtrip_and_emit_list_events(pool: PgPool) {
+#[tokio::test]
+async fn pin_color_archive_title_roundtrip_and_emit_list_events() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let id = f.create(json!({})).await;
     let d = f
@@ -387,10 +394,9 @@ async fn pin_color_archive_title_roundtrip_and_emit_list_events(pool: PgPool) {
     f.patch(id, json!({"archived":false,"pinned":false})).await;
     assert_eq!(f.events("conversation_updated").await.len(), 3);
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn conversation_updated_carries_attributes_and_counts_and_never_volatile_fields(
-    pool: PgPool,
-) {
+#[tokio::test]
+async fn conversation_updated_carries_attributes_and_counts_and_never_volatile_fields() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let id = f.create(json!({})).await;
     f.patch(id, json!({"title":"Ручное"})).await;
@@ -420,8 +426,9 @@ async fn conversation_updated_carries_attributes_and_counts_and_never_volatile_f
     .unwrap();
     assert_eq!(*p, chat);
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn archived_conversations_leave_default_list_and_appear_in_archive(pool: PgPool) {
+#[tokio::test]
+async fn archived_conversations_leave_default_list_and_appear_in_archive() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let id = f.create(json!({})).await;
     f.patch(id, json!({"pinned":true,"archived":true})).await;
@@ -437,8 +444,9 @@ async fn archived_conversations_leave_default_list_and_appear_in_archive(pool: P
     assert_eq!(archived["counts"]["archived"], 1);
     assert_eq!(archived["counts"]["all"], 0);
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn archiving_with_active_crunch_or_schedule_answers_409_unless_forced(pool: PgPool) {
+#[tokio::test]
+async fn archiving_with_active_crunch_or_schedule_answers_409_unless_forced() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let id = f.create(json!({"crunch":{"enabled":true}})).await;
     f.request(Method::POST,&format!("/api/v1/conversations/{id}/scheduled"),Some(json!({"run_at":Utc::now()+TimeDelta::hours(1),"content":[{"type":"text","text":"scheduled"}]})),201).await;
@@ -482,8 +490,9 @@ async fn archive_refusal(f: &Fixture, id: Uuid) -> Value {
     r["error"]["details"]["reasons"].clone()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn idle_process_archives_without_a_warning_and_stays_alive(pool: PgPool) {
+#[tokio::test]
+async fn idle_process_archives_without_a_warning_and_stays_alive() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let id = f.create(json!({"start":true})).await;
     set_phase(&f, id, "awaiting_input").await;
@@ -497,8 +506,9 @@ async fn idle_process_archives_without_a_warning_and_stays_alive(pool: PgPool) {
     assert_eq!(state, "running");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_turn_in_progress_still_asks_before_archiving(pool: PgPool) {
+#[tokio::test]
+async fn a_turn_in_progress_still_asks_before_archiving() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     for phase in [
         "generating",
@@ -541,8 +551,9 @@ async fn a_turn_in_progress_still_asks_before_archiving(pool: PgPool) {
     assert_eq!(archive_refusal(&f, asked).await, json!(["live_execution"]));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_lost_owner_is_no_turn_and_a_repeated_archive_answers_the_same(pool: PgPool) {
+#[tokio::test]
+async fn the_lost_owner_is_no_turn_and_a_repeated_archive_answers_the_same() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let id = f.create(json!({"start":true})).await;
     sqlx::query(
@@ -567,8 +578,9 @@ async fn the_lost_owner_is_no_turn_and_a_repeated_archive_answers_the_same(pool:
     assert_eq!(second.status.as_u16(), 200);
     assert_eq!(first.body, second.body);
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn title_search_is_case_insensitive_and_escapes_like_wildcards(pool: PgPool) {
+#[tokio::test]
+async fn title_search_is_case_insensitive_and_escapes_like_wildcards() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     for title in ["Ёлка", "Сборка", "100%_done\\", "100xxdone"] {
         f.create(json!({"title":title})).await;
@@ -584,8 +596,9 @@ async fn title_search_is_case_insensitive_and_escapes_like_wildcards(pool: PgPoo
         assert_eq!(p["items"][0]["title"], title);
     }
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn groups_are_many_to_many_and_counted(pool: PgPool) {
+#[tokio::test]
+async fn groups_are_many_to_many_and_counted() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let a = f.group("А").await;
     let b = f.group("Б").await;
@@ -614,8 +627,9 @@ async fn groups_are_many_to_many_and_counted(pool: PgPool) {
         1
     );
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn group_names_are_unique_case_insensitively(pool: PgPool) {
+#[tokio::test]
+async fn group_names_are_unique_case_insensitively() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let a = f.group("Ёлка").await;
     let b = f.group("Другая").await;
@@ -652,8 +666,9 @@ async fn group_names_are_unique_case_insensitively(pool: PgPool) {
     )
     .await;
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn group_icon_is_set_on_create_changed_by_patch_and_checked(pool: PgPool) {
+#[tokio::test]
+async fn group_icon_is_set_on_create_changed_by_patch_and_checked() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let work = f
         .request(
@@ -725,8 +740,9 @@ async fn group_icon_is_set_on_create_changed_by_patch_and_checked(pool: PgPool) 
         "{check}"
     );
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn deleting_a_group_keeps_its_conversations(pool: PgPool) {
+#[tokio::test]
+async fn deleting_a_group_keeps_its_conversations() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let g = f.group("Группа").await;
     let id = f.create(json!({"group_ids":[g]})).await;
@@ -735,8 +751,9 @@ async fn deleting_a_group_keeps_its_conversations(pool: PgPool) {
     assert_eq!(f.get(id).await["groups"], json!([]));
     assert_eq!(f.list("").await["counts"]["all"], 1);
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn group_deletion_emits_conversation_updated_for_former_members_with_counts(pool: PgPool) {
+#[tokio::test]
+async fn group_deletion_emits_conversation_updated_for_former_members_with_counts() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let g = f.group("Группа").await;
     let ids = vec![
@@ -758,8 +775,9 @@ async fn group_deletion_emits_conversation_updated_for_former_members_with_count
         2
     );
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn list_pages_by_cursor_without_gaps(pool: PgPool) {
+#[tokio::test]
+async fn list_pages_by_cursor_without_gaps() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let mut ids = Vec::new();
     for i in 0..9 {
@@ -793,15 +811,17 @@ async fn list_pages_by_cursor_without_gaps(pool: PgPool) {
     }
     assert_eq!(seen.len(), ids.len());
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn list_item_machine_is_id_and_name_only(pool: PgPool) {
+#[tokio::test]
+async fn list_item_machine_is_id_and_name_only() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     f.create(json!({})).await;
     let m = f.list("").await["items"][0]["machine"].clone();
     assert_eq!(m, json!({"id":f.machine,"name":"Машина"}));
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn list_item_carries_working_time_without_owner_waits(pool: PgPool) {
+#[tokio::test]
+async fn list_item_carries_working_time_without_owner_waits() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let id = f.create(json!({})).await;
     let execution = executions::start(&pool, f.owner, id, Uuid::now_v7())
@@ -858,8 +878,9 @@ async fn list_item_carries_working_time_without_owner_waits(pool: PgPool) {
     assert_eq!(item["working_ms"], json!(300_000));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn list_item_merges_overlapping_owner_waits(pool: PgPool) {
+#[tokio::test]
+async fn list_item_merges_overlapping_owner_waits() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let id = f.create(json!({})).await;
     let execution = executions::start(&pool, f.owner, id, Uuid::now_v7())
@@ -921,8 +942,9 @@ async fn list_item_merges_overlapping_owner_waits(pool: PgPool) {
     assert_eq!(item["working_ms"], json!(180_000));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn foreign_conversation_ids_are_not_found(pool: PgPool) {
+#[tokio::test]
+async fn foreign_conversation_ids_are_not_found() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let foreign = testkit::seed(&f.pool).await;
     let g = Uuid::now_v7();
@@ -982,8 +1004,9 @@ async fn foreign_conversation_ids_are_not_found(pool: PgPool) {
     )
     .await;
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn unread_marker_is_monotonic(pool: PgPool) {
+#[tokio::test]
+async fn unread_marker_is_monotonic() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let id = f.create(json!({})).await;
     for seq in ["20", "10", "30", "0"] {
@@ -1011,8 +1034,9 @@ async fn unread_marker_is_monotonic(pool: PgPool) {
     )
     .await;
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn read_marker_on_one_device_updates_unread_on_another_via_derived_changed(pool: PgPool) {
+#[tokio::test]
+async fn read_marker_on_one_device_updates_unread_on_another_via_derived_changed() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let id = f.create(json!({"start":true})).await;
     sqlx::query("insert into blocks(block_id,execution_id,conversation_id,kind,state,rev,created_seq) select $1,id,$2,'text','final',1,5 from executions where conversation_id=$2").bind(Uuid::now_v7()).bind(id).execute(&f.pool).await.unwrap();
@@ -1042,8 +1066,9 @@ async fn read_marker_on_one_device_updates_unread_on_another_via_derived_changed
     );
     assert_eq!(f.get(id).await["unread_count"], 0);
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn sibling_with_common_prefix_is_not_under_the_root(pool: PgPool) {
+#[tokio::test]
+async fn sibling_with_common_prefix_is_not_under_the_root() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     sqlx::query("update machines set allowed_roots='[\"/home/a\"]' where id=$1")
         .bind(f.machine)
@@ -1080,8 +1105,9 @@ fn incompressible_workdir(bytes: usize) -> String {
     path
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn workdir_length_is_capped_with_a_validation_error(pool: PgPool) {
+#[tokio::test]
+async fn workdir_length_is_capped_with_a_validation_error() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::conversations::MAX_WORKDIR_BYTES;
     let f = Fixture::new(pool).await;
     for bytes in [3000, MAX_WORKDIR_BYTES + 1, 4096] {
@@ -1097,8 +1123,9 @@ async fn workdir_length_is_capped_with_a_validation_error(pool: PgPool) {
     let id = f.create(json!({"workdir":longest})).await;
     assert_eq!(f.get(id).await["workdir"], longest);
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn recent_workdirs_shows_last_three_from_remembered_table(pool: PgPool) {
+#[tokio::test]
+async fn recent_workdirs_shows_last_three_from_remembered_table() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     for i in 0..23 {
         f.create(json!({"workdir":format!("/tmp/{i}")})).await;
@@ -1196,8 +1223,9 @@ async fn metrics(f: &Fixture, free: u64, ms: u64) {
     .await
     .unwrap();
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn machines_endpoint_lists_catalog_os_metrics_and_disk_warning(pool: PgPool) {
+#[tokio::test]
+async fn machines_endpoint_lists_catalog_os_metrics_and_disk_warning() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let id = f.create(json!({"title":"Сессия"})).await;
     metrics(&f, 30_500_000_000, 1).await;
@@ -1227,8 +1255,9 @@ async fn machines_endpoint_lists_catalog_os_metrics_and_disk_warning(pool: PgPoo
     assert!(m.get("availability_since").is_some());
     assert!(m.get("heartbeat_age_ms").is_some());
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn machines_endpoint_flags_limits_mismatch_and_stale_metrics(pool: PgPool) {
+#[tokio::test]
+async fn machines_endpoint_flags_limits_mismatch_and_stale_metrics() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     metrics(&f, 30_500_000_000, 1).await;
     sqlx::query("update machines set limits_ok=false where id=$1")
@@ -1250,8 +1279,9 @@ async fn machines_endpoint_flags_limits_mismatch_and_stale_metrics(pool: PgPool)
         .await;
     assert_eq!(m["warnings"], json!(["metrics_stale", "limits_mismatch"]));
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn machines_endpoint_shows_a_journal_stop_until_its_cursor_passes(pool: PgPool) {
+#[tokio::test]
+async fn machines_endpoint_shows_a_journal_stop_until_its_cursor_passes() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     metrics(&f, 30_500_000_000, 1).await;
     let (cj, sj) = (Uuid::now_v7(), Uuid::now_v7());
@@ -1306,10 +1336,9 @@ async fn limits_fixture(f: &Fixture) {
     sqlx::query("insert into run_model_usage(input_command_id,model,agent,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens) select input_command_id,'synthetic-small',agent,10,20,0,0 from runs cross join (values('main'),('helper')) a(agent)").execute(&f.pool).await.unwrap();
 }
 const HISTORY: &str = "/api/v1/limits/history?provider=claude&from=2026-10-26T00%3A00%3A00Z&to=2026-10-28T00%3A00%3A00Z&tz=Europe%2FMoscow";
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn limits_endpoint_returns_current_reserve_flag_and_history_grouped_by_day_session_model(
-    pool: PgPool,
-) {
+#[tokio::test]
+async fn limits_endpoint_returns_current_reserve_flag_and_history_grouped_by_day_session_model() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     limits_fixture(&f).await;
     let current = f.request(Method::GET, "/api/v1/limits", None, 200).await;
@@ -1334,8 +1363,9 @@ async fn limits_endpoint_returns_current_reserve_flag_and_history_grouped_by_day
     f.request(Method::GET, &format!("{HISTORY}bad"), None, 400)
         .await;
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn limits_history_has_five_hour_series_and_agent_breakdown(pool: PgPool) {
+#[tokio::test]
+async fn limits_history_has_five_hour_series_and_agent_breakdown() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     limits_fixture(&f).await;
     let h = f.request(Method::GET, HISTORY, None, 200).await;
@@ -1350,8 +1380,9 @@ async fn limits_history_has_five_hour_series_and_agent_breakdown(pool: PgPool) {
     agents.sort();
     assert_eq!(agents, vec!["helper", "main"]);
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn limits_history_reports_median_speed_per_model_for_today_and_the_period(pool: PgPool) {
+#[tokio::test]
+async fn limits_history_reports_median_speed_per_model_for_today_and_the_period() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     limits_fixture(&f).await;
     let h = f.request(Method::GET, HISTORY, None, 200).await;
@@ -1387,8 +1418,9 @@ async fn limits_history_reports_median_speed_per_model_for_today_and_the_period(
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn forced_archive_skips_claimed_jobs_and_rolls_back_every_effect(pool: PgPool) {
+#[tokio::test]
+async fn forced_archive_skips_claimed_jobs_and_rolls_back_every_effect() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let id = f.create(json!({"crunch":{"enabled":true}})).await;
     let message=f.request(Method::POST,&format!("/api/v1/conversations/{id}/scheduled"),Some(json!({"run_at":Utc::now()+TimeDelta::hours(1),"content":[{"type":"text","text":"scheduled"}]})),201).await;
@@ -1431,8 +1463,9 @@ async fn forced_archive_skips_claimed_jobs_and_rolls_back_every_effect(pool: PgP
     assert_eq!(r.status, 200);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn projector_materialises_settings_and_crunch_without_attribute_event(pool: PgPool) {
+#[tokio::test]
+async fn projector_materialises_settings_and_crunch_without_attribute_event() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let id = f.create(json!({})).await;
     f.request(
@@ -1464,8 +1497,9 @@ async fn projector_materialises_settings_and_crunch_without_attribute_event(pool
         canterlot_hub::config::LimitsConfig::default().default_resume_text
     );
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn missing_derived_rows_remain_listable_and_refresh_upserts(pool: PgPool) {
+#[tokio::test]
+async fn missing_derived_rows_remain_listable_and_refresh_upserts() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let id = testkit::seed_conversation(&f.pool, f.owner, f.machine).await;
     assert_eq!(f.get(id).await["activity"]["state"], "idle");
@@ -1490,8 +1524,9 @@ async fn missing_derived_rows_remain_listable_and_refresh_upserts(pool: PgPool) 
         1
     );
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn start_in_tx_preserves_resume_native_id_and_outbox_settings(pool: PgPool) {
+#[tokio::test]
+async fn start_in_tx_preserves_resume_native_id_and_outbox_settings() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::{executions, outbox};
     use canterlot_proto::worker::v1::command;
     let f = Fixture::new(pool).await;
@@ -1542,8 +1577,9 @@ async fn start_in_tx_preserves_resume_native_id_and_outbox_settings(pool: PgPool
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn machine_api_exposes_the_reported_home_and_an_old_worker_leaves_it_empty(pool: PgPool) {
+#[tokio::test]
+async fn machine_api_exposes_the_reported_home_and_an_old_worker_leaves_it_empty() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_proto::worker::v1::MachineReport;
     let f = Fixture::new(pool).await;
     let path = format!("/api/v1/machines/{}", f.machine);
@@ -1596,8 +1632,9 @@ fn answer(machine: Uuid, directories: &[&str], request: SuggestWorkdirs, registr
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn workdir_suggestions_come_from_the_live_worker(pool: PgPool) {
+#[tokio::test]
+async fn workdir_suggestions_come_from_the_live_worker() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut f = Fixture::new(pool).await;
     f._leases.clear();
     let mut session = testkit::fake_session(
@@ -1631,8 +1668,9 @@ async fn workdir_suggestions_come_from_the_live_worker(pool: PgPool) {
     worker.await.unwrap();
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn workdir_suggestions_are_empty_without_a_capable_live_worker(pool: PgPool) {
+#[tokio::test]
+async fn workdir_suggestions_are_empty_without_a_capable_live_worker() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut f = Fixture::new(pool).await;
     let path = format!("/api/v1/machines/{}/workdirs/suggest?path=/tmp/", f.machine);
     f._leases.clear();
@@ -1685,8 +1723,9 @@ async fn workdir_suggestions_are_empty_without_a_capable_live_worker(pool: PgPoo
     assert_eq!(missing["error"]["code"], "invalid_request");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn suggestion_wait_is_bounded_and_answers_match_the_asking_machine(pool: PgPool) {
+#[tokio::test]
+async fn suggestion_wait_is_bounded_and_answers_match_the_asking_machine() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut f = Fixture::new(pool).await;
     f._leases.clear();
     let mut session = testkit::fake_session(
@@ -1754,8 +1793,9 @@ async fn suggestion_wait_is_bounded_and_answers_match_the_asking_machine(pool: P
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn catalog_changes_publish_new_harness_attributes_in_both_conversation_scopes(pool: PgPool) {
+#[tokio::test]
+async fn catalog_changes_publish_new_harness_attributes_in_both_conversation_scopes() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_proto::worker::v1::{HarnessInfo, MachineReport, ModelInfo};
     let f = Fixture::new(pool).await;
     let id = f.create(json!({})).await;
@@ -1799,8 +1839,9 @@ async fn catalog_changes_publish_new_harness_attributes_in_both_conversation_sco
 }
 
 // Отчёт воркера с новой возможностью проходит через боевой composed-роутер до снимка машины.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn machine_report_cli_versions_reach_the_machine_snapshot(pool: PgPool) {
+#[tokio::test]
+async fn machine_report_cli_versions_reach_the_machine_snapshot() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::session::CAPABILITY_CLI_VERSIONS_V1;
     use canterlot_proto::worker::v1::{HarnessInfo, MachineReport, ModelInfo};
 
@@ -1873,8 +1914,9 @@ async fn machine_report_cli_versions_reach_the_machine_snapshot(pool: PgPool) {
 }
 
 // Каталог slash-команд проходит через боевой composed-роутер: отчёт воркера -> хаб -> снимок.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn machine_report_slash_catalog_reaches_the_machine_snapshot(pool: PgPool) {
+#[tokio::test]
+async fn machine_report_slash_catalog_reaches_the_machine_snapshot() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::session::CAPABILITY_SLASH_CATALOG_V1;
     use canterlot_proto::worker::v1::{CatalogEntry, HarnessInfo, MachineReport};
 
@@ -1950,8 +1992,9 @@ async fn machine_report_slash_catalog_reaches_the_machine_snapshot(pool: PgPool)
 }
 
 // Картинки и окно контекста у OpenCode свои у каждой модели: отчёт доходит до формы как есть.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn machine_report_keeps_the_per_model_facts(pool: PgPool) {
+#[tokio::test]
+async fn machine_report_keeps_the_per_model_facts() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_proto::worker::v1::{HarnessInfo, MachineReport, ModelInfo};
     let f = Fixture::new(pool).await;
     let report = MachineReport {
@@ -1996,8 +2039,9 @@ async fn machine_report_keeps_the_per_model_facts(pool: PgPool) {
     assert!(models[1]["context_window"].is_null());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn create_defaults_to_clean_preset(pool: PgPool) {
+#[tokio::test]
+async fn create_defaults_to_clean_preset() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let id = f.create(json!({})).await;
     let detail = f.get(id).await;
@@ -2011,8 +2055,9 @@ async fn create_defaults_to_clean_preset(pool: PgPool) {
     assert_eq!(preset["deleted"], false);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn create_with_custom_preset_pins_current_revision(pool: PgPool) {
+#[tokio::test]
+async fn create_with_custom_preset_pins_current_revision() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut f = Fixture::new(pool).await;
     f.caps(&["pilot_v1", "instructions_v1"]);
     let preset = f.create_preset("Исполнитель", "текст A").await;
@@ -2039,8 +2084,9 @@ async fn create_with_custom_preset_pins_current_revision(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn create_with_deleted_or_foreign_preset_is_profile_unknown(pool: PgPool) {
+#[tokio::test]
+async fn create_with_deleted_or_foreign_preset_is_profile_unknown() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut f = Fixture::new(pool).await;
     f.caps(&["pilot_v1", "instructions_v1"]);
     let preset = f.create_preset("Временный", "текст").await;
@@ -2069,8 +2115,9 @@ async fn create_with_deleted_or_foreign_preset_is_profile_unknown(pool: PgPool) 
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn non_owner_preset_needs_instructions_v1(pool: PgPool) {
+#[tokio::test]
+async fn non_owner_preset_needs_instructions_v1() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut f = Fixture::new(pool).await;
     let preset = f.create_preset("Исполнитель", "текст").await;
     let id: String = preset["id"].as_str().unwrap().into();
@@ -2115,8 +2162,9 @@ async fn non_owner_preset_needs_instructions_v1(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn start_and_resume_check_instructions_v1_and_disconnect_is_unavailable(pool: PgPool) {
+#[tokio::test]
+async fn start_and_resume_check_instructions_v1_and_disconnect_is_unavailable() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut f = Fixture::new(pool).await;
     // Машина без сеанса: это недоступность, а не старый воркер.
     f._leases.clear();
@@ -2177,8 +2225,9 @@ async fn start_and_resume_check_instructions_v1_and_disconnect_is_unavailable(po
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn input_switching_preset_on_old_worker_shows_capability_hold(pool: PgPool) {
+#[tokio::test]
+async fn input_switching_preset_on_old_worker_shows_capability_hold() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut f = Fixture::new(pool).await;
     f.caps(&["pilot_v1"]);
     let id = f.create(json!({"instruction_profile": "owner"})).await;
@@ -2249,8 +2298,9 @@ impl Fixture {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn group_pin_is_scoped_ordered_and_idempotent(pool: PgPool) {
+#[tokio::test]
+async fn group_pin_is_scoped_ordered_and_idempotent() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let a = f.group("А").await;
     let b = f.group("Б").await;
@@ -2312,8 +2362,9 @@ async fn group_pin_is_scoped_ordered_and_idempotent(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn group_pin_survives_archive_and_unpin_is_idempotent(pool: PgPool) {
+#[tokio::test]
+async fn group_pin_survives_archive_and_unpin_is_idempotent() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let a = f.group("А").await;
     let id = f.create(json!({"group_ids":[a]})).await;
@@ -2329,8 +2380,9 @@ async fn group_pin_survives_archive_and_unpin_is_idempotent(pool: PgPool) {
     assert_eq!(page["items"][0]["group_pins"], json!([]));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn group_pin_requires_membership_and_emits_list_update(pool: PgPool) {
+#[tokio::test]
+async fn group_pin_requires_membership_and_emits_list_update() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let a = f.group("А").await;
     let b = f.group("Б").await;
@@ -2355,8 +2407,9 @@ async fn group_pin_requires_membership_and_emits_list_update(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn leaving_or_deleting_a_group_drops_its_group_pins(pool: PgPool) {
+#[tokio::test]
+async fn leaving_or_deleting_a_group_drops_its_group_pins() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let a = f.group("А").await;
     let b = f.group("Б").await;
@@ -2394,8 +2447,9 @@ async fn leaving_or_deleting_a_group_drops_its_group_pins(pool: PgPool) {
     assert_eq!(f.get(id).await["group_pins"], json!([]));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn deleting_a_conversation_drops_its_group_pins(pool: PgPool) {
+#[tokio::test]
+async fn deleting_a_conversation_drops_its_group_pins() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let a = f.group("А").await;
     let id = f.create(json!({"group_ids":[a]})).await;
@@ -2454,8 +2508,9 @@ fn resume_body(machine: Uuid, native: &str) -> Value {
     })
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn resume_history_starts_the_new_session_on_the_existing_native_id(pool: PgPool) {
+#[tokio::test]
+async fn resume_history_starts_the_new_session_on_the_existing_native_id() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut f = Fixture::new(pool).await;
     f.caps(&[
         "pilot_v1",
@@ -2499,10 +2554,9 @@ async fn resume_history_starts_the_new_session_on_the_existing_native_id(pool: P
     assert_eq!(detail["execution"]["native_conversation_id"], native);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn resume_history_rejects_a_bad_id_another_harness_and_a_worker_without_the_capability(
-    pool: PgPool,
-) {
+#[tokio::test]
+async fn resume_history_rejects_a_bad_id_another_harness_and_a_worker_without_the_capability() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut f = Fixture::new(pool).await;
     f.caps(&["pilot_v1", "instructions_v1"]);
     claude_code_catalog(&f.pool, f.machine).await;
@@ -2550,8 +2604,9 @@ async fn resume_history_rejects_a_bad_id_another_harness_and_a_worker_without_th
     assert_eq!(refused["error"]["code"], "resume_harness_unsupported");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn claude_histories_come_from_the_live_worker(pool: PgPool) {
+#[tokio::test]
+async fn claude_histories_come_from_the_live_worker() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut f = Fixture::new(pool).await;
     f._leases.clear();
     let mut session = testkit::fake_session(
@@ -2614,8 +2669,9 @@ async fn claude_histories_come_from_the_live_worker(pool: PgPool) {
     worker.await.unwrap();
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn claude_histories_are_empty_without_a_capable_live_worker(pool: PgPool) {
+#[tokio::test]
+async fn claude_histories_are_empty_without_a_capable_live_worker() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut f = Fixture::new(pool).await;
     let path = format!(
         "/api/v1/machines/{}/claude-histories?workdir=/srv/project",
@@ -2638,8 +2694,9 @@ async fn claude_histories_are_empty_without_a_capable_live_worker(pool: PgPool) 
         "old worker gets no request"
     );
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn group_retry_across_the_icon_release_replays_the_old_answer(pool: PgPool) {
+#[tokio::test]
+async fn group_retry_across_the_icon_release_replays_the_old_answer() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::{groups, idempotency, testkit};
     let s = testkit::seed(&pool).await;
     // Ответы хаба до значков групп: тот же ключ, запрос без поля icon.

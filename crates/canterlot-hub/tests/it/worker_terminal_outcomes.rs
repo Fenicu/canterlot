@@ -6,7 +6,6 @@
 use std::collections::BTreeSet;
 
 use canterlot_hub::{executions, model::ExecutionState, testkit};
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use ExecutionState::{Created, Failed, OwnerLost, Running, Starting, Stopped, Stopping};
@@ -35,8 +34,9 @@ const WORKER_TERMINALS: &[(&[ExecutionState], ExecutionState, &str)] = &[
     (&[Starting, Running], Stopped, "machine_rebooted"),
 ];
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn every_worker_terminal_outcome_is_accepted(pool: PgPool) {
+#[tokio::test]
+async fn every_worker_terminal_outcome_is_accepted() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     for (path, terminal, outcome) in WORKER_TERMINALS {
         let conversation = testkit::seed_conversation(&pool, seed.owner_id, seed.machine_id).await;

@@ -44,8 +44,9 @@ async fn count(pool: &PgPool, table: &'static str) -> i64 {
     sqlx::query_scalar(sql).fetch_one(pool).await.unwrap()
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn apply_dry_run_writes_nothing(pool: PgPool) {
+#[tokio::test]
+async fn apply_dry_run_writes_nothing() {
+    let pool = canterlot_hub::testkit::db().await;
     testkit::seed(&pool).await;
     let config = MemoryConfig::default();
     let bundle = bundle(vec![
@@ -63,8 +64,9 @@ async fn apply_dry_run_writes_nothing(pool: PgPool) {
     assert_eq!(count(&pool, "memory_entries").await, 2);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn apply_is_idempotent(pool: PgPool) {
+#[tokio::test]
+async fn apply_is_idempotent() {
+    let pool = canterlot_hub::testkit::db().await;
     testkit::seed(&pool).await;
     let config = MemoryConfig::default();
     let bundle = bundle(vec![entry(
@@ -98,8 +100,9 @@ async fn apply_is_idempotent(pool: PgPool) {
     assert_eq!(third.renamed_collisions, 1);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn apply_renames_subject_collision_with_suffix_2(pool: PgPool) {
+#[tokio::test]
+async fn apply_renames_subject_collision_with_suffix_2() {
+    let pool = canterlot_hub::testkit::db().await;
     testkit::seed(&pool).await;
     let config = MemoryConfig::default();
     let bundle = bundle(vec![
@@ -126,8 +129,9 @@ async fn apply_renames_subject_collision_with_suffix_2(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn apply_refuses_secret_entry_even_if_bundle_has_it(pool: PgPool) {
+#[tokio::test]
+async fn apply_refuses_secret_entry_even_if_bundle_has_it() {
+    let pool = canterlot_hub::testkit::db().await;
     testkit::seed(&pool).await;
     let config = MemoryConfig::default();
     let token = format!("ghp_{}", "x".repeat(36));
@@ -160,8 +164,9 @@ async fn apply_refuses_secret_entry_even_if_bundle_has_it(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn apply_refuses_index_and_credential_named_sources(pool: PgPool) {
+#[tokio::test]
+async fn apply_refuses_index_and_credential_named_sources() {
+    let pool = canterlot_hub::testkit::db().await;
     testkit::seed(&pool).await;
     let config = MemoryConfig::default();
     let bundle = bundle(vec![
@@ -213,8 +218,9 @@ async fn import_lock_waiters(pool: &PgPool) -> i64 {
     .unwrap()
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn concurrent_applies_of_one_bundle_create_each_entry_once(pool: PgPool) {
+#[tokio::test]
+async fn concurrent_applies_of_one_bundle_create_each_entry_once() {
+    let pool = canterlot_hub::testkit::db().await;
     testkit::seed(&pool).await;
     let config = MemoryConfig::default();
     let bundle = bundle(vec![
@@ -260,8 +266,9 @@ async fn concurrent_applies_of_one_bundle_create_each_entry_once(pool: PgPool) {
     assert_eq!(count(&pool, "memory_entries").await, 2);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn frontmatter_description_to_subject_type_to_kind_modified_to_updated_at(pool: PgPool) {
+#[tokio::test]
+async fn frontmatter_description_to_subject_type_to_kind_modified_to_updated_at() {
+    let pool = canterlot_hub::testkit::db().await;
     testkit::seed(&pool).await;
     let config = MemoryConfig::default();
     let long_subject = format!("{} конец", "слово ".repeat(40));

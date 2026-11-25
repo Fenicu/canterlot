@@ -88,8 +88,9 @@ fn validator(name: &str) -> jsonschema::Validator {
     jsonschema::validator_for(&s).unwrap()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn list_starts_with_builtins_then_custom_by_title(pool: PgPool) {
+#[tokio::test]
+async fn list_starts_with_builtins_then_custom_by_title() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let first: Value = f
         .request(Method::GET, "/api/v1/presets", None, None)
@@ -131,8 +132,9 @@ async fn list_starts_with_builtins_then_custom_by_title(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn builtins_cannot_be_updated_or_deleted(pool: PgPool) {
+#[tokio::test]
+async fn builtins_cannot_be_updated_or_deleted() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     for id in ["clean", "owner"] {
         let patch = f
@@ -173,8 +175,9 @@ async fn builtins_cannot_be_updated_or_deleted(pool: PgPool) {
     assert_eq!(Fx::error_code(&missing), "preset_not_found");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn create_validates_title_text_and_limits(pool: PgPool) {
+#[tokio::test]
+async fn create_validates_title_text_and_limits() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     // Пустой текст.
     let empty = f
@@ -254,8 +257,9 @@ async fn create_validates_title_text_and_limits(pool: PgPool) {
     assert_eq!(Fx::error_code(&over), "preset_limit_reached");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn update_requires_current_base_revision_and_bumps_revision(pool: PgPool) {
+#[tokio::test]
+async fn update_requires_current_base_revision_and_bumps_revision() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let created = f.create("bump", "Версии", "первый").await;
     let id = created["id"].as_str().unwrap();
@@ -300,8 +304,9 @@ async fn update_requires_current_base_revision_and_bumps_revision(pool: PgPool) 
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn every_revision_keeps_its_text(pool: PgPool) {
+#[tokio::test]
+async fn every_revision_keeps_its_text() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let created = presets::create(
         &f.pool,
@@ -369,8 +374,9 @@ async fn every_revision_keeps_its_text(pool: PgPool) {
     assert_eq!(current.revision, Some(3));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn delete_is_soft_hides_from_list_and_keeps_revisions(pool: PgPool) {
+#[tokio::test]
+async fn delete_is_soft_hides_from_list_and_keeps_revisions() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let created = f.create("soft", "Мягкий", "текст копии").await;
     let id = created["id"].as_str().unwrap();
@@ -425,8 +431,9 @@ async fn delete_is_soft_hides_from_list_and_keeps_revisions(pool: PgPool) {
     assert_eq!(resolved.text.as_deref(), Some("текст копии"));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn agent_actor_is_recorded_as_origin_and_last_edit(pool: PgPool) {
+#[tokio::test]
+async fn agent_actor_is_recorded_as_origin_and_last_edit() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let conversation = testkit::seed_conversation(&f.pool, f.owner, f.machine).await;
     let created = presets::create(
@@ -473,8 +480,9 @@ async fn agent_actor_is_recorded_as_origin_and_last_edit(pool: PgPool) {
     assert!(last.conversation_id.is_none());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn used_by_counts_effective_and_pending_references(pool: PgPool) {
+#[tokio::test]
+async fn used_by_counts_effective_and_pending_references() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let created = f.create("used", "Используемый", "текст").await;
     let id = created["id"].as_str().unwrap();
@@ -509,8 +517,9 @@ async fn used_by_counts_effective_and_pending_references(pool: PgPool) {
     assert_eq!(detail["used_by"], 2);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn preset_events_and_snapshot_carry_no_text(pool: PgPool) {
+#[tokio::test]
+async fn preset_events_and_snapshot_carry_no_text() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let canary = "CANARY-PRESET-2C-TASK2-absence-check";
     let created = f.create("event_text", "Событийный", canary).await;
@@ -611,8 +620,9 @@ async fn preset_events_and_snapshot_carry_no_text(pool: PgPool) {
     assert!(!format!("{resolved:?}").contains(canary));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn seed_preset_is_created_once_per_owner_and_not_recreated_after_delete(pool: PgPool) {
+#[tokio::test]
+async fn seed_preset_is_created_once_per_owner_and_not_recreated_after_delete() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     // Владелец из init: посев уже создан.
     let list: Value = f
@@ -694,8 +704,9 @@ async fn seed_preset_is_created_once_per_owner_and_not_recreated_after_delete(po
     assert_eq!(again, 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn delete_clears_pending_references_and_keeps_effective_snapshot(pool: PgPool) {
+#[tokio::test]
+async fn delete_clears_pending_references_and_keeps_effective_snapshot() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let created = f.create("keep-copy", "Временный", "текст копии").await;
     let id = created["id"].as_str().unwrap();
@@ -757,8 +768,9 @@ async fn delete_clears_pending_references_and_keeps_effective_snapshot(pool: PgP
     assert!(applied.current_revision.is_none());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn nul_in_description_or_text_is_invalid_not_internal(pool: PgPool) {
+#[tokio::test]
+async fn nul_in_description_or_text_is_invalid_not_internal() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     for (key, body, field) in [
         (
@@ -816,8 +828,9 @@ async fn nul_in_description_or_text_is_invalid_not_internal(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn delete_with_pending_reference_takes_queue_before_list_counter(pool: PgPool) {
+#[tokio::test]
+async fn delete_with_pending_reference_takes_queue_before_list_counter() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let created = f.create("lock-order", "Блокировки", "текст").await;
     let id = created["id"].as_str().unwrap().to_owned();
@@ -887,8 +900,9 @@ async fn delete_with_pending_reference_takes_queue_before_list_counter(pool: PgP
     assert_eq!(pending, json!({}));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn idempotency_fingerprints_preset_text_and_stores_no_text(pool: PgPool) {
+#[tokio::test]
+async fn idempotency_fingerprints_preset_text_and_stores_no_text() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let created = f.create("text-key", "Отпечаток", "первый-секрет").await;
     assert_eq!(created["text"], "первый-секрет");
@@ -965,8 +979,9 @@ async fn idempotency_fingerprints_preset_text_and_stores_no_text(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn nudge_purpose_is_filtered_and_its_builtin_is_read_only(pool: PgPool) {
+#[tokio::test]
+async fn nudge_purpose_is_filtered_and_its_builtin_is_read_only() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let created = f
         .request(
@@ -1115,8 +1130,9 @@ async fn nudge_purpose_is_filtered_and_its_builtin_is_read_only(pool: PgPool) {
     assert!(invalid.is_err(), "check purpose rejects other values");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn nudge_text_resolves_only_nudge_presets_and_falls_back_to_builtin(pool: PgPool) {
+#[tokio::test]
+async fn nudge_text_resolves_only_nudge_presets_and_falls_back_to_builtin() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let preset = f
         .request(

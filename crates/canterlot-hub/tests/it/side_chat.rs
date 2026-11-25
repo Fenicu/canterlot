@@ -144,8 +144,9 @@ impl Fixture {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn side_endpoint_creates_returns_existing_and_deletes(pool: PgPool) {
+#[tokio::test]
+async fn side_endpoint_creates_returns_existing_and_deletes() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fixture(pool).await;
     let parent = f.parent("claude_code").await;
     let (status, side_id) = f.create_side(parent).await;
@@ -188,8 +189,9 @@ async fn side_endpoint_creates_returns_existing_and_deletes(pool: PgPool) {
     assert_eq!(status, 201, "после удаления копия создаётся заново");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn side_endpoint_refuses_capability_native_and_nested(pool: PgPool) {
+#[tokio::test]
+async fn side_endpoint_refuses_capability_native_and_nested() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut f = fixture(pool).await;
     let parent = f.parent("claude_code").await;
     f.lose_side_capability();
@@ -242,8 +244,9 @@ async fn side_endpoint_refuses_capability_native_and_nested(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn side_endpoint_refuses_opencode_mid_turn_and_releases_on_idle(pool: PgPool) {
+#[tokio::test]
+async fn side_endpoint_refuses_opencode_mid_turn_and_releases_on_idle() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fixture(pool).await;
     let parent = f.parent("opencode").await;
     sqlx::query(
@@ -275,8 +278,9 @@ async fn side_endpoint_refuses_opencode_mid_turn_and_releases_on_idle(pool: PgPo
     assert_eq!(f.create_side(parent).await.0, 201);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn side_input_holds_while_opencode_parent_is_busy(pool: PgPool) {
+#[tokio::test]
+async fn side_input_holds_while_opencode_parent_is_busy() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut f = fixture(pool.clone()).await;
     let parent = f.parent("opencode").await;
     let side_id = f.side(parent).await;
@@ -330,8 +334,9 @@ async fn side_input_holds_while_opencode_parent_is_busy(pool: PgPool) {
     f.leases.clear();
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn side_start_payload_forks_from_parent_and_repeats_instruction(pool: PgPool) {
+#[tokio::test]
+async fn side_start_payload_forks_from_parent_and_repeats_instruction() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fixture(pool).await;
     let parent = f.parent("claude_code").await;
     let side_id = f.side(parent).await;
@@ -365,8 +370,9 @@ async fn side_start_payload_forks_from_parent_and_repeats_instruction(pool: PgPo
     assert!(boundary.get("seq").is_some());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn side_outbox_requires_side_chat_capability(pool: PgPool) {
+#[tokio::test]
+async fn side_outbox_requires_side_chat_capability() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut f = fixture(pool).await;
     f.lose_side_capability();
     let row = canterlot_hub::outbox::CommandRow {
@@ -388,8 +394,9 @@ async fn side_outbox_requires_side_chat_capability(pool: PgPool) {
     assert!(canterlot_hub::outbox::to_proto_for_session(&row, &f.registry).is_ok());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn side_preface_carries_state_todos_and_texts_after_boundary(pool: PgPool) {
+#[tokio::test]
+async fn side_preface_carries_state_todos_and_texts_after_boundary() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fixture(pool).await;
     let parent = f.parent("claude_code").await;
     let side_id = f.side(parent).await;
@@ -453,8 +460,9 @@ async fn side_preface_carries_state_todos_and_texts_after_boundary(pool: PgPool)
     assert!(text.chars().count() <= 2000);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn side_preface_is_fixed_on_the_command_across_retry(pool: PgPool) {
+#[tokio::test]
+async fn side_preface_is_fixed_on_the_command_across_retry() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fixture(pool).await;
     let parent = f.parent("claude_code").await;
     let side_id = f.side(parent).await;
@@ -538,8 +546,9 @@ async fn side_preface_is_fixed_on_the_command_across_retry(pool: PgPool) {
     assert!(first.as_deref().is_some_and(|text| !text.is_empty()));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn side_hidden_from_lists_counts_and_snapshot(pool: PgPool) {
+#[tokio::test]
+async fn side_hidden_from_lists_counts_and_snapshot() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fixture(pool).await;
     let parent = f.parent("claude_code").await;
     let side_id = f.side(parent).await;
@@ -614,8 +623,9 @@ async fn side_hidden_from_lists_counts_and_snapshot(pool: PgPool) {
     assert!(page.items.is_empty());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn side_hidden_from_agent_sessions_and_machine_sessions(pool: PgPool) {
+#[tokio::test]
+async fn side_hidden_from_agent_sessions_and_machine_sessions() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fixture(pool).await;
     let parent = f.parent("claude_code").await;
     let side_id = f.side(parent).await;
@@ -650,8 +660,9 @@ async fn side_hidden_from_agent_sessions_and_machine_sessions(pool: PgPool) {
     assert!(!text.contains(&side_id.to_string()));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn side_hidden_from_search_bookmarks_presets_and_plan(pool: PgPool) {
+#[tokio::test]
+async fn side_hidden_from_search_bookmarks_presets_and_plan() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fixture(pool).await;
     let parent = f.parent("claude_code").await;
     let side_id = f.side(parent).await;
@@ -746,8 +757,9 @@ async fn side_hidden_from_search_bookmarks_presets_and_plan(pool: PgPool) {
     assert!(tasks.iter().all(|task| task.orchestrator_id != side_id));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn side_shows_as_parent_in_leases_disk_and_routing(pool: PgPool) {
+#[tokio::test]
+async fn side_shows_as_parent_in_leases_disk_and_routing() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fixture(pool).await;
     let parent = f.parent("claude_code").await;
     let side_id = f.side(parent).await;
@@ -839,8 +851,9 @@ async fn side_shows_as_parent_in_leases_disk_and_routing(pool: PgPool) {
     assert_eq!(picked, Some(other_machine));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn side_events_stay_out_of_the_owner_scope(pool: PgPool) {
+#[tokio::test]
+async fn side_events_stay_out_of_the_owner_scope() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fixture(pool).await;
     let parent = f.parent("claude_code").await;
     let side_id = f.side(parent).await;
@@ -876,8 +889,9 @@ async fn side_events_stay_out_of_the_owner_scope(pool: PgPool) {
     assert!(side_events >= 2);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn side_usage_rolls_into_parent_and_no_pushes(pool: PgPool) {
+#[tokio::test]
+async fn side_usage_rolls_into_parent_and_no_pushes() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fixture(pool).await;
     let parent = f.parent("claude_code").await;
     let side_id = f.side(parent).await;
@@ -962,8 +976,9 @@ async fn side_usage_rolls_into_parent_and_no_pushes(pool: PgPool) {
     assert_eq!(pushes, 0);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn trashing_parent_removes_the_side(pool: PgPool) {
+#[tokio::test]
+async fn trashing_parent_removes_the_side() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fixture(pool).await;
     let parent = f.parent("claude_code").await;
     let side_id = f.side(parent).await;
@@ -985,8 +1000,9 @@ async fn trashing_parent_removes_the_side(pool: PgPool) {
     assert!(!exists);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn purging_parent_removes_the_side(pool: PgPool) {
+#[tokio::test]
+async fn purging_parent_removes_the_side() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fixture(pool).await;
     let parent = f.parent("claude_code").await;
     let side_id = f.side(parent).await;
@@ -1018,8 +1034,9 @@ async fn purging_parent_removes_the_side(pool: PgPool) {
     assert!(!exists);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn accepting_parent_removes_the_side(pool: PgPool) {
+#[tokio::test]
+async fn accepting_parent_removes_the_side() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fixture(pool).await;
     let parent = f.parent("claude_code").await;
     let side_id = f.side(parent).await;
@@ -1049,8 +1066,9 @@ async fn accepting_parent_removes_the_side(pool: PgPool) {
     assert!(!exists);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn idle_side_stops_after_thirty_minutes(pool: PgPool) {
+#[tokio::test]
+async fn idle_side_stops_after_thirty_minutes() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fixture(pool).await;
     let parent = f.parent("claude_code").await;
     let side_id = f.side(parent).await;
@@ -1077,8 +1095,9 @@ async fn idle_side_stops_after_thirty_minutes(pool: PgPool) {
     assert_eq!(stops, 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn fresh_fork_on_later_start_marks_the_side(pool: PgPool) {
+#[tokio::test]
+async fn fresh_fork_on_later_start_marks_the_side() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::ingest::{Ingest, JournalKind};
     use canterlot_proto::worker::v1::{JournalRecord, JournalRecords, RecordBody, record_body};
     use sha2::Digest;

@@ -3,7 +3,7 @@ use canterlot_hub::{
     model::ExecutionState, testkit,
 };
 use serde::{Deserialize, Serialize};
-use sqlx::{PgConnection, PgPool};
+use sqlx::PgConnection;
 use std::collections::HashMap;
 use std::time::Duration;
 use uuid::Uuid;
@@ -55,8 +55,9 @@ async fn probe_queue(conn: &mut PgConnection, id: Uuid) -> Option<Uuid> {
     .unwrap()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn in_tx_rolls_back_synchronously_on_op_error(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn in_tx_rolls_back_synchronously_on_op_error() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let mut probe = pool.acquire().await?;
     for _ in 0..ITERATIONS {
@@ -78,8 +79,9 @@ async fn in_tx_rolls_back_synchronously_on_op_error(pool: PgPool) -> TestResult 
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn run_in_tx_op_error_rolls_back_synchronously(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn run_in_tx_op_error_rolls_back_synchronously() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let mut probe = pool.acquire().await?;
     for i in 0..ITERATIONS {
@@ -109,8 +111,9 @@ async fn run_in_tx_op_error_rolls_back_synchronously(pool: PgPool) -> TestResult
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn run_in_tx_serde_failure_rolls_back_synchronously(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn run_in_tx_serde_failure_rolls_back_synchronously() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let value = Unencodable {
         map: HashMap::from([(vec![1u8], "x".to_string())]),
@@ -145,8 +148,9 @@ async fn run_in_tx_serde_failure_rolls_back_synchronously(pool: PgPool) -> TestR
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn run_in_tx_record_failure_rolls_back_synchronously(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn run_in_tx_record_failure_rolls_back_synchronously() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let mut probe = pool.acquire().await?;
     for i in 0..ITERATIONS {
@@ -176,8 +180,9 @@ async fn run_in_tx_record_failure_rolls_back_synchronously(pool: PgPool) -> Test
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn set_state_invalid_transition_rolls_back_queue_lock(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn set_state_invalid_transition_rolls_back_queue_lock() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let started =
         executions::start(&pool, seed.owner_id, seed.conversation_id, Uuid::now_v7()).await?;
@@ -205,8 +210,9 @@ async fn set_state_invalid_transition_rolls_back_queue_lock(pool: PgPool) -> Tes
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn rotate_revoked_machine_rolls_back_machine_lock(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn rotate_revoked_machine_rolls_back_machine_lock() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let machine = machines::add(&pool, seed.owner_id, "revoked").await?;
     assert!(machines::revoke(&pool, machine.machine_id).await?);
@@ -230,8 +236,9 @@ async fn rotate_revoked_machine_rolls_back_machine_lock(pool: PgPool) -> TestRes
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn submit_unready_attachment_rolls_back_share_lock(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn submit_unready_attachment_rolls_back_share_lock() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let attachment = Uuid::now_v7();
     sqlx::query(
@@ -278,8 +285,9 @@ async fn submit_unready_attachment_rolls_back_share_lock(pool: PgPool) -> TestRe
 
 /// Взаимная блокировка двух транзакций: helper откатывает жертву и повторяет её,
 /// поэтому оба изменения в итоге фиксируются.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn run_in_tx_retries_a_deadlock_until_both_transactions_commit(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn run_in_tx_retries_a_deadlock_until_both_transactions_commit() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let second = testkit::seed_conversation(&pool, seed.owner_id, seed.machine_id).await;
     let first_id = seed.conversation_id;

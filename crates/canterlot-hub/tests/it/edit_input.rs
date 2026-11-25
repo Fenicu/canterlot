@@ -158,8 +158,9 @@ fn row_text(row: &CommandRow) -> String {
         .to_owned()
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn edit_queued_input_replaces_text_and_bumps_revision(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn edit_queued_input_replaces_text_and_bumps_revision() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let (input_id, command_id) = input(&pool, &seed, "старый текст").await;
 
@@ -192,8 +193,9 @@ async fn edit_queued_input_replaces_text_and_bumps_revision(pool: PgPool) -> Tes
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn stale_revision_does_not_overwrite(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn stale_revision_does_not_overwrite() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let (input_id, command_id) = input(&pool, &seed, "v1").await;
     edit(&pool, &seed, input_id, "v2", 1, "edit-1").await?;
@@ -208,8 +210,9 @@ async fn stale_revision_does_not_overwrite(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn edit_refused_once_not_queued(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn edit_refused_once_not_queued() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     running(&pool, &seed).await;
     let (first_id, first_cmd) = input(&pool, &seed, "first").await;
@@ -268,8 +271,9 @@ async fn edit_refused_once_not_queued(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn edit_races_dispatch_without_double_delivery(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn edit_races_dispatch_without_double_delivery() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     for _ in 0..25 {
         let seed = testkit::seed(&pool).await;
         running(&pool, &seed).await;
@@ -350,8 +354,9 @@ async fn edit_races_dispatch_without_double_delivery(pool: PgPool) -> TestResult
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn edit_updates_pending_steer_and_refuses_in_flight(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn edit_updates_pending_steer_and_refuses_in_flight() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     sqlx::query("update conversations set harness = 'codex' where id = $1")
         .bind(seed.conversation_id)
@@ -430,8 +435,9 @@ async fn edit_updates_pending_steer_and_refuses_in_flight(pool: PgPool) -> TestR
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn edit_races_outbox_claim_without_losing_the_new_text(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn edit_races_outbox_claim_without_losing_the_new_text() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     for _ in 0..20 {
         let seed = testkit::seed(&pool).await;
         sqlx::query("update conversations set harness = 'codex' where id = $1")
@@ -525,8 +531,9 @@ async fn edit_races_outbox_claim_without_losing_the_new_text(pool: PgPool) -> Te
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn edit_replaces_attachment_list(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn edit_replaces_attachment_list() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     sqlx::query("update machines set capabilities = '{pilot_v1}', limits_ok = true where id = $1")
         .bind(seed.machine_id)
@@ -594,8 +601,9 @@ async fn edit_replaces_attachment_list(pool: PgPool) -> TestResult {
 
 /// Правка проверяет текст так же, как отправка: NUL — отказ с причиной, а не
 /// ошибка базы.
-#[sqlx::test(migrations = "./migrations")]
-async fn edit_refuses_nul_character(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn edit_refuses_nul_character() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let (input_id, _) = input(&pool, &seed, "исходный").await;
     assert!(matches!(
@@ -627,8 +635,9 @@ async fn ready_attachment(pool: &PgPool, owner: Uuid, conversation: Uuid, name: 
 /// Пересланный другой сессией ввод держит вложения её разговора. Правка,
 /// которая их оставляет, проходит; чужое вложение, не привязанное к вводу,
 /// по-прежнему отклоняется.
-#[sqlx::test(migrations = "./migrations")]
-async fn edit_keeps_attachments_of_a_forwarded_input(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn edit_keeps_attachments_of_a_forwarded_input() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     sqlx::query("update machines set capabilities = '{pilot_v1}', limits_ok = true where id = $1")
         .bind(seed.machine_id)

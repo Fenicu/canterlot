@@ -72,8 +72,9 @@ fn quota_of(holds: &[HoldReason], account: &str) -> bool {
     )
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn observations_of_two_accounts_land_in_separate_rows(pool: PgPool) {
+#[tokio::test]
+async fn observations_of_two_accounts_land_in_separate_rows() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::new(&pool).await;
     let b = add_account_machine(&mut env, B).await;
     let now = start();
@@ -148,10 +149,9 @@ async fn observations_of_two_accounts_land_in_separate_rows(pool: PgPool) {
     assert!(accounts.contains(&"owner".to_owned()) && accounts.contains(&B.to_owned()));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_reading_of_an_account_arriving_before_its_machine_report_lands_in_that_account(
-    pool: PgPool,
-) {
+#[tokio::test]
+async fn a_reading_of_an_account_arriving_before_its_machine_report_lands_in_that_account() {
+    let pool = canterlot_hub::testkit::db().await;
     let env = Env::new(&pool).await;
     // Машина без строк каталога: отчёт машины ещё не приходил.
     let silent = Uuid::now_v7();
@@ -211,8 +211,9 @@ async fn a_reading_of_an_account_arriving_before_its_machine_report_lands_in_tha
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_unstamped_fact_from_a_machine_with_another_account_is_dropped(pool: PgPool) {
+#[tokio::test]
+async fn an_unstamped_fact_from_a_machine_with_another_account_is_dropped() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::new(&pool).await;
     let b = add_account_machine(&mut env, B).await;
     let bare = Uuid::now_v7();
@@ -255,8 +256,9 @@ async fn an_unstamped_fact_from_a_machine_with_another_account_is_dropped(pool: 
     assert!(resolve(b, "claude", "Bad_Label").await.is_err());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn holds_and_wakes_of_one_account_never_touch_a_conversation_of_another(pool: PgPool) {
+#[tokio::test]
+async fn holds_and_wakes_of_one_account_never_touch_a_conversation_of_another() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::with_config(&pool, patient_config()).await;
     let b = add_account_machine(&mut env, B).await;
     let owner_conversation = env.conversation(true, true).await;
@@ -336,8 +338,9 @@ async fn holds_and_wakes_of_one_account_never_touch_a_conversation_of_another(po
     assert_eq!(polled, vec![(env.claude, "owner".to_owned())]);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_weekly_reserve_of_one_account_holds_only_its_conversations(pool: PgPool) {
+#[tokio::test]
+async fn a_weekly_reserve_of_one_account_holds_only_its_conversations() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::with_config(&pool, patient_config()).await;
     let b = add_account_machine(&mut env, B).await;
     let owner_conversation = env.conversation(true, true).await;
@@ -407,8 +410,9 @@ async fn a_weekly_reserve_of_one_account_holds_only_its_conversations(pool: PgPo
     ));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_label_change_releases_the_holds_of_the_old_account(pool: PgPool) {
+#[tokio::test]
+async fn a_label_change_releases_the_holds_of_the_old_account() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::with_config(&pool, patient_config()).await;
     let b = add_account_machine(&mut env, B).await;
     let owner_conversation = env.conversation(true, true).await;
@@ -495,8 +499,9 @@ async fn a_label_change_releases_the_holds_of_the_old_account(pool: PgPool) {
     assert_eq!(stored, "c-acct");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn polls_and_snapshots_go_only_to_machines_of_the_account(pool: PgPool) {
+#[tokio::test]
+async fn polls_and_snapshots_go_only_to_machines_of_the_account() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::with_config(&pool, patient_config()).await;
     let b = add_account_machine(&mut env, B).await;
     let now = start();
@@ -564,8 +569,9 @@ async fn polls_and_snapshots_go_only_to_machines_of_the_account(pool: PgPool) {
     assert_eq!(snapshots, vec![(b, B.to_owned())]);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn max_parallel_busy_counts_are_per_account(pool: PgPool) {
+#[tokio::test]
+async fn max_parallel_busy_counts_are_per_account() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::with_config(&pool, patient_config()).await;
     let b = add_account_machine(&mut env, B).await;
     let owner_conversation = env.conversation(true, true).await;
@@ -633,8 +639,9 @@ fn owner_hold_and_pause_json_stay_byte_identical_and_other_accounts_add_a_key() 
     assert_eq!(view["account"], B);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn pending_jobs_and_holds_stored_before_accounts_survive_the_upgrade(pool: PgPool) {
+#[tokio::test]
+async fn pending_jobs_and_holds_stored_before_accounts_survive_the_upgrade() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::with_config(&pool, patient_config()).await;
     let waiting = env.conversation(true, true).await;
     let now = start();
@@ -898,8 +905,9 @@ fn limit_pause_of(pauses: &[PauseReason], account: &str) -> bool {
         .any(|p| matches!(p, PauseReason::LimitReached { account: a, .. } if a == account))
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_label_change_removes_the_old_account_pause_and_pending_wakes(pool: PgPool) {
+#[tokio::test]
+async fn a_label_change_removes_the_old_account_pause_and_pending_wakes() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::with_config(&pool, patient_config()).await;
     let b = add_account_machine(&mut env, B).await;
     // Разговор без «кранча»: его останавливает обычная пауза лимита, не удержание.
@@ -953,8 +961,9 @@ async fn a_label_change_removes_the_old_account_pause_and_pending_wakes(pool: Pg
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_replayed_limit_reached_of_the_old_account_never_recreates_a_hold_or_pause(pool: PgPool) {
+#[tokio::test]
+async fn a_replayed_limit_reached_of_the_old_account_never_recreates_a_hold_or_pause() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::with_config(&pool, patient_config()).await;
     let b = add_account_machine(&mut env, B).await;
     let crunch = env.conversation_on(b, true, true).await;
@@ -1003,8 +1012,9 @@ async fn a_replayed_limit_reached_of_the_old_account_never_recreates_a_hold_or_p
     assert!(limit_pause_of(&pauses(&pool, plain).await, "c-acct"));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_legacy_report_without_a_label_keeps_the_stored_non_owner_label(pool: PgPool) {
+#[tokio::test]
+async fn a_legacy_report_without_a_label_keeps_the_stored_non_owner_label() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::with_config(&pool, patient_config()).await;
     let b = add_account_machine(&mut env, B).await;
     let conversation = env.conversation_on(b, true, true).await;

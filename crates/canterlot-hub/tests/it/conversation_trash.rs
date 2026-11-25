@@ -120,8 +120,9 @@ fn caller(root: Uuid, machine: Uuid, owner: Uuid) -> Caller {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn trash_hides_the_session_from_lists_search_counts_usage_and_tools(pool: PgPool) {
+#[tokio::test]
+async fn trash_hides_the_session_from_lists_search_counts_usage_and_tools() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let other = f.conversation().await;
     let title = format!("корзина-{}", Uuid::now_v7());
@@ -232,8 +233,9 @@ async fn trash_hides_the_session_from_lists_search_counts_usage_and_tools(pool: 
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn trash_keeps_delete_preconditions_and_leaves_rows(pool: PgPool) {
+#[tokio::test]
+async fn trash_keeps_delete_preconditions_and_leaves_rows() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
 
     let live = f.conversation().await;
@@ -321,8 +323,9 @@ async fn notified_jobs(pool: &PgPool, target: Uuid) -> i64 {
     .unwrap()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn agents_are_told_once_at_trash_and_not_at_restore_or_purge(pool: PgPool) {
+#[tokio::test]
+async fn agents_are_told_once_at_trash_and_not_at_restore_or_purge() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let subscriber = f.conversation().await;
     let target = f.conversation().await;
@@ -398,8 +401,9 @@ async fn agents_are_told_once_at_trash_and_not_at_restore_or_purge(pool: PgPool)
     assert_eq!(owner_deleted, 1, "the list gets one deletion event");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn restore_is_idempotent_and_returns_the_session_as_it_was(pool: PgPool) {
+#[tokio::test]
+async fn restore_is_idempotent_and_returns_the_session_as_it_was() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     sqlx::query("update conversations set archived_at=clock_timestamp() where id=$1")
         .bind(f.conversation)
@@ -516,8 +520,9 @@ async fn seed_run(
     .unwrap();
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn purge_after_retention_uses_the_hard_delete_and_folds_usage(pool: PgPool) {
+#[tokio::test]
+async fn purge_after_retention_uses_the_hard_delete_and_folds_usage() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let parent = f.conversation().await;
     let child = f.conversation().await;
@@ -593,8 +598,9 @@ async fn purge_after_retention_uses_the_hard_delete_and_folds_usage(pool: PgPool
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn purge_endpoint_requires_trash_and_is_idempotent(pool: PgPool) {
+#[tokio::test]
+async fn purge_endpoint_requires_trash_and_is_idempotent() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let active = f.conversation().await;
     let response = purge(&f, active, "not-trashed").await;
@@ -618,8 +624,9 @@ async fn purge_endpoint_requires_trash_and_is_idempotent(pool: PgPool) {
     assert_eq!(code(&unknown), "not_found");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn input_to_a_trashed_session_is_rejected(pool: PgPool) {
+#[tokio::test]
+async fn input_to_a_trashed_session_is_rejected() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     assert_eq!(trash(&f, f.conversation, "input-trash").await.status, 204);
     let response = f
@@ -635,8 +642,9 @@ async fn input_to_a_trashed_session_is_rejected(pool: PgPool) {
     assert_eq!(inputs, 0);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn concurrent_restore_and_purge_have_exactly_one_winner(pool: PgPool) {
+#[tokio::test]
+async fn concurrent_restore_and_purge_have_exactly_one_winner() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     for round in 0..6 {
         let id = f.conversation().await;
@@ -677,8 +685,9 @@ async fn concurrent_restore_and_purge_have_exactly_one_winner(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn accepted_delegate_retention_stays_a_hard_delete(pool: PgPool) {
+#[tokio::test]
+async fn accepted_delegate_retention_stays_a_hard_delete() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let child = f.conversation().await;
     sqlx::query(
@@ -715,8 +724,9 @@ async fn accepted_delegate_retention_stays_a_hard_delete(pool: PgPool) {
 }
 
 /// Проверка возврата после окончательной уборки: надгробие отвечает как у удалённой.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn purged_session_answers_conversation_deleted(pool: PgPool) {
+#[tokio::test]
+async fn purged_session_answers_conversation_deleted() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     assert_eq!(trash(&f, f.conversation, "tomb-trash").await.status, 204);
     assert_eq!(purge(&f, f.conversation, "tomb-purge").await.status, 204);
@@ -738,8 +748,9 @@ async fn purged_session_answers_conversation_deleted(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn accepted_retention_never_deletes_a_trashed_delegate(pool: PgPool) {
+#[tokio::test]
+async fn accepted_retention_never_deletes_a_trashed_delegate() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let child = f.conversation().await;
     sqlx::query(
@@ -779,8 +790,9 @@ async fn accepted_retention_never_deletes_a_trashed_delegate(pool: PgPool) {
     ));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn deleted_event_after_trash_has_only_the_minimal_notice(pool: PgPool) {
+#[tokio::test]
+async fn deleted_event_after_trash_has_only_the_minimal_notice() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let subscriber = f.conversation().await;
     let target = f.conversation().await;
@@ -854,8 +866,9 @@ async fn deleted_event_after_trash_has_only_the_minimal_notice(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn scheduled_message_survives_trash_and_resumes_after_restore(pool: PgPool) {
+#[tokio::test]
+async fn scheduled_message_survives_trash_and_resumes_after_restore() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let file = f
         .ready_in(f.conversation, "later.txt", "text/plain", &content(32, 9))
@@ -958,8 +971,9 @@ async fn scheduled_message_survives_trash_and_resumes_after_restore(pool: PgPool
     assert!(blob.exists());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn submit_waiting_for_the_queue_rechecks_trash(pool: PgPool) {
+#[tokio::test]
+async fn submit_waiting_for_the_queue_rechecks_trash() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let id = f.conversation;
     let mut tx = f.pool.begin().await.unwrap();
@@ -1009,8 +1023,9 @@ async fn submit_waiting_for_the_queue_rechecks_trash(pool: PgPool) {
     assert_eq!(inputs, 0);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn trash_and_subscribe_share_one_lock_order(pool: PgPool) {
+#[tokio::test]
+async fn trash_and_subscribe_share_one_lock_order() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let subscriber = f.conversation().await;
     let target = f.conversation().await;
@@ -1054,8 +1069,9 @@ async fn trash_and_subscribe_share_one_lock_order(pool: PgPool) {
     assert!(trashed_at(&f.pool, target).await.is_some());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn trash_listing_is_paginated_and_ordered_by_trash_time(pool: PgPool) {
+#[tokio::test]
+async fn trash_listing_is_paginated_and_ordered_by_trash_time() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let first = f.conversation().await;
     let second = f.conversation().await;
@@ -1100,8 +1116,9 @@ async fn trash_listing_is_paginated_and_ordered_by_trash_time(pool: PgPool) {
     assert_eq!(next["items"].as_array().unwrap()[0]["id"], json!(first));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn machine_session_list_hides_trashed_sessions(pool: PgPool) {
+#[tokio::test]
+async fn machine_session_list_hides_trashed_sessions() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let machine = f
         .client
@@ -1141,8 +1158,9 @@ async fn machine_session_list_hides_trashed_sessions(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn trash_does_not_block_a_queue_first_conversation_update(pool: PgPool) {
+#[tokio::test]
+async fn trash_does_not_block_a_queue_first_conversation_update() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let id = f.conversation;
     // Первый шаг PATCH /settings (`change_settings`): очередь, затем разговор

@@ -3,7 +3,6 @@ use crate::support::task7 as support;
 use axum::http::Method;
 use canterlot_hub::{config::LimitsConfig, limit_settings};
 use serde_json::{Value, json};
-use sqlx::PgPool;
 use support::Fixture;
 use uuid::Uuid;
 
@@ -14,8 +13,9 @@ async fn put(f: &Fixture, key: &str, body: Value) -> axum::http::StatusCode {
         .status
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn settings_default_save_reset_and_config_follow_owner(pool: PgPool) {
+#[tokio::test]
+async fn settings_default_save_reset_and_config_follow_owner() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let defaults = json!({
         "warn_remaining_pct": 20,
@@ -82,8 +82,9 @@ async fn settings_default_save_reset_and_config_follow_owner(pool: PgPool) {
     assert_eq!(config["limit_thresholds"]["weekly_reserve_pct"], 95);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn invalid_settings_are_rejected_with_a_clear_code(pool: PgPool) {
+#[tokio::test]
+async fn invalid_settings_are_rejected_with_a_clear_code() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     for (key, settings) in [
         (

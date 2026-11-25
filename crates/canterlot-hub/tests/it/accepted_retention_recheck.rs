@@ -3,11 +3,11 @@
 //! блокировкой и сессия остаётся. Тест воспроизводит состояние после такой гонки.
 
 use canterlot_hub::{deletion, testkit};
-use sqlx::PgPool;
 use uuid::Uuid;
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn delete_retained_spares_a_delegate_the_owner_kept(pool: PgPool) {
+#[tokio::test]
+async fn delete_retained_spares_a_delegate_the_owner_kept() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let id = testkit::seed_conversation(&pool, seed.owner_id, seed.machine_id).await;
     // Принятая делегация старше срока: такой её увидел отбор кандидатов...

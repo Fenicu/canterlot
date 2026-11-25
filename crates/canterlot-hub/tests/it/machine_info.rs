@@ -26,8 +26,9 @@ async fn stopped_execution(pool: &PgPool, conversation_id: Uuid, generation: i64
     .unwrap();
     id
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn machine_view_has_no_profiles(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn machine_view_has_no_profiles() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     let mut r = report();
     machine_info::apply_report(&pool, s.owner_id, s.machine_id, &r, Uuid::now_v7()).await?;
@@ -75,8 +76,9 @@ async fn machine_view_has_no_profiles(pool: PgPool) -> TestResult {
     assert_eq!(n, 2);
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn report_with_mismatching_attachment_limits_flags_the_machine(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn report_with_mismatching_attachment_limits_flags_the_machine() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     let mut r = report();
     r.max_attachment_bytes -= 1;
@@ -92,8 +94,9 @@ async fn report_with_mismatching_attachment_limits_flags_the_machine(pool: PgPoo
     );
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn metrics_upsert_keeps_latest_and_appends_a_machines_event(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn metrics_upsert_keeps_latest_and_appends_a_machines_event() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     for ms in [1000, 2000] {
         assert_eq!(
@@ -133,8 +136,9 @@ async fn metrics_upsert_keeps_latest_and_appends_a_machines_event(pool: PgPool) 
     );
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn execution_cpu_above_one_core_is_accepted(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn execution_cpu_above_one_core_is_accepted() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     let first = stopped_execution(&pool, s.conversation_id, 1).await;
     let second = stopped_execution(&pool, s.conversation_id, 2).await;
@@ -178,8 +182,9 @@ async fn execution_cpu_above_one_core_is_accepted(pool: PgPool) -> TestResult {
     assert_eq!(rows[1]["cpu_permille"], 1000);
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn broken_execution_counter_drops_only_that_entry(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn broken_execution_counter_drops_only_that_entry() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     let good = stopped_execution(&pool, s.conversation_id, 1).await;
     let hot = stopped_execution(&pool, s.conversation_id, 2).await;
@@ -231,8 +236,9 @@ async fn broken_execution_counter_drops_only_that_entry(pool: PgPool) -> TestRes
     assert_eq!(rows[0]["cpu_permille"], 2400);
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn invalid_metrics_are_ignored_without_ending_the_stream(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn invalid_metrics_are_ignored_without_ending_the_stream() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = wire_seed(&pool).await;
     let hub = testkit::spawn_test_hub(pool.clone(), HubTimers::default()).await;
     let mut c = connect(&hub, &s, Uuid::now_v7(), true, 1000).await;
@@ -277,8 +283,9 @@ async fn invalid_metrics_are_ignored_without_ending_the_stream(pool: PgPool) -> 
     hub.join.await??;
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn failed_metrics_apply_does_not_end_the_stream(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn failed_metrics_apply_does_not_end_the_stream() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = wire_seed(&pool).await;
     let hub = testkit::spawn_test_hub(pool.clone(), HubTimers::default()).await;
     sqlx::raw_sql("create function fail_metrics() returns trigger language plpgsql as $$ begin raise exception 'metrics_outage'; end $$; create trigger fail_metrics before insert on machine_metrics for each row execute function fail_metrics();").execute(&pool).await?;
@@ -309,8 +316,9 @@ async fn failed_metrics_apply_does_not_end_the_stream(pool: PgPool) -> TestResul
     hub.join.await??;
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn availability_projection_emits_one_event_per_change(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn availability_projection_emits_one_event_per_change() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::session::Availability;
     use tokio_stream::wrappers::ReceiverStream;
     use tonic::transport::{Certificate, ClientTlsConfig, Endpoint};
@@ -400,8 +408,9 @@ async fn availability_projection_emits_one_event_per_change(pool: PgPool) -> Tes
     projector.release().await;
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn hub_start_resets_stored_availability(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn hub_start_resets_stored_availability() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let _s = testkit::seed(&pool).await;
     sqlx::query("update machines set availability='available'")
         .execute(&pool)
@@ -426,8 +435,9 @@ async fn hub_start_resets_stored_availability(pool: PgPool) -> TestResult {
     );
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn metrics_of_one_machine_never_touch_another(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn metrics_of_one_machine_never_touch_another() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let a = testkit::seed(&pool).await;
     let b = Run::new(&pool).await;
     let mut m = metrics(1000);
@@ -453,8 +463,9 @@ async fn metrics_of_one_machine_never_touch_another(pool: PgPool) -> TestResult 
     ));
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn pilot_capability_is_echoed_and_stored_per_session(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn pilot_capability_is_echoed_and_stored_per_session() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let a = wire_seed(&pool).await;
     let b = wire_seed(&pool).await;
     let hub = testkit::spawn_test_hub(pool.clone(), HubTimers::default()).await;
@@ -466,8 +477,9 @@ async fn pilot_capability_is_echoed_and_stored_per_session(pool: PgPool) -> Test
     hub.join.await??;
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn workdir_suggestions_travel_the_control_stream(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn workdir_suggestions_travel_the_control_stream() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = wire_seed(&pool).await;
     let hub = testkit::spawn_test_hub(pool.clone(), HubTimers::default()).await;
     let mut c = connect_with(
@@ -507,8 +519,9 @@ async fn workdir_suggestions_travel_the_control_stream(pool: PgPool) -> TestResu
     Ok(())
 }
 // Отказ в отчёте закрывает поток, и воркер прислал бы тот же отчёт снова.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn nul_in_a_report_never_refuses_it(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn nul_in_a_report_never_refuses_it() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     let mut r = report();
     r.worker_version = "ver\0sion".into();
@@ -532,8 +545,9 @@ async fn nul_in_a_report_never_refuses_it(pool: PgPool) -> TestResult {
     assert_eq!(models[0]["id"], "i\u{fffd}d");
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn failed_report_apply_is_retried_after_reconnect(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn failed_report_apply_is_retried_after_reconnect() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = wire_seed(&pool).await;
     let hub = testkit::spawn_test_hub(pool.clone(), HubTimers::default()).await;
     let journal = Uuid::now_v7();
@@ -571,10 +585,9 @@ async fn failed_report_apply_is_retried_after_reconnect(pool: PgPool) -> TestRes
     hub.join.await??;
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn singleton_lock_is_dedicated_and_status_projection_recovers_after_loss(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn singleton_lock_is_dedicated_and_status_projection_recovers_after_loss() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let options = pool.connect_options();
     let mut first = Singleton::acquire(&options, "test").await?.unwrap();
     assert!(Singleton::acquire(&options, "test").await?.is_none());
@@ -610,8 +623,9 @@ async fn singleton_lock_is_dedicated_and_status_projection_recovers_after_loss(
     tokio::time::timeout(WAIT, task).await??;
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn passive_hub_does_not_reset_stored_availability(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn passive_hub_does_not_reset_stored_availability() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let _s = testkit::seed(&pool).await;
     let lock = Singleton::acquire(&pool.connect_options(), "machine_status")
         .await?
@@ -640,8 +654,9 @@ async fn passive_hub_does_not_reset_stored_availability(pool: PgPool) -> TestRes
     lock.release().await;
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn passive_hub_takes_over_when_the_holder_leaves(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn passive_hub_takes_over_when_the_holder_leaves() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let _s = testkit::seed(&pool).await;
     let lock = Singleton::acquire(&pool.connect_options(), "machine_status")
         .await?
@@ -666,8 +681,9 @@ async fn passive_hub_takes_over_when_the_holder_leaves(pool: PgPool) -> TestResu
     tokio::time::timeout(WAIT, task).await??;
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn report_and_metrics_reach_the_hub_over_the_control_stream(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn report_and_metrics_reach_the_hub_over_the_control_stream() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = wire_seed(&pool).await;
     let hub = testkit::spawn_test_hub(pool.clone(), HubTimers::default()).await;
     let c = connect(
@@ -697,8 +713,9 @@ async fn report_and_metrics_reach_the_hub_over_the_control_stream(pool: PgPool) 
     hub.join.await??;
     Ok(())
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn machine_row_keeps_the_negotiated_capabilities(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn machine_row_keeps_the_negotiated_capabilities() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = wire_seed(&pool).await;
     let hub = testkit::spawn_test_hub(pool.clone(), HubTimers::default()).await;
     let client = connect_with(

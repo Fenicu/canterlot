@@ -177,8 +177,9 @@ async fn wake_texts(pool: &PgPool, id: Uuid) -> Vec<String> {
         .bind(id).fetch_all(pool).await.unwrap()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn arming_keeps_crunch_off_and_builds_the_same_hold_and_wake_job(pool: PgPool) {
+#[tokio::test]
+async fn arming_keeps_crunch_off_and_builds_the_same_hold_and_wake_job() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let execution = live(&f).await;
     let at = now();
@@ -223,8 +224,9 @@ async fn arming_keeps_crunch_off_and_builds_the_same_hold_and_wake_job(pool: PgP
     assert_eq!(jobs[0].payload["resets_at"], wire(reset));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn wake_after_verified_reset_continues_once_and_the_next_stop_is_plain(pool: PgPool) {
+#[tokio::test]
+async fn wake_after_verified_reset_continues_once_and_the_next_stop_is_plain() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let execution = live(&f).await;
     let mut at = now();
@@ -282,8 +284,9 @@ async fn wake_after_verified_reset_continues_once_and_the_next_stop_is_plain(poo
     assert_eq!(wake_jobs(&pool, id).await.len(), 1, "нового задания нет");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn cancel_restores_the_plain_pause_and_cancels_the_wake(pool: PgPool) {
+#[tokio::test]
+async fn cancel_restores_the_plain_pause_and_cancels_the_wake() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let execution = live(&f).await;
     let at = now();
@@ -321,8 +324,9 @@ async fn cancel_restores_the_plain_pause_and_cancels_the_wake(pool: PgPool) {
     assert_eq!(jobs[0].state, "cancelled");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn arming_without_a_limit_pause_is_refused(pool: PgPool) {
+#[tokio::test]
+async fn arming_without_a_limit_pause_is_refused() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     sqlx::query("update queue_state set hold_reasons='[]' where conversation_id=$1")
         .bind(f.seed.conversation_id)

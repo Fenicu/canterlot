@@ -1445,8 +1445,9 @@ mod tests {
 
     /// Обход обязан видеть недавно осевшую корневую сессию столько же, сколько живёт
     /// свежесть пуша: иначе после перезапуска хаба итог в окне десяти минут теряется.
-    #[sqlx::test(migrations = "./migrations")]
-    async fn sweep_keeps_a_root_idle_session_within_the_push_freshness(pool: PgPool) {
+    #[tokio::test]
+    async fn sweep_keeps_a_root_idle_session_within_the_push_freshness() {
+        let pool = crate::testkit::db().await;
         let seed = crate::testkit::seed(&pool).await;
         notify::configure(
             &pool,

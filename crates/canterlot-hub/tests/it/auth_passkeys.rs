@@ -87,8 +87,9 @@ async fn failures(pool: &PgPool) -> i64 {
         .unwrap()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn auth_passkeys_register_list_and_sign_in_update_the_counter(pool: PgPool) {
+#[tokio::test]
+async fn auth_passkeys_register_list_and_sign_in_update_the_counter() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = AuthHub::new(pool).await;
     let methods: Value = hub
         .anonymous(None)
@@ -149,8 +150,9 @@ async fn auth_passkeys_register_list_and_sign_in_update_the_counter(pool: PgPool
     assert!(stored_counter(&hub.pool).await > after);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn auth_passkeys_challenge_is_single_use_and_expires(pool: PgPool) {
+#[tokio::test]
+async fn auth_passkeys_challenge_is_single_use_and_expires() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = AuthHub::new(pool).await;
     let mut key = authenticator();
     assert_eq!(
@@ -193,8 +195,9 @@ async fn auth_passkeys_challenge_is_single_use_and_expires(pool: PgPool) {
     assert!((299.0..=301.0).contains(&ttl), "{ttl}");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn auth_passkeys_wrong_key_counts_and_locks_the_bucket(pool: PgPool) {
+#[tokio::test]
+async fn auth_passkeys_wrong_key_counts_and_locks_the_bucket() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = AuthHub::new(pool).await;
     let mut key = authenticator();
     assert_eq!(register(&hub.owner(), &mut key, None).await.status, 200);
@@ -231,8 +234,9 @@ async fn auth_passkeys_wrong_key_counts_and_locks_the_bucket(pool: PgPool) {
     assert_eq!(sign_in(&hub, &mut key, "198.51.100.73").await.status, 200);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn auth_passkeys_start_is_limited_and_needs_a_key(pool: PgPool) {
+#[tokio::test]
+async fn auth_passkeys_start_is_limited_and_needs_a_key() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = AuthHub::new(pool).await;
     let client = hub.anonymous(Some("203.0.113.74"));
     let none = post(&client, "/api/v1/auth/passkey/start", json!({})).await;
@@ -253,8 +257,9 @@ async fn auth_passkeys_start_is_limited_and_needs_a_key(pool: PgPool) {
     assert_eq!(error_code(&limited), "too_many_attempts");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn auth_passkeys_full_global_cap_still_lets_a_known_device_start(pool: PgPool) {
+#[tokio::test]
+async fn auth_passkeys_full_global_cap_still_lets_a_known_device_start() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = AuthHub::new(pool).await;
     hub.set_password(PASSWORD).await;
     let mut key = authenticator();
@@ -295,8 +300,9 @@ async fn auth_passkeys_full_global_cap_still_lets_a_known_device_start(pool: PgP
     assert_eq!(refused.status, 429);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn auth_passkeys_adding_and_deleting_need_a_fresh_session(pool: PgPool) {
+#[tokio::test]
+async fn auth_passkeys_adding_and_deleting_need_a_fresh_session() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = AuthHub::new(pool).await;
     let mut key = authenticator();
     let owner = hub.owner();
@@ -368,8 +374,9 @@ async fn auth_passkeys_adding_and_deleting_need_a_fresh_session(pool: PgPool) {
     assert_eq!(missing.status, 404);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn auth_passkeys_reauth_makes_a_qr_session_fresh(pool: PgPool) {
+#[tokio::test]
+async fn auth_passkeys_reauth_makes_a_qr_session_fresh() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = AuthHub::new(pool).await;
     let mut key = authenticator();
     assert_eq!(register(&hub.owner(), &mut key, None).await.status, 200);
@@ -406,8 +413,9 @@ async fn auth_passkeys_reauth_makes_a_qr_session_fresh(pool: PgPool) {
     assert_eq!(start.status, 200, "fresh after the passkey reauth");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn auth_passkeys_challenges_are_bound_to_their_kind_and_session(pool: PgPool) {
+#[tokio::test]
+async fn auth_passkeys_challenges_are_bound_to_their_kind_and_session() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = AuthHub::new(pool).await;
     let mut key = authenticator();
     let owner = hub.owner();
@@ -455,8 +463,9 @@ async fn auth_passkeys_challenges_are_bound_to_their_kind_and_session(pool: PgPo
     assert_eq!(rows, 0, "every finish consumes its row, right or wrong");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn auth_passkeys_register_finish_needs_the_session_still_fresh(pool: PgPool) {
+#[tokio::test]
+async fn auth_passkeys_register_finish_needs_the_session_still_fresh() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = AuthHub::new(pool).await;
     let owner = hub.owner();
     let mut key = authenticator();

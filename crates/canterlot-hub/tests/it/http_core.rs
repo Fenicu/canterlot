@@ -398,8 +398,9 @@ async fn effect_count(pool: &PgPool) -> i64 {
 
 // ---------------------------------------------------------------- здоровье и жизненный цикл
 
-#[sqlx::test(migrations = "./migrations")]
-async fn healthz_is_unauthenticated_and_readyz_reports_database_loss(pool: PgPool) {
+#[tokio::test]
+async fn healthz_is_unauthenticated_and_readyz_reports_database_loss() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = spawn_test_hub_http(pool.clone(), HubTimers::default(), test_http_config()).await;
     let outsider = TestClient::over_socket(hub.http_addr())
         .await
@@ -447,8 +448,9 @@ async fn healthz_is_unauthenticated_and_readyz_reports_database_loss(pool: PgPoo
     let _ = tokio::time::timeout(Duration::from_secs(10), hub.join).await;
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn serve_starts_http_beside_grpc_and_stops_on_shutdown(pool: PgPool) {
+#[tokio::test]
+async fn serve_starts_http_beside_grpc_and_stops_on_shutdown() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = spawn_test_hub_http(pool.clone(), HubTimers::default(), test_http_config()).await;
     let http_addr = hub.http_addr();
     let grpc_addr = hub.addr;
@@ -511,8 +513,9 @@ async fn serve_starts_http_beside_grpc_and_stops_on_shutdown(pool: PgPool) {
     .expect("no singleton lock outlives the shutdown");
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn background_services_stop_on_shutdown_and_release_their_locks(pool: PgPool) {
+#[tokio::test]
+async fn background_services_stop_on_shutdown_and_release_their_locks() {
+    let pool = canterlot_hub::testkit::db().await;
     let timers = HubTimers::default();
     let registry = canterlot_hub::session::Registry::new(timers.clone());
     let (dispatcher, dispatch_rx) = canterlot_hub::dispatcher::Dispatcher::channel();
@@ -571,8 +574,9 @@ async fn background_services_stop_on_shutdown_and_release_their_locks(pool: PgPo
 
 // ---------------------------------------------------------------- вход
 
-#[sqlx::test(migrations = "./migrations")]
-async fn forged_user_header_from_untrusted_peer_is_unauthenticated(pool: PgPool) {
+#[tokio::test]
+async fn forged_user_header_from_untrusted_peer_is_unauthenticated() {
+    let pool = canterlot_hub::testkit::db().await;
     let h = harness(pool).await;
     let none = h
         .outsider()
@@ -606,8 +610,9 @@ async fn forged_user_header_from_untrusted_peer_is_unauthenticated(pool: PgPool)
     assert_eq!(h.hits(), 0);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn x_forwarded_for_never_grants_trust(pool: PgPool) {
+#[tokio::test]
+async fn x_forwarded_for_never_grants_trust() {
+    let pool = canterlot_hub::testkit::db().await;
     let h = harness(pool).await;
     let baseline = h
         .outsider()
@@ -640,8 +645,9 @@ async fn x_forwarded_for_never_grants_trust(pool: PgPool) {
     assert_eq!(me(&trusted).await.status, 200);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn peer_address_is_taken_from_the_socket_not_headers(pool: PgPool) {
+#[tokio::test]
+async fn peer_address_is_taken_from_the_socket_not_headers() {
+    let pool = canterlot_hub::testkit::db().await;
     let h = harness(pool).await;
     let from_proxy = me(&h.owner().await).await;
     assert_eq!(from_proxy.status, 200);
@@ -681,8 +687,9 @@ async fn peer_address_is_taken_from_the_socket_not_headers(pool: PgPool) {
     assert_eq!(upgrade_forged, 401);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn proxy_secret_is_required_when_configured(pool: PgPool) {
+#[tokio::test]
+async fn proxy_secret_is_required_when_configured() {
+    let pool = canterlot_hub::testkit::db().await;
     captured();
     let marker_tag = marker("WRONGSECRET");
     let h = harness_with(pool, test_http_config(), Some(SECRET)).await;
@@ -773,8 +780,9 @@ async fn proxy_secret_is_required_when_configured(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn forged_identity_header_from_trusted_proxy_is_unauthenticated_and_flagged(pool: PgPool) {
+#[tokio::test]
+async fn forged_identity_header_from_trusted_proxy_is_unauthenticated_and_flagged() {
+    let pool = canterlot_hub::testkit::db().await;
     let h = harness(pool).await;
     for login in [TEST_OWNER_LOGIN, "attacker", "Owner", ""] {
         let client = h
@@ -815,8 +823,9 @@ async fn forged_identity_header_from_trusted_proxy_is_unauthenticated_and_flagge
     assert_eq!(h.hits(), 0);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn missing_duplicated_or_unknown_session_cookie_is_unauthenticated(pool: PgPool) {
+#[tokio::test]
+async fn missing_duplicated_or_unknown_session_cookie_is_unauthenticated() {
+    let pool = canterlot_hub::testkit::db().await;
     let h = harness(pool).await;
     let cookie = |value: &str| h.in_process().with_header("Cookie", value);
     let session = |token: &str| format!("__Host-canterlot_session={token}");
@@ -861,8 +870,9 @@ async fn missing_duplicated_or_unknown_session_cookie_is_unauthenticated(pool: P
     assert_eq!(h.hits(), 0);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn session_lookup_database_error_is_503_not_401(pool: PgPool) {
+#[tokio::test]
+async fn session_lookup_database_error_is_503_not_401() {
+    let pool = canterlot_hub::testkit::db().await;
     let h = harness(pool.clone()).await;
     assert_eq!(me(&h.in_process().as_owner()).await.status, 200);
     pool.close().await;
@@ -871,8 +881,9 @@ async fn session_lookup_database_error_is_503_not_401(pool: PgPool) {
     assert!(response.headers.get("set-cookie").is_none());
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn ipv4_mapped_ipv6_peer_matches_trusted_cidr(pool: PgPool) {
+#[tokio::test]
+async fn ipv4_mapped_ipv6_peer_matches_trusted_cidr() {
+    let pool = canterlot_hub::testkit::db().await;
     let nets: Vec<IpNet> = ["127.0.0.1/32", "10.0.0.0/8", "::1/128"]
         .iter()
         .map(|net| net.parse().unwrap())
@@ -961,8 +972,9 @@ fn proxy_secret_file_is_loaded_trimmed_and_validated() {
 
 // ---------------------------------------------------------------- CSRF и Origin
 
-#[sqlx::test(migrations = "./migrations")]
-async fn mutation_requires_allowed_origin_and_client_header(pool: PgPool) {
+#[tokio::test]
+async fn mutation_requires_allowed_origin_and_client_header() {
+    let pool = canterlot_hub::testkit::db().await;
     let h = harness(pool).await;
     let body = Some(json!({"n": 1}));
     let base = || h.client();
@@ -1103,8 +1115,9 @@ async fn mutation_requires_allowed_origin_and_client_header(pool: PgPool) {
     assert_error(&response, 403, "origin_rejected", "auth", "never");
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn safe_methods_need_no_origin(pool: PgPool) {
+#[tokio::test]
+async fn safe_methods_need_no_origin() {
+    let pool = canterlot_hub::testkit::db().await;
     let h = harness(pool).await;
     let bare_owner = h.client().await.with_session(TEST_SESSION_TOKEN);
     let get = bare_owner.send(Method::GET, "/api/v1/me", None, None).await;
@@ -1120,8 +1133,9 @@ async fn safe_methods_need_no_origin(pool: PgPool) {
     assert_eq!(upgrade_status(h.addr, None, &ws_owner_headers()).await, 101);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn cross_origin_requests_get_no_cors_headers_and_options_is_405(pool: PgPool) {
+#[tokio::test]
+async fn cross_origin_requests_get_no_cors_headers_and_options_is_405() {
+    let pool = canterlot_hub::testkit::db().await;
     let h = harness(pool).await;
     let no_cors = |response: &TestResponse| {
         for name in response.headers.keys() {
@@ -1200,8 +1214,9 @@ async fn cross_origin_requests_get_no_cors_headers_and_options_is_405(pool: PgPo
     no_cors(&accepted);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn every_route_requires_identity_unless_listed_public(pool: PgPool) {
+#[tokio::test]
+async fn every_route_requires_identity_unless_listed_public() {
+    let pool = canterlot_hub::testkit::db().await;
     let h = harness(pool).await;
     let outsider = h.outsider().await.as_owner();
     let mut checked = 0;
@@ -1306,8 +1321,9 @@ async fn every_route_requires_identity_unless_listed_public(pool: PgPool) {
 
 // ---------------------------------------------------------------- Idempotency-Key
 
-#[sqlx::test(migrations = "./migrations")]
-async fn idempotency_key_is_required_on_mutations_and_validated(pool: PgPool) {
+#[tokio::test]
+async fn idempotency_key_is_required_on_mutations_and_validated() {
+    let pool = canterlot_hub::testkit::db().await;
     let h = harness(pool).await;
     let owner = h.owner().await;
     let body = Some(json!({"n": 7}));
@@ -1365,8 +1381,9 @@ async fn idempotency_key_is_required_on_mutations_and_validated(pool: PgPool) {
     assert_error(&twice, 400, "invalid_request", "browser", "never");
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn idempotency_key_charset_excludes_internal_namespaces(pool: PgPool) {
+#[tokio::test]
+async fn idempotency_key_charset_excludes_internal_namespaces() {
+    let pool = canterlot_hub::testkit::db().await;
     let h = harness(pool).await;
     let owner = h.owner().await;
     for key in ["sched:x", "wake:x", "sched:", "wake:0190b3a2", "SCHED:x"] {
@@ -1385,10 +1402,10 @@ async fn idempotency_key_charset_excludes_internal_namespaces(pool: PgPool) {
 
 // ---------------------------------------------------------------- формат ошибок
 
-#[sqlx::test(migrations = "./migrations")]
-async fn error_body_has_code_scope_retry_and_correlation_id_and_russian_message_without_user_content(
-    pool: PgPool,
-) {
+#[tokio::test]
+async fn error_body_has_code_scope_retry_and_correlation_id_and_russian_message_without_user_content()
+ {
+    let pool = canterlot_hub::testkit::db().await;
     let h = harness(pool).await;
     let owner = h.owner().await;
     let leak = marker("USERCONTENT");
@@ -1525,8 +1542,9 @@ async fn error_body_has_code_scope_retry_and_correlation_id_and_russian_message_
     }
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn correlation_id_from_header_is_echoed_and_invalid_one_is_replaced(pool: PgPool) {
+#[tokio::test]
+async fn correlation_id_from_header_is_echoed_and_invalid_one_is_replaced() {
+    let pool = canterlot_hub::testkit::db().await;
     let h = harness(pool).await;
     let owner = h.owner().await;
     let id = Uuid::now_v7();
@@ -1599,8 +1617,9 @@ async fn correlation_id_from_header_is_echoed_and_invalid_one_is_replaced(pool: 
     Uuid::parse_str(header(&generated, "x-correlation-id").unwrap()).unwrap();
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn request_log_has_no_header_values_query_or_body(pool: PgPool) {
+#[tokio::test]
+async fn request_log_has_no_header_values_query_or_body() {
+    let pool = canterlot_hub::testkit::db().await;
     captured();
     let h = harness_with(pool, test_http_config(), Some(SECRET)).await;
     let leak = marker("LEAKED");
@@ -1698,8 +1717,9 @@ async fn request_log_has_no_header_values_query_or_body(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn oversized_json_body_is_413_resource_limit(pool: PgPool) {
+#[tokio::test]
+async fn oversized_json_body_is_413_resource_limit() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut config = test_http_config();
     config.max_json_body_bytes = 1024;
     let h = harness_with(pool, config, None).await;
@@ -1723,8 +1743,9 @@ async fn oversized_json_body_is_413_resource_limit(pool: PgPool) {
     assert_eq!(h.hits(), before);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn default_json_limit_is_512_kib(pool: PgPool) {
+#[tokio::test]
+async fn default_json_limit_is_512_kib() {
+    let pool = canterlot_hub::testkit::db().await;
     let h = harness(pool).await;
     let owner = h.owner().await;
     let padded = |size: usize| format!("{{\"n\":1,\"pad\":\"{}\"}}", "x".repeat(size)).into_bytes();
@@ -1748,8 +1769,9 @@ async fn default_json_limit_is_512_kib(pool: PgPool) {
     assert_error(&over, 413, "resource_limit", "browser", "never");
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn panic_in_a_handler_is_500_internal_without_details(pool: PgPool) {
+#[tokio::test]
+async fn panic_in_a_handler_is_500_internal_without_details() {
+    let pool = canterlot_hub::testkit::db().await;
     let h = harness(pool).await;
     let owner = h.owner().await;
     let response = owner
@@ -1765,8 +1787,9 @@ async fn panic_in_a_handler_is_500_internal_without_details(pool: PgPool) {
 
 // ---------------------------------------------------------------- /config, /me, заголовки, OpenAPI
 
-#[sqlx::test(migrations = "./migrations")]
-async fn config_endpoint_matches_proto_limits_and_config_structs(pool: PgPool) {
+#[tokio::test]
+async fn config_endpoint_matches_proto_limits_and_config_structs() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut http = test_http_config();
     http.ws.delta_window = Duration::from_millis(40);
     let (mut deps, dir) = test_app_deps(pool, http, None).await;
@@ -1825,8 +1848,9 @@ async fn me_path(h: &Harness, path: &str) -> TestResponse {
     h.owner().await.send(Method::GET, path, None, None).await
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn config_auth_is_empty_even_with_a_stale_logout_url(pool: PgPool) {
+#[tokio::test]
+async fn config_auth_is_empty_even_with_a_stale_logout_url() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut http = test_http_config();
     http.logout_url = Some("https://auth.example/logout?rd=https%3A%2F%2Fchat.test".into());
     let h = harness_with(pool, http, None).await;
@@ -1834,8 +1858,9 @@ async fn config_auth_is_empty_even_with_a_stale_logout_url(pool: PgPool) {
     assert_eq!(with["auth"], json!({}));
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn config_exposes_reserve_and_warning_thresholds(pool: PgPool) {
+#[tokio::test]
+async fn config_exposes_reserve_and_warning_thresholds() {
+    let pool = canterlot_hub::testkit::db().await;
     let h = harness(pool).await;
     let config: Value = me_path(&h, "/api/v1/config").await.json();
     let defaults = LimitsConfig::default();
@@ -1858,8 +1883,9 @@ async fn config_exposes_reserve_and_warning_thresholds(pool: PgPool) {
     assert_eq!(config["limit_thresholds"]["warn_pcts"], json!([80, 90, 95]));
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn api_responses_carry_no_store_and_server_time(pool: PgPool) {
+#[tokio::test]
+async fn api_responses_carry_no_store_and_server_time() {
+    let pool = canterlot_hub::testkit::db().await;
     let h = harness(pool).await;
     let owner = h.owner().await;
     let stranger = h.outsider().await.as_owner();
@@ -1923,8 +1949,9 @@ async fn api_responses_carry_no_store_and_server_time(pool: PgPool) {
     assert_eq!(header(&health, "cache-control"), Some("no-store"));
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn openapi_is_served_and_committed_file_matches_generated(pool: PgPool) {
+#[tokio::test]
+async fn openapi_is_served_and_committed_file_matches_generated() {
+    let pool = canterlot_hub::testkit::db().await;
     let h = harness(pool).await;
     let served = me_path(&h, "/api/v1/openapi.json").await;
     assert_eq!(served.status, 200);
@@ -2099,8 +2126,9 @@ async fn seed_owner(pool: &PgPool) -> Uuid {
     owner
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn run_replays_stored_response_and_conflicts_on_other_request(pool: PgPool) {
+#[tokio::test]
+async fn run_replays_stored_response_and_conflicts_on_other_request() {
+    let pool = canterlot_hub::testkit::db().await;
     seed_probe_tables(&pool).await;
     let owner = seed_owner(&pool).await;
     let other_owner = seed_owner(&pool).await;
@@ -2188,8 +2216,9 @@ async fn run_replays_stored_response_and_conflicts_on_other_request(pool: PgPool
 
 /// Временным считается только сбой базы 40P01/40001. Детерминированная
 /// `internal` повторяется один раз, а взаимоблокировка — до трёх.
-#[sqlx::test(migrations = "./migrations")]
-async fn api_error_retries_only_a_deadlock_from_the_database(pool: PgPool) {
+#[tokio::test]
+async fn api_error_retries_only_a_deadlock_from_the_database() {
+    let pool = canterlot_hub::testkit::db().await;
     let owner = seed_owner(&pool).await;
     let runs = Arc::new(AtomicUsize::new(0));
 
@@ -2279,8 +2308,9 @@ async fn api_error_retries_only_a_deadlock_from_the_database(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn run_in_tx_executes_once_for_concurrent_same_key(pool: PgPool) {
+#[tokio::test]
+async fn run_in_tx_executes_once_for_concurrent_same_key() {
+    let pool = canterlot_hub::testkit::db().await;
     seed_probe_tables(&pool).await;
     let owner = seed_owner(&pool).await;
     let barrier = Arc::new(tokio::sync::Barrier::new(2));
@@ -2329,8 +2359,9 @@ async fn run_in_tx_executes_once_for_concurrent_same_key(pool: PgPool) {
     assert_eq!(recorded, 1);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn idempotent_mutation_retried_after_a_restart_replays_the_stored_response(pool: PgPool) {
+#[tokio::test]
+async fn idempotent_mutation_retried_after_a_restart_replays_the_stored_response() {
+    let pool = canterlot_hub::testkit::db().await;
     seed_probe_tables(&pool).await;
     let first = harness(pool.clone()).await;
     let request = |h: Harness| async move {
@@ -2418,8 +2449,9 @@ async fn idempotent_mutation_retried_after_a_restart_replays_the_stored_response
 
 // ---------------------------------------------------------------- ошибки базы данных
 
-#[sqlx::test(migrations = "./migrations")]
-async fn db_error_logging_helper_returns_only_sqlstate_and_constraint(pool: PgPool) {
+#[tokio::test]
+async fn db_error_logging_helper_returns_only_sqlstate_and_constraint() {
+    let pool = canterlot_hub::testkit::db().await;
     seed_probe_tables(&pool).await;
     let duplicate = sqlx::query("insert into probe_unique (v) values ('LEAK-DETAIL-MARKER')")
         .execute(&pool)
@@ -2484,8 +2516,9 @@ async fn db_error_logging_helper_returns_only_sqlstate_and_constraint(pool: PgPo
     assert!(!log_text().contains("LEAK-DETAIL-MARKER"));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn ws_without_upgrade_headers_uses_api_error_envelope(pool: PgPool) {
+#[tokio::test]
+async fn ws_without_upgrade_headers_uses_api_error_envelope() {
+    let pool = canterlot_hub::testkit::db().await;
     let (deps, _directory) = test_app_deps(pool, test_http_config(), None).await;
     let client = TestClient::in_process(http::router(AppState::new(deps))).as_owner();
     let response = client.send(Method::GET, "/api/v1/ws", None, None).await;

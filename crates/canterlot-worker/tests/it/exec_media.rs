@@ -28,7 +28,6 @@ use canterlot_proto::{
 use chrono::{DateTime, Utc};
 use fixture::{Fixture, WAIT, sha, until};
 use serde_json::{Value, json};
-use sqlx::PgPool;
 use tokio::time::{sleep, timeout};
 use uuid::Uuid;
 
@@ -154,8 +153,9 @@ fn hub_blob(f: &Fixture, id: Uuid) -> PathBuf {
         .join(name)
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn media_is_referenced_only_after_durable_publish(pool: PgPool) {
+#[tokio::test]
+async fn media_is_referenced_only_after_durable_publish() {
+    let pool = canterlot_hub::testkit::db().await;
     let steps = Arc::new(Steps::default());
     let f = Fixture::with_trace(&pool, steps.clone()).await;
     let bytes = png(16, 9, 600_000);
@@ -208,8 +208,9 @@ async fn media_is_referenced_only_after_durable_publish(pool: PgPool) {
     until(async || files_in(&f.exec_dir().join("media")).is_empty()).await;
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn shared_file_is_published_with_the_supervisor_block_id(pool: PgPool) {
+#[tokio::test]
+async fn shared_file_is_published_with_the_supervisor_block_id() {
+    let pool = canterlot_hub::testkit::db().await;
     // Сквозной путь вызова share_file: загрузка несёт block_id записи BlockFile,
     // иначе хаб отвергает её без UUID.
     let f = Fixture::new(&pool).await;
@@ -282,8 +283,9 @@ async fn shared_file_is_published_with_the_supervisor_block_id(pool: PgPool) {
     until(async || files_in(&f.exec_dir().join("media")).is_empty()).await;
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn empty_shared_file_reaches_the_owner_as_a_zero_byte_file(pool: PgPool) {
+#[tokio::test]
+async fn empty_shared_file_reaches_the_owner_as_a_zero_byte_file() {
+    let pool = canterlot_hub::testkit::db().await;
     // Пустой файл: копия нулевой длины, SHA-256 пустого ввода, хаб публикует пустой blob.
     // Расширение видео не делает пустой файл видео: он уходит обычным файлом.
     let f = Fixture::new(&pool).await;
@@ -342,8 +344,9 @@ async fn empty_shared_file_reaches_the_owner_as_a_zero_byte_file(pool: PgPool) {
     until(async || files_in(&f.exec_dir().join("media")).is_empty()).await;
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn media_upload_resumes_after_reconnect_without_duplicate_record(pool: PgPool) {
+#[tokio::test]
+async fn media_upload_resumes_after_reconnect_without_duplicate_record() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut f = Fixture::new(&pool).await;
     let bytes = png(8, 6, 1_000_000);
     let path = image(&f, "resume.png", &bytes);
@@ -378,8 +381,9 @@ async fn media_upload_resumes_after_reconnect_without_duplicate_record(pool: PgP
     assert_eq!(f.transmissions(input.command_id), 1);
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn hub_restart_during_media_upload_completes_after_reconnect(pool: PgPool) {
+#[tokio::test]
+async fn hub_restart_during_media_upload_completes_after_reconnect() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut f = Fixture::new(&pool).await;
     let bytes = png(30, 20, 1_500_000);
     let path = image(&f, "restart.png", &bytes);
@@ -434,8 +438,9 @@ async fn hub_restart_during_media_upload_completes_after_reconnect(pool: PgPool)
     assert_eq!(f.transmissions(input.command_id), 1);
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn oversized_or_non_image_media_is_skipped_with_path_kept(pool: PgPool) {
+#[tokio::test]
+async fn oversized_or_non_image_media_is_skipped_with_path_kept() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(&pool).await;
     let big = image(&f, "huge.png", &png(4, 4, 0));
     fs::OpenOptions::new()
@@ -496,8 +501,9 @@ async fn oversized_or_non_image_media_is_skipped_with_path_kept(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn media_upload_does_not_starve_control_or_sj(pool: PgPool) {
+#[tokio::test]
+async fn media_upload_does_not_starve_control_or_sj() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(&pool).await;
     let bytes = png(64, 48, 16 * 1024 * 1024);
     let path = image(&f, "large.png", &bytes);

@@ -4,11 +4,11 @@
 use canterlot_hub::{
     dispatcher::Dispatcher, executions, model::ExecutionState, scheduler::Scheduler, testkit,
 };
-use sqlx::PgPool;
 use uuid::Uuid;
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn stuck_trash_candidates_do_not_block_later_ones(pool: PgPool) {
+#[tokio::test]
+async fn stuck_trash_candidates_do_not_block_later_ones() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     for _ in 0..100 {
         let stuck = testkit::seed_conversation(&pool, seed.owner_id, seed.machine_id).await;

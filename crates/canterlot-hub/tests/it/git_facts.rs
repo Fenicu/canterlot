@@ -48,8 +48,9 @@ fn with_git(body: Body, git: Option<GitFacts>, adopted: bool) -> Body {
     Body::RunFinished(f)
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn ingest_stores_git_facts(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn ingest_stores_git_facts() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut r = Run::new(&pool).await;
     let i = r.input(&pool).await;
     let ms = Utc::now().timestamp_millis();
@@ -81,8 +82,9 @@ async fn ingest_stores_git_facts(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn old_worker_run_finished_keeps_null_git(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn old_worker_run_finished_keeps_null_git() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut r = Run::new(&pool).await;
     let i = r.input(&pool).await;
     let ms = Utc::now().timestamp_millis();
@@ -92,8 +94,9 @@ async fn old_worker_run_finished_keeps_null_git(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn adopted_run_merges_git_facts(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn adopted_run_merges_git_facts() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut r = Run::new(&pool).await;
     let i = r.input(&pool).await;
     let ms = Utc::now().timestamp_millis();
@@ -140,8 +143,9 @@ async fn adopted_run_merges_git_facts(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn adopted_run_without_stored_facts_sets_them(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn adopted_run_without_stored_facts_sets_them() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut r = Run::new(&pool).await;
     let i = r.input(&pool).await;
     let ms = Utc::now().timestamp_millis();
@@ -159,8 +163,9 @@ async fn adopted_run_without_stored_facts_sets_them(pool: PgPool) -> TestResult 
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn hub_bounds_oversized_git_facts(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn hub_bounds_oversized_git_facts() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut r = Run::new(&pool).await;
     let i = r.input(&pool).await;
     let ms = Utc::now().timestamp_millis();

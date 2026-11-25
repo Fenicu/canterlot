@@ -120,8 +120,9 @@ fn key() -> String {
     format!("k{}", Uuid::now_v7().simple())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn attachment_http_responses_match_openapi_schemas(pool: PgPool) {
+#[tokio::test]
+async fn attachment_http_responses_match_openapi_schemas() {
+    let pool = canterlot_hub::testkit::db().await;
     let _shared = HEAVY.read().await;
     let f = Fixture::new(pool).await;
     let document: Value = serde_json::from_str(&canterlot_hub::http::openapi::render()).unwrap();
@@ -168,8 +169,9 @@ async fn attachment_http_responses_match_openapi_schemas(pool: PgPool) {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn create_validates_size_name_and_ceiling(pool: PgPool) {
+#[tokio::test]
+async fn create_validates_size_name_and_ceiling() {
+    let pool = canterlot_hub::testkit::db().await;
     let _shared = HEAVY.read().await;
     let f = Fixture::new(pool).await;
     let post = |body: Value| {
@@ -266,8 +268,9 @@ async fn create_validates_size_name_and_ceiling(pool: PgPool) {
     assert_eq!(std::fs::read(f.staging_path(id)).unwrap(), &data[..10]);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn upload_streams_to_staging_with_continuous_offsets(pool: PgPool) {
+#[tokio::test]
+async fn upload_streams_to_staging_with_continuous_offsets() {
+    let pool = canterlot_hub::testkit::db().await;
     let _shared = HEAVY.read().await;
     let f = Fixture::new(pool).await;
     let data = content(300 * 1024, 2);
@@ -316,8 +319,9 @@ async fn upload_streams_to_staging_with_continuous_offsets(pool: PgPool) {
     assert_eq!(view.json::<Value>()["uploaded_bytes"], data.len());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn interrupted_upload_resumes_from_head_offset(pool: PgPool) {
+#[tokio::test]
+async fn interrupted_upload_resumes_from_head_offset() {
+    let pool = canterlot_hub::testkit::db().await;
     let _shared = HEAVY.read().await;
     let f = Fixture::new(pool).await;
     let data = content(256 * 1024, 3);
@@ -342,8 +346,9 @@ async fn interrupted_upload_resumes_from_head_offset(pool: PgPool) {
     assert_eq!(std::fs::read(f.blob_path(id)).unwrap(), data);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn complete_verifies_length_and_checksum_then_publishes_durably(pool: PgPool) {
+#[tokio::test]
+async fn complete_verifies_length_and_checksum_then_publishes_durably() {
+    let pool = canterlot_hub::testkit::db().await;
     let _shared = HEAVY.read().await;
     let f = Fixture::new(pool).await;
     let data = content(200_000, 4);
@@ -428,8 +433,9 @@ async fn complete_verifies_length_and_checksum_then_publishes_durably(pool: PgPo
     assert!(f.trace.steps().is_empty());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn complete_is_idempotent_and_conflicts_on_different_checksum(pool: PgPool) {
+#[tokio::test]
+async fn complete_is_idempotent_and_conflicts_on_different_checksum() {
+    let pool = canterlot_hub::testkit::db().await;
     let _shared = HEAVY.read().await;
     let f = Fixture::new(pool).await;
     let data = content(5000, 7);
@@ -483,8 +489,9 @@ async fn complete_is_idempotent_and_conflicts_on_different_checksum(pool: PgPool
     assert_eq!(ready_events, 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn complete_hashes_outside_a_transaction_and_commits_only_if_still_uploading(pool: PgPool) {
+#[tokio::test]
+async fn complete_hashes_outside_a_transaction_and_commits_only_if_still_uploading() {
+    let pool = canterlot_hub::testkit::db().await;
     let _shared = HEAVY.read().await;
     let f = Fixture::new(pool).await;
     let data = content(4 * MIB, 8);
@@ -559,8 +566,9 @@ async fn complete_hashes_outside_a_transaction_and_commits_only_if_still_uploadi
     assert!(!f.blob_path(other).exists());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn crash_after_publish_before_commit_leaves_orphan_and_retry_completes(pool: PgPool) {
+#[tokio::test]
+async fn crash_after_publish_before_commit_leaves_orphan_and_retry_completes() {
+    let pool = canterlot_hub::testkit::db().await;
     let _shared = HEAVY.read().await;
     let f = Fixture::new(pool).await;
     let data = content(300_000, 9);
@@ -645,8 +653,9 @@ async fn crash_after_publish_before_commit_leaves_orphan_and_retry_completes(poo
     assert!(f.blob_path(id).exists());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn ready_row_is_never_visible_before_the_blob_is_durable(pool: PgPool) {
+#[tokio::test]
+async fn ready_row_is_never_visible_before_the_blob_is_durable() {
+    let pool = canterlot_hub::testkit::db().await;
     let _shared = HEAVY.read().await;
     let f = Fixture::new(pool).await;
     let violations = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -718,8 +727,9 @@ async fn ready_row_is_never_visible_before_the_blob_is_durable(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn max_size_upload_succeeds_and_one_byte_more_is_rejected(pool: PgPool) {
+#[tokio::test]
+async fn max_size_upload_succeeds_and_one_byte_more_is_rejected() {
+    let pool = canterlot_hub::testkit::db().await;
     let _shared = HEAVY.read().await;
     let f = Fixture::new(pool).await;
     let size = MAX_ATTACHMENT_BYTES;
@@ -756,8 +766,9 @@ async fn max_size_upload_succeeds_and_one_byte_more_is_rejected(pool: PgPool) {
     assert_eq!(std::fs::metadata(f.blob_path(id)).unwrap().len(), size);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn upload_memory_stays_bounded(pool: PgPool) {
+#[tokio::test]
+async fn upload_memory_stays_bounded() {
+    let pool = canterlot_hub::testkit::db().await;
     let _exclusive = HEAVY.write().await;
     let f = Fixture::new(pool).await;
     let size = MAX_ATTACHMENT_BYTES;
@@ -824,8 +835,9 @@ async fn spawn_patch(
     })
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn concurrent_uploads_are_limited_with_429(pool: PgPool) {
+#[tokio::test]
+async fn concurrent_uploads_are_limited_with_429() {
+    let pool = canterlot_hub::testkit::db().await;
     let _shared = HEAVY.read().await;
     let f = Fixture::with(pool, |c| c.max_concurrent_uploads = 2).await;
     let data = content(128 * 1024, 10);
@@ -864,8 +876,9 @@ async fn concurrent_uploads_are_limited_with_429(pool: PgPool) {
     assert_eq!(f.patch_bytes(ids[2], 0, &data).await.status, 204);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn upload_accepts_8_mib_chunks_and_config_announces_upload_chunk_bytes(pool: PgPool) {
+#[tokio::test]
+async fn upload_accepts_8_mib_chunks_and_config_announces_upload_chunk_bytes() {
+    let pool = canterlot_hub::testkit::db().await;
     let _shared = HEAVY.read().await;
     let f = Fixture::new(pool).await;
     let config = f
@@ -902,8 +915,9 @@ async fn upload_accepts_8_mib_chunks_and_config_announces_upload_chunk_bytes(poo
     assert_eq!(upload_offset(&f.head(over).await), Some(8 * MIB as u64));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn upload_body_over_a_socket_has_no_short_request_timeout(pool: PgPool) {
+#[tokio::test]
+async fn upload_body_over_a_socket_has_no_short_request_timeout() {
+    let pool = canterlot_hub::testkit::db().await;
     let _shared = HEAVY.read().await;
     let mut http = testkit::test_http_config();
     http.body_read_timeout = Duration::from_secs(1);
@@ -949,8 +963,9 @@ async fn upload_body_over_a_socket_has_no_short_request_timeout(pool: PgPool) {
     hub.join.await.unwrap().unwrap();
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn concurrent_patches_of_one_attachment_never_interleave(pool: PgPool) {
+#[tokio::test]
+async fn concurrent_patches_of_one_attachment_never_interleave() {
+    let pool = canterlot_hub::testkit::db().await;
     let _shared = HEAVY.read().await;
     let f = Fixture::new(pool).await;
     let data = content(256 * 1024, 14);
@@ -997,8 +1012,9 @@ async fn concurrent_patches_of_one_attachment_never_interleave(pool: PgPool) {
     assert_eq!(std::fs::read(f.blob_path(id)).unwrap(), data);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn chunks_after_failed_or_cancelled_are_refused(pool: PgPool) {
+#[tokio::test]
+async fn chunks_after_failed_or_cancelled_are_refused() {
+    let pool = canterlot_hub::testkit::db().await;
     let _shared = HEAVY.read().await;
     let f = Fixture::new(pool).await;
     let data = content(4096, 15);
@@ -1068,8 +1084,9 @@ async fn inputs_of(f: &Fixture, conversation: Uuid) -> i64 {
         .unwrap()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn submit_with_unready_attachment_is_refused_and_creates_no_input(pool: PgPool) {
+#[tokio::test]
+async fn submit_with_unready_attachment_is_refused_and_creates_no_input() {
+    let pool = canterlot_hub::testkit::db().await;
     let _shared = HEAVY.read().await;
     let f = Fixture::new(pool).await;
     let data = content(2048, 17);
@@ -1139,8 +1156,9 @@ async fn submit_with_unready_attachment_is_refused_and_creates_no_input(pool: Pg
     assert_eq!(f.events("input_queued").await[0]["content"], content);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn foreign_owner_or_conversation_attachment_is_rejected(pool: PgPool) {
+#[tokio::test]
+async fn foreign_owner_or_conversation_attachment_is_rejected() {
+    let pool = canterlot_hub::testkit::db().await;
     let _shared = HEAVY.read().await;
     let f = Fixture::new(pool).await;
     let data = content(512, 18);
@@ -1228,8 +1246,9 @@ async fn foreign_owner_or_conversation_attachment_is_rejected(pool: PgPool) {
     assert_eq!(inputs_of(&f, f.conversation).await, 0);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn ten_attachments_per_input_and_the_eleventh_is_rejected(pool: PgPool) {
+#[tokio::test]
+async fn ten_attachments_per_input_and_the_eleventh_is_rejected() {
+    let pool = canterlot_hub::testkit::db().await;
     let _shared = HEAVY.read().await;
     let f = Fixture::new(pool).await;
     let mut ids = Vec::new();
@@ -1280,8 +1299,9 @@ async fn ten_attachments_per_input_and_the_eleventh_is_rejected(pool: PgPool) {
     assert_eq!(order, ten);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn image_attachment_is_refused_for_a_harness_without_images(pool: PgPool) {
+#[tokio::test]
+async fn image_attachment_is_refused_for_a_harness_without_images() {
+    let pool = canterlot_hub::testkit::db().await;
     let _shared = HEAVY.read().await;
     let f = Fixture::new(pool).await;
     let png = f
@@ -1320,8 +1340,9 @@ async fn image_attachment_is_refused_for_a_harness_without_images(pool: PgPool) 
     assert_eq!(content[2]["image"], false, "svg is passed as a plain file");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn submit_with_attachments_replays_identically(pool: PgPool) {
+#[tokio::test]
+async fn submit_with_attachments_replays_identically() {
+    let pool = canterlot_hub::testkit::db().await;
     let _shared = HEAVY.read().await;
     let f = Fixture::new(pool).await;
     let a = f.ready("a.txt", "text/plain", b"a").await;
@@ -1340,8 +1361,9 @@ async fn submit_with_attachments_replays_identically(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn same_key_with_another_attachment_set_conflicts(pool: PgPool) {
+#[tokio::test]
+async fn same_key_with_another_attachment_set_conflicts() {
+    let pool = canterlot_hub::testkit::db().await;
     let _shared = HEAVY.read().await;
     let f = Fixture::new(pool).await;
     let a = f.ready("a.txt", "text/plain", b"a").await;
@@ -1365,10 +1387,9 @@ async fn same_key_with_another_attachment_set_conflicts(pool: PgPool) {
     assert_eq!(inputs_of(&f, f.conversation).await, 2);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn machine_without_pilot_capability_or_with_limits_mismatch_refuses_attachments(
-    pool: PgPool,
-) {
+#[tokio::test]
+async fn machine_without_pilot_capability_or_with_limits_mismatch_refuses_attachments() {
+    let pool = canterlot_hub::testkit::db().await;
     let _shared = HEAVY.read().await;
     let f = Fixture::new(pool).await;
     let a = f.ready("a.txt", "text/plain", b"a").await;
@@ -1453,8 +1474,9 @@ fn input_id(response: &testkit::TestResponse) -> Uuid {
         .unwrap()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn inputs_with_attachments_or_settings_wait_for_a_pilot_session(pool: PgPool) {
+#[tokio::test]
+async fn inputs_with_attachments_or_settings_wait_for_a_pilot_session() {
+    let pool = canterlot_hub::testkit::db().await;
     let _shared = HEAVY.read().await;
     let f = Fixture::new(pool).await;
     let data = b"\x89PNG\r\n\x1a\nimage";
@@ -1571,8 +1593,9 @@ async fn inputs_with_attachments_or_settings_wait_for_a_pilot_session(pool: PgPo
     ));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn attachments_can_be_queued_while_the_machine_is_offline(pool: PgPool) {
+#[tokio::test]
+async fn attachments_can_be_queued_while_the_machine_is_offline() {
+    let pool = canterlot_hub::testkit::db().await;
     let _shared = HEAVY.read().await;
     let f = Fixture::new(pool).await;
     assert!(f.state.registry.session_info(f.machine).is_none());
@@ -1603,8 +1626,9 @@ async fn attachments_can_be_queued_while_the_machine_is_offline(pool: PgPool) {
     assert_eq!(scheduled.json::<Value>()["attachment_ids"], json!([b]));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn dispatched_input_waiting_for_files_shows_delivering_attachments_end_to_end(pool: PgPool) {
+#[tokio::test]
+async fn dispatched_input_waiting_for_files_shows_delivering_attachments_end_to_end() {
+    let pool = canterlot_hub::testkit::db().await;
     let _shared = HEAVY.read().await;
     let f = Fixture::new(pool).await;
     sqlx::query("update machines set availability='available' where id=$1")
@@ -1714,8 +1738,9 @@ async fn download(f: &Fixture, client: &TestClient, id: Uuid) -> testkit::TestRe
         .await
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn download_requires_owner_and_sets_safe_headers(pool: PgPool) {
+#[tokio::test]
+async fn download_requires_owner_and_sets_safe_headers() {
+    let pool = canterlot_hub::testkit::db().await;
     let _shared = HEAVY.read().await;
     let f = Fixture::new(pool).await;
     let png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR".to_vec();
@@ -1791,8 +1816,9 @@ async fn download_requires_owner_and_sets_safe_headers(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn download_supports_if_none_match_with_etag(pool: PgPool) {
+#[tokio::test]
+async fn download_supports_if_none_match_with_etag() {
+    let pool = canterlot_hub::testkit::db().await;
     let _shared = HEAVY.read().await;
     let f = Fixture::new(pool).await;
     let png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR".to_vec();
@@ -1854,8 +1880,9 @@ fn real_png(width: u32, height: u32) -> Vec<u8> {
     bytes
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn preview_serves_downscaled_image_and_rejects_non_images(pool: PgPool) {
+#[tokio::test]
+async fn preview_serves_downscaled_image_and_rejects_non_images() {
+    let pool = canterlot_hub::testkit::db().await;
     let _shared = HEAVY.read().await;
     let f = Fixture::new(pool).await;
     let bytes = real_png(800, 1200);
@@ -1929,8 +1956,9 @@ async fn preview_serves_downscaled_image_and_rejects_non_images(pool: PgPool) {
     assert_eq!(unknown.status, 404);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn html_named_file_is_served_as_octet_stream_attachment(pool: PgPool) {
+#[tokio::test]
+async fn html_named_file_is_served_as_octet_stream_attachment() {
+    let pool = canterlot_hub::testkit::db().await;
     let _shared = HEAVY.read().await;
     let f = Fixture::new(pool).await;
     let html = b"<html><body><script>alert(document.cookie)</script></body></html>";
@@ -1951,8 +1979,9 @@ async fn html_named_file_is_served_as_octet_stream_attachment(pool: PgPool) {
     assert_eq!(response.body.as_ref(), html);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn svg_is_served_as_octet_stream(pool: PgPool) {
+#[tokio::test]
+async fn svg_is_served_as_octet_stream() {
+    let pool = canterlot_hub::testkit::db().await;
     let _shared = HEAVY.read().await;
     let f = Fixture::new(pool).await;
     let svg = b"<svg xmlns=\"http://www.w3.org/2000/svg\"><script>alert(1)</script></svg>";
@@ -1969,8 +1998,9 @@ async fn svg_is_served_as_octet_stream(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn attachment_events_reach_the_conversation_scope(pool: PgPool) {
+#[tokio::test]
+async fn attachment_events_reach_the_conversation_scope() {
+    let pool = canterlot_hub::testkit::db().await;
     let _shared = HEAVY.read().await;
     let f = Fixture::new(pool).await;
     let ready = f.ready("ready.txt", "text/plain", b"ready").await;
@@ -2058,8 +2088,9 @@ async fn job_links(f: &Fixture, job: &str) -> i64 {
         .unwrap()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn scheduled_message_carries_attachments_and_fails_cleanly_when_they_vanish(pool: PgPool) {
+#[tokio::test]
+async fn scheduled_message_carries_attachments_and_fails_cleanly_when_they_vanish() {
+    let pool = canterlot_hub::testkit::db().await;
     let _shared = HEAVY.read().await;
     let f = Fixture::new(pool).await;
     let a = f.ready("plan.txt", "text/plain", b"plan").await;
@@ -2132,8 +2163,9 @@ async fn scheduled_message_carries_attachments_and_fails_cleanly_when_they_vanis
     assert_eq!(last["state"], "failed");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn cancelling_or_failing_a_scheduled_job_deletes_its_attachment_links(pool: PgPool) {
+#[tokio::test]
+async fn cancelling_or_failing_a_scheduled_job_deletes_its_attachment_links() {
+    let pool = canterlot_hub::testkit::db().await;
     let _shared = HEAVY.read().await;
     let f = Fixture::new(pool).await;
     let a = f.ready("a.txt", "text/plain", b"a").await;
@@ -2279,8 +2311,9 @@ async fn cross_process_upload_child() {
     ));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn two_hub_processes_cannot_mutate_a_ready_linked_blob(pool: PgPool) {
+#[tokio::test]
+async fn two_hub_processes_cannot_mutate_a_ready_linked_blob() {
+    let pool = canterlot_hub::testkit::db().await;
     let _shared = HEAVY.read().await;
     let f = Fixture::new(pool.clone()).await;
     let id = f
@@ -2447,8 +2480,9 @@ fn publication_syncs_an_already_created_shard() {
     assert!(shard_mkdir < parent && parent < rename);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn aborted_publication_holds_the_volume_lock_until_io_finishes(pool: PgPool) {
+#[tokio::test]
+async fn aborted_publication_holds_the_volume_lock_until_io_finishes() {
+    let pool = canterlot_hub::testkit::db().await;
     use attachments::BlobStore;
     let _shared = HEAVY.read().await;
     let f = Fixture::new(pool.clone()).await;
@@ -2505,8 +2539,9 @@ async fn aborted_publication_holds_the_volume_lock_until_io_finishes(pool: PgPoo
     assert!(std::fs::read(f.blob_path(id)).unwrap() == b"GOOD");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn failed_submit_rolls_back_immediately_releasing_attachment_share_locks(pool: PgPool) {
+#[tokio::test]
+async fn failed_submit_rolls_back_immediately_releasing_attachment_share_locks() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let data = content(1024, 1);
     let id = f
@@ -2562,8 +2597,9 @@ async fn failed_submit_rolls_back_immediately_releasing_attachment_share_locks(p
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn gc_skipped_upload_rolls_back_immediately_leaving_no_lingering_locks(pool: PgPool) {
+#[tokio::test]
+async fn gc_skipped_upload_rolls_back_immediately_leaving_no_lingering_locks() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let data = content(1024, 1);
     let id = f
@@ -2600,8 +2636,9 @@ async fn gc_skipped_upload_rolls_back_immediately_leaving_no_lingering_locks(poo
 /// Пустой файл: создание с размером 0, завершение без единого тела (или с пустым телом),
 /// blob нулевой длины, скачивание `200` с `Content-Length: 0`. Два пустых файла с одним
 /// SHA-256 живут независимо и оба уходят агенту во вводе.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn empty_file_uploads_completes_and_downloads_as_zero_bytes(pool: PgPool) {
+#[tokio::test]
+async fn empty_file_uploads_completes_and_downloads_as_zero_bytes() {
+    let pool = canterlot_hub::testkit::db().await;
     let _shared = HEAVY.read().await;
     let f = Fixture::new(pool).await;
     let empty_sha = sha(b"");
@@ -2714,8 +2751,9 @@ async fn get_content(f: &Fixture, id: Uuid, headers: &[(&str, &str)]) -> testkit
         .await
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn content_answers_single_byte_ranges_with_206(pool: PgPool) {
+#[tokio::test]
+async fn content_answers_single_byte_ranges_with_206() {
+    let pool = canterlot_hub::testkit::db().await;
     let _shared = HEAVY.read().await;
     let f = Fixture::new(pool).await;
     let data = webm(5000);
@@ -2776,8 +2814,9 @@ async fn content_answers_single_byte_ranges_with_206(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn content_unsatisfiable_range_answers_416(pool: PgPool) {
+#[tokio::test]
+async fn content_unsatisfiable_range_answers_416() {
+    let pool = canterlot_hub::testkit::db().await;
     let _shared = HEAVY.read().await;
     let f = Fixture::new(pool).await;
     let data = webm(5000);
@@ -2801,8 +2840,9 @@ async fn content_unsatisfiable_range_answers_416(pool: PgPool) {
     assert_eq!(response.headers["content-range"], "bytes */0");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn content_ignores_multi_range_and_malformed_range(pool: PgPool) {
+#[tokio::test]
+async fn content_ignores_multi_range_and_malformed_range() {
+    let pool = canterlot_hub::testkit::db().await;
     let _shared = HEAVY.read().await;
     let f = Fixture::new(pool).await;
     let data = webm(5000);
@@ -2831,8 +2871,9 @@ async fn content_ignores_multi_range_and_malformed_range(pool: PgPool) {
     assert_eq!(response.status, 200);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn content_if_range_is_honoured_with_a_strong_etag(pool: PgPool) {
+#[tokio::test]
+async fn content_if_range_is_honoured_with_a_strong_etag() {
+    let pool = canterlot_hub::testkit::db().await;
     let _shared = HEAVY.read().await;
     let f = Fixture::new(pool).await;
     let data = webm(5000);
@@ -2869,8 +2910,9 @@ async fn content_if_range_is_honoured_with_a_strong_etag(pool: PgPool) {
     assert!(cached.body.is_empty());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn content_range_keeps_owner_checks(pool: PgPool) {
+#[tokio::test]
+async fn content_range_keeps_owner_checks() {
+    let pool = canterlot_hub::testkit::db().await;
     let _shared = HEAVY.read().await;
     let f = Fixture::new(pool.clone()).await;
     let data = webm(2048);
@@ -2897,8 +2939,9 @@ async fn content_range_keeps_owner_checks(pool: PgPool) {
     assert_error(&response, 404, "not_found", "never");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn content_serves_video_type_only_with_a_matching_signature(pool: PgPool) {
+#[tokio::test]
+async fn content_serves_video_type_only_with_a_matching_signature() {
+    let pool = canterlot_hub::testkit::db().await;
     let _shared = HEAVY.read().await;
     let f = Fixture::new(pool).await;
     let mut mp4 = content(300, 5);
@@ -2944,8 +2987,9 @@ async fn content_serves_video_type_only_with_a_matching_signature(pool: PgPool) 
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn content_range_of_a_large_file_is_not_buffered(pool: PgPool) {
+#[tokio::test]
+async fn content_range_of_a_large_file_is_not_buffered() {
+    let pool = canterlot_hub::testkit::db().await;
     let _exclusive = HEAVY.write().await;
     let f = Fixture::new(pool).await;
     let size = MAX_ATTACHMENT_BYTES;

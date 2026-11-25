@@ -4,11 +4,11 @@
 use std::time::Duration;
 
 use canterlot_hub::{deletion, testkit};
-use sqlx::PgPool;
 use uuid::Uuid;
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn delete_backs_off_from_a_job_the_scheduler_holds(pool: PgPool) {
+#[tokio::test]
+async fn delete_backs_off_from_a_job_the_scheduler_holds() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let id = testkit::seed_conversation(&pool, seed.owner_id, seed.machine_id).await;
     let job = Uuid::now_v7();

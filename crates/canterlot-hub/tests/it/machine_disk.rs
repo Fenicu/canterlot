@@ -166,8 +166,9 @@ async fn delivered(pool: &PgPool, conversation: Uuid) -> Vec<(String, Value)> {
     .collect()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn low_disk_warns_every_recipient_once_then_critical_once(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn low_disk_warns_every_recipient_once_then_critical_once() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     let second = conversation(&pool, f.owner, f.machine, "второй подписчик").await;
     subscribe(&pool, f.owner, second, f.target).await;
@@ -210,8 +211,9 @@ async fn low_disk_warns_every_recipient_once_then_critical_once(pool: PgPool) ->
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn restart_during_the_episode_does_not_repeat_the_event(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn restart_during_the_episode_does_not_repeat_the_event() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     let now = Utc::now();
     set_disk(&pool, f.machine, 24 * GB, 295 * GB, now).await;
@@ -227,8 +229,9 @@ async fn restart_during_the_episode_does_not_repeat_the_event(pool: PgPool) -> T
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn recovery_above_warn_plus_hysteresis_resets_silently(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn recovery_above_warn_plus_hysteresis_resets_silently() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     let now = Utc::now();
     set_disk(&pool, f.machine, 24 * GB, 295 * GB, now).await;
@@ -261,8 +264,9 @@ async fn recovery_above_warn_plus_hysteresis_resets_silently(pool: PgPool) -> Te
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn terminal_sessions_do_not_hear_about_low_disk(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn terminal_sessions_do_not_hear_about_low_disk() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     let idle = conversation(&pool, f.owner, f.machine, "живая").await;
     subscribe(&pool, f.owner, f.subscriber, idle).await;
@@ -281,8 +285,9 @@ async fn terminal_sessions_do_not_hear_about_low_disk(pool: PgPool) -> TestResul
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn subscriber_of_only_terminal_sessions_hears_nothing(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn subscriber_of_only_terminal_sessions_hears_nothing() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     derive(&pool, f.target, "stopped", json!({"outcome": "user_stop"})).await;
     let now = Utc::now();
@@ -292,8 +297,9 @@ async fn subscriber_of_only_terminal_sessions_hears_nothing(pool: PgPool) -> Tes
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn stale_metrics_do_not_open_an_episode(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn stale_metrics_do_not_open_an_episode() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     let now = Utc::now();
     set_disk(&pool, f.machine, GB, 295 * GB, now - TimeDelta::minutes(10)).await;
@@ -303,8 +309,9 @@ async fn stale_metrics_do_not_open_an_episode(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn delivered_text_names_the_machine_free_gb_and_percent(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn delivered_text_names_the_machine_free_gb_and_percent() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     let now = Utc::now();
     set_disk(&pool, f.machine, 24 * GB, 295 * GB, now).await;
@@ -425,8 +432,9 @@ async fn recipients_of(pool: &PgPool) -> Vec<Uuid> {
     .unwrap()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn orchestrators_on_the_machine_hear_it_unless_they_went_stale(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn orchestrators_on_the_machine_hear_it_unless_they_went_stale() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let now = Utc::now();
     let (owner, machine) = (seed.owner_id, seed.machine_id);
@@ -476,8 +484,9 @@ async fn orchestrators_on_the_machine_hear_it_unless_they_went_stale(pool: PgPoo
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn disk_text_names_the_largest_build_caches(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn disk_text_names_the_largest_build_caches() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     let now = Utc::now();
     let worktree = conversation(&pool, f.owner, f.machine, "Баннер связи").await;
@@ -538,8 +547,9 @@ async fn mem_episodes(pool: &PgPool, open: bool) -> i64 {
     .unwrap()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn low_memory_needs_three_samples_and_recovers_with_hysteresis(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn low_memory_needs_three_samples_and_recovers_with_hysteresis() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     let heavy = execution(&pool, f.target).await;
     let executions =
@@ -593,8 +603,9 @@ async fn low_memory_needs_three_samples_and_recovers_with_hysteresis(pool: PgPoo
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn leaked_processes_are_announced_once_per_episode(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn leaked_processes_are_announced_once_per_episode() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     let gone = execution(&pool, f.target).await;
     let now = Utc::now();
@@ -641,8 +652,9 @@ async fn leaked_processes_are_announced_once_per_episode(pool: PgPool) -> TestRe
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn stale_watch_does_not_open_a_leak_episode(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn stale_watch_does_not_open_a_leak_episode() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     let gone = execution(&pool, f.target).await;
     let now = Utc::now();
@@ -662,8 +674,9 @@ async fn stale_watch_does_not_open_a_leak_episode(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn watch_report_is_stored_resolved_and_published(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn watch_report_is_stored_resolved_and_published() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::machine_watch::{self, WatchOutcome};
     use canterlot_proto::worker::v1::{DiskHotspot, LeakedProcess, MachineWatch};
     let f = fx(&pool).await;
@@ -745,8 +758,9 @@ async fn late_orchestrator(pool: &PgPool, f: &Fx, now: DateTime<Utc>) -> Uuid {
     late
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_late_orchestrator_hears_open_memory_and_leak_episodes_once(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_late_orchestrator_hears_open_memory_and_leak_episodes_once() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     let gone = execution(&pool, f.target).await;
     let t0 = Utc::now();

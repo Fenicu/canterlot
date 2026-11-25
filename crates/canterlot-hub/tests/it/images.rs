@@ -4,7 +4,6 @@ use crate::support::task7 as support;
 use axum::http::Method;
 use canterlot_hub::{http, testkit::TestClient};
 use serde_json::Value;
-use sqlx::PgPool;
 use support::*;
 use uuid::Uuid;
 
@@ -102,8 +101,9 @@ fn ids(page: &Value) -> Vec<String> {
         .collect()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn images_are_listed_across_inputs_blocks_and_files_in_timeline_order(pool: PgPool) {
+#[tokio::test]
+async fn images_are_listed_across_inputs_blocks_and_files_in_timeline_order() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let e = f.execution().await;
     let i1 = f.input("i1").await;
@@ -146,8 +146,9 @@ async fn images_are_listed_across_inputs_blocks_and_files_in_timeline_order(pool
     assert!(page["next_after"].is_null());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn images_page_both_ways_and_around_an_item(pool: PgPool) {
+#[tokio::test]
+async fn images_page_both_ways_and_around_an_item() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let e = f.execution().await;
     let mut wanted = Vec::new();
@@ -212,8 +213,9 @@ async fn images_page_both_ways_and_around_an_item(pool: PgPool) {
     assert_eq!(got, wanted[4..8].to_vec());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn images_exclude_another_conversation_non_images_and_unready_files(pool: PgPool) {
+#[tokio::test]
+async fn images_exclude_another_conversation_non_images_and_unready_files() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let e = f.execution().await;
     let i1 = f.input("i1").await;
@@ -249,8 +251,9 @@ async fn images_exclude_another_conversation_non_images_and_unready_files(pool: 
     assert_eq!(page["total"], 3);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn images_reject_bad_cursors_and_unknown_items(pool: PgPool) {
+#[tokio::test]
+async fn images_reject_bad_cursors_and_unknown_items() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     for suffix in [
         "/images?before=nope",
@@ -278,8 +281,9 @@ async fn images_reject_bad_cursors_and_unknown_items(pool: PgPool) {
     assert_eq!(unknown.status.as_u16(), 404);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn images_are_owner_only(pool: PgPool) {
+#[tokio::test]
+async fn images_are_owner_only() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let anonymous = TestClient::in_process(http::router(f.state.clone()));
     let response = anonymous
@@ -289,8 +293,9 @@ async fn images_are_owner_only(pool: PgPool) {
     assert_eq!(response.json::<Value>()["error"]["code"], "unauthenticated");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn images_have_conversation_seq_indexes_for_paging(pool: PgPool) {
+#[tokio::test]
+async fn images_have_conversation_seq_indexes_for_paging() {
+    let pool = canterlot_hub::testkit::db().await;
     let indexes: Vec<String> = sqlx::query_scalar(
         "select indexname from pg_indexes where indexname in
          ('block_media_conversation_seq','block_files_conversation_seq') order by indexname",

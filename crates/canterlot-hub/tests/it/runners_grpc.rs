@@ -238,8 +238,9 @@ fn now_ms() -> u64 {
 
 const RUNNERS: &[&str] = &["runners_v1"];
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn runners_v1_is_negotiated_only_when_the_worker_asks_for_it(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn runners_v1_is_negotiated_only_when_the_worker_asks_for_it() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let host = Host::start(pool).await;
     let with = host.connect(&host.carrier, RUNNERS).await;
     assert!(with.capabilities.iter().any(|c| c == "runners_v1"));
@@ -248,8 +249,9 @@ async fn runners_v1_is_negotiated_only_when_the_worker_asks_for_it(pool: PgPool)
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_carrier_is_told_its_runners_on_connect_and_when_they_change(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_carrier_is_told_its_runners_on_connect_and_when_they_change() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let host = Host::start(pool.clone()).await;
     let mut carrier = host.connect(&host.carrier, RUNNERS).await;
     assert_eq!(
@@ -288,10 +290,9 @@ async fn a_carrier_is_told_its_runners_on_connect_and_when_they_change(pool: PgP
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_cloud_runner_is_listed_and_gets_its_token_only_while_a_window_serves(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn the_cloud_runner_is_listed_and_gets_its_token_only_while_a_window_serves() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let host = Host::start(pool.clone()).await;
     let mut carrier = host.connect(&host.carrier, RUNNERS).await;
     assert_eq!(
@@ -364,8 +365,9 @@ async fn the_cloud_runner_is_listed_and_gets_its_token_only_while_a_window_serve
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_token_goes_to_the_carrier_in_one_volatile_message(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn the_token_goes_to_the_carrier_in_one_volatile_message() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let host = Host::start(pool.clone()).await;
     let mut carrier = host.connect(&host.carrier, RUNNERS).await;
     carrier.assigned().await;
@@ -397,8 +399,9 @@ async fn the_token_goes_to_the_carrier_in_one_volatile_message(pool: PgPool) -> 
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn token_requests_are_refused_with_a_code_and_rotate_nothing(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn token_requests_are_refused_with_a_code_and_rotate_nothing() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let host = Host::start(pool.clone()).await;
     let other = machines::add(&pool, host.installation.owner_id, "other-carrier").await?;
     machines::set_carrier(&pool, other.machine_id, true).await?;
@@ -491,8 +494,9 @@ impl Worker {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn runner_messages_without_the_capability_end_the_stream(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn runner_messages_without_the_capability_end_the_stream() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let host = Host::start(pool).await;
     // Несущая по флагу, но воркер возможность не объявил: запрос не принимается.
     let mut carrier = host.connect(&host.carrier, &[]).await;
@@ -529,8 +533,9 @@ async fn runner_messages_without_the_capability_end_the_stream(pool: PgPool) -> 
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn observations_are_stored_only_from_the_carrier(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn observations_are_stored_only_from_the_carrier() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let host = Host::start(pool.clone()).await;
     let observation = |machine: Uuid, reachable: bool, failures: u32| {
         control_up::Msg::RunnerObservation(RunnerObservation {
@@ -630,10 +635,9 @@ impl Worker {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_owner_job_goes_over_the_control_stream_and_is_answered_by_request(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn an_owner_job_goes_over_the_control_stream_and_is_answered_by_request() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let host = Host::start(pool.clone()).await;
     sqlx::query("update machines set capabilities=array['jobs_inplace_v1'] where id=$1")
         .bind(host.carrier.machine_id)
@@ -670,8 +674,9 @@ async fn an_owner_job_goes_over_the_control_stream_and_is_answered_by_request(
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn only_a_carrier_with_the_capability_may_submit_owner_jobs(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn only_a_carrier_with_the_capability_may_submit_owner_jobs() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let host = Host::start(pool.clone()).await;
     // Обычная машина с возможностью: отказ кодом `not_carrier`, поток остаётся.
     let mut plain = host.connect(&host.plain, RUNNERS).await;
@@ -705,8 +710,9 @@ async fn only_a_carrier_with_the_capability_may_submit_owner_jobs(pool: PgPool) 
 
 /// Наблюдение, сменившее доступность раннера, сразу даёт клиентам событие со словарём раннера
 /// и временем наблюдения, не дожидаясь обхода проектора.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_observation_publishes_the_runners_availability_at_once(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn an_observation_publishes_the_runners_availability_at_once() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let host = Host::start(pool.clone()).await;
     let mut carrier = host.connect(&host.carrier, RUNNERS).await;
     carrier.assigned().await;

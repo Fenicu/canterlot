@@ -2,7 +2,6 @@ use crate::support::task7 as support;
 use axum::http::Method;
 use canterlot_hub::testkit;
 use serde_json::{Value, json};
-use sqlx::PgPool;
 use support::*;
 use uuid::Uuid;
 
@@ -20,8 +19,9 @@ async fn delivered(f: &Fixture, key: &str, feed: i64, text: &str, origin: Option
     input.input_id
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn owner_messages_are_chronological_paged_and_skip_undelivered(pool: PgPool) {
+#[tokio::test]
+async fn owner_messages_are_chronological_paged_and_skip_undelivered() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     delivered(&f, "m1", 10, "первое сообщение\nвторая строка", None).await;
     delivered(&f, "m2", 20, "второе", None).await;
@@ -58,8 +58,9 @@ async fn owner_messages_are_chronological_paged_and_skip_undelivered(pool: PgPoo
     assert!(first["next_before"].is_null());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn owner_messages_truncate_the_preview_and_keep_origin_and_attachments(pool: PgPool) {
+#[tokio::test]
+async fn owner_messages_truncate_the_preview_and_keep_origin_and_attachments() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let input = f.input("long").await;
     let text = "я".repeat(500);
@@ -85,8 +86,9 @@ async fn owner_messages_truncate_the_preview_and_keep_origin_and_attachments(poo
     assert_eq!(item["origin"], origin);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn owner_messages_skip_hub_events_and_alarms(pool: PgPool) {
+#[tokio::test]
+async fn owner_messages_skip_hub_events_and_alarms() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     delivered(&f, "own", 10, "моё", None).await;
     delivered(
@@ -142,8 +144,9 @@ async fn owner_messages_skip_hub_events_and_alarms(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn owner_messages_of_a_foreign_conversation_are_not_found(pool: PgPool) {
+#[tokio::test]
+async fn owner_messages_of_a_foreign_conversation_are_not_found() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let other_owner = Uuid::now_v7();
     sqlx::query("insert into owners(id) values($1)")
@@ -164,8 +167,9 @@ async fn owner_messages_of_a_foreign_conversation_are_not_found(pool: PgPool) {
     assert_eq!(response.status.as_u16(), 404);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn history_around_returns_a_window_with_the_target_and_both_sides(pool: PgPool) {
+#[tokio::test]
+async fn history_around_returns_a_window_with_the_target_and_both_sides() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let e = f.execution().await;
     for seq in [10, 30] {
@@ -187,8 +191,9 @@ async fn history_around_returns_a_window_with_the_target_and_both_sides(pool: Pg
     assert!(page["next_after"].is_null() || page["next_after"].is_string());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn history_around_rejects_two_directions_at_once(pool: PgPool) {
+#[tokio::test]
+async fn history_around_rejects_two_directions_at_once() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let response = f
         .client

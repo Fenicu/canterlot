@@ -932,8 +932,9 @@ fn transmissions(bodies: &[Body], command: Uuid) -> Vec<u32> {
         .collect()
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn conversation_turn_end_to_end(pool: PgPool) {
+#[tokio::test]
+async fn conversation_turn_end_to_end() {
+    let pool = canterlot_hub::testkit::db().await;
     let fixture = Fixture::new(&pool, "synthetic", &[]).await;
     let identities = fixture.identities();
     let before = fixture.faults().pause_next(Point::BeforeSjCommit);
@@ -966,8 +967,9 @@ async fn conversation_turn_end_to_end(pool: PgPool) {
     fixture.finish().await;
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn stream_break_mid_answer_yields_exact_block_text(pool: PgPool) {
+#[tokio::test]
+async fn stream_break_mid_answer_yields_exact_block_text() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut fixture = Fixture::new(&pool, "synthetic", &[]).await;
     let identities = fixture.identities();
     let (script, expected) = answer(50, 100);
@@ -991,8 +993,9 @@ async fn stream_break_mid_answer_yields_exact_block_text(pool: PgPool) {
     fixture.finish().await;
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn control_service_restart_keeps_execution_and_answer(pool: PgPool) {
+#[tokio::test]
+async fn control_service_restart_keeps_execution_and_answer() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut fixture = Fixture::new(&pool, "synthetic", &[]).await;
     let identities = fixture.identities();
     let (script, expected) = answer(50, 80);
@@ -1008,8 +1011,9 @@ async fn control_service_restart_keeps_execution_and_answer(pool: PgPool) {
     fixture.finish().await;
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn interrupt_ends_the_turn_and_the_next_input_is_transmitted_once(pool: PgPool) {
+#[tokio::test]
+async fn interrupt_ends_the_turn_and_the_next_input_is_transmitted_once() {
+    let pool = canterlot_hub::testkit::db().await;
     sqlx::raw_sql(
         "create function check_interrupt_owner_stop() returns trigger language plpgsql as $$
         begin
@@ -1162,8 +1166,9 @@ async fn interrupt_ends_the_turn_and_the_next_input_is_transmitted_once(pool: Pg
     }
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn stop_execution_reaches_stopped_only_after_group_empty(pool: PgPool) {
+#[tokio::test]
+async fn stop_execution_reaches_stopped_only_after_group_empty() {
+    let pool = canterlot_hub::testkit::db().await;
     for force in [false, true] {
         let fixture = Fixture::new(
             &pool,
@@ -1243,8 +1248,9 @@ async fn stop_execution_reaches_stopped_only_after_group_empty(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn large_answer_backlog_does_not_starve_control_session(pool: PgPool) {
+#[tokio::test]
+async fn large_answer_backlog_does_not_starve_control_session() {
+    let pool = canterlot_hub::testkit::db().await;
     let fixture = Fixture::new(&pool, "synthetic", &[]).await;
     let identities = fixture.identities();
     // Пауза 500 мс на пакет до 256 записей плюс ~4,5 мс на запись держат приём хаба около
@@ -1340,8 +1346,9 @@ async fn large_answer_backlog_does_not_starve_control_session(pool: PgPool) {
     fixture.finish().await;
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn lost_sj_acks_do_not_duplicate_blocks(pool: PgPool) {
+#[tokio::test]
+async fn lost_sj_acks_do_not_duplicate_blocks() {
+    let pool = canterlot_hub::testkit::db().await;
     let fixture = Fixture::new(&pool, "synthetic", &[]).await;
     let identities = fixture.identities();
     let ack_start = fixture.faults().acks().len();
@@ -1381,8 +1388,9 @@ async fn lost_sj_acks_do_not_duplicate_blocks(pool: PgPool) {
     fixture.finish().await;
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn withdrawn_input_is_redispatched_with_new_attempt_and_transmitted_once(pool: PgPool) {
+#[tokio::test]
+async fn withdrawn_input_is_redispatched_with_new_attempt_and_transmitted_once() {
+    let pool = canterlot_hub::testkit::db().await;
     let fixture = Fixture::new(
         &pool,
         "synthetic",
@@ -1432,8 +1440,9 @@ async fn withdrawn_input_is_redispatched_with_new_attempt_and_transmitted_once(p
     fixture.finish().await;
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn transport_errors_never_stop_an_execution(pool: PgPool) {
+#[tokio::test]
+async fn transport_errors_never_stop_an_execution() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut fixture = Fixture::new(&pool, "synthetic", &[]).await;
     let identities = fixture.identities();
     let (script, expected) = answer(80, 80);
@@ -1470,8 +1479,9 @@ async fn transport_errors_never_stop_an_execution(pool: PgPool) {
     fixture.finish().await;
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn killed_supervisor_is_never_respawned_and_exits_when_the_group_empties(pool: PgPool) {
+#[tokio::test]
+async fn killed_supervisor_is_never_respawned_and_exits_when_the_group_empties() {
+    let pool = canterlot_hub::testkit::db().await;
     let fixture = Fixture::new(&pool, "synthetic", &[]).await;
     let identities = fixture.identities();
     let input = fixture
@@ -1537,8 +1547,9 @@ impl Fixture {
     }
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn killed_supervisor_with_nothing_left_fails_and_the_session_resumes(pool: PgPool) {
+#[tokio::test]
+async fn killed_supervisor_with_nothing_left_fails_and_the_session_resumes() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut fixture = Fixture::new(&pool, "synthetic", &[]).await;
     let identities = fixture.identities();
     fixture
@@ -1593,8 +1604,9 @@ async fn killed_supervisor_with_nothing_left_fails_and_the_session_resumes(pool:
     fixture.finish().await;
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn orphan_process_waits_for_the_owner_and_stop_leads_to_the_resolve(pool: PgPool) {
+#[tokio::test]
+async fn orphan_process_waits_for_the_owner_and_stop_leads_to_the_resolve() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut fixture = Fixture::new(&pool, "synthetic", &[]).await;
     let identities = fixture.identities();
     fixture
@@ -1652,8 +1664,9 @@ async fn orphan_process_waits_for_the_owner_and_stop_leads_to_the_resolve(pool: 
 
 /// Сопровождение умерло между фиксацией записи на хабе и сохранением подтверждения: запись
 /// закоммичена, воркер это знает, а на диске журнала её подтверждения нет.
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn exit_of_a_lost_session_survives_an_ack_the_supervisor_never_saved(pool: PgPool) {
+#[tokio::test]
+async fn exit_of_a_lost_session_survives_an_ack_the_supervisor_never_saved() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut fixture = Fixture::new(&pool, "synthetic", &[]).await;
     let identities = fixture.identities();
     fixture.faults().drop_next_sj_acks(usize::MAX);
@@ -1772,8 +1785,9 @@ impl Fixture {
     }
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn lost_owner_returns_with_buffered_journal_and_queued_input(pool: PgPool) {
+#[tokio::test]
+async fn lost_owner_returns_with_buffered_journal_and_queued_input() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut fixture = Fixture::new(&pool, "synthetic", &[]).await;
     let identities = fixture.identities();
     let mut steps = vec![json!({"delta":"a"}), json!({"delay_ms":1500})];
@@ -1836,8 +1850,9 @@ async fn lost_owner_returns_with_buffered_journal_and_queued_input(pool: PgPool)
     fixture.finish().await;
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn request_waiting_through_the_loss_is_answered_after_the_return(pool: PgPool) {
+#[tokio::test]
+async fn request_waiting_through_the_loss_is_answered_after_the_return() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut fixture = Fixture::new(&pool, "synthetic", &[]).await;
     let identities = fixture.identities();
     let steps = json!([
@@ -1890,8 +1905,9 @@ async fn request_waiting_through_the_loss_is_answered_after_the_return(pool: PgP
     fixture.finish().await;
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn wave_w_d1a_dead_supervisor_then_control_restart(pool: PgPool) {
+#[tokio::test]
+async fn wave_w_d1a_dead_supervisor_then_control_restart() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut fixture = Fixture::new(&pool, "synthetic", &[]).await;
     let identities = fixture.identities();
     fixture
@@ -1908,8 +1924,9 @@ async fn wave_w_d1a_dead_supervisor_then_control_restart(pool: PgPool) {
     fixture.finish().await;
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn wave_w_d1b_supervisor_dies_while_control_down(pool: PgPool) {
+#[tokio::test]
+async fn wave_w_d1b_supervisor_dies_while_control_down() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut fixture = Fixture::new(&pool, "synthetic", &[]).await;
     let identities = fixture.identities();
     fixture
@@ -1926,8 +1943,9 @@ async fn wave_w_d1b_supervisor_dies_while_control_down(pool: PgPool) {
     fixture.finish().await;
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn wave_w_d3_exit_during_outage_reattaches_draining_supervisor(pool: PgPool) {
+#[tokio::test]
+async fn wave_w_d3_exit_during_outage_reattaches_draining_supervisor() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut fixture = Fixture::new(&pool, "synthetic", &[]).await;
     let identities = fixture.identities();
     let mut steps = vec![json!({"delta":"a"}), json!({"delay_ms":1500})];
@@ -1970,8 +1988,9 @@ async fn wave_w_d3_exit_during_outage_reattaches_draining_supervisor(pool: PgPoo
     fixture.finish().await;
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn wave_w_d5_dead_sj_intent_is_never_deferred_by_cj(pool: PgPool) {
+#[tokio::test]
+async fn wave_w_d5_dead_sj_intent_is_never_deferred_by_cj() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut fixture = Fixture::new(
         &pool,
         "synthetic",
@@ -2008,8 +2027,9 @@ async fn wave_w_d5_dead_sj_intent_is_never_deferred_by_cj(pool: PgPool) {
     fixture.finish().await;
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn wave_w_d6_stop_behind_slow_sj_backlog(pool: PgPool) {
+#[tokio::test]
+async fn wave_w_d6_stop_behind_slow_sj_backlog() {
+    let pool = canterlot_hub::testkit::db().await;
     let fixture = Fixture::new(&pool, "synthetic", &[]).await;
     let identities = fixture.identities();
     // Пакет до 256 записей и секундная пауза на пакет: за 2 с ожидания хаб принимает не больше
@@ -2111,9 +2131,10 @@ fn wave2_n3_runtime_wipe_and_replacement() {
 
 macro_rules! wave2_runtime_children {
     ($($name:ident => $case:literal),*) => {$(
-        #[sqlx::test(migrations = "../canterlot-hub/migrations")]
+        #[tokio::test]
         #[ignore]
-        async fn $name(pool: PgPool) {
+        async fn $name() {
+            let pool = canterlot_hub::testkit::db().await;
             wave2_n3_runtime_child(pool, $case).await;
         }
     )*};
@@ -2241,8 +2262,9 @@ async fn wave2_n3_runtime_child(pool: PgPool, case: &str) {
     fixture.finish().await;
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn wave2_n1_draining_delivery_releases_slot(pool: PgPool) {
+#[tokio::test]
+async fn wave2_n1_draining_delivery_releases_slot() {
+    let pool = canterlot_hub::testkit::db().await;
     let fixture = Fixture::new(&pool, "synthetic", &[]).await;
     let paused = fixture.faults().pause_next(Point::BeforeSjCommit);
     let stop = fixture.stop_execution(true).await;
@@ -2311,9 +2333,10 @@ fn wave_w_d2_runtime_socket_paths() {
 
 macro_rules! wave_w_runtime_children {
     ($($name:ident => $case:literal),*) => {$(
-        #[sqlx::test(migrations = "../canterlot-hub/migrations")]
+        #[tokio::test]
         #[ignore]
-        async fn $name(pool: PgPool) {
+        async fn $name() {
+            let pool = canterlot_hub::testkit::db().await;
             wave_w_runtime_child(pool, $case).await;
         }
     )*};
@@ -2385,8 +2408,9 @@ async fn wave_w_runtime_child(pool: PgPool, case: &str) {
     }
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn wave_w_data_reattach_discards_stale_sj_batches(pool: PgPool) {
+#[tokio::test]
+async fn wave_w_data_reattach_discards_stale_sj_batches() {
+    let pool = canterlot_hub::testkit::db().await;
     // Под нагрузкой подтверждения идут медленно: отказ по таймауту дал бы лишние
     // переподключения и ложно обвинил бы несвежие пакеты. Окно шире, а отказ хаба
     // переподключает сразу при любом окне, так что счёт по-прежнему ловит его.
@@ -2423,8 +2447,9 @@ async fn wave_w_data_reattach_discards_stale_sj_batches(pool: PgPool) {
     fixture.finish().await;
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn wave_w_pre_attach_timeout_kills_own_child_and_rejects_start(pool: PgPool) {
+#[tokio::test]
+async fn wave_w_pre_attach_timeout_kills_own_child_and_rejects_start() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut fixture = Fixture::new_with(
         &pool,
         "synthetic",
@@ -2470,8 +2495,9 @@ async fn wave_w_pre_attach_timeout_kills_own_child_and_rejects_start(pool: PgPoo
     fixture.stop_worker().await;
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn wave_w_spawning_ownership_reports_owner_lost_from_created(pool: PgPool) {
+#[tokio::test]
+async fn wave_w_spawning_ownership_reports_owner_lost_from_created() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut fixture = Fixture::new_with(&pool, "synthetic", &[], false, false).await;
     fixture.stop_worker().await;
     let started = executions::start(&pool, fixture.owner, fixture.conversation, Uuid::now_v7())
@@ -2499,8 +2525,9 @@ async fn wave_w_spawning_ownership_reports_owner_lost_from_created(pool: PgPool)
 
 // Весь путь до PostgreSQL: разрыв потока и перезапуск воркера посреди хода OpenCode. Хаб хранит
 // каждый блок один раз, текст целиком, без расхождений ревизий, а ввод ушёл один раз.
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn opencode_stream_cut_and_worker_restart_reach_the_hub_once(pool: PgPool) {
+#[tokio::test]
+async fn opencode_stream_cut_and_worker_restart_reach_the_hub_once() {
+    let pool = canterlot_hub::testkit::db().await;
     let script = Script::from_capture("recovery", Some("cut_midturn"))
         .with_canterlot_mcp("connected")
         .with_recorded_models()
@@ -2585,8 +2612,9 @@ async fn opencode_stream_cut_and_worker_restart_reach_the_hub_once(pool: PgPool)
 }
 
 // Поток данных общий для машины: запись одного разговора не должна держать другой.
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn nul_in_one_session_leaves_the_machine_stream_running(pool: PgPool) {
+#[tokio::test]
+async fn nul_in_one_session_leaves_the_machine_stream_running() {
+    let pool = canterlot_hub::testkit::db().await;
     let fixture = Fixture::new(&pool, "synthetic", &[]).await;
     let other = testkit::seed_conversation(&pool, fixture.owner, fixture.config.machine_id).await;
     sqlx::query("update conversations set workdir = $2 where id = $1")
@@ -2689,8 +2717,9 @@ fn refused_records_are_the_error_strings_of_the_hub() {
     assert_eq!(hub, canterlot_worker::session::REFUSED_RECORDS);
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn refused_record_stops_its_execution_and_leaves_the_machine_stream_running(pool: PgPool) {
+#[tokio::test]
+async fn refused_record_stops_its_execution_and_leaves_the_machine_stream_running() {
+    let pool = canterlot_hub::testkit::db().await;
     let fixture = Fixture::new(&pool, "synthetic", &[]).await;
     let other = testkit::seed_conversation(&pool, fixture.owner, fixture.config.machine_id).await;
     sqlx::query("update conversations set workdir = $2 where id = $1")
@@ -2799,8 +2828,9 @@ async fn refused_record_stops_its_execution_and_leaves_the_machine_stream_runnin
 
 /// Боковой чат через живой хаб и воркер с синтетическим харнессом: вопрос получает
 /// ответ, а очередь и вводы родителя остаются нетронутыми.
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn side_chat_answers_without_touching_the_parent(pool: PgPool) {
+#[tokio::test]
+async fn side_chat_answers_without_touching_the_parent() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut fixture = Fixture::new(&pool, "synthetic", &[]).await;
     let parent = fixture.conversation;
     let view = canterlot_hub::side::create(

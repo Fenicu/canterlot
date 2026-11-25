@@ -170,8 +170,9 @@ async fn snapshot(pool: &PgPool, conversation_id: Uuid) -> Value {
     .unwrap()
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn cancel_queued_input(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn cancel_queued_input() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     running(&pool, &seed).await;
     let head = input(&pool, &seed).await;
@@ -233,8 +234,9 @@ async fn cancel_queued_input(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn cancel_queued_input_cancels_pending_steer(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn cancel_queued_input_cancels_pending_steer() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     sqlx::query("update conversations set harness = 'codex' where id = $1")
         .bind(seed.conversation_id)
@@ -276,8 +278,9 @@ async fn cancel_queued_input_cancels_pending_steer(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn cancel_refuses_steer_already_handed_to_machine(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn cancel_refuses_steer_already_handed_to_machine() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     for claimed in [true, false] {
         let seed = testkit::seed(&pool).await;
         sqlx::query("update conversations set harness = 'codex' where id = $1")
@@ -327,8 +330,9 @@ async fn cancel_refuses_steer_already_handed_to_machine(pool: PgPool) -> TestRes
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn cancel_dispatched_requests_machine_cancel(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn cancel_dispatched_requests_machine_cancel() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     for stored in [false, true] {
         let seed = testkit::seed(&pool).await;
         let execution = running(&pool, &seed).await;
@@ -416,8 +420,9 @@ async fn cancel_dispatched_requests_machine_cancel(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn cancel_after_transmission_is_too_late(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn cancel_after_transmission_is_too_late() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     running(&pool, &seed).await;
     let head = input(&pool, &seed).await;
@@ -476,8 +481,9 @@ async fn cancel_after_transmission_is_too_late(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn cancel_races_dispatch_without_false_cancel(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn cancel_races_dispatch_without_false_cancel() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut hub_cancelled = 0;
     let mut machine_cancel_requested = 0;
     for _ in 0..100 {
@@ -561,10 +567,9 @@ async fn cancel_races_dispatch_without_false_cancel(pool: PgPool) -> TestResult 
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn interrupt_does_not_pause_the_queue_and_keeps_the_next_input_ready(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn interrupt_does_not_pause_the_queue_and_keeps_the_next_input_ready() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let execution = running(&pool, &seed).await;
     let first = input(&pool, &seed).await;
@@ -633,8 +638,9 @@ async fn interrupt_does_not_pause_the_queue_and_keeps_the_next_input_ready(
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn interrupt_keeps_the_other_pause_reasons(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn interrupt_keeps_the_other_pause_reasons() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     running(&pool, &seed).await;
     let pause = PauseReason::ProcessExited;
@@ -655,8 +661,9 @@ async fn interrupt_keeps_the_other_pause_reasons(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn interrupt_keeps_an_existing_user_stop_pause(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn interrupt_keeps_an_existing_user_stop_pause() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     running(&pool, &seed).await;
     // Старая пауза от прежнего прерывания переживает новое: миграции сохранённых причин нет.
@@ -680,8 +687,9 @@ async fn interrupt_keeps_an_existing_user_stop_pause(pool: PgPool) -> TestResult
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn interrupt_keeps_a_steer_as_the_next_turn(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn interrupt_keeps_a_steer_as_the_next_turn() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     sqlx::query("update conversations set harness = 'codex' where id = $1")
         .bind(seed.conversation_id)
@@ -736,8 +744,9 @@ async fn interrupt_keeps_a_steer_as_the_next_turn(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn stop_withdraws_undelivered_dispatch(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn stop_withdraws_undelivered_dispatch() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     for stored in [false, true] {
         let seed = testkit::seed(&pool).await;
         let execution = running(&pool, &seed).await;
@@ -804,8 +813,9 @@ async fn stop_withdraws_undelivered_dispatch(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn continue_releases_user_pause_and_dispatches_once(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn continue_releases_user_pause_and_dispatches_once() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let execution = running(&pool, &seed).await;
     let first = input(&pool, &seed).await;
@@ -880,10 +890,9 @@ async fn continue_releases_user_pause_and_dispatches_once(pool: PgPool) -> TestR
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn continue_clears_resolved_owner_lost_and_keeps_unconfirmed_input(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn continue_clears_resolved_owner_lost_and_keeps_unconfirmed_input() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     running(&pool, &seed).await;
     let head = input(&pool, &seed).await;
@@ -944,8 +953,9 @@ async fn continue_clears_resolved_owner_lost_and_keeps_unconfirmed_input(
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn stop_and_continue_are_idempotent(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn stop_and_continue_are_idempotent() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     running(&pool, &seed).await;
     let stop = request_stop(
@@ -1021,8 +1031,9 @@ async fn stop_and_continue_are_idempotent(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn continue_removes_only_releasable_reasons_and_preserves_holds(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn continue_removes_only_releasable_reasons_and_preserves_holds() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let head = input(&pool, &seed).await;
     let removed = vec![
@@ -1079,8 +1090,9 @@ async fn continue_removes_only_releasable_reasons_and_preserves_holds(pool: PgPo
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn stop_without_live_execution_and_after_transmission(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn stop_without_live_execution_and_after_transmission() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     assert_eq!(
         request_stop(
@@ -1123,8 +1135,9 @@ async fn stop_without_live_execution_and_after_transmission(pool: PgPool) -> Tes
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn control_checks_ownership_and_missing_objects(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn control_checks_ownership_and_missing_objects() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let stranger = testkit::seed(&pool).await;
     let head = input(&pool, &seed).await;
@@ -1187,8 +1200,9 @@ async fn control_checks_ownership_and_missing_objects(pool: PgPool) -> TestResul
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn idempotency_conflicts_do_not_change_any_queue(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn idempotency_conflicts_do_not_change_any_queue() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let other_conversation =
         testkit::seed_conversation(&pool, seed.owner_id, seed.machine_id).await;
@@ -1288,8 +1302,9 @@ async fn idempotency_conflicts_do_not_change_any_queue(pool: PgPool) -> TestResu
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn event_failure_rolls_back_controls_and_does_not_bind_keys(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn event_failure_rolls_back_controls_and_does_not_bind_keys() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     running(&pool, &seed).await;
     let head = input(&pool, &seed).await;
@@ -1371,8 +1386,9 @@ async fn event_failure_rolls_back_controls_and_does_not_bind_keys(pool: PgPool) 
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn concurrent_replays_create_one_command_per_operation(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn concurrent_replays_create_one_command_per_operation() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     running(&pool, &seed).await;
     let head = input(&pool, &seed).await;
@@ -1441,8 +1457,9 @@ async fn concurrent_replays_create_one_command_per_operation(pool: PgPool) -> Te
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn control_command_failure_rolls_back_flags_pause_and_commands(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn control_command_failure_rolls_back_flags_pause_and_commands() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     running(&pool, &seed).await;
     let head = input(&pool, &seed).await;
@@ -1509,8 +1526,9 @@ async fn control_command_failure_rolls_back_flags_pause_and_commands(pool: PgPoo
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn concurrent_conflicts_across_queues_roll_back_loser(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn concurrent_conflicts_across_queues_roll_back_loser() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let other = Seed {
         conversation_id: testkit::seed_conversation(&pool, seed.owner_id, seed.machine_id).await,
@@ -1551,8 +1569,9 @@ async fn concurrent_conflicts_across_queues_roll_back_loser(pool: PgPool) -> Tes
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn replays_wait_for_queue_lock(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn replays_wait_for_queue_lock() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let head = input(&pool, &seed).await;
     let cancel_result = cancel_input(
@@ -1643,8 +1662,9 @@ async fn replays_wait_for_queue_lock(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn closed_outbox_channel_releases_a_steer_so_cancel_succeeds(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn closed_outbox_channel_releases_a_steer_so_cancel_succeeds() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     sqlx::query("update conversations set harness = 'codex' where id = $1")
         .bind(seed.conversation_id)
@@ -1710,8 +1730,9 @@ async fn closed_outbox_channel_releases_a_steer_so_cancel_succeeds(pool: PgPool)
 
 /// Повтор после переподключения или рестарта хаба застаёт захват прошлой
 /// отправки: переполненный канал его не снимает, отмена видит вливание в пути.
-#[sqlx::test(migrations = "./migrations")]
-async fn full_channel_on_resend_keeps_an_earlier_claim(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn full_channel_on_resend_keeps_an_earlier_claim() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     sqlx::query("update conversations set harness = 'codex' where id = $1")
         .bind(seed.conversation_id)

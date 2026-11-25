@@ -209,8 +209,9 @@ async fn data_accepted(stream: &mut Streaming<DataDown>) -> Accepted {
     value
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn cj_ack_waits_for_record_commit(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn cj_ack_waits_for_record_commit() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let host = Host::start(pool.clone(), timers()).await;
     let conversation = canterlot_hub::testkit::seed_conversation(
         &pool,
@@ -306,8 +307,9 @@ async fn cj_ack_waits_for_record_commit(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn heartbeats_are_acked_while_a_large_batch_is_ingested(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn heartbeats_are_acked_while_a_large_batch_is_ingested() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let host = Host::start(pool.clone(), timers()).await;
     let hello = host.hello(host.machine.machine_id, Uuid::now_v7(), StreamKind::Control);
     let journal = hello.cj_journal_id.clone();
@@ -385,8 +387,9 @@ async fn heartbeats_are_acked_while_a_large_batch_is_ingested(pool: PgPool) -> T
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn cj_batch_for_another_journal_ends_the_stream(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn cj_batch_for_another_journal_ends_the_stream() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let host = Host::start(pool.clone(), timers()).await;
     let (tx, mut stream) = host
         .control(host.hello(host.machine.machine_id, Uuid::now_v7(), StreamKind::Control))
@@ -424,8 +427,9 @@ async fn cj_batch_for_another_journal_ends_the_stream(pool: PgPool) -> TestResul
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn journal_gap_reconnect_resumes_from_committed_cursor(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn journal_gap_reconnect_resumes_from_committed_cursor() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let host = Host::start(pool, timers()).await;
     let mut hello = host.hello(host.machine.machine_id, Uuid::now_v7(), StreamKind::Control);
     let journal_id = hello.cj_journal_id.clone();
@@ -588,8 +592,9 @@ async fn changed(
     .unwrap();
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn handshake_accepts_and_reports_cursors(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn handshake_accepts_and_reports_cursors() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let host = Host::start(pool.clone(), timers()).await;
     let other = machines::add(&pool, host.installation.owner_id, "other").await?;
     let journals = [Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7()];
@@ -669,8 +674,9 @@ async fn denied(host: &Host, token: Option<&str>) {
     assert_eq!(error.code(), Code::Unauthenticated);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn missing_or_wrong_token_is_unauthenticated(pool: PgPool) {
+#[tokio::test]
+async fn missing_or_wrong_token_is_unauthenticated() {
+    let pool = canterlot_hub::testkit::db().await;
     let host = Host::start(pool, timers()).await;
     denied(&host, None).await;
     denied(&host, Some("unknown-synthetic-token")).await;
@@ -681,8 +687,9 @@ async fn missing_or_wrong_token_is_unauthenticated(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn revoked_credential_is_rejected(pool: PgPool) {
+#[tokio::test]
+async fn revoked_credential_is_rejected() {
+    let pool = canterlot_hub::testkit::db().await;
     let host = Host::start(pool.clone(), timers()).await;
     assert!(
         machines::revoke(&pool, host.machine.machine_id)
@@ -696,8 +703,9 @@ async fn revoked_credential_is_rejected(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn installation_mismatch_is_rejected(pool: PgPool) {
+#[tokio::test]
+async fn installation_mismatch_is_rejected() {
+    let pool = canterlot_hub::testkit::db().await;
     let host = Host::start(pool, timers()).await;
     let mut hello = host.hello(host.machine.machine_id, Uuid::now_v7(), StreamKind::Control);
     hello.installation_id = Uuid::now_v7().to_string();
@@ -710,8 +718,9 @@ async fn installation_mismatch_is_rejected(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn restore_generation_mismatch_is_not_operational(pool: PgPool) {
+#[tokio::test]
+async fn restore_generation_mismatch_is_not_operational() {
+    let pool = canterlot_hub::testkit::db().await;
     let host = Host::start(pool, timers()).await;
     let mut hello = host.hello(host.machine.machine_id, Uuid::now_v7(), StreamKind::Control);
     hello.restore_generation = Uuid::now_v7().to_string();
@@ -724,8 +733,9 @@ async fn restore_generation_mismatch_is_not_operational(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn unknown_required_capability_is_rejected(pool: PgPool) {
+#[tokio::test]
+async fn unknown_required_capability_is_rejected() {
+    let pool = canterlot_hub::testkit::db().await;
     let host = Host::start(pool, timers()).await;
     let mut hello = host.hello(host.machine.machine_id, Uuid::now_v7(), StreamKind::Control);
     hello.required_capabilities = vec!["unknown_required".into()];
@@ -733,8 +743,9 @@ async fn unknown_required_capability_is_rejected(pool: PgPool) {
     rejected(&mut stream, RejectReason::UnknownRequiredCapability, false).await;
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn silent_stream_times_out(pool: PgPool) {
+#[tokio::test]
+async fn silent_stream_times_out() {
+    let pool = canterlot_hub::testkit::db().await;
     let host = Host::start(pool, timers()).await;
     let (_tx, rx) = mpsc::channel::<ControlUp>(1);
     let mut client = worker_control_client::WorkerControlClient::new(host.channel().await)
@@ -766,8 +777,9 @@ async fn silent_stream_times_out(pool: PgPool) {
     assert_eq!(error.code(), Code::DeadlineExceeded);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn second_live_identity_is_rejected(pool: PgPool) {
+#[tokio::test]
+async fn second_live_identity_is_rejected() {
+    let pool = canterlot_hub::testkit::db().await;
     let host = Host::start(pool, timers()).await;
     let connection = Uuid::now_v7();
     let (tx, mut first) = host
@@ -813,8 +825,9 @@ async fn second_live_identity_is_rejected(pool: PgPool) {
     heartbeat(&tx, &mut first, 1).await;
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn stale_session_is_replaced(pool: PgPool) {
+#[tokio::test]
+async fn stale_session_is_replaced() {
+    let pool = canterlot_hub::testkit::db().await;
     let host = Host::start(
         pool,
         HubTimers {
@@ -879,8 +892,9 @@ async fn stale_session_is_replaced(pool: PgPool) {
     .await;
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn data_stream_connection_binding_requires_same_machine(pool: PgPool) {
+#[tokio::test]
+async fn data_stream_connection_binding_requires_same_machine() {
+    let pool = canterlot_hub::testkit::db().await;
     let host = Host::start(pool.clone(), timers()).await;
     let other = machines::add(&pool, host.installation.owner_id, "other")
         .await
@@ -934,8 +948,9 @@ async fn data_stream_connection_binding_requires_same_machine(pool: PgPool) {
     heartbeat(&tx, &mut control, 19).await;
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn heartbeat_drives_availability(pool: PgPool) {
+#[tokio::test]
+async fn heartbeat_drives_availability() {
+    let pool = canterlot_hub::testkit::db().await;
     let host = Host::start(
         pool,
         HubTimers {
@@ -993,8 +1008,9 @@ async fn heartbeat_drives_availability(pool: PgPool) {
     assert!(host.registry.session_info(machine).is_none());
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn incompatible_protocol_and_wrong_stream_kind_are_rejected(pool: PgPool) {
+#[tokio::test]
+async fn incompatible_protocol_and_wrong_stream_kind_are_rejected() {
+    let pool = canterlot_hub::testkit::db().await;
     let host = Host::start(pool, timers()).await;
     let base = host.hello(host.machine.machine_id, Uuid::now_v7(), StreamKind::Control);
     for hello in [
@@ -1014,8 +1030,9 @@ async fn incompatible_protocol_and_wrong_stream_kind_are_rejected(pool: PgPool) 
     data_rejected(&mut data, RejectReason::ConnectionBindingMismatch, true).await;
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn journal_ingestion_acks_both_streams(pool: PgPool) {
+#[tokio::test]
+async fn journal_ingestion_acks_both_streams() {
+    let pool = canterlot_hub::testkit::db().await;
     let host = Host::start(pool.clone(), timers()).await;
     let connection = Uuid::now_v7();
     let hello = host.hello(host.machine.machine_id, connection, StreamKind::Control);
@@ -1187,22 +1204,21 @@ async fn ingest_refusal_ends_both_streams_as_revoked(pool: PgPool, on_data: bool
     );
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn control_ingest_refusal_for_revoked_credential_ends_both_streams_unauthenticated(
-    pool: PgPool,
-) {
+#[tokio::test]
+async fn control_ingest_refusal_for_revoked_credential_ends_both_streams_unauthenticated() {
+    let pool = canterlot_hub::testkit::db().await;
     ingest_refusal_ends_both_streams_as_revoked(pool, false).await;
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn data_ingest_refusal_for_revoked_credential_ends_both_streams_unauthenticated(
-    pool: PgPool,
-) {
+#[tokio::test]
+async fn data_ingest_refusal_for_revoked_credential_ends_both_streams_unauthenticated() {
+    let pool = canterlot_hub::testkit::db().await;
     ingest_refusal_ends_both_streams_as_revoked(pool, true).await;
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn tls_rejects_untrusted_ca_and_wrong_name(pool: PgPool) {
+#[tokio::test]
+async fn tls_rejects_untrusted_ca_and_wrong_name() {
+    let pool = canterlot_hub::testkit::db().await;
     let host = Host::start(pool, timers()).await;
     let _verified_channel = host.channel().await;
     assert!(
@@ -1219,8 +1235,9 @@ async fn tls_rejects_untrusted_ca_and_wrong_name(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn data_reattach_and_control_cancellation_preserve_session_ownership(pool: PgPool) {
+#[tokio::test]
+async fn data_reattach_and_control_cancellation_preserve_session_ownership() {
+    let pool = canterlot_hub::testkit::db().await;
     let host = Host::start(pool, timers()).await;
     let machine = host.machine.machine_id;
     let connection = Uuid::now_v7();
@@ -1272,8 +1289,9 @@ async fn data_reattach_and_control_cancellation_preserve_session_ownership(pool:
     );
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn transport_delivery_and_disconnect_do_not_complete_commands(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn transport_delivery_and_disconnect_do_not_complete_commands() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let host = Host::start(pool.clone(), timers()).await;
     let conversation = canterlot_hub::testkit::seed_conversation(
         &pool,
@@ -1334,8 +1352,9 @@ async fn transport_delivery_and_disconnect_do_not_complete_commands(pool: PgPool
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn first_message_must_be_hello_on_both_streams(pool: PgPool) {
+#[tokio::test]
+async fn first_message_must_be_hello_on_both_streams() {
+    let pool = canterlot_hub::testkit::db().await;
     let host = Host::start(pool, timers()).await;
     let mut client = worker_control_client::WorkerControlClient::new(host.channel().await)
         .max_decoding_message_size(MAX_MESSAGE_BYTES)
@@ -1387,8 +1406,9 @@ async fn first_message_must_be_hello_on_both_streams(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn changed_cj_is_terminal_local_state_reset(pool: PgPool) {
+#[tokio::test]
+async fn changed_cj_is_terminal_local_state_reset() {
+    let pool = canterlot_hub::testkit::db().await;
     let host = Host::start(pool.clone(), timers()).await;
     let hello = host.hello(host.machine.machine_id, Uuid::now_v7(), StreamKind::Control);
     let (tx, mut stream) = host.control(hello.clone()).await;
@@ -1439,8 +1459,9 @@ async fn next_end(stream: &mut Streaming<ControlDown>) -> bool {
         .is_none()
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn accepted_echoes_known_optional_capabilities_only(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn accepted_echoes_known_optional_capabilities_only() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let host = Host::start(pool, timers()).await;
     let connection = Uuid::now_v7();
     let mut hello = host.hello(host.machine.machine_id, connection, StreamKind::Control);
@@ -1459,8 +1480,9 @@ async fn accepted_echoes_known_optional_capabilities_only(pool: PgPool) -> TestR
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn session_without_exec_v1_is_reconciled_at_accepted(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn session_without_exec_v1_is_reconciled_at_accepted() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let host = Host::start(pool, timers()).await;
     let mut hello = host.hello(host.machine.machine_id, Uuid::now_v7(), StreamKind::Control);
     hello.optional_capabilities = vec!["unknown_optional".into()];
@@ -1478,8 +1500,9 @@ async fn session_without_exec_v1_is_reconciled_at_accepted(pool: PgPool) -> Test
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn accepted_lists_only_journals_the_worker_names(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn accepted_lists_only_journals_the_worker_names() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let host = Host::start(pool.clone(), timers()).await;
     let named = Uuid::now_v7();
     let missing = Uuid::now_v7();
@@ -1527,8 +1550,9 @@ async fn accepted_lists_only_journals_the_worker_names(pool: PgPool) -> TestResu
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn reconcile_report_is_applied_after_earlier_cj_batches(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn reconcile_report_is_applied_after_earlier_cj_batches() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let host = Host::start(pool.clone(), timers()).await;
     let conversation = canterlot_hub::testkit::seed_conversation(
         &pool,
@@ -1643,8 +1667,9 @@ fn precheck_reply(attempt_id: &str) -> PrecheckResult {
 /// Замена управляющего потока по gRPC: ожидание предпроверки старой аренды
 /// просыпается сразу, чужой ответ со старого соединения нового ожидания не
 /// закрывает, а ответ нового потока доходит.
-#[sqlx::test(migrations = "./migrations")]
-async fn precheck_waiter_follows_the_lease_across_stream_replacement(pool: PgPool) {
+#[tokio::test]
+async fn precheck_waiter_follows_the_lease_across_stream_replacement() {
+    let pool = canterlot_hub::testkit::db().await;
     let host = Host::start(
         pool,
         HubTimers {

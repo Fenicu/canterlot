@@ -77,8 +77,9 @@ fn overview_reply(request_id: &str) -> OwnerInstructionsOverview {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn owner_overview_proxies_a_fake_worker(pool: PgPool) {
+#[tokio::test]
+async fn owner_overview_proxies_a_fake_worker() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let mut session = testkit::fake_session(
         &f.registry,
@@ -117,8 +118,9 @@ async fn owner_overview_proxies_a_fake_worker(pool: PgPool) {
     let _ = session.commands.try_recv();
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn owner_endpoints_need_a_capable_live_worker(pool: PgPool) {
+#[tokio::test]
+async fn owner_endpoints_need_a_capable_live_worker() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let overview = format!("/api/v1/machines/{}/owner-instructions", f.machine);
     let file = format!(
@@ -166,8 +168,9 @@ async fn owner_endpoints_need_a_capable_live_worker(pool: PgPool) {
     served.await.unwrap();
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn owner_file_serves_content_and_validates_kinds(pool: PgPool) {
+#[tokio::test]
+async fn owner_file_serves_content_and_validates_kinds() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     testkit::fake_session(
         &f.registry,
@@ -254,8 +257,9 @@ async fn owner_file_serves_content_and_validates_kinds(pool: PgPool) {
     served.await.unwrap();
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn owner_symlink_reason_reaches_the_browser_and_unknown_is_dropped(pool: PgPool) {
+#[tokio::test]
+async fn owner_symlink_reason_reaches_the_browser_and_unknown_is_dropped() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let mut session = testkit::fake_session(
         &f.registry,

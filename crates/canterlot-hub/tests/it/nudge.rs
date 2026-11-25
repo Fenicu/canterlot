@@ -302,8 +302,9 @@ fn caller(f: &Fx) -> Caller {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn opencode_orchestrator_answer_with_marker_is_not_nudged(pool: PgPool) {
+#[tokio::test]
+async fn opencode_orchestrator_answer_with_marker_is_not_nudged() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     subscribe(&pool, &f).await;
     let now = Utc::now();
@@ -365,8 +366,9 @@ async fn opencode_orchestrator_answer_with_marker_is_not_nudged(pool: PgPool) {
     assert_eq!(rule_row(&pool, f.child).await, ("watching".into(), 0, 1));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn claude_main_answer_with_marker_is_not_nudged(pool: PgPool) {
+#[tokio::test]
+async fn claude_main_answer_with_marker_is_not_nudged() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     subscribe(&pool, &f).await;
     let now = Utc::now();
@@ -424,8 +426,9 @@ async fn claude_main_answer_with_marker_is_not_nudged(pool: PgPool) {
     assert_eq!(outcome, "marker_seen");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_subagent_marker_does_not_finish_the_main_agent(pool: PgPool) {
+#[tokio::test]
+async fn a_subagent_marker_does_not_finish_the_main_agent() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     subscribe(&pool, &f).await;
     let now = Utc::now();
@@ -452,8 +455,9 @@ async fn a_subagent_marker_does_not_finish_the_main_agent(pool: PgPool) {
     assert!(jobs(&pool, f.parent).await.is_empty());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn max_consecutive_two_without_progress_sends_exactly_two_nudges(pool: PgPool) {
+#[tokio::test]
+async fn max_consecutive_two_without_progress_sends_exactly_two_nudges() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     let now = Utc::now();
     prime_idle(&pool, &f, now).await;
@@ -531,8 +535,9 @@ async fn max_consecutive_two_without_progress_sends_exactly_two_nudges(pool: PgP
     assert_eq!(rule_row(&pool, f.child).await, ("exhausted".into(), 3, 2));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn idle_without_marker_is_held_and_with_marker_is_delivered(pool: PgPool) {
+#[tokio::test]
+async fn idle_without_marker_is_held_and_with_marker_is_delivered() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     subscribe(&pool, &f).await;
     let now = Utc::now();
@@ -594,8 +599,9 @@ async fn idle_without_marker_is_held_and_with_marker_is_delivered(pool: PgPool) 
     assert!(jobs(&pool, f2.child).await.is_empty(), "no nudge needed");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_question_in_the_text_is_not_nudged(pool: PgPool) {
+#[tokio::test]
+async fn a_question_in_the_text_is_not_nudged() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     subscribe(&pool, &f).await;
     let now = Utc::now();
@@ -621,8 +627,9 @@ async fn a_question_in_the_text_is_not_nudged(pool: PgPool) {
     assert_eq!(events[0]["asks_in_text"], true);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn background_suspected_defers_the_nudge(pool: PgPool) {
+#[tokio::test]
+async fn background_suspected_defers_the_nudge() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     let now = Utc::now();
     prime_idle(&pool, &f, now).await;
@@ -658,8 +665,9 @@ async fn background_suspected_defers_the_nudge(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn nudge_is_delivered_with_origin_and_depth(pool: PgPool) {
+#[tokio::test]
+async fn nudge_is_delivered_with_origin_and_depth() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     let now = Utc::now();
     prime_idle(&pool, &f, now).await;
@@ -716,8 +724,9 @@ async fn nudge_is_delivered_with_origin_and_depth(pool: PgPool) {
     assert_eq!(rule_row(&pool, f.child).await, ("watching".into(), 1, 1));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn bounded_nudges_exhaust_and_release_the_held_result_once(pool: PgPool) {
+#[tokio::test]
+async fn bounded_nudges_exhaust_and_release_the_held_result_once() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     subscribe(&pool, &f).await;
     let now = Utc::now();
@@ -783,8 +792,9 @@ async fn bounded_nudges_exhaust_and_release_the_held_result_once(pool: PgPool) {
     assert_eq!(inputs, 1, "the subscriber sees the result once");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn progress_resets_the_series(pool: PgPool) {
+#[tokio::test]
+async fn progress_resets_the_series() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     let now = Utc::now();
     prime_idle(&pool, &f, now).await;
@@ -830,8 +840,9 @@ async fn progress_resets_the_series(pool: PgPool) {
     assert_eq!(total, 2);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn changed_fingerprint_cancels_the_pending_nudge(pool: PgPool) {
+#[tokio::test]
+async fn changed_fingerprint_cancels_the_pending_nudge() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     let now = Utc::now();
     prime_idle(&pool, &f, now).await;
@@ -865,8 +876,9 @@ async fn changed_fingerprint_cancels_the_pending_nudge(pool: PgPool) {
     assert_eq!(rule_row(&pool, f.child).await.0, "watching");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn permission_recheck_blocks_a_nudge_from_a_non_ancestor(pool: PgPool) {
+#[tokio::test]
+async fn permission_recheck_blocks_a_nudge_from_a_non_ancestor() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     let stranger = testkit::seed_conversation(&pool, f.owner, f.machine).await;
     subscribe(&pool, &f).await;
@@ -903,8 +915,9 @@ async fn permission_recheck_blocks_a_nudge_from_a_non_ancestor(pool: PgPool) {
     assert_eq!(owner_inputs, 0, "nothing was written into the executor");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn abandon_exhausts_and_releases_the_held_result(pool: PgPool) {
+#[tokio::test]
+async fn abandon_exhausts_and_releases_the_held_result() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     subscribe(&pool, &f).await;
     let now = Utc::now();
@@ -953,8 +966,9 @@ async fn abandon_exhausts_and_releases_the_held_result(pool: PgPool) {
     assert_eq!(line, 1, "the timeline says the nudge failed");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn orchestrator_cannot_set_a_rule_on_a_non_descendant(pool: PgPool) {
+#[tokio::test]
+async fn orchestrator_cannot_set_a_rule_on_a_non_descendant() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     let stranger = testkit::seed_conversation(&pool, f.owner, f.machine).await;
     let ctx = context(&pool);
@@ -981,8 +995,9 @@ async fn orchestrator_cannot_set_a_rule_on_a_non_descendant(pool: PgPool) {
     assert_eq!(cleared["state"], "cleared");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn restart_between_hold_and_nudge_does_not_duplicate_it(pool: PgPool) {
+#[tokio::test]
+async fn restart_between_hold_and_nudge_does_not_duplicate_it() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     let now = Utc::now();
     prime_idle(&pool, &f, now).await;
@@ -1017,8 +1032,9 @@ async fn restart_between_hold_and_nudge_does_not_duplicate_it(pool: PgPool) {
     assert_eq!(nudges, 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn stalled_never_holds_and_never_nudges(pool: PgPool) {
+#[tokio::test]
+async fn stalled_never_holds_and_never_nudges() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     let now = Utc::now();
     rule(&pool, &f, f.parent, 3, 3, 10).await;
@@ -1038,8 +1054,9 @@ async fn stalled_never_holds_and_never_nudges(pool: PgPool) {
     assert!(jobs(&pool, f.child).await.is_empty());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn batch_and_watchdog_fire_once_after_the_marker(pool: PgPool) {
+#[tokio::test]
+async fn batch_and_watchdog_fire_once_after_the_marker() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     subscribe(&pool, &f).await;
     let now = Utc::now();
@@ -1147,8 +1164,9 @@ async fn batch_and_watchdog_fire_once_after_the_marker(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn permission_recheck_blocks_widened_modes_and_open_owner_requests(pool: PgPool) {
+#[tokio::test]
+async fn permission_recheck_blocks_widened_modes_and_open_owner_requests() {
+    let pool = canterlot_hub::testkit::db().await;
     // Режимы расширились после взвода: автор в read_only, цель в bypass.
     let f = fx(&pool).await;
     subscribe(&pool, &f).await;
@@ -1231,8 +1249,9 @@ async fn permission_recheck_blocks_widened_modes_and_open_owner_requests(pool: P
     assert_eq!(jobs(&pool, f2.parent).await.len(), 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_stale_job_clears_the_hold_so_a_new_one_can_be_scheduled(pool: PgPool) {
+#[tokio::test]
+async fn a_stale_job_clears_the_hold_so_a_new_one_can_be_scheduled() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     let now = Utc::now();
     prime_idle(&pool, &f, now).await;
@@ -1288,8 +1307,9 @@ async fn a_stale_job_clears_the_hold_so_a_new_one_can_be_scheduled(pool: PgPool)
     assert_eq!(pending, 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn disabled_after_hold_gives_one_completion_and_no_nudge(pool: PgPool) {
+#[tokio::test]
+async fn disabled_after_hold_gives_one_completion_and_no_nudge() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     subscribe(&pool, &f).await;
     let now = Utc::now();
@@ -1379,8 +1399,9 @@ async fn disabled_after_hold_gives_one_completion_and_no_nudge(pool: PgPool) {
     assert_eq!(jobs(&pool, f2.parent).await.len(), 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_concurrent_settings_change_is_seen_before_the_nudge(pool: PgPool) {
+#[tokio::test]
+async fn a_concurrent_settings_change_is_seen_before_the_nudge() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     subscribe(&pool, &f).await;
     let now = Utc::now();
@@ -1438,8 +1459,9 @@ async fn a_concurrent_settings_change_is_seen_before_the_nudge(pool: PgPool) {
     assert_eq!(jobs(&pool, f.parent).await.len(), 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn input_cancellation_does_not_wait_for_a_claimed_job(pool: PgPool) {
+#[tokio::test]
+async fn input_cancellation_does_not_wait_for_a_claimed_job() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     let now = Utc::now();
     prime_idle(&pool, &f, now).await;
@@ -1492,8 +1514,9 @@ async fn input_cancellation_does_not_wait_for_a_claimed_job(pool: PgPool) {
     assert_eq!(rule_row(&pool, f.child).await.0, "watching");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn stop_between_hold_and_job_cancels_the_nudge_and_releases_once(pool: PgPool) {
+#[tokio::test]
+async fn stop_between_hold_and_job_cancels_the_nudge_and_releases_once() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     subscribe(&pool, &f).await;
     let now = Utc::now();
@@ -1548,8 +1571,9 @@ async fn stop_between_hold_and_job_cancels_the_nudge_and_releases_once(pool: PgP
     assert_eq!(nudges, 0);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn accept_removes_the_rule_and_pending_nudges(pool: PgPool) {
+#[tokio::test]
+async fn accept_removes_the_rule_and_pending_nudges() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     let now = Utc::now();
     prime_idle(&pool, &f, now).await;
@@ -1591,8 +1615,9 @@ async fn accept_removes_the_rule_and_pending_nudges(pool: PgPool) {
     assert_eq!(pending, 0);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn release_waits_for_a_locked_subscription_instead_of_a_fallback_note(pool: PgPool) {
+#[tokio::test]
+async fn release_waits_for_a_locked_subscription_instead_of_a_fallback_note() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     subscribe(&pool, &f).await;
     let now = Utc::now();
@@ -1652,8 +1677,9 @@ async fn release_waits_for_a_locked_subscription_instead_of_a_fallback_note(pool
     assert_eq!(jobs[0]["action"], "event", "no fallback note");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn two_busy_cpu_samples_after_the_turn_mark_background_work(pool: PgPool) {
+#[tokio::test]
+async fn two_busy_cpu_samples_after_the_turn_mark_background_work() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     let now = Utc::now();
     prime_idle(&pool, &f, now).await;
@@ -1705,8 +1731,9 @@ async fn two_busy_cpu_samples_after_the_turn_mark_background_work(pool: PgPool) 
     assert_eq!(held[0]["signals"]["background_suspected"], true);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_nudged_summary_keeps_the_substantive_report(pool: PgPool) {
+#[tokio::test]
+async fn a_nudged_summary_keeps_the_substantive_report() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     subscribe(&pool, &f).await;
     sqlx::query(
@@ -1770,8 +1797,9 @@ async fn a_nudged_summary_keeps_the_substantive_report(pool: PgPool) {
     assert!(text.contains("DETAILED-REPORT-MARKER"), "{text}");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn opencode_summary_keeps_the_answer_before_the_nudges(pool: PgPool) {
+#[tokio::test]
+async fn opencode_summary_keeps_the_answer_before_the_nudges() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     subscribe(&pool, &f).await;
     sqlx::query(
@@ -1835,8 +1863,9 @@ async fn opencode_summary_keeps_the_answer_before_the_nudges(pool: PgPool) {
     assert!(text.contains("OPENCODE-REPORT-MARKER"), "{text}");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_batched_summary_keeps_nudge_metadata_and_the_report(pool: PgPool) {
+#[tokio::test]
+async fn a_batched_summary_keeps_nudge_metadata_and_the_report() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     subscribe(&pool, &f).await;
     sqlx::query(
@@ -1930,8 +1959,9 @@ async fn a_batched_summary_keeps_nudge_metadata_and_the_report(pool: PgPool) {
     assert!(text.contains("BATCH-REPORT-MARKER"), "{text}");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_concurrent_author_read_only_change_blocks_the_nudge(pool: PgPool) {
+#[tokio::test]
+async fn a_concurrent_author_read_only_change_blocks_the_nudge() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     subscribe(&pool, &f).await;
     let now = Utc::now();
@@ -1991,8 +2021,9 @@ async fn a_concurrent_author_read_only_change_blocks_the_nudge(pool: PgPool) {
     assert_eq!(rule_row(&pool, f.child).await.0, "exhausted");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn release_and_subscriber_deletion_complete_with_one_outcome(pool: PgPool) {
+#[tokio::test]
+async fn release_and_subscriber_deletion_complete_with_one_outcome() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     subscribe(&pool, &f).await;
     let other = testkit::seed_conversation(&pool, f.owner, f.machine).await;
@@ -2063,8 +2094,9 @@ async fn release_and_subscriber_deletion_complete_with_one_outcome(pool: PgPool)
     assert_eq!(jobs[0]["action"], "event");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn disabled_refresh_before_cleanup_reports_once(pool: PgPool) {
+#[tokio::test]
+async fn disabled_refresh_before_cleanup_reports_once() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     subscribe(&pool, &f).await;
     let now = Utc::now();
@@ -2159,8 +2191,9 @@ async fn jobs_abandon(
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn nudge_text_comes_from_a_nudge_preset_and_set_rejects_instructions(pool: PgPool) {
+#[tokio::test]
+async fn nudge_text_comes_from_a_nudge_preset_and_set_rejects_instructions() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     let custom = canterlot_hub::presets::create(
         &pool,

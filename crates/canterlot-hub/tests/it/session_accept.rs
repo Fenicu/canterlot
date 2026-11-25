@@ -453,8 +453,9 @@ fn code(result: Result<Value, ToolError>) -> Code {
     result.expect_err("tool error").code
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn accept_stops_then_removes_then_archives(pool: PgPool) {
+#[tokio::test]
+async fn accept_stops_then_removes_then_archives() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     fx.run_child().await;
     assert_eq!(fx.open_subscriptions().await, 1);
@@ -544,8 +545,9 @@ async fn accept_stops_then_removes_then_archives(pool: PgPool) {
     assert_eq!(fx.live_executions().await, 0);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_session_that_died_before_its_worktree_was_created_is_accepted(pool: PgPool) {
+#[tokio::test]
+async fn a_session_that_died_before_its_worktree_was_created_is_accepted() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     // Воркер отверг запуск: исходный каталог не репозиторий git, на диске ничего нет.
     let start: Uuid = sqlx::query_scalar(
@@ -586,8 +588,9 @@ async fn a_session_that_died_before_its_worktree_was_created_is_accepted(pool: P
     assert!(fx.commands("remove_worktree").await.is_empty());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn accept_without_worktree_stops_and_archives(pool: PgPool) {
+#[tokio::test]
+async fn accept_without_worktree_stops_and_archives() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::with(pool, false).await;
     assert!(fx.worktree().await.is_null());
     fx.run_child().await;
@@ -642,8 +645,9 @@ async fn accept_without_worktree_stops_and_archives(pool: PgPool) {
     assert!(archived);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn only_parent_can_accept(pool: PgPool) {
+#[tokio::test]
+async fn only_parent_can_accept() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     fx.run_child().await;
     let child_caller = fx.caller(fx.child, fx.child_execution);
@@ -707,8 +711,9 @@ async fn set_mode(fx: &Fx, id: Uuid, mode: &str) {
         .unwrap();
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn read_only_parent_cannot_stop_a_writing_child_or_discard_its_work(pool: PgPool) {
+#[tokio::test]
+async fn read_only_parent_cannot_stop_a_writing_child_or_discard_its_work() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     fx.stopped_child().await;
     set_mode(&fx, fx.parent, "read_only").await;
@@ -738,8 +743,9 @@ async fn read_only_parent_cannot_stop_a_writing_child_or_discard_its_work(pool: 
     assert_eq!(fx.pending_cleanups().await, 0);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn read_only_parent_may_accept_a_read_only_child_but_never_force(pool: PgPool) {
+#[tokio::test]
+async fn read_only_parent_may_accept_a_read_only_child_but_never_force() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     fx.stopped_child().await;
     set_mode(&fx, fx.parent, "read_only").await;
@@ -762,8 +768,9 @@ async fn read_only_parent_may_accept_a_read_only_child_but_never_force(pool: PgP
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn accept_tells_other_subscribers_instead_of_dropping_them(pool: PgPool) {
+#[tokio::test]
+async fn accept_tells_other_subscribers_instead_of_dropping_them() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     fx.run_child().await;
     let child_caller = fx.caller(fx.child, fx.child_execution);
@@ -864,8 +871,9 @@ async fn post(fx: &Fx, id: Uuid, key: &str, body: Value) -> TestResponse {
         .await
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn owner_can_accept_over_http(pool: PgPool) {
+#[tokio::test]
+async fn owner_can_accept_over_http() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     fx.run_child().await;
     let first = post(&fx, fx.child, "accept-1", json!({})).await;
@@ -901,8 +909,9 @@ async fn owner_can_accept_over_http(pool: PgPool) {
     assert!(unknown.status.as_u16() >= 400);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn owner_accepts_a_child_whose_parent_is_gone(pool: PgPool) {
+#[tokio::test]
+async fn owner_accepts_a_child_whose_parent_is_gone() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     fx.stopped_child().await;
     // Так оставляет deletion.rs: потомок без родителя, но всё ещё делегированный.
@@ -946,8 +955,9 @@ async fn set_worktree_state(fx: &Fx, state: &str) {
         .unwrap();
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn deleting_a_session_keeps_waiting_for_its_worktree(pool: PgPool) {
+#[tokio::test]
+async fn deleting_a_session_keeps_waiting_for_its_worktree() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     fx.stopped_child().await;
     for state in ["active", "dirty", "removing"] {
@@ -967,16 +977,18 @@ async fn deleting_a_session_keeps_waiting_for_its_worktree(pool: PgPool) {
     assert_eq!(done.status, 204, "{}", String::from_utf8_lossy(&done.body));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn delete_does_not_wait_for_a_removal_that_failed(pool: PgPool) {
+#[tokio::test]
+async fn delete_does_not_wait_for_a_removal_that_failed() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     fx.stopped_child().await;
     set_worktree_state(&fx, "failed").await;
     assert_eq!(delete(&fx, fx.child, "failed").await.status, 204);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn delete_does_not_wait_for_a_machine_that_is_gone(pool: PgPool) {
+#[tokio::test]
+async fn delete_does_not_wait_for_a_machine_that_is_gone() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     fx.stopped_child().await;
     sqlx::query("update machines set availability='unavailable' where id=$1")
@@ -987,8 +999,9 @@ async fn delete_does_not_wait_for_a_machine_that_is_gone(pool: PgPool) {
     assert_eq!(delete(&fx, fx.child, "gone").await.status, 204);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn dirty_keeps_work_and_tells_parent(pool: PgPool) {
+#[tokio::test]
+async fn dirty_keeps_work_and_tells_parent() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     fx.stopped_child().await;
     let answer = fx.accept(false).await;
@@ -1026,8 +1039,9 @@ async fn dirty_keeps_work_and_tells_parent(pool: PgPool) {
     assert_eq!(origin["event"]["worktree"], "dirty");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn force_removes_dirty_and_reports_branch(pool: PgPool) {
+#[tokio::test]
+async fn force_removes_dirty_and_reports_branch() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     fx.stopped_child().await;
     fx.accept(false).await;
@@ -1057,8 +1071,9 @@ async fn force_removes_dirty_and_reports_branch(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn failed_removal_is_reported_and_can_be_retried(pool: PgPool) {
+#[tokio::test]
+async fn failed_removal_is_reported_and_can_be_retried() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     fx.stopped_child().await;
     fx.accept(false).await;
@@ -1081,8 +1096,9 @@ async fn failed_removal_is_reported_and_can_be_retried(pool: PgPool) {
     assert_eq!(fx.commands("remove_worktree").await.len(), 2);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn accept_survives_hub_restart(pool: PgPool) {
+#[tokio::test]
+async fn accept_survives_hub_restart() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     fx.run_child().await;
     assert_eq!(fx.accept(false).await["status"], "stopping");
@@ -1103,8 +1119,9 @@ async fn accept_survives_hub_restart(pool: PgPool) {
     assert_eq!(fx.worktree().await["state"], "removed");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn accept_is_idempotent(pool: PgPool) {
+#[tokio::test]
+async fn accept_is_idempotent() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     fx.run_child().await;
     assert_eq!(fx.accept(false).await["status"], "stopping");
@@ -1131,8 +1148,9 @@ async fn accept_is_idempotent(pool: PgPool) {
     assert_eq!(fx.notes().await.len(), notes);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn live_session_gets_one_forced_stop_after_ten_minutes(pool: PgPool) {
+#[tokio::test]
+async fn live_session_gets_one_forced_stop_after_ten_minutes() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     fx.run_child().await;
     fx.accept(false).await;
@@ -1147,8 +1165,9 @@ async fn live_session_gets_one_forced_stop_after_ten_minutes(pool: PgPool) {
     assert_eq!(fx.pending_cleanups().await, 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn stop_that_never_finishes_gives_up_after_a_day(pool: PgPool) {
+#[tokio::test]
+async fn stop_that_never_finishes_gives_up_after_a_day() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     fx.run_child().await;
     fx.accept(false).await;
@@ -1161,8 +1180,9 @@ async fn stop_that_never_finishes_gives_up_after_a_day(pool: PgPool) {
     assert!(fx.last_note().await.contains("stop_timeout"));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn resume_after_cleanup_is_refused(pool: PgPool) {
+#[tokio::test]
+async fn resume_after_cleanup_is_refused() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     fx.stopped_child().await;
     fx.accept(false).await;
@@ -1202,8 +1222,9 @@ async fn resume_after_cleanup_is_refused(pool: PgPool) {
     assert_eq!(launched, 1, "no second start was queued");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn dirty_session_can_be_resumed_because_its_worktree_exists(pool: PgPool) {
+#[tokio::test]
+async fn dirty_session_can_be_resumed_because_its_worktree_exists() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     fx.stopped_child().await;
     fx.accept(false).await;
@@ -1224,8 +1245,9 @@ async fn dirty_session_can_be_resumed_because_its_worktree_exists(pool: PgPool) 
     assert_eq!(start["worktree"]["branch"], fx.worktree().await["branch"]);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn worktree_removed_requires_capability_negotiated_command(pool: PgPool) {
+#[tokio::test]
+async fn worktree_removed_requires_capability_negotiated_command() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     fx.stopped_child().await;
     fx.accept(false).await;
@@ -1269,8 +1291,9 @@ async fn worktree_removed_requires_capability_negotiated_command(pool: PgPool) {
     assert_eq!(fx.worktree().await["state"], "removed");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn rejected_removal_does_not_leave_the_copy_removing(pool: PgPool) {
+#[tokio::test]
+async fn rejected_removal_does_not_leave_the_copy_removing() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     fx.stopped_child().await;
     fx.accept(false).await;
@@ -1312,8 +1335,9 @@ async fn control_tool(
     session_tools::call(&fx.context, &caller, tool, json!({"session_id": target})).await
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn interrupt_stops_the_live_turn_once(pool: PgPool) {
+#[tokio::test]
+async fn interrupt_stops_the_live_turn_once() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     fx.run_child().await;
     let first = control_tool(&fx, fx.parent_caller(), "sessions.interrupt", fx.child)
@@ -1329,8 +1353,9 @@ async fn interrupt_stops_the_live_turn_once(pool: PgPool) {
     assert_eq!(fx.live_executions().await, 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn interrupt_reports_nothing_running(pool: PgPool) {
+#[tokio::test]
+async fn interrupt_reports_nothing_running() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     fx.stopped_child().await;
     let answer = control_tool(&fx, fx.parent_caller(), "sessions.interrupt", fx.child)
@@ -1340,8 +1365,9 @@ async fn interrupt_reports_nothing_running(pool: PgPool) {
     assert!(fx.commands("interrupt").await.is_empty());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn stop_stops_the_process_and_keeps_the_worktree(pool: PgPool) {
+#[tokio::test]
+async fn stop_stops_the_process_and_keeps_the_worktree() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     fx.run_child().await;
     let answer = control_tool(&fx, fx.parent_caller(), "sessions.stop", fx.child)
@@ -1360,8 +1386,9 @@ async fn stop_stops_the_process_and_keeps_the_worktree(pool: PgPool) {
     assert!(fx.accept(false).await["status"].is_string());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn only_the_direct_parent_may_stop_and_owner_sessions_are_untouchable(pool: PgPool) {
+#[tokio::test]
+async fn only_the_direct_parent_may_stop_and_owner_sessions_are_untouchable() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     let elsewhere = testkit::seed_conversation(&fx.pool, fx.owner, fx.machine).await;
     sqlx::query("update conversations set parent_conversation_id=$2 where id=$1")
@@ -1406,8 +1433,9 @@ async fn send_to_child(fx: &Fx, text: &str) -> Value {
     .unwrap()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn after_an_interrupt_the_parents_next_message_is_delivered(pool: PgPool) {
+#[tokio::test]
+async fn after_an_interrupt_the_parents_next_message_is_delivered() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     fx.run_child().await;
     let answer = control_tool(&fx, fx.parent_caller(), "sessions.interrupt", fx.child)
@@ -1438,8 +1466,9 @@ async fn after_an_interrupt_the_parents_next_message_is_delivered(pool: PgPool) 
     assert_eq!(state, "queued");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_parent_never_lifts_the_owners_stop(pool: PgPool) {
+#[tokio::test]
+async fn the_parent_never_lifts_the_owners_stop() {
+    let pool = canterlot_hub::testkit::db().await;
     let fx = Fx::new(pool).await;
     fx.run_child().await;
     control_tool(&fx, fx.parent_caller(), "sessions.interrupt", fx.child)

@@ -230,8 +230,9 @@ fn code(response: &TestResponse) -> String {
         .to_owned()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn input_bookmark_add_is_idempotent_and_delete_is_idempotent(pool: PgPool) {
+#[tokio::test]
+async fn input_bookmark_add_is_idempotent_and_delete_is_idempotent() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let input = f.input(f.conversation, "  Привет,\n мир  ", 17).await;
 
@@ -268,10 +269,9 @@ async fn input_bookmark_add_is_idempotent_and_delete_is_idempotent(pool: PgPool)
     assert!(f.list(f.conversation).await.is_empty());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn block_bookmark_excerpt_collapses_whitespace_and_cuts_on_a_character_boundary(
-    pool: PgPool,
-) {
+#[tokio::test]
+async fn block_bookmark_excerpt_collapses_whitespace_and_cuts_on_a_character_boundary() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let long = format!("  Первая\n\nстрока\t{}", "Ж".repeat(400));
     let block = f.block(f.conversation, &long, 5, None).await;
@@ -303,8 +303,9 @@ async fn block_bookmark_excerpt_collapses_whitespace_and_cuts_on_a_character_bou
     assert_eq!(bookmark["excerpt"], "");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn nested_foreign_and_unknown_targets_are_refused(pool: PgPool) {
+#[tokio::test]
+async fn nested_foreign_and_unknown_targets_are_refused() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let other = f.conversation("Другая").await;
     let top = f.block(f.conversation, "верхний", 1, None).await;
@@ -341,8 +342,9 @@ async fn nested_foreign_and_unknown_targets_are_refused(pool: PgPool) {
         .unwrap();
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn conversation_list_follows_the_timeline_not_the_bookmarking_order(pool: PgPool) {
+#[tokio::test]
+async fn conversation_list_follows_the_timeline_not_the_bookmarking_order() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let first = f.input(f.conversation, "первый", 10).await;
     let second = f.block(f.conversation, "второй", 20, None).await;
@@ -363,8 +365,9 @@ async fn conversation_list_follows_the_timeline_not_the_bookmarking_order(pool: 
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn global_list_is_newest_first_paginates_and_hides_trash(pool: PgPool) {
+#[tokio::test]
+async fn global_list_is_newest_first_paginates_and_hides_trash() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let first_chat = f.conversation("Первый разговор").await;
     let second_chat = f.conversation("Второй разговор").await;
@@ -444,8 +447,9 @@ async fn global_list_is_newest_first_paginates_and_hides_trash(pool: PgPool) {
     assert_eq!(code(&refused), "invalid_request");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn missing_targets_are_omitted_and_removed_lazily(pool: PgPool) {
+#[tokio::test]
+async fn missing_targets_are_omitted_and_removed_lazily() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let block = f.block(f.conversation, "исчезнет", 1, None).await;
     assert_eq!(f.put(f.conversation, "block", block).await.status, 201);
@@ -463,8 +467,9 @@ async fn missing_targets_are_omitted_and_removed_lazily(pool: PgPool) {
     assert_eq!(rows, 0);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn purging_a_conversation_removes_its_bookmarks(pool: PgPool) {
+#[tokio::test]
+async fn purging_a_conversation_removes_its_bookmarks() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let input = f
         .input(f.conversation, "уйдёт вместе с разговором", 1)
@@ -503,8 +508,9 @@ async fn purging_a_conversation_removes_its_bookmarks(pool: PgPool) {
     assert_eq!(rows, 0);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn bookmark_changed_is_published_on_add_and_remove(pool: PgPool) {
+#[tokio::test]
+async fn bookmark_changed_is_published_on_add_and_remove() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let input = f.input(f.conversation, "отмечу", 4).await;
     let created: Value = f.put(f.conversation, "input", input).await.json();
@@ -551,8 +557,9 @@ async fn migration_applies_on_top_of_0080(pool: PgPool) -> Result<(), Box<dyn st
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn bookmark_changed_matches_the_published_schema(pool: PgPool) {
+#[tokio::test]
+async fn bookmark_changed_matches_the_published_schema() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let block = f.block(f.conversation, "текст ответа", 1, None).await;
     assert_eq!(f.put(f.conversation, "block", block).await.status, 201);

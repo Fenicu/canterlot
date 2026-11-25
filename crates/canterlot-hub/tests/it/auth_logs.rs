@@ -9,7 +9,6 @@ use std::{
 
 use canterlot_hub::testkit::{Method, TEST_OWNER_LOGIN};
 use serde_json::json;
-use sqlx::PgPool;
 use tracing_subscriber::fmt::MakeWriter;
 
 use crate::support::auth::{AuthHub, PASSWORD};
@@ -68,8 +67,9 @@ fn clear() {
     captured().lock().unwrap().clear();
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn auth_logs_expected_internet_outcomes_are_info(pool: PgPool) {
+#[tokio::test]
+async fn auth_logs_expected_internet_outcomes_are_info() {
+    let pool = canterlot_hub::testkit::db().await;
     captured();
     let hub = AuthHub::new(pool).await;
     hub.set_password(PASSWORD).await;

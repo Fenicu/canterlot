@@ -38,8 +38,9 @@ fn context(pool: &PgPool) -> ToolContext {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn limits_report_lists_every_provider_with_windows_and_freshness(pool: PgPool) {
+#[tokio::test]
+async fn limits_report_lists_every_provider_with_windows_and_freshness() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     for provider in ["claude", "codex", "opencode"] {
         testkit::offer_provider(&pool, seed.machine_id, provider).await;
@@ -170,8 +171,9 @@ async fn insert_weekly_with_forecast(
 
 /// Провайдер без харнесса в каталоге машин владельца скрыт и в PWA, и в инструменте,
 /// включая строку `Observed:`; видимые провайдеры описаны как прежде.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn limits_report_hides_providers_the_pwa_hides(pool: PgPool) {
+#[tokio::test]
+async fn limits_report_hides_providers_the_pwa_hides() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     testkit::offer_provider(&pool, seed.machine_id, "claude").await;
     testkit::offer_provider(&pool, seed.machine_id, "codex").await;
@@ -218,8 +220,9 @@ async fn limits_report_hides_providers_the_pwa_hides(pool: PgPool) {
 }
 
 /// Ни одного провайдера в каталоге: инструмент говорит, что данных нет, как пустая полоса PWA.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn limits_report_without_offered_providers_says_no_data(pool: PgPool) {
+#[tokio::test]
+async fn limits_report_without_offered_providers_says_no_data() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     sqlx::query(
         "insert into provider_limits(provider,weekly_used_permille,weekly_resets_at,weekly_observed_at)
@@ -237,8 +240,9 @@ async fn limits_report_without_offered_providers_says_no_data(pool: PgPool) {
 
 /// Сброс окна уже прошёл: инструмент говорит, что данные устарели, не обещает сброс
 /// «меньше чем через минуту» и не даёт прогноз; окно без прошедшего сброса не меняется.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn limits_report_marks_a_passed_reset_as_stale(pool: PgPool) {
+#[tokio::test]
+async fn limits_report_marks_a_passed_reset_as_stale() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     testkit::offer_provider(&pool, seed.machine_id, "codex").await;
     let now = Utc::now();
@@ -275,8 +279,9 @@ async fn limits_report_marks_a_passed_reset_as_stale(pool: PgPool) {
 
 /// Прогноз есть у свежего окна и пропадает у окна, чьи данные старше `limits.stale_after`
 /// или чей сброс уже прошёл.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn limits_report_suppresses_the_forecast_for_stale_windows(pool: PgPool) {
+#[tokio::test]
+async fn limits_report_suppresses_the_forecast_for_stale_windows() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     for provider in ["claude", "codex", "opencode"] {
         testkit::offer_provider(&pool, seed.machine_id, provider).await;
@@ -363,8 +368,9 @@ async fn limits_report_suppresses_the_forecast_for_stale_windows(pool: PgPool) {
     assert_eq!(find("opencode")["forecast"], serde_json::Value::Null);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn limits_report_includes_the_countdown_and_the_forecast(pool: PgPool) {
+#[tokio::test]
+async fn limits_report_includes_the_countdown_and_the_forecast() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     testkit::offer_provider(&pool, seed.machine_id, "claude").await;
     testkit::offer_provider(&pool, seed.machine_id, "codex").await;
@@ -479,10 +485,9 @@ async fn second_account_machine(pool: &PgPool, owner: Uuid, name: &str, account:
     id
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn limits_report_prints_a_line_per_account_and_names_it_only_when_there_are_several(
-    pool: PgPool,
-) {
+#[tokio::test]
+async fn limits_report_prints_a_line_per_account_and_names_it_only_when_there_are_several() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     testkit::offer_provider(&pool, seed.machine_id, "opencode").await;
     let now = Utc::now();
@@ -543,10 +548,9 @@ async fn limits_report_prints_a_line_per_account_and_names_it_only_when_there_ar
     assert!(text.contains("Observed: opencode b-opencode"), "{text}");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn credentials_and_credits_are_listed_per_machine_and_never_mixed_across_accounts(
-    pool: PgPool,
-) {
+#[tokio::test]
+async fn credentials_and_credits_are_listed_per_machine_and_never_mixed_across_accounts() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_proto::worker::v1::{ProviderCredits, ResetCredit};
     let seed = testkit::seed(&pool).await;
     testkit::offer_provider(&pool, seed.machine_id, "opencode").await;
@@ -662,8 +666,9 @@ async fn credentials_and_credits_are_listed_per_machine_and_never_mixed_across_a
     assert_eq!(payload["machine_credits"][0]["reset_count"], 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn limits_report_without_data_says_so(pool: PgPool) {
+#[tokio::test]
+async fn limits_report_without_data_says_so() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let caller = Caller {
         owner_id: seed.owner_id,

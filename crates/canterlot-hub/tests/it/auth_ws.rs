@@ -28,8 +28,9 @@ async fn closed_as_revoked(ws: &mut TestWs, within: Duration) {
     assert_eq!(ws.close_code, Some(4401));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn auth_ws_revocation_closes_the_socket_within_two_seconds(pool: PgPool) {
+#[tokio::test]
+async fn auth_ws_revocation_closes_the_socket_within_two_seconds() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = hub(pool, Duration::from_secs(60)).await;
     let addr = hub.addr.unwrap();
     let (id, token) = hub.session(SignInMethod::Password, None).await;
@@ -60,8 +61,9 @@ async fn auth_ws_revocation_closes_the_socket_within_two_seconds(pool: PgPool) {
 }
 
 #[cfg(feature = "fault-injection")]
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn auth_ws_lost_notice_is_caught_by_the_periodic_check(pool: PgPool) {
+#[tokio::test]
+async fn auth_ws_lost_notice_is_caught_by_the_periodic_check() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = hub(pool, Duration::from_millis(500)).await;
     let (id, token) = hub.session(SignInMethod::Password, None).await;
     let mut ws = TestWs::connect(hub.addr.unwrap(), TEST_ORIGIN, Some(&token))
@@ -74,8 +76,9 @@ async fn auth_ws_lost_notice_is_caught_by_the_periodic_check(pool: PgPool) {
     closed_as_revoked(&mut ws, Duration::from_secs(3)).await;
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn auth_ws_idle_expiry_closes_the_socket_on_the_periodic_check(pool: PgPool) {
+#[tokio::test]
+async fn auth_ws_idle_expiry_closes_the_socket_on_the_periodic_check() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = hub(pool, Duration::from_millis(300)).await;
     let (id, token) = hub.session(SignInMethod::Password, None).await;
     let mut ws = TestWs::connect(hub.addr.unwrap(), TEST_ORIGIN, Some(&token))

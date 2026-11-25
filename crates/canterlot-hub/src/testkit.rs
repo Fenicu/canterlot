@@ -3,6 +3,9 @@ use uuid::Uuid;
 
 use crate::model::HoldReason;
 
+mod test_db;
+pub use test_db::db;
+
 pub const TEST_OWNER_LOGIN: &str = "owner";
 pub const TEST_ORIGIN: &str = "https://chat.test";
 /// Токен сеанса, заранее заведённого для владельца в каждой тестовой базе
@@ -14,7 +17,7 @@ pub const TEST_SESSION_COOKIE: &str =
 pub const TEST_SESSION_ID: Uuid = Uuid::from_u128(0x0190_0000_0000_7000_8000_0000_0000_0001);
 
 /// Заводит (или оживляет) тестовый сеанс владельца: свежий, без адреса.
-/// Каждый `sqlx::test` получает свою базу, поэтому общий токен не пересекается между тестами.
+/// Каждый тест получает свою базу (`db()` или `sqlx::test`), поэтому общий токен не пересекается между тестами.
 /// Тест, который сбрасывает установку или сеансы, вызывает это снова.
 pub async fn seed_test_session(pool: &PgPool, owner_id: Uuid) {
     sqlx::query(

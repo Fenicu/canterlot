@@ -95,8 +95,9 @@ async fn slot(pool: &PgPool, conversation_id: Uuid) -> RunSlot {
     RunSlot::from_columns(&name, id, attempt).unwrap()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn receipts_are_monotonic_and_attempt_scoped(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn receipts_are_monotonic_and_attempt_scoped() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let (_, _, first) = setup(&pool).await;
     assert_eq!(
         apply(&pool, first.command_id, 1, InputReceipt::Accepted).await,
@@ -142,8 +143,9 @@ async fn receipts_are_monotonic_and_attempt_scoped(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn undetermined_pauses_and_never_redispatches(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn undetermined_pauses_and_never_redispatches() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let (seed, execution, head) = setup(&pool).await;
     input(&pool, &seed).await;
     let unrelated = PauseReason::UnconfirmedDelivery {
@@ -228,8 +230,9 @@ async fn undetermined_pauses_and_never_redispatches(pool: PgPool) -> TestResult 
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn withdrawn_returns_to_same_place(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn withdrawn_returns_to_same_place() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     for receipt in [
         InputReceipt::Withdrawn,
         InputReceipt::DispatchDeferred {
@@ -291,8 +294,9 @@ async fn withdrawn_returns_to_same_place(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn receipt_mapping_and_events(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn receipt_mapping_and_events() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let (seed, execution, head) = setup(&pool).await;
     for (receipt, expected_state, delivery, rank, expected_slot) in [
         (
@@ -391,8 +395,9 @@ async fn receipt_mapping_and_events(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn cancel_lost_is_rank_neutral_and_allows_acceptance(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn cancel_lost_is_rank_neutral_and_allows_acceptance() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let (seed, _, head) = setup(&pool).await;
     apply(&pool, head.command_id, 1, InputReceipt::TransmissionStarted).await;
     sqlx::query("update inputs set cancel_requested = true where id = $1")
@@ -479,8 +484,9 @@ async fn cancel_lost_is_rank_neutral_and_allows_acceptance(pool: PgPool) -> Test
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn acceptance_and_terminal_execution_free_slot_in_either_order(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn acceptance_and_terminal_execution_free_slot_in_either_order() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     for terminal in [ExecutionState::Stopped, ExecutionState::Failed] {
         for accepted_first in [true, false] {
             let (seed, execution, head) = setup(&pool).await;
@@ -550,8 +556,9 @@ async fn acceptance_and_terminal_execution_free_slot_in_either_order(pool: PgPoo
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn terminal_execution_acceptance_preserves_unrelated_slots(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn terminal_execution_acceptance_preserves_unrelated_slots() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     for next_state in ["free", "dispatching", "running"] {
         let (seed, execution, head) = setup(&pool).await;
         executions::set_state(
@@ -606,8 +613,9 @@ async fn terminal_execution_acceptance_preserves_unrelated_slots(pool: PgPool) -
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn dispatch_deferred_adds_hold_once_and_is_atomic_with_event(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn dispatch_deferred_adds_hold_once_and_is_atomic_with_event() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     for already_held in [false, true] {
         let (seed, _, head) = setup(&pool).await;
         let mut holds = vec![HoldReason::ContextMaintenance, HoldReason::RunInProgress];
@@ -663,8 +671,9 @@ async fn dispatch_deferred_adds_hold_once_and_is_atomic_with_event(pool: PgPool)
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn transmitting_never_returns_to_queue_or_cancellation(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn transmitting_never_returns_to_queue_or_cancellation() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     for receipt in [
         InputReceipt::Withdrawn,
         InputReceipt::DispatchDeferred {
@@ -687,8 +696,9 @@ async fn transmitting_never_returns_to_queue_or_cancellation(pool: PgPool) -> Te
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn unknown_and_terminal_receipts_are_ignored(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn unknown_and_terminal_receipts_are_ignored() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     assert_eq!(
         apply(&pool, Uuid::now_v7(), 1, InputReceipt::Stored).await,
         ApplyOutcome::Ignored(Ignored::UnknownCommand)
@@ -714,8 +724,9 @@ async fn unknown_and_terminal_receipts_are_ignored(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn late_acceptance_preserves_another_running_slot(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn late_acceptance_preserves_another_running_slot() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let (seed, execution, head) = setup(&pool).await;
     apply(
         &pool,
@@ -759,8 +770,9 @@ async fn late_acceptance_preserves_another_running_slot(pool: PgPool) -> TestRes
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn run_finished_matches_execution_command_and_running_slot(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn run_finished_matches_execution_command_and_running_slot() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let (seed, execution, head) = setup(&pool).await;
     let (other, other_execution, other_head) = setup(&pool).await;
     apply_run_finished(
@@ -830,8 +842,9 @@ async fn run_finished_matches_execution_command_and_running_slot(pool: PgPool) -
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn event_failure_rolls_back_receipt_and_run_finished(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn event_failure_rolls_back_receipt_and_run_finished() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let (seed, execution, head) = setup(&pool).await;
     let before = snapshot(&pool, &head).await;
     sqlx::query("alter table events add constraint reject_receipt_events check (kind <> 'input_state_changed') not valid").execute(&pool).await?;
@@ -877,8 +890,9 @@ async fn event_failure_rolls_back_receipt_and_run_finished(pool: PgPool) -> Test
 /// передавалась агенту. Повторять её молча нельзя, а удержание «нет
 /// исполнения» на живом исполнении не снялось бы до его перезапуска:
 /// приём считается неподтверждённым, решает владелец.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn already_transmitted_deferral_is_unconfirmed_not_held(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn already_transmitted_deferral_is_unconfirmed_not_held() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let (seed, _, head) = setup(&pool).await;
     apply(&pool, head.command_id, 1, InputReceipt::Stored).await;
     assert_eq!(

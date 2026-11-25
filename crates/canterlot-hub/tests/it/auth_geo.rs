@@ -114,8 +114,9 @@ async fn geo_hub(pool: PgPool, dir: &tempfile::TempDir) -> AuthHub {
     AuthHub::with_geo(pool, path).await
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn auth_geo_sessions_show_the_cached_location(pool: PgPool) {
+#[tokio::test]
+async fn auth_geo_sessions_show_the_cached_location() {
+    let pool = canterlot_hub::testkit::db().await;
     let dir = tempfile::tempdir().unwrap();
     let hub = geo_hub(pool, &dir).await;
     hub.set_password(PASSWORD).await;
@@ -161,8 +162,9 @@ async fn pushes(pool: &PgPool, kind: &str) -> Vec<Value> {
         .unwrap()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn auth_geo_new_country_is_pushed_once_per_session_and_country(pool: PgPool) {
+#[tokio::test]
+async fn auth_geo_new_country_is_pushed_once_per_session_and_country() {
+    let pool = canterlot_hub::testkit::db().await;
     let dir = tempfile::tempdir().unwrap();
     let hub = geo_hub(pool, &dir).await;
     crate::auth_pushes::enable(&hub.pool).await;
@@ -216,8 +218,9 @@ async fn auth_geo_new_country_is_pushed_once_per_session_and_country(pool: PgPoo
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn auth_geo_missing_base_gives_no_location(pool: PgPool) {
+#[tokio::test]
+async fn auth_geo_missing_base_gives_no_location() {
+    let pool = canterlot_hub::testkit::db().await;
     let dir = tempfile::tempdir().unwrap();
     let hub = AuthHub::with_geo(pool, dir.path().join("absent.mmdb")).await;
     hub.set_password(PASSWORD).await;

@@ -1754,10 +1754,10 @@ pub(crate) async fn publish_archive_cancellations(
 mod tests {
     /// Терпение очереди считается с первой заблокированной попытки, а не с создания
     /// задания: давно созданное событие не сгорает на первом `queue_full`.
-    #[sqlx::test(migrations = "./migrations")]
-    async fn queue_full_patience_runs_from_the_first_block(
-        pool: sqlx::PgPool,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    #[tokio::test]
+    async fn queue_full_patience_runs_from_the_first_block()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let pool = crate::testkit::db().await;
         let seed = crate::testkit::seed(&pool).await;
         let id = uuid::Uuid::now_v7();
         let now = chrono::Utc::now();
@@ -1823,10 +1823,10 @@ mod tests {
     }
 
     /// Исчерпание попыток задания очереди: элемент `failed`, следующий снова доступен.
-    #[sqlx::test(migrations = "./migrations")]
-    async fn exhausted_spawn_dequeue_fails_the_item_and_wakes_the_next(
-        pool: sqlx::PgPool,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    #[tokio::test]
+    async fn exhausted_spawn_dequeue_fails_the_item_and_wakes_the_next()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let pool = crate::testkit::db().await;
         let seed = crate::testkit::seed(&pool).await;
         let now = chrono::Utc::now();
         let failed_item = uuid::Uuid::now_v7();
@@ -1901,10 +1901,10 @@ mod tests {
 
     /// Повтор с ядовитой нагрузкой: `record_failure` возвращает ошибку и синхронно
     /// откатывает транзакцию, не оставляя блокировки строки задания.
-    #[sqlx::test(migrations = "./migrations")]
-    async fn record_failure_retry_rolls_back_row_lock(
-        pool: sqlx::PgPool,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    #[tokio::test]
+    async fn record_failure_retry_rolls_back_row_lock()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let pool = crate::testkit::db().await;
         let seed = crate::testkit::seed(&pool).await;
         let job = super::JobRow {
             id: uuid::Uuid::now_v7(),

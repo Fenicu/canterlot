@@ -58,8 +58,9 @@ pub(crate) async fn fleet(pool: &PgPool) -> Fleet {
 
 // ───────── Создание ─────────
 
-#[sqlx::test(migrations = "./migrations")]
-async fn add_runner_creates_a_runner_row_that_accepts_remote_work(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn add_runner_creates_a_runner_row_that_accepts_remote_work() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let owner = owner(&pool).await;
     let parent = machines::add(&pool, owner, "carrier").await?;
     let runner = machines::add_runner(&pool, owner, "runner-a", &spec(parent.machine_id)).await?;
@@ -105,8 +106,9 @@ async fn add_runner_creates_a_runner_row_that_accepts_remote_work(pool: PgPool) 
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn add_runner_validates_parent_and_root_dir(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn add_runner_validates_parent_and_root_dir() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let owner = owner(&pool).await;
     let parent = machines::add(&pool, owner, "carrier").await?;
     let runner = machines::add_runner(&pool, owner, "runner-a", &spec(parent.machine_id)).await?;
@@ -174,8 +176,9 @@ async fn add_runner_validates_parent_and_root_dir(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn the_runner_shape_is_enforced_by_the_database(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn the_runner_shape_is_enforced_by_the_database() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let owner = owner(&pool).await;
     let parent = machines::add(&pool, owner, "carrier").await?;
     let no_parent = sqlx::query("insert into machines (id, owner_id, name, role, root_dir) values ($1, $2, 'x', 'runner', '/srv/x')")
@@ -202,8 +205,9 @@ async fn the_runner_shape_is_enforced_by_the_database(pool: PgPool) -> TestResul
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn set_carrier_marks_only_worker_machines(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn set_carrier_marks_only_worker_machines() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fleet(&pool).await;
     let is_carrier = |id: Uuid| {
         let pool = pool.clone();
@@ -431,8 +435,9 @@ async fn cli_adds_runners_and_marks_carriers(pool: PgPool) -> TestResult {
 
 // ───────── Допуск несущей ─────────
 
-#[sqlx::test(migrations = "./migrations")]
-async fn a_carrier_gets_a_token_for_its_runner_and_only_its_own(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_carrier_gets_a_token_for_its_runner_and_only_its_own() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fleet(&pool).await;
     let old = sqlx::query_scalar::<_, Vec<u8>>(
         "select token_sha256 from machine_credentials where machine_id = $1 and revoked_at is null",
@@ -505,8 +510,9 @@ async fn a_carrier_gets_a_token_for_its_runner_and_only_its_own(pool: PgPool) ->
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn a_revoked_runner_gets_no_token(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_revoked_runner_gets_no_token() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fleet(&pool).await;
     machines::revoke(&pool, f.runner).await?;
     assert_eq!(
@@ -525,8 +531,9 @@ async fn a_revoked_runner_gets_no_token(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn observations_pass_the_same_gate_and_keep_the_last_one(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn observations_pass_the_same_gate_and_keep_the_last_one() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fleet(&pool).await;
     let at = Utc::now();
     machines::record_runner_observation(&pool, f.carrier, f.runner, false, 4, at).await?;
@@ -580,8 +587,9 @@ async fn observations_pass_the_same_gate_and_keep_the_last_one(pool: PgPool) -> 
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn runners_of_lists_only_live_children_of_the_carrier(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn runners_of_lists_only_live_children_of_the_carrier() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fleet(&pool).await;
     let second = machines::add_runner(
         &pool,
@@ -677,8 +685,9 @@ fn availability_follows_the_spec_rule() {
     );
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn availability_reads_the_registry_and_the_stored_observation(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn availability_reads_the_registry_and_the_stored_observation() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fleet(&pool).await;
     let registry = Registry::new(Default::default());
     let at = |conn: &PgPool| {
@@ -764,8 +773,9 @@ async fn seed_job(
     id
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn revoke_ends_in_place_jobs_as_lost_with_one_message_each(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn revoke_ends_in_place_jobs_as_lost_with_one_message_each() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let carrier = machines::add(&pool, seed.owner_id, "carrier").await?;
     let runner =
@@ -831,8 +841,9 @@ async fn revoke_ends_in_place_jobs_as_lost_with_one_message_each(pool: PgPool) -
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn revoke_of_an_ordinary_machine_also_ends_its_jobs(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn revoke_of_an_ordinary_machine_also_ends_its_jobs() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let worker = machines::add(&pool, seed.owner_id, "build-host").await?;
     let queued = seed_job(

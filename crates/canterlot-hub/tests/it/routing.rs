@@ -205,8 +205,9 @@ async fn child_of(pool: &PgPool, parent: Uuid, harness: &str, model: &str, state
     id
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn spawn_with_route_starts_resolved_session(pool: PgPool) {
+#[tokio::test]
+async fn spawn_with_route_starts_resolved_session() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let answer = f
         .call(
@@ -258,8 +259,9 @@ async fn spawn_with_route_starts_resolved_session(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn spawn_with_route_and_harness_or_model_is_invalid(pool: PgPool) {
+#[tokio::test]
+async fn spawn_with_route_and_harness_or_model_is_invalid() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     for args in [
         json!({"route":{"task_type":"bugfix"},"harness":"opencode","brief":"b"}),
@@ -272,8 +274,9 @@ async fn spawn_with_route_and_harness_or_model_is_invalid(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn spawn_accepts_route_as_a_task_type_string(pool: PgPool) {
+#[tokio::test]
+async fn spawn_accepts_route_as_a_task_type_string() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     // Один кандидат на оба типа: сравнение короткой и вложенной формы не зависит от занятости.
     sqlx::query("update owners set routing_policy=$2 where id=$1")
@@ -356,8 +359,9 @@ async fn spawn_accepts_route_as_a_task_type_string(pool: PgPool) {
     assert_eq!(plain_level, None);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn spawn_rejects_level_that_disagrees_with_route_level(pool: PgPool) {
+#[tokio::test]
+async fn spawn_rejects_level_that_disagrees_with_route_level() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let error = f
         .call(
@@ -374,8 +378,9 @@ async fn spawn_rejects_level_that_disagrees_with_route_level(pool: PgPool) {
     assert!(error.message.contains("route.level"), "{}", error.message);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn spawn_rejects_level_without_route(pool: PgPool) {
+#[tokio::test]
+async fn spawn_rejects_level_without_route() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let error = f
         .call("sessions.spawn", json!({"level":"high","brief":"b"}))
@@ -389,8 +394,9 @@ async fn spawn_rejects_level_without_route(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn spawn_with_unknown_task_type_lists_available(pool: PgPool) {
+#[tokio::test]
+async fn spawn_with_unknown_task_type_lists_available() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let error = f
         .call(
@@ -403,8 +409,9 @@ async fn spawn_with_unknown_task_type_lists_available(pool: PgPool) {
     assert!(error.message.contains("bugfix"), "{}", error.message);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn spawn_with_route_reports_no_executor(pool: PgPool) {
+#[tokio::test]
+async fn spawn_with_route_reports_no_executor() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     for provider in ["opencode", "claude", "codex"] {
         sqlx::query(
@@ -428,8 +435,9 @@ async fn spawn_with_route_reports_no_executor(pool: PgPool) {
     assert!(error.message.contains("weekly"), "{}", error.message);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn spawn_with_route_counts_only_live_delegates(pool: PgPool) {
+#[tokio::test]
+async fn spawn_with_route_counts_only_live_delegates() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     // Четыре живых делегата на DeepSeek: выбор уходит к Muse.
     for _ in 0..4 {
@@ -465,8 +473,9 @@ async fn spawn_with_route_counts_only_live_delegates(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn spawn_with_route_applies_explicit_overrides(pool: PgPool) {
+#[tokio::test]
+async fn spawn_with_route_applies_explicit_overrides() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let preset_id = Uuid::now_v7();
     sqlx::query("insert into instruction_presets(id,owner_id,title,revision,origin) values($1,$2,'Свой',1,'owner')")
@@ -529,8 +538,9 @@ async fn spawn_with_route_applies_explicit_overrides(pool: PgPool) {
     assert!((50..=70).contains(&lead), "watchdog ~60 min, got {lead}");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn spawn_without_route_arms_explicit_watchdog(pool: PgPool) {
+#[tokio::test]
+async fn spawn_without_route_arms_explicit_watchdog() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let answer = f
         .call(
@@ -550,8 +560,9 @@ async fn spawn_without_route_arms_explicit_watchdog(pool: PgPool) {
     assert!(armed, "explicit watchdog arms the parent");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn no_agent_call_changes_routing_policy(pool: PgPool) {
+#[tokio::test]
+async fn no_agent_call_changes_routing_policy() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let snapshot = |pool: PgPool| async move {
         sqlx::query_scalar::<_, String>("select string_agg(o::text,',' order by id) from owners o")
@@ -574,8 +585,9 @@ async fn no_agent_call_changes_routing_policy(pool: PgPool) {
     assert_eq!(snapshot(f.pool.clone()).await, before);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn routing_policy_http_roundtrip(pool: PgPool) {
+#[tokio::test]
+async fn routing_policy_http_roundtrip() {
+    let pool = canterlot_hub::testkit::db().await;
     let (deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
     let owner = deps.installation.owner_id;
@@ -654,8 +666,9 @@ async fn routing_policy_http_roundtrip(pool: PgPool) {
     let _ = owner;
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn routing_preview_http_matches_tool(pool: PgPool) {
+#[tokio::test]
+async fn routing_preview_http_matches_tool() {
+    let pool = canterlot_hub::testkit::db().await;
     let (deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
     let owner = deps.installation.owner_id;
@@ -716,8 +729,9 @@ async fn routing_preview_http_matches_tool(pool: PgPool) {
     assert_eq!(http_unknown.status, 404, "{:?}", http_unknown.body);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn routing_preview_no_executor_has_structured_details(pool: PgPool) {
+#[tokio::test]
+async fn routing_preview_no_executor_has_structured_details() {
+    let pool = canterlot_hub::testkit::db().await;
     let (deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
     let owner = deps.installation.owner_id;
@@ -771,8 +785,9 @@ async fn provider_status(pool: &PgPool, provider: &str, level: &str) {
     .unwrap();
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn route_skips_a_provider_in_outage_and_explains_it(pool: PgPool) {
+#[tokio::test]
+async fn route_skips_a_provider_in_outage_and_explains_it() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     provider_status(&f.pool, "codex", "partial_outage").await;
     let preview = f
@@ -808,8 +823,9 @@ async fn route_skips_a_provider_in_outage_and_explains_it(pool: PgPool) {
     assert!(answer.get("provider_status").is_none(), "{answer}");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn route_chooses_an_outage_provider_when_it_is_the_only_one(pool: PgPool) {
+#[tokio::test]
+async fn route_chooses_an_outage_provider_when_it_is_the_only_one() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     provider_status(&f.pool, "codex", "major_outage").await;
     provider_status(&f.pool, "claude", "partial_outage").await;
@@ -831,8 +847,9 @@ async fn route_chooses_an_outage_provider_when_it_is_the_only_one(pool: PgPool) 
     assert_eq!(answer["provider_status"]["level"], "major_outage");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn explicit_spawn_is_never_refused_for_status_and_carries_a_warning(pool: PgPool) {
+#[tokio::test]
+async fn explicit_spawn_is_never_refused_for_status_and_carries_a_warning() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     provider_status(&f.pool, "codex", "major_outage").await;
     let answer = f
@@ -872,8 +889,9 @@ async fn explicit_spawn_is_never_refused_for_status_and_carries_a_warning(pool: 
     assert!(answer.get("provider_status").is_none(), "{answer}");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn degraded_provider_is_chosen_with_a_note(pool: PgPool) {
+#[tokio::test]
+async fn degraded_provider_is_chosen_with_a_note() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     provider_status(&f.pool, "codex", "degraded").await;
     let answer = f

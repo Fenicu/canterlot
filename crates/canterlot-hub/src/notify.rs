@@ -2372,8 +2372,9 @@ mod tests {
     /// расписание, затем пуш. Расписание держит «постановку», попытка ждёт его,
     /// затем «постановка» идёт к строке пуша: при обратном порядке попытки это
     /// взаимная блокировка (40P01), при общем порядке обе завершаются.
-    #[sqlx::test(migrations = "./migrations")]
-    async fn enqueue_and_send_attempt_lock_rows_in_one_order(pool: PgPool) {
+    #[tokio::test]
+    async fn enqueue_and_send_attempt_lock_rows_in_one_order() {
+        let pool = crate::testkit::db().await;
         let seed = crate::testkit::seed(&pool).await;
         configure(
             &pool,

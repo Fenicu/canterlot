@@ -72,8 +72,9 @@ async fn at_state(
     Ok((seed, started))
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn start_creates_generation_and_command(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn start_creates_generation_and_command() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let correlation_id = Uuid::now_v7();
     let started =
@@ -132,8 +133,9 @@ async fn start_creates_generation_and_command(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn second_live_start_is_refused(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn second_live_start_is_refused() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     for state in [
         ExecutionState::Created,
         ExecutionState::Starting,
@@ -159,8 +161,9 @@ async fn second_live_start_is_refused(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn running_clears_start_holds(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn running_clears_start_holds() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let (seed, started) = at_state(&pool, ExecutionState::Starting).await?;
     let holds = vec![
         HoldReason::ExecutionStarting,
@@ -200,8 +203,9 @@ async fn running_clears_start_holds(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn crash_pauses_queue(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn crash_pauses_queue() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     for (terminal, outcome, added_pause) in [
         (
             ExecutionState::Failed,
@@ -263,8 +267,9 @@ async fn crash_pauses_queue(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn illegal_transition_rejected(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn illegal_transition_rejected() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let (seed, started) = at_state(&pool, ExecutionState::Created).await?;
     let before = queue(&pool, seed.conversation_id).await?;
     for (to, outcome) in [
@@ -344,8 +349,9 @@ async fn illegal_transition_rejected(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn terminal_frees_running_slot_only(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn terminal_frees_running_slot_only() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     for slot in [
         RunSlot::Running {
             input_id: Uuid::now_v7(),
@@ -395,10 +401,9 @@ async fn terminal_frees_running_slot_only(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn resume_after_stop_creates_next_generation_without_clearing_pause(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn resume_after_stop_creates_next_generation_without_clearing_pause() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let (seed, first) = at_state(&pool, ExecutionState::Stopping).await?;
     sqlx::query("update queue_state set pause_reasons = $2 where conversation_id = $1")
         .bind(seed.conversation_id)
@@ -431,8 +436,9 @@ async fn resume_after_stop_creates_next_generation_without_clearing_pause(
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn owner_lost_and_boot_changed_paths(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn owner_lost_and_boot_changed_paths() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     for from in [
         ExecutionState::Starting,
         ExecutionState::Running,
@@ -517,8 +523,9 @@ async fn owner_lost_and_boot_changed_paths(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn workdir_wait_and_start_failure(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn workdir_wait_and_start_failure() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let (seed, started) = at_state(&pool, ExecutionState::Created).await?;
     let before = queue(&pool, seed.conversation_id).await?;
     executions::set_state(
@@ -562,8 +569,9 @@ async fn workdir_wait_and_start_failure(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn start_checks_owner_and_closed_conversation(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn start_checks_owner_and_closed_conversation() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     for (owner_id, conversation_id) in [
         (seed.owner_id, Uuid::now_v7()),
@@ -597,8 +605,9 @@ async fn start_checks_owner_and_closed_conversation(pool: PgPool) -> TestResult 
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn concurrent_starts_create_one_live_execution(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn concurrent_starts_create_one_live_execution() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let (first, second) = tokio::join!(
         executions::start(&pool, seed.owner_id, seed.conversation_id, Uuid::now_v7()),
@@ -616,8 +625,9 @@ async fn concurrent_starts_create_one_live_execution(pool: PgPool) -> TestResult
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn event_failure_rolls_back_all_mutations(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn event_failure_rolls_back_all_mutations() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let initial = queue(&pool, seed.conversation_id).await?;
     sqlx::query("alter table events add constraint reject_execution_events check (kind <> 'execution_state_changed')")
@@ -663,10 +673,9 @@ async fn event_failure_rolls_back_all_mutations(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn start_payload_carries_pinned_revision_text_after_edit_and_delete(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn start_payload_carries_pinned_revision_text_after_edit_and_delete() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::{conversations, presets};
     let seed = testkit::seed(&pool).await;
     testkit::seed_catalog(&pool, seed.machine_id).await;
@@ -780,8 +789,9 @@ async fn start_payload_carries_pinned_revision_text_after_edit_and_delete(
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn first_start_pins_the_preset_revision_current_at_launch(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn first_start_pins_the_preset_revision_current_at_launch() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::{conversations, presets};
     let seed = testkit::seed(&pool).await;
     testkit::seed_catalog(&pool, seed.machine_id).await;

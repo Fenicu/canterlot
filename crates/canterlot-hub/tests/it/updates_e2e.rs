@@ -10,7 +10,6 @@ use canterlot_hub::{
 use canterlot_proto::worker::v1::{ControlUp, HarnessInfo, MachineReport, ModelInfo, control_up};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use sqlx::PgPool;
 use uuid::Uuid;
 
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
@@ -36,8 +35,9 @@ fn report() -> MachineReport {
     report
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn worker_report_reaches_the_feed_and_the_live_stream(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn worker_report_reaches_the_feed_and_the_live_stream() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let hub =
         testkit::spawn_test_hub_http(pool.clone(), HubTimers::default(), test_http_config()).await;
     let owner = hub.installation.owner_id;

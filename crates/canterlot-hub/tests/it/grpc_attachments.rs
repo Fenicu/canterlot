@@ -256,8 +256,9 @@ async fn server(
     )
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn fetch_attachment_streams_in_128k_chunks_from_offset(pool: PgPool) {
+#[tokio::test]
+async fn fetch_attachment_streams_in_128k_chunks_from_offset() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let (mut client, stop, task) = server(f.hub.clone()).await;
     for start in [
@@ -294,8 +295,9 @@ async fn fetch_attachment_streams_in_128k_chunks_from_offset(pool: PgPool) {
     timeout(WAIT, task).await.unwrap().unwrap().unwrap();
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn fetch_rejects_attachment_of_another_machine_or_unlinked(pool: PgPool) {
+#[tokio::test]
+async fn fetch_rejects_attachment_of_another_machine_or_unlinked() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let unlinked = f
         .files
@@ -336,8 +338,9 @@ async fn fetch_rejects_attachment_of_another_machine_or_unlinked(pool: PgPool) {
     assert_eq!(error.code(), Code::Unauthenticated);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn fetch_refuses_cancelled_or_rejected_inputs(pool: PgPool) {
+#[tokio::test]
+async fn fetch_refuses_cancelled_or_rejected_inputs() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     for state in ["cancelled", "rejected"] {
         sqlx::query("update inputs set state=$2 where id=$1")
@@ -353,8 +356,9 @@ async fn fetch_refuses_cancelled_or_rejected_inputs(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn fetch_concurrency_is_limited_per_machine(pool: PgPool) {
+#[tokio::test]
+async fn fetch_concurrency_is_limited_per_machine() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let mut streams = Vec::new();
     for _ in 0..4 {
@@ -387,8 +391,9 @@ async fn fetch_concurrency_is_limited_per_machine(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn fetch_does_not_hold_a_pg_connection(pool: PgPool) {
+#[tokio::test]
+async fn fetch_does_not_hold_a_pg_connection() {
+    let pool = canterlot_hub::testkit::db().await;
     let limited = PgPoolOptions::new()
         .max_connections(2)
         .connect_with(pool.connect_options().as_ref().clone())
@@ -414,8 +419,9 @@ async fn fetch_does_not_hold_a_pg_connection(pool: PgPool) {
     limited.close().await;
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn fetch_offset_beyond_size_is_out_of_range(pool: PgPool) {
+#[tokio::test]
+async fn fetch_offset_beyond_size_is_out_of_range() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     for offset in [f.bytes.len() as u64 + 1, u64::MAX] {
         assert_eq!(
@@ -425,8 +431,9 @@ async fn fetch_offset_beyond_size_is_out_of_range(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn attachment_ready_updates_link_and_emits_event(pool: PgPool) {
+#[tokio::test]
+async fn attachment_ready_updates_link_and_emits_event() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     f.ingest(vec![f.failed(true), f.ready(), f.ready()]).await;
     assert_eq!(f.link().await, ("ready".into(), None, None));
@@ -449,8 +456,9 @@ async fn attachment_ready_updates_link_and_emits_event(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn nonretryable_attachment_failure_rejects_input_before_transmission(pool: PgPool) {
+#[tokio::test]
+async fn nonretryable_attachment_failure_rejects_input_before_transmission() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     f.ingest(vec![f.failed(false), f.failed(false)]).await;
     assert_eq!(
@@ -487,8 +495,9 @@ async fn nonretryable_attachment_failure_rejects_input_before_transmission(pool:
     );
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn retryable_attachment_failure_only_updates_the_reason(pool: PgPool) {
+#[tokio::test]
+async fn retryable_attachment_failure_only_updates_the_reason() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     f.ingest(vec![f.failed(true), f.failed(true)]).await;
     assert_eq!(
@@ -548,8 +557,9 @@ async fn retryable_attachment_failure_only_updates_the_reason(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn attachment_records_ignore_stale_attempts_and_unlinked_files(pool: PgPool) {
+#[tokio::test]
+async fn attachment_records_ignore_stale_attempts_and_unlinked_files() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let mut stale_ready = f.ready();
     let record_body::Body::AttachmentReady(ready) = &mut stale_ready else {
@@ -571,8 +581,9 @@ async fn attachment_records_ignore_stale_attempts_and_unlinked_files(pool: PgPoo
     assert!(f.machine_events().await.is_empty());
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn attachments_hold_until_every_link_is_ready(pool: PgPool) {
+#[tokio::test]
+async fn attachments_hold_until_every_link_is_ready() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let second = f
         .files
@@ -611,8 +622,9 @@ async fn attachments_hold_until_every_link_is_ready(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn attachment_records_of_another_machine_are_ignored(pool: PgPool) {
+#[tokio::test]
+async fn attachment_records_of_another_machine_are_ignored() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let other = machines::add(&f.files.pool, f.files.owner, "other")
         .await
@@ -647,8 +659,9 @@ async fn attachment_records_of_another_machine_are_ignored(pool: PgPool) {
 }
 
 #[cfg(feature = "fault-injection")]
-#[sqlx::test(migrations = "./migrations")]
-async fn hub_shutdown_ends_open_fetch_streams_with_unavailable(pool: PgPool) {
+#[tokio::test]
+async fn hub_shutdown_ends_open_fetch_streams_with_unavailable() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::fault_injection::Point;
     let f = Fixture::new(pool).await;
     let pause = f.hub.faults.pause_next(Point::BeforeFetchChunk);
@@ -673,8 +686,9 @@ async fn hub_shutdown_ends_open_fetch_streams_with_unavailable(pool: PgPool) {
     assert_eq!(f.input_state().await, ("on_machine".into(), None));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn new_execution_attempt_resets_attachment_readiness_atomically(pool: PgPool) {
+#[tokio::test]
+async fn new_execution_attempt_resets_attachment_readiness_atomically() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::{
         delivery::{
             dispatch::{DispatchOutcome, GateInputs, dispatch_next},
@@ -745,8 +759,9 @@ async fn new_execution_attempt_resets_attachment_readiness_atomically(pool: PgPo
     assert_eq!(f.machine_events().await.len(), before);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn new_attempt_clears_attachment_failure_reason_and_retryability(pool: PgPool) {
+#[tokio::test]
+async fn new_attempt_clears_attachment_failure_reason_and_retryability() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::{
         delivery::{
             dispatch::{DispatchOutcome, GateInputs, dispatch_next},
@@ -792,8 +807,9 @@ async fn new_attempt_clears_attachment_failure_reason_and_retryability(pool: PgP
 }
 
 /// Пустое вложение уходит машине одним кадром: смещение 0, без данных, `last`.
-#[sqlx::test(migrations = "./migrations")]
-async fn fetch_of_an_empty_attachment_is_one_last_empty_chunk(pool: PgPool) {
+#[tokio::test]
+async fn fetch_of_an_empty_attachment_is_one_last_empty_chunk() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let empty = f.files.ready("empty.txt", "text/plain", b"").await;
     let response = f

@@ -110,8 +110,9 @@ impl Api {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_list_has_live_windows_and_the_last_twenty_ended_with_costs(pool: PgPool) {
+#[tokio::test]
+async fn the_list_has_live_windows_and_the_last_twenty_ended_with_costs() {
+    let pool = canterlot_hub::testkit::db().await;
     let api = Api::new(pool).await;
     assert_eq!(api.list().await["items"], json!([]));
 
@@ -168,8 +169,9 @@ async fn the_list_has_live_windows_and_the_last_twenty_ended_with_costs(pool: Pg
     assert!(!text.contains("PRIVATE") && !text.contains("host_key"));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_displayed_cost_is_not_capped_at_the_reservation(pool: PgPool) {
+#[tokio::test]
+async fn the_displayed_cost_is_not_capped_at_the_reservation() {
+    let pool = canterlot_hub::testkit::db().await;
     let api = Api::new(pool).await;
     let id = api
         .insert("ready", 1_000, Some("fhmfakeinstance0778"))
@@ -188,8 +190,9 @@ async fn the_displayed_cost_is_not_capped_at_the_reservation(pool: PgPool) {
     assert!(cost > 7224);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn only_the_owner_sees_the_windows(pool: PgPool) {
+#[tokio::test]
+async fn only_the_owner_sees_the_windows() {
+    let pool = canterlot_hub::testkit::db().await;
     let api = Api::new(pool).await;
     let id = api.insert("ready", 5, Some("fhmfakeinstance0777")).await;
     let list = api
@@ -215,8 +218,9 @@ async fn only_the_owner_sees_the_windows(pool: PgPool) {
     assert_eq!(state, "ready", "an unauthenticated call changes nothing");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn delete_now_revokes_the_cloud_runner_and_leaves_the_instance_to_the_service(pool: PgPool) {
+#[tokio::test]
+async fn delete_now_revokes_the_cloud_runner_and_leaves_the_instance_to_the_service() {
+    let pool = canterlot_hub::testkit::db().await;
     let api = Api::new(pool).await;
     let id = api.insert("ready", 5, Some("fhmfakeinstance0777")).await;
     // Строка раннера `cloud` с токеном и задачей на ней.
@@ -286,8 +290,9 @@ async fn delete_now_revokes_the_cloud_runner_and_leaves_the_instance_to_the_serv
     assert_eq!(again["outcome"], "deleting");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_delete_replay_never_revokes_the_next_window(pool: PgPool) {
+#[tokio::test]
+async fn a_delete_replay_never_revokes_the_next_window() {
+    let pool = canterlot_hub::testkit::db().await;
     let api = Api::new(pool).await;
     let config = cloud_config(&api);
     let machine = {
@@ -337,8 +342,9 @@ fn cloud_config(api: &Api) -> CloudConfig {
     .unwrap()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn delete_now_cancels_a_create_that_was_never_sent_and_refuses_unknown_windows(pool: PgPool) {
+#[tokio::test]
+async fn delete_now_cancels_a_create_that_was_never_sent_and_refuses_unknown_windows() {
+    let pool = canterlot_hub::testkit::db().await;
     let api = Api::new(pool).await;
     let intent = api.insert("create_intent", 0, None).await;
     let result = api.delete(intent, &Uuid::now_v7().to_string(), 200).await;

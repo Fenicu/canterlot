@@ -9,14 +9,14 @@ use canterlot_hub::{
 };
 use chrono::Utc;
 use serde_json::{Value, json};
-use sqlx::PgPool;
 use std::{collections::BTreeSet, sync::Arc, time::Duration};
 use support::*;
 use tokio::sync::Barrier;
 use uuid::Uuid;
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn snapshot_then_tail_loses_no_event_under_concurrent_writers(pool: PgPool) {
+#[tokio::test]
+async fn snapshot_then_tail_loses_no_event_under_concurrent_writers() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let owner = f.seed.owner_id;
     let id = f.seed.conversation_id;
@@ -159,8 +159,9 @@ async fn snapshot_then_tail_loses_no_event_under_concurrent_writers(pool: PgPool
     .unwrap();
     assert_eq!(after, deadlocks);
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn naive_global_sequence_boundary_is_detected_as_lossy(pool: PgPool) {
+#[tokio::test]
+async fn naive_global_sequence_boundary_is_detected_as_lossy() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     sqlx::query("create table boundary_probe(gid bigserial primary key)")
         .execute(&f.pool)
@@ -281,8 +282,9 @@ async fn naive_global_sequence_boundary_is_detected_as_lossy(pool: PgPool) {
         reserved
     );
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn snapshot_is_one_repeatable_read_transaction(pool: PgPool) {
+#[tokio::test]
+async fn snapshot_is_one_repeatable_read_transaction() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let mut tx = snapshot::begin(&f.pool).await.unwrap();
     let iso: String = sqlx::query_scalar("show transaction_isolation")
@@ -321,8 +323,9 @@ async fn range(f: &Fixture, after: i64, limit: i64) -> Value {
     ))
     .await
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn stale_cursor_gets_resync_not_reconnect_loop(pool: PgPool) {
+#[tokio::test]
+async fn stale_cursor_gets_resync_not_reconnect_loop() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     for _ in 0..3 {
         f.emit("queue_state_changed", json!({})).await;
@@ -349,8 +352,9 @@ async fn stale_cursor_gets_resync_not_reconnect_loop(pool: PgPool) {
             .is_empty()
     );
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn cursor_ahead_of_head_requires_resync(pool: PgPool) {
+#[tokio::test]
+async fn cursor_ahead_of_head_requires_resync() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     assert_eq!(
         range(&f, 99, 256).await["resync_required"]["reason"],
@@ -362,8 +366,9 @@ async fn cursor_ahead_of_head_requires_resync(pool: PgPool) {
         json!({"reason":"cursor_ahead","oldest_available_seq":"1"})
     );
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn events_range_endpoint_returns_gap_range_or_resync(pool: PgPool) {
+#[tokio::test]
+async fn events_range_endpoint_returns_gap_range_or_resync() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     for _ in 0..4 {
         f.emit("queue_state_changed", empty()).await;
@@ -394,8 +399,9 @@ async fn events_range_endpoint_returns_gap_range_or_resync(pool: PgPool) {
         );
     }
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn range_endpoint_never_skips_a_seq(pool: PgPool) {
+#[tokio::test]
+async fn range_endpoint_never_skips_a_seq() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     f.emit("queue_state_changed", empty()).await;
     let first = f.emit("journal_closed", json!({"secret":"internal"})).await;
@@ -447,8 +453,9 @@ fn fold(item: &mut Value, e: &Value) {
         _ => {}
     }
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn list_snapshot_then_tail_folds_to_the_database_state(pool: PgPool) {
+#[tokio::test]
+async fn list_snapshot_then_tail_folds_to_the_database_state() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let owner = f.seed.owner_id;
     let id = f.seed.conversation_id;
@@ -604,8 +611,9 @@ async fn list_snapshot_then_tail_folds_to_the_database_state(pool: PgPool) {
         assert_eq!(counts, final_page["counts"]);
     }
 }
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn snapshot_cursor_and_seq_fields_are_decimal_strings_with_wire_aliases(pool: PgPool) {
+#[tokio::test]
+async fn snapshot_cursor_and_seq_fields_are_decimal_strings_with_wire_aliases() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     f.input("seq").await;
     for (p, scope) in [
@@ -644,8 +652,9 @@ async fn snapshot_cursor_and_seq_fields_are_decimal_strings_with_wire_aliases(po
     assert!(s["data"]["queue"]["queued"][0]["created_seq"].is_string());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn list_snapshot_is_bounded_and_includes_archived_and_legacy_rows(pool: PgPool) {
+#[tokio::test]
+async fn list_snapshot_is_bounded_and_includes_archived_and_legacy_rows() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     sqlx::query("insert into conversations(id,owner_id,machine_id,harness,workdir,archived_at) select gen_random_uuid(),$1,$2,'synthetic','/tmp/w',case when n%2=0 then now() end from generate_series(1,500) n").bind(f.seed.owner_id).bind(f.seed.machine_id).execute(&f.pool).await.unwrap();
     let s = f.get("/api/v1/snapshot/conversations").await;

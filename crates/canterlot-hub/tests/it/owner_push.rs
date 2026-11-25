@@ -500,8 +500,9 @@ fn presence_sender(config: &GotifyConfig, presence: &Presence) -> Sender {
 
 // ---------- тесты ----------
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_question_of_any_session_is_pushed_once_with_the_key_in_the_header(pool: PgPool) {
+#[tokio::test]
+async fn a_question_of_any_session_is_pushed_once_with_the_key_in_the_header() {
+    let pool = canterlot_hub::testkit::db().await;
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     enable(&pool).await;
@@ -547,8 +548,9 @@ async fn a_question_of_any_session_is_pushed_once_with_the_key_in_the_header(poo
     assert_eq!(sender(&config).deliver_due(&pool).await.unwrap().sent, 0);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_question_in_another_payload_shape_keeps_its_text(pool: PgPool) {
+#[tokio::test]
+async fn a_question_in_another_payload_shape_keeps_its_text() {
+    let pool = canterlot_hub::testkit::db().await;
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     enable(&pool).await;
@@ -568,8 +570,9 @@ async fn a_question_in_another_payload_shape_keeps_its_text(pool: PgPool) {
     assert_eq!(fake.seen()[0].body["message"], "Ждёт ответа: Выкатить?");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_question_answered_before_delivery_is_not_pushed(pool: PgPool) {
+#[tokio::test]
+async fn a_question_answered_before_delivery_is_not_pushed() {
+    let pool = canterlot_hub::testkit::db().await;
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     enable(&pool).await;
@@ -590,8 +593,9 @@ async fn a_question_answered_before_delivery_is_not_pushed(pool: PgPool) {
     assert!(fake.seen().is_empty());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_finished_turn_of_a_root_session_is_pushed_once_and_a_delegate_turn_is_not(pool: PgPool) {
+#[tokio::test]
+async fn a_finished_turn_of_a_root_session_is_pushed_once_and_a_delegate_turn_is_not() {
+    let pool = canterlot_hub::testkit::db().await;
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     enable(&pool).await;
@@ -641,8 +645,9 @@ async fn a_finished_turn_of_a_root_session_is_pushed_once_and_a_delegate_turn_is
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_turn_held_by_a_background_task_is_pushed_when_the_background_ends(pool: PgPool) {
+#[tokio::test]
+async fn a_turn_held_by_a_background_task_is_pushed_when_the_background_ends() {
+    let pool = canterlot_hub::testkit::db().await;
     enable(&pool).await;
     let s = seed(&pool).await;
     let execution = start(&pool, s.owner_id, s.conversation_id).await;
@@ -671,8 +676,9 @@ async fn a_turn_held_by_a_background_task_is_pushed_when_the_background_ends(poo
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_turn_from_the_owner_is_pushed_and_a_turn_from_an_event_is_silent(pool: PgPool) {
+#[tokio::test]
+async fn a_turn_from_the_owner_is_pushed_and_a_turn_from_an_event_is_silent() {
+    let pool = canterlot_hub::testkit::db().await;
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     enable(&pool).await;
@@ -731,8 +737,9 @@ async fn a_turn_from_the_owner_is_pushed_and_a_turn_from_an_event_is_silent(pool
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_owner_turn_without_delegates_gives_exactly_one_push(pool: PgPool) {
+#[tokio::test]
+async fn an_owner_turn_without_delegates_gives_exactly_one_push() {
+    let pool = canterlot_hub::testkit::db().await;
     enable(&pool).await;
     let s = seed(&pool).await;
     let execution = start(&pool, s.owner_id, s.conversation_id).await;
@@ -770,8 +777,9 @@ async fn an_owner_turn_without_delegates_gives_exactly_one_push(pool: PgPool) {
     assert_eq!(final_pushes, 0, "пуш о ходе владельца и есть итог");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_last_delegate_result_sends_one_all_done_push(pool: PgPool) {
+#[tokio::test]
+async fn the_last_delegate_result_sends_one_all_done_push() {
+    let pool = canterlot_hub::testkit::db().await;
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     enable(&pool).await;
@@ -901,8 +909,9 @@ async fn the_last_delegate_result_sends_one_all_done_push(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_delegate_stuck_on_the_owner_holds_the_all_done_push(pool: PgPool) {
+#[tokio::test]
+async fn a_delegate_stuck_on_the_owner_holds_the_all_done_push() {
+    let pool = canterlot_hub::testkit::db().await;
     enable(&pool).await;
     let s = seed(&pool).await;
     let execution = start(&pool, s.owner_id, s.conversation_id).await;
@@ -979,8 +988,9 @@ async fn a_delegate_stuck_on_the_owner_holds_the_all_done_push(pool: PgPool) {
     assert_eq!(turn_finished(&pool, s.conversation_id).await, 2);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_queued_spawn_holds_the_all_done_push(pool: PgPool) {
+#[tokio::test]
+async fn a_queued_spawn_holds_the_all_done_push() {
+    let pool = canterlot_hub::testkit::db().await;
     enable(&pool).await;
     let s = seed(&pool).await;
     let execution = start(&pool, s.owner_id, s.conversation_id).await;
@@ -1070,8 +1080,9 @@ async fn a_queued_spawn_holds_the_all_done_push(pool: PgPool) {
     assert_eq!(turn_finished(&pool, s.conversation_id).await, 2);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_owner_mark_is_reloaded_from_the_database(pool: PgPool) {
+#[tokio::test]
+async fn the_owner_mark_is_reloaded_from_the_database() {
+    let pool = canterlot_hub::testkit::db().await;
     enable(&pool).await;
     let s = seed(&pool).await;
     let execution = start(&pool, s.owner_id, s.conversation_id).await;
@@ -1176,8 +1187,9 @@ async fn block(
     .unwrap();
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_finished_turn_without_text_does_not_show_the_previous_answer(pool: PgPool) {
+#[tokio::test]
+async fn a_finished_turn_without_text_does_not_show_the_previous_answer() {
+    let pool = canterlot_hub::testkit::db().await;
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     enable(&pool).await;
@@ -1228,8 +1240,9 @@ async fn a_finished_turn_without_text_does_not_show_the_previous_answer(pool: Pg
     assert_eq!(seen[0].body["message"], "Ход завершён");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_turn_is_pushed_once_even_when_the_state_flaps(pool: PgPool) {
+#[tokio::test]
+async fn a_turn_is_pushed_once_even_when_the_state_flaps() {
+    let pool = canterlot_hub::testkit::db().await;
     enable(&pool).await;
     let s = seed(&pool).await;
     let now = Utc::now();
@@ -1301,8 +1314,9 @@ async fn owner_reclaimed(pool: &PgPool, execution: Uuid) {
     .unwrap();
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_reopened_request_is_pushed_only_if_the_first_push_never_left(pool: PgPool) {
+#[tokio::test]
+async fn a_reopened_request_is_pushed_only_if_the_first_push_never_left() {
+    let pool = canterlot_hub::testkit::db().await;
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     enable(&pool).await;
@@ -1341,8 +1355,9 @@ async fn a_reopened_request_is_pushed_only_if_the_first_push_never_left(pool: Pg
     assert_eq!(fake.seen().len(), 2);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_revived_waiting_push_is_fresh_even_if_the_first_row_is_old(pool: PgPool) {
+#[tokio::test]
+async fn a_revived_waiting_push_is_fresh_even_if_the_first_row_is_old() {
+    let pool = canterlot_hub::testkit::db().await;
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     enable(&pool).await;
@@ -1377,8 +1392,9 @@ async fn a_revived_waiting_push_is_fresh_even_if_the_first_row_is_old(pool: PgPo
     assert_eq!(fake.seen().len(), 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_old_idle_session_does_not_push_after_a_restart(pool: PgPool) {
+#[tokio::test]
+async fn an_old_idle_session_does_not_push_after_a_restart() {
+    let pool = canterlot_hub::testkit::db().await;
     enable(&pool).await;
     let s = seed(&pool).await;
     let execution = start(&pool, s.owner_id, s.conversation_id).await;
@@ -1397,8 +1413,9 @@ async fn an_old_idle_session_does_not_push_after_a_restart(pool: PgPool) {
     assert!(pushes(&pool).await.is_empty());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_late_event_does_not_revive_an_old_turn_push(pool: PgPool) {
+#[tokio::test]
+async fn a_late_event_does_not_revive_an_old_turn_push() {
+    let pool = canterlot_hub::testkit::db().await;
     enable(&pool).await;
     let s = seed(&pool).await;
     let execution = start(&pool, s.owner_id, s.conversation_id).await;
@@ -1439,8 +1456,9 @@ async fn lose(pool: &PgPool, conversation: Uuid, execution: Uuid) {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_failure_of_a_root_session_is_pushed_once_and_a_delegate_failure_is_not(pool: PgPool) {
+#[tokio::test]
+async fn a_failure_of_a_root_session_is_pushed_once_and_a_delegate_failure_is_not() {
+    let pool = canterlot_hub::testkit::db().await;
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     enable(&pool).await;
@@ -1461,8 +1479,9 @@ async fn a_failure_of_a_root_session_is_pushed_once_and_a_delegate_failure_is_no
     assert_eq!(seen[0].body["message"], "Сессия упала: воркер потерян");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn one_failure_push_per_episode_survives_a_failed_idle_bounce(pool: PgPool) {
+#[tokio::test]
+async fn one_failure_push_per_episode_survives_a_failed_idle_bounce() {
+    let pool = canterlot_hub::testkit::db().await;
     enable(&pool).await;
     let s = seed(&pool).await;
     start(&pool, s.owner_id, s.conversation_id).await;
@@ -1505,8 +1524,9 @@ async fn one_failure_push_per_episode_survives_a_failed_idle_bounce(pool: PgPool
     assert_eq!(failure_pushes(&pool, s.conversation_id).await, 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn one_failure_push_per_episode_survives_a_stalled_working_bounce(pool: PgPool) {
+#[tokio::test]
+async fn one_failure_push_per_episode_survives_a_stalled_working_bounce() {
+    let pool = canterlot_hub::testkit::db().await;
     enable(&pool).await;
     let s = seed(&pool).await;
     start(&pool, s.owner_id, s.conversation_id).await;
@@ -1554,8 +1574,9 @@ async fn one_failure_push_per_episode_survives_a_stalled_working_bounce(pool: Pg
     assert_eq!(failure_pushes(&pool, s.conversation_id).await, 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_read_episode_never_pushes_again(pool: PgPool) {
+#[tokio::test]
+async fn a_read_episode_never_pushes_again() {
+    let pool = canterlot_hub::testkit::db().await;
     enable(&pool).await;
     let s = seed(&pool).await;
     start(&pool, s.owner_id, s.conversation_id).await;
@@ -1607,8 +1628,9 @@ async fn a_read_episode_never_pushes_again(pool: PgPool) {
     assert_eq!(failure_pushes(&pool, s.conversation_id).await, 0);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_new_execution_failing_is_a_new_episode(pool: PgPool) {
+#[tokio::test]
+async fn a_new_execution_failing_is_a_new_episode() {
+    let pool = canterlot_hub::testkit::db().await;
     enable(&pool).await;
     let s = seed(&pool).await;
     let first = start(&pool, s.owner_id, s.conversation_id).await;
@@ -1651,8 +1673,9 @@ async fn a_new_execution_failing_is_a_new_episode(pool: PgPool) {
     assert_eq!(failure_pushes(&pool, s.conversation_id).await, 2);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn another_reason_is_a_new_episode(pool: PgPool) {
+#[tokio::test]
+async fn another_reason_is_a_new_episode() {
+    let pool = canterlot_hub::testkit::db().await;
     enable(&pool).await;
     let s = seed(&pool).await;
     start(&pool, s.owner_id, s.conversation_id).await;
@@ -1682,8 +1705,9 @@ async fn another_reason_is_a_new_episode(pool: PgPool) {
     assert_eq!(failure_pushes(&pool, s.conversation_id).await, 2);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn delivery_uses_the_database_clock(pool: PgPool) {
+#[tokio::test]
+async fn delivery_uses_the_database_clock() {
+    let pool = canterlot_hub::testkit::db().await;
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     enable(&pool).await;
@@ -1712,8 +1736,9 @@ async fn delivery_uses_the_database_clock(pool: PgPool) {
     assert_eq!(fake.seen().len(), 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_attempt_is_recorded_before_the_request_goes_out(pool: PgPool) {
+#[tokio::test]
+async fn an_attempt_is_recorded_before_the_request_goes_out() {
+    let pool = canterlot_hub::testkit::db().await;
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     enable(&pool).await;
@@ -1742,8 +1767,9 @@ async fn an_attempt_is_recorded_before_the_request_goes_out(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_server_error_is_retried_and_then_delivered(pool: PgPool) {
+#[tokio::test]
+async fn a_server_error_is_retried_and_then_delivered() {
+    let pool = canterlot_hub::testkit::db().await;
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     fake.script(&[500]);
@@ -1774,8 +1800,9 @@ async fn a_server_error_is_retried_and_then_delivered(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn delivery_gives_up_after_the_last_attempt_without_leaking_the_key(pool: PgPool) {
+#[tokio::test]
+async fn delivery_gives_up_after_the_last_attempt_without_leaking_the_key() {
+    let pool = canterlot_hub::testkit::db().await;
     capture_logs();
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
@@ -1818,8 +1845,9 @@ async fn delivery_gives_up_after_the_last_attempt_without_leaking_the_key(pool: 
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_client_error_is_not_retried(pool: PgPool) {
+#[tokio::test]
+async fn a_client_error_is_not_retried() {
+    let pool = canterlot_hub::testkit::db().await;
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     fake.script(&[401]);
@@ -1841,8 +1869,9 @@ async fn a_client_error_is_not_retried(pool: PgPool) {
     assert_eq!(fake.seen().len(), 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_rate_limit_defers_the_rest(pool: PgPool) {
+#[tokio::test]
+async fn the_rate_limit_defers_the_rest() {
+    let pool = canterlot_hub::testkit::db().await;
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "max_per_minute = 2\n");
     enable(&pool).await;
@@ -1863,8 +1892,9 @@ async fn the_rate_limit_defers_the_rest(pool: PgPool) {
     assert_eq!(sender.deliver_due(&pool).await.unwrap().deferred, 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn without_the_section_nothing_is_queued(pool: PgPool) {
+#[tokio::test]
+async fn without_the_section_nothing_is_queued() {
+    let pool = canterlot_hub::testkit::db().await;
     let (_dir, config) = load("", None);
     assert!(config.unwrap().notify.gotify.is_none());
     enable(&pool).await;
@@ -1881,8 +1911,9 @@ async fn without_the_section_nothing_is_queued(pool: PgPool) {
     assert!(pushes(&pool).await.is_empty());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn disabling_at_start_cancels_what_was_pending(pool: PgPool) {
+#[tokio::test]
+async fn disabling_at_start_cancels_what_was_pending() {
+    let pool = canterlot_hub::testkit::db().await;
     enable(&pool).await;
     let s = seed(&pool).await;
     let execution = start(&pool, s.owner_id, s.conversation_id).await;
@@ -1896,8 +1927,9 @@ async fn disabling_at_start_cancels_what_was_pending(pool: PgPool) {
     assert_eq!(pushes(&pool).await[0].2, "cancelled");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn finished_rows_are_cleaned_without_the_section(pool: PgPool) {
+#[tokio::test]
+async fn finished_rows_are_cleaned_without_the_section() {
+    let pool = canterlot_hub::testkit::db().await;
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     enable(&pool).await;
@@ -1927,8 +1959,9 @@ async fn finished_rows_are_cleaned_without_the_section(pool: PgPool) {
     assert_eq!(left, [format!("waiting:{fresh}")]);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn trash_cancels_pending_pushes_and_purge_removes_them(pool: PgPool) {
+#[tokio::test]
+async fn trash_cancels_pending_pushes_and_purge_removes_them() {
+    let pool = canterlot_hub::testkit::db().await;
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     enable(&pool).await;
@@ -1996,8 +2029,9 @@ async fn trash_cancels_pending_pushes_and_purge_removes_them(pool: PgPool) {
     assert!(pushes(&pool).await.is_empty());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_unknown_timezone_is_refused_at_start(pool: PgPool) {
+#[tokio::test]
+async fn an_unknown_timezone_is_refused_at_start() {
+    let pool = canterlot_hub::testkit::db().await;
     let error = notify::configure(
         &pool,
         Some(&PushSettings {
@@ -2098,8 +2132,9 @@ fn config_errors_are_clear_at_start() {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_visible_and_read_chat_suppresses_waiting_and_turn_finished(pool: PgPool) {
+#[tokio::test]
+async fn a_visible_and_read_chat_suppresses_waiting_and_turn_finished() {
+    let pool = canterlot_hub::testkit::db().await;
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     enable(&pool).await;
@@ -2172,8 +2207,9 @@ async fn a_visible_and_read_chat_suppresses_waiting_and_turn_finished(pool: PgPo
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_hidden_chat_does_not_suppress(pool: PgPool) {
+#[tokio::test]
+async fn a_hidden_chat_does_not_suppress() {
+    let pool = canterlot_hub::testkit::db().await;
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     enable(&pool).await;
@@ -2199,8 +2235,9 @@ async fn a_hidden_chat_does_not_suppress(pool: PgPool) {
     assert_eq!(fake.seen().len(), 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_second_device_keeps_a_chat_visible_when_another_goes_hidden(pool: PgPool) {
+#[tokio::test]
+async fn a_second_device_keeps_a_chat_visible_when_another_goes_hidden() {
+    let pool = canterlot_hub::testkit::db().await;
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     enable(&pool).await;
@@ -2233,8 +2270,9 @@ async fn a_second_device_keeps_a_chat_visible_when_another_goes_hidden(pool: PgP
     assert!(fake.seen().is_empty());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_visible_but_unread_chat_gets_the_push_after_the_postpone(pool: PgPool) {
+#[tokio::test]
+async fn a_visible_but_unread_chat_gets_the_push_after_the_postpone() {
+    let pool = canterlot_hub::testkit::db().await;
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     enable(&pool).await;
@@ -2276,8 +2314,9 @@ async fn a_visible_but_unread_chat_gets_the_push_after_the_postpone(pool: PgPool
     assert_eq!(fake.seen().len(), 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_still_visible_chat_is_postponed_twice_and_then_gets_the_push(pool: PgPool) {
+#[tokio::test]
+async fn a_still_visible_chat_is_postponed_twice_and_then_gets_the_push() {
+    let pool = canterlot_hub::testkit::db().await;
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     enable(&pool).await;
@@ -2328,8 +2367,9 @@ async fn a_still_visible_chat_is_postponed_twice_and_then_gets_the_push(pool: Pg
     assert_eq!(fake.seen().len(), 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn presence_expires_after_45_seconds_of_silence(pool: PgPool) {
+#[tokio::test]
+async fn presence_expires_after_45_seconds_of_silence() {
+    let pool = canterlot_hub::testkit::db().await;
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     enable(&pool).await;
@@ -2355,8 +2395,9 @@ async fn presence_expires_after_45_seconds_of_silence(pool: PgPool) {
     assert_eq!(fake.seen().len(), 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn sign_in_pushes_are_never_suppressed(pool: PgPool) {
+#[tokio::test]
+async fn sign_in_pushes_are_never_suppressed() {
+    let pool = canterlot_hub::testkit::db().await;
     let (fake, url) = fake_gotify().await;
     let (_dir, config) = gotify(&url, "");
     enable(&pool).await;

@@ -177,8 +177,9 @@ impl Run {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn proven_owner_returns_to_running_and_clears_the_pause(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn proven_owner_returns_to_running_and_clears_the_pause() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut run = Run::new(&pool).await;
     run.lose_owner().await;
     let reclaim = run.reclaim();
@@ -195,8 +196,9 @@ async fn proven_owner_returns_to_running_and_clears_the_pause(pool: PgPool) -> T
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn repeated_proof_changes_nothing(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn repeated_proof_changes_nothing() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut run = Run::new(&pool).await;
     run.lose_owner().await;
     let reclaim = run.reclaim();
@@ -209,8 +211,9 @@ async fn repeated_proof_changes_nothing(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn execution_lost_while_stopping_returns_to_stopping(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn execution_lost_while_stopping_returns_to_stopping() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut run = Run::new(&pool).await;
     let stopping = run.fact("stopping", "");
     run.send_sj(vec![stopping]).await;
@@ -224,8 +227,9 @@ async fn execution_lost_while_stopping_returns_to_stopping(pool: PgPool) -> Test
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn plain_running_fact_never_leaves_owner_lost(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn plain_running_fact_never_leaves_owner_lost() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut run = Run::new(&pool).await;
     run.lose_owner().await;
     let running = run.fact("running", "");
@@ -237,8 +241,9 @@ async fn plain_running_fact_never_leaves_owner_lost(pool: PgPool) -> TestResult 
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn supervisor_journal_cannot_claim_the_proof(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn supervisor_journal_cannot_claim_the_proof() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut run = Run::new(&pool).await;
     run.lose_owner().await;
     let reclaim = run.reclaim();
@@ -248,8 +253,9 @@ async fn supervisor_journal_cannot_claim_the_proof(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn proof_of_another_generation_is_ignored(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn proof_of_another_generation_is_ignored() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut run = Run::new(&pool).await;
     run.lose_owner().await;
     let Body::ExecutionState(mut reclaim) = run.reclaim() else {
@@ -262,8 +268,9 @@ async fn proof_of_another_generation_is_ignored(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn terminal_execution_is_never_reclaimed(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn terminal_execution_is_never_reclaimed() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut run = Run::new(&pool).await;
     run.lose_owner().await;
     let failed = run.fact("failed", "supervisor_died");
@@ -277,8 +284,9 @@ async fn terminal_execution_is_never_reclaimed(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn closed_journal_means_a_finished_group(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn closed_journal_means_a_finished_group() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut run = Run::new(&pool).await;
     run.lose_owner().await;
     let closed = Body::JournalClosed(JournalClosed {
@@ -294,10 +302,9 @@ async fn closed_journal_means_a_finished_group(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn request_closed_by_the_loss_reopens_when_the_supervisor_repeats_it(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn request_closed_by_the_loss_reopens_when_the_supervisor_repeats_it() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut run = Run::new(&pool).await;
     let request = run.request("native-1");
     run.send_sj(vec![request.clone()]).await;
@@ -332,8 +339,9 @@ async fn request_closed_by_the_loss_reopens_when_the_supervisor_repeats_it(
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn request_closed_by_the_supervisor_stays_closed(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn request_closed_by_the_supervisor_stays_closed() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut run = Run::new(&pool).await;
     let request = run.request("native-2");
     let closed = Body::RequestClosed(RequestClosed {
@@ -352,8 +360,9 @@ async fn request_closed_by_the_supervisor_stays_closed(pool: PgPool) -> TestResu
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn loss_can_repeat_after_a_reclaim(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn loss_can_repeat_after_a_reclaim() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut run = Run::new(&pool).await;
     run.lose_owner().await;
     let reclaim = run.reclaim();
@@ -423,10 +432,9 @@ impl Run {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn confirmed_empty_group_fails_the_execution_and_closes_the_dead_journal(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn confirmed_empty_group_fails_the_execution_and_closes_the_dead_journal() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut run = Run::new(&pool).await;
     let block = Uuid::now_v7();
     run.send_sj(vec![Run::block(block)]).await;
@@ -472,10 +480,9 @@ async fn confirmed_empty_group_fails_the_execution_and_closes_the_dead_journal(
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn after_the_exit_resume_continues_the_native_history_and_clears_the_pauses(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn after_the_exit_resume_continues_the_native_history_and_clears_the_pauses() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut run = Run::new(&pool).await;
     sqlx::query("update executions set native_conversation_id = 'native-id' where id = $1")
         .bind(run.execution.execution_id)
@@ -520,8 +527,9 @@ async fn after_the_exit_resume_continues_the_native_history_and_clears_the_pause
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn reboot_exits_any_live_state_with_the_real_reason(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn reboot_exits_any_live_state_with_the_real_reason() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut run = Run::new(&pool).await;
     run.lose_owner().await;
     let rebooted = run.fact("stopped", "machine_rebooted");
@@ -534,10 +542,9 @@ async fn reboot_exits_any_live_state_with_the_real_reason(pool: PgPool) -> TestR
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn reboot_exits_a_running_execution_without_passing_through_the_loss(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn reboot_exits_a_running_execution_without_passing_through_the_loss() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut run = Run::new(&pool).await;
     let rebooted = run.fact("stopped", "machine_rebooted");
     run.send_cj(vec![rebooted]).await;
@@ -546,8 +553,9 @@ async fn reboot_exits_a_running_execution_without_passing_through_the_loss(
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn reboot_exits_an_execution_the_hub_still_sees_as_created(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn reboot_exits_an_execution_the_hub_still_sees_as_created() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let execution =
         executions::start(&pool, seed.owner_id, seed.conversation_id, Uuid::now_v7()).await?;
@@ -563,8 +571,9 @@ async fn reboot_exits_an_execution_the_hub_still_sees_as_created(pool: PgPool) -
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn stop_of_a_lost_execution_leads_to_the_resolve_action(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn stop_of_a_lost_execution_leads_to_the_resolve_action() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut run = Run::new(&pool).await;
     run.lose_owner().await;
     let outcome = request_stop_execution(
@@ -583,8 +592,9 @@ async fn stop_of_a_lost_execution_leads_to_the_resolve_action(pool: PgPool) -> T
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn resolve_is_one_command_and_ends_with_the_exit(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn resolve_is_one_command_and_ends_with_the_exit() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut run = Run::new(&pool).await;
     assert_eq!(
         run.resolve("early").await,
@@ -615,8 +625,9 @@ async fn resolve_is_one_command_and_ends_with_the_exit(pool: PgPool) -> TestResu
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn resolve_ends_with_a_reclaim_when_the_supervisor_was_alive(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn resolve_ends_with_a_reclaim_when_the_supervisor_was_alive() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut run = Run::new(&pool).await;
     run.lose_owner().await;
     let ResolveOwnerLostOutcome::Requested { command_id } = run.resolve("first").await else {
@@ -631,8 +642,9 @@ async fn resolve_ends_with_a_reclaim_when_the_supervisor_was_alive(pool: PgPool)
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn resolve_goes_only_to_a_session_that_agreed_to_it(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn resolve_goes_only_to_a_session_that_agreed_to_it() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::{
         config::HubTimers,
         grpc::KNOWN_OPTIONAL_CAPABILITIES,

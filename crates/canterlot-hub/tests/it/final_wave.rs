@@ -45,8 +45,9 @@ async fn lock_pid(pool: &PgPool, service: &str, previous: i32) -> i32 {
     }).await.unwrap()
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn singleton_scheduler_reacquires_after_backend_termination(pool: PgPool) {
+#[tokio::test]
+async fn singleton_scheduler_reacquires_after_backend_termination() {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     let sch = scheduler(
         &pool,
@@ -92,8 +93,9 @@ async fn singleton_scheduler_reacquires_after_backend_termination(pool: PgPool) 
     assert!(recovered.is_ok(), "scheduler did not resume");
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn poisoned_message_cannot_block_later_due_jobs(pool: PgPool) {
+#[tokio::test]
+async fn poisoned_message_cannot_block_later_due_jobs() {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     let sch = scheduler(
         &pool,
@@ -129,10 +131,9 @@ async fn poisoned_message_cannot_block_later_due_jobs(pool: PgPool) {
     assert_eq!(count(&pool, "select count(*) from inputs").await, 1);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn deterministic_database_failure_has_bounded_attempts_and_yields_to_other_jobs(
-    pool: PgPool,
-) {
+#[tokio::test]
+async fn deterministic_database_failure_has_bounded_attempts_and_yields_to_other_jobs() {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     let sch = scheduler(
         &pool,
@@ -166,8 +167,9 @@ async fn deterministic_database_failure_has_bounded_attempts_and_yields_to_other
     assert_eq!(attempts, 2);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn schedule_and_update_check_metadata_with_attachment_refs(pool: PgPool) {
+#[tokio::test]
+async fn schedule_and_update_check_metadata_with_attachment_refs() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = files::Fixture::new(pool).await;
     let mut ids = Vec::new();
     for n in 0..10 {
@@ -243,8 +245,9 @@ async fn schedule_and_update_check_metadata_with_attachment_refs(pool: PgPool) {
     assert_eq!(count(&f.pool, "select count(*) from inputs").await, 0);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn settings_promotion_and_attachment_fk_have_no_deadlocks_50_times(pool: PgPool) {
+#[tokio::test]
+async fn settings_promotion_and_attachment_fk_have_no_deadlocks_50_times() {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     input(&pool, &s, "settings").await;
     let command: Uuid = sqlx::query_scalar("select id from commands where kind='deliver_input'")
@@ -327,8 +330,9 @@ async fn settings_promotion_and_attachment_fk_have_no_deadlocks_50_times(pool: P
     );
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn unchanged_refresh_advances_repair_watermark_without_events(pool: PgPool) {
+#[tokio::test]
+async fn unchanged_refresh_advances_repair_watermark_without_events() {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     refresh(&pool, s.conversation_id).await;
     notice(&pool, s.conversation_id, "conversation_updated").await;
@@ -342,8 +346,9 @@ async fn unchanged_refresh_advances_repair_watermark_without_events(pool: PgPool
     assert_eq!(count(&pool, "select count(*) from events").await, events);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn mark_read_uses_configured_activity_thresholds(pool: PgPool) {
+#[tokio::test]
+async fn mark_read_uses_configured_activity_thresholds() {
+    let pool = canterlot_hub::testkit::db().await;
     let (s, _) = running(&pool).await;
     let (mut deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
@@ -387,8 +392,9 @@ async fn mark_read_uses_configured_activity_thresholds(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn auto_title_counts_follow_prior_list_commit(pool: PgPool) {
+#[tokio::test]
+async fn auto_title_counts_follow_prior_list_commit() {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     let other = testkit::seed_conversation(&pool, s.owner_id, s.machine_id).await;
     sqlx::query("update conversations set title_source='auto' where id=$1")
@@ -446,8 +452,9 @@ async fn auto_title_counts_follow_prior_list_commit(pool: PgPool) {
     assert_eq!(counts["archived"], 1);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn group_delete_and_queue_resume_conform_to_public_schema(pool: PgPool) {
+#[tokio::test]
+async fn group_delete_and_queue_resume_conform_to_public_schema() {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     let g = groups::create_group(&pool, s.owner_id, "group", "g", None, Uuid::now_v7())
         .await
@@ -491,10 +498,9 @@ async fn group_delete_and_queue_resume_conform_to_public_schema(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn maintenance_purges_failed_jobs_and_expired_keys_but_keeps_pending_and_recent(
-    pool: PgPool,
-) {
+#[tokio::test]
+async fn maintenance_purges_failed_jobs_and_expired_keys_but_keeps_pending_and_recent() {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     let sch = scheduler(&pool, Default::default());
     let now = Utc::now();
@@ -515,8 +521,9 @@ async fn maintenance_purges_failed_jobs_and_expired_keys_but_keeps_pending_and_r
     );
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn maintenance_continues_after_one_purge_fails(pool: PgPool) {
+#[tokio::test]
+async fn maintenance_continues_after_one_purge_fails() {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     let sch = scheduler(&pool, Default::default());
     let m = scheduled(&pool, &s, "purge", Utc::now()).await;
@@ -540,8 +547,9 @@ async fn maintenance_continues_after_one_purge_fails(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn sensitive_debug_redacts_stored_response_and_database_detail(pool: PgPool) {
+#[tokio::test]
+async fn sensitive_debug_redacts_stored_response_and_database_detail() {
+    let pool = canterlot_hub::testkit::db().await;
     let marker = "private_regression_marker";
     let replay = idempotency::Begin::Replay(json!({"content":marker}));
     assert!(!format!("{replay:?}").contains(marker));
@@ -566,8 +574,9 @@ fn blob_shards_use_random_uuid_tail() {
     assert_ne!(store.blob_path(a).parent(), store.blob_path(b).parent());
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn readyz_names_an_unexpectedly_stopped_singleton(pool: PgPool) {
+#[tokio::test]
+async fn readyz_names_an_unexpectedly_stopped_singleton() {
+    let pool = canterlot_hub::testkit::db().await;
     let (deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
     let sch = deps.scheduler.clone();
@@ -585,8 +594,9 @@ async fn readyz_names_an_unexpectedly_stopped_singleton(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn orphan_gc_batches_catalog_queries(pool: PgPool) {
+#[tokio::test]
+async fn orphan_gc_batches_catalog_queries() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::attachments::BlobStore;
     use std::sync::atomic::{AtomicUsize, Ordering};
     let f = files::Fixture::new(pool.clone()).await;
@@ -624,8 +634,9 @@ async fn orphan_gc_batches_catalog_queries(pool: PgPool) {
     probe.close().await;
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn singleton_activity_recreates_projection_after_lock_loss(pool: PgPool) {
+#[tokio::test]
+async fn singleton_activity_recreates_projection_after_lock_loss() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::{
         bus::EventBus,
         config::{ActivityConfig, MachinesConfig},
@@ -663,8 +674,9 @@ async fn singleton_activity_recreates_projection_after_lock_loss(pool: PgPool) {
     bus.join().await;
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn singleton_gc_stays_passive_then_recovers_and_collects(pool: PgPool) {
+#[tokio::test]
+async fn singleton_gc_stays_passive_then_recovers_and_collects() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = files::Fixture::new(pool.clone()).await;
     let held =
         canterlot_hub::singleton::Singleton::acquire(&pool.connect_options(), "attachment-gc")
@@ -720,8 +732,9 @@ async fn singleton_gc_stays_passive_then_recovers_and_collects(pool: PgPool) {
     task.await.unwrap();
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn singleton_status_retries_failed_initial_projection(pool: PgPool) {
+#[tokio::test]
+async fn singleton_status_retries_failed_initial_projection() {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     sqlx::query("update machines set availability='available'")
         .execute(&pool)
@@ -785,8 +798,9 @@ async fn singleton_status_retries_failed_initial_projection(pool: PgPool) {
     task.await.unwrap();
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn scheduled_history_keeps_the_newest_terminal_jobs(pool: PgPool) {
+#[tokio::test]
+async fn scheduled_history_keeps_the_newest_terminal_jobs() {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     let ids: Vec<_> = (0..205).map(|_| Uuid::now_v7()).collect();
     sqlx::query("insert into scheduled_jobs(id,kind,owner_id,conversation_id,run_at,state,payload,updated_at) select id,'message',$2,$3,clock_timestamp()+n*interval '1 second','failed','{\"content\":[],\"attachment_ids\":[]}',clock_timestamp()+n*interval '1 second' from unnest($1::uuid[]) with ordinality t(id,n)")
@@ -803,8 +817,9 @@ async fn scheduled_history_keeps_the_newest_terminal_jobs(pool: PgPool) {
     assert!(!list.iter().any(|job| job.id == ids[0]));
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn mark_read_preserves_configured_metrics_freshness(pool: PgPool) {
+#[tokio::test]
+async fn mark_read_preserves_configured_metrics_freshness() {
+    let pool = canterlot_hub::testkit::db().await;
     let (s, execution) = running(&pool).await;
     sqlx::query("update executions set phase_at=clock_timestamp()-interval '31 minutes',last_event_at=clock_timestamp()-interval '31 minutes' where id=$1")
         .bind(execution)
@@ -854,8 +869,9 @@ async fn mark_read_preserves_configured_metrics_freshness(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn changed_machine_limits_fail_scheduled_attachments_without_blocking_text(pool: PgPool) {
+#[tokio::test]
+async fn changed_machine_limits_fail_scheduled_attachments_without_blocking_text() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = files::Fixture::new(pool).await;
     let id = f.ready("f.bin", "application/octet-stream", b"x").await;
     let now = Utc::now();
@@ -906,8 +922,9 @@ async fn changed_machine_limits_fail_scheduled_attachments_without_blocking_text
     assert_eq!(reason, "limits_mismatch");
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn malformed_wake_and_message_without_conversation_do_not_block_valid_message(pool: PgPool) {
+#[tokio::test]
+async fn malformed_wake_and_message_without_conversation_do_not_block_valid_message() {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     let sch = scheduler(&pool, Default::default());
     let now = Utc::now();

@@ -638,8 +638,9 @@ fn the_month_is_counted_in_moscow_time() {
     assert_eq!(windows::month_of(at(2026, 6, 15, 0, 0, 0)), "2026-06");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_reservation_follows_config_and_the_price_module(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn the_reservation_follows_config_and_the_price_module() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     // Две ставки часа берутся из каталога SKU провайдера.
     let pricing = rig.service.pricing().await?;
@@ -706,8 +707,9 @@ async fn the_reservation_follows_config_and_the_price_module(pool: PgPool) -> Te
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn with_a_zero_budget_only_the_exact_consent_passes(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn with_a_zero_budget_only_the_exact_consent_passes() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     let reservation = rig.reservation(60);
     let attempt = |consent: Option<i64>| {
@@ -751,8 +753,9 @@ async fn with_a_zero_budget_only_the_exact_consent_passes(pool: PgPool) -> TestR
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_budget_counts_ended_final_cost_and_live_reservations(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn the_budget_counts_ended_final_cost_and_live_reservations() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     let reservation = rig.reservation(60);
     sqlx::query("update cloud_budget set monthly_budget_kopecks = $1")
@@ -837,8 +840,9 @@ async fn the_budget_counts_ended_final_cost_and_live_reservations(pool: PgPool) 
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn only_one_window_is_live_at_a_time(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn only_one_window_is_live_at_a_time() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     let first = rig.create(60).await;
     for state in [
@@ -899,8 +903,9 @@ async fn only_one_window_is_live_at_a_time(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn concurrent_creates_make_exactly_one_window(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn concurrent_creates_make_exactly_one_window() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     sqlx::query("update cloud_budget set monthly_budget_kopecks = 10000000")
         .execute(&rig.pool)
@@ -933,8 +938,9 @@ async fn concurrent_creates_make_exactly_one_window(pool: PgPool) -> TestResult 
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_private_host_key_is_never_stored(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn the_private_host_key_is_never_stored() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     let id = rig.create(60).await;
     let window = rig.window(id).await;
@@ -949,10 +955,9 @@ async fn the_private_host_key_is_never_stored(pool: PgPool) -> TestResult {
 
 // ───────── Полный цикл ─────────
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_full_cycle_create_ready_idle_delete_ended_with_the_final_cost(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn the_full_cycle_create_ready_idle_delete_ended_with_the_final_cost() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     let _carrier = rig.carrier_session();
     let t0 = now_micros();
@@ -1085,10 +1090,9 @@ async fn the_full_cycle_create_ready_idle_delete_ended_with_the_final_cost(
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_rejected_create_fails_the_window_and_releases_the_reservation(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn a_rejected_create_fails_the_window_and_releases_the_reservation() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     rig.fake.control().create = CreateMode::Error {
         http: 400,
@@ -1122,8 +1126,9 @@ async fn a_rejected_create_fails_the_window_and_releases_the_reservation(
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_rejected_create_stays_open_until_both_listings_are_complete(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_rejected_create_stays_open_until_both_listings_are_complete() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     rig.fake.control().create = CreateMode::Error {
         http: 403,
@@ -1197,10 +1202,9 @@ fn posted_cores(rig: &Rig) -> Vec<String> {
         .collect()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_reservation_and_the_budget_use_the_most_expensive_profile_of_the_list(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn the_reservation_and_the_budget_use_the_most_expensive_profile_of_the_list() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     // Самый дорогой не первый и не последний.
     let rig = rig_with(pool, profiles(&[MID, DEAR, CHEAP])).await;
     let pricing = rig.service.pricing().await?;
@@ -1268,8 +1272,9 @@ async fn the_reservation_and_the_budget_use_the_most_expensive_profile_of_the_li
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_price_that_cannot_be_read_refuses_the_window(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_price_that_cannot_be_read_refuses_the_window() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     // В каталоге нет SKU диска: цена не угадывается, окно не создаётся.
     rig.fake
@@ -1298,10 +1303,10 @@ async fn a_price_that_cannot_be_read_refuses_the_window(pool: PgPool) -> TestRes
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_definite_refusal_moves_to_the_next_profile_in_the_same_window_and_the_ledger_uses_the_real_price(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn a_definite_refusal_moves_to_the_next_profile_in_the_same_window_and_the_ledger_uses_the_real_price()
+-> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig_with(pool, profiles(&[DEAR, MID, CHEAP])).await;
     let _carrier = rig.carrier_session();
     rig.fake
@@ -1370,10 +1375,10 @@ async fn a_definite_refusal_moves_to_the_next_profile_in_the_same_window_and_the
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_quota_or_capacity_refusal_falls_back_and_any_other_one_closes_the_window(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn a_quota_or_capacity_refusal_falls_back_and_any_other_one_closes_the_window() -> TestResult
+{
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig_with(pool, profiles(&[DEAR, CHEAP])).await;
     let mut t = now_micros();
     for mode in [CreateMode::quota(), CreateMode::not_enough_resources()] {
@@ -1414,10 +1419,10 @@ async fn a_quota_or_capacity_refusal_falls_back_and_any_other_one_closes_the_win
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn when_every_profile_is_refused_the_window_fails_with_the_codes_and_a_zero_cost(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn when_every_profile_is_refused_the_window_fails_with_the_codes_and_a_zero_cost()
+-> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig_with(pool, profiles(&[DEAR, MID, CHEAP])).await;
     {
         let mut state = rig.fake.control();
@@ -1455,10 +1460,10 @@ async fn when_every_profile_is_refused_the_window_fails_with_the_codes_and_a_zer
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_ambiguous_outcome_stops_the_fallback_and_the_attempted_profile_is_billed(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn an_ambiguous_outcome_stops_the_fallback_and_the_attempted_profile_is_billed() -> TestResult
+{
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig_with(pool, profiles(&[DEAR, MID])).await;
     // Первый профиль принят провайдером, ответ потерян по дороге.
     rig.fake.control().create = CreateMode::AcceptThenDrop;
@@ -1518,8 +1523,9 @@ async fn an_ambiguous_outcome_stops_the_fallback_and_the_attempted_profile_is_bi
 
 // ───────── Операция создания и подключение ─────────
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn attach_goes_to_the_public_address_of_the_instance_on_port_22(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn attach_goes_to_the_public_address_of_the_instance_on_port_22() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     let _carrier = rig.carrier_session();
     let t0 = now_micros();
@@ -1566,8 +1572,9 @@ async fn attach_goes_to_the_public_address_of_the_instance_on_port_22(pool: PgPo
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn attach_carries_the_prepare_script(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn attach_carries_the_prepare_script() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     let _carrier = rig.carrier_session();
     let t0 = now_micros();
@@ -1590,8 +1597,9 @@ async fn attach_carries_the_prepare_script(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn attach_waits_for_the_create_operation_and_a_running_instance(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn attach_waits_for_the_create_operation_and_a_running_instance() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     let _carrier = rig.carrier_session();
     // Машина ещё грузится: и операция создания, и сама машина отвечают «не готово».
@@ -1613,10 +1621,9 @@ async fn attach_waits_for_the_create_operation_and_a_running_instance(pool: PgPo
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_instance_found_by_name_is_checked_directly_without_an_operation(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn an_instance_found_by_name_is_checked_directly_without_an_operation() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     let _carrier = rig.carrier_session();
     rig.fake.control().create = CreateMode::AcceptThenDrop;
@@ -1654,8 +1661,9 @@ async fn an_instance_found_by_name_is_checked_directly_without_an_operation(
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_failed_create_operation_cleans_up_the_instance_and_the_disk(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_failed_create_operation_cleans_up_the_instance_and_the_disk() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     enable_pushes(&rig.pool).await;
     let _carrier = rig.carrier_session();
@@ -1709,10 +1717,9 @@ async fn a_failed_create_operation_cleans_up_the_instance_and_the_disk(pool: PgP
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_failed_create_operation_that_rolled_back_still_confirms_both_absences(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn a_failed_create_operation_that_rolled_back_still_confirms_both_absences() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     let _carrier = rig.carrier_session();
     // Яндекс откатил создание сам: ни машины, ни диска.
@@ -1745,8 +1752,9 @@ async fn a_failed_create_operation_that_rolled_back_still_confirms_both_absences
 
 // ───────── Прерывание и поломка машины ─────────
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_stopped_preemptible_instance_is_cleaned_up_as_preempted(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_stopped_preemptible_instance_is_cleaned_up_as_preempted() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     enable_pushes(&rig.pool).await;
     let _carrier = rig.carrier_session();
@@ -1811,8 +1819,9 @@ async fn a_stopped_preemptible_instance_is_cleaned_up_as_preempted(pool: PgPool)
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_stopped_regular_instance_is_cleaned_up_as_vm_broken(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_stopped_regular_instance_is_cleaned_up_as_vm_broken() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig_with(pool, |config| config.preemptible = false).await;
     enable_pushes(&rig.pool).await;
     let _carrier = rig.carrier_session();
@@ -1840,8 +1849,9 @@ async fn a_stopped_regular_instance_is_cleaned_up_as_vm_broken(pool: PgPool) -> 
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_crashed_instance_is_vm_broken_even_when_preemptible(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_crashed_instance_is_vm_broken_even_when_preemptible() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     enable_pushes(&rig.pool).await;
     let _carrier = rig.carrier_session();
@@ -1870,10 +1880,9 @@ async fn a_crashed_instance_is_vm_broken_even_when_preemptible(pool: PgPool) -> 
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_preempted_window_retries_its_sourced_job_and_gets_a_replacement(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn a_preempted_window_retries_its_sourced_job_and_gets_a_replacement() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     enable_pushes(&rig.pool).await;
     rig.set_budget(10_000_000).await;
@@ -1929,8 +1938,9 @@ async fn a_preempted_window_retries_its_sourced_job_and_gets_a_replacement(
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_replacement_inherits_the_prepare_of_its_parent(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_replacement_inherits_the_prepare_of_its_parent() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     enable_pushes(&rig.pool).await;
     rig.set_budget(10_000_000).await;
@@ -1969,8 +1979,9 @@ async fn a_replacement_inherits_the_prepare_of_its_parent(pool: PgPool) -> TestR
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_replacement_is_never_replaced_and_its_retried_job_is_lost(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_replacement_is_never_replaced_and_its_retried_job_is_lost() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     enable_pushes(&rig.pool).await;
     rig.set_budget(10_000_000).await;
@@ -2027,8 +2038,9 @@ async fn a_replacement_is_never_replaced_and_its_retried_job_is_lost(pool: PgPoo
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_canceled_job_is_not_retried_after_preemption(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_canceled_job_is_not_retried_after_preemption() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     enable_pushes(&rig.pool).await;
     rig.set_budget(10_000_000).await;
@@ -2061,8 +2073,9 @@ async fn a_canceled_job_is_not_retried_after_preemption(pool: PgPool) -> TestRes
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_broken_vm_gets_no_retry_and_no_replacement(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_broken_vm_gets_no_retry_and_no_replacement() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig_with(pool, |config| config.preemptible = false).await;
     enable_pushes(&rig.pool).await;
     let _carrier = rig.carrier_session();
@@ -2092,10 +2105,9 @@ async fn a_broken_vm_gets_no_retry_and_no_replacement(pool: PgPool) -> TestResul
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_budget_refuses_the_replacement_without_over_budget_consent(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn the_budget_refuses_the_replacement_without_over_budget_consent() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     enable_pushes(&rig.pool).await;
     let _carrier = rig.carrier_session();
@@ -2131,8 +2143,9 @@ async fn the_budget_refuses_the_replacement_without_over_budget_consent(
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn too_little_time_to_the_parent_deadline_skips_the_replacement(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn too_little_time_to_the_parent_deadline_skips_the_replacement() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     enable_pushes(&rig.pool).await;
     rig.set_budget(10_000_000).await;
@@ -2164,8 +2177,9 @@ async fn too_little_time_to_the_parent_deadline_skips_the_replacement(pool: PgPo
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_replacement_is_repriced_before_its_first_post(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_replacement_is_repriced_before_its_first_post() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     enable_pushes(&rig.pool).await;
     rig.set_budget(10_000_000).await;
@@ -2203,8 +2217,9 @@ async fn a_replacement_is_repriced_before_its_first_post(pool: PgPool) -> TestRe
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_window_past_its_deadline_fails_before_any_provider_call(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_window_past_its_deadline_fails_before_any_provider_call() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     let _carrier = rig.carrier_session();
     let now = now_micros();
@@ -2232,10 +2247,9 @@ async fn a_window_past_its_deadline_fails_before_any_provider_call(pool: PgPool)
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_replacement_with_less_than_the_lead_left_fails_before_any_provider_call(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn a_replacement_with_less_than_the_lead_left_fails_before_any_provider_call() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     let _carrier = rig.carrier_session();
     let now = now_micros();
@@ -2270,10 +2284,9 @@ async fn a_replacement_with_less_than_the_lead_left_fails_before_any_provider_ca
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_retry_pending_job_without_a_preempted_window_is_lost_on_reconcile(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn a_retry_pending_job_without_a_preempted_window_is_lost_on_reconcile() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     let _carrier = rig.carrier_session();
     let t0 = now_micros();
@@ -2296,10 +2309,9 @@ async fn a_retry_pending_job_without_a_preempted_window_is_lost_on_reconcile(
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_restart_between_revocation_and_absence_releases_the_job_once(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn a_restart_between_revocation_and_absence_releases_the_job_once() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     enable_pushes(&rig.pool).await;
     rig.set_budget(10_000_000).await;
@@ -2341,8 +2353,9 @@ async fn a_restart_between_revocation_and_absence_releases_the_job_once(
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_stop_after_an_owner_delete_never_rewrites_the_reason(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_stop_after_an_owner_delete_never_rewrites_the_reason() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     enable_pushes(&rig.pool).await;
     let _carrier = rig.carrier_session();
@@ -2372,8 +2385,9 @@ async fn a_stop_after_an_owner_delete_never_rewrites_the_reason(pool: PgPool) ->
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_instance_that_vanished_goes_through_cleanup_and_ends_gone(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn an_instance_that_vanished_goes_through_cleanup_and_ends_gone() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     enable_pushes(&rig.pool).await;
     let _carrier = rig.carrier_session();
@@ -2422,10 +2436,9 @@ async fn an_instance_that_vanished_goes_through_cleanup_and_ends_gone(pool: PgPo
 
 // ───────── Неопределённое создание и списки ─────────
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_ambiguous_create_is_found_by_name_and_is_never_posted_twice(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn an_ambiguous_create_is_found_by_name_and_is_never_posted_twice() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     rig.fake.control().create = CreateMode::AcceptThenDrop;
     let t0 = now_micros();
@@ -2455,10 +2468,9 @@ async fn an_ambiguous_create_is_found_by_name_and_is_never_posted_twice(
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_ambiguous_create_absent_from_full_listings_fails_after_the_window(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn an_ambiguous_create_absent_from_full_listings_fails_after_the_window() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     rig.fake.control().create = CreateMode::unavailable();
     let t0 = now_micros();
@@ -2488,10 +2500,9 @@ async fn an_ambiguous_create_absent_from_full_listings_fails_after_the_window(
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_absence_timestamp_is_taken_after_the_listing_not_at_the_tick_start(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn an_absence_timestamp_is_taken_after_the_listing_not_at_the_tick_start() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     // Провайдер отвечает только после того, как тест отпустит запрос: проход уже давно начался.
     let t0 = now_micros();
@@ -2528,10 +2539,9 @@ async fn an_absence_timestamp_is_taken_after_the_listing_not_at_the_tick_start(
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_vanished_instance_is_marked_gone_after_the_listing_that_confirmed_it(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn a_vanished_instance_is_marked_gone_after_the_listing_that_confirmed_it() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     let _carrier = rig.carrier_session();
     let t0 = now_micros();
@@ -2571,10 +2581,10 @@ async fn a_vanished_instance_is_marked_gone_after_the_listing_that_confirmed_it(
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_instance_a_listing_missed_is_still_deleted_because_its_disk_is_attached(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn an_instance_a_listing_missed_is_still_deleted_because_its_disk_is_attached() -> TestResult
+{
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     rig.fake.control().create = CreateMode::AcceptThenDrop;
     let t0 = now_micros();
@@ -2613,8 +2623,9 @@ async fn an_instance_a_listing_missed_is_still_deleted_because_its_disk_is_attac
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_failed_or_partial_listing_changes_nothing(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_failed_or_partial_listing_changes_nothing() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     enable_pushes(&rig.pool).await;
     rig.fake.control().create = CreateMode::unavailable();
@@ -2694,8 +2705,9 @@ async fn a_failed_or_partial_listing_changes_nothing(pool: PgPool) -> TestResult
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_listing_gap_does_not_close_an_instance_that_still_answers(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_listing_gap_does_not_close_an_instance_that_still_answers() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     let _carrier = rig.carrier_session();
     let t0 = now_micros();
@@ -2723,8 +2735,9 @@ async fn a_listing_gap_does_not_close_an_instance_that_still_answers(pool: PgPoo
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_hard_cap_drains_cancels_then_bounds_teardown_and_deletes(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn the_hard_cap_drains_cancels_then_bounds_teardown_and_deletes() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     let _carrier = rig.carrier_session();
     let t0 = now_micros();
@@ -2800,8 +2813,9 @@ async fn the_hard_cap_drains_cancels_then_bounds_teardown_and_deletes(pool: PgPo
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_draining_window_with_no_work_left_is_deleted_at_once(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_draining_window_with_no_work_left_is_deleted_at_once() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     let _carrier = rig.carrier_session();
     let t0 = now_micros();
@@ -2818,10 +2832,9 @@ async fn a_draining_window_with_no_work_left_is_deleted_at_once(pool: PgPool) ->
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_window_found_past_every_bound_after_an_outage_is_deleted_with_an_alert(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn a_window_found_past_every_bound_after_an_outage_is_deleted_with_an_alert() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     enable_pushes(&rig.pool).await;
     let _carrier = rig.carrier_session();
@@ -2853,10 +2866,9 @@ async fn drive_to_deleting(rig: &Rig, t0: DateTime<Utc>) -> (WindowId, DateTime<
     (id, when)
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_delete_requires_the_expected_name_and_the_folder_of_the_window(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn a_delete_requires_the_expected_name_and_the_folder_of_the_window() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     // Прямой ответ отдаёт не то имя, что у окна: DELETE нет, окно живо, пуш владельцу.
     {
         let rig = rig(pool.clone()).await;
@@ -2954,8 +2966,9 @@ async fn a_delete_requires_the_expected_name_and_the_folder_of_the_window(
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_direct_404_alone_never_confirms_absence(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_direct_404_alone_never_confirms_absence() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     let now = now_micros();
     let instance = rig.add_instance("placeholder");
@@ -2994,8 +3007,9 @@ async fn a_direct_404_alone_never_confirms_absence(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn repeated_lookup_failures_count_as_delete_failures_and_alert(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn repeated_lookup_failures_count_as_delete_failures_and_alert() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     enable_pushes(&rig.pool).await;
     let now = now_micros();
@@ -3057,8 +3071,9 @@ async fn repeated_lookup_failures_count_as_delete_failures_and_alert(pool: PgPoo
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_confirmed_absence_skips_the_delete_call(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_confirmed_absence_skips_the_delete_call() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     let now = now_micros();
     let id = raw_window(
@@ -3090,10 +3105,9 @@ async fn a_confirmed_absence_skips_the_delete_call(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_instance_deleted_by_hand_while_the_delete_is_failing_ends_the_window(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn an_instance_deleted_by_hand_while_the_delete_is_failing_ends_the_window() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     let _carrier = rig.carrier_session();
     let t0 = now_micros();
@@ -3113,10 +3127,9 @@ async fn an_instance_deleted_by_hand_while_the_delete_is_failing_ends_the_window
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_failing_delete_retries_with_backoff_and_alerts_after_three_failures(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn a_failing_delete_retries_with_backoff_and_alerts_after_three_failures() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     enable_pushes(&rig.pool).await;
     let _carrier = rig.carrier_session();
@@ -3155,10 +3168,9 @@ async fn a_failing_delete_retries_with_backoff_and_alerts_after_three_failures(
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_accepted_delete_is_confirmed_only_by_absence_from_a_full_listing(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn an_accepted_delete_is_confirmed_only_by_absence_from_a_full_listing() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     enable_pushes(&rig.pool).await;
     let _carrier = rig.carrier_session();
@@ -3208,10 +3220,9 @@ async fn an_accepted_delete_is_confirmed_only_by_absence_from_a_full_listing(
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_failed_delete_operation_is_retried_after_a_fresh_ownership_check(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn a_failed_delete_operation_is_retried_after_a_fresh_ownership_check() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     let _carrier = rig.carrier_session();
     let t0 = now_micros();
@@ -3241,10 +3252,9 @@ async fn a_failed_delete_operation_is_retried_after_a_fresh_ownership_check(
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_boot_disk_that_outlives_the_instance_is_deleted_before_the_window_ends(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn a_boot_disk_that_outlives_the_instance_is_deleted_before_the_window_ends() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     enable_pushes(&rig.pool).await;
     let _carrier = rig.carrier_session();
@@ -3302,10 +3312,9 @@ async fn a_boot_disk_that_outlives_the_instance_is_deleted_before_the_window_end
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_disk_is_deleted_only_under_the_window_name_and_only_when_detached(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn a_disk_is_deleted_only_under_the_window_name_and_only_when_detached() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     enable_pushes(&rig.pool).await;
     let now = now_micros();
@@ -3361,8 +3370,9 @@ async fn a_disk_is_deleted_only_under_the_window_name_and_only_when_detached(
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_disk_is_adopted_by_its_name_only_when_exactly_one_matches(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_disk_is_adopted_by_its_name_only_when_exactly_one_matches() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     // Без сохранённого номера диск ищется по имени, а имя не доказывает принадлежность: два
     // диска с именем окна — неоднозначность, и удалять первый из них нельзя.
     {
@@ -3433,8 +3443,9 @@ async fn a_disk_is_adopted_by_its_name_only_when_exactly_one_matches(pool: PgPoo
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_name_only_instance_recovery_requires_exactly_one_match(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_name_only_instance_recovery_requires_exactly_one_match() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     // Номера машины нет: снос ищет её по имени. Две машины с именем окна — неоднозначность.
     {
         let rig = rig(pool.clone()).await;
@@ -3520,10 +3531,10 @@ fn stray_name() -> String {
     format!("canterlot-runner-{}", Uuid::now_v7())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn reconcile_deletes_a_stray_instance_and_a_stray_disk_and_touches_nothing_else(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn reconcile_deletes_a_stray_instance_and_a_stray_disk_and_touches_nothing_else() -> TestResult
+{
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     enable_pushes(&rig.pool).await;
     let stray = stray_name();
@@ -3585,10 +3596,9 @@ async fn reconcile_deletes_a_stray_instance_and_a_stray_disk_and_touches_nothing
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_stray_disk_that_cannot_be_deleted_alerts_and_an_attached_one_waits(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn a_stray_disk_that_cannot_be_deleted_alerts_and_an_attached_one_waits() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     enable_pushes(&rig.pool).await;
     let lone = rig.fake.control().add_stray_disk(&stray_name());
@@ -3618,8 +3628,9 @@ async fn a_stray_disk_that_cannot_be_deleted_alerts_and_an_attached_one_waits(
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_late_instance_of_a_failed_window_reopens_it_as_late_cleanup(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_late_instance_of_a_failed_window_reopens_it_as_late_cleanup() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     let _carrier = rig.carrier_session();
     let t0 = now_micros();
@@ -3664,8 +3675,9 @@ async fn a_late_instance_of_a_failed_window_reopens_it_as_late_cleanup(pool: PgP
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_late_disk_reopens_its_closed_window_and_is_billed_to_it(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_late_disk_reopens_its_closed_window_and_is_billed_to_it() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     enable_pushes(&rig.pool).await;
     let _carrier = rig.carrier_session();
@@ -3740,8 +3752,9 @@ async fn a_late_disk_reopens_its_closed_window_and_is_billed_to_it(pool: PgPool)
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_late_disk_of_a_failed_window_is_cleaned_and_makes_it_cost(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_late_disk_of_a_failed_window_is_cleaned_and_makes_it_cost() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     let t0 = now_micros();
     rig.fake.control().create = CreateMode::unavailable();
@@ -3769,8 +3782,9 @@ async fn a_late_disk_of_a_failed_window_is_cleaned_and_makes_it_cost(pool: PgPoo
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_folder_change_keeps_cleaning_the_old_folder(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_folder_change_keeps_cleaning_the_old_folder() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     enable_pushes(&rig.pool).await;
     let _carrier = rig.carrier_session();
@@ -3839,10 +3853,9 @@ async fn a_folder_change_keeps_cleaning_the_old_folder(pool: PgPool) -> TestResu
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_late_disk_in_a_historical_folder_is_found_after_a_folder_change(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn a_late_disk_in_a_historical_folder_is_found_after_a_folder_change() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     enable_pushes(&rig.pool).await;
     let _carrier = rig.carrier_session();
@@ -3874,10 +3887,9 @@ async fn a_late_disk_in_a_historical_folder_is_found_after_a_folder_change(
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_late_cleanup_leaves_the_live_slot_to_the_successor_and_is_billed(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn a_late_cleanup_leaves_the_live_slot_to_the_successor_and_is_billed() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     enable_pushes(&rig.pool).await;
     let now = now_micros();
@@ -3923,8 +3935,9 @@ async fn a_late_cleanup_leaves_the_live_slot_to_the_successor_and_is_billed(
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_open_late_cleanup_blocks_new_creates(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn an_open_late_cleanup_blocks_new_creates() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     let now = now_micros();
     let old = raw_window(
@@ -3946,8 +3959,9 @@ async fn an_open_late_cleanup_blocks_new_creates(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_stray_that_cannot_be_deleted_alerts_every_half_hour(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_stray_that_cannot_be_deleted_alerts_every_half_hour() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     enable_pushes(&rig.pool).await;
     rig.add_instance(&stray_name());
@@ -3966,10 +3980,9 @@ async fn a_stray_that_cannot_be_deleted_alerts_every_half_hour(pool: PgPool) -> 
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_stray_is_deleted_only_when_the_direct_get_shows_its_own_name(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn a_stray_is_deleted_only_when_the_direct_get_shows_its_own_name() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     enable_pushes(&rig.pool).await;
     rig.add_instance(&stray_name());
@@ -3994,8 +4007,9 @@ async fn a_stray_is_deleted_only_when_the_direct_get_shows_its_own_name(
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_folder_listing_failure_does_not_stop_another_folder(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_folder_listing_failure_does_not_stop_another_folder() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     let now = now_micros();
     // Окно из старой конфигурации: его каталог — не текущий.
@@ -4038,8 +4052,9 @@ async fn a_folder_listing_failure_does_not_stop_another_folder(pool: PgPool) -> 
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn reconcile_runs_at_start_before_any_create(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn reconcile_runs_at_start_before_any_create() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     rig.add_instance(&stray_name());
     let id = rig.create(60).await;
@@ -4069,8 +4084,9 @@ async fn reconcile_runs_at_start_before_any_create(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn without_a_successful_reconcile_nothing_is_created(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn without_a_successful_reconcile_nothing_is_created() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     rig.fake.control().list_fail_page = Some(FailPage {
         list: "disks",
@@ -4092,8 +4108,9 @@ async fn without_a_successful_reconcile_nothing_is_created(pool: PgPool) -> Test
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_create_call_interrupted_by_a_crash_is_never_repeated(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_create_call_interrupted_by_a_crash_is_never_repeated() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     ready_row(&rig).await;
     let now = now_micros();
@@ -4120,8 +4137,9 @@ async fn a_create_call_interrupted_by_a_crash_is_never_repeated(pool: PgPool) ->
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_cost_is_per_second_and_each_rate_stops_at_its_own_end(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn the_cost_is_per_second_and_each_rate_stops_at_its_own_end() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     let now = now_micros();
     let called = now - TimeDelta::hours(5);
@@ -4268,8 +4286,9 @@ async fn ready_row(rig: &Rig) {
     .unwrap();
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_hub_restart_resumes_windows_in_every_state(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_hub_restart_resumes_windows_in_every_state() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     ready_row(&rig).await;
     let now = now_micros();
@@ -4397,10 +4416,9 @@ async fn a_hub_restart_resumes_windows_in_every_state(pool: PgPool) -> TestResul
 
 // ───────── Строка раннера `cloud` ─────────
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_cloud_row_is_reused_reactivated_on_attach_and_revoked_at_the_end(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn the_cloud_row_is_reused_reactivated_on_attach_and_revoked_at_the_end() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     let _carrier = rig.carrier_session();
     let t0 = now_micros();
@@ -4509,8 +4527,9 @@ async fn the_cloud_row_is_reused_reactivated_on_attach_and_revoked_at_the_end(
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn static_runners_keep_their_token_flags(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn static_runners_keep_their_token_flags() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     let spec = machines::RunnerSpec {
         parent: rig.carrier,
@@ -4586,8 +4605,9 @@ async fn attach_runner_is_a_machine_level_command_only_with_runners_v1() {
 
 // ───────── Простой и отключение ─────────
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn idle_counts_running_queued_and_takeable_waiting_jobs(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn idle_counts_running_queued_and_takeable_waiting_jobs() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     let _carrier = rig.carrier_session();
     let t0 = now_micros();
@@ -4630,8 +4650,9 @@ async fn idle_counts_running_queued_and_takeable_waiting_jobs(pool: PgPool) -> T
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn idle_ignores_work_the_cloud_runner_cannot_take(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn idle_ignores_work_the_cloud_runner_cannot_take() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     let _carrier = rig.carrier_session();
     let t0 = now_micros();
@@ -4667,8 +4688,9 @@ async fn idle_ignores_work_the_cloud_runner_cannot_take(pool: PgPool) -> TestRes
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_cloud_row_is_placement_kind_cloud(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn the_cloud_row_is_placement_kind_cloud() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     let _carrier = rig.carrier_session();
     let t0 = now_micros();
@@ -4700,10 +4722,10 @@ async fn the_cloud_row_is_placement_kind_cloud(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_disconnected_runner_is_deleted_after_ten_minutes_only_while_the_carrier_is_connected(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn a_disconnected_runner_is_deleted_after_ten_minutes_only_while_the_carrier_is_connected()
+-> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     let carrier = rig.carrier_session();
     let t0 = now_micros();
@@ -4733,10 +4755,9 @@ async fn a_disconnected_runner_is_deleted_after_ten_minutes_only_while_the_carri
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_disconnected_runner_with_a_disconnected_carrier_is_not_deleted(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn a_disconnected_runner_with_a_disconnected_carrier_is_not_deleted() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     let carrier = rig.carrier_session();
     let t0 = now_micros();
@@ -4759,10 +4780,9 @@ async fn a_disconnected_runner_with_a_disconnected_carrier_is_not_deleted(
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_runner_that_never_connects_is_deleted_after_the_ready_timeout(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn the_runner_that_never_connects_is_deleted_after_the_ready_timeout() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     let _carrier = rig.carrier_session();
     let t0 = now_micros();
@@ -4785,8 +4805,9 @@ async fn the_runner_that_never_connects_is_deleted_after_the_ready_timeout(
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_machine_that_is_not_a_carrier_gets_no_attach_command(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_machine_that_is_not_a_carrier_gets_no_attach_command() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     let t0 = now_micros();
     // Окно создаётся при живой несущей, а теряет её до подключения.
@@ -4808,10 +4829,9 @@ async fn a_machine_that_is_not_a_carrier_gets_no_attach_command(pool: PgPool) ->
 
 // ───────── Удалить сейчас ─────────
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn delete_now_cancels_an_unsent_create_and_revokes_a_running_window(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn delete_now_cancels_an_unsent_create_and_revokes_a_running_window() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     let _carrier = rig.carrier_session();
     let now = now_micros();
@@ -4853,10 +4873,9 @@ async fn delete_now_cancels_an_unsent_create_and_revokes_a_running_window(
 
 // ───────── Включение при старте ─────────
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn startup_enables_the_service_only_with_a_readable_key_and_a_valid_table(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn startup_enables_the_service_only_with_a_readable_key_and_a_valid_table() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::cloud::service::from_config;
     let capture = Capture::default();
     let subscriber = tracing_subscriber::fmt()
@@ -4949,10 +4968,9 @@ fn private_key_sample() -> String {
         .collect()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn without_a_carrier_only_new_creates_stop_and_cleanup_still_runs(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn without_a_carrier_only_new_creates_stop_and_cleanup_still_runs() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     machines::set_carrier(&rig.pool, rig.carrier, false).await?;
     assert!(matches!(
@@ -4988,8 +5006,9 @@ async fn without_a_carrier_only_new_creates_stop_and_cleanup_still_runs(
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_restart_keeps_the_terms_approved_at_create(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_restart_keeps_the_terms_approved_at_create() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     let _carrier = rig.carrier_session();
     let t0 = now_micros();
@@ -5025,10 +5044,9 @@ fn set_vcpu_price(rig: &Rig, price: &str) {
         json!([street_price("2025-12-31T21:00:00Z", price)]);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_stale_quote_that_would_grow_the_reservation_cancels_the_create(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn a_stale_quote_that_would_grow_the_reservation_cancels_the_create() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     enable_pushes(&rig.pool).await;
     let _carrier = rig.carrier_session();
@@ -5054,8 +5072,9 @@ async fn a_stale_quote_that_would_grow_the_reservation_cancels_the_create(
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_stale_quote_is_replaced_by_the_new_lower_price(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_stale_quote_is_replaced_by_the_new_lower_price() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let rig = rig(pool).await;
     let _carrier = rig.carrier_session();
     let t0 = now_micros();
@@ -5104,10 +5123,9 @@ impl<'a> MakeWriter<'a> for Capture {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn neither_the_account_key_nor_the_token_nor_the_host_key_reach_the_logs(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn neither_the_account_key_nor_the_token_nor_the_host_key_reach_the_logs() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let capture = Capture::default();
     let subscriber = tracing_subscriber::fmt()
         .with_max_level(tracing::Level::TRACE)

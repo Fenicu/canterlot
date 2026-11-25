@@ -523,8 +523,9 @@ async fn set_resume_pending(pool: &PgPool, ids: &[Uuid]) {
         .unwrap();
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn five_hour_limit_without_crunch_pauses_with_reset_time(pool: PgPool) {
+#[tokio::test]
+async fn five_hour_limit_without_crunch_pauses_with_reset_time() {
+    let pool = canterlot_hub::testkit::db().await;
     let env = Env::new(&pool).await;
     let id = env.conversation(false, true).await;
     let now = start();
@@ -555,8 +556,9 @@ async fn five_hour_limit_without_crunch_pauses_with_reset_time(pool: PgPool) {
     assert!(events_of(&pool, id, "crunch_held").await.is_empty());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn five_hour_limit_with_crunch_holds_and_schedules_wake_at_reset_plus_grace(pool: PgPool) {
+#[tokio::test]
+async fn five_hour_limit_with_crunch_holds_and_schedules_wake_at_reset_plus_grace() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut run = worker::Run::new(&pool).await;
     let id = run.seed.conversation_id;
     sqlx::query("update conversations set crunch_enabled=true where id=$1")
@@ -617,8 +619,9 @@ async fn five_hour_limit_with_crunch_holds_and_schedules_wake_at_reset_plus_grac
     assert_eq!(events_of(&pool, id, "limit_reached").await.len(), 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_single_estimated_reset_reading_does_not_release_the_hold(pool: PgPool) {
+#[tokio::test]
+async fn a_single_estimated_reset_reading_does_not_release_the_hold() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::with_config(&pool, patient_config()).await;
     let id = env.conversation(true, true).await;
     let now = start();
@@ -648,8 +651,9 @@ async fn a_single_estimated_reset_reading_does_not_release_the_hold(pool: PgPool
     assert!(wake_texts(&pool, id).await.is_empty());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_early_estimated_reset_reading_does_not_release_the_hold(pool: PgPool) {
+#[tokio::test]
+async fn an_early_estimated_reset_reading_does_not_release_the_hold() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::with_config(&pool, patient_config()).await;
     let id = env.conversation(true, true).await;
     let now = start();
@@ -680,8 +684,9 @@ async fn an_early_estimated_reset_reading_does_not_release_the_hold(pool: PgPool
     assert!(wake_texts(&pool, id).await.is_empty());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_second_estimated_reset_reading_after_the_wake_releases_the_hold(pool: PgPool) {
+#[tokio::test]
+async fn a_second_estimated_reset_reading_after_the_wake_releases_the_hold() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::with_config(&pool, patient_config()).await;
     let id = env.conversation(true, true).await;
     let now = start();
@@ -721,8 +726,9 @@ async fn a_second_estimated_reset_reading_after_the_wake_releases_the_hold(pool:
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_not_reset_reading_does_not_confirm_an_estimated_reset(pool: PgPool) {
+#[tokio::test]
+async fn a_not_reset_reading_does_not_confirm_an_estimated_reset() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::with_config(&pool, patient_config()).await;
     let id = env.conversation(true, true).await;
     let now = start();
@@ -772,8 +778,9 @@ async fn a_not_reset_reading_does_not_confirm_an_estimated_reset(pool: PgPool) {
     assert!(!has_quota(&holds(&pool, id).await));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_exact_reset_reading_still_releases_the_hold_on_its_own(pool: PgPool) {
+#[tokio::test]
+async fn an_exact_reset_reading_still_releases_the_hold_on_its_own() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::with_config(&pool, patient_config()).await;
     let id = env.conversation(true, true).await;
     let now = start();
@@ -805,8 +812,9 @@ async fn an_exact_reset_reading_still_releases_the_hold_on_its_own(pool: PgPool)
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_missing_five_hour_window_wakes_after_an_estimated_reading(pool: PgPool) {
+#[tokio::test]
+async fn a_missing_five_hour_window_wakes_after_an_estimated_reading() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::with_config(&pool, patient_config()).await;
     let id = env.conversation(true, true).await;
     // Вся сцена в прошлом: отметку об отсутствии после сброса нельзя датировать будущим,
@@ -841,8 +849,9 @@ async fn a_missing_five_hour_window_wakes_after_an_estimated_reading(pool: PgPoo
     assert!(!has_quota(&holds(&pool, id).await));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn unknown_reset_time_uses_the_retry_interval(pool: PgPool) {
+#[tokio::test]
+async fn unknown_reset_time_uses_the_retry_interval() {
+    let pool = canterlot_hub::testkit::db().await;
     let env = Env::new(&pool).await;
     let id = env.conversation(true, true).await;
     let now = start();
@@ -865,8 +874,9 @@ async fn unknown_reset_time_uses_the_retry_interval(pool: PgPool) {
     assert_eq!(wakes[0].run_at, expected + secs(20));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn repeat_limit_reached_with_a_later_reset_moves_the_wake(pool: PgPool) {
+#[tokio::test]
+async fn repeat_limit_reached_with_a_later_reset_moves_the_wake() {
+    let pool = canterlot_hub::testkit::db().await;
     let env = Env::new(&pool).await;
     let id = env.conversation(true, true).await;
     let now = start();
@@ -931,8 +941,9 @@ async fn repeat_limit_reached_with_a_later_reset_moves_the_wake(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn wake_before_a_fresh_observation_requests_a_poll_and_retries_with_backoff(pool: PgPool) {
+#[tokio::test]
+async fn wake_before_a_fresh_observation_requests_a_poll_and_retries_with_backoff() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::new(&pool).await;
     let id = env.conversation(true, true).await;
     let now = start();
@@ -961,8 +972,9 @@ async fn wake_before_a_fresh_observation_requests_a_poll_and_retries_with_backof
     assert!(resume_pending(&pool, id).await);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn poll_is_requested_after_the_wake_transaction_commits(pool: PgPool) {
+#[tokio::test]
+async fn poll_is_requested_after_the_wake_transaction_commits() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::new(&pool).await;
     let id = env.conversation(true, true).await;
     let now = start();
@@ -1034,8 +1046,9 @@ async fn poll_offsets(env: &mut Env, from: DateTime<Utc>, until: DateTime<Utc>) 
     offsets
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn poll_cadence_falls_back_to_the_provider_floor_after_the_backoff(pool: PgPool) {
+#[tokio::test]
+async fn poll_cadence_falls_back_to_the_provider_floor_after_the_backoff() {
+    let pool = canterlot_hub::testkit::db().await;
     let config = LimitsConfig {
         poll_min_interval: Duration::from_secs(30),
         ..patient_config()
@@ -1072,8 +1085,9 @@ async fn poll_cadence_falls_back_to_the_provider_floor_after_the_backoff(pool: P
     assert_eq!(check, expected, "limit_check cadence");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn wake_after_verified_reset_releases_hold_and_queues_resume_text_once(pool: PgPool) {
+#[tokio::test]
+async fn wake_after_verified_reset_releases_hold_and_queues_resume_text_once() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::new(&pool).await;
     let id = env.conversation(true, true).await;
     let now = start();
@@ -1158,8 +1172,9 @@ async fn wake_after_verified_reset_releases_hold_and_queues_resume_text_once(poo
     assert_eq!(inputs(&pool, id).await, 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_five_hour_hold_wakes_when_the_provider_no_longer_has_that_window(pool: PgPool) {
+#[tokio::test]
+async fn a_five_hour_hold_wakes_when_the_provider_no_longer_has_that_window() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::new(&pool).await;
     let id = env.conversation(true, true).await;
     // Сброс и отсутствие окна в прошлом: будущую отметку хаб прижимает к now.
@@ -1195,8 +1210,9 @@ async fn a_five_hour_hold_wakes_when_the_provider_no_longer_has_that_window(pool
     assert!(env.take_polls().is_empty());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn five_hour_wake_is_not_verified_by_a_replayed_pre_limit_observation(pool: PgPool) {
+#[tokio::test]
+async fn five_hour_wake_is_not_verified_by_a_replayed_pre_limit_observation() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::with_config(&pool, patient_config()).await;
     let known = env.conversation(true, true).await;
     let unknown = env.conversation(true, true).await;
@@ -1244,8 +1260,9 @@ async fn five_hour_wake_is_not_verified_by_a_replayed_pre_limit_observation(pool
     assert!(has_quota(&holds(&pool, known).await));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn hold_wakes_by_the_clock_when_no_reading_arrives_after_the_reset(pool: PgPool) {
+#[tokio::test]
+async fn hold_wakes_by_the_clock_when_no_reading_arrives_after_the_reset() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::new(&pool).await;
     let known = env.conversation(true, true).await;
     let unknown = env.conversation(true, true).await;
@@ -1274,8 +1291,9 @@ async fn hold_wakes_by_the_clock_when_no_reading_arrives_after_the_reset(pool: P
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn fresh_reading_of_a_full_window_keeps_the_hold_past_the_clock(pool: PgPool) {
+#[tokio::test]
+async fn fresh_reading_of_a_full_window_keeps_the_hold_past_the_clock() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::new(&pool).await;
     let id = env.conversation(true, true).await;
     let now = start();
@@ -1296,8 +1314,9 @@ async fn fresh_reading_of_a_full_window_keeps_the_hold_past_the_clock(pool: PgPo
     assert_eq!(inputs(&pool, id).await, 0);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn weekly_reserve_ends_by_the_clock_when_no_reading_arrives_after_the_reset(pool: PgPool) {
+#[tokio::test]
+async fn weekly_reserve_ends_by_the_clock_when_no_reading_arrives_after_the_reset() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::new(&pool).await;
     let id = env.conversation(true, true).await;
     let idle = env.conversation(true, false).await;
@@ -1328,8 +1347,9 @@ async fn weekly_reserve_ends_by_the_clock_when_no_reading_arrives_after_the_rese
     assert_eq!(wake_texts(&pool, id).await.len(), 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn fresh_reading_above_the_threshold_keeps_the_reserve_past_the_clock(pool: PgPool) {
+#[tokio::test]
+async fn fresh_reading_above_the_threshold_keeps_the_reserve_past_the_clock() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::new(&pool).await;
     let id = env.conversation(true, false).await;
     let now = start();
@@ -1355,8 +1375,9 @@ async fn fresh_reading_above_the_threshold_keeps_the_reserve_past_the_clock(pool
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn custom_resume_text_is_used_and_default_comes_from_config(pool: PgPool) {
+#[tokio::test]
+async fn custom_resume_text_is_used_and_default_comes_from_config() {
+    let pool = canterlot_hub::testkit::db().await;
     let config = LimitsConfig {
         default_resume_text: "Текст из конфигурации".into(),
         ..Default::default()
@@ -1405,8 +1426,9 @@ async fn verified_reset(env: &Env, reset: DateTime<Utc>) {
     .await;
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn rereview_nineteen_polls_and_backend_loss_still_wake_after_reset(pool: PgPool) {
+#[tokio::test]
+async fn rereview_nineteen_polls_and_backend_loss_still_wake_after_reset() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::with_config(&pool, patient_config()).await;
     let id = env.conversation(true, true).await;
     let now = start();
@@ -1459,8 +1481,9 @@ async fn rereview_nineteen_polls_and_backend_loss_still_wake_after_reset(pool: P
     assert_eq!(wake_texts(&pool, id).await.len(), 1);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn rereview_limit_check_transient_errors_retry_beyond_max_attempts(pool: PgPool) {
+#[tokio::test]
+async fn rereview_limit_check_transient_errors_retry_beyond_max_attempts() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::new(&pool).await;
     let now = start();
     env.observe("claude", Window::Weekly, 960, Some(now + secs(3600)), now)
@@ -1493,8 +1516,9 @@ async fn rereview_limit_check_transient_errors_retry_beyond_max_attempts(pool: P
     assert_eq!(jobs(&pool, "limit_check").await[0].state, "fired");
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn rereview_late_limit_fact_cannot_rearm_owner_stopped_turn(pool: PgPool) {
+#[tokio::test]
+async fn rereview_late_limit_fact_cannot_rearm_owner_stopped_turn() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::new(&pool).await;
     let now = start();
     let reset = now + secs(3600);
@@ -1560,8 +1584,9 @@ async fn rereview_late_limit_fact_cannot_rearm_owner_stopped_turn(pool: PgPool) 
     }
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn rereview_new_hold_gets_fresh_expiry_after_no_live_skip(pool: PgPool) {
+#[tokio::test]
+async fn rereview_new_hold_gets_fresh_expiry_after_no_live_skip() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::new(&pool).await;
     let id = env.conversation(true, true).await;
     let now = start();
@@ -1648,8 +1673,9 @@ async fn rereview_new_hold_gets_fresh_expiry_after_no_live_skip(pool: PgPool) {
     assert_eq!(wake_texts(&pool, id).await.len(), 1);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn rereview_sj_stop_marker_blocks_old_turn_but_allows_new_turn(pool: PgPool) {
+#[tokio::test]
+async fn rereview_sj_stop_marker_blocks_old_turn_but_allows_new_turn() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut run = worker::Run::new(&pool).await;
     let mut env = Env::attach(
         &pool,
@@ -1722,8 +1748,9 @@ async fn rereview_sj_stop_marker_blocks_old_turn_but_allows_new_turn(pool: PgPoo
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn wake_respects_user_pause_and_only_releases_the_hold(pool: PgPool) {
+#[tokio::test]
+async fn wake_respects_user_pause_and_only_releases_the_hold() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::new(&pool).await;
     let id = env.conversation(true, true).await;
     let now = start();
@@ -1746,8 +1773,9 @@ async fn wake_respects_user_pause_and_only_releases_the_hold(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn wake_with_no_live_execution_releases_the_hold_and_keeps_resume_pending(pool: PgPool) {
+#[tokio::test]
+async fn wake_with_no_live_execution_releases_the_hold_and_keeps_resume_pending() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::new(&pool).await;
     let id = env.conversation(true, true).await;
     let now = start();
@@ -1771,8 +1799,9 @@ async fn wake_with_no_live_execution_releases_the_hold_and_keeps_resume_pending(
     assert_eq!(job.result.as_ref().unwrap()["skipped"], "no_live_execution");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn no_live_execution_note_to_the_parent_carries_the_reset_time(pool: PgPool) {
+#[tokio::test]
+async fn no_live_execution_note_to_the_parent_carries_the_reset_time() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::new(&pool).await;
     let parent = env.conversation(true, true).await;
     let id = env.conversation(true, true).await;
@@ -1819,8 +1848,9 @@ async fn no_live_execution_note_to_the_parent_carries_the_reset_time(pool: PgPoo
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn wake_with_an_owner_input_queued_sends_no_resume_text(pool: PgPool) {
+#[tokio::test]
+async fn wake_with_an_owner_input_queued_sends_no_resume_text() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::new(&pool).await;
     let before = env.conversation(true, true).await;
     let after = env.conversation(true, true).await;
@@ -1856,8 +1886,9 @@ async fn wake_with_an_owner_input_queued_sends_no_resume_text(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn wake_while_weekly_reserve_active_never_sends_resume(pool: PgPool) {
+#[tokio::test]
+async fn wake_while_weekly_reserve_active_never_sends_resume() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::new(&pool).await;
     let held = env.conversation(true, true).await;
     let overridden = env.conversation(true, true).await;
@@ -1888,8 +1919,9 @@ async fn wake_while_weekly_reserve_active_never_sends_resume(pool: PgPool) {
     assert!(has_weekly(&holds(&pool, held).await, "claude"));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn observation_95_percent_holds_new_turns_but_running_turn_completes(pool: PgPool) {
+#[tokio::test]
+async fn observation_95_percent_holds_new_turns_but_running_turn_completes() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut run = worker::Run::new(&pool).await;
     let id = run.seed.conversation_id;
     let mut env = Env::attach(
@@ -1966,8 +1998,9 @@ async fn observation_95_percent_holds_new_turns_but_running_turn_completes(pool:
     assert_eq!(execution, "running");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn reserve_entry_withdraws_a_dispatched_untransmitted_input(pool: PgPool) {
+#[tokio::test]
+async fn reserve_entry_withdraws_a_dispatched_untransmitted_input() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::new(&pool).await;
     let waiting = env.conversation(false, true).await;
     let transmitting = env.conversation(false, true).await;
@@ -2019,8 +2052,9 @@ async fn reserve_entry_withdraws_a_dispatched_untransmitted_input(pool: PgPool) 
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn weekly_reserve_hold_covers_all_sessions_of_the_provider_only(pool: PgPool) {
+#[tokio::test]
+async fn weekly_reserve_hold_covers_all_sessions_of_the_provider_only() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::new(&pool).await;
     let crunch = env.conversation(true, true).await;
     let plain = env.conversation(false, false).await;
@@ -2107,8 +2141,9 @@ fn new_conversation(env: &Env, start_execution: bool) -> NewConversation {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn new_conversation_created_during_reserve_starts_held(pool: PgPool) {
+#[tokio::test]
+async fn new_conversation_created_during_reserve_starts_held() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::new(&pool).await;
     let now = start();
     let weekly_reset = now + TimeDelta::days(2);
@@ -2166,8 +2201,9 @@ async fn new_conversation_created_during_reserve_starts_held(pool: PgPool) {
     assert!(holds(&pool, raw).await.contains(&hold));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn create_racing_reserve_entry_always_ends_held(pool: PgPool) {
+#[tokio::test]
+async fn create_racing_reserve_entry_always_ends_held() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::new(&pool).await;
     let base = start();
     let weekly_reset = base + TimeDelta::days(5);
@@ -2247,8 +2283,9 @@ async fn create_racing_reserve_entry_always_ends_held(pool: PgPool) {
     assert!(by_rule > 0, "creation before the reserve never happened");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn reserve_override_continues_one_session_only(pool: PgPool) {
+#[tokio::test]
+async fn reserve_override_continues_one_session_only() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::new(&pool).await;
     let first = env.conversation(true, true).await;
     let second = env.conversation(true, true).await;
@@ -2320,8 +2357,9 @@ async fn reserve_override_continues_one_session_only(pool: PgPool) {
     assert!(!has_weekly(&holds(&pool, second).await, "claude"));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn weekly_reset_wakes_only_sessions_cut_by_a_limit(pool: PgPool) {
+#[tokio::test]
+async fn weekly_reset_wakes_only_sessions_cut_by_a_limit() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::new(&pool).await;
     let idle_a = env.conversation(true, true).await;
     let idle_b = env.conversation(true, true).await;
@@ -2385,8 +2423,9 @@ async fn weekly_reset_wakes_only_sessions_cut_by_a_limit(pool: PgPool) {
     assert_eq!(rule.result.unwrap()["woken"], json!([cut]));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn reset_wakes_all_limit_stopped_crunch_sessions_at_once(pool: PgPool) {
+#[tokio::test]
+async fn reset_wakes_all_limit_stopped_crunch_sessions_at_once() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::new(&pool).await;
     let mut stopped = Vec::new();
     for _ in 0..3 {
@@ -2423,8 +2462,9 @@ async fn reset_wakes_all_limit_stopped_crunch_sessions_at_once(pool: PgPool) {
     assert_eq!(jobs(&pool, "wake").await.len(), 3);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn weekly_reset_wake_is_not_cancelled_by_the_removed_weekly_hold(pool: PgPool) {
+#[tokio::test]
+async fn weekly_reset_wake_is_not_cancelled_by_the_removed_weekly_hold() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::new(&pool).await;
     let id = env.conversation(true, true).await;
     let idle = env.conversation(true, true).await;
@@ -2478,8 +2518,9 @@ async fn weekly_reset_wake_is_not_cancelled_by_the_removed_weekly_hold(pool: PgP
     tx.rollback().await.unwrap();
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn reading_oscillating_around_95_percent_does_not_wake_crunch_sessions(pool: PgPool) {
+#[tokio::test]
+async fn reading_oscillating_around_95_percent_does_not_wake_crunch_sessions() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::new(&pool).await;
     let id = env.conversation(true, true).await;
     set_resume_pending(&pool, &[id]).await;
@@ -2514,8 +2555,9 @@ async fn reading_oscillating_around_95_percent_does_not_wake_crunch_sessions(poo
     assert!(resume_pending(&pool, id).await);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn stale_replay_never_clears_the_reserve(pool: PgPool) {
+#[tokio::test]
+async fn stale_replay_never_clears_the_reserve() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::new(&pool).await;
     let id = env.conversation(true, true).await;
     set_resume_pending(&pool, &[id]).await;
@@ -2568,8 +2610,9 @@ async fn stale_replay_never_clears_the_reserve(pool: PgPool) {
     assert!(has_weekly(&holds(&pool, id).await, "claude"));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn providers_are_independent(pool: PgPool) {
+#[tokio::test]
+async fn providers_are_independent() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::new(&pool).await;
     let claude = env.conversation(true, true).await;
     let codex = env.codex_conversation(true, true).await;
@@ -2624,8 +2667,9 @@ async fn providers_are_independent(pool: PgPool) {
 }
 
 #[cfg(feature = "fault-injection")]
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn wake_is_exactly_once_under_two_schedulers(pool: PgPool) {
+#[tokio::test]
+async fn wake_is_exactly_once_under_two_schedulers() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::fault_injection::Point;
     let env = Env::new(&pool).await;
     let now = start();
@@ -2686,8 +2730,9 @@ async fn wake_is_exactly_once_under_two_schedulers(pool: PgPool) {
     assert_eq!(deadlocks(&pool).await, before);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn two_wakes_for_one_reset_queue_one_resume(pool: PgPool) {
+#[tokio::test]
+async fn two_wakes_for_one_reset_queue_one_resume() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::new(&pool).await;
     let now = start();
     let weekly_reset = now + TimeDelta::days(2);
@@ -2730,8 +2775,9 @@ async fn two_wakes_for_one_reset_queue_one_resume(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn hub_restart_between_hold_and_wake_still_wakes_once(pool: PgPool) {
+#[tokio::test]
+async fn hub_restart_between_hold_and_wake_still_wakes_once() {
+    let pool = canterlot_hub::testkit::db().await;
     let env = Env::new(&pool).await;
     let id = env.conversation(true, true).await;
     let now = start();
@@ -2771,8 +2817,9 @@ async fn hub_restart_between_hold_and_wake_still_wakes_once(pool: PgPool) {
     assert_eq!(inputs(&pool, id).await, 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn limit_check_notices_weekly_reset_without_live_sessions(pool: PgPool) {
+#[tokio::test]
+async fn limit_check_notices_weekly_reset_without_live_sessions() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::new(&pool).await;
     let id = env.conversation(true, false).await;
     let now = start();
@@ -2810,8 +2857,9 @@ async fn limit_check_notices_weekly_reset_without_live_sessions(pool: PgPool) {
     assert_eq!(checks[0].state, "fired");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn poll_requests_are_rate_limited_per_provider_and_skip_unavailable_machines(pool: PgPool) {
+#[tokio::test]
+async fn poll_requests_are_rate_limited_per_provider_and_skip_unavailable_machines() {
+    let pool = canterlot_hub::testkit::db().await;
     let owner = Uuid::now_v7();
     sqlx::query("insert into owners(id) values($1)")
         .bind(owner)
@@ -2913,8 +2961,9 @@ async fn poll_requests_are_rate_limited_per_provider_and_skip_unavailable_machin
     assert!(polls(&mut degraded_s).is_empty());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn disabling_crunch_turns_quota_hold_into_limit_pause_and_cancels_wakes(pool: PgPool) {
+#[tokio::test]
+async fn disabling_crunch_turns_quota_hold_into_limit_pause_and_cancels_wakes() {
+    let pool = canterlot_hub::testkit::db().await;
     let env = Env::new(&pool).await;
     let id = env.conversation(true, true).await;
     let now = start();
@@ -3023,8 +3072,9 @@ async fn disabling_crunch_turns_quota_hold_into_limit_pause_and_cancels_wakes(po
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn lock_order_has_no_deadlocks_across_ingest_dispatch_scheduler_and_http(pool: PgPool) {
+#[tokio::test]
+async fn lock_order_has_no_deadlocks_across_ingest_dispatch_scheduler_and_http() {
+    let pool = canterlot_hub::testkit::db().await;
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(24)
         .connect_with(pool.connect_options().as_ref().clone())
@@ -3206,8 +3256,9 @@ async fn lock_order_has_no_deadlocks_across_ingest_dispatch_scheduler_and_http(p
     assert_eq!(deadlocks(&pool).await, before);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn final_wave_owner_stop_prevents_resume_at_later_weekly_reset(pool: PgPool) {
+#[tokio::test]
+async fn final_wave_owner_stop_prevents_resume_at_later_weekly_reset() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::new(&pool).await;
     let id = env.conversation(true, true).await;
     let now = start();
@@ -3245,8 +3296,9 @@ async fn final_wave_owner_stop_prevents_resume_at_later_weekly_reset(pool: PgPoo
     assert!(wake_texts(&pool, id).await.is_empty());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn final_wave_owner_execution_stop_clears_resume_pending(pool: PgPool) {
+#[tokio::test]
+async fn final_wave_owner_execution_stop_clears_resume_pending() {
+    let pool = canterlot_hub::testkit::db().await;
     let env = Env::new(&pool).await;
     let id = env.conversation(true, true).await;
     let now = start();
@@ -3265,8 +3317,9 @@ async fn final_wave_owner_execution_stop_clears_resume_pending(pool: PgPool) {
     assert!(!resume_pending(&pool, id).await);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn final_wave_pending_resume_expires_at_end_of_next_weekly_window(pool: PgPool) {
+#[tokio::test]
+async fn final_wave_pending_resume_expires_at_end_of_next_weekly_window() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::new(&pool).await;
     let id = env.conversation(true, true).await;
     let now = start();
@@ -3310,8 +3363,9 @@ async fn final_wave_pending_resume_expires_at_end_of_next_weekly_window(pool: Pg
     assert!(wake_texts(&pool, id).await.is_empty());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn final_wave_limits_events_carry_reserve_window_on_entry_and_rollover(pool: PgPool) {
+#[tokio::test]
+async fn final_wave_limits_events_carry_reserve_window_on_entry_and_rollover() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::new(&pool).await;
     let now = start();
     let week = now + TimeDelta::days(1);
@@ -3327,8 +3381,9 @@ async fn final_wave_limits_events_carry_reserve_window_on_entry_and_rollover(poo
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn final_wave_failed_poll_send_does_not_consume_provider_slot(pool: PgPool) {
+#[tokio::test]
+async fn final_wave_failed_poll_send_does_not_consume_provider_slot() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::new(&pool).await;
     let sender = env.registry.command_sender(env.claude).unwrap();
     while sender.try_send(ControlDown::default()).is_ok() {}
@@ -3396,8 +3451,9 @@ async fn dead_turn(pool: &PgPool, child: Uuid) {
     .unwrap();
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn wake_without_a_live_execution_notes_the_parent_once(pool: PgPool) {
+#[tokio::test]
+async fn wake_without_a_live_execution_notes_the_parent_once() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::new(&pool).await;
     let parent = env.conversation(true, false).await;
     let child = delegate_of(&env, parent).await;
@@ -3455,8 +3511,9 @@ async fn wake_without_a_live_execution_notes_the_parent_once(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn wake_without_a_live_execution_notes_each_pause_episode(pool: PgPool) {
+#[tokio::test]
+async fn wake_without_a_live_execution_notes_each_pause_episode() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::new(&pool).await;
     let parent = env.conversation(true, false).await;
     let child = delegate_of(&env, parent).await;
@@ -3501,8 +3558,9 @@ async fn wake_without_a_live_execution_notes_each_pause_episode(pool: PgPool) {
     assert_eq!(notes.len(), 2, "one note per pause episode: {notes:?}");
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn wake_without_a_live_execution_sends_no_note_to_an_owner_stopped_child(pool: PgPool) {
+#[tokio::test]
+async fn wake_without_a_live_execution_sends_no_note_to_an_owner_stopped_child() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::new(&pool).await;
     let parent = env.conversation(true, false).await;
     let child = delegate_of(&env, parent).await;
@@ -3521,8 +3579,9 @@ async fn wake_without_a_live_execution_sends_no_note_to_an_owner_stopped_child(p
     assert!(!resume_pending(&pool, child).await);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn wake_with_a_live_execution_still_sends_the_resume_text(pool: PgPool) {
+#[tokio::test]
+async fn wake_with_a_live_execution_still_sends_the_resume_text() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut env = Env::new(&pool).await;
     let parent = env.conversation(true, false).await;
     let child = delegate_of(&env, parent).await;

@@ -204,8 +204,9 @@ fn model<'a>(usage: &'a Value, slot: &str, name: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("{slot} has no model {name}: {usage}"))
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn totals_cover_turns_models_and_cache(pool: PgPool) {
+#[tokio::test]
+async fn totals_cover_turns_models_and_cache() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     f.run(f.conversation, "opus", (100, 10, 5, 2)).await;
     f.run(f.conversation, "haiku", (50, 5, 0, 0)).await;
@@ -229,8 +230,9 @@ async fn totals_cover_turns_models_and_cache(pool: PgPool) {
     assert!(usage["delegates"]["models"].as_array().unwrap().is_empty());
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn delegates_include_the_whole_live_subtree(pool: PgPool) {
+#[tokio::test]
+async fn delegates_include_the_whole_live_subtree() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let middle = f.child(f.conversation).await;
     let leaf = f.child(middle).await;
@@ -256,8 +258,9 @@ async fn delegates_include_the_whole_live_subtree(pool: PgPool) {
     assert_eq!(nested["delegates"]["input_tokens"], 30);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn retention_keeps_the_parent_delegates_total(pool: PgPool) {
+#[tokio::test]
+async fn retention_keeps_the_parent_delegates_total() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let child = f.child(f.conversation).await;
     f.run(child, "sonnet", (100, 10, 5, 2)).await;
@@ -278,8 +281,9 @@ async fn retention_keeps_the_parent_delegates_total(pool: PgPool) {
     assert_eq!(after["session"]["turns"], 0);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn manual_delete_keeps_the_parent_delegates_total(pool: PgPool) {
+#[tokio::test]
+async fn manual_delete_keeps_the_parent_delegates_total() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let child = f.child(f.conversation).await;
     f.run(child, "haiku", (40, 4, 0, 0)).await;
@@ -306,8 +310,9 @@ async fn manual_delete_keeps_the_parent_delegates_total(pool: PgPool) {
     assert_eq!(model(&after, "delegates", "haiku")["output_tokens"], 4);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn folding_the_same_delegate_twice_counts_once(pool: PgPool) {
+#[tokio::test]
+async fn folding_the_same_delegate_twice_counts_once() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let child = f.child(f.conversation).await;
     f.run(child, "sonnet", (70, 7, 2, 1)).await;
@@ -339,8 +344,9 @@ async fn folding_the_same_delegate_twice_counts_once(pool: PgPool) {
     assert_eq!(after["delegates"]["input_tokens"], 70);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn folded_grandchild_stays_in_the_whole_subtree(pool: PgPool) {
+#[tokio::test]
+async fn folded_grandchild_stays_in_the_whole_subtree() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let middle = f.child(f.conversation).await;
     let leaf = f.child(middle).await;
@@ -370,8 +376,9 @@ async fn folded_grandchild_stays_in_the_whole_subtree(pool: PgPool) {
     assert_eq!(model(&root, "delegates", "sonnet")["input_tokens"], 20);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn deleting_the_parent_removes_its_rollup(pool: PgPool) {
+#[tokio::test]
+async fn deleting_the_parent_removes_its_rollup() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let child = f.child(f.conversation).await;
     f.run(child, "sonnet", (90, 9, 0, 0)).await;
@@ -401,8 +408,9 @@ async fn deleting_the_parent_removes_its_rollup(pool: PgPool) {
     assert_eq!(left, 0);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn cost_sums_known_turns_and_counts_unknown_ones(pool: PgPool) {
+#[tokio::test]
+async fn cost_sums_known_turns_and_counts_unknown_ones() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let child = f.child(f.conversation).await;
     f.run_costed(f.conversation, "opus", (100, 10, 0, 0), Some(620_000))
@@ -425,8 +433,9 @@ async fn cost_sums_known_turns_and_counts_unknown_ones(pool: PgPool) {
     assert_eq!(usage["delegates"]["unknown_cost_turns"], 1);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn a_partly_priced_turn_keeps_its_known_sum_and_counts_as_incomplete(pool: PgPool) {
+#[tokio::test]
+async fn a_partly_priced_turn_keeps_its_known_sum_and_counts_as_incomplete() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let child = f.child(f.conversation).await;
     f.run_costed(f.conversation, "opus", (100, 10, 0, 0), Some(620_000))
@@ -446,8 +455,9 @@ async fn a_partly_priced_turn_keeps_its_known_sum_and_counts_as_incomplete(pool:
     assert_eq!(usage["delegates"]["unknown_cost_turns"], 1);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn deletion_fold_keeps_partial_cost_as_known_and_incomplete(pool: PgPool) {
+#[tokio::test]
+async fn deletion_fold_keeps_partial_cost_as_known_and_incomplete() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let child = f.child(f.conversation).await;
     f.run_partial(child, "opencode", (10, 1, 0, 0), 410_000)
@@ -464,8 +474,9 @@ async fn deletion_fold_keeps_partial_cost_as_known_and_incomplete(pool: PgPool) 
     assert_eq!(after["delegates"]["turns"], 2);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn deletion_fold_keeps_cost_and_unknown_turns(pool: PgPool) {
+#[tokio::test]
+async fn deletion_fold_keeps_cost_and_unknown_turns() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let child = f.child(f.conversation).await;
     let grandchild = f.child(child).await;
@@ -493,8 +504,9 @@ async fn deletion_fold_keeps_cost_and_unknown_turns(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn cache_hint_follows_the_previous_finished_turn(pool: PgPool) {
+#[tokio::test]
+async fn cache_hint_follows_the_previous_finished_turn() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let first = f.run_cached("opus", (1_000, 50, 40_000, 0), 60, 59).await;
     // Простой 20 минут, чтение кеша обвалилось, запись крупная.
@@ -516,8 +528,9 @@ async fn cache_hint_follows_the_previous_finished_turn(pool: PgPool) {
     assert_eq!(f.hint(fourth).await, Value::Null);
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn cache_hint_names_a_model_change_and_a_compaction(pool: PgPool) {
+#[tokio::test]
+async fn cache_hint_names_a_model_change_and_a_compaction() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     f.run_cached("opus", (1_000, 50, 40_000, 0), 60, 59).await;
     let switched = f.run_cached("sonnet", (500, 50, 0, 38_000), 58, 57).await;
@@ -549,8 +562,9 @@ async fn cache_hint_names_a_model_change_and_a_compaction(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn cache_hint_is_absent_when_the_previous_turn_has_no_usage(pool: PgPool) {
+#[tokio::test]
+async fn cache_hint_is_absent_when_the_previous_turn_has_no_usage() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool).await;
     let first = f.run_cached("opus", (0, 0, 0, 0), 60, 59).await;
     let second = f.run_cached("opus", (500, 50, 0, 38_000), 58, 57).await;

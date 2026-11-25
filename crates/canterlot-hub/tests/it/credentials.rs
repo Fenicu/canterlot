@@ -79,10 +79,9 @@ async fn own_machine(pool: &PgPool, owner_id: Uuid, name: &str) -> Uuid {
     id
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn credential_is_stored_per_machine_and_the_earliest_one_is_shown(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn credential_is_stored_per_machine_and_the_earliest_one_is_shown() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     testkit::offer_provider(&pool, s.machine_id, "claude").await;
     observe_window(&pool, &s).await;
@@ -138,8 +137,9 @@ async fn credential_is_stored_per_machine_and_the_earliest_one_is_shown(
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_new_login_date_replaces_the_expired_one(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn a_new_login_date_replaces_the_expired_one() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     let expired = at(Duration::days(-1));
     let renewed = at(Duration::days(30));
@@ -174,8 +174,9 @@ async fn a_new_login_date_replaces_the_expired_one(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn machine_view_names_the_credential_date(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn machine_view_names_the_credential_date() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let fixture = support::Fixture::new(pool.clone()).await;
     let expires = at(Duration::days(4));
     record(

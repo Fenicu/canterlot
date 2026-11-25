@@ -139,10 +139,9 @@ async fn delivered(pool: &PgPool, conversation: Uuid) -> Vec<(String, Value)> {
     .collect()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn outage_beyond_grace_notifies_every_subscriber_once_per_session(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn outage_beyond_grace_notifies_every_subscriber_once_per_session() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     let second = conversation(&pool, f.owner, f.machine, "второй подписчик").await;
     subscribe(&pool, f.owner, second, f.target).await;
@@ -192,8 +191,9 @@ async fn outage_beyond_grace_notifies_every_subscriber_once_per_session(
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn outage_shorter_than_grace_is_silent(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn outage_shorter_than_grace_is_silent() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     let now = Utc::now();
     set_availability(&pool, f.machine, "unavailable", now - TimeDelta::minutes(1)).await;
@@ -204,8 +204,9 @@ async fn outage_shorter_than_grace_is_silent(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn restart_during_outage_does_not_repeat_the_event(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn restart_during_outage_does_not_repeat_the_event() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     let now = Utc::now();
     set_availability(
@@ -226,8 +227,9 @@ async fn restart_during_outage_does_not_repeat_the_event(pool: PgPool) -> TestRe
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn reconnect_sends_one_available_event_with_the_current_state(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn reconnect_sends_one_available_event_with_the_current_state() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     let now = Utc::now();
     set_availability(
@@ -269,8 +271,9 @@ async fn reconnect_sends_one_available_event_with_the_current_state(pool: PgPool
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn terminal_sessions_are_not_told_about_the_outage(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn terminal_sessions_are_not_told_about_the_outage() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     let idle = conversation(&pool, f.owner, f.machine, "живая").await;
     subscribe(&pool, f.owner, f.subscriber, idle).await;
@@ -292,8 +295,9 @@ async fn terminal_sessions_are_not_told_about_the_outage(pool: PgPool) -> TestRe
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn lost_execution_still_hears_about_the_outage(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn lost_execution_still_hears_about_the_outage() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     derive(&pool, f.target, "failed", json!({"reason": "owner_lost"})).await;
     let now = Utc::now();
@@ -310,8 +314,9 @@ async fn lost_execution_still_hears_about_the_outage(pool: PgPool) -> TestResult
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn outages_of_two_machines_stay_isolated(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn outages_of_two_machines_stay_isolated() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     let other_machine = Uuid::now_v7();
     sqlx::query("insert into machines(id,owner_id,name) values($1,$2,'other')")
@@ -349,10 +354,9 @@ async fn outages_of_two_machines_stay_isolated(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn unavailable_event_waits_for_a_new_subscriber_during_the_same_outage(
-    pool: PgPool,
-) -> TestResult {
+#[tokio::test]
+async fn unavailable_event_waits_for_a_new_subscriber_during_the_same_outage() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let f = fx(&pool).await;
     let now = Utc::now();
     set_availability(

@@ -137,8 +137,9 @@ async fn dispatch(pool: &PgPool, seed: &Seed) -> DispatchOutcome {
     .unwrap()
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_accepted_event_is_a_quiet_feed_line_and_an_input_prefix(pool: PgPool) {
+#[tokio::test]
+async fn an_accepted_event_is_a_quiet_feed_line_and_an_input_prefix() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = seed(&pool).await;
     start(&pool, &seed).await;
     let child = testkit::seed_conversation(&pool, seed.owner_id, seed.machine_id).await;
@@ -213,8 +214,9 @@ async fn an_accepted_event_is_a_quiet_feed_line_and_an_input_prefix(pool: PgPool
     assert_eq!(attached, Some(owner.input_id));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_started_queued_spawn_is_quiet(pool: PgPool) {
+#[tokio::test]
+async fn a_started_queued_spawn_is_quiet() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = seed(&pool).await;
     let child = testkit::seed_conversation(&pool, seed.owner_id, seed.machine_id).await;
     let note = note(
@@ -242,8 +244,9 @@ async fn a_started_queued_spawn_is_quiet(pool: PgPool) {
     assert_eq!(queued, 0);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_failed_queued_spawn_still_wakes_the_orchestrator(pool: PgPool) {
+#[tokio::test]
+async fn a_failed_queued_spawn_still_wakes_the_orchestrator() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = seed(&pool).await;
     let note = note(
         &pool,
@@ -262,8 +265,9 @@ async fn a_failed_queued_spawn_still_wakes_the_orchestrator(pool: PgPool) {
     assert!(!service);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_note_that_arrives_while_the_input_waits_rides_with_it(pool: PgPool) {
+#[tokio::test]
+async fn a_note_that_arrives_while_the_input_waits_rides_with_it() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = seed(&pool).await;
     start(&pool, &seed).await;
     let owner = owner_input(&pool, &seed).await;
@@ -299,8 +303,9 @@ async fn a_note_that_arrives_while_the_input_waits_rides_with_it(pool: PgPool) {
     assert_eq!(attached, Some(owner.input_id));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_quiet_note_does_not_block_its_own_dispatch(pool: PgPool) {
+#[tokio::test]
+async fn a_quiet_note_does_not_block_its_own_dispatch() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = seed(&pool).await;
     start(&pool, &seed).await;
     let note = note(

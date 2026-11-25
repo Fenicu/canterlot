@@ -140,8 +140,9 @@ async fn stop_hub(hub: TestHub) {
 }
 
 // Настоящие хаб и воркер: запись вида, которого хаб не знает, остаётся на машине, а сверка стоит.
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn cj_record_the_hub_cannot_read_stops_the_session_and_stays_on_the_worker(pool: PgPool) {
+#[tokio::test]
+async fn cj_record_the_hub_cannot_read_stops_the_session_and_stays_on_the_worker() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_journal::{Journal, JournalOptions};
     use canterlot_worker::session::ErrorKind;
     let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
@@ -193,8 +194,9 @@ async fn cj_record_the_hub_cannot_read_stops_the_session_and_stays_on_the_worker
     assert_eq!((cursor.last_seq, cursor.acked_seq_known_to_worker), (1, 0));
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn worker_connects_and_goes_live(pool: PgPool) {
+#[tokio::test]
+async fn worker_connects_and_goes_live() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
     let (_directory, _secrets, config, store) = fixture(&pool, &hub).await;
     let machine = config.machine_id;
@@ -209,8 +211,9 @@ async fn worker_connects_and_goes_live(pool: PgPool) {
     stop_hub(hub).await;
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn worker_rejected_on_installation_mismatch_stops(pool: PgPool) {
+#[tokio::test]
+async fn worker_rejected_on_installation_mismatch_stops() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
     let (_directory, _secrets, mut config, store) = fixture(&pool, &hub).await;
     config.installation_id = Uuid::now_v7();
@@ -235,8 +238,9 @@ async fn worker_rejected_on_installation_mismatch_stops(pool: PgPool) {
     stop_hub(hub).await;
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn worker_reconnects_with_backoff_after_hub_restart(pool: PgPool) {
+#[tokio::test]
+async fn worker_reconnects_with_backoff_after_hub_restart() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
     let (_directory, _secrets, config, store) = fixture(&pool, &hub).await;
     let machine = config.machine_id;
@@ -272,8 +276,9 @@ async fn worker_reconnects_with_backoff_after_hub_restart(pool: PgPool) {
     restarted.await.unwrap().unwrap();
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn received_command_is_stored_and_receipt_shipped(pool: PgPool) {
+#[tokio::test]
+async fn received_command_is_stored_and_receipt_shipped() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
     let (_directory, _secrets, config, store) = fixture(&pool, &hub).await;
     let machine = config.machine_id;
@@ -322,8 +327,9 @@ async fn received_command_is_stored_and_receipt_shipped(pool: PgPool) {
     stop_hub(hub).await;
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn no_listening_socket_on_worker(pool: PgPool) {
+#[tokio::test]
+async fn no_listening_socket_on_worker() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
     let (directory, _secrets, config, store) = fixture(&pool, &hub).await;
     let path = directory.path().join("worker.toml");
@@ -410,8 +416,9 @@ fn segment(path: &Path) -> std::path::PathBuf {
         .unwrap()
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn poisoned_store_waits_for_storage_then_requests_a_restart(pool: PgPool) {
+#[tokio::test]
+async fn poisoned_store_waits_for_storage_then_requests_a_restart() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
     let (_directory, _secrets, config, store) = fixture(&pool, &hub).await;
     let machine = config.machine_id;
@@ -659,8 +666,9 @@ async fn tls_rejects_untrusted_ca_and_wrong_hostname() {
     }
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn retryable_identity_rejection_backs_off_without_displacing_live_worker(pool: PgPool) {
+#[tokio::test]
+async fn retryable_identity_rejection_backs_off_without_displacing_live_worker() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
     let (_directory, _secrets, config, store) = fixture(&pool, &hub).await;
     let machine = config.machine_id;
@@ -738,8 +746,9 @@ async fn worker_api_refuses_plaintext_urls() {
     assert!(hub.events.try_recv().is_err());
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn wrong_configured_generation_is_rejected_by_hub(pool: PgPool) {
+#[tokio::test]
+async fn wrong_configured_generation_is_rejected_by_hub() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
     let (_directory, _secrets, mut config, store) = fixture(&pool, &hub).await;
     config.restore_generation = Uuid::now_v7();

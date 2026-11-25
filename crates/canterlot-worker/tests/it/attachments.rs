@@ -459,8 +459,9 @@ async fn relative_execution_directory_produces_an_absolute_agent_path() {
 mod execution_fixture;
 
 #[cfg(all(feature = "synthetic-adapter", feature = "fault-injection"))]
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn terminal_execution_attachment_dir_is_removed_after_ack(pool: sqlx::PgPool) {
+#[tokio::test]
+async fn terminal_execution_attachment_dir_is_removed_after_ack() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = execution_fixture::Fixture::new(&pool).await;
     let id = f.ready(b"cleanup").await;
     let input = f.submit(&[id], "hello").await;

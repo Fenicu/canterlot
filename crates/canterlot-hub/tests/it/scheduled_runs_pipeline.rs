@@ -99,8 +99,9 @@ pub(crate) fn scheduler(f: &Fixture) -> canterlot_hub::scheduler::Scheduler {
     .with_limits(f.state.registry.clone(), Default::default())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn tick_claims_once_and_queues_one_input(pool: PgPool) {
+#[tokio::test]
+async fn tick_claims_once_and_queues_one_input() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
     let id = create(&f, existing(&f), "0 9 * * *").await;
@@ -136,8 +137,9 @@ async fn tick_claims_once_and_queues_one_input(pool: PgPool) {
     assert_eq!(runs, 1, "second tick must not re-claim");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn missed_occurrences_are_counted_in_one_run(pool: PgPool) {
+#[tokio::test]
+async fn missed_occurrences_are_counted_in_one_run() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let id = create(&f, existing(&f), "0 9 * * *").await;
     // Фиксированный момент вместо `Utc::now()`: тест шёл через `now - 2 дня`,
@@ -160,8 +162,9 @@ async fn missed_occurrences_are_counted_in_one_run(pool: PgPool) {
     assert_eq!(runs, 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn overlap_and_offline_are_skipped(pool: PgPool) {
+#[tokio::test]
+async fn overlap_and_offline_are_skipped() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let id = create(&f, existing(&f), "0 9 * * *").await;
     let schedule = Uuid::parse_str(&id).unwrap();
@@ -191,8 +194,9 @@ async fn overlap_and_offline_are_skipped(pool: PgPool) {
     let _detail = wait_state(&pool, rid2, "skipped_machine_offline").await;
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn red_limits_window_skips_the_run(pool: PgPool) {
+#[tokio::test]
+async fn red_limits_window_skips_the_run() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
     let now = Utc::now();
@@ -230,8 +234,9 @@ async fn red_limits_window_skips_the_run(pool: PgPool) {
 
 /// Допуск запуска смотрит окна той учётной записи, которую харнесс расписания держит на своей
 /// машине: красное окно чужой подписки того же провайдера запуск не пропускает.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn admission_reads_the_window_of_the_schedules_own_account(pool: PgPool) {
+#[tokio::test]
+async fn admission_reads_the_window_of_the_schedules_own_account() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
     let updated = sqlx::query(
@@ -308,8 +313,9 @@ async fn admission_reads_the_window_of_the_schedules_own_account(pool: PgPool) {
     assert_eq!(detail["window"], "weekly", "{detail}");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn precheck_exit_zero_starts_and_nonzero_skips(pool: PgPool) {
+#[tokio::test]
+async fn precheck_exit_zero_starts_and_nonzero_skips() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let mut session: FakeSession =
         testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
@@ -381,8 +387,9 @@ async fn precheck_exit_zero_starts_and_nonzero_skips(pool: PgPool) {
     worker.abort();
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn new_session_target_creates_a_session_and_delivers_first_input(pool: PgPool) {
+#[tokio::test]
+async fn new_session_target_creates_a_session_and_delivers_first_input() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let mut session: FakeSession =
         testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
@@ -469,8 +476,9 @@ async fn new_session_target_creates_a_session_and_delivers_first_input(pool: PgP
     let _ = &mut session;
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn rollback_before_claim_commit_reclaims_exactly_once(pool: PgPool) {
+#[tokio::test]
+async fn rollback_before_claim_commit_reclaims_exactly_once() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let id = create(&f, existing(&f), "0 9 * * 1-5").await;
     let now = Utc::now();
@@ -496,8 +504,9 @@ async fn rollback_before_claim_commit_reclaims_exactly_once(pool: PgPool) {
     assert_eq!(runs, 1, "next tick claims once");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn replay_after_dispatch_commit_does_not_duplicate_work(pool: PgPool) {
+#[tokio::test]
+async fn replay_after_dispatch_commit_does_not_duplicate_work() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
     sqlx::query("update machines set availability='available' where id=$1")
@@ -589,8 +598,9 @@ async fn replay_after_dispatch_commit_does_not_duplicate_work(pool: PgPool) {
     let _ = session_id;
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn stranded_claimed_is_readmitted_and_young_prechecking_survives(pool: PgPool) {
+#[tokio::test]
+async fn stranded_claimed_is_readmitted_and_young_prechecking_survives() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
     let id = create(&f, existing(&f), "0 9 * * *").await;
@@ -639,8 +649,9 @@ async fn stranded_claimed_is_readmitted_and_young_prechecking_survives(pool: PgP
     assert_eq!(state, "prechecking", "young prechecking is not reaped");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn interrupted_prechecking_is_failed_without_rerun(pool: PgPool) {
+#[tokio::test]
+async fn interrupted_prechecking_is_failed_without_rerun() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let id = create(&f, existing(&f), "0 9 * * *").await;
     let schedule = Uuid::parse_str(&id).unwrap();
@@ -671,8 +682,9 @@ async fn interrupted_prechecking_is_failed_without_rerun(pool: PgPool) {
     assert_eq!(detail["reason"], "precheck_result_unknown", "{detail}");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn run_now_is_idempotent_and_run_anyway_bypasses_checks(pool: PgPool) {
+#[tokio::test]
+async fn run_now_is_idempotent_and_run_anyway_bypasses_checks() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
     let now = Utc::now();
@@ -760,8 +772,9 @@ async fn run_now_is_idempotent_and_run_anyway_bypasses_checks(pool: PgPool) {
     assert_eq!(normal.json::<Value>()["state"], "skipped_limits");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn failed_runs_push_once_per_schedule_per_hour(pool: PgPool) {
+#[tokio::test]
+async fn failed_runs_push_once_per_schedule_per_hour() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::notify::{self, PushSettings};
     notify::configure(
         &pool,
@@ -824,8 +837,9 @@ async fn failed_runs_push_once_per_schedule_per_hour(pool: PgPool) {
     assert!(payload["reason"].as_str().is_some());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn concurrent_run_now_with_one_key_dispatches_once(pool: PgPool) {
+#[tokio::test]
+async fn concurrent_run_now_with_one_key_dispatches_once() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
     let r = f
@@ -892,8 +906,9 @@ async fn concurrent_run_now_with_one_key_dispatches_once(pool: PgPool) {
     assert_eq!(inputs, 1, "no duplicate input");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn undelivered_input_and_working_session_block_overlap(pool: PgPool) {
+#[tokio::test]
+async fn undelivered_input_and_working_session_block_overlap() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
     let id = create(&f, existing(&f), "0 9 * * *").await;
@@ -935,8 +950,9 @@ async fn undelivered_input_and_working_session_block_overlap(pool: PgPool) {
     wait_state(&pool, third, "skipped_overlap").await;
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn acceptance_unconfirmed_input_blocks_overlap(pool: PgPool) {
+#[tokio::test]
+async fn acceptance_unconfirmed_input_blocks_overlap() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
     let id = create(&f, existing(&f), "0 9 * * *").await;
@@ -966,8 +982,9 @@ async fn acceptance_unconfirmed_input_blocks_overlap(pool: PgPool) {
     wait_state(&pool, second, "skipped_overlap").await;
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn weekly_reserve_hold_skips_new_session_run(pool: PgPool) {
+#[tokio::test]
+async fn weekly_reserve_hold_skips_new_session_run() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
     sqlx::query(
@@ -993,8 +1010,9 @@ async fn weekly_reserve_hold_skips_new_session_run(pool: PgPool) {
     assert_eq!(detail["reason"], "initial_hold", "{detail}");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn schedules_deny_unauthenticated_callers(pool: PgPool) {
+#[tokio::test]
+async fn schedules_deny_unauthenticated_callers() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let anonymous = canterlot_hub::testkit::TestClient::in_process(canterlot_hub::http::router(
         f.state.clone(),
@@ -1026,8 +1044,9 @@ async fn schedules_deny_unauthenticated_callers(pool: PgPool) {
 
 /// A: пока приёмка этого хаба держит запуск, восстановление его не тронет.
 /// Снятие стража делает ту же старую строку кандидатом на возврат.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn recovery_skips_a_run_being_admitted_by_this_hub(pool: PgPool) {
+#[tokio::test]
+async fn recovery_skips_a_run_being_admitted_by_this_hub() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::schedules::{AdmittingGuard, RECLAIM_LEASE, recover_interrupted};
 
     let f = Fixture::new(pool.clone()).await;
@@ -1072,8 +1091,9 @@ async fn recovery_skips_a_run_being_admitted_by_this_hub(pool: PgPool) {
 /// B/2: пока удаление второго расписания держит его замок, восстановление
 /// первого обязано завершиться и отпустить счётчик событий владельца: один
 /// короткий проход на расписание, без цикла ожидания и без отката пачки.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn recovery_of_one_schedule_does_not_hold_the_event_counter_for_the_next(pool: PgPool) {
+#[tokio::test]
+async fn recovery_of_one_schedule_does_not_hold_the_event_counter_for_the_next() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::schedules::{RECLAIM_LEASE, recover_interrupted};
     use std::time::Duration;
 
@@ -1168,8 +1188,9 @@ async fn recovery_of_one_schedule_does_not_hold_the_event_counter_for_the_next(p
 
 /// 14: `started` и его событие живут в одной транзакции — по завершении
 /// приёмки состояние без события невозможно.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn started_and_its_event_commit_together(pool: PgPool) {
+#[tokio::test]
+async fn started_and_its_event_commit_together() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
     let id = create(&f, existing(&f), "0 9 * * *").await;
@@ -1194,8 +1215,9 @@ async fn started_and_its_event_commit_together(pool: PgPool) {
 
 /// 16: маршрутизированная цель нового сеанса проходит весь путь через тик:
 /// заявка, выбор исполнителя по политике, creation и первый ввод.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn routed_new_session_target_runs_through_the_tick(pool: PgPool) {
+#[tokio::test]
+async fn routed_new_session_target_runs_through_the_tick() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
     sqlx::query("update machines set availability='available' where id=$1")
@@ -1261,8 +1283,9 @@ async fn routed_new_session_target_runs_through_the_tick(pool: PgPool) {
 
 /// 1: ключ клиента Run Now, совпавший с ключом будущего срабатывания другого
 /// расписания, не останавливает пачку заявок тика.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn run_now_key_equal_to_a_future_occurrence_key_does_not_stall_the_tick(pool: PgPool) {
+#[tokio::test]
+async fn run_now_key_equal_to_a_future_occurrence_key_does_not_stall_the_tick() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
     let a = create(&f, existing(&f), "0 9 * * *").await;
@@ -1306,8 +1329,9 @@ async fn inputs_with_text(pool: &PgPool, text: &str) -> i64 {
 
 /// 3: ответ Run Now потерян после commit dispatch; повтор по тому же ключу
 /// возвращает начатый запуск, даже когда журнал запусков уже обрезан.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn lost_run_now_response_replays_the_started_run_after_pruning(pool: PgPool) {
+#[tokio::test]
+async fn lost_run_now_response_replays_the_started_run_after_pruning() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::schedules::fault::{self, Fault};
 
     let f = Fixture::new(pool.clone()).await;
@@ -1367,8 +1391,9 @@ async fn lost_run_now_response_replays_the_started_run_after_pruning(pool: PgPoo
 
 /// 3: другая мутация API с тем же ключом получает конфликт, пока запуск идёт,
 /// и Run Now не отвечает 409 после начатой сессии.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn foreign_mutation_cannot_take_a_reserved_run_now_key(pool: PgPool) {
+#[tokio::test]
+async fn foreign_mutation_cannot_take_a_reserved_run_now_key() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::schedules::admission::{Reservation, reserve_manual};
 
     let f = Fixture::new(pool.clone()).await;
@@ -1406,8 +1431,9 @@ async fn foreign_mutation_cannot_take_a_reserved_run_now_key(pool: PgPool) {
 
 /// 3: заявленный ручной запуск, который доводит восстановление, тоже
 /// фиксирует ответ ключа: повтор получает начатый запуск, не вторую сессию.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn recovery_dispatched_manual_claim_finalizes_the_key(pool: PgPool) {
+#[tokio::test]
+async fn recovery_dispatched_manual_claim_finalizes_the_key() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::schedules::admission::{Reservation, reserve_manual};
 
     let f = Fixture::new(pool.clone()).await;
@@ -1451,8 +1477,9 @@ async fn recovery_dispatched_manual_claim_finalizes_the_key(pool: PgPool) {
 
 /// 5: охраняемые строки не расходуют предел пачки восстановления:
 /// брошенная заявка позади 32 охраняемых всё равно возвращается.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn guarded_runs_do_not_starve_recovery_of_an_abandoned_claim(pool: PgPool) {
+#[tokio::test]
+async fn guarded_runs_do_not_starve_recovery_of_an_abandoned_claim() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::schedules::{AdmittingGuard, RECLAIM_LEASE, recover_interrupted};
 
     let f = Fixture::new(pool.clone()).await;
@@ -1493,8 +1520,9 @@ async fn guarded_runs_do_not_starve_recovery_of_an_abandoned_claim(pool: PgPool)
 
 /// 5: сбой базы в начале dispatch после предпроверки пишет итог из
 /// `prechecking`, а не пытается писать из `claimed` (запись ушла бы в пустоту).
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn early_dispatch_error_after_precheck_finalizes_from_prechecking(pool: PgPool) {
+#[tokio::test]
+async fn early_dispatch_error_after_precheck_finalizes_from_prechecking() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::schedules::fault::{self, Fault};
 
     let f = Fixture::new(pool.clone()).await;
@@ -1600,8 +1628,9 @@ async fn routed_fixture(f: &Fixture, pool: &PgPool, candidates: Value, whitelist
 
 /// F: основной кандидат без порога дочерней политики, но с красным окном по
 /// правилам приёма, не выбирается: зелёный запасной стартует.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn routing_skips_a_red_primary_without_child_thresholds_for_a_green_backup(pool: PgPool) {
+#[tokio::test]
+async fn routing_skips_a_red_primary_without_child_thresholds_for_a_green_backup() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
     routed_fixture(
@@ -1640,8 +1669,9 @@ async fn routing_skips_a_red_primary_without_child_thresholds_for_a_green_backup
 
 /// F: кандидат стал занятым после маршрутизации (parallel limit under locks):
 /// dispatch выбирает запасного, а не пропускает запуск.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn candidate_that_becomes_busy_after_routing_falls_back(pool: PgPool) {
+#[tokio::test]
+async fn candidate_that_becomes_busy_after_routing_falls_back() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::schedules::fault::{self, Fault};
 
     let f = Fixture::new(pool.clone()).await;
@@ -1689,8 +1719,9 @@ async fn candidate_that_becomes_busy_after_routing_falls_back(pool: PgPool) {
 
 /// 4: пятичасовое наблюдение, закоммиченное после чтения зелёных лимитов
 /// диспетчером, но до его commit, не обходит красное окно у существующей сессии.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn observation_landing_during_existing_session_dispatch_turns_it_red(pool: PgPool) {
+#[tokio::test]
+async fn observation_landing_during_existing_session_dispatch_turns_it_red() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
     let id = create(&f, existing(&f), "0 9 * * *").await;
@@ -1747,8 +1778,9 @@ async fn observation_landing_during_existing_session_dispatch_turns_it_red(pool:
 /// приёма дольше аренды; второй по восстановлению забирает строку и доводит
 /// её. Опоздавшая приёмка первого не делает ни второй предпроверки, ни
 /// второй сессии: на воркере ровно одна предпроверка, в базе ровно один ввод.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn second_hub_takes_over_a_stalled_admission_with_one_precheck_and_one_session(pool: PgPool) {
+#[tokio::test]
+async fn second_hub_takes_over_a_stalled_admission_with_one_precheck_and_one_session() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::schedules::{admission::admit, claim_due};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1833,8 +1865,9 @@ async fn second_hub_takes_over_a_stalled_admission_with_one_precheck_and_one_ses
 
 /// 8: гибель процесса до commit dispatch (точка отказа): запуск остаётся
 /// `claimed`, восстановление после аренды доводит его ровно до одной сессии.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn crash_before_dispatch_commit_is_recovered_into_exactly_one_session(pool: PgPool) {
+#[tokio::test]
+async fn crash_before_dispatch_commit_is_recovered_into_exactly_one_session() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::schedules::fault::{self, Fault};
 
     let f = Fixture::new(pool.clone()).await;
@@ -1873,8 +1906,9 @@ async fn wait_crashed(schedule: Uuid, run: Uuid) {
 
 /// 1: композер выигрывает общий ключ между проверкой и вставкой резерва.
 /// Резерв Run Now не вправе закоммитить заявку: откат и конфликт, строки нет.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn run_now_does_not_commit_a_claim_when_another_operation_wins_the_key(pool: PgPool) {
+#[tokio::test]
+async fn run_now_does_not_commit_a_claim_when_another_operation_wins_the_key() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::schedules::{ScheduleError, admission::reserve_manual};
 
     let f = Fixture::new(pool.clone()).await;
@@ -1932,8 +1966,9 @@ async fn run_now_does_not_commit_a_claim_when_another_operation_wins_the_key(poo
 /// 2: подтверждённая смена модели на Fable во время предпроверки. Проекция
 /// `conversation_derived` не обновлена (держим её), но dispatch читает
 /// авторитетную `conversations.model` под замком очереди и видит красное окно.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn model_change_during_precheck_is_read_from_the_authoritative_row(pool: PgPool) {
+#[tokio::test]
+async fn model_change_during_precheck_is_read_from_the_authoritative_row() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let mut session: FakeSession =
         testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
@@ -2002,8 +2037,9 @@ async fn model_change_during_precheck_is_read_from_the_authoritative_row(pool: P
 
 /// Ожидающая, ещё не подтверждённая смена модели уходит с вводом при выдаче,
 /// поэтому окна проверяются по ней: красное окно Fable пропускает запуск.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn pending_model_change_is_checked_against_its_own_limit_window(pool: PgPool) {
+#[tokio::test]
+async fn pending_model_change_is_checked_against_its_own_limit_window() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
     sqlx::query(
@@ -2041,8 +2077,9 @@ async fn pending_model_change_is_checked_against_its_own_limit_window(pool: PgPo
 
 /// 5: занятость в приёме считается тем же запросом, что в маршрутизации:
 /// сессия с ожидающим толчком держит слот и при явном исполнителе.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn dispatch_counts_a_pending_nudge_as_busy_like_routing(pool: PgPool) {
+#[tokio::test]
+async fn dispatch_counts_a_pending_nudge_as_busy_like_routing() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
     sqlx::query("update machines set availability='available' where id=$1")
@@ -2119,8 +2156,9 @@ async fn insert_run_at(
 
 /// 6: ручной запуск с тем же моментом, что у срабатывания по расписанию, его
 /// не подавляет: уникальность момента действует только для срабатываний.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn manual_run_with_the_same_timestamp_does_not_suppress_the_cron_occurrence(pool: PgPool) {
+#[tokio::test]
+async fn manual_run_with_the_same_timestamp_does_not_suppress_the_cron_occurrence() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
     let id = create(&f, existing(&f), "0 9 * * *").await;
@@ -2144,8 +2182,9 @@ async fn manual_run_with_the_same_timestamp_does_not_suppress_the_cron_occurrenc
 }
 
 /// 6: если строка срабатывания уже есть, тик всё равно двигает `next_fire_at`.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn claim_tick_advances_the_cursor_when_the_occurrence_row_exists(pool: PgPool) {
+#[tokio::test]
+async fn claim_tick_advances_the_cursor_when_the_occurrence_row_exists() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
     let id = create(&f, existing(&f), "0 9 * * *").await;
@@ -2175,8 +2214,9 @@ async fn claim_tick_advances_the_cursor_when_the_occurrence_row_exists(pool: PgP
 
 /// 7: уборка истории снимает только завершённые запуски: заявленный, но ещё
 /// не принятый запуск под наплывом новых строк остаётся.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn history_pruning_keeps_active_runs(pool: PgPool) {
+#[tokio::test]
+async fn history_pruning_keeps_active_runs() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let id = create(&f, existing(&f), "0 9 * * *").await;
     let schedule = Uuid::parse_str(&id).unwrap();
@@ -2216,8 +2256,9 @@ async fn history_pruning_keeps_active_runs(pool: PgPool) {
 
 /// 7: повтор, прочитавший `claimed` перед финалом, не получает 404, если
 /// уборка успела снять строку: итог берётся из долговечной записи ключа.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn replay_rereads_the_durable_record_when_the_history_row_is_gone(pool: PgPool) {
+#[tokio::test]
+async fn replay_rereads_the_durable_record_when_the_history_row_is_gone() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::schedules::{
         RunState,
         admission::{Reservation, reserve_manual, settle_existing},
@@ -2254,8 +2295,9 @@ async fn replay_rereads_the_durable_record_when_the_history_row_is_gone(pool: Pg
 
 /// 11: после общего срока ключа Run Now с тем же запросом получает прежний
 /// запуск из истории, другой запрос под тем же ключом — конфликт.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn run_now_replays_from_history_after_the_key_expired(pool: PgPool) {
+#[tokio::test]
+async fn run_now_replays_from_history_after_the_key_expired() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::schedules::{
         ScheduleError,
         admission::{Reservation, reserve_manual},
@@ -2294,8 +2336,9 @@ async fn run_now_replays_from_history_after_the_key_expired(pool: PgPool) {
 
 /// 7: повтор Run Now после удаления расписания (каскад убрал активный запуск)
 /// отвечает так же, как для удалённого расписания, а не прежним `claimed`.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn run_now_replay_after_the_schedule_was_deleted_is_not_found(pool: PgPool) {
+#[tokio::test]
+async fn run_now_replay_after_the_schedule_was_deleted_is_not_found() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::schedules::admission::{Reservation, reserve_manual};
 
     let f = Fixture::new(pool.clone()).await;
@@ -2333,8 +2376,9 @@ async fn run_now_replay_after_the_schedule_was_deleted_is_not_found(pool: PgPool
 
 /// 8: временный замок расписания (55P03 по `lock_timeout`) не оставляет запуск
 /// в `prechecking` до аренды: итог повторяется ограниченное число раз.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn finalization_retries_a_lock_timeout(pool: PgPool) {
+#[tokio::test]
+async fn finalization_retries_a_lock_timeout() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::schedules::{RunState, admission::write_outcome_retrying};
     use sqlx::postgres::PgPoolOptions;
 
@@ -2412,8 +2456,9 @@ async fn finalization_retries_a_lock_timeout(pool: PgPool) {
 
 /// 8: восстановление не ждёт заблокированное расписание: следующее в пачке
 /// обрабатывается сразу.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn recovery_skips_a_locked_schedule(pool: PgPool) {
+#[tokio::test]
+async fn recovery_skips_a_locked_schedule() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::schedules::{RECLAIM_LEASE, recover_interrupted};
 
     let f = Fixture::new(pool.clone()).await;
@@ -2472,8 +2517,9 @@ async fn recovery_skips_a_locked_schedule(pool: PgPool) {
 
 /// 8: пачка не заполняется строками заблокированного расписания: 33 заявки
 /// под одним замком не вытесняют восстановление другого расписания.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn recovery_batch_limit_applies_after_skipping_locked_schedules(pool: PgPool) {
+#[tokio::test]
+async fn recovery_batch_limit_applies_after_skipping_locked_schedules() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::schedules::{RECLAIM_LEASE, recover_interrupted};
 
     let f = Fixture::new(pool.clone()).await;
@@ -2542,8 +2588,9 @@ async fn lock_waiters(pool: &PgPool) -> i64 {
 /// как у обычного создания. Три транзакции (создание держит провайдера и ждёт
 /// машину, отзыв держит машину и ждёт учётные данные, приём журнала держит
 /// учётные данные и ждёт провайдера) иначе замыкаются в цикл.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn scheduled_new_session_takes_the_machine_lock_before_the_provider_lock(pool: PgPool) {
+#[tokio::test]
+async fn scheduled_new_session_takes_the_machine_lock_before_the_provider_lock() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fixture::new(pool.clone()).await;
     let _session = testkit::fake_session(&f.state.registry, f.seed.machine_id, &caps(), true);
     sqlx::query("update machines set availability='available' where id=$1")
@@ -2760,8 +2807,9 @@ async fn titled_conversations(pool: &PgPool, owner: Uuid) -> i64 {
 /// реестром и своим воркером доводит запуск. Опоздавшая приёмка A, отпущенная
 /// после завершения B, ничего не делает: одна предпроверка на всех воркерах,
 /// одна сессия, один ввод.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn routed_new_session_stalled_on_hub_a_is_finished_once_by_hub_b(pool: PgPool) {
+#[tokio::test]
+async fn routed_new_session_stalled_on_hub_a_is_finished_once_by_hub_b() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::schedules::{admission::admit, claim_due, fault};
     use std::sync::atomic::Ordering;
 
@@ -2846,8 +2894,9 @@ async fn routed_new_session_stalled_on_hub_a_is_finished_once_by_hub_b(pool: PgP
 
 /// 12: тот же маршрут без предпроверки, но гибель приёмки A перед commit
 /// dispatch; независимый хаб B довершает ровно одну сессию с одним вводом.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn routed_new_session_crash_before_commit_fails_over_to_hub_b(pool: PgPool) {
+#[tokio::test]
+async fn routed_new_session_crash_before_commit_fails_over_to_hub_b() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::schedules::fault::{self, Fault};
 
     let f = Fixture::new(pool.clone()).await;
@@ -2892,8 +2941,9 @@ async fn routed_new_session_crash_before_commit_fails_over_to_hub_b(pool: PgPool
 /// не увидел бы настоящий второй процесс: тест проверяет, что строку со сторожем тик не
 /// берёт, а после снятия сторожа берёт, и ровно один разговор и один ввод. Межпроцессный
 /// захват (аренда без общего сторожа) он не проверяет.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn same_process_guard_holds_the_row_until_the_guard_is_dropped(pool: PgPool) {
+#[tokio::test]
+async fn same_process_guard_holds_the_row_until_the_guard_is_dropped() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::schedules::{admission::admit, claim_due, fault, is_admitting};
 
     let f = Fixture::new(pool.clone()).await;

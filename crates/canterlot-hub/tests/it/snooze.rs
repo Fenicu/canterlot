@@ -38,8 +38,9 @@ async fn snooze(pool: &PgPool, id: Uuid, until: DateTime<Utc>) {
         .unwrap();
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_endpoint_sets_and_clears_an_absolute_snooze(pool: PgPool) {
+#[tokio::test]
+async fn the_endpoint_sets_and_clears_an_absolute_snooze() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = http_support::Fixture::new(pool.clone()).await;
     let until = now() + TimeDelta::hours(3);
     let set = f
@@ -68,8 +69,9 @@ async fn the_endpoint_sets_and_clears_an_absolute_snooze(pool: PgPool) {
     assert_eq!(f.get(&f.path("")).await["snoozed_until"], Value::Null);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn the_snooze_time_must_be_in_the_future_and_within_thirty_days(pool: PgPool) {
+#[tokio::test]
+async fn the_snooze_time_must_be_in_the_future_and_within_thirty_days() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = http_support::Fixture::new(pool.clone()).await;
     for (key, until) in [
         ("past", now() - TimeDelta::minutes(1)),
@@ -90,8 +92,9 @@ async fn the_snooze_time_must_be_in_the_future_and_within_thirty_days(pool: PgPo
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_question_wakes_a_snoozed_session(pool: PgPool) {
+#[tokio::test]
+async fn a_question_wakes_a_snoozed_session() {
+    let pool = canterlot_hub::testkit::db().await;
     let (s, execution) = activity_support::running(&pool).await;
     snooze(&pool, s.conversation_id, now() + TimeDelta::hours(8)).await;
     assert_eq!(
@@ -113,8 +116,9 @@ async fn a_question_wakes_a_snoozed_session(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_failure_wakes_a_snoozed_session(pool: PgPool) {
+#[tokio::test]
+async fn a_failure_wakes_a_snoozed_session() {
+    let pool = canterlot_hub::testkit::db().await;
     let (s, execution) = activity_support::running(&pool).await;
     snooze(&pool, s.conversation_id, now() + TimeDelta::hours(8)).await;
     activity_support::refresh(&pool, s.conversation_id).await;
@@ -133,8 +137,9 @@ async fn a_failure_wakes_a_snoozed_session(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_stall_wakes_a_snoozed_session(pool: PgPool) {
+#[tokio::test]
+async fn a_stall_wakes_a_snoozed_session() {
+    let pool = canterlot_hub::testkit::db().await;
     let (s, execution) = activity_support::running(&pool).await;
     snooze(&pool, s.conversation_id, now() + TimeDelta::hours(8)).await;
     activity_support::refresh(&pool, s.conversation_id).await;
@@ -164,8 +169,9 @@ async fn a_stall_wakes_a_snoozed_session(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_finished_turn_does_not_wake_a_snoozed_session(pool: PgPool) {
+#[tokio::test]
+async fn a_finished_turn_does_not_wake_a_snoozed_session() {
+    let pool = canterlot_hub::testkit::db().await;
     let (s, execution) = activity_support::running(&pool).await;
     snooze(&pool, s.conversation_id, now() + TimeDelta::hours(8)).await;
     activity_support::refresh(&pool, s.conversation_id).await;
@@ -196,8 +202,9 @@ async fn a_finished_turn_does_not_wake_a_snoozed_session(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn an_owner_message_wakes_a_snoozed_session(pool: PgPool) {
+#[tokio::test]
+async fn an_owner_message_wakes_a_snoozed_session() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = http_support::Fixture::new(pool.clone()).await;
     snooze(&pool, f.seed.conversation_id, now() + TimeDelta::hours(8)).await;
     let response = f
@@ -217,8 +224,9 @@ async fn an_owner_message_wakes_a_snoozed_session(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_snooze_silences_turn_finished_pushes_but_not_waiting_or_failure(pool: PgPool) {
+#[tokio::test]
+async fn a_snooze_silences_turn_finished_pushes_but_not_waiting_or_failure() {
+    let pool = canterlot_hub::testkit::db().await;
     let s = testkit::seed(&pool).await;
     sqlx::query("insert into push_settings(singleton,waiting,turn_finished,failures,timezone) values(true,true,true,true,'UTC')")
         .execute(&pool)

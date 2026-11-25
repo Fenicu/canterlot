@@ -25,8 +25,9 @@ async fn singleton_pid(pool: &PgPool, previous: i32) -> i32 {
     }).await.unwrap()
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn rereview_machine_status_reacquire_does_not_publish_unavailable(pool: PgPool) {
+#[tokio::test]
+async fn rereview_machine_status_reacquire_does_not_publish_unavailable() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let registry = Registry::new(HubTimers {
         degraded_after: Duration::from_secs(3600),
@@ -61,8 +62,9 @@ async fn rereview_machine_status_reacquire_does_not_publish_unavailable(pool: Pg
     );
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn rereview_failing_start_projection_keeps_exponential_backoff(pool: PgPool) {
+#[tokio::test]
+async fn rereview_failing_start_projection_keeps_exponential_backoff() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     sqlx::query("update machines set availability='available' where id=$1")
         .bind(seed.machine_id)
@@ -90,8 +92,9 @@ async fn rereview_failing_start_projection_keeps_exponential_backoff(pool: PgPoo
     );
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn rereview_input_replay_survives_generic_key_purge(pool: PgPool) {
+#[tokio::test]
+async fn rereview_input_replay_survives_generic_key_purge() {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let request = || SubmitMessage {
         owner_id: seed.owner_id,

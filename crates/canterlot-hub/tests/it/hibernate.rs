@@ -101,8 +101,9 @@ async fn stop_command(pool: &PgPool, conversation: Uuid) -> Option<Value> {
 /// Ни одно из blocking условий не должно дать команду остановки.
 macro_rules! blocked {
     ($name:ident, $blocker:expr) => {
-        #[sqlx::test(migrations = "./migrations")]
-        async fn $name(pool: PgPool) -> TestResult {
+        #[tokio::test]
+        async fn $name() -> TestResult {
+            let pool = canterlot_hub::testkit::db().await;
             let (seed, _run) = setup(&pool).await;
             $blocker(&pool, &seed).await;
             assert_eq!(hibernate::sweep(&pool, &Presence::default()).await?, 0);
@@ -294,8 +295,9 @@ blocked!(live_secret_blocks, block_secret);
 blocked!(quota_hold_blocks, block_hold);
 blocked!(unresumable_harness_blocks, block_unresumable);
 
-#[sqlx::test(migrations = "./migrations")]
-async fn visible_chat_blocks(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn visible_chat_blocks() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let (seed, _run) = setup(&pool).await;
     let presence = Presence::default();
     presence.report(seed.conversation_id, "phone", true, testkit::clock_now());
@@ -304,8 +306,9 @@ async fn visible_chat_blocks(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn disabled_setting_blocks(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn disabled_setting_blocks() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let (seed, _run) = setup(&pool).await;
     let mut conn = pool.acquire().await?;
     hibernate::replace_settings_in_tx(
@@ -320,8 +323,9 @@ async fn disabled_setting_blocks(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn unproven_idle_does_not_hibernate(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn unproven_idle_does_not_hibernate() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let (seed, _run) = setup(&pool).await;
     sqlx::query("update conversation_derived set activity_evidence=$2 where conversation_id=$1")
         .bind(seed.conversation_id)
@@ -346,8 +350,9 @@ fn startup_grace_is_over_exactly_at_the_window_end() {
 /// Первые десять минут после старта хаба обход ничего не усыпляет: сессия, простоявшая
 /// больше часа, не должна уснуть сразу под выкатом новой версии. Часы синтетические,
 /// моменты сдвигаются арифметикой, без ожиданий.
-#[sqlx::test(migrations = "./migrations")]
-async fn startup_grace_window_blocks_hibernation(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn startup_grace_window_blocks_hibernation() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let (seed, _run) = setup(&pool).await;
     let started = testkit::clock_now();
     let grace = StartupGrace::new(started, Duration::from_secs(600));
@@ -369,8 +374,9 @@ async fn startup_grace_window_blocks_hibernation(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn proven_idle_for_an_hour_hibernates(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn proven_idle_for_an_hour_hibernates() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let (seed, run) = setup(&pool).await;
     assert_eq!(hibernate::sweep(&pool, &Presence::default()).await?, 1);
     assert_eq!(
@@ -421,8 +427,9 @@ fn execution_fact(run: &StartedExecution, state: &str, outcome: &str) -> Body {
     })
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn input_during_stop_is_delivered_once_after_resume(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn input_during_stop_is_delivered_once_after_resume() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let (seed, run) = setup(&pool).await;
     assert_eq!(hibernate::sweep(&pool, &Presence::default()).await?, 1);
     let submitted = submit_input(
@@ -525,8 +532,9 @@ async fn input_during_stop_is_delivered_once_after_resume(pool: PgPool) -> TestR
     Ok(())
 }
 
-#[sqlx::test(migrations = "./migrations")]
-async fn owner_message_through_http_wakes_and_replies(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn owner_message_through_http_wakes_and_replies() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let (deps, dir) = testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
     let owner_id = deps.installation.owner_id;
     let machine_id = Uuid::now_v7();
@@ -630,8 +638,9 @@ async fn owner_message_through_http_wakes_and_replies(pool: PgPool) -> TestResul
 /// Перезагрузка машины останавливает исполнение исходом `machine_rebooted`; воркер
 /// сообщает об этом при следующем старте, уже после того как владелец написал в сессию.
 /// Отложенный ввод поднимает исполнение с тем же нативным id и доставляется ровно раз.
-#[sqlx::test(migrations = "./migrations")]
-async fn input_queued_before_the_reboot_fact_wakes_the_session(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn input_queued_before_the_reboot_fact_wakes_the_session() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let run = start_running(&pool, &seed).await;
     // Сообщение пришло, пока хаб ещё считает исполнение живым: будить нечего, ввод в очереди.
@@ -644,8 +653,9 @@ async fn input_queued_before_the_reboot_fact_wakes_the_session(pool: PgPool) -> 
 
 /// Ввод после уже записанной остановки перезагрузкой будит сессию тем же путём, что
 /// и усыплённую: новое исполнение с нативным id, паузы `process_exited` и `owner_lost` сняты.
-#[sqlx::test(migrations = "./migrations")]
-async fn owner_message_after_a_reboot_stop_wakes_the_session(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn owner_message_after_a_reboot_stop_wakes_the_session() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let run = start_running(&pool, &seed).await;
     stop_by_reboot(&pool, &seed, &run).await;
@@ -664,8 +674,9 @@ async fn owner_message_after_a_reboot_stop_wakes_the_session(pool: PgPool) -> Te
 
 /// Сообщение другой сессии будит остановленную перезагрузкой сессию так же, как сообщение
 /// владельца: `session_send` идёт тем же путём приёма ввода.
-#[sqlx::test(migrations = "./migrations")]
-async fn session_send_after_a_reboot_stop_wakes_the_session(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn session_send_after_a_reboot_stop_wakes_the_session() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let run = start_running(&pool, &seed).await;
     stop_by_reboot(&pool, &seed, &run).await;
@@ -715,8 +726,9 @@ async fn session_send_after_a_reboot_stop_wakes_the_session(pool: PgPool) -> Tes
 
 /// Остановка владельцем не будится вводом: сообщение остаётся в очереди, исполнение не
 /// начинается — как и до этой правки.
-#[sqlx::test(migrations = "./migrations")]
-async fn owner_message_does_not_wake_a_user_stopped_session(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn owner_message_does_not_wake_a_user_stopped_session() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let seed = testkit::seed(&pool).await;
     let run = start_running(&pool, &seed).await;
     request_stop_execution(

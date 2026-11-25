@@ -8,7 +8,6 @@ use canterlot_hub::{
     testkit::{Method, TEST_ORIGIN, TEST_SESSION_ID, TestClient, TestResponse},
 };
 use serde_json::{Value, json};
-use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::support::auth::{AuthHub, error_code, set_cookie};
@@ -83,8 +82,9 @@ async fn act(client: &TestClient, action: &str, secret: &str) -> TestResponse {
         .await
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn auth_qr_start_scan_approve_signs_in_once(pool: PgPool) {
+#[tokio::test]
+async fn auth_qr_start_scan_approve_signs_in_once() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = AuthHub::new(pool).await;
     let qr = started(&hub, "203.0.113.50").await;
     assert_eq!(qr.secret.len(), 43);
@@ -157,8 +157,9 @@ async fn auth_qr_start_scan_approve_signs_in_once(pool: PgPool) {
     assert_eq!(act(&hub.owner(), "approve", &qr.secret).await.status, 410);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn auth_qr_two_concurrent_polls_get_exactly_one_session(pool: PgPool) {
+#[tokio::test]
+async fn auth_qr_two_concurrent_polls_get_exactly_one_session() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = AuthHub::new(pool).await;
     for _ in 0..5 {
         let qr = started(&hub, "203.0.113.50").await;
@@ -189,8 +190,9 @@ async fn auth_qr_two_concurrent_polls_get_exactly_one_session(pool: PgPool) {
     assert_eq!(qr_sessions, 5);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn auth_qr_deny_and_expiry_end_the_code(pool: PgPool) {
+#[tokio::test]
+async fn auth_qr_deny_and_expiry_end_the_code() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = AuthHub::new(pool).await;
     let client = poller(&hub);
     let denied = started(&hub, "203.0.113.50").await;
@@ -239,8 +241,9 @@ async fn auth_qr_deny_and_expiry_end_the_code(pool: PgPool) {
     assert_eq!(state(&unknown), "expired");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn auth_qr_inspect_approve_and_deny_need_a_session(pool: PgPool) {
+#[tokio::test]
+async fn auth_qr_inspect_approve_and_deny_need_a_session() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = AuthHub::new(pool).await;
     let qr = started(&hub, "203.0.113.50").await;
     for action in ["inspect", "approve", "deny"] {
@@ -255,8 +258,9 @@ async fn auth_qr_inspect_approve_and_deny_need_a_session(pool: PgPool) {
     assert_eq!(state_now, "pending");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn auth_qr_secret_and_poll_token_are_not_interchangeable(pool: PgPool) {
+#[tokio::test]
+async fn auth_qr_secret_and_poll_token_are_not_interchangeable() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = AuthHub::new(pool).await;
     let qr = started(&hub, "203.0.113.50").await;
     let wrong = act(&hub.owner(), "inspect", &qr.poll_token).await;
@@ -270,8 +274,9 @@ async fn auth_qr_secret_and_poll_token_are_not_interchangeable(pool: PgPool) {
     assert!(set_cookie(&response, SESSION_COOKIE).is_none());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn auth_qr_start_is_limited_per_bucket_and_in_total(pool: PgPool) {
+#[tokio::test]
+async fn auth_qr_start_is_limited_per_bucket_and_in_total() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = AuthHub::new(pool).await;
     for _ in 0..10 {
         assert_eq!(start(&hub, "203.0.113.50").await.status, 200);
@@ -300,8 +305,9 @@ async fn auth_qr_start_is_limited_per_bucket_and_in_total(pool: PgPool) {
     assert_eq!(start(&hub, "198.51.100.77").await.status, 200);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn auth_qr_at_most_eight_polls_wait_at_once(pool: PgPool) {
+#[tokio::test]
+async fn auth_qr_at_most_eight_polls_wait_at_once() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = AuthHub::new(pool).await;
     let qr = started(&hub, "203.0.113.50").await;
     let waiting: Vec<_> = (0..8)
@@ -329,8 +335,9 @@ async fn auth_qr_at_most_eight_polls_wait_at_once(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn auth_qr_born_session_dies_with_its_approver(pool: PgPool) {
+#[tokio::test]
+async fn auth_qr_born_session_dies_with_its_approver() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = AuthHub::new(pool).await;
     let (approver, approver_token) = hub.session(SignInMethod::Password, None).await;
     let approver_client = hub.with_session(&approver_token, Some("198.51.100.9"));
@@ -366,8 +373,9 @@ async fn auth_qr_born_session_dies_with_its_approver(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn auth_qr_approval_by_a_revoked_session_is_not_delivered(pool: PgPool) {
+#[tokio::test]
+async fn auth_qr_approval_by_a_revoked_session_is_not_delivered() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = AuthHub::new(pool).await;
     let (approver, approver_token) = hub.session(SignInMethod::Password, None).await;
     let qr = started(&hub, "203.0.113.50").await;
@@ -391,8 +399,9 @@ async fn auth_qr_approval_by_a_revoked_session_is_not_delivered(pool: PgPool) {
     assert!(set_cookie(&response, SESSION_COOKIE).is_none());
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn auth_qr_one_session_approves_at_most_five_live_sessions(pool: PgPool) {
+#[tokio::test]
+async fn auth_qr_one_session_approves_at_most_five_live_sessions() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = AuthHub::new(pool).await;
     let (_, approver_token) = hub.session(SignInMethod::Password, None).await;
     let approver = hub.with_session(&approver_token, Some("198.51.100.9"));
@@ -425,8 +434,9 @@ async fn auth_qr_one_session_approves_at_most_five_live_sessions(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn auth_qr_delivery_never_evicts_other_sessions(pool: PgPool) {
+#[tokio::test]
+async fn auth_qr_delivery_never_evicts_other_sessions() {
+    let pool = canterlot_hub::testkit::db().await;
     let hub = AuthHub::new(pool).await;
     // Заранее заведённый сеанс владельца плюс 49: предел 50 достигнут.
     for _ in 0..49 {

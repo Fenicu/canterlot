@@ -342,8 +342,9 @@ fn git(head: &str, commits: &[(&str, &str)], files: &[&str]) -> Value {
     })
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn add_list_and_update_follow_the_rules_and_limits(pool: PgPool) {
+#[tokio::test]
+async fn add_list_and_update_follow_the_rules_and_limits() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     let added = f.add(&["  Парсер\nчисел ", "Тесты"]).await;
     assert_eq!(added["numbers"], json!([1, 2]));
@@ -450,8 +451,9 @@ async fn add_list_and_update_follow_the_rules_and_limits(pool: PgPool) {
     assert_eq!(child_list["tasks"], json!([]));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn read_only_sessions_may_keep_their_plan(pool: PgPool) {
+#[tokio::test]
+async fn read_only_sessions_may_keep_their_plan() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     sqlx::query("update conversations set permission_mode='read_only' where id=$1")
         .bind(f.orchestrator)
@@ -465,8 +467,9 @@ async fn read_only_sessions_may_keep_their_plan(pool: PgPool) {
     assert_eq!(f.state(1).await, "in_progress");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_plan_holds_at_most_two_hundred_tasks(pool: PgPool) {
+#[tokio::test]
+async fn a_plan_holds_at_most_two_hundred_tasks() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     for _ in 0..9 {
         f.call(
@@ -493,8 +496,9 @@ async fn a_plan_holds_at_most_two_hundred_tasks(pool: PgPool) {
     assert_eq!(f.add(&["последняя"]).await["numbers"], json!([200]));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn idle_with_the_gate_open_moves_to_review_once_per_episode(pool: PgPool) {
+#[tokio::test]
+async fn idle_with_the_gate_open_moves_to_review_once_per_episode() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.add(&["Парсер"]).await;
     f.link(1, f.child).await;
@@ -557,8 +561,9 @@ async fn idle_with_the_gate_open_moves_to_review_once_per_episode(pool: PgPool) 
     assert_eq!(reviews, 2, "one event per transition");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_new_turn_brings_a_reviewed_task_back_to_work(pool: PgPool) {
+#[tokio::test]
+async fn a_new_turn_brings_a_reviewed_task_back_to_work() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.add(&["Парсер"]).await;
     f.link(1, f.child).await;
@@ -577,8 +582,9 @@ async fn a_new_turn_brings_a_reviewed_task_back_to_work(pool: PgPool) {
     assert_eq!(f.state(1).await, "in_progress");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn a_nudged_delegate_stays_in_progress_until_its_marker(pool: PgPool) {
+#[tokio::test]
+async fn a_nudged_delegate_stays_in_progress_until_its_marker() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.add(&["Парсер"]).await;
     f.link(1, f.child).await;
@@ -618,8 +624,9 @@ async fn a_nudged_delegate_stays_in_progress_until_its_marker(pool: PgPool) {
     assert_eq!(f.state(1).await, "in_review");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn other_settled_states_never_move_the_task(pool: PgPool) {
+#[tokio::test]
+async fn other_settled_states_never_move_the_task() {
+    let pool = canterlot_hub::testkit::db().await;
     for case in ["waiting", "stalled", "failed", "stopped", "owner_lost"] {
         let f = Fx::new(pool.clone()).await;
         f.add(&["Парсер"]).await;
@@ -683,8 +690,9 @@ async fn other_settled_states_never_move_the_task(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn accept_marks_the_task_done(pool: PgPool) {
+#[tokio::test]
+async fn accept_marks_the_task_done() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.add(&["Парсер", "Тесты"]).await;
     f.link(1, f.child).await;
@@ -708,8 +716,9 @@ async fn accept_marks_the_task_done(pool: PgPool) {
     );
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn adopt_moves_open_tasks_and_the_adopter_may_accept_their_executors(pool: PgPool) {
+#[tokio::test]
+async fn adopt_moves_open_tasks_and_the_adopter_may_accept_their_executors() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.add(&["Парсер", "Тесты", "Доки"]).await;
     f.link(2, f.child).await;
@@ -770,8 +779,9 @@ async fn adopt_moves_open_tasks_and_the_adopter_may_accept_their_executors(pool:
     assert_eq!(f.task_of(fresh, 3).await.0, "done");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn adopt_refuses_delegates_foreign_and_missing_sources(pool: PgPool) {
+#[tokio::test]
+async fn adopt_refuses_delegates_foreign_and_missing_sources() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.add(&["Парсер"]).await;
     // Делегат не забирает план своего корня.
@@ -816,8 +826,9 @@ async fn adopt_refuses_delegates_foreign_and_missing_sources(pool: PgPool) {
 
 /// Исполнитель, оставшийся от версии без доменов и теперь из другого домена, в списке плана
 /// показан без коммитов, ответа и идентификатора.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn plan_list_hides_a_cross_domain_executor(pool: PgPool) {
+#[tokio::test]
+async fn plan_list_hides_a_cross_domain_executor() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.add(&["Парсер"]).await;
     f.link(1, f.child).await;
@@ -854,8 +865,9 @@ async fn plan_list_hides_a_cross_domain_executor(pool: PgPool) {
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn derived_commits_and_report_are_computed_on_demand(pool: PgPool) {
+#[tokio::test]
+async fn derived_commits_and_report_are_computed_on_demand() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.add(&["Парсер", "Тесты"]).await;
     f.link(1, f.child).await;
@@ -925,8 +937,9 @@ async fn derived_commits_and_report_are_computed_on_demand(pool: PgPool) {
     assert!(last["task"].get("commits").is_none(), "{last}");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn http_plan_and_snapshot_carry_the_contract(pool: PgPool) {
+#[tokio::test]
+async fn http_plan_and_snapshot_carry_the_contract() {
+    let pool = canterlot_hub::testkit::db().await;
     let (deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
     let owner = deps.installation.owner_id;
@@ -1048,8 +1061,9 @@ async fn http_plan_and_snapshot_carry_the_contract(pool: PgPool) {
     assert_eq!(titles, vec!["Парсер"], "{tasks}");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn deleting_the_executor_unlinks_and_republishes_and_the_orchestrator_cascades(pool: PgPool) {
+#[tokio::test]
+async fn deleting_the_executor_unlinks_and_republishes_and_the_orchestrator_cascades() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.add(&["Парсер"]).await;
     f.link(1, f.child).await;
@@ -1110,8 +1124,9 @@ async fn deleting_the_executor_unlinks_and_republishes_and_the_orchestrator_casc
 
 /// Порядок блокировок (delivery.md): приём исполнителя, проход проектора, ручная правка
 /// и удаление стороннего оркестратора идут одновременно без взаимоблокировки.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn plan_writes_share_the_lock_order_with_accept_projector_and_delete(pool: PgPool) {
+#[tokio::test]
+async fn plan_writes_share_the_lock_order_with_accept_projector_and_delete() {
+    let pool = canterlot_hub::testkit::db().await;
     for round in 0..8 {
         let f = Fx::new(pool.clone()).await;
         f.add(&["Парсер", "Тесты"]).await;
@@ -1156,8 +1171,9 @@ async fn plan_writes_share_the_lock_order_with_accept_projector_and_delete(pool:
     }
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn idle_with_a_running_background_job_never_moves_the_task(pool: PgPool) {
+#[tokio::test]
+async fn idle_with_a_running_background_job_never_moves_the_task() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.add(&["Парсер"]).await;
     f.link(1, f.child).await;
@@ -1298,8 +1314,9 @@ async fn in_review(f: &Fx) {
         .unwrap();
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn plan_update_and_executor_projection_do_not_deadlock(pool: PgPool) {
+#[tokio::test]
+async fn plan_update_and_executor_projection_do_not_deadlock() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool.clone()).await;
     f.add(&["Парсер"]).await;
     f.link(1, f.child).await;
@@ -1333,8 +1350,9 @@ async fn plan_update_and_executor_projection_do_not_deadlock(pool: PgPool) {
     assert_eq!(findings, json!(["x"]));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn plan_adopt_and_executor_projection_do_not_deadlock(pool: PgPool) {
+#[tokio::test]
+async fn plan_adopt_and_executor_projection_do_not_deadlock() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool.clone()).await;
     f.add(&["Парсер"]).await;
     f.link(1, f.child).await;
@@ -1362,8 +1380,9 @@ async fn plan_adopt_and_executor_projection_do_not_deadlock(pool: PgPool) {
 }
 
 /// Связь задачи в `start_child` идёт после событий создания разговора в журнале владельца.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn linking_a_child_and_plan_update_do_not_deadlock(pool: PgPool) {
+#[tokio::test]
+async fn linking_a_child_and_plan_update_do_not_deadlock() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool.clone()).await;
     f.add(&["Парсер"]).await;
     let mut start = hold_owner_journal(&f).await;
@@ -1398,8 +1417,9 @@ async fn linking_a_child_and_plan_update_do_not_deadlock(pool: PgPool) {
     assert_eq!((state.as_str(), executor), ("in_progress", Some(f.child)));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn finished_tasks_are_archived_by_number_and_all_finished(pool: PgPool) {
+#[tokio::test]
+async fn finished_tasks_are_archived_by_number_and_all_finished() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.add(&["Первая", "Вторая", "Третья", "Открытая"]).await;
     f.call(
@@ -1446,8 +1466,9 @@ async fn finished_tasks_are_archived_by_number_and_all_finished(pool: PgPool) {
     assert_eq!(saved.1, json!(["находка"]));
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn open_tasks_cannot_be_archived(pool: PgPool) {
+#[tokio::test]
+async fn open_tasks_cannot_be_archived() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.add(&["Открытая", "В работе"]).await;
     f.call("plan.update", json!({"number": 2, "state": "in_progress"}))
@@ -1465,8 +1486,9 @@ async fn open_tasks_cannot_be_archived(pool: PgPool) {
     assert!(!f.archived(2).await);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn plan_add_archives_oldest_finished_tasks_to_make_room(pool: PgPool) {
+#[tokio::test]
+async fn plan_add_archives_oldest_finished_tasks_to_make_room() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     for _ in 0..10 {
         f.call(
@@ -1496,8 +1518,9 @@ async fn plan_add_archives_oldest_finished_tasks_to_make_room(pool: PgPool) {
     assert_eq!(archived, 1);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn plan_add_still_fails_when_nothing_can_be_archived(pool: PgPool) {
+#[tokio::test]
+async fn plan_add_still_fails_when_nothing_can_be_archived() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     for _ in 0..9 {
         f.call(
@@ -1541,8 +1564,9 @@ async fn plan_add_still_fails_when_nothing_can_be_archived(pool: PgPool) {
     assert!(!f.archived(1).await);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn old_finished_tasks_are_archived_on_any_board_mutation(pool: PgPool) {
+#[tokio::test]
+async fn old_finished_tasks_are_archived_on_any_board_mutation() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.add(&["Старая", "Свежая", "Открытая"]).await;
     f.finish_at(1, "done", 8).await;
@@ -1561,8 +1585,9 @@ async fn old_finished_tasks_are_archived_on_any_board_mutation(pool: PgPool) {
     assert!(f.archived(2).await);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn archived_task_numbers_are_never_reused(pool: PgPool) {
+#[tokio::test]
+async fn archived_task_numbers_are_never_reused() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.add(&["Первая", "Вторая"]).await;
     f.call("plan.update", json!({"number": 1, "state": "done"}))
@@ -1575,8 +1600,9 @@ async fn archived_task_numbers_are_never_reused(pool: PgPool) {
     assert!(!f.archived(3).await);
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn plan_list_hides_archived_compacts_finished_and_reads_one_in_full(pool: PgPool) {
+#[tokio::test]
+async fn plan_list_hides_archived_compacts_finished_and_reads_one_in_full() {
+    let pool = canterlot_hub::testkit::db().await;
     let f = Fx::new(pool).await;
     f.add(&["В работе", "Готовая", "Отменённая", "В архиве"])
         .await;

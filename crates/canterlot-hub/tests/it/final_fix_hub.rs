@@ -111,8 +111,9 @@ fn delta(id: Uuid, rev: u64, text: String) -> Body {
     })
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn wave2_n2_sj_batch_and_stop_share_lock_order(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn wave2_n2_sj_batch_and_stop_share_lock_order() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::delivery::control;
     use std::time::Duration;
     use tokio::time::{sleep, timeout};
@@ -207,8 +208,9 @@ async fn wave2_n2_sj_batch_and_stop_share_lock_order(pool: PgPool) -> TestResult
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn created_can_lose_owner_before_first_sj(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn created_can_lose_owner_before_first_sj() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let run = Run::new(&pool).await;
     executions::set_state(
         &pool,
@@ -233,8 +235,9 @@ async fn created_can_lose_owner_before_first_sj(pool: PgPool) -> TestResult {
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn reconcile_waits_for_closed_sj_and_applies_owner_lost(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn reconcile_waits_for_closed_sj_and_applies_owner_lost() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut run = Run::new(&pool).await;
     run.send(vec![
         run.opened(),
@@ -278,8 +281,9 @@ async fn reconcile_waits_for_closed_sj_and_applies_owner_lost(pool: PgPool) -> T
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn unsuccessful_start_facts_complete_command_with_outcome(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn unsuccessful_start_facts_complete_command_with_outcome() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     for (state, outcome) in [
         ("failed", "start_failed"),
         ("stopped", "start_cancelled"),
@@ -323,8 +327,9 @@ async fn unsuccessful_start_facts_complete_command_with_outcome(pool: PgPool) ->
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn terminal_execution_clears_phase_and_counts_late_phase(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn terminal_execution_clears_phase_and_counts_late_phase() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     for (terminal, outcome) in [("stopped", "normal_exit"), ("failed", "start_failed")] {
         let mut run = Run::new(&pool).await;
         let phase = || {
@@ -372,8 +377,9 @@ async fn terminal_execution_clears_phase_and_counts_late_phase(pool: PgPool) -> 
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn omitted_final_after_revision_gap_stays_incomplete(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn omitted_final_after_revision_gap_stays_incomplete() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut run = Run::new(&pool).await;
     for text in ["missing middle", "prefix"] {
         let id = Uuid::now_v7();
@@ -421,8 +427,9 @@ async fn omitted_final_after_revision_gap_stays_incomplete(pool: PgPool) -> Test
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn sj_batch_uses_one_transaction_and_acks_only_its_prefix(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn sj_batch_uses_one_transaction_and_acks_only_its_prefix() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut run = Run::new(&pool).await;
     sqlx::query("create table record_transactions (tx bigint not null)")
         .execute(&pool)
@@ -470,8 +477,9 @@ async fn sj_batch_uses_one_transaction_and_acks_only_its_prefix(pool: PgPool) ->
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn sj_successful_batch_has_one_commit_and_cursor_update(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn sj_successful_batch_has_one_commit_and_cursor_update() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut run = Run::new(&pool).await;
     sqlx::query("create table record_transactions (tx bigint not null)")
         .execute(&pool)
@@ -514,8 +522,9 @@ async fn sj_successful_batch_has_one_commit_and_cursor_update(pool: PgPool) -> T
 /// замер идёт без статистики: автовакуум (а с ним и автоанализ) выключен на всех таблицах,
 /// планы одинаковы во всех пакетах. Перезапись накопленного текста или его чтение на
 /// каждую дельту всё равно дали бы рост в разы: строки читаются при любом плане.
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn sj_ingest_cost_does_not_grow_with_block_size(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn sj_ingest_cost_does_not_grow_with_block_size() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut run = Run::new(&pool).await;
     let id = Uuid::now_v7();
     run.send(vec![run.opened(), start(id)]).await;
@@ -592,8 +601,9 @@ async fn sj_ingest_cost_does_not_grow_with_block_size(pool: PgPool) -> TestResul
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn delta_and_incomplete_need_no_content_select_privilege(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn delta_and_incomplete_need_no_content_select_privilege() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::blocks::{self, ExecutionRef};
     let mut run = Run::new(&pool).await;
     let id = Uuid::now_v7();
@@ -664,8 +674,9 @@ async fn delta_and_incomplete_need_no_content_select_privilege(pool: PgPool) -> 
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn reconcile_accepts_terminal_only_after_its_bound_sj_is_closed(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn reconcile_accepts_terminal_only_after_its_bound_sj_is_closed() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut run = Run::new(&pool).await;
     run.send(vec![
         run.opened(),
@@ -760,8 +771,9 @@ async fn migration_preserves_existing_streaming_and_materialized_text(pool: PgPo
     Ok(())
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn failed_sj_commit_never_acks_a_prefix(pool: PgPool) -> TestResult {
+#[tokio::test]
+async fn failed_sj_commit_never_acks_a_prefix() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
     let mut run = Run::new(&pool).await;
     sqlx::query("create function reject_commit() returns trigger language plpgsql as $$ begin raise exception 'rejected commit'; end $$").execute(&pool).await?;
     sqlx::query("create constraint trigger reject_commit after insert on events deferrable initially deferred for each row execute function reject_commit()").execute(&pool).await?;

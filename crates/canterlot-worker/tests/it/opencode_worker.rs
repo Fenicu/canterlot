@@ -321,8 +321,9 @@ impl Stack {
     }
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn worker_with_the_table_reports_the_harness_and_runs_a_turn(pool: PgPool) {
+#[tokio::test]
+async fn worker_with_the_table_reports_the_harness_and_runs_a_turn() {
+    let pool = canterlot_hub::testkit::db().await;
     let stack = Stack::start(
         pool.clone(),
         with_autonomous_run(
@@ -386,8 +387,9 @@ async fn worker_with_the_table_reports_the_harness_and_runs_a_turn(pool: PgPool)
 
 /// Ход с инструментом в режиме владельца: вызов виден сразу по готовности входа,
 /// пометка политики — на результате, скорость честная.
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn tool_turn_in_owner_mode_yields_a_speed(pool: PgPool) {
+#[tokio::test]
+async fn tool_turn_in_owner_mode_yields_a_speed() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::speed;
     let mut script = Script::from_capture("start_stream", None)
         .with_canterlot_mcp("connected")
@@ -515,8 +517,9 @@ async fn tool_turn_in_owner_mode_yields_a_speed(pool: PgPool) {
 }
 
 /// Ход с инструментом в режиме по умолчанию: рассуждение и вызов дают честную генерацию.
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn tool_turn_in_bypass_yields_a_speed(pool: PgPool) {
+#[tokio::test]
+async fn tool_turn_in_bypass_yields_a_speed() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::speed;
     let mut script = Script::from_capture("start_stream", None)
         .with_canterlot_mcp("connected")
@@ -657,8 +660,9 @@ async fn tool_turn_in_bypass_yields_a_speed(pool: PgPool) {
 }
 
 /// Сбой пробы на старте не убирает харнесс до перезапуска: повтор доносит каталог до хаба.
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn failed_startup_probe_is_retried_and_updates_the_catalog(pool: PgPool) {
+#[tokio::test]
+async fn failed_startup_probe_is_retried_and_updates_the_catalog() {
+    let pool = canterlot_hub::testkit::db().await;
     let script = Script::from_capture("start_stream", None)
         .with_canterlot_mcp("connected")
         .with_recorded_models();
@@ -708,8 +712,9 @@ async fn failed_startup_probe_is_retried_and_updates_the_catalog(pool: PgPool) {
 }
 
 /// Упор в лимит доходит до очереди: следующий ввод не уходит в тот же отказ.
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn provider_quota_pauses_the_queue_with_the_reset_time(pool: PgPool) {
+#[tokio::test]
+async fn provider_quota_pauses_the_queue_with_the_reset_time() {
+    let pool = canterlot_hub::testkit::db().await;
     let mut script = Script::from_capture("start_stream", None)
         .with_canterlot_mcp("connected")
         .with_recorded_models();
@@ -749,8 +754,9 @@ async fn provider_quota_pauses_the_queue_with_the_reset_time(pool: PgPool) {
 }
 
 /// Весь путь застрявшей сессии: факт воркера, пауза, команда хаба, снятие паузы.
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn stuck_session_pauses_the_queue_until_compaction_finishes(pool: PgPool) {
+#[tokio::test]
+async fn stuck_session_pauses_the_queue_until_compaction_finishes() {
+    let pool = canterlot_hub::testkit::db().await;
     let script = Script::from_capture("stuck_invalid_request", None)
         .with_canterlot_mcp("connected")
         .with_recorded_models()
@@ -795,8 +801,9 @@ async fn stuck_session_pauses_the_queue_until_compaction_finishes(pool: PgPool) 
 /// Обычный текстовый ход OpenCode даёт скорость: кадры как в записи
 /// `live/turn_text_flash` (OpenCode 2.2.6), генерация разнесена паузой двойника,
 /// чтобы время генерации было честным.
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn plain_text_turn_yields_a_speed(pool: PgPool) {
+#[tokio::test]
+async fn plain_text_turn_yields_a_speed() {
+    let pool = canterlot_hub::testkit::db().await;
     use canterlot_hub::speed;
     let model = "opencode-go/deepseek-v4.1-flash";
     let mut script = Script::from_capture("start_stream", None)
