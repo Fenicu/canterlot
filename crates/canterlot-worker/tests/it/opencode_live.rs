@@ -1788,7 +1788,7 @@ async fn real_subagent_runs_in_the_lane_of_its_call() {
     ])
     .await;
     let mut session = Session::start(&stub, "bypass").await;
-    let events = session.turn(&input("делегируй")).await;
+    let mut events = session.turn(&input("делегируй")).await;
     let call = events
         .iter()
         .find_map(|event| match event {
@@ -1800,6 +1800,35 @@ async fn real_subagent_runs_in_the_lane_of_its_call() {
             _ => None,
         })
         .expect("subagent call");
+    // С 2.4.1 потомок работает в фоне: его блоки приходят после конца хода
+    // родителя, вместе с принятым ходом на `<background-result>`.
+    let has_child_text = |events: &[AdapterEvent]| {
+        events.iter().any(|event| {
+            matches!(
+                event,
+                AdapterEvent::BlockStarted {
+                    parent: Some(_),
+                    kind: BlockKind::Text,
+                    ..
+                }
+            )
+        })
+    };
+    if !has_child_text(&events) {
+        tokio::time::timeout(WAIT, async {
+            loop {
+                let event = session.adapter.next_event().await;
+                let stop =
+                    matches!(event, AdapterEvent::RunFinished { .. }) && has_child_text(&events);
+                events.push(event);
+                if stop {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("background child must finish");
+    }
     let lane: Vec<_> = events
         .iter()
         .filter_map(|event| match event {
@@ -1812,12 +1841,17 @@ async fn real_subagent_runs_in_the_lane_of_its_call() {
             _ => None,
         })
         .collect();
-    assert_eq!(
-        lane,
-        vec![
-            (Some(call), "general".to_owned()),
-            (None, "orchestrator".to_owned())
-        ]
+    // Порядок зависит от версии: 2.4.1 успевает отдать текст родителя до конца
+    // фонового потомка, прежние версии — после. Дорожка и имя те же.
+    assert!(
+        lane.contains(&(Some(call), "general".to_owned())),
+        "{lane:?}"
+    );
+    let roots: Vec<_> = lane.iter().filter(|(parent, _)| parent.is_none()).collect();
+    assert!(!roots.is_empty(), "{lane:?}");
+    assert!(
+        roots.iter().all(|(_, agent)| agent == "orchestrator"),
+        "{lane:?}"
     );
     let Some(AdapterEvent::RunFinished { usage, .. }) = events.last() else {
         panic!("run must finish");
@@ -2080,7 +2114,7 @@ async fn real_child_todo_list_goes_to_the_lane_of_its_call() {
     ])
     .await;
     let mut session = Session::start(&stub, "bypass").await;
-    let events = session.turn(&input("делегируй")).await;
+    let mut events = session.turn(&input("делегируй")).await;
     let call = events
         .iter()
         .find_map(|event| match event {
@@ -2092,6 +2126,25 @@ async fn real_child_todo_list_goes_to_the_lane_of_its_call() {
             _ => None,
         })
         .expect("subagent call");
+    // С 2.4.1 потомок отвечает после конца хода родителя: список задач приходит
+    // в фоновой части, но дорожку вызова сохраняет.
+    if !events
+        .iter()
+        .any(|event| matches!(event, AdapterEvent::TodoUpdated { .. }))
+    {
+        tokio::time::timeout(WAIT, async {
+            loop {
+                let event = session.adapter.next_event().await;
+                let stop = matches!(event, AdapterEvent::TodoUpdated { .. });
+                events.push(event);
+                if stop {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("background child todo");
+    }
     let lists: Vec<_> = events
         .iter()
         .filter_map(|event| match event {

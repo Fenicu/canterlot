@@ -37,6 +37,8 @@ const BLOCK_NAMESPACE: Uuid = Uuid::from_u128(0x7c1e_52a0_9d3b_4f6e_8a21_3b5d_c0
 const KNOWN: &[&str] = &[
     "agent.updated",
     "command.updated",
+    "experimental.job.updated",
+    "experimental.mcp.event",
     "integration.updated",
     "location.shutdown",
     "mcp.resources.changed",
@@ -56,6 +58,7 @@ const KNOWN: &[&str] = &[
     "session.instructions.updated",
     "session.model.selected",
     "session.permissions",
+    "session.step.first-token",
     "session.step.streamed",
     "session.synthetic",
     "session.tool.input.ended",
@@ -1336,10 +1339,18 @@ impl Translator {
     }
 
     fn on_tool_failed(&mut self, data: &Value) -> Vec<Translated> {
-        let status = match data.pointer("/error/type").and_then(Value::as_str) {
-            Some("permission.rejected") => "declined",
-            Some("aborted") => "interrupted",
-            _ => "failed",
+        let status = if data
+            .pointer("/metadata/interrupted")
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            "interrupted"
+        } else {
+            match data.pointer("/error/type").and_then(Value::as_str) {
+                Some("permission.rejected") => "declined",
+                Some("aborted") => "interrupted",
+                _ => "failed",
+            }
         };
         let message = data
             .pointer("/error/message")

@@ -63,6 +63,9 @@ const MCP_READY_WAIT: Duration = Duration::from_secs(90);
 const REQUEST_WAIT: Duration = Duration::from_secs(10);
 /// Весь `discover` при старте воркера: запуск сервера, версия и каталог.
 const DISCOVER_WAIT: Duration = Duration::from_secs(20);
+/// 2.4.1 наполняет `/api/model` после первой сессии волнами; ждём не дольше этого,
+/// чтобы пустой каталог остался пустым, а не стал отказом по общему сроку.
+const MODEL_SETTLE: Duration = Duration::from_secs(5);
 const INTERRUPT_WAIT: Duration = Duration::from_secs(5);
 const POLL_EVERY: Duration = Duration::from_millis(100);
 /// Эвристика: `connected` публикуется раньше инструментов, дебаунс `mcp.tools.changed`
@@ -107,6 +110,10 @@ pub const VERIFIED_OPENAPI_SHA256: &[(Triple, &str)] = &[
     (
         (2, 2, 6),
         "4172c8b5a105c666235144d87ed9bef3baad837b7249a89fdc4af1bbf6be2b46",
+    ),
+    (
+        (2, 4, 1),
+        "6e23e77072e41a75ec55b8da91d3abb32e5c66fc4e234763ed5a02f8f28ecbbb",
     ),
 ];
 
@@ -227,9 +234,14 @@ async fn discover_inner(
     )
     .await
     .map_err(DiscoverError::Version)?;
-    let models = probe_models(cfg, env, &layout.tmp())
-        .await
-        .map_err(|_| DiscoverError::Catalog)?;
+    let models = probe_models(
+        cfg,
+        env,
+        &layout.tmp(),
+        version::parse_version(version.label()).is_ok_and(|number| number >= (2, 4, 1)),
+    )
+    .await
+    .map_err(|_| DiscoverError::Catalog)?;
     Ok(OpenCodeCatalog { version, models })
 }
 
@@ -253,6 +265,7 @@ async fn probe_models(
     cfg: &OpenCodeConfig,
     mut env: Vec<(OsString, OsString)>,
     workdir: &Path,
+    lazy_models: bool,
 ) -> Result<Vec<catalog::ModelEntry>, ()> {
     let password = random_password();
     env.push(("OPENCODE_PASSWORD".into(), password.clone().into()));
@@ -265,6 +278,51 @@ async fn probe_models(
         let models = models_reply(&http, "/api/model", DISCOVER_WAIT)
             .await
             .map_err(drop)?;
+        let models = if lazy_models && models["data"].as_array().is_none_or(Vec::is_empty) {
+            // 2.4.1 поднимает локацию, модели и поставщиков лениво: до первой сессии
+            // `/api/model` пуст, а после неё список наполняется волнами — сперва
+            // встроенные провайдеры, затем настроенные. Заводим временную сессию и
+            // ждём модели нужных провайдеров, затем убираем её за собой.
+            let session = http
+                .post("/api/session", &json!({}), DISCOVER_WAIT)
+                .await
+                .ok();
+            let id = session
+                .as_ref()
+                .and_then(|reply| reply.pointer("/data/id"))
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            let wanted = |models: &Value| {
+                let Some(list) = models["data"].as_array() else {
+                    return false;
+                };
+                if list.is_empty() {
+                    return false;
+                }
+                cfg.providers.is_empty()
+                    || list.iter().any(|model| {
+                        model["providerID"].as_str().is_some_and(|provider| {
+                            cfg.providers.iter().any(|name| name == provider)
+                        })
+                    })
+            };
+            let mut models = models;
+            if let Some(id) = id {
+                let deadline = Instant::now() + MODEL_SETTLE;
+                while !wanted(&models) && Instant::now() < deadline {
+                    tokio::time::sleep(POLL_EVERY).await;
+                    models = models_reply(&http, "/api/model", DISCOVER_WAIT)
+                        .await
+                        .map_err(drop)?;
+                }
+                let _ = http
+                    .delete(&format!("/api/session/{id}"), &[], REQUEST_WAIT)
+                    .await;
+            }
+            models
+        } else {
+            models
+        };
         let default = http.get("/api/model/default", REQUEST_WAIT).await.ok();
         let mut entries = catalog::entries(
             &models,

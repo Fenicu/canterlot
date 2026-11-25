@@ -469,3 +469,26 @@ env -i PATH=... HOME=... XDG_DATA_HOME=<свой> XDG_CONFIG_HOME=<свой> \
 | Тип отказа подписки Go: `provider.go-limit` вместо `provider.quota`; новые `provider.chatgpt-limit`, `provider.budget-limit`, `provider.model-budget-limit` | 2.2.5 | **ломающее для адаптера**: схема `Session.StructuredError` не изменилась (`type` — строка), но упор в лимит Go перестал давать `LimitReached`. Найдено L2-тестом `real_quota_refusal_is_a_reached_limit_with_the_wait`, который проходит на 2.1.4 и падал на 2.2.5 и 2.2.6 |
 
 Единственное изменение, которое затронуло адаптер, — типы отказов подписок: `failure.rs` признаёт упором в лимит и старый `provider.quota`, и новые `go-limit`, `chatgpt-limit`, `budget-limit`, поэтому работают обе версии. Потолок трат одной модели (`model-budget-limit`) остаётся ошибкой хода: другая модель харнесса доступна. Проверенные версии: 2.1.4, 2.2.5, 2.2.6; у непроверенной схема сверяется со всеми манифестами (`VERIFIED_OPENAPI_SHA256`). Минимум остаётся 2.1.4. L2-тесты `opencode_live.rs` на 2.2.5 и 2.2.6: 42 из 43; `real_preset_and_limit_tools_answer_the_model` падает и на 2.1.4 с неизменённым кодом (адаптер не получает `AgentCall`), от версии CLI не зависит.
+
+## 11. Сверка 2.4.1 (25.11.2026)
+
+Манифест новой версии: `evidence/opencode/openapi-2.4.1.sha256` (467 460 байт, 146 путей); `scripts/opencode-schema-check.sh` выбирает манифест по версии CLI. Схема сравнивалась по всем путям, которые использует адаптер, со ссылками `$ref`, раскрытыми до конца.
+
+| Изменение | Класс |
+| --- | --- |
+| Новые экспериментальные пути `automation/*`, `blob/{id}`, `generate/video`, `job/{id}/cancel`, `machine/*`; убраны `schedule/*` | не используются |
+| Список событий `GET /api/event`: += `session.step.first-token`, `experimental.job.updated`, `experimental.mcp.event`; те же три в `Session.Event.Durable` и `V2Event` | добавление; первые два теперь известны и молчат, третье не приходит на SSE |
+| `Job.Kind` += `video`, `codemode`; `Model.Type` += значение; `VoiceModel.engine`, `name`; `SessionGenerateResponse.cost`, `tokens` | не используются |
+| `Config.InfoEncoded`: `automations`, `compaction.background`, флаги `experimental.*` (убраны `background_compaction`, `schedules`); `Provider.Settings.tls`; `Model.Capabilities.freeform` | добавление или флаги, адаптер конфигурацию владельца не разбирает |
+| `Session.Message.Assistant.time.firstToken`, `Model.Info.experimental.speed`, `session.usage.recorded.source` += значение | добавление; не читаются |
+| `credential.updated.data` из `not: null` в объект `{integrationID, credentialID}` | не используется |
+| `GET /api/agent` без ответа 503 | адаптер и раньше повторял запрос до срока |
+| `POST /api/session`: описание `parentID` (потомок создаётся в локации родителя) | переписка описания |
+
+Схема сама по себе совместима: используемые типы только выросли. Но две перемены поведения L2-тесты поймали, и адаптер к ним приспособлен:
+
+- `GET /api/model` стал ленивым. До первой сессии ответ пуст, после создания сессии список наполняется волнами: сперва встроенные провайдеры, через секунду-две — настроенные в `providers`. Короткий зонд каталога теперь при пустом ответе заводит временную сессию, ждёт модели нужных провайдеров и удаляет её (`probe_models`). Без этого харнесс на 2.4.1 показывал пустой каталог у всех, у кого модели не встроенные.
+- Субагент стал фоновым: вызов `subagent` сразу возвращает «working in the background», сессия потомка и событие `experimental.job.updated` (`kind: subagent`, `childSessionID`) приходят после конца хода родителя, а его блоки и расход — принятым ходом на `<background-result>`. Адаптер это уже умел (`BackgroundWork`, `RunAdopted`); L2-тест субагента теперь дочитывает события после конца хода.
+- Передняя команда, снятая прерыванием, приходит как `shell.exited` со `status: killed` и `session.tool.failed` с `error.type: tool.execution` и `metadata.interrupted: true`. Адаптер по этому признаку пишет `interrupted`, а не `failed`.
+
+L2-тесты `opencode_live.rs` на 2.4.1: 40 из 43. `real_child_todo_list_goes_to_the_lane_of_its_call` не проходит, потому что фоновый потомок и родитель берут ответы заглушки по очереди: список задач приходит от родителя, а не от потомка, и дорожку вызова не проверить тем же сценарием. `real_mcp_elicitation_is_refused_and_the_call_returns` не проходит: чужой локальный MCP-сервер из файла конфигурации остаётся в статусе `pending`, тогда как сервер canterlot подключается; нужна живая проверка владельца. `real_retry_of_a_rate_limit_finishes_the_same_turn` падает и на 2.2.6 с неизменённым кодом — от версии CLI не зависит. Проверенные версии: 2.1.4, 2.2.5, 2.2.6 и 2.4.1; минимум остаётся 2.1.4.

@@ -196,3 +196,22 @@ codex app-server generate-json-schema --out <dir>   # сверка с schema-0.1
 | `HookRunSummary.sourcePath`, `HooksListParams.threadId`, `ProcessExitedNotification.outputDrainTimedOut`, `ThreadUsage.nativeUsageUsdMicros`, `otel` в требованиях конфига | — | не используются |
 
 Ломающих изменений для адаптера нет, правок протокола не понадобилось, минимум остаётся 0.164.0. 0.167.0 внесена в проверенные версии после живого зонда `live_probe` (`codex_e2e.rs`): на 0.164.0 и 0.167.0 одинаково проходят короткий ход, смена усилия (`turn_context`: `low`, затем `medium`), команда оболочки с вливанием `turn/steer` посреди хода (доказательство `codex_user_message_item`, ответ учёл влитый ввод) и прерывание.
+
+## 10. Сверка 0.172.0 (25.11.2026)
+
+Между 0.167.0 и 0.172.0 схемы менялись и в 0.169.0, для которого манифест не снят, поэтому сверка 0.167.0 → 0.172.0 покрывает оба выпуска. Манифесты новой версии: `evidence/codex/schema-0.172.0/`; `scripts/codex-schema-check.sh` выбирает каталог по версии CLI. Стабильная схема: 322 → 331 файл, экспериментальная: 470 → 483 файла. Новых файлов 9 в стабильной и 15 в экспериментальной, удалены два экспериментальных: `CurrentTimeReadParams` и `CurrentTimeReadResponse`. Поле-в-поле сравнивались обе схемы, включая вложенные определения `v2`.
+
+| Изменение | Где | Класс |
+| --- | --- | --- |
+| `CodexErrorInfo` += `apiKeySpendLimitExceeded`, `projectSpendLimitExceeded`, `organizationSpendLimitExceeded`, `bioPolicy`, `inferenceHookDenied` | `error`, `turn/completed` | добавление; у каждого вида своя ветка таблицы, неизвестный идёт общей ошибкой хода |
+| `ThreadItem.moderation` (сообщение агента), `ItemCompletedNotification.contentTokenCount` | `item/*` | добавление, адаптер читает элементы как `Value` |
+| `McpServerElicitationRequestParams.environmentId`, `ListMcpServerStatusParams.environmentId`, `McpServerStatus.environmentId` и тот же ключ в `mcpServer/*` | запросы разрешений и статус MCP | добавление, необязательное; адаптер его не читает |
+| `Thread`, `ThreadSettings`, `ThreadStartParams`, `TurnSettingsUpdateParams`, `ThreadSampleParams`, `ThreadListParams`, `ThreadSearchParams`, `ThreadItemsListParams`, `ThreadQueueAddParams`, `ThreadQueueUpdateParams`, `ThreadItemEntry`: `environments`, `deferOutput`/`outputDeferred`, `currentAccountOnly`, `includeAttachedThreads`, `responsesapiClientMetadata`, `attachedToThreadId`, `daybreakProgramPropagationEnrolled` | `thread/*`, `turn/*` | добавление, не используются; `turn/start`, `turn/steer`, `thread/resume` не менялись |
+| `FunctionCallOutputContentItem`: `audio_url` переехал из свойств в `anyOf` вместе с `file`; обязательных полей на одно меньше | результат вызова инструмента | переписка схемы, на проводе те же значения; адаптер читает как `Value` |
+| `Project.position` удалено, `Project.required` без него | экспериментальные проекты | не используется |
+| `ThreadRealtimeItem` += `frame`, `turnInputAccepted`, `sessionInputSaved`; новые `thread/realtime/list`, `thread/realtime/stream` | голос | не используется |
+| Новые методы `account/securitySetup/read`, `modelProvider/{config/write,default/set,list}`, `thread/prepareApprovedPlan`, `thread/search/{cancel,stream,stream/cancel}`, уведомления `thread/search/partial` | — | не используются; неизвестное уведомление пропускается |
+| Удалён экспериментальный `currentTime/read` (и его файлы схемы) | — | не используется; неизвестный запрос сервера получает `-32601` и диагностику `unsupported_server_request` |
+| `FunctionCallOutputContentItem` и `Project` выше, `ServerRequest` 11 → 10 | — | единственные удаления полей и методов; ни одно не читается адаптером |
+
+Ломающих изменений для адаптера нет, правок протокола не понадобилось, минимум остаётся 0.164.0. 0.172.0 внесена в проверенные версии; живую пробу `live_probe` на ней запускает владелец отдельно, офлайн проверены схема и манифесты.

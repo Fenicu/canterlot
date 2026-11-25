@@ -16,7 +16,7 @@ const OUTPUT_CAP: u64 = 64 * 1024;
 
 // Ветка 1.x другая программа с другим протоколом, поддержки нет.
 pub const MIN_SUPPORTED_VERSION: Triple = (2, 1, 4);
-pub const VERIFIED_VERSIONS: &[Triple] = &[(2, 1, 4), (2, 2, 5), (2, 2, 6)];
+pub const VERIFIED_VERSIONS: &[Triple] = &[(2, 1, 4), (2, 2, 5), (2, 2, 6), (2, 4, 1)];
 
 const POLICY: VersionPolicy = VersionPolicy {
     prefix: "opencode v",

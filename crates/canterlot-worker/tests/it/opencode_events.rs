@@ -381,6 +381,27 @@ fn unknown_type_is_diagnosed_once() {
 }
 
 #[test]
+fn experimental_job_and_mcp_events_are_known_and_silent() {
+    let mut translator = Translator::new("ses_a", HashMap::new());
+    for kind in ["experimental.job.updated", "experimental.mcp.event"] {
+        let event = json!({"type": kind, "data": {"info": {"sessionID": "ses_a"}}});
+        assert!(translator.feed(&event).is_empty(), "{kind}");
+    }
+}
+
+#[test]
+fn step_first_token_is_known_and_silent() {
+    // 2.4.1 присылает `session.step.first-token` перед первым токеном шага.
+    // Время до первого токена адаптер не использует, но событие известно.
+    let mut translator = Translator::new("ses_a", HashMap::new());
+    let event = json!({
+        "type": "session.step.first-token",
+        "data": {"sessionID": "ses_a", "messageID": "msg_1", "stepID": "stp_1"},
+    });
+    assert!(translator.feed(&event).is_empty());
+}
+
+#[test]
 fn unknown_execution_end_is_required() {
     let mut translator = Translator::new("ses_a", HashMap::new());
     let unknown = json!({"type": "session.execution.paused", "data": {"sessionID": "ses_a"}});
@@ -647,6 +668,22 @@ fn rejection_and_interruption_are_named() {
             .any(|summary| summary.ends_with(", interrupted")),
         "{summaries:?}"
     );
+}
+
+#[test]
+fn interrupted_tool_with_an_execution_error_is_named_interrupted() {
+    // 2.4.1 снимает переднюю команду как `tool.execution` и помечает её в metadata.
+    let mut translator = Translator::new("ses_a", HashMap::new());
+    translator.begin_run(Some(Uuid::now_v7()));
+    let out = translator.feed(&json!({"type": "session.tool.failed", "data": {
+        "sessionID": "ses_a", "assistantMessageID": "msg_1", "id": "call_1",
+        "executed": false,
+        "error": {"type": "tool.execution", "message": "Command interrupted by the user"},
+        "metadata": {"interrupted": true, "shellID": "sh_1"}}}));
+    let tools = tools_of(out);
+    assert_eq!(tools.len(), 1);
+    let summary = tools[0].final_summary.as_deref().unwrap_or_default();
+    assert!(summary.ends_with(", interrupted"), "{summary}");
 }
 
 #[test]

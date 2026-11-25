@@ -57,6 +57,13 @@ async fn version_parsing_and_classification() {
         let verdict = check(&script).await;
         assert_eq!(verdict.is_err(), below, "{text}: {verdict:?}");
     }
+    let td = TempDir::new().unwrap();
+    let script = td.path().join("fake.sh");
+    fake_exec::write_executable(&script, "#!/bin/sh\necho '2.1.332 (Claude Code)'\n", 0o755);
+    assert_eq!(
+        check(&script).await.unwrap(),
+        CliVersion::Verified("2.1.332".into())
+    );
 }
 
 #[test]
