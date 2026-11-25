@@ -109,12 +109,14 @@ pub async fn set_password(
     let revoked = sessions::change_password(
         pool,
         owner_id,
+        sessions::Expected::Any,
         &phc,
         None,
         revoke.then_some(RevokeReason::Server),
     )
     .await
-    .map_err(|_| "db_error")?;
+    .map_err(|_| "db_error")?
+    .map_err(|_| "password_changed")?;
     if !revoke {
         return Ok("password_set".into());
     }

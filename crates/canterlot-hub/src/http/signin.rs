@@ -29,7 +29,7 @@ use crate::{
     owner_auth::{
         self, Method, RevokeReason, bucket_key,
         password::{self},
-        sessions::{self, ClientInfo, Proof, SessionRow},
+        sessions::{self, ChangeRefused, ClientInfo, Proof, SessionRow},
         throttle::{self, Reservation},
     },
 };
@@ -602,9 +602,14 @@ async fn check_password(
 
 /// Задать или сменить пароль. Смена несёт `current_password`; первый пароль требует
 /// свежего сеанса. Успех завершает все остальные сеансы и делает текущий свежим.
+/// Если за время проверки пароль сменил другой запрос, ответ `409 version_conflict`;
+/// если этот сеанс тем временем завершили — `401 session_revoked`. В обоих случаях
+/// ничего не записано.
 #[utoipa::path(put, path = "/api/v1/auth/password", tag = "auth", request_body = SetPasswordBody, responses(
     (status = 200, description = "Пароль сохранён; отозванные сеансы", body = RevokedView),
+    (status = 401, description = "session_revoked: сеанс завершён, пока шла проверка", body = ErrorEnvelope),
     (status = 403, description = "wrong_password или reauth_required", body = ErrorEnvelope),
+    (status = 409, description = "version_conflict: пароль уже сменён другим запросом", body = ErrorEnvelope),
     (status = 429, description = "too_many_attempts", body = ErrorEnvelope),
 ))]
 async fn set_password(
@@ -628,7 +633,7 @@ async fn set_password(
         let current = body
             .current_password
             .ok_or_else(|| invalid_field("current_password"))?;
-        check_password(&state, &client, current, stored).await?;
+        check_password(&state, &client, current, stored.clone()).await?;
     }
     let phc = state
         .passwords
@@ -636,14 +641,27 @@ async fn set_password(
         .await
         .map_err(|_| ApiError::new(ErrorCode::Internal))?;
     drop(_permit);
+    #[cfg(feature = "fault-injection")]
+    state
+        .auth_faults
+        .pause(crate::fault_injection::Point::PasswordChangeVerified)
+        .await;
     let revoked = sessions::change_password(
         &state.pool,
         owner.owner_id,
+        stored.as_deref().into(),
         &phc,
         Some(session.id),
         Some(RevokeReason::PasswordChanged),
     )
-    .await?;
+    .await?
+    .map_err(|refused| {
+        tracing::info!(kind = "password_change_stale", reason = ?refused, "password change refused");
+        match refused {
+            ChangeRefused::SessionRevoked => ApiError::new(ErrorCode::SessionRevoked),
+            ChangeRefused::PasswordChanged => ApiError::new(ErrorCode::VersionConflict),
+        }
+    })?;
     tracing::info!(
         kind = "password_changed",
         revoked = revoked.len(),

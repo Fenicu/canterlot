@@ -538,15 +538,46 @@ async fn revoke_all_except_in_tx(
 /// отдельности запись пароля прошла бы, а отзыв нет, и владелец, менявший пароль из-за
 /// чужого сеанса, остался бы с новым паролем при живом чужом сеансе и с отказом на
 /// повтор по старому. Возвращает отозванные сеансы.
+///
+/// Запрос из браузера проверяет текущий пароль до замка, долго. Под замком смена сверяет,
+/// что пароль всё ещё тот, что проверен (`expected`), и что сеанс `keep` жив. Иначе
+/// второй сеанс, проверивший тот же пароль, после чужой смены, отозвавшей его, записал бы
+/// свой пароль и отозвал первый: владелец остался бы без сеансов. При отказе ничего не
+/// записано.
 pub async fn change_password(
     pool: &PgPool,
     owner_id: Uuid,
+    expected: Expected<'_>,
     phc: &str,
     keep: Option<Uuid>,
     revoke: Option<RevokeReason>,
-) -> Result<Vec<Uuid>, sqlx::Error> {
+) -> Result<Result<Vec<Uuid>, ChangeRefused>, sqlx::Error> {
     let mut tx = crate::db::begin(pool).await?;
     serialize_with_delivery(&mut tx).await?;
+    if let Some(keep) = keep {
+        let live: bool = sqlx::query_scalar(
+            "select exists(select 1 from owner_sessions where id=$1 and revoked_at is null)",
+        )
+        .bind(keep)
+        .fetch_one(&mut *tx)
+        .await?;
+        if !live {
+            return Ok(Err(ChangeRefused::SessionRevoked));
+        }
+    }
+    let current: Option<String> =
+        sqlx::query_scalar("select phc from owner_passwords where owner_id=$1")
+            .bind(owner_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let matches = match expected {
+        Expected::Any => true,
+        Expected::Missing => current.is_none(),
+        Expected::Phc(phc) => current.as_deref() == Some(phc),
+    };
+    if !matches {
+        return Ok(Err(ChangeRefused::PasswordChanged));
+    }
     super::password::store(&mut tx, owner_id, phc).await?;
     let revoked = match revoke {
         Some(reason) => revoke_all_except_in_tx(&mut tx, owner_id, keep, reason).await?,
@@ -568,7 +599,33 @@ pub async fn change_password(
     if !revoked.is_empty() {
         super::notify_changed(pool, "session_revoked").await;
     }
-    Ok(revoked)
+    Ok(Ok(revoked))
+}
+
+/// Какой пароль застаёт смена (`change_password`).
+#[derive(Debug, Clone, Copy)]
+pub enum Expected<'a> {
+    /// Любой: команда на хосте хаба задаёт пароль без проверки текущего.
+    Any,
+    /// Пароля нет: первая установка.
+    Missing,
+    /// Строка PHC, с которой сверен текущий пароль.
+    Phc(&'a str),
+}
+
+impl<'a> From<Option<&'a str>> for Expected<'a> {
+    fn from(phc: Option<&'a str>) -> Self {
+        phc.map_or(Self::Missing, Self::Phc)
+    }
+}
+
+/// Почему смена пароля не записана.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChangeRefused {
+    /// Пароль уже сменил или задал другой запрос.
+    PasswordChanged,
+    /// Сеанс, менявший пароль, отозван, пока шла проверка.
+    SessionRevoked,
 }
 
 /// Устройства, чей последний вход дал отозванные сеансы, забываются при отзыве владельцем,

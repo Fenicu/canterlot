@@ -30,6 +30,8 @@ pub enum Point {
     SignInAfterSession,
     /// Вход: доказательство проверено, сеанс ещё не записан.
     SignInVerified,
+    /// Смена пароля: текущий пароль проверен и новый хеш готов, запись ещё не сделана.
+    PasswordChangeVerified,
 }
 
 #[derive(Clone, Debug)]

@@ -240,6 +240,9 @@ export interface paths {
         /**
          * Задать или сменить пароль. Смена несёт `current_password`; первый пароль требует
          *     свежего сеанса. Успех завершает все остальные сеансы и делает текущий свежим.
+         *     Если за время проверки пароль сменил другой запрос, ответ `409 version_conflict`;
+         *     если этот сеанс тем временем завершили — `401 session_revoked`. В обоих случаях
+         *     ничего не записано.
          */
         put: operations["put__api_v1_auth_password"];
         /**
@@ -7079,8 +7082,30 @@ export interface operations {
                     "application/json": components["schemas"]["RevokedView"];
                 };
             };
+            /** @description session_revoked: сеанс завершён, пока шла проверка */
+            401: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
             /** @description wrong_password или reauth_required */
             403: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description version_conflict: пароль уже сменён другим запросом */
+            409: {
                 headers: {
                     /** @description Часы хаба: целые миллисекунды Unix */
                     "X-Server-Time-Ms"?: number;

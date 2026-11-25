@@ -680,4 +680,104 @@ mod races {
             .await;
         assert_eq!(ok.status, 200, "{:?}", ok.body);
     }
+
+    /// Два сеанса проверили один и тот же текущий пароль. Первый сменил его и завершил
+    /// второй; запоздавший запрос второго не пишет свой пароль и не отзывает первый.
+    #[tokio::test]
+    async fn auth_password_change_from_a_session_revoked_meanwhile_is_refused() {
+        let pool = canterlot_hub::testkit::db().await;
+        let hub = AuthHub::new(pool).await;
+        hub.set_password(PASSWORD).await;
+        let (second, token) = hub.session(SignInMethod::Password, None).await;
+        let paused = hub
+            .state
+            .auth_faults
+            .pause_next(Point::PasswordChangeVerified);
+        let late = change(
+            &hub.with_session(&token, Some("203.0.113.71")),
+            Some(PASSWORD),
+            "the second new password",
+        );
+        let resume = tokio::time::timeout(WAIT, paused).await.unwrap().unwrap();
+        let first = change(&hub.owner(), Some(PASSWORD), "the first new password")
+            .await
+            .unwrap();
+        assert_eq!(first.status, 200, "{:?}", first.body);
+        let written = phc(&hub).await;
+        assert_eq!(
+            hub.revoke_reason(second).await.as_deref(),
+            Some("password_changed")
+        );
+        resume.send(()).unwrap();
+        let late = tokio::time::timeout(WAIT, late).await.unwrap().unwrap();
+        assert_eq!(late.status, 401, "{:?}", late.body);
+        assert_eq!(error_code(&late), "session_revoked");
+        assert_eq!(phc(&hub).await, written, "the late request wrote nothing");
+        assert_eq!(hub.revoke_reason(TEST_SESSION_ID).await, None);
+        let me = hub
+            .owner()
+            .send(Method::GET, "/api/v1/me", None, None)
+            .await;
+        assert_eq!(me.status, 200, "the first session stays");
+    }
+
+    /// Повтор смены из того же сеанса, проверенный по уже заменённому паролю, и
+    /// параллельная первая установка пароля отказывают `version_conflict`.
+    #[tokio::test]
+    async fn auth_password_change_checked_against_a_replaced_password_conflicts() {
+        let pool = canterlot_hub::testkit::db().await;
+        let hub = AuthHub::new(pool).await;
+        // Первая установка: два запроса одного свежего сеанса, оба видели «пароля нет».
+        let paused = hub
+            .state
+            .auth_faults
+            .pause_next(Point::PasswordChangeVerified);
+        let late = change(&hub.owner(), None, "the late first password");
+        let resume = tokio::time::timeout(WAIT, paused).await.unwrap().unwrap();
+        let first = change(&hub.owner(), None, "the first password!")
+            .await
+            .unwrap();
+        assert_eq!(first.status, 200, "{:?}", first.body);
+        let written = phc(&hub).await;
+        assert!(written.is_some());
+        resume.send(()).unwrap();
+        let late = tokio::time::timeout(WAIT, late).await.unwrap().unwrap();
+        assert_eq!(late.status, 409, "{:?}", late.body);
+        assert_eq!(error_code(&late), "version_conflict");
+        assert_eq!(phc(&hub).await, written);
+
+        // Смена: оба запроса проверили один текущий пароль.
+        let paused = hub
+            .state
+            .auth_faults
+            .pause_next(Point::PasswordChangeVerified);
+        let late = change(
+            &hub.owner(),
+            Some("the first password!"),
+            "the late change!",
+        );
+        let resume = tokio::time::timeout(WAIT, paused).await.unwrap().unwrap();
+        let first = change(
+            &hub.owner(),
+            Some("the first password!"),
+            "the first change!",
+        )
+        .await
+        .unwrap();
+        assert_eq!(first.status, 200, "{:?}", first.body);
+        let written = phc(&hub).await;
+        resume.send(()).unwrap();
+        let late = tokio::time::timeout(WAIT, late).await.unwrap().unwrap();
+        assert_eq!(late.status, 409, "{:?}", late.body);
+        assert_eq!(error_code(&late), "version_conflict");
+        assert_eq!(phc(&hub).await, written);
+        let ok = hub
+            .sign_in(
+                &hub.anonymous(Some("203.0.113.72")),
+                TEST_OWNER_LOGIN,
+                "the first change!",
+            )
+            .await;
+        assert_eq!(ok.status, 200, "{:?}", ok.body);
+    }
 }

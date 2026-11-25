@@ -1357,7 +1357,7 @@
         "tags": [
           "auth"
         ],
-        "summary": "Задать или сменить пароль. Смена несёт `current_password`; первый пароль требует\nсвежего сеанса. Успех завершает все остальные сеансы и делает текущий свежим.",
+        "summary": "Задать или сменить пароль. Смена несёт `current_password`; первый пароль требует\nсвежего сеанса. Успех завершает все остальные сеансы и делает текущий свежим.\nЕсли за время проверки пароль сменил другой запрос, ответ `409 version_conflict`;\nесли этот сеанс тем временем завершили — `401 session_revoked`. В обоих случаях\nничего не записано.",
         "operationId": "put__api_v1_auth_password",
         "requestBody": {
           "content": {
@@ -1389,8 +1389,46 @@
               }
             }
           },
+          "401": {
+            "description": "session_revoked: сеанс завершён, пока шла проверка",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
           "403": {
             "description": "wrong_password или reauth_required",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "version_conflict: пароль уже сменён другим запросом",
             "headers": {
               "X-Server-Time-Ms": {
                 "schema": {
