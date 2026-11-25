@@ -5,6 +5,9 @@
 #
 #   scripts/gate/in-container.sh --src DIR --out DIR --sha SHA12
 #
+# Только внутри контейнера гейта: скрипт вычищает /tmp и отказывает без метки
+# CANTERLOT_GATE_CONTAINER=1, которую ставят scripts/gate-remote.sh и scripts/gate/runner-gate.sh.
+#
 # Окружение готовит scripts/gate-remote.sh:
 #   /src              рабочая копия на проверяемом коммите (сюда же пишется
 #                     web/node_modules);
@@ -41,6 +44,17 @@ done
 [[ -d "$src" ]] || { echo "FATAL: нет каталога исходников $src" >&2; exit 1; }
 [[ -d "$out" ]] || { echo "FATAL: нет каталога вывода $out" >&2; exit 1; }
 [[ -z "$(ls -A "$out")" ]] || { echo "FATAL: каталог вывода $out не пуст" >&2; exit 1; }
+# Ниже скрипт вычищает /tmp. В контейнере это смонтированный каталог кэша, а на машине — её
+# /tmp с файлами состояния идущего выката и временными каталогами всех сессий. Метку ставят
+# только scripts/gate-remote.sh и scripts/gate/runner-gate.sh через docker run -e; запуск
+# руками по строке использования её не несёт и останавливается здесь.
+[[ "${CANTERLOT_GATE_CONTAINER:-}" == 1 ]] || {
+    echo "FATAL: скрипт запущен не в контейнере гейта (нет CANTERLOT_GATE_CONTAINER=1): он вычищает /tmp. Запускайте через scripts/gate-remote.sh или scripts/gate/runner-gate.sh" >&2
+    exit 1
+}
+# Дерево с чужим HEAD гейт бы не заметил, поэтому sha проверяется — и тоже до чистки /tmp.
+[[ "$(git -C "$src" rev-parse --short=12 HEAD)" == "$want_sha" ]] \
+    || { echo "FATAL: HEAD в $src не $want_sha" >&2; exit 1; }
 
 port=${CANTERLOT_TEST_PG_PORT:-55441}
 export CANTERLOT_TEST_PG_PORT="$port"
@@ -141,9 +155,7 @@ phase_done "PostgreSQL"
 # Шаги не перечисляются здесь заново: контейнер гоняет тот же scripts/gate.sh, что и VM
 # (npm ci, check.sh --all --no-web, наборы scripts/deploy/tests/run.sh, check-web.sh),
 # без аттестации и без аренды (воркера в контейнере нет). Покрытие проверяет
-# scripts/gate-coverage.sh. Дерево с чужим HEAD гейт бы не заметил, поэтому sha проверяется.
-[[ "$(git -C "$src" rev-parse --short=12 HEAD)" == "$want_sha" ]] \
-    || die "HEAD в $src не $want_sha"
+# scripts/gate-coverage.sh. HEAD рабочей копии сверен с --sha в начале, до чистки /tmp.
 phase "scripts/gate.sh --no-attest"
 g=0
 (cd "$src" && CANTERLOT_NO_LEASE=1 bash scripts/gate.sh --no-attest) >"$out/gate.log" 2>&1 || g=$?

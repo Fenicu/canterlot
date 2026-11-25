@@ -135,6 +135,8 @@ run_args=(
     -v "$in_container:/build/in-container.sh:ro"
     -e CARGO_HOME=/cache/cargo
     -e npm_config_cache=/cache/npm
+    # Метка «это контейнер гейта»: без неё in-container.sh не чистит /tmp и отказывает.
+    -e CANTERLOT_GATE_CONTAINER=1
     -w /src
     "${proxy_run[@]}"
 )
