@@ -54,9 +54,11 @@ verify_dist_manifest() {
     [ -n "${rel_sha}" ] || die "dist ${SHA} RELEASE has no sha"
     sha_match "${rel_sha}" "${SHA}" || die "dist RELEASE sha ${rel_sha} is not ${SHA}"
 }
-# Не оставлять мусор в /tmp хостов после неудачи.
+# Stage-каталог хаба: рядом с релизами, в каталоге, который принадлежит root (см. stage_hub).
+HUB_STAGE="${HUB_RELEASES}/.stage-${SHA}"
+# Не оставлять мусор на хостах после неудачи.
 cleanup_stage_tmp() {
-    run_write "clean hub stage tmp" ssh_hub "rm -rf '/tmp/stage-${SHA}'" || true
+    run_write "clean hub stage dir" ssh_hub "rm -rf '${HUB_STAGE}'" || true
     run_write "clean web stage tmp" ssh_web "rm -rf '/tmp/webstage-${SHA}'" || true
     run_write "clean worker stage" rm -rf "${WORKER_BASE}/.stage-${SHA}" || true
     run_write "clean local sums" rm -f "/tmp/web-dist-${SHA}.sums" "/tmp/web-staged-${SHA}.sums"
@@ -81,18 +83,26 @@ stage_hub() {
         return 0
     fi
     # Явный конвейер вместо rsync (урок: план говорил rsync).
-    tar -C "${DIST}/hub" -cf - bin | run_write_pipe "stage hub binaries" recv_to "${HUB_SSH}" "rm -rf '/tmp/stage-${SHA}' && mkdir -p '/tmp/stage-${SHA}' && tar -C '/tmp/stage-${SHA}' -xf -"
-    tar -C "${DIST}" -cf - RELEASE SHA256SUMS | run_write_pipe "stage hub RELEASE" recv_to "${HUB_SSH}" "tar -C '/tmp/stage-${SHA}' -xf -"
+    # Stage-каталог лежит рядом с релизами (releases/.stage-<sha>), а не в /tmp: имя в /tmp
+    # предсказуемо, каталог туда может подложить любой локальный пользователь CT, и файл между
+    # сверкой и запуском можно было бы подменить. Каталог релизов принадлежит root, а mv -T
+    # внутри одной файловой системы атомарен. Остаток .stage-* ищет проверка обслуживания.
+    tar -C "${DIST}/hub" -cf - bin | run_write_pipe "stage hub binaries" recv_to "${HUB_SSH}" "mkdir -p '${HUB_RELEASES}' && rm -rf '${HUB_STAGE}' && mkdir '${HUB_STAGE}' && tar -C '${HUB_STAGE}' -xf -"
+    tar -C "${DIST}" -cf - RELEASE SHA256SUMS | run_write_pipe "stage hub RELEASE" recv_to "${HUB_SSH}" "tar -C '${HUB_STAGE}' -xf -"
     # Полный состав stagedir проверяется ДО публикации, а не только бинарь.
-    verify_remote_tree "${HUB_SSH}" "/tmp/stage-${SHA}" "$(hub_expected_sums)" "hub ${SHA}"
+    verify_remote_tree "${HUB_SSH}" "${HUB_STAGE}" "$(hub_expected_sums)" "hub ${SHA}"
     # Хэш staged binary равен dist; staged binary запускается на CT и отдаёт openapi из репо.
     LOCAL_HASH="$(sha256sum "${DIST}/hub/bin/canterlot-hub" | cut -d' ' -f1)"
-    STAGED_HASH="$(ssh_hub "sha256sum '/tmp/stage-${SHA}/bin/canterlot-hub'" | cut -d' ' -f1)"
+    STAGED_HASH="$(ssh_hub "sha256sum '${HUB_STAGE}/bin/canterlot-hub'" | cut -d' ' -f1)"
     [ "${LOCAL_HASH}" = "${STAGED_HASH}" ] || die "hub staged binary hash mismatch"
-    STAGED_OPENAPI="$(ssh_hub "'/tmp/stage-${SHA}/bin/canterlot-hub' openapi" | sha256sum | cut -d' ' -f1)"
+    # Бинарь цели — чужой для этого прогона код: от учётной записи службы и под пределом времени,
+    # не от root (как манифест миграций в cutover.sh). Отказ или таймаут бинаря приходит кодом
+    # выхода ssh, а pipefail этого скрипта доносит его через конвейер с sha256sum.
+    STAGED_OPENAPI="$(ssh_hub "runuser -u '${HUB_SERVICE_USER}' -- timeout ${MANIFEST_TIMEOUT} '${HUB_STAGE}/bin/canterlot-hub' openapi" | sha256sum | cut -d' ' -f1)" \
+        || die "the staged hub binary did not print its openapi (as ${HUB_SERVICE_USER}, within ${MANIFEST_TIMEOUT} s)"
     REPO_OPENAPI="$(sha256sum "${SOURCE_DIR}/docs/api/openapi.json" | cut -d' ' -f1)"
     [ "${STAGED_OPENAPI}" = "${REPO_OPENAPI}" ] || die "staged hub openapi differs from ${SOURCE_DIR}/docs/api/openapi.json"
-    run_write "publish hub release" ssh_hub "cd '${HUB_RELEASES}' && mv -T '/tmp/stage-${SHA}' '${SHA}'"
+    run_write "publish hub release" ssh_hub "cd '${HUB_RELEASES}' && mv -T '.stage-${SHA}' '${SHA}'"
     # Точный состав корня: bin, RELEASE, SHA256SUMS — и ничего лишнего.
     TOP="$(ssh_hub "ls -A '${HUB_RELEASES}/${SHA}'" | sort | tr '\n' ' ')"
     HUB_EXPECTED="$(printf 'bin\nRELEASE\nSHA256SUMS\n' | LC_ALL=C sort | tr '\n' ' ')"

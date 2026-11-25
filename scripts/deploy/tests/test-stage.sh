@@ -18,7 +18,9 @@ setup_stage() {
     DIST="${FAKE_ROOT}/dist/${SHA_NEW}"
     mkdir -p "${DIST}/hub/bin" "${DIST}/worker/bin" "${DIST}/web/_app" "${DIST}/web/icons"
     # shellcheck disable=SC2016 # format string is intentional
-    printf '#!/bin/sh\nif [ "$1" = openapi ]; then cat "%s"; else exit 99; fi\n' "${OPENAPI_REAL}" >"${DIST}/hub/bin/canterlot-hub"
+    # Бинарь хаба записывает, от чьего имени и откуда его запустили (FAKE_RUNUSER ставит подменный
+    # runuser), а с файлом state/openapi-hang висит: так проверяется предел времени.
+    printf '#!/bin/sh\nif [ "$1" = openapi ]; then echo "hub-openapi user=${FAKE_RUNUSER:-root} exe=$0" >>"${FAKE_ROOT}/state/calls.log"; if [ -e "${FAKE_ROOT}/state/openapi-hang" ]; then sleep 100; fi; cat "%s"; else exit 99; fi\n' "${OPENAPI_REAL}" >"${DIST}/hub/bin/canterlot-hub"
     chmod +x "${DIST}/hub/bin/canterlot-hub"
     echo fakeworker >"${DIST}/worker/bin/canterlot-worker"
     echo '<html></html>' >"${DIST}/web/200.html"
@@ -57,6 +59,14 @@ fi
 [ -z "$(find "${WORKER_RELEASES}" -maxdepth 1 -name '.stage-*' -print -quit)" ] \
     && case_ok "no stage dir left behind" || case_fail "stage dir left behind"
 [ -z "$(ls -A "${FAKE_ROOT}/tmp" 2>/dev/null)" ] && case_ok "no tmp leftovers" || case_fail "tmp junk left"
+# Бинарь цели — чужой для этого прогона код: он запускается от учётной записи службы, под пределом
+# времени и из каталога рядом с релизами, а не от root из предсказуемого /tmp/stage-<sha>.
+assert_contains "${FAKE_ROOT}/state/calls.log" "hub-openapi user=canterlot exe=${HUB_RELEASES}/.stage-${SHA_NEW}/bin/canterlot-hub" \
+    "the staged hub binary ran as the service user from releases/.stage-<sha>"
+assert_not_contains "${FAKE_ROOT}/state/calls.log" "hub-openapi user=root" "the staged hub binary never ran as root"
+assert_not_contains "${FAKE_ROOT}/state/calls.log" "/tmp/stage-${SHA_NEW}" "nothing of the hub was staged through /tmp"
+[ -z "$(find "${HUB_RELEASES}" -maxdepth 1 -name '.stage-*' -print -quit)" ] \
+    && case_ok "no hub stage dir left behind" || case_fail "hub stage dir left behind"
 if LC_ALL=C bash "${DEPLOY_DIR}/stage.sh" "${SHA_NEW}" --dist "${FAKE_ROOT}/dist" >"${FAKE_ROOT}/stage2.log" 2>&1; then
     case_ok "second run exit 0"
 else
@@ -64,6 +74,27 @@ else
 fi
 [ "$(grep -c "already staged identically, skipping" "${FAKE_ROOT}/stage2.log")" = "3" ] \
     && case_ok "all three skipped" || case_fail "skip count wrong"
+teardown_case
+case_end
+
+# S1b: бинарь цели завис на openapi — заливка отказывает на пределе времени, ничего не
+# опубликовано, stage-каталог убран.
+case_begin "stage refuses a hub binary that hangs on openapi"
+setup_stage openapihang
+: >"${FAKE_ROOT}/state/openapi-hang"
+export MANIFEST_TIMEOUT=1
+HANG_STARTED="$(date +%s)"
+if bash "${DEPLOY_DIR}/stage.sh" "${SHA_NEW}" --dist "${FAKE_ROOT}/dist" >"${FAKE_ROOT}/stage.log" 2>&1; then
+    case_fail "exit 0 with a hanging hub binary"
+else
+    case_ok "exit nonzero"
+fi
+unset MANIFEST_TIMEOUT
+[ "$(( $(date +%s) - HANG_STARTED ))" -lt 30 ] && case_ok "the hang was cut by the time limit" || case_fail "stage waited for the hanging binary"
+assert_contains "${FAKE_ROOT}/stage.log" "did not print its openapi" "the refusal names the openapi run"
+[ ! -e "${HUB_RELEASES}/${SHA_NEW}" ] && case_ok "the hub release was not published" || case_fail "hub release published"
+[ -z "$(find "${HUB_RELEASES}" -maxdepth 1 -name '.stage-*' -print -quit)" ] \
+    && case_ok "the hub stage dir was removed" || case_fail "hub stage dir left behind"
 teardown_case
 case_end
 
