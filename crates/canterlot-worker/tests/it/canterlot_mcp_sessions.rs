@@ -759,6 +759,52 @@ async fn a_process_outside_the_session_tree_is_not_served_even_with_the_secret()
     assert!(answer.get("result").is_some(), "{answer}");
 }
 
+/// Соединения без приветствия занимают все места допуска: следующее закрывается сразу,
+/// а не ждёт приветствия, и работа на него не порождается. Занявшие места соединения
+/// при этом живы и после приветствия обслуживаются.
+#[tokio::test]
+async fn connections_awaiting_admission_are_bounded() {
+    use canterlot_worker::adapter::canterlot_mcp::broker::MAX_ADMISSIONS;
+    use tokio::io::AsyncReadExt as _;
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let broker = Broker::bind_with(dir.path(), ToolSet::LimitsOnly, "codex")
+        .await
+        .expect("bind");
+    let socket = dir.path().join("mcp.sock");
+    let mut silent = Vec::new();
+    for _ in 0..MAX_ADMISSIONS {
+        silent.push(UnixStream::connect(&socket).await.expect("connect"));
+    }
+    // Лишнее соединение закрыто без ожидания приветствия: молчащие ещё держат места.
+    let mut extra = UnixStream::connect(&socket).await.expect("connect");
+    let mut nothing = Vec::new();
+    let closed = tokio::time::timeout(Duration::from_secs(30), extra.read_to_end(&mut nothing))
+        .await
+        .expect("the extra connection is closed");
+    assert!(closed.is_err() || nothing.is_empty());
+    // Первое молчащее соединение всё ещё ждёт приветствия: оно не истекло, пока закрывали
+    // лишнее, значит лишнее закрыли сразу.
+    let first = silent.remove(0);
+    let (read, mut sink) = first.into_split();
+    sink.write_all(relay_hello(broker.relay_secret()).as_bytes())
+        .await
+        .expect("hello");
+    sink.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"ping\"}\n")
+        .await
+        .expect("ping");
+    let mut answer = String::new();
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        BufReader::new(read).read_line(&mut answer),
+    )
+    .await
+    .expect("answer in time")
+    .expect("read");
+    let answer: Value = serde_json::from_str(answer.trim())
+        .unwrap_or_else(|_| panic!("a waiting connection must be served, got {answer:?}"));
+    assert_eq!(answer["id"], 3, "{answer}");
+}
+
 #[tokio::test]
 async fn session_call_reaches_the_hub_and_returns_text_with_hint() {
     let dir = tempfile::TempDir::new().expect("tempdir");

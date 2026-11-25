@@ -126,7 +126,7 @@ pub(crate) fn read_stat(path: impl AsRef<std::path::Path>) -> io::Result<String>
     Ok(String::from_utf8_lossy(&fs::read(path)?).into_owned())
 }
 
-fn stat(pid: u32) -> Result<Stat, ContainmentError> {
+pub(crate) fn stat(pid: u32) -> Result<Stat, ContainmentError> {
     let text = read_stat(format!("/proc/{pid}/stat"))?;
     parse_stat(pid, &text)
 }

@@ -204,7 +204,19 @@ async fn authenticated(
         .is_some_and(|given| same_secret(given, secret.as_bytes()))
 }
 
-/// Pid соединившегося процесса, если он того же пользователя.
+/// Сколько соединений одновременно проходят допуск (родство и приветствие). Следующее
+/// закрывается сразу, до порождения работы: до проверки секрета соединения того же
+/// пользователя ничего не стоят тому, кто их открывает.
+pub const MAX_ADMISSIONS: usize = 16;
+/// Сколько раз проверка родства начинается заново, если цепочка поменялась под рукой.
+const CHAIN_ATTEMPTS: usize = 3;
+/// Предел длины цепочки родителей: глубже дерево исполнения не бывает.
+const CHAIN_DEPTH: usize = 128;
+
+/// Pid соединившегося процесса, если он того же пользователя. `SO_PEERCRED` даёт только
+/// номер; время старта, прочитанное сразу при приёме, привязывает проверку к поколению
+/// процесса, который соединился. `SO_PEERPIDFD` привязал бы надёжнее, но rustix его не
+/// читает, а небезопасный код в крейте запрещён.
 fn same_user_peer(stream: &UnixStream) -> Option<u32> {
     let cred = stream.peer_cred().ok()?;
     if cred.uid() != rustix::process::getuid().as_raw() {
@@ -213,32 +225,93 @@ fn same_user_peer(stream: &UnixStream) -> Option<u32> {
     u32::try_from(cred.pid()?).ok()
 }
 
-/// Процесс `pid` — корень дерева или его потомок. Одно сопровождение ведёт одно
-/// исполнение: CLI и его relay — потомки сопровождения, осиротевшие процессы исполнения
-/// достаются ему же (`PR_SET_CHILD_SUBREAPER`). Агент соседней сессии в это дерево не
-/// попадает, даже зная секрет: тот читается с диска и из `/proc` под тем же uid. Родство
-/// берётся одним снимком `/proc`; что прочесть не удалось — чужое: здесь безопасен отказ.
-fn in_tree(pid: u32, root: u32) -> bool {
-    if pid == root {
-        return true;
-    }
-    let Ok(table) = crate::containment::process_table() else {
-        return false;
-    };
-    let mut current = pid;
-    for _ in 0..table.len() {
-        let Some(info) = table.get(&current) else {
-            return false;
-        };
-        if info.parent == root {
-            return true;
+/// Звено цепочки родителей: процесс и номер его родителя.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Link {
+    pid: u32,
+    start_ticks: u64,
+    parent: u32,
+}
+
+fn read_link(pid: u32) -> Option<Link> {
+    let stat = crate::containment::stat(pid).ok()?;
+    Some(Link {
+        pid,
+        start_ticks: stat.member.start_ticks,
+        parent: stat.parent,
+    })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Walk {
+    Inside,
+    Outside,
+    /// Цепочка поменялась между чтениями: читать заново.
+    Changed,
+}
+
+/// Процесс `peer` (pid, время старта) — корень дерева или его потомок. Одно
+/// сопровождение ведёт одно исполнение: CLI и его relay — потомки сопровождения,
+/// осиротевшие процессы исполнения достаются ему же (`PR_SET_CHILD_SUBREAPER`). Агент
+/// соседней сессии в это дерево не попадает, даже зная секрет: тот читается с диска и из
+/// `/proc` под тем же uid.
+///
+/// Читается только цепочка родителей самого peer, не весь `/proc`: закрытый от чтения
+/// чужой процесс (`hidepid`) допуску не мешает, а работа ограничена длиной цепочки.
+/// Каждое звено привязано к поколению: peer тот же, что при приёме, родитель старше
+/// ребёнка, а ребёнок после чтения родителя всё ещё у него. Иначе номер умершего
+/// родителя мог занять другой процесс, и звенья принадлежали бы разным поколениям.
+/// Поменявшаяся цепочка перечитывается до `CHAIN_ATTEMPTS` раз; не подтвердилось или не
+/// прочлось — отказ.
+fn in_tree(peer: (u32, u64), root: (u32, u64)) -> bool {
+    in_tree_with(peer, root, read_link)
+}
+
+fn in_tree_with(
+    peer: (u32, u64),
+    root: (u32, u64),
+    mut read: impl FnMut(u32) -> Option<Link>,
+) -> bool {
+    for _ in 0..CHAIN_ATTEMPTS {
+        match walk(peer, root, &mut read) {
+            Walk::Inside => return true,
+            Walk::Outside => return false,
+            Walk::Changed => {}
         }
-        if info.parent <= 1 {
-            return false;
-        }
-        current = info.parent;
     }
     false
+}
+
+fn walk(peer: (u32, u64), root: (u32, u64), read: &mut impl FnMut(u32) -> Option<Link>) -> Walk {
+    let mut child = peer;
+    for _ in 0..CHAIN_DEPTH {
+        if child == root {
+            return Walk::Inside;
+        }
+        if child.0 == root.0 {
+            return Walk::Outside;
+        }
+        let link = read(child.0).filter(|link| (link.pid, link.start_ticks) == child);
+        let Some(link) = link else {
+            // Соединившийся процесс исчез или его номер уже занят: не от кого допускать.
+            return if child == peer {
+                Walk::Outside
+            } else {
+                Walk::Changed
+            };
+        };
+        if link.parent <= 1 {
+            return Walk::Outside;
+        }
+        let Some(parent) = read(link.parent) else {
+            return Walk::Changed;
+        };
+        if parent.start_ticks > link.start_ticks || read(child.0) != Some(link) {
+            return Walk::Changed;
+        }
+        child = (parent.pid, parent.start_ticks);
+    }
+    Walk::Outside
 }
 
 pub struct Broker {
@@ -297,6 +370,11 @@ impl Broker {
         }));
         let provider = limits_provider.to_owned();
         let secret = new_secret();
+        let root = (
+            tree_root,
+            crate::containment::start_ticks(tree_root).map_err(std::io::Error::other)?,
+        );
+        let admissions = Arc::new(tokio::sync::Semaphore::new(MAX_ADMISSIONS));
         let task = {
             let pending = pending.clone();
             let agent_pending = agent_pending.clone();
@@ -311,6 +389,23 @@ impl Broker {
                     let Some(peer) = same_user_peer(&stream) else {
                         continue;
                     };
+                    // Предел проверяемых соединений берётся до любой работы.
+                    let Ok(admission) = admissions.clone().try_acquire_owned() else {
+                        tracing::warn!(
+                            kind = "mcp_relay_rejected",
+                            "too many mcp socket connections awaiting admission"
+                        );
+                        continue;
+                    };
+                    // Одно чтение `stat` сразу после приёма: поколение соединившегося.
+                    let Ok(started) = crate::containment::start_ticks(peer) else {
+                        tracing::warn!(
+                            kind = "mcp_relay_rejected",
+                            "mcp socket peer is gone before admission"
+                        );
+                        continue;
+                    };
+                    let peer = (peer, started);
                     let (pending, agent_pending, gate, tx, provider, secret) = (
                         pending.clone(),
                         agent_pending.clone(),
@@ -321,9 +416,8 @@ impl Broker {
                     );
                     // Приветствие ждётся в своей задаче: молчащий процесс не держит приём.
                     tokio::spawn(async move {
-                        // Снимок `/proc` — блокирующее чтение: не на потоке цикла приёма.
-                        let inside =
-                            tokio::task::spawn_blocking(move || in_tree(peer, tree_root)).await;
+                        // Цепочка родителей — блокирующие чтения: не на потоке цикла приёма.
+                        let inside = tokio::task::spawn_blocking(move || in_tree(peer, root)).await;
                         if !matches!(inside, Ok(true)) {
                             tracing::warn!(
                                 kind = "mcp_relay_rejected",
@@ -340,6 +434,7 @@ impl Broker {
                             );
                             return;
                         }
+                        drop(admission);
                         let Some(conn) = gate.lock().expect("mcp gate").admit() else {
                             return;
                         };
@@ -767,4 +862,114 @@ async fn serve_conn(
         .lock()
         .await
         .retain(|(owner, _), _| *owner != conn);
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+
+    const ROOT: (u32, u64) = (100, 10);
+
+    fn link(pid: u32, start_ticks: u64, parent: u32) -> Link {
+        Link {
+            pid,
+            start_ticks,
+            parent,
+        }
+    }
+
+    /// `/proc` из таблицы; прочитанные номера записываются.
+    fn table(links: &[Link]) -> (HashMap<u32, Link>, Vec<u32>) {
+        (
+            links.iter().map(|link| (link.pid, *link)).collect(),
+            Vec::new(),
+        )
+    }
+
+    /// Обход читает только цепочку peer: чужой процесс, закрытый от чтения, ему не мешает,
+    /// и работа не зависит от числа процессов машины.
+    #[test]
+    fn the_walk_reads_only_the_peer_chain() {
+        let (procs, mut reads) = table(&[link(100, 10, 1), link(200, 20, 100), link(300, 30, 200)]);
+        let inside = in_tree_with((300, 30), ROOT, |pid| {
+            reads.push(pid);
+            // Всё вне цепочки закрыто (`hidepid`): прочесть нельзя.
+            procs.get(&pid).copied()
+        });
+        assert!(inside);
+        assert!(
+            reads.iter().all(|pid| [100, 200, 300].contains(pid)),
+            "{reads:?}"
+        );
+        assert!(reads.len() <= 3 * 3, "{reads:?}");
+        // Корень сам себе допуск.
+        assert!(in_tree_with(ROOT, ROOT, |_| None));
+    }
+
+    /// Процесс вне дерева, родитель, ушедший к init, и peer с другим временем старта
+    /// (номер уже занят другим процессом) — отказ без повторов.
+    #[test]
+    fn foreign_orphaned_and_replaced_peers_are_outside() {
+        let (procs, _) = table(&[
+            link(100, 10, 1),
+            link(400, 40, 1),
+            link(500, 50, 400),
+            link(300, 30, 1),
+        ]);
+        let mut reads = 0;
+        let mut read = |pid: u32| {
+            reads += 1;
+            procs.get(&pid).copied()
+        };
+        assert!(!in_tree_with((500, 50), ROOT, &mut read));
+        assert!(!in_tree_with((300, 30), ROOT, &mut read));
+        assert!(
+            !in_tree_with((300, 29), ROOT, &mut read),
+            "pid reused after accept"
+        );
+        // Номер корня с другим временем старта — не корень.
+        assert!(!in_tree_with((100, 11), ROOT, &mut read));
+        assert!(reads <= 6, "no retries for a settled answer: {reads}");
+    }
+
+    /// Номер умершего родителя занял процесс моложе ребёнка: звенья разных поколений.
+    /// Такая цепочка не подтверждается, а повторов не больше `CHAIN_ATTEMPTS`.
+    #[test]
+    fn a_parent_younger_than_its_child_is_another_generation() {
+        let (procs, _) = table(&[link(100, 10, 1), link(200, 90, 100), link(300, 30, 200)]);
+        let mut walks = 0;
+        let inside = in_tree_with((300, 30), ROOT, |pid| {
+            if pid == 300 {
+                walks += 1;
+            }
+            procs.get(&pid).copied()
+        });
+        assert!(!inside);
+        assert!(walks <= CHAIN_ATTEMPTS * 2, "bounded rereads: {walks}");
+    }
+
+    /// Ребёнка усыновили между чтением его и родителя: родитель умер, сирота перешёл к
+    /// сопровождению (subreaper). Обход перечитывает цепочку и видит новое родство.
+    #[test]
+    fn a_reparented_link_is_reread() {
+        let mut parent_of_300 = 200;
+        let mut reads_of_300 = 0;
+        let inside = in_tree_with((300, 30), ROOT, |pid| match pid {
+            100 => Some(link(100, 10, 1)),
+            200 => {
+                // Родитель уходит сразу после того, как его прочли.
+                parent_of_300 = 100;
+                Some(link(200, 20, 100))
+            }
+            300 => {
+                reads_of_300 += 1;
+                Some(link(300, 30, parent_of_300))
+            }
+            _ => None,
+        });
+        assert!(inside);
+        assert!(reads_of_300 >= 2, "the chain was reread");
+    }
 }
