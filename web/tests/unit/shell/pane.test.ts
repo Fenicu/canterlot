@@ -203,3 +203,18 @@ describe('shell/pane: панель на широком окне', () => {
     expect(bare.shown).toBeNull();
   });
 });
+
+describe('shell/pane: стол стоя', () => {
+  it('правой панели нет: настройки, сообщения и поиск открываются листом', () => {
+    const portrait = new Pane(() => memoryStorage());
+    portrait.mode = 'desktop';
+    portrait.width = 1080;
+    expect(portrait.lane).toBe(true);
+    portrait.dock = true;
+    expect(portrait.desktop).toBe(true);
+    expect(portrait.lane).toBe(false);
+    portrait.mode = 'tablet';
+    portrait.dock = false;
+    expect(portrait.lane).toBe(false);
+  });
+});

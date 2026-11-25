@@ -1717,6 +1717,8 @@
 :root {
   --ui-scale: 1;
   --sidebar-width: clamp(min(20rem, 50vw), 18vw, 28rem);
+  /* Список стола стоя: 18vw там меньше пола, и пол 18rem оставляет колонке ленты 600 px на 1066 px окна. */
+  --sidebar-portrait: clamp(18rem, 18vw, 28rem);
 }
 @media (min-width: 118rem) and (min-height: 56rem), (min-width: 62rem) and (min-height: 112rem) { :root { --ui-scale: 1.0667; } }
 @media (min-width: 156rem) and (min-height: 70rem), (min-width: 76rem) and (min-height: 150rem) { :root { --ui-scale: 1.2; } }

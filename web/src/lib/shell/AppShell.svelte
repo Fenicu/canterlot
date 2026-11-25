@@ -13,7 +13,7 @@
   import type { Snippet, Component } from 'svelte';
   import { onMount } from 'svelte';
   import ConnectionBanner from './ConnectionBanner.svelte';
-  import { layoutMode, type LayoutMode } from './layout';
+  import { dockForm, layoutMode, type LayoutMode } from './layout';
   import { pane } from './pane.svelte';
   import Nav from './Nav.svelte';
   import { applyMotion } from '#lib/screens/settings/preferences.js';
@@ -33,12 +33,18 @@
   let { children }: { children: Snippet } = $props();
   let runtime = $state<Runtime | null>(null);
   let width = $state(0);
+  let height = $state(0);
+  // Мышь или тачпад: монитор стоя с ними раскладывается как стол.
+  let mouse = $state(false);
   let laidOut = $state(false);
   let update = $state<UpdateController | null>(null);
   let updateState = $state('idle');
   let updateMessage = $state('');
   let updateError = $state('');
-  const mode: LayoutMode = $derived(layoutMode(width || 412));
+  const viewport = $derived({ width: width || 412, height, mouse });
+  const mode: LayoutMode = $derived(layoutMode(viewport));
+  // Стол стоя: правой панели нет, список чуть уже, чтобы колонке ленты осталось 600 px.
+  const dock = $derived(dockForm(viewport));
   const path = $derived(page.url.pathname);
   const onSessions = $derived(path === '/' || path === '/sessions');
   const standalonePage = $derived(path === '/settings' || path === '/settings/sign-in' || path === '/changes' || path === '/share' || path === '/search' || path === '/bookmarks' || path === '/plan' || path.startsWith('/plan/'));
@@ -93,6 +99,7 @@
 
   $effect(() => {
     pane.mode = mode;
+    pane.dock = dock;
     pane.width = width;
   });
 
@@ -252,7 +259,14 @@
     document.addEventListener('visibilitychange', visibility);
     const read = () => {
       width = document.documentElement.clientWidth;
+      height = document.documentElement.clientHeight;
     };
+    const pointer = window.matchMedia('(hover: hover) and (pointer: fine)');
+    const readPointer = () => {
+      mouse = pointer.matches;
+    };
+    readPointer();
+    pointer.addEventListener('change', readPointer);
     read();
     laidOut = true;
     window.addEventListener('resize', read);
@@ -274,6 +288,7 @@
       window.removeEventListener('online', checkUpdate);
       document.removeEventListener('visibilitychange', visibility);
       window.removeEventListener('resize', read);
+      pointer.removeEventListener('change', readPointer);
       stopViewport();
       releaseTicker();
     };
@@ -351,7 +366,7 @@
       <Nav current={nav} create={onSessions || onNew} {createHref} />
     {/if}
   {:else if laidOut}
-    <div class="panes">
+    <div class="panes" data-dock={dock ? '' : undefined}>
       <!-- Стол: группы и разделы в полосе слева, нижней навигации в панели списка нет. -->
       <aside data-pane="list" data-railed={mode === 'desktop' ? '' : undefined}>
         <SessionList create rail={mode === 'desktop'} section={nav} />
@@ -361,7 +376,7 @@
         {@render banner()}
         {@render children()}
       </div>
-      {#if mode === 'desktop' && pane.shown && (onChat || pane.shown === 'search')}
+      {#if pane.lane && pane.shown && (onChat || pane.shown === 'search')}
         <aside data-pane="lane">
           {#if pane.shown === 'search' && SearchPanelComponent}
             <SearchPanelComponent onpick={pickHit} onclose={() => pane.close()} />
@@ -435,6 +450,11 @@
   [data-pane="list"] {
     width: var(--sidebar-width);
     flex: 0 0 var(--sidebar-width);
+  }
+
+  /* Стол стоя: список уже, колонке ленты остаётся не меньше 600 px. */
+  .panes[data-dock] {
+    --sidebar-width: var(--sidebar-portrait);
   }
 
   [data-pane="list"][data-railed] {

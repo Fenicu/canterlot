@@ -6,10 +6,41 @@ export type LayoutMode = 'phone' | 'tablet' | 'desktop';
  */
 const MEDIA_REM_PX = 16;
 
-/** Телефон уже 44rem, планшет до 74rem, дальше стол. */
-export function layoutMode(widthPx: number): LayoutMode {
-	if (widthPx < 44 * MEDIA_REM_PX) return 'phone';
-	if (widthPx < 74 * MEDIA_REM_PX) return 'tablet';
+/** Окно в CSS-пикселях и главный указатель. */
+export interface Viewport {
+	width: number;
+	height: number;
+	/** Мышь или тачпад: `(hover: hover) and (pointer: fine)`. */
+	mouse: boolean;
+}
+
+/**
+ * Монитор стоя с мышью — стол: полоса разделов, список и чат, а план и делегаты внизу колонки чата.
+ * Ширина: колонке ленты нужно не меньше 600 px. Рядом с ней стоят поля и промежуток панелей (36 px),
+ * полоса разделов (78 px), список стоя (18rem, 288 px) и поля ленты (34 px), всего 436 px при масштабе 1.
+ * Стоя от 1792 px высоты масштаб уже 1.0667, и 600 + 436 × 1.0667 даёт 1066 px. Уже этого окна
+ * (Full HD стоя при 125%, 2K стоя при 150%) остаётся планшет: список и чат, лента не сжимается.
+ */
+export const PORTRAIT_DESK_MIN_WIDTH = 1066;
+/**
+ * Высота окна стоя: нижняя панель берёт треть колонки чата, и лента над ней остаётся
+ * не ниже, чем на столе боком 1920×1080. Ниже порога окно раскладывается по ширине, как раньше.
+ */
+export const PORTRAIT_DESK_MIN_HEIGHT = 1440;
+
+/** Стол стоя: план и делегаты в нижней панели колонки чата вместо правой панели. */
+export function dockForm({ width, height, mouse }: Viewport): boolean {
+	return mouse && height > width && width >= PORTRAIT_DESK_MIN_WIDTH && height >= PORTRAIT_DESK_MIN_HEIGHT;
+}
+
+/**
+ * Телефон уже 44rem, планшет до 74rem, дальше стол. Монитор стоя с мышью — стол и уже 74rem
+ * (см. `dockForm`); сенсорный планшет стоя и боком раскладывается по ширине, как раньше.
+ */
+export function layoutMode(viewport: Viewport): LayoutMode {
+	if (dockForm(viewport)) return 'desktop';
+	if (viewport.width < 44 * MEDIA_REM_PX) return 'phone';
+	if (viewport.width < 74 * MEDIA_REM_PX) return 'tablet';
 	return 'desktop';
 }
 

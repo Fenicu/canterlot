@@ -37,6 +37,8 @@ export class Pane {
 	/** Панель, открытая явно. Пока её нет, на широком окне стоит панель плана и делегатов. */
 	view = $state<PaneView | null>(null);
 	mode = $state<LayoutMode>('phone');
+	/** Стол стоя (`dockForm`): правой панели нет. */
+	dock = $state(false);
 	/** Ширина окна в CSS-пикселях: от неё зависит, открывается ли панель сама. */
 	width = $state(0);
 	/** У открытого чата есть план или делегаты; пишет шапка чата. */
@@ -60,13 +62,18 @@ export class Pane {
 		return this.mode === 'desktop';
 	}
 
+	/** Правая панель стола есть: окно боком. Стоя настройки, сообщения, будильники и поиск открываются листом, как на планшете. */
+	get lane(): boolean {
+		return this.desktop && !this.dock;
+	}
+
 	/** Стол от порога ширины: панель делегирования показывает план и дерево стопкой. */
 	get stacked(): boolean {
-		return this.desktop && laneRoom(this.width);
+		return this.lane && laneRoom(this.width);
 	}
 
 	get auto(): boolean {
-		return laneAutoOpen({ mode: this.mode, width: this.width, delegated: this.delegated, closed: this.closed });
+		return !this.dock && laneAutoOpen({ mode: this.mode, width: this.width, delegated: this.delegated, closed: this.closed });
 	}
 
 	/** Панель, которую рисует оболочка: явно открытая или открытая сама. */

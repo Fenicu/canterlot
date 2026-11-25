@@ -361,18 +361,18 @@
 				type="button"
 				class="icon-button messages-btn"
 				aria-label="Мои сообщения"
-				aria-pressed={pane.desktop ? pane.view === 'messages' : undefined}
+				aria-pressed={pane.lane ? pane.view === 'messages' : undefined}
 				onclick={() => {
-					if (pane.desktop) pane.toggle('messages');
+					if (pane.lane) pane.toggle('messages');
 					else onOpenMessages?.();
 				}}
 			>
 				<Icon name="list" />
 			</button>
-			{#if pane.desktop && delegated}
+			{#if pane.lane && delegated}
 				<button type="button" class="pane-action" aria-pressed={pane.shown === 'delegation'} onclick={() => pane.toggleDelegation()}>{running > 0 ? `Делегирование · ${running}` : 'Делегирование'}</button>
 			{/if}
-			{#if !pane.desktop && delegated && onOpenDelegation}
+			{#if !pane.lane && delegated && onOpenDelegation}
 				<button
 					type="button"
 					class="icon-button delegation-btn"
@@ -523,7 +523,7 @@
 						icon="clock"
 						onclick={() => {
 							menuOpen = false;
-							if (pane.desktop) pane.toggle('alarms');
+							if (pane.lane) pane.toggle('alarms');
 							else onOpenAlarms();
 						}}
 					>Будильники · {alarmCount}</MenuItem>

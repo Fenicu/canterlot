@@ -171,7 +171,7 @@
 	$effect.pre(() => pane.forChat(chat.id));
 	function openPlan(): void {
 		pane.openPlan();
-		if (pane.desktop) pane.open('delegation');
+		if (pane.lane) pane.open('delegation');
 		else showDelegation = true;
 	}
 	const parentTitle = $derived.by(() => {
@@ -279,7 +279,7 @@
 		machine={resolvedMachine}
 		onOpenSheet={listRow ? () => (showSheet = true) : undefined}
 		onOpenSettings={() => {
-			if (pane.desktop) pane.open('settings');
+			if (pane.lane) pane.open('settings');
 			else showSettings = true;
 		}}
 		onOpenDiagnostics={() => (showDiagnostics = true)}
@@ -439,11 +439,11 @@
 		/>
 	{/if}
 
-	{#if showDelegation && !pane.desktop}
+	{#if showDelegation && !pane.lane}
 		<DelegationSheet {chat} onclose={() => (showDelegation = false)} />
 	{/if}
 
-	{#if showMessages && !pane.desktop && OwnerMessagesSheet}
+	{#if showMessages && !pane.lane && OwnerMessagesSheet}
 		<OwnerMessagesSheet
 			{chat}
 			onclose={() => (showMessages = false)}
@@ -467,7 +467,7 @@
 		/>
 	{/if}
 
-	{#if showAlarms && !pane.desktop && AlarmsSheet}
+	{#if showAlarms && !pane.lane && AlarmsSheet}
 		<AlarmsSheet {chat} onclose={() => (showAlarms = false)} />
 	{/if}
 
