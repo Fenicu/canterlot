@@ -1429,6 +1429,102 @@ async fn nudge_set_resolves_the_report_path_and_refuses_a_denied_one() -> TestRe
     Ok(())
 }
 
+/// Вся семья в личном домене; машина знает рабочий корень `/h/work`.
+async fn personal_family(f: &Fx) {
+    scope_caller(f, Some("personal"), r#"["/h/work"]"#).await;
+    sqlx::query("update conversations set memory_domain='personal' where id=$1")
+        .bind(f.child)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+}
+
+/// Файл отчёта под рабочим корнем личному оркестратору не отдаётся: ни существование, ни
+/// размер, ни путь в тексте толчка. То же обещание, что у будильника по файлу.
+#[tokio::test]
+async fn non_work_author_cannot_set_a_report_file_under_a_work_root() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
+    let f = Fx::new(pool).await;
+    let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
+    personal_family(&f).await;
+    for (path, answer) in [
+        // Файла нет: отказ тот же, что у существующего.
+        ("/h/work/rep/out.md", missing()),
+        ("/h/work/rep/out.md", exists_at("/h/work/rep/out.md", "")),
+        // Ссылка вне рабочего корня на файл внутри него: решает настоящий путь.
+        ("/tmp/w/link.md", exists_at("/h/work/rep/out.md", "")),
+    ] {
+        worker.push(answer);
+        let error = session_tools::call(
+            &f.context(),
+            &f.caller(),
+            "nudge.set",
+            json!({"session_id": f.child, "report_file": path}),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.code,
+            session_tools::ToolErrorCode::DomainMismatch,
+            "{path}"
+        );
+    }
+    let rules: i64 = sqlx::query_scalar("select count(*) from nudge_rules")
+        .fetch_one(&f.pool)
+        .await?;
+    assert_eq!(rules, 0);
+    f.stop().await;
+    Ok(())
+}
+
+/// Правило поставлено раньше, чем автор оказался вне рабочего домена: задание толчка ответ
+/// пробы не использует. Ни «файла нет», ни размера в решении о прогрессе.
+#[tokio::test]
+async fn nudge_job_ignores_a_report_probe_the_author_may_not_see() -> TestResult {
+    let pool = canterlot_hub::testkit::db().await;
+    let f = Fx::new(pool).await;
+    let worker = FakeWorker::connect(&f.hub, &f.seed, &["pilot_v1", "path_probe_v1"]).await;
+    let now = Utc::now();
+    prime_idle(&f.pool, &f, now).await;
+    answer_and_run(
+        &f.pool,
+        &f,
+        "Still working on the parser.",
+        now - TimeDelta::minutes(1),
+    )
+    .await;
+    activity::refresh(&f.pool, f.child, now, &thresholds(), Uuid::now_v7())
+        .await
+        .unwrap();
+    let at = now + TimeDelta::minutes(3);
+    let fingerprint = idle_fingerprint(&f.pool, f.child, at + TimeDelta::seconds(1)).await;
+    pending_nudge(
+        &f.pool,
+        &f,
+        Some("/h/work/rep/out.md"),
+        baseline(10, now - TimeDelta::minutes(5)),
+        0,
+        at,
+        &fingerprint,
+    )
+    .await;
+    personal_family(&f).await;
+    worker.push(missing());
+
+    let scheduler = f.scheduler();
+    scheduler.tick(at).await?;
+    worker.wait(1).await;
+    scheduler.tick(at + TimeDelta::seconds(1)).await?;
+
+    let text = nudge_inputs(&f.pool, f.child).await.remove(0);
+    assert!(!text.contains("/h/work"), "{text}");
+    let signals = nudge_events(&f.pool, f.child).await.remove(0).1;
+    assert_eq!(signals["report_probe_failed"], true, "{signals}");
+    assert_ne!(signals["report_missing"], true, "{signals}");
+    f.stop().await;
+    Ok(())
+}
+
 #[tokio::test]
 async fn nudge_set_needs_path_probe_v1_for_a_report() -> TestResult {
     let pool = canterlot_hub::testkit::db().await;

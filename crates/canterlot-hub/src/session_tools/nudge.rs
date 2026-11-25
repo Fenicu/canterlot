@@ -1055,6 +1055,23 @@ pub async fn run_job_in_tx(
             json!({"state":"exhausted","reason":reason}),
         ));
     }
+    // Домен автора или рабочие корни машины могли смениться после постановки правила: ответ
+    // пробы по файлу, который автор уже не вправе видеть, не идёт ни в решение о прогрессе,
+    // ни в текст толчка. Проба считается несостоявшейся.
+    let probe = match (probe, rule.report_file.as_deref(), rule.set_by_conversation) {
+        (Some(probe), Some(path), Some(author)) => {
+            let canonical = match &probe {
+                PathProbe::Exists { canonical, .. } => canonical.clone(),
+                _ => None,
+            };
+            if crate::memory::file_denied_for(conn, author, path, canonical.as_deref()).await? {
+                Some(PathProbe::NotAllowed("domain_mismatch".into()))
+            } else {
+                Some(probe)
+            }
+        }
+        (probe, _, _) => probe,
+    };
     let facts = facts_in_tx(conn, target, &rule, now, probe.as_ref()).await?;
     let progress = still_progress(rule.progress_baseline.as_ref(), &facts.baseline);
     let consecutive = if progress { 1 } else { rule.consecutive + 1 };
@@ -2185,7 +2202,27 @@ pub async fn set(
                 return Err(ToolError::new(ToolErrorCode::MachineUnavailable));
             };
             let resolved = paths::resolve(raw, Some(&workdir))?;
-            match crate::session_tools::probe::ask(&context.registry, machine, &resolved, 0).await {
+            let probe =
+                crate::session_tools::probe::ask(&context.registry, machine, &resolved, 0).await;
+            // То же обещание, что у будильника по файлу: рабочий файл не рабочему автору не
+            // отдаётся ни существованием, ни метаданными. Отказ один для любого ответа пробы.
+            let canonical = match &probe {
+                PathProbe::Exists { canonical, .. } => canonical.as_deref(),
+                _ => None,
+            };
+            let mut conn = context.pool.acquire().await?;
+            if crate::memory::file_denied_for(
+                &mut conn,
+                caller.conversation_id,
+                &resolved,
+                canonical,
+            )
+            .await?
+            {
+                return Err(ToolError::new(ToolErrorCode::DomainMismatch));
+            }
+            drop(conn);
+            match probe {
                 PathProbe::Missing | PathProbe::Exists { .. } => {}
                 PathProbe::NotAllowed(reason) => {
                     return Err(ToolError::with_message(
