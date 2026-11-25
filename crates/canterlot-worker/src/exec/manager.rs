@@ -1342,8 +1342,32 @@ pub(super) async fn answer_without_execution(
                 )
                 .await
         }
+        Some(Kind::GoalCommand(_)) => {
+            let reason = match known {
+                Some(generation) if generation != command.execution_generation => {
+                    "stale_generation"
+                }
+                _ => "execution_closed",
+            };
+            goal_rejected(shared, command, reason).await
+        }
         _ => shared.cj(vec![], terminal_self(command)).await,
     }
+}
+
+/// Команда цели, не дошедшая до адаптера, закрывается у хаба отказом: иначе она
+/// пропала бы молча, а цель осталась бы прежней.
+async fn goal_rejected(shared: &Shared, command: &Command, reason: &str) -> Result<(), ExecError> {
+    shared
+        .cj(
+            vec![Body::CommandRejected(CommandRejected {
+                command_id: command.command_id.clone(),
+                dispatch_attempt: command.dispatch_attempt,
+                reason: reason.into(),
+            })],
+            terminal_self(command),
+        )
+        .await
 }
 
 async fn decision_rejected(
@@ -2771,9 +2795,13 @@ impl Actor {
                         self.waiting.push_back(command);
                         return Ok(());
                     }
+                    // Итог адаптера сопровождение пишет в SJ: неприменённая команда
+                    // получает там отказ.
                     self.shared.cj(vec![], self_terminal).await
+                } else if command.execution_generation != self.generation {
+                    goal_rejected(&self.shared, &command, "stale_generation").await
                 } else {
-                    self.shared.cj(vec![], self_terminal).await
+                    goal_rejected(&self.shared, &command, "execution_closed").await
                 }
             }
             Some(

@@ -1517,7 +1517,7 @@ impl Adapter for ClaudeCodeAdapter {
             .is_some_and(|queue| queue.active().is_some())
             || self.parser.wake_turn_open();
         if busy {
-            return GoalCommandOutcome::NotApplicable;
+            return GoalCommandOutcome::Busy;
         }
         if self.cli.is_none() || self.exited || self.eof || !self.cli_ready {
             return GoalCommandOutcome::Failed;

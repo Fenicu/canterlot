@@ -3441,13 +3441,16 @@ impl Supervisor {
         Ok(())
     }
 
-    /// Команда владельца уходит адаптеру; состояние вернётся событием `Goal`.
+    /// Команда владельца уходит адаптеру; состояние вернётся событием `Goal`. Команда,
+    /// которую адаптер не применил, получает в SJ отказ `CommandRejected` с причиной:
+    /// воркер гасит команду сразу после передачи по IPC, и без отказа хаб не узнал бы,
+    /// что цель осталась прежней.
     async fn on_goal_command(
         &mut self,
         command: canterlot_proto::worker::ipc::GoalRequest,
     ) -> Result<(), SupervisorError> {
         // Смена актора исполнения может прислать ту же команду дважды: ключ живёт столько
-        // же, сколько сопровождение, и адаптер получает её один раз.
+        // же, сколько сопровождение, и адаптер получает её один раз, а итог пишется один раз.
         if !command.command_id.is_empty()
             && !self
                 .known_goals
@@ -3455,30 +3458,69 @@ impl Supervisor {
         {
             return Ok(());
         }
+        let reason = match self.apply_goal(&command).await {
+            GoalCommandOutcome::Applied => return Ok(()),
+            GoalCommandOutcome::Busy => "goal_busy",
+            GoalCommandOutcome::NotApplicable => "goal_not_applicable",
+            GoalCommandOutcome::Failed => "goal_failed",
+        };
+        self.reject_goal(&command, reason)
+    }
+
+    async fn apply_goal(
+        &mut self,
+        command: &canterlot_proto::worker::ipc::GoalRequest,
+    ) -> GoalCommandOutcome {
         if matches!(
             self.lifecycle,
             Lifecycle::Stopping(_) | Lifecycle::Draining { .. }
         ) {
-            return Ok(());
+            return GoalCommandOutcome::NotApplicable;
         }
         let Some(action) = GoalAction::parse(&command.action) else {
-            return Ok(());
+            return GoalCommandOutcome::NotApplicable;
         };
         if action == GoalAction::Set && command.objective.is_empty() {
-            return Ok(());
+            return GoalCommandOutcome::NotApplicable;
         }
         let Some(adapter) = self.adapter.as_mut() else {
-            return Ok(());
+            return GoalCommandOutcome::NotApplicable;
         };
         let objective = (!command.objective.is_empty()).then_some(command.objective.as_str());
-        match adapter
+        adapter
             .goal_command(action, objective, command.token_budget)
             .await
-        {
-            GoalCommandOutcome::Applied
-            | GoalCommandOutcome::NotApplicable
-            | GoalCommandOutcome::Failed => Ok(()),
+    }
+
+    fn reject_goal(
+        &mut self,
+        command: &canterlot_proto::worker::ipc::GoalRequest,
+        reason: &str,
+    ) -> Result<(), SupervisorError> {
+        // Запрос воркера прежней версии ключа не несёт: отказ нечем назвать.
+        if command.command_id.is_empty() {
+            return Ok(());
         }
+        let reason = match &self.lifecycle {
+            Lifecycle::Stopping(_) => "execution_stopped",
+            // Журнал закрыт: записать отказ некуда, команду закроет итог исполнения.
+            Lifecycle::Draining { .. } => return Ok(()),
+            _ if GoalAction::parse(&command.action).is_none()
+                || (GoalAction::parse(&command.action) == Some(GoalAction::Set)
+                    && command.objective.is_empty()) =>
+            {
+                "invalid_goal_command"
+            }
+            _ => reason,
+        };
+        self.record(Body::CommandRejected(
+            canterlot_proto::worker::v1::CommandRejected {
+                command_id: command.command_id.clone(),
+                dispatch_attempt: command.dispatch_attempt,
+                reason: reason.into(),
+            },
+        ))?;
+        Ok(())
     }
 
     // Сжатие запускает отдельный период работы: во время хода его не начать.
@@ -3949,6 +3991,8 @@ mod tests {
         /// События, которые адаптер уже отдал бы без ожидания.
         ready_events: std::collections::VecDeque<AdapterEvent>,
         goal_calls: u32,
+        /// Что адаптер ответит на команду цели; без значения — `Applied`.
+        goal_outcome: Option<crate::adapter::GoalCommandOutcome>,
     }
 
     struct StubAdapter {
@@ -4031,8 +4075,11 @@ mod tests {
             _objective: Option<&str>,
             _token_budget: Option<i64>,
         ) -> crate::adapter::GoalCommandOutcome {
-            self.state.lock().unwrap().goal_calls += 1;
-            crate::adapter::GoalCommandOutcome::Applied
+            let mut state = self.state.lock().unwrap();
+            state.goal_calls += 1;
+            state
+                .goal_outcome
+                .unwrap_or(crate::adapter::GoalCommandOutcome::Applied)
         }
 
         async fn refuse_request(&mut self, request_id: &str, _message: &str) {
@@ -4961,6 +5008,104 @@ mod tests {
             supervisor.on_goal_command(legacy.clone()).await.unwrap();
         }
         assert_eq!(state.lock().unwrap().goal_calls, 4);
+    }
+
+    fn goal_rejections(bodies: &[Body]) -> Vec<(String, u32, String)> {
+        bodies
+            .iter()
+            .filter_map(|body| match body {
+                Body::CommandRejected(fact) => Some((
+                    fact.command_id.clone(),
+                    fact.dispatch_attempt,
+                    fact.reason.clone(),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Команда цели, которую адаптер не применил (ход идёт, действие не поддерживается,
+    /// CLI не принял), не пропадает молча: в SJ ложится отказ этой команды с причиной,
+    /// и хаб закрывает её отказом. Применённая команда отказа не получает, повтор того же
+    /// ключа второй записи не даёт.
+    #[tokio::test]
+    async fn a_goal_command_the_adapter_did_not_apply_is_rejected_in_the_sj() {
+        use crate::adapter::GoalCommandOutcome;
+        use canterlot_proto::worker::ipc::GoalRequest;
+        let cases = [
+            (Some(GoalCommandOutcome::Busy), Some("goal_busy")),
+            (
+                Some(GoalCommandOutcome::NotApplicable),
+                Some("goal_not_applicable"),
+            ),
+            (Some(GoalCommandOutcome::Failed), Some("goal_failed")),
+            (None, None),
+        ];
+        for (outcome, reason) in cases {
+            let (_dir, mut supervisor, state) = test_supervisor();
+            state.lock().unwrap().goal_outcome = outcome;
+            let request = GoalRequest {
+                action: "clear".into(),
+                command_id: Uuid::now_v7().to_string(),
+                dispatch_attempt: 2,
+                ..Default::default()
+            };
+            for _ in 0..2 {
+                supervisor.on_goal_command(request.clone()).await.unwrap();
+            }
+            let expected: Vec<_> = reason
+                .map(|reason| (request.command_id.clone(), 2, reason.to_owned()))
+                .into_iter()
+                .collect();
+            assert_eq!(
+                goal_rejections(&shipped_bodies(&mut supervisor)),
+                expected,
+                "{outcome:?}"
+            );
+        }
+    }
+
+    /// Без адаптера, с неизвестным действием или в остановке команда цели тоже получает
+    /// отказ; запрос без ключа (воркер прежней версии) отказа не получает: его нечем назвать.
+    #[tokio::test]
+    async fn a_goal_command_that_never_reaches_the_adapter_is_rejected_too() {
+        use canterlot_proto::worker::ipc::GoalRequest;
+        let request = |action: &str| GoalRequest {
+            action: action.into(),
+            command_id: Uuid::now_v7().to_string(),
+            dispatch_attempt: 1,
+            ..Default::default()
+        };
+        let (_dir, mut supervisor, state) = test_supervisor();
+        let unknown = request("teleport");
+        supervisor.on_goal_command(unknown.clone()).await.unwrap();
+        let empty_set = request("set");
+        supervisor.on_goal_command(empty_set.clone()).await.unwrap();
+        supervisor
+            .on_goal_command(GoalRequest {
+                command_id: String::new(),
+                ..request("teleport")
+            })
+            .await
+            .unwrap();
+        supervisor
+            .begin_stop(StopCause::User { force: false }, false)
+            .unwrap();
+        let stopping = request("clear");
+        supervisor.on_goal_command(stopping.clone()).await.unwrap();
+        assert_eq!(state.lock().unwrap().goal_calls, 0);
+        let reasons: Vec<_> = goal_rejections(&shipped_bodies(&mut supervisor))
+            .into_iter()
+            .map(|(id, _, reason)| (id, reason))
+            .collect();
+        assert_eq!(
+            reasons,
+            [
+                (unknown.command_id, "invalid_goal_command".to_owned()),
+                (empty_set.command_id, "invalid_goal_command".to_owned()),
+                (stopping.command_id, "execution_stopped".to_owned()),
+            ]
+        );
     }
 
     #[tokio::test]

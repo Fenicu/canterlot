@@ -1407,6 +1407,37 @@ async fn a_failed_replay_read_after_an_actor_restart_is_retried() {
     env.stop().await;
 }
 
+/// Команда цели для исполнения, которого здесь уже нет, закрывается отказом в CJ, а не
+/// гасится молча: хаб показывает владельцу, что цель не изменилась.
+#[tokio::test]
+async fn a_goal_command_for_a_finished_execution_is_rejected() {
+    use canterlot_proto::worker::v1::GoalCommand;
+    let mut env = Env::new().await;
+    env.hub_session();
+    env.start(1).await;
+    env.wait_running().await;
+    env.stop().await;
+    let goal = command(
+        Uuid::now_v7(),
+        1,
+        env.execution,
+        1,
+        Kind::GoalCommand(GoalCommand {
+            action: "clear".into(),
+            ..Default::default()
+        }),
+    );
+    env.send(goal.clone()).await;
+    env.wait_cj("goal rejection", |cj| {
+        cj.iter().any(|body| {
+            matches!(body, Body::CommandRejected(fact)
+                if fact.command_id == goal.command_id && fact.reason == "execution_closed")
+        })
+    })
+    .await;
+    assert!(env.terminal(&goal).await);
+}
+
 /// У живого исполнения нет актора (он упал и больше не поднялся). Остановка такой сессии не
 /// гасится молча: сопровождение её не получило бы никогда. Команда остаётся в хранилище и
 /// исполняется, когда актор появляется снова.

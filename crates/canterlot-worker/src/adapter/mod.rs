@@ -675,6 +675,8 @@ pub enum AdapterEvent {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GoalCommandOutcome {
     Applied,
+    /// CLI занят ходом: команду сейчас передать нельзя, владелец может повторить позже.
+    Busy,
     NotApplicable,
     Failed,
 }
