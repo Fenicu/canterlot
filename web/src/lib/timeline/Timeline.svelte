@@ -854,7 +854,7 @@
   .loading { display: flex; flex-direction: column; gap: var(--s6); padding: var(--s8) var(--s6); }
   .empty { margin: auto var(--s0); padding: var(--s8) var(--s6); color: var(--muted); font-size: var(--fs-meta); text-align: center; }
   .feed-wrap { position: relative; flex: 1; min-height: 0; display: flex; container-type: inline-size; }
-  .feed { overflow: auto; overflow-anchor: none; scrollbar-gutter: stable; flex: 1; min-width: 0; padding-inline: max(var(--gutter), calc((100% - var(--reading-max)) / 2 + var(--gutter))); padding-block: var(--s6); mask-image: linear-gradient(to bottom, var(--transparent), var(--text) var(--s6), var(--text) calc(100% - var(--s6)), var(--transparent)); }
+  .feed { overflow: auto; overflow-anchor: none; scrollbar-gutter: stable; flex: 1; min-width: 0; padding-inline: max(var(--gutter), calc((100% - var(--feed-max)) / 2 + var(--gutter))); padding-block: var(--s6); mask-image: linear-gradient(to bottom, var(--transparent), var(--text) var(--s6), var(--text) calc(100% - var(--s6)), var(--transparent)); }
   .feed :global(*) { overflow-anchor: none; }
   /* Карточка запроса в ленте не ограничена по высоте, но остаётся скроллером с contain для
      случая у поля ввода. Chrome держит касание в таком скроллере, даже когда прокручивать

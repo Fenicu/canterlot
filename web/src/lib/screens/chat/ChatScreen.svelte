@@ -523,7 +523,7 @@
 
 	.screen > :global(:not(dialog)) {
 		width: 100%;
-		max-width: var(--reading-max);
+		max-width: var(--feed-max);
 		margin-inline: auto;
 	}
 
