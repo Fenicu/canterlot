@@ -70,11 +70,27 @@ async fn cataloged(pool: &PgPool, ids: &[Uuid]) -> Result<Vec<Uuid>, sqlx::Error
 /// отсрочки и за которыми нет ни строки, ни staging, ни blob. Удаление идёт под захватом
 /// этого же файла и с повторной проверкой: приём с тем же ID либо держит захват, либо
 /// придёт позже и создаст новый файл (`try_lock` не принимает захват на удалённом).
+/// Только в процессе, который один владеет томом (`BlobStore::owns_dir`): хаб без сверки
+/// inode, работающий с тем же томом, этим протоколом не защищён.
 async fn sweep_locks(
     pool: &PgPool,
     store: &dyn BlobStore,
     cutoff: DateTime<Utc>,
 ) -> Result<usize, sqlx::Error> {
+    match store.owns_dir() {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::warn!(
+                kind = "attachment_gc_locks_skipped",
+                "another hub process owns the blob dir; lock files are kept"
+            );
+            return Ok(0);
+        }
+        Err(error) => {
+            tracing::warn!(kind = "attachment_gc_locks_skipped", error = %error.kind(), "blob dir ownership check failed; lock files are kept");
+            return Ok(0);
+        }
+    }
     let locks = match store.scan_locks().await {
         Ok(locks) => locks,
         Err(error) => {

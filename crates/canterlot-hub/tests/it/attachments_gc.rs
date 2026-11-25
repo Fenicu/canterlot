@@ -446,6 +446,33 @@ async fn gc_removes_lock_files_of_vanished_attachments() {
     assert_eq!(f.state_of(live).await, "ready");
 }
 
+/// Lock-файлы убирает только процесс, который один владеет `blob_dir` (`hub.lock`). Пока
+/// тот же том открыт другим процессом хаба, сборщик их не трогает: процесс версии без
+/// сверки inode продолжил бы работу на удалённом файле. Владение переходит к сборщику,
+/// когда другой процесс закрыл том.
+#[tokio::test]
+async fn gc_removes_lock_files_only_while_it_owns_the_blob_dir() {
+    let pool = canterlot_hub::testkit::db().await;
+    let f = Fixture::new(pool).await;
+    let lock = |id: Uuid| f.config.blob_dir.join("locks").join(id.to_string());
+    let gone = Uuid::now_v7();
+    drop(f.blobs().try_lock(gone).unwrap().expect("free lock"));
+    set_mtime(&lock(gone), 30);
+    let other =
+        attachments::LocalBlobStore::open(&f.config, Arc::new(attachments::NoTrace)).unwrap();
+    let report = gc::run_once(&f.pool, f.blobs(), Utc::now(), DAY)
+        .await
+        .unwrap();
+    assert_eq!(report.stale_locks, 0);
+    assert!(lock(gone).exists(), "another hub process uses the blob dir");
+    drop(other);
+    let report = gc::run_once(&f.pool, f.blobs(), Utc::now(), DAY)
+        .await
+        .unwrap();
+    assert_eq!(report.stale_locks, 1);
+    assert!(!lock(gone).exists());
+}
+
 /// Обёртка, которая видит состояние строки в момент удаления blob и может сорвать удаление.
 #[derive(Clone)]
 struct Observing {

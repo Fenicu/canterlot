@@ -107,6 +107,61 @@ pub trait BlobStore: Send + Sync {
     async fn delete_lock(&self) -> io::Result<()> {
         Ok(())
     }
+    /// Процесс один владеет томом (`hub.lock`): только тогда сборщик удаляет lock-файлы.
+    fn owns_dir(&self) -> io::Result<bool> {
+        Ok(false)
+    }
+}
+
+/// Исключительный `flock` на `blob_dir/hub.lock`, общий для клонов драйвера процесса.
+///
+/// Удалять lock-файлы безопасно, только если каждый процесс с этим томом после `flock`
+/// сверяет inode с путём. Хаб до этой сверки так не делает: он продолжил бы работу на
+/// удалённом файле параллельно с новым захватом. Поэтому lock-файлы удаляет только
+/// процесс, который держит `hub.lock`; второй процесс хаба на том же томе его не получит
+/// и lock-файлы не тронет. Старый хаб `hub.lock` не берёт, и от него защищает порядок
+/// выката: прежний хаб останавливается до старта нового (docs/deploy/pilot.md, §11.4).
+struct DirOwner {
+    path: PathBuf,
+    held: std::sync::Mutex<Option<fs::File>>,
+}
+
+impl DirOwner {
+    fn new(path: PathBuf) -> Self {
+        let owner = Self {
+            path,
+            held: std::sync::Mutex::new(None),
+        };
+        // Сразу при открытии: второй процесс, открывший том позже, увидит захват.
+        if let Err(error) = owner.acquire() {
+            tracing::warn!(kind = "attachment_dir_owner_failed", error = %error.kind(), "blob dir ownership not checked");
+        }
+        owner
+    }
+
+    /// Держит ли процесс `hub.lock`; если нет, пробует взять его снова: прежний владелец
+    /// мог закрыть том.
+    fn acquire(&self) -> io::Result<bool> {
+        let mut held = self.held.lock().unwrap_or_else(|error| error.into_inner());
+        if held.is_some() {
+            return Ok(true);
+        }
+        let file = fs::File::options()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .open(&self.path)?;
+        match file.try_lock() {
+            Ok(()) => {
+                *held = Some(file);
+                Ok(true)
+            }
+            Err(fs::TryLockError::WouldBlock) => Ok(false),
+            Err(fs::TryLockError::Error(error)) => Err(error),
+        }
+    }
 }
 
 /// Локальный том: `staging/<id>.part` и `blobs/<последние 2 hex>/<id>` в одном `blob_dir` на одной ФС.
@@ -117,6 +172,7 @@ pub struct LocalBlobStore {
     trace: Arc<dyn PublishTrace>,
     locks: PathBuf,
     held: Option<(Uuid, Arc<fs::File>)>,
+    owner: Arc<DirOwner>,
 }
 
 /// Итог попытки захвата на открытом lock-файле.
@@ -196,12 +252,14 @@ impl LocalBlobStore {
             return Err(BlobError::CrossDevice);
         }
         sync_dir(&config.blob_dir)?;
+        let owner = Arc::new(DirOwner::new(config.blob_dir.join("hub.lock")));
         Ok(Self {
             staging,
             blobs,
             trace,
             locks,
             held: None,
+            owner,
         })
     }
 
@@ -453,6 +511,9 @@ impl BlobStore for LocalBlobStore {
             return Err(io::Error::other("blob store is not locked"));
         };
         self.remove_file(self.locks.join(id.to_string())).await
+    }
+    fn owns_dir(&self) -> io::Result<bool> {
+        self.owner.acquire()
     }
     async fn staging_len(&self, id: Uuid) -> io::Result<Option<u64>> {
         match tokio::fs::metadata(self.staging_path(id)).await {
