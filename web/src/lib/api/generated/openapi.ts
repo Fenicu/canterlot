@@ -341,8 +341,8 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Новый код входа на 60 секунд. Не больше 10 запусков в минуту с одной корзины адресов
-         *     и 20 ожидающих кодов всего; сверх предела 429 сразу.
+         * Новый код входа на 60 секунд. Не больше 10 запусков в минуту и 5 ожидающих кодов
+         *     с одной корзины адресов, 20 ожидающих кодов всего; сверх предела 429 сразу.
          */
         post: operations["post__api_v1_auth_qr_start"];
         delete?: never;
@@ -7352,7 +7352,7 @@ export interface operations {
                     "application/json": components["schemas"]["QrPollView"];
                 };
             };
-            /** @description too_many_attempts: в этом процессе хаба уже ждут 8 опросов */
+            /** @description too_many_attempts: в этом процессе хаба уже ждут 8 опросов или 3 опроса с той же корзины адресов */
             429: {
                 headers: {
                     /** @description Часы хаба: целые миллисекунды Unix */

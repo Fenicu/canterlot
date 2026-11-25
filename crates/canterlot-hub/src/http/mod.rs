@@ -175,8 +175,8 @@ pub struct AppState {
     pub geo: Arc<crate::owner_auth::geo::Geo>,
     /// Проверяющая сторона WebAuthn из `[auth]`; `None`, если origin для неё не годится.
     pub webauthn: Option<Arc<webauthn_rs::Webauthn>>,
-    /// Одновременные долгие опросы входа по QR в этом процессе.
-    pub qr_polls: Arc<tokio::sync::Semaphore>,
+    /// Одновременные долгие опросы входа по QR в этом процессе: всего и на корзину адресов.
+    pub qr_polls: crate::owner_auth::qr::PollSlots,
     pub ws_tasks: tokio_util::task::TaskTracker,
     #[cfg(feature = "fault-injection")]
     pub ws_faults: crate::fault_injection::Faults,
@@ -217,9 +217,7 @@ impl AppState {
             user_header,
             geo: Arc::new(crate::owner_auth::geo::Geo::open(&deps.auth.geoip.path)),
             webauthn: signin_passkeys::relying_party(&deps.auth),
-            qr_polls: Arc::new(tokio::sync::Semaphore::new(
-                crate::owner_auth::qr::MAX_POLLS,
-            )),
+            qr_polls: Default::default(),
             auth: Arc::new(deps.auth),
             dictation: Arc::new(deps.dictation),
             dictation_timers: Arc::new(deps.dictation_timers),

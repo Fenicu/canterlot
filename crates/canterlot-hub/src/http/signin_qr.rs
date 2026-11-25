@@ -59,8 +59,8 @@ pub struct QrStartView {
     pub expires_at: DateTime<Utc>,
 }
 
-/// Новый код входа на 60 секунд. Не больше 10 запусков в минуту с одной корзины адресов
-/// и 20 ожидающих кодов всего; сверх предела 429 сразу.
+/// Новый код входа на 60 секунд. Не больше 10 запусков в минуту и 5 ожидающих кодов
+/// с одной корзины адресов, 20 ожидающих кодов всего; сверх предела 429 сразу.
 #[utoipa::path(post, path = "/api/v1/auth/qr/start", tag = "auth", request_body = QrStartBody, responses(
     (status = 200, description = "Код создан", body = QrStartView),
     (status = 429, description = "too_many_attempts, details.retry_after_seconds", body = ErrorEnvelope),
@@ -144,13 +144,14 @@ async fn auth_notice(
 /// двух одновременных его получает ровно один, второй видит `expired`.
 #[utoipa::path(post, path = "/api/v1/auth/qr/poll", tag = "auth", request_body = QrPollBody, responses(
     (status = 200, description = "Состояние кода; при approved — Set-Cookie сеанса", body = QrPollView),
-    (status = 429, description = "too_many_attempts: в этом процессе хаба уже ждут 8 опросов", body = ErrorEnvelope),
+    (status = 429, description = "too_many_attempts: в этом процессе хаба уже ждут 8 опросов или 3 опроса с той же корзины адресов", body = ErrorEnvelope),
 ))]
 async fn qr_poll(
     State(state): State<AppState>,
+    client: Client,
     ApiJson(body): ApiJson<QrPollBody>,
 ) -> Result<Response, ApiError> {
-    let Ok(_permit) = state.qr_polls.clone().try_acquire_owned() else {
+    let Some(_slot) = state.qr_polls.try_acquire(&bucket_key(client.ip)) else {
         return Ok(refused(std::time::Duration::from_secs(1)));
     };
     let after = body.after.unwrap_or(QrState::Pending);

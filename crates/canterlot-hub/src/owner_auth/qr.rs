@@ -3,7 +3,12 @@
 //! смотрит запрос (`scanned`), одобряет или отклоняет. Сеанс создаёт опрос, первым
 //! увидевший `approved`, в одной транзакции с переводом строки в `delivered`.
 
-use std::{net::IpAddr, time::Duration};
+use std::{
+    collections::HashMap,
+    net::IpAddr,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -11,7 +16,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::{
-    Method, Secret, digest, generate_token,
+    Method, Secret, UNKNOWN_BUCKET, digest, generate_token,
     geo::Location,
     sessions::{self, ClientInfo, Created},
     token_shape_ok,
@@ -25,8 +30,16 @@ pub const DELIVERY_SECS: i64 = 60;
 pub const STARTS_PER_MINUTE: i64 = 10;
 /// Ожидающих кодов всего.
 pub const MAX_PENDING: i64 = 20;
+/// Ожидающих кодов с одной корзины адресов. Общие пределы делят все, а `start` и `poll`
+/// публичны: без предела на корзину один адрес занимал бы их целиком и выключал вход по QR
+/// для владельца. Хост с IPv4 и IPv6 — две корзины, и вместе они не выбирают общий предел.
+pub const MAX_PENDING_PER_BUCKET: i64 = 5;
 /// Одновременных опросов в процессе.
 pub const MAX_POLLS: usize = 8;
+/// Одновременных опросов с одной корзины адресов в процессе.
+pub const MAX_POLLS_PER_BUCKET: usize = 3;
+// Корзина неизвестного адреса (`UNKNOWN_BUCKET`, секрет прокси не задан) одна на всех:
+// предел на корзину к ней не применяется — он лишь сузил бы общий.
 /// Живых сеансов, вход которых подтвердил один сеанс (вместе с ещё не забранными
 /// одобрениями): украденный несвежий сеанс не плодит сеансы без счёта.
 pub const MAX_APPROVED_PER_SESSION: i64 = 5;
@@ -36,6 +49,68 @@ pub const POLL_WAIT: Duration = Duration::from_secs(25);
 pub const RECHECK: Duration = Duration::from_millis(500);
 /// Вид уведомления шины: код отсканирован, одобрен или отклонён.
 pub const BUS_KIND: &str = "qr_changed";
+
+/// Слоты долгого опроса в процессе: общий предел и предел на корзину адресов.
+#[derive(Clone)]
+pub struct PollSlots {
+    total: Arc<tokio::sync::Semaphore>,
+    buckets: Arc<Mutex<HashMap<String, usize>>>,
+}
+
+impl Default for PollSlots {
+    fn default() -> Self {
+        Self {
+            total: Arc::new(tokio::sync::Semaphore::new(MAX_POLLS)),
+            buckets: Arc::default(),
+        }
+    }
+}
+
+impl PollSlots {
+    /// Слот опроса для корзины; `None` — занят общий предел или предел корзины.
+    pub fn try_acquire(&self, bucket: &str) -> Option<PollSlot> {
+        let bucket = (bucket != UNKNOWN_BUCKET).then(|| bucket.to_owned());
+        // Сначала корзина: отказ по ней не должен даже на миг занимать общий слот.
+        if let Some(bucket) = &bucket {
+            let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
+            let held = buckets.entry(bucket.clone()).or_insert(0);
+            if *held >= MAX_POLLS_PER_BUCKET {
+                return None;
+            }
+            *held += 1;
+        }
+        let mut slot = PollSlot {
+            _total: None,
+            buckets: self.buckets.clone(),
+            bucket,
+        };
+        // Нет общего слота: `slot` уходит и возвращает место корзине.
+        slot._total = Some(self.total.clone().try_acquire_owned().ok()?);
+        Some(slot)
+    }
+}
+
+/// Занятый слот опроса; освобождается при уходе, в том числе когда клиент оборвал запрос.
+pub struct PollSlot {
+    _total: Option<tokio::sync::OwnedSemaphorePermit>,
+    buckets: Arc<Mutex<HashMap<String, usize>>>,
+    bucket: Option<String>,
+}
+
+impl Drop for PollSlot {
+    fn drop(&mut self) {
+        let Some(bucket) = self.bucket.take() else {
+            return;
+        };
+        let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(held) = buckets.get_mut(&bucket) {
+            *held = held.saturating_sub(1);
+            if *held == 0 {
+                buckets.remove(&bucket);
+            }
+        }
+    }
+}
 
 /// Состояние кода, как его видит опрашивающее устройство.
 #[derive(
@@ -89,6 +164,21 @@ pub async fn start(
         return Ok(Start::Limited {
             retry_after: seconds(oldest),
         });
+    }
+    if bucket != UNKNOWN_BUCKET {
+        let (own, soonest): (i64, Option<f64>) = sqlx::query_as(
+            "select count(*),extract(epoch from min(expires_at)-now())::float8
+             from owner_qr_logins
+             where bucket=$1 and state in ('pending','scanned') and expires_at>now()",
+        )
+        .bind(bucket)
+        .fetch_one(&mut *tx)
+        .await?;
+        if own >= MAX_PENDING_PER_BUCKET {
+            return Ok(Start::Limited {
+                retry_after: seconds(soonest),
+            });
+        }
     }
     let (pending, soonest): (i64, Option<f64>) = sqlx::query_as(
         "select count(*),extract(epoch from min(expires_at)-now())::float8 from owner_qr_logins

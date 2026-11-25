@@ -149,11 +149,11 @@ async fn auth_logs_expected_internet_outcomes_are_info() {
     assert_eq!(lookalike.status, 403);
     assert_eq!(levels("auth_rejected", Some("origin")), ["WARN", "WARN"]);
 
-    // Предел запусков QR.
+    // Предел запусков QR: шестой живой код с одной корзины адресов.
     clear();
     let qr = hub.anonymous(Some("203.0.113.71"));
     let mut limited = 0;
-    for _ in 0..11 {
+    for _ in 0..6 {
         let response = qr
             .send(Method::POST, "/api/v1/auth/qr/start", None, Some(json!({})))
             .await;

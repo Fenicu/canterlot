@@ -168,6 +168,9 @@ impl RevokeReason {
     }
 }
 
+/// Корзина неизвестного адреса: одна на всех клиентов.
+pub const UNKNOWN_BUCKET: &str = "unknown";
+
 /// Ключ корзины перебора: IPv4 как есть (и из `::ffff:a.b.c.d`), прочий IPv6 по /64,
 /// неизвестный адрес в одной общей корзине.
 pub fn bucket_key(ip: Option<IpAddr>) -> String {
@@ -187,7 +190,7 @@ pub fn bucket_key(ip: Option<IpAddr>) -> String {
             );
             format!("net:{net}/64")
         }
-        None => "unknown".into(),
+        None => UNKNOWN_BUCKET.into(),
     }
 }
 

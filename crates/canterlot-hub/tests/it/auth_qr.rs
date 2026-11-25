@@ -278,26 +278,52 @@ async fn auth_qr_secret_and_poll_token_are_not_interchangeable() {
 async fn auth_qr_start_is_limited_per_bucket_and_in_total() {
     let pool = canterlot_hub::testkit::db().await;
     let hub = AuthHub::new(pool).await;
-    for _ in 0..10 {
+    let retry_of = |limited: &TestResponse| {
+        assert_eq!(limited.status, 429);
+        assert_eq!(error_code(limited), "too_many_attempts");
+        let retry = limited.json::<Value>()["error"]["details"]["retry_after_seconds"]
+            .as_u64()
+            .unwrap();
+        assert!((1..=60).contains(&retry), "{retry}");
+    };
+    let expire = |bucket: &'static str| {
+        let pool = hub.pool.clone();
+        async move {
+            sqlx::query(
+                "update owner_qr_logins set expires_at=now()-interval '1 second' where bucket=$1",
+            )
+            .bind(bucket)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+    };
+    // С одной корзины живут не больше пяти кодов: шестой ждёт, пока истечёт старший.
+    for _ in 0..5 {
         assert_eq!(start(&hub, "203.0.113.50").await.status, 200);
     }
-    let limited = start(&hub, "203.0.113.50").await;
-    assert_eq!(limited.status, 429);
-    assert_eq!(error_code(&limited), "too_many_attempts");
-    let retry = limited.json::<Value>()["error"]["details"]["retry_after_seconds"]
-        .as_u64()
-        .unwrap();
-    assert!((1..=60).contains(&retry), "{retry}");
+    retry_of(&start(&hub, "203.0.113.50").await);
+    // Истёкшие коды место освобождают, но десять запусков в минуту с корзины остаются.
+    expire("ip:203.0.113.50").await;
+    for _ in 0..5 {
+        assert_eq!(start(&hub, "203.0.113.50").await.status, 200);
+    }
+    expire("ip:203.0.113.50").await;
+    retry_of(&start(&hub, "203.0.113.50").await);
     // Тот же /64 IPv6 — та же корзина.
-    for n in 0..10 {
+    for n in 0..5 {
         let ip = format!("2001:db8:5:6::{n:x}");
         assert_eq!(start(&hub, &ip).await.status, 200);
     }
     assert_eq!(start(&hub, "2001:db8:5:6:ffff::1").await.status, 429);
-    // Всего не больше 20 ожидающих кодов: 21-й с нового адреса получает 429.
-    let total = start(&hub, "198.51.100.77").await;
-    assert_eq!(total.status, 429);
-    assert_eq!(error_code(&total), "too_many_attempts");
+    // Всего не больше 20 ожидающих кодов: четыре корзины их выбирают, 21-й с нового
+    // адреса получает 429.
+    for bucket in ["198.51.100.1", "198.51.100.2", "198.51.100.3"] {
+        for _ in 0..5 {
+            assert_eq!(start(&hub, bucket).await.status, 200);
+        }
+    }
+    retry_of(&start(&hub, "198.51.100.77").await);
     sqlx::query("update owner_qr_logins set expires_at=now()-interval '1 second'")
         .execute(&hub.pool)
         .await
@@ -305,14 +331,80 @@ async fn auth_qr_start_is_limited_per_bucket_and_in_total() {
     assert_eq!(start(&hub, "198.51.100.77").await.status, 200);
 }
 
+/// `start` публичен. Один адрес, даже с IPv4 и IPv6 сразу, не выбирает общий предел
+/// ожидающих кодов: новое устройство владельца с другого адреса код получает.
+#[tokio::test]
+async fn auth_qr_one_host_cannot_take_every_pending_code() {
+    let pool = canterlot_hub::testkit::db().await;
+    let hub = AuthHub::new(pool).await;
+    let mut granted = 0;
+    for _ in 0..10 {
+        for ip in ["203.0.113.50", "2001:db8:5:6::1"] {
+            if start(&hub, ip).await.status == 200 {
+                granted += 1;
+            }
+        }
+    }
+    assert_eq!(granted, 10, "five living codes per address bucket");
+    assert_eq!(start(&hub, "198.51.100.77").await.status, 200);
+}
+
+/// `poll` публичен, а слотов долгого опроса в процессе восемь. С одной корзины адресов
+/// ждут не больше трёх опросов, поэтому опрос с другого адреса слот получает.
+#[tokio::test]
+async fn auth_qr_one_address_cannot_take_every_poll_slot() {
+    let pool = canterlot_hub::testkit::db().await;
+    let hub = AuthHub::new(pool).await;
+    let qr = started(&hub, "203.0.113.50").await;
+    // Четыре долгих опроса с одного адреса разом: три ждут, а тот, что пришёл четвёртым,
+    // получает отказ сразу — он и завершается первым, остальные висят до решения.
+    let mut waiting = tokio::task::JoinSet::new();
+    for _ in 0..4 {
+        let client = poller(&hub);
+        let token = qr.poll_token.clone();
+        waiting.spawn(async move { poll(&client, &token, None).await });
+    }
+    let refused = tokio::time::timeout(Duration::from_secs(10), waiting.join_next())
+        .await
+        .expect("one of four polls answers at once")
+        .unwrap()
+        .unwrap();
+    assert_eq!(refused.status, 429);
+    assert_eq!(error_code(&refused), "too_many_attempts");
+    // Опрос с `after`, отличным от состояния кода, отвечает сразу, если получил слот.
+    let probe = |client: TestClient| {
+        let token = qr.poll_token.clone();
+        async move { poll(&client, &token, Some("scanned")).await.status }
+    };
+    assert_eq!(probe(poller(&hub)).await, 429, "the address is full");
+    let other = hub
+        .anonymous(Some("198.51.100.77"))
+        .with_header("User-Agent", FIREFOX);
+    assert_eq!(probe(other).await, 200, "another address still gets a slot");
+    assert_eq!(act(&hub.owner(), "deny", &qr.secret).await.status, 200);
+    for _ in 0..3 {
+        let response = tokio::time::timeout(Duration::from_secs(5), waiting.join_next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(state(&response), "denied");
+    }
+    // Слоты корзины вернулись вместе с опросами.
+    assert_eq!(probe(poller(&hub)).await, 200);
+}
+
 #[tokio::test]
 async fn auth_qr_at_most_eight_polls_wait_at_once() {
     let pool = canterlot_hub::testkit::db().await;
     let hub = AuthHub::new(pool).await;
     let qr = started(&hub, "203.0.113.50").await;
+    // Восемь опросов с разных адресов: предел на корзину здесь не мешает общему.
     let waiting: Vec<_> = (0..8)
-        .map(|_| {
-            let client = poller(&hub);
+        .map(|n| {
+            let client = hub
+                .anonymous(Some(&format!("198.51.100.{}", n + 1)))
+                .with_header("User-Agent", FIREFOX);
             let token = qr.poll_token.clone();
             tokio::spawn(async move { poll(&client, &token, None).await })
         })
