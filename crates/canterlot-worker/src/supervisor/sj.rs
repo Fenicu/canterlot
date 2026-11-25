@@ -37,6 +37,9 @@ pub(super) struct Sj {
     pending: Vec<Vec<u8>>,
     requests: BTreeMap<String, RequestState>,
     closed_reason: Option<String>,
+    /// Наибольшее подтверждение хаба, которое ещё не легло в файл ack: запись ack могла
+    /// отказать, а хаб второй раз его не пришлёт.
+    owed_ack: u64,
     /// Номер последней записи, которая свидетельствует о прогрессе хода.
     progress_seq: u64,
     #[cfg(test)]
@@ -62,6 +65,7 @@ impl Sj {
             pending: Vec::new(),
             requests: BTreeMap::new(),
             closed_reason: None,
+            owed_ack: 0,
             progress_seq: 0,
             #[cfg(test)]
             commits: 0,
@@ -191,9 +195,17 @@ impl Sj {
         Ok(seq)
     }
 
-    /// Пишет накопленные записи на диск. При отказе записи они остаются в памяти:
-    /// следующий вызов открывает журнал заново и повторяет запись.
+    /// Пишет накопленные записи на диск и недописанное подтверждение. При отказе записи
+    /// они остаются в памяти: следующий вызов открывает журнал заново и повторяет запись.
+    /// Подтверждение пишется и тогда, когда очередь записей отказывает: оно касается уже
+    /// лежащих на диске записей.
     pub fn flush(&mut self) -> Result<(), SupervisorError> {
+        let appended = self.append_pending();
+        let acked = self.settle_ack();
+        appended.and(acked)
+    }
+
+    fn append_pending(&mut self) -> Result<(), SupervisorError> {
         if !self.pending.is_empty() {
             self.heal()?;
             let payloads: Vec<&[u8]> = self.pending.iter().map(Vec::as_slice).collect();
@@ -204,6 +216,26 @@ impl Sj {
                 self.commits += 1;
             }
         }
+        Ok(())
+    }
+
+    fn settle_ack(&mut self) -> Result<(), SupervisorError> {
+        if self.owed_ack <= self.journal.acked_seq() {
+            return Ok(());
+        }
+        self.heal()?;
+        self.journal.ack(self.owed_ack)?;
+        // Компакция идёт до самой ранней ещё нужной записи: хаб подтвердил,
+        // а восстановление держится на RequestOpened открытого запроса
+        // (и его передаче решения).
+        let horizon = self
+            .requests
+            .values()
+            .filter(|request| !request.terminal)
+            .map(|request| request.opened_seq)
+            .min()
+            .unwrap_or_else(|| self.journal.last_seq().saturating_add(1));
+        self.journal.compact_up_to(horizon)?;
         Ok(())
     }
 
@@ -266,19 +298,8 @@ impl Sj {
             }
             ship.next = ship.next.max(up_to + 1);
         }
-        self.journal.ack(up_to)?;
-        // Компакция идёт до самой ранней ещё нужной записи: хаб подтвердил,
-        // а восстановление держится на RequestOpened открытого запроса
-        // (и его передаче решения).
-        let horizon = self
-            .requests
-            .values()
-            .filter(|request| !request.terminal)
-            .map(|request| request.opened_seq)
-            .min()
-            .unwrap_or_else(|| self.journal.last_seq().saturating_add(1));
-        self.journal.compact_up_to(horizon)?;
-        Ok(())
+        self.owed_ack = self.owed_ack.max(up_to);
+        self.settle_ack()
     }
 
     pub fn next_batch(&mut self) -> Result<Option<SjBatch>, SupervisorError> {
@@ -405,6 +426,33 @@ mod tests {
         assert_eq!(open.len(), 1, "only the open request is re-announceable");
         assert_eq!(open[0].request_id, "r2");
         assert_eq!(open[0].payload_json.len(), 64 * 1024);
+    }
+
+    fn set_writable(dir: &Path, writable: bool) {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = if writable { 0o700 } else { 0o500 };
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    /// Хаб подтвердил последний пакет, а замена файла ack отказала (диск полон).
+    /// Подтверждение не теряется: следующий сброс очереди, даже пустой, дописывает его,
+    /// как только хранилище снова пишет, и сопровождение может выйти.
+    #[test]
+    fn a_failed_ack_write_is_retried_by_the_next_flush() {
+        let root = tempfile::tempdir().unwrap();
+        let mut sj = Sj::create(root.path()).unwrap();
+        sj.append(Body::PhaseChanged(Default::default())).unwrap();
+        sj.flush().unwrap();
+        let last = sj.last_seq();
+        set_writable(&root.path().join("sj"), false);
+        assert!(sj.ack(last).is_err());
+        assert!(!sj.fully_acked());
+        assert!(sj.flush().is_err(), "the ack is still owed");
+        set_writable(&root.path().join("sj"), true);
+        sj.flush().unwrap();
+        assert!(sj.fully_acked());
+        drop(sj);
+        assert_eq!(Sj::create(root.path()).unwrap().acked_seq(), last);
     }
 
     #[test]
