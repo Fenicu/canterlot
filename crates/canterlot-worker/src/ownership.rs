@@ -98,6 +98,7 @@ impl OwnershipStore {
             return Err(StoreError::NeedsReopen);
         }
         let result = (|| {
+            self.forget_superseded();
             let snapshot = Snapshot {
                 seq: self.journal.last_seq(),
                 records: self.latest.values().map(Message::encode_to_vec).collect(),
@@ -111,6 +112,37 @@ impl OwnershipStore {
             self.poisoned = true;
         }
         result
+    }
+
+    /// Убирает из памяти (а снимком и с диска) записи исполнений, которые больше ничему не
+    /// нужны: запись освобождена, каталог исполнения уже убран, а в её разговоре есть
+    /// поколение старше. Новое поколение хаб начинает только после итога прежнего, так что
+    /// итог такого исполнения давно в PG. Запись старшего поколения остаётся и освобождённой:
+    /// по ней отклоняются запуски с устаревшим поколением. Без этого записи всех когда-либо
+    /// запущенных исполнений копились бы в памяти и переписывались в каждом снимке.
+    fn forget_superseded(&mut self) {
+        let mut newest: HashMap<&str, u64> = HashMap::new();
+        for record in self.latest.values() {
+            let generation = newest.entry(record.conversation_id.as_str()).or_default();
+            *generation = (*generation).max(record.generation);
+        }
+        let superseded: Vec<Uuid> = self
+            .latest
+            .iter()
+            .filter(|(_, record)| {
+                record.phase == OwnershipPhase::Released as i32
+                    && !record.conversation_id.is_empty()
+                    && newest
+                        .get(record.conversation_id.as_str())
+                        .is_some_and(|generation| record.generation < *generation)
+                    && !record.exec_dir.is_empty()
+                    && !Path::new(&record.exec_dir).exists()
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in superseded {
+            self.latest.remove(&id);
+        }
     }
 
     pub fn live(&self) -> Vec<&Ownership> {
@@ -187,5 +219,89 @@ mod tests {
         assert_eq!(store.max_generation(&conversation), 100);
         assert_eq!(store.live().len(), 1);
         assert_eq!(store.get(id).unwrap().generation, 100);
+    }
+
+    fn released(conversation: &str, generation: u64, exec_dir: &Path) -> Ownership {
+        Ownership {
+            execution_id: Uuid::now_v7().to_string(),
+            conversation_id: conversation.into(),
+            generation,
+            phase: OwnershipPhase::Released as i32,
+            released_reason: "user_stop".into(),
+            exec_dir: exec_dir.to_string_lossy().into_owned(),
+            secret_sha256: vec![7; 32],
+            ..Default::default()
+        }
+    }
+
+    /// Записи всех когда-либо запущенных исполнений не копятся: после компактации от
+    /// разговора остаётся запись старшего поколения, по которой отклоняются устаревшие запуски.
+    #[test]
+    fn compaction_drops_released_records_superseded_in_their_conversation() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("ownership");
+        let gone = root.path().join("executions/gone");
+        let kept_dir = root.path().join("executions/still-here");
+        std::fs::create_dir_all(&kept_dir).unwrap();
+        let mut store = OwnershipStore::open(&path).unwrap();
+        let busy = Uuid::now_v7().to_string();
+        let quiet = Uuid::now_v7().to_string();
+        // Каталог старого исполнения ещё не убран: запись нужна уборке.
+        let lingering = released(&busy, 1, &kept_dir);
+        store.append(lingering.clone()).unwrap();
+        let mut old = Vec::new();
+        for generation in 2..=200 {
+            let record = released(&busy, generation, &gone);
+            old.push(record.execution_id.clone());
+            store.append(record).unwrap();
+        }
+        let live = Ownership {
+            phase: OwnershipPhase::Attached as i32,
+            released_reason: String::new(),
+            ..released(&busy, 201, &gone)
+        };
+        store.append(live.clone()).unwrap();
+        let single = released(&quiet, 5, &gone);
+        store.append(single.clone()).unwrap();
+        store.compact().unwrap();
+
+        let check = |store: &OwnershipStore| {
+            assert_eq!(
+                store.latest.len(),
+                3,
+                "one conversation does not keep 200 records"
+            );
+            for id in &old {
+                assert!(store.get(Uuid::parse_str(id).unwrap()).is_none());
+            }
+            for record in [&lingering, &live, &single] {
+                let id = Uuid::parse_str(&record.execution_id).unwrap();
+                assert_eq!(store.get(id), Some(record));
+            }
+            assert_eq!(store.max_generation(&busy), 201);
+            assert_eq!(store.max_generation(&quiet), 5);
+        };
+        check(&store);
+        drop(store);
+        check(&OwnershipStore::open(&path).unwrap());
+    }
+
+    /// Старшее поколение разговора остаётся и освобождённым: без него следующий запуск
+    /// с тем же или меньшим поколением прошёл бы проверку.
+    #[test]
+    fn the_newest_generation_of_a_conversation_survives_compaction() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("ownership");
+        let gone = root.path().join("executions/gone");
+        let mut store = OwnershipStore::open(&path).unwrap();
+        let conversation = Uuid::now_v7().to_string();
+        for generation in 1..=40 {
+            store
+                .append(released(&conversation, generation, &gone))
+                .unwrap();
+        }
+        store.compact().unwrap();
+        assert_eq!(store.latest.len(), 1);
+        assert_eq!(store.max_generation(&conversation), 40);
     }
 }
