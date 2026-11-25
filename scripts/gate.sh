@@ -527,6 +527,12 @@ junit="target/nextest/default/junit.xml"
 # В обычном прогоне вызывает настоящий скрипт; в тесте — подменённую команду.
 # Режим и выбор передаются подмене через окружение (GATE_STEP_*).
 run_gate_step() {
+    local rc=0
+    run_gate_step_cmd "$@" || rc=$?
+    tree_after_step "$1"
+    return "$rc"
+}
+run_gate_step_cmd() {
     local kind=$1 cmd=$2 mode=$3
     shift 3
     local selection="$*"
@@ -559,6 +565,14 @@ run_gate_step() {
                 ;;
             web) bash scripts/check-web.sh ;;
         esac
+    fi
+}
+# После каждого шага: HEAD тот же и дерево чистое. Проверки только в начале и в конце прохода
+# не видят, что HEAD временно сменили или файл правили и вернули, пока шёл другой шаг.
+tree_after_step() {
+    if ((tree_clean)) && { [[ "$(git rev-parse HEAD)" != "$sha" ]] || ! clean_tree; }; then
+        tree_clean=0
+        printf 'гейт: после шага %s HEAD сместился или дерево грязное: этот проход не аттестуется\n' "$1" >&2
     fi
 }
 
@@ -922,6 +936,12 @@ fi
 if ! clean_tree; then
     echo 'гейт: рабочая копия стала грязной за прогон; аттестация не пишется' >&2
     git status --short >&2 || true
+    exit 1
+fi
+# tree_clean помнит каждую проверку прохода (начало, после каждого шага, конец): дерево, бывшее
+# грязным в любой из них, не аттестуется, даже если к этой строке оно снова чистое.
+if ((!tree_clean)); then
+    echo 'гейт: дерево было грязным или HEAD смещался за проход (tree=dirty в состоянии); аттестация не пишется' >&2
     exit 1
 fi
 

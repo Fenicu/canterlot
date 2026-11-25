@@ -341,6 +341,22 @@ rm -f "$ge/stray"
 run 1 "${tree_env[@]}" CANTERLOT_GATE_STEP_CHECK="$fake_check_dirties" bash "$ge/scripts/gate.sh" --runner local --rerun-failed
 [[ ! -e "$ge/.superpowers/gate/$gesha.ok" ]] || fail 'перезапуск аттестовал проход, за который дерево стало грязным'
 
+# Дерево было грязным между шагами и стало чистым к концу прохода (шаг npm оставил файл, шаг check
+# его убрал): проверки в начале и в конце этого не видят, аттестации всё равно нет.
+# shellcheck disable=SC2016
+fake_npm_dirties='echo "npm dirties" >>"$GATE_FAKE_CALLS"; : >stray; exit 0'
+# shellcheck disable=SC2016
+fake_check_cleans='echo "check cleans" >>"$GATE_FAKE_CALLS"; rm -f stray; exit 0'
+gm="$tmp/gm"
+new_gate_repo "$gm"
+gmsha=$(git -C "$gm" rev-parse HEAD)
+run 1 "${tree_env[@]}" CANTERLOT_GATE_STEP_NPM="$fake_npm_dirties" CANTERLOT_GATE_STEP_CHECK="$fake_check_cleans" \
+    bash "$gm/scripts/gate.sh" --runner local
+grep -q 'HEAD смещался за проход' "$out" || { cat "$out" >&2; fail 'нет отказа, когда дерево было грязным между шагами'; }
+grep -q 'после шага npm' "$gm/.superpowers/gate/${gmsha:0:8}/npm-ci.log" || fail 'лог шага npm не называет грязное дерево'
+[[ ! -e "$gm/.superpowers/gate/$gmsha.ok" ]] || fail 'аттестация записана, хотя дерево было грязным между шагами'
+grep -qF $'tree\tdirty' "$gm/.superpowers/gate/${gmsha:0:8}/state.tsv" || fail 'грязное между шагами дерево не помечено tree=dirty'
+
 # Состояние старого формата (без ключа tree) чистоты не доказывает: с аттестацией — отказ.
 gf="$tmp/gf"
 new_gate_repo "$gf"
